@@ -552,7 +552,11 @@ mod tests {
         let mut server_config = Arc::new(server_config);
         Arc::get_mut(&mut server_config).unwrap().alpn_protocols = vec![b"h2".to_vec()];
 
+        let server_ready = Arc::new(std::sync::Barrier::new(2));
+        let server_ready2 = Arc::clone(&server_ready);
+
         std::thread::spawn(move || {
+            server_ready2.wait();
             let (tcp_stream, _) = listener.accept().unwrap();
             let conn = ServerConnection::new(server_config).unwrap();
             let mut tls_stream = StreamOwned::new(conn, tcp_stream);
@@ -600,6 +604,7 @@ mod tests {
             tls_stream.flush().unwrap();
         });
 
+        server_ready.wait();
         let addr: std::net::SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
         let stream = TcpStream::connect_timeout(&addr, Duration::from_secs(5)).unwrap();
         let mut root_store = RootCertStore::empty();
