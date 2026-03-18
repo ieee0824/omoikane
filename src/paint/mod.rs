@@ -1,6 +1,8 @@
 //! Pixel-based painting primitives and layout tree rendering.
 
+use std::fs;
 use std::io::Read;
+use std::path::Path;
 
 use crate::css::{ComputedStyle, ComputedValue, Origin, StyleResolver, Stylesheet, parse_stylesheet};
 use crate::dom::{Node, NodeHandle, NodeType};
@@ -290,6 +292,72 @@ pub fn render_document(document: &NodeHandle, viewport: Rect) -> Result<Canvas, 
 /// Encodes the rendered document directly as PNG.
 pub fn render_document_png(document: &NodeHandle, viewport: Rect) -> Result<Vec<u8>, PaintError> {
     Ok(render_document(document, viewport)?.encode_png())
+}
+
+/// Renders a DOM document into a canvas, resolving local fixture assets from `base_path`.
+pub fn render_document_with_base_path(
+    document: &NodeHandle,
+    viewport: Rect,
+    base_path: &Path,
+) -> Result<Canvas, PaintError> {
+    materialize_local_assets(document, base_path)?;
+    render_document(document, viewport)
+}
+
+fn materialize_local_assets(node: &NodeHandle, base_path: &Path) -> Result<(), PaintError> {
+    if node.node_type() == NodeType::Element {
+        match node.tag_name().as_deref() {
+            Some("img") => rewrite_local_asset_attribute(node, "src", base_path)?,
+            Some("link") => rewrite_local_asset_attribute(node, "href", base_path)?,
+            _ => {}
+        }
+    }
+
+    for child in node.child_nodes() {
+        materialize_local_assets(&child, base_path)?;
+    }
+
+    Ok(())
+}
+
+fn rewrite_local_asset_attribute(
+    node: &NodeHandle,
+    attribute_name: &str,
+    base_path: &Path,
+) -> Result<(), PaintError> {
+    let attributes = node.attributes().unwrap_or_default();
+    let Some(value) = attributes.get(attribute_name) else {
+        return Ok(());
+    };
+    if value.is_empty()
+        || value.starts_with("data:")
+        || value.starts_with("http://")
+        || value.starts_with("https://")
+        || value.starts_with('#')
+        || value.contains(':')
+    {
+        return Ok(());
+    }
+
+    let asset_path = base_path.join(value);
+    if !asset_path.is_file() {
+        return Ok(());
+    }
+
+    let mime_type = match asset_path.extension().and_then(|ext| ext.to_str()) {
+        Some(ext) if ext.eq_ignore_ascii_case("png") => "image/png",
+        Some(ext) if ext.eq_ignore_ascii_case("css") => "text/css",
+        _ => return Ok(()),
+    };
+
+    let data = fs::read(asset_path).map_err(|_| PaintError::InvalidDataUri)?;
+    let encoded = base64::engine::general_purpose::STANDARD.encode(data);
+    node.set_attribute(
+        attribute_name,
+        format!("data:{mime_type};base64,{encoded}"),
+    );
+
+    Ok(())
 }
 
 /// Computes a per-pixel diff image and count between two canvases.
@@ -1392,7 +1460,28 @@ mod tests {
     }
 
     #[test]
-    fn acid2_fixture_matches_reference_png() {
+    fn renders_official_reference_fixture_to_png() {
+        let html = fs::read_to_string(acid2_official_reference_html_path()).unwrap();
+        let document = TreeBuilder::parse(&html).document();
+
+        let png = render_document_with_base_path(
+            &document,
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 800.0,
+                height: 600.0,
+            },
+            &acid2_fixture_dir(),
+        )
+        .unwrap()
+        .encode_png();
+
+        assert_eq!(&png[..8], &[137, 80, 78, 71, 13, 10, 26, 10]);
+    }
+
+    #[test]
+    fn acid2_fixture_matches_local_baseline_png() {
         let html = fs::read_to_string(acid2_fixture_path()).unwrap();
         let document = TreeBuilder::parse(&html).document();
         let actual = render_document(
@@ -1406,10 +1495,10 @@ mod tests {
         )
         .unwrap();
 
-        let reference_path = acid2_reference_path();
+        let reference_path = acid2_baseline_path();
         assert!(
             reference_path.exists(),
-            "missing reference image at {}",
+            "missing local Acid2 baseline image at {}",
             reference_path.display()
         );
         let expected = Image::decode_png(&fs::read(reference_path).unwrap()).unwrap();
@@ -1423,12 +1512,80 @@ mod tests {
             fs::write(acid2_output_dir().join("acid2.actual.png"), actual.encode_png()).unwrap();
             fs::write(acid2_output_dir().join("acid2.diff.png"), diff.encode_png()).unwrap();
         }
-        assert_eq!(changed, 0, "acid2 rendering diverged; wrote diff assets to tests/output/acid2");
+        assert_eq!(
+            changed,
+            0,
+            "acid2 rendering diverged from the checked-in local baseline; wrote diff assets to tests/output/acid2"
+        );
     }
 
     #[test]
-    #[ignore = "used only to refresh the checked-in Acid2 reference image"]
-    fn refresh_acid2_reference_png() {
+    fn official_acid2_reference_assets_are_checked_in() {
+        let reference_html = fs::read_to_string(acid2_official_reference_html_path()).unwrap();
+        assert!(reference_html.contains("The Second Acid Test (Reference Rendering)"));
+
+        let reference_png = fs::read(acid2_official_reference_png_path()).unwrap();
+        let decoded = Image::decode_png(&reference_png).unwrap();
+        assert_eq!(decoded.width(), 168);
+        assert_eq!(decoded.height(), 168);
+    }
+
+    #[test]
+    #[ignore = "documents current gap to the official Acid2 reference rendering"]
+    fn acid2_fixture_matches_official_reference_rendering() {
+        let acid2_html = fs::read_to_string(acid2_fixture_path()).unwrap();
+        let acid2_document = TreeBuilder::parse(&acid2_html).document();
+        let actual = render_document(
+            &acid2_document,
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 800.0,
+                height: 600.0,
+            },
+        )
+        .unwrap();
+
+        let reference_html = fs::read_to_string(acid2_official_reference_html_path()).unwrap();
+        let reference_document = TreeBuilder::parse(&reference_html).document();
+        let expected = render_document_with_base_path(
+            &reference_document,
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 800.0,
+                height: 600.0,
+            },
+            &acid2_fixture_dir(),
+        )
+        .unwrap();
+
+        let (diff, changed) = diff_canvases(&actual, &expected);
+        if changed > 0 {
+            fs::create_dir_all(acid2_output_dir()).unwrap();
+            fs::write(acid2_output_dir().join("acid2.official-reference.actual.png"), actual.encode_png()).unwrap();
+            fs::write(
+                acid2_output_dir().join("acid2.official-reference.expected.png"),
+                expected.encode_png(),
+            )
+            .unwrap();
+            fs::write(
+                acid2_output_dir().join("acid2.official-reference.diff.png"),
+                diff.encode_png(),
+            )
+            .unwrap();
+        }
+
+        assert_eq!(
+            changed,
+            0,
+            "acid2 rendering diverged from official reference rendering; wrote diff assets to tests/output/acid2"
+        );
+    }
+
+    #[test]
+    #[ignore = "used only to refresh the checked-in local Acid2 baseline image"]
+    fn refresh_acid2_baseline_png() {
         let html = fs::read_to_string(acid2_fixture_path()).unwrap();
         let document = TreeBuilder::parse(&html).document();
         let png = render_document_png(
@@ -1443,7 +1600,7 @@ mod tests {
         .unwrap();
 
         fs::create_dir_all(acid2_fixture_dir()).unwrap();
-        fs::write(acid2_reference_path(), png).unwrap();
+        fs::write(acid2_baseline_path(), png).unwrap();
     }
 
     fn acid2_fixture_dir() -> PathBuf {
@@ -1454,8 +1611,16 @@ mod tests {
         acid2_fixture_dir().join("acid2.html")
     }
 
-    fn acid2_reference_path() -> PathBuf {
-        acid2_fixture_dir().join("acid2.reference.png")
+    fn acid2_baseline_path() -> PathBuf {
+        acid2_fixture_dir().join("acid2.baseline.png")
+    }
+
+    fn acid2_official_reference_html_path() -> PathBuf {
+        acid2_fixture_dir().join("reference.html")
+    }
+
+    fn acid2_official_reference_png_path() -> PathBuf {
+        acid2_fixture_dir().join("reference.png")
     }
 
     fn acid2_output_dir() -> PathBuf {

@@ -1036,6 +1036,9 @@ fn intrinsic_width(node: &NodeHandle, resolver: &mut StyleResolver) -> f32 {
             if let Some(width) = explicit_length(&style, "width") {
                 return width;
             }
+            if let Some(image) = element_inline_image(node) {
+                return image.width() as f32;
+            }
             let mut width: f32 = 0.0;
             for child in node.child_nodes() {
                 width = width.max(intrinsic_width(&child, resolver));
@@ -1413,7 +1416,7 @@ fn is_inline_child(node: &NodeHandle, resolver: &mut StyleResolver) -> bool {
                         || keyword.eq_ignore_ascii_case("inline-block")
             ) || node
                 .tag_name()
-                .map(|tag| matches!(tag.as_str(), "span" | "a" | "em" | "strong" | "b" | "i"))
+                .map(|tag| matches!(tag.as_str(), "span" | "a" | "em" | "strong" | "b" | "i" | "img"))
                 .unwrap_or(false)
         }
         _ => false,
@@ -1482,6 +1485,17 @@ fn collect_inline_segments(
             }
 
             out.extend(generated_inline_segments(node, resolver, PseudoElement::Before));
+            if let Some(image) = element_inline_image(node) {
+                out.push(InlineSegment {
+                    node: node.clone(),
+                    content: InlineSegmentContent::Image(image.clone()),
+                    metrics: font_metrics(&style),
+                    line_height: line_height(&style).max(image.height() as f32),
+                    vertical_align: vertical_align(&style),
+                });
+                out.extend(generated_inline_segments(node, resolver, PseudoElement::After));
+                return;
+            }
             for child in node.child_nodes() {
                 match child.node_type() {
                     NodeType::Text => {
@@ -1555,6 +1569,23 @@ fn generated_inline_segments(
 enum GeneratedContent {
     Text(String),
     Image(Image),
+}
+
+fn element_inline_image(node: &NodeHandle) -> Option<Image> {
+    let tag_name = node.tag_name()?;
+    if !tag_name.eq_ignore_ascii_case("img") {
+        return None;
+    }
+
+    let attributes = node.attributes().unwrap_or_default();
+    let src = attributes.get("src")?;
+    let data_uri = parse_data_uri(src).ok()?;
+    match data_uri {
+        DataUri::Binary { mime_type, data } if mime_type.eq_ignore_ascii_case("image/png") => {
+            Image::decode_png(&data).ok()
+        }
+        _ => None,
+    }
 }
 
 fn generated_content_value(value: &ComputedValue) -> Option<GeneratedContent> {
