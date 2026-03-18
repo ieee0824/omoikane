@@ -10,11 +10,15 @@ use crate::cdp::CdpSession;
 /// Opaque browser handle for the C ABI.
 #[repr(C)]
 pub struct OmoikaneBrowser {
+    _private: [u8; 0],
+}
+
+struct OmoikaneBrowserHandle {
     session: RefCell<CdpSession>,
     last_error: RefCell<Option<String>>,
 }
 
-impl OmoikaneBrowser {
+impl OmoikaneBrowserHandle {
     fn new() -> Result<Self, String> {
         Ok(Self {
             session: RefCell::new(CdpSession::new()?),
@@ -34,8 +38,8 @@ impl OmoikaneBrowser {
 /// Creates a new browser handle.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn omoikane_init() -> *mut OmoikaneBrowser {
-    match OmoikaneBrowser::new() {
-        Ok(browser) => Box::into_raw(Box::new(browser)),
+    match OmoikaneBrowserHandle::new() {
+        Ok(browser) => Box::into_raw(Box::new(browser)) as *mut OmoikaneBrowser,
         Err(_) => std::ptr::null_mut(),
     }
 }
@@ -49,7 +53,7 @@ pub unsafe extern "C" fn omoikane_free(browser: *mut OmoikaneBrowser) {
 
     // SAFETY: `browser` was created by `Box::into_raw` in `omoikane_init`.
     unsafe {
-        drop(Box::from_raw(browser));
+        drop(Box::from_raw(browser as *mut OmoikaneBrowserHandle));
     }
 }
 
@@ -198,21 +202,23 @@ pub unsafe extern "C" fn omoikane_string_free(value: *mut c_char) {
     }
 }
 
-fn browser_from_ptr<'a>(browser: *mut OmoikaneBrowser) -> Option<&'a OmoikaneBrowser> {
+fn browser_from_ptr<'a>(browser: *mut OmoikaneBrowser) -> Option<&'a OmoikaneBrowserHandle> {
     if browser.is_null() {
         None
     } else {
         // SAFETY: Caller promises a valid pointer for the duration of the call.
-        Some(unsafe { &*browser })
+        Some(unsafe { &*(browser as *mut OmoikaneBrowserHandle) })
     }
 }
 
-fn browser_from_const_ptr<'a>(browser: *const OmoikaneBrowser) -> Option<&'a OmoikaneBrowser> {
+fn browser_from_const_ptr<'a>(
+    browser: *const OmoikaneBrowser,
+) -> Option<&'a OmoikaneBrowserHandle> {
     if browser.is_null() {
         None
     } else {
         // SAFETY: Caller promises a valid pointer for the duration of the call.
-        Some(unsafe { &*browser })
+        Some(unsafe { &*(browser as *const OmoikaneBrowserHandle) })
     }
 }
 

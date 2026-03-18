@@ -11,16 +11,11 @@
 #include <stdint.h>
 #include <stdlib.h>
 
-typedef struct RefCell_CdpSession RefCell_CdpSession;
-
-typedef struct RefCell_Option_String RefCell_Option_String;
-
 /**
  * Opaque browser handle for the C ABI.
  */
 typedef struct OmoikaneBrowser {
-  struct RefCell_CdpSession session;
-  struct RefCell_Option_String last_error;
+  uint8_t _private[0];
 } OmoikaneBrowser;
 
 #ifdef __cplusplus

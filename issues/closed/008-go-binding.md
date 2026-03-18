@@ -1,7 +1,7 @@
 ---
 number: 008
 slug: go-binding
-status: open
+status: closed
 ---
 
 # Goバインディング対応
@@ -20,4 +20,4 @@ Go 側から `NewBrowser`, `Navigate`, `Evaluate`, `Content`, `Close` などの�
 
 ## 子issue
 
-- [ ] [008-1 Go cgo ラッパー実装](008-1-go-cgo-wrapper.md) — Go API, cgo 設定, サンプル・テスト整備
+- [x] [008-1 Go cgo ラッパー実装](008-1-go-cgo-wrapper.md) — Go API, cgo 設定, サンプル・テスト整備
