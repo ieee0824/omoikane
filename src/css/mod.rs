@@ -793,6 +793,9 @@ fn parse_single_value(token: &CssToken) -> Result<Value, CssParseError> {
 fn expand_shorthand(name: &str, value: Value, important: bool) -> Vec<Declaration> {
     match name {
         "margin" | "padding" => expand_box_shorthand(name, value, important),
+        "border-width" | "border-style" | "border-color" => {
+            expand_border_axis_shorthand(name, value, important)
+        }
         "border" => expand_border_shorthand(value, important),
         "border-top" | "border-right" | "border-bottom" | "border-left" => {
             expand_border_side_shorthand(name, value, important)
@@ -845,6 +848,51 @@ fn expand_box_shorthand(prefix: &str, value: Value, important: bool) -> Vec<Decl
         },
         Declaration {
             name: format!("{prefix}-left"),
+            value: left,
+            important,
+        },
+    ]
+}
+
+fn expand_border_axis_shorthand(name: &str, value: Value, important: bool) -> Vec<Declaration> {
+    let values = match value {
+        Value::List(values) => values,
+        single => vec![single],
+    };
+
+    let suffix = name.strip_prefix("border-").unwrap_or(name);
+    let (top, right, bottom, left) = match values.as_slice() {
+        [a] => (a.clone(), a.clone(), a.clone(), a.clone()),
+        [a, b] => (a.clone(), b.clone(), a.clone(), b.clone()),
+        [a, b, c] => (a.clone(), b.clone(), c.clone(), b.clone()),
+        [a, b, c, d] => (a.clone(), b.clone(), c.clone(), d.clone()),
+        _ => {
+            return vec![Declaration {
+                name: name.to_string(),
+                value: Value::List(values),
+                important,
+            }];
+        }
+    };
+
+    vec![
+        Declaration {
+            name: format!("border-top-{suffix}"),
+            value: top,
+            important,
+        },
+        Declaration {
+            name: format!("border-right-{suffix}"),
+            value: right,
+            important,
+        },
+        Declaration {
+            name: format!("border-bottom-{suffix}"),
+            value: bottom,
+            important,
+        },
+        Declaration {
+            name: format!("border-left-{suffix}"),
             value: left,
             important,
         },
@@ -1031,6 +1079,16 @@ fn expand_background_shorthand(value: Value, important: bool) -> Vec<Declaration
                 value: item.clone(),
                 important,
             }),
+            Value::Keyword(keyword)
+                if keyword.eq_ignore_ascii_case("repeat")
+                    || keyword.eq_ignore_ascii_case("no-repeat") =>
+            {
+                declarations.push(Declaration {
+                    name: "background-repeat".to_string(),
+                    value: Value::Keyword(keyword.to_string()),
+                    important,
+                });
+            }
             Value::Color(_) | Value::Function { .. } => declarations.push(Declaration {
                 name: "background-color".to_string(),
                 value: item.clone(),
@@ -1466,6 +1524,19 @@ mod tests {
     }
 
     #[test]
+    fn expands_background_repeat_keywords() {
+        let stylesheet = parse_stylesheet("div { background: url(\"x\") no-repeat; }").unwrap();
+        let Rule::Style(rule) = &stylesheet.rules[0] else {
+            panic!("expected style rule");
+        };
+
+        assert!(rule.declarations.iter().any(
+            |decl| decl.name == "background-repeat"
+                && matches!(&decl.value, Value::Keyword(value) if value == "no-repeat")
+        ));
+    }
+
+    #[test]
     fn expands_background_none_to_transparent_and_no_image() {
         let stylesheet = parse_stylesheet("div { background: none; }").unwrap();
         let Rule::Style(rule) = &stylesheet.rules[0] else {
@@ -1500,6 +1571,31 @@ mod tests {
         assert!(rule.declarations.iter().any(
             |decl| decl.name == "border-top-color"
                 && matches!(&decl.value, Value::Keyword(value) if value == "yellow")
+        ));
+    }
+
+    #[test]
+    fn expands_border_style_box_shorthand() {
+        let stylesheet = parse_stylesheet("div { border-style: none solid; }").unwrap();
+        let Rule::Style(rule) = &stylesheet.rules[0] else {
+            panic!("expected style rule");
+        };
+
+        assert!(rule.declarations.iter().any(
+            |decl| decl.name == "border-top-style"
+                && matches!(&decl.value, Value::Keyword(value) if value == "none")
+        ));
+        assert!(rule.declarations.iter().any(
+            |decl| decl.name == "border-right-style"
+                && matches!(&decl.value, Value::Keyword(value) if value == "solid")
+        ));
+        assert!(rule.declarations.iter().any(
+            |decl| decl.name == "border-bottom-style"
+                && matches!(&decl.value, Value::Keyword(value) if value == "none")
+        ));
+        assert!(rule.declarations.iter().any(
+            |decl| decl.name == "border-left-style"
+                && matches!(&decl.value, Value::Keyword(value) if value == "solid")
         ));
     }
 }

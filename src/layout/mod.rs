@@ -2502,7 +2502,12 @@ mod tests {
         )
         .unwrap();
 
-        let line = &layout.children[0].lines[0];
+        let container_box = find_layout_box_by_tag(&layout, "div").unwrap();
+        assert!(
+            !container_box.lines.is_empty(),
+            "expected nested object fallback to contribute an inline line box"
+        );
+        let line = &container_box.lines[0];
         assert_eq!(line.rect.height, 30.0);
         assert_eq!(line.fragments[0].rect.y, line.rect.y);
         assert_eq!(
@@ -2546,7 +2551,12 @@ mod tests {
         )
         .unwrap();
 
-        let line = &layout.children[0].lines[0];
+        let container_box = find_layout_box_by_tag(&layout, "div").unwrap();
+        assert!(
+            !container_box.lines.is_empty(),
+            "expected nested object fallback to contribute an inline line box"
+        );
+        let line = &container_box.lines[0];
         let base_fragment = &line.fragments[0];
         let raised_fragment = line
             .fragments
@@ -2708,6 +2718,72 @@ mod tests {
             fragment.content,
             InlineFragmentContent::Image(_)
         )));
+    }
+
+    #[test]
+    fn nested_object_fallback_with_vertical_align_bottom_stays_in_line_box() {
+        let document = NodeHandle::document();
+        let body = NodeHandle::element("body");
+        let container = NodeHandle::element("div");
+        let outer_object = NodeHandle::element("object");
+        let middle_object = NodeHandle::element("object");
+        let inner_object = NodeHandle::element("object");
+        document.append_child(body.clone());
+        body.append_child(container.clone());
+        container.append_child(outer_object.clone());
+        outer_object.append_child(middle_object.clone());
+        middle_object.append_child(inner_object.clone());
+
+        outer_object.set_attribute("data", "data:application/x-unknown,ERROR");
+        middle_object.set_attribute("data", "data:application/x-unknown,ERROR");
+        let image_data_uri = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAIAAAD91JpzAAAABnRSTlMAAAAAAABupgeRAAAABmJLR0QA%2FwD%2FAP%2BgvaeTAAAAEUlEQVR42mP4%2F58BCv7%2FZwAAHfAD%2FabwPj4AAAAASUVORK5CYII%3D";
+        inner_object.set_attribute("data", image_data_uri);
+
+        let mut resolver = StyleResolver::new();
+        resolver.add_stylesheet(
+            Origin::Author,
+            parse_stylesheet(
+                "div { line-height: 16px; } object { display: inline; vertical-align: bottom; }",
+            )
+            .unwrap(),
+        );
+
+        let data_uri = parse_data_uri(image_data_uri).unwrap();
+        let DataUri::Binary { data, .. } = data_uri else {
+            panic!("expected binary data uri");
+        };
+        assert!(Image::decode_png(&data).is_ok(), "expected PNG payload to decode");
+        assert!(
+            element_inline_image(&outer_object).is_some(),
+            "expected nested object fallback chain to resolve to a PNG image"
+        );
+
+        let layout = layout_tree(
+            &body,
+            &mut resolver,
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 200.0,
+                height: 0.0,
+            },
+        )
+        .unwrap();
+
+        let container_box = find_layout_box_by_tag(&layout, "div").unwrap();
+        assert!(
+            !container_box.lines.is_empty(),
+            "expected nested object fallback to contribute an inline line box"
+        );
+        let line = &container_box.lines[0];
+        let image_fragment = line
+            .fragments
+            .iter()
+            .find(|fragment| matches!(fragment.content, InlineFragmentContent::Image(_)))
+            .unwrap();
+
+        assert!(image_fragment.rect.y >= line.rect.y);
+        assert!(image_fragment.rect.y + image_fragment.rect.height <= line.rect.y + line.rect.height);
     }
 
     #[test]

@@ -595,6 +595,13 @@ fn background_image(style: &ComputedStyle) -> Option<Image> {
     }
 }
 
+fn background_repeat(style: &ComputedStyle) -> bool {
+    !matches!(
+        style.get("background-repeat"),
+        Some(ComputedValue::Keyword(keyword)) if keyword.eq_ignore_ascii_case("no-repeat")
+    )
+}
+
 fn parse_background_image_value(value: &str) -> Option<Image> {
     let trimmed = value.trim();
     if trimmed.eq_ignore_ascii_case("none") {
@@ -653,11 +660,15 @@ fn paint_background_image(
     let tile_height = image.height().max(1) as f32;
     let x_end = area.x + area.width;
     let y_end = area.y + area.height;
+    let repeat = background_repeat(style);
     let mut y = area.y;
     while y < y_end {
         let mut x = area.x;
         while x < x_end {
             canvas.draw_image_clipped(&image, x, y, clip.or(Some(area)));
+            if !repeat {
+                return;
+            }
             x += tile_width;
         }
         y += tile_height;
@@ -1429,6 +1440,48 @@ mod tests {
 
         assert_eq!(canvas.pixel(1, 1), Some(Color::rgb(255, 0, 0)));
         assert_eq!(canvas.pixel(3, 3), Some(Color::rgb(255, 0, 0)));
+    }
+
+    #[test]
+    fn paints_non_repeating_background_images_once() {
+        let document = NodeHandle::document();
+        let body = NodeHandle::element("body");
+        let div = NodeHandle::element("div");
+        document.append_child(body.clone());
+        body.append_child(div);
+
+        let stylesheet =
+            "body { margin: 0; } div { width: 4px; height: 4px; background: url(\"data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADElEQVR4AQEFAPr/AP8AAP9zftimAAAAAElFTkSuQmCC\") no-repeat; }";
+        let mut resolver = StyleResolver::new();
+        resolver.add_stylesheet(Origin::Author, parse_stylesheet(stylesheet).unwrap());
+        let layout = layout_tree(
+            &body,
+            &mut resolver,
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 10.0,
+                height: 10.0,
+            },
+        )
+        .unwrap();
+
+        let mut paint_resolver = StyleResolver::new();
+        paint_resolver.add_stylesheet(Origin::Author, parse_stylesheet(stylesheet).unwrap());
+        let canvas = paint_layout(
+            &layout,
+            &mut paint_resolver,
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 10.0,
+                height: 10.0,
+            },
+        );
+
+        assert_eq!(canvas.pixel(0, 0), Some(Color::rgb(255, 0, 0)));
+        assert_eq!(canvas.pixel(1, 0), Some(Color::rgba(0, 0, 0, 0)));
+        assert_eq!(canvas.pixel(0, 1), Some(Color::rgba(0, 0, 0, 0)));
     }
 
     #[test]
