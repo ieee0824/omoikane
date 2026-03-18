@@ -1,5 +1,6 @@
 //! Core library for the Omoikane headless browser engine.
 
+pub mod cdp;
 pub mod css;
 pub mod dom;
 pub mod html;
