@@ -38,6 +38,11 @@ void omoikane_free(struct OmoikaneBrowser *browser);
 bool omoikane_navigate(struct OmoikaneBrowser *browser, const char *url);
 
 /**
+ * Sets the `User-Agent` used for subsequent navigations.
+ */
+bool omoikane_set_user_agent(struct OmoikaneBrowser *browser, const char *user_agent);
+
+/**
  * Evaluates JavaScript in the current page and returns a JSON payload string.
  */
 char *omoikane_evaluate(struct OmoikaneBrowser *browser, const char *expression);

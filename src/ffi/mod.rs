@@ -88,6 +88,25 @@ pub unsafe extern "C" fn omoikane_navigate(
     }
 }
 
+/// Sets the `User-Agent` used for subsequent navigations.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn omoikane_set_user_agent(
+    browser: *mut OmoikaneBrowser,
+    user_agent: *const c_char,
+) -> bool {
+    let Some(browser) = browser_from_ptr(browser) else {
+        return false;
+    };
+    let Some(user_agent) = string_from_ptr(user_agent) else {
+        browser.set_error("user_agent must be a valid UTF-8 string");
+        return false;
+    };
+
+    browser.session.borrow_mut().set_user_agent(user_agent);
+    browser.clear_error();
+    true
+}
+
 /// Evaluates JavaScript in the current page and returns a JSON payload string.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn omoikane_evaluate(
@@ -244,6 +263,9 @@ fn into_c_string(value: String) -> *mut c_char {
 mod tests {
     use super::*;
     use std::fs;
+    use std::io::{BufRead, BufReader, Write};
+    use std::net::TcpListener;
+    use std::thread;
 
     fn to_c_string(value: &str) -> CString {
         CString::new(value).unwrap()
@@ -273,6 +295,53 @@ mod tests {
         let content = unsafe { omoikane_get_content(browser) };
         let html = unsafe { take_string(content) };
         assert!(html.contains("<main id=\"app\">ffi</main>"));
+
+        unsafe { omoikane_free(browser) };
+    }
+
+    #[test]
+    fn ffi_can_override_user_agent_for_navigation() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+
+        thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut reader = BufReader::new(&stream);
+            let mut request_line = String::new();
+            reader.read_line(&mut request_line).unwrap();
+
+            let mut user_agent = None;
+            loop {
+                let mut line = String::new();
+                reader.read_line(&mut line).unwrap();
+                let trimmed = line.trim().to_string();
+                if trimmed.is_empty() {
+                    break;
+                }
+                if let Some((name, value)) = trimmed.split_once(':') {
+                    if name.trim().eq_ignore_ascii_case("user-agent") {
+                        user_agent = Some(value.trim().to_string());
+                    }
+                }
+            }
+
+            assert_eq!(user_agent.as_deref(), Some("FFIAgent/1.0"));
+
+            let response = "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok";
+            stream.write_all(response.as_bytes()).unwrap();
+            stream.flush().unwrap();
+        });
+
+        let browser = unsafe { omoikane_init() };
+        assert!(!browser.is_null());
+
+        let user_agent = to_c_string("FFIAgent/1.0");
+        let ok = unsafe { omoikane_set_user_agent(browser, user_agent.as_ptr()) };
+        assert!(ok);
+
+        let url = to_c_string(&format!("http://127.0.0.1:{port}/"));
+        let ok = unsafe { omoikane_navigate(browser, url.as_ptr()) };
+        assert!(ok);
 
         unsafe { omoikane_free(browser) };
     }

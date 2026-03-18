@@ -601,6 +601,11 @@ impl CdpSession {
         self.runtime.document()
     }
 
+    /// Sets the HTTP client `User-Agent` used for subsequent navigations.
+    pub fn set_user_agent(&mut self, user_agent: impl Into<String>) {
+        self.http_client.set_user_agent(user_agent);
+    }
+
     fn page_navigate(&mut self, params: &Value) -> Result<Value, JsonRpcError> {
         let url = require_string(params, "url")?;
         let loader_id = self.next_loader_id.to_string();
