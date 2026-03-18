@@ -119,8 +119,10 @@ impl HttpRequest {
     /// Sets the request body and automatically sets the `Content-Length` header.
     pub fn set_body(&mut self, body: Vec<u8>) {
         // Remove any existing Content-Length
-        self.headers.retain(|(k, _)| !k.eq_ignore_ascii_case("content-length"));
-        self.headers.push(("Content-Length".to_string(), body.len().to_string()));
+        self.headers
+            .retain(|(k, _)| !k.eq_ignore_ascii_case("content-length"));
+        self.headers
+            .push(("Content-Length".to_string(), body.len().to_string()));
         self.body = Some(body);
     }
 

@@ -177,7 +177,8 @@ impl Builder {
             } if matches!(
                 name.as_str(),
                 "base" | "link" | "meta" | "title" | "style" | "script" | "template"
-            ) => {
+            ) =>
+            {
                 let element = self.insert_element_with_attributes(&name, &attributes);
                 if name == "template" {
                     self.open_elements.push(element.clone());
@@ -199,7 +200,10 @@ impl Builder {
             }
             Token::EndTag { name } if name == "template" => {
                 self.pop_matching("template");
-                let restored = self.template_insertion_modes.pop().unwrap_or(InsertionMode::InHead);
+                let restored = self
+                    .template_insertion_modes
+                    .pop()
+                    .unwrap_or(InsertionMode::InHead);
                 self.mode = restored;
             }
             other => {
@@ -322,13 +326,17 @@ impl Builder {
                 self_closing,
             } => match name.as_str() {
                 "tr" => {
-                    let table = self.current_table().unwrap_or_else(|| self.ensure_table_element());
+                    let table = self
+                        .current_table()
+                        .unwrap_or_else(|| self.ensure_table_element());
                     let tr = self.insert_into(&table, "tr", &attributes);
                     self.open_elements.push(tr);
                     self.mode = InsertionMode::InRow;
                 }
                 "td" | "th" => {
-                    let table = self.current_table().unwrap_or_else(|| self.ensure_table_element());
+                    let table = self
+                        .current_table()
+                        .unwrap_or_else(|| self.ensure_table_element());
                     let tr = self.ensure_table_row(&table);
                     let cell = self.insert_into(&tr, &name, &attributes);
                     self.open_elements.push(cell);
@@ -397,7 +405,9 @@ impl Builder {
             other => {
                 self.mode = InsertionMode::InTable;
                 self.process_token(other, errors);
-                self.mode = if self.find_open_element("td").is_some() || self.find_open_element("th").is_some() {
+                self.mode = if self.find_open_element("td").is_some()
+                    || self.find_open_element("th").is_some()
+                {
                     InsertionMode::InCell
                 } else if self.find_open_element("tr").is_some() {
                     InsertionMode::InRow
@@ -658,7 +668,10 @@ fn is_void_head_tag(tag_name: &str) -> bool {
 }
 
 fn is_formatting_element(tag_name: &str) -> bool {
-    matches!(tag_name, "a" | "b" | "em" | "i" | "small" | "span" | "strong" | "u")
+    matches!(
+        tag_name,
+        "a" | "b" | "em" | "i" | "small" | "span" | "strong" | "u"
+    )
 }
 
 #[cfg(test)]
@@ -703,7 +716,10 @@ mod tests {
         assert_eq!(children[0].node_name(), "#text");
         assert_eq!(children[0].data(), Some("Hello ".to_string()));
         assert_eq!(children[1].node_name(), "B");
-        assert_eq!(children[1].child_nodes()[0].data(), Some("world".to_string()));
+        assert_eq!(
+            children[1].child_nodes()[0].data(),
+            Some("world".to_string())
+        );
     }
 
     #[test]

@@ -170,10 +170,7 @@ mod tests {
             // Verify Host header value
             let host_value = host_value.expect("Host header missing");
             if let Some(expected) = &expected_host {
-                assert_eq!(
-                    &host_value, expected,
-                    "Host header value mismatch"
-                );
+                assert_eq!(&host_value, expected, "Host header value mismatch");
             }
 
             // Send response
@@ -331,9 +328,8 @@ mod tests {
     ) -> Result<HttpResponse, HttpParseError> {
         let addr: std::net::SocketAddr = format!("127.0.0.1:{}", port).parse().unwrap();
 
-        let stream =
-            TcpStream::connect_timeout(&addr, Duration::from_secs(DEFAULT_TIMEOUT_SECS))
-                .map_err(HttpParseError::Io)?;
+        let stream = TcpStream::connect_timeout(&addr, Duration::from_secs(DEFAULT_TIMEOUT_SECS))
+            .map_err(HttpParseError::Io)?;
         stream
             .set_read_timeout(Some(Duration::from_secs(DEFAULT_TIMEOUT_SECS)))
             .map_err(HttpParseError::Io)?;

@@ -5,16 +5,16 @@
 //! `Transfer-Encoding: chunked` body handling, TLS via rustls, cookie management,
 //! and automatic redirect following.
 
-mod url;
-mod request;
-mod response;
+mod client;
 mod connection;
 mod cookie;
-mod client;
+mod request;
+mod response;
+mod url;
 
-pub use url::Url;
-pub use request::{HttpRequest, Method};
-pub use response::HttpResponse;
+pub use client::Client;
 pub use connection::send;
 pub use cookie::{Cookie, CookieJar, SameSite};
-pub use client::Client;
+pub use request::{HttpRequest, Method};
+pub use response::HttpResponse;
+pub use url::Url;

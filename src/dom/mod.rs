@@ -362,13 +362,20 @@ fn matches_selector(node: &NodeHandle, selector: &str) -> bool {
     };
 
     if let Some(id) = selector.strip_prefix('#') {
-        return attributes.get("id").map(|value| value == id).unwrap_or(false);
+        return attributes
+            .get("id")
+            .map(|value| value == id)
+            .unwrap_or(false);
     }
 
     if let Some(class_name) = selector.strip_prefix('.') {
         return attributes
             .get("class")
-            .map(|value| value.split_ascii_whitespace().any(|class| class == class_name))
+            .map(|value| {
+                value
+                    .split_ascii_whitespace()
+                    .any(|class| class == class_name)
+            })
             .unwrap_or(false);
     }
 

@@ -289,9 +289,8 @@ impl CookieJar {
             let name = cookie.name.clone();
             let domain = cookie.domain.clone();
             let path = cookie.path.clone();
-            self.cookies.retain(|(c, _)| {
-                !(c.name == name && c.domain == domain && c.path == path)
-            });
+            self.cookies
+                .retain(|(c, _)| !(c.name == name && c.domain == domain && c.path == path));
 
             self.cookies.push((cookie, origin_domain));
         }
@@ -488,16 +487,14 @@ mod tests {
 
     #[test]
     fn parse_cookie_expires() {
-        let c =
-            Cookie::parse("a=b; Expires=Thu, 01 Jan 2099 00:00:00 GMT").unwrap();
+        let c = Cookie::parse("a=b; Expires=Thu, 01 Jan 2099 00:00:00 GMT").unwrap();
         assert!(c.expires().is_some());
         assert!(!c.is_expired(SystemTime::now()));
     }
 
     #[test]
     fn parse_cookie_expired_in_past() {
-        let c =
-            Cookie::parse("a=b; Expires=Thu, 01 Jan 1970 00:00:01 GMT").unwrap();
+        let c = Cookie::parse("a=b; Expires=Thu, 01 Jan 1970 00:00:01 GMT").unwrap();
         assert!(c.is_expired(SystemTime::now()));
     }
 
@@ -509,10 +506,7 @@ mod tests {
 
     #[test]
     fn max_age_takes_precedence_over_expires() {
-        let c = Cookie::parse(
-            "a=b; Max-Age=3600; Expires=Thu, 01 Jan 1970 00:00:01 GMT",
-        )
-        .unwrap();
+        let c = Cookie::parse("a=b; Max-Age=3600; Expires=Thu, 01 Jan 1970 00:00:01 GMT").unwrap();
         assert!(!c.is_expired(SystemTime::now()));
     }
 
@@ -649,16 +643,16 @@ mod tests {
     #[test]
     fn jar_secure_cookie_not_sent_over_http() {
         let mut jar = CookieJar::new();
-        jar.add_from_header("s=secret; Secure; Domain=example.com; Path=/", "example.com");
+        jar.add_from_header(
+            "s=secret; Secure; Domain=example.com; Path=/",
+            "example.com",
+        );
 
         let http_url: Url = "http://example.com/".parse().unwrap();
         assert_eq!(jar.cookie_header(&http_url), None);
 
         let https_url: Url = "https://example.com/".parse().unwrap();
-        assert_eq!(
-            jar.cookie_header(&https_url),
-            Some("s=secret".to_string())
-        );
+        assert_eq!(jar.cookie_header(&https_url), Some("s=secret".to_string()));
     }
 
     #[test]

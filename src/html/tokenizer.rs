@@ -762,15 +762,19 @@ fn consume_character_reference(cursor: &mut Cursor) -> Result<String, HtmlParseE
         "quot" => Ok("\"".to_string()),
         "apos" => Ok("'".to_string()),
         _ => {
-            if let Some(rest) = entity.strip_prefix("#x").or_else(|| entity.strip_prefix("#X")) {
-                let value =
-                    u32::from_str_radix(rest, 16).map_err(|_| HtmlParseError::InvalidCharacterReference)?;
+            if let Some(rest) = entity
+                .strip_prefix("#x")
+                .or_else(|| entity.strip_prefix("#X"))
+            {
+                let value = u32::from_str_radix(rest, 16)
+                    .map_err(|_| HtmlParseError::InvalidCharacterReference)?;
                 char::from_u32(value)
                     .map(|ch| ch.to_string())
                     .ok_or(HtmlParseError::InvalidCharacterReference)
             } else if let Some(rest) = entity.strip_prefix('#') {
-                let value =
-                    rest.parse::<u32>().map_err(|_| HtmlParseError::InvalidCharacterReference)?;
+                let value = rest
+                    .parse::<u32>()
+                    .map_err(|_| HtmlParseError::InvalidCharacterReference)?;
                 char::from_u32(value)
                     .map(|ch| ch.to_string())
                     .ok_or(HtmlParseError::InvalidCharacterReference)

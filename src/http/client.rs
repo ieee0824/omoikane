@@ -185,13 +185,18 @@ fn resolve_redirect_url(base: &Url, location: &str) -> Result<Url, HttpParseErro
 
     // Construct new URL string and parse
     let new_url_str = match query {
-        Some(q) => format!("{}://{}:{}{path}?{q}", base.scheme(), base.host(), base.port()),
+        Some(q) => format!(
+            "{}://{}:{}{path}?{q}",
+            base.scheme(),
+            base.host(),
+            base.port()
+        ),
         None => format!("{}://{}:{}{path}", base.scheme(), base.host(), base.port()),
     };
 
-    new_url_str.parse::<Url>().map_err(|e| {
-        HttpParseError::Io(std::io::Error::new(std::io::ErrorKind::InvalidInput, e))
-    })
+    new_url_str
+        .parse::<Url>()
+        .map_err(|e| HttpParseError::Io(std::io::Error::new(std::io::ErrorKind::InvalidInput, e)))
 }
 
 #[cfg(test)]
@@ -316,9 +321,8 @@ mod tests {
                 }
             }
 
-            let resp = format!(
-                "HTTP/1.1 302 Found\r\nLocation: /final\r\nContent-Length: 0\r\n\r\n"
-            );
+            let resp =
+                format!("HTTP/1.1 302 Found\r\nLocation: /final\r\nContent-Length: 0\r\n\r\n");
             stream.write_all(resp.as_bytes()).unwrap();
             stream.flush().unwrap();
             drop(stream);
@@ -328,7 +332,11 @@ mod tests {
             let mut reader2 = BufReader::new(&stream2);
             let mut line2 = String::new();
             reader2.read_line(&mut line2).unwrap();
-            assert!(line2.contains("/final"), "expected /final, got: {}", line2.trim());
+            assert!(
+                line2.contains("/final"),
+                "expected /final, got: {}",
+                line2.trim()
+            );
             // Consume headers
             loop {
                 let mut h = String::new();
@@ -370,7 +378,8 @@ mod tests {
                 }
             }
 
-            let resp = "HTTP/1.1 200 OK\r\nSet-Cookie: token=xyz; Path=/\r\nContent-Length: 2\r\n\r\nok";
+            let resp =
+                "HTTP/1.1 200 OK\r\nSet-Cookie: token=xyz; Path=/\r\nContent-Length: 2\r\n\r\nok";
             stream.write_all(resp.as_bytes()).unwrap();
             stream.flush().unwrap();
             drop(stream);
@@ -442,9 +451,8 @@ mod tests {
                     }
                 }
 
-                let resp = format!(
-                    "HTTP/1.1 302 Found\r\nLocation: /loop\r\nContent-Length: 0\r\n\r\n"
-                );
+                let resp =
+                    format!("HTTP/1.1 302 Found\r\nLocation: /loop\r\nContent-Length: 0\r\n\r\n");
                 stream.write_all(resp.as_bytes()).unwrap();
                 stream.flush().unwrap();
             }

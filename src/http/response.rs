@@ -65,7 +65,9 @@ impl HttpResponse {
 
         // Status line
         let mut status_line = String::new();
-        buf_reader.read_line(&mut status_line).map_err(HttpParseError::Io)?;
+        buf_reader
+            .read_line(&mut status_line)
+            .map_err(HttpParseError::Io)?;
         let status_line = status_line.trim_end_matches(|c| c == '\r' || c == '\n');
 
         let (status_code, reason) = parse_status_line(status_line)?;
@@ -74,7 +76,9 @@ impl HttpResponse {
         let mut headers = Vec::new();
         loop {
             let mut line = String::new();
-            buf_reader.read_line(&mut line).map_err(HttpParseError::Io)?;
+            buf_reader
+                .read_line(&mut line)
+                .map_err(HttpParseError::Io)?;
             let trimmed = line.trim_end_matches(|c| c == '\r' || c == '\n');
             if trimmed.is_empty() {
                 break;
@@ -161,9 +165,9 @@ fn read_body(
     reader: &mut impl BufRead,
 ) -> Result<Vec<u8>, HttpParseError> {
     // Check Transfer-Encoding first (takes priority over Content-Length per RFC 7230)
-    let is_chunked = headers
-        .iter()
-        .any(|(k, v)| k.eq_ignore_ascii_case("transfer-encoding") && v.eq_ignore_ascii_case("chunked"));
+    let is_chunked = headers.iter().any(|(k, v)| {
+        k.eq_ignore_ascii_case("transfer-encoding") && v.eq_ignore_ascii_case("chunked")
+    });
 
     if is_chunked {
         return read_chunked_body(reader);
@@ -192,11 +196,13 @@ fn read_chunked_body(reader: &mut impl BufRead) -> Result<Vec<u8>, HttpParseErro
 
     loop {
         let mut size_line = String::new();
-        reader.read_line(&mut size_line).map_err(HttpParseError::Io)?;
+        reader
+            .read_line(&mut size_line)
+            .map_err(HttpParseError::Io)?;
         let size_str = size_line.trim();
 
-        let chunk_size = usize::from_str_radix(size_str, 16)
-            .map_err(|_| HttpParseError::InvalidChunkSize)?;
+        let chunk_size =
+            usize::from_str_radix(size_str, 16).map_err(|_| HttpParseError::InvalidChunkSize)?;
 
         if chunk_size == 0 {
             // Read trailing \r\n after final chunk

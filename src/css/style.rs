@@ -64,7 +64,8 @@ impl StyleResolver {
 
     /// Adds a stylesheet with its origin.
     pub fn add_stylesheet(&mut self, origin: Origin, stylesheet: Stylesheet) {
-        self.stylesheets.push(StylesheetInput { origin, stylesheet });
+        self.stylesheets
+            .push(StylesheetInput { origin, stylesheet });
         self.cache.clear();
     }
 
@@ -75,13 +76,19 @@ impl StyleResolver {
             return style.clone();
         }
 
-        let inherited = node.parent_node().map(|parent| self.computed_style(&parent));
+        let inherited = node
+            .parent_node()
+            .map(|parent| self.computed_style(&parent));
         let style = self.compute_style(node, inherited.as_ref());
         self.cache.insert(key, style.clone());
         style
     }
 
-    fn compute_style(&self, node: &NodeHandle, parent_style: Option<&ComputedStyle>) -> ComputedStyle {
+    fn compute_style(
+        &self,
+        node: &NodeHandle,
+        parent_style: Option<&ComputedStyle>,
+    ) -> ComputedStyle {
         let mut candidates = Vec::new();
         let mut source_order = 0usize;
 
@@ -191,7 +198,10 @@ fn cascade_rank(candidate: &Candidate) -> (u8, u8) {
 fn compute_value(value: &Value, property_name: &str, parent_font_size: f32) -> ComputedValue {
     match value {
         Value::Keyword(keyword) => {
-            if is_color_keyword(keyword) || property_name.ends_with("color") || property_name == "color" {
+            if is_color_keyword(keyword)
+                || property_name.ends_with("color")
+                || property_name == "color"
+            {
                 ComputedValue::Color(keyword.clone())
             } else {
                 ComputedValue::Keyword(keyword.clone())
@@ -225,7 +235,10 @@ fn compute_value(value: &Value, property_name: &str, parent_font_size: f32) -> C
                 })
                 .collect();
             if channels.len() == 3 {
-                ComputedValue::Color(format!("#{:02x}{:02x}{:02x}", channels[0], channels[1], channels[2]))
+                ComputedValue::Color(format!(
+                    "#{:02x}{:02x}{:02x}",
+                    channels[0], channels[1], channels[2]
+                ))
             } else {
                 ComputedValue::Keyword(name.clone())
             }
@@ -250,7 +263,10 @@ fn apply_initial_values(properties: &mut BTreeMap<String, ComputedValue>) {
         .or_insert_with(|| ComputedValue::Px(16.0));
 }
 
-fn apply_inheritance(properties: &mut BTreeMap<String, ComputedValue>, parent_style: Option<&ComputedStyle>) {
+fn apply_inheritance(
+    properties: &mut BTreeMap<String, ComputedValue>,
+    parent_style: Option<&ComputedStyle>,
+) {
     let Some(parent_style) = parent_style else {
         return;
     };
@@ -264,7 +280,10 @@ fn apply_inheritance(properties: &mut BTreeMap<String, ComputedValue>, parent_st
     }
 }
 
-fn inherited_font_size(parent_style: Option<&ComputedStyle>, current: &BTreeMap<String, ComputedValue>) -> f32 {
+fn inherited_font_size(
+    parent_style: Option<&ComputedStyle>,
+    current: &BTreeMap<String, ComputedValue>,
+) -> f32 {
     if let Some(ComputedValue::Px(value)) = current.get("font-size") {
         return *value;
     }
@@ -290,9 +309,17 @@ fn render_value(value: &Value) -> String {
         Value::Color(value) => value.clone(),
         Value::Function { name, arguments } => format!(
             "{name}({})",
-            arguments.iter().map(render_value).collect::<Vec<_>>().join(", ")
+            arguments
+                .iter()
+                .map(render_value)
+                .collect::<Vec<_>>()
+                .join(", ")
         ),
-        Value::List(values) => values.iter().map(render_value).collect::<Vec<_>>().join(" "),
+        Value::List(values) => values
+            .iter()
+            .map(render_value)
+            .collect::<Vec<_>>()
+            .join(" "),
         Value::String(value) => value.clone(),
         Value::Number(value) => value.to_string(),
         Value::Percentage(value) => format!("{value}%"),
@@ -341,7 +368,10 @@ mod tests {
         );
 
         let style = resolver.computed_style(&title);
-        assert_eq!(style.get("color"), Some(&ComputedValue::Color("red".to_string())));
+        assert_eq!(
+            style.get("color"),
+            Some(&ComputedValue::Color("red".to_string()))
+        );
     }
 
     #[test]
@@ -359,7 +389,10 @@ mod tests {
         );
 
         let style = resolver.computed_style(&title);
-        assert_eq!(style.get("color"), Some(&ComputedValue::Color("green".to_string())));
+        assert_eq!(
+            style.get("color"),
+            Some(&ComputedValue::Color("green".to_string()))
+        );
     }
 
     #[test]
@@ -377,8 +410,14 @@ mod tests {
         let body_style = resolver.computed_style(&body);
         let title_style = resolver.computed_style(&title);
 
-        assert_eq!(body_style.get("color"), Some(&ComputedValue::Color("blue".to_string())));
-        assert_eq!(title_style.get("color"), Some(&ComputedValue::Color("blue".to_string())));
+        assert_eq!(
+            body_style.get("color"),
+            Some(&ComputedValue::Color("blue".to_string()))
+        );
+        assert_eq!(
+            title_style.get("color"),
+            Some(&ComputedValue::Color("blue".to_string()))
+        );
         assert_eq!(title_style.get("font-size"), Some(&ComputedValue::Px(20.0)));
     }
 
@@ -389,7 +428,8 @@ mod tests {
 
         resolver.add_stylesheet(
             Origin::Author,
-            parse_stylesheet("body { font-size: 20px; } h1 { margin-top: 2em; font-size: 150%; }").unwrap(),
+            parse_stylesheet("body { font-size: 20px; } h1 { margin-top: 2em; font-size: 150%; }")
+                .unwrap(),
         );
 
         let _ = document;
@@ -422,7 +462,10 @@ mod tests {
         let mut resolver = StyleResolver::new();
 
         let style = resolver.computed_style(&title);
-        assert_eq!(style.get("color"), Some(&ComputedValue::Color("black".to_string())));
+        assert_eq!(
+            style.get("color"),
+            Some(&ComputedValue::Color("black".to_string()))
+        );
         assert_eq!(style.get("font-size"), Some(&ComputedValue::Px(16.0)));
     }
 }

@@ -96,7 +96,9 @@ fn matches_selector_part(node: &NodeHandle, selector: &Selector, index: usize) -
 }
 
 fn matches_compound(node: &NodeHandle, part: &SelectorPart) -> bool {
-    part.simples.iter().all(|simple| matches_simple_selector(node, simple))
+    part.simples
+        .iter()
+        .all(|simple| matches_simple_selector(node, simple))
 }
 
 fn matches_simple_selector(node: &NodeHandle, simple: &SimpleSelector) -> bool {
@@ -107,7 +109,11 @@ fn matches_simple_selector(node: &NodeHandle, simple: &SimpleSelector) -> bool {
             .unwrap_or(false),
         SimpleSelector::Universal => node.node_type() == NodeType::Element,
         SimpleSelector::Class(class_name) => get_attribute(node, "class")
-            .map(|class_attr| class_attr.split_ascii_whitespace().any(|class| class == class_name))
+            .map(|class_attr| {
+                class_attr
+                    .split_ascii_whitespace()
+                    .any(|class| class == class_name)
+            })
             .unwrap_or(false),
         SimpleSelector::Id(id) => get_attribute(node, "id")
             .map(|actual| actual == *id)
@@ -144,7 +150,9 @@ fn matches_attribute_selector(
 }
 
 fn matches_pseudo_class(node: &NodeHandle, name: &str) -> bool {
-    if let Some(argument) = name.strip_prefix("nth-child(").and_then(|rest| rest.strip_suffix(')'))
+    if let Some(argument) = name
+        .strip_prefix("nth-child(")
+        .and_then(|rest| rest.strip_suffix(')'))
     {
         return matches_nth_child(node, argument.trim());
     }
@@ -279,9 +287,15 @@ mod tests {
         let (_, _, _, _, lead, _, _) = sample_tree();
 
         assert!(matches_selector(&lead, &selector("[data-kind] {}")));
-        assert!(matches_selector(&lead, &selector(r#"[data-kind="intro hero"] {}"#)));
+        assert!(matches_selector(
+            &lead,
+            &selector(r#"[data-kind="intro hero"] {}"#)
+        ));
         assert!(matches_selector(&lead, &selector("[data-kind~=hero] {}")));
-        assert!(!matches_selector(&lead, &selector("[data-kind~=missing] {}")));
+        assert!(!matches_selector(
+            &lead,
+            &selector("[data-kind~=missing] {}")
+        ));
     }
 
     #[test]

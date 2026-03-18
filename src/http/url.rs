@@ -78,7 +78,13 @@ impl Url {
 
 impl fmt::Display for Url {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}://{}{}", self.scheme, self.authority(), self.request_target())
+        write!(
+            f,
+            "{}://{}{}",
+            self.scheme,
+            self.authority(),
+            self.request_target()
+        )
     }
 }
 
@@ -113,7 +119,9 @@ impl std::str::FromStr for Url {
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         // scheme
-        let (scheme, rest) = s.split_once("://").ok_or(UrlParseError::MissingSchemeSeparator)?;
+        let (scheme, rest) = s
+            .split_once("://")
+            .ok_or(UrlParseError::MissingSchemeSeparator)?;
         let scheme = scheme.to_ascii_lowercase();
         if scheme != "http" && scheme != "https" {
             return Err(UrlParseError::UnsupportedScheme);
@@ -156,20 +164,34 @@ impl std::str::FromStr for Url {
         let (path, query) = if path_and_query.starts_with('?') {
             // No explicit path, e.g. "http://example.com?x=1"
             let q = &path_and_query[1..];
-            let query = if q.is_empty() { None } else { Some(q.to_string()) };
+            let query = if q.is_empty() {
+                None
+            } else {
+                Some(q.to_string())
+            };
             ("/".to_string(), query)
         } else {
             match path_and_query.find('?') {
                 Some(i) => {
                     let q = &path_and_query[i + 1..];
-                    let query = if q.is_empty() { None } else { Some(q.to_string()) };
+                    let query = if q.is_empty() {
+                        None
+                    } else {
+                        Some(q.to_string())
+                    };
                     (path_and_query[..i].to_string(), query)
                 }
                 None => (path_and_query.to_string(), None),
             }
         };
 
-        Ok(Url { scheme, host, port, path, query })
+        Ok(Url {
+            scheme,
+            host,
+            port,
+            path,
+            query,
+        })
     }
 }
 
@@ -292,7 +314,9 @@ mod tests {
 
     #[test]
     fn error_invalid_port() {
-        let err = "http://example.com:notaport/path".parse::<Url>().unwrap_err();
+        let err = "http://example.com:notaport/path"
+            .parse::<Url>()
+            .unwrap_err();
         assert_eq!(err, UrlParseError::InvalidPort);
     }
 

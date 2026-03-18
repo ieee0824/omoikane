@@ -430,7 +430,10 @@ impl Parser {
             }
 
             let simples = self.parse_simple_selectors()?;
-            parts.push(SelectorPart { combinator, simples });
+            parts.push(SelectorPart {
+                combinator,
+                simples,
+            });
             combinator = None;
         }
 
@@ -507,7 +510,8 @@ impl Parser {
                             self.next();
                             let mut argument_tokens = Vec::new();
                             while !matches!(self.peek(), Some(CssToken::ParenClose) | None) {
-                                argument_tokens.push(self.next().expect("peeked token should exist"));
+                                argument_tokens
+                                    .push(self.next().expect("peeked token should exist"));
                             }
                             match self.next() {
                                 Some(CssToken::ParenClose) => {}
@@ -806,11 +810,13 @@ fn expand_box_shorthand(prefix: &str, value: Value, important: bool) -> Vec<Decl
         [a, b] => (a.clone(), b.clone(), a.clone(), b.clone()),
         [a, b, c] => (a.clone(), b.clone(), c.clone(), b.clone()),
         [a, b, c, d] => (a.clone(), b.clone(), c.clone(), d.clone()),
-        _ => return vec![Declaration {
-            name: prefix.to_string(),
-            value: Value::List(values),
-            important,
-        }],
+        _ => {
+            return vec![Declaration {
+                name: prefix.to_string(),
+                value: Value::List(values),
+                important,
+            }];
+        }
     };
 
     vec![
@@ -996,7 +1002,8 @@ fn is_ident_char(ch: char) -> bool {
 
 fn is_number_start(chars: &[char], index: usize) -> bool {
     chars.get(index).is_some_and(|c| c.is_ascii_digit())
-        || (chars.get(index) == Some(&'.') && chars.get(index + 1).is_some_and(|c| c.is_ascii_digit()))
+        || (chars.get(index) == Some(&'.')
+            && chars.get(index + 1).is_some_and(|c| c.is_ascii_digit()))
 }
 
 fn consume_ident(chars: &[char], index: &mut usize) -> String {
@@ -1039,7 +1046,9 @@ fn consume_number(chars: &[char], index: &mut usize) -> Result<f32, CssParseErro
             break;
         }
     }
-    value.parse::<f32>().map_err(|_| CssParseError::InvalidNumber)
+    value
+        .parse::<f32>()
+        .map_err(|_| CssParseError::InvalidNumber)
 }
 
 #[cfg(test)]
@@ -1062,16 +1071,32 @@ mod tests {
         };
 
         assert_eq!(rule.selectors.len(), 2);
-        assert_eq!(rule.selectors[0].parts[0].simples[0], SimpleSelector::Type("div".to_string()));
-        assert_eq!(rule.selectors[0].parts[0].simples[1], SimpleSelector::Class("hero".to_string()));
-        assert_eq!(rule.selectors[0].parts[1].combinator, Some(Combinator::Child));
-        assert_eq!(rule.selectors[1].parts[0].simples[0], SimpleSelector::Type("a".to_string()));
-        assert_eq!(rule.selectors[1].parts[0].simples[1], SimpleSelector::PseudoClass("hover".to_string()));
+        assert_eq!(
+            rule.selectors[0].parts[0].simples[0],
+            SimpleSelector::Type("div".to_string())
+        );
+        assert_eq!(
+            rule.selectors[0].parts[0].simples[1],
+            SimpleSelector::Class("hero".to_string())
+        );
+        assert_eq!(
+            rule.selectors[0].parts[1].combinator,
+            Some(Combinator::Child)
+        );
+        assert_eq!(
+            rule.selectors[1].parts[0].simples[0],
+            SimpleSelector::Type("a".to_string())
+        );
+        assert_eq!(
+            rule.selectors[1].parts[0].simples[1],
+            SimpleSelector::PseudoClass("hover".to_string())
+        );
     }
 
     #[test]
     fn parses_attribute_and_pseudo_element_selectors() {
-        let stylesheet = parse_stylesheet(r#"input[type="text"]::placeholder { color: gray; }"#).unwrap();
+        let stylesheet =
+            parse_stylesheet(r#"input[type="text"]::placeholder { color: gray; }"#).unwrap();
         let Rule::Style(rule) = &stylesheet.rules[0] else {
             panic!("expected style rule");
         };
@@ -1092,7 +1117,9 @@ mod tests {
 
     #[test]
     fn parses_values_and_functions() {
-        let stylesheet = parse_stylesheet("body { width: calc(100%); background-color: rgb(255, 0, 0); }").unwrap();
+        let stylesheet =
+            parse_stylesheet("body { width: calc(100%); background-color: rgb(255, 0, 0); }")
+                .unwrap();
         let Rule::Style(rule) = &stylesheet.rules[0] else {
             panic!("expected style rule");
         };
@@ -1140,15 +1167,36 @@ mod tests {
 
     #[test]
     fn expands_margin_and_border_shorthands() {
-        let stylesheet = parse_stylesheet("div { margin: 1px 2px; border: 1px solid #000; }").unwrap();
+        let stylesheet =
+            parse_stylesheet("div { margin: 1px 2px; border: 1px solid #000; }").unwrap();
         let Rule::Style(rule) = &stylesheet.rules[0] else {
             panic!("expected style rule");
         };
 
-        assert!(rule.declarations.iter().any(|decl| decl.name == "margin-top"));
-        assert!(rule.declarations.iter().any(|decl| decl.name == "margin-right"));
-        assert!(rule.declarations.iter().any(|decl| decl.name == "border-width"));
-        assert!(rule.declarations.iter().any(|decl| decl.name == "border-style"));
-        assert!(rule.declarations.iter().any(|decl| decl.name == "border-color"));
+        assert!(
+            rule.declarations
+                .iter()
+                .any(|decl| decl.name == "margin-top")
+        );
+        assert!(
+            rule.declarations
+                .iter()
+                .any(|decl| decl.name == "margin-right")
+        );
+        assert!(
+            rule.declarations
+                .iter()
+                .any(|decl| decl.name == "border-width")
+        );
+        assert!(
+            rule.declarations
+                .iter()
+                .any(|decl| decl.name == "border-style")
+        );
+        assert!(
+            rule.declarations
+                .iter()
+                .any(|decl| decl.name == "border-color")
+        );
     }
 }
