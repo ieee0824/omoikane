@@ -5,6 +5,7 @@ edition = "2024"
 description = "A headless browser engine built from scratch in Rust."
 
 [dependencies]
+boa_engine = "0.21.0"
 rustls = "0.23"
 webpki-roots = "1.0"
 
