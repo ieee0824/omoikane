@@ -4,7 +4,9 @@ use std::collections::{BTreeMap, HashMap};
 
 use crate::dom::{Node, NodeHandle, NodeType};
 
-use super::{Rule, Specificity, Stylesheet, Value, matches_selector, specificity};
+use super::{
+    PseudoElement, Rule, Specificity, Stylesheet, Value, matches_selector_with_pseudo, specificity,
+};
 
 /// CSS origin.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -54,6 +56,7 @@ pub struct StylesheetInput {
 pub struct StyleResolver {
     stylesheets: Vec<StylesheetInput>,
     cache: HashMap<usize, ComputedStyle>,
+    pseudo_cache: HashMap<(usize, PseudoElement), ComputedStyle>,
 }
 
 impl StyleResolver {
@@ -67,6 +70,7 @@ impl StyleResolver {
         self.stylesheets
             .push(StylesheetInput { origin, stylesheet });
         self.cache.clear();
+        self.pseudo_cache.clear();
     }
 
     /// Resolves computed style for `node`, using the cache when possible.
@@ -84,10 +88,40 @@ impl StyleResolver {
         style
     }
 
+    /// Resolves computed style for a pseudo-element attached to `node`.
+    pub fn computed_pseudo_style(
+        &mut self,
+        node: &NodeHandle,
+        pseudo: PseudoElement,
+    ) -> Option<ComputedStyle> {
+        let key = (node.identity(), pseudo);
+        if let Some(style) = self.pseudo_cache.get(&key) {
+            return Some(style.clone());
+        }
+
+        let parent_style = self.computed_style(node);
+        let style = self.compute_style_with_pseudo(node, Some(&parent_style), Some(pseudo));
+        if style.properties.is_empty() {
+            return None;
+        }
+
+        self.pseudo_cache.insert(key, style.clone());
+        Some(style)
+    }
+
     fn compute_style(
         &self,
         node: &NodeHandle,
         parent_style: Option<&ComputedStyle>,
+    ) -> ComputedStyle {
+        self.compute_style_with_pseudo(node, parent_style, None)
+    }
+
+    fn compute_style_with_pseudo(
+        &self,
+        node: &NodeHandle,
+        parent_style: Option<&ComputedStyle>,
+        pseudo: Option<PseudoElement>,
     ) -> ComputedStyle {
         let mut candidates = Vec::new();
         let mut source_order = 0usize;
@@ -97,6 +131,7 @@ impl StyleResolver {
                 node,
                 &input.stylesheet.rules,
                 input.origin,
+                pseudo,
                 &mut source_order,
                 &mut candidates,
             );
@@ -138,6 +173,7 @@ fn collect_rule_candidates(
     node: &NodeHandle,
     rules: &[Rule],
     origin: Origin,
+    pseudo: Option<PseudoElement>,
     source_order: &mut usize,
     out: &mut Vec<Candidate>,
 ) {
@@ -151,7 +187,7 @@ fn collect_rule_candidates(
                 let matching_specificity = style_rule
                     .selectors
                     .iter()
-                    .filter(|selector| matches_selector(node, selector))
+                    .filter(|selector| matches_selector_with_pseudo(node, selector, pseudo))
                     .map(specificity)
                     .max();
 
@@ -173,7 +209,7 @@ fn collect_rule_candidates(
             }
             Rule::At(at_rule) => {
                 if let Some(block) = &at_rule.block {
-                    collect_rule_candidates(node, block, origin, source_order, out);
+                    collect_rule_candidates(node, block, origin, pseudo, source_order, out);
                 } else {
                     *source_order += at_rule.declarations.len();
                 }
@@ -328,7 +364,7 @@ fn render_value(value: &Value) -> String {
 
 #[cfg(test)]
 mod tests {
-    use crate::css::parse_stylesheet;
+    use crate::css::{PseudoElement, parse_stylesheet};
     use crate::dom::NodeHandle;
 
     use super::*;
@@ -467,5 +503,41 @@ mod tests {
             Some(&ComputedValue::Color("black".to_string()))
         );
         assert_eq!(style.get("font-size"), Some(&ComputedValue::Px(16.0)));
+    }
+
+    #[test]
+    fn keeps_pseudo_element_rules_out_of_normal_computed_style() {
+        let (_document, _body, title, _html) = sample_tree();
+        let mut resolver = StyleResolver::new();
+        resolver.add_stylesheet(
+            Origin::Author,
+            parse_stylesheet("h1::before { content: \"prefix\"; color: red; }").unwrap(),
+        );
+
+        let style = resolver.computed_style(&title);
+        assert_eq!(style.get("content"), None);
+        assert_eq!(style.get("color"), Some(&ComputedValue::Color("black".to_string())));
+    }
+
+    #[test]
+    fn resolves_computed_style_for_pseudo_elements() {
+        let (_document, _body, title, _html) = sample_tree();
+        let mut resolver = StyleResolver::new();
+        resolver.add_stylesheet(
+            Origin::Author,
+            parse_stylesheet("h1 { color: blue; } h1::before { content: \"prefix\"; }").unwrap(),
+        );
+
+        let style = resolver
+            .computed_pseudo_style(&title, PseudoElement::Before)
+            .unwrap();
+        assert_eq!(
+            style.get("content"),
+            Some(&ComputedValue::String("prefix".to_string()))
+        );
+        assert_eq!(
+            style.get("color"),
+            Some(&ComputedValue::Color("blue".to_string()))
+        );
     }
 }

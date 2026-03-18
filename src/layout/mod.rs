@@ -3,8 +3,9 @@
 //! The layout phase consumes DOM nodes together with computed styles and
 //! produces a tree of rectangular block boxes.
 
-use crate::css::{ComputedStyle, ComputedValue, StyleResolver};
+use crate::css::{ComputedStyle, ComputedValue, PseudoElement, StyleResolver};
 use crate::dom::{Node, NodeHandle, NodeType};
+use crate::paint::{DataUri, Image, parse_data_uri};
 
 /// A rectangle in layout space.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
@@ -81,10 +82,18 @@ pub enum Overflow {
 #[derive(Debug, Clone, PartialEq)]
 pub struct InlineFragment {
     pub node: NodeHandle,
-    pub text: String,
+    pub content: InlineFragmentContent,
     pub rect: Rect,
     pub metrics: FontMetrics,
     pub vertical_align: VerticalAlign,
+}
+
+/// A laid out inline fragment payload.
+#[derive(Debug, Clone, PartialEq)]
+pub enum InlineFragmentContent {
+    Text(String),
+    Image(Image),
+    GeneratedBox,
 }
 
 /// A single line box inside a block formatting context.
@@ -189,6 +198,16 @@ impl LayoutBox {
     /// Returns the box height including padding, border, and margins.
     pub fn total_height(&self) -> f32 {
         self.dimensions.total_height()
+    }
+}
+
+impl InlineFragment {
+    /// Returns the text payload when this fragment represents text.
+    pub fn text(&self) -> Option<&str> {
+        match &self.content {
+            InlineFragmentContent::Text(text) => Some(text.as_str()),
+            _ => None,
+        }
     }
 }
 
@@ -1010,10 +1029,17 @@ fn layout_inline_nodes(
 #[derive(Debug, Clone)]
 struct InlineSegment {
     node: NodeHandle,
-    text: String,
+    content: InlineSegmentContent,
     metrics: FontMetrics,
     line_height: f32,
     vertical_align: VerticalAlign,
+}
+
+#[derive(Debug, Clone)]
+enum InlineSegmentContent {
+    Text(String),
+    Image(Image),
+    GeneratedBox,
 }
 
 fn collect_inline_segments(
@@ -1032,7 +1058,7 @@ fn collect_inline_segments(
                 if !text.is_empty() {
                     out.push(InlineSegment {
                         node: node.clone(),
-                        text,
+                        content: InlineSegmentContent::Text(text),
                         metrics: font_metrics(&parent_style),
                         line_height: line_height(&parent_style),
                         vertical_align: vertical_align(&parent_style),
@@ -1046,6 +1072,7 @@ fn collect_inline_segments(
                 return;
             }
 
+            out.extend(generated_inline_segments(node, resolver, PseudoElement::Before));
             for child in node.child_nodes() {
                 match child.node_type() {
                     NodeType::Text => {
@@ -1054,7 +1081,7 @@ fn collect_inline_segments(
                             if !text.is_empty() {
                                 out.push(InlineSegment {
                                     node: child,
-                                    text,
+                                    content: InlineSegmentContent::Text(text),
                                     metrics: font_metrics(&style),
                                     line_height: line_height(&style),
                                     vertical_align: vertical_align(&style),
@@ -1068,8 +1095,86 @@ fn collect_inline_segments(
                     _ => {}
                 }
             }
+            out.extend(generated_inline_segments(node, resolver, PseudoElement::After));
         }
         _ => {}
+    }
+}
+
+fn generated_inline_segments(
+    node: &NodeHandle,
+    resolver: &mut StyleResolver,
+    pseudo: PseudoElement,
+) -> Vec<InlineSegment> {
+    let Some(style) = resolver.computed_pseudo_style(node, pseudo) else {
+        return Vec::new();
+    };
+    if is_display_none(&style) {
+        return Vec::new();
+    }
+
+    let Some(content) = style.get("content") else {
+        return Vec::new();
+    };
+    let metrics = font_metrics(&style);
+    let line_height = line_height(&style);
+    let vertical_align = vertical_align(&style);
+
+    match generated_content_value(content) {
+        Some(GeneratedContent::Text(text)) => vec![InlineSegment {
+            node: node.clone(),
+            content: if text.is_empty() {
+                InlineSegmentContent::GeneratedBox
+            } else {
+                InlineSegmentContent::Text(normalize_text(&text, white_space(&style)))
+            },
+            metrics,
+            line_height,
+            vertical_align,
+        }],
+        Some(GeneratedContent::Image(image)) => vec![InlineSegment {
+            node: node.clone(),
+            content: InlineSegmentContent::Image(image),
+            metrics,
+            line_height: line_height.max(metrics.font_size),
+            vertical_align,
+        }],
+        None => Vec::new(),
+    }
+}
+
+enum GeneratedContent {
+    Text(String),
+    Image(Image),
+}
+
+fn generated_content_value(value: &ComputedValue) -> Option<GeneratedContent> {
+    match value {
+        ComputedValue::String(text) => Some(GeneratedContent::Text(text.clone())),
+        ComputedValue::Keyword(keyword)
+            if keyword.eq_ignore_ascii_case("none") || keyword.eq_ignore_ascii_case("normal") =>
+        {
+            None
+        }
+        ComputedValue::Keyword(keyword) => parse_generated_content_keyword(keyword),
+        _ => None,
+    }
+}
+
+fn parse_generated_content_keyword(keyword: &str) -> Option<GeneratedContent> {
+    let url = keyword
+        .strip_prefix("url(")
+        .and_then(|value| value.strip_suffix(')'))?
+        .trim()
+        .trim_matches('"')
+        .trim_matches('\'');
+    let data_uri = parse_data_uri(url).ok()?;
+    match data_uri {
+        DataUri::Text { data, .. } => Some(GeneratedContent::Text(data)),
+        DataUri::Binary { mime_type, data } if mime_type.eq_ignore_ascii_case("image/png") => {
+            Image::decode_png(&data).ok().map(GeneratedContent::Image)
+        }
+        DataUri::Binary { .. } => None,
     }
 }
 
@@ -1090,12 +1195,28 @@ fn white_space(style: &ComputedStyle) -> WhiteSpaceMode {
 
 fn normalize_text(text: &str, mode: WhiteSpaceMode) -> String {
     match mode {
-        WhiteSpaceMode::Normal => {
-            let collapsed = text.split_whitespace().collect::<Vec<_>>().join(" ");
-            collapsed
-        }
+        WhiteSpaceMode::Normal => collapse_white_space(text),
         WhiteSpaceMode::Pre => text.to_string(),
     }
+}
+
+fn collapse_white_space(text: &str) -> String {
+    let mut out = String::new();
+    let mut previous_was_space = false;
+
+    for ch in text.chars() {
+        if ch.is_whitespace() {
+            if !previous_was_space {
+                out.push(' ');
+                previous_was_space = true;
+            }
+        } else {
+            out.push(ch);
+            previous_was_space = false;
+        }
+    }
+
+    out
 }
 
 fn font_size(style: &ComputedStyle) -> f32 {
@@ -1148,50 +1269,55 @@ fn layout_inline_segments(
 
     for segment in segments {
         for piece in split_segment(segment) {
-            if piece == "\n" {
-                push_line(
-                    &mut lines,
-                    &mut current_fragments,
-                    start_x,
-                    cursor_y,
-                    cursor_x - start_x,
-                    current_line_height.max(segment.line_height),
-                );
-                cursor_y += current_line_height.max(segment.line_height);
-                cursor_x = start_x;
-                current_line_height = 0.0;
-                continue;
-            }
+            match piece {
+                InlinePiece::Newline => {
+                    push_line(
+                        &mut lines,
+                        &mut current_fragments,
+                        start_x,
+                        cursor_y,
+                        cursor_x - start_x,
+                        current_line_height.max(segment.line_height),
+                    );
+                    cursor_y += current_line_height.max(segment.line_height);
+                    cursor_x = start_x;
+                    current_line_height = 0.0;
+                }
+                InlinePiece::Fragment {
+                    content,
+                    width,
+                    height,
+                } => {
+                    if cursor_x > start_x && cursor_x + width > start_x + available_width {
+                        push_line(
+                            &mut lines,
+                            &mut current_fragments,
+                            start_x,
+                            cursor_y,
+                            cursor_x - start_x,
+                            current_line_height.max(segment.line_height),
+                        );
+                        cursor_y += current_line_height.max(segment.line_height);
+                        cursor_x = start_x;
+                        current_line_height = 0.0;
+                    }
 
-            let piece_width = measure_text_width(&piece, segment.metrics);
-            if cursor_x > start_x && cursor_x + piece_width > start_x + available_width {
-                push_line(
-                    &mut lines,
-                    &mut current_fragments,
-                    start_x,
-                    cursor_y,
-                    cursor_x - start_x,
-                    current_line_height.max(segment.line_height),
-                );
-                cursor_y += current_line_height.max(segment.line_height);
-                cursor_x = start_x;
-                current_line_height = 0.0;
+                    current_fragments.push(InlineFragment {
+                        node: segment.node.clone(),
+                        content,
+                        rect: Rect {
+                            x: cursor_x,
+                            y: cursor_y,
+                            width,
+                            height,
+                        },
+                        metrics: segment.metrics,
+                        vertical_align: segment.vertical_align,
+                    });
+                    cursor_x += width;
+                    current_line_height = current_line_height.max(segment.line_height.max(height));
+                }
             }
-
-            current_fragments.push(InlineFragment {
-                node: segment.node.clone(),
-                text: piece.clone(),
-                rect: Rect {
-                    x: cursor_x,
-                    y: cursor_y,
-                    width: piece_width,
-                    height: segment.line_height,
-                },
-                metrics: segment.metrics,
-                vertical_align: segment.vertical_align,
-            });
-            cursor_x += piece_width;
-            current_line_height = current_line_height.max(segment.line_height);
         }
     }
 
@@ -1209,20 +1335,61 @@ fn layout_inline_segments(
     lines
 }
 
-fn split_segment(segment: &InlineSegment) -> Vec<String> {
-    if segment.text.contains('\n') {
+enum InlinePiece {
+    Newline,
+    Fragment {
+        content: InlineFragmentContent,
+        width: f32,
+        height: f32,
+    },
+}
+
+fn split_segment(segment: &InlineSegment) -> Vec<InlinePiece> {
+    match &segment.content {
+        InlineSegmentContent::Text(text) => split_text_segment(text, segment.metrics, segment.line_height),
+        InlineSegmentContent::Image(image) => vec![InlinePiece::Fragment {
+            content: InlineFragmentContent::Image(image.clone()),
+            width: image.width() as f32,
+            height: image.height() as f32,
+        }],
+        InlineSegmentContent::GeneratedBox => vec![InlinePiece::Fragment {
+            content: InlineFragmentContent::GeneratedBox,
+            width: 0.0,
+            height: segment.line_height,
+        }],
+    }
+}
+
+fn split_text_segment(text: &str, metrics: FontMetrics, line_height: f32) -> Vec<InlinePiece> {
+    if text.contains('\n') {
         let mut pieces = Vec::new();
-        for (index, part) in segment.text.split('\n').enumerate() {
+        let line_count = text.split('\n').count();
+        for (index, part) in text.split('\n').enumerate() {
             if !part.is_empty() {
-                pieces.extend(split_words_preserving_spaces(part));
+                pieces.extend(
+                    split_words_preserving_spaces(part)
+                        .into_iter()
+                        .map(|piece| InlinePiece::Fragment {
+                            width: measure_text_width(&piece, metrics),
+                            height: line_height,
+                            content: InlineFragmentContent::Text(piece),
+                        }),
+                );
             }
-            if index + 1 < segment.text.split('\n').count() {
-                pieces.push("\n".to_string());
+            if index + 1 < line_count {
+                pieces.push(InlinePiece::Newline);
             }
         }
         pieces
     } else {
-        split_words_preserving_spaces(&segment.text)
+        split_words_preserving_spaces(text)
+            .into_iter()
+            .map(|piece| InlinePiece::Fragment {
+                width: measure_text_width(&piece, metrics),
+                height: line_height,
+                content: InlineFragmentContent::Text(piece),
+            })
+            .collect()
     }
 }
 
@@ -1565,9 +1732,9 @@ mod tests {
 
         let paragraph_box = &layout.children[0];
         assert_eq!(paragraph_box.lines.len(), 3);
-        assert_eq!(paragraph_box.lines[0].fragments[0].text, "hello");
-        assert_eq!(paragraph_box.lines[1].fragments[0].text.trim(), "world");
-        assert_eq!(paragraph_box.lines[2].fragments[0].text.trim(), "again");
+        assert_eq!(paragraph_box.lines[0].fragments[0].text(), Some("hello"));
+        assert_eq!(paragraph_box.lines[1].fragments[0].text().map(str::trim), Some("world"));
+        assert_eq!(paragraph_box.lines[2].fragments[0].text().map(str::trim), Some("again"));
         assert_eq!(paragraph_box.dimensions.content.height, 60.0);
     }
 
@@ -1599,7 +1766,7 @@ mod tests {
         let rendered = paragraph_box.lines[0]
             .fragments
             .iter()
-            .map(|fragment| fragment.text.as_str())
+            .filter_map(|fragment| fragment.text())
             .collect::<String>();
         assert_eq!(rendered, "hello world");
     }
@@ -1638,12 +1805,12 @@ mod tests {
         let first_line = paragraph_box.lines[0]
             .fragments
             .iter()
-            .map(|fragment| fragment.text.as_str())
+            .filter_map(|fragment| fragment.text())
             .collect::<String>();
         let second_line = paragraph_box.lines[1]
             .fragments
             .iter()
-            .map(|fragment| fragment.text.as_str())
+            .filter_map(|fragment| fragment.text())
             .collect::<String>();
         assert_eq!(first_line, "hello   world");
         assert_eq!(second_line, "next");
@@ -1683,7 +1850,7 @@ mod tests {
 
         let paragraph_box = &layout.children[0];
         assert_eq!(paragraph_box.lines.len(), 1);
-        assert_eq!(paragraph_box.lines[0].fragments[0].text, "inline");
+        assert_eq!(paragraph_box.lines[0].fragments[0].text(), Some("inline"));
     }
 
     #[test]
@@ -1787,10 +1954,123 @@ mod tests {
         let raised_fragment = line
             .fragments
             .iter()
-            .find(|fragment| fragment.text == "lift")
+            .find(|fragment| fragment.text() == Some("lift"))
             .unwrap();
 
         assert!(raised_fragment.rect.y < base_fragment.rect.y);
+    }
+
+    #[test]
+    fn generated_before_and_after_content_participate_in_inline_layout() {
+        let document = NodeHandle::document();
+        let body = NodeHandle::element("body");
+        let paragraph = NodeHandle::element("p");
+        let span = NodeHandle::element("span");
+        span.append_child(NodeHandle::text("core"));
+        document.append_child(body.clone());
+        body.append_child(paragraph.clone());
+        paragraph.append_child(span.clone());
+
+        let mut resolver = StyleResolver::new();
+        resolver.add_stylesheet(
+            Origin::Author,
+            parse_stylesheet(
+                "span::before { content: \"pre \"; } \
+                 span::after { content: \" post\"; }",
+            )
+            .unwrap(),
+        );
+
+        let layout = layout_tree(
+            &body,
+            &mut resolver,
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 200.0,
+                height: 0.0,
+            },
+        )
+        .unwrap();
+
+        let line = &layout.children[0].lines[0];
+        let rendered = line
+            .fragments
+            .iter()
+            .filter_map(|fragment| fragment.text())
+            .collect::<String>();
+        assert_eq!(rendered, "pre core post");
+    }
+
+    #[test]
+    fn generated_empty_content_creates_a_zero_width_fragment() {
+        let document = NodeHandle::document();
+        let body = NodeHandle::element("body");
+        let paragraph = NodeHandle::element("p");
+        let span = NodeHandle::element("span");
+        document.append_child(body.clone());
+        body.append_child(paragraph.clone());
+        paragraph.append_child(span.clone());
+
+        let mut resolver = StyleResolver::new();
+        resolver.add_stylesheet(
+            Origin::Author,
+            parse_stylesheet("span::before { content: \"\"; }").unwrap(),
+        );
+
+        let layout = layout_tree(
+            &body,
+            &mut resolver,
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 100.0,
+                height: 0.0,
+            },
+        )
+        .unwrap();
+
+        let line = &layout.children[0].lines[0];
+        assert!(line
+            .fragments
+            .iter()
+            .any(|fragment| matches!(fragment.content, InlineFragmentContent::GeneratedBox)));
+    }
+
+    #[test]
+    fn generated_data_uri_png_content_creates_image_fragment() {
+        let document = NodeHandle::document();
+        let body = NodeHandle::element("body");
+        let paragraph = NodeHandle::element("p");
+        let span = NodeHandle::element("span");
+        document.append_child(body.clone());
+        body.append_child(paragraph.clone());
+        paragraph.append_child(span.clone());
+
+        let image_data = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADElEQVR4AQEFAPr/AP8AAP9zftimAAAAAElFTkSuQmCC";
+        let stylesheet = format!(
+            "span::before {{ content: url(\"data:image/png;base64,{image_data}\"); }}"
+        );
+        let mut resolver = StyleResolver::new();
+        resolver.add_stylesheet(Origin::Author, parse_stylesheet(&stylesheet).unwrap());
+
+        let layout = layout_tree(
+            &body,
+            &mut resolver,
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 100.0,
+                height: 0.0,
+            },
+        )
+        .unwrap();
+
+        let line = &layout.children[0].lines[0];
+        assert!(line.fragments.iter().any(|fragment| matches!(
+            fragment.content,
+            InlineFragmentContent::Image(_)
+        )));
     }
 
     #[test]

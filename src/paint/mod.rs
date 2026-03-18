@@ -3,7 +3,8 @@
 use std::io::Read;
 
 use crate::css::{ComputedStyle, ComputedValue, StyleResolver};
-use crate::layout::{LayoutBox, Rect, Visibility};
+use crate::layout::{InlineFragmentContent, LayoutBox, Rect, Visibility};
+use base64::Engine;
 use flate2::read::ZlibDecoder;
 
 /// An RGBA color.
@@ -62,11 +63,26 @@ impl Image {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PaintError {
     InvalidImageBuffer,
+    InvalidDataUri,
+    InvalidBase64,
     InvalidPngSignature,
     MissingPngHeader,
     UnsupportedPngFormat,
     CorruptPng,
     DecompressionFailed,
+}
+
+/// Parsed contents of a `data:` URI.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DataUri {
+    Text {
+        mime_type: String,
+        data: String,
+    },
+    Binary {
+        mime_type: String,
+        data: Vec<u8>,
+    },
 }
 
 impl Color {
@@ -365,26 +381,34 @@ fn paint_text(
 
     for line in &layout.lines {
         for fragment in &line.fragments {
-            let mut cursor_x = fragment.rect.x;
-            let advance = fragment.metrics.average_advance.max(1.0);
-            let font_size = fragment.metrics.font_size.max(1.0);
-            let glyph_height = (font_size * 0.7).max(1.0);
-            let glyph_y = fragment.rect.y + (font_size - glyph_height) * 0.5;
+            match &fragment.content {
+                InlineFragmentContent::Text(text) => {
+                    let mut cursor_x = fragment.rect.x;
+                    let advance = fragment.metrics.average_advance.max(1.0);
+                    let font_size = fragment.metrics.font_size.max(1.0);
+                    let glyph_height = (font_size * 0.7).max(1.0);
+                    let glyph_y = fragment.rect.y + (font_size - glyph_height) * 0.5;
 
-            for ch in fragment.text.chars() {
-                if !ch.is_whitespace() {
-                    canvas.fill_rect_clipped(
-                        Rect {
-                            x: cursor_x,
-                            y: glyph_y,
-                            width: (advance * 0.7).max(1.0),
-                            height: glyph_height,
-                        },
-                        color,
-                        clip,
-                    );
+                    for ch in text.chars() {
+                        if !ch.is_whitespace() {
+                            canvas.fill_rect_clipped(
+                                Rect {
+                                    x: cursor_x,
+                                    y: glyph_y,
+                                    width: (advance * 0.7).max(1.0),
+                                    height: glyph_height,
+                                },
+                                color,
+                                clip,
+                            );
+                        }
+                        cursor_x += advance;
+                    }
                 }
-                cursor_x += advance;
+                InlineFragmentContent::Image(image) => {
+                    canvas.draw_image_clipped(image, fragment.rect.x, fragment.rect.y, clip);
+                }
+                InlineFragmentContent::GeneratedBox => {}
             }
         }
     }
@@ -693,6 +717,67 @@ fn decode_png(bytes: &[u8]) -> Result<Image, PaintError> {
     }
 
     Image::new(width, height, reconstructed)
+}
+
+/// Parses a `data:` URI into either text or binary content.
+pub fn parse_data_uri(uri: &str) -> Result<DataUri, PaintError> {
+    let payload = uri
+        .strip_prefix("data:")
+        .ok_or(PaintError::InvalidDataUri)?;
+    let (metadata, data) = payload.split_once(',').ok_or(PaintError::InvalidDataUri)?;
+    let mut mime_type = "text/plain".to_string();
+    let mut is_base64 = false;
+
+    if !metadata.is_empty() {
+        for (index, part) in metadata.split(';').enumerate() {
+            if index == 0 && !part.is_empty() {
+                mime_type = part.to_string();
+                continue;
+            }
+            if part.eq_ignore_ascii_case("base64") {
+                is_base64 = true;
+            }
+        }
+    }
+
+    if is_base64 {
+        let data = base64::engine::general_purpose::STANDARD
+            .decode(data)
+            .map_err(|_| PaintError::InvalidBase64)?;
+        Ok(DataUri::Binary { mime_type, data })
+    } else {
+        Ok(DataUri::Text {
+            mime_type,
+            data: percent_decode(data),
+        })
+    }
+}
+
+fn percent_decode(input: &str) -> String {
+    let bytes = input.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut index = 0usize;
+    while index < bytes.len() {
+        if bytes[index] == b'%' && index + 2 < bytes.len() {
+            if let (Some(high), Some(low)) = (hex_value(bytes[index + 1]), hex_value(bytes[index + 2])) {
+                out.push((high << 4) | low);
+                index += 3;
+                continue;
+            }
+        }
+        out.push(bytes[index]);
+        index += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+fn hex_value(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
 }
 
 fn unfilter_scanline(
@@ -1103,5 +1188,37 @@ mod tests {
         canvas.draw_image(&image, 0.0, 0.0);
 
         assert_eq!(canvas.pixel(0, 0), Some(Color::rgba(128, 0, 127, 255)));
+    }
+
+    #[test]
+    fn parses_text_and_png_data_uris() {
+        let text = parse_data_uri("data:,hello%20world").unwrap();
+        assert_eq!(
+            text,
+            DataUri::Text {
+                mime_type: "text/plain".to_string(),
+                data: "hello world".to_string(),
+            }
+        );
+
+        let mut canvas = Canvas::new(1, 1);
+        canvas.fill_rect(
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 1.0,
+                height: 1.0,
+            },
+            Color::rgb(255, 0, 0),
+        );
+        let encoded = base64::engine::general_purpose::STANDARD.encode(canvas.encode_png());
+        let image = parse_data_uri(&format!("data:image/png;base64,{encoded}")).unwrap();
+        match image {
+            DataUri::Binary { mime_type, data } => {
+                assert_eq!(mime_type, "image/png");
+                assert_eq!(Image::decode_png(&data).unwrap().pixels(), &[255, 0, 0, 255]);
+            }
+            DataUri::Text { .. } => panic!("expected binary data uri"),
+        }
     }
 }

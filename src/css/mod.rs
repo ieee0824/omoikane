@@ -8,7 +8,10 @@ use std::fmt;
 mod matcher;
 mod style;
 
-pub use matcher::{Specificity, matches_selector, specificity};
+pub use matcher::{
+    PseudoElement, Specificity, matches_selector, matches_selector_with_pseudo,
+    selector_pseudo_element, specificity,
+};
 pub use style::{ComputedStyle, ComputedValue, Origin, StyleResolver, StylesheetInput};
 
 /// A token emitted by the CSS tokenizer.

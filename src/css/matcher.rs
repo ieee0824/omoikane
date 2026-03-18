@@ -4,6 +4,23 @@ use crate::dom::{Node, NodeHandle, NodeType};
 
 use super::{AttributeOperator, Combinator, Selector, SelectorPart, SimpleSelector};
 
+/// Supported pseudo-elements for style matching.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum PseudoElement {
+    Before,
+    After,
+}
+
+impl PseudoElement {
+    /// Returns the CSS identifier for this pseudo-element.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Before => "before",
+            Self::After => "after",
+        }
+    }
+}
+
 /// CSS selector specificity `(a, b, c)`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Specificity {
@@ -25,11 +42,45 @@ impl Specificity {
 
 /// Returns `true` when `node` matches `selector`.
 pub fn matches_selector(node: &NodeHandle, selector: &Selector) -> bool {
+    matches_selector_with_pseudo(node, selector, None)
+}
+
+/// Returns `true` when `node` matches `selector` for the requested pseudo-element.
+pub fn matches_selector_with_pseudo(
+    node: &NodeHandle,
+    selector: &Selector,
+    pseudo: Option<PseudoElement>,
+) -> bool {
     if selector.parts.is_empty() || node.node_type() != NodeType::Element {
         return false;
     }
 
+    if selector_pseudo_element(selector) != pseudo {
+        return false;
+    }
+
     matches_selector_part(node, selector, selector.parts.len() - 1)
+}
+
+/// Returns the pseudo-element targeted by `selector`, if any.
+pub fn selector_pseudo_element(selector: &Selector) -> Option<PseudoElement> {
+    let mut pseudo = None;
+    for part in &selector.parts {
+        for simple in &part.simples {
+            if let SimpleSelector::PseudoElement(name) = simple {
+                let current = match name.as_str() {
+                    "before" => PseudoElement::Before,
+                    "after" => PseudoElement::After,
+                    _ => return None,
+                };
+                if pseudo.is_some() {
+                    return None;
+                }
+                pseudo = Some(current);
+            }
+        }
+    }
+    pseudo
 }
 
 /// Computes selector specificity.
