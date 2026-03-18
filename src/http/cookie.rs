@@ -37,7 +37,9 @@ pub struct Cookie {
     name: String,
     value: String,
     domain: Option<String>,
+    host_only: bool,
     path: Option<String>,
+    created_at: SystemTime,
     expires: Option<SystemTime>,
     max_age: Option<i64>,
     secure: bool,
@@ -66,7 +68,9 @@ impl Cookie {
             name,
             value,
             domain: None,
+            host_only: true,
             path: None,
+            created_at: SystemTime::now(),
             expires: None,
             max_age: None,
             secure: false,
@@ -89,6 +93,7 @@ impl Cookie {
                         "domain" => {
                             let d = attr_value.strip_prefix('.').unwrap_or(attr_value);
                             cookie.domain = Some(d.to_ascii_lowercase());
+                            cookie.host_only = false;
                         }
                         "path" => {
                             cookie.path = Some(attr_value.to_string());
@@ -136,6 +141,11 @@ impl Cookie {
         self.domain.as_deref()
     }
 
+    /// Returns `true` if this is a host-only cookie.
+    pub fn host_only(&self) -> bool {
+        self.host_only
+    }
+
     /// Returns the `Path` attribute, if set.
     pub fn path(&self) -> Option<&str> {
         self.path.as_deref()
@@ -172,6 +182,12 @@ impl Cookie {
             if max_age <= 0 {
                 return true;
             }
+
+            if let Ok(elapsed) = now.duration_since(self.created_at) {
+                return elapsed >= Duration::from_secs(max_age as u64);
+            }
+
+            return false;
         }
         if let Some(expires) = self.expires {
             return now > expires;
@@ -181,9 +197,14 @@ impl Cookie {
 
     /// Returns `true` if this cookie should be sent with a request to `url`.
     fn matches_url(&self, url: &Url) -> bool {
-        // Domain matching
         if let Some(domain) = &self.domain {
-            if !domain_matches(url.host(), domain) {
+            let matches = if self.host_only {
+                url.host().eq_ignore_ascii_case(domain)
+            } else {
+                domain_matches(url.host(), domain)
+            };
+
+            if !matches {
                 return false;
             }
         }
@@ -236,22 +257,32 @@ impl CookieJar {
     /// `origin_domain` is the domain of the server that set the cookie,
     /// used for domain validation.
     pub fn add_from_header(&mut self, header_value: &str, origin_domain: &str) {
+        let origin_url: Url = format!("http://{origin_domain}/")
+            .parse()
+            .expect("origin domain should be a valid URL host");
+        self.add_from_header_for_url(header_value, &origin_url);
+    }
+
+    /// Parses a `Set-Cookie` header value and stores the cookie for `origin_url`.
+    pub fn add_from_header_for_url(&mut self, header_value: &str, origin_url: &Url) {
         if let Some(mut cookie) = Cookie::parse(header_value) {
-            // If no domain attribute, default to origin
+            let origin_domain = origin_url.host().to_ascii_lowercase();
+
             if cookie.domain.is_none() {
-                cookie.domain = Some(origin_domain.to_ascii_lowercase());
+                cookie.domain = Some(origin_domain.clone());
+                cookie.host_only = true;
+            } else {
+                cookie.host_only = false;
             }
 
-            // Validate domain: cookie domain must domain-match the origin
             if let Some(domain) = &cookie.domain {
-                if !domain_matches(origin_domain, domain) {
+                if !domain_matches(&origin_domain, domain) {
                     return; // Reject: server can't set cookie for unrelated domain
                 }
             }
 
-            // If no path attribute, default to "/"
             if cookie.path.is_none() {
-                cookie.path = Some("/".to_string());
+                cookie.path = Some(default_path(origin_url.path()));
             }
 
             // Remove existing cookie with same name+domain+path
@@ -262,8 +293,7 @@ impl CookieJar {
                 !(c.name == name && c.domain == domain && c.path == path)
             });
 
-            self.cookies
-                .push((cookie, origin_domain.to_ascii_lowercase()));
+            self.cookies.push((cookie, origin_domain));
         }
     }
 
@@ -333,6 +363,17 @@ fn path_matches(request_path: &str, cookie_path: &str) -> bool {
     }
 
     false
+}
+
+fn default_path(request_path: &str) -> String {
+    if !request_path.starts_with('/') {
+        return "/".to_string();
+    }
+
+    match request_path.rfind('/') {
+        Some(0) | None => "/".to_string(),
+        Some(index) => request_path[..index].to_string(),
+    }
 }
 
 /// Parses a subset of HTTP-date formats (RFC 7231 §7.1.1.1).
@@ -416,6 +457,7 @@ mod tests {
         assert_eq!(c.name(), "name");
         assert_eq!(c.value(), "value");
         assert_eq!(c.domain(), None);
+        assert!(c.host_only());
         assert_eq!(c.path(), None);
         assert!(!c.secure());
         assert!(!c.http_only());
@@ -430,6 +472,7 @@ mod tests {
         assert_eq!(c.name(), "id");
         assert_eq!(c.value(), "42");
         assert_eq!(c.domain(), Some("example.com"));
+        assert!(!c.host_only());
         assert_eq!(c.path(), Some("/api"));
         assert!(c.secure());
         assert!(c.http_only());
@@ -462,6 +505,15 @@ mod tests {
     fn parse_cookie_max_age_zero_is_expired() {
         let c = Cookie::parse("a=b; Max-Age=0").unwrap();
         assert!(c.is_expired(SystemTime::now()));
+    }
+
+    #[test]
+    fn max_age_takes_precedence_over_expires() {
+        let c = Cookie::parse(
+            "a=b; Max-Age=3600; Expires=Thu, 01 Jan 1970 00:00:01 GMT",
+        )
+        .unwrap();
+        assert!(!c.is_expired(SystemTime::now()));
     }
 
     #[test]
@@ -507,6 +559,13 @@ mod tests {
     fn domain_does_not_match_suffix() {
         // "notexample.com" should NOT match "example.com"
         assert!(!domain_matches("notexample.com", "example.com"));
+    }
+
+    #[test]
+    fn default_path_uses_parent_directory() {
+        assert_eq!(default_path("/docs/page.html"), "/docs");
+        assert_eq!(default_path("/docs/"), "/docs");
+        assert_eq!(default_path("/"), "/");
     }
 
     // --- path_matches tests ---
@@ -629,14 +688,27 @@ mod tests {
     #[test]
     fn jar_no_domain_defaults_to_origin() {
         let mut jar = CookieJar::new();
-        jar.add_from_header("a=1; Path=/", "example.com");
+        let origin: Url = "http://example.com/account/login".parse().unwrap();
+        jar.add_from_header_for_url("a=1", &origin);
 
-        let url: Url = "http://example.com/".parse().unwrap();
+        let url: Url = "http://example.com/account/profile".parse().unwrap();
         assert!(jar.cookie_header(&url).is_some());
 
-        // Should NOT match subdomain when domain was defaulted (host-only)
-        // Note: our simplified implementation does match subdomains here.
-        // Full RFC 6265 host-only flag is not yet implemented.
+        let subdomain: Url = "http://www.example.com/".parse().unwrap();
+        assert_eq!(jar.cookie_header(&subdomain), None);
+    }
+
+    #[test]
+    fn jar_default_path_uses_origin_directory() {
+        let mut jar = CookieJar::new();
+        let origin: Url = "http://example.com/docs/page.html".parse().unwrap();
+        jar.add_from_header_for_url("theme=dark", &origin);
+
+        let nested: Url = "http://example.com/docs/chapter-1".parse().unwrap();
+        assert_eq!(jar.cookie_header(&nested), Some("theme=dark".to_string()));
+
+        let outside: Url = "http://example.com/home".parse().unwrap();
+        assert_eq!(jar.cookie_header(&outside), None);
     }
 
     // --- parse_http_date tests ---

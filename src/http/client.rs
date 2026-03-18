@@ -77,10 +77,10 @@ impl Client {
             let response = connection::send(&request)?;
 
             // Store Set-Cookie headers
-            let origin = request.url().host().to_string();
+            let origin = request.url().clone();
             for (name, value) in response.headers() {
                 if name.eq_ignore_ascii_case("set-cookie") {
-                    self.cookie_jar.add_from_header(value, &origin);
+                    self.cookie_jar.add_from_header_for_url(value, &origin);
                 }
             }
 
@@ -108,8 +108,17 @@ impl Client {
 
             // Preserve headers (except Host, which is set by HttpRequest::new)
             for (name, value) in request.headers() {
-                if !name.eq_ignore_ascii_case("host") && !name.eq_ignore_ascii_case("cookie") {
+                if !name.eq_ignore_ascii_case("host")
+                    && !name.eq_ignore_ascii_case("cookie")
+                    && !name.eq_ignore_ascii_case("content-length")
+                {
                     new_request.add_header(name.clone(), value.clone());
+                }
+            }
+
+            if matches!(response.status_code(), 307 | 308) {
+                if let Some(body) = request.body() {
+                    new_request.set_body(body.to_vec());
                 }
             }
 
@@ -214,6 +223,22 @@ mod tests {
     #[test]
     fn redirect_308_preserves_method() {
         assert_eq!(redirect_method(308, Method::Post), Method::Post);
+    }
+
+    #[test]
+    fn redirect_307_preserves_request_body() {
+        let original = HttpRequest::post("http://example.com/upload", b"hello".to_vec()).unwrap();
+        let mut redirected = HttpRequest::new(
+            redirect_method(307, original.method()),
+            "http://example.com/next".parse().unwrap(),
+        );
+
+        if let Some(body) = original.body() {
+            redirected.set_body(body.to_vec());
+        }
+
+        assert_eq!(redirected.method(), Method::Post);
+        assert_eq!(redirected.body(), Some(&b"hello"[..]));
     }
 
     // --- resolve_redirect_url tests ---

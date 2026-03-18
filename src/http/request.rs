@@ -106,6 +106,11 @@ impl HttpRequest {
         &self.headers
     }
 
+    /// Returns the request body, if present.
+    pub fn body(&self) -> Option<&[u8]> {
+        self.body.as_deref()
+    }
+
     /// Appends a header. Does not check for duplicates.
     pub fn add_header(&mut self, name: impl Into<String>, value: impl Into<String>) {
         self.headers.push((name.into(), value.into()));
