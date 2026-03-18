@@ -11,6 +11,8 @@ Omoikane は、HTTP クライアント、HTML/CSS パーサー、DOM、レイア
 ## 現在できること
 
 - HTTP/1.1 と最小の HTTP/2 クライアント
+- `gzip` 圧縮レスポンスの自動展開
+- `User-Agent` の既定設定と上書き
 - HTML パースと DOM 構築
 - CSS パースと基本的なスタイル計算
 - ブロック、インライン、Flexbox を含む最小レイアウト
@@ -58,6 +60,33 @@ Omoikane は、HTTP クライアント、HTML/CSS パーサー、DOM、レイア
 cargo build
 cargo test
 ```
+
+最小の HTTP クライアント例:
+
+```rust
+use omoikane::http::Client;
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let mut client = Client::new();
+    client.set_user_agent("MyCrawler/1.0");
+
+    let response = client.get("https://example.com/")?;
+    println!("status={}", response.status_code());
+    println!("body-bytes={}", response.body().len());
+
+    Ok(())
+}
+```
+
+`Client::new()` の既定 `User-Agent` は `Omoikane/{version} {OS}` 形式です。
+必要に応じて [`src/http/client.rs`](/Users/ast/Documents/product/omoikane/src/http/client.rs) の `set_user_agent` で上書きできます。
+
+HTTP クライアントの現状仕様:
+
+- 既定で `Accept-Encoding: gzip` を送信します
+- `Content-Encoding: gzip` のレスポンスは自動で展開されます
+- `Transfer-Encoding: chunked` と `gzip` の組み合わせも扱えます
+- `h2` で応答ヘッダ解釈に失敗した場合は `HTTP/1.1` へフォールバックします
 
 ### C FFI
 
