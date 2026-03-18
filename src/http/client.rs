@@ -2,7 +2,7 @@
 
 use super::connection;
 use super::cookie::CookieJar;
-use super::request::{HttpRequest, Method};
+use super::request::{HttpRequest, Method, default_user_agent};
 use super::response::{HttpParseError, HttpResponse};
 use super::url::Url;
 
@@ -25,6 +25,7 @@ const DEFAULT_MAX_REDIRECTS: u32 = 10;
 pub struct Client {
     cookie_jar: CookieJar,
     max_redirects: u32,
+    user_agent: String,
 }
 
 impl Client {
@@ -33,12 +34,23 @@ impl Client {
         Self {
             cookie_jar: CookieJar::new(),
             max_redirects: DEFAULT_MAX_REDIRECTS,
+            user_agent: default_user_agent(),
         }
     }
 
     /// Sets the maximum number of redirects to follow.
     pub fn set_max_redirects(&mut self, max: u32) {
         self.max_redirects = max;
+    }
+
+    /// Returns the client-wide `User-Agent` value.
+    pub fn user_agent(&self) -> &str {
+        &self.user_agent
+    }
+
+    /// Sets the client-wide `User-Agent` value.
+    pub fn set_user_agent(&mut self, user_agent: impl Into<String>) {
+        self.user_agent = user_agent.into();
     }
 
     /// Returns a reference to the client's cookie jar.
@@ -67,8 +79,16 @@ impl Client {
     /// [`Client::set_max_redirects`].
     pub fn send(&mut self, mut request: HttpRequest) -> Result<HttpResponse, HttpParseError> {
         let mut redirects_remaining = self.max_redirects;
+        let built_in_user_agent = default_user_agent();
 
         loop {
+            let should_apply_client_user_agent = request
+                .header("user-agent")
+                .is_none_or(|value| value == built_in_user_agent);
+            if should_apply_client_user_agent {
+                request.set_header("User-Agent", self.user_agent.clone());
+            }
+
             // Attach cookies
             if let Some(cookie_header) = self.cookie_jar.cookie_header(request.url()) {
                 request.add_header("Cookie", cookie_header);
@@ -463,5 +483,140 @@ mod tests {
         let result = client.get(&url);
 
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn client_uses_default_user_agent() {
+        let default_user_agent = default_user_agent();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut reader = BufReader::new(&stream);
+            let mut line = String::new();
+            reader.read_line(&mut line).unwrap();
+
+            let mut user_agent = None;
+            loop {
+                let mut header = String::new();
+                reader.read_line(&mut header).unwrap();
+                let trimmed = header.trim().to_string();
+                if trimmed.is_empty() {
+                    break;
+                }
+                if let Some((name, value)) = trimmed.split_once(':') {
+                    if name.trim().eq_ignore_ascii_case("user-agent") {
+                        user_agent = Some(value.trim().to_string());
+                    }
+                }
+            }
+
+            assert_eq!(user_agent.as_deref(), Some(default_user_agent.as_str()));
+
+            let resp = "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok";
+            stream.write_all(resp.as_bytes()).unwrap();
+            stream.flush().unwrap();
+        });
+
+        let mut client = Client::new();
+        let url = format!("http://127.0.0.1:{port}/ua");
+        let resp = client.get(&url).unwrap();
+        assert_eq!(resp.status_code(), 200);
+    }
+
+    #[test]
+    fn client_can_override_default_user_agent() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+
+        std::thread::spawn(move || {
+            for expected_path in ["/start", "/final"] {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut reader = BufReader::new(&stream);
+                let mut line = String::new();
+                reader.read_line(&mut line).unwrap();
+                assert!(
+                    line.contains(expected_path),
+                    "unexpected path: {}",
+                    line.trim()
+                );
+
+                let mut user_agent = None;
+                loop {
+                    let mut header = String::new();
+                    reader.read_line(&mut header).unwrap();
+                    let trimmed = header.trim().to_string();
+                    if trimmed.is_empty() {
+                        break;
+                    }
+                    if let Some((name, value)) = trimmed.split_once(':') {
+                        if name.trim().eq_ignore_ascii_case("user-agent") {
+                            user_agent = Some(value.trim().to_string());
+                        }
+                    }
+                }
+
+                assert_eq!(user_agent.as_deref(), Some("CustomAgent/1.0"));
+
+                let resp = if expected_path == "/start" {
+                    "HTTP/1.1 302 Found\r\nLocation: /final\r\nContent-Length: 0\r\n\r\n"
+                } else {
+                    "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok"
+                };
+                stream.write_all(resp.as_bytes()).unwrap();
+                stream.flush().unwrap();
+            }
+        });
+
+        let mut client = Client::new();
+        client.set_user_agent("CustomAgent/1.0");
+
+        let url = format!("http://127.0.0.1:{port}/start");
+        let resp = client.get(&url).unwrap();
+        assert_eq!(resp.status_code(), 200);
+    }
+
+    #[test]
+    fn explicit_request_user_agent_wins_over_client_default() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut reader = BufReader::new(&stream);
+            let mut line = String::new();
+            reader.read_line(&mut line).unwrap();
+
+            let mut user_agent = None;
+            loop {
+                let mut header = String::new();
+                reader.read_line(&mut header).unwrap();
+                let trimmed = header.trim().to_string();
+                if trimmed.is_empty() {
+                    break;
+                }
+                if let Some((name, value)) = trimmed.split_once(':') {
+                    if name.trim().eq_ignore_ascii_case("user-agent") {
+                        user_agent = Some(value.trim().to_string());
+                    }
+                }
+            }
+
+            assert_eq!(user_agent.as_deref(), Some("RequestAgent/2.0"));
+
+            let resp = "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok";
+            stream.write_all(resp.as_bytes()).unwrap();
+            stream.flush().unwrap();
+        });
+
+        let mut client = Client::new();
+        client.set_user_agent("ClientAgent/1.0");
+
+        let mut request = HttpRequest::get(&format!("http://127.0.0.1:{port}/ua")).unwrap();
+        request.set_header("User-Agent", "RequestAgent/2.0");
+
+        let resp = client.send(request).unwrap();
+        assert_eq!(resp.status_code(), 200);
     }
 }

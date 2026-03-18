@@ -16,6 +16,6 @@ mod url;
 pub use client::Client;
 pub use connection::send;
 pub use cookie::{Cookie, CookieJar, SameSite};
-pub use request::{HttpRequest, Method};
+pub use request::{HttpRequest, Method, default_user_agent};
 pub use response::HttpResponse;
 pub use url::Url;

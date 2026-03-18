@@ -4,6 +4,24 @@ use std::fmt;
 
 use super::url::Url;
 
+/// Returns the default `User-Agent` header sent by Omoikane HTTP requests.
+pub fn default_user_agent() -> String {
+    format!(
+        "Omoikane/{} {}",
+        env!("CARGO_PKG_VERSION"),
+        target_os_name()
+    )
+}
+
+fn target_os_name() -> &'static str {
+    match std::env::consts::OS {
+        "macos" => "macOS",
+        "linux" => "Linux",
+        "windows" => "Windows",
+        other => other,
+    }
+}
+
 /// HTTP request methods.
 ///
 /// Covers the methods most commonly needed by a headless browser.
@@ -64,7 +82,8 @@ pub struct HttpRequest {
 impl HttpRequest {
     /// Creates a new request with the given method and URL.
     ///
-    /// Automatically adds a `Host` header derived from the URL.
+    /// Automatically adds `Host` and `User-Agent` headers derived from the URL
+    /// and crate version.
     pub fn new(method: Method, url: Url) -> Self {
         let host = url.authority();
         let mut req = Self {
@@ -74,6 +93,8 @@ impl HttpRequest {
             body: None,
         };
         req.headers.push(("Host".to_string(), host));
+        req.headers
+            .push(("User-Agent".to_string(), default_user_agent()));
         req
     }
 
@@ -111,9 +132,25 @@ impl HttpRequest {
         self.body.as_deref()
     }
 
+    /// Returns the first header value matching `name`, ignoring ASCII case.
+    pub fn header(&self, name: &str) -> Option<&str> {
+        self.headers
+            .iter()
+            .find(|(header_name, _)| header_name.eq_ignore_ascii_case(name))
+            .map(|(_, value)| value.as_str())
+    }
+
     /// Appends a header. Does not check for duplicates.
     pub fn add_header(&mut self, name: impl Into<String>, value: impl Into<String>) {
         self.headers.push((name.into(), value.into()));
+    }
+
+    /// Sets a header, replacing any existing values with the same name.
+    pub fn set_header(&mut self, name: impl Into<String>, value: impl Into<String>) {
+        let name = name.into();
+        self.headers
+            .retain(|(header_name, _)| !header_name.eq_ignore_ascii_case(&name));
+        self.headers.push((name, value.into()));
     }
 
     /// Sets the request body and automatically sets the `Content-Length` header.
@@ -167,9 +204,11 @@ mod tests {
     fn get_request_serialization() {
         let req = HttpRequest::get("http://example.com/path?q=1").unwrap();
         let text = String::from_utf8(req.serialize()).unwrap();
+        let default_user_agent = default_user_agent();
 
         assert!(text.starts_with("GET /path?q=1 HTTP/1.1\r\n"));
         assert!(text.contains("Host: example.com\r\n"));
+        assert!(text.contains(&format!("User-Agent: {default_user_agent}\r\n")));
         assert!(text.ends_with("\r\n\r\n"));
     }
 
@@ -208,6 +247,17 @@ mod tests {
         let text = String::from_utf8(req.serialize()).unwrap();
 
         assert!(text.contains("Accept: text/html\r\n"));
+    }
+
+    #[test]
+    fn set_header_replaces_existing_value_case_insensitively() {
+        let mut req = HttpRequest::get("http://example.com").unwrap();
+        req.set_header("user-agent", "TestAgent/1.0");
+        let text = String::from_utf8(req.serialize()).unwrap();
+
+        assert!(text.contains("user-agent: TestAgent/1.0\r\n"));
+        assert_eq!(text.matches("User-Agent:").count(), 0);
+        assert_eq!(text.matches("user-agent:").count(), 1);
     }
 
     #[test]
