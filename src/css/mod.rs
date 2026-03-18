@@ -794,6 +794,8 @@ fn expand_shorthand(name: &str, value: Value, important: bool) -> Vec<Declaratio
     match name {
         "margin" | "padding" => expand_box_shorthand(name, value, important),
         "border" => expand_border_shorthand(value, important),
+        "background" => expand_background_shorthand(value, important),
+        "font" => expand_font_shorthand(value, important),
         _ => vec![Declaration {
             name: name.to_string(),
             value,
@@ -922,6 +924,114 @@ fn expand_border_shorthand(value: Value, important: bool) -> Vec<Declaration> {
     }
 
     declarations
+}
+
+fn expand_background_shorthand(value: Value, important: bool) -> Vec<Declaration> {
+    let values = match value {
+        Value::List(values) => values,
+        single => vec![single],
+    };
+
+    let mut declarations = Vec::new();
+    for item in &values {
+        match item {
+            Value::Color(_) | Value::Function { .. } => declarations.push(Declaration {
+                name: "background-color".to_string(),
+                value: item.clone(),
+                important,
+            }),
+            Value::Keyword(keyword) if is_background_color_keyword(&keyword) => {
+                declarations.push(Declaration {
+                    name: "background-color".to_string(),
+                    value: Value::Keyword(keyword.to_string()),
+                    important,
+                });
+            }
+            _ => {}
+        }
+    }
+
+    if declarations.is_empty() {
+        vec![Declaration {
+            name: "background".to_string(),
+            value: Value::List(values),
+            important,
+        }]
+    } else {
+        declarations
+    }
+}
+
+fn expand_font_shorthand(value: Value, important: bool) -> Vec<Declaration> {
+    let values = match value {
+        Value::List(values) => values,
+        single => vec![single],
+    };
+
+    let mut declarations = Vec::new();
+    for item in &values {
+        match item {
+            Value::Length(_, unit) if unit == "px" || unit == "em" => declarations.push(Declaration {
+                name: "font-size".to_string(),
+                value: item.clone(),
+                important,
+            }),
+            Value::Percentage(_) => declarations.push(Declaration {
+                name: "font-size".to_string(),
+                value: item.clone(),
+                important,
+            }),
+            Value::Keyword(keyword) => {
+                if let Some((font_size, line_height)) = keyword.split_once('/') {
+                    if let Some(size) = parse_font_shorthand_length(font_size.trim()) {
+                        declarations.push(Declaration {
+                            name: "font-size".to_string(),
+                            value: size,
+                            important,
+                        });
+                    }
+                    if let Some(height) = parse_font_shorthand_length(line_height.trim()) {
+                        declarations.push(Declaration {
+                            name: "line-height".to_string(),
+                            value: height,
+                            important,
+                        });
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    if declarations.is_empty() {
+        vec![Declaration {
+            name: "font".to_string(),
+            value: Value::List(values),
+            important,
+        }]
+    } else {
+        declarations
+    }
+}
+
+fn parse_font_shorthand_length(value: &str) -> Option<Value> {
+    if let Some(unit) = value.strip_suffix("px") {
+        return unit.trim().parse().ok().map(|number| Value::Length(number, "px".to_string()));
+    }
+    if let Some(unit) = value.strip_suffix("em") {
+        return unit.trim().parse().ok().map(|number| Value::Length(number, "em".to_string()));
+    }
+    if let Some(unit) = value.strip_suffix('%') {
+        return unit.trim().parse().ok().map(Value::Percentage);
+    }
+    None
+}
+
+fn is_background_color_keyword(keyword: &str) -> bool {
+    matches!(
+        keyword,
+        "transparent" | "black" | "white" | "red" | "green" | "blue" | "gray" | "grey" | "navy" | "yellow"
+    )
 }
 
 fn render_tokens(tokens: &[CssToken]) -> String {
@@ -1200,6 +1310,31 @@ mod tests {
             rule.declarations
                 .iter()
                 .any(|decl| decl.name == "border-color")
+        );
+    }
+
+    #[test]
+    fn expands_background_and_font_shorthands() {
+        let stylesheet =
+            parse_stylesheet("h1 { background: white; font: 24px/24px sans-serif; }").unwrap();
+        let Rule::Style(rule) = &stylesheet.rules[0] else {
+            panic!("expected style rule");
+        };
+
+        assert!(
+            rule.declarations
+                .iter()
+                .any(|decl| decl.name == "background-color")
+        );
+        assert!(
+            rule.declarations
+                .iter()
+                .any(|decl| decl.name == "font-size")
+        );
+        assert!(
+            rule.declarations
+                .iter()
+                .any(|decl| decl.name == "line-height")
         );
     }
 }

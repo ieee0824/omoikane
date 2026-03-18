@@ -271,6 +271,9 @@ pub fn paint_layout(layout: &LayoutBox, resolver: &mut StyleResolver, viewport: 
     let width = viewport.width.ceil().max(1.0) as u32;
     let height = viewport.height.ceil().max(1.0) as u32;
     let mut canvas = Canvas::new(width, height);
+    if let Some(background) = viewport_background_color(layout, resolver) {
+        canvas.fill_rect(viewport, background);
+    }
     paint_box(&mut canvas, layout, resolver, None);
     canvas
 }
@@ -425,6 +428,29 @@ fn paint_box(
     for child in &layout.children {
         paint_box(canvas, child, resolver, clip);
     }
+}
+
+fn viewport_background_color(layout: &LayoutBox, resolver: &mut StyleResolver) -> Option<Color> {
+    if layout.node.node_type() != NodeType::Document {
+        return None;
+    }
+
+    let root = layout
+        .children
+        .iter()
+        .find(|child| child.node.tag_name().as_deref() == Some("html"))
+        .or_else(|| layout.children.first())?;
+    let root_style = resolver.computed_style(&root.node);
+    if let Some(color) = background_color(&root_style) {
+        return Some(color);
+    }
+
+    let body = root
+        .children
+        .iter()
+        .find(|child| child.node.tag_name().as_deref() == Some("body"))?;
+    let body_style = resolver.computed_style(&body.node);
+    background_color(&body_style)
 }
 
 fn paint_borders(
