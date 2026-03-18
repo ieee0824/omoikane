@@ -574,6 +574,7 @@ impl CdpSession {
             "Page.reload" => self.page_reload(),
             "Page.getFrameTree" => Ok(self.page_get_frame_tree()),
             "DOM.getDocument" => self.dom_get_document(&params),
+            "DOM.getAttributes" => self.dom_get_attributes(&params),
             "DOM.querySelector" => self.dom_query_selector(&params),
             "DOM.getOuterHTML" => self.dom_get_outer_html(&params),
             "Runtime.evaluate" => self.runtime_evaluate(&params),
@@ -696,6 +697,18 @@ impl CdpSession {
             .map(|node| self.ensure_node_id(&node))
             .unwrap_or(0);
         Ok(json!({ "nodeId": result }))
+    }
+
+    fn dom_get_attributes(&mut self, params: &Value) -> Result<Value, JsonRpcError> {
+        let node_id = require_u64(params, "nodeId")?;
+        let node = self.lookup_node(node_id)?;
+        let attributes = node
+            .attributes()
+            .unwrap_or_default()
+            .into_iter()
+            .flat_map(|(name, value)| [Value::String(name), Value::String(value)])
+            .collect::<Vec<_>>();
+        Ok(json!({ "attributes": attributes }))
     }
 
     fn dom_get_outer_html(&mut self, params: &Value) -> Result<Value, JsonRpcError> {
@@ -1292,12 +1305,12 @@ mod tests {
     }
 
     #[test]
-    fn dom_domain_exposes_document_query_and_outer_html() {
+    fn dom_domain_exposes_document_query_attributes_and_outer_html() {
         let mut session = CdpSession::new().unwrap();
         session
             .dispatch(
                 "Page.navigate",
-                json!({ "url": "data:text/html,<html><body><main id=\"app\"><p>Hello</p></main></body></html>" }),
+                json!({ "url": "data:text/html,<html><head><meta property=\"og:image\" content=\"https://example.com/image.jpg\"></head><body><main id=\"app\"><p>Hello</p></main></body></html>" }),
             )
             .unwrap();
 
@@ -1310,12 +1323,32 @@ mod tests {
             )
             .unwrap();
         let app_id = queried["nodeId"].as_u64().unwrap();
+        let meta = session
+            .dispatch(
+                "DOM.querySelector",
+                json!({ "nodeId": root_id, "selector": r#"meta[property="og:image"]"# }),
+            )
+            .unwrap();
+        let meta_id = meta["nodeId"].as_u64().unwrap();
+        let attributes = session
+            .dispatch("DOM.getAttributes", json!({ "nodeId": meta_id }))
+            .unwrap();
         let html = session
             .dispatch("DOM.getOuterHTML", json!({ "nodeId": app_id }))
             .unwrap();
 
         assert_eq!(document["root"]["nodeName"], "#document");
         assert!(app_id > 0);
+        assert!(meta_id > 0);
+        assert_eq!(
+            attributes["attributes"],
+            json!([
+                "content",
+                "https://example.com/image.jpg",
+                "property",
+                "og:image"
+            ])
+        );
         assert_eq!(html["outerHTML"], "<main id=\"app\"><p>Hello</p></main>");
     }
 

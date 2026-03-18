@@ -42,6 +42,31 @@ const DEFAULT_TIMEOUT_SECS: u64 = 30;
 /// ```
 pub fn send(request: &HttpRequest) -> Result<HttpResponse, HttpParseError> {
     let url = request.url();
+    if url.scheme() == "https" {
+        send_https_with_fallback(
+            request,
+            || connect_stream(request),
+            |enable_http2| Arc::new(default_client_config(enable_http2)),
+        )
+    } else {
+        let stream = connect_stream(request)?;
+        send_over_tcp(stream, request)
+    }
+}
+
+fn send_over_tcp(
+    mut stream: TcpStream,
+    request: &HttpRequest,
+) -> Result<HttpResponse, HttpParseError> {
+    stream
+        .write_all(&request.serialize())
+        .map_err(HttpParseError::Io)?;
+    stream.flush().map_err(HttpParseError::Io)?;
+    HttpResponse::parse(&mut stream)
+}
+
+fn connect_stream(request: &HttpRequest) -> Result<TcpStream, HttpParseError> {
+    let url = request.url();
     let addr = format!("{}:{}", url.host(), url.port());
     let socket_addr = addr
         .to_socket_addrs()
@@ -62,33 +87,21 @@ pub fn send(request: &HttpRequest) -> Result<HttpResponse, HttpParseError> {
         .set_read_timeout(Some(Duration::from_secs(DEFAULT_TIMEOUT_SECS)))
         .map_err(HttpParseError::Io)?;
 
-    if url.scheme() == "https" {
-        let config = default_client_config();
-        send_over_tls_with_config(stream, request, Arc::new(config))
-    } else {
-        send_over_tcp(stream, request)
-    }
+    Ok(stream)
 }
 
-fn send_over_tcp(
-    mut stream: TcpStream,
-    request: &HttpRequest,
-) -> Result<HttpResponse, HttpParseError> {
-    stream
-        .write_all(&request.serialize())
-        .map_err(HttpParseError::Io)?;
-    stream.flush().map_err(HttpParseError::Io)?;
-    HttpResponse::parse(&mut stream)
-}
-
-fn default_client_config() -> ClientConfig {
+fn default_client_config(enable_http2: bool) -> ClientConfig {
     let root_store =
         rustls::RootCertStore::from_iter(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
 
     let mut config = ClientConfig::builder()
         .with_root_certificates(root_store)
         .with_no_client_auth();
-    config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
+    config.alpn_protocols = if enable_http2 {
+        vec![b"h2".to_vec(), b"http/1.1".to_vec()]
+    } else {
+        vec![b"http/1.1".to_vec()]
+    };
     config
 }
 
@@ -98,6 +111,26 @@ fn send_over_tls_with_config(
     config: Arc<ClientConfig>,
 ) -> Result<HttpResponse, HttpParseError> {
     http2::send_over_tls(stream, request, config)
+}
+
+fn send_https_with_fallback<Connect, Config>(
+    request: &HttpRequest,
+    connect: Connect,
+    config: Config,
+) -> Result<HttpResponse, HttpParseError>
+where
+    Connect: Fn() -> Result<TcpStream, HttpParseError>,
+    Config: Fn(bool) -> Arc<ClientConfig>,
+{
+    let stream = connect()?;
+    match send_over_tls_with_config(stream, request, config(true)) {
+        Ok(response) => Ok(response),
+        Err(HttpParseError::InvalidHeader) => {
+            let stream = connect()?;
+            send_over_tls_with_config(stream, request, config(false))
+        }
+        Err(error) => Err(error),
+    }
 }
 
 #[cfg(test)]
@@ -382,5 +415,93 @@ mod tests {
         let result = send_to_local_tls_server_with_config(&req, port, &ca_cert);
 
         assert!(result.is_err(), "should reject hostname mismatch");
+    }
+
+    #[test]
+    fn tls_falls_back_to_http11_when_http2_header_decode_fails() {
+        let (cert_der, key_der) = generate_test_cert("localhost");
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+
+        let server_config = rustls::ServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(vec![cert_der.clone()], key_der)
+            .unwrap();
+        let mut server_config = Arc::new(server_config);
+        Arc::get_mut(&mut server_config).unwrap().alpn_protocols =
+            vec![b"h2".to_vec(), b"http/1.1".to_vec()];
+
+        std::thread::spawn(move || {
+            // First connection negotiates h2 and returns an unsupported frame type,
+            // which the client currently treats as InvalidHeader.
+            let (tcp_stream, _) = listener.accept().unwrap();
+            let conn = rustls::ServerConnection::new(server_config.clone()).unwrap();
+            let mut tls_stream = StreamOwned::new(conn, tcp_stream);
+
+            let mut preface = [0u8; 24];
+            tls_stream.read_exact(&mut preface).unwrap();
+            let mut frame_header = [0u8; 9];
+            tls_stream.read_exact(&mut frame_header).unwrap();
+            let settings_len = ((frame_header[0] as usize) << 16)
+                | ((frame_header[1] as usize) << 8)
+                | frame_header[2] as usize;
+            let mut settings_payload = vec![0u8; settings_len];
+            tls_stream.read_exact(&mut settings_payload).unwrap();
+
+            let invalid_frame = [
+                0u8, 0u8, 0u8,  // payload len
+                0xFF, // unknown frame type
+                0u8,  // flags
+                0u8, 0u8, 0u8, 0u8, // stream id
+            ];
+            tls_stream.write_all(&invalid_frame).unwrap();
+            tls_stream.flush().unwrap();
+            drop(tls_stream);
+
+            // Second connection negotiates HTTP/1.1 and returns a valid response.
+            let (tcp_stream, _) = listener.accept().unwrap();
+            let conn = rustls::ServerConnection::new(server_config).unwrap();
+            let mut tls_stream = StreamOwned::new(conn, tcp_stream);
+
+            let mut request_bytes = vec![0u8; 4096];
+            let _ = tls_stream.read(&mut request_bytes).unwrap();
+
+            let response = "HTTP/1.1 200 OK\r\nContent-Length: 8\r\n\r\nfallback";
+            tls_stream.write_all(response.as_bytes()).unwrap();
+            tls_stream.flush().unwrap();
+        });
+
+        let addr: std::net::SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
+        let req = HttpRequest::get(&format!("https://localhost:{port}/")).unwrap();
+        let mut root_store = rustls::RootCertStore::empty();
+        root_store.add(cert_der).unwrap();
+
+        let response = send_https_with_fallback(
+            &req,
+            || {
+                let stream =
+                    TcpStream::connect_timeout(&addr, Duration::from_secs(DEFAULT_TIMEOUT_SECS))
+                        .map_err(HttpParseError::Io)?;
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(DEFAULT_TIMEOUT_SECS)))
+                    .map_err(HttpParseError::Io)?;
+                Ok(stream)
+            },
+            |enable_http2| {
+                let mut config = ClientConfig::builder()
+                    .with_root_certificates(root_store.clone())
+                    .with_no_client_auth();
+                config.alpn_protocols = if enable_http2 {
+                    vec![b"h2".to_vec(), b"http/1.1".to_vec()]
+                } else {
+                    vec![b"http/1.1".to_vec()]
+                };
+                Arc::new(config)
+            },
+        )
+        .unwrap();
+
+        assert_eq!(response.status_code(), 200);
+        assert_eq!(response.body(), b"fallback");
     }
 }

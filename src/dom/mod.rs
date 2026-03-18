@@ -298,7 +298,9 @@ impl NodeHandle {
 
     /// Returns the first matching descendant element for a simple selector.
     ///
-    /// Supported selectors are tag names, `#id`, and `.class`.
+    /// Supported selectors are tag names, `#id`, `.class`, and simple
+    /// attribute selectors such as `[name]`, `[name="value"]`, and
+    /// `tag[name="value"]`.
     pub fn query_selector(&self, selector: &str) -> Option<NodeHandle> {
         if matches_selector(self, selector) {
             return Some(self.clone());
@@ -361,6 +363,30 @@ fn matches_selector(node: &NodeHandle, selector: &str) -> bool {
         return false;
     };
 
+    if let Some(parsed) = parse_attribute_selector(selector) {
+        let tag_matches = parsed
+            .tag_name
+            .as_ref()
+            .map(|tag_name| {
+                node.tag_name()
+                    .map(|actual| actual.eq_ignore_ascii_case(tag_name))
+                    .unwrap_or(false)
+            })
+            .unwrap_or(true);
+        if !tag_matches {
+            return false;
+        }
+
+        return match attributes.get(parsed.attribute_name.as_str()) {
+            Some(actual) => parsed
+                .attribute_value
+                .as_ref()
+                .map(|expected| actual == expected)
+                .unwrap_or(true),
+            None => false,
+        };
+    }
+
     if let Some(id) = selector.strip_prefix('#') {
         return attributes
             .get("id")
@@ -382,6 +408,50 @@ fn matches_selector(node: &NodeHandle, selector: &str) -> bool {
     node.tag_name()
         .map(|tag_name| tag_name.eq_ignore_ascii_case(selector))
         .unwrap_or(false)
+}
+
+struct AttributeSelector {
+    tag_name: Option<String>,
+    attribute_name: String,
+    attribute_value: Option<String>,
+}
+
+fn parse_attribute_selector(selector: &str) -> Option<AttributeSelector> {
+    let open = selector.find('[')?;
+    let close = selector.rfind(']')?;
+    if close <= open {
+        return None;
+    }
+
+    let tag_name = selector[..open].trim();
+    let body = selector[open + 1..close].trim();
+    if body.is_empty() {
+        return None;
+    }
+
+    let (attribute_name, attribute_value) = if let Some((name, value)) = body.split_once('=') {
+        let trimmed_name = name.trim();
+        if trimmed_name.is_empty() {
+            return None;
+        }
+        let trimmed_value = value.trim().trim_matches('"').trim_matches('\'');
+        (
+            trimmed_name.to_ascii_lowercase(),
+            Some(trimmed_value.to_string()),
+        )
+    } else {
+        (body.to_ascii_lowercase(), None)
+    };
+
+    Some(AttributeSelector {
+        tag_name: if tag_name.is_empty() {
+            None
+        } else {
+            Some(tag_name.to_ascii_lowercase())
+        },
+        attribute_name,
+        attribute_value,
+    })
 }
 
 #[cfg(test)]
@@ -475,6 +545,31 @@ mod tests {
         assert_eq!(document.query_selector("#app"), Some(main.clone()));
         assert_eq!(document.query_selector(".primary"), Some(main));
         assert_eq!(document.query_selector(".missing"), None);
+    }
+
+    #[test]
+    fn query_selector_matches_simple_attribute_selectors() {
+        let document = NodeHandle::document();
+        let html = NodeHandle::element("html");
+        let head = NodeHandle::element("head");
+        let meta = NodeHandle::element("meta");
+
+        meta.set_attribute("property", "og:image");
+        meta.set_attribute("content", "https://example.com/image.jpg");
+
+        document.append_child(html.clone());
+        html.append_child(head.clone());
+        head.append_child(meta.clone());
+
+        assert_eq!(document.query_selector("[property]"), Some(meta.clone()));
+        assert_eq!(
+            document.query_selector(r#"meta[property="og:image"]"#),
+            Some(meta.clone())
+        );
+        assert_eq!(
+            document.query_selector(r#"[content="https://example.com/image.jpg"]"#),
+            Some(meta)
+        );
     }
 
     #[test]
