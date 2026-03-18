@@ -15,6 +15,10 @@ issues/          タスク管理
 - タスクは `issues/open/` にmarkdownファイルとして作成する
 - 完了時は `issues/closed/` へ移動する
 - ファイル名は `{番号}-{slug}.md` 形式（例: `001-http-client.md`）
+- 大きいタスクは子issueに分割する
+  - 親: `{番号}-{slug}.md` — 子issueへのリンクを持つ（例: `001-http-client.md`）
+  - 子: `{番号}-{連番}-{slug}.md` — frontmatterに `parent` を持つ（例: `001-1-http-basic.md`）
+  - 子issueがすべてclosedになったら親もclosedへ移動する
 
 ## 開発フェーズ
 
