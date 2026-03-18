@@ -171,6 +171,14 @@ pub enum AlignItems {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TableDisplay {
+    Table,
+    RowGroup,
+    Row,
+    Cell,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PositionScheme {
     Static,
     Absolute,
@@ -331,6 +339,12 @@ fn layout_element(
     let width = compute_width(&style, containing_block.width, padding, border, &mut margin);
     let x = containing_block.x + margin.left + border.left + padding.left;
     let y = containing_block.y + margin.top + border.top + padding.top;
+
+    if is_table_container(&style) {
+        return layout_table_container(
+            node, resolver, style, margin, padding, border, x, y, width, viewport,
+        );
+    }
 
     if is_flex_container(&style) {
         return layout_flex_container(
@@ -595,6 +609,261 @@ fn layout_flex_container(
     })
 }
 
+fn layout_table_container(
+    node: &NodeHandle,
+    resolver: &mut StyleResolver,
+    style: ComputedStyle,
+    margin: EdgeSizes,
+    padding: EdgeSizes,
+    border: EdgeSizes,
+    x: f32,
+    y: f32,
+    width: f32,
+    viewport: Rect,
+) -> Option<LayoutBox> {
+    let spacing = table_border_spacing(&style);
+    let collapse_spacing = spacing * 2.0;
+    let mut entries = collect_table_entries(node, resolver);
+    let column_count = entries
+        .iter()
+        .map(|entry| entry.cells.len())
+        .max()
+        .unwrap_or(0)
+        .max(1);
+    let column_width =
+        ((width - spacing * (column_count as f32 + 1.0)).max(0.0)) / column_count as f32;
+    let inner_width = (width - collapse_spacing).max(0.0);
+
+    let mut children = Vec::new();
+    let mut cursor_y = y + spacing;
+    let mut pending_group: Option<(NodeHandle, Vec<LayoutBox>, f32, f32)> = None;
+
+    for entry in entries.drain(..) {
+        let row_y = cursor_y;
+        let (row_box, row_height) =
+            layout_table_row_entry(&entry, resolver, x + spacing, row_y, column_width, spacing, viewport)?;
+        cursor_y += row_height + spacing;
+
+        if let Some(group_node) = entry.row_group {
+            match &mut pending_group {
+                Some((current_group, rows, _, group_start_y)) if *current_group == group_node => {
+                    rows.push(row_box);
+                    let _ = group_start_y;
+                }
+                Some((current_group, rows, _, group_start_y)) => {
+                    let group_box = build_row_group_box(
+                        current_group.clone(),
+                        std::mem::take(rows),
+                        x + spacing,
+                        *group_start_y,
+                        inner_width,
+                    );
+                    children.push(group_box);
+                    *current_group = group_node.clone();
+                    *group_start_y = row_y;
+                    rows.push(row_box);
+                }
+                None => {
+                    pending_group = Some((group_node, vec![row_box], inner_width, row_y));
+                }
+            }
+        } else {
+            if let Some((group_node, rows, _, group_start_y)) = pending_group.take() {
+                let group_box =
+                    build_row_group_box(group_node, rows, x + spacing, group_start_y, inner_width);
+                children.push(group_box);
+            }
+            children.push(row_box);
+        }
+    }
+
+    if let Some((group_node, rows, _, group_start_y)) = pending_group.take() {
+        let group_box = build_row_group_box(group_node, rows, x + spacing, group_start_y, inner_width);
+        children.push(group_box);
+    }
+
+    let content_height = explicit_length(&style, "height").unwrap_or((cursor_y - y).max(spacing));
+    Some(LayoutBox {
+        node: node.clone(),
+        dimensions: BoxDimensions {
+            content: Rect {
+                x,
+                y,
+                width,
+                height: content_height,
+            },
+            padding,
+            border,
+            margin,
+        },
+        visibility: visibility(&style),
+        overflow: overflow(&style),
+        z_index: z_index(&style),
+        lines: Vec::new(),
+        children,
+    })
+}
+
+#[derive(Debug, Clone)]
+struct TableRowEntry {
+    row_node: NodeHandle,
+    row_group: Option<NodeHandle>,
+    cells: Vec<NodeHandle>,
+}
+
+fn collect_table_entries(node: &NodeHandle, resolver: &mut StyleResolver) -> Vec<TableRowEntry> {
+    let mut entries = Vec::new();
+    let mut anonymous_cells = Vec::new();
+
+    for child in node.child_nodes() {
+        match table_display(&resolver.computed_style(&child)) {
+            Some(TableDisplay::RowGroup) => {
+                flush_anonymous_row(&mut entries, &mut anonymous_cells);
+                for row in child.child_nodes() {
+                    match table_display(&resolver.computed_style(&row)) {
+                        Some(TableDisplay::Row) => entries.push(TableRowEntry {
+                            row_node: row.clone(),
+                            row_group: Some(child.clone()),
+                            cells: collect_row_cells(&row, resolver),
+                        }),
+                        Some(TableDisplay::Cell) => anonymous_cells.push(row),
+                        _ => {}
+                    }
+                }
+            }
+            Some(TableDisplay::Row) => {
+                flush_anonymous_row(&mut entries, &mut anonymous_cells);
+                entries.push(TableRowEntry {
+                    row_node: child.clone(),
+                    row_group: None,
+                    cells: collect_row_cells(&child, resolver),
+                });
+            }
+            Some(TableDisplay::Cell) => anonymous_cells.push(child),
+            _ => {}
+        }
+    }
+
+    flush_anonymous_row(&mut entries, &mut anonymous_cells);
+    entries
+}
+
+fn flush_anonymous_row(entries: &mut Vec<TableRowEntry>, anonymous_cells: &mut Vec<NodeHandle>) {
+    if anonymous_cells.is_empty() {
+        return;
+    }
+    entries.push(TableRowEntry {
+        row_node: NodeHandle::element("tr"),
+        row_group: None,
+        cells: std::mem::take(anonymous_cells),
+    });
+}
+
+fn collect_row_cells(row: &NodeHandle, resolver: &mut StyleResolver) -> Vec<NodeHandle> {
+    row.child_nodes()
+        .into_iter()
+        .filter(|child| matches!(table_display(&resolver.computed_style(child)), Some(TableDisplay::Cell)))
+        .collect()
+}
+
+fn layout_table_row_entry(
+    entry: &TableRowEntry,
+    resolver: &mut StyleResolver,
+    x: f32,
+    y: f32,
+    column_width: f32,
+    spacing: f32,
+    viewport: Rect,
+) -> Option<(LayoutBox, f32)> {
+    let mut measured = Vec::new();
+    let mut row_height = 0.0f32;
+
+    for (index, cell) in entry.cells.iter().enumerate() {
+        let cell_containing = Rect {
+            x: 0.0,
+            y: 0.0,
+            width: column_width,
+            height: 0.0,
+        };
+        let mut layout_cell = layout_node(cell, resolver, cell_containing, viewport)?;
+        let cell_style = resolver.computed_style(cell);
+        let cell_height = explicit_length(&cell_style, "height").unwrap_or(layout_cell.total_height());
+        layout_cell.dimensions.content.width = column_width;
+        layout_cell.dimensions.content.height = cell_height;
+        row_height = row_height.max(layout_cell.total_height());
+        measured.push((index, layout_cell, cell_style));
+    }
+
+    let mut children = Vec::new();
+    for (index, mut cell, cell_style) in measured {
+        let outer_x = x + index as f32 * (column_width + spacing);
+        let outer_y = y
+            + match vertical_align(&cell_style) {
+                VerticalAlign::Bottom => row_height - cell.total_height(),
+                VerticalAlign::Middle => (row_height - cell.total_height()) / 2.0,
+                _ => 0.0,
+            };
+        translate_layout_box_to_outer(&mut cell, outer_x, outer_y);
+        children.push(cell);
+    }
+
+    let row_width = if entry.cells.is_empty() {
+        0.0
+    } else {
+        entry.cells.len() as f32 * column_width + (entry.cells.len().saturating_sub(1)) as f32 * spacing
+    };
+    let row_box = LayoutBox {
+        node: entry.row_node.clone(),
+        dimensions: BoxDimensions {
+            content: Rect {
+                x,
+                y,
+                width: row_width,
+                height: row_height,
+            },
+            ..BoxDimensions::default()
+        },
+        visibility: Visibility::Visible,
+        overflow: Overflow::Visible,
+        z_index: 0,
+        lines: Vec::new(),
+        children,
+    };
+
+    Some((row_box, row_height))
+}
+
+fn build_row_group_box(
+    node: NodeHandle,
+    rows: Vec<LayoutBox>,
+    x: f32,
+    y: f32,
+    width: f32,
+) -> LayoutBox {
+    let height = rows
+        .last()
+        .map(|row| row.dimensions.content.y + row.dimensions.content.height - y)
+        .unwrap_or(0.0);
+
+    LayoutBox {
+        node,
+        dimensions: BoxDimensions {
+            content: Rect {
+                x,
+                y,
+                width,
+                height,
+            },
+            ..BoxDimensions::default()
+        },
+        visibility: Visibility::Visible,
+        overflow: Overflow::Visible,
+        z_index: 0,
+        lines: Vec::new(),
+        children: rows,
+    }
+}
+
 fn compute_width(
     style: &ComputedStyle,
     containing_width: f32,
@@ -772,6 +1041,41 @@ fn is_flex_container(style: &ComputedStyle) -> bool {
         style.get("display"),
         Some(ComputedValue::Keyword(keyword)) if keyword.eq_ignore_ascii_case("flex")
     )
+}
+
+fn is_table_container(style: &ComputedStyle) -> bool {
+    matches!(table_display(style), Some(TableDisplay::Table))
+}
+
+fn table_display(style: &ComputedStyle) -> Option<TableDisplay> {
+    match style.get("display") {
+        Some(ComputedValue::Keyword(keyword)) if keyword.eq_ignore_ascii_case("table") => {
+            Some(TableDisplay::Table)
+        }
+        Some(ComputedValue::Keyword(keyword))
+            if keyword.eq_ignore_ascii_case("table-row-group") =>
+        {
+            Some(TableDisplay::RowGroup)
+        }
+        Some(ComputedValue::Keyword(keyword)) if keyword.eq_ignore_ascii_case("table-row") => {
+            Some(TableDisplay::Row)
+        }
+        Some(ComputedValue::Keyword(keyword)) if keyword.eq_ignore_ascii_case("table-cell") => {
+            Some(TableDisplay::Cell)
+        }
+        _ => None,
+    }
+}
+
+fn table_border_spacing(style: &ComputedStyle) -> f32 {
+    if matches!(
+        style.get("border-collapse"),
+        Some(ComputedValue::Keyword(keyword)) if keyword.eq_ignore_ascii_case("collapse")
+    ) {
+        return 0.0;
+    }
+
+    explicit_length(style, "border-spacing").unwrap_or(0.0)
 }
 
 fn flex_direction(style: &ComputedStyle) -> FlexDirection {
@@ -2071,6 +2375,154 @@ mod tests {
             fragment.content,
             InlineFragmentContent::Image(_)
         )));
+    }
+
+    #[test]
+    fn lays_out_basic_table_rows_and_cells() {
+        let document = NodeHandle::document();
+        let body = NodeHandle::element("body");
+        let table = NodeHandle::element("table");
+        let tbody = NodeHandle::element("tbody");
+        let row = NodeHandle::element("tr");
+        let first = NodeHandle::element("td");
+        let second = NodeHandle::element("td");
+
+        first.append_child(NodeHandle::text("A"));
+        second.append_child(NodeHandle::text("B"));
+        document.append_child(body.clone());
+        body.append_child(table.clone());
+        table.append_child(tbody.clone());
+        tbody.append_child(row.clone());
+        row.append_child(first);
+        row.append_child(second);
+
+        let mut resolver = StyleResolver::new();
+        resolver.add_stylesheet(
+            Origin::Author,
+            parse_stylesheet(
+                "table { display: table; width: 120px; border-spacing: 4px; } \
+                 tbody { display: table-row-group; } \
+                 tr { display: table-row; } \
+                 td { display: table-cell; height: 10px; }",
+            )
+            .unwrap(),
+        );
+
+        let layout = layout_tree(
+            &body,
+            &mut resolver,
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 200.0,
+                height: 0.0,
+            },
+        )
+        .unwrap();
+
+        let table_box = &layout.children[0];
+        let row_group_box = &table_box.children[0];
+        let row_box = &row_group_box.children[0];
+        assert_eq!(row_box.children.len(), 2);
+        assert_eq!(row_box.children[0].dimensions.content.x, 4.0);
+        assert_eq!(row_box.children[0].dimensions.content.width, 54.0);
+        assert_eq!(row_box.children[1].dimensions.content.x, 62.0);
+        assert_eq!(table_box.dimensions.content.width, 120.0);
+    }
+
+    #[test]
+    fn aligns_table_cells_vertically_within_row_height() {
+        let document = NodeHandle::document();
+        let body = NodeHandle::element("body");
+        let table = NodeHandle::element("table");
+        let row = NodeHandle::element("tr");
+        let tall = NodeHandle::element("td");
+        let bottom = NodeHandle::element("td");
+
+        tall.set_attribute("class", "tall");
+        bottom.set_attribute("class", "bottom");
+        document.append_child(body.clone());
+        body.append_child(table.clone());
+        table.append_child(row.clone());
+        row.append_child(tall);
+        row.append_child(bottom);
+
+        let mut resolver = StyleResolver::new();
+        resolver.add_stylesheet(
+            Origin::Author,
+            parse_stylesheet(
+                "table { display: table; width: 100px; } \
+                 tr { display: table-row; } \
+                 td { display: table-cell; height: 10px; vertical-align: top; } \
+                 .tall { height: 30px; } \
+                 .bottom { vertical-align: bottom; }",
+            )
+            .unwrap(),
+        );
+
+        let layout = layout_tree(
+            &body,
+            &mut resolver,
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 120.0,
+                height: 0.0,
+            },
+        )
+        .unwrap();
+
+        let row_box = &layout.children[0].children[0];
+        let tall_box = &row_box.children[0];
+        let bottom_box = &row_box.children[1];
+        assert_eq!(row_box.dimensions.content.height, 30.0);
+        assert_eq!(tall_box.dimensions.content.y, row_box.dimensions.content.y);
+        assert_eq!(
+            bottom_box.dimensions.content.y,
+            row_box.dimensions.content.y + 20.0
+        );
+    }
+
+    #[test]
+    fn creates_anonymous_rows_for_direct_table_cells() {
+        let document = NodeHandle::document();
+        let body = NodeHandle::element("body");
+        let table = NodeHandle::element("table");
+        let first = NodeHandle::element("td");
+        let second = NodeHandle::element("td");
+
+        document.append_child(body.clone());
+        body.append_child(table.clone());
+        table.append_child(first);
+        table.append_child(second);
+
+        let mut resolver = StyleResolver::new();
+        resolver.add_stylesheet(
+            Origin::Author,
+            parse_stylesheet(
+                "table { display: table; width: 100px; } \
+                 td { display: table-cell; height: 10px; }",
+            )
+            .unwrap(),
+        );
+
+        let layout = layout_tree(
+            &body,
+            &mut resolver,
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 120.0,
+                height: 0.0,
+            },
+        )
+        .unwrap();
+
+        let table_box = &layout.children[0];
+        assert_eq!(table_box.children.len(), 1);
+        let anonymous_row = &table_box.children[0];
+        assert_eq!(anonymous_row.node.tag_name().as_deref(), Some("tr"));
+        assert_eq!(anonymous_row.children.len(), 2);
     }
 
     #[test]
