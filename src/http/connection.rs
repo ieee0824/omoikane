@@ -1,47 +1,47 @@
-//! TCP connection handling for HTTP requests.
+//! TCP/TLS connection handling for HTTP requests.
 
 use std::io::{self, Write};
 use std::net::{TcpStream, ToSocketAddrs};
+use std::sync::Arc;
 use std::time::Duration;
+
+use rustls::pki_types::ServerName;
+use rustls::{ClientConfig, ClientConnection, StreamOwned};
 
 use super::request::HttpRequest;
 use super::response::{HttpParseError, HttpResponse};
 
-/// Default read timeout in seconds.
-const DEFAULT_READ_TIMEOUT_SECS: u64 = 30;
+/// Default timeout in seconds for both connection and read operations.
+const DEFAULT_TIMEOUT_SECS: u64 = 30;
 
 /// Sends an HTTP request over a new TCP connection and returns the response.
 ///
-/// Opens a TCP connection to the host and port specified in the request URL,
-/// writes the serialized request, and parses the response.
-///
-/// Only `http` URLs are supported. `https` URLs will return an error until
-/// TLS support is implemented.
+/// For `http` URLs, uses a plain TCP connection. For `https` URLs, wraps the
+/// connection with TLS using rustls, with certificate verification against
+/// Mozilla's root certificate store and SNI support.
 ///
 /// # Errors
 ///
-/// Returns an error if the scheme is `https`, the connection cannot be
-/// established, the request cannot be sent, or the response cannot be parsed.
+/// Returns an error if the connection cannot be established, TLS handshake
+/// fails, the request cannot be sent, or the response cannot be parsed.
 ///
 /// # Examples
 ///
 /// ```no_run
 /// use omoikane::http::{HttpRequest, send};
 ///
+/// // Plain HTTP
 /// let req = HttpRequest::get("http://example.com/").unwrap();
+/// let resp = send(&req).unwrap();
+/// println!("Status: {}", resp.status_code());
+///
+/// // HTTPS with TLS
+/// let req = HttpRequest::get("https://example.com/").unwrap();
 /// let resp = send(&req).unwrap();
 /// println!("Status: {}", resp.status_code());
 /// ```
 pub fn send(request: &HttpRequest) -> Result<HttpResponse, HttpParseError> {
     let url = request.url();
-
-    if url.scheme() == "https" {
-        return Err(HttpParseError::Io(io::Error::new(
-            io::ErrorKind::Unsupported,
-            "HTTPS is not yet supported; see issue 001-2",
-        )));
-    }
-
     let addr = format!("{}:{}", url.host(), url.port());
     let socket_addr = addr
         .to_socket_addrs()
@@ -54,26 +54,71 @@ pub fn send(request: &HttpRequest) -> Result<HttpResponse, HttpParseError> {
             ))
         })?;
 
-    let mut stream =
-        TcpStream::connect_timeout(&socket_addr, Duration::from_secs(DEFAULT_READ_TIMEOUT_SECS))
+    let stream =
+        TcpStream::connect_timeout(&socket_addr, Duration::from_secs(DEFAULT_TIMEOUT_SECS))
             .map_err(HttpParseError::Io)?;
 
     stream
-        .set_read_timeout(Some(Duration::from_secs(DEFAULT_READ_TIMEOUT_SECS)))
+        .set_read_timeout(Some(Duration::from_secs(DEFAULT_TIMEOUT_SECS)))
         .map_err(HttpParseError::Io)?;
 
+    if url.scheme() == "https" {
+        let config = default_client_config();
+        send_over_tls_with_config(stream, request, Arc::new(config))
+    } else {
+        send_over_tcp(stream, request)
+    }
+}
+
+fn send_over_tcp(
+    mut stream: TcpStream,
+    request: &HttpRequest,
+) -> Result<HttpResponse, HttpParseError> {
     stream
         .write_all(&request.serialize())
         .map_err(HttpParseError::Io)?;
     stream.flush().map_err(HttpParseError::Io)?;
-
     HttpResponse::parse(&mut stream)
+}
+
+fn default_client_config() -> ClientConfig {
+    let root_store =
+        rustls::RootCertStore::from_iter(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+
+    ClientConfig::builder()
+        .with_root_certificates(root_store)
+        .with_no_client_auth()
+}
+
+fn send_over_tls_with_config(
+    stream: TcpStream,
+    request: &HttpRequest,
+    config: Arc<ClientConfig>,
+) -> Result<HttpResponse, HttpParseError> {
+    let server_name = ServerName::try_from(request.url().host().to_string()).map_err(|e| {
+        HttpParseError::Io(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("invalid server name for SNI: {e}"),
+        ))
+    })?;
+
+    let conn = ClientConnection::new(config, server_name)
+        .map_err(|e| HttpParseError::Io(io::Error::new(io::ErrorKind::ConnectionRefused, e)))?;
+
+    let mut tls_stream = StreamOwned::new(conn, stream);
+
+    tls_stream
+        .write_all(&request.serialize())
+        .map_err(HttpParseError::Io)?;
+    tls_stream.flush().map_err(HttpParseError::Io)?;
+
+    HttpResponse::parse(&mut tls_stream)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::{BufRead, BufReader};
+    use std::io::{BufRead, BufReader, Read};
     use std::net::TcpListener;
 
     /// Starts a local TCP server that reads an HTTP request, validates it,
@@ -210,9 +255,149 @@ mod tests {
     }
 
     #[test]
-    fn send_rejects_https() {
-        let req = HttpRequest::get("https://example.com/").unwrap();
-        let err = send(&req);
-        assert!(err.is_err());
+    fn tls_rejects_invalid_server_name() {
+        // IP addresses cannot be used as SNI server names with rustls
+        let req = HttpRequest::get("https://127.0.0.1/").unwrap();
+        let result = send(&req);
+        assert!(result.is_err());
+    }
+
+    // --- TLS tests using a local rustls server with rcgen certificates ---
+
+    use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
+
+    /// Generates a self-signed certificate for the given hostname using rcgen.
+    /// Returns (certificate DER, private key DER).
+    fn generate_test_cert(hostname: &str) -> (CertificateDer<'static>, PrivateKeyDer<'static>) {
+        let mut params = rcgen::CertificateParams::new(vec![hostname.to_string()]).unwrap();
+        params.distinguished_name = rcgen::DistinguishedName::new();
+        let key_pair = rcgen::KeyPair::generate().unwrap();
+        let key_der = key_pair.serialize_der();
+        let cert = params.self_signed(&key_pair).unwrap();
+        let cert_der = cert.der().clone();
+        (
+            cert_der,
+            PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(key_der)),
+        )
+    }
+
+    /// Starts a local TLS server that accepts one connection, reads an HTTP
+    /// request, and responds with a fixed 200 OK response. Returns the port
+    /// and the CA certificate DER (for client trust).
+    fn start_tls_test_server(
+        hostname: &str,
+        response_body: &str,
+    ) -> (u16, CertificateDer<'static>) {
+        let (cert_der, key_der) = generate_test_cert(hostname);
+        let ca_cert = cert_der.clone();
+
+        let server_config = rustls::ServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(vec![cert_der], key_der)
+            .unwrap();
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let response_body = response_body.to_string();
+
+        std::thread::spawn(move || {
+            let (tcp_stream, _) = listener.accept().unwrap();
+            let conn = rustls::ServerConnection::new(Arc::new(server_config)).unwrap();
+            let mut tls_stream = StreamOwned::new(conn, tcp_stream);
+
+            // Read request (consume until \r\n\r\n)
+            let mut buf = vec![0u8; 4096];
+            let _ = tls_stream.read(&mut buf);
+
+            // Send response
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{}",
+                response_body.len(),
+                response_body
+            );
+            tls_stream.write_all(response.as_bytes()).unwrap();
+            tls_stream.flush().unwrap();
+        });
+
+        (port, ca_cert)
+    }
+
+    /// Helper: connect to the local TLS server while exercising the same
+    /// request/TLS path as production code, but with a test-specific root store.
+    fn send_to_local_tls_server_with_config(
+        request: &HttpRequest,
+        port: u16,
+        ca_cert: &CertificateDer<'_>,
+    ) -> Result<HttpResponse, HttpParseError> {
+        let addr: std::net::SocketAddr = format!("127.0.0.1:{}", port).parse().unwrap();
+
+        let stream =
+            TcpStream::connect_timeout(&addr, Duration::from_secs(DEFAULT_TIMEOUT_SECS))
+                .map_err(HttpParseError::Io)?;
+        stream
+            .set_read_timeout(Some(Duration::from_secs(DEFAULT_TIMEOUT_SECS)))
+            .map_err(HttpParseError::Io)?;
+
+        let mut root_store = rustls::RootCertStore::empty();
+        root_store.add(ca_cert.clone()).unwrap();
+
+        let config = ClientConfig::builder()
+            .with_root_certificates(root_store)
+            .with_no_client_auth();
+        send_over_tls_with_config(stream, request, Arc::new(config))
+    }
+
+    #[test]
+    fn tls_https_success_with_trusted_cert() {
+        let (port, ca_cert) = start_tls_test_server("localhost", "tls-ok");
+
+        let url = format!("https://localhost:{}/", port);
+        let req = HttpRequest::get(&url).unwrap();
+        let resp = send_to_local_tls_server_with_config(&req, port, &ca_cert).unwrap();
+
+        assert_eq!(resp.status_code(), 200);
+        assert_eq!(resp.body(), b"tls-ok");
+    }
+
+    #[test]
+    fn tls_rejects_untrusted_self_signed_cert() {
+        // Start a server with a self-signed cert, but connect using the
+        // default Mozilla root store — the cert won't be trusted.
+        let (port, _ca_cert) = start_tls_test_server("localhost", "should-not-reach");
+
+        // Connect directly to 127.0.0.1 to avoid DNS issues, using default roots.
+        let addr: std::net::SocketAddr = format!("127.0.0.1:{}", port).parse().unwrap();
+        let stream = TcpStream::connect_timeout(&addr, Duration::from_secs(5)).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+
+        let root_store =
+            rustls::RootCertStore::from_iter(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+        let config = ClientConfig::builder()
+            .with_root_certificates(root_store)
+            .with_no_client_auth();
+        let server_name = ServerName::try_from("localhost".to_string()).unwrap();
+        let conn = ClientConnection::new(Arc::new(config), server_name).unwrap();
+        let mut tls_stream = StreamOwned::new(conn, stream);
+
+        // The TLS handshake should fail during write (certificate not trusted).
+        let req = HttpRequest::get(&format!("https://localhost:{}/", port)).unwrap();
+        let result = tls_stream.write_all(&req.serialize());
+
+        assert!(result.is_err(), "should reject untrusted self-signed cert");
+    }
+
+    #[test]
+    fn tls_rejects_hostname_mismatch() {
+        // Certificate is issued for "correct-host.test", but we connect
+        // using "localhost" — hostname verification should fail.
+        let (port, ca_cert) = start_tls_test_server("correct-host.test", "should-not-reach");
+
+        let url = format!("https://localhost:{}/", port);
+        let req = HttpRequest::get(&url).unwrap();
+        let result = send_to_local_tls_server_with_config(&req, port, &ca_cert);
+
+        assert!(result.is_err(), "should reject hostname mismatch");
     }
 }

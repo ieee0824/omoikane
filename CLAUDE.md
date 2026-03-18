@@ -59,3 +59,5 @@ issues/          タスク管理
 - 他言語連携: CDP(Chrome DevTools Protocol)互換 + C FFI薄レイヤー
 - テスト: Web Platform Testsを参考にする
 - 依存: 可能な限り最小限に抑え、コア部分は自前実装
+- コア部分の定義: HTMLパーサー、CSSパーサー、レイアウトエンジン、DOM、JavaScriptバインディング等のブラウザエンジン固有機能
+- インフラ層（TLS、暗号、圧縮等）はpure Rustクレートの利用を許可する
