@@ -43,14 +43,14 @@ Omoikane は、HTTP クライアント、HTML/CSS パーサー、DOM、レイア
 
 主要モジュール:
 
-- [`src/http`](/Users/ast/Documents/product/omoikane/src/http) HTTP/1.1, HTTP/2
-- [`src/html`](/Users/ast/Documents/product/omoikane/src/html) HTML パーサー
-- [`src/dom`](/Users/ast/Documents/product/omoikane/src/dom) DOM
-- [`src/css`](/Users/ast/Documents/product/omoikane/src/css) CSS パーサーとスタイル計算
-- [`src/layout`](/Users/ast/Documents/product/omoikane/src/layout) レイアウトエンジン
-- [`src/js`](/Users/ast/Documents/product/omoikane/src/js) JavaScript ランタイム
-- [`src/cdp`](/Users/ast/Documents/product/omoikane/src/cdp) CDP / WebSocket / JSON-RPC
-- [`src/ffi`](/Users/ast/Documents/product/omoikane/src/ffi) C FFI
+- [`src/http`](/src/http) HTTP/1.1, HTTP/2
+- [`src/html`](/src/html) HTML パーサー
+- [`src/dom`](/src/dom) DOM
+- [`src/css`](/src/css) CSS パーサーとスタイル計算
+- [`src/layout`](/src/layout) レイアウトエンジン
+- [`src/js`](/src/js) JavaScript ランタイム
+- [`src/cdp`](/src/cdp) CDP / WebSocket / JSON-RPC
+- [`src/ffi`](/src/ffi) C FFI
 
 ## クイックスタート
 
@@ -79,7 +79,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 ```
 
 `Client::new()` の既定 `User-Agent` は `Omoikane/{version} {OS}` 形式です。
-必要に応じて [`src/http/client.rs`](/Users/ast/Documents/product/omoikane/src/http/client.rs) の `set_user_agent` で上書きできます。
+必要に応じて [`src/http/client.rs`](/src/http/client.rs) の `set_user_agent` で上書きできます。
 
 HTTP クライアントの現状仕様:
 
@@ -92,9 +92,9 @@ HTTP クライアントの現状仕様:
 
 共有ライブラリをビルドすると、macOS では `target/debug/libomoikane.dylib`、Linux では `target/debug/libomoikane.so` が生成されます。
 
-生成ヘッダは [`include/omoikane.h`](/Users/ast/Documents/product/omoikane/include/omoikane.h) です。
+生成ヘッダは [`include/omoikane.h`](/include/omoikane.h) です。
 
-サンプルは [`examples/ffi`](/Users/ast/Documents/product/omoikane/examples/ffi) にあります。
+サンプルは [`examples/ffi`](/examples/ffi) にあります。
 
 ## 進捗
 
@@ -108,7 +108,7 @@ issue ベースの開発状況では、以下の大きな実装フェーズは�
 - CDP 互換 API
 - C FFI
 
-現在の open issue は [`issues/open`](/Users/ast/Documents/product/omoikane/issues/open) を参照してください。
+現在の open issue は [`issues/open`](/issues/open) を参照してください。
 
 ## 制約
 
@@ -119,7 +119,7 @@ issue ベースの開発状況では、以下の大きな実装フェーズは�
 
 ## 開発ルール
 
-開発ルールと進め方は [`CLAUDE.md`](/Users/ast/Documents/product/omoikane/CLAUDE.md) にあります。作業前に必ず参照してください。
+開発ルールと進め方は [`CLAUDE.md`](/CLAUDE.md) にあります。作業前に必ず参照してください。
 
 ## ライセンス
 
