@@ -5,6 +5,10 @@
 
 use std::fmt;
 
+mod matcher;
+
+pub use matcher::{Specificity, matches_selector, specificity};
+
 /// A token emitted by the CSS tokenizer.
 #[derive(Debug, Clone, PartialEq)]
 pub enum CssToken {
@@ -390,7 +394,13 @@ impl Parser {
                 && combinator.is_none()
                 && !matches!(
                     self.peek(),
-                    Some(CssToken::Delim('>') | CssToken::Delim('+') | CssToken::Delim('~'))
+                    Some(
+                        CssToken::Delim('>')
+                            | CssToken::Delim('+')
+                            | CssToken::Delim('~')
+                            | CssToken::CurlyOpen
+                            | CssToken::Comma
+                    ) | None
                 )
             {
                 combinator = Some(Combinator::Descendant);
@@ -489,7 +499,22 @@ impl Parser {
                         self.next();
                         SimpleSelector::PseudoElement(self.expect_ident()?)
                     } else {
-                        SimpleSelector::PseudoClass(self.expect_ident()?)
+                        let name = self.expect_ident()?;
+                        if matches!(self.peek(), Some(CssToken::ParenOpen)) {
+                            self.next();
+                            let mut argument_tokens = Vec::new();
+                            while !matches!(self.peek(), Some(CssToken::ParenClose) | None) {
+                                argument_tokens.push(self.next().expect("peeked token should exist"));
+                            }
+                            match self.next() {
+                                Some(CssToken::ParenClose) => {}
+                                _ => return Err(CssParseError::ExpectedToken(")")),
+                            }
+                            let argument = render_tokens(&argument_tokens).trim().to_string();
+                            SimpleSelector::PseudoClass(format!("{name}({argument})"))
+                        } else {
+                            SimpleSelector::PseudoClass(name)
+                        }
                     };
                     simples.push(pseudo);
                 }
