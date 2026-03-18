@@ -214,6 +214,11 @@ impl NodeHandle {
         })))
     }
 
+    /// Returns a stable identity for this node handle.
+    pub(crate) fn identity(&self) -> usize {
+        Rc::as_ptr(&self.0) as usize
+    }
+
     /// Appends `child` to the node's children.
     pub fn append_child(&self, child: NodeHandle) {
         detach_from_parent(&child);

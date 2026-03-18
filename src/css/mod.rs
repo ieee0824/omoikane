@@ -6,8 +6,10 @@
 use std::fmt;
 
 mod matcher;
+mod style;
 
 pub use matcher::{Specificity, matches_selector, specificity};
+pub use style::{ComputedStyle, ComputedValue, Origin, StyleResolver, StylesheetInput};
 
 /// A token emitted by the CSS tokenizer.
 #[derive(Debug, Clone, PartialEq)]
@@ -105,6 +107,7 @@ pub struct AtRule {
 pub struct Declaration {
     pub name: String,
     pub value: Value,
+    pub important: bool,
 }
 
 /// CSS values used by declarations.
@@ -566,8 +569,9 @@ impl Parser {
             }
         }
 
+        let (value_tokens, important) = split_important(&value_tokens);
         let value = parse_value_tokens(&value_tokens)?;
-        Ok(expand_shorthand(&name, value))
+        Ok(expand_shorthand(&name, value, important))
     }
 
     fn consume_whitespace(&mut self) -> bool {
@@ -779,18 +783,19 @@ fn parse_single_value(token: &CssToken) -> Result<Value, CssParseError> {
     }
 }
 
-fn expand_shorthand(name: &str, value: Value) -> Vec<Declaration> {
+fn expand_shorthand(name: &str, value: Value, important: bool) -> Vec<Declaration> {
     match name {
-        "margin" | "padding" => expand_box_shorthand(name, value),
-        "border" => expand_border_shorthand(value),
+        "margin" | "padding" => expand_box_shorthand(name, value, important),
+        "border" => expand_border_shorthand(value, important),
         _ => vec![Declaration {
             name: name.to_string(),
             value,
+            important,
         }],
     }
 }
 
-fn expand_box_shorthand(prefix: &str, value: Value) -> Vec<Declaration> {
+fn expand_box_shorthand(prefix: &str, value: Value, important: bool) -> Vec<Declaration> {
     let values = match value {
         Value::List(values) => values,
         single => vec![single],
@@ -804,6 +809,7 @@ fn expand_box_shorthand(prefix: &str, value: Value) -> Vec<Declaration> {
         _ => return vec![Declaration {
             name: prefix.to_string(),
             value: Value::List(values),
+            important,
         }],
     };
 
@@ -811,23 +817,27 @@ fn expand_box_shorthand(prefix: &str, value: Value) -> Vec<Declaration> {
         Declaration {
             name: format!("{prefix}-top"),
             value: top,
+            important,
         },
         Declaration {
             name: format!("{prefix}-right"),
             value: right,
+            important,
         },
         Declaration {
             name: format!("{prefix}-bottom"),
             value: bottom,
+            important,
         },
         Declaration {
             name: format!("{prefix}-left"),
             value: left,
+            important,
         },
     ]
 }
 
-fn expand_border_shorthand(value: Value) -> Vec<Declaration> {
+fn expand_border_shorthand(value: Value, important: bool) -> Vec<Declaration> {
     let values = match value {
         Value::List(values) => values,
         single => vec![single],
@@ -876,18 +886,21 @@ fn expand_border_shorthand(value: Value) -> Vec<Declaration> {
         declarations.push(Declaration {
             name: "border-width".to_string(),
             value: width,
+            important,
         });
     }
     if let Some(style) = style {
         declarations.push(Declaration {
             name: "border-style".to_string(),
             value: style,
+            important,
         });
     }
     if let Some(color) = color {
         declarations.push(Declaration {
             name: "border-color".to_string(),
             value: color,
+            important,
         });
     }
 
@@ -895,6 +908,7 @@ fn expand_border_shorthand(value: Value) -> Vec<Declaration> {
         declarations.push(Declaration {
             name: "border".to_string(),
             value: Value::List(Vec::new()),
+            important,
         });
     }
 
@@ -942,6 +956,26 @@ fn render_tokens(tokens: &[CssToken]) -> String {
         }
     }
     rendered
+}
+
+fn split_important(tokens: &[CssToken]) -> (Vec<CssToken>, bool) {
+    let compact: Vec<CssToken> = tokens
+        .iter()
+        .filter(|token| !matches!(token, CssToken::Whitespace))
+        .cloned()
+        .collect();
+
+    if compact.len() >= 2
+        && matches!(compact[compact.len() - 2], CssToken::Delim('!'))
+        && matches!(
+            &compact[compact.len() - 1],
+            CssToken::Ident(keyword) if keyword.eq_ignore_ascii_case("important")
+        )
+    {
+        return (compact[..compact.len() - 2].to_vec(), true);
+    }
+
+    (tokens.to_vec(), false)
 }
 
 fn trimmed_number(value: f32) -> String {

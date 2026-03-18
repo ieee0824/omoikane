@@ -2,7 +2,7 @@
 id: 003
 title: CSSパーサー & スタイル計算
 phase: 2
-status: open
+status: closed
 children: [003-1, 003-2, 003-3]
 ---
 
