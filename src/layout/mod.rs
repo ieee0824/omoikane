@@ -181,6 +181,7 @@ enum TableDisplay {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PositionScheme {
     Static,
+    Relative,
     Absolute,
     Fixed,
 }
@@ -228,7 +229,7 @@ pub fn layout_tree(
     resolver: &mut StyleResolver,
     containing_block: Rect,
 ) -> Option<LayoutBox> {
-    layout_node(node, resolver, containing_block, containing_block)
+    layout_node(node, resolver, containing_block, containing_block, None)
 }
 
 fn layout_node(
@@ -236,10 +237,15 @@ fn layout_node(
     resolver: &mut StyleResolver,
     containing_block: Rect,
     viewport: Rect,
+    positioned_ancestor: Option<BoxDimensions>,
 ) -> Option<LayoutBox> {
     match node.node_type() {
-        NodeType::Document => layout_document(node, resolver, containing_block, viewport),
-        NodeType::Element => layout_element(node, resolver, containing_block, viewport),
+        NodeType::Document => {
+            layout_document(node, resolver, containing_block, viewport, positioned_ancestor)
+        }
+        NodeType::Element => {
+            layout_element(node, resolver, containing_block, viewport, positioned_ancestor)
+        }
         _ => None,
     }
 }
@@ -249,6 +255,7 @@ fn layout_document(
     resolver: &mut StyleResolver,
     containing_block: Rect,
     viewport: Rect,
+    positioned_ancestor: Option<BoxDimensions>,
 ) -> Option<LayoutBox> {
     let mut children = Vec::new();
     let mut positioned_children = Vec::new();
@@ -260,12 +267,6 @@ fn layout_document(
             NodeType::Element => Some(resolver.computed_style(&child)),
             _ => None,
         };
-        if let Some(style) = &child_style {
-            if is_out_of_flow_positioned(style) {
-                positioned_children.push((child, style.clone()));
-                continue;
-            }
-        }
         let child_margin_top = child_style
             .as_ref()
             .map(|style| edge_sizes(style, "margin").top)
@@ -281,8 +282,16 @@ fn layout_document(
             width: containing_block.width,
             height: 0.0,
         };
+        if let Some(style) = &child_style {
+            if is_out_of_flow_positioned(style) {
+                positioned_children.push((child, style.clone(), child_containing));
+                continue;
+            }
+        }
 
-        if let Some(layout_child) = layout_node(&child, resolver, child_containing, viewport) {
+        if let Some(layout_child) =
+            layout_node(&child, resolver, child_containing, viewport, positioned_ancestor)
+        {
             cursor_y += layout_child.total_height();
             previous_margin_bottom = Some(layout_child.dimensions.margin.bottom);
             children.push(layout_child);
@@ -301,9 +310,16 @@ fn layout_document(
         content: dimensions.content,
         ..BoxDimensions::default()
     };
-    for (child, style) in positioned_children {
+    for (child, style, static_position) in positioned_children {
         if let Some(positioned) =
-            layout_positioned_child(&child, resolver, &style, document_box, viewport, viewport)
+            layout_positioned_child(
+                &child,
+                resolver,
+                &style,
+                positioned_ancestor.unwrap_or(document_box),
+                static_position,
+                viewport,
+            )
         {
             children.push(positioned);
         }
@@ -326,6 +342,7 @@ fn layout_element(
     resolver: &mut StyleResolver,
     containing_block: Rect,
     viewport: Rect,
+    positioned_ancestor: Option<BoxDimensions>,
 ) -> Option<LayoutBox> {
     let style = resolver.computed_style(node);
     if is_display_none(&style) {
@@ -379,12 +396,6 @@ fn layout_element(
             NodeType::Element => Some(resolver.computed_style(&child)),
             _ => None,
         };
-        if let Some(style) = &child_style {
-            if is_out_of_flow_positioned(style) {
-                positioned_children.push((child, style.clone()));
-                continue;
-            }
-        }
         let child_margin_top = child_style
             .as_ref()
             .map(|style| edge_sizes(style, "margin").top)
@@ -400,8 +411,35 @@ fn layout_element(
             width,
             height: 0.0,
         };
+        if let Some(style) = &child_style {
+            if is_out_of_flow_positioned(style) {
+                positioned_children.push((child, style.clone(), child_containing));
+                continue;
+            }
+        }
 
-        if let Some(layout_child) = layout_node(&child, resolver, child_containing, viewport) {
+        let next_positioned_ancestor = if establishes_positioned_containing_block(&style) {
+            Some(BoxDimensions {
+                content: Rect {
+                    x,
+                    y,
+                    width,
+                    height: 0.0,
+                },
+                padding,
+                border,
+                margin,
+            })
+        } else {
+            positioned_ancestor
+        };
+        if let Some(layout_child) = layout_node(
+            &child,
+            resolver,
+            child_containing,
+            viewport,
+            next_positioned_ancestor,
+        ) {
             cursor_y += layout_child.total_height();
             previous_margin_bottom = Some(layout_child.dimensions.margin.bottom);
             children.push(layout_child);
@@ -428,13 +466,18 @@ fn layout_element(
         border,
         margin,
     };
-    for (child, style) in positioned_children {
+    let next_positioned_ancestor = if establishes_positioned_containing_block(&style) {
+        Some(dimensions)
+    } else {
+        positioned_ancestor
+    };
+    for (child, style, static_position) in positioned_children {
         if let Some(positioned) = layout_positioned_child(
             &child,
             resolver,
             &style,
-            dimensions,
-            containing_block,
+            next_positioned_ancestor.unwrap_or(dimensions),
+            static_position,
             viewport,
         ) {
             children.push(positioned);
@@ -522,7 +565,7 @@ fn layout_flex_container(
             };
 
             if let Some(layout_child) =
-                layout_node(&item.node, resolver, child_containing, viewport)
+                layout_node(&item.node, resolver, child_containing, viewport, None)
             {
                 let cross_size = match direction {
                     FlexDirection::Row => layout_child.total_height(),
@@ -785,7 +828,7 @@ fn layout_table_row_entry(
             width: column_width,
             height: 0.0,
         };
-        let mut layout_cell = layout_node(cell, resolver, cell_containing, viewport)?;
+        let mut layout_cell = layout_node(cell, resolver, cell_containing, viewport, None)?;
         let cell_style = resolver.computed_style(cell);
         let cell_height = explicit_length(&cell_style, "height").unwrap_or(layout_cell.total_height());
         layout_cell.dimensions.content.width = column_width;
@@ -950,8 +993,18 @@ fn is_out_of_flow_positioned(style: &ComputedStyle) -> bool {
     )
 }
 
+fn establishes_positioned_containing_block(style: &ComputedStyle) -> bool {
+    matches!(
+        position_scheme(style),
+        PositionScheme::Relative | PositionScheme::Absolute | PositionScheme::Fixed
+    )
+}
+
 fn position_scheme(style: &ComputedStyle) -> PositionScheme {
     match style.get("position") {
+        Some(ComputedValue::Keyword(keyword)) if keyword.eq_ignore_ascii_case("relative") => {
+            PositionScheme::Relative
+        }
         Some(ComputedValue::Keyword(keyword)) if keyword.eq_ignore_ascii_case("absolute") => {
             PositionScheme::Absolute
         }
@@ -959,6 +1012,48 @@ fn position_scheme(style: &ComputedStyle) -> PositionScheme {
             PositionScheme::Fixed
         }
         _ => PositionScheme::Static,
+    }
+}
+
+fn shrink_to_fit_width(node: &NodeHandle, resolver: &mut StyleResolver, available_width: f32) -> f32 {
+    intrinsic_width(node, resolver).min(available_width).max(0.0)
+}
+
+fn intrinsic_width(node: &NodeHandle, resolver: &mut StyleResolver) -> f32 {
+    match node.node_type() {
+        NodeType::Text => node
+            .data()
+            .map(|text| {
+                let parent_style = node
+                    .parent_node()
+                    .map(|parent| resolver.computed_style(&parent))
+                    .unwrap_or_default();
+                measure_text_width(&normalize_text(&text, white_space(&parent_style)), font_metrics(&parent_style))
+            })
+            .unwrap_or(0.0),
+        NodeType::Element => {
+            let style = resolver.computed_style(node);
+            if let Some(width) = explicit_length(&style, "width") {
+                return width;
+            }
+            let mut width: f32 = 0.0;
+            for child in node.child_nodes() {
+                width = width.max(intrinsic_width(&child, resolver));
+            }
+            if width == 0.0 {
+                width = generated_inline_segments(node, resolver, PseudoElement::Before)
+                    .into_iter()
+                    .chain(generated_inline_segments(node, resolver, PseudoElement::After))
+                    .map(|segment| match segment.content {
+                        InlineSegmentContent::Text(text) => measure_text_width(&text, segment.metrics),
+                        InlineSegmentContent::Image(image) => image.width() as f32,
+                        InlineSegmentContent::GeneratedBox => 0.0,
+                    })
+                    .fold(0.0, f32::max);
+            }
+            width
+        }
+        _ => 0.0,
     }
 }
 
@@ -983,34 +1078,44 @@ fn layout_positioned_child(
         PositionScheme::Fixed => viewport,
         PositionScheme::Absolute => parent_box.content,
         PositionScheme::Static => containing_block,
+        PositionScheme::Relative => containing_block,
     };
 
-    let child_containing = Rect {
-        x: origin.x,
-        y: origin.y,
-        width: origin.width,
-        height: origin.height,
-    };
-    let mut layout_child = layout_node(child, resolver, child_containing, viewport)?;
-    let outer_width = layout_child.total_width();
-    let outer_height = layout_child.total_height();
     let left = explicit_length(style, "left");
     let right = explicit_length(style, "right");
     let top = explicit_length(style, "top");
     let bottom = explicit_length(style, "bottom");
+    let static_outer = containing_block;
+    let child_width = if explicit_length(style, "width").is_none() {
+        shrink_to_fit_width(child, resolver, origin.width)
+    } else {
+        origin.width
+    };
+    let child_containing = Rect {
+        x: origin.x,
+        y: origin.y,
+        width: child_width,
+        height: origin.height,
+    };
+    let mut layout_child = layout_node(child, resolver, child_containing, viewport, Some(parent_box))?;
+    if explicit_length(style, "width").is_none() {
+        layout_child.dimensions.content.width = shrink_to_fit_width(child, resolver, origin.width);
+    }
+    let outer_width = layout_child.total_width();
+    let outer_height = layout_child.total_height();
     let outer_x = if let Some(left) = left {
         origin.x + left
     } else if let Some(right) = right {
         origin.x + origin.width - outer_width - right
     } else {
-        origin.x
+        static_outer.x
     };
     let outer_y = if let Some(top) = top {
         origin.y + top
     } else if let Some(bottom) = bottom {
         origin.y + origin.height - outer_height - bottom
     } else {
-        origin.y
+        static_outer.y
     };
     translate_layout_box_to_outer(&mut layout_child, outer_x, outer_y);
     layout_child.z_index = z_index(style);
@@ -1808,6 +1913,18 @@ mod tests {
         body.append_child(card.clone());
 
         (document, html, body, card)
+    }
+
+    fn find_layout_box_by_tag<'a>(layout: &'a LayoutBox, tag: &str) -> Option<&'a LayoutBox> {
+        if layout.node.tag_name().as_deref() == Some(tag) {
+            return Some(layout);
+        }
+        for child in &layout.children {
+            if let Some(found) = find_layout_box_by_tag(child, tag) {
+                return Some(found);
+            }
+        }
+        None
     }
 
     #[test]
@@ -2818,6 +2935,137 @@ mod tests {
         let fixed_box = &layout.children[0];
         assert_eq!(fixed_box.dimensions.content.x, 240.0);
         assert_eq!(fixed_box.dimensions.content.y, 150.0);
+    }
+
+    #[test]
+    fn absolute_uses_nearest_positioned_ancestor_content_box() {
+        let document = NodeHandle::document();
+        let body = NodeHandle::element("body");
+        let outer = NodeHandle::element("div");
+        let middle = NodeHandle::element("section");
+        let absolute = NodeHandle::element("aside");
+
+        outer.set_attribute("class", "outer");
+        middle.set_attribute("class", "middle");
+        absolute.set_attribute("class", "absolute");
+        document.append_child(body.clone());
+        body.append_child(outer.clone());
+        outer.append_child(middle.clone());
+        middle.append_child(absolute);
+
+        let mut resolver = StyleResolver::new();
+        resolver.add_stylesheet(
+            Origin::Author,
+            parse_stylesheet(
+                ".outer { position: relative; width: 200px; padding-left: 10px; padding-top: 5px; } \
+                 .middle { width: 120px; padding-left: 7px; padding-top: 9px; } \
+                 .absolute { position: absolute; left: 20px; top: 30px; width: 40px; height: 10px; }",
+            )
+            .unwrap(),
+        );
+
+        let layout = layout_tree(
+            &body,
+            &mut resolver,
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 240.0,
+                height: 0.0,
+            },
+        )
+        .unwrap();
+
+        let absolute_box = find_layout_box_by_tag(&layout, "aside").unwrap();
+        assert_eq!(absolute_box.dimensions.content.x, 30.0);
+        assert_eq!(absolute_box.dimensions.content.y, 35.0);
+    }
+
+    #[test]
+    fn absolute_auto_offsets_use_static_position() {
+        let document = NodeHandle::document();
+        let body = NodeHandle::element("body");
+        let container = NodeHandle::element("div");
+        let first = NodeHandle::element("section");
+        let absolute = NodeHandle::element("aside");
+
+        first.set_attribute("class", "first");
+        absolute.set_attribute("class", "absolute");
+        document.append_child(body.clone());
+        body.append_child(container.clone());
+        container.append_child(first);
+        container.append_child(absolute.clone());
+
+        let mut resolver = StyleResolver::new();
+        resolver.add_stylesheet(
+            Origin::Author,
+            parse_stylesheet(
+                "div { position: relative; width: 200px; } \
+                 .first { height: 20px; } \
+                 .absolute { position: absolute; width: 50px; height: 10px; }",
+            )
+            .unwrap(),
+        );
+
+        let layout = layout_tree(
+            &body,
+            &mut resolver,
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 240.0,
+                height: 0.0,
+            },
+        )
+        .unwrap();
+
+        let container_box = &layout.children[0];
+        let absolute_box = container_box
+            .children
+            .iter()
+            .find(|child| child.node.tag_name().as_deref() == Some("aside"))
+            .unwrap();
+        assert_eq!(absolute_box.dimensions.content.x, 0.0);
+        assert_eq!(absolute_box.dimensions.content.y, 20.0);
+    }
+
+    #[test]
+    fn absolute_auto_width_shrink_to_fit_text_content() {
+        let document = NodeHandle::document();
+        let body = NodeHandle::element("body");
+        let container = NodeHandle::element("div");
+        let absolute = NodeHandle::element("aside");
+        absolute.set_attribute("class", "absolute");
+        absolute.append_child(NodeHandle::text("hello"));
+        document.append_child(body.clone());
+        body.append_child(container.clone());
+        container.append_child(absolute);
+
+        let mut resolver = StyleResolver::new();
+        resolver.add_stylesheet(
+            Origin::Author,
+            parse_stylesheet(
+                "div { position: relative; width: 200px; } \
+                 .absolute { position: absolute; left: 0; top: 0; }",
+            )
+            .unwrap(),
+        );
+
+        let layout = layout_tree(
+            &body,
+            &mut resolver,
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 240.0,
+                height: 0.0,
+            },
+        )
+        .unwrap();
+
+        let absolute_box = find_layout_box_by_tag(&layout, "aside").unwrap();
+        assert!(absolute_box.dimensions.content.width < 200.0);
+        assert!(absolute_box.dimensions.content.width > 0.0);
     }
 
     #[test]
