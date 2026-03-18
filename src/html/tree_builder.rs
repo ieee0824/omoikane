@@ -228,7 +228,12 @@ impl Builder {
                 name,
                 attributes,
                 self_closing,
-            } => match name.as_str() {
+            } => {
+                if should_close_p_before_start_tag(&name) && self.find_open_element("p").is_some() {
+                    self.pop_matching("p");
+                }
+
+                match name.as_str() {
                 "html" => {}
                 "head" => {}
                 "body" => {
@@ -271,7 +276,8 @@ impl Builder {
                         self.open_elements.push(element);
                     }
                 }
-            },
+                }
+            }
             Token::EndTag { name } => match name.as_str() {
                 "body" => {
                     self.pop_matching("body");
@@ -674,6 +680,38 @@ fn is_formatting_element(tag_name: &str) -> bool {
     )
 }
 
+fn should_close_p_before_start_tag(tag_name: &str) -> bool {
+    matches!(
+        tag_name,
+        "address"
+            | "article"
+            | "aside"
+            | "blockquote"
+            | "div"
+            | "dl"
+            | "fieldset"
+            | "footer"
+            | "form"
+            | "h1"
+            | "h2"
+            | "h3"
+            | "h4"
+            | "h5"
+            | "h6"
+            | "header"
+            | "hgroup"
+            | "hr"
+            | "main"
+            | "nav"
+            | "ol"
+            | "p"
+            | "pre"
+            | "section"
+            | "table"
+            | "ul"
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use crate::dom::Node;
@@ -756,5 +794,40 @@ mod tests {
 
         assert_eq!(div.child_nodes()[0].data(), Some("inside".to_string()));
         assert_eq!(p.child_nodes()[0].data(), Some("after".to_string()));
+    }
+
+    #[test]
+    fn closes_paragraph_before_block_elements_in_body() {
+        let result = TreeBuilder::parse(
+            "<div class=\"picture\"><p><table><tr><td></table><p class=\"bad\"><div class=\"forehead\"></div></div>",
+        );
+        let document = result.document();
+        let bad = find_by_class(&document, "bad").unwrap();
+        let forehead = find_by_class(&document, "forehead").unwrap();
+
+        assert_ne!(forehead.parent_node(), Some(bad));
+        assert_eq!(
+            forehead.parent_node().and_then(|node| node.tag_name()),
+            Some("div".to_string())
+        );
+    }
+
+    fn find_by_class(node: &NodeHandle, class: &str) -> Option<NodeHandle> {
+        if node
+            .attributes()
+            .and_then(|attributes| attributes.get("class").cloned())
+            .map(|value| value.split_whitespace().any(|candidate| candidate == class))
+            .unwrap_or(false)
+        {
+            return Some(node.clone());
+        }
+
+        for child in node.child_nodes() {
+            if let Some(found) = find_by_class(&child, class) {
+                return Some(found);
+            }
+        }
+
+        None
     }
 }

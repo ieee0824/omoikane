@@ -935,6 +935,11 @@ fn expand_background_shorthand(value: Value, important: bool) -> Vec<Declaration
     let mut declarations = Vec::new();
     for item in &values {
         match item {
+            Value::Function { name, .. } if name.eq_ignore_ascii_case("url") => declarations.push(Declaration {
+                name: "background-image".to_string(),
+                value: item.clone(),
+                important,
+            }),
             Value::Color(_) | Value::Function { .. } => declarations.push(Declaration {
                 name: "background-color".to_string(),
                 value: item.clone(),
@@ -943,6 +948,15 @@ fn expand_background_shorthand(value: Value, important: bool) -> Vec<Declaration
             Value::Keyword(keyword) if is_background_color_keyword(&keyword) => {
                 declarations.push(Declaration {
                     name: "background-color".to_string(),
+                    value: Value::Keyword(keyword.to_string()),
+                    important,
+                });
+            }
+            Value::Keyword(keyword)
+                if keyword.starts_with("url(") || keyword.eq_ignore_ascii_case("none") =>
+            {
+                declarations.push(Declaration {
+                    name: "background-image".to_string(),
                     value: Value::Keyword(keyword.to_string()),
                     important,
                 });
@@ -1336,5 +1350,17 @@ mod tests {
                 .iter()
                 .any(|decl| decl.name == "line-height")
         );
+    }
+
+    #[test]
+    fn expands_background_image_from_url_shorthand() {
+        let stylesheet =
+            parse_stylesheet("div { background: red url(\"data:image/png;base64,AAAA\"); }").unwrap();
+        let Rule::Style(rule) = &stylesheet.rules[0] else {
+            panic!("expected style rule");
+        };
+
+        assert!(rule.declarations.iter().any(|decl| decl.name == "background-color"));
+        assert!(rule.declarations.iter().any(|decl| decl.name == "background-image"));
     }
 }

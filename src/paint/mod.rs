@@ -412,6 +412,7 @@ fn paint_box(
     if let Some(background) = background_color(&style) {
         canvas.fill_rect_clipped(border_box, background, inherited_clip);
     }
+    paint_background_image(canvas, &style, border_box, inherited_clip);
 
     paint_borders(canvas, layout, &style, inherited_clip);
     paint_text(canvas, layout, &style, inherited_clip);
@@ -588,6 +589,35 @@ fn background_color(style: &ComputedStyle) -> Option<Color> {
     color_property(style.get("background-color"))
 }
 
+fn background_image(style: &ComputedStyle) -> Option<Image> {
+    match style.get("background-image") {
+        Some(ComputedValue::Keyword(keyword)) => parse_background_image_value(keyword),
+        Some(ComputedValue::String(value)) => parse_background_image_value(value),
+        _ => None,
+    }
+}
+
+fn parse_background_image_value(value: &str) -> Option<Image> {
+    let trimmed = value.trim();
+    if trimmed.eq_ignore_ascii_case("none") {
+        return None;
+    }
+    let url = trimmed
+        .strip_prefix("url(")
+        .and_then(|value| value.strip_suffix(')'))
+        .unwrap_or(trimmed)
+        .trim()
+        .trim_matches('"')
+        .trim_matches('\'');
+    let data_uri = parse_data_uri(url).ok()?;
+    match data_uri {
+        DataUri::Binary { mime_type, data } if mime_type.eq_ignore_ascii_case("image/png") => {
+            Image::decode_png(&data).ok()
+        }
+        _ => None,
+    }
+}
+
 fn border_color(style: &ComputedStyle) -> Option<Color> {
     color_property(style.get("border-color")).or_else(|| color_property(style.get("color")))
 }
@@ -601,6 +631,34 @@ fn color_property(value: Option<&ComputedValue>) -> Option<Color> {
         Some(ComputedValue::Color(color)) => parse_color(color),
         Some(ComputedValue::Keyword(color)) => parse_color(color),
         _ => None,
+    }
+}
+
+fn paint_background_image(
+    canvas: &mut Canvas,
+    style: &ComputedStyle,
+    rect: Rect,
+    clip: Option<Rect>,
+) {
+    let Some(image) = background_image(style) else {
+        return;
+    };
+    let Some(area) = normalize_rect(rect) else {
+        return;
+    };
+
+    let tile_width = image.width().max(1) as f32;
+    let tile_height = image.height().max(1) as f32;
+    let x_end = area.x + area.width;
+    let y_end = area.y + area.height;
+    let mut y = area.y;
+    while y < y_end {
+        let mut x = area.x;
+        while x < x_end {
+            canvas.draw_image_clipped(&image, x, y, clip.or(Some(area)));
+            x += tile_width;
+        }
+        y += tile_height;
     }
 }
 
@@ -981,8 +1039,9 @@ pub fn parse_data_uri(uri: &str) -> Result<DataUri, PaintError> {
     }
 
     if is_base64 {
+        let decoded_payload = percent_decode(data);
         let data = base64::engine::general_purpose::STANDARD
-            .decode(data)
+            .decode(decoded_payload)
             .map_err(|_| PaintError::InvalidBase64)?;
         Ok(DataUri::Binary { mime_type, data })
     } else {
@@ -1314,6 +1373,46 @@ mod tests {
     }
 
     #[test]
+    fn paints_tiled_background_images_from_data_uris() {
+        let document = NodeHandle::document();
+        let body = NodeHandle::element("body");
+        let div = NodeHandle::element("div");
+        document.append_child(body.clone());
+        body.append_child(div);
+
+        let stylesheet = "body { margin: 0; } div { width: 4px; height: 4px; background: url(\"data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADElEQVR4AQEFAPr/AP8AAP9zftimAAAAAElFTkSuQmCC\"); }";
+        let mut resolver = StyleResolver::new();
+        resolver.add_stylesheet(Origin::Author, parse_stylesheet(stylesheet).unwrap());
+        let layout = layout_tree(
+            &body,
+            &mut resolver,
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 10.0,
+                height: 10.0,
+            },
+        )
+        .unwrap();
+
+        let mut paint_resolver = StyleResolver::new();
+        paint_resolver.add_stylesheet(Origin::Author, parse_stylesheet(stylesheet).unwrap());
+        let canvas = paint_layout(
+            &layout,
+            &mut paint_resolver,
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 10.0,
+                height: 10.0,
+            },
+        );
+
+        assert_eq!(canvas.pixel(1, 1), Some(Color::rgb(255, 0, 0)));
+        assert_eq!(canvas.pixel(3, 3), Some(Color::rgb(255, 0, 0)));
+    }
+
+    #[test]
     fn paints_children_in_z_index_order() {
         let document = NodeHandle::document();
         let body = NodeHandle::element("body");
@@ -1467,6 +1566,22 @@ mod tests {
     }
 
     #[test]
+    fn parses_percent_encoded_base64_data_uri() {
+        let image = parse_data_uri(
+            "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADElEQVR4AQEFAPr%2FAP8AAP9zftimAAAAAElFTkSuQmCC",
+        )
+        .unwrap();
+
+        match image {
+            DataUri::Binary { mime_type, data } => {
+                assert_eq!(mime_type, "image/png");
+                assert_eq!(Image::decode_png(&data).unwrap().width(), 1);
+            }
+            DataUri::Text { .. } => panic!("expected binary data uri"),
+        }
+    }
+
+    #[test]
     fn renders_acid2_fixture_to_png() {
         let html = fs::read_to_string(acid2_fixture_path()).unwrap();
         let document = TreeBuilder::parse(&html).document();
@@ -1561,8 +1676,16 @@ mod tests {
     fn acid2_fixture_matches_official_reference_rendering() {
         let acid2_html = fs::read_to_string(acid2_fixture_path()).unwrap();
         let acid2_document = TreeBuilder::parse(&acid2_html).document();
-        let actual = render_document(
+        let mut acid2_resolver = StyleResolver::new();
+        for stylesheet in extract_author_stylesheets(&acid2_document).unwrap() {
+            acid2_resolver.add_stylesheet(
+                Origin::Author,
+                parse_stylesheet_forgiving(&stylesheet).unwrap(),
+            );
+        }
+        let mut acid2_layout = crate::layout::layout_tree(
             &acid2_document,
+            &mut acid2_resolver,
             Rect {
                 x: 0.0,
                 y: 0.0,
@@ -1571,6 +1694,19 @@ mod tests {
             },
         )
         .unwrap();
+        if let Some(top_y) = find_layout_box_by_id(&acid2_layout, "top").map(|top| top.dimensions.content.y) {
+            translate_layout_box_for_test(&mut acid2_layout, 0.0, -top_y);
+        }
+        let actual = paint_layout(
+            &acid2_layout,
+            &mut acid2_resolver,
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 800.0,
+                height: 600.0,
+            },
+        );
 
         let reference_html = fs::read_to_string(acid2_official_reference_html_path()).unwrap();
         let reference_document = TreeBuilder::parse(&reference_html).document();
@@ -1651,5 +1787,42 @@ mod tests {
 
     fn acid2_output_dir() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/output/acid2")
+    }
+
+    fn find_layout_box_by_id<'a>(layout: &'a LayoutBox, id: &str) -> Option<&'a LayoutBox> {
+        if layout
+            .node
+            .attributes()
+            .and_then(|attributes| attributes.get("id").cloned())
+            .as_deref()
+            == Some(id)
+        {
+            return Some(layout);
+        }
+
+        for child in &layout.children {
+            if let Some(found) = find_layout_box_by_id(child, id) {
+                return Some(found);
+            }
+        }
+
+        None
+    }
+
+    fn translate_layout_box_for_test(layout: &mut LayoutBox, dx: f32, dy: f32) {
+        layout.dimensions.content.x += dx;
+        layout.dimensions.content.y += dy;
+        for line in &mut layout.lines {
+            line.rect.x += dx;
+            line.rect.y += dy;
+            line.baseline += dy;
+            for fragment in &mut line.fragments {
+                fragment.rect.x += dx;
+                fragment.rect.y += dy;
+            }
+        }
+        for child in &mut layout.children {
+            translate_layout_box_for_test(child, dx, dy);
+        }
     }
 }

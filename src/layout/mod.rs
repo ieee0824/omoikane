@@ -1416,7 +1416,12 @@ fn is_inline_child(node: &NodeHandle, resolver: &mut StyleResolver) -> bool {
                         || keyword.eq_ignore_ascii_case("inline-block")
             ) || node
                 .tag_name()
-                .map(|tag| matches!(tag.as_str(), "span" | "a" | "em" | "strong" | "b" | "i" | "img"))
+                .map(|tag| {
+                    matches!(
+                        tag.as_str(),
+                        "span" | "a" | "em" | "strong" | "b" | "i" | "img" | "object"
+                    )
+                })
                 .unwrap_or(false)
         }
         _ => false,
@@ -1573,16 +1578,37 @@ enum GeneratedContent {
 
 fn element_inline_image(node: &NodeHandle) -> Option<Image> {
     let tag_name = node.tag_name()?;
-    if !tag_name.eq_ignore_ascii_case("img") {
-        return None;
-    }
-
     let attributes = node.attributes().unwrap_or_default();
-    let src = attributes.get("src")?;
-    let data_uri = parse_data_uri(src).ok()?;
-    match data_uri {
-        DataUri::Binary { mime_type, data } if mime_type.eq_ignore_ascii_case("image/png") => {
-            Image::decode_png(&data).ok()
+    match tag_name.as_str() {
+        "img" => {
+            let src = attributes.get("src")?;
+            let data_uri = parse_data_uri(src).ok()?;
+            match data_uri {
+                DataUri::Binary { mime_type, data } if mime_type.eq_ignore_ascii_case("image/png") => {
+                    Image::decode_png(&data).ok()
+                }
+                _ => None,
+            }
+        }
+        "object" => {
+            if let Some(data) = attributes.get("data") {
+                let data_uri = parse_data_uri(data).ok();
+                if let Some(DataUri::Binary { mime_type, data }) = data_uri {
+                    if mime_type.eq_ignore_ascii_case("image/png") {
+                        if let Ok(image) = Image::decode_png(&data) {
+                            return Some(image);
+                        }
+                    }
+                }
+            }
+
+            for child in node.child_nodes() {
+                if let Some(image) = element_inline_image(&child) {
+                    return Some(image);
+                }
+            }
+
+            None
         }
         _ => None,
     }
@@ -2505,6 +2531,46 @@ mod tests {
         );
         let mut resolver = StyleResolver::new();
         resolver.add_stylesheet(Origin::Author, parse_stylesheet(&stylesheet).unwrap());
+
+        let layout = layout_tree(
+            &body,
+            &mut resolver,
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 100.0,
+                height: 0.0,
+            },
+        )
+        .unwrap();
+
+        let line = &layout.children[0].lines[0];
+        assert!(line.fragments.iter().any(|fragment| matches!(
+            fragment.content,
+            InlineFragmentContent::Image(_)
+        )));
+    }
+
+    #[test]
+    fn object_fallback_data_png_creates_image_fragment() {
+        let document = NodeHandle::document();
+        let body = NodeHandle::element("body");
+        let paragraph = NodeHandle::element("p");
+        let outer_object = NodeHandle::element("object");
+        let inner_object = NodeHandle::element("object");
+        document.append_child(body.clone());
+        body.append_child(paragraph.clone());
+        paragraph.append_child(outer_object.clone());
+        outer_object.append_child(inner_object.clone());
+
+        outer_object.set_attribute("data", "data:application/x-unknown,ERROR");
+        inner_object.set_attribute(
+            "data",
+            "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADElEQVR4AQEFAPr/AP8AAP9zftimAAAAAElFTkSuQmCC",
+        );
+
+        let mut resolver = StyleResolver::new();
+        resolver.add_stylesheet(Origin::Author, parse_stylesheet("object { display: inline; }").unwrap());
 
         let layout = layout_tree(
             &body,
