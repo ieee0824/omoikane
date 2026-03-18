@@ -2,7 +2,7 @@
 id: 002
 title: HTMLパーサー実装
 phase: 1
-status: open
+status: closed
 children: [002-1, 002-2, 002-3]
 ---
 
