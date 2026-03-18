@@ -794,6 +794,9 @@ fn expand_shorthand(name: &str, value: Value, important: bool) -> Vec<Declaratio
     match name {
         "margin" | "padding" => expand_box_shorthand(name, value, important),
         "border" => expand_border_shorthand(value, important),
+        "border-top" | "border-right" | "border-bottom" | "border-left" => {
+            expand_border_side_shorthand(name, value, important)
+        }
         "background" => expand_background_shorthand(value, important),
         "font" => expand_font_shorthand(value, important),
         _ => vec![Declaration {
@@ -926,6 +929,94 @@ fn expand_border_shorthand(value: Value, important: bool) -> Vec<Declaration> {
     declarations
 }
 
+fn expand_border_side_shorthand(name: &str, value: Value, important: bool) -> Vec<Declaration> {
+    let values = match value {
+        Value::List(values) => values,
+        single => vec![single],
+    };
+
+    let mut width = None;
+    let mut style = None;
+    let mut color = None;
+
+    for item in values {
+        let is_width_keyword = matches!(
+            &item,
+            Value::Keyword(keyword) if matches!(keyword.as_str(), "thin" | "medium" | "thick")
+        );
+        let is_border_style = matches!(
+            &item,
+            Value::Keyword(keyword)
+                if matches!(
+                    keyword.as_str(),
+                    "none"
+                        | "hidden"
+                        | "dotted"
+                        | "dashed"
+                        | "solid"
+                        | "double"
+                        | "groove"
+                        | "ridge"
+                        | "inset"
+                        | "outset"
+                )
+        );
+
+        match item {
+            Value::Length(_, _) | Value::Number(_) if width.is_none() => width = Some(item),
+            Value::Keyword(_) if is_width_keyword && width.is_none() => width = Some(item),
+            Value::Keyword(_) if is_border_style && style.is_none() => style = Some(item),
+            Value::Color(_) | Value::Function { .. } | Value::Keyword(_) if color.is_none() => {
+                color = Some(item)
+            }
+            _ => {}
+        }
+    }
+
+    let mut declarations = Vec::new();
+    if let Some(width) = width {
+        declarations.push(Declaration {
+            name: format!("{name}-width"),
+            value: width,
+            important,
+        });
+    }
+    if let Some(style) = style {
+        declarations.push(Declaration {
+            name: format!("{name}-style"),
+            value: style.clone(),
+            important,
+        });
+        declarations.push(Declaration {
+            name: "border-style".to_string(),
+            value: style,
+            important,
+        });
+    }
+    if let Some(color) = color {
+        declarations.push(Declaration {
+            name: format!("{name}-color"),
+            value: color.clone(),
+            important,
+        });
+        declarations.push(Declaration {
+            name: "border-color".to_string(),
+            value: color,
+            important,
+        });
+    }
+
+    if declarations.is_empty() {
+        declarations.push(Declaration {
+            name: name.to_string(),
+            value: Value::List(Vec::new()),
+            important,
+        });
+    }
+
+    declarations
+}
+
 fn expand_background_shorthand(value: Value, important: bool) -> Vec<Declaration> {
     let values = match value {
         Value::List(values) => values,
@@ -952,12 +1043,22 @@ fn expand_background_shorthand(value: Value, important: bool) -> Vec<Declaration
                     important,
                 });
             }
-            Value::Keyword(keyword)
-                if keyword.starts_with("url(") || keyword.eq_ignore_ascii_case("none") =>
-            {
+            Value::Keyword(keyword) if keyword.starts_with("url(") => {
                 declarations.push(Declaration {
                     name: "background-image".to_string(),
                     value: Value::Keyword(keyword.to_string()),
+                    important,
+                });
+            }
+            Value::Keyword(keyword) if keyword.eq_ignore_ascii_case("none") => {
+                declarations.push(Declaration {
+                    name: "background-image".to_string(),
+                    value: Value::Keyword(keyword.to_string()),
+                    important,
+                });
+                declarations.push(Declaration {
+                    name: "background-color".to_string(),
+                    value: Value::Keyword("transparent".to_string()),
                     important,
                 });
             }
@@ -1362,5 +1463,43 @@ mod tests {
 
         assert!(rule.declarations.iter().any(|decl| decl.name == "background-color"));
         assert!(rule.declarations.iter().any(|decl| decl.name == "background-image"));
+    }
+
+    #[test]
+    fn expands_background_none_to_transparent_and_no_image() {
+        let stylesheet = parse_stylesheet("div { background: none; }").unwrap();
+        let Rule::Style(rule) = &stylesheet.rules[0] else {
+            panic!("expected style rule");
+        };
+
+        assert!(rule.declarations.iter().any(
+            |decl| decl.name == "background-image"
+                && matches!(&decl.value, Value::Keyword(value) if value == "none")
+        ));
+        assert!(rule.declarations.iter().any(
+            |decl| decl.name == "background-color"
+                && matches!(&decl.value, Value::Keyword(value) if value == "transparent")
+        ));
+    }
+
+    #[test]
+    fn expands_border_side_shorthands() {
+        let stylesheet = parse_stylesheet("div { border-top: solid yellow 2px; }").unwrap();
+        let Rule::Style(rule) = &stylesheet.rules[0] else {
+            panic!("expected style rule");
+        };
+
+        assert!(rule.declarations.iter().any(
+            |decl| decl.name == "border-top-width"
+                && matches!(&decl.value, Value::Length(value, unit) if *value == 2.0 && unit == "px")
+        ));
+        assert!(rule.declarations.iter().any(
+            |decl| decl.name == "border-top-style"
+                && matches!(&decl.value, Value::Keyword(value) if value == "solid")
+        ));
+        assert!(rule.declarations.iter().any(
+            |decl| decl.name == "border-top-color"
+                && matches!(&decl.value, Value::Keyword(value) if value == "yellow")
+        ));
     }
 }

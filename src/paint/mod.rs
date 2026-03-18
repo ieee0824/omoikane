@@ -460,16 +460,14 @@ fn paint_borders(
     style: &ComputedStyle,
     clip: Option<Rect>,
 ) {
-    if !has_solid_border(style) {
+    if !has_any_solid_border(style) {
         return;
     }
-
-    let color = border_color(style).unwrap_or(Color::rgb(0, 0, 0));
     let border_box = border_box_rect(layout);
     let padding_box = padding_box_rect(layout);
     let border = layout.dimensions.border;
 
-    if border.top > 0.0 {
+    if border.top > 0.0 && has_solid_border_side(style, "top") {
         canvas.fill_rect_clipped(
             Rect {
                 x: border_box.x,
@@ -477,11 +475,11 @@ fn paint_borders(
                 width: border_box.width,
                 height: border.top,
             },
-            color,
+            border_color_side(style, "top").unwrap_or(Color::rgb(0, 0, 0)),
             clip,
         );
     }
-    if border.bottom > 0.0 {
+    if border.bottom > 0.0 && has_solid_border_side(style, "bottom") {
         canvas.fill_rect_clipped(
             Rect {
                 x: border_box.x,
@@ -489,11 +487,11 @@ fn paint_borders(
                 width: border_box.width,
                 height: border.bottom,
             },
-            color,
+            border_color_side(style, "bottom").unwrap_or(Color::rgb(0, 0, 0)),
             clip,
         );
     }
-    if border.left > 0.0 {
+    if border.left > 0.0 && has_solid_border_side(style, "left") {
         canvas.fill_rect_clipped(
             Rect {
                 x: border_box.x,
@@ -501,11 +499,11 @@ fn paint_borders(
                 width: border.left,
                 height: border_box.height - border.top - border.bottom,
             },
-            color,
+            border_color_side(style, "left").unwrap_or(Color::rgb(0, 0, 0)),
             clip,
         );
     }
-    if border.right > 0.0 {
+    if border.right > 0.0 && has_solid_border_side(style, "right") {
         canvas.fill_rect_clipped(
             Rect {
                 x: padding_box.x + padding_box.width,
@@ -513,7 +511,7 @@ fn paint_borders(
                 width: border.right,
                 height: border_box.height - border.top - border.bottom,
             },
-            color,
+            border_color_side(style, "right").unwrap_or(Color::rgb(0, 0, 0)),
             clip,
         );
     }
@@ -622,6 +620,10 @@ fn border_color(style: &ComputedStyle) -> Option<Color> {
     color_property(style.get("border-color")).or_else(|| color_property(style.get("color")))
 }
 
+fn border_color_side(style: &ComputedStyle, side: &str) -> Option<Color> {
+    color_property(style.get(&format!("border-{side}-color"))).or_else(|| border_color(style))
+}
+
 fn text_color(style: &ComputedStyle) -> Option<Color> {
     color_property(style.get("color"))
 }
@@ -662,7 +664,20 @@ fn paint_background_image(
     }
 }
 
-fn has_solid_border(style: &ComputedStyle) -> bool {
+fn has_any_solid_border(style: &ComputedStyle) -> bool {
+    ["top", "right", "bottom", "left"]
+        .into_iter()
+        .any(|side| has_solid_border_side(style, side))
+}
+
+fn has_solid_border_side(style: &ComputedStyle, side: &str) -> bool {
+    if matches!(
+        style.get(&format!("border-{side}-style")),
+        Some(ComputedValue::Keyword(keyword)) if keyword.eq_ignore_ascii_case("solid")
+    ) {
+        return true;
+    }
+
     matches!(
         style.get("border-style"),
         Some(ComputedValue::Keyword(keyword)) if keyword.eq_ignore_ascii_case("solid")
@@ -682,6 +697,10 @@ fn parse_color(value: &str) -> Option<Color> {
         "red" => return Some(Color::rgb(255, 0, 0)),
         "green" => return Some(Color::rgb(0, 128, 0)),
         "blue" => return Some(Color::rgb(0, 0, 255)),
+        "yellow" => return Some(Color::rgb(255, 255, 0)),
+        "navy" => return Some(Color::rgb(0, 0, 128)),
+        "purple" => return Some(Color::rgb(128, 0, 128)),
+        "maroon" => return Some(Color::rgb(128, 0, 0)),
         "gray" | "grey" => return Some(Color::rgb(128, 128, 128)),
         _ => {}
     }
@@ -1410,6 +1429,50 @@ mod tests {
 
         assert_eq!(canvas.pixel(1, 1), Some(Color::rgb(255, 0, 0)));
         assert_eq!(canvas.pixel(3, 3), Some(Color::rgb(255, 0, 0)));
+    }
+
+    #[test]
+    fn paints_side_specific_border_colors() {
+        let document = NodeHandle::document();
+        let body = NodeHandle::element("body");
+        let div = NodeHandle::element("div");
+        document.append_child(body.clone());
+        body.append_child(div);
+
+        let stylesheet =
+            "body { margin: 0; } \
+             div { width: 4px; height: 4px; border-top: solid red 1px; border-left: solid blue 1px; border-right: solid yellow 1px; border-bottom: solid black 1px; }";
+        let mut resolver = StyleResolver::new();
+        resolver.add_stylesheet(Origin::Author, parse_stylesheet(stylesheet).unwrap());
+        let layout = layout_tree(
+            &body,
+            &mut resolver,
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 10.0,
+                height: 10.0,
+            },
+        )
+        .unwrap();
+
+        let mut paint_resolver = StyleResolver::new();
+        paint_resolver.add_stylesheet(Origin::Author, parse_stylesheet(stylesheet).unwrap());
+        let canvas = paint_layout(
+            &layout,
+            &mut paint_resolver,
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 10.0,
+                height: 10.0,
+            },
+        );
+
+        assert_eq!(canvas.pixel(1, 0), Some(Color::rgb(255, 0, 0)));
+        assert_eq!(canvas.pixel(0, 1), Some(Color::rgb(0, 0, 255)));
+        assert_eq!(canvas.pixel(5, 1), Some(Color::rgb(255, 255, 0)));
+        assert_eq!(canvas.pixel(1, 5), Some(Color::rgb(0, 0, 0)));
     }
 
     #[test]

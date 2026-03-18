@@ -186,6 +186,21 @@ enum PositionScheme {
     Fixed,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FloatSide {
+    None,
+    Left,
+    Right,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ClearSide {
+    None,
+    Left,
+    Right,
+    Both,
+}
+
 /// A block layout box derived from a DOM node.
 #[derive(Debug, Clone, PartialEq)]
 pub struct LayoutBox {
@@ -375,8 +390,15 @@ fn layout_element(
     let mut cursor_y = y;
     let mut previous_margin_bottom: Option<f32> = None;
     let mut pending_inline_nodes = Vec::new();
+    let mut left_float_offset = 0.0f32;
+    let mut right_float_offset = 0.0f32;
+    let mut float_bottom = y;
 
     for child in node.child_nodes() {
+        if cursor_y >= float_bottom {
+            left_float_offset = 0.0;
+            right_float_offset = 0.0;
+        }
         if is_inline_child(&child, resolver) {
             pending_inline_nodes.push(child);
             continue;
@@ -400,20 +422,72 @@ fn layout_element(
             .as_ref()
             .map(|style| edge_sizes(style, "margin").top)
             .unwrap_or(0.0);
+        if let Some(style) = &child_style {
+            match clear_side(style) {
+                ClearSide::Left if left_float_offset > 0.0 => {
+                    cursor_y = cursor_y.max(float_bottom);
+                    left_float_offset = 0.0;
+                }
+                ClearSide::Right if right_float_offset > 0.0 => {
+                    cursor_y = cursor_y.max(float_bottom);
+                    right_float_offset = 0.0;
+                }
+                ClearSide::Both if left_float_offset > 0.0 || right_float_offset > 0.0 => {
+                    cursor_y = cursor_y.max(float_bottom);
+                    left_float_offset = 0.0;
+                    right_float_offset = 0.0;
+                }
+                ClearSide::None => {}
+                _ => {}
+            }
+        }
         let collapse_delta = previous_margin_bottom
             .map(|margin_bottom| {
                 margin_bottom + child_margin_top - collapse_margins(margin_bottom, child_margin_top)
             })
             .unwrap_or(0.0);
+        let available_width = (width - left_float_offset - right_float_offset).max(0.0);
         let child_containing = Rect {
-            x,
+            x: x + left_float_offset,
             y: cursor_y - collapse_delta,
-            width,
+            width: available_width,
             height: 0.0,
         };
         if let Some(style) = &child_style {
             if is_out_of_flow_positioned(style) {
                 positioned_children.push((child, style.clone(), child_containing));
+                continue;
+            }
+            let float_side = float_side(style);
+            if float_side != FloatSide::None {
+                if let Some(mut layout_child) = layout_node(
+                    &child,
+                    resolver,
+                    child_containing,
+                    viewport,
+                    positioned_ancestor,
+                ) {
+                    let outer_y = child_containing.y
+                        - layout_child.dimensions.margin.top
+                        - layout_child.dimensions.border.top
+                        - layout_child.dimensions.padding.top;
+                    let outer_x = match float_side {
+                        FloatSide::Left => x + left_float_offset,
+                        FloatSide::Right => {
+                            x + width - right_float_offset - layout_child.total_width()
+                        }
+                        FloatSide::None => x + left_float_offset,
+                    };
+                    translate_layout_box_to_outer(&mut layout_child, outer_x, outer_y);
+                    match float_side {
+                        FloatSide::Left => left_float_offset += layout_child.total_width(),
+                        FloatSide::Right => right_float_offset += layout_child.total_width(),
+                        FloatSide::None => {}
+                    }
+                    float_bottom = float_bottom.max(outer_y + layout_child.total_height());
+                    children.push(layout_child);
+                }
+                previous_margin_bottom = None;
                 continue;
             }
         }
@@ -447,14 +521,20 @@ fn layout_element(
     }
 
     if !pending_inline_nodes.is_empty() {
-        let inline_lines = layout_inline_nodes(&pending_inline_nodes, resolver, x, cursor_y, width);
+        let inline_lines = layout_inline_nodes(
+            &pending_inline_nodes,
+            resolver,
+            x + left_float_offset,
+            cursor_y,
+            (width - left_float_offset - right_float_offset).max(0.0),
+        );
         if let Some(last_line) = inline_lines.last() {
             cursor_y = last_line.rect.y + last_line.rect.height;
         }
         lines.extend(inline_lines);
     }
 
-    let content_height = explicit_length(&style, "height").unwrap_or(cursor_y - y);
+    let content_height = explicit_length(&style, "height").unwrap_or((cursor_y.max(float_bottom)) - y);
     let dimensions = BoxDimensions {
         content: Rect {
             x,
@@ -955,12 +1035,24 @@ fn edge_sizes(style: &ComputedStyle, prefix: &str) -> EdgeSizes {
         "border" => "border-width",
         _ => prefix,
     };
+    let side_property = match prefix {
+        "border" => "border-{}-width",
+        _ => "{prefix}-{}",
+    };
     let shorthand = explicit_length(style, shorthand_property).unwrap_or(0.0);
     EdgeSizes {
-        top: explicit_length(style, &format!("{prefix}-top")).unwrap_or(shorthand),
-        right: explicit_length(style, &format!("{prefix}-right")).unwrap_or(shorthand),
-        bottom: explicit_length(style, &format!("{prefix}-bottom")).unwrap_or(shorthand),
-        left: explicit_length(style, &format!("{prefix}-left")).unwrap_or(shorthand),
+        top: explicit_length(style, &side_property.replace("{}", "top").replace("{prefix}", prefix))
+            .or_else(|| explicit_length(style, &format!("{prefix}-top")))
+            .unwrap_or(shorthand),
+        right: explicit_length(style, &side_property.replace("{}", "right").replace("{prefix}", prefix))
+            .or_else(|| explicit_length(style, &format!("{prefix}-right")))
+            .unwrap_or(shorthand),
+        bottom: explicit_length(style, &side_property.replace("{}", "bottom").replace("{prefix}", prefix))
+            .or_else(|| explicit_length(style, &format!("{prefix}-bottom")))
+            .unwrap_or(shorthand),
+        left: explicit_length(style, &side_property.replace("{}", "left").replace("{prefix}", prefix))
+            .or_else(|| explicit_length(style, &format!("{prefix}-left")))
+            .unwrap_or(shorthand),
     }
 }
 
@@ -1012,6 +1104,33 @@ fn position_scheme(style: &ComputedStyle) -> PositionScheme {
             PositionScheme::Fixed
         }
         _ => PositionScheme::Static,
+    }
+}
+
+fn float_side(style: &ComputedStyle) -> FloatSide {
+    match style.get("float") {
+        Some(ComputedValue::Keyword(keyword)) if keyword.eq_ignore_ascii_case("left") => {
+            FloatSide::Left
+        }
+        Some(ComputedValue::Keyword(keyword)) if keyword.eq_ignore_ascii_case("right") => {
+            FloatSide::Right
+        }
+        _ => FloatSide::None,
+    }
+}
+
+fn clear_side(style: &ComputedStyle) -> ClearSide {
+    match style.get("clear") {
+        Some(ComputedValue::Keyword(keyword)) if keyword.eq_ignore_ascii_case("left") => {
+            ClearSide::Left
+        }
+        Some(ComputedValue::Keyword(keyword)) if keyword.eq_ignore_ascii_case("right") => {
+            ClearSide::Right
+        }
+        Some(ComputedValue::Keyword(keyword)) if keyword.eq_ignore_ascii_case("both") => {
+            ClearSide::Both
+        }
+        _ => ClearSide::None,
     }
 }
 
@@ -3163,6 +3282,99 @@ mod tests {
         let absolute_box = find_layout_box_by_tag(&layout, "aside").unwrap();
         assert!(absolute_box.dimensions.content.width < 200.0);
         assert!(absolute_box.dimensions.content.width > 0.0);
+    }
+
+    #[test]
+    fn float_left_and_right_reduce_available_block_width() {
+        let document = NodeHandle::document();
+        let body = NodeHandle::element("body");
+        let left = NodeHandle::element("div");
+        let right = NodeHandle::element("div");
+        let block = NodeHandle::element("section");
+
+        left.set_attribute("class", "left");
+        right.set_attribute("class", "right");
+        block.set_attribute("class", "block");
+        document.append_child(body.clone());
+        body.append_child(left);
+        body.append_child(right);
+        body.append_child(block.clone());
+
+        let mut resolver = StyleResolver::new();
+        resolver.add_stylesheet(
+            Origin::Author,
+            parse_stylesheet(
+                ".left { float: left; width: 20px; height: 10px; } \
+                 .right { float: right; width: 30px; height: 10px; } \
+                 .block { height: 5px; }",
+            )
+            .unwrap(),
+        );
+
+        let layout = layout_tree(
+            &body,
+            &mut resolver,
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 100.0,
+                height: 100.0,
+            },
+        )
+        .unwrap();
+
+        let left_box = find_layout_box_by_tag(&layout, "div").unwrap();
+        let block_box = find_layout_box_by_tag(&layout, "section").unwrap();
+        let right_box = layout
+            .children
+            .iter()
+            .find(|child| child.node.attributes().and_then(|attrs| attrs.get("class").cloned()) == Some("right".to_string()))
+            .unwrap();
+
+        assert_eq!(left_box.dimensions.content.x, 0.0);
+        assert_eq!(right_box.dimensions.content.x, 70.0);
+        assert_eq!(block_box.dimensions.content.x, 20.0);
+        assert_eq!(block_box.dimensions.content.width, 50.0);
+    }
+
+    #[test]
+    fn clear_both_moves_block_below_floats() {
+        let document = NodeHandle::document();
+        let body = NodeHandle::element("body");
+        let float = NodeHandle::element("div");
+        let cleared = NodeHandle::element("section");
+
+        float.set_attribute("class", "float");
+        cleared.set_attribute("class", "cleared");
+        document.append_child(body.clone());
+        body.append_child(float);
+        body.append_child(cleared.clone());
+
+        let mut resolver = StyleResolver::new();
+        resolver.add_stylesheet(
+            Origin::Author,
+            parse_stylesheet(
+                ".float { float: left; width: 20px; height: 10px; } \
+                 .cleared { clear: both; height: 5px; }",
+            )
+            .unwrap(),
+        );
+
+        let layout = layout_tree(
+            &body,
+            &mut resolver,
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 100.0,
+                height: 100.0,
+            },
+        )
+        .unwrap();
+
+        let cleared_box = find_layout_box_by_tag(&layout, "section").unwrap();
+        assert_eq!(cleared_box.dimensions.content.y, 10.0);
+        assert_eq!(cleared_box.dimensions.content.x, 0.0);
     }
 
     #[test]

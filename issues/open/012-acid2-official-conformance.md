@@ -11,8 +11,15 @@ status: open
 
 ## 現状
 - `paint::tests::acid2_fixture_matches_official_reference_rendering` を `--ignored` で実行すると失敗する
-- 差分ピクセル数は 207,517
+- 差分ピクセル数は 66,465
 - 差分画像は `tests/output/acid2/acid2.official-reference.{actual,expected,diff}.png` に出力される
+
+## 進捗メモ
+- `background: none` が `background-image` しか消していなかった問題を修正し、`.picture` の赤ベタ背景を解消
+- `float: left/right` と `clear: both` の最小対応を入れ、Acid2 部品の横配置を少し改善
+- `border-top` / `border-left` など side shorthand を展開し、side ごとの border color paint に対応
+- color keyword に `yellow` / `navy` / `purple` / `maroon` を追加し、Acid2 の配色を改善
+- ローカル baseline `acid2.baseline.png` は今回の描画改善に合わせて更新済み
 
 ## タスク
 - [ ] 公式比較の差分画像を見て、主要な未実装要素を特定する
