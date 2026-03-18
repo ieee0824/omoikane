@@ -108,6 +108,10 @@ pub enum HttpParseError {
     InvalidHeader,
     /// A chunk size in chunked transfer encoding is malformed.
     InvalidChunkSize,
+    /// Too many redirects were followed without reaching a final response.
+    TooManyRedirects,
+    /// A redirect response is missing the `Location` header.
+    MissingLocation,
 }
 
 impl fmt::Display for HttpParseError {
@@ -118,6 +122,8 @@ impl fmt::Display for HttpParseError {
             Self::InvalidStatusCode => write!(f, "invalid HTTP status code"),
             Self::InvalidHeader => write!(f, "invalid HTTP header"),
             Self::InvalidChunkSize => write!(f, "invalid chunk size in chunked encoding"),
+            Self::TooManyRedirects => write!(f, "too many redirects"),
+            Self::MissingLocation => write!(f, "redirect response missing Location header"),
         }
     }
 }
