@@ -2,7 +2,7 @@
 id: 006
 title: CDP互換API & 他言語連携
 phase: 5
-status: open
+status: closed
 children: [006-1, 006-2, 006-3]
 ---
 
