@@ -82,8 +82,8 @@ pub struct HttpRequest {
 impl HttpRequest {
     /// Creates a new request with the given method and URL.
     ///
-    /// Automatically adds `Host` and `User-Agent` headers derived from the URL
-    /// and crate version.
+    /// Automatically adds `Host`, `User-Agent`, and `Accept-Encoding` headers
+    /// derived from the URL and crate version.
     pub fn new(method: Method, url: Url) -> Self {
         let host = url.authority();
         let mut req = Self {
@@ -95,6 +95,8 @@ impl HttpRequest {
         req.headers.push(("Host".to_string(), host));
         req.headers
             .push(("User-Agent".to_string(), default_user_agent()));
+        req.headers
+            .push(("Accept-Encoding".to_string(), "gzip".to_string()));
         req
     }
 
@@ -238,6 +240,14 @@ mod tests {
         let text = String::from_utf8(req.serialize()).unwrap();
 
         assert!(text.contains("Host: example.com\r\n"));
+    }
+
+    #[test]
+    fn get_request_includes_accept_encoding_gzip() {
+        let req = HttpRequest::get("http://example.com").unwrap();
+        let text = String::from_utf8(req.serialize()).unwrap();
+
+        assert!(text.contains("Accept-Encoding: gzip\r\n"));
     }
 
     #[test]

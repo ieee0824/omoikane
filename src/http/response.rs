@@ -1,5 +1,6 @@
 //! HTTP response parsing.
 
+use flate2::read::GzDecoder;
 use std::fmt;
 use std::io::{self, BufRead, Read};
 
@@ -103,6 +104,7 @@ impl HttpResponse {
 
         // Body
         let body = read_body(&headers, &mut buf_reader)?;
+        let body = decode_content_encoding(&headers, body)?;
 
         Ok(HttpResponse::new(status_code, reason, headers, body))
     }
@@ -232,9 +234,45 @@ fn read_chunked_body(reader: &mut impl BufRead) -> Result<Vec<u8>, HttpParseErro
     Ok(body)
 }
 
+fn decode_content_encoding(
+    headers: &[(String, String)],
+    body: Vec<u8>,
+) -> Result<Vec<u8>, HttpParseError> {
+    let Some(encoding) = headers
+        .iter()
+        .find(|(k, _)| k.eq_ignore_ascii_case("content-encoding"))
+        .map(|(_, v)| v.as_str())
+    else {
+        return Ok(body);
+    };
+
+    if !encoding
+        .split(',')
+        .any(|value| value.trim().eq_ignore_ascii_case("gzip"))
+    {
+        return Ok(body);
+    }
+
+    let mut decoder = GzDecoder::new(&body[..]);
+    let mut decoded = Vec::new();
+    decoder
+        .read_to_end(&mut decoded)
+        .map_err(HttpParseError::Io)?;
+    Ok(decoded)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use flate2::Compression;
+    use flate2::write::GzEncoder;
+    use std::io::Write;
+
+    fn gzip_bytes(bytes: &[u8]) -> Vec<u8> {
+        let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+        encoder.write_all(bytes).unwrap();
+        encoder.finish().unwrap()
+    }
 
     #[test]
     fn parse_simple_response() {
@@ -310,6 +348,37 @@ mod tests {
         let resp = HttpResponse::parse(&mut &raw[..]).unwrap();
 
         assert_eq!(resp.body(), b"abc");
+    }
+
+    #[test]
+    fn parse_gzip_encoded_response() {
+        let compressed = gzip_bytes(b"hello gzip");
+        let raw = format!(
+            "HTTP/1.1 200 OK\r\nContent-Encoding: gzip\r\nContent-Length: {}\r\n\r\n",
+            compressed.len()
+        )
+        .into_bytes();
+        let mut response = raw;
+        response.extend_from_slice(&compressed);
+
+        let resp = HttpResponse::parse(&mut &response[..]).unwrap();
+        assert_eq!(resp.body(), b"hello gzip");
+    }
+
+    #[test]
+    fn parse_chunked_gzip_response() {
+        let compressed = gzip_bytes(b"chunked gzip");
+        let chunk = format!("{:X}\r\n", compressed.len()).into_bytes();
+
+        let mut raw =
+            b"HTTP/1.1 200 OK\r\nContent-Encoding: gzip\r\nTransfer-Encoding: chunked\r\n\r\n"
+                .to_vec();
+        raw.extend_from_slice(&chunk);
+        raw.extend_from_slice(&compressed);
+        raw.extend_from_slice(b"\r\n0\r\n\r\n");
+
+        let resp = HttpResponse::parse(&mut &raw[..]).unwrap();
+        assert_eq!(resp.body(), b"chunked gzip");
     }
 
     #[test]
