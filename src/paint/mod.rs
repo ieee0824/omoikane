@@ -2,7 +2,8 @@
 
 use std::io::Read;
 
-use crate::css::{ComputedStyle, ComputedValue, StyleResolver};
+use crate::css::{ComputedStyle, ComputedValue, Origin, StyleResolver, Stylesheet, parse_stylesheet};
+use crate::dom::{Node, NodeHandle, NodeType};
 use crate::layout::{InlineFragmentContent, LayoutBox, Rect, Visibility};
 use base64::Engine;
 use flate2::read::ZlibDecoder;
@@ -65,6 +66,7 @@ pub enum PaintError {
     InvalidImageBuffer,
     InvalidDataUri,
     InvalidBase64,
+    InvalidStylesheet,
     InvalidPngSignature,
     MissingPngHeader,
     UnsupportedPngFormat,
@@ -269,6 +271,57 @@ pub fn paint_layout(layout: &LayoutBox, resolver: &mut StyleResolver, viewport: 
     let mut canvas = Canvas::new(width, height);
     paint_box(&mut canvas, layout, resolver, None);
     canvas
+}
+
+/// Renders a DOM document into a canvas using inline and linked author stylesheets.
+pub fn render_document(document: &NodeHandle, viewport: Rect) -> Result<Canvas, PaintError> {
+    let mut resolver = StyleResolver::new();
+    for stylesheet in extract_author_stylesheets(document)? {
+        resolver.add_stylesheet(
+            Origin::Author,
+            parse_stylesheet_forgiving(&stylesheet)?,
+        );
+    }
+    let layout = crate::layout::layout_tree(document, &mut resolver, viewport)
+        .ok_or(PaintError::InvalidImageBuffer)?;
+    Ok(paint_layout(&layout, &mut resolver, viewport))
+}
+
+/// Encodes the rendered document directly as PNG.
+pub fn render_document_png(document: &NodeHandle, viewport: Rect) -> Result<Vec<u8>, PaintError> {
+    Ok(render_document(document, viewport)?.encode_png())
+}
+
+/// Computes a per-pixel diff image and count between two canvases.
+pub fn diff_canvases(actual: &Canvas, expected: &Canvas) -> (Canvas, usize) {
+    let width = actual.width().max(expected.width());
+    let height = actual.height().max(expected.height());
+    let mut diff = Canvas::new(width, height);
+    let mut changed = 0usize;
+
+    for y in 0..height {
+        for x in 0..width {
+            let left = actual.pixel(x, y).unwrap_or(Color::rgba(0, 0, 0, 0));
+            let right = expected.pixel(x, y).unwrap_or(Color::rgba(0, 0, 0, 0));
+            let color = if left == right {
+                Color::rgba(0, 0, 0, 0)
+            } else {
+                changed += 1;
+                Color::rgb(255, 0, 255)
+            };
+            diff.fill_rect(
+                Rect {
+                    x: x as f32,
+                    y: y as f32,
+                    width: 1.0,
+                    height: 1.0,
+                },
+                color,
+            );
+        }
+    }
+
+    (diff, changed)
 }
 
 fn paint_box(
@@ -606,6 +659,99 @@ fn crc32(data: &[u8]) -> u32 {
     !crc
 }
 
+fn extract_author_stylesheets(document: &NodeHandle) -> Result<Vec<String>, PaintError> {
+    let mut stylesheets = Vec::new();
+    collect_author_stylesheets(document, &mut stylesheets)?;
+    Ok(stylesheets)
+}
+
+fn collect_author_stylesheets(
+    node: &NodeHandle,
+    out: &mut Vec<String>,
+) -> Result<(), PaintError> {
+    if node.node_type() == NodeType::Element {
+        match node.tag_name().as_deref() {
+            Some("style") => {
+                let css = collect_text_contents(node);
+                if !css.trim().is_empty() {
+                    out.push(css);
+                }
+            }
+            Some("link") => {
+                let attributes = node.attributes().unwrap_or_default();
+                let rel = attributes.get("rel").cloned().unwrap_or_default();
+                let href = attributes.get("href").cloned().unwrap_or_default();
+                if rel.contains("stylesheet") && href.starts_with("data:text/css") {
+                    match parse_data_uri(&href)? {
+                        DataUri::Text { data, .. } => out.push(data),
+                        DataUri::Binary { data, .. } => {
+                            out.push(String::from_utf8_lossy(&data).into_owned())
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    for child in node.child_nodes() {
+        collect_author_stylesheets(&child, out)?;
+    }
+
+    Ok(())
+}
+
+fn collect_text_contents(node: &NodeHandle) -> String {
+    let mut text = String::new();
+    for child in node.child_nodes() {
+        match child.node_type() {
+            NodeType::Text => {
+                if let Some(data) = child.data() {
+                    text.push_str(&data);
+                }
+            }
+            NodeType::Element => text.push_str(&collect_text_contents(&child)),
+            _ => {}
+        }
+    }
+    text
+}
+
+fn parse_stylesheet_forgiving(input: &str) -> Result<Stylesheet, PaintError> {
+    if let Ok(stylesheet) = parse_stylesheet(input) {
+        return Ok(stylesheet);
+    }
+
+    let mut rules = Vec::new();
+    let mut current = String::new();
+    let mut depth = 0usize;
+
+    for ch in input.chars() {
+        current.push(ch);
+        match ch {
+            '{' => depth += 1,
+            '}' => {
+                if depth > 0 {
+                    depth -= 1;
+                }
+                if depth == 0 {
+                    if let Ok(stylesheet) = parse_stylesheet(&current) {
+                        rules.extend(stylesheet.rules);
+                    }
+                    current.clear();
+                }
+            }
+            _ => {}
+        }
+    }
+
+    if rules.is_empty() {
+        Err(PaintError::InvalidStylesheet)
+    } else {
+        Ok(Stylesheet { rules })
+    }
+}
+
 fn decode_png(bytes: &[u8]) -> Result<Image, PaintError> {
     const SIGNATURE: &[u8; 8] = b"\x89PNG\r\n\x1a\n";
     if bytes.len() < SIGNATURE.len() || &bytes[..8] != SIGNATURE {
@@ -858,7 +1004,11 @@ fn paeth_predictor(left: u8, up: u8, upper_left: u8) -> u8 {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+    use std::path::PathBuf;
+
     use crate::css::{Origin, StyleResolver, parse_stylesheet};
+    use crate::html::TreeBuilder;
     use crate::dom::NodeHandle;
     use crate::layout::{Rect, layout_tree};
 
@@ -1220,5 +1370,95 @@ mod tests {
             }
             DataUri::Text { .. } => panic!("expected binary data uri"),
         }
+    }
+
+    #[test]
+    fn renders_acid2_fixture_to_png() {
+        let html = fs::read_to_string(acid2_fixture_path()).unwrap();
+        let document = TreeBuilder::parse(&html).document();
+
+        let png = render_document_png(
+            &document,
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 800.0,
+                height: 600.0,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(&png[..8], &[137, 80, 78, 71, 13, 10, 26, 10]);
+    }
+
+    #[test]
+    fn acid2_fixture_matches_reference_png() {
+        let html = fs::read_to_string(acid2_fixture_path()).unwrap();
+        let document = TreeBuilder::parse(&html).document();
+        let actual = render_document(
+            &document,
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 800.0,
+                height: 600.0,
+            },
+        )
+        .unwrap();
+
+        let reference_path = acid2_reference_path();
+        assert!(
+            reference_path.exists(),
+            "missing reference image at {}",
+            reference_path.display()
+        );
+        let expected = Image::decode_png(&fs::read(reference_path).unwrap()).unwrap();
+        let expected_canvas = Canvas::new(expected.width(), expected.height());
+        let mut expected_canvas = expected_canvas;
+        expected_canvas.draw_image(&expected, 0.0, 0.0);
+
+        let (diff, changed) = diff_canvases(&actual, &expected_canvas);
+        if changed > 0 {
+            fs::create_dir_all(acid2_output_dir()).unwrap();
+            fs::write(acid2_output_dir().join("acid2.actual.png"), actual.encode_png()).unwrap();
+            fs::write(acid2_output_dir().join("acid2.diff.png"), diff.encode_png()).unwrap();
+        }
+        assert_eq!(changed, 0, "acid2 rendering diverged; wrote diff assets to tests/output/acid2");
+    }
+
+    #[test]
+    #[ignore = "used only to refresh the checked-in Acid2 reference image"]
+    fn refresh_acid2_reference_png() {
+        let html = fs::read_to_string(acid2_fixture_path()).unwrap();
+        let document = TreeBuilder::parse(&html).document();
+        let png = render_document_png(
+            &document,
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 800.0,
+                height: 600.0,
+            },
+        )
+        .unwrap();
+
+        fs::create_dir_all(acid2_fixture_dir()).unwrap();
+        fs::write(acid2_reference_path(), png).unwrap();
+    }
+
+    fn acid2_fixture_dir() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/acid2")
+    }
+
+    fn acid2_fixture_path() -> PathBuf {
+        acid2_fixture_dir().join("acid2.html")
+    }
+
+    fn acid2_reference_path() -> PathBuf {
+        acid2_fixture_dir().join("acid2.reference.png")
+    }
+
+    fn acid2_output_dir() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/output/acid2")
     }
 }

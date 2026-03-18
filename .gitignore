@@ -6,6 +6,7 @@ Cargo.lock
 # Build
 /dist/
 /build/
+/tests/output/
 
 # OS
 .DS_Store
