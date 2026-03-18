@@ -620,11 +620,16 @@ fn compute_width(
 }
 
 fn edge_sizes(style: &ComputedStyle, prefix: &str) -> EdgeSizes {
+    let shorthand_property = match prefix {
+        "border" => "border-width",
+        _ => prefix,
+    };
+    let shorthand = explicit_length(style, shorthand_property).unwrap_or(0.0);
     EdgeSizes {
-        top: explicit_length(style, &format!("{prefix}-top")).unwrap_or(0.0),
-        right: explicit_length(style, &format!("{prefix}-right")).unwrap_or(0.0),
-        bottom: explicit_length(style, &format!("{prefix}-bottom")).unwrap_or(0.0),
-        left: explicit_length(style, &format!("{prefix}-left")).unwrap_or(0.0),
+        top: explicit_length(style, &format!("{prefix}-top")).unwrap_or(shorthand),
+        right: explicit_length(style, &format!("{prefix}-right")).unwrap_or(shorthand),
+        bottom: explicit_length(style, &format!("{prefix}-bottom")).unwrap_or(shorthand),
+        left: explicit_length(style, &format!("{prefix}-left")).unwrap_or(shorthand),
     }
 }
 
