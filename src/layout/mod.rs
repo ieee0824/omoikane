@@ -128,6 +128,46 @@ pub enum VerticalAlign {
     Length(f32),
 }
 
+/// Supported flex directions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FlexDirection {
+    Row,
+    Column,
+}
+
+/// Supported flex wrapping modes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FlexWrap {
+    NoWrap,
+    Wrap,
+}
+
+/// Minimal justify-content values supported by the flex layout engine.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JustifyContent {
+    FlexStart,
+    Center,
+    FlexEnd,
+    SpaceBetween,
+    SpaceAround,
+}
+
+/// Minimal align-items / align-self values supported by the flex layout engine.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AlignItems {
+    Stretch,
+    FlexStart,
+    Center,
+    FlexEnd,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PositionScheme {
+    Static,
+    Absolute,
+    Fixed,
+}
+
 /// A block layout box derived from a DOM node.
 #[derive(Debug, Clone, PartialEq)]
 pub struct LayoutBox {
@@ -135,6 +175,7 @@ pub struct LayoutBox {
     pub dimensions: BoxDimensions,
     pub visibility: Visibility,
     pub overflow: Overflow,
+    pub z_index: i32,
     pub lines: Vec<LineBox>,
     pub children: Vec<LayoutBox>,
 }
@@ -160,17 +201,18 @@ pub fn layout_tree(
     resolver: &mut StyleResolver,
     containing_block: Rect,
 ) -> Option<LayoutBox> {
-    layout_node(node, resolver, containing_block)
+    layout_node(node, resolver, containing_block, containing_block)
 }
 
 fn layout_node(
     node: &NodeHandle,
     resolver: &mut StyleResolver,
     containing_block: Rect,
+    viewport: Rect,
 ) -> Option<LayoutBox> {
     match node.node_type() {
-        NodeType::Document => layout_document(node, resolver, containing_block),
-        NodeType::Element => layout_element(node, resolver, containing_block),
+        NodeType::Document => layout_document(node, resolver, containing_block, viewport),
+        NodeType::Element => layout_element(node, resolver, containing_block, viewport),
         _ => None,
     }
 }
@@ -179,8 +221,10 @@ fn layout_document(
     node: &NodeHandle,
     resolver: &mut StyleResolver,
     containing_block: Rect,
+    viewport: Rect,
 ) -> Option<LayoutBox> {
     let mut children = Vec::new();
+    let mut positioned_children = Vec::new();
     let mut cursor_y = containing_block.y;
     let mut previous_margin_bottom: Option<f32> = None;
 
@@ -189,6 +233,12 @@ fn layout_document(
             NodeType::Element => Some(resolver.computed_style(&child)),
             _ => None,
         };
+        if let Some(style) = &child_style {
+            if is_out_of_flow_positioned(style) {
+                positioned_children.push((child, style.clone()));
+                continue;
+            }
+        }
         let child_margin_top = child_style
             .as_ref()
             .map(|style| edge_sizes(style, "margin").top)
@@ -205,7 +255,7 @@ fn layout_document(
             height: 0.0,
         };
 
-        if let Some(layout_child) = layout_node(&child, resolver, child_containing) {
+        if let Some(layout_child) = layout_node(&child, resolver, child_containing, viewport) {
             cursor_y += layout_child.total_height();
             previous_margin_bottom = Some(layout_child.dimensions.margin.bottom);
             children.push(layout_child);
@@ -220,11 +270,25 @@ fn layout_document(
         height: cursor_y - containing_block.y,
     };
 
+    let document_box = BoxDimensions {
+        content: dimensions.content,
+        ..BoxDimensions::default()
+    };
+    for (child, style) in positioned_children {
+        if let Some(positioned) =
+            layout_positioned_child(&child, resolver, &style, document_box, viewport, viewport)
+        {
+            children.push(positioned);
+        }
+    }
+    sort_children_by_z_index(&mut children);
+
     Some(LayoutBox {
         node: node.clone(),
         dimensions,
         visibility: Visibility::Visible,
         overflow: Overflow::Visible,
+        z_index: 0,
         lines: Vec::new(),
         children,
     })
@@ -234,6 +298,7 @@ fn layout_element(
     node: &NodeHandle,
     resolver: &mut StyleResolver,
     containing_block: Rect,
+    viewport: Rect,
 ) -> Option<LayoutBox> {
     let style = resolver.computed_style(node);
     if is_display_none(&style) {
@@ -248,7 +313,14 @@ fn layout_element(
     let x = containing_block.x + margin.left + border.left + padding.left;
     let y = containing_block.y + margin.top + border.top + padding.top;
 
+    if is_flex_container(&style) {
+        return layout_flex_container(
+            node, resolver, style, margin, padding, border, x, y, width, viewport,
+        );
+    }
+
     let mut children = Vec::new();
+    let mut positioned_children = Vec::new();
     let mut lines = Vec::new();
     let mut cursor_y = y;
     let mut previous_margin_bottom: Option<f32> = None;
@@ -274,6 +346,12 @@ fn layout_element(
             NodeType::Element => Some(resolver.computed_style(&child)),
             _ => None,
         };
+        if let Some(style) = &child_style {
+            if is_out_of_flow_positioned(style) {
+                positioned_children.push((child, style.clone()));
+                continue;
+            }
+        }
         let child_margin_top = child_style
             .as_ref()
             .map(|style| edge_sizes(style, "margin").top)
@@ -290,7 +368,7 @@ fn layout_element(
             height: 0.0,
         };
 
-        if let Some(layout_child) = layout_node(&child, resolver, child_containing) {
+        if let Some(layout_child) = layout_node(&child, resolver, child_containing, viewport) {
             cursor_y += layout_child.total_height();
             previous_margin_bottom = Some(layout_child.dimensions.margin.bottom);
             children.push(layout_child);
@@ -317,13 +395,183 @@ fn layout_element(
         border,
         margin,
     };
+    for (child, style) in positioned_children {
+        if let Some(positioned) = layout_positioned_child(
+            &child,
+            resolver,
+            &style,
+            dimensions,
+            containing_block,
+            viewport,
+        ) {
+            children.push(positioned);
+        }
+    }
+    sort_children_by_z_index(&mut children);
 
     Some(LayoutBox {
         node: node.clone(),
         dimensions,
         visibility: visibility(&style),
         overflow: overflow(&style),
+        z_index: z_index(&style),
         lines,
+        children,
+    })
+}
+
+fn layout_flex_container(
+    node: &NodeHandle,
+    resolver: &mut StyleResolver,
+    style: ComputedStyle,
+    margin: EdgeSizes,
+    padding: EdgeSizes,
+    border: EdgeSizes,
+    x: f32,
+    y: f32,
+    width: f32,
+    viewport: Rect,
+) -> Option<LayoutBox> {
+    let direction = flex_direction(&style);
+    let wrap = flex_wrap(&style);
+    let justify = justify_content(&style);
+    let align = align_items(&style);
+
+    let mut items = Vec::new();
+    let mut positioned_children = Vec::new();
+    for child in node.child_nodes() {
+        if child.node_type() != NodeType::Element {
+            continue;
+        }
+        let child_style = resolver.computed_style(&child);
+        if is_display_none(&child_style) {
+            continue;
+        }
+        if is_out_of_flow_positioned(&child_style) {
+            positioned_children.push((child, child_style));
+            continue;
+        }
+        items.push(FlexItemSpec {
+            node: child,
+            base_main_size: flex_basis(&child_style, direction)
+                .or_else(|| explicit_main_size(&child_style, direction))
+                .unwrap_or(0.0),
+            explicit_cross_size: explicit_cross_size(&child_style, direction),
+            flex_grow: flex_grow(&child_style),
+            flex_shrink: flex_shrink(&child_style),
+            align_self: align_self(&child_style),
+        });
+    }
+
+    let lines = build_flex_lines(&items, width, wrap);
+    let mut children = Vec::new();
+    let mut cross_cursor = y;
+
+    for line in lines {
+        let resolved_main_sizes = resolve_flex_main_sizes(&line.items, width);
+        let mut laid_out = Vec::new();
+        let mut line_cross_size = 0.0f32;
+
+        for (item, main_size) in line.items.iter().zip(resolved_main_sizes.iter()) {
+            let child_containing = match direction {
+                FlexDirection::Row => Rect {
+                    x: 0.0,
+                    y: 0.0,
+                    width: *main_size,
+                    height: item.explicit_cross_size.unwrap_or(0.0),
+                },
+                FlexDirection::Column => Rect {
+                    x: 0.0,
+                    y: 0.0,
+                    width: item.explicit_cross_size.unwrap_or(width),
+                    height: *main_size,
+                },
+            };
+
+            if let Some(layout_child) =
+                layout_node(&item.node, resolver, child_containing, viewport)
+            {
+                let cross_size = match direction {
+                    FlexDirection::Row => layout_child.total_height(),
+                    FlexDirection::Column => layout_child.total_width(),
+                };
+                line_cross_size = line_cross_size.max(cross_size);
+                laid_out.push((item, layout_child));
+            }
+        }
+
+        let total_main_size: f32 = laid_out
+            .iter()
+            .map(|(_, child)| match direction {
+                FlexDirection::Row => child.total_width(),
+                FlexDirection::Column => child.total_height(),
+            })
+            .sum();
+        let (line_start, gap) = justify_offsets(justify, width, total_main_size, laid_out.len());
+
+        let mut main_cursor = match direction {
+            FlexDirection::Row => x + line_start,
+            FlexDirection::Column => y + line_start,
+        };
+
+        for (item, mut child) in laid_out {
+            let child_main_size = match direction {
+                FlexDirection::Row => child.total_width(),
+                FlexDirection::Column => child.total_height(),
+            };
+            let child_cross_size = match direction {
+                FlexDirection::Row => child.total_height(),
+                FlexDirection::Column => child.total_width(),
+            };
+            let align_value = item.align_self.unwrap_or(align);
+            let cross_offset = align_offset(align_value, line_cross_size, child_cross_size);
+
+            let (outer_x, outer_y) = match direction {
+                FlexDirection::Row => (main_cursor, cross_cursor + cross_offset),
+                FlexDirection::Column => (x + cross_offset, main_cursor),
+            };
+            translate_layout_box_to_outer(&mut child, outer_x, outer_y);
+            children.push(child);
+
+            main_cursor += child_main_size + gap;
+        }
+
+        cross_cursor += line_cross_size;
+    }
+
+    let content_height = explicit_length(&style, "height").unwrap_or(cross_cursor - y);
+    let dimensions = BoxDimensions {
+        content: Rect {
+            x,
+            y,
+            width,
+            height: content_height,
+        },
+        padding,
+        border,
+        margin,
+    };
+    for (child, style) in positioned_children {
+        if let Some(positioned) = layout_positioned_child(
+            &child,
+            resolver,
+            &style,
+            dimensions,
+            dimensions.content,
+            viewport,
+        ) {
+            children.push(positioned);
+        }
+    }
+    sort_children_by_z_index(&mut children);
+
+    Some(LayoutBox {
+        node: node.clone(),
+        dimensions,
+        visibility: visibility(&style),
+        overflow: overflow(&style),
+        z_index: z_index(&style),
+        lines: Vec::new(),
         children,
     })
 }
@@ -399,6 +647,324 @@ fn collapse_margins(first: f32, second: f32) -> f32 {
         first.min(second)
     } else {
         first + second
+    }
+}
+
+fn is_out_of_flow_positioned(style: &ComputedStyle) -> bool {
+    matches!(
+        position_scheme(style),
+        PositionScheme::Absolute | PositionScheme::Fixed
+    )
+}
+
+fn position_scheme(style: &ComputedStyle) -> PositionScheme {
+    match style.get("position") {
+        Some(ComputedValue::Keyword(keyword)) if keyword.eq_ignore_ascii_case("absolute") => {
+            PositionScheme::Absolute
+        }
+        Some(ComputedValue::Keyword(keyword)) if keyword.eq_ignore_ascii_case("fixed") => {
+            PositionScheme::Fixed
+        }
+        _ => PositionScheme::Static,
+    }
+}
+
+fn z_index(style: &ComputedStyle) -> i32 {
+    match style.get("z-index") {
+        Some(ComputedValue::Number(value)) => *value as i32,
+        Some(ComputedValue::Px(value)) => *value as i32,
+        _ => 0,
+    }
+}
+
+fn layout_positioned_child(
+    child: &NodeHandle,
+    resolver: &mut StyleResolver,
+    style: &ComputedStyle,
+    parent_box: BoxDimensions,
+    containing_block: Rect,
+    viewport: Rect,
+) -> Option<LayoutBox> {
+    let position = position_scheme(style);
+    let origin = match position {
+        PositionScheme::Fixed => viewport,
+        PositionScheme::Absolute => parent_box.content,
+        PositionScheme::Static => containing_block,
+    };
+
+    let child_containing = Rect {
+        x: origin.x,
+        y: origin.y,
+        width: origin.width,
+        height: origin.height,
+    };
+    let mut layout_child = layout_node(child, resolver, child_containing, viewport)?;
+    let outer_width = layout_child.total_width();
+    let outer_height = layout_child.total_height();
+    let left = explicit_length(style, "left");
+    let right = explicit_length(style, "right");
+    let top = explicit_length(style, "top");
+    let bottom = explicit_length(style, "bottom");
+    let outer_x = if let Some(left) = left {
+        origin.x + left
+    } else if let Some(right) = right {
+        origin.x + origin.width - outer_width - right
+    } else {
+        origin.x
+    };
+    let outer_y = if let Some(top) = top {
+        origin.y + top
+    } else if let Some(bottom) = bottom {
+        origin.y + origin.height - outer_height - bottom
+    } else {
+        origin.y
+    };
+    translate_layout_box_to_outer(&mut layout_child, outer_x, outer_y);
+    layout_child.z_index = z_index(style);
+    Some(layout_child)
+}
+
+fn sort_children_by_z_index(children: &mut [LayoutBox]) {
+    children.sort_by_key(|child| child.z_index);
+}
+
+#[derive(Debug, Clone)]
+struct FlexItemSpec {
+    node: NodeHandle,
+    base_main_size: f32,
+    explicit_cross_size: Option<f32>,
+    flex_grow: f32,
+    flex_shrink: f32,
+    align_self: Option<AlignItems>,
+}
+
+#[derive(Debug, Clone)]
+struct FlexLine<'a> {
+    items: Vec<&'a FlexItemSpec>,
+}
+
+fn is_flex_container(style: &ComputedStyle) -> bool {
+    matches!(
+        style.get("display"),
+        Some(ComputedValue::Keyword(keyword)) if keyword.eq_ignore_ascii_case("flex")
+    )
+}
+
+fn flex_direction(style: &ComputedStyle) -> FlexDirection {
+    match style.get("flex-direction") {
+        Some(ComputedValue::Keyword(keyword)) if keyword.eq_ignore_ascii_case("column") => {
+            FlexDirection::Column
+        }
+        _ => FlexDirection::Row,
+    }
+}
+
+fn flex_wrap(style: &ComputedStyle) -> FlexWrap {
+    match style.get("flex-wrap") {
+        Some(ComputedValue::Keyword(keyword)) if keyword.eq_ignore_ascii_case("wrap") => {
+            FlexWrap::Wrap
+        }
+        _ => FlexWrap::NoWrap,
+    }
+}
+
+fn justify_content(style: &ComputedStyle) -> JustifyContent {
+    match style.get("justify-content") {
+        Some(ComputedValue::Keyword(keyword)) if keyword.eq_ignore_ascii_case("center") => {
+            JustifyContent::Center
+        }
+        Some(ComputedValue::Keyword(keyword)) if keyword.eq_ignore_ascii_case("flex-end") => {
+            JustifyContent::FlexEnd
+        }
+        Some(ComputedValue::Keyword(keyword)) if keyword.eq_ignore_ascii_case("space-between") => {
+            JustifyContent::SpaceBetween
+        }
+        Some(ComputedValue::Keyword(keyword)) if keyword.eq_ignore_ascii_case("space-around") => {
+            JustifyContent::SpaceAround
+        }
+        _ => JustifyContent::FlexStart,
+    }
+}
+
+fn align_items(style: &ComputedStyle) -> AlignItems {
+    match style.get("align-items") {
+        Some(ComputedValue::Keyword(keyword)) if keyword.eq_ignore_ascii_case("flex-start") => {
+            AlignItems::FlexStart
+        }
+        Some(ComputedValue::Keyword(keyword)) if keyword.eq_ignore_ascii_case("center") => {
+            AlignItems::Center
+        }
+        Some(ComputedValue::Keyword(keyword)) if keyword.eq_ignore_ascii_case("flex-end") => {
+            AlignItems::FlexEnd
+        }
+        _ => AlignItems::Stretch,
+    }
+}
+
+fn align_self(style: &ComputedStyle) -> Option<AlignItems> {
+    match style.get("align-self") {
+        Some(ComputedValue::Keyword(keyword)) if keyword.eq_ignore_ascii_case("flex-start") => {
+            Some(AlignItems::FlexStart)
+        }
+        Some(ComputedValue::Keyword(keyword)) if keyword.eq_ignore_ascii_case("center") => {
+            Some(AlignItems::Center)
+        }
+        Some(ComputedValue::Keyword(keyword)) if keyword.eq_ignore_ascii_case("flex-end") => {
+            Some(AlignItems::FlexEnd)
+        }
+        Some(ComputedValue::Keyword(keyword)) if keyword.eq_ignore_ascii_case("stretch") => {
+            Some(AlignItems::Stretch)
+        }
+        _ => None,
+    }
+}
+
+fn explicit_main_size(style: &ComputedStyle, direction: FlexDirection) -> Option<f32> {
+    match direction {
+        FlexDirection::Row => explicit_length(style, "width"),
+        FlexDirection::Column => explicit_length(style, "height"),
+    }
+}
+
+fn explicit_cross_size(style: &ComputedStyle, direction: FlexDirection) -> Option<f32> {
+    match direction {
+        FlexDirection::Row => explicit_length(style, "height"),
+        FlexDirection::Column => explicit_length(style, "width"),
+    }
+}
+
+fn flex_basis(style: &ComputedStyle, direction: FlexDirection) -> Option<f32> {
+    explicit_length(style, "flex-basis").or_else(|| explicit_main_size(style, direction))
+}
+
+fn flex_grow(style: &ComputedStyle) -> f32 {
+    match style.get("flex-grow") {
+        Some(ComputedValue::Number(value)) => *value,
+        Some(ComputedValue::Px(value)) => *value,
+        _ => 0.0,
+    }
+}
+
+fn flex_shrink(style: &ComputedStyle) -> f32 {
+    match style.get("flex-shrink") {
+        Some(ComputedValue::Number(value)) => *value,
+        Some(ComputedValue::Px(value)) => *value,
+        _ => 1.0,
+    }
+}
+
+fn build_flex_lines<'a>(
+    items: &'a [FlexItemSpec],
+    available_main_size: f32,
+    wrap: FlexWrap,
+) -> Vec<FlexLine<'a>> {
+    let mut lines = Vec::new();
+    let mut current = Vec::new();
+    let mut occupied = 0.0f32;
+
+    for item in items {
+        let item_size = item.base_main_size;
+        let would_wrap = wrap == FlexWrap::Wrap
+            && !current.is_empty()
+            && occupied + item_size > available_main_size;
+        if would_wrap {
+            lines.push(FlexLine { items: current });
+            current = Vec::new();
+            occupied = 0.0;
+        }
+        occupied += item_size;
+        current.push(item);
+    }
+
+    if !current.is_empty() {
+        lines.push(FlexLine { items: current });
+    }
+
+    lines
+}
+
+fn resolve_flex_main_sizes(items: &[&FlexItemSpec], available_main_size: f32) -> Vec<f32> {
+    let total_base: f32 = items.iter().map(|item| item.base_main_size).sum();
+    let total_grow: f32 = items.iter().map(|item| item.flex_grow).sum();
+    let total_shrink_factor: f32 = items
+        .iter()
+        .map(|item| item.flex_shrink * item.base_main_size)
+        .sum();
+
+    items
+        .iter()
+        .map(|item| {
+            if total_base < available_main_size && total_grow > 0.0 {
+                let extra = available_main_size - total_base;
+                item.base_main_size + extra * (item.flex_grow / total_grow)
+            } else if total_base > available_main_size && total_shrink_factor > 0.0 {
+                let overflow = total_base - available_main_size;
+                let shrink =
+                    overflow * ((item.flex_shrink * item.base_main_size) / total_shrink_factor);
+                (item.base_main_size - shrink).max(0.0)
+            } else {
+                item.base_main_size
+            }
+        })
+        .collect()
+}
+
+fn justify_offsets(
+    justify: JustifyContent,
+    available_main_size: f32,
+    used_main_size: f32,
+    item_count: usize,
+) -> (f32, f32) {
+    let free_space = (available_main_size - used_main_size).max(0.0);
+    match justify {
+        JustifyContent::FlexStart => (0.0, 0.0),
+        JustifyContent::Center => (free_space / 2.0, 0.0),
+        JustifyContent::FlexEnd => (free_space, 0.0),
+        JustifyContent::SpaceBetween if item_count > 1 => {
+            (0.0, free_space / (item_count - 1) as f32)
+        }
+        JustifyContent::SpaceAround if item_count > 0 => {
+            let gap = free_space / item_count as f32;
+            (gap / 2.0, gap)
+        }
+        _ => (0.0, 0.0),
+    }
+}
+
+fn align_offset(align: AlignItems, line_cross_size: f32, child_cross_size: f32) -> f32 {
+    match align {
+        AlignItems::FlexStart | AlignItems::Stretch => 0.0,
+        AlignItems::Center => (line_cross_size - child_cross_size).max(0.0) / 2.0,
+        AlignItems::FlexEnd => (line_cross_size - child_cross_size).max(0.0),
+    }
+}
+
+fn translate_layout_box_to_outer(layout: &mut LayoutBox, outer_x: f32, outer_y: f32) {
+    let current_outer_x = layout.dimensions.content.x
+        - layout.dimensions.padding.left
+        - layout.dimensions.border.left
+        - layout.dimensions.margin.left;
+    let current_outer_y = layout.dimensions.content.y
+        - layout.dimensions.padding.top
+        - layout.dimensions.border.top
+        - layout.dimensions.margin.top;
+    translate_layout_box(layout, outer_x - current_outer_x, outer_y - current_outer_y);
+}
+
+fn translate_layout_box(layout: &mut LayoutBox, dx: f32, dy: f32) {
+    layout.dimensions.content.x += dx;
+    layout.dimensions.content.y += dy;
+    for line in &mut layout.lines {
+        line.rect.x += dx;
+        line.rect.y += dy;
+        line.baseline += dy;
+        for fragment in &mut line.fragments {
+            fragment.rect.x += dx;
+            fragment.rect.y += dy;
+        }
+    }
+    for child in &mut layout.children {
+        translate_layout_box(child, dx, dy);
     }
 }
 
@@ -1220,5 +1786,357 @@ mod tests {
             .unwrap();
 
         assert!(raised_fragment.rect.y < base_fragment.rect.y);
+    }
+
+    #[test]
+    fn lays_out_flex_row_with_center_justification() {
+        let document = NodeHandle::document();
+        let body = NodeHandle::element("body");
+        let container = NodeHandle::element("div");
+        let first = NodeHandle::element("article");
+        let second = NodeHandle::element("article");
+
+        document.append_child(body.clone());
+        body.append_child(container.clone());
+        container.append_child(first);
+        container.append_child(second);
+
+        let mut resolver = StyleResolver::new();
+        resolver.add_stylesheet(
+            Origin::Author,
+            parse_stylesheet(
+                "div { display: flex; width: 300px; justify-content: center; } \
+                 article { width: 100px; height: 40px; }",
+            )
+            .unwrap(),
+        );
+
+        let layout = layout_tree(
+            &body,
+            &mut resolver,
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 300.0,
+                height: 0.0,
+            },
+        )
+        .unwrap();
+
+        let container_box = &layout.children[0];
+        assert_eq!(container_box.children.len(), 2);
+        assert_eq!(container_box.children[0].dimensions.content.width, 100.0);
+        assert_eq!(container_box.children[1].dimensions.content.width, 100.0);
+        assert_eq!(container_box.children[0].dimensions.content.x, 50.0);
+        assert_eq!(container_box.children[1].dimensions.content.x, 150.0);
+    }
+
+    #[test]
+    fn grows_last_flex_item_to_fill_remaining_space() {
+        let document = NodeHandle::document();
+        let body = NodeHandle::element("body");
+        let container = NodeHandle::element("div");
+        let first = NodeHandle::element("article");
+        let second = NodeHandle::element("article");
+
+        second.set_attribute("class", "grow");
+        document.append_child(body.clone());
+        body.append_child(container.clone());
+        container.append_child(first);
+        container.append_child(second);
+
+        let mut resolver = StyleResolver::new();
+        resolver.add_stylesheet(
+            Origin::Author,
+            parse_stylesheet(
+                "div { display: flex; width: 300px; } \
+                 article { flex-basis: 100px; height: 40px; } \
+                 .grow { flex-grow: 1; }",
+            )
+            .unwrap(),
+        );
+
+        let layout = layout_tree(
+            &body,
+            &mut resolver,
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 300.0,
+                height: 0.0,
+            },
+        )
+        .unwrap();
+
+        let container_box = &layout.children[0];
+        assert_eq!(container_box.children[0].dimensions.content.width, 100.0);
+        assert_eq!(container_box.children[1].dimensions.content.width, 200.0);
+    }
+
+    #[test]
+    fn lays_out_flex_column() {
+        let document = NodeHandle::document();
+        let body = NodeHandle::element("body");
+        let container = NodeHandle::element("div");
+        let first = NodeHandle::element("section");
+        let second = NodeHandle::element("section");
+
+        document.append_child(body.clone());
+        body.append_child(container.clone());
+        container.append_child(first);
+        container.append_child(second);
+
+        let mut resolver = StyleResolver::new();
+        resolver.add_stylesheet(
+            Origin::Author,
+            parse_stylesheet(
+                "div { display: flex; flex-direction: column; width: 120px; } \
+                 section { height: 30px; }",
+            )
+            .unwrap(),
+        );
+
+        let layout = layout_tree(
+            &body,
+            &mut resolver,
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 120.0,
+                height: 0.0,
+            },
+        )
+        .unwrap();
+
+        let container_box = &layout.children[0];
+        assert_eq!(container_box.children[0].dimensions.content.y, 0.0);
+        assert_eq!(container_box.children[1].dimensions.content.y, 30.0);
+    }
+
+    #[test]
+    fn wraps_flex_items_across_multiple_lines() {
+        let document = NodeHandle::document();
+        let body = NodeHandle::element("body");
+        let container = NodeHandle::element("div");
+
+        for _ in 0..3 {
+            container.append_child(NodeHandle::element("article"));
+        }
+
+        document.append_child(body.clone());
+        body.append_child(container);
+
+        let mut resolver = StyleResolver::new();
+        resolver.add_stylesheet(
+            Origin::Author,
+            parse_stylesheet(
+                "div { display: flex; width: 200px; flex-wrap: wrap; } \
+                 article { width: 100px; height: 20px; }",
+            )
+            .unwrap(),
+        );
+
+        let layout = layout_tree(
+            &body,
+            &mut resolver,
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 200.0,
+                height: 0.0,
+            },
+        )
+        .unwrap();
+
+        let container_box = &layout.children[0];
+        assert_eq!(container_box.children[0].dimensions.content.y, 0.0);
+        assert_eq!(container_box.children[1].dimensions.content.y, 0.0);
+        assert_eq!(container_box.children[2].dimensions.content.y, 20.0);
+    }
+
+    #[test]
+    fn aligns_flex_items_with_align_items_and_align_self() {
+        let document = NodeHandle::document();
+        let body = NodeHandle::element("body");
+        let container = NodeHandle::element("div");
+        let first = NodeHandle::element("article");
+        let second = NodeHandle::element("article");
+
+        first.set_attribute("class", "tall");
+        second.set_attribute("class", "self-end");
+        document.append_child(body.clone());
+        body.append_child(container.clone());
+        container.append_child(first);
+        container.append_child(second);
+
+        let mut resolver = StyleResolver::new();
+        resolver.add_stylesheet(
+            Origin::Author,
+            parse_stylesheet(
+                "div { display: flex; width: 200px; height: 80px; align-items: center; } \
+                 article { width: 60px; height: 10px; } \
+                 .tall { height: 20px; } \
+                 .self-end { align-self: flex-end; }",
+            )
+            .unwrap(),
+        );
+
+        let layout = layout_tree(
+            &body,
+            &mut resolver,
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 200.0,
+                height: 0.0,
+            },
+        )
+        .unwrap();
+
+        let container_box = &layout.children[0];
+        assert_eq!(container_box.children[0].dimensions.content.y, 0.0);
+        assert_eq!(container_box.children[1].dimensions.content.y, 10.0);
+    }
+
+    #[test]
+    fn absolutely_positions_child_relative_to_parent_content_box() {
+        let document = NodeHandle::document();
+        let body = NodeHandle::element("body");
+        let container = NodeHandle::element("div");
+        let absolute = NodeHandle::element("aside");
+        let flow = NodeHandle::element("section");
+
+        absolute.set_attribute("class", "absolute");
+        flow.set_attribute("class", "flow");
+        document.append_child(body.clone());
+        body.append_child(container.clone());
+        container.append_child(flow);
+        container.append_child(absolute);
+
+        let mut resolver = StyleResolver::new();
+        resolver.add_stylesheet(
+            Origin::Author,
+            parse_stylesheet(
+                "div { width: 200px; padding-left: 10px; padding-top: 5px; } \
+                 .flow { height: 20px; } \
+                 .absolute { position: absolute; left: 30px; top: 12px; width: 50px; height: 15px; }",
+            )
+            .unwrap(),
+        );
+
+        let layout = layout_tree(
+            &body,
+            &mut resolver,
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 200.0,
+                height: 0.0,
+            },
+        )
+        .unwrap();
+
+        let container_box = &layout.children[0];
+        let absolute_box = container_box
+            .children
+            .iter()
+            .find(|child| child.node.tag_name().as_deref() == Some("aside"))
+            .unwrap();
+        assert_eq!(absolute_box.dimensions.content.x, 40.0);
+        assert_eq!(absolute_box.dimensions.content.y, 17.0);
+        assert_eq!(container_box.dimensions.content.height, 20.0);
+    }
+
+    #[test]
+    fn fixed_position_uses_viewport_as_containing_block() {
+        let document = NodeHandle::document();
+        let body = NodeHandle::element("body");
+        let fixed = NodeHandle::element("div");
+
+        fixed.set_attribute("class", "fixed");
+        document.append_child(body.clone());
+        body.append_child(fixed);
+
+        let mut resolver = StyleResolver::new();
+        resolver.add_stylesheet(
+            Origin::Author,
+            parse_stylesheet(
+                ".fixed { position: fixed; right: 10px; bottom: 20px; width: 50px; height: 30px; }",
+            )
+            .unwrap(),
+        );
+
+        let layout = layout_tree(
+            &body,
+            &mut resolver,
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 300.0,
+                height: 200.0,
+            },
+        )
+        .unwrap();
+
+        let fixed_box = &layout.children[0];
+        assert_eq!(fixed_box.dimensions.content.x, 240.0);
+        assert_eq!(fixed_box.dimensions.content.y, 150.0);
+    }
+
+    #[test]
+    fn sorts_siblings_by_z_index() {
+        let document = NodeHandle::document();
+        let body = NodeHandle::element("body");
+        let low = NodeHandle::element("div");
+        let high = NodeHandle::element("div");
+
+        low.set_attribute("class", "low");
+        high.set_attribute("class", "high");
+        document.append_child(body.clone());
+        body.append_child(low);
+        body.append_child(high);
+
+        let mut resolver = StyleResolver::new();
+        resolver.add_stylesheet(
+            Origin::Author,
+            parse_stylesheet(
+                ".low { position: absolute; z-index: 1; width: 10px; height: 10px; } \
+                 .high { position: absolute; z-index: 10; width: 10px; height: 10px; }",
+            )
+            .unwrap(),
+        );
+
+        let layout = layout_tree(
+            &body,
+            &mut resolver,
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 100.0,
+                height: 100.0,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(layout.children[0].z_index, 1);
+        assert_eq!(layout.children[1].z_index, 10);
+        assert_eq!(
+            layout.children[0]
+                .node
+                .attributes()
+                .unwrap()
+                .get("class")
+                .unwrap(),
+            "low"
+        );
+        assert_eq!(
+            layout.children[1]
+                .node
+                .attributes()
+                .unwrap()
+                .get("class")
+                .unwrap(),
+            "high"
+        );
     }
 }
