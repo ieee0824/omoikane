@@ -77,6 +77,57 @@ pub enum Overflow {
     Hidden,
 }
 
+/// A laid out fragment of inline text.
+#[derive(Debug, Clone, PartialEq)]
+pub struct InlineFragment {
+    pub node: NodeHandle,
+    pub text: String,
+    pub rect: Rect,
+    pub metrics: FontMetrics,
+    pub vertical_align: VerticalAlign,
+}
+
+/// A single line box inside a block formatting context.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LineBox {
+    pub rect: Rect,
+    pub baseline: f32,
+    pub fragments: Vec<InlineFragment>,
+}
+
+/// Approximate font metrics used by inline layout.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct FontMetrics {
+    pub font_size: f32,
+    pub ascent: f32,
+    pub descent: f32,
+    pub line_gap: f32,
+    pub average_advance: f32,
+}
+
+impl FontMetrics {
+    /// Creates approximate metrics from a CSS font size.
+    pub fn from_font_size(font_size: f32) -> Self {
+        Self {
+            font_size,
+            ascent: font_size * 0.8,
+            descent: font_size * 0.2,
+            line_gap: font_size * 0.2,
+            average_advance: font_size * 0.6,
+        }
+    }
+}
+
+/// Minimal `vertical-align` values supported by the inline layout engine.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum VerticalAlign {
+    Baseline,
+    Top,
+    Middle,
+    Bottom,
+    Length(f32),
+}
+
 /// A block layout box derived from a DOM node.
 #[derive(Debug, Clone, PartialEq)]
 pub struct LayoutBox {
@@ -84,6 +135,7 @@ pub struct LayoutBox {
     pub dimensions: BoxDimensions,
     pub visibility: Visibility,
     pub overflow: Overflow,
+    pub lines: Vec<LineBox>,
     pub children: Vec<LayoutBox>,
 }
 
@@ -173,6 +225,7 @@ fn layout_document(
         dimensions,
         visibility: Visibility::Visible,
         overflow: Overflow::Visible,
+        lines: Vec::new(),
         children,
     })
 }
@@ -196,10 +249,27 @@ fn layout_element(
     let y = containing_block.y + margin.top + border.top + padding.top;
 
     let mut children = Vec::new();
+    let mut lines = Vec::new();
     let mut cursor_y = y;
     let mut previous_margin_bottom: Option<f32> = None;
+    let mut pending_inline_nodes = Vec::new();
 
     for child in node.child_nodes() {
+        if is_inline_child(&child, resolver) {
+            pending_inline_nodes.push(child);
+            continue;
+        }
+
+        if !pending_inline_nodes.is_empty() {
+            let inline_lines =
+                layout_inline_nodes(&pending_inline_nodes, resolver, x, cursor_y, width);
+            if let Some(last_line) = inline_lines.last() {
+                cursor_y = last_line.rect.y + last_line.rect.height;
+            }
+            lines.extend(inline_lines);
+            pending_inline_nodes.clear();
+        }
+
         let child_style = match child.node_type() {
             NodeType::Element => Some(resolver.computed_style(&child)),
             _ => None,
@@ -227,6 +297,14 @@ fn layout_element(
         }
     }
 
+    if !pending_inline_nodes.is_empty() {
+        let inline_lines = layout_inline_nodes(&pending_inline_nodes, resolver, x, cursor_y, width);
+        if let Some(last_line) = inline_lines.last() {
+            cursor_y = last_line.rect.y + last_line.rect.height;
+        }
+        lines.extend(inline_lines);
+    }
+
     let content_height = explicit_length(&style, "height").unwrap_or(cursor_y - y);
     let dimensions = BoxDimensions {
         content: Rect {
@@ -245,6 +323,7 @@ fn layout_element(
         dimensions,
         visibility: visibility(&style),
         overflow: overflow(&style),
+        lines,
         children,
     })
 }
@@ -321,6 +400,328 @@ fn collapse_margins(first: f32, second: f32) -> f32 {
     } else {
         first + second
     }
+}
+
+fn is_inline_child(node: &NodeHandle, resolver: &mut StyleResolver) -> bool {
+    match node.node_type() {
+        NodeType::Text => true,
+        NodeType::Element => {
+            let style = resolver.computed_style(node);
+            matches!(
+                style.get("display"),
+                Some(ComputedValue::Keyword(keyword))
+                    if keyword.eq_ignore_ascii_case("inline")
+                        || keyword.eq_ignore_ascii_case("inline-block")
+            ) || node
+                .tag_name()
+                .map(|tag| matches!(tag.as_str(), "span" | "a" | "em" | "strong" | "b" | "i"))
+                .unwrap_or(false)
+        }
+        _ => false,
+    }
+}
+
+fn layout_inline_nodes(
+    nodes: &[NodeHandle],
+    resolver: &mut StyleResolver,
+    start_x: f32,
+    start_y: f32,
+    available_width: f32,
+) -> Vec<LineBox> {
+    let mut segments = Vec::new();
+    for node in nodes {
+        collect_inline_segments(node, resolver, &mut segments);
+    }
+
+    layout_inline_segments(&segments, start_x, start_y, available_width)
+}
+
+#[derive(Debug, Clone)]
+struct InlineSegment {
+    node: NodeHandle,
+    text: String,
+    metrics: FontMetrics,
+    line_height: f32,
+    vertical_align: VerticalAlign,
+}
+
+fn collect_inline_segments(
+    node: &NodeHandle,
+    resolver: &mut StyleResolver,
+    out: &mut Vec<InlineSegment>,
+) {
+    match node.node_type() {
+        NodeType::Text => {
+            if let Some(text) = node.data() {
+                let parent_style = node
+                    .parent_node()
+                    .map(|parent| resolver.computed_style(&parent))
+                    .unwrap_or_default();
+                let text = normalize_text(&text, white_space(&parent_style));
+                if !text.is_empty() {
+                    out.push(InlineSegment {
+                        node: node.clone(),
+                        text,
+                        metrics: font_metrics(&parent_style),
+                        line_height: line_height(&parent_style),
+                        vertical_align: vertical_align(&parent_style),
+                    });
+                }
+            }
+        }
+        NodeType::Element => {
+            let style = resolver.computed_style(node);
+            if is_display_none(&style) {
+                return;
+            }
+
+            for child in node.child_nodes() {
+                match child.node_type() {
+                    NodeType::Text => {
+                        if let Some(text) = child.data() {
+                            let text = normalize_text(&text, white_space(&style));
+                            if !text.is_empty() {
+                                out.push(InlineSegment {
+                                    node: child,
+                                    text,
+                                    metrics: font_metrics(&style),
+                                    line_height: line_height(&style),
+                                    vertical_align: vertical_align(&style),
+                                });
+                            }
+                        }
+                    }
+                    NodeType::Element if is_inline_child(&child, resolver) => {
+                        collect_inline_segments(&child, resolver, out);
+                    }
+                    _ => {}
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WhiteSpaceMode {
+    Normal,
+    Pre,
+}
+
+fn white_space(style: &ComputedStyle) -> WhiteSpaceMode {
+    match style.get("white-space") {
+        Some(ComputedValue::Keyword(keyword)) if keyword.eq_ignore_ascii_case("pre") => {
+            WhiteSpaceMode::Pre
+        }
+        _ => WhiteSpaceMode::Normal,
+    }
+}
+
+fn normalize_text(text: &str, mode: WhiteSpaceMode) -> String {
+    match mode {
+        WhiteSpaceMode::Normal => {
+            let collapsed = text.split_whitespace().collect::<Vec<_>>().join(" ");
+            collapsed
+        }
+        WhiteSpaceMode::Pre => text.to_string(),
+    }
+}
+
+fn font_size(style: &ComputedStyle) -> f32 {
+    explicit_length(style, "font-size").unwrap_or(16.0)
+}
+
+fn font_metrics(style: &ComputedStyle) -> FontMetrics {
+    FontMetrics::from_font_size(font_size(style))
+}
+
+fn line_height(style: &ComputedStyle) -> f32 {
+    match style.get("line-height") {
+        Some(ComputedValue::Px(value)) => *value,
+        Some(ComputedValue::Number(value)) => *value * font_size(style),
+        Some(ComputedValue::Keyword(keyword)) if keyword.eq_ignore_ascii_case("normal") => {
+            font_size(style) * 1.2
+        }
+        _ => font_size(style) * 1.2,
+    }
+}
+
+fn vertical_align(style: &ComputedStyle) -> VerticalAlign {
+    match style.get("vertical-align") {
+        Some(ComputedValue::Keyword(keyword)) if keyword.eq_ignore_ascii_case("top") => {
+            VerticalAlign::Top
+        }
+        Some(ComputedValue::Keyword(keyword)) if keyword.eq_ignore_ascii_case("middle") => {
+            VerticalAlign::Middle
+        }
+        Some(ComputedValue::Keyword(keyword)) if keyword.eq_ignore_ascii_case("bottom") => {
+            VerticalAlign::Bottom
+        }
+        Some(ComputedValue::Px(value)) => VerticalAlign::Length(*value),
+        Some(ComputedValue::Number(value)) => VerticalAlign::Length(*value),
+        _ => VerticalAlign::Baseline,
+    }
+}
+
+fn layout_inline_segments(
+    segments: &[InlineSegment],
+    start_x: f32,
+    start_y: f32,
+    available_width: f32,
+) -> Vec<LineBox> {
+    let mut lines = Vec::new();
+    let mut current_fragments = Vec::new();
+    let mut cursor_x = start_x;
+    let mut cursor_y = start_y;
+    let mut current_line_height: f32 = 0.0;
+
+    for segment in segments {
+        for piece in split_segment(segment) {
+            if piece == "\n" {
+                push_line(
+                    &mut lines,
+                    &mut current_fragments,
+                    start_x,
+                    cursor_y,
+                    cursor_x - start_x,
+                    current_line_height.max(segment.line_height),
+                );
+                cursor_y += current_line_height.max(segment.line_height);
+                cursor_x = start_x;
+                current_line_height = 0.0;
+                continue;
+            }
+
+            let piece_width = measure_text_width(&piece, segment.metrics);
+            if cursor_x > start_x && cursor_x + piece_width > start_x + available_width {
+                push_line(
+                    &mut lines,
+                    &mut current_fragments,
+                    start_x,
+                    cursor_y,
+                    cursor_x - start_x,
+                    current_line_height.max(segment.line_height),
+                );
+                cursor_y += current_line_height.max(segment.line_height);
+                cursor_x = start_x;
+                current_line_height = 0.0;
+            }
+
+            current_fragments.push(InlineFragment {
+                node: segment.node.clone(),
+                text: piece.clone(),
+                rect: Rect {
+                    x: cursor_x,
+                    y: cursor_y,
+                    width: piece_width,
+                    height: segment.line_height,
+                },
+                metrics: segment.metrics,
+                vertical_align: segment.vertical_align,
+            });
+            cursor_x += piece_width;
+            current_line_height = current_line_height.max(segment.line_height);
+        }
+    }
+
+    if !current_fragments.is_empty() {
+        push_line(
+            &mut lines,
+            &mut current_fragments,
+            start_x,
+            cursor_y,
+            cursor_x - start_x,
+            current_line_height.max(0.0),
+        );
+    }
+
+    lines
+}
+
+fn split_segment(segment: &InlineSegment) -> Vec<String> {
+    if segment.text.contains('\n') {
+        let mut pieces = Vec::new();
+        for (index, part) in segment.text.split('\n').enumerate() {
+            if !part.is_empty() {
+                pieces.extend(split_words_preserving_spaces(part));
+            }
+            if index + 1 < segment.text.split('\n').count() {
+                pieces.push("\n".to_string());
+            }
+        }
+        pieces
+    } else {
+        split_words_preserving_spaces(&segment.text)
+    }
+}
+
+fn split_words_preserving_spaces(text: &str) -> Vec<String> {
+    let mut pieces = Vec::new();
+    let mut current = String::new();
+    let mut was_space = None;
+
+    for ch in text.chars() {
+        let is_space = ch == ' ';
+        match was_space {
+            Some(previous) if previous != is_space => {
+                if !current.is_empty() {
+                    pieces.push(std::mem::take(&mut current));
+                }
+            }
+            _ => {}
+        }
+        current.push(ch);
+        was_space = Some(is_space);
+    }
+
+    if !current.is_empty() {
+        pieces.push(current);
+    }
+
+    pieces
+}
+
+fn push_line(
+    lines: &mut Vec<LineBox>,
+    fragments: &mut Vec<InlineFragment>,
+    x: f32,
+    y: f32,
+    width: f32,
+    height: f32,
+) {
+    let baseline = fragments
+        .iter()
+        .filter_map(|fragment| match fragment.vertical_align {
+            VerticalAlign::Baseline | VerticalAlign::Length(_) => Some(fragment.metrics.ascent),
+            _ => None,
+        })
+        .fold(0.0f32, f32::max)
+        .max(height * 0.8);
+
+    for fragment in fragments.iter_mut() {
+        fragment.rect.y = match fragment.vertical_align {
+            VerticalAlign::Baseline => y + baseline - fragment.metrics.ascent,
+            VerticalAlign::Length(shift) => y + baseline - fragment.metrics.ascent - shift,
+            VerticalAlign::Top => y,
+            VerticalAlign::Middle => y + (height - fragment.rect.height) / 2.0,
+            VerticalAlign::Bottom => y + height - fragment.rect.height,
+        };
+    }
+
+    lines.push(LineBox {
+        rect: Rect {
+            x,
+            y,
+            width,
+            height,
+        },
+        baseline: y + baseline,
+        fragments: std::mem::take(fragments),
+    });
+}
+
+fn measure_text_width(text: &str, metrics: FontMetrics) -> f32 {
+    text.chars().count() as f32 * metrics.average_advance
 }
 
 fn is_display_none(style: &ComputedStyle) -> bool {
@@ -560,5 +961,264 @@ mod tests {
         assert_eq!(first_border_bottom, 30.0);
         assert_eq!(second_border_top, 50.0);
         assert_eq!(second_border_top - first_border_bottom, 20.0);
+    }
+
+    #[test]
+    fn wraps_inline_text_into_multiple_lines() {
+        let document = NodeHandle::document();
+        let body = NodeHandle::element("body");
+        let paragraph = NodeHandle::element("p");
+        let text = NodeHandle::text("hello world again");
+
+        document.append_child(body.clone());
+        body.append_child(paragraph.clone());
+        paragraph.append_child(text);
+
+        let mut resolver = StyleResolver::new();
+        resolver.add_stylesheet(
+            Origin::Author,
+            parse_stylesheet("p { line-height: 20px; }").unwrap(),
+        );
+
+        let layout = layout_tree(
+            &body,
+            &mut resolver,
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 70.0,
+                height: 0.0,
+            },
+        )
+        .unwrap();
+
+        let paragraph_box = &layout.children[0];
+        assert_eq!(paragraph_box.lines.len(), 3);
+        assert_eq!(paragraph_box.lines[0].fragments[0].text, "hello");
+        assert_eq!(paragraph_box.lines[1].fragments[0].text.trim(), "world");
+        assert_eq!(paragraph_box.lines[2].fragments[0].text.trim(), "again");
+        assert_eq!(paragraph_box.dimensions.content.height, 60.0);
+    }
+
+    #[test]
+    fn normal_white_space_collapses_runs() {
+        let document = NodeHandle::document();
+        let body = NodeHandle::element("body");
+        let paragraph = NodeHandle::element("p");
+        let text = NodeHandle::text("hello   world");
+
+        document.append_child(body.clone());
+        body.append_child(paragraph.clone());
+        paragraph.append_child(text);
+
+        let mut resolver = StyleResolver::new();
+        let layout = layout_tree(
+            &body,
+            &mut resolver,
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 200.0,
+                height: 0.0,
+            },
+        )
+        .unwrap();
+
+        let paragraph_box = &layout.children[0];
+        let rendered = paragraph_box.lines[0]
+            .fragments
+            .iter()
+            .map(|fragment| fragment.text.as_str())
+            .collect::<String>();
+        assert_eq!(rendered, "hello world");
+    }
+
+    #[test]
+    fn pre_white_space_preserves_spaces_and_newlines() {
+        let document = NodeHandle::document();
+        let body = NodeHandle::element("body");
+        let paragraph = NodeHandle::element("p");
+        let text = NodeHandle::text("hello   world\nnext");
+
+        document.append_child(body.clone());
+        body.append_child(paragraph.clone());
+        paragraph.append_child(text);
+
+        let mut resolver = StyleResolver::new();
+        resolver.add_stylesheet(
+            Origin::Author,
+            parse_stylesheet("p { white-space: pre; line-height: 18px; }").unwrap(),
+        );
+
+        let layout = layout_tree(
+            &body,
+            &mut resolver,
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 500.0,
+                height: 0.0,
+            },
+        )
+        .unwrap();
+
+        let paragraph_box = &layout.children[0];
+        assert_eq!(paragraph_box.lines.len(), 2);
+        let first_line = paragraph_box.lines[0]
+            .fragments
+            .iter()
+            .map(|fragment| fragment.text.as_str())
+            .collect::<String>();
+        let second_line = paragraph_box.lines[1]
+            .fragments
+            .iter()
+            .map(|fragment| fragment.text.as_str())
+            .collect::<String>();
+        assert_eq!(first_line, "hello   world");
+        assert_eq!(second_line, "next");
+        assert_eq!(paragraph_box.lines[0].rect.height, 18.0);
+    }
+
+    #[test]
+    fn inline_elements_contribute_text_fragments() {
+        let document = NodeHandle::document();
+        let body = NodeHandle::element("body");
+        let paragraph = NodeHandle::element("p");
+        let span = NodeHandle::element("span");
+        let text = NodeHandle::text("inline");
+
+        span.append_child(text);
+        document.append_child(body.clone());
+        body.append_child(paragraph.clone());
+        paragraph.append_child(span);
+
+        let mut resolver = StyleResolver::new();
+        resolver.add_stylesheet(
+            Origin::Author,
+            parse_stylesheet("span { display: inline; }").unwrap(),
+        );
+
+        let layout = layout_tree(
+            &body,
+            &mut resolver,
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 200.0,
+                height: 0.0,
+            },
+        )
+        .unwrap();
+
+        let paragraph_box = &layout.children[0];
+        assert_eq!(paragraph_box.lines.len(), 1);
+        assert_eq!(paragraph_box.lines[0].fragments[0].text, "inline");
+    }
+
+    #[test]
+    fn approximates_font_metrics_from_font_size() {
+        let metrics = FontMetrics::from_font_size(20.0);
+
+        assert_eq!(metrics.font_size, 20.0);
+        assert_eq!(metrics.ascent, 16.0);
+        assert_eq!(metrics.descent, 4.0);
+        assert_eq!(metrics.line_gap, 4.0);
+        assert_eq!(metrics.average_advance, 12.0);
+    }
+
+    #[test]
+    fn vertical_align_top_and_bottom_adjust_fragment_positions() {
+        let document = NodeHandle::document();
+        let body = NodeHandle::element("body");
+        let paragraph = NodeHandle::element("p");
+        let top = NodeHandle::element("span");
+        let bottom = NodeHandle::element("span");
+
+        top.set_attribute("class", "top");
+        bottom.set_attribute("class", "bottom");
+        top.append_child(NodeHandle::text("A"));
+        bottom.append_child(NodeHandle::text("B"));
+        document.append_child(body.clone());
+        body.append_child(paragraph.clone());
+        paragraph.append_child(top);
+        paragraph.append_child(bottom);
+
+        let mut resolver = StyleResolver::new();
+        resolver.add_stylesheet(
+            Origin::Author,
+            parse_stylesheet(
+                "p { line-height: 30px; } \
+                 span { display: inline; } \
+                 .top { vertical-align: top; } \
+                 .bottom { vertical-align: bottom; }",
+            )
+            .unwrap(),
+        );
+
+        let layout = layout_tree(
+            &body,
+            &mut resolver,
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 200.0,
+                height: 0.0,
+            },
+        )
+        .unwrap();
+
+        let line = &layout.children[0].lines[0];
+        assert_eq!(line.rect.height, 30.0);
+        assert_eq!(line.fragments[0].rect.y, line.rect.y);
+        assert_eq!(
+            line.fragments[1].rect.y,
+            line.rect.y + line.rect.height - line.fragments[1].rect.height
+        );
+    }
+
+    #[test]
+    fn vertical_align_length_raises_fragment_above_baseline() {
+        let document = NodeHandle::document();
+        let body = NodeHandle::element("body");
+        let paragraph = NodeHandle::element("p");
+        let raised = NodeHandle::element("span");
+
+        raised.append_child(NodeHandle::text("lift"));
+        document.append_child(body.clone());
+        body.append_child(paragraph.clone());
+        paragraph.append_child(NodeHandle::text("base"));
+        paragraph.append_child(raised);
+
+        let mut resolver = StyleResolver::new();
+        resolver.add_stylesheet(
+            Origin::Author,
+            parse_stylesheet(
+                "p { line-height: 20px; } \
+                 span { display: inline; vertical-align: 4px; }",
+            )
+            .unwrap(),
+        );
+
+        let layout = layout_tree(
+            &body,
+            &mut resolver,
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 300.0,
+                height: 0.0,
+            },
+        )
+        .unwrap();
+
+        let line = &layout.children[0].lines[0];
+        let base_fragment = &line.fragments[0];
+        let raised_fragment = line
+            .fragments
+            .iter()
+            .find(|fragment| fragment.text == "lift")
+            .unwrap();
+
+        assert!(raised_fragment.rect.y < base_fragment.rect.y);
     }
 }

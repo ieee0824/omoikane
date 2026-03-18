@@ -271,7 +271,7 @@ fn apply_inheritance(
         return;
     };
 
-    for inherited_name in ["color", "font-size"] {
+    for inherited_name in ["color", "font-size", "line-height", "white-space"] {
         if !properties.contains_key(inherited_name) {
             if let Some(value) = parent_style.get(inherited_name) {
                 properties.insert(inherited_name.to_string(), value.clone());
