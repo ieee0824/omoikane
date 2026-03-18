@@ -13,6 +13,11 @@ mod request;
 mod response;
 mod url;
 
+#[cfg(test)]
+mod request_tests;
+#[cfg(test)]
+mod response_tests;
+
 pub use client::Client;
 pub use connection::send;
 pub use cookie::{Cookie, CookieJar, SameSite};
