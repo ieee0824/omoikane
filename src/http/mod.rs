@@ -8,6 +8,7 @@
 mod client;
 mod connection;
 mod cookie;
+mod http2;
 mod request;
 mod response;
 mod url;

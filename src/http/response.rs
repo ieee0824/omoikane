@@ -25,6 +25,20 @@ pub struct HttpResponse {
 }
 
 impl HttpResponse {
+    pub(crate) fn new(
+        status_code: u16,
+        reason: impl Into<String>,
+        headers: Vec<(String, String)>,
+        body: Vec<u8>,
+    ) -> Self {
+        Self {
+            status_code,
+            reason: reason.into(),
+            headers,
+            body,
+        }
+    }
+
     /// Returns the HTTP status code (e.g. `200`, `404`).
     pub fn status_code(&self) -> u16 {
         self.status_code
@@ -90,12 +104,7 @@ impl HttpResponse {
         // Body
         let body = read_body(&headers, &mut buf_reader)?;
 
-        Ok(HttpResponse {
-            status_code,
-            reason,
-            headers,
-            body,
-        })
+        Ok(HttpResponse::new(status_code, reason, headers, body))
     }
 }
 

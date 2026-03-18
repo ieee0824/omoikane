@@ -2,7 +2,7 @@
 id: 001
 title: HTTPクライアント実装
 phase: 1
-status: open
+status: closed
 children: [001-1, 001-2, 001-3, 001-4]
 ---
 

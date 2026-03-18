@@ -5,9 +5,9 @@ use std::net::{TcpStream, ToSocketAddrs};
 use std::sync::Arc;
 use std::time::Duration;
 
-use rustls::pki_types::ServerName;
-use rustls::{ClientConfig, ClientConnection, StreamOwned};
+use rustls::ClientConfig;
 
+use super::http2;
 use super::request::HttpRequest;
 use super::response::{HttpParseError, HttpResponse};
 
@@ -85,9 +85,11 @@ fn default_client_config() -> ClientConfig {
     let root_store =
         rustls::RootCertStore::from_iter(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
 
-    ClientConfig::builder()
+    let mut config = ClientConfig::builder()
         .with_root_certificates(root_store)
-        .with_no_client_auth()
+        .with_no_client_auth();
+    config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
+    config
 }
 
 fn send_over_tls_with_config(
@@ -95,29 +97,14 @@ fn send_over_tls_with_config(
     request: &HttpRequest,
     config: Arc<ClientConfig>,
 ) -> Result<HttpResponse, HttpParseError> {
-    let server_name = ServerName::try_from(request.url().host().to_string()).map_err(|e| {
-        HttpParseError::Io(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            format!("invalid server name for SNI: {e}"),
-        ))
-    })?;
-
-    let conn = ClientConnection::new(config, server_name)
-        .map_err(|e| HttpParseError::Io(io::Error::new(io::ErrorKind::ConnectionRefused, e)))?;
-
-    let mut tls_stream = StreamOwned::new(conn, stream);
-
-    tls_stream
-        .write_all(&request.serialize())
-        .map_err(HttpParseError::Io)?;
-    tls_stream.flush().map_err(HttpParseError::Io)?;
-
-    HttpResponse::parse(&mut tls_stream)
+    http2::send_over_tls(stream, request, config)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rustls::pki_types::ServerName;
+    use rustls::{ClientConnection, StreamOwned};
     use std::io::{BufRead, BufReader, Read};
     use std::net::TcpListener;
 
