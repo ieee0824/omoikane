@@ -76,6 +76,7 @@ status: open
 - block layout の float/clear は active float region ベースへ再設計した。`float` の配置探索と `clear` の計算はより CSS 2.1 に近づいたが、ignored の公式比較差分は引き続き `40,427` で、主戦場はまだ `smile/chin` の最終位置か `.eyes` 以外の縦配置に残っている
 - 012-8 の切り分けとして `paint::tests::acid2_lower_face_boxes_keep_expected_vertical_order`、`paint::tests::acid2_empty_block_starts_shortly_after_nose`、`paint::tests::acid2_empty_block_creates_large_gap_before_smile` を追加した。`nose -> empty` と `empty -> smile` の局所 gap は大きく崩れておらず、ignored の公式比較差分も引き続き `40,427` のため、下半分の主戦場は単純な block gap ではなく paint phase / stacking か、さらに上流の縦配置に寄っている可能性が高い
 - 012-7 の修正として、paint の phase 分離を immediate child ベースから一段広げ、non-positioned subtree の positioned descendant も祖先 stacking phase へ defer するようにした。`paint::tests::positioned_grandchild_paints_above_float_uncle` を追加し、ignored の公式比較差分は `40,427 -> 36,708` まで改善した。local baseline `tests/fixtures/acid2/acid2.baseline.png` も更新済み
+- ignored の公式比較ハーネスでは、Acid2 側だけ `#top` 基準で上へ詰めていたため reference 側の `h2` と origin が揃っていなかった。比較前に Acid2 の `#top` content origin を reference の `h2` content origin へ合わせるようにして、より対称な比較へ寄せた結果、ignored の公式比較差分は `36,708 -> 33,957` まで改善した。これは主に比較の整合化であり、renderer 本体の改善量とは分けて扱う
 
 ## 子issue
 

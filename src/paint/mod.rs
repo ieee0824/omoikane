@@ -3387,8 +3387,44 @@ mod tests {
             },
         )
         .unwrap();
-        if let Some(top_y) = find_layout_box_by_id(&acid2_layout, "top").map(|top| top.dimensions.content.y) {
-            translate_layout_box_for_test(&mut acid2_layout, &mut acid2_resolver, 0.0, -top_y);
+
+        let reference_html = fs::read_to_string(acid2_official_reference_html_path()).unwrap();
+        let reference_document = TreeBuilder::parse(&reference_html).document();
+        materialize_local_assets(&reference_document, &acid2_fixture_dir()).unwrap();
+        let mut reference_resolver = StyleResolver::new();
+        for stylesheet in extract_author_stylesheets(&reference_document).unwrap() {
+            reference_resolver.add_stylesheet(
+                Origin::Author,
+                parse_stylesheet_forgiving(&stylesheet).unwrap(),
+            );
+        }
+        let reference_layout = crate::layout::layout_tree(
+            &reference_document,
+            &mut reference_resolver,
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 800.0,
+                height: 600.0,
+            },
+        )
+        .unwrap();
+        if let (Some((top_x, top_y)), Some((reference_x, reference_y))) = (
+            find_layout_box_by_id(&acid2_layout, "top")
+                .map(|top| (top.dimensions.content.x, top.dimensions.content.y)),
+            find_first_layout_box_by_tag(&reference_layout, "h2").map(|heading| {
+                (
+                    heading.dimensions.content.x,
+                    heading.dimensions.content.y,
+                )
+            }),
+        ) {
+            translate_layout_box_for_test(
+                &mut acid2_layout,
+                &mut acid2_resolver,
+                reference_x - top_x,
+                reference_y - top_y,
+            );
         }
         let actual = paint_layout(
             &acid2_layout,
@@ -3400,20 +3436,16 @@ mod tests {
                 height: 600.0,
             },
         );
-
-        let reference_html = fs::read_to_string(acid2_official_reference_html_path()).unwrap();
-        let reference_document = TreeBuilder::parse(&reference_html).document();
-        let expected = render_document_with_base_path(
-            &reference_document,
+        let expected = paint_layout(
+            &reference_layout,
+            &mut reference_resolver,
             Rect {
                 x: 0.0,
                 y: 0.0,
                 width: 800.0,
                 height: 600.0,
             },
-            &acid2_fixture_dir(),
-        )
-        .unwrap();
+        );
 
         let (diff, changed) = diff_canvases(&actual, &expected);
         if changed > 0 {
@@ -3541,6 +3573,20 @@ mod tests {
 
         for child in &layout.children {
             if let Some(found) = find_layout_box_by_id(child, id) {
+                return Some(found);
+            }
+        }
+
+        None
+    }
+
+    fn find_first_layout_box_by_tag<'a>(layout: &'a LayoutBox, tag: &str) -> Option<&'a LayoutBox> {
+        if layout.node.tag_name().as_deref() == Some(tag) {
+            return Some(layout);
+        }
+
+        for child in &layout.children {
+            if let Some(found) = find_first_layout_box_by_tag(child, tag) {
                 return Some(found);
             }
         }
