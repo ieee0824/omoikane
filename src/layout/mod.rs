@@ -1039,7 +1039,16 @@ fn collect_table_entries(node: &NodeHandle, resolver: &mut StyleResolver) -> Vec
                 });
             }
             Some(TableDisplay::Cell) => anonymous_cells.push(child),
-            _ => {}
+            Some(TableDisplay::Table) => {
+                // CSS 2.1 §17.2.1: wrap non-row/cell children in anonymous cell
+                anonymous_cells.push(child);
+            }
+            _ => {
+                if child.node_type() == NodeType::Element {
+                    // Treat block-level children as anonymous cells
+                    anonymous_cells.push(child);
+                }
+            }
         }
     }
 
