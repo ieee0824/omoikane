@@ -20,9 +20,12 @@ status: open
 - `border-top` / `border-left` など side shorthand を展開し、side ごとの border color paint に対応
 - color keyword に `yellow` / `navy` / `purple` / `maroon` を追加し、Acid2 の配色を改善
 - ローカル baseline `acid2.baseline.png` は今回の描画改善に合わせて更新済み
+- `head` / `title` / `meta` / `style` / `script` / `link` をレイアウト対象から除外し、`reference.html` 側の不要テキスト描画を抑制
+- ignored の公式比較テスト差分は `66,465 -> 26,020` まで減少
+- 現時点の主な残差分は、reference 側で先頭に 1 行ぶん余計な黒テキストが残ることと、Acid2 本体側で目・鼻・口まわりの形状が大きく崩れていること
 
 ## タスク
-- [ ] 公式比較の差分画像を見て、主要な未実装要素を特定する
+- [x] 公式比較の差分画像を見て、主要な未実装要素を特定する
 - [ ] 参照ページ側で欠けている描画要素（背景、見出しテキスト、画像配置など）を切り分ける
 - [ ] Acid2 本体側で欠けている描画要素（object/img、背景、フォント shorthand、テキスト配置など）を切り分ける
 - [ ] 必要なら子 issue に分割して段階的に差分を減らす

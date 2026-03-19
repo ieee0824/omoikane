@@ -366,6 +366,10 @@ fn layout_element(
     viewport: Rect,
     positioned_ancestor: Option<BoxDimensions>,
 ) -> Option<LayoutBox> {
+    if is_non_rendered_html_element(node) {
+        return None;
+    }
+
     let style = resolver.computed_style(node);
     if is_display_none(&style) {
         return None;
@@ -1541,6 +1545,9 @@ fn is_inline_child(node: &NodeHandle, resolver: &mut StyleResolver) -> bool {
     match node.node_type() {
         NodeType::Text => true,
         NodeType::Element => {
+            if is_non_rendered_html_element(node) {
+                return false;
+            }
             let style = resolver.computed_style(node);
             matches!(
                 style.get("display"),
@@ -1618,6 +1625,9 @@ fn collect_inline_segments(
             }
         }
         NodeType::Element => {
+            if is_non_rendered_html_element(node) {
+                return;
+            }
             let style = resolver.computed_style(node);
             if is_display_none(&style) {
                 return;
@@ -1746,6 +1756,13 @@ fn element_inline_image(node: &NodeHandle) -> Option<Image> {
         }
         _ => None,
     }
+}
+
+fn is_non_rendered_html_element(node: &NodeHandle) -> bool {
+    matches!(
+        node.tag_name().as_deref(),
+        Some("head" | "title" | "meta" | "style" | "script" | "link")
+    )
 }
 
 fn generated_content_value(value: &ComputedValue) -> Option<GeneratedContent> {
@@ -2265,6 +2282,47 @@ mod tests {
 
         assert_eq!(layout.children.len(), 1);
         assert_eq!(layout.children[0].node.tag_name().as_deref(), Some("div"));
+    }
+
+    #[test]
+    fn omits_non_rendered_head_elements() {
+        let document = NodeHandle::document();
+        let html = NodeHandle::element("html");
+        let head = NodeHandle::element("head");
+        let title = NodeHandle::element("title");
+        let meta = NodeHandle::element("meta");
+        let body = NodeHandle::element("body");
+        let paragraph = NodeHandle::element("p");
+        let text = NodeHandle::text("visible");
+
+        document.append_child(html.clone());
+        html.append_child(head.clone());
+        head.append_child(title.clone());
+        head.append_child(meta);
+        title.append_child(NodeHandle::text("hidden"));
+        html.append_child(body.clone());
+        body.append_child(paragraph.clone());
+        paragraph.append_child(text);
+
+        let mut resolver = StyleResolver::new();
+        let layout = layout_tree(
+            &document,
+            &mut resolver,
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 200.0,
+                height: 0.0,
+            },
+        )
+        .unwrap();
+
+        let html_layout = layout.children.iter().find(|child| child.node == html).unwrap();
+        assert_eq!(html_layout.children.len(), 1);
+        assert_eq!(html_layout.children[0].node, body);
+        assert!(find_layout_box_by_tag(&layout, "head").is_none());
+        assert!(find_layout_box_by_tag(&layout, "title").is_none());
+        assert!(find_layout_box_by_tag(&layout, "meta").is_none());
     }
 
     #[test]
