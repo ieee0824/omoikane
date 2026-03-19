@@ -4016,6 +4016,23 @@ mod tests {
         None
     }
 
+    fn translate_all_layout_boxes(layout: &mut LayoutBox, dx: f32, dy: f32) {
+        layout.dimensions.content.x += dx;
+        layout.dimensions.content.y += dy;
+        for line in &mut layout.lines {
+            line.rect.x += dx;
+            line.rect.y += dy;
+            line.baseline += dy;
+            for fragment in &mut line.fragments {
+                fragment.rect.x += dx;
+                fragment.rect.y += dy;
+            }
+        }
+        for child in &mut layout.children {
+            translate_all_layout_boxes(child, dx, dy);
+        }
+    }
+
     fn translate_layout_box_for_test(
         layout: &mut LayoutBox,
         resolver: &mut StyleResolver,
@@ -4028,7 +4045,6 @@ mod tests {
         ) {
             return;
         }
-
         layout.dimensions.content.x += dx;
         layout.dimensions.content.y += dy;
         for line in &mut layout.lines {
