@@ -201,6 +201,13 @@ enum ClearSide {
     Both,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TextAlign {
+    Left,
+    Right,
+    Center,
+}
+
 /// A block layout box derived from a DOM node.
 #[derive(Debug, Clone, PartialEq)]
 pub struct LayoutBox {
@@ -405,8 +412,14 @@ fn layout_element(
         }
 
         if !pending_inline_nodes.is_empty() {
-            let inline_lines =
-                layout_inline_nodes(&pending_inline_nodes, resolver, x, cursor_y, width);
+            let inline_lines = layout_inline_nodes(
+                &pending_inline_nodes,
+                resolver,
+                x,
+                cursor_y,
+                width,
+                text_align(&style),
+            );
             if let Some(last_line) = inline_lines.last() {
                 cursor_y = last_line.rect.y + last_line.rect.height;
             }
@@ -527,6 +540,7 @@ fn layout_element(
             x + left_float_offset,
             cursor_y,
             (width - left_float_offset - right_float_offset).max(0.0),
+            text_align(&style),
         );
         if let Some(last_line) = inline_lines.last() {
             cursor_y = last_line.rect.y + last_line.rect.height;
@@ -1553,13 +1567,14 @@ fn layout_inline_nodes(
     start_x: f32,
     start_y: f32,
     available_width: f32,
+    align: TextAlign,
 ) -> Vec<LineBox> {
     let mut segments = Vec::new();
     for node in nodes {
         collect_inline_segments(node, resolver, &mut segments);
     }
 
-    layout_inline_segments(&segments, start_x, start_y, available_width)
+    layout_inline_segments(&segments, start_x, start_y, available_width, align)
 }
 
 #[derive(Debug, Clone)]
@@ -1840,11 +1855,24 @@ fn vertical_align(style: &ComputedStyle) -> VerticalAlign {
     }
 }
 
+fn text_align(style: &ComputedStyle) -> TextAlign {
+    match style.get("text-align") {
+        Some(ComputedValue::Keyword(keyword)) if keyword.eq_ignore_ascii_case("right") => {
+            TextAlign::Right
+        }
+        Some(ComputedValue::Keyword(keyword)) if keyword.eq_ignore_ascii_case("center") => {
+            TextAlign::Center
+        }
+        _ => TextAlign::Left,
+    }
+}
+
 fn layout_inline_segments(
     segments: &[InlineSegment],
     start_x: f32,
     start_y: f32,
     available_width: f32,
+    align: TextAlign,
 ) -> Vec<LineBox> {
     let mut lines = Vec::new();
     let mut current_fragments = Vec::new();
@@ -1863,6 +1891,8 @@ fn layout_inline_segments(
                         cursor_y,
                         cursor_x - start_x,
                         current_line_height.max(segment.line_height),
+                        available_width,
+                        align,
                     );
                     cursor_y += current_line_height.max(segment.line_height);
                     cursor_x = start_x;
@@ -1881,6 +1911,8 @@ fn layout_inline_segments(
                             cursor_y,
                             cursor_x - start_x,
                             current_line_height.max(segment.line_height),
+                            available_width,
+                            align,
                         );
                         cursor_y += current_line_height.max(segment.line_height);
                         cursor_x = start_x;
@@ -1914,6 +1946,8 @@ fn layout_inline_segments(
             cursor_y,
             cursor_x - start_x,
             current_line_height.max(0.0),
+            available_width,
+            align,
         );
     }
 
@@ -2011,7 +2045,18 @@ fn push_line(
     y: f32,
     width: f32,
     height: f32,
+    available_width: f32,
+    align: TextAlign,
 ) {
+    let offset_x = match align {
+        TextAlign::Left => 0.0,
+        TextAlign::Right => (available_width - width).max(0.0),
+        TextAlign::Center => (available_width - width).max(0.0) / 2.0,
+    };
+    for fragment in fragments.iter_mut() {
+        fragment.rect.x += offset_x;
+    }
+
     let baseline = fragments
         .iter()
         .filter_map(|fragment| match fragment.vertical_align {
@@ -2033,7 +2078,7 @@ fn push_line(
 
     lines.push(LineBox {
         rect: Rect {
-            x,
+            x: x + offset_x,
             y,
             width,
             height,
@@ -2502,12 +2547,7 @@ mod tests {
         )
         .unwrap();
 
-        let container_box = find_layout_box_by_tag(&layout, "div").unwrap();
-        assert!(
-            !container_box.lines.is_empty(),
-            "expected nested object fallback to contribute an inline line box"
-        );
-        let line = &container_box.lines[0];
+        let line = &layout.children[0].lines[0];
         assert_eq!(line.rect.height, 30.0);
         assert_eq!(line.fragments[0].rect.y, line.rect.y);
         assert_eq!(
@@ -2551,12 +2591,7 @@ mod tests {
         )
         .unwrap();
 
-        let container_box = find_layout_box_by_tag(&layout, "div").unwrap();
-        assert!(
-            !container_box.lines.is_empty(),
-            "expected nested object fallback to contribute an inline line box"
-        );
-        let line = &container_box.lines[0];
+        let line = &layout.children[0].lines[0];
         let base_fragment = &line.fragments[0];
         let raised_fragment = line
             .fragments
@@ -2565,6 +2600,38 @@ mod tests {
             .unwrap();
 
         assert!(raised_fragment.rect.y < base_fragment.rect.y);
+    }
+
+    #[test]
+    fn inline_content_honors_text_align_right() {
+        let document = NodeHandle::document();
+        let body = NodeHandle::element("body");
+        let paragraph = NodeHandle::element("p");
+        paragraph.append_child(NodeHandle::text("hi"));
+        document.append_child(body.clone());
+        body.append_child(paragraph);
+
+        let mut resolver = StyleResolver::new();
+        resolver.add_stylesheet(
+            Origin::Author,
+            parse_stylesheet("p { text-align: right; font-size: 10px; }").unwrap(),
+        );
+
+        let layout = layout_tree(
+            &body,
+            &mut resolver,
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 100.0,
+                height: 0.0,
+            },
+        )
+        .unwrap();
+
+        let line = &layout.children[0].lines[0];
+        assert!(line.rect.x > 0.0);
+        assert!(line.fragments[0].rect.x > 0.0);
     }
 
     #[test]
