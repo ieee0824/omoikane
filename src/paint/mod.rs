@@ -3572,9 +3572,6 @@ mod tests {
         let nose = find_layout_box_by_class(&layout, "nose").unwrap();
         let forehead = find_layout_box_by_class(&layout, "forehead").unwrap();
 
-        eprintln!("forehead y: {}", forehead.dimensions.content.y);
-        eprintln!("eyes y: {}", eyes.dimensions.content.y);
-        eprintln!("nose y: {}", nose.dimensions.content.y);
 
         // Currently eyes (y=1598) is BELOW nose (y=1562) — this is wrong.
         // .eyes { position: absolute; top: 5em } should place eyes at

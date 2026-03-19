@@ -433,7 +433,7 @@ fn layout_element(
             let all_whitespace = pending_inline_nodes.iter().all(|n| {
                 n.node_type() == NodeType::Text
                     && n.data()
-                        .map(|t| t.trim().is_empty())
+                        .map(|t| t.bytes().all(|b| matches!(b, b' ' | b'\t' | b'\n' | b'\r' | b'\x0C')))
                         .unwrap_or(true)
             });
             if !all_whitespace {
@@ -655,7 +655,7 @@ fn layout_element(
         let all_whitespace = pending_inline_nodes.iter().all(|n| {
             n.node_type() == NodeType::Text
                 && n.data()
-                    .map(|t| t.trim().is_empty())
+                    .map(|t| t.bytes().all(|b| matches!(b, b' ' | b'\t' | b'\n' | b'\r' | b'\x0C')))
                     .unwrap_or(true)
         });
         if !all_whitespace {
