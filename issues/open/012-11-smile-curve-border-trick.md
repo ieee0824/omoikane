@@ -43,4 +43,8 @@ Acid2 の smile は `relative + absolute + nested float + border` の組み合�
 - absolute child of relative の yellow border 描画は正しく動作（テスト追加済み）
 - smile の absolute div の auto width が 72px（期待: 96px 程度）。span の border-left/right(12+12) が shrink-to-fit 幅に含まれていない
 - `intrinsic_width` が explicit width なしのときに自身の padding/border を加算していない。修正を試みたが `shrink_to_fit_width` の戻り値が outer width になることで layout_positioned_child 等に影響があり revert
-- 根本修正には `intrinsic_width` の戻り値が content width なのか outer width なのかの設計整理が必要
+- `intrinsic_width` を outer width で一貫する設計に変更済み。absolute div width が 72→96 に改善
+- 比較テストで smile 領域の pixel を確認: relative div(黒) の上に absolute div(yellow border) が描画されるべきだが、pixel(118, 222) = 黒のまま
+- paint 順序上は正しい: `.picture` の auto_positioned phase で relative → absolute の順で paint される
+- relative の黒背景が先、absolute の黄色 border が後に描画されるはず
+- **未解決**: absolute の yellow border が実際に paint_borders で描画されているのに見えない原因。translate_layout_box_for_test が absolute の border rect を正しく移動していない可能性。または別の要素が上書きしている可能性
