@@ -152,6 +152,7 @@ impl StyleResolver {
             properties.insert(candidate.name, computed);
         }
 
+        resolve_explicit_inherit(&mut properties, parent_style);
         apply_inheritance(&mut properties, parent_style);
         apply_initial_values(&mut properties);
 
@@ -297,6 +298,31 @@ fn apply_initial_values(properties: &mut BTreeMap<String, ComputedValue>) {
     properties
         .entry("font-size".to_string())
         .or_insert_with(|| ComputedValue::Px(16.0));
+}
+
+fn resolve_explicit_inherit(
+    properties: &mut BTreeMap<String, ComputedValue>,
+    parent_style: Option<&ComputedStyle>,
+) {
+    let inherited_names: Vec<String> = properties
+        .iter()
+        .filter_map(|(name, value)| match value {
+            ComputedValue::Keyword(keyword) if keyword.eq_ignore_ascii_case("inherit") => {
+                Some(name.clone())
+            }
+            _ => None,
+        })
+        .collect();
+
+    for name in inherited_names {
+        if let Some(parent_style) = parent_style {
+            if let Some(parent_value) = parent_style.get(&name) {
+                properties.insert(name, parent_value.clone());
+                continue;
+            }
+        }
+        properties.remove(&name);
+    }
 }
 
 fn apply_inheritance(
@@ -538,6 +564,28 @@ mod tests {
         assert_eq!(
             style.get("color"),
             Some(&ComputedValue::Color("blue".to_string()))
+        );
+    }
+
+    #[test]
+    fn resolves_explicit_inherit_keyword_from_parent() {
+        let (_document, body, title, _html) = sample_tree();
+        let mut resolver = StyleResolver::new();
+        resolver.add_stylesheet(
+            Origin::Author,
+            parse_stylesheet("body { float: right; } h1 { float: inherit; }").unwrap(),
+        );
+
+        let body_style = resolver.computed_style(&body);
+        let title_style = resolver.computed_style(&title);
+
+        assert_eq!(
+            body_style.get("float"),
+            Some(&ComputedValue::Keyword("right".to_string()))
+        );
+        assert_eq!(
+            title_style.get("float"),
+            Some(&ComputedValue::Keyword("right".to_string()))
         );
     }
 }

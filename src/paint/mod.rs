@@ -2429,6 +2429,161 @@ mod tests {
     }
 
     #[test]
+    fn acid2_eyes_inline_layer_stays_at_same_origin_as_float_and_block_layers() {
+        let acid2_html = fs::read_to_string(acid2_fixture_path()).unwrap();
+        let acid2_document = TreeBuilder::parse(&acid2_html).document();
+        let mut resolver = StyleResolver::new();
+        for stylesheet in extract_author_stylesheets(&acid2_document).unwrap() {
+            resolver.add_stylesheet(
+                Origin::Author,
+                parse_stylesheet_forgiving(&stylesheet).unwrap(),
+            );
+        }
+
+        let layout = crate::layout::layout_tree(
+            &acid2_document,
+            &mut resolver,
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 800.0,
+                height: 600.0,
+            },
+        )
+        .unwrap();
+
+        let eyes = find_layout_box_by_id(&layout, "eyes-a")
+            .and_then(|eyes_a| find_parent_layout_box_by_id(&layout, "eyes-a").or(Some(eyes_a)))
+            .unwrap();
+        let eyes_a = find_layout_box_by_id(&layout, "eyes-a").unwrap();
+        let eyes_b = find_layout_box_by_id(&layout, "eyes-b").unwrap();
+        let eyes_c = find_layout_box_by_id(&layout, "eyes-c").unwrap();
+        let first_line = eyes_a.lines.first().unwrap();
+        let first_image = first_line
+            .fragments
+            .iter()
+            .find(|fragment| matches!(fragment.content, InlineFragmentContent::Image(_, _)))
+            .unwrap();
+
+        assert_eq!(eyes_b.dimensions.content.y, eyes_c.dimensions.content.y);
+        assert_eq!(first_line.rect.y, eyes_b.dimensions.content.y);
+        assert!(first_image.rect.x >= eyes.dimensions.content.x);
+        assert!(
+            first_image.rect.x + first_image.rect.width
+                <= eyes.dimensions.content.x + eyes.dimensions.content.width + 0.5,
+            "{:?} {:?}",
+            first_image.rect,
+            eyes.dimensions.content
+        );
+    }
+
+    #[test]
+    fn acid2_smile_layout_contains_positioned_and_floated_descendants() {
+        let acid2_html = fs::read_to_string(acid2_fixture_path()).unwrap();
+        let acid2_document = TreeBuilder::parse(&acid2_html).document();
+        let mut resolver = StyleResolver::new();
+        for stylesheet in extract_author_stylesheets(&acid2_document).unwrap() {
+            resolver.add_stylesheet(
+                Origin::Author,
+                parse_stylesheet_forgiving(&stylesheet).unwrap(),
+            );
+        }
+
+        let layout = crate::layout::layout_tree(
+            &acid2_document,
+            &mut resolver,
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 800.0,
+                height: 600.0,
+            },
+        )
+        .unwrap();
+
+        let smile = find_layout_box_by_class(&layout, "smile").unwrap();
+        let positioned = smile
+            .children
+            .iter()
+            .find(|child| {
+                matches!(
+                    resolver.computed_style(&child.node).get("position"),
+                    Some(ComputedValue::Keyword(keyword)) if keyword.eq_ignore_ascii_case("relative")
+                )
+            })
+            .unwrap();
+        let absolute = positioned
+            .children
+            .iter()
+            .find(|child| {
+                matches!(
+                    resolver.computed_style(&child.node).get("position"),
+                    Some(ComputedValue::Keyword(keyword)) if keyword.eq_ignore_ascii_case("absolute")
+                )
+            })
+            .unwrap();
+        let float_descendant = absolute
+            .children
+            .iter()
+            .find(|child| {
+                matches!(
+                    resolver.computed_style(&child.node).get("float"),
+                    Some(ComputedValue::Keyword(keyword))
+                        if keyword.eq_ignore_ascii_case("left")
+                            || keyword.eq_ignore_ascii_case("right")
+                )
+            })
+            .unwrap();
+
+        assert!(absolute.dimensions.content.width > 0.0, "{:?}", absolute.dimensions);
+        assert!(float_descendant.total_width() > 0.0, "{:?}", float_descendant.dimensions);
+    }
+
+    #[test]
+    fn test_scroll_translation_keeps_fixed_positioned_boxes_in_viewport_place() {
+        let document = NodeHandle::document();
+        let body = NodeHandle::element("body");
+        let flow = NodeHandle::element("div");
+        let fixed = NodeHandle::element("aside");
+        flow.set_attribute("class", "flow");
+        fixed.set_attribute("class", "fixed");
+        document.append_child(body.clone());
+        body.append_child(flow.clone());
+        body.append_child(fixed.clone());
+
+        let mut resolver = StyleResolver::new();
+        resolver.add_stylesheet(
+            Origin::Author,
+            parse_stylesheet(
+                ".flow { width: 10px; height: 100px; } .fixed { position: fixed; top: 20px; left: 5px; width: 10px; height: 10px; }",
+            )
+            .unwrap(),
+        );
+
+        let mut layout = crate::layout::layout_tree(
+            &body,
+            &mut resolver,
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 100.0,
+                height: 100.0,
+            },
+        )
+        .unwrap();
+
+        let fixed_before = find_layout_box_by_class(&layout, "fixed")
+            .map(|node| node.dimensions.content)
+            .unwrap();
+        translate_layout_box_for_test(&mut layout, &mut resolver, 0.0, -50.0);
+        let fixed_after = find_layout_box_by_class(&layout, "fixed")
+            .map(|node| node.dimensions.content)
+            .unwrap();
+
+        assert_eq!(fixed_before, fixed_after);
+    }
+
+    #[test]
     fn acid2_eye_png_decodes() {
         let acid2_html = fs::read_to_string(acid2_fixture_path()).unwrap();
         let marker = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAGAAAAAY";
@@ -2509,7 +2664,7 @@ mod tests {
         )
         .unwrap();
         if let Some(top_y) = find_layout_box_by_id(&acid2_layout, "top").map(|top| top.dimensions.content.y) {
-            translate_layout_box_for_test(&mut acid2_layout, 0.0, -top_y);
+            translate_layout_box_for_test(&mut acid2_layout, &mut acid2_resolver, 0.0, -top_y);
         }
         let actual = paint_layout(
             &acid2_layout,
@@ -2654,7 +2809,57 @@ mod tests {
         None
     }
 
-    fn translate_layout_box_for_test(layout: &mut LayoutBox, dx: f32, dy: f32) {
+    fn find_layout_box_by_class<'a>(layout: &'a LayoutBox, class_name: &str) -> Option<&'a LayoutBox> {
+        if layout
+            .node
+            .attributes()
+            .and_then(|attributes| attributes.get("class").cloned())
+            .map(|classes| classes.split_ascii_whitespace().any(|class| class == class_name))
+            .unwrap_or(false)
+        {
+            return Some(layout);
+        }
+
+        for child in &layout.children {
+            if let Some(found) = find_layout_box_by_class(child, class_name) {
+                return Some(found);
+            }
+        }
+
+        None
+    }
+
+    fn find_parent_layout_box_by_id<'a>(layout: &'a LayoutBox, id: &str) -> Option<&'a LayoutBox> {
+        for child in &layout.children {
+            if child
+                .node
+                .attributes()
+                .and_then(|attributes| attributes.get("id").cloned())
+                .as_deref()
+                == Some(id)
+            {
+                return Some(layout);
+            }
+            if let Some(found) = find_parent_layout_box_by_id(child, id) {
+                return Some(found);
+            }
+        }
+        None
+    }
+
+    fn translate_layout_box_for_test(
+        layout: &mut LayoutBox,
+        resolver: &mut StyleResolver,
+        dx: f32,
+        dy: f32,
+    ) {
+        if matches!(
+            resolver.computed_style(&layout.node).get("position"),
+            Some(ComputedValue::Keyword(keyword)) if keyword.eq_ignore_ascii_case("fixed")
+        ) {
+            return;
+        }
+
         layout.dimensions.content.x += dx;
         layout.dimensions.content.y += dy;
         for line in &mut layout.lines {
@@ -2667,7 +2872,7 @@ mod tests {
             }
         }
         for child in &mut layout.children {
-            translate_layout_box_for_test(child, dx, dy);
+            translate_layout_box_for_test(child, resolver, dx, dy);
         }
     }
 }

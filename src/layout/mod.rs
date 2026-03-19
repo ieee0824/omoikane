@@ -582,8 +582,7 @@ fn layout_element(
         }
     }
     sort_children_by_z_index(&mut children);
-
-    Some(LayoutBox {
+    let mut layout = LayoutBox {
         node: node.clone(),
         dimensions,
         visibility: visibility(&style),
@@ -591,7 +590,10 @@ fn layout_element(
         z_index: z_index(&style),
         lines,
         children,
-    })
+    };
+    apply_relative_offset(&mut layout, &style);
+
+    Some(layout)
 }
 
 fn layout_flex_container(
@@ -1173,8 +1175,15 @@ fn intrinsic_width(node: &NodeHandle, resolver: &mut StyleResolver) -> f32 {
             if let Some(width) = explicit_length(&style, "width") {
                 return width;
             }
-            if let Some((_image_node, image)) = element_inline_image(node) {
-                return image.width() as f32;
+            if let Some((image_node, image)) = element_inline_image(node) {
+                let image_style = resolver.computed_style(&image_node);
+                let padding = edge_sizes(&image_style, "padding");
+                let border = edge_sizes(&image_style, "border");
+                return image.width() as f32
+                    + padding.left
+                    + padding.right
+                    + border.left
+                    + border.right;
             }
             let mut width: f32 = 0.0;
             for child in node.child_nodes() {
@@ -1218,6 +1227,21 @@ fn z_index(style: &ComputedStyle) -> i32 {
         Some(ComputedValue::Number(value)) => *value as i32,
         Some(ComputedValue::Px(value)) => *value as i32,
         _ => 0,
+    }
+}
+
+fn apply_relative_offset(layout: &mut LayoutBox, style: &ComputedStyle) {
+    if position_scheme(style) != PositionScheme::Relative {
+        return;
+    }
+
+    let dx = explicit_length(style, "left").unwrap_or(0.0)
+        - explicit_length(style, "right").unwrap_or(0.0);
+    let dy = explicit_length(style, "top").unwrap_or(0.0)
+        - explicit_length(style, "bottom").unwrap_or(0.0);
+
+    if dx != 0.0 || dy != 0.0 {
+        translate_layout_box(layout, dx, dy);
     }
 }
 
@@ -1565,6 +1589,9 @@ fn is_inline_child(node: &NodeHandle, resolver: &mut StyleResolver) -> bool {
                 return false;
             }
             let style = resolver.computed_style(node);
+            if float_side(&style) != FloatSide::None || is_out_of_flow_positioned(&style) {
+                return false;
+            }
             matches!(
                 style.get("display"),
                 Some(ComputedValue::Keyword(keyword))
@@ -3491,6 +3518,48 @@ mod tests {
     }
 
     #[test]
+    fn relative_position_offsets_visual_box_without_changing_flow_height() {
+        let document = NodeHandle::document();
+        let body = NodeHandle::element("body");
+        let relative = NodeHandle::element("div");
+        let sibling = NodeHandle::element("section");
+
+        relative.set_attribute("class", "relative");
+        sibling.set_attribute("class", "sibling");
+        document.append_child(body.clone());
+        body.append_child(relative.clone());
+        body.append_child(sibling.clone());
+
+        let mut resolver = StyleResolver::new();
+        resolver.add_stylesheet(
+            Origin::Author,
+            parse_stylesheet(
+                ".relative { position: relative; top: 5px; left: 7px; width: 20px; height: 10px; } \
+                 .sibling { width: 20px; height: 6px; }",
+            )
+            .unwrap(),
+        );
+
+        let layout = layout_tree(
+            &body,
+            &mut resolver,
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 80.0,
+                height: 0.0,
+            },
+        )
+        .unwrap();
+
+        let relative_box = find_layout_box_by_tag(&layout, "div").unwrap();
+        let sibling_box = find_layout_box_by_tag(&layout, "section").unwrap();
+        assert_eq!(relative_box.dimensions.content.x, 7.0);
+        assert_eq!(relative_box.dimensions.content.y, 5.0);
+        assert_eq!(sibling_box.dimensions.content.y, 10.0);
+    }
+
+    #[test]
     fn absolute_auto_width_shrink_to_fit_text_content() {
         let document = NodeHandle::document();
         let body = NodeHandle::element("body");
@@ -3527,6 +3596,91 @@ mod tests {
         let absolute_box = find_layout_box_by_tag(&layout, "aside").unwrap();
         assert!(absolute_box.dimensions.content.width < 200.0);
         assert!(absolute_box.dimensions.content.width > 0.0);
+    }
+
+    #[test]
+    fn absolute_auto_width_includes_inline_image_padding_and_border() {
+        let document = NodeHandle::document();
+        let body = NodeHandle::element("body");
+        let container = NodeHandle::element("div");
+        let absolute = NodeHandle::element("aside");
+        let object = NodeHandle::element("object");
+        absolute.set_attribute("class", "absolute");
+        object.set_attribute(
+            "data",
+            "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAIAAAD91JpzAAAABnRSTlMAAAAAAABupgeRAAAABmJLR0QA/wD/AP+gvaeTAAAAEUlEQVR42mP4/58BCv7/ZwAAHfAD/abwPj4AAAAASUVORK5CYII=",
+        );
+        document.append_child(body.clone());
+        body.append_child(container.clone());
+        container.append_child(absolute.clone());
+        absolute.append_child(object);
+
+        let mut resolver = StyleResolver::new();
+        resolver.add_stylesheet(
+            Origin::Author,
+            parse_stylesheet(
+                "div { position: relative; width: 20px; } \
+                 .absolute { position: absolute; left: 0; top: 0; } \
+                 object { display: inline; padding: 1px 2px 1px 3px; border-right: 4px solid black; }",
+            )
+            .unwrap(),
+        );
+
+        let layout = layout_tree(
+            &body,
+            &mut resolver,
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 40.0,
+                height: 0.0,
+            },
+        )
+        .unwrap();
+
+        let absolute_box = find_layout_box_by_tag(&layout, "aside").unwrap();
+        assert_eq!(absolute_box.dimensions.content.width, 11.0);
+    }
+
+    #[test]
+    fn floated_inline_element_is_taken_out_of_inline_line_layout() {
+        let document = NodeHandle::document();
+        let body = NodeHandle::element("body");
+        let container = NodeHandle::element("div");
+        let floated = NodeHandle::element("span");
+        floated.set_attribute("class", "floated");
+        document.append_child(body.clone());
+        body.append_child(container.clone());
+        container.append_child(floated.clone());
+
+        let mut resolver = StyleResolver::new();
+        resolver.add_stylesheet(
+            Origin::Author,
+            parse_stylesheet(
+                ".floated { display: inline; float: right; width: 20px; height: 10px; }",
+            )
+            .unwrap(),
+        );
+
+        let layout = layout_tree(
+            &body,
+            &mut resolver,
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 80.0,
+                height: 0.0,
+            },
+        )
+        .unwrap();
+
+        let container_box = find_layout_box_by_tag(&layout, "div").unwrap();
+        assert!(container_box.lines.is_empty());
+        assert_eq!(container_box.children.len(), 1);
+        assert_eq!(
+            container_box.children[0].node.tag_name().as_deref(),
+            Some("span")
+        );
     }
 
     #[test]
