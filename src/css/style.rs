@@ -289,6 +289,11 @@ fn compute_value(value: &Value, property_name: &str, parent_font_size: f32) -> C
             let px = match unit.as_str() {
                 "px" => *number,
                 "em" => *number * parent_font_size,
+                "mm" => *number * (96.0 / 25.4),
+                "cm" => *number * (96.0 / 2.54),
+                "in" => *number * 96.0,
+                "pt" => *number * (96.0 / 72.0),
+                "pc" => *number * (96.0 / 6.0),
                 _ => *number,
             };
             ComputedValue::Px(px)
