@@ -66,12 +66,20 @@ status: open
 - 公式比較差分は今回 `40,872 -> 40,423` まで改善し、`.eyes-c` が右へ逃げる崩れはひとまず抑えられた
 - 負 margin 自体は通るようになったが、下半分の位置ずれはまだ大きい。`.smile` の nested float 幅崩れは回帰テストで固定でき、ignored の公式比較も `40,999 -> 40,379` まで戻せた一方、主戦場は引き続き `.eyes-a` の inline image / fixed background の最終 paint と下半分の細かな位置合わせにある
 
+## 子issue
+
+- [012-1 `<link rel="stylesheet">` による外部スタイルシート適用](012-1-link-stylesheet-loading.md)
+- [012-2 負margin collapsingと clear の負clearance](012-2-negative-margin-collapsing-and-clear.md)
+- [012-3 `overflow: hidden` によるクリッピング](012-3-overflow-hidden-clipping.md)
+- [012-4 `display: table` / `table-cell` レイアウト](012-4-table-layout.md)
+- [012-5 `min-height` が `max-height` を override する処理](012-5-min-max-height-override.md)
+
 ## タスク
 - [x] 公式比較の差分画像を見て、主要な未実装要素を特定する
 - [x] 参照ページ側で欠けている描画要素（背景、見出しテキスト、画像配置など）を切り分ける
-- [ ] Acid2 本体側で欠けている描画要素（stacking / inline alignment / positioned paint order など）を切り分ける
-- [ ] 必要なら子 issue に分割して段階的に差分を減らす
-- [ ] ignored の公式比較テストを常時通る状態へ近づける
+- [x] Acid2 本体側で欠けている描画要素（stacking / inline alignment / positioned paint order など）を切り分ける
+- [x] 必要なら子 issue に分割して段階的に差分を減らす
+- [ ] 子issueを順次実装し、ignored の公式比較テストを常時通る状態へ近づける
 
 ## 次フェーズのプラン
 1. `.eyes` の 3 レイヤーを個別に固定する
