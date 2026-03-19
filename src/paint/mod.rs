@@ -3706,6 +3706,65 @@ mod tests {
     }
 
     #[test]
+    fn acid2_nose_inner_div_has_before_and_after_pseudo_with_border() {
+        let acid2_html = fs::read_to_string(acid2_fixture_path()).unwrap();
+        let document = TreeBuilder::parse(&acid2_html).document();
+        let mut resolver = StyleResolver::new();
+        for stylesheet in extract_author_stylesheets(&document).unwrap() {
+            resolver.add_stylesheet(
+                Origin::Author,
+                parse_stylesheet_forgiving(&stylesheet).unwrap(),
+            );
+        }
+        // .nose > div > div is the inner red square
+        let nose = find_first_descendant_by_class(&document, "nose").unwrap();
+        let nose_outer_div = nose.child_nodes().into_iter().find(|n| n.tag_name().as_deref() == Some("div")).unwrap();
+        let nose_inner_div = nose_outer_div.child_nodes().into_iter().find(|n| n.tag_name().as_deref() == Some("div")).unwrap();
+
+        let before = resolver.computed_pseudo_style(&nose_inner_div, PseudoElement::Before);
+        let after = resolver.computed_pseudo_style(&nose_inner_div, PseudoElement::After);
+
+
+        assert!(before.is_some(), "nose inner div should have :before pseudo");
+        let before = before.unwrap();
+        assert_eq!(before.get("content"), Some(&ComputedValue::String("".to_string())));
+        assert_eq!(before.get("display"), Some(&ComputedValue::Keyword("block".to_string())));
+
+        assert!(after.is_some(), "nose should have :after pseudo (selector is .nose div :after)");
+    }
+
+    #[test]
+    fn pseudo_before_border_triangle_renders() {
+        let html = r#"<html><head><style>
+            body { margin: 0; }
+            div { width: 24px; height: 24px; background: red; margin: 24px; }
+            div:before { display: block; content: ''; height: 0;
+                border-style: none solid solid;
+                border-width: 12px;
+                border-color: red yellow black yellow; }
+        </style></head><body><div></div></body></html>"#;
+        let document = TreeBuilder::parse(html).document();
+        let canvas = render_document(
+            &document,
+            Rect { x: 0.0, y: 0.0, width: 80.0, height: 80.0 },
+        )
+        .unwrap();
+
+        // :before has content=0x0, border: top(12,none) right(12,solid) bottom(12,solid) left(12,solid)
+        // center = (rect.x + border.left, rect.y + border.top) = (24+12, 0+12) = (36, 12)
+        // bottom triangle: (24,12)-(48,12)-(36,24) → black
+        // left triangle: (36,0)-(24,12)-(36,24) → yellow
+        // right triangle: (36,0)-(48,12)-(36,24) → yellow
+        let has_black = (12..24).any(|y| canvas.pixel(36, y) == Some(Color::rgb(0, 0, 0)));
+        // left triangle at x=30, y=12 (center of triangle) → yellow
+        let has_yellow = canvas.pixel(26, 12) == Some(Color::rgb(255, 255, 0))
+            || canvas.pixel(30, 12) == Some(Color::rgb(255, 255, 0));
+        assert!(has_black, "should have black border-bottom triangle from :before");
+        assert!(has_yellow, "should have yellow border-left triangle from :before, got {:?} {:?}",
+            canvas.pixel(26, 12), canvas.pixel(30, 12));
+    }
+
+    #[test]
     #[ignore = "documents current gap to the official Acid2 reference rendering"]
     fn acid2_fixture_matches_official_reference_rendering() {
         let acid2_html = fs::read_to_string(acid2_fixture_path()).unwrap();
