@@ -961,117 +961,68 @@ fn paint_zero_sized_border_box(
     border: EdgeSizesForPaint,
     clip: Option<Rect>,
 ) {
-    let center_x = rect.x + border.left;
-    let center_y = rect.y + border.top;
+    let inner_left = rect.x + border.left;
+    let inner_top = rect.y + border.top;
+    let inner_right = rect.x + rect.width - border.right;
+    let inner_bottom = rect.y + rect.height - border.bottom;
 
-    if border.top == 0.0 && border.bottom > 0.0 {
-        if border.left > 0.0 && has_solid_border_side(style, "left") {
-            fill_triangle_clipped(
-                canvas,
-                (rect.x, rect.y),
-                (center_x, rect.y),
-                (rect.x, rect.y + rect.height),
-                border_color_side(style, "left").unwrap_or(Color::rgb(0, 0, 0)),
-                clip,
-            );
-        }
-        if border.right > 0.0 && has_solid_border_side(style, "right") {
-            fill_triangle_clipped(
-                canvas,
-                (center_x, rect.y),
-                (rect.x + rect.width, rect.y),
-                (rect.x + rect.width, rect.y + rect.height),
-                border_color_side(style, "right").unwrap_or(Color::rgb(0, 0, 0)),
-                clip,
-            );
-        }
-        if has_solid_border_side(style, "bottom") {
-            fill_triangle_clipped(
-                canvas,
-                (rect.x, rect.y),
-                (rect.x + rect.width, rect.y),
-                (center_x, rect.y + rect.height),
-                border_color_side(style, "bottom").unwrap_or(Color::rgb(0, 0, 0)),
-                clip,
-            );
-        }
-        return;
-    }
-
-    if border.bottom == 0.0 && border.top > 0.0 {
-        if border.left > 0.0 && has_solid_border_side(style, "left") {
-            fill_triangle_clipped(
-                canvas,
-                (rect.x, rect.y),
-                (center_x, rect.y),
-                (rect.x, rect.y + rect.height),
-                border_color_side(style, "left").unwrap_or(Color::rgb(0, 0, 0)),
-                clip,
-            );
-        }
-        if border.right > 0.0 && has_solid_border_side(style, "right") {
-            fill_triangle_clipped(
-                canvas,
-                (center_x, rect.y),
-                (rect.x + rect.width, rect.y),
-                (rect.x + rect.width, rect.y + rect.height),
-                border_color_side(style, "right").unwrap_or(Color::rgb(0, 0, 0)),
-                clip,
-            );
-        }
-        if has_solid_border_side(style, "top") {
-            fill_triangle_clipped(
-                canvas,
-                (rect.x, rect.y + rect.height),
-                (center_x, rect.y),
-                (rect.x + rect.width, rect.y + rect.height),
-                border_color_side(style, "top").unwrap_or(Color::rgb(0, 0, 0)),
-                clip,
-            );
-        }
-        return;
-    }
-
-    if border.right > 0.0 && has_solid_border_side(style, "right") {
-        fill_triangle_clipped(
-            canvas,
-            (center_x, rect.y),
-            (rect.x + rect.width, center_y),
-            (center_x, rect.y + rect.height),
-            border_color_side(style, "right").unwrap_or(Color::rgb(0, 0, 0)),
-            clip,
-        );
-    }
-    if border.left > 0.0 && has_solid_border_side(style, "left") {
-        fill_triangle_clipped(
-            canvas,
-            (center_x, rect.y),
-            (rect.x, center_y),
-            (center_x, rect.y + rect.height),
-            border_color_side(style, "left").unwrap_or(Color::rgb(0, 0, 0)),
-            clip,
-        );
-    }
     if border.top > 0.0 && has_solid_border_side(style, "top") {
-        fill_triangle_clipped(
+        fill_quad_clipped(
             canvas,
-            (rect.x, center_y),
-            (center_x, rect.y),
-            (rect.x + rect.width, center_y),
+            (rect.x, rect.y),
+            (rect.x + rect.width, rect.y),
+            (inner_right, inner_top),
+            (inner_left, inner_top),
             border_color_side(style, "top").unwrap_or(Color::rgb(0, 0, 0)),
             clip,
         );
     }
-    if border.bottom > 0.0 && has_solid_border_side(style, "bottom") {
-        fill_triangle_clipped(
+    if border.right > 0.0 && has_solid_border_side(style, "right") {
+        fill_quad_clipped(
             canvas,
-            (rect.x, center_y),
-            (rect.x + rect.width, center_y),
-            (center_x, rect.y + rect.height),
+            (rect.x + rect.width, rect.y),
+            (rect.x + rect.width, rect.y + rect.height),
+            (inner_right, inner_bottom),
+            (inner_right, inner_top),
+            border_color_side(style, "right").unwrap_or(Color::rgb(0, 0, 0)),
+            clip,
+        );
+    }
+    if border.bottom > 0.0 && has_solid_border_side(style, "bottom") {
+        fill_quad_clipped(
+            canvas,
+            (rect.x, rect.y + rect.height),
+            (rect.x + rect.width, rect.y + rect.height),
+            (inner_right, inner_bottom),
+            (inner_left, inner_bottom),
             border_color_side(style, "bottom").unwrap_or(Color::rgb(0, 0, 0)),
             clip,
         );
     }
+    if border.left > 0.0 && has_solid_border_side(style, "left") {
+        fill_quad_clipped(
+            canvas,
+            (rect.x, rect.y),
+            (rect.x, rect.y + rect.height),
+            (inner_left, inner_bottom),
+            (inner_left, inner_top),
+            border_color_side(style, "left").unwrap_or(Color::rgb(0, 0, 0)),
+            clip,
+        );
+    }
+}
+
+fn fill_quad_clipped(
+    canvas: &mut Canvas,
+    p1: (f32, f32),
+    p2: (f32, f32),
+    p3: (f32, f32),
+    p4: (f32, f32),
+    color: Color,
+    clip: Option<Rect>,
+) {
+    fill_triangle_clipped(canvas, p1, p2, p3, color, clip);
+    fill_triangle_clipped(canvas, p1, p3, p4, color, clip);
 }
 
 fn border_box_rect(layout: &LayoutBox) -> Rect {
@@ -2301,6 +2252,30 @@ mod tests {
 
         assert!(count_pixels(&canvas, Color::rgb(255, 255, 0)) > 0);
         assert!(count_pixels(&canvas, Color::rgb(0, 0, 0)) > 0);
+    }
+
+    #[test]
+    fn zero_height_border_box_paints_top_and_bottom_bands_across_full_width() {
+        let html = r#"<html><head><style>
+            body { margin: 0; }
+            div { width: 24px; height: 0; border-top: 4px solid yellow; border-bottom: 4px solid black; }
+        </style></head><body><div></div></body></html>"#;
+        let document = TreeBuilder::parse(html).document();
+        let canvas = render_document(
+            &document,
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 24.0,
+                height: 8.0,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(canvas.pixel(0, 0), Some(Color::rgb(255, 255, 0)));
+        assert_eq!(canvas.pixel(12, 0), Some(Color::rgb(255, 255, 0)));
+        assert_eq!(canvas.pixel(0, 7), Some(Color::rgb(0, 0, 0)));
+        assert_eq!(canvas.pixel(12, 7), Some(Color::rgb(0, 0, 0)));
     }
 
     #[test]
