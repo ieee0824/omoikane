@@ -2,7 +2,7 @@
 number: 012-7
 slug: eyes-stacking-and-paint-phases
 parent: 012-acid2-official-conformance
-status: open
+status: closed
 ---
 
 # `.eyes` の stacking / paint phase 整合

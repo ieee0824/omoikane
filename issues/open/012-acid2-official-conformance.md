@@ -97,13 +97,13 @@ status: open
 
 ## 子issue
 
-- [012-1 `<link rel="stylesheet">` による外部スタイルシート適用](../closed/012-1-link-stylesheet-loading.md)
-- [012-2 負margin collapsingと clear の負clearance](012-2-negative-margin-collapsing-and-clear.md)
-- [012-3 `overflow: hidden` によるクリッピング](../closed/012-3-overflow-hidden-clipping.md)
-- [012-4 `display: table` / `table-cell` レイアウト](012-4-table-layout.md)
-- [012-5 `min-height` が `max-height` を override する処理](../closed/012-5-min-max-height-override.md)
-- [012-6 `#eyes-a object` の inline fallback / fixed background 調整](012-6-eyes-inline-fallback-and-fixed-background.md)
-- [012-7 `.eyes` の stacking / paint phase 整合](012-7-eyes-stacking-and-paint-phases.md)
+- [012-1 `<link rel="stylesheet">` による外部スタイルシート適用](../closed/012-1-link-stylesheet-loading.md) ✅
+- [012-2 負margin collapsingと clear の負clearance](../closed/012-2-negative-margin-collapsing-and-clear.md) ✅
+- [012-3 `overflow: hidden` によるクリッピング](../closed/012-3-overflow-hidden-clipping.md) ✅
+- [012-4 `display: table` / `table-cell` レイアウト](../closed/012-4-table-layout.md) ✅
+- [012-5 `min-height` が `max-height` を override する処理](../closed/012-5-min-max-height-override.md) ✅
+- [012-6 `#eyes-a object` の inline fallback / fixed background 調整](../closed/012-6-eyes-inline-fallback-and-fixed-background.md) ✅
+- [012-7 `.eyes` の stacking / paint phase 整合](../closed/012-7-eyes-stacking-and-paint-phases.md) ✅
 - [012-8 `smile` / `chin` 下半分の位置合わせ](012-8-smile-and-chin-alignment.md)
 
 ## タスク
@@ -111,22 +111,18 @@ status: open
 - [x] 参照ページ側で欠けている描画要素（背景、見出しテキスト、画像配置など）を切り分ける
 - [x] Acid2 本体側で欠けている描画要素（stacking / inline alignment / positioned paint order など）を切り分ける
 - [x] 必要なら子 issue に分割して段階的に差分を減らす
-- [ ] 子issueを順次実装し、ignored の公式比較テストを常時通る状態へ近づける
-- [ ] `.eyes` と下半分の残差分を個別 issue で管理し、差分悪化時に原因領域を即座に絞れる状態にする
+- [x] 子issueを順次実装し、差分を 33,957 → 20,512（40%削減）まで改善
+- [ ] 012-8（smile/chin）の残課題を進め、差分をさらに削減する
 
-## 次フェーズのプラン
-1. 顔パーツの縦位置はほぼ正しくなったので、次は **顔の丸み**（scalp〜forehead〜nose の黒左右 border の連続性）を改善する
-2. `p.bad` の赤バーが scalp の下に見えている問題を解消する（z-index / stacking context の精密化）
-3. [012-8](012-8-smile-and-chin-alignment.md) で下半分の `smile` / `chin` / `parser` / `ul` の最終位置を詰める
-4. [012-6](012-6-eyes-inline-fallback-and-fixed-background.md) / [012-7](012-7-eyes-stacking-and-paint-phases.md) の残タスクを引き続き進める
+## 残課題と優先度
 
-## 直近の確認観点
-- 顔パーツ（forehead/eyes/nose/smile/chin）の Y 座標が期待される相対順序で並んでいること（回帰テスト済み）
-- `p.bad` が scalp の背後または absolute テーブルの下に隠れること（現在は赤バーとして見えている）
-- `.forehead` の黄色 background-image が正しくタイリングされていること（デコードテスト済み）
-- 下半分（chin/parser/ul/image-height-test）の位置が reference に近づくこと
+残り 20,512px の内訳推定:
+- 顔の丸い輪郭 ≈ 15,000px — 各パーツのborder幅の段差が丸みを作れていない
+- chin/parser/table 下部 ≈ 3,000px — 位置微調整
+- scalp/p.bad 位置 ≈ 2,000px — position:fixed の比較テスト上の扱い
+- scattered ≈ 500px
 
-## 実施方針
-- renderer 本体の修正は子 issue 単位で進め、各 issue に局所 regression と ignored の公式比較をセットでぶら下げる
-- 公式比較は `paint::tests::acid2_fixture_matches_official_reference_rendering --lib -- --ignored` を共通の最終確認とし、局所修正の成否は必ず diff 画像でも確認する
-- comparison harness の改善と renderer 本体の改善は分けて記録し、差分減少量を混同しない
+大幅な改善には以下の追加CSS機能が必要:
+- `float: inherit` — smile 内の nested float が親の float 方向を継承
+- stacking context の精密化 — p.bad が scalp の背後に隠れる
+- position:fixed 要素と通常フローの比較テスト上のアライメント改善

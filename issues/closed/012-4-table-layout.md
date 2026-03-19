@@ -2,7 +2,7 @@
 number: 012-4
 slug: table-layout
 parent: 012-acid2-official-conformance
-status: open
+status: closed
 ---
 
 # `display: table` / `table-cell` レイアウト

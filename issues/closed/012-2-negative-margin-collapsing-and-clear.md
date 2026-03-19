@@ -2,7 +2,7 @@
 number: 012-2
 slug: negative-margin-collapsing-and-clear
 parent: 012-acid2-official-conformance
-status: open
+status: closed
 ---
 
 # 負margin collapsingと clear の負clearance

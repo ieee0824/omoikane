@@ -2,7 +2,7 @@
 number: 012-6
 slug: eyes-inline-fallback-and-fixed-background
 parent: 012-acid2-official-conformance
-status: open
+status: closed
 ---
 
 # `#eyes-a object` の inline fallback / fixed background 調整
