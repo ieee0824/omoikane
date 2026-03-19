@@ -21,6 +21,7 @@ pub enum Origin {
 pub enum ComputedValue {
     Keyword(String),
     Px(f32),
+    Percentage(f32),
     Color(String),
     String(String),
     Number(f32),
@@ -253,12 +254,12 @@ fn compute_value(value: &Value, property_name: &str, parent_font_size: f32) -> C
             ComputedValue::Px(px)
         }
         Value::Percentage(percent) => {
-            let px = if property_name == "font-size" {
-                parent_font_size * (*percent / 100.0)
+            if property_name == "font-size" {
+                let px = parent_font_size * (*percent / 100.0);
+                ComputedValue::Px(px)
             } else {
-                *percent
-            };
-            ComputedValue::Px(px)
+                ComputedValue::Percentage(*percent)
+            }
         }
         Value::Color(color) => ComputedValue::Color(color.clone()),
         Value::String(value) => ComputedValue::String(value.clone()),
@@ -375,7 +376,7 @@ fn render_value(value: &Value) -> String {
                 .iter()
                 .map(render_value)
                 .collect::<Vec<_>>()
-                .join(", ")
+                .join(if name.eq_ignore_ascii_case("url") { "," } else { ", " })
         ),
         Value::List(values) => values
             .iter()

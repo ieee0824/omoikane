@@ -41,8 +41,14 @@ status: open
   - `layout::tests::absolute_auto_width_includes_inline_image_padding_and_border`
   - `layout::tests::floated_inline_element_is_taken_out_of_inline_line_layout`
   - `paint::tests::acid2_eyes_inline_layer_stays_at_same_origin_as_float_and_block_layers`
+- non-`font-size` の `%` 値を computed style で生の percentage として保持し、`height` / `min-height` / `max-height` は containing block 高さが未確定なら `auto` 扱いに寄せた
+- `max-height` / `min-height` と positioned `% width` の clamp を layout に追加し、`empty` の誤った `height: 10px` 化と scalp の shrink-to-fit 潰れを抑制した
+- forgiving CSS parse で unquoted `url(data:...)` を正規化して再 parse するようにし、`background: fixed url(...)` から `background-image` を救えるようにした
+- 追加した回帰テスト
+  - `layout::tests::percentage_height_in_auto_sized_container_becomes_auto`
+  - `layout::tests::percentage_width_resolves_for_positioned_elements`
 - 現時点の主な残差分は、Acid2 本体側で `eyes-a` / `eyes-b` / `eyes-c` の layering と inline 配置が崩れ、目が横長の赤帯として描かれていること
-- 目の auto width 計算は改善したが、公式比較差分は現時点で `43,356 -> 43,932` とまだ悪化しており、主戦場は `smile` の nested float / absolute positioning と、顔パーツの縦方向の重なりに移っている
+- 公式比較差分は今回 `47,084 -> 41,508 -> 40,872` まで減少したが、主戦場はまだ `smile` の nested float / absolute positioning と、顔パーツの縦方向の重なりにある
 
 ## タスク
 - [x] 公式比較の差分画像を見て、主要な未実装要素を特定する

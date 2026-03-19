@@ -727,11 +727,18 @@ fn parse_value_sequence(tokens: &[CssToken]) -> Result<Vec<Value>, CssParseError
                     return Err(CssParseError::UnexpectedEndOfInput);
                 }
 
-                let arguments = parse_function_arguments(&tokens[start..end])?;
-                values.push(Value::Function {
-                    name: name.clone(),
-                    arguments,
-                });
+                if name.eq_ignore_ascii_case("url") {
+                    values.push(Value::Keyword(format!(
+                        "url({})",
+                        render_tokens(&tokens[start..end]).trim()
+                    )));
+                } else {
+                    let arguments = parse_function_arguments(&tokens[start..end])?;
+                    values.push(Value::Function {
+                        name: name.clone(),
+                        arguments,
+                    });
+                }
                 index = end + 1;
             }
             _ => {

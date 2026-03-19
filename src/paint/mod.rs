@@ -1376,7 +1376,8 @@ fn salvage_style_rule(input: &str) -> Option<crate::css::StyleRule> {
     let mut declarations = Vec::new();
 
     for declaration in split_declarations_forgiving(body) {
-        let candidate = format!("{selector} {{ {declaration}; }}");
+        let normalized = normalize_unquoted_urls(&declaration);
+        let candidate = format!("{selector} {{ {normalized}; }}");
         let Ok(stylesheet) = parse_stylesheet(&candidate) else {
             continue;
         };
@@ -1397,6 +1398,35 @@ fn salvage_style_rule(input: &str) -> Option<crate::css::StyleRule> {
         selectors: selectors?,
         declarations,
     })
+}
+
+fn normalize_unquoted_urls(input: &str) -> String {
+    let mut output = String::new();
+    let mut index = 0usize;
+
+    while let Some(relative_start) = input[index..].find("url(") {
+        let start = index + relative_start;
+        output.push_str(&input[index..start + 4]);
+        let content_start = start + 4;
+        let Some(relative_end) = input[content_start..].find(')') else {
+            output.push_str(&input[content_start..]);
+            return output;
+        };
+        let end = content_start + relative_end;
+        let content = input[content_start..end].trim();
+        if content.starts_with('"') || content.starts_with('\'') {
+            output.push_str(content);
+        } else {
+            output.push('"');
+            output.push_str(content);
+            output.push('"');
+        }
+        output.push(')');
+        index = end + 1;
+    }
+
+    output.push_str(&input[index..]);
+    output
 }
 
 fn split_declarations_forgiving(input: &str) -> Vec<String> {
@@ -1906,6 +1936,7 @@ mod tests {
         assert!(rule.declarations.iter().any(|decl| decl.name == "float"));
         assert!(rule.declarations.iter().any(|decl| decl.name == "width"));
         assert!(rule.declarations.iter().any(|decl| decl.name == "height"));
+        assert!(rule.declarations.iter().any(|decl| decl.name == "background-image"));
         assert!(rule.declarations.iter().any(|decl| decl.name == "border-left-width"));
         assert!(rule.declarations.iter().any(|decl| decl.name == "border-right-width"));
     }
@@ -2502,6 +2533,9 @@ mod tests {
         .unwrap();
 
         let smile = find_layout_box_by_class(&layout, "smile").unwrap();
+        let nose = find_layout_box_by_class(&layout, "nose").unwrap();
+        let empty = find_layout_box_by_class(&layout, "empty").unwrap();
+        let chin = find_layout_box_by_class(&layout, "chin").unwrap();
         let positioned = smile
             .children
             .iter()
@@ -2537,6 +2571,9 @@ mod tests {
 
         assert!(absolute.dimensions.content.width > 0.0, "{:?}", absolute.dimensions);
         assert!(float_descendant.total_width() > 0.0, "{:?}", float_descendant.dimensions);
+        assert_eq!(empty.dimensions.content.height, 0.0, "{:?}", empty.dimensions);
+        assert!(nose.dimensions.content.height <= 36.0, "{:?}", nose.dimensions);
+        assert!(chin.dimensions.content.y < smile.dimensions.content.y + 200.0);
     }
 
     #[test]

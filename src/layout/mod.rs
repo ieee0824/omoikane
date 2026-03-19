@@ -552,7 +552,15 @@ fn layout_element(
         lines.extend(inline_lines);
     }
 
-    let content_height = explicit_length(&style, "height").unwrap_or((cursor_y.max(float_bottom)) - y);
+    let auto_height = (cursor_y.max(float_bottom)) - y;
+    let mut content_height = resolved_length(&style, "height", containing_block.height)
+        .unwrap_or(auto_height);
+    if let Some(min_height) = resolved_length(&style, "min-height", containing_block.height) {
+        content_height = content_height.max(min_height);
+    }
+    if let Some(max_height) = resolved_length(&style, "max-height", containing_block.height) {
+        content_height = content_height.min(max_height);
+    }
     let dimensions = BoxDimensions {
         content: Rect {
             x,
@@ -715,7 +723,14 @@ fn layout_flex_container(
         cross_cursor += line_cross_size;
     }
 
-    let content_height = explicit_length(&style, "height").unwrap_or(cross_cursor - y);
+    let auto_height = cross_cursor - y;
+    let mut content_height = resolved_length(&style, "height", 0.0).unwrap_or(auto_height);
+    if let Some(min_height) = resolved_length(&style, "min-height", 0.0) {
+        content_height = content_height.max(min_height);
+    }
+    if let Some(max_height) = resolved_length(&style, "max-height", 0.0) {
+        content_height = content_height.min(max_height);
+    }
     let dimensions = BoxDimensions {
         content: Rect {
             x,
@@ -825,7 +840,14 @@ fn layout_table_container(
         children.push(group_box);
     }
 
-    let content_height = explicit_length(&style, "height").unwrap_or((cursor_y - y).max(spacing));
+    let auto_height = (cursor_y - y).max(spacing);
+    let mut content_height = resolved_length(&style, "height", 0.0).unwrap_or(auto_height);
+    if let Some(min_height) = resolved_length(&style, "min-height", 0.0) {
+        content_height = content_height.max(min_height);
+    }
+    if let Some(max_height) = resolved_length(&style, "max-height", 0.0) {
+        content_height = content_height.min(max_height);
+    }
     Some(LayoutBox {
         node: node.clone(),
         dimensions: BoxDimensions {
@@ -1014,11 +1036,11 @@ fn compute_width(
     border: EdgeSizes,
     margin: &mut EdgeSizes,
 ) -> f32 {
-    let specified_width = explicit_length(style, "width");
+    let specified_width = resolved_length(style, "width", containing_width);
     let margin_left_auto = is_auto(style.get("margin-left"));
     let margin_right_auto = is_auto(style.get("margin-right"));
 
-    if let Some(width) = specified_width {
+    let mut width = if let Some(width) = specified_width {
         let remaining =
             (containing_width - width - padding.horizontal() - border.horizontal()).max(0.0);
 
@@ -1047,7 +1069,16 @@ fn compute_width(
 
         (containing_width - padding.horizontal() - border.horizontal() - margin.horizontal())
             .max(0.0)
+    };
+
+    if let Some(min_width) = resolved_length(style, "min-width", containing_width) {
+        width = width.max(min_width);
     }
+    if let Some(max_width) = resolved_length(style, "max-width", containing_width) {
+        width = width.min(max_width);
+    }
+
+    width
 }
 
 fn edge_sizes(style: &ComputedStyle, prefix: &str) -> EdgeSizes {
@@ -1082,6 +1113,25 @@ fn explicit_length(style: &ComputedStyle, property: &str) -> Option<f32> {
         Some(ComputedValue::Number(value)) => Some(*value),
         _ => None,
     }
+}
+
+fn percentage_length(style: &ComputedStyle, property: &str) -> Option<f32> {
+    match style.get(property) {
+        Some(ComputedValue::Percentage(value)) => Some(*value),
+        _ => None,
+    }
+}
+
+fn resolved_length(style: &ComputedStyle, property: &str, basis: f32) -> Option<f32> {
+    explicit_length(style, property).or_else(|| {
+        percentage_length(style, property).and_then(|percent| {
+            if basis > 0.0 {
+                Some(basis * (percent / 100.0))
+            } else {
+                None
+            }
+        })
+    })
 }
 
 fn is_auto(value: Option<&ComputedValue>) -> bool {
@@ -1266,7 +1316,8 @@ fn layout_positioned_child(
     let top = explicit_length(style, "top");
     let bottom = explicit_length(style, "bottom");
     let static_outer = containing_block;
-    let child_width = if explicit_length(style, "width").is_none() {
+    let specified_width = resolved_length(style, "width", origin.width);
+    let child_width = if specified_width.is_none() {
         shrink_to_fit_width(child, resolver, origin.width)
     } else {
         origin.width
@@ -1278,7 +1329,7 @@ fn layout_positioned_child(
         height: origin.height,
     };
     let mut layout_child = layout_node(child, resolver, child_containing, viewport, Some(parent_box))?;
-    if explicit_length(style, "width").is_none() {
+    if specified_width.is_none() {
         layout_child.dimensions.content.width = shrink_to_fit_width(child, resolver, origin.width);
     }
     let outer_width = layout_child.total_width();
@@ -3640,6 +3691,86 @@ mod tests {
 
         let absolute_box = find_layout_box_by_tag(&layout, "aside").unwrap();
         assert_eq!(absolute_box.dimensions.content.width, 11.0);
+    }
+
+    #[test]
+    fn percentage_height_in_auto_sized_container_becomes_auto() {
+        let document = NodeHandle::document();
+        let body = NodeHandle::element("body");
+        let parent = NodeHandle::element("div");
+        let child = NodeHandle::element("section");
+        let grandchild = NodeHandle::element("p");
+
+        child.set_attribute("class", "percent");
+        grandchild.set_attribute("class", "content");
+        document.append_child(body.clone());
+        body.append_child(parent.clone());
+        parent.append_child(child.clone());
+        child.append_child(grandchild);
+
+        let mut resolver = StyleResolver::new();
+        resolver.add_stylesheet(
+            Origin::Author,
+            parse_stylesheet(
+                ".percent { height: 50%; max-height: 18px; } \
+                 .content { height: 40px; }",
+            )
+            .unwrap(),
+        );
+
+        let layout = layout_tree(
+            &body,
+            &mut resolver,
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 200.0,
+                height: 0.0,
+            },
+        )
+        .unwrap();
+
+        let child_box = find_layout_box_by_tag(&layout, "section").unwrap();
+        assert_eq!(child_box.dimensions.content.height, 18.0);
+    }
+
+    #[test]
+    fn percentage_width_resolves_for_positioned_elements() {
+        let document = NodeHandle::document();
+        let body = NodeHandle::element("body");
+        let parent = NodeHandle::element("div");
+        let child = NodeHandle::element("section");
+
+        parent.set_attribute("class", "parent");
+        child.set_attribute("class", "child");
+        document.append_child(body.clone());
+        body.append_child(parent.clone());
+        parent.append_child(child.clone());
+
+        let mut resolver = StyleResolver::new();
+        resolver.add_stylesheet(
+            Origin::Author,
+            parse_stylesheet(
+                ".parent { position: relative; width: 200px; } \
+                 .child { position: absolute; width: 50%; max-width: 80px; height: 10px; }",
+            )
+            .unwrap(),
+        );
+
+        let layout = layout_tree(
+            &body,
+            &mut resolver,
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 240.0,
+                height: 0.0,
+            },
+        )
+        .unwrap();
+
+        let child_box = find_layout_box_by_tag(&layout, "section").unwrap();
+        assert_eq!(child_box.dimensions.content.width, 80.0);
     }
 
     #[test]
