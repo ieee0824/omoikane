@@ -3573,16 +3573,43 @@ mod tests {
         let forehead = find_layout_box_by_class(&layout, "forehead").unwrap();
 
 
-        // Currently eyes (y=1598) is BELOW nose (y=1562) — this is wrong.
-        // .eyes { position: absolute; top: 5em } should place eyes at
-        // .picture.content.y + 60, which should be above the nose.
-        // Root cause: inline <table> between <p> and .forehead advances cursor_y.
-        // TODO: fix so that eyes.y < nose.y
+        // .eyes { position: absolute; top: 5em } places eyes above the nose
         assert!(
-            (eyes.dimensions.content.y - nose.dimensions.content.y).abs() < 100.0,
-            "eyes (y={}) and nose (y={}) should be close",
+            eyes.dimensions.content.y < nose.dimensions.content.y,
+            "eyes (y={}) should be above nose (y={})",
             eyes.dimensions.content.y,
             nose.dimensions.content.y,
+        );
+        // eyes should be at or overlapping with the forehead area
+        assert!(
+            eyes.dimensions.content.y <= forehead.dimensions.content.y + forehead.dimensions.content.height,
+            "eyes (y={}) should be at or above forehead bottom (y={})",
+            eyes.dimensions.content.y,
+            forehead.dimensions.content.y + forehead.dimensions.content.height,
+        );
+    }
+
+    #[test]
+    fn acid2_p_bad_has_margin_top_from_adjacent_sibling_selector() {
+        let acid2_html = fs::read_to_string(acid2_fixture_path()).unwrap();
+        let document = TreeBuilder::parse(&acid2_html).document();
+        let mut resolver = StyleResolver::new();
+        for stylesheet in extract_author_stylesheets(&document).unwrap() {
+            resolver.add_stylesheet(
+                Origin::Author,
+                parse_stylesheet_forgiving(&stylesheet).unwrap(),
+            );
+        }
+        let p_bad = find_first_descendant_by_class(&document, "bad").unwrap();
+        let style = resolver.computed_style(&p_bad);
+        let margin_top = style.get("margin-top");
+        eprintln!("p.bad margin-top: {:?}", margin_top);
+        eprintln!("p.bad position: {:?}", style.get("position"));
+        // p + table + p { margin-top: 3em; } should match p.bad → 3em = 36px
+        assert!(
+            matches!(margin_top, Some(ComputedValue::Px(v)) if (*v - 36.0).abs() < 0.1),
+            "p.bad should have margin-top: 3em (36px) from 'p + table + p' selector, got {:?}",
+            margin_top,
         );
     }
 
