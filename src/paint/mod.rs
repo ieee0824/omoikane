@@ -2899,6 +2899,44 @@ mod tests {
     }
 
     #[test]
+    fn acid2_second_line_absolute_shrink_wraps_float() {
+        let acid2_html = fs::read_to_string(acid2_fixture_path()).unwrap();
+        let acid2_document = TreeBuilder::parse(&acid2_html).document();
+        let mut resolver = StyleResolver::new();
+        for stylesheet in extract_author_stylesheets(&acid2_document).unwrap() {
+            resolver.add_stylesheet(
+                Origin::Author,
+                parse_stylesheet_forgiving(&stylesheet).unwrap(),
+            );
+        }
+
+        let layout = crate::layout::layout_tree(
+            &acid2_document,
+            &mut resolver,
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 800.0,
+                height: 600.0,
+            },
+        )
+        .unwrap();
+
+        let second_line = find_layout_box_by_class(&layout, "first").unwrap();
+        let floated_inner = second_line.children.iter().find(|child| {
+            matches!(
+                resolver.computed_style(&child.node).get("float"),
+                Some(ComputedValue::Keyword(keyword)) if keyword.eq_ignore_ascii_case("right")
+            )
+        });
+
+        assert_eq!(second_line.dimensions.content.width, 48.0);
+        assert!(floated_inner.is_some(), "{:?}", second_line.children);
+        assert_eq!(second_line.dimensions.content.height, 12.0);
+    }
+
+
+    #[test]
     fn acid2_smile_nested_float_keeps_block_width_source_descendant() {
         let acid2_html = fs::read_to_string(acid2_fixture_path()).unwrap();
         let acid2_document = TreeBuilder::parse(&acid2_html).document();
@@ -3241,6 +3279,7 @@ mod tests {
         }
         None
     }
+
 
     fn find_layout_box_by_class<'a>(layout: &'a LayoutBox, class_name: &str) -> Option<&'a LayoutBox> {
         if layout

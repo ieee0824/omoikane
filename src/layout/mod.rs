@@ -3794,6 +3794,64 @@ mod tests {
     }
 
     #[test]
+    fn absolute_auto_width_relayouts_right_aligned_inline_content_after_expanding() {
+        let document = NodeHandle::document();
+        let body = NodeHandle::element("body");
+        let container = NodeHandle::element("div");
+        let absolute = NodeHandle::element("aside");
+        let object = NodeHandle::element("object");
+        let sibling = NodeHandle::element("section");
+
+        absolute.set_attribute("class", "absolute");
+        sibling.set_attribute("class", "sibling");
+        object.set_attribute(
+            "data",
+            "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAIAAAD91JpzAAAABnRSTlMAAAAAAABupgeRAAAABmJLR0QA/wD/AP+gvaeTAAAAEUlEQVR42mP4/58BCv7/ZwAAHfAD/abwPj4AAAAASUVORK5CYII=",
+        );
+        document.append_child(body.clone());
+        body.append_child(container.clone());
+        container.append_child(absolute.clone());
+        container.append_child(sibling);
+        absolute.append_child(object);
+
+        let mut resolver = StyleResolver::new();
+        resolver.add_stylesheet(
+            Origin::Author,
+            parse_stylesheet(
+                "div { position: relative; width: 200px; } \
+                 .absolute { position: absolute; left: 0; top: 0; text-align: right; } \
+                 object { display: inline; padding-left: 3px; border-right: 4px solid black; } \
+                 .sibling { width: 40px; height: 1px; }",
+            )
+            .unwrap(),
+        );
+
+        let layout = layout_tree(
+            &body,
+            &mut resolver,
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 240.0,
+                height: 0.0,
+            },
+        )
+        .unwrap();
+
+        let absolute_box = find_layout_box_by_tag(&layout, "aside").unwrap();
+        let line = absolute_box.lines.first().unwrap();
+        let image = line
+            .fragments
+            .iter()
+            .find(|fragment| matches!(fragment.content, InlineFragmentContent::Image(_, _)))
+            .unwrap();
+
+        assert_eq!(absolute_box.dimensions.content.width, 9.0);
+        assert_eq!(line.rect.width, 9.0);
+        assert_eq!(image.rect.x + image.rect.width, absolute_box.dimensions.content.x + 9.0);
+    }
+
+    #[test]
     fn percentage_height_in_auto_sized_container_becomes_auto() {
         let document = NodeHandle::document();
         let body = NodeHandle::element("body");

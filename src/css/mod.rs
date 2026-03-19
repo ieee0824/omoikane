@@ -206,7 +206,7 @@ pub fn tokenize(input: &str) -> Result<Vec<CssToken>, CssParseError> {
                     tokens.push(CssToken::Number(number));
                 }
             }
-            c if is_ident_start(c) || c == '-' => {
+            c if is_ident_start(c) || c == '-' || c == '\\' => {
                 let ident = consume_ident(&chars, &mut index);
                 tokens.push(CssToken::Ident(ident));
             }
@@ -1335,7 +1335,14 @@ fn is_number_start(chars: &[char], index: usize) -> bool {
 fn consume_ident(chars: &[char], index: &mut usize) -> String {
     let mut ident = String::new();
     while let Some(&ch) = chars.get(*index) {
-        if is_ident_char(ch) {
+        if ch == '\\' {
+            if let Some(&escaped) = chars.get(*index + 1) {
+                ident.push(escaped);
+                *index += 2;
+            } else {
+                *index += 1;
+            }
+        } else if is_ident_char(ch) {
             ident.push(ch);
             *index += 1;
         } else {
@@ -1353,7 +1360,14 @@ fn consume_string(chars: &[char], index: &mut usize, quote: char) -> Result<Stri
         if ch == quote {
             return Ok(value);
         }
-        value.push(ch);
+        if ch == '\\' {
+            if let Some(&escaped) = chars.get(*index) {
+                value.push(escaped);
+                *index += 1;
+            }
+        } else {
+            value.push(ch);
+        }
     }
     Err(CssParseError::UnexpectedEndOfInput)
 }
@@ -1448,6 +1462,32 @@ mod tests {
                     value: Some("text".to_string()),
                 },
                 SimpleSelector::PseudoElement("placeholder".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn parses_escaped_attribute_selector_values() {
+        let stylesheet =
+            parse_stylesheet(r#"[class=second\ two][class="second two"] { float: right; }"#)
+                .unwrap();
+        let Rule::Style(rule) = &stylesheet.rules[0] else {
+            panic!("expected style rule");
+        };
+
+        assert_eq!(
+            rule.selectors[0].parts[0].simples,
+            vec![
+                SimpleSelector::Attribute {
+                    name: "class".to_string(),
+                    operator: Some(AttributeOperator::Equals),
+                    value: Some("second two".to_string()),
+                },
+                SimpleSelector::Attribute {
+                    name: "class".to_string(),
+                    operator: Some(AttributeOperator::Equals),
+                    value: Some("second two".to_string()),
+                },
             ]
         );
     }
