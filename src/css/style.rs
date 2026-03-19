@@ -150,6 +150,13 @@ impl StyleResolver {
         for candidate in candidates {
             let font_size = inherited_font_size(parent_style, &properties);
             let computed = compute_value(&candidate.value, &candidate.name, font_size);
+            // CSS 2.1: non-zero unitless numbers are invalid for length properties;
+            // skip them so they don't override valid length values in the cascade.
+            if matches!(computed, ComputedValue::Number(n) if n != 0.0)
+                && is_length_property(&candidate.name)
+            {
+                continue;
+            }
             properties.insert(candidate.name, computed);
         }
 
@@ -218,6 +225,18 @@ fn collect_rule_candidates(
             }
         }
     }
+}
+
+fn is_length_property(name: &str) -> bool {
+    matches!(
+        name,
+        "width" | "height" | "min-width" | "min-height" | "max-width" | "max-height"
+            | "margin-top" | "margin-right" | "margin-bottom" | "margin-left"
+            | "padding-top" | "padding-right" | "padding-bottom" | "padding-left"
+            | "border-top-width" | "border-right-width" | "border-bottom-width" | "border-left-width"
+            | "top" | "right" | "bottom" | "left"
+            | "border-spacing"
+    )
 }
 
 fn cascade_rank(candidate: &Candidate) -> (u8, u8) {

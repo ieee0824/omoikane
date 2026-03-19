@@ -1327,7 +1327,8 @@ fn edge_sizes(style: &ComputedStyle, prefix: &str) -> EdgeSizes {
 fn explicit_length(style: &ComputedStyle, property: &str) -> Option<f32> {
     match style.get(property) {
         Some(ComputedValue::Px(value)) => Some(*value),
-        Some(ComputedValue::Number(value)) => Some(*value),
+        // CSS 2.1: unitless numbers are only valid as lengths when the value is 0
+        Some(ComputedValue::Number(value)) if *value == 0.0 => Some(0.0),
         _ => None,
     }
 }

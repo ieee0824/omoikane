@@ -1476,10 +1476,13 @@ fn parse_stylesheet_forgiving(input: &str) -> Result<Stylesheet, PaintError> {
                     depth -= 1;
                 }
                 if depth == 0 {
-                    if let Ok(stylesheet) = parse_stylesheet(&current) {
-                        rules.extend(stylesheet.rules);
-                    } else if let Some(rule) = salvage_style_rule(&current) {
-                        rules.push(crate::css::Rule::Style(rule));
+                    let trimmed = current.trim_start_matches(|c: char| c == ';' || c.is_ascii_whitespace());
+                    if !trimmed.is_empty() {
+                        if let Ok(stylesheet) = parse_stylesheet(trimmed) {
+                            rules.extend(stylesheet.rules);
+                        } else if let Some(rule) = salvage_style_rule(trimmed) {
+                            rules.push(crate::css::Rule::Style(rule));
+                        }
                     }
                     current.clear();
                 }
