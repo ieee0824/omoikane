@@ -586,10 +586,16 @@ fn layout_element(
     let auto_height = (cursor_y.max(float_bottom)) - y;
     let mut content_height = resolved_length(&style, "height", containing_block.height)
         .unwrap_or(auto_height);
-    if let Some(min_height) = resolved_length(&style, "min-height", containing_block.height) {
+    let (min_height, max_height) = normalized_min_max_lengths(
+        &style,
+        "min-height",
+        "max-height",
+        containing_block.height,
+    );
+    if let Some(min_height) = min_height {
         content_height = content_height.max(min_height);
     }
-    if let Some(max_height) = resolved_length(&style, "max-height", containing_block.height) {
+    if let Some(max_height) = max_height {
         content_height = content_height.min(max_height);
     }
     let dimensions = BoxDimensions {
@@ -756,10 +762,12 @@ fn layout_flex_container(
 
     let auto_height = cross_cursor - y;
     let mut content_height = resolved_length(&style, "height", 0.0).unwrap_or(auto_height);
-    if let Some(min_height) = resolved_length(&style, "min-height", 0.0) {
+    let (min_height, max_height) =
+        normalized_min_max_lengths(&style, "min-height", "max-height", 0.0);
+    if let Some(min_height) = min_height {
         content_height = content_height.max(min_height);
     }
-    if let Some(max_height) = resolved_length(&style, "max-height", 0.0) {
+    if let Some(max_height) = max_height {
         content_height = content_height.min(max_height);
     }
     let dimensions = BoxDimensions {
@@ -873,10 +881,12 @@ fn layout_table_container(
 
     let auto_height = (cursor_y - y).max(spacing);
     let mut content_height = resolved_length(&style, "height", 0.0).unwrap_or(auto_height);
-    if let Some(min_height) = resolved_length(&style, "min-height", 0.0) {
+    let (min_height, max_height) =
+        normalized_min_max_lengths(&style, "min-height", "max-height", 0.0);
+    if let Some(min_height) = min_height {
         content_height = content_height.max(min_height);
     }
-    if let Some(max_height) = resolved_length(&style, "max-height", 0.0) {
+    if let Some(max_height) = max_height {
         content_height = content_height.min(max_height);
     }
     Some(LayoutBox {
@@ -1102,14 +1112,30 @@ fn compute_width(
             .max(0.0)
     };
 
-    if let Some(min_width) = resolved_length(style, "min-width", containing_width) {
+    let (min_width, max_width) =
+        normalized_min_max_lengths(style, "min-width", "max-width", containing_width);
+    if let Some(min_width) = min_width {
         width = width.max(min_width);
     }
-    if let Some(max_width) = resolved_length(style, "max-width", containing_width) {
+    if let Some(max_width) = max_width {
         width = width.min(max_width);
     }
 
     width
+}
+
+fn normalized_min_max_lengths(
+    style: &ComputedStyle,
+    min_name: &str,
+    max_name: &str,
+    containing_length: f32,
+) -> (Option<f32>, Option<f32>) {
+    let min = resolved_length(style, min_name, containing_length);
+    let max = resolved_length(style, max_name, containing_length);
+    match (min, max) {
+        (Some(min), Some(max)) if min > max => (Some(min), Some(min)),
+        pair => pair,
+    }
 }
 
 fn edge_sizes(style: &ComputedStyle, prefix: &str) -> EdgeSizes {
@@ -3929,6 +3955,74 @@ mod tests {
 
         let child_box = find_layout_box_by_tag(&layout, "section").unwrap();
         assert_eq!(child_box.dimensions.content.width, 80.0);
+    }
+
+    #[test]
+    fn min_height_overrides_smaller_max_height() {
+        let document = NodeHandle::document();
+        let body = NodeHandle::element("body");
+        let child = NodeHandle::element("div");
+        child.set_attribute("class", "clamped");
+        document.append_child(body.clone());
+        body.append_child(child.clone());
+
+        let mut resolver = StyleResolver::new();
+        resolver.add_stylesheet(
+            Origin::Author,
+            parse_stylesheet(
+                ".clamped { height: 8px; min-height: 12px; max-height: 7px; width: 20px; }",
+            )
+            .unwrap(),
+        );
+
+        let layout = layout_tree(
+            &body,
+            &mut resolver,
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 100.0,
+                height: 0.0,
+            },
+        )
+        .unwrap();
+
+        let child_box = find_layout_box_by_tag(&layout, "div").unwrap();
+        assert_eq!(child_box.dimensions.content.height, 12.0);
+    }
+
+    #[test]
+    fn min_width_overrides_smaller_max_width() {
+        let document = NodeHandle::document();
+        let body = NodeHandle::element("body");
+        let child = NodeHandle::element("div");
+        child.set_attribute("class", "clamped");
+        document.append_child(body.clone());
+        body.append_child(child.clone());
+
+        let mut resolver = StyleResolver::new();
+        resolver.add_stylesheet(
+            Origin::Author,
+            parse_stylesheet(
+                ".clamped { width: 20px; min-width: 32px; max-width: 24px; height: 10px; }",
+            )
+            .unwrap(),
+        );
+
+        let layout = layout_tree(
+            &body,
+            &mut resolver,
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 100.0,
+                height: 0.0,
+            },
+        )
+        .unwrap();
+
+        let child_box = find_layout_box_by_tag(&layout, "div").unwrap();
+        assert_eq!(child_box.dimensions.content.width, 32.0);
     }
 
     #[test]

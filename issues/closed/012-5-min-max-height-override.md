@@ -2,7 +2,7 @@
 number: 012-5
 slug: min-max-height-override
 parent: 012-acid2-official-conformance
-status: open
+status: closed
 ---
 
 # `min-height` が `max-height` を override する処理
@@ -27,3 +27,9 @@ status: open
 
 - `height: 8px; min-height: 1em; max-height: 2mm;` のようなケースで `min-height: 1em` (= 12px) が勝つこと
 - `min-height` が percentage で containing block 高さが未確定の場合は auto 扱い（既存処理との整合性）
+
+## 完了メモ
+
+- layout の width / height clamp に `min > max` 正規化を共通化して導入した
+- `layout::tests::min_height_overrides_smaller_max_height` を追加し、height 側の override を固定した
+- `layout::tests::min_width_overrides_smaller_max_width` を追加し、width 側の override を固定した

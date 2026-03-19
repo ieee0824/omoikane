@@ -2,7 +2,7 @@
 number: 012-3
 slug: overflow-hidden-clipping
 parent: 012-acid2-official-conformance
-status: open
+status: closed
 ---
 
 # `overflow: hidden` によるクリッピング
@@ -26,3 +26,9 @@ status: open
 
 - `overflow: scroll` / `overflow: auto` によるスクロールバー生成
 - `overflow-x` / `overflow-y` の個別制御
+
+## 完了メモ
+
+- paint 側で overflow hidden の clip 適用は実装済み
+- `paint::tests::clips_children_when_overflow_is_hidden` で基本ケースを固定済み
+- Acid2 fixture / reference ともに viewport 側で `overflow: hidden` を使うため、Acid2 公式比較の前提機能として利用中

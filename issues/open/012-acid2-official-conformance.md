@@ -11,7 +11,7 @@ status: open
 
 ## 現状
 - `paint::tests::acid2_fixture_matches_official_reference_rendering` を `--ignored` で実行すると失敗する
-- 差分ピクセル数は現在 40,379
+- 差分ピクセル数は現在 40,427
 - 差分画像は `tests/output/acid2/acid2.official-reference.{actual,expected,diff}.png` に出力される
 
 ## 進捗メモ
@@ -47,32 +47,41 @@ status: open
 - `background` shorthand から `background-attachment: fixed` と `background-position-x/y` を展開し、paint 側でも viewport 基準の fixed background と position offset を扱えるようにした
 - float 後続 block の containing block を見直し、explicit `width` を持つ block は先行 float の offset で丸ごと右へ逃がさないようにして、`#eyes-c` が `#eyes-b` と水平帯域を共有するようにした
 - CSS tokenizer で負の数値を `Dimension/Number` として扱うようにし、`.empty div { margin-bottom: -6em; }` のような負 margin が computed style まで落ちない問題を修正した
+- escaped identifier / string を CSS tokenizer で decode するようにし、`[class=second\ two][class="second two"]` のような attribute selector が正しく一致するようにした
 - 追加した回帰テスト
   - `layout::tests::percentage_height_in_auto_sized_container_becomes_auto`
   - `layout::tests::percentage_width_resolves_for_positioned_elements`
   - `css::tests::expands_background_attachment_and_position`
   - `css::tests::tokenizes_negative_dimensions`
+  - `css::tests::parses_escaped_attribute_selector_values`
   - `paint::tests::paints_background_image_with_position_offset`
   - `paint::tests::fixed_background_image_uses_viewport_origin`
 - 追加した Acid2 回帰テスト
   - `paint::tests::acid2_eyes_block_layer_stays_overlapping_float_layer`
+  - `paint::tests::acid2_second_line_absolute_shrink_wraps_float`
 - float / absolute の `width: auto` を初期 layout 時点で shrink-to-fit するよう寄せ、`.smile` 内の nested float が zero-height block child (`strong { width: 6em; display: block; }`) 由来の幅を失わないようにした
 - positioned `width: auto` は、初期 shrink-to-fit 幅で一度レイアウトしたあと、実際の child/line 使用幅が広ければその幅で再レイアウトするようにし、`.eyes` の親 absolute box が `#eyes-b/#eyes-c` 幅を取り込んだ後に `#eyes-a` の line box も right align し直せるようにした
 - 追加した Acid2 回帰テスト
   - `paint::tests::acid2_smile_nested_float_keeps_block_width_source_descendant`
 - 強化した Acid2 回帰テスト
   - `paint::tests::acid2_eyes_inline_layer_stays_at_same_origin_as_float_and_block_layers`
+- `blockquote.first.one` 配下の `address.second two` に `float:right; width:48px; height:12px` が乗る状態を回帰テストで固定し、Acid2 上半分の second line 用 shrink-wrap がレイアウト上は復活した
+- `min-height > max-height` / `min-width > max-width` のときに min 側を採用する正規化を layout に入れ、CSS 2.1 §10.4 / §10.7 に沿うようにした
 - 現時点の主な残差分は、Acid2 本体側で `eyes-a` / `eyes-b` / `eyes-c` の layering と inline 配置が崩れ、目が横長の赤帯として描かれていること
 - 公式比較差分は今回 `40,872 -> 40,423` まで改善し、`.eyes-c` が右へ逃げる崩れはひとまず抑えられた
 - 負 margin 自体は通るようになったが、下半分の位置ずれはまだ大きい。`.smile` の nested float 幅崩れは回帰テストで固定でき、ignored の公式比較も `40,999 -> 40,379` まで戻せた一方、主戦場は引き続き `.eyes-a` の inline image / fixed background の最終 paint と下半分の細かな位置合わせにある
+- min/max override 修正で `layout::tests::min_height_overrides_smaller_max_height` / `layout::tests::min_width_overrides_smaller_max_width` を追加した。`cargo test --lib` は通過したが、ignored の公式比較は今回は `40,379 -> 40,427` とわずかに悪化した
 
 ## 子issue
 
 - [012-1 `<link rel="stylesheet">` による外部スタイルシート適用](012-1-link-stylesheet-loading.md)
 - [012-2 負margin collapsingと clear の負clearance](012-2-negative-margin-collapsing-and-clear.md)
-- [012-3 `overflow: hidden` によるクリッピング](012-3-overflow-hidden-clipping.md)
+- [012-3 `overflow: hidden` によるクリッピング](../closed/012-3-overflow-hidden-clipping.md)
 - [012-4 `display: table` / `table-cell` レイアウト](012-4-table-layout.md)
-- [012-5 `min-height` が `max-height` を override する処理](012-5-min-max-height-override.md)
+- [012-5 `min-height` が `max-height` を override する処理](../closed/012-5-min-max-height-override.md)
+- [012-6 `#eyes-a object` の inline fallback / fixed background 調整](012-6-eyes-inline-fallback-and-fixed-background.md)
+- [012-7 `.eyes` の stacking / paint phase 整合](012-7-eyes-stacking-and-paint-phases.md)
+- [012-8 `smile` / `chin` 下半分の位置合わせ](012-8-smile-and-chin-alignment.md)
 
 ## タスク
 - [x] 公式比較の差分画像を見て、主要な未実装要素を特定する
@@ -80,25 +89,15 @@ status: open
 - [x] Acid2 本体側で欠けている描画要素（stacking / inline alignment / positioned paint order など）を切り分ける
 - [x] 必要なら子 issue に分割して段階的に差分を減らす
 - [ ] 子issueを順次実装し、ignored の公式比較テストを常時通る状態へ近づける
+- [ ] `.eyes` と下半分の残差分を個別 issue で管理し、差分悪化時に原因領域を即座に絞れる状態にする
 
 ## 次フェーズのプラン
-1. `.eyes` の 3 レイヤーを個別に固定する
-   - `#eyes-c` は通常 flow block として最下層に残ること
-   - `#eyes-b` は float としてその上に乗ること
-   - `#eyes-a` は inline content を含む `height: 0` box として最上層に乗ること
-2. `#eyes-a object` の inline formatting を詰める
-   - fallback 後の replaced content が inline のまま line box に参加すること
-   - `vertical-align: bottom` と `text-align: right` が目画像の最終位置に効くこと
-   - inline の `width` / `height` 指定が Acid2 コメントどおり効かないこと
-3. positioned descendant の stacking を狭く修正する
-   - Appendix E 全体を一気に実装するのではなく、`positioned + float + inline` の混在ケースを優先する
-   - `.eyes` の子孫については descendant 順ではなく paint phase 順で描けることを回帰テストで固定する
-4. 目が安定したら smile / chin を次の子タスクに切り分ける
-   - 口は `relative + absolute + nested float`
-   - あごは `line-height` と fixed background の最終確認
+1. [012-6](012-6-eyes-inline-fallback-and-fixed-background.md) で `#eyes-a` の inline image / fallback / fixed background を詰める
+2. [012-7](012-7-eyes-stacking-and-paint-phases.md) で `.eyes` の 3 レイヤーの paint 順と stacking を固定する
+3. [012-8](012-8-smile-and-chin-alignment.md) で `smile` / `chin` の下半分の位置合わせを詰める
+4. 必要なら `forehead` / `nose` の上半分を追加 issue 化し、ignored 比較の差分をさらに分解する
 
 ## 直近の確認観点
-- `#eyes-a` の line box が `#eyes-b` と `#eyes-c` に押し下げられず、同じ `.eyes` 原点付近に残ること
-- `#eyes-a` の inline image fragment が border/padding を含んだ外形で right align されること
-- `#eyes-b` の float width が 10em + 左右 border として確保されること
-- `.eyes` の paint 順が block -> float -> inline になっていること
+- [012-6](012-6-eyes-inline-fallback-and-fixed-background.md): `#eyes-a` の line box が `#eyes-b` と `#eyes-c` に押し下げられず、inline image fragment が right align されること
+- [012-7](012-7-eyes-stacking-and-paint-phases.md): `.eyes` の paint 順が block -> float -> inline になり、3 レイヤーが同じ原点帯域を共有すること
+- [012-8](012-8-smile-and-chin-alignment.md): `smile` と `chin` の縦位置が official reference に寄り、fixed background が不要に見えないこと
