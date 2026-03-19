@@ -73,6 +73,9 @@ status: open
 - min/max override 修正で `layout::tests::min_height_overrides_smaller_max_height` / `layout::tests::min_width_overrides_smaller_max_width` を追加した。`cargo test --lib` は通過したが、ignored の公式比較は今回は `40,379 -> 40,427` とわずかに悪化した
 - 012-6 の切り分けとして `layout::tests::object_type_width_and_height_do_not_change_nested_inline_fallback_image_size` と `paint::tests::nested_object_fallback_preserves_fixed_background_on_inline_image_fragment` を追加し、nested object fallback 上の width/height 無効化と fixed background paint 自体は成立していることを固定した
 - 012-2 の切り分けとして `clear` の押し下げ量を border edge 基準へ寄せ、`layout::tests::clear_both_positions_border_edge_below_float_not_margin_edge` を追加した。局所挙動は改善したが、ignored の公式比較差分は `40,427` のままで変化しなかった
+- block layout の float/clear は active float region ベースへ再設計した。`float` の配置探索と `clear` の計算はより CSS 2.1 に近づいたが、ignored の公式比較差分は引き続き `40,427` で、主戦場はまだ `smile/chin` の最終位置か `.eyes` 以外の縦配置に残っている
+- 012-8 の切り分けとして `paint::tests::acid2_lower_face_boxes_keep_expected_vertical_order`、`paint::tests::acid2_empty_block_starts_shortly_after_nose`、`paint::tests::acid2_empty_block_creates_large_gap_before_smile` を追加した。`nose -> empty` と `empty -> smile` の局所 gap は大きく崩れておらず、ignored の公式比較差分も引き続き `40,427` のため、下半分の主戦場は単純な block gap ではなく paint phase / stacking か、さらに上流の縦配置に寄っている可能性が高い
+- 012-7 の修正として、paint の phase 分離を immediate child ベースから一段広げ、non-positioned subtree の positioned descendant も祖先 stacking phase へ defer するようにした。`paint::tests::positioned_grandchild_paints_above_float_uncle` を追加し、ignored の公式比較差分は `40,427 -> 36,708` まで改善した。local baseline `tests/fixtures/acid2/acid2.baseline.png` も更新済み
 
 ## 子issue
 

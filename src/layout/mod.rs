@@ -193,6 +193,18 @@ enum FloatSide {
     Right,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct FloatRegion {
+    outer: Rect,
+    side: FloatSide,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct FloatOffsets {
+    left: f32,
+    right: f32,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ClearSide {
     None,
@@ -406,27 +418,22 @@ fn layout_element(
     let mut cursor_y = y;
     let mut previous_margin_bottom: Option<f32> = None;
     let mut pending_inline_nodes = Vec::new();
-    let mut left_float_offset = 0.0f32;
-    let mut right_float_offset = 0.0f32;
-    let mut float_bottom = y;
+    let mut float_regions = Vec::new();
 
     for child in node.child_nodes() {
-        if cursor_y >= float_bottom {
-            left_float_offset = 0.0;
-            right_float_offset = 0.0;
-        }
         if is_inline_child(&child, resolver) {
             pending_inline_nodes.push(child);
             continue;
         }
 
         if !pending_inline_nodes.is_empty() {
+            let offsets = active_float_offsets(&float_regions, cursor_y, x, width);
             let inline_lines = layout_inline_nodes(
                 &pending_inline_nodes,
                 resolver,
-                x,
+                x + offsets.left,
                 cursor_y,
-                width,
+                (width - offsets.left - offsets.right).max(0.0),
                 text_align(&style),
             );
             if let Some(last_line) = inline_lines.last() {
@@ -450,34 +457,55 @@ fn layout_element(
             })
             .unwrap_or(0.0);
         if let Some(style) = &child_style {
-            let clear_target_y = float_bottom + collapse_delta - child_margin_top;
             match clear_side(style) {
-                ClearSide::Left if left_float_offset > 0.0 => {
-                    cursor_y = cursor_y.max(clear_target_y);
-                    left_float_offset = 0.0;
+                ClearSide::Left => {
+                    cursor_y = clear_cursor_y_for_side(
+                        cursor_y,
+                        child_margin_top,
+                        collapse_delta,
+                        &float_regions,
+                        FloatSide::Left,
+                    );
                 }
-                ClearSide::Right if right_float_offset > 0.0 => {
-                    cursor_y = cursor_y.max(clear_target_y);
-                    right_float_offset = 0.0;
+                ClearSide::Right => {
+                    cursor_y = clear_cursor_y_for_side(
+                        cursor_y,
+                        child_margin_top,
+                        collapse_delta,
+                        &float_regions,
+                        FloatSide::Right,
+                    );
                 }
-                ClearSide::Both if left_float_offset > 0.0 || right_float_offset > 0.0 => {
-                    cursor_y = cursor_y.max(clear_target_y);
-                    left_float_offset = 0.0;
-                    right_float_offset = 0.0;
+                ClearSide::Both => {
+                    cursor_y = clear_cursor_y_for_side(
+                        cursor_y,
+                        child_margin_top,
+                        collapse_delta,
+                        &float_regions,
+                        FloatSide::Left,
+                    );
+                    cursor_y = clear_cursor_y_for_side(
+                        cursor_y,
+                        child_margin_top,
+                        collapse_delta,
+                        &float_regions,
+                        FloatSide::Right,
+                    );
                 }
                 ClearSide::None => {}
-                _ => {}
             }
         }
         if let Some(child_style) = &child_style {
-            let available_width = (width - left_float_offset - right_float_offset).max(0.0);
+            let child_y = cursor_y - collapse_delta;
+            let offsets = active_float_offsets(&float_regions, child_y, x, width);
+            let available_width = (width - offsets.left - offsets.right).max(0.0);
             let child_containing = Rect {
                 x: if explicit_length(child_style, "width").is_some() {
                     x
                 } else {
-                    x + left_float_offset
+                    x + offsets.left
                 },
-                y: cursor_y - collapse_delta,
+                y: child_y,
                 width: if explicit_length(child_style, "width").is_some() {
                     width
                 } else {
@@ -491,36 +519,62 @@ fn layout_element(
             }
             let float_side = float_side(child_style);
             if float_side != FloatSide::None {
-                if let Some(mut layout_child) = layout_node(
-                    &child,
-                    resolver,
-                    child_containing,
-                    viewport,
-                    positioned_ancestor,
-                ) {
-                    if resolved_length(child_style, "width", available_width).is_none() {
-                        layout_child.dimensions.content.width =
-                            shrink_to_fit_width(&child, resolver, available_width);
-                    }
-                    let outer_y = child_containing.y
-                        - layout_child.dimensions.margin.top
-                        - layout_child.dimensions.border.top
-                        - layout_child.dimensions.padding.top;
-                    let outer_x = match float_side {
-                        FloatSide::Left => x + left_float_offset,
-                        FloatSide::Right => {
-                            x + width - right_float_offset - layout_child.total_width()
+                let float_width = resolved_length(child_style, "width", available_width)
+                    .unwrap_or_else(|| shrink_to_fit_width(&child, resolver, width));
+                let mut float_y = child_y;
+                loop {
+                    let offsets = active_float_offsets(&float_regions, float_y, x, width);
+                    let float_available_width = (width - offsets.left - offsets.right).max(0.0);
+                    if float_width <= float_available_width + 0.5 {
+                        let float_containing = Rect {
+                            x: x + offsets.left,
+                            y: float_y,
+                            width: float_available_width.max(float_width),
+                            height: 0.0,
+                        };
+                        if let Some(mut layout_child) = layout_node(
+                            &child,
+                            resolver,
+                            float_containing,
+                            viewport,
+                            positioned_ancestor,
+                        ) {
+                            if resolved_length(child_style, "width", float_available_width).is_none()
+                            {
+                                layout_child.dimensions.content.width = float_width;
+                            }
+                            let outer_y = float_containing.y
+                                - layout_child.dimensions.margin.top
+                                - layout_child.dimensions.border.top
+                                - layout_child.dimensions.padding.top;
+                            let outer_x = match float_side {
+                                FloatSide::Left => x + offsets.left,
+                                FloatSide::Right => {
+                                    x + width - offsets.right - layout_child.total_width()
+                                }
+                                FloatSide::None => x + offsets.left,
+                            };
+                            translate_layout_box_to_outer(&mut layout_child, outer_x, outer_y);
+                            float_regions.push(FloatRegion {
+                                outer: Rect {
+                                    x: outer_x,
+                                    y: outer_y,
+                                    width: layout_child.total_width(),
+                                    height: layout_child.total_height(),
+                                },
+                                side: float_side,
+                            });
+                            children.push(layout_child);
                         }
-                        FloatSide::None => x + left_float_offset,
-                    };
-                    translate_layout_box_to_outer(&mut layout_child, outer_x, outer_y);
-                    match float_side {
-                        FloatSide::Left => left_float_offset += layout_child.total_width(),
-                        FloatSide::Right => right_float_offset += layout_child.total_width(),
-                        FloatSide::None => {}
+                        break;
                     }
-                    float_bottom = float_bottom.max(outer_y + layout_child.total_height());
-                    children.push(layout_child);
+                    let Some(next_y) = next_float_boundary_after(&float_regions, float_y) else {
+                        break;
+                    };
+                    if next_y <= float_y {
+                        break;
+                    }
+                    float_y = next_y;
                 }
                 previous_margin_bottom = None;
                 continue;
@@ -570,12 +624,13 @@ fn layout_element(
     }
 
     if !pending_inline_nodes.is_empty() {
+        let offsets = active_float_offsets(&float_regions, cursor_y, x, width);
         let inline_lines = layout_inline_nodes(
             &pending_inline_nodes,
             resolver,
-            x + left_float_offset,
+            x + offsets.left,
             cursor_y,
-            (width - left_float_offset - right_float_offset).max(0.0),
+            (width - offsets.left - offsets.right).max(0.0),
             text_align(&style),
         );
         if let Some(last_line) = inline_lines.last() {
@@ -584,6 +639,10 @@ fn layout_element(
         lines.extend(inline_lines);
     }
 
+    let float_bottom = float_regions
+        .iter()
+        .map(|region| region.outer.y + region.outer.height)
+        .fold(y, f32::max);
     let auto_height = (cursor_y.max(float_bottom)) - y;
     let mut content_height = resolved_length(&style, "height", containing_block.height)
         .unwrap_or(auto_height);
@@ -1138,6 +1197,58 @@ fn normalized_min_max_lengths(
         pair => pair,
     }
 }
+
+fn active_float_offsets(regions: &[FloatRegion], y: f32, x: f32, width: f32) -> FloatOffsets {
+    let mut offsets = FloatOffsets::default();
+    for region in regions {
+        if y < region.outer.y || y >= region.outer.y + region.outer.height {
+            continue;
+        }
+        match region.side {
+            FloatSide::Left => {
+                offsets.left = offsets.left.max((region.outer.x + region.outer.width - x).max(0.0));
+            }
+            FloatSide::Right => {
+                let right_edge = x + width;
+                offsets.right = offsets.right.max((right_edge - region.outer.x).max(0.0));
+            }
+            FloatSide::None => {}
+        }
+    }
+    offsets
+}
+
+fn next_float_boundary_after(regions: &[FloatRegion], y: f32) -> Option<f32> {
+    regions
+        .iter()
+        .filter_map(|region| {
+            let bottom = region.outer.y + region.outer.height;
+            (bottom > y).then_some(bottom)
+        })
+        .min_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+}
+
+fn clear_cursor_y_for_side(
+    cursor_y: f32,
+    child_margin_top: f32,
+    collapse_delta: f32,
+    regions: &[FloatRegion],
+    side: FloatSide,
+) -> f32 {
+    let border_edge_top = cursor_y + child_margin_top - collapse_delta;
+    let interfering_bottom = regions
+        .iter()
+        .filter(|region| match side {
+            FloatSide::Left => region.side == FloatSide::Left,
+            FloatSide::Right => region.side == FloatSide::Right,
+            FloatSide::None => false,
+        })
+        .filter(|region| region.outer.y + region.outer.height > border_edge_top)
+        .map(|region| region.outer.y + region.outer.height)
+        .fold(border_edge_top, f32::max);
+    cursor_y.max(interfering_bottom + collapse_delta - child_margin_top)
+}
+
 
 
 fn edge_sizes(style: &ComputedStyle, prefix: &str) -> EdgeSizes {
@@ -4291,7 +4402,6 @@ mod tests {
         let cleared_box = find_layout_box_by_tag(&layout, "section").unwrap();
         assert_eq!(cleared_box.dimensions.content.y, 10.0);
     }
-
 
     #[test]
     fn sorts_siblings_by_z_index() {

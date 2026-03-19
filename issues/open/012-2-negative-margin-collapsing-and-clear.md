@@ -40,3 +40,6 @@ status: open
 - `layout::tests::clear_both_positions_border_edge_below_float_not_margin_edge` を追加し、`margin-top` を持つ cleared block が不必要に余分な分だけ下がらないことを固定した
 - 既存の `layout::tests::clear_both_moves_block_below_floats` も維持できている
 - ただし ignored の公式 Acid2 比較差分はこの変更単独では `40,427` のままで、`smile`/`chin` の残差分解消にはまだ追加要因がある
+- block layout の float/clear 処理を単一の `left/right offset` 追跡から、active float region を都度問い合わせる内部モデルへ切り替えた
+- float 配置は「現在 y で使える幅が足りなければ次の float boundary まで降りる」形に寄せ、`clear` も active float region の bottom を見て計算するようにした
+- `layout::tests::float_left_and_right_reduce_available_block_width` や Acid2 関連の局所回帰は維持できているが、ignored の公式比較差分は依然 `40,427`

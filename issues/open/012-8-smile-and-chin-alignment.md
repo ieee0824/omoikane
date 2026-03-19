@@ -25,6 +25,9 @@ Acid2 下半分は `clear: both`、negative margin、`relative + absolute + nest
 
 - `paint::tests::acid2_smile_layout_contains_positioned_and_floated_descendants`
 - `paint::tests::acid2_smile_nested_float_keeps_block_width_source_descendant`
+- `paint::tests::acid2_lower_face_boxes_keep_expected_vertical_order`
+- `paint::tests::acid2_empty_block_starts_shortly_after_nose`
+- `paint::tests::acid2_empty_block_creates_large_gap_before_smile`
 - `paint::tests::fixed_background_image_uses_viewport_origin`
 - ignored の公式 Acid2 比較で下半分の差分が縮小すること
 
@@ -32,3 +35,4 @@ Acid2 下半分は `clear: both`、negative margin、`relative + absolute + nest
 
 - 以前に empty margin collapse / negative clearance を試して差分が悪化した履歴があるため、再挑戦時は局所テストを先に置く
 - `chin` は fixed background の最終可視性確認も必要なので、layout だけでなく paint まで含めて見る
+- `nose -> empty` と `empty -> smile` の gap は現状の局所テストでは大きく崩れていないため、下半分の大きな見た目差分は単純な block 間隔よりも paint phase / stacking / さらに上流の縦配置にある可能性が高い

@@ -402,6 +402,24 @@ fn paint_box(
     inherited_clip: Option<Rect>,
     viewport: Rect,
 ) {
+    paint_box_internal(
+        canvas,
+        layout,
+        resolver,
+        inherited_clip,
+        viewport,
+        true,
+    );
+}
+
+fn paint_box_internal(
+    canvas: &mut Canvas,
+    layout: &LayoutBox,
+    resolver: &mut StyleResolver,
+    inherited_clip: Option<Rect>,
+    viewport: Rect,
+    include_positioned_descendants: bool,
+) {
     if layout.visibility == Visibility::Hidden {
         return;
     }
@@ -443,14 +461,26 @@ fn paint_box(
     for child in &layout.children {
         let child_style = resolver.computed_style(&child.node);
         if is_positioned_for_paint(&child_style) {
-            if child.z_index < 0 {
-                negative_positioned_children.push(child);
-            } else if child.z_index > 0 {
-                positive_positioned_children.push(child);
-            } else {
-                auto_positioned_children.push(child);
+            if include_positioned_descendants {
+                if child.z_index < 0 {
+                    negative_positioned_children.push(child);
+                } else if child.z_index > 0 {
+                    positive_positioned_children.push(child);
+                } else {
+                    auto_positioned_children.push(child);
+                }
             }
             continue;
+        }
+
+        if include_positioned_descendants {
+            collect_positioned_descendants(
+                child,
+                resolver,
+                &mut negative_positioned_children,
+                &mut auto_positioned_children,
+                &mut positive_positioned_children,
+            );
         }
 
         if is_float_for_paint(&child_style) {
@@ -465,27 +495,60 @@ fn paint_box(
         }
     }
 
+    negative_positioned_children.sort_by_key(|child| child.z_index);
+    positive_positioned_children.sort_by_key(|child| child.z_index);
+
     for child in negative_positioned_children {
-        paint_box(canvas, child, resolver, clip, viewport);
+        paint_box_internal(canvas, child, resolver, clip, viewport, true);
     }
     for child in normal_block_children {
-        paint_box(canvas, child, resolver, clip, viewport);
+        paint_box_internal(canvas, child, resolver, clip, viewport, false);
     }
     for child in float_children {
-        paint_box(canvas, child, resolver, clip, viewport);
+        paint_box_internal(canvas, child, resolver, clip, viewport, false);
     }
     paint_text(canvas, layout, &style, clip, viewport);
     for child in inline_children {
-        paint_box(canvas, child, resolver, clip, viewport);
+        paint_box_internal(canvas, child, resolver, clip, viewport, false);
     }
     for child in auto_positioned_children {
-        paint_box(canvas, child, resolver, clip, viewport);
+        paint_box_internal(canvas, child, resolver, clip, viewport, true);
     }
     for child in positive_positioned_children {
-        paint_box(canvas, child, resolver, clip, viewport);
+        paint_box_internal(canvas, child, resolver, clip, viewport, true);
     }
 
     paint_block_generated_pseudo_box(canvas, layout, resolver, PseudoElement::After, clip, viewport);
+}
+
+fn collect_positioned_descendants<'a>(
+    layout: &'a LayoutBox,
+    resolver: &mut StyleResolver,
+    negative_positioned_children: &mut Vec<&'a LayoutBox>,
+    auto_positioned_children: &mut Vec<&'a LayoutBox>,
+    positive_positioned_children: &mut Vec<&'a LayoutBox>,
+) {
+    for child in &layout.children {
+        let child_style = resolver.computed_style(&child.node);
+        if is_positioned_for_paint(&child_style) {
+            if child.z_index < 0 {
+                negative_positioned_children.push(child);
+            } else if child.z_index > 0 {
+                positive_positioned_children.push(child);
+            } else {
+                auto_positioned_children.push(child);
+            }
+            continue;
+        }
+
+        collect_positioned_descendants(
+            child,
+            resolver,
+            negative_positioned_children,
+            auto_positioned_children,
+            positive_positioned_children,
+        );
+    }
 }
 
 fn is_float_for_paint(style: &ComputedStyle) -> bool {
@@ -2404,6 +2467,55 @@ mod tests {
     }
 
     #[test]
+    fn positioned_grandchild_paints_above_float_uncle() {
+        let root = NodeHandle::element("div");
+        root.set_attribute("class", "root");
+        let wrapper = NodeHandle::element("div");
+        wrapper.set_attribute("class", "wrapper");
+        let overlay = NodeHandle::element("div");
+        overlay.set_attribute("class", "overlay");
+        let float = NodeHandle::element("div");
+        float.set_attribute("class", "float");
+        root.append_child(wrapper.clone());
+        root.append_child(float.clone());
+        wrapper.append_child(overlay.clone());
+
+        let stylesheet =
+            ".root { position: relative; } \
+             .wrapper { width: 8px; height: 8px; } \
+             .overlay { position: absolute; left: 0; top: 0; width: 8px; height: 8px; background: red; } \
+             .float { float: left; width: 8px; height: 8px; background: blue; }";
+        let mut resolver = StyleResolver::new();
+        resolver.add_stylesheet(Origin::Author, parse_stylesheet(stylesheet).unwrap());
+        let layout = layout_tree(
+            &root,
+            &mut resolver,
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 8.0,
+                height: 8.0,
+            },
+        )
+        .unwrap();
+
+        let mut paint_resolver = StyleResolver::new();
+        paint_resolver.add_stylesheet(Origin::Author, parse_stylesheet(stylesheet).unwrap());
+        let canvas = paint_layout(
+            &layout,
+            &mut paint_resolver,
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 8.0,
+                height: 8.0,
+            },
+        );
+
+        assert_eq!(canvas.pixel(0, 0), Some(Color::rgb(255, 0, 0)));
+    }
+
+    #[test]
     fn paints_side_specific_border_colors() {
         let document = NodeHandle::document();
         let body = NodeHandle::element("body");
@@ -2949,6 +3061,121 @@ mod tests {
         assert_eq!(empty.dimensions.content.height, 0.0, "{:?}", empty.dimensions);
         assert!(nose.dimensions.content.height <= 36.0, "{:?}", nose.dimensions);
         assert!(chin.dimensions.content.y < smile.dimensions.content.y + 200.0);
+    }
+
+    #[test]
+    fn acid2_lower_face_boxes_keep_expected_vertical_order() {
+        let acid2_html = fs::read_to_string(acid2_fixture_path()).unwrap();
+        let acid2_document = TreeBuilder::parse(&acid2_html).document();
+        let mut resolver = StyleResolver::new();
+        for stylesheet in extract_author_stylesheets(&acid2_document).unwrap() {
+            resolver.add_stylesheet(
+                Origin::Author,
+                parse_stylesheet_forgiving(&stylesheet).unwrap(),
+            );
+        }
+
+        let layout = crate::layout::layout_tree(
+            &acid2_document,
+            &mut resolver,
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 800.0,
+                height: 600.0,
+            },
+        )
+        .unwrap();
+
+        let nose = find_layout_box_by_class(&layout, "nose").unwrap();
+        let empty = find_layout_box_by_class(&layout, "empty").unwrap();
+        let smile = find_layout_box_by_class(&layout, "smile").unwrap();
+        let chin = find_layout_box_by_class(&layout, "chin").unwrap();
+        let smile_relative = smile.children.first().unwrap();
+        let nose_to_smile_gap = smile.dimensions.content.y - (nose.dimensions.content.y + nose.dimensions.content.height);
+        let smile_to_chin_gap = chin.dimensions.content.y - smile.dimensions.content.y;
+
+        assert!(empty.dimensions.content.y >= nose.dimensions.content.y + nose.dimensions.content.height);
+        assert!(smile.dimensions.content.y >= empty.dimensions.content.y);
+        assert!(chin.dimensions.content.y >= smile.dimensions.content.y);
+        assert!(smile_relative.dimensions.content.y < chin.dimensions.content.y);
+        assert!(chin.dimensions.content.y - smile.dimensions.content.y < 220.0);
+        assert!(nose_to_smile_gap < 160.0, "{nose_to_smile_gap}");
+        assert!(smile_to_chin_gap < 220.0, "{smile_to_chin_gap}");
+    }
+
+    #[test]
+    fn acid2_empty_block_creates_large_gap_before_smile() {
+        let acid2_html = fs::read_to_string(acid2_fixture_path()).unwrap();
+        let acid2_document = TreeBuilder::parse(&acid2_html).document();
+        let mut resolver = StyleResolver::new();
+        for stylesheet in extract_author_stylesheets(&acid2_document).unwrap() {
+            resolver.add_stylesheet(
+                Origin::Author,
+                parse_stylesheet_forgiving(&stylesheet).unwrap(),
+            );
+        }
+
+        let layout = crate::layout::layout_tree(
+            &acid2_document,
+            &mut resolver,
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 800.0,
+                height: 600.0,
+            },
+        )
+        .unwrap();
+
+        let empty = find_layout_box_by_class(&layout, "empty").unwrap();
+        let smile = find_layout_box_by_class(&layout, "smile").unwrap();
+        let empty_outer_bottom = empty.dimensions.content.y
+            + empty.dimensions.content.height
+            + empty.dimensions.padding.bottom
+            + empty.dimensions.border.bottom
+            + empty.dimensions.margin.bottom;
+        let gap_after_empty = smile.dimensions.content.y - empty_outer_bottom;
+
+        assert_eq!(empty.dimensions.content.height, 0.0);
+        assert!(gap_after_empty < 20.0, "{gap_after_empty} {:?}", empty.dimensions);
+    }
+
+    #[test]
+    fn acid2_empty_block_starts_shortly_after_nose() {
+        let acid2_html = fs::read_to_string(acid2_fixture_path()).unwrap();
+        let acid2_document = TreeBuilder::parse(&acid2_html).document();
+        let mut resolver = StyleResolver::new();
+        for stylesheet in extract_author_stylesheets(&acid2_document).unwrap() {
+            resolver.add_stylesheet(
+                Origin::Author,
+                parse_stylesheet_forgiving(&stylesheet).unwrap(),
+            );
+        }
+
+        let layout = crate::layout::layout_tree(
+            &acid2_document,
+            &mut resolver,
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 800.0,
+                height: 600.0,
+            },
+        )
+        .unwrap();
+
+        let nose = find_layout_box_by_class(&layout, "nose").unwrap();
+        let empty = find_layout_box_by_class(&layout, "empty").unwrap();
+        let nose_outer_bottom = nose.dimensions.content.y
+            + nose.dimensions.content.height
+            + nose.dimensions.padding.bottom
+            + nose.dimensions.border.bottom
+            + nose.dimensions.margin.bottom;
+        let gap_before_empty = empty.dimensions.content.y - nose_outer_bottom;
+
+        assert_eq!(empty.dimensions.content.height, 0.0);
+        assert!(gap_before_empty < 80.0, "{gap_before_empty} {:?}", empty.dimensions);
     }
 
     #[test]
