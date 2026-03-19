@@ -1537,8 +1537,22 @@ fn intrinsic_width(node: &NodeHandle, resolver: &mut StyleResolver) -> f32 {
                     + border.right;
             }
             let mut width: f32 = 0.0;
-            for child in node.child_nodes() {
-                width = width.max(intrinsic_width(&child, resolver));
+            if is_table_container(&style) {
+                let entries = collect_table_entries(node, resolver);
+                let spacing = table_border_spacing(&style);
+                for entry in &entries {
+                    let row_width: f32 = entry
+                        .cells
+                        .iter()
+                        .map(|cell| intrinsic_width(cell, resolver))
+                        .sum::<f32>()
+                        + spacing * (entry.cells.len().max(1) as f32 + 1.0);
+                    width = width.max(row_width);
+                }
+            } else {
+                for child in node.child_nodes() {
+                    width = width.max(intrinsic_width(&child, resolver));
+                }
             }
             if width == 0.0 {
                 width = generated_inline_segments(node, resolver, PseudoElement::Before)

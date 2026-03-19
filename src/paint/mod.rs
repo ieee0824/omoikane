@@ -3551,6 +3551,34 @@ mod tests {
     }
 
     #[test]
+    fn acid2_ul_table_cells_cover_red_background() {
+        let acid2_html = fs::read_to_string(acid2_fixture_path()).unwrap();
+        let acid2_document = TreeBuilder::parse(&acid2_html).document();
+        let mut resolver = StyleResolver::new();
+        for stylesheet in extract_author_stylesheets(&acid2_document).unwrap() {
+            resolver.add_stylesheet(
+                Origin::Author,
+                parse_stylesheet_forgiving(&stylesheet).unwrap(),
+            );
+        }
+        let layout = crate::layout::layout_tree(
+            &acid2_document,
+            &mut resolver,
+            Rect { x: 0.0, y: 0.0, width: 800.0, height: 600.0 },
+        )
+        .unwrap();
+
+        let ul = find_first_layout_box_by_tag(&layout, "ul").unwrap();
+        // ul: display: table with 4 li cells, each 1em wide
+        assert_eq!(ul.dimensions.content.width, 48.0, "ul width should be 4 × 1em = 48px");
+        let row = &ul.children[0];
+        assert_eq!(row.children.len(), 4, "should have 4 cells");
+        for cell in &row.children {
+            assert_eq!(cell.dimensions.content.width, 12.0);
+        }
+    }
+
+    #[test]
     fn acid2_eyes_positioned_above_nose() {
         let acid2_html = fs::read_to_string(acid2_fixture_path()).unwrap();
         let acid2_document = TreeBuilder::parse(&acid2_html).document();
