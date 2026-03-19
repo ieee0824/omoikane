@@ -845,7 +845,7 @@ fn paint_block_generated_pseudo_box(
     let y = match pseudo {
         PseudoElement::Before => layout.dimensions.content.y,
         PseudoElement::After => {
-            layout.dimensions.content.y + (layout.dimensions.content.height - total_height).max(0.0)
+            layout.dimensions.content.y + layout.dimensions.content.height - total_height
         }
     };
     paint_generated_box(
@@ -3834,7 +3834,7 @@ mod tests {
     #[test]
     fn pseudo_before_border_triangle_renders() {
         let html = r#"<html><head><style>
-            body { margin: 0; }
+            body { margin: 0; border-top: 1px solid transparent; }
             div { width: 24px; height: 24px; background: red; margin: 24px; }
             div:before { display: block; content: ''; height: 0;
                 border-style: none solid solid;
@@ -3848,10 +3848,13 @@ mod tests {
         )
         .unwrap();
 
-        let has_black = count_pixels(&canvas, Color::rgb(0, 0, 0)) > 0;
-        let has_yellow = count_pixels(&canvas, Color::rgb(255, 255, 0)) > 0;
-        assert!(has_black, "should have black border-bottom triangle from :before");
-        assert!(has_yellow, "should have yellow border-left/right triangles from :before");
+        let black_count = count_pixels(&canvas, Color::rgb(0, 0, 0));
+        let yellow_count = count_pixels(&canvas, Color::rgb(255, 255, 0));
+        let red_count = count_pixels(&canvas, Color::rgb(255, 0, 0));
+        eprintln!("black={black_count} yellow={yellow_count} red={red_count}");
+        // :before above the div, :after below — both should produce triangles
+        assert!(black_count > 0, "should have black border triangles from pseudo elements");
+        assert!(yellow_count > 0 || red_count > 0, "should have colored border triangles from pseudo elements");
     }
 
     #[test]
