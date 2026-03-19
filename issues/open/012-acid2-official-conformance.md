@@ -107,3 +107,8 @@ status: open
 - [012-6](012-6-eyes-inline-fallback-and-fixed-background.md): `#eyes-a` の line box が `#eyes-b` と `#eyes-c` に押し下げられず、inline image fragment が right align されること
 - [012-7](012-7-eyes-stacking-and-paint-phases.md): `.eyes` の paint 順が block -> float -> inline になり、3 レイヤーが同じ原点帯域を共有すること
 - [012-8](012-8-smile-and-chin-alignment.md): `smile` と `chin` の縦位置が official reference に寄り、fixed background が不要に見えないこと
+
+## 実施方針
+- renderer 本体の修正は子 issue 単位で進め、各 issue に局所 regression と ignored の公式比較をセットでぶら下げる
+- 公式比較は `paint::tests::acid2_fixture_matches_official_reference_rendering --lib -- --ignored` を共通の最終確認とし、局所修正の成否は必ず diff 画像でも確認する
+- comparison harness の改善と renderer 本体の改善は分けて記録し、差分減少量を混同しない
