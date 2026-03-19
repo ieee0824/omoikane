@@ -543,10 +543,7 @@ fn layout_element(
                             {
                                 layout_child.dimensions.content.width = float_width;
                             }
-                            let outer_y = float_containing.y
-                                - layout_child.dimensions.margin.top
-                                - layout_child.dimensions.border.top
-                                - layout_child.dimensions.padding.top;
+                            let outer_y = float_containing.y;
                             let outer_x = match float_side {
                                 FloatSide::Left => x + offsets.left,
                                 FloatSide::Right => {
@@ -4401,6 +4398,45 @@ mod tests {
 
         let cleared_box = find_layout_box_by_tag(&layout, "section").unwrap();
         assert_eq!(cleared_box.dimensions.content.y, 10.0);
+    }
+
+    #[test]
+    fn float_preserves_negative_top_margin_offset() {
+        let document = NodeHandle::document();
+        let body = NodeHandle::element("body");
+        let before = NodeHandle::element("div");
+        let floated = NodeHandle::element("section");
+
+        before.set_attribute("class", "before");
+        floated.set_attribute("class", "floated");
+        document.append_child(body.clone());
+        body.append_child(before);
+        body.append_child(floated.clone());
+
+        let mut resolver = StyleResolver::new();
+        resolver.add_stylesheet(
+            Origin::Author,
+            parse_stylesheet(
+                ".before { height: 40px; } \
+                 .floated { float: left; width: 20px; height: 10px; margin-top: -12px; }",
+            )
+            .unwrap(),
+        );
+
+        let layout = layout_tree(
+            &body,
+            &mut resolver,
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 100.0,
+                height: 100.0,
+            },
+        )
+        .unwrap();
+
+        let floated_box = find_layout_box_by_tag(&layout, "section").unwrap();
+        assert_eq!(floated_box.dimensions.content.y, 28.0);
     }
 
     #[test]

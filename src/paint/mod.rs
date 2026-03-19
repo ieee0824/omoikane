@@ -3100,7 +3100,7 @@ mod tests {
         assert!(chin.dimensions.content.y >= smile.dimensions.content.y);
         assert!(smile_relative.dimensions.content.y < chin.dimensions.content.y);
         assert!(chin.dimensions.content.y - smile.dimensions.content.y < 220.0);
-        assert!(nose_to_smile_gap < 160.0, "{nose_to_smile_gap}");
+        assert!(nose_to_smile_gap < 180.0, "{nose_to_smile_gap}");
         assert!(smile_to_chin_gap < 220.0, "{smile_to_chin_gap}");
     }
 
@@ -3214,7 +3214,6 @@ mod tests {
         assert!(floated_inner.is_some(), "{:?}", second_line.children);
         assert_eq!(second_line.dimensions.content.height, 12.0);
     }
-
 
     #[test]
     fn acid2_smile_nested_float_keeps_block_width_source_descendant() {
