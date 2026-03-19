@@ -92,8 +92,8 @@ pub struct InlineFragment {
 #[derive(Debug, Clone, PartialEq)]
 pub enum InlineFragmentContent {
     Text(String),
-    Image(Image),
-    GeneratedBox,
+    Image(Image, ComputedStyle),
+    GeneratedBox(ComputedStyle),
 }
 
 /// A single line box inside a block formatting context.
@@ -1173,7 +1173,7 @@ fn intrinsic_width(node: &NodeHandle, resolver: &mut StyleResolver) -> f32 {
             if let Some(width) = explicit_length(&style, "width") {
                 return width;
             }
-            if let Some(image) = element_inline_image(node) {
+            if let Some((_image_node, image)) = element_inline_image(node) {
                 return image.width() as f32;
             }
             let mut width: f32 = 0.0;
@@ -1186,8 +1186,24 @@ fn intrinsic_width(node: &NodeHandle, resolver: &mut StyleResolver) -> f32 {
                     .chain(generated_inline_segments(node, resolver, PseudoElement::After))
                     .map(|segment| match segment.content {
                         InlineSegmentContent::Text(text) => measure_text_width(&text, segment.metrics),
-                        InlineSegmentContent::Image(image) => image.width() as f32,
-                        InlineSegmentContent::GeneratedBox => 0.0,
+                        InlineSegmentContent::Image(image, style) => {
+                            let padding = edge_sizes(&style, "padding");
+                            let border = edge_sizes(&style, "border");
+                            image.width() as f32
+                                + padding.left
+                                + padding.right
+                                + border.left
+                                + border.right
+                        }
+                        InlineSegmentContent::GeneratedBox(style) => {
+                            let padding = edge_sizes(&style, "padding");
+                            let border = edge_sizes(&style, "border");
+                            explicit_length(&style, "width").unwrap_or(0.0)
+                                + padding.left
+                                + padding.right
+                                + border.left
+                                + border.right
+                        }
                     })
                     .fold(0.0, f32::max);
             }
@@ -1596,8 +1612,8 @@ struct InlineSegment {
 #[derive(Debug, Clone)]
 enum InlineSegmentContent {
     Text(String),
-    Image(Image),
-    GeneratedBox,
+    Image(Image, ComputedStyle),
+    GeneratedBox(ComputedStyle),
 }
 
 fn collect_inline_segments(
@@ -1634,13 +1650,22 @@ fn collect_inline_segments(
             }
 
             out.extend(generated_inline_segments(node, resolver, PseudoElement::Before));
-            if let Some(image) = element_inline_image(node) {
+            if let Some((image_node, image)) = element_inline_image(node) {
+                let image_style = resolver.computed_style(&image_node);
+                let padding = edge_sizes(&image_style, "padding");
+                let border = edge_sizes(&image_style, "border");
                 out.push(InlineSegment {
-                    node: node.clone(),
-                    content: InlineSegmentContent::Image(image.clone()),
-                    metrics: font_metrics(&style),
-                    line_height: line_height(&style).max(image.height() as f32),
-                    vertical_align: vertical_align(&style),
+                    node: image_node,
+                    content: InlineSegmentContent::Image(image.clone(), image_style.clone()),
+                    metrics: font_metrics(&image_style),
+                    line_height: line_height(&image_style).max(
+                        image.height() as f32
+                            + padding.top
+                            + padding.bottom
+                            + border.top
+                            + border.bottom,
+                    ),
+                    vertical_align: vertical_align(&image_style),
                 });
                 out.extend(generated_inline_segments(node, resolver, PseudoElement::After));
                 return;
@@ -1696,7 +1721,7 @@ fn generated_inline_segments(
         Some(GeneratedContent::Text(text)) => vec![InlineSegment {
             node: node.clone(),
             content: if text.is_empty() {
-                InlineSegmentContent::GeneratedBox
+                InlineSegmentContent::GeneratedBox(style.clone())
             } else {
                 InlineSegmentContent::Text(normalize_text(&text, white_space(&style)))
             },
@@ -1706,7 +1731,7 @@ fn generated_inline_segments(
         }],
         Some(GeneratedContent::Image(image)) => vec![InlineSegment {
             node: node.clone(),
-            content: InlineSegmentContent::Image(image),
+            content: InlineSegmentContent::Image(image, style.clone()),
             metrics,
             line_height: line_height.max(metrics.font_size),
             vertical_align,
@@ -1720,7 +1745,7 @@ enum GeneratedContent {
     Image(Image),
 }
 
-fn element_inline_image(node: &NodeHandle) -> Option<Image> {
+fn element_inline_image(node: &NodeHandle) -> Option<(NodeHandle, Image)> {
     let tag_name = node.tag_name()?;
     let attributes = node.attributes().unwrap_or_default();
     match tag_name.as_str() {
@@ -1729,7 +1754,7 @@ fn element_inline_image(node: &NodeHandle) -> Option<Image> {
             let data_uri = parse_data_uri(src).ok()?;
             match data_uri {
                 DataUri::Binary { mime_type, data } if mime_type.eq_ignore_ascii_case("image/png") => {
-                    Image::decode_png(&data).ok()
+                    Image::decode_png(&data).ok().map(|image| (node.clone(), image))
                 }
                 _ => None,
             }
@@ -1740,7 +1765,7 @@ fn element_inline_image(node: &NodeHandle) -> Option<Image> {
                 if let Some(DataUri::Binary { mime_type, data }) = data_uri {
                     if mime_type.eq_ignore_ascii_case("image/png") {
                         if let Ok(image) = Image::decode_png(&data) {
-                            return Some(image);
+                            return Some((node.clone(), image));
                         }
                     }
                 }
@@ -1983,16 +2008,35 @@ enum InlinePiece {
 fn split_segment(segment: &InlineSegment) -> Vec<InlinePiece> {
     match &segment.content {
         InlineSegmentContent::Text(text) => split_text_segment(text, segment.metrics, segment.line_height),
-        InlineSegmentContent::Image(image) => vec![InlinePiece::Fragment {
-            content: InlineFragmentContent::Image(image.clone()),
-            width: image.width() as f32,
-            height: image.height() as f32,
-        }],
-        InlineSegmentContent::GeneratedBox => vec![InlinePiece::Fragment {
-            content: InlineFragmentContent::GeneratedBox,
-            width: 0.0,
-            height: segment.line_height,
-        }],
+        InlineSegmentContent::Image(image, style) => {
+            let padding = edge_sizes(style, "padding");
+            let border = edge_sizes(style, "border");
+            vec![InlinePiece::Fragment {
+                content: InlineFragmentContent::Image(image.clone(), style.clone()),
+                width: image.width() as f32 + padding.left + padding.right + border.left + border.right,
+                height: image.height() as f32 + padding.top + padding.bottom + border.top + border.bottom,
+            }]
+        }
+        InlineSegmentContent::GeneratedBox(style) => {
+            let padding = edge_sizes(style, "padding");
+            let border = edge_sizes(style, "border");
+            let width = explicit_length(style, "width").unwrap_or(0.0)
+                + padding.left
+                + padding.right
+                + border.left
+                + border.right;
+            let height = explicit_length(style, "height").unwrap_or(0.0)
+                + padding.top
+                + padding.bottom
+                + border.top
+                + border.bottom;
+
+            vec![InlinePiece::Fragment {
+                content: InlineFragmentContent::GeneratedBox(style.clone()),
+                width,
+                height,
+            }]
+        }
     }
 }
 
@@ -2766,7 +2810,7 @@ mod tests {
         assert!(line
             .fragments
             .iter()
-            .any(|fragment| matches!(fragment.content, InlineFragmentContent::GeneratedBox)));
+            .any(|fragment| matches!(fragment.content, InlineFragmentContent::GeneratedBox(_))));
     }
 
     #[test]
@@ -2801,7 +2845,7 @@ mod tests {
         let line = &layout.children[0].lines[0];
         assert!(line.fragments.iter().any(|fragment| matches!(
             fragment.content,
-            InlineFragmentContent::Image(_)
+            InlineFragmentContent::Image(_, _)
         )));
     }
 
@@ -2841,7 +2885,7 @@ mod tests {
         let line = &layout.children[0].lines[0];
         assert!(line.fragments.iter().any(|fragment| matches!(
             fragment.content,
-            InlineFragmentContent::Image(_)
+            InlineFragmentContent::Image(_, _)
         )));
     }
 
@@ -2904,7 +2948,7 @@ mod tests {
         let image_fragment = line
             .fragments
             .iter()
-            .find(|fragment| matches!(fragment.content, InlineFragmentContent::Image(_)))
+            .find(|fragment| matches!(fragment.content, InlineFragmentContent::Image(_, _)))
             .unwrap();
 
         assert!(image_fragment.rect.y >= line.rect.y);

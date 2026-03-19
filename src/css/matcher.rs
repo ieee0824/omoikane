@@ -67,8 +67,17 @@ pub fn selector_pseudo_element(selector: &Selector) -> Option<PseudoElement> {
     let mut pseudo = None;
     for part in &selector.parts {
         for simple in &part.simples {
-            if let SimpleSelector::PseudoElement(name) = simple {
-                let current = match name.as_str() {
+            let name = match simple {
+                SimpleSelector::PseudoElement(name) => Some(name.as_str()),
+                SimpleSelector::PseudoClass(name)
+                    if matches!(name.as_str(), "before" | "after") =>
+                {
+                    Some(name.as_str())
+                }
+                _ => None,
+            };
+            if let Some(name) = name {
+                let current = match name {
                     "before" => PseudoElement::Before,
                     "after" => PseudoElement::After,
                     _ => return None,
@@ -91,9 +100,13 @@ pub fn specificity(selector: &Selector) -> Specificity {
         for simple in &part.simples {
             match simple {
                 SimpleSelector::Id(_) => value.ids += 1,
-                SimpleSelector::Class(_)
-                | SimpleSelector::Attribute { .. }
-                | SimpleSelector::PseudoClass(_) => value.classes += 1,
+                SimpleSelector::Class(_) | SimpleSelector::Attribute { .. } => value.classes += 1,
+                SimpleSelector::PseudoClass(name)
+                    if matches!(name.as_str(), "before" | "after") =>
+                {
+                    value.elements += 1
+                }
+                SimpleSelector::PseudoClass(_) => value.classes += 1,
                 SimpleSelector::Type(_) | SimpleSelector::PseudoElement(_) => value.elements += 1,
                 SimpleSelector::Universal => {}
             }
@@ -209,6 +222,7 @@ fn matches_pseudo_class(node: &NodeHandle, name: &str) -> bool {
     }
 
     match name {
+        "before" | "after" => true,
         "first-child" => element_index_in_parent(node) == Some(1),
         "last-child" => {
             let Some((index, total)) = element_position(node) else {
@@ -386,6 +400,26 @@ mod tests {
             Specificity {
                 ids: 1,
                 classes: 3,
+                elements: 2,
+            }
+        );
+    }
+
+    #[test]
+    fn legacy_single_colon_before_is_treated_as_pseudo_element() {
+        let (_, _, _, main, _, _, _) = sample_tree();
+        let selector = selector("main:before {}");
+
+        assert_eq!(selector_pseudo_element(&selector), Some(PseudoElement::Before));
+        assert!(matches_selector_with_pseudo(&main, &selector, Some(PseudoElement::Before)));
+        assert!(!matches_selector(&main, &selector));
+
+        let value = specificity(&selector);
+        assert_eq!(
+            value,
+            Specificity {
+                ids: 0,
+                classes: 0,
                 elements: 2,
             }
         );

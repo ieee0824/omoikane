@@ -4,7 +4,7 @@ use std::fs;
 use std::io::Read;
 use std::path::Path;
 
-use crate::css::{ComputedStyle, ComputedValue, Origin, StyleResolver, Stylesheet, parse_stylesheet};
+use crate::css::{ComputedStyle, ComputedValue, Origin, PseudoElement, StyleResolver, Stylesheet, parse_stylesheet};
 use crate::dom::{Node, NodeHandle, NodeType};
 use crate::layout::{InlineFragmentContent, LayoutBox, Rect, Visibility};
 use base64::Engine;
@@ -413,6 +413,13 @@ fn paint_box(
         canvas.fill_rect_clipped(border_box, background, inherited_clip);
     }
     paint_background_image(canvas, &style, border_box, inherited_clip);
+    paint_block_generated_pseudo_box(
+        canvas,
+        layout,
+        resolver,
+        PseudoElement::Before,
+        inherited_clip,
+    );
 
     paint_borders(canvas, layout, &style, inherited_clip);
     paint_text(canvas, layout, &style, inherited_clip);
@@ -429,6 +436,8 @@ fn paint_box(
     for child in &layout.children {
         paint_box(canvas, child, resolver, clip);
     }
+
+    paint_block_generated_pseudo_box(canvas, layout, resolver, PseudoElement::After, clip);
 }
 
 fn viewport_background_color(layout: &LayoutBox, resolver: &mut StyleResolver) -> Option<Color> {
@@ -551,12 +560,280 @@ fn paint_text(
                         cursor_x += advance;
                     }
                 }
-                InlineFragmentContent::Image(image) => {
-                    canvas.draw_image_clipped(image, fragment.rect.x, fragment.rect.y, clip);
+                InlineFragmentContent::Image(image, style) => {
+                    paint_inline_image_fragment(canvas, fragment.rect, image, style, clip);
                 }
-                InlineFragmentContent::GeneratedBox => {}
+                InlineFragmentContent::GeneratedBox(style) => {
+                    paint_generated_box(canvas, fragment.rect, style, clip);
+                }
             }
         }
+    }
+}
+
+fn paint_inline_image_fragment(
+    canvas: &mut Canvas,
+    rect: Rect,
+    image: &Image,
+    style: &ComputedStyle,
+    clip: Option<Rect>,
+) {
+    if let Some(background) = background_color(style) {
+        canvas.fill_rect_clipped(rect, background, clip);
+    }
+    paint_background_image(canvas, style, rect, clip);
+
+    let border = EdgeSizesForPaint::from_style(style);
+    if border.total_horizontal() > 0.0 || border.total_vertical() > 0.0 {
+        paint_rect_borders(canvas, rect, style, border, clip);
+    }
+
+    let padding_left = length_property(style, "padding-left")
+        .or_else(|| length_property(style, "padding"))
+        .unwrap_or(0.0);
+    let padding_top = length_property(style, "padding-top")
+        .or_else(|| length_property(style, "padding"))
+        .unwrap_or(0.0);
+    canvas.draw_image_clipped(
+        image,
+        rect.x + border.left + padding_left,
+        rect.y + border.top + padding_top,
+        clip,
+    );
+}
+
+fn paint_generated_box(
+    canvas: &mut Canvas,
+    rect: Rect,
+    style: &ComputedStyle,
+    clip: Option<Rect>,
+) {
+    if let Some(background) = background_color(style) {
+        canvas.fill_rect_clipped(rect, background, clip);
+    }
+
+    let border = EdgeSizesForPaint::from_style(style);
+    if border.total_horizontal() == 0.0 && border.total_vertical() == 0.0 {
+        return;
+    }
+
+    if rect.width == border.total_horizontal() && rect.height == border.total_vertical() {
+        paint_zero_sized_border_box(canvas, rect, style, border, clip);
+        return;
+    }
+
+    paint_rect_borders(canvas, rect, style, border, clip);
+}
+
+fn paint_block_generated_pseudo_box(
+    canvas: &mut Canvas,
+    layout: &LayoutBox,
+    resolver: &mut StyleResolver,
+    pseudo: PseudoElement,
+    clip: Option<Rect>,
+) {
+    let Some(style) = resolver.computed_pseudo_style(&layout.node, pseudo) else {
+        return;
+    };
+    if !matches!(
+        style.get("content"),
+        Some(ComputedValue::String(content)) if content.is_empty()
+    ) {
+        return;
+    }
+    if !matches!(
+        style.get("display"),
+        Some(ComputedValue::Keyword(keyword)) if keyword.eq_ignore_ascii_case("block")
+    ) {
+        return;
+    }
+
+    let border = EdgeSizesForPaint::from_style(&style);
+    let padding_left = length_property(&style, "padding-left")
+        .or_else(|| length_property(&style, "padding"))
+        .unwrap_or(0.0);
+    let padding_right = length_property(&style, "padding-right")
+        .or_else(|| length_property(&style, "padding"))
+        .unwrap_or(0.0);
+    let padding_top = length_property(&style, "padding-top")
+        .or_else(|| length_property(&style, "padding"))
+        .unwrap_or(0.0);
+    let padding_bottom = length_property(&style, "padding-bottom")
+        .or_else(|| length_property(&style, "padding"))
+        .unwrap_or(0.0);
+    let content_width = length_property(&style, "width").unwrap_or(
+        (layout.dimensions.content.width
+            - padding_left
+            - padding_right
+            - border.left
+            - border.right)
+            .max(0.0),
+    );
+    let content_height = length_property(&style, "height").unwrap_or(0.0);
+    let total_width = content_width + padding_left + padding_right + border.left + border.right;
+    let total_height = content_height + padding_top + padding_bottom + border.top + border.bottom;
+    if total_width <= 0.0 && total_height <= 0.0 {
+        return;
+    }
+
+    let y = match pseudo {
+        PseudoElement::Before => layout.dimensions.content.y - total_height,
+        PseudoElement::After => layout.dimensions.content.y + layout.dimensions.content.height,
+    };
+    paint_generated_box(
+        canvas,
+        Rect {
+            x: layout.dimensions.content.x,
+            y,
+            width: total_width,
+            height: total_height,
+        },
+        &style,
+        clip,
+    );
+}
+
+#[derive(Clone, Copy)]
+struct EdgeSizesForPaint {
+    top: f32,
+    right: f32,
+    bottom: f32,
+    left: f32,
+}
+
+impl EdgeSizesForPaint {
+    fn from_style(style: &ComputedStyle) -> Self {
+        Self {
+            top: length_property(style, "border-top-width")
+                .or_else(|| length_property(style, "border-width"))
+                .unwrap_or(0.0),
+            right: length_property(style, "border-right-width")
+                .or_else(|| length_property(style, "border-width"))
+                .unwrap_or(0.0),
+            bottom: length_property(style, "border-bottom-width")
+                .or_else(|| length_property(style, "border-width"))
+                .unwrap_or(0.0),
+            left: length_property(style, "border-left-width")
+                .or_else(|| length_property(style, "border-width"))
+                .unwrap_or(0.0),
+        }
+    }
+
+    fn total_horizontal(self) -> f32 {
+        self.left + self.right
+    }
+
+    fn total_vertical(self) -> f32 {
+        self.top + self.bottom
+    }
+}
+
+fn paint_rect_borders(
+    canvas: &mut Canvas,
+    rect: Rect,
+    style: &ComputedStyle,
+    border: EdgeSizesForPaint,
+    clip: Option<Rect>,
+) {
+    if border.top > 0.0 && has_solid_border_side(style, "top") {
+        canvas.fill_rect_clipped(
+            Rect {
+                x: rect.x,
+                y: rect.y,
+                width: rect.width,
+                height: border.top,
+            },
+            border_color_side(style, "top").unwrap_or(Color::rgb(0, 0, 0)),
+            clip,
+        );
+    }
+    if border.bottom > 0.0 && has_solid_border_side(style, "bottom") {
+        canvas.fill_rect_clipped(
+            Rect {
+                x: rect.x,
+                y: rect.y + rect.height - border.bottom,
+                width: rect.width,
+                height: border.bottom,
+            },
+            border_color_side(style, "bottom").unwrap_or(Color::rgb(0, 0, 0)),
+            clip,
+        );
+    }
+    if border.left > 0.0 && has_solid_border_side(style, "left") {
+        canvas.fill_rect_clipped(
+            Rect {
+                x: rect.x,
+                y: rect.y + border.top,
+                width: border.left,
+                height: (rect.height - border.top - border.bottom).max(0.0),
+            },
+            border_color_side(style, "left").unwrap_or(Color::rgb(0, 0, 0)),
+            clip,
+        );
+    }
+    if border.right > 0.0 && has_solid_border_side(style, "right") {
+        canvas.fill_rect_clipped(
+            Rect {
+                x: rect.x + rect.width - border.right,
+                y: rect.y + border.top,
+                width: border.right,
+                height: (rect.height - border.top - border.bottom).max(0.0),
+            },
+            border_color_side(style, "right").unwrap_or(Color::rgb(0, 0, 0)),
+            clip,
+        );
+    }
+}
+
+fn paint_zero_sized_border_box(
+    canvas: &mut Canvas,
+    rect: Rect,
+    style: &ComputedStyle,
+    border: EdgeSizesForPaint,
+    clip: Option<Rect>,
+) {
+    let center_x = rect.x + border.left;
+    let center_y = rect.y + border.top;
+
+    if border.top > 0.0 && has_solid_border_side(style, "top") {
+        fill_triangle_clipped(
+            canvas,
+            (rect.x, center_y),
+            (center_x, rect.y),
+            (rect.x + rect.width, center_y),
+            border_color_side(style, "top").unwrap_or(Color::rgb(0, 0, 0)),
+            clip,
+        );
+    }
+    if border.right > 0.0 && has_solid_border_side(style, "right") {
+        fill_triangle_clipped(
+            canvas,
+            (center_x, rect.y),
+            (rect.x + rect.width, center_y),
+            (center_x, rect.y + rect.height),
+            border_color_side(style, "right").unwrap_or(Color::rgb(0, 0, 0)),
+            clip,
+        );
+    }
+    if border.bottom > 0.0 && has_solid_border_side(style, "bottom") {
+        fill_triangle_clipped(
+            canvas,
+            (rect.x, center_y),
+            (rect.x + rect.width, center_y),
+            (center_x, rect.y + rect.height),
+            border_color_side(style, "bottom").unwrap_or(Color::rgb(0, 0, 0)),
+            clip,
+        );
+    }
+    if border.left > 0.0 && has_solid_border_side(style, "left") {
+        fill_triangle_clipped(
+            canvas,
+            (center_x, rect.y),
+            (rect.x, center_y),
+            (center_x, rect.y + rect.height),
+            border_color_side(style, "left").unwrap_or(Color::rgb(0, 0, 0)),
+            clip,
+        );
     }
 }
 
@@ -639,6 +916,14 @@ fn color_property(value: Option<&ComputedValue>) -> Option<Color> {
     match value {
         Some(ComputedValue::Color(color)) => parse_color(color),
         Some(ComputedValue::Keyword(color)) => parse_color(color),
+        _ => None,
+    }
+}
+
+fn length_property(style: &ComputedStyle, name: &str) -> Option<f32> {
+    match style.get(name) {
+        Some(ComputedValue::Px(value)) => Some(*value),
+        Some(ComputedValue::Number(value)) => Some(*value),
         _ => None,
     }
 }
@@ -760,6 +1045,65 @@ fn intersect(left: Rect, right: Rect) -> Option<Rect> {
             height: y1 - y0,
         })
     }
+}
+
+fn fill_triangle_clipped(
+    canvas: &mut Canvas,
+    p0: (f32, f32),
+    p1: (f32, f32),
+    p2: (f32, f32),
+    color: Color,
+    clip: Option<Rect>,
+) {
+    if color.a == 0 {
+        return;
+    }
+
+    let min_x = p0.0.min(p1.0).min(p2.0).floor().max(0.0) as i32;
+    let min_y = p0.1.min(p1.1).min(p2.1).floor().max(0.0) as i32;
+    let max_x = p0.0.max(p1.0).max(p2.0).ceil().min(canvas.width as f32) as i32;
+    let max_y = p0.1.max(p1.1).max(p2.1).ceil().min(canvas.height as f32) as i32;
+    let clip = clip.and_then(normalize_rect);
+
+    for y in min_y..max_y {
+        for x in min_x..max_x {
+            let px = x as f32 + 0.5;
+            let py = y as f32 + 0.5;
+            if !point_in_triangle((px, py), p0, p1, p2) {
+                continue;
+            }
+            if let Some(clip_rect) = clip {
+                if px < clip_rect.x
+                    || px >= clip_rect.x + clip_rect.width
+                    || py < clip_rect.y
+                    || py >= clip_rect.y + clip_rect.height
+                {
+                    continue;
+                }
+            }
+
+            let index = ((y as u32 * canvas.width + x as u32) * 4) as usize;
+            blend_pixel(&mut canvas.pixels[index..index + 4], color);
+        }
+    }
+}
+
+fn point_in_triangle(
+    point: (f32, f32),
+    p0: (f32, f32),
+    p1: (f32, f32),
+    p2: (f32, f32),
+) -> bool {
+    let d1 = triangle_sign(point, p0, p1);
+    let d2 = triangle_sign(point, p1, p2);
+    let d3 = triangle_sign(point, p2, p0);
+    let has_neg = d1 < 0.0 || d2 < 0.0 || d3 < 0.0;
+    let has_pos = d1 > 0.0 || d2 > 0.0 || d3 > 0.0;
+    !(has_neg && has_pos)
+}
+
+fn triangle_sign(p0: (f32, f32), p1: (f32, f32), p2: (f32, f32)) -> f32 {
+    (p0.0 - p2.0) * (p1.1 - p2.1) - (p1.0 - p2.0) * (p0.1 - p2.1)
 }
 
 fn blend_pixel(pixel: &mut [u8], color: Color) {
@@ -1485,6 +1829,25 @@ mod tests {
     }
 
     #[test]
+    fn paints_generated_border_box_pseudo_elements() {
+        let html = "<html><head><style>body { margin: 0; } span::before { content: ''; border-style: none solid solid; border-color: red yellow black yellow; border-width: 4px; }</style></head><body><span></span></body></html>";
+        let document = TreeBuilder::parse(html).document();
+        let canvas = render_document(
+            &document,
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 20.0,
+                height: 20.0,
+            },
+        )
+        .unwrap();
+
+        assert!(count_pixels(&canvas, Color::rgb(255, 255, 0)) > 0);
+        assert!(count_pixels(&canvas, Color::rgb(0, 0, 0)) > 0);
+    }
+
+    #[test]
     fn paints_side_specific_border_colors() {
         let document = NodeHandle::document();
         let body = NodeHandle::element("body");
@@ -1953,6 +2316,18 @@ mod tests {
         for child in &layout.children {
             collect_layout_texts_into(child, out);
         }
+    }
+
+    fn count_pixels(canvas: &Canvas, color: Color) -> usize {
+        let mut count = 0usize;
+        for y in 0..canvas.height() {
+            for x in 0..canvas.width() {
+                if canvas.pixel(x, y) == Some(color) {
+                    count += 1;
+                }
+            }
+        }
+        count
     }
 
     fn find_layout_box_by_id<'a>(layout: &'a LayoutBox, id: &str) -> Option<&'a LayoutBox> {

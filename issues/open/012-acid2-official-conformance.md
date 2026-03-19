@@ -24,6 +24,8 @@ status: open
 - `title` テキストが `<head>` ではなく本文側へ落ちていた tree builder の扱いを修正し、`&nbsp;` の文字参照も decode するようにした
 - ignored の公式比較テスト差分は `66,465 -> 26,020 -> 23,114` まで減少
 - `reference.html` 側では、本文テキストが `Hello World!` のみになることをテストで確認できた
+- `content: ''` の擬似要素を border 図形として描けるようにし、legacy な `:before` / `:after` も pseudo-element として扱うようにした
+- inline 画像フラグメントが自身の style（padding / border / background）を持てるようにし、`object` fallback では実際に画像を解決した内側要素の style を使うようにした
 - 現時点の主な残差分は、Acid2 本体側で目・鼻・口まわりの形状が大きく崩れていること
 
 ## タスク
