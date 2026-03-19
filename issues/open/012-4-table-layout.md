@@ -31,3 +31,10 @@ CSS の `display: table` / `display: table-cell` 等のテーブル関連 displa
 - 自動テーブルレイアウトアルゴリズム（複雑な幅分配）
 - `border-collapse: collapse` モデル
 - `vertical-align` によるセル内容の垂直配置（初期値 baseline のみ）
+
+## 進捗メモ
+
+- table container 内で table-cell/row/row-group 以外の子要素を anonymous cell として扱うようにした（CSS 2.1 §17.2.1）
+- width:auto の table container に shrink-to-fit 幅を適用し、テーブルが親の全幅に広がらないようにした
+- ignored の公式比較差分は `34,604 -> 27,884` まで改善。主に `.image-height-test` 内の table 幅縮小による
+- table の intrinsic_width をセル幅の合算で計算する試みは微増（27,884 → 28,316）だったため revert。セル幅のより正確な計算は今後の課題
