@@ -400,7 +400,7 @@ fn layout_element(
     let x = containing_block.x + margin.left + border.left + padding.left;
     let y = containing_block.y + margin.top + border.top + padding.top;
 
-    if is_table_container(&style) {
+    if is_table_container_element(node, &style) {
         if resolved_length(&style, "width", containing_block.width).is_none() {
             width = shrink_to_fit_width(node, resolver, containing_block.width);
         }
@@ -1020,11 +1020,11 @@ fn collect_table_entries(node: &NodeHandle, resolver: &mut StyleResolver) -> Vec
     let mut anonymous_cells = Vec::new();
 
     for child in node.child_nodes() {
-        match table_display(&resolver.computed_style(&child)) {
+        match table_display_for_node(&child, &resolver.computed_style(&child)) {
             Some(TableDisplay::RowGroup) => {
                 flush_anonymous_row(&mut entries, &mut anonymous_cells);
                 for row in child.child_nodes() {
-                    match table_display(&resolver.computed_style(&row)) {
+                    match table_display_for_node(&row, &resolver.computed_style(&row)) {
                         Some(TableDisplay::Row) => entries.push(TableRowEntry {
                             row_node: row.clone(),
                             row_group: Some(child.clone()),
@@ -1075,7 +1075,7 @@ fn flush_anonymous_row(entries: &mut Vec<TableRowEntry>, anonymous_cells: &mut V
 fn collect_row_cells(row: &NodeHandle, resolver: &mut StyleResolver) -> Vec<NodeHandle> {
     row.child_nodes()
         .into_iter()
-        .filter(|child| matches!(table_display(&resolver.computed_style(child)), Some(TableDisplay::Cell)))
+        .filter(|child| matches!(table_display_for_node(child, &resolver.computed_style(child)), Some(TableDisplay::Cell)))
         .collect()
 }
 
@@ -1539,7 +1539,7 @@ fn intrinsic_width(node: &NodeHandle, resolver: &mut StyleResolver) -> f32 {
                     + border.right;
             }
             let mut width: f32 = 0.0;
-            if is_table_container(&style) {
+            if is_table_container_element(node, &style) {
                 let entries = collect_table_entries(node, resolver);
                 let spacing = table_border_spacing(&style);
                 for entry in &entries {
@@ -1710,6 +1710,19 @@ fn is_table_container(style: &ComputedStyle) -> bool {
     matches!(table_display(style), Some(TableDisplay::Table))
 }
 
+fn is_table_container_element(node: &NodeHandle, style: &ComputedStyle) -> bool {
+    if is_table_container(style) {
+        return true;
+    }
+    // HTML default: <table> is display: table
+    if matches!(style.get("display"), None) {
+        if let Some(tag) = node.tag_name() {
+            return tag.eq_ignore_ascii_case("table");
+        }
+    }
+    false
+}
+
 fn table_display(style: &ComputedStyle) -> Option<TableDisplay> {
     match style.get("display") {
         Some(ComputedValue::Keyword(keyword)) if keyword.eq_ignore_ascii_case("table") => {
@@ -1728,6 +1741,25 @@ fn table_display(style: &ComputedStyle) -> Option<TableDisplay> {
         }
         _ => None,
     }
+}
+
+fn table_display_for_node(node: &NodeHandle, style: &ComputedStyle) -> Option<TableDisplay> {
+    if let Some(display) = table_display(style) {
+        return Some(display);
+    }
+    // HTML default display values for table elements
+    if matches!(style.get("display"), None) {
+        if let Some(tag) = node.tag_name() {
+            return match tag.to_ascii_lowercase().as_str() {
+                "table" => Some(TableDisplay::Table),
+                "thead" | "tbody" | "tfoot" => Some(TableDisplay::RowGroup),
+                "tr" => Some(TableDisplay::Row),
+                "td" | "th" => Some(TableDisplay::Cell),
+                _ => None,
+            };
+        }
+    }
+    None
 }
 
 fn table_border_spacing(style: &ComputedStyle) -> f32 {
