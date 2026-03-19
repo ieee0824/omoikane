@@ -107,6 +107,9 @@ status: open
 - [012-6 `#eyes-a object` の inline fallback / fixed background 調整](../closed/012-6-eyes-inline-fallback-and-fixed-background.md) ✅
 - [012-7 `.eyes` の stacking / paint phase 整合](../closed/012-7-eyes-stacking-and-paint-phases.md) ✅
 - [012-8 `smile` / `chin` 下半分の位置合わせ](012-8-smile-and-chin-alignment.md)
+- [012-9 鼻のダイヤモンド形状（`:before`/`:after` の border triangle）](012-9-nose-diamond-pseudo-elements.md)
+- [012-10 scalp（position:fixed）の顔との位置合わせ](012-10-scalp-fixed-position-alignment.md)
+- [012-11 smile の曲線形状（nested float/absolute/border）](012-11-smile-curve-border-trick.md)
 
 ## タスク
 - [x] 公式比較の差分画像を見て、主要な未実装要素を特定する
