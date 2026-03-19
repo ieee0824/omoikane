@@ -43,3 +43,4 @@ status: open
 - block layout の float/clear 処理を単一の `left/right offset` 追跡から、active float region を都度問い合わせる内部モデルへ切り替えた
 - float 配置は「現在 y で使える幅が足りなければ次の float boundary まで降りる」形に寄せ、`clear` も active float region の bottom を見て計算するようにした
 - `layout::tests::float_left_and_right_reduce_available_block_width` や Acid2 関連の局所回帰は維持できているが、ignored の公式比較差分は依然 `40,427`
+- 鼻まわりの切り分けとして、float 配置時に負 `margin-top` を打ち消していたバグを別筋で修正し、`layout::tests::float_preserves_negative_top_margin_offset` を追加した。これは `.nose { margin: -2em ... }` の前提には効くが、ignored の公式比較差分 `33,957` 自体は動かなかったため、012-2 の本丸は引き続き `clear` の負 clearance と empty/self margin collapse にある

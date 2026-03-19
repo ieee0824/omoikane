@@ -11,7 +11,7 @@ status: open
 
 ## 現状
 - `paint::tests::acid2_fixture_matches_official_reference_rendering` を `--ignored` で実行すると失敗する
-- 差分ピクセル数は現在 40,427
+- 差分ピクセル数は現在 33,957
 - 差分画像は `tests/output/acid2/acid2.official-reference.{actual,expected,diff}.png` に出力される
 
 ## 進捗メモ
@@ -77,6 +77,8 @@ status: open
 - 012-8 の切り分けとして `paint::tests::acid2_lower_face_boxes_keep_expected_vertical_order`、`paint::tests::acid2_empty_block_starts_shortly_after_nose`、`paint::tests::acid2_empty_block_creates_large_gap_before_smile` を追加した。`nose -> empty` と `empty -> smile` の局所 gap は大きく崩れておらず、ignored の公式比較差分も引き続き `40,427` のため、下半分の主戦場は単純な block gap ではなく paint phase / stacking か、さらに上流の縦配置に寄っている可能性が高い
 - 012-7 の修正として、paint の phase 分離を immediate child ベースから一段広げ、non-positioned subtree の positioned descendant も祖先 stacking phase へ defer するようにした。`paint::tests::positioned_grandchild_paints_above_float_uncle` を追加し、ignored の公式比較差分は `40,427 -> 36,708` まで改善した。local baseline `tests/fixtures/acid2/acid2.baseline.png` も更新済み
 - ignored の公式比較ハーネスでは、Acid2 側だけ `#top` 基準で上へ詰めていたため reference 側の `h2` と origin が揃っていなかった。比較前に Acid2 の `#top` content origin を reference の `h2` content origin へ合わせるようにして、より対称な比較へ寄せた結果、ignored の公式比較差分は `36,708 -> 33,957` まで改善した。これは主に比較の整合化であり、renderer 本体の改善量とは分けて扱う
+- `.nose` の前提修正として、float 配置時に負 `margin-top` を打ち消していたバグを修正し、`layout::tests::float_preserves_negative_top_margin_offset` を追加した。これは鼻周辺の前提には効くが、ignored の公式比較差分 `33,957` 自体は変わらなかった
+- 012-7 の追加修正として、non-positioned subtree の float descendant も祖先 float phase へ defer するように広げ、`paint::tests::float_grandchild_paints_above_block_uncle` を追加した。`cargo test --lib` は維持できているが、ignored の公式比較差分 `33,957` は据え置きだった
 
 ## 子issue
 

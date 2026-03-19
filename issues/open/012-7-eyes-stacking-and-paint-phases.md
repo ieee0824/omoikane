@@ -32,6 +32,7 @@ Acid2 の `.eyes` は `#eyes-c` の block、`#eyes-b` の float、`#eyes-a` の 
 
 - `cargo test absolute_inline_content_paints_above_float_siblings --lib`
 - `cargo test positioned_grandchild_paints_above_float_uncle --lib`
+- `cargo test float_grandchild_paints_above_block_uncle --lib`
 - `cargo test acid2_eyes_inline_layer_stays_at_same_origin_as_float_and_block_layers --lib`
 - `cargo test acid2_eyes_block_layer_stays_overlapping_float_layer --lib`
 - `cargo test paint::tests::acid2_fixture_matches_official_reference_rendering --lib -- --ignored`
@@ -42,6 +43,7 @@ Acid2 の `.eyes` は `#eyes-c` の block、`#eyes-b` の float、`#eyes-a` の 
 - `paint::tests::acid2_eyes_block_layer_stays_overlapping_float_layer`
 - `paint::tests::absolute_inline_content_paints_above_float_siblings`
 - `paint::tests::positioned_grandchild_paints_above_float_uncle`
+- `paint::tests::float_grandchild_paints_above_block_uncle`
 - `.eyes` 専用の追加回帰テスト
 - ignored の公式 Acid2 比較で目周りの差分が縮小すること
 
@@ -51,3 +53,4 @@ Acid2 の `.eyes` は `#eyes-c` の block、`#eyes-b` の float、`#eyes-a` の 
 - `#eyes-a` 自体の inline/fixed background 問題は [012-6](012-6-eyes-inline-fallback-and-fixed-background.md) で扱う
 - immediate child だけでなく、non-positioned subtree の中にある positioned descendant も祖先 stacking phase へ defer する必要がある
 - 上の defer を paint に入れたことで、`positioned_grandchild_paints_above_float_uncle` を含む局所回帰は維持しつつ、ignored の公式比較差分は `40,427 -> 36,708` まで改善した
+- さらに non-positioned subtree の float descendant も祖先 float phase へ defer するように広げ、`paint::tests::float_grandchild_paints_above_block_uncle` を追加した。phase model 自体は健全になったが、ignored の公式比較差分 `33,957` は今回も据え置きで、残差分の本丸は `.eyes` の phase 順だけではなさそう
