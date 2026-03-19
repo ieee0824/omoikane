@@ -2284,7 +2284,9 @@ fn collapse_white_space(text: &str) -> String {
     let mut previous_was_space = false;
 
     for ch in text.chars() {
-        if ch.is_whitespace() {
+        // CSS 2.1 §16.6.1: only ASCII whitespace (space, tab, newline, etc.)
+        // is collapsible. Non-breaking space (U+00A0) is NOT collapsible.
+        if ch != '\u{00A0}' && ch.is_whitespace() {
             if !previous_was_space {
                 out.push(' ');
                 previous_was_space = true;

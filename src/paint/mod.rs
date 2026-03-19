@@ -2972,7 +2972,7 @@ mod tests {
         .unwrap();
 
         let texts = collect_layout_texts(&layout);
-        let joined = texts.concat();
+        let joined: String = texts.concat().replace('\u{00A0}', " ");
         assert_eq!(joined.trim(), "Hello World!");
     }
 
