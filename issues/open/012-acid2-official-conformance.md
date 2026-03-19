@@ -11,7 +11,7 @@ status: open
 
 ## 現状
 - `paint::tests::acid2_fixture_matches_official_reference_rendering` を `--ignored` で実行すると失敗する
-- 差分ピクセル数は現在 6,862
+- 差分ピクセル数は現在 2,992
 - 差分画像は `tests/output/acid2/acid2.official-reference.{actual,expected,diff}.png` に出力される
 
 ## 進捗メモ
@@ -100,6 +100,12 @@ status: open
 - border-style:none の辺の border-width を computed value 0 に修正（CSS 2.1 §8.5.3）
 - 012-9/10/11 の子 issue を追加: 鼻ダイヤモンド、scalp 位置、smile 曲線
 - `intrinsic_width` を outer width（padding+border含む）で一貫する設計に変更。auto width パスで自身の padding/border を加算し、`shrink_to_fit_width` で content width に変換。smile の absolute div width が 72→96 に改善。公式比較差分 `7,078 -> 6,862`
+- pseudo element (:before/:after) の Y 配置を修正: :before は content.y に配置、:after は content 下端 - total_height に配置。公式比較差分 `6,862 -> 5,146`
+- zero-sized border box の三角形描画を改善: border-top=0 / border-bottom=0 の場合の 3 辺三角形描画を追加。公式比較差分 `5,146 -> 5,008`
+- border-style:none の border-width zeroing で shorthand のみ指定のケースも対応
+- parent-child top margin collapsing を実装（CSS 2.1 §8.3.1）。親に border/padding-top がない場合、最初の in-flow child の margin-top が親と collapse。公式比較差分 `5,008 -> 2,992`
+- float children の paint で include_phase_descendants=true に変更し、float 内の positioned 要素（smile の em border 等）が描画されるようにした
+- 残りの差分 2,992px: smile 曲線の細部、chin/parser 位置、nose ダイヤモンドの色
 
 ## 子issue
 
