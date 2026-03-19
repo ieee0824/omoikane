@@ -1497,7 +1497,7 @@ fn parse_stylesheet_forgiving(input: &str) -> Result<Stylesheet, PaintError> {
                     depth -= 1;
                 }
                 if depth == 0 {
-                    let trimmed = current.trim_start_matches(|c: char| c == ';' || c.is_ascii_whitespace());
+                    let trimmed = current.trim_start_matches(|c: char| c.is_ascii_whitespace());
                     if !trimmed.is_empty() {
                         if let Ok(stylesheet) = parse_stylesheet(trimmed) {
                             rules.extend(stylesheet.rules);
@@ -3634,6 +3634,53 @@ mod tests {
     }
 
     #[test]
+    fn acid2_chin_height_includes_strut_from_parent_line_height() {
+        let acid2_html = fs::read_to_string(acid2_fixture_path()).unwrap();
+        let acid2_document = TreeBuilder::parse(&acid2_html).document();
+        let mut resolver = StyleResolver::new();
+        for stylesheet in extract_author_stylesheets(&acid2_document).unwrap() {
+            resolver.add_stylesheet(
+                Origin::Author,
+                parse_stylesheet_forgiving(&stylesheet).unwrap(),
+            );
+        }
+        let layout = crate::layout::layout_tree(
+            &acid2_document,
+            &mut resolver,
+            Rect { x: 0.0, y: 0.0, width: 800.0, height: 600.0 },
+        )
+        .unwrap();
+        let chin = find_layout_box_by_class(&layout, "chin").unwrap();
+        // .chin { line-height: 1em } = 12px establishes the strut.
+        // .chin div { display: inline; font: 2px/4px serif } has line-height 4px.
+        // The strut (12px) must override the inline child's 4px.
+        assert_eq!(
+            chin.dimensions.content.height, 12.0,
+            "chin content height should be 12px (strut from line-height: 1em), got {}",
+            chin.dimensions.content.height,
+        );
+    }
+
+    #[test]
+    fn stray_semicolon_between_rules_invalidates_next_selector() {
+        let css = r#"
+            .a { color: red; };
+            .a { height: 99px; }
+        "#;
+        let parsed = parse_stylesheet_forgiving(css).unwrap();
+        // The stray ';' after '}' is consumed into the next rule's selector
+        // prelude, making it '; .a' which is invalid. The rule is dropped.
+        let has_height = parsed.rules.iter().any(|rule| {
+            if let crate::css::Rule::Style(style_rule) = rule {
+                style_rule.declarations.iter().any(|d| d.name == "height")
+            } else {
+                false
+            }
+        });
+        assert!(!has_height, "height: 99px should be dropped because ';' invalidates the selector");
+    }
+
+    #[test]
     fn acid2_ul_table_cells_cover_red_background() {
         let acid2_html = fs::read_to_string(acid2_fixture_path()).unwrap();
         let acid2_document = TreeBuilder::parse(&acid2_html).document();
@@ -3747,9 +3794,11 @@ mod tests {
         // width: 2em (24px) — later `width: 200` is invalid (unitless non-zero)
         assert_eq!(style.get("width"), Some(&ComputedValue::Px(24.0)),
             "parser width should be 2em (24px), got {:?}", style.get("width"));
-        // height: 3em (36px) — overridden by later `.parser { height: 3em; }`
-        assert_eq!(style.get("height"), Some(&ComputedValue::Px(36.0)),
-            "parser height should be 3em (36px), got {:?}", style.get("height"));
+        // height: 1em (12px) — `.parser { height: 3em; }` is dropped because the
+        // stray `;` between rules is consumed into its selector prelude per CSS
+        // error recovery, making the selector invalid.
+        assert_eq!(style.get("height"), Some(&ComputedValue::Px(12.0)),
+            "parser height should be 1em (12px), got {:?}", style.get("height"));
     }
 
     #[test]

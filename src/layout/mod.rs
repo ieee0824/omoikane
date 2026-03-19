@@ -445,6 +445,7 @@ fn layout_element(
                     cursor_y,
                     (width - offsets.left - offsets.right).max(0.0),
                     text_align(&style),
+                    line_height(&style),
                 );
                 if let Some(last_line) = inline_lines.last() {
                     cursor_y = last_line.rect.y + last_line.rect.height;
@@ -682,6 +683,7 @@ fn layout_element(
                 cursor_y,
                 (width - offsets.left - offsets.right).max(0.0),
                 text_align(&style),
+                line_height(&style),
             );
             if let Some(last_line) = inline_lines.last() {
                 cursor_y = last_line.rect.y + last_line.rect.height;
@@ -2064,13 +2066,14 @@ fn layout_inline_nodes(
     start_y: f32,
     available_width: f32,
     align: TextAlign,
+    strut_line_height: f32,
 ) -> Vec<LineBox> {
     let mut segments = Vec::new();
     for node in nodes {
         collect_inline_segments(node, resolver, &mut segments);
     }
 
-    layout_inline_segments(&segments, start_x, start_y, available_width, align)
+    layout_inline_segments(&segments, start_x, start_y, available_width, align, strut_line_height)
 }
 
 #[derive(Debug, Clone)]
@@ -2390,12 +2393,13 @@ fn layout_inline_segments(
     start_y: f32,
     available_width: f32,
     align: TextAlign,
+    strut_line_height: f32,
 ) -> Vec<LineBox> {
     let mut lines = Vec::new();
     let mut current_fragments = Vec::new();
     let mut cursor_x = start_x;
     let mut cursor_y = start_y;
-    let mut current_line_height: f32 = 0.0;
+    let mut current_line_height: f32 = strut_line_height;
 
     for segment in segments {
         for piece in split_segment(segment) {
@@ -2413,7 +2417,7 @@ fn layout_inline_segments(
                     );
                     cursor_y += current_line_height.max(segment.line_height);
                     cursor_x = start_x;
-                    current_line_height = 0.0;
+                    current_line_height = strut_line_height;
                 }
                 InlinePiece::Fragment {
                     content,
@@ -2433,7 +2437,7 @@ fn layout_inline_segments(
                         );
                         cursor_y += current_line_height.max(segment.line_height);
                         cursor_x = start_x;
-                        current_line_height = 0.0;
+                        current_line_height = strut_line_height;
                     }
 
                     current_fragments.push(InlineFragment {
@@ -4839,6 +4843,46 @@ mod tests {
                 .get("class")
                 .unwrap(),
             "high"
+        );
+    }
+
+    #[test]
+    fn strut_enforces_parent_line_height_as_minimum_for_line_box() {
+        let document = NodeHandle::document();
+        let body = NodeHandle::element("body");
+        let container = NodeHandle::element("div");
+        let inline_child = NodeHandle::element("span");
+        let text = NodeHandle::text("x");
+        container.set_attribute("class", "container");
+        inline_child.set_attribute("class", "small");
+        document.append_child(body.clone());
+        body.append_child(container.clone());
+        container.append_child(inline_child.clone());
+        inline_child.append_child(text);
+
+        let mut resolver = StyleResolver::new();
+        resolver.add_stylesheet(
+            Origin::Author,
+            parse_stylesheet(
+                ".container { line-height: 24px; width: 100px; } .small { font-size: 2px; line-height: 4px; }",
+            )
+            .unwrap(),
+        );
+
+        let layout = layout_tree(
+            &body,
+            &mut resolver,
+            Rect { x: 0.0, y: 0.0, width: 200.0, height: 0.0 },
+        )
+        .unwrap();
+
+        let container_box = &layout.children[0];
+        // The container's strut (line-height: 24px) should be the minimum
+        // line box height, even though the inline child only has 4px.
+        assert_eq!(
+            container_box.dimensions.content.height, 24.0,
+            "container height should be 24px (strut), got {}",
+            container_box.dimensions.content.height,
         );
     }
 }
