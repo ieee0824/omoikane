@@ -147,7 +147,28 @@ impl StyleResolver {
 
         let mut properties: BTreeMap<String, ComputedValue> = BTreeMap::new();
 
+        // Process font-size first so that em units in other properties
+        // resolve against the element's own computed font-size.
+        if let Some(fs_candidate) = candidates
+            .iter()
+            .filter(|c| c.name == "font-size")
+            .last()
+        {
+            let parent_fs = parent_style
+                .and_then(|ps| ps.get("font-size"))
+                .and_then(|v| match v {
+                    ComputedValue::Px(px) => Some(*px),
+                    _ => None,
+                })
+                .unwrap_or(16.0);
+            let computed = compute_value(&fs_candidate.value, "font-size", parent_fs);
+            properties.insert("font-size".to_string(), computed);
+        }
+
         for candidate in candidates {
+            if candidate.name == "font-size" {
+                continue; // already processed above
+            }
             let font_size = inherited_font_size(parent_style, &properties);
             let computed = compute_value(&candidate.value, &candidate.name, font_size);
             // CSS 2.1: non-zero unitless numbers are invalid for length properties;
@@ -519,7 +540,8 @@ mod tests {
         let style = resolver.computed_style(&title);
 
         assert_eq!(style.get("font-size"), Some(&ComputedValue::Px(30.0)));
-        assert_eq!(style.get("margin-top"), Some(&ComputedValue::Px(40.0)));
+        // CSS 2.1 §4.3.2: em unit uses the element's own computed font-size
+        assert_eq!(style.get("margin-top"), Some(&ComputedValue::Px(60.0)));
     }
 
     #[test]
