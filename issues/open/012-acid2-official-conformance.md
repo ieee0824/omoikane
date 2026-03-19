@@ -11,7 +11,7 @@ status: open
 
 ## 現状
 - `paint::tests::acid2_fixture_matches_official_reference_rendering` を `--ignored` で実行すると失敗する
-- 差分ピクセル数は現在 35,033
+- 差分ピクセル数は現在 22,006
 - 差分画像は `tests/output/acid2/acid2.official-reference.{actual,expected,diff}.png` に出力される
 
 ## 進捗メモ
@@ -89,6 +89,8 @@ status: open
 - `p + table + p` セレクタによる `p.bad` の margin-top:3em は正しく適用されていることを確認（position:fixed で viewport 上 y=144 に配置）
 - 012-4: table の intrinsic_width をセル幅の合算で計算するようにした。`ul` テーブルの幅が 12px → 48px に修正され、4 セルが正しく横並びになった。公式比較差分は `34,601 -> 35,033` と微増（テーブル幅修正で周辺レイアウトに影響）
 - 残りの赤バー（x=60〜380 付近）は `ul` ではなく `.image-height-test` 内の 64x64 red square PNG と `.chin` の fixed background が原因の可能性。次回以降の調査対象
+- margin collapsing の cursor_y 計算を修正: `cursor_y += total_height` を `cursor_y += total_height - collapse_delta` に変更し、collapse_delta の二重加算を解消。同時に float 後の previous_margin_bottom を維持するよう変更。これにより nose→smile gap=48→0, smile→chin gap=42→改善。公式比較差分は `35,033 -> 22,006` に大幅改善
+- HTML table/tr/td/th タグを CSS display 指定なしでもデフォルトの table display 値で認識するよう改善。`.image-height-test` 内の `<table>` が 740px→64px に修正（overflow:hidden で見た目は同じ）
 
 ## 子issue
 
