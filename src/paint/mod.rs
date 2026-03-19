@@ -3552,12 +3552,10 @@ mod tests {
 
         // .chin { margin: -4em 4em 0 } → margin-top: -48px
         // .smile { margin: 5em 3em } → margin-bottom: 60px
-        // collapse_margins(60, -48) = 12px gap (target)
-        // Currently 29.4px due to intervening whitespace text nodes
-        assert!(
-            chin_top - smile_bottom < 40.0,
-            "chin should be close to smile, gap={}, smile_bottom={smile_bottom}, chin_top={chin_top}",
-            chin_top - smile_bottom,
+        // collapse_margins(60, -48) = 12px gap
+        assert_eq!(
+            chin_top - smile_bottom, 12.0,
+            "chin-smile gap should be 12px (collapsed margin), smile_bottom={smile_bottom}, chin_top={chin_top}",
         );
         assert!(chin.dimensions.margin.top < 0.0, "chin should have negative margin-top");
     }
@@ -3673,6 +3671,12 @@ mod tests {
             || matches!(style.get("background-color"), Some(ComputedValue::Keyword(k)) if k == "yellow"),
             "parser should have background: yellow, got {:?}", style.get("background-color"),
         );
+        // width: 2em (24px) — later `width: 200` is invalid (unitless non-zero)
+        assert_eq!(style.get("width"), Some(&ComputedValue::Px(24.0)),
+            "parser width should be 2em (24px), got {:?}", style.get("width"));
+        // height: 3em (36px) — overridden by later `.parser { height: 3em; }`
+        assert_eq!(style.get("height"), Some(&ComputedValue::Px(36.0)),
+            "parser height should be 3em (36px), got {:?}", style.get("height"));
     }
 
     #[test]
