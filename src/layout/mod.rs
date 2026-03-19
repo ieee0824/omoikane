@@ -427,19 +427,27 @@ fn layout_element(
         }
 
         if !pending_inline_nodes.is_empty() {
-            let offsets = active_float_offsets(&float_regions, cursor_y, x, width);
-            let inline_lines = layout_inline_nodes(
-                &pending_inline_nodes,
-                resolver,
-                x + offsets.left,
-                cursor_y,
-                (width - offsets.left - offsets.right).max(0.0),
-                text_align(&style),
-            );
-            if let Some(last_line) = inline_lines.last() {
-                cursor_y = last_line.rect.y + last_line.rect.height;
+            let all_whitespace = pending_inline_nodes.iter().all(|n| {
+                n.node_type() == NodeType::Text
+                    && n.data()
+                        .map(|t| t.trim().is_empty())
+                        .unwrap_or(true)
+            });
+            if !all_whitespace {
+                let offsets = active_float_offsets(&float_regions, cursor_y, x, width);
+                let inline_lines = layout_inline_nodes(
+                    &pending_inline_nodes,
+                    resolver,
+                    x + offsets.left,
+                    cursor_y,
+                    (width - offsets.left - offsets.right).max(0.0),
+                    text_align(&style),
+                );
+                if let Some(last_line) = inline_lines.last() {
+                    cursor_y = last_line.rect.y + last_line.rect.height;
+                }
+                lines.extend(inline_lines);
             }
-            lines.extend(inline_lines);
             pending_inline_nodes.clear();
         }
 
@@ -641,19 +649,27 @@ fn layout_element(
     }
 
     if !pending_inline_nodes.is_empty() {
-        let offsets = active_float_offsets(&float_regions, cursor_y, x, width);
-        let inline_lines = layout_inline_nodes(
-            &pending_inline_nodes,
-            resolver,
-            x + offsets.left,
-            cursor_y,
-            (width - offsets.left - offsets.right).max(0.0),
-            text_align(&style),
-        );
-        if let Some(last_line) = inline_lines.last() {
-            cursor_y = last_line.rect.y + last_line.rect.height;
+        let all_whitespace = pending_inline_nodes.iter().all(|n| {
+            n.node_type() == NodeType::Text
+                && n.data()
+                    .map(|t| t.trim().is_empty())
+                    .unwrap_or(true)
+        });
+        if !all_whitespace {
+            let offsets = active_float_offsets(&float_regions, cursor_y, x, width);
+            let inline_lines = layout_inline_nodes(
+                &pending_inline_nodes,
+                resolver,
+                x + offsets.left,
+                cursor_y,
+                (width - offsets.left - offsets.right).max(0.0),
+                text_align(&style),
+            );
+            if let Some(last_line) = inline_lines.last() {
+                cursor_y = last_line.rect.y + last_line.rect.height;
+            }
+            lines.extend(inline_lines);
         }
-        lines.extend(inline_lines);
     }
 
     let float_bottom = float_regions
@@ -4580,6 +4596,49 @@ mod tests {
         // Negative min: min(-15) = -15
         // Result: 20 + (-15) = 5
         assert_eq!(after_box.dimensions.content.y, 15.0); // 10 (before height) + 5 (collapsed)
+    }
+
+    #[test]
+    fn whitespace_between_blocks_does_not_create_line_box() {
+        let document = NodeHandle::document();
+        let body = NodeHandle::element("body");
+        let first = NodeHandle::element("div");
+        let whitespace = NodeHandle::text("\n   ");
+        let second = NodeHandle::element("section");
+
+        first.set_attribute("class", "first");
+        second.set_attribute("class", "second");
+        document.append_child(body.clone());
+        body.append_child(first);
+        body.append_child(whitespace);
+        body.append_child(second.clone());
+
+        let mut resolver = StyleResolver::new();
+        resolver.add_stylesheet(
+            Origin::Author,
+            parse_stylesheet(
+                ".first { height: 10px; margin-bottom: 5px; } \
+                 .second { height: 10px; margin-top: 3px; }",
+            )
+            .unwrap(),
+        );
+
+        let layout = layout_tree(
+            &body,
+            &mut resolver,
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 100.0,
+                height: 0.0,
+            },
+        )
+        .unwrap();
+
+        let second_box = find_layout_box_by_tag(&layout, "section").unwrap();
+        // margin collapse: max(5, 3) = 5
+        assert_eq!(second_box.dimensions.content.y, 15.0); // 10 + 5
+        assert!(layout.lines.is_empty(), "whitespace should not create line boxes");
     }
 
     #[test]

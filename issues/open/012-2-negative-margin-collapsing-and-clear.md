@@ -47,3 +47,6 @@ status: open
 - empty element の self margin collapsing を実装した。`is_empty_for_margin_collapse` で height=0 / vertical border+padding=0 / lines なし / 全子孫も empty の要素を判定し、`collapse_through_empty` で自身と子孫の全 margin を再帰的に collapse する
 - `layout::tests::empty_element_collapses_own_margins_through` / `layout::tests::empty_element_with_negative_child_margin_collapses_through` を追加し、正 margin 同士の collapse と子の負 margin を含む collapse の両方を固定した
 - ignored の公式比較差分は `33,957 -> 39,245` と一時的に悪化した。原因は empty collapsing で下半分の間隔が縮み、以前画面外だった `.chin` / `.parser` / `ul` table 要素が viewport 内に入ったが、それらの位置がまだ正しくないため。構造的には正しい方向への変更
+- block formatting context 内の block 要素間にある空白のみのテキストノード（改行やスペース）が line box を生成し、cursor_y を不要に進めていた問題を修正した。`pending_inline_nodes` が空白テキストのみの場合はレイアウトをスキップするようにした
+- `layout::tests::whitespace_between_blocks_does_not_create_line_box` を追加し、block 間の空白が margin collapsing を壊さないことを固定した
+- ignored の公式比較差分は `39,245 -> 34,604` まで改善した
