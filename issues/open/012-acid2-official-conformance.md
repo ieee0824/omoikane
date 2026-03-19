@@ -11,7 +11,7 @@ status: open
 
 ## 現状
 - `paint::tests::acid2_fixture_matches_official_reference_rendering` を `--ignored` で実行すると失敗する
-- 差分ピクセル数は現在 40,423
+- 差分ピクセル数は現在 40,379
 - 差分画像は `tests/output/acid2/acid2.official-reference.{actual,expected,diff}.png` に出力される
 
 ## 進捗メモ
@@ -56,9 +56,15 @@ status: open
   - `paint::tests::fixed_background_image_uses_viewport_origin`
 - 追加した Acid2 回帰テスト
   - `paint::tests::acid2_eyes_block_layer_stays_overlapping_float_layer`
+- float / absolute の `width: auto` を初期 layout 時点で shrink-to-fit するよう寄せ、`.smile` 内の nested float が zero-height block child (`strong { width: 6em; display: block; }`) 由来の幅を失わないようにした
+- positioned `width: auto` は、初期 shrink-to-fit 幅で一度レイアウトしたあと、実際の child/line 使用幅が広ければその幅で再レイアウトするようにし、`.eyes` の親 absolute box が `#eyes-b/#eyes-c` 幅を取り込んだ後に `#eyes-a` の line box も right align し直せるようにした
+- 追加した Acid2 回帰テスト
+  - `paint::tests::acid2_smile_nested_float_keeps_block_width_source_descendant`
+- 強化した Acid2 回帰テスト
+  - `paint::tests::acid2_eyes_inline_layer_stays_at_same_origin_as_float_and_block_layers`
 - 現時点の主な残差分は、Acid2 本体側で `eyes-a` / `eyes-b` / `eyes-c` の layering と inline 配置が崩れ、目が横長の赤帯として描かれていること
 - 公式比較差分は今回 `40,872 -> 40,423` まで改善し、`.eyes-c` が右へ逃げる崩れはひとまず抑えられた
-- 負 margin 自体は通るようになったが、下半分の位置ずれはまだ大きく、主戦場は引き続き `smile` の nested float / absolute positioning と、`.eyes-a` の inline image / fixed background の最終位置合わせにある
+- 負 margin 自体は通るようになったが、下半分の位置ずれはまだ大きい。`.smile` の nested float 幅崩れは回帰テストで固定でき、ignored の公式比較も `40,999 -> 40,379` まで戻せた一方、主戦場は引き続き `.eyes-a` の inline image / fixed background の最終 paint と下半分の細かな位置合わせにある
 
 ## タスク
 - [x] 公式比較の差分画像を見て、主要な未実装要素を特定する

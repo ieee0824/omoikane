@@ -379,7 +379,12 @@ fn layout_element(
     let border = edge_sizes(&style, "border");
     let mut margin = edge_sizes(&style, "margin");
 
-    let width = compute_width(&style, containing_block.width, padding, border, &mut margin);
+    let mut width = compute_width(&style, containing_block.width, padding, border, &mut margin);
+    if float_side(&style) != FloatSide::None
+        && resolved_length(&style, "width", containing_block.width).is_none()
+    {
+        width = shrink_to_fit_width(node, resolver, containing_block.width);
+    }
     let x = containing_block.x + margin.left + border.left + padding.left;
     let y = containing_block.y + margin.top + border.top + padding.top;
 
@@ -492,6 +497,10 @@ fn layout_element(
                     viewport,
                     positioned_ancestor,
                 ) {
+                    if resolved_length(child_style, "width", available_width).is_none() {
+                        layout_child.dimensions.content.width =
+                            shrink_to_fit_width(&child, resolver, available_width);
+                    }
                     let outer_y = child_containing.y
                         - layout_child.dimensions.margin.top
                         - layout_child.dimensions.border.top
@@ -1230,6 +1239,63 @@ fn shrink_to_fit_width(node: &NodeHandle, resolver: &mut StyleResolver, availabl
     intrinsic_width(node, resolver).min(available_width).max(0.0)
 }
 
+fn shrink_to_fit_layout_width(
+    node: &NodeHandle,
+    resolver: &mut StyleResolver,
+    available_width: f32,
+) -> f32 {
+    let style = resolver.computed_style(node);
+    let padding = edge_sizes(&style, "padding");
+    let border = edge_sizes(&style, "border");
+    let mut margin = edge_sizes(&style, "margin");
+    if is_auto(style.get("margin-left")) {
+        margin.left = 0.0;
+    }
+    if is_auto(style.get("margin-right")) {
+        margin.right = 0.0;
+    }
+
+    shrink_to_fit_width(node, resolver, available_width)
+        + padding.horizontal()
+        + border.horizontal()
+        + margin.horizontal()
+}
+
+fn used_content_width(layout: &LayoutBox) -> f32 {
+    let content_left = layout.dimensions.content.x;
+    let line_width = layout
+        .lines
+        .iter()
+        .map(|line| (line.rect.x + line.rect.width - content_left).max(0.0))
+        .fold(0.0, f32::max);
+    let child_width = layout
+        .children
+        .iter()
+        .map(|child| {
+            let outer_right = child.dimensions.content.x
+                + child.dimensions.content.width
+                + child.dimensions.padding.right
+                + child.dimensions.border.right
+                + child.dimensions.margin.right;
+            (outer_right - content_left).max(0.0)
+        })
+        .fold(0.0, f32::max);
+
+    line_width.max(child_width)
+}
+
+fn auto_width_from_layout(
+    layout: &LayoutBox,
+    node: &NodeHandle,
+    resolver: &mut StyleResolver,
+    available_width: f32,
+) -> f32 {
+    used_content_width(layout)
+        .max(shrink_to_fit_width(node, resolver, available_width))
+        .min(available_width)
+        .max(0.0)
+}
+
 fn intrinsic_width(node: &NodeHandle, resolver: &mut StyleResolver) -> f32 {
     match node.node_type() {
         NodeType::Text => node
@@ -1245,7 +1311,10 @@ fn intrinsic_width(node: &NodeHandle, resolver: &mut StyleResolver) -> f32 {
         NodeType::Element => {
             let style = resolver.computed_style(node);
             if let Some(width) = explicit_length(&style, "width") {
-                return width;
+                let padding = edge_sizes(&style, "padding");
+                let border = edge_sizes(&style, "border");
+                let margin = edge_sizes(&style, "margin");
+                return width + padding.horizontal() + border.horizontal() + margin.horizontal();
             }
             if let Some((image_node, image)) = element_inline_image(node) {
                 let image_style = resolver.computed_style(&image_node);
@@ -1340,7 +1409,7 @@ fn layout_positioned_child(
     let static_outer = containing_block;
     let specified_width = resolved_length(style, "width", origin.width);
     let child_width = if specified_width.is_none() {
-        shrink_to_fit_width(child, resolver, origin.width)
+        shrink_to_fit_layout_width(child, resolver, origin.width)
     } else {
         origin.width
     };
@@ -1352,7 +1421,17 @@ fn layout_positioned_child(
     };
     let mut layout_child = layout_node(child, resolver, child_containing, viewport, Some(parent_box))?;
     if specified_width.is_none() {
-        layout_child.dimensions.content.width = shrink_to_fit_width(child, resolver, origin.width);
+        let auto_width = auto_width_from_layout(&layout_child, child, resolver, origin.width);
+        if (auto_width - layout_child.dimensions.content.width).abs() > 0.5 {
+            let relayout_containing = Rect {
+                width: auto_width,
+                ..child_containing
+            };
+            layout_child =
+                layout_node(child, resolver, relayout_containing, viewport, Some(parent_box))?;
+        }
+        layout_child.dimensions.content.width =
+            auto_width_from_layout(&layout_child, child, resolver, origin.width);
     }
     let outer_width = layout_child.total_width();
     let outer_height = layout_child.total_height();
@@ -1665,12 +1744,11 @@ fn is_inline_child(node: &NodeHandle, resolver: &mut StyleResolver) -> bool {
             if float_side(&style) != FloatSide::None || is_out_of_flow_positioned(&style) {
                 return false;
             }
-            matches!(
-                style.get("display"),
-                Some(ComputedValue::Keyword(keyword))
-                    if keyword.eq_ignore_ascii_case("inline")
-                        || keyword.eq_ignore_ascii_case("inline-block")
-            ) || node
+            if let Some(ComputedValue::Keyword(keyword)) = style.get("display") {
+                return keyword.eq_ignore_ascii_case("inline")
+                    || keyword.eq_ignore_ascii_case("inline-block");
+            }
+            node
                 .tag_name()
                 .map(|tag| {
                     matches!(
@@ -3834,6 +3912,41 @@ mod tests {
             container_box.children[0].node.tag_name().as_deref(),
             Some("span")
         );
+    }
+
+    #[test]
+    fn explicit_block_display_overrides_inline_tag_default() {
+        let document = NodeHandle::document();
+        let body = NodeHandle::element("body");
+        let container = NodeHandle::element("div");
+        let strong = NodeHandle::element("strong");
+        document.append_child(body.clone());
+        body.append_child(container.clone());
+        container.append_child(strong.clone());
+
+        let mut resolver = StyleResolver::new();
+        resolver.add_stylesheet(
+            Origin::Author,
+            parse_stylesheet("strong { display: block; width: 20px; height: 10px; }").unwrap(),
+        );
+
+        let layout = layout_tree(
+            &body,
+            &mut resolver,
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 100.0,
+                height: 0.0,
+            },
+        )
+        .unwrap();
+
+        let container_box = find_layout_box_by_tag(&layout, "div").unwrap();
+        assert!(container_box.lines.is_empty());
+        assert_eq!(container_box.children.len(), 1);
+        assert_eq!(container_box.children[0].node.tag_name().as_deref(), Some("strong"));
+        assert_eq!(container_box.children[0].dimensions.content.width, 20.0);
     }
 
     #[test]

@@ -2768,13 +2768,27 @@ mod tests {
             .iter()
             .find(|fragment| matches!(fragment.content, InlineFragmentContent::Image(_, _)))
             .unwrap();
-
         assert_eq!(eyes_b.dimensions.content.y, eyes_c.dimensions.content.y);
         assert_eq!(first_line.rect.y, eyes_b.dimensions.content.y);
+        assert!(
+            (eyes_a.dimensions.content.width - eyes.dimensions.content.width).abs() <= 0.5,
+            "{:?} {:?}",
+            eyes_a.dimensions.content,
+            eyes.dimensions.content
+        );
         assert!(first_image.rect.x >= eyes.dimensions.content.x);
         assert!(
             first_image.rect.x + first_image.rect.width
                 <= eyes.dimensions.content.x + eyes.dimensions.content.width + 0.5,
+            "{:?} {:?}",
+            first_image.rect,
+            eyes.dimensions.content
+        );
+        assert!(
+            ((first_image.rect.x + first_image.rect.width)
+                - (eyes.dimensions.content.x + eyes.dimensions.content.width))
+                .abs()
+                <= 0.5,
             "{:?} {:?}",
             first_image.rect,
             eyes.dimensions.content
@@ -2883,6 +2897,53 @@ mod tests {
         assert!(nose.dimensions.content.height <= 36.0, "{:?}", nose.dimensions);
         assert!(chin.dimensions.content.y < smile.dimensions.content.y + 200.0);
     }
+
+    #[test]
+    fn acid2_smile_nested_float_keeps_block_width_source_descendant() {
+        let acid2_html = fs::read_to_string(acid2_fixture_path()).unwrap();
+        let acid2_document = TreeBuilder::parse(&acid2_html).document();
+        let mut resolver = StyleResolver::new();
+        for stylesheet in extract_author_stylesheets(&acid2_document).unwrap() {
+            resolver.add_stylesheet(
+                Origin::Author,
+                parse_stylesheet_forgiving(&stylesheet).unwrap(),
+            );
+        }
+
+        let layout = crate::layout::layout_tree(
+            &acid2_document,
+            &mut resolver,
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 800.0,
+                height: 600.0,
+            },
+        )
+        .unwrap();
+
+        let smile = find_layout_box_by_class(&layout, "smile").unwrap();
+        let relative = smile.children.first().unwrap();
+        let absolute = relative.children.first().unwrap();
+        let nested_float = absolute.children.first().unwrap();
+        let inherited_float = nested_float.children.first().unwrap();
+        let strong = find_first_descendant_by_tag(&acid2_document, "strong").unwrap();
+        let strong_style = resolver.computed_style(&strong);
+
+        assert_eq!(strong_style.get("display"), Some(&ComputedValue::Keyword("block".to_string())));
+        assert_eq!(strong_style.get("width"), Some(&ComputedValue::Px(72.0)));
+        assert!(
+            !inherited_float.children.is_empty(),
+            "{:?}",
+            inherited_float.dimensions
+        );
+        assert!(
+            inherited_float.dimensions.content.width >= 72.0,
+            "{:?}",
+            inherited_float.dimensions
+        );
+    }
+
 
     #[test]
     fn test_scroll_translation_keeps_fixed_positioned_boxes_in_viewport_place() {
@@ -3166,6 +3227,18 @@ mod tests {
             }
         }
 
+        None
+    }
+
+    fn find_first_descendant_by_tag(node: &NodeHandle, tag: &str) -> Option<NodeHandle> {
+        if node.tag_name().as_deref() == Some(tag) {
+            return Some(node.clone());
+        }
+        for child in node.child_nodes() {
+            if let Some(found) = find_first_descendant_by_tag(&child, tag) {
+                return Some(found);
+            }
+        }
         None
     }
 
