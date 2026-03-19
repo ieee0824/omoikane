@@ -1352,13 +1352,42 @@ fn is_number_start(chars: &[char], index: usize) -> bool {
                 .is_some_and(|c| c.is_ascii_digit() || *c == '.'))
 }
 
+fn consume_css_escape(chars: &[char], index: &mut usize) -> Option<char> {
+    // CSS 2.1 §4.1.3: backslash escapes
+    // \<hex>{1,6} followed by optional whitespace → Unicode code point
+    // \<non-hex> → literal character
+    let start = *index;
+    if chars.get(start) != Some(&'\\') {
+        return None;
+    }
+    let next = chars.get(start + 1)?;
+    if next.is_ascii_hexdigit() {
+        let mut hex = String::new();
+        let mut i = start + 1;
+        while i < chars.len() && hex.len() < 6 && chars[i].is_ascii_hexdigit() {
+            hex.push(chars[i]);
+            i += 1;
+        }
+        // Consume optional trailing whitespace
+        if i < chars.len() && chars[i].is_ascii_whitespace() {
+            i += 1;
+        }
+        *index = i;
+        u32::from_str_radix(&hex, 16)
+            .ok()
+            .and_then(char::from_u32)
+    } else {
+        *index = start + 2;
+        Some(*next)
+    }
+}
+
 fn consume_ident(chars: &[char], index: &mut usize) -> String {
     let mut ident = String::new();
     while let Some(&ch) = chars.get(*index) {
         if ch == '\\' {
-            if let Some(&escaped) = chars.get(*index + 1) {
+            if let Some(escaped) = consume_css_escape(chars, index) {
                 ident.push(escaped);
-                *index += 2;
             } else {
                 *index += 1;
             }
@@ -1376,16 +1405,18 @@ fn consume_string(chars: &[char], index: &mut usize, quote: char) -> Result<Stri
     *index += 1;
     let mut value = String::new();
     while let Some(&ch) = chars.get(*index) {
-        *index += 1;
         if ch == quote {
+            *index += 1;
             return Ok(value);
         }
         if ch == '\\' {
-            if let Some(&escaped) = chars.get(*index) {
+            if let Some(escaped) = consume_css_escape(chars, index) {
                 value.push(escaped);
+            } else {
                 *index += 1;
             }
         } else {
+            *index += 1;
             value.push(ch);
         }
     }
@@ -1432,6 +1463,15 @@ mod tests {
         let tokens = tokenize("div { margin-bottom: -6em; top: -.5px; }").unwrap();
         assert!(tokens.contains(&CssToken::Dimension(-6.0, "em".to_string())));
         assert!(tokens.contains(&CssToken::Dimension(-0.5, "px".to_string())));
+    }
+
+    #[test]
+    fn hex_escape_in_ident_produces_unicode_codepoint() {
+        // \a = U+000A (line feed), so m\argin ≠ margin
+        let tokens = tokenize(r"div { m\argin: 2em; }").unwrap();
+        // The property name should NOT be "margin" — it should contain U+000A
+        let has_margin_ident = tokens.iter().any(|t| matches!(t, CssToken::Ident(s) if s == "margin"));
+        assert!(!has_margin_ident, "m\\argin should not tokenize as 'margin'; tokens: {:?}", tokens);
     }
 
     #[test]
