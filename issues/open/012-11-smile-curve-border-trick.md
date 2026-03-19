@@ -38,8 +38,9 @@ Acid2 の smile は `relative + absolute + nested float + border` の組み合�
 - nested float の shrink-to-fit 幅が strong の width:6em を反映すること（実装済み）
 - 全体が組み合わさって曲線状の口に見えること
 
-## 残課題の可能性
+## 進捗メモ
 
-- absolute div の right:1em オフセットが正しく効いているか
-- span の negative margin-top:-1em が正しく適用されているか
-- border の描画順序（background → border → children）
+- absolute child of relative の yellow border 描画は正しく動作（テスト追加済み）
+- smile の absolute div の auto width が 72px（期待: 96px 程度）。span の border-left/right(12+12) が shrink-to-fit 幅に含まれていない
+- `intrinsic_width` が explicit width なしのときに自身の padding/border を加算していない。修正を試みたが `shrink_to_fit_width` の戻り値が outer width になることで layout_positioned_child 等に影響があり revert
+- 根本修正には `intrinsic_width` の戻り値が content width なのか outer width なのかの設計整理が必要
