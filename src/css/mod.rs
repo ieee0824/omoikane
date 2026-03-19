@@ -1079,6 +1079,7 @@ fn expand_background_shorthand(value: Value, important: bool) -> Vec<Declaration
     };
 
     let mut declarations = Vec::new();
+    let mut position_values = Vec::new();
     for item in &values {
         match item {
             Value::Function { name, .. } if name.eq_ignore_ascii_case("url") => declarations.push(Declaration {
@@ -1092,6 +1093,13 @@ fn expand_background_shorthand(value: Value, important: bool) -> Vec<Declaration
             {
                 declarations.push(Declaration {
                     name: "background-repeat".to_string(),
+                    value: Value::Keyword(keyword.to_string()),
+                    important,
+                });
+            }
+            Value::Keyword(keyword) if keyword.eq_ignore_ascii_case("fixed") => {
+                declarations.push(Declaration {
+                    name: "background-attachment".to_string(),
                     value: Value::Keyword(keyword.to_string()),
                     important,
                 });
@@ -1127,8 +1135,29 @@ fn expand_background_shorthand(value: Value, important: bool) -> Vec<Declaration
                     important,
                 });
             }
+            Value::Length(_, unit) if unit == "px" || unit == "em" => {
+                position_values.push(item.clone());
+            }
+            Value::Number(_) => {
+                position_values.push(item.clone());
+            }
             _ => {}
         }
+    }
+
+    if let Some(first) = position_values.first() {
+        declarations.push(Declaration {
+            name: "background-position-x".to_string(),
+            value: first.clone(),
+            important,
+        });
+    }
+    if let Some(second) = position_values.get(1) {
+        declarations.push(Declaration {
+            name: "background-position-y".to_string(),
+            value: second.clone(),
+            important,
+        });
     }
 
     if declarations.is_empty() {
@@ -1540,6 +1569,27 @@ mod tests {
         assert!(rule.declarations.iter().any(
             |decl| decl.name == "background-repeat"
                 && matches!(&decl.value, Value::Keyword(value) if value == "no-repeat")
+        ));
+    }
+
+    #[test]
+    fn expands_background_attachment_and_position() {
+        let stylesheet = parse_stylesheet("div { background: fixed url(\"x\") 1px 0; }").unwrap();
+        let Rule::Style(rule) = &stylesheet.rules[0] else {
+            panic!("expected style rule");
+        };
+
+        assert!(rule.declarations.iter().any(
+            |decl| decl.name == "background-attachment"
+                && matches!(&decl.value, Value::Keyword(value) if value == "fixed")
+        ));
+        assert!(rule.declarations.iter().any(
+            |decl| decl.name == "background-position-x"
+                && matches!(&decl.value, Value::Length(value, unit) if *value == 1.0 && unit == "px")
+        ));
+        assert!(rule.declarations.iter().any(
+            |decl| decl.name == "background-position-y"
+                && matches!(&decl.value, Value::Number(value) if *value == 0.0)
         ));
     }
 

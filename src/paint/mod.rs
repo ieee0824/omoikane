@@ -272,7 +272,7 @@ pub fn paint_layout(layout: &LayoutBox, resolver: &mut StyleResolver, viewport: 
     if let Some(background) = viewport_background_color(layout, resolver) {
         canvas.fill_rect(viewport, background);
     }
-    paint_box(&mut canvas, layout, resolver, None);
+    paint_box(&mut canvas, layout, resolver, None, viewport);
     canvas
 }
 
@@ -398,6 +398,7 @@ fn paint_box(
     layout: &LayoutBox,
     resolver: &mut StyleResolver,
     inherited_clip: Option<Rect>,
+    viewport: Rect,
 ) {
     if layout.visibility == Visibility::Hidden {
         return;
@@ -410,13 +411,14 @@ fn paint_box(
     if let Some(background) = background_color(&style) {
         canvas.fill_rect_clipped(border_box, background, inherited_clip);
     }
-    paint_background_image(canvas, &style, border_box, inherited_clip);
+    paint_background_image(canvas, &style, border_box, inherited_clip, viewport);
     paint_block_generated_pseudo_box(
         canvas,
         layout,
         resolver,
         PseudoElement::Before,
         inherited_clip,
+        viewport,
     );
 
     paint_borders(canvas, layout, &style, inherited_clip);
@@ -462,26 +464,26 @@ fn paint_box(
     }
 
     for child in negative_positioned_children {
-        paint_box(canvas, child, resolver, clip);
+        paint_box(canvas, child, resolver, clip, viewport);
     }
     for child in normal_block_children {
-        paint_box(canvas, child, resolver, clip);
+        paint_box(canvas, child, resolver, clip, viewport);
     }
     for child in float_children {
-        paint_box(canvas, child, resolver, clip);
+        paint_box(canvas, child, resolver, clip, viewport);
     }
-    paint_text(canvas, layout, &style, clip);
+    paint_text(canvas, layout, &style, clip, viewport);
     for child in inline_children {
-        paint_box(canvas, child, resolver, clip);
+        paint_box(canvas, child, resolver, clip, viewport);
     }
     for child in auto_positioned_children {
-        paint_box(canvas, child, resolver, clip);
+        paint_box(canvas, child, resolver, clip, viewport);
     }
     for child in positive_positioned_children {
-        paint_box(canvas, child, resolver, clip);
+        paint_box(canvas, child, resolver, clip, viewport);
     }
 
-    paint_block_generated_pseudo_box(canvas, layout, resolver, PseudoElement::After, clip);
+    paint_block_generated_pseudo_box(canvas, layout, resolver, PseudoElement::After, clip, viewport);
 }
 
 fn is_float_for_paint(style: &ComputedStyle) -> bool {
@@ -593,6 +595,7 @@ fn paint_text(
     layout: &LayoutBox,
     style: &ComputedStyle,
     clip: Option<Rect>,
+    viewport: Rect,
 ) {
     let color = text_color(style).unwrap_or(Color::rgb(0, 0, 0));
 
@@ -623,10 +626,10 @@ fn paint_text(
                     }
                 }
                 InlineFragmentContent::Image(image, style) => {
-                    paint_inline_image_fragment(canvas, fragment.rect, image, style, clip);
+                    paint_inline_image_fragment(canvas, fragment.rect, image, style, clip, viewport);
                 }
                 InlineFragmentContent::GeneratedBox(style) => {
-                    paint_generated_box(canvas, fragment.rect, style, clip);
+                    paint_generated_box(canvas, fragment.rect, style, clip, viewport);
                 }
             }
         }
@@ -639,11 +642,12 @@ fn paint_inline_image_fragment(
     image: &Image,
     style: &ComputedStyle,
     clip: Option<Rect>,
+    viewport: Rect,
 ) {
     if let Some(background) = background_color(style) {
         canvas.fill_rect_clipped(rect, background, clip);
     }
-    paint_background_image(canvas, style, rect, clip);
+    paint_background_image(canvas, style, rect, clip, viewport);
 
     let border = EdgeSizesForPaint::from_style(style);
     if border.total_horizontal() > 0.0 || border.total_vertical() > 0.0 {
@@ -690,10 +694,13 @@ fn paint_generated_box(
     rect: Rect,
     style: &ComputedStyle,
     clip: Option<Rect>,
+    viewport: Rect,
 ) {
     if let Some(background) = background_color(style) {
         canvas.fill_rect_clipped(rect, background, clip);
     }
+
+    paint_background_image(canvas, style, rect, clip, viewport);
 
     let border = EdgeSizesForPaint::from_style(style);
     if border.total_horizontal() == 0.0 && border.total_vertical() == 0.0 {
@@ -714,6 +721,7 @@ fn paint_block_generated_pseudo_box(
     resolver: &mut StyleResolver,
     pseudo: PseudoElement,
     clip: Option<Rect>,
+    viewport: Rect,
 ) {
     let Some(style) = resolver.computed_pseudo_style(&layout.node, pseudo) else {
         return;
@@ -773,6 +781,7 @@ fn paint_block_generated_pseudo_box(
         },
         &style,
         clip,
+        viewport,
     );
 }
 
@@ -962,6 +971,20 @@ fn background_repeat(style: &ComputedStyle) -> bool {
     )
 }
 
+fn background_attachment_fixed(style: &ComputedStyle) -> bool {
+    matches!(
+        style.get("background-attachment"),
+        Some(ComputedValue::Keyword(keyword)) if keyword.eq_ignore_ascii_case("fixed")
+    )
+}
+
+fn background_position(style: &ComputedStyle) -> (f32, f32) {
+    (
+        length_property(style, "background-position-x").unwrap_or(0.0),
+        length_property(style, "background-position-y").unwrap_or(0.0),
+    )
+}
+
 fn parse_background_image_value(value: &str) -> Option<Image> {
     let trimmed = value.trim();
     if trimmed.eq_ignore_ascii_case("none") {
@@ -973,7 +996,11 @@ fn parse_background_image_value(value: &str) -> Option<Image> {
         .unwrap_or(trimmed)
         .trim()
         .trim_matches('"')
-        .trim_matches('\'');
+        .trim_matches('\'')
+        .trim_start_matches("\\\"")
+        .trim_end_matches("\\\"")
+        .trim_start_matches("\\'")
+        .trim_end_matches("\\'");
     let data_uri = parse_data_uri(url).ok()?;
     match data_uri {
         DataUri::Binary { mime_type, data } if mime_type.eq_ignore_ascii_case("image/png") => {
@@ -1016,6 +1043,7 @@ fn paint_background_image(
     style: &ComputedStyle,
     rect: Rect,
     clip: Option<Rect>,
+    viewport: Rect,
 ) {
     let Some(image) = background_image(style) else {
         return;
@@ -1029,9 +1057,29 @@ fn paint_background_image(
     let x_end = area.x + area.width;
     let y_end = area.y + area.height;
     let repeat = background_repeat(style);
-    let mut y = area.y;
+    let (position_x, position_y) = background_position(style);
+    let fixed = background_attachment_fixed(style);
+    let anchor_x = if fixed {
+        viewport.x + position_x
+    } else {
+        area.x + position_x
+    };
+    let anchor_y = if fixed {
+        viewport.y + position_y
+    } else {
+        area.y + position_y
+    };
+    let mut y = if repeat {
+        anchor_y + ((area.y - anchor_y) / tile_height).floor() * tile_height
+    } else {
+        anchor_y
+    };
     while y < y_end {
-        let mut x = area.x;
+        let mut x = if repeat {
+            anchor_x + ((area.x - anchor_x) / tile_width).floor() * tile_width
+        } else {
+            anchor_x
+        };
         while x < x_end {
             canvas.draw_image_clipped(&image, x, y, clip.or(Some(area)));
             if !repeat {
@@ -1832,9 +1880,12 @@ mod tests {
         document.append_child(body.clone());
         body.append_child(div);
 
-        let stylesheet = "body { margin: 0; } div { width: 4px; height: 4px; background: url(\"data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADElEQVR4AQEFAPr/AP8AAP9zftimAAAAAElFTkSuQmCC\"); }";
+        let stylesheet = format!(
+            "body {{ margin: 0; }} div {{ width: 4px; height: 4px; background: url(\"{}\"); }}",
+            red_pixel_data_uri()
+        );
         let mut resolver = StyleResolver::new();
-        resolver.add_stylesheet(Origin::Author, parse_stylesheet(stylesheet).unwrap());
+        resolver.add_stylesheet(Origin::Author, parse_stylesheet(&stylesheet).unwrap());
         let layout = layout_tree(
             &body,
             &mut resolver,
@@ -1848,7 +1899,7 @@ mod tests {
         .unwrap();
 
         let mut paint_resolver = StyleResolver::new();
-        paint_resolver.add_stylesheet(Origin::Author, parse_stylesheet(stylesheet).unwrap());
+        paint_resolver.add_stylesheet(Origin::Author, parse_stylesheet(&stylesheet).unwrap());
         let canvas = paint_layout(
             &layout,
             &mut paint_resolver,
@@ -1872,10 +1923,12 @@ mod tests {
         document.append_child(body.clone());
         body.append_child(div);
 
-        let stylesheet =
-            "body { margin: 0; } div { width: 4px; height: 4px; background: url(\"data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADElEQVR4AQEFAPr/AP8AAP9zftimAAAAAElFTkSuQmCC\") no-repeat; }";
+        let stylesheet = format!(
+            "body {{ margin: 0; }} div {{ width: 4px; height: 4px; background: url(\"{}\") no-repeat; }}",
+            red_pixel_data_uri()
+        );
         let mut resolver = StyleResolver::new();
-        resolver.add_stylesheet(Origin::Author, parse_stylesheet(stylesheet).unwrap());
+        resolver.add_stylesheet(Origin::Author, parse_stylesheet(&stylesheet).unwrap());
         let layout = layout_tree(
             &body,
             &mut resolver,
@@ -1889,7 +1942,7 @@ mod tests {
         .unwrap();
 
         let mut paint_resolver = StyleResolver::new();
-        paint_resolver.add_stylesheet(Origin::Author, parse_stylesheet(stylesheet).unwrap());
+        paint_resolver.add_stylesheet(Origin::Author, parse_stylesheet(&stylesheet).unwrap());
         let canvas = paint_layout(
             &layout,
             &mut paint_resolver,
@@ -1966,12 +2019,62 @@ mod tests {
             &image,
             &image_style,
             None,
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 10.0,
+                height: 10.0,
+            },
         );
 
         assert_eq!(image_style.get("border-style"), Some(&ComputedValue::Keyword("solid".to_string())));
         assert_eq!(canvas.pixel(0, 1), Some(Color::rgb(0, 0, 255)));
         assert_eq!(canvas.pixel(2, 2), Some(Color::rgb(255, 255, 0)));
         assert_eq!(canvas.pixel(3, 3), Some(Color::rgb(255, 0, 0)));
+    }
+
+    #[test]
+    fn paints_background_image_with_position_offset() {
+        let html = format!(
+            "<html><head><style>body {{ margin: 0; }} div {{ width: 4px; height: 2px; background-image: url(\"{}\"); background-repeat: no-repeat; background-position-x: 1px; background-position-y: 0; }}</style></head><body><div></div></body></html>",
+            red_pixel_data_uri()
+        );
+        let document = TreeBuilder::parse(&html).document();
+        let canvas = render_document(
+            &document,
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 4.0,
+                height: 2.0,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(canvas.pixel(0, 0), Some(Color::rgba(0, 0, 0, 0)));
+        assert_eq!(canvas.pixel(1, 0), Some(Color::rgb(255, 0, 0)));
+    }
+
+    #[test]
+    fn fixed_background_image_uses_viewport_origin() {
+        let html = format!(
+            "<html><head><style>body {{ margin: 0; }} div {{ width: 4px; height: 2px; margin-left: 2px; background-image: url(\"{}\"); background-repeat: no-repeat; background-position-x: 1px; background-position-y: 0; background-attachment: fixed; }}</style></head><body><div></div></body></html>",
+            red_pixel_data_uri()
+        );
+        let document = TreeBuilder::parse(&html).document();
+        let canvas = render_document(
+            &document,
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 6.0,
+                height: 2.0,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(canvas.pixel(1, 0), Some(Color::rgba(0, 0, 0, 0)));
+        assert_eq!(canvas.pixel(3, 0), Some(Color::rgba(0, 0, 0, 0)));
     }
 
     #[test]
@@ -2824,6 +2927,21 @@ mod tests {
             }
         }
         count
+    }
+
+    fn red_pixel_data_uri() -> String {
+        let mut canvas = Canvas::new(1, 1);
+        canvas.fill_rect(
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 1.0,
+                height: 1.0,
+            },
+            Color::rgb(255, 0, 0),
+        );
+        let encoded = base64::engine::general_purpose::STANDARD.encode(canvas.encode_png());
+        format!("data:image/png;base64,{encoded}")
     }
 
     fn find_layout_box_by_id<'a>(layout: &'a LayoutBox, id: &str) -> Option<&'a LayoutBox> {
