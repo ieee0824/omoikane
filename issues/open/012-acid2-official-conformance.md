@@ -96,6 +96,7 @@ status: open
 - em 単位を要素自身の computed font-size で解決するよう修正（CSS 2.1 §4.3.2）。font-size 以外のプロパティの em 計算が親 font-size を使っていたため、Acid2 の全パーツのサイズと位置が数十 px 単位でずれていた。公式比較差分 `20,512 -> 7,012` に大幅改善
 - CSS 絶対長さ単位（mm/cm/in/pt/pc）を 96dpi 基準で正しく px 変換するようにした
 - 残りの差分 7,012px の内訳: smile の曲線形状、chin/parser の位置微調整、scalp の形状
+- :before/:after pseudo element の border triangle 描画は正しく動作していることを確認。鼻のダイヤモンドが diff に出る原因は比較テストの translation 精度の問題
 
 ## 子issue
 
