@@ -418,7 +418,7 @@ fn paint_box_internal(
     resolver: &mut StyleResolver,
     inherited_clip: Option<Rect>,
     viewport: Rect,
-    include_positioned_descendants: bool,
+    include_phase_descendants: bool,
 ) {
     if layout.visibility == Visibility::Hidden {
         return;
@@ -461,7 +461,7 @@ fn paint_box_internal(
     for child in &layout.children {
         let child_style = resolver.computed_style(&child.node);
         if is_positioned_for_paint(&child_style) {
-            if include_positioned_descendants {
+            if include_phase_descendants {
                 if child.z_index < 0 {
                     negative_positioned_children.push(child);
                 } else if child.z_index > 0 {
@@ -473,19 +473,22 @@ fn paint_box_internal(
             continue;
         }
 
-        if include_positioned_descendants {
-            collect_positioned_descendants(
+        if is_float_for_paint(&child_style) {
+            if include_phase_descendants {
+                float_children.push(child);
+            }
+            continue;
+        }
+
+        if include_phase_descendants {
+            collect_phase_descendants(
                 child,
                 resolver,
+                &mut float_children,
                 &mut negative_positioned_children,
                 &mut auto_positioned_children,
                 &mut positive_positioned_children,
             );
-        }
-
-        if is_float_for_paint(&child_style) {
-            float_children.push(child);
-            continue;
         }
 
         if child.lines.is_empty() {
@@ -521,9 +524,10 @@ fn paint_box_internal(
     paint_block_generated_pseudo_box(canvas, layout, resolver, PseudoElement::After, clip, viewport);
 }
 
-fn collect_positioned_descendants<'a>(
+fn collect_phase_descendants<'a>(
     layout: &'a LayoutBox,
     resolver: &mut StyleResolver,
+    float_children: &mut Vec<&'a LayoutBox>,
     negative_positioned_children: &mut Vec<&'a LayoutBox>,
     auto_positioned_children: &mut Vec<&'a LayoutBox>,
     positive_positioned_children: &mut Vec<&'a LayoutBox>,
@@ -541,9 +545,15 @@ fn collect_positioned_descendants<'a>(
             continue;
         }
 
-        collect_positioned_descendants(
+        if is_float_for_paint(&child_style) {
+            float_children.push(child);
+            continue;
+        }
+
+        collect_phase_descendants(
             child,
             resolver,
+            float_children,
             negative_positioned_children,
             auto_positioned_children,
             positive_positioned_children,
@@ -2513,6 +2523,111 @@ mod tests {
         );
 
         assert_eq!(canvas.pixel(0, 0), Some(Color::rgb(255, 0, 0)));
+    }
+
+    #[test]
+    fn float_grandchild_paints_above_block_uncle() {
+        let root = NodeHandle::element("div");
+        root.set_attribute("class", "root");
+        let wrapper = NodeHandle::element("div");
+        wrapper.set_attribute("class", "wrapper");
+        let floated = NodeHandle::element("div");
+        floated.set_attribute("class", "floated");
+        let block = NodeHandle::element("div");
+        block.set_attribute("class", "block");
+        root.append_child(wrapper.clone());
+        root.append_child(block.clone());
+        wrapper.append_child(floated.clone());
+
+        let stylesheet =
+            ".wrapper { width: 8px; height: 8px; } \
+             .floated { float: left; width: 8px; height: 8px; background: blue; } \
+             .block { width: 8px; height: 8px; background: red; }";
+        let mut resolver = StyleResolver::new();
+        resolver.add_stylesheet(Origin::Author, parse_stylesheet(stylesheet).unwrap());
+        let layout = LayoutBox {
+            node: root,
+            dimensions: BoxDimensions {
+                content: Rect {
+                    x: 0.0,
+                    y: 0.0,
+                    width: 8.0,
+                    height: 8.0,
+                },
+                ..BoxDimensions::default()
+            },
+            visibility: Visibility::Visible,
+            overflow: crate::layout::Overflow::Visible,
+            z_index: 0,
+            lines: Vec::new(),
+            children: vec![
+                LayoutBox {
+                    node: wrapper,
+                    dimensions: BoxDimensions {
+                        content: Rect {
+                            x: 0.0,
+                            y: 0.0,
+                            width: 8.0,
+                            height: 8.0,
+                        },
+                        ..BoxDimensions::default()
+                    },
+                    visibility: Visibility::Visible,
+                    overflow: crate::layout::Overflow::Visible,
+                    z_index: 0,
+                    lines: Vec::new(),
+                    children: vec![LayoutBox {
+                        node: floated,
+                        dimensions: BoxDimensions {
+                            content: Rect {
+                                x: 0.0,
+                                y: 0.0,
+                                width: 8.0,
+                                height: 8.0,
+                            },
+                            ..BoxDimensions::default()
+                        },
+                        visibility: Visibility::Visible,
+                        overflow: crate::layout::Overflow::Visible,
+                        z_index: 0,
+                        lines: Vec::new(),
+                        children: Vec::new(),
+                    }],
+                },
+                LayoutBox {
+                    node: block,
+                    dimensions: BoxDimensions {
+                        content: Rect {
+                            x: 0.0,
+                            y: 0.0,
+                            width: 8.0,
+                            height: 8.0,
+                        },
+                        ..BoxDimensions::default()
+                    },
+                    visibility: Visibility::Visible,
+                    overflow: crate::layout::Overflow::Visible,
+                    z_index: 0,
+                    lines: Vec::new(),
+                    children: Vec::new(),
+                },
+            ],
+        };
+
+        let mut paint_resolver = StyleResolver::new();
+        paint_resolver.add_stylesheet(Origin::Author, parse_stylesheet(stylesheet).unwrap());
+        let canvas = paint_layout(
+            &layout,
+            &mut paint_resolver,
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 8.0,
+                height: 8.0,
+            },
+        );
+
+        assert_eq!(canvas.pixel(0, 0), Some(Color::rgb(0, 0, 255)));
     }
 
     #[test]
