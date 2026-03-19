@@ -10,8 +10,8 @@ status: open
 ## 概要
 
 Acid2 下半分は `clear: both`、negative margin、`relative + absolute + nested float`、
-`line-height`、fixed background が重なっており、現在も公式比較で大きめの残差分が残っている。
-`.smile` の nested float 幅崩れは止められているため、次は縦位置と最終 paint を詰める段階。
+`line-height`、fixed background が重なる難所だったが、現在は大きな残差はほぼ解消した。
+最新の公式比較差分は 52px で、主残差は下半分よりも鼻・目周辺に寄っている。
 
 ## スコープ
 
@@ -55,3 +55,4 @@ Acid2 下半分は `clear: both`、negative margin、`relative + absolute + nest
 - 以前に empty margin collapse / negative clearance を試して差分が悪化した履歴があるため、再挑戦時は局所テストを先に置く
 - `chin` は fixed background の最終可視性確認も必要なので、layout だけでなく paint まで含めて見る
 - `nose -> empty` と `empty -> smile` の gap は現状の局所テストでは大きく崩れていないため、下半分の大きな見た目差分は単純な block 間隔よりも paint phase / stacking / さらに上流の縦配置にある可能性が高い
+- `cargo test paint::tests::acid2_fixture_matches_official_reference_rendering --lib -- --ignored` の最新差分は 52px。下半分の大枠は揃っており、本 issue は実質的に終盤

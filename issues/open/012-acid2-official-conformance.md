@@ -7,11 +7,11 @@ status: open
 # Acid2 公式リファレンス一致
 
 公式 `reference.html` と `reference.png` を fixture 化し、比較用の ignored テストも追加したが、
-現状の `acid2.html` レンダリングは公式リファレンスと大きく乖離している。
+現状の `acid2.html` レンダリングは公式リファレンスとほぼ一致している。
 
 ## 現状
 - `paint::tests::acid2_fixture_matches_official_reference_rendering` を `--ignored` で実行すると失敗する
-- 差分ピクセル数は現在 2,992
+- 差分ピクセル数は現在 52
 - 差分画像は `tests/output/acid2/acid2.official-reference.{actual,expected,diff}.png` に出力される
 
 ## 進捗メモ
@@ -105,7 +105,9 @@ status: open
 - border-style:none の border-width zeroing で shorthand のみ指定のケースも対応
 - parent-child top margin collapsing を実装（CSS 2.1 §8.3.1）。親に border/padding-top がない場合、最初の in-flow child の margin-top が親と collapse。公式比較差分 `5,008 -> 2,992`
 - float children の paint で include_phase_descendants=true に変更し、float 内の positioned 要素（smile の em border 等）が描画されるようにした
-- 残りの差分 2,992px: smile 曲線の細部、chin/parser 位置、nose ダイヤモンドの色
+- zero-sized border box の描画を「三角形の寄せ集め」から「外枠-内枠の4辺ポリゴン塗り」に変更し、鼻ダイヤ/口周りの境界を改善。公式比較差分 `2,992 -> 2,740`
+- `line-height` と inline strut の扱いを見直し、下半分の縦ズレを縮小。最新の公式比較差分は `52`
+- 残差は鼻ダイヤの対角境界と目の外側カーブ周辺の微小ピクセル差に集中している
 
 ## 子issue
 
@@ -127,17 +129,15 @@ status: open
 - [x] Acid2 本体側で欠けている描画要素（stacking / inline alignment / positioned paint order など）を切り分ける
 - [x] 必要なら子 issue に分割して段階的に差分を減らす
 - [x] 子issueを順次実装し、差分を 33,957 → 20,512（40%削減）まで改善
-- [ ] 012-8（smile/chin）の残課題を進め、差分をさらに削減する
+- [x] 012-8（smile/chin）を中心に下半分の大きな差分を解消する
+- [ ] 012-9（nose）の境界ピクセル差を詰め、公式比較を 0px にする
 
 ## 残課題と優先度
 
-残り 20,512px の内訳推定:
-- 顔の丸い輪郭 ≈ 15,000px — 各パーツのborder幅の段差が丸みを作れていない
-- chin/parser/table 下部 ≈ 3,000px — 位置微調整
-- scalp/p.bad 位置 ≈ 2,000px — position:fixed の比較テスト上の扱い
-- scattered ≈ 500px
+残り 52px の内訳推定:
+- 鼻ダイヤの対角境界 ≈ 40px
+- 目の外側カーブ周辺 ≈ 12px
 
-大幅な改善には以下の追加CSS機能が必要:
-- `float: inherit` — smile 内の nested float が親の float 方向を継承
-- stacking context の精密化 — p.bad が scalp の背後に隠れる
-- position:fixed 要素と通常フローの比較テスト上のアライメント改善
+優先実装:
+- `paint_zero_sized_border_box` / `fill_triangle_clipped` の境界判定（floor/ceil と内外判定）を微調整する
+- 公式比較テストの差分画像を確認しながら、1px 単位で境界の塗り漏れ/塗り過ぎを潰す
