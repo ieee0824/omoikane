@@ -3765,6 +3765,29 @@ mod tests {
     }
 
     #[test]
+    fn absolute_child_of_relative_paints_yellow_border() {
+        let html = r#"<html><head><style>
+            body { margin: 0; }
+            .outer { width: 120px; height: 24px; background: black; position: relative; }
+            .inner { position: absolute; top: 0; right: 12px; width: 48px; height: 0; border: yellow solid 12px; }
+        </style></head><body><div class="outer"><div class="inner"></div></div></body></html>"#;
+        let document = TreeBuilder::parse(html).document();
+        let canvas = render_document(
+            &document,
+            Rect { x: 0.0, y: 0.0, width: 200.0, height: 50.0 },
+        )
+        .unwrap();
+
+        // .inner: width=48, height=0, border=12 all sides. total: 72x24.
+        // right: 12px from .outer right edge. x = 120 - 72 - 12 = 36.
+        // Yellow border should be visible on top of black background.
+        let has_yellow = (0..120).any(|x| canvas.pixel(x, 5) == Some(Color::rgb(255, 255, 0)));
+        let has_black = (0..120).any(|x| canvas.pixel(x, 5) == Some(Color::rgb(0, 0, 0)));
+        assert!(has_black, "should have black background");
+        assert!(has_yellow, "absolute child's yellow border should paint on top of relative parent's black background");
+    }
+
+    #[test]
     #[ignore = "documents current gap to the official Acid2 reference rendering"]
     fn acid2_fixture_matches_official_reference_rendering() {
         let acid2_html = fs::read_to_string(acid2_fixture_path()).unwrap();
