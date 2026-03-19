@@ -964,16 +964,74 @@ fn paint_zero_sized_border_box(
     let center_x = rect.x + border.left;
     let center_y = rect.y + border.top;
 
-    if border.top > 0.0 && has_solid_border_side(style, "top") {
-        fill_triangle_clipped(
-            canvas,
-            (rect.x, center_y),
-            (center_x, rect.y),
-            (rect.x + rect.width, center_y),
-            border_color_side(style, "top").unwrap_or(Color::rgb(0, 0, 0)),
-            clip,
-        );
+    if border.top == 0.0 && border.bottom > 0.0 {
+        if border.left > 0.0 && has_solid_border_side(style, "left") {
+            fill_triangle_clipped(
+                canvas,
+                (rect.x, rect.y),
+                (center_x, rect.y),
+                (rect.x, rect.y + rect.height),
+                border_color_side(style, "left").unwrap_or(Color::rgb(0, 0, 0)),
+                clip,
+            );
+        }
+        if border.right > 0.0 && has_solid_border_side(style, "right") {
+            fill_triangle_clipped(
+                canvas,
+                (center_x, rect.y),
+                (rect.x + rect.width, rect.y),
+                (rect.x + rect.width, rect.y + rect.height),
+                border_color_side(style, "right").unwrap_or(Color::rgb(0, 0, 0)),
+                clip,
+            );
+        }
+        if has_solid_border_side(style, "bottom") {
+            fill_triangle_clipped(
+                canvas,
+                (rect.x, rect.y),
+                (rect.x + rect.width, rect.y),
+                (center_x, rect.y + rect.height),
+                border_color_side(style, "bottom").unwrap_or(Color::rgb(0, 0, 0)),
+                clip,
+            );
+        }
+        return;
     }
+
+    if border.bottom == 0.0 && border.top > 0.0 {
+        if border.left > 0.0 && has_solid_border_side(style, "left") {
+            fill_triangle_clipped(
+                canvas,
+                (rect.x, rect.y),
+                (center_x, rect.y),
+                (rect.x, rect.y + rect.height),
+                border_color_side(style, "left").unwrap_or(Color::rgb(0, 0, 0)),
+                clip,
+            );
+        }
+        if border.right > 0.0 && has_solid_border_side(style, "right") {
+            fill_triangle_clipped(
+                canvas,
+                (center_x, rect.y),
+                (rect.x + rect.width, rect.y),
+                (rect.x + rect.width, rect.y + rect.height),
+                border_color_side(style, "right").unwrap_or(Color::rgb(0, 0, 0)),
+                clip,
+            );
+        }
+        if has_solid_border_side(style, "top") {
+            fill_triangle_clipped(
+                canvas,
+                (rect.x, rect.y + rect.height),
+                (center_x, rect.y),
+                (rect.x + rect.width, rect.y + rect.height),
+                border_color_side(style, "top").unwrap_or(Color::rgb(0, 0, 0)),
+                clip,
+            );
+        }
+        return;
+    }
+
     if border.right > 0.0 && has_solid_border_side(style, "right") {
         fill_triangle_clipped(
             canvas,
@@ -984,16 +1042,6 @@ fn paint_zero_sized_border_box(
             clip,
         );
     }
-    if border.bottom > 0.0 && has_solid_border_side(style, "bottom") {
-        fill_triangle_clipped(
-            canvas,
-            (rect.x, center_y),
-            (rect.x + rect.width, center_y),
-            (center_x, rect.y + rect.height),
-            border_color_side(style, "bottom").unwrap_or(Color::rgb(0, 0, 0)),
-            clip,
-        );
-    }
     if border.left > 0.0 && has_solid_border_side(style, "left") {
         fill_triangle_clipped(
             canvas,
@@ -1001,6 +1049,26 @@ fn paint_zero_sized_border_box(
             (rect.x, center_y),
             (center_x, rect.y + rect.height),
             border_color_side(style, "left").unwrap_or(Color::rgb(0, 0, 0)),
+            clip,
+        );
+    }
+    if border.top > 0.0 && has_solid_border_side(style, "top") {
+        fill_triangle_clipped(
+            canvas,
+            (rect.x, center_y),
+            (center_x, rect.y),
+            (rect.x + rect.width, center_y),
+            border_color_side(style, "top").unwrap_or(Color::rgb(0, 0, 0)),
+            clip,
+        );
+    }
+    if border.bottom > 0.0 && has_solid_border_side(style, "bottom") {
+        fill_triangle_clipped(
+            canvas,
+            (rect.x, center_y),
+            (rect.x + rect.width, center_y),
+            (center_x, rect.y + rect.height),
+            border_color_side(style, "bottom").unwrap_or(Color::rgb(0, 0, 0)),
             clip,
         );
     }
@@ -4096,23 +4164,6 @@ mod tests {
             }
         }
         None
-    }
-
-    fn translate_all_layout_boxes(layout: &mut LayoutBox, dx: f32, dy: f32) {
-        layout.dimensions.content.x += dx;
-        layout.dimensions.content.y += dy;
-        for line in &mut layout.lines {
-            line.rect.x += dx;
-            line.rect.y += dy;
-            line.baseline += dy;
-            for fragment in &mut line.fragments {
-                fragment.rect.x += dx;
-                fragment.rect.y += dy;
-            }
-        }
-        for child in &mut layout.children {
-            translate_all_layout_boxes(child, dx, dy);
-        }
     }
 
     fn translate_layout_box_for_test(
