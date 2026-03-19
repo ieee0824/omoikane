@@ -11,7 +11,7 @@ status: open
 
 ## 現状
 - `paint::tests::acid2_fixture_matches_official_reference_rendering` を `--ignored` で実行すると失敗する
-- 差分ピクセル数は現在 20,512
+- 差分ピクセル数は現在 7,012
 - 差分画像は `tests/output/acid2/acid2.official-reference.{actual,expected,diff}.png` に出力される
 
 ## 進捗メモ
@@ -93,7 +93,9 @@ status: open
 - HTML table/tr/td/th タグを CSS display 指定なしでもデフォルトの table display 値で認識するよう改善。`.image-height-test` 内の `<table>` が 740px→64px に修正（overflow:hidden で見た目は同じ）
 - CSS パーサー修正 4 件: (1) forgiving parse の `\}` エスケープ対応、(2) `background: red pink` の shorthand reject、(3) 非ゼロ unitless number の cascade 排除、(4) CSS hex escape の正しい実装。これにより `.parser` の background=yellow / width=2em / margin=0 5em 1em が正しく適用された。公式比較差分は `22,006 -> 20,512` に改善
 - nbsp を whitespace collapsing から除外（CSS 2.1 §16.6.1）。forehead 内の 30 nbsp は non-breaking のため行折り返しせず height=12px のまま（正しい動作）
-- 残りの差分 20,512px の大部分は顔の丸い輪郭の位置ずれ。パーツの相対位置は正しいが、expected の丸い黒 border 形状と actual の四角い形状の差が支配的
+- em 単位を要素自身の computed font-size で解決するよう修正（CSS 2.1 §4.3.2）。font-size 以外のプロパティの em 計算が親 font-size を使っていたため、Acid2 の全パーツのサイズと位置が数十 px 単位でずれていた。公式比較差分 `20,512 -> 7,012` に大幅改善
+- CSS 絶対長さ単位（mm/cm/in/pt/pc）を 96dpi 基準で正しく px 変換するようにした
+- 残りの差分 7,012px の内訳: smile の曲線形状、chin/parser の位置微調整、scalp の形状
 
 ## 子issue
 
