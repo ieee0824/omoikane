@@ -3183,6 +3183,8 @@ mod tests {
             })
             .unwrap();
 
+        // After intrinsic_width fix, absolute div width includes span's borders
+        assert_eq!(absolute.dimensions.content.width, 96.0, "absolute div should be 96px (span 72 + border 24)");
         assert!(absolute.dimensions.content.width > 0.0, "{:?}", absolute.dimensions);
         assert!(float_descendant.total_width() > 0.0, "{:?}", float_descendant.dimensions);
         assert_eq!(empty.dimensions.content.height, 0.0, "{:?}", empty.dimensions);
