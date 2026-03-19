@@ -1457,7 +1457,13 @@ fn clear_side(style: &ComputedStyle) -> ClearSide {
 }
 
 fn shrink_to_fit_width(node: &NodeHandle, resolver: &mut StyleResolver, available_width: f32) -> f32 {
-    intrinsic_width(node, resolver).min(available_width).max(0.0)
+    let outer = intrinsic_width(node, resolver);
+    let style = resolver.computed_style(node);
+    let padding = edge_sizes(&style, "padding");
+    let border = edge_sizes(&style, "border");
+    (outer - padding.horizontal() - border.horizontal())
+        .max(0.0)
+        .min(available_width)
 }
 
 fn shrink_to_fit_layout_width(
@@ -1517,6 +1523,8 @@ fn auto_width_from_layout(
         .max(0.0)
 }
 
+/// Returns the outer width (content + padding + border) that `node` needs.
+/// Used by parent elements to determine how wide their content area must be.
 fn intrinsic_width(node: &NodeHandle, resolver: &mut StyleResolver) -> f32 {
     match node.node_type() {
         NodeType::Text => node
@@ -1531,23 +1539,24 @@ fn intrinsic_width(node: &NodeHandle, resolver: &mut StyleResolver) -> f32 {
             .unwrap_or(0.0),
         NodeType::Element => {
             let style = resolver.computed_style(node);
+            let padding = edge_sizes(&style, "padding");
+            let border = edge_sizes(&style, "border");
             if let Some(width) = explicit_length(&style, "width") {
-                let padding = edge_sizes(&style, "padding");
-                let border = edge_sizes(&style, "border");
                 let margin = edge_sizes(&style, "margin");
                 return width + padding.horizontal() + border.horizontal() + margin.horizontal();
             }
             if let Some((image_node, image)) = element_inline_image(node) {
                 let image_style = resolver.computed_style(&image_node);
-                let padding = edge_sizes(&image_style, "padding");
-                let border = edge_sizes(&image_style, "border");
+                let img_padding = edge_sizes(&image_style, "padding");
+                let img_border = edge_sizes(&image_style, "border");
                 return image.width() as f32
-                    + padding.left
-                    + padding.right
-                    + border.left
-                    + border.right;
+                    + img_padding.left
+                    + img_padding.right
+                    + img_border.left
+                    + img_border.right;
             }
-            let mut width: f32 = 0.0;
+            // Content width = max of children's outer widths
+            let mut content_width: f32 = 0.0;
             if is_table_container_element(node, &style) {
                 let entries = collect_table_entries(node, resolver);
                 let spacing = table_border_spacing(&style);
@@ -1558,13 +1567,14 @@ fn intrinsic_width(node: &NodeHandle, resolver: &mut StyleResolver) -> f32 {
                         .map(|cell| intrinsic_width(cell, resolver))
                         .sum::<f32>()
                         + spacing * (entry.cells.len().max(1) as f32 + 1.0);
-                    width = width.max(row_width);
+                    content_width = content_width.max(row_width);
                 }
             } else {
                 for child in node.child_nodes() {
-                    width = width.max(intrinsic_width(&child, resolver));
+                    content_width = content_width.max(intrinsic_width(&child, resolver));
                 }
             }
+            let mut width = content_width;
             if width == 0.0 {
                 width = generated_inline_segments(node, resolver, PseudoElement::Before)
                     .into_iter()
@@ -1592,7 +1602,8 @@ fn intrinsic_width(node: &NodeHandle, resolver: &mut StyleResolver) -> f32 {
                     })
                     .fold(0.0, f32::max);
             }
-            width
+            // Outer width = content + own padding + border
+            width + padding.horizontal() + border.horizontal()
         }
         _ => 0.0,
     }
