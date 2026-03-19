@@ -50,3 +50,5 @@ status: open
 - block formatting context 内の block 要素間にある空白のみのテキストノード（改行やスペース）が line box を生成し、cursor_y を不要に進めていた問題を修正した。`pending_inline_nodes` が空白テキストのみの場合はレイアウトをスキップするようにした
 - `layout::tests::whitespace_between_blocks_does_not_create_line_box` を追加し、block 間の空白が margin collapsing を壊さないことを固定した
 - ignored の公式比較差分は `39,245 -> 34,604` まで改善した
+- 空白スキップ判定で `&nbsp;`(U+00A0) が ASCII 空白と同様にスキップされていた問題を修正。`trim()` の代わりに ASCII 空白のみのバイト判定に変更。これにより `.forehead` 内の nbsp×30 テキストに高さが戻り、顔パーツの位置が正しくなった
+- 残課題: `clear` の負 clearance（`.smile { clear: both }` で clearance が負になるケース）はまだ未着手。これが下半分の最終位置合わせに効く可能性が高い

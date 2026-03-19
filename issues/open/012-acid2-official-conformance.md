@@ -11,7 +11,7 @@ status: open
 
 ## 現状
 - `paint::tests::acid2_fixture_matches_official_reference_rendering` を `--ignored` で実行すると失敗する
-- 差分ピクセル数は現在 27,884
+- 差分ピクセル数は現在 34,601（顔パーツ配置の構造改善による一時的悪化。eyes/nose/forehead の位置関係は正しくなった）
 - 差分画像は `tests/output/acid2/acid2.official-reference.{actual,expected,diff}.png` に出力される
 
 ## 進捗メモ
@@ -84,6 +84,9 @@ status: open
 - block 要素間の空白テキストノードが line box を生成して cursor_y を不要に進めていた問題を修正。`pending_inline_nodes` が空白テキストのみの場合はレイアウトをスキップするようにした。ignored の公式比較差分は `39,245 -> 34,604` まで改善。baseline も更新済み
 - 012-4: table container 内で table-cell/row/row-group 以外の子要素を anonymous cell として扱うようにした（CSS 2.1 §17.2.1）
 - 012-4: width:auto の table container に shrink-to-fit 幅を適用し、`.image-height-test` 内 table 等が親の全幅に広がらないようにした。ignored の公式比較差分は `34,604 -> 27,884` まで改善。baseline も更新済み
+- block 間空白スキップで `&nbsp;`(U+00A0) を ASCII 空白と同様にスキップしていた問題を修正。Rust の `trim()` は Unicode 空白を除去するため、forehead 内の nbsp×30 テキストが無視されて height=0 になっていた。ASCII 空白のみのバイト判定に変更したことで forehead に高さが戻り、eyes/nose の位置関係が正しくなった。公式比較差分は `27,884 -> 34,601` と一時悪化（パーツが正しい位置に移動した過渡期）
+- eyes は `.picture` 上端 +60px（top:5em）に配置され、forehead の下端と一致することを回帰テストで固定した
+- `p + table + p` セレクタによる `p.bad` の margin-top:3em は正しく適用されていることを確認（position:fixed で viewport 上 y=144 に配置）
 
 ## 子issue
 
@@ -105,15 +108,16 @@ status: open
 - [ ] `.eyes` と下半分の残差分を個別 issue で管理し、差分悪化時に原因領域を即座に絞れる状態にする
 
 ## 次フェーズのプラン
-1. [012-6](012-6-eyes-inline-fallback-and-fixed-background.md) で `#eyes-a` の inline image / fallback / fixed background を詰める
-2. [012-7](012-7-eyes-stacking-and-paint-phases.md) で `.eyes` の 3 レイヤーの paint 順と stacking を固定する
-3. [012-8](012-8-smile-and-chin-alignment.md) で `smile` / `chin` の下半分の位置合わせを詰める
-4. 必要なら `forehead` / `nose` の上半分を追加 issue 化し、ignored 比較の差分をさらに分解する
+1. 顔パーツの縦位置はほぼ正しくなったので、次は **顔の丸み**（scalp〜forehead〜nose の黒左右 border の連続性）を改善する
+2. `p.bad` の赤バーが scalp の下に見えている問題を解消する（z-index / stacking context の精密化）
+3. [012-8](012-8-smile-and-chin-alignment.md) で下半分の `smile` / `chin` / `parser` / `ul` の最終位置を詰める
+4. [012-6](012-6-eyes-inline-fallback-and-fixed-background.md) / [012-7](012-7-eyes-stacking-and-paint-phases.md) の残タスクを引き続き進める
 
 ## 直近の確認観点
-- [012-6](012-6-eyes-inline-fallback-and-fixed-background.md): `#eyes-a` の line box が `#eyes-b` と `#eyes-c` に押し下げられず、inline image fragment が right align されること
-- [012-7](012-7-eyes-stacking-and-paint-phases.md): `.eyes` の paint 順が block -> float -> inline になり、3 レイヤーが同じ原点帯域を共有すること
-- [012-8](012-8-smile-and-chin-alignment.md): `smile` と `chin` の縦位置が official reference に寄り、fixed background が不要に見えないこと
+- 顔パーツ（forehead/eyes/nose/smile/chin）の Y 座標が期待される相対順序で並んでいること（回帰テスト済み）
+- `p.bad` が scalp の背後または absolute テーブルの下に隠れること（現在は赤バーとして見えている）
+- `.forehead` の黄色 background-image が正しくタイリングされていること（デコードテスト済み）
+- 下半分（chin/parser/ul/image-height-test）の位置が reference に近づくこと
 
 ## 実施方針
 - renderer 本体の修正は子 issue 単位で進め、各 issue に局所 regression と ignored の公式比較をセットでぶら下げる
