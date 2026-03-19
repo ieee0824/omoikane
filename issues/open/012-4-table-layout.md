@@ -37,4 +37,6 @@ CSS の `display: table` / `display: table-cell` 等のテーブル関連 displa
 - table container 内で table-cell/row/row-group 以外の子要素を anonymous cell として扱うようにした（CSS 2.1 §17.2.1）
 - width:auto の table container に shrink-to-fit 幅を適用し、テーブルが親の全幅に広がらないようにした
 - ignored の公式比較差分は `34,604 -> 27,884` まで改善。主に `.image-height-test` 内の table 幅縮小による
-- table の intrinsic_width をセル幅の合算で計算する試みは微増（27,884 → 28,316）だったため revert。セル幅のより正確な計算は今後の課題
+- table の intrinsic_width をセル幅の合算 + spacing で計算する形に再実装した。spacing も含めた正確な計算により `ul` テーブルの幅が 12px → 48px に修正され、4 セル（各 12px）が正しく横並びになった
+- `paint::tests::acid2_ul_table_cells_cover_red_background` を追加し、ul width=48px / 4 セル各 12px を固定した
+- 残課題: セルの height stretching（行内の最大セル高さに揃える）が未実装。`li.third-part { height: 0.5em }` が 6px のままで行高 12px に揃っていない

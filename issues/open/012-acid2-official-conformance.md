@@ -11,7 +11,7 @@ status: open
 
 ## 現状
 - `paint::tests::acid2_fixture_matches_official_reference_rendering` を `--ignored` で実行すると失敗する
-- 差分ピクセル数は現在 34,601（顔パーツ配置の構造改善による一時的悪化。eyes/nose/forehead の位置関係は正しくなった）
+- 差分ピクセル数は現在 35,033
 - 差分画像は `tests/output/acid2/acid2.official-reference.{actual,expected,diff}.png` に出力される
 
 ## 進捗メモ
@@ -87,6 +87,8 @@ status: open
 - block 間空白スキップで `&nbsp;`(U+00A0) を ASCII 空白と同様にスキップしていた問題を修正。Rust の `trim()` は Unicode 空白を除去するため、forehead 内の nbsp×30 テキストが無視されて height=0 になっていた。ASCII 空白のみのバイト判定に変更したことで forehead に高さが戻り、eyes/nose の位置関係が正しくなった。公式比較差分は `27,884 -> 34,601` と一時悪化（パーツが正しい位置に移動した過渡期）
 - eyes は `.picture` 上端 +60px（top:5em）に配置され、forehead の下端と一致することを回帰テストで固定した
 - `p + table + p` セレクタによる `p.bad` の margin-top:3em は正しく適用されていることを確認（position:fixed で viewport 上 y=144 に配置）
+- 012-4: table の intrinsic_width をセル幅の合算で計算するようにした。`ul` テーブルの幅が 12px → 48px に修正され、4 セルが正しく横並びになった。公式比較差分は `34,601 -> 35,033` と微増（テーブル幅修正で周辺レイアウトに影響）
+- 残りの赤バー（x=60〜380 付近）は `ul` ではなく `.image-height-test` 内の 64x64 red square PNG と `.chin` の fixed background が原因の可能性。次回以降の調査対象
 
 ## 子issue
 
