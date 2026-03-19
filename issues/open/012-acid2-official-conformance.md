@@ -11,7 +11,7 @@ status: open
 
 ## 現状
 - `paint::tests::acid2_fixture_matches_official_reference_rendering` を `--ignored` で実行すると失敗する
-- 差分ピクセル数は現在 43,879
+- 差分ピクセル数は現在 40,423
 - 差分画像は `tests/output/acid2/acid2.official-reference.{actual,expected,diff}.png` に出力される
 
 ## 進捗メモ
@@ -45,15 +45,20 @@ status: open
 - `max-height` / `min-height` と positioned `% width` の clamp を layout に追加し、`empty` の誤った `height: 10px` 化と scalp の shrink-to-fit 潰れを抑制した
 - forgiving CSS parse で unquoted `url(data:...)` を正規化して再 parse するようにし、`background: fixed url(...)` から `background-image` を救えるようにした
 - `background` shorthand から `background-attachment: fixed` と `background-position-x/y` を展開し、paint 側でも viewport 基準の fixed background と position offset を扱えるようにした
+- float 後続 block の containing block を見直し、explicit `width` を持つ block は先行 float の offset で丸ごと右へ逃がさないようにして、`#eyes-c` が `#eyes-b` と水平帯域を共有するようにした
+- CSS tokenizer で負の数値を `Dimension/Number` として扱うようにし、`.empty div { margin-bottom: -6em; }` のような負 margin が computed style まで落ちない問題を修正した
 - 追加した回帰テスト
   - `layout::tests::percentage_height_in_auto_sized_container_becomes_auto`
   - `layout::tests::percentage_width_resolves_for_positioned_elements`
   - `css::tests::expands_background_attachment_and_position`
+  - `css::tests::tokenizes_negative_dimensions`
   - `paint::tests::paints_background_image_with_position_offset`
   - `paint::tests::fixed_background_image_uses_viewport_origin`
+- 追加した Acid2 回帰テスト
+  - `paint::tests::acid2_eyes_block_layer_stays_overlapping_float_layer`
 - 現時点の主な残差分は、Acid2 本体側で `eyes-a` / `eyes-b` / `eyes-c` の layering と inline 配置が崩れ、目が横長の赤帯として描かれていること
-- 公式比較差分は今回 `47,084 -> 41,508 -> 40,872` まで減少したが、主戦場はまだ `smile` の nested float / absolute positioning と、顔パーツの縦方向の重なりにある
-- ただし fixed background を viewport 基準へ寄せた直後の公式比較は `40,872 -> 43,879` と一時的に悪化したため、`.eyes` / `.chin` に対する position offset と viewport anchoring の適用範囲を再切り分ける必要がある
+- 公式比較差分は今回 `40,872 -> 40,423` まで改善し、`.eyes-c` が右へ逃げる崩れはひとまず抑えられた
+- 負 margin 自体は通るようになったが、下半分の位置ずれはまだ大きく、主戦場は引き続き `smile` の nested float / absolute positioning と、`.eyes-a` の inline image / fixed background の最終位置合わせにある
 
 ## タスク
 - [x] 公式比較の差分画像を見て、主要な未実装要素を特定する

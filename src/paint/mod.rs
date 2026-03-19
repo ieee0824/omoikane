@@ -2612,6 +2612,41 @@ mod tests {
     }
 
     #[test]
+    fn acid2_eyes_block_layer_stays_overlapping_float_layer() {
+        let acid2_html = fs::read_to_string(acid2_fixture_path()).unwrap();
+        let acid2_document = TreeBuilder::parse(&acid2_html).document();
+        let mut resolver = StyleResolver::new();
+        for stylesheet in extract_author_stylesheets(&acid2_document).unwrap() {
+            resolver.add_stylesheet(
+                Origin::Author,
+                parse_stylesheet_forgiving(&stylesheet).unwrap(),
+            );
+        }
+
+        let layout = crate::layout::layout_tree(
+            &acid2_document,
+            &mut resolver,
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 800.0,
+                height: 600.0,
+            },
+        )
+        .unwrap();
+
+        let eyes_b = find_layout_box_by_id(&layout, "eyes-b").unwrap();
+        let eyes_c = find_layout_box_by_id(&layout, "eyes-c").unwrap();
+
+        assert!(
+            eyes_c.dimensions.content.x < eyes_b.dimensions.content.x + eyes_b.dimensions.content.width,
+            "{:?} {:?}",
+            eyes_b.dimensions.content,
+            eyes_c.dimensions.content
+        );
+    }
+
+    #[test]
     fn acid2_smile_layout_contains_positioned_and_floated_descendants() {
         let acid2_html = fs::read_to_string(acid2_fixture_path()).unwrap();
         let acid2_document = TreeBuilder::parse(&acid2_html).document();

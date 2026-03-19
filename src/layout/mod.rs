@@ -463,14 +463,22 @@ fn layout_element(
                 margin_bottom + child_margin_top - collapse_margins(margin_bottom, child_margin_top)
             })
             .unwrap_or(0.0);
-        let available_width = (width - left_float_offset - right_float_offset).max(0.0);
-        let child_containing = Rect {
-            x: x + left_float_offset,
-            y: cursor_y - collapse_delta,
-            width: available_width,
-            height: 0.0,
-        };
         if let Some(style) = &child_style {
+            let available_width = (width - left_float_offset - right_float_offset).max(0.0);
+            let child_containing = Rect {
+                x: if explicit_length(style, "width").is_some() {
+                    x
+                } else {
+                    x + left_float_offset
+                },
+                y: cursor_y - collapse_delta,
+                width: if explicit_length(style, "width").is_some() {
+                    width
+                } else {
+                    available_width
+                },
+                height: 0.0,
+            };
             if is_out_of_flow_positioned(style) {
                 positioned_children.push((child, style.clone(), child_containing));
                 continue;
@@ -507,30 +515,44 @@ fn layout_element(
                 previous_margin_bottom = None;
                 continue;
             }
+            let next_positioned_ancestor = if establishes_positioned_containing_block(&style) {
+                Some(BoxDimensions {
+                    content: Rect {
+                        x,
+                        y,
+                        width,
+                        height: 0.0,
+                    },
+                    padding,
+                    border,
+                    margin,
+                })
+            } else {
+                positioned_ancestor
+            };
+            if let Some(layout_child) = layout_node(
+                &child,
+                resolver,
+                child_containing,
+                viewport,
+                next_positioned_ancestor,
+            ) {
+                cursor_y += layout_child.total_height();
+                previous_margin_bottom = Some(layout_child.dimensions.margin.bottom);
+                children.push(layout_child);
+            }
+            continue;
         }
 
-        let next_positioned_ancestor = if establishes_positioned_containing_block(&style) {
-            Some(BoxDimensions {
-                content: Rect {
-                    x,
-                    y,
-                    width,
-                    height: 0.0,
-                },
-                padding,
-                border,
-                margin,
-            })
-        } else {
-            positioned_ancestor
+        let child_containing = Rect {
+            x,
+            y: cursor_y - collapse_delta,
+            width,
+            height: 0.0,
         };
-        if let Some(layout_child) = layout_node(
-            &child,
-            resolver,
-            child_containing,
-            viewport,
-            next_positioned_ancestor,
-        ) {
+        if let Some(layout_child) =
+            layout_node(&child, resolver, child_containing, viewport, positioned_ancestor)
+        {
             cursor_y += layout_child.total_height();
             previous_margin_bottom = Some(layout_child.dimensions.margin.bottom);
             children.push(layout_child);
@@ -3906,6 +3928,7 @@ mod tests {
         assert_eq!(cleared_box.dimensions.content.y, 10.0);
         assert_eq!(cleared_box.dimensions.content.x, 0.0);
     }
+
 
     #[test]
     fn sorts_siblings_by_z_index() {

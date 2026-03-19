@@ -1326,6 +1326,10 @@ fn is_number_start(chars: &[char], index: usize) -> bool {
     chars.get(index).is_some_and(|c| c.is_ascii_digit())
         || (chars.get(index) == Some(&'.')
             && chars.get(index + 1).is_some_and(|c| c.is_ascii_digit()))
+        || ((chars.get(index) == Some(&'+') || chars.get(index) == Some(&'-'))
+            && chars
+                .get(index + 1)
+                .is_some_and(|c| c.is_ascii_digit() || *c == '.'))
 }
 
 fn consume_ident(chars: &[char], index: &mut usize) -> String {
@@ -1356,6 +1360,10 @@ fn consume_string(chars: &[char], index: &mut usize, quote: char) -> Result<Stri
 
 fn consume_number(chars: &[char], index: &mut usize) -> Result<f32, CssParseError> {
     let mut value = String::new();
+    if let Some(sign @ ('+' | '-')) = chars.get(*index).copied() {
+        value.push(sign);
+        *index += 1;
+    }
     if chars.get(*index) == Some(&'.') {
         value.push('.');
         *index += 1;
@@ -1383,6 +1391,13 @@ mod tests {
         assert!(tokens.contains(&CssToken::Ident("h1".to_string())));
         assert!(tokens.contains(&CssToken::Dimension(10.0, "px".to_string())));
         assert!(tokens.contains(&CssToken::CurlyOpen));
+    }
+
+    #[test]
+    fn tokenizes_negative_dimensions() {
+        let tokens = tokenize("div { margin-bottom: -6em; top: -.5px; }").unwrap();
+        assert!(tokens.contains(&CssToken::Dimension(-6.0, "em".to_string())));
+        assert!(tokens.contains(&CssToken::Dimension(-0.5, "px".to_string())));
     }
 
     #[test]
