@@ -184,6 +184,7 @@ impl StyleResolver {
         resolve_explicit_inherit(&mut properties, parent_style);
         apply_inheritance(&mut properties, parent_style);
         apply_initial_values(&mut properties);
+        zero_border_width_for_none_style(&mut properties);
 
         ComputedStyle { properties }
     }
@@ -344,6 +345,23 @@ fn apply_initial_values(properties: &mut BTreeMap<String, ComputedValue>) {
     properties
         .entry("font-size".to_string())
         .or_insert_with(|| ComputedValue::Px(16.0));
+}
+
+/// CSS 2.1 §8.5.3: If border-style is 'none', the computed border-width is 0.
+fn zero_border_width_for_none_style(properties: &mut BTreeMap<String, ComputedValue>) {
+    for side in ["top", "right", "bottom", "left"] {
+        let style_key = format!("border-{side}-style");
+        let is_none = matches!(
+            properties.get(&style_key),
+            Some(ComputedValue::Keyword(keyword)) if keyword.eq_ignore_ascii_case("none")
+        );
+        if is_none {
+            let width_key = format!("border-{side}-width");
+            if properties.contains_key(&width_key) {
+                properties.insert(width_key, ComputedValue::Px(0.0));
+            }
+        }
+    }
 }
 
 fn resolve_explicit_inherit(
