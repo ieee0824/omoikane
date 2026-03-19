@@ -32,3 +32,6 @@ Acid2 の `#eyes-a` は nested `object` fallback の最内周で PNG を inline 
 
 - 既に object fallback chain 自体は解決できている
 - 問題は「inline fallback の最終使用幅」と「fixed background の最終 paint origin」が混ざる地点に残っている可能性が高い
+- `layout::tests::object_type_width_and_height_do_not_change_nested_inline_fallback_image_size` を追加し、`object[type]` の `width/height` が nested inline fallback の最終 image fragment 幅に効かないことを固定した
+- `paint::tests::nested_object_fallback_preserves_fixed_background_on_inline_image_fragment` を追加し、nested object fallback 上でも innermost decoration style の fixed background が実際に paint されることを確認した
+- `cargo test --lib` は通過、ignored の公式 Acid2 比較差分はこの時点では `40,427` のまま

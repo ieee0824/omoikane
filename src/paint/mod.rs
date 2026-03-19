@@ -2248,6 +2248,59 @@ mod tests {
     }
 
     #[test]
+    fn nested_object_fallback_preserves_fixed_background_on_inline_image_fragment() {
+        let html = r#"<html><head><style>body { margin: 0; font: 2px/2px sans-serif; } object { display: inline; vertical-align: bottom; } object object object { background: url(data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAIAAAD91JpzAAAABnRSTlMAAAAAAABupgeRAAAABmJLR0QA%2FwD%2FAP%2BgvaeTAAAAEUlEQVR42mP4%2F58BCv7%2FZwAAHfAD%2FabwPj4AAAAASUVORK5CYII%3D) fixed 1px 0; }</style></head><body><object data="data:application/x-unknown,ERROR"><object data="data:application/x-unknown,ERROR" type="text/html"><object data="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAIAAAD91JpzAAAABnRSTlMAAAAAAABupgeRAAAABmJLR0QA%2FwD%2FAP%2BgvaeTAAAAEUlEQVR42mP4%2F58BCv7%2FZwAAHfAD%2FabwPj4AAAAASUVORK5CYII%3D"></object></object></object></body></html>"#;
+        let document = TreeBuilder::parse(html).document();
+        let mut resolver = StyleResolver::new();
+        for stylesheet in extract_author_stylesheets(&document).unwrap() {
+            resolver.add_stylesheet(
+                Origin::Author,
+                parse_stylesheet_forgiving(&stylesheet).unwrap(),
+            );
+        }
+        let layout = crate::layout::layout_tree(
+            &document,
+            &mut resolver,
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 2.0,
+                height: 2.0,
+            },
+        )
+        .unwrap();
+        let image_fragment = find_first_image_fragment(&layout).unwrap();
+        assert_eq!(image_fragment.rect.x, 0.0);
+        assert_eq!(image_fragment.rect.y, 0.0);
+        match &image_fragment.content {
+            InlineFragmentContent::Image(_, style) => {
+                assert_eq!(
+                    style.get("background-attachment"),
+                    Some(&ComputedValue::Keyword("fixed".to_string()))
+                );
+                assert!(style.get("background-image").is_some());
+            }
+            _ => panic!("expected image fragment"),
+        }
+
+        let canvas = render_document(
+            &document,
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 2.0,
+                height: 2.0,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(canvas.pixel(0, 0), Some(Color::rgb(255, 255, 0)));
+        assert_eq!(canvas.pixel(1, 0), Some(Color::rgb(255, 255, 0)));
+        assert_eq!(canvas.pixel(0, 1), Some(Color::rgb(255, 255, 0)));
+        assert_eq!(canvas.pixel(1, 1), Some(Color::rgb(255, 255, 0)));
+    }
+
+    #[test]
     fn absolute_inline_content_paints_above_float_siblings() {
         let root = NodeHandle::element("div");
         root.set_attribute("class", "root");
@@ -3274,6 +3327,24 @@ mod tests {
         }
         for child in node.child_nodes() {
             if let Some(found) = find_first_descendant_by_tag(&child, tag) {
+                return Some(found);
+            }
+        }
+        None
+    }
+
+    fn find_first_image_fragment(layout: &LayoutBox) -> Option<&InlineFragment> {
+        for line in &layout.lines {
+            if let Some(fragment) = line
+                .fragments
+                .iter()
+                .find(|fragment| matches!(fragment.content, InlineFragmentContent::Image(_, _)))
+            {
+                return Some(fragment);
+            }
+        }
+        for child in &layout.children {
+            if let Some(found) = find_first_image_fragment(child) {
                 return Some(found);
             }
         }

@@ -3160,6 +3160,63 @@ mod tests {
     }
 
     #[test]
+    fn object_type_width_and_height_do_not_change_nested_inline_fallback_image_size() {
+        let document = NodeHandle::document();
+        let body = NodeHandle::element("body");
+        let container = NodeHandle::element("div");
+        let outer_object = NodeHandle::element("object");
+        let middle_object = NodeHandle::element("object");
+        let inner_object = NodeHandle::element("object");
+        document.append_child(body.clone());
+        body.append_child(container.clone());
+        container.append_child(outer_object.clone());
+        outer_object.append_child(middle_object.clone());
+        middle_object.append_child(inner_object.clone());
+
+        outer_object.set_attribute("data", "data:application/x-unknown,ERROR");
+        middle_object.set_attribute("data", "data:application/x-unknown,ERROR");
+        middle_object.set_attribute("type", "text/html");
+        inner_object.set_attribute(
+            "data",
+            "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAIAAAD91JpzAAAABnRSTlMAAAAAAABupgeRAAAABmJLR0QA%2FwD%2FAP%2BgvaeTAAAAEUlEQVR42mP4%2F58BCv7%2FZwAAHfAD%2FabwPj4AAAAASUVORK5CYII%3D",
+        );
+
+        let mut resolver = StyleResolver::new();
+        resolver.add_stylesheet(
+            Origin::Author,
+            parse_stylesheet(
+                "object { display: inline; vertical-align: bottom; } \
+                 object[type] { width: 90px; height: 30px; } \
+                 object object object { padding-left: 11px; padding-right: 12px; border-right: 12px solid black; }",
+            )
+            .unwrap(),
+        );
+
+        let layout = layout_tree(
+            &body,
+            &mut resolver,
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 200.0,
+                height: 0.0,
+            },
+        )
+        .unwrap();
+
+        let container_box = find_layout_box_by_tag(&layout, "div").unwrap();
+        let line = &container_box.lines[0];
+        let image_fragment = line
+            .fragments
+            .iter()
+            .find(|fragment| matches!(fragment.content, InlineFragmentContent::Image(_, _)))
+            .unwrap();
+
+        assert_eq!(image_fragment.rect.width, 37.0);
+        assert_eq!(image_fragment.rect.height, 2.0);
+    }
+
+    #[test]
     fn lays_out_basic_table_rows_and_cells() {
         let document = NodeHandle::document();
         let body = NodeHandle::element("body");

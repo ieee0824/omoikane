@@ -71,6 +71,7 @@ status: open
 - 公式比較差分は今回 `40,872 -> 40,423` まで改善し、`.eyes-c` が右へ逃げる崩れはひとまず抑えられた
 - 負 margin 自体は通るようになったが、下半分の位置ずれはまだ大きい。`.smile` の nested float 幅崩れは回帰テストで固定でき、ignored の公式比較も `40,999 -> 40,379` まで戻せた一方、主戦場は引き続き `.eyes-a` の inline image / fixed background の最終 paint と下半分の細かな位置合わせにある
 - min/max override 修正で `layout::tests::min_height_overrides_smaller_max_height` / `layout::tests::min_width_overrides_smaller_max_width` を追加した。`cargo test --lib` は通過したが、ignored の公式比較は今回は `40,379 -> 40,427` とわずかに悪化した
+- 012-6 の切り分けとして `layout::tests::object_type_width_and_height_do_not_change_nested_inline_fallback_image_size` と `paint::tests::nested_object_fallback_preserves_fixed_background_on_inline_image_fragment` を追加し、nested object fallback 上の width/height 無効化と fixed background paint 自体は成立していることを固定した
 
 ## 子issue
 
