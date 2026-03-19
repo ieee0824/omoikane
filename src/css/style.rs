@@ -357,9 +357,7 @@ fn zero_border_width_for_none_style(properties: &mut BTreeMap<String, ComputedVa
         );
         if is_none {
             let width_key = format!("border-{side}-width");
-            if properties.contains_key(&width_key) {
-                properties.insert(width_key, ComputedValue::Px(0.0));
-            }
+            properties.insert(width_key, ComputedValue::Px(0.0));
         }
     }
 }
@@ -652,5 +650,27 @@ mod tests {
             title_style.get("float"),
             Some(&ComputedValue::Keyword("right".to_string()))
         );
+    }
+
+    #[test]
+    fn border_style_none_zeroes_side_width_even_when_width_only_comes_from_shorthand() {
+        let (_document, _body, title, _html) = sample_tree();
+        let mut resolver = StyleResolver::new();
+        resolver.add_stylesheet(
+            Origin::Author,
+            parse_stylesheet(
+                "h1 { border: solid 12px transparent; border-style: none solid; }",
+            )
+            .unwrap(),
+        );
+
+        let style = resolver.computed_style(&title);
+
+        assert_eq!(style.get("border-top-style"), Some(&ComputedValue::Keyword("none".to_string())));
+        assert_eq!(style.get("border-bottom-style"), Some(&ComputedValue::Keyword("none".to_string())));
+        assert_eq!(style.get("border-top-width"), Some(&ComputedValue::Px(0.0)));
+        assert_eq!(style.get("border-bottom-width"), Some(&ComputedValue::Px(0.0)));
+        assert_eq!(style.get("border-right-style"), Some(&ComputedValue::Keyword("solid".to_string())));
+        assert_eq!(style.get("border-left-style"), Some(&ComputedValue::Keyword("solid".to_string())));
     }
 }
