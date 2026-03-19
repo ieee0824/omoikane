@@ -401,6 +401,9 @@ fn layout_element(
     let y = containing_block.y + margin.top + border.top + padding.top;
 
     if is_table_container(&style) {
+        if resolved_length(&style, "width", containing_block.width).is_none() {
+            width = shrink_to_fit_width(node, resolver, containing_block.width);
+        }
         return layout_table_container(
             node, resolver, style, margin, padding, border, x, y, width, viewport,
         );

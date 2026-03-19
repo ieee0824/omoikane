@@ -11,7 +11,7 @@ status: open
 
 ## 現状
 - `paint::tests::acid2_fixture_matches_official_reference_rendering` を `--ignored` で実行すると失敗する
-- 差分ピクセル数は現在 34,604
+- 差分ピクセル数は現在 27,884
 - 差分画像は `tests/output/acid2/acid2.official-reference.{actual,expected,diff}.png` に出力される
 
 ## 進捗メモ
@@ -82,6 +82,8 @@ status: open
 - 012-1 は調査の結果、`collect_author_stylesheets` 内で既に `<link rel="stylesheet">` の `data:text/css` URI に対応済みだった。`paint::tests::acid2_link_stylesheet_overrides_picture_background_to_none` テストで確認し close した
 - 012-2 の empty element self margin collapsing を実装した。`is_empty_for_margin_collapse` / `collapse_through_empty` で empty 要素とその子孫の全 margin を再帰的に collapse する。`layout::tests::empty_element_collapses_own_margins_through` / `layout::tests::empty_element_with_negative_child_margin_collapses_through` を追加。ignored の公式比較差分は `33,957 -> 39,245` と一時的に悪化（下部要素が viewport 内に入ったため）だが、構造的には正しい方向
 - block 要素間の空白テキストノードが line box を生成して cursor_y を不要に進めていた問題を修正。`pending_inline_nodes` が空白テキストのみの場合はレイアウトをスキップするようにした。ignored の公式比較差分は `39,245 -> 34,604` まで改善。baseline も更新済み
+- 012-4: table container 内で table-cell/row/row-group 以外の子要素を anonymous cell として扱うようにした（CSS 2.1 §17.2.1）
+- 012-4: width:auto の table container に shrink-to-fit 幅を適用し、`.image-height-test` 内 table 等が親の全幅に広がらないようにした。ignored の公式比較差分は `34,604 -> 27,884` まで改善。baseline も更新済み
 
 ## 子issue
 
