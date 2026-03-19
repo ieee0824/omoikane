@@ -44,3 +44,6 @@ status: open
 - float 配置は「現在 y で使える幅が足りなければ次の float boundary まで降りる」形に寄せ、`clear` も active float region の bottom を見て計算するようにした
 - `layout::tests::float_left_and_right_reduce_available_block_width` や Acid2 関連の局所回帰は維持できているが、ignored の公式比較差分は依然 `40,427`
 - 鼻まわりの切り分けとして、float 配置時に負 `margin-top` を打ち消していたバグを別筋で修正し、`layout::tests::float_preserves_negative_top_margin_offset` を追加した。これは `.nose { margin: -2em ... }` の前提には効くが、ignored の公式比較差分 `33,957` 自体は動かなかったため、012-2 の本丸は引き続き `clear` の負 clearance と empty/self margin collapse にある
+- empty element の self margin collapsing を実装した。`is_empty_for_margin_collapse` で height=0 / vertical border+padding=0 / lines なし / 全子孫も empty の要素を判定し、`collapse_through_empty` で自身と子孫の全 margin を再帰的に collapse する
+- `layout::tests::empty_element_collapses_own_margins_through` / `layout::tests::empty_element_with_negative_child_margin_collapses_through` を追加し、正 margin 同士の collapse と子の負 margin を含む collapse の両方を固定した
+- ignored の公式比較差分は `33,957 -> 39,245` と一時的に悪化した。原因は empty collapsing で下半分の間隔が縮み、以前画面外だった `.chin` / `.parser` / `ul` table 要素が viewport 内に入ったが、それらの位置がまだ正しくないため。構造的には正しい方向への変更

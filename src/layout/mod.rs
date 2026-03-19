@@ -598,9 +598,20 @@ fn layout_element(
                 viewport,
                 next_positioned_ancestor,
             ) {
-                cursor_y += layout_child.total_height();
-                previous_margin_bottom = Some(layout_child.dimensions.margin.bottom);
-                children.push(layout_child);
+                if is_empty_for_margin_collapse(&layout_child) {
+                    let prev = previous_margin_bottom.unwrap_or(0.0);
+                    let empty_collapsed = collapse_through_empty(&layout_child);
+                    let combined = collapse_margins(prev, empty_collapsed);
+                    // Advance cursor_y by the difference between the combined
+                    // collapsed margin and the previous margin already tracked.
+                    cursor_y += combined - prev;
+                    previous_margin_bottom = Some(combined);
+                    children.push(layout_child);
+                } else {
+                    cursor_y += layout_child.total_height();
+                    previous_margin_bottom = Some(layout_child.dimensions.margin.bottom);
+                    children.push(layout_child);
+                }
             }
             continue;
         }
@@ -614,9 +625,18 @@ fn layout_element(
         if let Some(layout_child) =
             layout_node(&child, resolver, child_containing, viewport, positioned_ancestor)
         {
-            cursor_y += layout_child.total_height();
-            previous_margin_bottom = Some(layout_child.dimensions.margin.bottom);
-            children.push(layout_child);
+            if is_empty_for_margin_collapse(&layout_child) {
+                let prev = previous_margin_bottom.unwrap_or(0.0);
+                let empty_collapsed = collapse_through_empty(&layout_child);
+                let combined = collapse_margins(prev, empty_collapsed);
+                cursor_y += combined - prev;
+                previous_margin_bottom = Some(combined);
+                children.push(layout_child);
+            } else {
+                cursor_y += layout_child.total_height();
+                previous_margin_bottom = Some(layout_child.dimensions.margin.bottom);
+                children.push(layout_child);
+            }
         }
     }
 
@@ -1313,6 +1333,32 @@ fn collapse_margins(first: f32, second: f32) -> f32 {
     } else {
         first + second
     }
+}
+
+/// CSS 2.1 §8.3.1: An element is "empty" for margin collapsing when it has
+/// zero height, zero vertical border/padding, no line boxes, and all
+/// children (if any) are themselves empty for margin collapsing.
+fn is_empty_for_margin_collapse(layout: &LayoutBox) -> bool {
+    layout.dimensions.content.height == 0.0
+        && layout.dimensions.padding.top == 0.0
+        && layout.dimensions.padding.bottom == 0.0
+        && layout.dimensions.border.top == 0.0
+        && layout.dimensions.border.bottom == 0.0
+        && layout.lines.is_empty()
+        && layout.children.iter().all(|c| is_empty_for_margin_collapse(c))
+}
+
+/// Collapse all margins through an empty element and its empty descendants.
+/// Returns the single collapsed margin value that represents the entire chain.
+fn collapse_through_empty(layout: &LayoutBox) -> f32 {
+    let mut result = collapse_margins(
+        layout.dimensions.margin.top,
+        layout.dimensions.margin.bottom,
+    );
+    for child in &layout.children {
+        result = collapse_margins(result, collapse_through_empty(child));
+    }
+    result
 }
 
 fn is_out_of_flow_positioned(style: &ComputedStyle) -> bool {
@@ -4437,6 +4483,103 @@ mod tests {
 
         let floated_box = find_layout_box_by_tag(&layout, "section").unwrap();
         assert_eq!(floated_box.dimensions.content.y, 28.0);
+    }
+
+    #[test]
+    fn empty_element_collapses_own_margins_through() {
+        let document = NodeHandle::document();
+        let body = NodeHandle::element("body");
+        let before = NodeHandle::element("div");
+        let empty = NodeHandle::element("div");
+        let after = NodeHandle::element("section");
+
+        before.set_attribute("class", "before");
+        empty.set_attribute("class", "empty");
+        after.set_attribute("class", "after");
+        document.append_child(body.clone());
+        body.append_child(before);
+        body.append_child(empty);
+        body.append_child(after.clone());
+
+        let mut resolver = StyleResolver::new();
+        resolver.add_stylesheet(
+            Origin::Author,
+            parse_stylesheet(
+                ".before { height: 10px; margin-bottom: 0; } \
+                 .empty { margin-top: 20px; margin-bottom: 30px; } \
+                 .after { height: 10px; margin-top: 0; }",
+            )
+            .unwrap(),
+        );
+
+        let layout = layout_tree(
+            &body,
+            &mut resolver,
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 100.0,
+                height: 0.0,
+            },
+        )
+        .unwrap();
+
+        let after_box = find_layout_box_by_tag(&layout, "section").unwrap();
+        // empty element's top (20) and bottom (30) collapse → max = 30
+        // then 30 collapses with .before's mb (0) → 30
+        // and with .after's mt (0) → 30
+        assert_eq!(after_box.dimensions.content.y, 40.0); // 10 (before height) + 30 (collapsed margin)
+    }
+
+    #[test]
+    fn empty_element_with_negative_child_margin_collapses_through() {
+        let document = NodeHandle::document();
+        let body = NodeHandle::element("body");
+        let before = NodeHandle::element("div");
+        let empty = NodeHandle::element("div");
+        let inner = NodeHandle::element("div");
+        let after = NodeHandle::element("section");
+
+        before.set_attribute("class", "before");
+        empty.set_attribute("class", "empty");
+        inner.set_attribute("class", "inner");
+        after.set_attribute("class", "after");
+        document.append_child(body.clone());
+        body.append_child(before);
+        body.append_child(empty.clone());
+        empty.append_child(inner);
+        body.append_child(after.clone());
+
+        let mut resolver = StyleResolver::new();
+        resolver.add_stylesheet(
+            Origin::Author,
+            parse_stylesheet(
+                ".before { height: 10px; margin-bottom: 0; } \
+                 .empty { margin: 20px 0; } \
+                 .inner { margin-bottom: -15px; } \
+                 .after { height: 10px; margin-top: 5px; }",
+            )
+            .unwrap(),
+        );
+
+        let layout = layout_tree(
+            &body,
+            &mut resolver,
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 100.0,
+                height: 0.0,
+            },
+        )
+        .unwrap();
+
+        let after_box = find_layout_box_by_tag(&layout, "section").unwrap();
+        // Collapse chain: .empty mt=20, .inner mt=0, .inner mb=-15, .empty mb=20, .after mt=5
+        // Positive max: max(20, 0, 20, 5) = 20
+        // Negative min: min(-15) = -15
+        // Result: 20 + (-15) = 5
+        assert_eq!(after_box.dimensions.content.y, 15.0); // 10 (before height) + 5 (collapsed)
     }
 
     #[test]

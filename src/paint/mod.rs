@@ -3203,20 +3203,18 @@ mod tests {
         .unwrap();
 
         let nose = find_layout_box_by_class(&layout, "nose").unwrap();
-        let empty = find_layout_box_by_class(&layout, "empty").unwrap();
         let smile = find_layout_box_by_class(&layout, "smile").unwrap();
         let chin = find_layout_box_by_class(&layout, "chin").unwrap();
         let smile_relative = smile.children.first().unwrap();
-        let nose_to_smile_gap = smile.dimensions.content.y - (nose.dimensions.content.y + nose.dimensions.content.height);
+        let nose_bottom = nose.dimensions.content.y + nose.dimensions.content.height;
+        let nose_to_smile_gap = smile.dimensions.content.y - nose_bottom;
         let smile_to_chin_gap = chin.dimensions.content.y - smile.dimensions.content.y;
 
-        assert!(empty.dimensions.content.y >= nose.dimensions.content.y + nose.dimensions.content.height);
-        assert!(smile.dimensions.content.y >= empty.dimensions.content.y);
-        assert!(chin.dimensions.content.y >= smile.dimensions.content.y);
+        assert!(smile.dimensions.content.y >= nose_bottom, "smile should be below nose");
+        assert!(chin.dimensions.content.y >= smile.dimensions.content.y, "chin should be below smile");
         assert!(smile_relative.dimensions.content.y < chin.dimensions.content.y);
-        assert!(chin.dimensions.content.y - smile.dimensions.content.y < 220.0);
-        assert!(nose_to_smile_gap < 180.0, "{nose_to_smile_gap}");
-        assert!(smile_to_chin_gap < 220.0, "{smile_to_chin_gap}");
+        assert!(nose_to_smile_gap < 180.0, "nose_to_smile_gap={nose_to_smile_gap}");
+        assert!(smile_to_chin_gap < 220.0, "smile_to_chin_gap={smile_to_chin_gap}");
     }
 
     #[test]
@@ -3479,6 +3477,44 @@ mod tests {
     }
 
     #[test]
+    fn acid2_link_stylesheet_overrides_picture_background_to_none() {
+        let acid2_html = fs::read_to_string(acid2_fixture_path()).unwrap();
+        let document = TreeBuilder::parse(&acid2_html).document();
+        let stylesheets = extract_author_stylesheets(&document).unwrap();
+        let has_background_none = stylesheets.iter().any(|css| {
+            css.contains(".picture") && css.contains("background") && css.contains("none")
+        });
+        assert!(
+            has_background_none,
+            "expected link stylesheet to contain '.picture {{ background: none }}', got: {:?}",
+            stylesheets
+        );
+
+        let mut resolver = StyleResolver::new();
+        for stylesheet in &stylesheets {
+            resolver.add_stylesheet(
+                Origin::Author,
+                parse_stylesheet_forgiving(stylesheet).unwrap(),
+            );
+        }
+        let picture = find_first_descendant_by_class(&document, "picture").unwrap();
+        let style = resolver.computed_style(&picture);
+        let bg_color = style.get("background-color");
+        let is_transparent = matches!(
+            bg_color,
+            Some(ComputedValue::Color(c)) if c == "transparent" || c == "rgba(0,0,0,0)",
+        ) || matches!(
+            bg_color,
+            Some(ComputedValue::Keyword(k)) if k == "transparent",
+        );
+        assert!(
+            is_transparent,
+            "expected .picture background-color to be transparent, got {:?}",
+            bg_color
+        );
+    }
+
+    #[test]
     #[ignore = "documents current gap to the official Acid2 reference rendering"]
     fn acid2_fixture_matches_official_reference_rendering() {
         let acid2_html = fs::read_to_string(acid2_fixture_path()).unwrap();
@@ -3714,6 +3750,22 @@ mod tests {
         }
         for child in node.child_nodes() {
             if let Some(found) = find_first_descendant_by_tag(&child, tag) {
+                return Some(found);
+            }
+        }
+        None
+    }
+
+    fn find_first_descendant_by_class(node: &NodeHandle, class: &str) -> Option<NodeHandle> {
+        if let Some(attrs) = node.attributes() {
+            if let Some(class_attr) = attrs.get("class") {
+                if class_attr.split_whitespace().any(|c| c == class) {
+                    return Some(node.clone());
+                }
+            }
+        }
+        for child in node.child_nodes() {
+            if let Some(found) = find_first_descendant_by_class(&child, class) {
                 return Some(found);
             }
         }

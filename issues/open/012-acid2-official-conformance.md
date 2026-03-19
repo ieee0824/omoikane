@@ -11,7 +11,7 @@ status: open
 
 ## 現状
 - `paint::tests::acid2_fixture_matches_official_reference_rendering` を `--ignored` で実行すると失敗する
-- 差分ピクセル数は現在 33,957
+- 差分ピクセル数は現在 39,245（empty margin collapsing 実装で一時悪化、下部要素が viewport 内に入ったため）
 - 差分画像は `tests/output/acid2/acid2.official-reference.{actual,expected,diff}.png` に出力される
 
 ## 進捗メモ
@@ -79,10 +79,12 @@ status: open
 - ignored の公式比較ハーネスでは、Acid2 側だけ `#top` 基準で上へ詰めていたため reference 側の `h2` と origin が揃っていなかった。比較前に Acid2 の `#top` content origin を reference の `h2` content origin へ合わせるようにして、より対称な比較へ寄せた結果、ignored の公式比較差分は `36,708 -> 33,957` まで改善した。これは主に比較の整合化であり、renderer 本体の改善量とは分けて扱う
 - `.nose` の前提修正として、float 配置時に負 `margin-top` を打ち消していたバグを修正し、`layout::tests::float_preserves_negative_top_margin_offset` を追加した。これは鼻周辺の前提には効くが、ignored の公式比較差分 `33,957` 自体は変わらなかった
 - 012-7 の追加修正として、non-positioned subtree の float descendant も祖先 float phase へ defer するように広げ、`paint::tests::float_grandchild_paints_above_block_uncle` を追加した。`cargo test --lib` は維持できているが、ignored の公式比較差分 `33,957` は据え置きだった
+- 012-1 は調査の結果、`collect_author_stylesheets` 内で既に `<link rel="stylesheet">` の `data:text/css` URI に対応済みだった。`paint::tests::acid2_link_stylesheet_overrides_picture_background_to_none` テストで確認し close した
+- 012-2 の empty element self margin collapsing を実装した。`is_empty_for_margin_collapse` / `collapse_through_empty` で empty 要素とその子孫の全 margin を再帰的に collapse する。`layout::tests::empty_element_collapses_own_margins_through` / `layout::tests::empty_element_with_negative_child_margin_collapses_through` を追加。ignored の公式比較差分は `33,957 -> 39,245` と一時的に悪化（下部要素が viewport 内に入ったため）だが、構造的には正しい方向
 
 ## 子issue
 
-- [012-1 `<link rel="stylesheet">` による外部スタイルシート適用](012-1-link-stylesheet-loading.md)
+- [012-1 `<link rel="stylesheet">` による外部スタイルシート適用](../closed/012-1-link-stylesheet-loading.md)
 - [012-2 負margin collapsingと clear の負clearance](012-2-negative-margin-collapsing-and-clear.md)
 - [012-3 `overflow: hidden` によるクリッピング](../closed/012-3-overflow-hidden-clipping.md)
 - [012-4 `display: table` / `table-cell` レイアウト](012-4-table-layout.md)

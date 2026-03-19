@@ -2,7 +2,7 @@
 number: 012-1
 slug: link-stylesheet-loading
 parent: 012-acid2-official-conformance
-status: open
+status: closed
 ---
 
 # `<link rel="stylesheet">` による外部スタイルシート適用
@@ -30,3 +30,9 @@ status: open
 - HTTP/HTTPS による外部リソース取得（将来の HTTP クライアント統合時に対応）
 - `@import` ルール
 - `media` 属性によるメディアクエリフィルタリング
+
+## 結果
+
+- 調査の結果、`collect_author_stylesheets` 内で `<link rel="stylesheet">` の `data:text/css` URI は既に対応済みだった
+- `rel.contains("stylesheet")` で複合 rel 値にも対応、`parse_data_uri` で percent-encoding デコードも動作
+- `paint::tests::acid2_link_stylesheet_overrides_picture_background_to_none` テストで `.picture { background: none; }` が正しくカスケードに乗ることを確認し close
