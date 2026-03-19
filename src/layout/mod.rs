@@ -584,7 +584,9 @@ fn layout_element(
                     }
                     float_y = next_y;
                 }
-                previous_margin_bottom = None;
+                // Floats don't participate in margin collapsing;
+                // preserve previous_margin_bottom so adjacent in-flow
+                // siblings can still collapse through.
                 continue;
             }
             let next_positioned_ancestor = if establishes_positioned_containing_block(&style) {
@@ -619,7 +621,7 @@ fn layout_element(
                     previous_margin_bottom = Some(combined);
                     children.push(layout_child);
                 } else {
-                    cursor_y += layout_child.total_height();
+                    cursor_y += layout_child.total_height() - collapse_delta;
                     previous_margin_bottom = Some(layout_child.dimensions.margin.bottom);
                     children.push(layout_child);
                 }
@@ -644,7 +646,7 @@ fn layout_element(
                 previous_margin_bottom = Some(combined);
                 children.push(layout_child);
             } else {
-                cursor_y += layout_child.total_height();
+                cursor_y += layout_child.total_height() - collapse_delta;
                 previous_margin_bottom = Some(layout_child.dimensions.margin.bottom);
                 children.push(layout_child);
             }
