@@ -444,18 +444,24 @@ fn layout_element(
             .as_ref()
             .map(|style| edge_sizes(style, "margin").top)
             .unwrap_or(0.0);
+        let collapse_delta = previous_margin_bottom
+            .map(|margin_bottom| {
+                margin_bottom + child_margin_top - collapse_margins(margin_bottom, child_margin_top)
+            })
+            .unwrap_or(0.0);
         if let Some(style) = &child_style {
+            let clear_target_y = float_bottom + collapse_delta - child_margin_top;
             match clear_side(style) {
                 ClearSide::Left if left_float_offset > 0.0 => {
-                    cursor_y = cursor_y.max(float_bottom);
+                    cursor_y = cursor_y.max(clear_target_y);
                     left_float_offset = 0.0;
                 }
                 ClearSide::Right if right_float_offset > 0.0 => {
-                    cursor_y = cursor_y.max(float_bottom);
+                    cursor_y = cursor_y.max(clear_target_y);
                     right_float_offset = 0.0;
                 }
                 ClearSide::Both if left_float_offset > 0.0 || right_float_offset > 0.0 => {
-                    cursor_y = cursor_y.max(float_bottom);
+                    cursor_y = cursor_y.max(clear_target_y);
                     left_float_offset = 0.0;
                     right_float_offset = 0.0;
                 }
@@ -463,11 +469,6 @@ fn layout_element(
                 _ => {}
             }
         }
-        let collapse_delta = previous_margin_bottom
-            .map(|margin_bottom| {
-                margin_bottom + child_margin_top - collapse_margins(margin_bottom, child_margin_top)
-            })
-            .unwrap_or(0.0);
         if let Some(child_style) = &child_style {
             let available_width = (width - left_float_offset - right_float_offset).max(0.0);
             let child_containing = Rect {
@@ -1137,6 +1138,7 @@ fn normalized_min_max_lengths(
         pair => pair,
     }
 }
+
 
 fn edge_sizes(style: &ComputedStyle, prefix: &str) -> EdgeSizes {
     let shorthand_property = match prefix {
@@ -4249,6 +4251,45 @@ mod tests {
         let cleared_box = find_layout_box_by_tag(&layout, "section").unwrap();
         assert_eq!(cleared_box.dimensions.content.y, 10.0);
         assert_eq!(cleared_box.dimensions.content.x, 0.0);
+    }
+
+    #[test]
+    fn clear_both_positions_border_edge_below_float_not_margin_edge() {
+        let document = NodeHandle::document();
+        let body = NodeHandle::element("body");
+        let float = NodeHandle::element("div");
+        let cleared = NodeHandle::element("section");
+
+        float.set_attribute("class", "float");
+        cleared.set_attribute("class", "cleared");
+        document.append_child(body.clone());
+        body.append_child(float);
+        body.append_child(cleared.clone());
+
+        let mut resolver = StyleResolver::new();
+        resolver.add_stylesheet(
+            Origin::Author,
+            parse_stylesheet(
+                ".float { float: left; width: 20px; height: 10px; } \
+                 .cleared { clear: both; margin-top: 5px; height: 5px; }",
+            )
+            .unwrap(),
+        );
+
+        let layout = layout_tree(
+            &body,
+            &mut resolver,
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 100.0,
+                height: 100.0,
+            },
+        )
+        .unwrap();
+
+        let cleared_box = find_layout_box_by_tag(&layout, "section").unwrap();
+        assert_eq!(cleared_box.dimensions.content.y, 10.0);
     }
 
 
