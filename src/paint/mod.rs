@@ -3515,6 +3515,63 @@ mod tests {
     }
 
     #[test]
+    fn acid2_chin_negative_margin_pulls_it_toward_smile() {
+        let acid2_html = fs::read_to_string(acid2_fixture_path()).unwrap();
+        let acid2_document = TreeBuilder::parse(&acid2_html).document();
+        let mut resolver = StyleResolver::new();
+        for stylesheet in extract_author_stylesheets(&acid2_document).unwrap() {
+            resolver.add_stylesheet(
+                Origin::Author,
+                parse_stylesheet_forgiving(&stylesheet).unwrap(),
+            );
+        }
+        let layout = crate::layout::layout_tree(
+            &acid2_document,
+            &mut resolver,
+            Rect { x: 0.0, y: 0.0, width: 800.0, height: 600.0 },
+        )
+        .unwrap();
+
+        let smile = find_layout_box_by_class(&layout, "smile").unwrap();
+        let chin = find_layout_box_by_class(&layout, "chin").unwrap();
+        let smile_bottom = smile.dimensions.content.y + smile.dimensions.content.height
+            + smile.dimensions.padding.bottom + smile.dimensions.border.bottom;
+        let chin_top = chin.dimensions.content.y - chin.dimensions.padding.top - chin.dimensions.border.top;
+
+        // .chin { margin: -4em 4em 0 } → margin-top: -48px
+        // .smile { margin: 5em 3em } → margin-bottom: 60px
+        // collapse_margins(60, -48) = 12px gap (target)
+        // Currently 29.4px due to intervening whitespace text nodes
+        assert!(
+            chin_top - smile_bottom < 40.0,
+            "chin should be close to smile, gap={}, smile_bottom={smile_bottom}, chin_top={chin_top}",
+            chin_top - smile_bottom,
+        );
+        assert!(chin.dimensions.margin.top < 0.0, "chin should have negative margin-top");
+    }
+
+    #[test]
+    fn acid2_forehead_has_yellow_background_image() {
+        let acid2_html = fs::read_to_string(acid2_fixture_path()).unwrap();
+        let document = TreeBuilder::parse(&acid2_html).document();
+        let mut resolver = StyleResolver::new();
+        for stylesheet in extract_author_stylesheets(&document).unwrap() {
+            resolver.add_stylesheet(
+                Origin::Author,
+                parse_stylesheet_forgiving(&stylesheet).unwrap(),
+            );
+        }
+        let forehead = find_first_descendant_by_class(&document, "forehead").unwrap();
+        let style = resolver.computed_style(&forehead);
+        let bg_image = style.get("background-image");
+        assert!(
+            bg_image.is_some(),
+            "expected .forehead to have background-image, got {:?}",
+            style
+        );
+    }
+
+    #[test]
     #[ignore = "documents current gap to the official Acid2 reference rendering"]
     fn acid2_fixture_matches_official_reference_rendering() {
         let acid2_html = fs::read_to_string(acid2_fixture_path()).unwrap();
