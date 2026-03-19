@@ -2,12 +2,14 @@
 
 use std::fs;
 use std::io::Cursor;
+use std::io::Read;
 use std::path::Path;
 
 use crate::css::{ComputedStyle, ComputedValue, Origin, PseudoElement, StyleResolver, Stylesheet, parse_stylesheet};
 use crate::dom::{Node, NodeHandle, NodeType};
 use crate::layout::{InlineFragmentContent, LayoutBox, Rect, Visibility};
 use base64::Engine;
+use flate2::read::ZlibDecoder;
 /// An RGBA color.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Color {
@@ -1553,13 +1555,15 @@ fn split_declarations_forgiving(input: &str) -> Vec<String> {
 fn decode_png(bytes: &[u8]) -> Result<Image, PaintError> {
     let mut decoder = png::Decoder::new(Cursor::new(bytes));
     decoder.set_transformations(png::Transformations::EXPAND | png::Transformations::STRIP_16);
-    let mut reader = decoder
-        .read_info()
-        .map_err(|_| PaintError::UnsupportedPngFormat)?;
+    let mut reader = match decoder.read_info() {
+        Ok(reader) => reader,
+        Err(_) => return decode_png_fallback(bytes),
+    };
     let mut buffer = vec![0; reader.output_buffer_size()];
-    let info = reader
-        .next_frame(&mut buffer)
-        .map_err(|_| PaintError::UnsupportedPngFormat)?;
+    let info = match reader.next_frame(&mut buffer) {
+        Ok(info) => info,
+        Err(_) => return decode_png_fallback(bytes),
+    };
     let pixels = &buffer[..info.buffer_size()];
 
     let rgba = match info.color_type {
@@ -1589,6 +1593,172 @@ fn decode_png(bytes: &[u8]) -> Result<Image, PaintError> {
     };
 
     Image::new(info.width, info.height, rgba)
+}
+
+fn decode_png_fallback(bytes: &[u8]) -> Result<Image, PaintError> {
+    const SIGNATURE: &[u8; 8] = b"\x89PNG\r\n\x1a\n";
+    if bytes.len() < SIGNATURE.len() || &bytes[..8] != SIGNATURE {
+        return Err(PaintError::InvalidPngSignature);
+    }
+
+    let mut index = 8usize;
+    let mut width = None;
+    let mut height = None;
+    let mut bit_depth = 0u8;
+    let mut color_type = 0u8;
+    let mut interlace = 0u8;
+    let mut compressed = Vec::new();
+
+    while index + 8 <= bytes.len() {
+        let length = u32::from_be_bytes(bytes[index..index + 4].try_into().unwrap()) as usize;
+        index += 4;
+        let chunk_type = &bytes[index..index + 4];
+        index += 4;
+        if index + length + 4 > bytes.len() {
+            return Err(PaintError::CorruptPng);
+        }
+        let data = &bytes[index..index + length];
+        index += length;
+        index += 4;
+
+        match chunk_type {
+            b"IHDR" => {
+                if data.len() < 13 {
+                    return Err(PaintError::MissingPngHeader);
+                }
+                width = Some(u32::from_be_bytes(data[0..4].try_into().unwrap()));
+                height = Some(u32::from_be_bytes(data[4..8].try_into().unwrap()));
+                bit_depth = data[8];
+                color_type = data[9];
+                interlace = data[12];
+            }
+            b"IDAT" => compressed.extend_from_slice(data),
+            b"IEND" => break,
+            _ => {}
+        }
+    }
+
+    let width = width.ok_or(PaintError::MissingPngHeader)?;
+    let height = height.ok_or(PaintError::MissingPngHeader)?;
+    if bit_depth != 8 || interlace != 0 {
+        return Err(PaintError::UnsupportedPngFormat);
+    }
+
+    let bytes_per_pixel = match color_type {
+        0 => 1usize,
+        2 => 3usize,
+        4 => 2usize,
+        6 => 4usize,
+        _ => return Err(PaintError::UnsupportedPngFormat),
+    };
+    let stride = width as usize * bytes_per_pixel;
+    let expected = height as usize * (1 + stride);
+    let mut decompressed = Vec::new();
+    ZlibDecoder::new(Cursor::new(compressed))
+        .read_to_end(&mut decompressed)
+        .map_err(|_| PaintError::DecompressionFailed)?;
+    if decompressed.len() < expected {
+        return Err(PaintError::CorruptPng);
+    }
+
+    let mut raw = vec![0u8; height as usize * stride];
+    for row in 0..height as usize {
+        let filter = decompressed[row * (stride + 1)];
+        let src = &decompressed[row * (stride + 1) + 1..row * (stride + 1) + 1 + stride];
+        let (previous_rows, current_and_rest) = raw.split_at_mut(row * stride);
+        let dest = &mut current_and_rest[..stride];
+        let prev = if row == 0 {
+            None
+        } else {
+            Some(&previous_rows[(row - 1) * stride..row * stride])
+        };
+        unfilter_png_scanline(filter, src, prev, dest, bytes_per_pixel)?;
+    }
+
+    let mut rgba = Vec::with_capacity(width as usize * height as usize * 4);
+    match color_type {
+        0 => {
+            for &value in &raw {
+                rgba.extend_from_slice(&[value, value, value, 255]);
+            }
+        }
+        2 => {
+            for chunk in raw.chunks_exact(3) {
+                rgba.extend_from_slice(&[chunk[0], chunk[1], chunk[2], 255]);
+            }
+        }
+        4 => {
+            for chunk in raw.chunks_exact(2) {
+                rgba.extend_from_slice(&[chunk[0], chunk[0], chunk[0], chunk[1]]);
+            }
+        }
+        6 => rgba = raw,
+        _ => return Err(PaintError::UnsupportedPngFormat),
+    }
+
+    Image::new(width, height, rgba)
+}
+
+fn unfilter_png_scanline(
+    filter: u8,
+    src: &[u8],
+    prev: Option<&[u8]>,
+    dest: &mut [u8],
+    bytes_per_pixel: usize,
+) -> Result<(), PaintError> {
+    match filter {
+        0 => dest.copy_from_slice(src),
+        1 => {
+            for index in 0..src.len() {
+                let left = if index >= bytes_per_pixel { dest[index - bytes_per_pixel] } else { 0 };
+                dest[index] = src[index].wrapping_add(left);
+            }
+        }
+        2 => {
+            for index in 0..src.len() {
+                let up = prev.map(|row| row[index]).unwrap_or(0);
+                dest[index] = src[index].wrapping_add(up);
+            }
+        }
+        3 => {
+            for index in 0..src.len() {
+                let left = if index >= bytes_per_pixel { dest[index - bytes_per_pixel] } else { 0 };
+                let up = prev.map(|row| row[index]).unwrap_or(0);
+                dest[index] = src[index].wrapping_add(((left as u16 + up as u16) / 2) as u8);
+            }
+        }
+        4 => {
+            for index in 0..src.len() {
+                let a = if index >= bytes_per_pixel { dest[index - bytes_per_pixel] } else { 0 };
+                let b = prev.map(|row| row[index]).unwrap_or(0);
+                let c = if index >= bytes_per_pixel {
+                    prev.map(|row| row[index - bytes_per_pixel]).unwrap_or(0)
+                } else {
+                    0
+                };
+                dest[index] = src[index].wrapping_add(paeth_predictor(a, b, c));
+            }
+        }
+        _ => return Err(PaintError::UnsupportedPngFormat),
+    }
+    Ok(())
+}
+
+fn paeth_predictor(a: u8, b: u8, c: u8) -> u8 {
+    let a = a as i32;
+    let b = b as i32;
+    let c = c as i32;
+    let p = a + b - c;
+    let pa = (p - a).abs();
+    let pb = (p - b).abs();
+    let pc = (p - c).abs();
+    if pa <= pb && pa <= pc {
+        a as u8
+    } else if pb <= pc {
+        b as u8
+    } else {
+        c as u8
+    }
 }
 
 /// Parses a `data:` URI into either text or binary content.
@@ -2454,22 +2624,22 @@ mod tests {
             "missing local Acid2 baseline image at {}",
             reference_path.display()
         );
-        let expected = Image::decode_png(&fs::read(reference_path).unwrap()).unwrap();
-        let expected_canvas = Canvas::new(expected.width(), expected.height());
-        let mut expected_canvas = expected_canvas;
-        expected_canvas.draw_image(&expected, 0.0, 0.0);
+        let actual_png = actual.encode_png();
+        let expected_png = fs::read(reference_path).unwrap();
 
-        let (diff, changed) = diff_canvases(&actual, &expected_canvas);
-        if changed > 0 {
+        if actual_png != expected_png {
+            let expected = Image::decode_png(&expected_png).unwrap();
+            let expected_canvas = Canvas::new(expected.width(), expected.height());
+            let mut expected_canvas = expected_canvas;
+            expected_canvas.draw_image(&expected, 0.0, 0.0);
+            let (diff, _changed) = diff_canvases(&actual, &expected_canvas);
             fs::create_dir_all(acid2_output_dir()).unwrap();
-            fs::write(acid2_output_dir().join("acid2.actual.png"), actual.encode_png()).unwrap();
+            fs::write(acid2_output_dir().join("acid2.actual.png"), actual_png).unwrap();
             fs::write(acid2_output_dir().join("acid2.diff.png"), diff.encode_png()).unwrap();
+            panic!(
+                "acid2 rendering diverged from the checked-in local baseline; wrote diff assets to tests/output/acid2"
+            );
         }
-        assert_eq!(
-            changed,
-            0,
-            "acid2 rendering diverged from the checked-in local baseline; wrote diff assets to tests/output/acid2"
-        );
     }
 
     #[test]

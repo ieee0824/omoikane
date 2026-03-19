@@ -463,27 +463,27 @@ fn layout_element(
                 margin_bottom + child_margin_top - collapse_margins(margin_bottom, child_margin_top)
             })
             .unwrap_or(0.0);
-        if let Some(style) = &child_style {
+        if let Some(child_style) = &child_style {
             let available_width = (width - left_float_offset - right_float_offset).max(0.0);
             let child_containing = Rect {
-                x: if explicit_length(style, "width").is_some() {
+                x: if explicit_length(child_style, "width").is_some() {
                     x
                 } else {
                     x + left_float_offset
                 },
                 y: cursor_y - collapse_delta,
-                width: if explicit_length(style, "width").is_some() {
+                width: if explicit_length(child_style, "width").is_some() {
                     width
                 } else {
                     available_width
                 },
                 height: 0.0,
             };
-            if is_out_of_flow_positioned(style) {
-                positioned_children.push((child, style.clone(), child_containing));
+            if is_out_of_flow_positioned(child_style) {
+                positioned_children.push((child, child_style.clone(), child_containing));
                 continue;
             }
-            let float_side = float_side(style);
+            let float_side = float_side(child_style);
             if float_side != FloatSide::None {
                 if let Some(mut layout_child) = layout_node(
                     &child,
