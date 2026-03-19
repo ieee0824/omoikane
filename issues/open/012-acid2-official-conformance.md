@@ -11,7 +11,7 @@ status: open
 
 ## 現状
 - `paint::tests::acid2_fixture_matches_official_reference_rendering` を `--ignored` で実行すると失敗する
-- 差分ピクセル数は現在 22,006
+- 差分ピクセル数は現在 20,512
 - 差分画像は `tests/output/acid2/acid2.official-reference.{actual,expected,diff}.png` に出力される
 
 ## 進捗メモ
@@ -91,6 +91,9 @@ status: open
 - 残りの赤バー（x=60〜380 付近）は `ul` ではなく `.image-height-test` 内の 64x64 red square PNG と `.chin` の fixed background が原因の可能性。次回以降の調査対象
 - margin collapsing の cursor_y 計算を修正: `cursor_y += total_height` を `cursor_y += total_height - collapse_delta` に変更し、collapse_delta の二重加算を解消。同時に float 後の previous_margin_bottom を維持するよう変更。これにより nose→smile gap=48→0, smile→chin gap=42→改善。公式比較差分は `35,033 -> 22,006` に大幅改善
 - HTML table/tr/td/th タグを CSS display 指定なしでもデフォルトの table display 値で認識するよう改善。`.image-height-test` 内の `<table>` が 740px→64px に修正（overflow:hidden で見た目は同じ）
+- CSS パーサー修正 4 件: (1) forgiving parse の `\}` エスケープ対応、(2) `background: red pink` の shorthand reject、(3) 非ゼロ unitless number の cascade 排除、(4) CSS hex escape の正しい実装。これにより `.parser` の background=yellow / width=2em / margin=0 5em 1em が正しく適用された。公式比較差分は `22,006 -> 20,512` に改善
+- nbsp を whitespace collapsing から除外（CSS 2.1 §16.6.1）。forehead 内の 30 nbsp は non-breaking のため行折り返しせず height=12px のまま（正しい動作）
+- 残りの差分 20,512px の大部分は顔の丸い輪郭の位置ずれ。パーツの相対位置は正しいが、expected の丸い黒 border 形状と actual の四角い形状の差が支配的
 
 ## 子issue
 
