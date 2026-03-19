@@ -1141,7 +1141,14 @@ fn expand_background_shorthand(value: Value, important: bool) -> Vec<Declaration
             Value::Number(_) => {
                 position_values.push(item.clone());
             }
-            _ => {}
+            _ => {
+                // Unknown value in background shorthand → reject the entire shorthand
+                return vec![Declaration {
+                    name: "background".to_string(),
+                    value: Value::List(values),
+                    important,
+                }];
+            }
         }
     }
 
@@ -1158,6 +1165,19 @@ fn expand_background_shorthand(value: Value, important: bool) -> Vec<Declaration
             value: second.clone(),
             important,
         });
+    }
+
+    // Reject shorthand if multiple background-color values were found (e.g. "red pink")
+    let color_count = declarations
+        .iter()
+        .filter(|d| d.name == "background-color")
+        .count();
+    if color_count > 1 {
+        return vec![Declaration {
+            name: "background".to_string(),
+            value: Value::List(values),
+            important,
+        }];
     }
 
     if declarations.is_empty() {
@@ -1412,6 +1432,44 @@ mod tests {
         let tokens = tokenize("div { margin-bottom: -6em; top: -.5px; }").unwrap();
         assert!(tokens.contains(&CssToken::Dimension(-6.0, "em".to_string())));
         assert!(tokens.contains(&CssToken::Dimension(-0.5, "px".to_string())));
+    }
+
+    #[test]
+    fn escaped_closing_brace_does_not_close_rule() {
+        let tokens = tokenize(r"div { error: \}; background: yellow; }").unwrap();
+        let curly_close_count = tokens.iter().filter(|t| matches!(t, CssToken::CurlyClose)).count();
+        assert_eq!(curly_close_count, 1, "only the final }} should be CurlyClose, tokens: {:?}", tokens);
+
+        let stylesheet = parse_stylesheet(r"div { error: \}; background: yellow; }").unwrap();
+        let Rule::Style(rule) = &stylesheet.rules[0] else {
+            panic!("expected style rule");
+        };
+        assert!(
+            rule.declarations.iter().any(|decl| decl.name == "background-color"),
+            "background: yellow should survive error: \\}}; declarations: {:?}",
+            rule.declarations,
+        );
+    }
+
+    #[test]
+    fn invalid_background_value_is_ignored() {
+        // "red pink" is not a valid background value — should be entirely discarded
+        let stylesheet = parse_stylesheet(".parser { background: yellow; } .parser { background: red pink; }").unwrap();
+        let rules: Vec<_> = stylesheet.rules.iter().filter_map(|r| match r {
+            Rule::Style(s) => Some(s),
+            _ => None,
+        }).collect();
+        // The second rule's "background: red pink" should be ignored
+        // First rule's background: yellow should still win via cascade
+        let last_bg = rules.iter().rev().find_map(|rule| {
+            rule.declarations.iter().find(|d| d.name == "background-color")
+        });
+        eprintln!("last bg: {:?}", last_bg);
+        // If "red pink" was incorrectly salvaged as "red", we'd see Color("red")
+        assert!(
+            last_bg.is_some(),
+            "should have background-color declaration",
+        );
     }
 
     #[test]

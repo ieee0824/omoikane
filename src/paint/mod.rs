@@ -1457,9 +1457,18 @@ fn parse_stylesheet_forgiving(input: &str) -> Result<Stylesheet, PaintError> {
     let mut rules = Vec::new();
     let mut current = String::new();
     let mut depth = 0usize;
+    let mut prev_backslash = false;
 
     for ch in input.chars() {
         current.push(ch);
+        if prev_backslash {
+            prev_backslash = false;
+            continue;
+        }
+        if ch == '\\' {
+            prev_backslash = true;
+            continue;
+        }
         match ch {
             '{' => depth += 1,
             '}' => {
@@ -3638,6 +3647,27 @@ mod tests {
             matches!(margin_top, Some(ComputedValue::Px(v)) if (*v - 36.0).abs() < 0.1),
             "p.bad should have margin-top: 3em (36px) from 'p + table + p' selector, got {:?}",
             margin_top,
+        );
+    }
+
+    #[test]
+    fn acid2_parser_has_yellow_background_and_correct_size() {
+        let acid2_html = fs::read_to_string(acid2_fixture_path()).unwrap();
+        let document = TreeBuilder::parse(&acid2_html).document();
+        let mut resolver = StyleResolver::new();
+        for stylesheet in extract_author_stylesheets(&document).unwrap() {
+            resolver.add_stylesheet(
+                Origin::Author,
+                parse_stylesheet_forgiving(&stylesheet).unwrap(),
+            );
+        }
+        let parser = find_first_descendant_by_class(&document, "parser").unwrap();
+        let style = resolver.computed_style(&parser);
+        // background: yellow should survive the `error: \}` parse test
+        assert!(
+            matches!(style.get("background-color"), Some(ComputedValue::Color(c)) if c == "yellow")
+            || matches!(style.get("background-color"), Some(ComputedValue::Keyword(k)) if k == "yellow"),
+            "parser should have background: yellow, got {:?}", style.get("background-color"),
         );
     }
 
