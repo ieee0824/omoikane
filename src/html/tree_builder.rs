@@ -165,7 +165,7 @@ impl Builder {
 
     fn handle_in_head(&mut self, token: Token, errors: &mut Vec<HtmlParseError>) {
         match token {
-            Token::Character(data) if data.trim().is_empty() => {
+            Token::Character(data) => {
                 self.insert_text(&data);
             }
             Token::Comment(data) => self.current_node().append_child(NodeHandle::comment(data)),
@@ -190,8 +190,10 @@ impl Builder {
                     }
                 } else if !self_closing && !is_void_head_tag(&name) {
                     self.open_elements.push(element);
-                    self.pop_matching(&name);
                 }
+            }
+            Token::EndTag { name } if matches!(name.as_str(), "title" | "style" | "script") => {
+                self.pop_matching(&name);
             }
             Token::EndTag { name } if name == "head" => {
                 self.pop_matching("head");
@@ -758,6 +760,21 @@ mod tests {
             children[1].child_nodes()[0].data(),
             Some("world".to_string())
         );
+    }
+
+    #[test]
+    fn keeps_title_text_inside_head() {
+        let result = TreeBuilder::parse(
+            "<html><head><title>The Second Acid Test</title></head><body><p>visible</p></body></html>",
+        );
+        let document = result.document();
+        let head = document.query_selector("head").unwrap();
+        let title = document.query_selector("title").unwrap();
+        let body = document.query_selector("body").unwrap();
+
+        assert_eq!(title.parent_node(), Some(head));
+        assert_eq!(title.child_nodes()[0].data(), Some("The Second Acid Test".to_string()));
+        assert_eq!(body.child_nodes()[0].tag_name().as_deref(), Some("p"));
     }
 
     #[test]

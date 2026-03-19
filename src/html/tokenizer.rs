@@ -761,6 +761,7 @@ fn consume_character_reference(cursor: &mut Cursor) -> Result<String, HtmlParseE
         "gt" => Ok(">".to_string()),
         "quot" => Ok("\"".to_string()),
         "apos" => Ok("'".to_string()),
+        "nbsp" => Ok("\u{00a0}".to_string()),
         _ => {
             if let Some(rest) = entity
                 .strip_prefix("#x")
@@ -861,10 +862,10 @@ mod tests {
 
     #[test]
     fn decodes_character_references_in_text() {
-        let tokens = Tokenizer::new("&lt;p&gt;&#x41;&amp;").tokenize();
+        let tokens = Tokenizer::new("&lt;p&gt;&#x41;&amp;&nbsp;").tokenize();
         assert_eq!(
             tokens,
-            vec![Token::Character("<p>A&".to_string()), Token::Eof]
+            vec![Token::Character("<p>A&\u{00a0}".to_string()), Token::Eof]
         );
     }
 

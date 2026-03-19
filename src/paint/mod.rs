@@ -1788,6 +1788,37 @@ mod tests {
     }
 
     #[test]
+    fn official_reference_fixture_only_lays_out_hello_world_text() {
+        let html = fs::read_to_string(acid2_official_reference_html_path()).unwrap();
+        let document = TreeBuilder::parse(&html).document();
+        materialize_local_assets(&document, &acid2_fixture_dir()).unwrap();
+
+        let mut resolver = StyleResolver::new();
+        for stylesheet in extract_author_stylesheets(&document).unwrap() {
+            resolver.add_stylesheet(
+                Origin::Author,
+                parse_stylesheet_forgiving(&stylesheet).unwrap(),
+            );
+        }
+
+        let layout = crate::layout::layout_tree(
+            &document,
+            &mut resolver,
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 800.0,
+                height: 600.0,
+            },
+        )
+        .unwrap();
+
+        let texts = collect_layout_texts(&layout);
+        let joined = texts.concat();
+        assert_eq!(joined.trim(), "Hello World!");
+    }
+
+    #[test]
     #[ignore = "documents current gap to the official Acid2 reference rendering"]
     fn acid2_fixture_matches_official_reference_rendering() {
         let acid2_html = fs::read_to_string(acid2_fixture_path()).unwrap();
@@ -1903,6 +1934,25 @@ mod tests {
 
     fn acid2_output_dir() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/output/acid2")
+    }
+
+    fn collect_layout_texts(layout: &LayoutBox) -> Vec<String> {
+        let mut texts = Vec::new();
+        collect_layout_texts_into(layout, &mut texts);
+        texts
+    }
+
+    fn collect_layout_texts_into(layout: &LayoutBox, out: &mut Vec<String>) {
+        for line in &layout.lines {
+            for fragment in &line.fragments {
+                if let InlineFragmentContent::Text(text) = &fragment.content {
+                    out.push(text.clone());
+                }
+            }
+        }
+        for child in &layout.children {
+            collect_layout_texts_into(child, out);
+        }
     }
 
     fn find_layout_box_by_id<'a>(layout: &'a LayoutBox, id: &str) -> Option<&'a LayoutBox> {
