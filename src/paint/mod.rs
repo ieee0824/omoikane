@@ -1,6 +1,7 @@
 //! Pixel-based painting primitives and layout tree rendering.
 
 use std::fs;
+use std::io::Cursor;
 use std::io::Read;
 use std::path::Path;
 
@@ -433,7 +434,32 @@ fn paint_box(
         inherited_clip
     };
 
+    let mut normal_children = Vec::new();
+    let mut float_children = Vec::new();
+    let mut inline_children = Vec::new();
     for child in &layout.children {
+        let child_style = resolver.computed_style(&child.node);
+        let is_float = matches!(
+            child_style.get("float"),
+            Some(ComputedValue::Keyword(keyword))
+                if keyword.eq_ignore_ascii_case("left") || keyword.eq_ignore_ascii_case("right")
+        );
+        if !child.lines.is_empty() {
+            inline_children.push(child);
+        } else if is_float {
+            float_children.push(child);
+        } else {
+            normal_children.push(child);
+        }
+    }
+
+    for child in normal_children {
+        paint_box(canvas, child, resolver, clip);
+    }
+    for child in float_children {
+        paint_box(canvas, child, resolver, clip);
+    }
+    for child in inline_children {
         paint_box(canvas, child, resolver, clip);
     }
 
@@ -1263,6 +1289,8 @@ fn parse_stylesheet_forgiving(input: &str) -> Result<Stylesheet, PaintError> {
                 if depth == 0 {
                     if let Ok(stylesheet) = parse_stylesheet(&current) {
                         rules.extend(stylesheet.rules);
+                    } else if let Some(rule) = salvage_style_rule(&current) {
+                        rules.push(crate::css::Rule::Style(rule));
                     }
                     current.clear();
                 }
@@ -1278,117 +1306,154 @@ fn parse_stylesheet_forgiving(input: &str) -> Result<Stylesheet, PaintError> {
     }
 }
 
-fn decode_png(bytes: &[u8]) -> Result<Image, PaintError> {
-    const SIGNATURE: &[u8; 8] = b"\x89PNG\r\n\x1a\n";
-    if bytes.len() < SIGNATURE.len() || &bytes[..8] != SIGNATURE {
-        return Err(PaintError::InvalidPngSignature);
+fn salvage_style_rule(input: &str) -> Option<crate::css::StyleRule> {
+    let open = input.find('{')?;
+    let close = input.rfind('}')?;
+    if close <= open {
+        return None;
     }
 
-    let mut cursor = 8usize;
-    let mut width = None;
-    let mut height = None;
-    let mut color_type = None;
-    let mut bit_depth = None;
-    let mut interlace_method = None;
-    let mut compressed = Vec::new();
+    let selector = input[..open].trim();
+    let body = &input[open + 1..close];
+    let mut selectors = None;
+    let mut declarations = Vec::new();
 
-    while cursor + 8 <= bytes.len() {
-        let length = u32::from_be_bytes(
-            bytes[cursor..cursor + 4]
-                .try_into()
-                .map_err(|_| PaintError::CorruptPng)?,
-        ) as usize;
-        cursor += 4;
-        let chunk_type = &bytes[cursor..cursor + 4];
-        cursor += 4;
-        if cursor + length + 4 > bytes.len() {
-            return Err(PaintError::CorruptPng);
+    for declaration in split_declarations_forgiving(body) {
+        let candidate = format!("{selector} {{ {declaration}; }}");
+        let Ok(stylesheet) = parse_stylesheet(&candidate) else {
+            continue;
+        };
+        let Some(crate::css::Rule::Style(rule)) = stylesheet.rules.into_iter().next() else {
+            continue;
+        };
+        if selectors.is_none() {
+            selectors = Some(rule.selectors);
         }
-        let data = &bytes[cursor..cursor + length];
-        cursor += length;
-        let _crc = &bytes[cursor..cursor + 4];
-        cursor += 4;
+        declarations.extend(rule.declarations);
+    }
 
-        match chunk_type {
-            b"IHDR" => {
-                if data.len() != 13 {
-                    return Err(PaintError::CorruptPng);
-                }
-                width = Some(u32::from_be_bytes(
-                    data[0..4].try_into().map_err(|_| PaintError::CorruptPng)?,
-                ));
-                height = Some(u32::from_be_bytes(
-                    data[4..8].try_into().map_err(|_| PaintError::CorruptPng)?,
-                ));
-                bit_depth = Some(data[8]);
-                color_type = Some(data[9]);
-                interlace_method = Some(data[12]);
+    if declarations.is_empty() {
+        return None;
+    }
+
+    Some(crate::css::StyleRule {
+        selectors: selectors?,
+        declarations,
+    })
+}
+
+fn split_declarations_forgiving(input: &str) -> Vec<String> {
+    let mut declarations = Vec::new();
+    let mut current = String::new();
+    let mut paren_depth = 0usize;
+    let mut bracket_depth = 0usize;
+    let mut in_string = None::<char>;
+    let chars: Vec<char> = input.chars().collect();
+    let mut index = 0usize;
+
+    while index < chars.len() {
+        let ch = chars[index];
+        if let Some(quote) = in_string {
+            current.push(ch);
+            if ch == quote {
+                in_string = None;
+            } else if ch == '\\' && index + 1 < chars.len() {
+                index += 1;
+                current.push(chars[index]);
             }
-            b"IDAT" => compressed.extend_from_slice(data),
-            b"IEND" => break,
-            _ => {}
+            index += 1;
+            continue;
         }
+
+        if ch == '/' && chars.get(index + 1) == Some(&'*') {
+            index += 2;
+            while index + 1 < chars.len() && !(chars[index] == '*' && chars[index + 1] == '/') {
+                index += 1;
+            }
+            index = (index + 2).min(chars.len());
+            continue;
+        }
+
+        match ch {
+            '"' | '\'' => {
+                in_string = Some(ch);
+                current.push(ch);
+            }
+            '(' => {
+                paren_depth += 1;
+                current.push(ch);
+            }
+            ')' => {
+                paren_depth = paren_depth.saturating_sub(1);
+                current.push(ch);
+            }
+            '[' => {
+                bracket_depth += 1;
+                current.push(ch);
+            }
+            ']' => {
+                bracket_depth = bracket_depth.saturating_sub(1);
+                current.push(ch);
+            }
+            ';' if paren_depth == 0 && bracket_depth == 0 => {
+                let trimmed = current.trim();
+                if !trimmed.is_empty() {
+                    declarations.push(trimmed.to_string());
+                }
+                current.clear();
+            }
+            _ => current.push(ch),
+        }
+        index += 1;
     }
 
-    let width = width.ok_or(PaintError::MissingPngHeader)?;
-    let height = height.ok_or(PaintError::MissingPngHeader)?;
-    let bit_depth = bit_depth.ok_or(PaintError::MissingPngHeader)?;
-    let color_type = color_type.ok_or(PaintError::MissingPngHeader)?;
-    let interlace_method = interlace_method.ok_or(PaintError::MissingPngHeader)?;
-
-    if bit_depth != 8 || interlace_method != 0 {
-        return Err(PaintError::UnsupportedPngFormat);
+    let trimmed = current.trim();
+    if !trimmed.is_empty() {
+        declarations.push(trimmed.to_string());
     }
 
-    let bytes_per_pixel = match color_type {
-        6 => 4usize,
-        2 => 3usize,
+    declarations
+}
+
+fn decode_png(bytes: &[u8]) -> Result<Image, PaintError> {
+    let mut decoder = png::Decoder::new(Cursor::new(bytes));
+    decoder.set_transformations(png::Transformations::EXPAND | png::Transformations::STRIP_16);
+    let mut reader = decoder
+        .read_info()
+        .map_err(|_| PaintError::UnsupportedPngFormat)?;
+    let mut buffer = vec![0; reader.output_buffer_size()];
+    let info = reader
+        .next_frame(&mut buffer)
+        .map_err(|_| PaintError::UnsupportedPngFormat)?;
+    let pixels = &buffer[..info.buffer_size()];
+
+    let rgba = match info.color_type {
+        png::ColorType::Rgba => pixels.to_vec(),
+        png::ColorType::Rgb => {
+            let mut out = Vec::with_capacity(info.width as usize * info.height as usize * 4);
+            for chunk in pixels.chunks_exact(3) {
+                out.extend_from_slice(&[chunk[0], chunk[1], chunk[2], 255]);
+            }
+            out
+        }
+        png::ColorType::GrayscaleAlpha => {
+            let mut out = Vec::with_capacity(info.width as usize * info.height as usize * 4);
+            for chunk in pixels.chunks_exact(2) {
+                out.extend_from_slice(&[chunk[0], chunk[0], chunk[0], chunk[1]]);
+            }
+            out
+        }
+        png::ColorType::Grayscale => {
+            let mut out = Vec::with_capacity(info.width as usize * info.height as usize * 4);
+            for value in pixels {
+                out.extend_from_slice(&[*value, *value, *value, 255]);
+            }
+            out
+        }
         _ => return Err(PaintError::UnsupportedPngFormat),
     };
-    let stride = width as usize * bytes_per_pixel;
-    let expected = (stride + 1) * height as usize;
 
-    let mut decoder = ZlibDecoder::new(compressed.as_slice());
-    let mut decompressed = Vec::new();
-    decoder
-        .read_to_end(&mut decompressed)
-        .map_err(|_| PaintError::DecompressionFailed)?;
-    if decompressed.len() != expected {
-        return Err(PaintError::CorruptPng);
-    }
-
-    let mut previous = vec![0u8; stride];
-    let mut reconstructed = vec![0u8; width as usize * height as usize * 4];
-
-    for row in 0..height as usize {
-        let row_offset = row * (stride + 1);
-        let filter = decompressed[row_offset];
-        let filtered = &decompressed[row_offset + 1..row_offset + 1 + stride];
-        let mut current = vec![0u8; stride];
-        unfilter_scanline(filter, filtered, &previous, bytes_per_pixel, &mut current)?;
-
-        match color_type {
-            6 => {
-                let start = row * width as usize * 4;
-                reconstructed[start..start + stride].copy_from_slice(&current);
-            }
-            2 => {
-                for column in 0..width as usize {
-                    let source = column * 3;
-                    let dest = (row * width as usize + column) * 4;
-                    reconstructed[dest] = current[source];
-                    reconstructed[dest + 1] = current[source + 1];
-                    reconstructed[dest + 2] = current[source + 2];
-                    reconstructed[dest + 3] = 255;
-                }
-            }
-            _ => unreachable!(),
-        }
-
-        previous = current;
-    }
-
-    Image::new(width, height, reconstructed)
+    Image::new(info.width, info.height, rgba)
 }
 
 /// Parses a `data:` URI into either text or binary content.
@@ -2179,6 +2244,111 @@ mod tests {
         let texts = collect_layout_texts(&layout);
         let joined = texts.concat();
         assert_eq!(joined.trim(), "Hello World!");
+    }
+
+    #[test]
+    fn acid2_eyes_layout_contains_expected_boxes() {
+        let acid2_html = fs::read_to_string(acid2_fixture_path()).unwrap();
+        let acid2_document = TreeBuilder::parse(&acid2_html).document();
+        let mut resolver = StyleResolver::new();
+        for stylesheet in extract_author_stylesheets(&acid2_document).unwrap() {
+            resolver.add_stylesheet(
+                Origin::Author,
+                parse_stylesheet_forgiving(&stylesheet).unwrap(),
+            );
+        }
+
+        let layout = crate::layout::layout_tree(
+            &acid2_document,
+            &mut resolver,
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 800.0,
+                height: 600.0,
+            },
+        )
+        .unwrap();
+
+        let eyes_a = find_layout_box_by_id(&layout, "eyes-a").unwrap();
+        let eyes_b = find_layout_box_by_id(&layout, "eyes-b").unwrap();
+        let eyes_c = find_layout_box_by_id(&layout, "eyes-c").unwrap();
+        let eyes_b_style = resolver.computed_style(&eyes_b.node);
+
+        assert!(!eyes_a.lines.is_empty());
+        assert!(eyes_a.lines.iter().any(|line| {
+            line.fragments
+                .iter()
+                .any(|fragment| matches!(fragment.content, InlineFragmentContent::Image(_, _)))
+        }));
+        assert!(eyes_b.dimensions.content.width > 0.0, "{:?}", eyes_b.dimensions);
+        assert!(
+            eyes_b.dimensions.content.height > 0.0,
+            "{:?} {:?} {:?} {:?}",
+            eyes_b.dimensions,
+            eyes_b_style.get("height"),
+            eyes_b_style.get("border-left-width"),
+            eyes_b_style.get("border-right-width")
+        );
+        assert!(eyes_c.dimensions.content.width > 0.0, "{:?}", eyes_c.dimensions);
+        assert!(eyes_c.dimensions.content.height > 0.0, "{:?}", eyes_c.dimensions);
+    }
+
+    #[test]
+    fn acid2_eye_png_decodes() {
+        let acid2_html = fs::read_to_string(acid2_fixture_path()).unwrap();
+        let marker = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAGAAAAAY";
+        let start = acid2_html.find(marker).unwrap();
+        let rest = &acid2_html[start..];
+        let end = rest.find('"').unwrap();
+        let data_uri = parse_data_uri(&rest[..end]).unwrap();
+        let DataUri::Binary { data, .. } = data_uri else {
+            panic!("expected binary data uri");
+        };
+
+        let image = Image::decode_png(&data).unwrap();
+        assert!(image.width() > 0);
+        assert!(image.height() > 0);
+    }
+
+    #[test]
+    fn acid2_eyes_b_rule_survives_forgiving_stylesheet_parse() {
+        let acid2_html = fs::read_to_string(acid2_fixture_path()).unwrap();
+        let document = TreeBuilder::parse(&acid2_html).document();
+        let stylesheets = extract_author_stylesheets(&document).unwrap();
+        let joined = stylesheets.join("\n");
+
+        assert!(joined.contains("#eyes-b"));
+        let parsed = parse_stylesheet_forgiving(&joined).unwrap();
+        let mut found = false;
+        for rule in parsed.rules {
+            let crate::css::Rule::Style(rule) = rule else {
+                continue;
+            };
+            let matches_eyes_b = rule.selectors.iter().any(|selector| {
+                selector.parts.iter().any(|part| {
+                    part.simples.iter().any(|simple| {
+                        matches!(simple, crate::css::SimpleSelector::Id(id) if id == "eyes-b")
+                    })
+                })
+            });
+            if !matches_eyes_b {
+                continue;
+            }
+
+            found = true;
+            assert!(rule.declarations.iter().any(|decl| decl.name == "height"), "{rule:#?}");
+            assert!(
+                rule.declarations.iter().any(|decl| decl.name == "border-left-width"),
+                "{rule:#?}"
+            );
+            assert!(
+                rule.declarations.iter().any(|decl| decl.name == "border-right-width"),
+                "{rule:#?}"
+            );
+        }
+
+        assert!(found, "expected parsed stylesheet to contain #eyes-b rule");
     }
 
     #[test]
