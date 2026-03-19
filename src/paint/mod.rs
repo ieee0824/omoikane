@@ -2,15 +2,12 @@
 
 use std::fs;
 use std::io::Cursor;
-use std::io::Read;
 use std::path::Path;
 
 use crate::css::{ComputedStyle, ComputedValue, Origin, PseudoElement, StyleResolver, Stylesheet, parse_stylesheet};
 use crate::dom::{Node, NodeHandle, NodeType};
 use crate::layout::{InlineFragmentContent, LayoutBox, Rect, Visibility};
 use base64::Engine;
-use flate2::read::ZlibDecoder;
-
 /// An RGBA color.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Color {
@@ -423,7 +420,6 @@ fn paint_box(
     );
 
     paint_borders(canvas, layout, &style, inherited_clip);
-    paint_text(canvas, layout, &style, inherited_clip);
 
     let clip = if layout.overflow == crate::layout::Overflow::Hidden {
         match inherited_clip {
@@ -434,36 +430,76 @@ fn paint_box(
         inherited_clip
     };
 
-    let mut normal_children = Vec::new();
+    let mut negative_positioned_children = Vec::new();
+    let mut normal_block_children = Vec::new();
     let mut float_children = Vec::new();
     let mut inline_children = Vec::new();
+    let mut auto_positioned_children = Vec::new();
+    let mut positive_positioned_children = Vec::new();
     for child in &layout.children {
         let child_style = resolver.computed_style(&child.node);
-        let is_float = matches!(
-            child_style.get("float"),
-            Some(ComputedValue::Keyword(keyword))
-                if keyword.eq_ignore_ascii_case("left") || keyword.eq_ignore_ascii_case("right")
-        );
-        if !child.lines.is_empty() {
-            inline_children.push(child);
-        } else if is_float {
+        if is_positioned_for_paint(&child_style) {
+            if child.z_index < 0 {
+                negative_positioned_children.push(child);
+            } else if child.z_index > 0 {
+                positive_positioned_children.push(child);
+            } else {
+                auto_positioned_children.push(child);
+            }
+            continue;
+        }
+
+        if is_float_for_paint(&child_style) {
             float_children.push(child);
+            continue;
+        }
+
+        if child.lines.is_empty() {
+            normal_block_children.push(child);
         } else {
-            normal_children.push(child);
+            inline_children.push(child);
         }
     }
 
-    for child in normal_children {
+    for child in negative_positioned_children {
+        paint_box(canvas, child, resolver, clip);
+    }
+    for child in normal_block_children {
         paint_box(canvas, child, resolver, clip);
     }
     for child in float_children {
         paint_box(canvas, child, resolver, clip);
     }
+    paint_text(canvas, layout, &style, clip);
     for child in inline_children {
+        paint_box(canvas, child, resolver, clip);
+    }
+    for child in auto_positioned_children {
+        paint_box(canvas, child, resolver, clip);
+    }
+    for child in positive_positioned_children {
         paint_box(canvas, child, resolver, clip);
     }
 
     paint_block_generated_pseudo_box(canvas, layout, resolver, PseudoElement::After, clip);
+}
+
+fn is_float_for_paint(style: &ComputedStyle) -> bool {
+    matches!(
+        style.get("float"),
+        Some(ComputedValue::Keyword(keyword))
+            if keyword.eq_ignore_ascii_case("left") || keyword.eq_ignore_ascii_case("right")
+    )
+}
+
+fn is_positioned_for_paint(style: &ComputedStyle) -> bool {
+    matches!(
+        style.get("position"),
+        Some(ComputedValue::Keyword(keyword))
+            if keyword.eq_ignore_ascii_case("absolute")
+                || keyword.eq_ignore_ascii_case("fixed")
+                || keyword.eq_ignore_ascii_case("relative")
+    )
 }
 
 fn viewport_background_color(layout: &LayoutBox, resolver: &mut StyleResolver) -> Option<Color> {
@@ -614,18 +650,39 @@ fn paint_inline_image_fragment(
         paint_rect_borders(canvas, rect, style, border, clip);
     }
 
+    let content_rect = inline_fragment_content_rect(rect, style, border);
+    canvas.draw_image_clipped(
+        image,
+        content_rect.x,
+        content_rect.y,
+        clip,
+    );
+}
+
+fn inline_fragment_content_rect(
+    rect: Rect,
+    style: &ComputedStyle,
+    border: EdgeSizesForPaint,
+) -> Rect {
     let padding_left = length_property(style, "padding-left")
+        .or_else(|| length_property(style, "padding"))
+        .unwrap_or(0.0);
+    let padding_right = length_property(style, "padding-right")
         .or_else(|| length_property(style, "padding"))
         .unwrap_or(0.0);
     let padding_top = length_property(style, "padding-top")
         .or_else(|| length_property(style, "padding"))
         .unwrap_or(0.0);
-    canvas.draw_image_clipped(
-        image,
-        rect.x + border.left + padding_left,
-        rect.y + border.top + padding_top,
-        clip,
-    );
+    let padding_bottom = length_property(style, "padding-bottom")
+        .or_else(|| length_property(style, "padding"))
+        .unwrap_or(0.0);
+
+    Rect {
+        x: rect.x + border.left + padding_left,
+        y: rect.y + border.top + padding_top,
+        width: (rect.width - border.left - border.right - padding_left - padding_right).max(0.0),
+        height: (rect.height - border.top - border.bottom - padding_top - padding_bottom).max(0.0),
+    }
 }
 
 fn paint_generated_box(
@@ -1518,82 +1575,6 @@ fn hex_value(byte: u8) -> Option<u8> {
     }
 }
 
-fn unfilter_scanline(
-    filter: u8,
-    filtered: &[u8],
-    previous: &[u8],
-    bytes_per_pixel: usize,
-    out: &mut [u8],
-) -> Result<(), PaintError> {
-    match filter {
-        0 => out.copy_from_slice(filtered),
-        1 => {
-            for index in 0..filtered.len() {
-                let left = if index >= bytes_per_pixel {
-                    out[index - bytes_per_pixel]
-                } else {
-                    0
-                };
-                out[index] = filtered[index].wrapping_add(left);
-            }
-        }
-        2 => {
-            for index in 0..filtered.len() {
-                out[index] = filtered[index].wrapping_add(previous[index]);
-            }
-        }
-        3 => {
-            for index in 0..filtered.len() {
-                let left = if index >= bytes_per_pixel {
-                    out[index - bytes_per_pixel]
-                } else {
-                    0
-                };
-                let up = previous[index];
-                out[index] = filtered[index].wrapping_add(((left as u16 + up as u16) / 2) as u8);
-            }
-        }
-        4 => {
-            for index in 0..filtered.len() {
-                let left = if index >= bytes_per_pixel {
-                    out[index - bytes_per_pixel]
-                } else {
-                    0
-                };
-                let up = previous[index];
-                let upper_left = if index >= bytes_per_pixel {
-                    previous[index - bytes_per_pixel]
-                } else {
-                    0
-                };
-                out[index] =
-                    filtered[index].wrapping_add(paeth_predictor(left, up, upper_left));
-            }
-        }
-        _ => return Err(PaintError::UnsupportedPngFormat),
-    }
-
-    Ok(())
-}
-
-fn paeth_predictor(left: u8, up: u8, upper_left: u8) -> u8 {
-    let left = left as i32;
-    let up = up as i32;
-    let upper_left = upper_left as i32;
-    let predictor = left + up - upper_left;
-    let left_distance = (predictor - left).abs();
-    let up_distance = (predictor - up).abs();
-    let upper_left_distance = (predictor - upper_left).abs();
-
-    if left_distance <= up_distance && left_distance <= upper_left_distance {
-        left as u8
-    } else if up_distance <= upper_left_distance {
-        up as u8
-    } else {
-        upper_left as u8
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::fs;
@@ -1602,7 +1583,9 @@ mod tests {
     use crate::css::{Origin, StyleResolver, parse_stylesheet};
     use crate::html::TreeBuilder;
     use crate::dom::NodeHandle;
-    use crate::layout::{Rect, layout_tree};
+    use crate::layout::{
+        BoxDimensions, FontMetrics, InlineFragment, LineBox, Rect, VerticalAlign, layout_tree,
+    };
 
     use super::*;
 
@@ -1910,6 +1893,157 @@ mod tests {
 
         assert!(count_pixels(&canvas, Color::rgb(255, 255, 0)) > 0);
         assert!(count_pixels(&canvas, Color::rgb(0, 0, 0)) > 0);
+    }
+
+    #[test]
+    fn forgiving_parse_preserves_valid_declarations_in_partially_invalid_rule() {
+        let stylesheet = "#eyes-b { float: left; width: 10em; height: 2em; background: fixed url(data:image/png;base64,AAAA); border-left: solid 1em black; border-right: solid 1em red; }";
+        let parsed = parse_stylesheet_forgiving(stylesheet).unwrap();
+        let crate::css::Rule::Style(rule) = parsed.rules.into_iter().next().unwrap() else {
+            panic!("expected style rule");
+        };
+
+        assert!(rule.declarations.iter().any(|decl| decl.name == "float"));
+        assert!(rule.declarations.iter().any(|decl| decl.name == "width"));
+        assert!(rule.declarations.iter().any(|decl| decl.name == "height"));
+        assert!(rule.declarations.iter().any(|decl| decl.name == "border-left-width"));
+        assert!(rule.declarations.iter().any(|decl| decl.name == "border-right-width"));
+    }
+
+    #[test]
+    fn inline_replaced_element_with_padding_border_and_background_paints_in_order() {
+        let document = NodeHandle::document();
+        let body = NodeHandle::element("body");
+        let image_node = NodeHandle::element("img");
+        document.append_child(body.clone());
+        body.append_child(image_node.clone());
+
+        let stylesheet = "img { padding: 2px; border: 1px solid blue; background: yellow; }";
+        let mut resolver = StyleResolver::new();
+        resolver.add_stylesheet(Origin::Author, parse_stylesheet(stylesheet).unwrap());
+        let image_style = resolver.computed_style(&image_node);
+        let mut canvas = Canvas::new(10, 10);
+        let image = Image::new(1, 1, vec![255, 0, 0, 255]).unwrap();
+        paint_inline_image_fragment(
+            &mut canvas,
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 7.0,
+                height: 7.0,
+            },
+            &image,
+            &image_style,
+            None,
+        );
+
+        assert_eq!(image_style.get("border-style"), Some(&ComputedValue::Keyword("solid".to_string())));
+        assert_eq!(canvas.pixel(0, 1), Some(Color::rgb(0, 0, 255)));
+        assert_eq!(canvas.pixel(2, 2), Some(Color::rgb(255, 255, 0)));
+        assert_eq!(canvas.pixel(3, 3), Some(Color::rgb(255, 0, 0)));
+    }
+
+    #[test]
+    fn absolute_inline_content_paints_above_float_siblings() {
+        let root = NodeHandle::element("div");
+        root.set_attribute("class", "root");
+        let float = NodeHandle::element("div");
+        float.set_attribute("class", "float");
+        let overlay = NodeHandle::element("div");
+        overlay.set_attribute("class", "overlay");
+        let generated = NodeHandle::element("span");
+        generated.set_attribute("class", "generated");
+
+        let stylesheet =
+            ".root { position: relative; } .float { float: left; background: blue; } .overlay { position: absolute; left: 0; top: 0; } .generated { background: red; }";
+        let mut resolver = StyleResolver::new();
+        resolver.add_stylesheet(Origin::Author, parse_stylesheet(stylesheet).unwrap());
+        let generated_style = resolver.computed_style(&generated);
+        let layout = LayoutBox {
+            node: root,
+            dimensions: BoxDimensions {
+                content: Rect {
+                    x: 0.0,
+                    y: 0.0,
+                    width: 8.0,
+                    height: 8.0,
+                },
+                ..BoxDimensions::default()
+            },
+            visibility: Visibility::Visible,
+            overflow: crate::layout::Overflow::Visible,
+            z_index: 0,
+            lines: Vec::new(),
+            children: vec![
+                LayoutBox {
+                    node: float,
+                    dimensions: BoxDimensions {
+                        content: Rect {
+                            x: 0.0,
+                            y: 0.0,
+                            width: 8.0,
+                            height: 8.0,
+                        },
+                        ..BoxDimensions::default()
+                    },
+                    visibility: Visibility::Visible,
+                    overflow: crate::layout::Overflow::Visible,
+                    z_index: 0,
+                    lines: Vec::new(),
+                    children: Vec::new(),
+                },
+                LayoutBox {
+                    node: overlay,
+                    dimensions: BoxDimensions {
+                        content: Rect {
+                            x: 0.0,
+                            y: 0.0,
+                            width: 8.0,
+                            height: 8.0,
+                        },
+                        ..BoxDimensions::default()
+                    },
+                    visibility: Visibility::Visible,
+                    overflow: crate::layout::Overflow::Visible,
+                    z_index: 0,
+                    lines: vec![LineBox {
+                        rect: Rect {
+                            x: 0.0,
+                            y: 0.0,
+                            width: 8.0,
+                            height: 8.0,
+                        },
+                        baseline: 0.0,
+                        fragments: vec![InlineFragment {
+                            node: generated,
+                            content: InlineFragmentContent::GeneratedBox(generated_style),
+                            rect: Rect {
+                                x: 0.0,
+                                y: 0.0,
+                                width: 8.0,
+                                height: 8.0,
+                            },
+                            metrics: FontMetrics::from_font_size(8.0),
+                            vertical_align: VerticalAlign::Top,
+                        }],
+                    }],
+                    children: Vec::new(),
+                },
+            ],
+        };
+        let canvas = paint_layout(
+            &layout,
+            &mut resolver,
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 8.0,
+                height: 8.0,
+            },
+        )
+        ;
+
+        assert_eq!(canvas.pixel(0, 0), Some(Color::rgb(255, 0, 0)));
     }
 
     #[test]

@@ -11,7 +11,7 @@ status: open
 
 ## 現状
 - `paint::tests::acid2_fixture_matches_official_reference_rendering` を `--ignored` で実行すると失敗する
-- 差分ピクセル数は 66,465
+- 差分ピクセル数は現在 43,356
 - 差分画像は `tests/output/acid2/acid2.official-reference.{actual,expected,diff}.png` に出力される
 
 ## 進捗メモ
@@ -26,12 +26,21 @@ status: open
 - `reference.html` 側では、本文テキストが `Hello World!` のみになることをテストで確認できた
 - `content: ''` の擬似要素を border 図形として描けるようにし、legacy な `:before` / `:after` も pseudo-element として扱うようにした
 - inline 画像フラグメントが自身の style（padding / border / background）を持てるようにし、`object` fallback では実際に画像を解決した内側要素の style を使うようにした
-- 現時点の主な残差分は、Acid2 本体側で目・鼻・口まわりの形状が大きく崩れていること
+- interlaced PNG を `png` クレートで decode するようにし、Acid2 の目画像自体は読み出せるようになった
+- forgiving CSS parse を declaration salvage ベースに寄せ、壊れた declaration を含む rule でも有効な declaration を救えるようにした
+- `#eyes-b` 相当の rule で `width` / `height` / 左右 border / `float` が残ることをテストで確認した
+- paint 順序を単純な children 順から、負 z-index positioned / 通常 block / float / inline content / auto z-index positioned / 正 z-index positioned の段階描画に切り替えた
+- inline replaced element で content box と border/padding box を分離し、background・border の上に画像本体を描くようにした
+- 追加した診断テスト
+  - `paint::tests::forgiving_parse_preserves_valid_declarations_in_partially_invalid_rule`
+  - `paint::tests::inline_replaced_element_with_padding_border_and_background_paints_in_order`
+  - `paint::tests::absolute_inline_content_paints_above_float_siblings`
+- 現時点の主な残差分は、Acid2 本体側で `eyes-a` / `eyes-b` / `eyes-c` の layering と inline 配置が崩れ、目が横長の赤帯として描かれていること
 
 ## タスク
 - [x] 公式比較の差分画像を見て、主要な未実装要素を特定する
 - [x] 参照ページ側で欠けている描画要素（背景、見出しテキスト、画像配置など）を切り分ける
-- [ ] Acid2 本体側で欠けている描画要素（object/img、背景、フォント shorthand、テキスト配置など）を切り分ける
+- [ ] Acid2 本体側で欠けている描画要素（stacking / inline alignment / positioned paint order など）を切り分ける
 - [ ] 必要なら子 issue に分割して段階的に差分を減らす
 - [ ] ignored の公式比較テストを常時通る状態へ近づける
 
