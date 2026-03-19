@@ -508,7 +508,7 @@ fn paint_box_internal(
         paint_box_internal(canvas, child, resolver, clip, viewport, false);
     }
     for child in float_children {
-        paint_box_internal(canvas, child, resolver, clip, viewport, false);
+        paint_box_internal(canvas, child, resolver, clip, viewport, true);
     }
     paint_text(canvas, layout, &style, clip, viewport);
     for child in inline_children {
@@ -3456,6 +3456,32 @@ mod tests {
             "{:?}",
             inherited_float.dimensions
         );
+    }
+
+    #[test]
+    fn acid2_smile_nested_float_uses_side_borders_only_on_span_and_top_bottom_on_em() {
+        let acid2_html = fs::read_to_string(acid2_fixture_path()).unwrap();
+        let document = TreeBuilder::parse(&acid2_html).document();
+        let mut resolver = StyleResolver::new();
+        for stylesheet in extract_author_stylesheets(&document).unwrap() {
+            resolver.add_stylesheet(
+                Origin::Author,
+                parse_stylesheet_forgiving(&stylesheet).unwrap(),
+            );
+        }
+
+        let span = find_first_descendant_by_tag(&document, "span").unwrap();
+        let em = find_first_descendant_by_tag(&document, "em").unwrap();
+        let span_style = resolver.computed_style(&span);
+        let em_style = resolver.computed_style(&em);
+
+        assert_eq!(span_style.get("border-top-width"), Some(&ComputedValue::Px(0.0)));
+        assert_eq!(span_style.get("border-bottom-width"), Some(&ComputedValue::Px(0.0)));
+        assert_eq!(span_style.get("border-left-style"), Some(&ComputedValue::Keyword("solid".to_string())));
+        assert_eq!(span_style.get("border-right-style"), Some(&ComputedValue::Keyword("solid".to_string())));
+
+        assert_eq!(em_style.get("border-top-style"), Some(&ComputedValue::Keyword("solid".to_string())));
+        assert_eq!(em_style.get("border-bottom-style"), Some(&ComputedValue::Keyword("solid".to_string())));
     }
 
 

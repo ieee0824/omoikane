@@ -507,7 +507,20 @@ fn layout_element(
             }
         }
         if let Some(child_style) = &child_style {
-            let child_y = cursor_y - collapse_delta;
+            let parent_top_margin_collapse = previous_margin_bottom.is_none()
+                && lines.is_empty()
+                && pending_inline_nodes.is_empty()
+                && border.top == 0.0
+                && padding.top == 0.0
+                && clear_side(child_style) == ClearSide::None
+                && !is_out_of_flow_positioned(child_style)
+                && float_side(child_style) == FloatSide::None;
+            let effective_collapse_delta = if parent_top_margin_collapse {
+                collapse_delta + child_margin_top
+            } else {
+                collapse_delta
+            };
+            let child_y = cursor_y - effective_collapse_delta;
             let offsets = active_float_offsets(&float_regions, child_y, x, width);
             let available_width = (width - offsets.left - offsets.right).max(0.0);
             let child_containing = Rect {
@@ -617,11 +630,11 @@ fn layout_element(
                     let combined = collapse_margins(prev, empty_collapsed);
                     // Advance cursor_y by the difference between the combined
                     // collapsed margin and the previous margin already tracked.
-                    cursor_y += combined - prev;
+                    cursor_y += combined - prev - (effective_collapse_delta - collapse_delta);
                     previous_margin_bottom = Some(combined);
                     children.push(layout_child);
                 } else {
-                    cursor_y += layout_child.total_height() - collapse_delta;
+                    cursor_y += layout_child.total_height() - effective_collapse_delta;
                     previous_margin_bottom = Some(layout_child.dimensions.margin.bottom);
                     children.push(layout_child);
                 }
@@ -4686,6 +4699,47 @@ mod tests {
         // Negative min: min(-15) = -15
         // Result: 20 + (-15) = 5
         assert_eq!(after_box.dimensions.content.y, 15.0); // 10 (before height) + 5 (collapsed)
+    }
+
+    #[test]
+    fn first_in_flow_child_top_margin_collapses_with_parent_top() {
+        let document = NodeHandle::document();
+        let body = NodeHandle::element("body");
+        let parent = NodeHandle::element("div");
+        let child = NodeHandle::element("section");
+
+        parent.set_attribute("class", "parent");
+        child.set_attribute("class", "child");
+        document.append_child(body.clone());
+        body.append_child(parent.clone());
+        parent.append_child(child.clone());
+
+        let mut resolver = StyleResolver::new();
+        resolver.add_stylesheet(
+            Origin::Author,
+            parse_stylesheet(
+                ".parent { width: 100px; } \
+                 .child { margin-top: 12px; height: 10px; }",
+            )
+            .unwrap(),
+        );
+
+        let layout = layout_tree(
+            &body,
+            &mut resolver,
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 100.0,
+                height: 0.0,
+            },
+        )
+        .unwrap();
+
+        let parent_box = find_layout_box_by_tag(&layout, "div").unwrap();
+        let child_box = find_layout_box_by_tag(&layout, "section").unwrap();
+        assert_eq!(child_box.dimensions.content.y, parent_box.dimensions.content.y);
+        assert_eq!(parent_box.dimensions.content.height, 10.0);
     }
 
     #[test]
