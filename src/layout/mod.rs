@@ -1110,12 +1110,20 @@ fn layout_table_row_entry(
     let mut children = Vec::new();
     for (index, mut cell, cell_style) in measured {
         let outer_x = x + index as f32 * (column_width + spacing);
-        let outer_y = y
-            + match vertical_align(&cell_style) {
-                VerticalAlign::Bottom => row_height - cell.total_height(),
-                VerticalAlign::Middle => (row_height - cell.total_height()) / 2.0,
+        let original_total_height = cell.total_height();
+        let extra_height = (row_height - original_total_height).max(0.0);
+        if extra_height > 0.0 {
+            cell.dimensions.content.height += extra_height;
+            let content_offset = match vertical_align(&cell_style) {
+                VerticalAlign::Bottom => extra_height,
+                VerticalAlign::Middle => extra_height / 2.0,
                 _ => 0.0,
             };
+            if content_offset > 0.0 {
+                translate_layout_contents(&mut cell, 0.0, content_offset);
+            }
+        }
+        let outer_y = y;
         translate_layout_box_to_outer(&mut cell, outer_x, outer_y);
         children.push(cell);
     }
@@ -1978,6 +1986,10 @@ fn translate_layout_box_to_outer(layout: &mut LayoutBox, outer_x: f32, outer_y: 
 fn translate_layout_box(layout: &mut LayoutBox, dx: f32, dy: f32) {
     layout.dimensions.content.x += dx;
     layout.dimensions.content.y += dy;
+    translate_layout_contents(layout, dx, dy);
+}
+
+fn translate_layout_contents(layout: &mut LayoutBox, dx: f32, dy: f32) {
     for line in &mut layout.lines {
         line.rect.x += dx;
         line.rect.y += dy;
@@ -3515,6 +3527,7 @@ mod tests {
 
         tall.set_attribute("class", "tall");
         bottom.set_attribute("class", "bottom");
+        bottom.append_child(NodeHandle::text("x"));
         document.append_child(body.clone());
         body.append_child(table.clone());
         table.append_child(row.clone());
@@ -3527,7 +3540,7 @@ mod tests {
             parse_stylesheet(
                 "table { display: table; width: 100px; } \
                  tr { display: table-row; } \
-                 td { display: table-cell; height: 10px; vertical-align: top; } \
+                 td { display: table-cell; height: 10px; vertical-align: top; font-size: 10px; line-height: 10px; } \
                  .tall { height: 30px; } \
                  .bottom { vertical-align: bottom; }",
             )
@@ -3551,10 +3564,13 @@ mod tests {
         let bottom_box = &row_box.children[1];
         assert_eq!(row_box.dimensions.content.height, 30.0);
         assert_eq!(tall_box.dimensions.content.y, row_box.dimensions.content.y);
+        assert_eq!(tall_box.dimensions.content.height, 30.0);
         assert_eq!(
             bottom_box.dimensions.content.y,
-            row_box.dimensions.content.y + 20.0
+            row_box.dimensions.content.y
         );
+        assert_eq!(bottom_box.dimensions.content.height, 30.0);
+        assert_eq!(bottom_box.lines[0].rect.y, row_box.dimensions.content.y + 20.0);
     }
 
     #[test]

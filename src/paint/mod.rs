@@ -3587,6 +3587,7 @@ mod tests {
         assert_eq!(row.children.len(), 4, "should have 4 cells");
         for cell in &row.children {
             assert_eq!(cell.dimensions.content.width, 12.0);
+            assert_eq!(cell.dimensions.content.height, 12.0);
         }
     }
 
