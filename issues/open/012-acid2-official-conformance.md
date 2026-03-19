@@ -11,7 +11,7 @@ status: open
 
 ## 現状
 - `paint::tests::acid2_fixture_matches_official_reference_rendering` を `--ignored` で実行すると失敗する
-- 差分ピクセル数は現在 7,078
+- 差分ピクセル数は現在 6,862
 - 差分画像は `tests/output/acid2/acid2.official-reference.{actual,expected,diff}.png` に出力される
 
 ## 進捗メモ
@@ -99,6 +99,7 @@ status: open
 - :before/:after pseudo element の border triangle 描画は正しく動作していることを確認。鼻のダイヤモンドが diff に出る原因は比較テストの translation 精度の問題
 - border-style:none の辺の border-width を computed value 0 に修正（CSS 2.1 §8.5.3）
 - 012-9/10/11 の子 issue を追加: 鼻ダイヤモンド、scalp 位置、smile 曲線
+- `intrinsic_width` を outer width（padding+border含む）で一貫する設計に変更。auto width パスで自身の padding/border を加算し、`shrink_to_fit_width` で content width に変換。smile の absolute div width が 72→96 に改善。公式比較差分 `7,078 -> 6,862`
 
 ## 子issue
 
