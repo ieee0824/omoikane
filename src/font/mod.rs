@@ -4,7 +4,9 @@
 //! Handles font file loading, character-to-glyph mapping, and rasterization.
 
 use ab_glyph::{Font as AbGlyphFont, FontVec, ScaleFont};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::{fmt, io};
 
 #[cfg(test)]
@@ -359,4 +361,172 @@ pub fn load_system_font(family: &str) -> Result<Font, FontError> {
     })?;
 
     Font::load_from_file(&path)
+}
+
+// ============================================================================
+// Font and Glyph Caching (Phase 3)
+// ============================================================================
+
+/// Cache for loaded fonts, keyed by family name.
+///
+/// Fonts are expensive to load from disk, so we cache them by family name.
+/// Uses `Arc<Font>` to allow sharing across multiple users.
+pub struct FontCache {
+    fonts: HashMap<String, Arc<Font>>,
+    max_entries: usize,
+}
+
+impl FontCache {
+    /// Create a new font cache with the specified maximum entries.
+    pub fn new(max_entries: usize) -> Self {
+        Self {
+            fonts: HashMap::new(),
+            max_entries,
+        }
+    }
+
+    /// Get or load a font by family name.
+    ///
+    /// If the font is already cached, returns a clone of the Arc.
+    /// Otherwise, loads the font from the system and caches it.
+    pub fn get_or_load(&mut self, family: &str) -> Result<Arc<Font>, FontError> {
+        let key = family.to_lowercase();
+
+        if let Some(font) = self.fonts.get(&key) {
+            return Ok(Arc::clone(font));
+        }
+
+        // Evict oldest entry if at capacity (simple FIFO eviction)
+        if self.fonts.len() >= self.max_entries {
+            if let Some(oldest_key) = self.fonts.keys().next().cloned() {
+                self.fonts.remove(&oldest_key);
+            }
+        }
+
+        let font = Arc::new(load_system_font(family)?);
+        self.fonts.insert(key, Arc::clone(&font));
+        Ok(font)
+    }
+
+    /// Clear all cached fonts.
+    pub fn clear(&mut self) {
+        self.fonts.clear();
+    }
+
+    /// Get the number of cached fonts.
+    pub fn len(&self) -> usize {
+        self.fonts.len()
+    }
+
+    /// Check if the cache is empty.
+    pub fn is_empty(&self) -> bool {
+        self.fonts.is_empty()
+    }
+}
+
+impl Default for FontCache {
+    fn default() -> Self {
+        Self::new(20) // Default to 20 fonts
+    }
+}
+
+/// Cache key for rasterized glyphs: (character, size in tenths of pixels).
+/// Size is stored as integer tenths to allow HashMap lookup with floating point sizes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct GlyphCacheKey {
+    ch: char,
+    size_tenths: u32,
+}
+
+impl GlyphCacheKey {
+    fn new(ch: char, size_px: f32) -> Self {
+        Self {
+            ch,
+            size_tenths: (size_px * 10.0).round() as u32,
+        }
+    }
+}
+
+/// Cache for rasterized glyphs.
+///
+/// Glyph rasterization is CPU-intensive, so we cache the results.
+/// This cache is per-font and stores rasterized bitmaps.
+pub struct GlyphCache {
+    glyphs: HashMap<GlyphCacheKey, GlyphRaster>,
+    max_entries: usize,
+}
+
+impl GlyphCache {
+    /// Create a new glyph cache with the specified maximum entries.
+    pub fn new(max_entries: usize) -> Self {
+        Self {
+            glyphs: HashMap::new(),
+            max_entries,
+        }
+    }
+
+    /// Get a cached glyph raster, if present.
+    pub fn get(&self, ch: char, size_px: f32) -> Option<&GlyphRaster> {
+        let key = GlyphCacheKey::new(ch, size_px);
+        self.glyphs.get(&key)
+    }
+
+    /// Insert a glyph raster into the cache.
+    pub fn insert(&mut self, ch: char, size_px: f32, raster: GlyphRaster) {
+        // Evict if at capacity (simple FIFO)
+        if self.glyphs.len() >= self.max_entries {
+            if let Some(oldest_key) = self.glyphs.keys().next().cloned() {
+                self.glyphs.remove(&oldest_key);
+            }
+        }
+
+        let key = GlyphCacheKey::new(ch, size_px);
+        self.glyphs.insert(key, raster);
+    }
+
+    /// Get or rasterize a glyph using the provided font.
+    pub fn get_or_rasterize(
+        &mut self,
+        font: &Font,
+        ch: char,
+        size_px: f32,
+    ) -> Result<&GlyphRaster, FontError> {
+        let key = GlyphCacheKey::new(ch, size_px);
+
+        // Use entry API for efficient get-or-insert
+        if !self.glyphs.contains_key(&key) {
+            // Evict if at capacity
+            if self.glyphs.len() >= self.max_entries {
+                if let Some(oldest_key) = self.glyphs.keys().next().cloned() {
+                    self.glyphs.remove(&oldest_key);
+                }
+            }
+
+            let raster = font.rasterize(ch, size_px)?;
+            self.glyphs.insert(key, raster);
+        }
+
+        Ok(self.glyphs.get(&key).unwrap())
+    }
+
+    /// Clear all cached glyphs.
+    pub fn clear(&mut self) {
+        self.glyphs.clear();
+    }
+
+    /// Get the number of cached glyphs.
+    pub fn len(&self) -> usize {
+        self.glyphs.len()
+    }
+
+    /// Check if the cache is empty.
+    pub fn is_empty(&self) -> bool {
+        self.glyphs.is_empty()
+    }
+}
+
+impl Default for GlyphCache {
+    fn default() -> Self {
+        Self::new(5000) // Default to 5000 glyphs
+    }
 }

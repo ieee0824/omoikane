@@ -250,3 +250,113 @@ fn test_load_system_font_helvetica() {
         assert!(font.is_ok(), "Should find Helvetica on macOS");
     }
 }
+
+// ============================================================================
+// Phase 3: Font and Glyph Cache Tests
+// ============================================================================
+
+#[test]
+fn test_font_cache_creation() {
+    let cache = FontCache::new(10);
+    assert!(cache.is_empty());
+    assert_eq!(cache.len(), 0);
+}
+
+#[test]
+fn test_glyph_cache_creation() {
+    let cache = GlyphCache::new(100);
+    assert!(cache.is_empty());
+    assert_eq!(cache.len(), 0);
+}
+
+#[test]
+fn test_glyph_cache_insert_and_get() {
+    let mut cache = GlyphCache::new(100);
+
+    let raster = GlyphRaster {
+        width: 10,
+        height: 12,
+        bitmap: vec![128; 120],
+        advance_x: 8.0,
+        advance_y: 0.0,
+    };
+
+    cache.insert('A', 16.0, raster.clone());
+    assert_eq!(cache.len(), 1);
+
+    let retrieved = cache.get('A', 16.0);
+    assert!(retrieved.is_some());
+    assert_eq!(retrieved.unwrap().width, 10);
+    assert_eq!(retrieved.unwrap().height, 12);
+
+    // Different size should not be found
+    let not_found = cache.get('A', 20.0);
+    assert!(not_found.is_none());
+
+    // Different character should not be found
+    let not_found = cache.get('B', 16.0);
+    assert!(not_found.is_none());
+}
+
+#[test]
+fn test_glyph_cache_size_quantization() {
+    let mut cache = GlyphCache::new(100);
+
+    let raster = GlyphRaster {
+        width: 5,
+        height: 5,
+        bitmap: vec![255; 25],
+        advance_x: 4.0,
+        advance_y: 0.0,
+    };
+
+    // Insert at 16.0 px
+    cache.insert('X', 16.0, raster);
+
+    // Should find at exact same size
+    assert!(cache.get('X', 16.0).is_some());
+
+    // Should find at 16.04 (rounds to same tenth: 160)
+    assert!(cache.get('X', 16.04).is_some());
+
+    // Should NOT find at 16.1 (rounds to 161, different key)
+    assert!(cache.get('X', 16.1).is_none());
+
+    // Should NOT find at different character
+    assert!(cache.get('Y', 16.0).is_none());
+}
+
+#[test]
+fn test_glyph_cache_eviction() {
+    let mut cache = GlyphCache::new(3);
+
+    for i in 0..5 {
+        let raster = GlyphRaster {
+            width: i as u32,
+            height: 1,
+            bitmap: vec![0; i as usize],
+            advance_x: i as f32,
+            advance_y: 0.0,
+        };
+        cache.insert(char::from_u32('A' as u32 + i).unwrap(), 10.0, raster);
+    }
+
+    // Cache should have max 3 entries
+    assert_eq!(cache.len(), 3);
+}
+
+#[test]
+#[ignore] // Requires system fonts
+fn test_font_cache_get_or_load() {
+    let mut cache = FontCache::new(5);
+
+    // First load
+    let font1 = cache.get_or_load("sans-serif");
+    assert!(font1.is_ok());
+    assert_eq!(cache.len(), 1);
+
+    // Second load should return cached
+    let font2 = cache.get_or_load("sans-serif");
+    assert!(font2.is_ok());
+    assert_eq!(cache.len(), 1); // Still 1, not 2
+}
