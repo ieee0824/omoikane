@@ -302,6 +302,27 @@ fn img_width_and_height_attributes_define_intrinsic_size() {
     let image_fragment = find_first_image_fragment(&layout).unwrap();
     assert_eq!(image_fragment.rect.width, 4.0);
     assert_eq!(image_fragment.rect.height, 2.0);
+    let sample_x = (image_fragment.rect.x + image_fragment.rect.width - 1.0)
+        .max(0.0)
+        .floor() as u32;
+    let sample_y = (image_fragment.rect.y + image_fragment.rect.height - 1.0)
+        .max(0.0)
+        .floor() as u32;
+
+    let canvas = paint_layout(
+        &layout,
+        &mut resolver,
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 20.0,
+            height: 20.0,
+        },
+    );
+    assert_eq!(
+        canvas.pixel(sample_x, sample_y),
+        Some(Color::rgb(255, 0, 0))
+    );
 }
 
 #[test]

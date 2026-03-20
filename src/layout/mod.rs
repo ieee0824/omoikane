@@ -23,11 +23,20 @@ thread_local! {
 
 /// Runs layout/image resolution with a temporary base URL used for relative image sources.
 pub fn with_image_base_url<T>(base_url: Option<Url>, f: impl FnOnce() -> T) -> T {
+    struct ImageBaseUrlGuard(Option<Url>);
+
+    impl Drop for ImageBaseUrlGuard {
+        fn drop(&mut self) {
+            IMAGE_BASE_URL.with(|cell| {
+                cell.replace(self.0.take());
+            });
+        }
+    }
+
     IMAGE_BASE_URL.with(|cell| {
         let previous = cell.replace(base_url);
-        let result = f();
-        cell.replace(previous);
-        result
+        let _guard = ImageBaseUrlGuard(previous);
+        f()
     })
 }
 
