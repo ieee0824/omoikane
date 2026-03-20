@@ -4450,4 +4450,113 @@ mod tests {
         let stylesheets = extract_author_stylesheets(&document, None).unwrap();
         assert!(stylesheets.is_empty());
     }
+
+    #[test]
+    fn extract_stylesheets_fetches_relative_urls_with_base() {
+        use std::io::{BufRead, BufReader, Write};
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+
+        std::thread::spawn(move || {
+            // Accept first request for /css/style.css
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut reader = BufReader::new(&stream);
+            let mut line = String::new();
+            reader.read_line(&mut line).unwrap();
+            // Consume headers
+            loop {
+                let mut h = String::new();
+                reader.read_line(&mut h).unwrap();
+                if h.trim().is_empty() {
+                    break;
+                }
+            }
+
+            let css_content = "body { margin: 0; }";
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{}",
+                css_content.len(),
+                css_content
+            );
+            stream.write_all(resp.as_bytes()).unwrap();
+            stream.flush().unwrap();
+
+            // Accept second request for /other.css
+            let (mut stream2, _) = listener.accept().unwrap();
+            let mut reader2 = BufReader::new(&stream2);
+            let mut line2 = String::new();
+            reader2.read_line(&mut line2).unwrap();
+            // Consume headers
+            loop {
+                let mut h = String::new();
+                reader2.read_line(&mut h).unwrap();
+                if h.trim().is_empty() {
+                    break;
+                }
+            }
+
+            let css_content2 = "p { color: red; }";
+            let resp2 = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{}",
+                css_content2.len(),
+                css_content2
+            );
+            stream2.write_all(resp2.as_bytes()).unwrap();
+            stream2.flush().unwrap();
+        });
+
+        let html = r#"<html><head>
+            <link rel="stylesheet" href="/css/style.css">
+            <link rel="stylesheet" href="other.css">
+        </head><body></body></html>"#;
+
+        let document = TreeBuilder::parse(html).document();
+        let base_url = format!("http://127.0.0.1:{}/page.html", port)
+            .parse::<crate::http::Url>()
+            .unwrap();
+
+        let stylesheets = extract_author_stylesheets(&document, Some(&base_url)).unwrap();
+
+        assert_eq!(stylesheets.len(), 2);
+        assert!(stylesheets[0].contains("margin: 0"));
+        assert!(stylesheets[1].contains("color: red"));
+    }
+
+    #[test]
+    fn extract_stylesheets_skips_absolute_urls() {
+        let html = r#"<html><head>
+            <link rel="stylesheet" href="https://example.com/style.css">
+            <link rel="stylesheet" href="//cdn.example.com/style.css">
+            <style>p { color: blue; }</style>
+        </head><body></body></html>"#;
+
+        let document = TreeBuilder::parse(html).document();
+        let base_url = "http://localhost:8000/page.html"
+            .parse::<crate::http::Url>()
+            .unwrap();
+
+        let stylesheets = extract_author_stylesheets(&document, Some(&base_url)).unwrap();
+
+        // Only the <style> tag should be included, not the absolute URLs
+        assert_eq!(stylesheets.len(), 1);
+        assert!(stylesheets[0].contains("color: blue"));
+    }
+
+    #[test]
+    fn extract_stylesheets_handles_case_insensitive_rel() {
+        let html = r#"<html><head>
+            <link rel="StyleSheet" href="data:text/css,body%7Bmargin%3A0%7D">
+            <link rel="STYLESHEET" href="data:text/css,p%7Bcolor%3Ared%7D">
+        </head><body></body></html>"#;
+
+        let document = TreeBuilder::parse(html).document();
+        let stylesheets = extract_author_stylesheets(&document, None).unwrap();
+
+        // Both should be recognized despite case differences
+        assert_eq!(stylesheets.len(), 2);
+        assert!(stylesheets[0].contains("margin"));
+        assert!(stylesheets[1].contains("color"));
+    }
 }
