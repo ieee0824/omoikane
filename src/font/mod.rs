@@ -54,6 +54,10 @@ pub struct GlyphRaster {
     pub advance_x: f32,
     /// Vertical advance width (usually 0 for horizontal text).
     pub advance_y: f32,
+    /// Horizontal offset from the pen position to the bitmap left edge.
+    pub offset_x: f32,
+    /// Vertical offset from the baseline to the bitmap top edge (typically negative).
+    pub offset_y: f32,
 }
 
 /// Font representation wrapping `ab_glyph::FontVec`.
@@ -92,6 +96,8 @@ impl Font {
                 bitmap: vec![],
                 advance_x,
                 advance_y: 0.0,
+                offset_x: 0.0,
+                offset_y: 0.0,
             });
         };
 
@@ -108,6 +114,8 @@ impl Font {
                 bitmap: vec![],
                 advance_x,
                 advance_y: 0.0,
+                offset_x: bounds.min.x,
+                offset_y: bounds.min.y,
             });
         }
 
@@ -127,6 +135,8 @@ impl Font {
             bitmap,
             advance_x,
             advance_y: 0.0,
+            offset_x: bounds.min.x,
+            offset_y: bounds.min.y,
         })
     }
 
