@@ -360,3 +360,56 @@ fn test_font_cache_get_or_load() {
     assert!(font2.is_ok());
     assert_eq!(cache.len(), 1); // Still 1, not 2
 }
+
+// ============================================================================
+// Phase 4: Text Width Measurement Tests
+// ============================================================================
+
+#[test]
+#[ignore] // Requires system fonts
+fn test_measure_text_width() {
+    let font = load_system_font("sans-serif").expect("Need sans-serif font");
+
+    let width = font.measure_text_width("Hello", 16.0);
+    assert!(width > 0.0, "Text width should be positive");
+
+    // "Hello" should be wider than "Hi"
+    let width_hi = font.measure_text_width("Hi", 16.0);
+    assert!(width > width_hi, "Longer text should be wider");
+}
+
+#[test]
+#[ignore] // Requires system fonts
+fn test_measure_text_width_scales() {
+    let font = load_system_font("sans-serif").expect("Need sans-serif font");
+
+    let width_10 = font.measure_text_width("Test", 10.0);
+    let width_20 = font.measure_text_width("Test", 20.0);
+
+    // Width should roughly scale with size
+    let ratio = width_20 / width_10;
+    assert!(ratio > 1.8 && ratio < 2.2, "Width should roughly double at 2x size");
+}
+
+#[test]
+#[ignore] // Requires system fonts
+fn test_average_advance() {
+    let font = load_system_font("sans-serif").expect("Need sans-serif font");
+
+    let avg = font.average_advance(16.0);
+    assert!(avg > 0.0, "Average advance should be positive");
+    assert!(avg < 16.0, "Average advance should be less than font size for proportional fonts");
+}
+
+#[test]
+#[ignore] // Requires system fonts
+fn test_layout_metrics() {
+    let font = load_system_font("sans-serif").expect("Need sans-serif font");
+
+    let metrics = font.layout_metrics(16.0);
+
+    assert_eq!(metrics.font_size, 16.0);
+    assert!(metrics.ascent > 0.0, "Ascent should be positive");
+    assert!(metrics.descent >= 0.0, "Descent should be non-negative");
+    assert!(metrics.average_advance > 0.0, "Average advance should be positive");
+}

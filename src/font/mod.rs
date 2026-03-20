@@ -530,3 +530,62 @@ impl Default for GlyphCache {
         Self::new(5000) // Default to 5000 glyphs
     }
 }
+
+// ============================================================================
+// Text Width Measurement (Phase 4)
+// ============================================================================
+
+impl Font {
+    /// Measure the total width of a text string at a given font size.
+    ///
+    /// This sums the advance widths of all characters in the string.
+    pub fn measure_text_width(&self, text: &str, size_px: f32) -> f32 {
+        text.chars()
+            .map(|ch| self.glyph_advance(ch, size_px))
+            .sum()
+    }
+
+    /// Calculate average character advance for a font at a given size.
+    ///
+    /// Uses a sample of common ASCII characters to estimate average width.
+    pub fn average_advance(&self, size_px: f32) -> f32 {
+        const SAMPLE: &str = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+        let total: f32 = SAMPLE
+            .chars()
+            .map(|ch| self.glyph_advance(ch, size_px))
+            .sum();
+        total / SAMPLE.len() as f32
+    }
+}
+
+/// Font metrics that can be used for layout calculations.
+///
+/// This struct mirrors `layout::FontMetrics` but can be populated
+/// from actual font data instead of approximations.
+#[derive(Debug, Clone, Copy)]
+pub struct LayoutFontMetrics {
+    pub font_size: f32,
+    pub ascent: f32,
+    pub descent: f32,
+    pub line_gap: f32,
+    pub average_advance: f32,
+}
+
+impl Font {
+    /// Create layout-compatible font metrics from actual font data.
+    ///
+    /// These metrics can be used to populate `layout::FontMetrics`
+    /// for more accurate text layout.
+    pub fn layout_metrics(&self, size_px: f32) -> LayoutFontMetrics {
+        let table = self.metrics();
+        let px = table.at_size(size_px);
+
+        LayoutFontMetrics {
+            font_size: size_px,
+            ascent: px.ascender.abs(),
+            descent: px.descender.abs(),
+            line_gap: px.line_gap.abs(),
+            average_advance: self.average_advance(size_px),
+        }
+    }
+}
