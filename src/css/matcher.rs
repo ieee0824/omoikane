@@ -410,8 +410,15 @@ mod tests {
         let (_, _, _, main, _, _, _) = sample_tree();
         let selector = selector("main:before {}");
 
-        assert_eq!(selector_pseudo_element(&selector), Some(PseudoElement::Before));
-        assert!(matches_selector_with_pseudo(&main, &selector, Some(PseudoElement::Before)));
+        assert_eq!(
+            selector_pseudo_element(&selector),
+            Some(PseudoElement::Before)
+        );
+        assert!(matches_selector_with_pseudo(
+            &main,
+            &selector,
+            Some(PseudoElement::Before)
+        ));
         assert!(!matches_selector(&main, &selector));
 
         let value = specificity(&selector);

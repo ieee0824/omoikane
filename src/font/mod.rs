@@ -363,10 +363,7 @@ fn fuzzy_font_match(filename: &str, query: &str) -> bool {
         .replace("italic", "")
         .replace("oblique", "");
 
-    let clean_query = query
-        .replace('-', "")
-        .replace('_', "")
-        .replace(' ', "");
+    let clean_query = query.replace('-', "").replace('_', "").replace(' ', "");
 
     clean_filename.contains(&clean_query) || clean_query.contains(&clean_filename)
 }
@@ -376,9 +373,8 @@ fn fuzzy_font_match(filename: &str, query: &str) -> bool {
 /// Searches system font directories and returns the first matching font.
 /// Supports generic families: sans-serif, serif, monospace.
 pub fn load_system_font(family: &str) -> Result<Font, FontError> {
-    let path = find_system_font(family).ok_or_else(|| {
-        FontError::Other(format!("System font '{}' not found", family))
-    })?;
+    let path = find_system_font(family)
+        .ok_or_else(|| FontError::Other(format!("System font '{}' not found", family)))?;
 
     Font::load_from_file(&path)
 }

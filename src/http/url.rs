@@ -238,8 +238,7 @@ pub fn resolve_url(base: &Url, reference: &str) -> Result<Url, UrlParseError> {
     // also let the parser decide; since this crate only supports HTTP(S), such
     // inputs will be rejected instead of incorrectly merged.
     if let Some(colon_idx) = reference.find(':') {
-        let first_delim = reference
-            .find(|c| c == '/' || c == '?' || c == '#');
+        let first_delim = reference.find(|c| c == '/' || c == '?' || c == '#');
         let colon_before_delim = match first_delim {
             Some(idx) => colon_idx < idx,
             None => true,
@@ -291,7 +290,11 @@ fn split_path_query(s: &str) -> (String, Option<String>) {
     match s.find('?') {
         Some(i) => {
             let q = &s[i + 1..];
-            let query = if q.is_empty() { None } else { Some(q.to_string()) };
+            let query = if q.is_empty() {
+                None
+            } else {
+                Some(q.to_string())
+            };
             (s[..i].to_string(), query)
         }
         None => (s.to_string(), None),
@@ -304,7 +307,9 @@ fn normalize_path(path: &str) -> String {
     for seg in path.split('/') {
         match seg {
             "." => {}
-            ".." => { segments.pop(); }
+            ".." => {
+                segments.pop();
+            }
             s => segments.push(s),
         }
     }

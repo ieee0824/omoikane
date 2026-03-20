@@ -149,11 +149,7 @@ impl StyleResolver {
 
         // Process font-size first so that em units in other properties
         // resolve against the element's own computed font-size.
-        if let Some(fs_candidate) = candidates
-            .iter()
-            .filter(|c| c.name == "font-size")
-            .last()
-        {
+        if let Some(fs_candidate) = candidates.iter().filter(|c| c.name == "font-size").last() {
             let parent_fs = parent_style
                 .and_then(|ps| ps.get("font-size"))
                 .and_then(|v| match v {
@@ -252,11 +248,28 @@ fn collect_rule_candidates(
 fn is_length_property(name: &str) -> bool {
     matches!(
         name,
-        "width" | "height" | "min-width" | "min-height" | "max-width" | "max-height"
-            | "margin-top" | "margin-right" | "margin-bottom" | "margin-left"
-            | "padding-top" | "padding-right" | "padding-bottom" | "padding-left"
-            | "border-top-width" | "border-right-width" | "border-bottom-width" | "border-left-width"
-            | "top" | "right" | "bottom" | "left"
+        "width"
+            | "height"
+            | "min-width"
+            | "min-height"
+            | "max-width"
+            | "max-height"
+            | "margin-top"
+            | "margin-right"
+            | "margin-bottom"
+            | "margin-left"
+            | "padding-top"
+            | "padding-right"
+            | "padding-bottom"
+            | "padding-left"
+            | "border-top-width"
+            | "border-right-width"
+            | "border-bottom-width"
+            | "border-left-width"
+            | "top"
+            | "right"
+            | "bottom"
+            | "left"
             | "border-spacing"
     )
 }
@@ -433,11 +446,13 @@ fn render_value(value: &Value) -> String {
         Value::Color(value) => value.clone(),
         Value::Function { name, arguments } => format!(
             "{name}({})",
-            arguments
-                .iter()
-                .map(render_value)
-                .collect::<Vec<_>>()
-                .join(if name.eq_ignore_ascii_case("url") { "," } else { ", " })
+            arguments.iter().map(render_value).collect::<Vec<_>>().join(
+                if name.eq_ignore_ascii_case("url") {
+                    ","
+                } else {
+                    ", "
+                }
+            )
         ),
         Value::List(values) => values
             .iter()
@@ -605,7 +620,10 @@ mod tests {
 
         let style = resolver.computed_style(&title);
         assert_eq!(style.get("content"), None);
-        assert_eq!(style.get("color"), Some(&ComputedValue::Color("black".to_string())));
+        assert_eq!(
+            style.get("color"),
+            Some(&ComputedValue::Color("black".to_string()))
+        );
     }
 
     #[test]
@@ -658,19 +676,32 @@ mod tests {
         let mut resolver = StyleResolver::new();
         resolver.add_stylesheet(
             Origin::Author,
-            parse_stylesheet(
-                "h1 { border: solid 12px transparent; border-style: none solid; }",
-            )
-            .unwrap(),
+            parse_stylesheet("h1 { border: solid 12px transparent; border-style: none solid; }")
+                .unwrap(),
         );
 
         let style = resolver.computed_style(&title);
 
-        assert_eq!(style.get("border-top-style"), Some(&ComputedValue::Keyword("none".to_string())));
-        assert_eq!(style.get("border-bottom-style"), Some(&ComputedValue::Keyword("none".to_string())));
+        assert_eq!(
+            style.get("border-top-style"),
+            Some(&ComputedValue::Keyword("none".to_string()))
+        );
+        assert_eq!(
+            style.get("border-bottom-style"),
+            Some(&ComputedValue::Keyword("none".to_string()))
+        );
         assert_eq!(style.get("border-top-width"), Some(&ComputedValue::Px(0.0)));
-        assert_eq!(style.get("border-bottom-width"), Some(&ComputedValue::Px(0.0)));
-        assert_eq!(style.get("border-right-style"), Some(&ComputedValue::Keyword("solid".to_string())));
-        assert_eq!(style.get("border-left-style"), Some(&ComputedValue::Keyword("solid".to_string())));
+        assert_eq!(
+            style.get("border-bottom-width"),
+            Some(&ComputedValue::Px(0.0))
+        );
+        assert_eq!(
+            style.get("border-right-style"),
+            Some(&ComputedValue::Keyword("solid".to_string()))
+        );
+        assert_eq!(
+            style.get("border-left-style"),
+            Some(&ComputedValue::Keyword("solid".to_string()))
+        );
     }
 }

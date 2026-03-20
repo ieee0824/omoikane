@@ -1082,11 +1082,13 @@ fn expand_background_shorthand(value: Value, important: bool) -> Vec<Declaration
     let mut position_values = Vec::new();
     for item in &values {
         match item {
-            Value::Function { name, .. } if name.eq_ignore_ascii_case("url") => declarations.push(Declaration {
-                name: "background-image".to_string(),
-                value: item.clone(),
-                important,
-            }),
+            Value::Function { name, .. } if name.eq_ignore_ascii_case("url") => {
+                declarations.push(Declaration {
+                    name: "background-image".to_string(),
+                    value: item.clone(),
+                    important,
+                })
+            }
             Value::Keyword(keyword)
                 if keyword.eq_ignore_ascii_case("repeat")
                     || keyword.eq_ignore_ascii_case("no-repeat") =>
@@ -1200,11 +1202,13 @@ fn expand_font_shorthand(value: Value, important: bool) -> Vec<Declaration> {
     let mut declarations = Vec::new();
     for item in &values {
         match item {
-            Value::Length(_, unit) if unit == "px" || unit == "em" => declarations.push(Declaration {
-                name: "font-size".to_string(),
-                value: item.clone(),
-                important,
-            }),
+            Value::Length(_, unit) if unit == "px" || unit == "em" => {
+                declarations.push(Declaration {
+                    name: "font-size".to_string(),
+                    value: item.clone(),
+                    important,
+                })
+            }
             Value::Percentage(_) => declarations.push(Declaration {
                 name: "font-size".to_string(),
                 value: item.clone(),
@@ -1245,10 +1249,18 @@ fn expand_font_shorthand(value: Value, important: bool) -> Vec<Declaration> {
 
 fn parse_font_shorthand_length(value: &str) -> Option<Value> {
     if let Some(unit) = value.strip_suffix("px") {
-        return unit.trim().parse().ok().map(|number| Value::Length(number, "px".to_string()));
+        return unit
+            .trim()
+            .parse()
+            .ok()
+            .map(|number| Value::Length(number, "px".to_string()));
     }
     if let Some(unit) = value.strip_suffix("em") {
-        return unit.trim().parse().ok().map(|number| Value::Length(number, "em".to_string()));
+        return unit
+            .trim()
+            .parse()
+            .ok()
+            .map(|number| Value::Length(number, "em".to_string()));
     }
     if let Some(unit) = value.strip_suffix('%') {
         return unit.trim().parse().ok().map(Value::Percentage);
@@ -1259,7 +1271,16 @@ fn parse_font_shorthand_length(value: &str) -> Option<Value> {
 fn is_background_color_keyword(keyword: &str) -> bool {
     matches!(
         keyword,
-        "transparent" | "black" | "white" | "red" | "green" | "blue" | "gray" | "grey" | "navy" | "yellow"
+        "transparent"
+            | "black"
+            | "white"
+            | "red"
+            | "green"
+            | "blue"
+            | "gray"
+            | "grey"
+            | "navy"
+            | "yellow"
     )
 }
 
@@ -1373,9 +1394,7 @@ fn consume_css_escape(chars: &[char], index: &mut usize) -> Option<char> {
             i += 1;
         }
         *index = i;
-        u32::from_str_radix(&hex, 16)
-            .ok()
-            .and_then(char::from_u32)
+        u32::from_str_radix(&hex, 16).ok().and_then(char::from_u32)
     } else {
         *index = start + 2;
         Some(*next)
@@ -1470,22 +1489,37 @@ mod tests {
         // \a = U+000A (line feed), so m\argin ≠ margin
         let tokens = tokenize(r"div { m\argin: 2em; }").unwrap();
         // The property name should NOT be "margin" — it should contain U+000A
-        let has_margin_ident = tokens.iter().any(|t| matches!(t, CssToken::Ident(s) if s == "margin"));
-        assert!(!has_margin_ident, "m\\argin should not tokenize as 'margin'; tokens: {:?}", tokens);
+        let has_margin_ident = tokens
+            .iter()
+            .any(|t| matches!(t, CssToken::Ident(s) if s == "margin"));
+        assert!(
+            !has_margin_ident,
+            "m\\argin should not tokenize as 'margin'; tokens: {:?}",
+            tokens
+        );
     }
 
     #[test]
     fn escaped_closing_brace_does_not_close_rule() {
         let tokens = tokenize(r"div { error: \}; background: yellow; }").unwrap();
-        let curly_close_count = tokens.iter().filter(|t| matches!(t, CssToken::CurlyClose)).count();
-        assert_eq!(curly_close_count, 1, "only the final }} should be CurlyClose, tokens: {:?}", tokens);
+        let curly_close_count = tokens
+            .iter()
+            .filter(|t| matches!(t, CssToken::CurlyClose))
+            .count();
+        assert_eq!(
+            curly_close_count, 1,
+            "only the final }} should be CurlyClose, tokens: {:?}",
+            tokens
+        );
 
         let stylesheet = parse_stylesheet(r"div { error: \}; background: yellow; }").unwrap();
         let Rule::Style(rule) = &stylesheet.rules[0] else {
             panic!("expected style rule");
         };
         assert!(
-            rule.declarations.iter().any(|decl| decl.name == "background-color"),
+            rule.declarations
+                .iter()
+                .any(|decl| decl.name == "background-color"),
             "background: yellow should survive error: \\}}; declarations: {:?}",
             rule.declarations,
         );
@@ -1494,15 +1528,23 @@ mod tests {
     #[test]
     fn invalid_background_value_is_ignored() {
         // "red pink" is not a valid background value — should be entirely discarded
-        let stylesheet = parse_stylesheet(".parser { background: yellow; } .parser { background: red pink; }").unwrap();
-        let rules: Vec<_> = stylesheet.rules.iter().filter_map(|r| match r {
-            Rule::Style(s) => Some(s),
-            _ => None,
-        }).collect();
+        let stylesheet =
+            parse_stylesheet(".parser { background: yellow; } .parser { background: red pink; }")
+                .unwrap();
+        let rules: Vec<_> = stylesheet
+            .rules
+            .iter()
+            .filter_map(|r| match r {
+                Rule::Style(s) => Some(s),
+                _ => None,
+            })
+            .collect();
         // The second rule's "background: red pink" should be ignored
         // First rule's background: yellow should still win via cascade
         let last_bg = rules.iter().rev().find_map(|rule| {
-            rule.declarations.iter().find(|d| d.name == "background-color")
+            rule.declarations
+                .iter()
+                .find(|d| d.name == "background-color")
         });
         eprintln!("last bg: {:?}", last_bg);
         // If "red pink" was incorrectly salvaged as "red", we'd see Color("red")
@@ -1703,13 +1745,22 @@ mod tests {
     #[test]
     fn expands_background_image_from_url_shorthand() {
         let stylesheet =
-            parse_stylesheet("div { background: red url(\"data:image/png;base64,AAAA\"); }").unwrap();
+            parse_stylesheet("div { background: red url(\"data:image/png;base64,AAAA\"); }")
+                .unwrap();
         let Rule::Style(rule) = &stylesheet.rules[0] else {
             panic!("expected style rule");
         };
 
-        assert!(rule.declarations.iter().any(|decl| decl.name == "background-color"));
-        assert!(rule.declarations.iter().any(|decl| decl.name == "background-image"));
+        assert!(
+            rule.declarations
+                .iter()
+                .any(|decl| decl.name == "background-color")
+        );
+        assert!(
+            rule.declarations
+                .iter()
+                .any(|decl| decl.name == "background-image")
+        );
     }
 
     #[test]
@@ -1719,10 +1770,12 @@ mod tests {
             panic!("expected style rule");
         };
 
-        assert!(rule.declarations.iter().any(
-            |decl| decl.name == "background-repeat"
-                && matches!(&decl.value, Value::Keyword(value) if value == "no-repeat")
-        ));
+        assert!(
+            rule.declarations
+                .iter()
+                .any(|decl| decl.name == "background-repeat"
+                    && matches!(&decl.value, Value::Keyword(value) if value == "no-repeat"))
+        );
     }
 
     #[test]
@@ -1732,18 +1785,22 @@ mod tests {
             panic!("expected style rule");
         };
 
-        assert!(rule.declarations.iter().any(
-            |decl| decl.name == "background-attachment"
-                && matches!(&decl.value, Value::Keyword(value) if value == "fixed")
-        ));
+        assert!(
+            rule.declarations
+                .iter()
+                .any(|decl| decl.name == "background-attachment"
+                    && matches!(&decl.value, Value::Keyword(value) if value == "fixed"))
+        );
         assert!(rule.declarations.iter().any(
             |decl| decl.name == "background-position-x"
                 && matches!(&decl.value, Value::Length(value, unit) if *value == 1.0 && unit == "px")
         ));
-        assert!(rule.declarations.iter().any(
-            |decl| decl.name == "background-position-y"
-                && matches!(&decl.value, Value::Number(value) if *value == 0.0)
-        ));
+        assert!(
+            rule.declarations
+                .iter()
+                .any(|decl| decl.name == "background-position-y"
+                    && matches!(&decl.value, Value::Number(value) if *value == 0.0))
+        );
     }
 
     #[test]
@@ -1753,14 +1810,18 @@ mod tests {
             panic!("expected style rule");
         };
 
-        assert!(rule.declarations.iter().any(
-            |decl| decl.name == "background-image"
-                && matches!(&decl.value, Value::Keyword(value) if value == "none")
-        ));
-        assert!(rule.declarations.iter().any(
-            |decl| decl.name == "background-color"
-                && matches!(&decl.value, Value::Keyword(value) if value == "transparent")
-        ));
+        assert!(
+            rule.declarations
+                .iter()
+                .any(|decl| decl.name == "background-image"
+                    && matches!(&decl.value, Value::Keyword(value) if value == "none"))
+        );
+        assert!(
+            rule.declarations
+                .iter()
+                .any(|decl| decl.name == "background-color"
+                    && matches!(&decl.value, Value::Keyword(value) if value == "transparent"))
+        );
     }
 
     #[test]
@@ -1774,14 +1835,18 @@ mod tests {
             |decl| decl.name == "border-top-width"
                 && matches!(&decl.value, Value::Length(value, unit) if *value == 2.0 && unit == "px")
         ));
-        assert!(rule.declarations.iter().any(
-            |decl| decl.name == "border-top-style"
-                && matches!(&decl.value, Value::Keyword(value) if value == "solid")
-        ));
-        assert!(rule.declarations.iter().any(
-            |decl| decl.name == "border-top-color"
-                && matches!(&decl.value, Value::Keyword(value) if value == "yellow")
-        ));
+        assert!(
+            rule.declarations
+                .iter()
+                .any(|decl| decl.name == "border-top-style"
+                    && matches!(&decl.value, Value::Keyword(value) if value == "solid"))
+        );
+        assert!(
+            rule.declarations
+                .iter()
+                .any(|decl| decl.name == "border-top-color"
+                    && matches!(&decl.value, Value::Keyword(value) if value == "yellow"))
+        );
     }
 
     #[test]
@@ -1791,21 +1856,29 @@ mod tests {
             panic!("expected style rule");
         };
 
-        assert!(rule.declarations.iter().any(
-            |decl| decl.name == "border-top-style"
-                && matches!(&decl.value, Value::Keyword(value) if value == "none")
-        ));
-        assert!(rule.declarations.iter().any(
-            |decl| decl.name == "border-right-style"
-                && matches!(&decl.value, Value::Keyword(value) if value == "solid")
-        ));
-        assert!(rule.declarations.iter().any(
-            |decl| decl.name == "border-bottom-style"
-                && matches!(&decl.value, Value::Keyword(value) if value == "none")
-        ));
-        assert!(rule.declarations.iter().any(
-            |decl| decl.name == "border-left-style"
-                && matches!(&decl.value, Value::Keyword(value) if value == "solid")
-        ));
+        assert!(
+            rule.declarations
+                .iter()
+                .any(|decl| decl.name == "border-top-style"
+                    && matches!(&decl.value, Value::Keyword(value) if value == "none"))
+        );
+        assert!(
+            rule.declarations
+                .iter()
+                .any(|decl| decl.name == "border-right-style"
+                    && matches!(&decl.value, Value::Keyword(value) if value == "solid"))
+        );
+        assert!(
+            rule.declarations
+                .iter()
+                .any(|decl| decl.name == "border-bottom-style"
+                    && matches!(&decl.value, Value::Keyword(value) if value == "none"))
+        );
+        assert!(
+            rule.declarations
+                .iter()
+                .any(|decl| decl.name == "border-left-style"
+                    && matches!(&decl.value, Value::Keyword(value) if value == "solid"))
+        );
     }
 }
