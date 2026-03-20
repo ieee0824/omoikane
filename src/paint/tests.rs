@@ -969,6 +969,40 @@ use crate::paint::*;
     }
 
     #[test]
+    fn decodes_jpeg_image() {
+        // Minimal valid JPEG: 1x1 red pixel
+        // Created with: convert -size 1x1 xc:red red.jpg && base64 red.jpg
+        let jpeg_base64 = "/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAgGBgcGBQgHBwcJCQgKDBQNDAsLDBkSEw8UHRofHh0aHBwgJC4nICIsIxwcKDcpLDAxNDQ0Hyc5PTgyPC4zNDL/wAALCAABAAEBAREA/8QAFAABAAAAAAAAAAAAAAAAAAAACf/EABQQAQAAAAAAAAAAAAAAAAAAAAD/2gAIAQEAAD8AVN//2Q==";
+        let jpeg_data = base64::engine::general_purpose::STANDARD
+            .decode(jpeg_base64)
+            .unwrap();
+
+        let image = Image::decode_jpeg(&jpeg_data).unwrap();
+        assert_eq!(image.width(), 1);
+        assert_eq!(image.height(), 1);
+        // JPEG is lossy, so we just check that we got valid RGBA data
+        assert_eq!(image.pixels().len(), 4);
+    }
+
+    #[test]
+    fn decodes_jpeg_data_uri() {
+        // Minimal valid JPEG: 1x1 red pixel
+        let jpeg_base64 = "/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAgGBgcGBQgHBwcJCQgKDBQNDAsLDBkSEw8UHRofHh0aHBwgJC4nICIsIxwcKDcpLDAxNDQ0Hyc5PTgyPC4zNDL/wAALCAABAAEBAREA/8QAFAABAAAAAAAAAAAAAAAAAAAACf/EABQQAQAAAAAAAAAAAAAAAAAAAAD/2gAIAQEAAD8AVN//2Q==";
+        let data_uri = format!("data:image/jpeg;base64,{}", jpeg_base64);
+
+        let parsed = parse_data_uri(&data_uri).unwrap();
+        match parsed {
+            DataUri::Binary { mime_type, data } => {
+                assert_eq!(mime_type, "image/jpeg");
+                let image = Image::decode_jpeg(&data).unwrap();
+                assert_eq!(image.width(), 1);
+                assert_eq!(image.height(), 1);
+            }
+            DataUri::Text { .. } => panic!("expected binary data uri"),
+        }
+    }
+
+    #[test]
     fn renders_acid2_fixture_to_png() {
         let html = fs::read_to_string(acid2_fixture_path()).unwrap();
         let document = TreeBuilder::parse(&html).document();

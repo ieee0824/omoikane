@@ -3,9 +3,19 @@
 //! The layout phase consumes DOM nodes together with computed styles and
 //! produces a tree of rectangular block boxes.
 
+use std::cell::RefCell;
+use std::collections::HashMap;
+
 use crate::css::{ComputedStyle, ComputedValue, PseudoElement, StyleResolver};
 use crate::dom::{Node, NodeHandle, NodeType};
+use crate::http::Client;
 use crate::paint::{DataUri, Image, parse_data_uri};
+
+// Thread-local cache for fetched images to avoid redundant fetches
+thread_local! {
+    static IMAGE_CACHE: RefCell<HashMap<String, Option<Image>>> = RefCell::new(HashMap::new());
+    static HTTP_CLIENT: RefCell<Client> = RefCell::new(Client::new());
+}
 
 /// A rectangle in layout space.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
@@ -2227,22 +2237,25 @@ fn element_inline_image(node: &NodeHandle) -> Option<(NodeHandle, Image)> {
     match tag_name.as_str() {
         "img" => {
             let src = attributes.get("src")?;
-            let data_uri = parse_data_uri(src).ok()?;
-            match data_uri {
-                DataUri::Binary { mime_type, data } if mime_type.eq_ignore_ascii_case("image/png") => {
-                    Image::decode_png(&data).ok().map(|image| (node.clone(), image))
-                }
-                _ => None,
+            // Try data: URI first
+            if src.starts_with("data:") {
+                return decode_data_uri_image(src).map(|image| (node.clone(), image));
             }
+            // Try HTTP/HTTPS URL
+            if src.starts_with("http://") || src.starts_with("https://") {
+                return fetch_image(src).map(|image| (node.clone(), image));
+            }
+            None
         }
         "object" => {
             if let Some(data) = attributes.get("data") {
-                let data_uri = parse_data_uri(data).ok();
-                if let Some(DataUri::Binary { mime_type, data }) = data_uri {
-                    if mime_type.eq_ignore_ascii_case("image/png") {
-                        if let Ok(image) = Image::decode_png(&data) {
-                            return Some((node.clone(), image));
-                        }
+                if data.starts_with("data:") {
+                    if let Some(image) = decode_data_uri_image(data) {
+                        return Some((node.clone(), image));
+                    }
+                } else if data.starts_with("http://") || data.starts_with("https://") {
+                    if let Some(image) = fetch_image(data) {
+                        return Some((node.clone(), image));
                     }
                 }
             }
@@ -2256,6 +2269,79 @@ fn element_inline_image(node: &NodeHandle) -> Option<(NodeHandle, Image)> {
             None
         }
         _ => None,
+    }
+}
+
+/// Decode an image from a data: URI (PNG or JPEG).
+fn decode_data_uri_image(uri: &str) -> Option<Image> {
+    let data_uri = parse_data_uri(uri).ok()?;
+    match data_uri {
+        DataUri::Binary { mime_type, data } => {
+            if mime_type.eq_ignore_ascii_case("image/png") {
+                Image::decode_png(&data).ok()
+            } else if mime_type.eq_ignore_ascii_case("image/jpeg")
+                || mime_type.eq_ignore_ascii_case("image/jpg")
+            {
+                Image::decode_jpeg(&data).ok()
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
+}
+
+/// Maximum image size to fetch (10 MiB).
+const MAX_IMAGE_SIZE: usize = 10 * 1024 * 1024;
+
+/// Fetch an image from an HTTP/HTTPS URL with caching.
+fn fetch_image(url: &str) -> Option<Image> {
+    // Check cache first
+    let cached = IMAGE_CACHE.with(|cache| cache.borrow().get(url).cloned());
+    if let Some(result) = cached {
+        return result;
+    }
+
+    // Fetch and decode the image
+    let result = fetch_image_uncached(url);
+
+    // Cache the result (even if None, to avoid re-fetching failed URLs)
+    IMAGE_CACHE.with(|cache| {
+        cache.borrow_mut().insert(url.to_string(), result.clone());
+    });
+
+    result
+}
+
+/// Fetch an image without caching (internal helper).
+fn fetch_image_uncached(url: &str) -> Option<Image> {
+    // Use shared HTTP client for connection reuse and cookie sharing
+    let response = HTTP_CLIENT.with(|client| client.borrow_mut().get(url).ok())?;
+
+    if response.status_code() != 200 {
+        return None;
+    }
+
+    let body = response.body();
+
+    // Enforce size limit to prevent DoS
+    if body.len() > MAX_IMAGE_SIZE {
+        return None;
+    }
+
+    let content_type: String = response
+        .header("content-type")
+        .map(str::to_lowercase)
+        .unwrap_or_default();
+
+    // Determine image type from Content-Type header or try both decoders
+    if content_type.contains("image/png") {
+        Image::decode_png(body).ok()
+    } else if content_type.contains("image/jpeg") || content_type.contains("image/jpg") {
+        Image::decode_jpeg(body).ok()
+    } else {
+        // Try PNG first, then JPEG
+        Image::decode_png(body).ok().or_else(|| Image::decode_jpeg(body).ok())
     }
 }
 
