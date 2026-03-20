@@ -4,6 +4,7 @@ pub mod cdp;
 pub mod css;
 pub mod dom;
 pub mod ffi;
+pub mod font;
 pub mod html;
 pub mod http;
 pub mod js;

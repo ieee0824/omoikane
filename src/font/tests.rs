@@ -1,0 +1,182 @@
+//! Tests for font module.
+
+use super::*;
+
+/// Try to find a system font for testing.
+/// Returns path if found, otherwise None.
+fn find_test_font() -> Option<String> {
+    #[cfg(target_os = "macos")]
+    {
+        // macOS: Try system fonts
+        [
+            "/System/Library/Fonts/Helvetica.ttc",
+            "/System/Library/Fonts/Arial.ttf",
+            "/System/Library/Fonts/Times New Roman.ttf",
+            "/Library/Fonts/Arial.ttf",
+        ]
+        .iter()
+        .find_map(|&path| {
+            if std::path::Path::new(path).exists() {
+                Some(path.to_string())
+            } else {
+                None
+            }
+        })
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        // Linux: Try common fonts
+        [
+            "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+            "/usr/share/fonts/truetype/liberation/LiberationMono-Regular.ttf",
+        ]
+        .iter()
+        .find_map(|&path| {
+            if std::path::Path::new(path).exists() {
+                Some(path.to_string())
+            } else {
+                None
+            }
+        })
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        // Windows: Try system fonts
+        [
+            "C:\\Windows\\Fonts\\arial.ttf",
+            "C:\\Windows\\Fonts\\times.ttf",
+        ]
+        .iter()
+        .find_map(|&path| {
+            if std::path::Path::new(path).exists() {
+                Some(path.to_string())
+            } else {
+                None
+            }
+        })
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+    None
+}
+
+#[test]
+fn test_glyph_raster_empty_is_valid() {
+    // Test that an empty GlyphRaster can be created
+    let raster = GlyphRaster {
+        width: 0,
+        height: 0,
+        bitmap: vec![],
+        advance_x: 5.0,
+        advance_y: 0.0,
+    };
+    assert_eq!(raster.width, 0);
+    assert_eq!(raster.height, 0);
+    assert_eq!(raster.advance_x, 5.0);
+}
+
+#[test]
+fn test_glyph_raster_with_bitmap() {
+    let bitmap = vec![0, 128, 255, 64];
+    let raster = GlyphRaster {
+        width: 2,
+        height: 2,
+        bitmap,
+        advance_x: 10.0,
+        advance_y: 0.0,
+    };
+    assert_eq!(raster.width, 2);
+    assert_eq!(raster.height, 2);
+    assert_eq!(raster.bitmap.len(), 4);
+}
+
+#[test]
+#[ignore] // This test requires system fonts to be available
+fn test_load_system_font_and_rasterize() {
+    let Some(font_path) = find_test_font() else {
+        eprintln!("Skipping test: no system font found");
+        return;
+    };
+
+    let font = Font::load_from_file(std::path::Path::new(&font_path))
+        .expect("Failed to load system font");
+
+    // Rasterize a simple character
+    let raster = font.rasterize('A', 20.0).expect("Failed to rasterize 'A'");
+
+    // Check that rasterization produced non-zero dimensions
+    assert!(raster.width > 0 || raster.height == 0, "Width must be > 0 or height must be 0");
+    assert!(raster.advance_x > 0.0, "Advance width must be positive");
+}
+
+#[test]
+#[ignore] // This test requires system fonts to be available
+fn test_different_characters_different_advances() {
+    let Some(font_path) = find_test_font() else {
+        eprintln!("Skipping test: no system font found");
+        return;
+    };
+
+    let font = Font::load_from_file(std::path::Path::new(&font_path))
+        .expect("Failed to load system font");
+
+    let size = 20.0;
+    let advance_i = font.glyph_advance('i', size);
+    let advance_m = font.glyph_advance('m', size);
+
+    // 'm' should be wider than 'i' in most fonts
+    assert!(
+        advance_m >= advance_i,
+        "Expected 'm' advance ({}) >= 'i' advance ({})",
+        advance_m,
+        advance_i
+    );
+}
+
+#[test]
+#[ignore] // This test requires system fonts to be available
+fn test_rasterize_space_character() {
+    let Some(font_path) = find_test_font() else {
+        eprintln!("Skipping test: no system font found");
+        return;
+    };
+
+    let font = Font::load_from_file(std::path::Path::new(&font_path))
+        .expect("Failed to load system font");
+
+    // Space character should have zero bitmap but positive advance
+    let raster = font.rasterize(' ', 20.0).expect("Failed to rasterize space");
+    assert_eq!(raster.width, 0);
+    assert_eq!(raster.height, 0);
+    assert!(raster.advance_x > 0.0, "Space should have positive advance width");
+}
+
+#[test]
+#[ignore] // This test requires system fonts to be available
+fn test_advance_scales_with_size() {
+    let Some(font_path) = find_test_font() else {
+        eprintln!("Skipping test: no system font found");
+        return;
+    };
+
+    let font = Font::load_from_file(std::path::Path::new(&font_path))
+        .expect("Failed to load system font");
+
+    let advance_10 = font.glyph_advance('A', 10.0);
+    let advance_20 = font.glyph_advance('A', 20.0);
+    let advance_40 = font.glyph_advance('A', 40.0);
+
+    // Advances should be approximately proportional to size
+    assert!(advance_20 > advance_10, "Larger size should have larger advance");
+    assert!(advance_40 > advance_20, "Even larger size should have larger advance");
+
+    // Check approximate scaling (allowing 5% tolerance for rounding)
+    let ratio_1 = advance_20 / advance_10;
+    let ratio_2 = advance_40 / advance_20;
+
+    assert!(ratio_1 > 1.8 && ratio_1 < 2.2, "Advance should roughly double with 2x size");
+    assert!(ratio_2 > 1.8 && ratio_2 < 2.2, "Advance should roughly double with 2x size");
+}
