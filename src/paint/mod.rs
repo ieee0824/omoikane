@@ -7,6 +7,7 @@ use std::path::Path;
 
 use crate::css::{ComputedStyle, ComputedValue, Origin, PseudoElement, StyleResolver, Stylesheet, parse_stylesheet};
 use crate::dom::{Node, NodeHandle, NodeType};
+use crate::font::{load_system_font, Font};
 use crate::http::url::resolve_url;
 use crate::layout::{InlineFragmentContent, LayoutBox, Rect, Visibility};
 use base64::Engine;
@@ -262,6 +263,79 @@ impl Canvas {
                 };
                 let dest_index = ((dest_y as u32 * self.width + dest_x as u32) * 4) as usize;
                 blend_pixel(&mut self.pixels[dest_index..dest_index + 4], color);
+            }
+        }
+    }
+
+    /// Draws a glyph alpha mask at the given position with the specified color.
+    ///
+    /// The `mask` is a single-channel alpha bitmap (one u8 per pixel, row-major order).
+    /// Each mask value is multiplied with the color's alpha to produce the final alpha.
+    fn draw_glyph_mask(
+        &mut self,
+        x: f32,
+        y: f32,
+        mask_width: u32,
+        mask_height: u32,
+        mask: &[u8],
+        color: Color,
+        clip: Option<Rect>,
+    ) {
+        if mask_width == 0 || mask_height == 0 || mask.is_empty() {
+            return;
+        }
+
+        let destination = Rect {
+            x,
+            y,
+            width: mask_width as f32,
+            height: mask_height as f32,
+        };
+        let Some(mut area) = normalize_rect(destination) else {
+            return;
+        };
+
+        if let Some(clip_rect) = clip.and_then(normalize_rect) {
+            let Some(intersection) = intersect(area, clip_rect) else {
+                return;
+            };
+            area = intersection;
+        }
+
+        let x0 = area.x.floor().max(0.0) as i32;
+        let y0 = area.y.floor().max(0.0) as i32;
+        let x1 = (area.x + area.width).ceil().min(self.width as f32) as i32;
+        let y1 = (area.y + area.height).ceil().min(self.height as f32) as i32;
+
+        for dest_y in y0..y1 {
+            for dest_x in x0..x1 {
+                let mask_x = (dest_x as f32 - x).floor() as i32;
+                let mask_y = (dest_y as f32 - y).floor() as i32;
+                if mask_x < 0
+                    || mask_y < 0
+                    || mask_x >= mask_width as i32
+                    || mask_y >= mask_height as i32
+                {
+                    continue;
+                }
+
+                let mask_index = (mask_y as u32 * mask_width + mask_x as u32) as usize;
+                let mask_alpha = mask.get(mask_index).copied().unwrap_or(0);
+                if mask_alpha == 0 {
+                    continue;
+                }
+
+                // Combine mask alpha with color alpha
+                let combined_alpha = ((color.a as u32 * mask_alpha as u32 + 127) / 255) as u8;
+                let glyph_color = Color {
+                    r: color.r,
+                    g: color.g,
+                    b: color.b,
+                    a: combined_alpha,
+                };
+
+                let dest_index = ((dest_y as u32 * self.width + dest_x as u32) * 4) as usize;
+                blend_pixel(&mut self.pixels[dest_index..dest_index + 4], glyph_color);
             }
         }
     }
@@ -699,44 +773,113 @@ fn paint_text(
     layout: &LayoutBox,
     style: &ComputedStyle,
     clip: Option<Rect>,
-    viewport: Rect,
+    _viewport: Rect,
 ) {
     let color = text_color(style).unwrap_or(Color::rgb(0, 0, 0));
+
+    // Try to load a system font, fall back to placeholder rendering if unavailable
+    let font = load_system_font("sans-serif").ok();
 
     for line in &layout.lines {
         for fragment in &line.fragments {
             match &fragment.content {
                 InlineFragmentContent::Text(text) => {
-                    let mut cursor_x = fragment.rect.x;
-                    let advance = fragment.metrics.average_advance.max(1.0);
                     let font_size = fragment.metrics.font_size.max(1.0);
-                    let glyph_height = (font_size * 0.7).max(1.0);
-                    let glyph_y = fragment.rect.y + (font_size - glyph_height) * 0.5;
 
-                    for ch in text.chars() {
-                        if !ch.is_whitespace() {
-                            canvas.fill_rect_clipped(
-                                Rect {
-                                    x: cursor_x,
-                                    y: glyph_y,
-                                    width: (advance * 0.7).max(1.0),
-                                    height: glyph_height,
-                                },
-                                color,
-                                clip,
-                            );
-                        }
-                        cursor_x += advance;
+                    if let Some(ref font) = font {
+                        // Real glyph rendering
+                        paint_text_with_font(canvas, fragment.rect, text, font_size, font, color, clip);
+                    } else {
+                        // Fallback: placeholder rectangles
+                        paint_text_placeholder(canvas, fragment.rect, text, font_size, color, clip);
                     }
                 }
                 InlineFragmentContent::Image(image, style) => {
-                    paint_inline_image_fragment(canvas, fragment.rect, image, style, clip, viewport);
+                    paint_inline_image_fragment(canvas, fragment.rect, image, style, clip, _viewport);
                 }
                 InlineFragmentContent::GeneratedBox(style) => {
-                    paint_generated_box(canvas, fragment.rect, style, clip, viewport);
+                    paint_generated_box(canvas, fragment.rect, style, clip, _viewport);
                 }
             }
         }
+    }
+}
+
+/// Paint text using actual font glyphs.
+fn paint_text_with_font(
+    canvas: &mut Canvas,
+    rect: Rect,
+    text: &str,
+    font_size: f32,
+    font: &Font,
+    color: Color,
+    clip: Option<Rect>,
+) {
+    let metrics = font.metrics().at_size(font_size);
+    // Baseline is at rect.y + ascender (ascender is positive, descender is negative)
+    let baseline_y = rect.y + metrics.ascender;
+    let mut cursor_x = rect.x;
+
+    for ch in text.chars() {
+        if ch.is_whitespace() {
+            // For whitespace, just advance the cursor
+            cursor_x += font.glyph_advance(ch, font_size);
+            continue;
+        }
+
+        if let Ok(glyph) = font.rasterize(ch, font_size) {
+            if glyph.width > 0 && glyph.height > 0 && !glyph.bitmap.is_empty() {
+                // Calculate glyph position
+                // offset_y is from baseline to bitmap top (typically negative for glyphs above baseline)
+                let glyph_x = cursor_x + glyph.offset_x;
+                let glyph_y = baseline_y + glyph.offset_y;
+
+                canvas.draw_glyph_mask(
+                    glyph_x,
+                    glyph_y,
+                    glyph.width,
+                    glyph.height,
+                    &glyph.bitmap,
+                    color,
+                    clip,
+                );
+            }
+            cursor_x += glyph.advance_x;
+        } else {
+            // If rasterization fails, use fallback advance
+            cursor_x += font.glyph_advance(ch, font_size);
+        }
+    }
+}
+
+/// Paint text as placeholder rectangles (fallback when no font available).
+fn paint_text_placeholder(
+    canvas: &mut Canvas,
+    rect: Rect,
+    text: &str,
+    font_size: f32,
+    color: Color,
+    clip: Option<Rect>,
+) {
+    let mut cursor_x = rect.x;
+    let advance = (font_size * 0.6).max(1.0); // Approximate advance
+    let glyph_height = (font_size * 0.7).max(1.0);
+    let glyph_y = rect.y + (font_size - glyph_height) * 0.5;
+
+    for ch in text.chars() {
+        if !ch.is_whitespace() {
+            canvas.fill_rect_clipped(
+                Rect {
+                    x: cursor_x,
+                    y: glyph_y,
+                    width: (advance * 0.7).max(1.0),
+                    height: glyph_height,
+                },
+                color,
+                clip,
+            );
+        }
+        cursor_x += advance;
     }
 }
 

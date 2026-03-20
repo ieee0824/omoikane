@@ -72,6 +72,8 @@ fn test_glyph_raster_empty_is_valid() {
         bitmap: vec![],
         advance_x: 5.0,
         advance_y: 0.0,
+        offset_x: 0.0,
+        offset_y: 0.0,
     };
     assert_eq!(raster.width, 0);
     assert_eq!(raster.height, 0);
@@ -87,6 +89,8 @@ fn test_glyph_raster_with_bitmap() {
         bitmap,
         advance_x: 10.0,
         advance_y: 0.0,
+        offset_x: 0.0,
+        offset_y: 0.0,
     };
     assert_eq!(raster.width, 2);
     assert_eq!(raster.height, 2);
@@ -279,6 +283,8 @@ fn test_glyph_cache_insert_and_get() {
         bitmap: vec![128; 120],
         advance_x: 8.0,
         advance_y: 0.0,
+        offset_x: 0.0,
+        offset_y: -10.0,
     };
 
     cache.insert('A', 16.0, raster.clone());
@@ -308,6 +314,8 @@ fn test_glyph_cache_size_quantization() {
         bitmap: vec![255; 25],
         advance_x: 4.0,
         advance_y: 0.0,
+        offset_x: 0.0,
+        offset_y: -4.0,
     };
 
     // Insert at 16.0 px
@@ -337,6 +345,8 @@ fn test_glyph_cache_eviction() {
             bitmap: vec![0; i as usize],
             advance_x: i as f32,
             advance_y: 0.0,
+            offset_x: 0.0,
+            offset_y: 0.0,
         };
         cache.insert(char::from_u32('A' as u32 + i).unwrap(), 10.0, raster);
     }
