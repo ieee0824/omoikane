@@ -1,8 +1,10 @@
 //! CSS cascade and computed style resolution.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::sync::{Mutex, OnceLock};
 
 use crate::dom::{Node, NodeHandle, NodeType};
+use rusqlite::{Connection, params};
 
 use super::{
     PseudoElement, Rule, Specificity, Stylesheet, Value, matches_selector_with_pseudo, specificity,
@@ -59,6 +61,10 @@ pub struct StyleResolver {
     cache: HashMap<usize, ComputedStyle>,
     pseudo_cache: HashMap<(usize, PseudoElement), ComputedStyle>,
 }
+
+static UNSUPPORTED_CSS_LOGGED: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+static SQLITE_LOG_ERRORS: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+static SQLITE_LOG_INITIALIZED: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
 
 impl StyleResolver {
     /// Creates a new style resolver.
@@ -124,6 +130,10 @@ impl StyleResolver {
         parent_style: Option<&ComputedStyle>,
         pseudo: Option<PseudoElement>,
     ) -> ComputedStyle {
+        if let Some(path) = unsupported_css_sqlite_path() {
+            ensure_unsupported_css_sqlite_schema(&path);
+        }
+
         let mut candidates = Vec::new();
         let mut source_order = 0usize;
 
@@ -165,6 +175,7 @@ impl StyleResolver {
             if candidate.name == "font-size" {
                 continue; // already processed above
             }
+            log_unsupported_css_if_enabled(&candidate.name, &candidate.value);
             let font_size = inherited_font_size(parent_style, &properties);
             let computed = compute_value(&candidate.value, &candidate.name, font_size);
             // CSS 2.1: non-zero unitless numbers are invalid for length properties;
@@ -177,6 +188,7 @@ impl StyleResolver {
             properties.insert(candidate.name, computed);
         }
 
+        apply_presentational_hints(node, &mut properties, pseudo);
         resolve_explicit_inherit(&mut properties, parent_style);
         apply_inheritance(&mut properties, parent_style);
         apply_initial_values(&mut properties);
@@ -287,6 +299,180 @@ fn cascade_rank(candidate: &Candidate) -> (u8, u8) {
     (importance, origin)
 }
 
+fn log_unsupported_css_if_enabled(property: &str, value: &Value) {
+    let sqlite_path = unsupported_css_sqlite_path();
+    if let Some(path) = sqlite_path.as_deref() {
+        ensure_unsupported_css_sqlite_schema(path);
+    }
+
+    if is_supported_property(property) {
+        return;
+    }
+
+    let rendered_value = render_value(value);
+    if let Some(path) = sqlite_path.as_deref() {
+        persist_unsupported_css_to_sqlite(path, property, &rendered_value);
+    }
+
+    if unsupported_css_logging_enabled() {
+        let key = format!("{property}={rendered_value}");
+        let logged = UNSUPPORTED_CSS_LOGGED.get_or_init(|| Mutex::new(HashSet::new()));
+        let mut logged = logged.lock().expect("unsupported css log lock poisoned");
+        if logged.insert(key.clone()) {
+            eprintln!("[omoikane][unsupported-css] {key}");
+        }
+    }
+}
+
+fn unsupported_css_logging_enabled() -> bool {
+    std::env::var("OMOIKANE_LOG_UNSUPPORTED_CSS")
+        .map(|value| {
+            let value = value.trim();
+            value == "1" || value.eq_ignore_ascii_case("true") || value.eq_ignore_ascii_case("yes")
+        })
+        .unwrap_or(false)
+}
+
+fn unsupported_css_sqlite_path() -> Option<String> {
+    std::env::var("OMOIKANE_UNSUPPORTED_CSS_SQLITE")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+fn ensure_unsupported_css_sqlite_schema(path: &str) {
+    let initialized = SQLITE_LOG_INITIALIZED.get_or_init(|| Mutex::new(HashSet::new()));
+    let mut initialized = initialized
+        .lock()
+        .expect("sqlite css log init lock poisoned");
+    if initialized.contains(path) {
+        return;
+    }
+
+    let result = (|| -> Result<(), rusqlite::Error> {
+        let conn = Connection::open(path)?;
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS unsupported_css_log (
+                property TEXT NOT NULL,
+                value TEXT NOT NULL,
+                first_seen_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                last_seen_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                occurrences INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (property, value)
+            );
+            CREATE INDEX IF NOT EXISTS idx_unsupported_css_log_occurrences
+            ON unsupported_css_log (occurrences DESC);",
+        )?;
+        Ok(())
+    })();
+
+    match result {
+        Ok(()) => {
+            initialized.insert(path.to_string());
+        }
+        Err(error) => log_sqlite_error(&error),
+    }
+}
+
+fn persist_unsupported_css_to_sqlite(path: &str, property: &str, value: &str) {
+    ensure_unsupported_css_sqlite_schema(path);
+
+    let result = (|| -> Result<(), rusqlite::Error> {
+        let conn = Connection::open(path)?;
+        conn.execute(
+            "INSERT INTO unsupported_css_log (property, value, occurrences)
+             VALUES (?1, ?2, 1)
+             ON CONFLICT(property, value) DO UPDATE SET
+               occurrences = unsupported_css_log.occurrences + 1,
+               last_seen_at = CURRENT_TIMESTAMP",
+            params![property, value],
+        )?;
+        Ok(())
+    })();
+
+    if let Err(error) = result {
+        log_sqlite_error(&error);
+    }
+}
+
+fn log_sqlite_error(error: &rusqlite::Error) {
+    let error_key = format!("{error}");
+    let errors = SQLITE_LOG_ERRORS.get_or_init(|| Mutex::new(HashSet::new()));
+    let mut errors = errors.lock().expect("sqlite css log error lock poisoned");
+    if errors.insert(error_key.clone()) {
+        eprintln!("[omoikane][unsupported-css][sqlite-error] {error_key}");
+    }
+}
+
+fn is_supported_property(name: &str) -> bool {
+    matches!(
+        name,
+        "align-items"
+            | "align-self"
+            | "background-attachment"
+            | "background-color"
+            | "background-image"
+            | "background-position-x"
+            | "background-position-y"
+            | "background-repeat"
+            | "border-bottom-color"
+            | "border-bottom-style"
+            | "border-bottom-width"
+            | "border-collapse"
+            | "border-left-color"
+            | "border-left-style"
+            | "border-left-width"
+            | "border-right-color"
+            | "border-right-style"
+            | "border-right-width"
+            | "border-spacing"
+            | "border-style"
+            | "border-top-color"
+            | "border-top-style"
+            | "border-top-width"
+            | "bottom"
+            | "clear"
+            | "color"
+            | "content"
+            | "display"
+            | "flex-direction"
+            | "flex-grow"
+            | "flex-shrink"
+            | "flex-wrap"
+            | "float"
+            | "font-family"
+            | "font-size"
+            | "font-style"
+            | "font-weight"
+            | "height"
+            | "justify-content"
+            | "left"
+            | "line-height"
+            | "margin-bottom"
+            | "margin-left"
+            | "margin-right"
+            | "margin-top"
+            | "max-height"
+            | "max-width"
+            | "min-height"
+            | "min-width"
+            | "overflow"
+            | "padding-bottom"
+            | "padding-left"
+            | "padding-right"
+            | "padding-top"
+            | "position"
+            | "right"
+            | "text-align"
+            | "top"
+            | "vertical-align"
+            | "visibility"
+            | "white-space"
+            | "width"
+            | "z-index"
+    )
+}
+
 fn compute_value(value: &Value, property_name: &str, parent_font_size: f32) -> ComputedValue {
     match value {
         Value::Keyword(keyword) => {
@@ -349,6 +535,80 @@ fn compute_value(value: &Value, property_name: &str, parent_font_size: f32) -> C
             }
         }
     }
+}
+
+fn apply_presentational_hints(
+    node: &NodeHandle,
+    properties: &mut BTreeMap<String, ComputedValue>,
+    pseudo: Option<PseudoElement>,
+) {
+    if pseudo.is_some() || node.node_type() != NodeType::Element {
+        return;
+    }
+
+    let attributes = node.attributes().unwrap_or_default();
+
+    if !properties.contains_key("background-color") {
+        if let Some(background) = attributes
+            .get("bgcolor")
+            .and_then(|value| parse_legacy_color_hint(value))
+        {
+            properties.insert("background-color".to_string(), ComputedValue::Color(background));
+        }
+    }
+
+    if !properties.contains_key("color")
+        && node
+            .tag_name()
+            .as_deref()
+            .is_some_and(|name| name.eq_ignore_ascii_case("body"))
+    {
+        if let Some(color) = attributes
+            .get("text")
+            .and_then(|value| parse_legacy_color_hint(value))
+        {
+            properties.insert("color".to_string(), ComputedValue::Color(color));
+        }
+    }
+
+    if !properties.contains_key("text-align") {
+        if let Some(align) = attributes
+            .get("align")
+            .map(|value| value.trim().to_ascii_lowercase())
+            .filter(|value| matches!(value.as_str(), "left" | "right" | "center" | "justify"))
+        {
+            properties.insert("text-align".to_string(), ComputedValue::Keyword(align));
+        }
+    }
+}
+
+fn parse_legacy_color_hint(value: &str) -> Option<String> {
+    let value = value.trim();
+    if value.is_empty() {
+        return None;
+    }
+
+    if let Some(hex) = value.strip_prefix('#') {
+        return if is_hex_color(hex) {
+            Some(format!("#{hex}").to_ascii_lowercase())
+        } else {
+            None
+        };
+    }
+
+    if is_hex_color(value) {
+        return Some(format!("#{value}").to_ascii_lowercase());
+    }
+
+    if value.chars().all(|ch| ch.is_ascii_alphabetic()) {
+        return Some(value.to_ascii_lowercase());
+    }
+
+    None
+}
+
+fn is_hex_color(value: &str) -> bool {
+    (value.len() == 3 || value.len() == 6) && value.chars().all(|ch| ch.is_ascii_hexdigit())
 }
 
 fn apply_initial_values(properties: &mut BTreeMap<String, ComputedValue>) {
@@ -467,6 +727,9 @@ fn render_value(value: &Value) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
     use crate::css::{PseudoElement, parse_stylesheet};
     use crate::dom::NodeHandle;
 
@@ -532,6 +795,94 @@ mod tests {
             style.get("color"),
             Some(&ComputedValue::Color("green".to_string()))
         );
+    }
+
+    #[test]
+    fn identifies_supported_property_names() {
+        assert!(is_supported_property("background-color"));
+        assert!(is_supported_property("position"));
+        assert!(!is_supported_property("transform"));
+        assert!(!is_supported_property("filter"));
+    }
+
+    #[test]
+    fn applies_legacy_html_presentational_hints() {
+        let document = NodeHandle::document();
+        let html = NodeHandle::element("html");
+        let body = NodeHandle::element("body");
+        let cell = NodeHandle::element("td");
+        cell.set_attribute("bgcolor", "336699");
+        cell.set_attribute("align", "center");
+        body.set_attribute("text", "#112233");
+        document.append_child(html.clone());
+        html.append_child(body.clone());
+        body.append_child(cell.clone());
+
+        let mut resolver = StyleResolver::new();
+        let body_style = resolver.computed_style(&body);
+        let cell_style = resolver.computed_style(&cell);
+
+        assert_eq!(
+            body_style.get("color"),
+            Some(&ComputedValue::Color("#112233".to_string()))
+        );
+        assert_eq!(
+            cell_style.get("background-color"),
+            Some(&ComputedValue::Color("#336699".to_string()))
+        );
+        assert_eq!(
+            cell_style.get("text-align"),
+            Some(&ComputedValue::Keyword("center".to_string()))
+        );
+    }
+
+    #[test]
+    fn sqlite_logging_creates_schema_and_accumulates_occurrences() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let db_path = std::env::temp_dir().join(format!("omoikane-unsupported-css-{unique}.db"));
+        let db_path_str = db_path.to_string_lossy().to_string();
+
+        ensure_unsupported_css_sqlite_schema(&db_path_str);
+        persist_unsupported_css_to_sqlite(&db_path_str, "transform", "translateX(10px)");
+        persist_unsupported_css_to_sqlite(&db_path_str, "transform", "translateX(10px)");
+        persist_unsupported_css_to_sqlite(&db_path_str, "filter", "blur(4px)");
+
+        let conn = Connection::open(&db_path_str).unwrap();
+        let mut stmt = conn
+            .prepare(
+                "SELECT property, value, occurrences
+                 FROM unsupported_css_log
+                 ORDER BY property, value",
+            )
+            .unwrap();
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?,
+                ))
+            })
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+
+        assert_eq!(rows.len(), 2);
+        assert_eq!(
+            rows[0],
+            ("filter".to_string(), "blur(4px)".to_string(), 1_i64)
+        );
+        assert_eq!(
+            rows[1],
+            ("transform".to_string(), "translateX(10px)".to_string(), 2_i64)
+        );
+
+        drop(stmt);
+        drop(conn);
+        let _ = fs::remove_file(db_path);
     }
 
     #[test]
