@@ -598,6 +598,8 @@ mod tests {
             tls_stream.write_all(&response.encode()).unwrap();
             tls_stream.write_all(&data.encode()).unwrap();
             tls_stream.flush().unwrap();
+            // Wait for the client to close the connection to avoid "Connection reset by peer"
+            let _ = tls_stream.read(&mut [0u8; 1]);
         });
 
         let addr: std::net::SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
