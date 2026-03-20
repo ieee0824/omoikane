@@ -2,7 +2,7 @@
 number: 013-3
 slug: external-image-fetch
 parent: 013-real-world-rendering
-status: open
+status: closed
 ---
 
 # 外部画像のHTTPフェッチと描画
