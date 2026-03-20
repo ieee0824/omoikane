@@ -2,7 +2,7 @@
 number: 012-11
 slug: smile-curve-border-trick
 parent: 012-acid2-official-conformance
-status: open
+status: closed
 ---
 
 # smile の曲線形状（nested float/absolute/border）

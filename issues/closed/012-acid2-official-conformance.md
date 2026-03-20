@@ -1,7 +1,7 @@
 ---
 number: 012
 slug: acid2-official-conformance
-status: open
+status: closed
 ---
 
 # Acid2 公式リファレンス一致
@@ -11,7 +11,7 @@ status: open
 
 ## 現状
 - `paint::tests::acid2_fixture_matches_official_reference_rendering` を `--ignored` で実行すると失敗する
-- 差分ピクセル数は現在 52
+- 差分ピクセル数は現在 28
 - 差分画像は `tests/output/acid2/acid2.official-reference.{actual,expected,diff}.png` に出力される
 
 ## 進捗メモ
@@ -106,8 +106,9 @@ status: open
 - parent-child top margin collapsing を実装（CSS 2.1 §8.3.1）。親に border/padding-top がない場合、最初の in-flow child の margin-top が親と collapse。公式比較差分 `5,008 -> 2,992`
 - float children の paint で include_phase_descendants=true に変更し、float 内の positioned 要素（smile の em border 等）が描画されるようにした
 - zero-sized border box の描画を「三角形の寄せ集め」から「外枠-内枠の4辺ポリゴン塗り」に変更し、鼻ダイヤ/口周りの境界を改善。公式比較差分 `2,992 -> 2,740`
-- `line-height` と inline strut の扱いを見直し、下半分の縦ズレを縮小。最新の公式比較差分は `52`
-- 残差は鼻ダイヤの対角境界と目の外側カーブ周辺の微小ピクセル差に集中している
+- `line-height` と inline strut の扱いを見直し、下半分の縦ズレを縮小。公式比較差分 `2,740 -> 52`
+- `zero-sized border box` の塗り順を `top=0` / `bottom=0` ケースで分岐し、triangle の境界判定を top-left ルールへ寄せた。公式比較差分 `52 -> 28`
+- 残差は鼻ダイヤの対角境界 12px と、目の外側カーブ周辺の 1 階調差 16px に集中している
 
 ## 子issue
 
@@ -134,9 +135,9 @@ status: open
 
 ## 残課題と優先度
 
-残り 52px の内訳推定:
-- 鼻ダイヤの対角境界 ≈ 40px
-- 目の外側カーブ周辺 ≈ 12px
+残り 28px の内訳推定:
+- 鼻ダイヤの対角境界 ≈ 12px
+- 目の外側カーブ周辺 ≈ 16px
 
 優先実装:
 - `paint_zero_sized_border_box` / `fill_triangle_clipped` の境界判定（floor/ceil と内外判定）を微調整する

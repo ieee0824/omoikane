@@ -2,7 +2,7 @@
 number: 012-10
 slug: scalp-fixed-position-alignment
 parent: 012-acid2-official-conformance
-status: open
+status: closed
 ---
 
 # scalp（position:fixed）の顔との位置合わせ

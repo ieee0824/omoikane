@@ -2,7 +2,7 @@
 number: 012-9
 slug: nose-diamond-pseudo-elements
 parent: 012-acid2-official-conformance
-status: open
+status: closed
 ---
 
 # 鼻のダイヤモンド形状（`:before` / `:after` の border triangle）
@@ -12,7 +12,7 @@ status: open
 Acid2 の `.nose div div` の中央に赤い四角（2em × 2em）があり、
 `:before` と `:after` 擬似要素の border で上下三角形を描いてダイヤモンド形状を作る。
 赤い四角がそのまま見える状態は解消済みで、現在はダイヤモンド形状まで到達している。
-ただし公式比較では対角線境界に微小なピクセル差が残っている（全体差分 52px の主因）。
+ただし公式比較では対角線境界に微小なピクセル差が残っている（全体差分 28px のうち 12px が主因）。
 
 ## 仕様参照
 
