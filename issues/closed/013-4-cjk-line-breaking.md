@@ -2,7 +2,7 @@
 number: 013-4
 slug: cjk-line-breaking
 parent: 013-real-world-rendering
-status: open
+status: closed
 ---
 
 # CJKテキストの行折り返し・禁則処理

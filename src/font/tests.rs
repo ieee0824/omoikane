@@ -423,3 +423,54 @@ fn test_layout_metrics() {
     assert!(metrics.descent >= 0.0, "Descent should be non-negative");
     assert!(metrics.average_advance > 0.0, "Average advance should be positive");
 }
+
+    #[test]
+    #[ignore = "debug test"]
+    fn debug_hello_world_measurement() {
+        use crate::font::load_system_font;
+        
+        let font = load_system_font("sans-serif").unwrap();
+        let size = 32.0; // 2em = 32px
+        
+        // Check individual character advances
+        println!("Font size: {}px", size);
+        println!("' ' (space) advance: {:.2}px", font.glyph_advance(' ', size));
+        println!("'H' advance: {:.2}px", font.glyph_advance('H', size));
+        println!("'e' advance: {:.2}px", font.glyph_advance('e', size));
+        println!("'l' advance: {:.2}px", font.glyph_advance('l', size));
+        println!("'o' advance: {:.2}px", font.glyph_advance('o', size));
+        
+        // Measure text widths
+        let hello = "Hello";
+        let world = "World!";
+        let full = "Hello World!";
+        
+        println!("\"{}\" width: {:.2}px", hello, font.measure_text_width(hello, size));
+        println!("\"{}\" width: {:.2}px", world, font.measure_text_width(world, size));
+        println!("\"{}\" width: {:.2}px", full, font.measure_text_width(full, size));
+        println!("Sum Hello + space + World! = {:.2}px", 
+            font.measure_text_width(hello, size) + 
+            font.glyph_advance(' ', size) + 
+            font.measure_text_width(world, size));
+    }
+
+    #[test]
+    #[ignore = "debug test"]
+    fn debug_nbsp_vs_space() {
+        use crate::font::load_system_font;
+        
+        let font = load_system_font("sans-serif").unwrap();
+        let size = 24.0;
+        
+        let space = ' ';
+        let nbsp = '\u{00A0}';
+        
+        println!("Font size: {}px", size);
+        println!("Regular space ' ' advance: {:.2}px", font.glyph_advance(space, size));
+        println!("NBSP '\\u{{00A0}}' advance: {:.2}px", font.glyph_advance(nbsp, size));
+        println!("'H' advance: {:.2}px", font.glyph_advance('H', size));
+        
+        // Measure text width
+        println!("\"Hello World!\" (regular space): {:.2}px", font.measure_text_width("Hello World!", size));
+        println!("\"Hello\\u{{00A0}}World!\" (NBSP): {:.2}px", font.measure_text_width("Hello\u{00A0}World!", size));
+    }

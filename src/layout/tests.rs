@@ -285,7 +285,7 @@ use crate::layout::*;
             Rect {
                 x: 0.0,
                 y: 0.0,
-                width: 70.0,
+                width: 50.0, // Narrower width to force 3 lines with real font metrics
                 height: 0.0,
             },
         )
@@ -2223,3 +2223,67 @@ use crate::layout::*;
             container_box.dimensions.content.height,
         );
     }
+
+    #[test]
+    fn cjk_text_splits_between_characters() {
+        // Test that CJK text is split between characters for line breaking
+        let pieces = super::split_words_preserving_spaces_cjk("日本語");
+        // Should be split into individual characters
+        assert_eq!(pieces.len(), 3);
+        assert_eq!(pieces[0], "日");
+        assert_eq!(pieces[1], "本");
+        assert_eq!(pieces[2], "語");
+    }
+
+    #[test]
+    fn cjk_kinsoku_keeps_punctuation_with_previous() {
+        // Line-start prohibited characters should stay with previous character
+        let pieces = super::split_words_preserving_spaces_cjk("日本。語");
+        // '。' should stay with '本', not be its own piece
+        assert_eq!(pieces.len(), 3);
+        assert_eq!(pieces[0], "日");
+        assert_eq!(pieces[1], "本。");
+        assert_eq!(pieces[2], "語");
+    }
+
+    #[test]
+    fn cjk_kinsoku_keeps_opening_bracket_with_next() {
+        // Line-end prohibited characters should stay with next character
+        let pieces = super::split_words_preserving_spaces_cjk("日「本」語");
+        // '「' should stay with '本', '」' should stay with '本'
+        assert_eq!(pieces.len(), 3);
+        assert_eq!(pieces[0], "日");
+        assert_eq!(pieces[1], "「本」");
+        assert_eq!(pieces[2], "語");
+    }
+
+    #[test]
+    fn mixed_ascii_and_cjk_text_splits_correctly() {
+        // Mixed ASCII and CJK should break at transitions
+        let pieces = super::split_words_preserving_spaces_cjk("Hello日本語World");
+        assert!(pieces.len() >= 3);
+        assert_eq!(pieces[0], "Hello");
+        // CJK characters should be split
+        assert!(pieces.contains(&"日".to_string()));
+    }
+
+    #[test]
+    fn spaces_still_cause_breaks() {
+        // Spaces should still cause breaks
+        let pieces = super::split_words_preserving_spaces_cjk("hello world");
+        assert_eq!(pieces.len(), 3);
+        assert_eq!(pieces[0], "hello");
+        assert_eq!(pieces[1], " ");
+        assert_eq!(pieces[2], "world");
+    }
+
+    #[test]
+    fn cjk_small_kana_stays_with_previous() {
+        // Small kana (っ, ゃ, etc.) should stay with previous character
+        let pieces = super::split_words_preserving_spaces_cjk("日本っ語");
+        assert_eq!(pieces.len(), 3);
+        assert_eq!(pieces[0], "日");
+        assert_eq!(pieces[1], "本っ");
+        assert_eq!(pieces[2], "語");
+    }
+

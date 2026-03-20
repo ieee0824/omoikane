@@ -2,7 +2,7 @@
 number: 013-2
 slug: external-css-fetch
 parent: 013-real-world-rendering
-status: open
+status: closed
 ---
 
 # 外部CSSのHTTPフェッチと適用

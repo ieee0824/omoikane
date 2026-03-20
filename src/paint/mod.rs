@@ -826,11 +826,17 @@ fn paint_text_with_font(
     // Baseline is at rect.y + ascender (ascender is positive, descender is negative)
     let baseline_y = rect.y + metrics.ascender;
     let mut cursor_x = rect.x;
+    let mut previous_char = None;
 
     for ch in text.chars() {
+        if let Some(prev) = previous_char {
+            cursor_x += font.glyph_kerning(prev, ch, font_size);
+        }
+
         if ch.is_whitespace() {
             // For whitespace, just advance the cursor
             cursor_x += font.glyph_advance(ch, font_size);
+            previous_char = Some(ch);
             continue;
         }
 
@@ -856,6 +862,7 @@ fn paint_text_with_font(
             // If rasterization fails, use fallback advance
             cursor_x += font.glyph_advance(ch, font_size);
         }
+        previous_char = Some(ch);
     }
 }
 

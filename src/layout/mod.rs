@@ -8,13 +8,15 @@ use std::collections::HashMap;
 
 use crate::css::{ComputedStyle, ComputedValue, PseudoElement, StyleResolver};
 use crate::dom::{Node, NodeHandle, NodeType};
+use crate::font::{load_system_font, Font};
 use crate::http::Client;
 use crate::paint::{DataUri, Image, parse_data_uri};
 
-// Thread-local cache for fetched images to avoid redundant fetches
+// Thread-local cache for fetched images and fonts to avoid redundant loads
 thread_local! {
     static IMAGE_CACHE: RefCell<HashMap<String, Option<Image>>> = RefCell::new(HashMap::new());
     static HTTP_CLIENT: RefCell<Client> = RefCell::new(Client::new());
+    static LAYOUT_FONT: RefCell<Option<Font>> = RefCell::new(None);
 }
 
 /// A rectangle in layout space.
@@ -2612,7 +2614,7 @@ fn split_text_segment(text: &str, metrics: FontMetrics, line_height: f32) -> Vec
         for (index, part) in text.split('\n').enumerate() {
             if !part.is_empty() {
                 pieces.extend(
-                    split_words_preserving_spaces(part)
+                    split_words_preserving_spaces_cjk(part)
                         .into_iter()
                         .map(|piece| InlinePiece::Fragment {
                             width: measure_text_width(&piece, metrics),
@@ -2627,7 +2629,7 @@ fn split_text_segment(text: &str, metrics: FontMetrics, line_height: f32) -> Vec
         }
         pieces
     } else {
-        split_words_preserving_spaces(text)
+        split_words_preserving_spaces_cjk(text)
             .into_iter()
             .map(|piece| InlinePiece::Fragment {
                 width: measure_text_width(&piece, metrics),
@@ -2638,23 +2640,110 @@ fn split_text_segment(text: &str, metrics: FontMetrics, line_height: f32) -> Vec
     }
 }
 
-fn split_words_preserving_spaces(text: &str) -> Vec<String> {
+/// Check if a character is a CJK ideograph or related character.
+/// This includes CJK Unified Ideographs, Hiragana, Katakana, and common symbols.
+fn is_cjk_char(ch: char) -> bool {
+    matches!(ch,
+        // CJK Unified Ideographs
+        '\u{4E00}'..='\u{9FFF}' |
+        // CJK Unified Ideographs Extension A
+        '\u{3400}'..='\u{4DBF}' |
+        // Hiragana
+        '\u{3040}'..='\u{309F}' |
+        // Katakana
+        '\u{30A0}'..='\u{30FF}' |
+        // Katakana Phonetic Extensions
+        '\u{31F0}'..='\u{31FF}' |
+        // Halfwidth and Fullwidth Forms (Katakana)
+        '\u{FF65}'..='\u{FF9F}' |
+        // CJK Symbols and Punctuation
+        '\u{3000}'..='\u{303F}' |
+        // Fullwidth ASCII variants
+        '\u{FF01}'..='\u{FF60}' |
+        // Hangul Syllables
+        '\u{AC00}'..='\u{D7AF}'
+    )
+}
+
+/// Characters that must not appear at the start of a line (line-start prohibited).
+/// These are typically closing punctuation and certain symbols.
+fn is_line_start_prohibited(ch: char) -> bool {
+    matches!(ch,
+        // Japanese punctuation
+        '。' | '、' | '，' | '．' | '・' | '：' | '；' | '！' | '？' |
+        // Closing brackets
+        '）' | '」' | '』' | '】' | '〕' | '｝' | '］' |
+        // Other
+        'ー' | '～' | '…' | '‥' |
+        // Small kana
+        'ぁ' | 'ぃ' | 'ぅ' | 'ぇ' | 'ぉ' | 'っ' | 'ゃ' | 'ゅ' | 'ょ' | 'ゎ' |
+        'ァ' | 'ィ' | 'ゥ' | 'ェ' | 'ォ' | 'ッ' | 'ャ' | 'ュ' | 'ョ' | 'ヮ'
+    )
+}
+
+/// Characters that must not appear at the end of a line (line-end prohibited).
+/// These are typically opening punctuation.
+fn is_line_end_prohibited(ch: char) -> bool {
+    matches!(ch,
+        // Opening brackets
+        '（' | '「' | '『' | '【' | '〔' | '｛' | '［'
+    )
+}
+
+/// Split text into pieces that can be laid out, with CJK-aware breaking.
+/// This allows line breaks between CJK characters while respecting kinsoku rules.
+fn split_words_preserving_spaces_cjk(text: &str) -> Vec<String> {
     let mut pieces = Vec::new();
     let mut current = String::new();
-    let mut was_space = None;
 
     for ch in text.chars() {
         let is_space = ch == ' ';
-        match was_space {
-            Some(previous) if previous != is_space => {
-                if !current.is_empty() {
-                    pieces.push(std::mem::take(&mut current));
-                }
+        let is_cjk = is_cjk_char(ch);
+
+        // Check if we should break before this character
+        let should_break = if current.is_empty() {
+            false
+        } else if is_space {
+            // Break before space if previous was not space
+            !current.ends_with(' ')
+        } else if is_cjk {
+            let prev_char = current.chars().last().unwrap();
+            let prev_is_cjk = is_cjk_char(prev_char);
+            let prev_is_space = prev_char == ' ';
+
+            if prev_is_space {
+                // Always break after space
+                true
+            } else if prev_is_cjk {
+                // Between two CJK characters: check kinsoku rules
+                // Don't break if current char is line-start prohibited
+                // Don't break if previous char is line-end prohibited
+                !is_line_start_prohibited(ch) && !is_line_end_prohibited(prev_char)
+            } else {
+                // Transition from non-CJK to CJK
+                true
             }
-            _ => {}
+        } else {
+            // Non-CJK, non-space character
+            let prev_char = current.chars().last().unwrap();
+            let prev_is_space = prev_char == ' ';
+            let prev_is_cjk = is_cjk_char(prev_char);
+
+            if prev_is_space {
+                true
+            } else if prev_is_cjk {
+                // Transition from CJK to non-CJK: allow break unless kinsoku
+                !is_line_start_prohibited(ch)
+            } else {
+                false
+            }
+        };
+
+        if should_break && !current.is_empty() {
+            pieces.push(std::mem::take(&mut current));
         }
+
         current.push(ch);
-        was_space = Some(is_space);
     }
 
     if !current.is_empty() {
@@ -2715,7 +2804,23 @@ fn push_line(
 }
 
 fn measure_text_width(text: &str, metrics: FontMetrics) -> f32 {
-    text.chars().count() as f32 * metrics.average_advance
+    // Try to use actual font glyph advances for accurate measurement
+    LAYOUT_FONT.with(|cell| {
+        let mut font_ref = cell.borrow_mut();
+
+        // Lazily load the font on first use
+        if font_ref.is_none() {
+            *font_ref = load_system_font("sans-serif").ok();
+        }
+
+        if let Some(ref font) = *font_ref {
+            // Use real glyph advances from the font
+            font.measure_text_width(text, metrics.font_size)
+        } else {
+            // Fallback to approximation when no font is available
+            text.chars().count() as f32 * metrics.average_advance
+        }
+    })
 }
 
 fn is_display_none(style: &ComputedStyle) -> bool {

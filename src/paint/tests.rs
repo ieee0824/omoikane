@@ -2616,3 +2616,464 @@ use crate::paint::*;
         assert_eq!(stylesheets.len(), 1);
         assert!(stylesheets[0].contains("color: green"));
     }
+
+    #[test]
+    #[ignore = "debug test"]
+    fn debug_hello_world_layout() {
+        let html = fs::read_to_string(acid2_official_reference_html_path()).unwrap();
+        let document = TreeBuilder::parse(&html).document();
+        materialize_local_assets(&document, &acid2_fixture_dir()).unwrap();
+
+        let mut resolver = StyleResolver::new();
+        for stylesheet in extract_author_stylesheets(&document, None).unwrap() {
+            resolver.add_stylesheet(
+                Origin::Author,
+                parse_stylesheet_forgiving(&stylesheet).unwrap(),
+            );
+        }
+
+        let layout = crate::layout::layout_tree(
+            &document,
+            &mut resolver,
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 800.0,
+                height: 600.0,
+            },
+        )
+        .unwrap();
+
+        // Find h2 box and print its text fragments
+        fn find_h2_lines(lb: &crate::layout::LayoutBox) -> Vec<&crate::layout::LineBox> {
+            if lb.node.tag_name().as_deref() == Some("h2") {
+                return lb.lines.iter().collect();
+            }
+            for child in &lb.children {
+                let lines = find_h2_lines(child);
+                if !lines.is_empty() {
+                    return lines;
+                }
+            }
+            vec![]
+        }
+        
+        let lines = find_h2_lines(&layout);
+        println!("Found {} lines in h2", lines.len());
+        for (i, line) in lines.iter().enumerate() {
+            println!("Line {}: ", i);
+            for frag in &line.fragments {
+                match &frag.content {
+                    crate::layout::InlineFragmentContent::Text(t) => {
+                        println!("  Text: {:?}", t);
+                        println!("    rect: x={:.2}, y={:.2}, w={:.2}, h={:.2}", 
+                            frag.rect.x, frag.rect.y, frag.rect.width, frag.rect.height);
+                        println!("    font_size: {:.2}", frag.metrics.font_size);
+                    }
+                    _ => println!("  Other content"),
+                }
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "debug test"]
+    fn debug_acid2_hello_world_layout() {
+        let html = fs::read_to_string(acid2_fixture_path()).unwrap();
+        let document = TreeBuilder::parse(&html).document();
+        materialize_local_assets(&document, &acid2_fixture_dir()).unwrap();
+
+        let mut resolver = StyleResolver::new();
+        for stylesheet in extract_author_stylesheets(&document, None).unwrap() {
+            resolver.add_stylesheet(
+                Origin::Author,
+                parse_stylesheet_forgiving(&stylesheet).unwrap(),
+            );
+        }
+
+        let layout = crate::layout::layout_tree(
+            &document,
+            &mut resolver,
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 800.0,
+                height: 600.0,
+            },
+        )
+        .unwrap();
+
+        // Find h2 box and print its text fragments
+        fn find_h2_lines(lb: &crate::layout::LayoutBox) -> Vec<&crate::layout::LineBox> {
+            if lb.node.tag_name().as_deref() == Some("h2") {
+                return lb.lines.iter().collect();
+            }
+            for child in &lb.children {
+                let lines = find_h2_lines(child);
+                if !lines.is_empty() {
+                    return lines;
+                }
+            }
+            vec![]
+        }
+        
+        let lines = find_h2_lines(&layout);
+        println!("Found {} lines in h2 (acid2.html)", lines.len());
+        for (i, line) in lines.iter().enumerate() {
+            println!("Line {}: ", i);
+            for frag in &line.fragments {
+                match &frag.content {
+                    crate::layout::InlineFragmentContent::Text(t) => {
+                        println!("  Text: {:?}", t);
+                        println!("    rect: x={:.2}, y={:.2}, w={:.2}, h={:.2}", 
+                            frag.rect.x, frag.rect.y, frag.rect.width, frag.rect.height);
+                        println!("    font_size: {:.2}", frag.metrics.font_size);
+                    }
+                    _ => println!("  Other content"),
+                }
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "debug test"]
+    fn debug_paint_trace() {
+        use crate::font::load_system_font;
+        
+        let font = load_system_font("sans-serif").unwrap();
+        let size = 24.0;
+        let text = "Hello\u{00A0}World!";
+        
+        let mut cursor_x = 0.0_f32;
+        let mut previous_char = None;
+        
+        println!("Tracing paint for \"Hello\\u{{00A0}}World!\" at {}px", size);
+        for ch in text.chars() {
+            let start_x = cursor_x;
+            if let Some(prev) = previous_char {
+                cursor_x += font.glyph_kerning(prev, ch, size);
+            }
+            
+            if ch.is_whitespace() {
+                let advance = font.glyph_advance(ch, size);
+                cursor_x += advance;
+                println!("  '{:?}' (whitespace): x={:.2} -> {:.2} (advance={:.2})", 
+                    ch, start_x, cursor_x, advance);
+            } else {
+                let glyph = font.rasterize(ch, size).unwrap();
+                println!("  '{}': x={:.2} -> {:.2} (advance_x={:.2}, glyph_advance={:.2})",
+                    ch, start_x, cursor_x + glyph.advance_x, glyph.advance_x, 
+                    font.glyph_advance(ch, size));
+                cursor_x += glyph.advance_x;
+            }
+            previous_char = Some(ch);
+        }
+        println!("Final cursor_x: {:.2}", cursor_x);
+        println!("Expected width from measure_text_width: {:.2}", font.measure_text_width(text, size));
+    }
+
+    #[test]
+    #[ignore = "debug test"]
+    fn debug_paint_offsets() {
+        use crate::font::load_system_font;
+        
+        let font = load_system_font("sans-serif").unwrap();
+        let size = 24.0;
+        let text = "Hello\u{00A0}World!";
+        
+        println!("Glyph offsets for \"Hello\\u{{00A0}}World!\" at {}px", size);
+        for ch in text.chars() {
+            if !ch.is_whitespace() {
+                let glyph = font.rasterize(ch, size).unwrap();
+                println!("  '{}': offset_x={:.2}, offset_y={:.2}, advance_x={:.2}, w={}, h={}",
+                    ch, glyph.offset_x, glyph.offset_y, glyph.advance_x, glyph.width, glyph.height);
+            } else {
+                println!("  '{:?}': (whitespace, no glyph)", ch);
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "debug test"]
+    fn debug_actual_pixel_positions() {
+        use crate::font::load_system_font;
+        
+        let font = load_system_font("sans-serif").unwrap();
+        let size = 24.0;
+        let text = "Hello\u{00A0}World!";
+        let start_x = 84.0_f32;
+        
+        let metrics = font.metrics().at_size(size);
+        let baseline_y = 48.0 + metrics.ascender;
+        let mut cursor_x = start_x;
+        let mut previous_char = None;
+        
+        println!("Pixel positions for \"Hello\\u{{00A0}}World!\":");
+        println!("start_x={:.2}, baseline_y={:.2}", start_x, baseline_y);
+        
+        for ch in text.chars() {
+            if let Some(prev) = previous_char {
+                cursor_x += font.glyph_kerning(prev, ch, size);
+            }
+
+            if ch.is_whitespace() {
+                let advance = font.glyph_advance(ch, size);
+                println!("  '{:?}': skip (whitespace), cursor {:.2} -> {:.2}", ch, cursor_x, cursor_x + advance);
+                cursor_x += advance;
+            } else {
+                let glyph = font.rasterize(ch, size).unwrap();
+                let glyph_x = cursor_x + glyph.offset_x;
+                let glyph_y = baseline_y + glyph.offset_y;
+                println!("  '{}': draw at ({:.2}, {:.2}), cursor {:.2} -> {:.2}", 
+                    ch, glyph_x, glyph_y, cursor_x, cursor_x + glyph.advance_x);
+                cursor_x += glyph.advance_x;
+            }
+            previous_char = Some(ch);
+        }
+        println!("Final cursor: {:.2}", cursor_x);
+    }
+
+    #[test]
+    #[ignore = "debug paint"]
+    fn debug_reference_paint() {
+        let html = fs::read_to_string(acid2_official_reference_html_path()).unwrap();
+        let document = TreeBuilder::parse(&html).document();
+        materialize_local_assets(&document, &acid2_fixture_dir()).unwrap();
+
+        let mut resolver = StyleResolver::new();
+        for stylesheet in extract_author_stylesheets(&document, None).unwrap() {
+            resolver.add_stylesheet(
+                Origin::Author,
+                parse_stylesheet_forgiving(&stylesheet).unwrap(),
+            );
+        }
+
+        let layout = crate::layout::layout_tree(
+            &document,
+            &mut resolver,
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 800.0,
+                height: 600.0,
+            },
+        )
+        .unwrap();
+
+        // Find h2 and print its lines/fragments
+        fn find_h2(lb: &crate::layout::LayoutBox) -> Option<&crate::layout::LayoutBox> {
+            if lb.node.tag_name().as_deref() == Some("h2") {
+                return Some(lb);
+            }
+            for child in &lb.children {
+                if let Some(h2) = find_h2(child) {
+                    return Some(h2);
+                }
+            }
+            None
+        }
+        
+        if let Some(h2) = find_h2(&layout) {
+            println!("H2 layout box:");
+            println!("  content rect: x={:.2}, y={:.2}, w={:.2}, h={:.2}",
+                h2.dimensions.content.x, h2.dimensions.content.y, 
+                h2.dimensions.content.width, h2.dimensions.content.height);
+            println!("  lines: {}", h2.lines.len());
+            
+            for (li, line) in h2.lines.iter().enumerate() {
+                println!("  Line {}:", li);
+                for (fi, frag) in line.fragments.iter().enumerate() {
+                    match &frag.content {
+                        crate::layout::InlineFragmentContent::Text(t) => {
+                            println!("    Fragment {}: Text {:?}", fi, t);
+                            println!("      rect: x={:.2}, y={:.2}, w={:.2}, h={:.2}", 
+                                frag.rect.x, frag.rect.y, frag.rect.width, frag.rect.height);
+                        }
+                        _ => {
+                            println!("    Fragment {}: non-text", fi);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "debug pixel positions"]
+    fn debug_painted_pixel_positions() {
+        use crate::font::load_system_font;
+        
+        // Create a small canvas just for the text area
+        let mut canvas = super::Canvas::new(200, 30);
+        
+        let font = load_system_font("sans-serif").unwrap();
+        let text = "Hello\u{00A0}World!";
+        let font_size = 24.0;
+        let start_x = 0.0;
+        let start_y = 0.0;
+        let color = super::Color::rgb(0, 0, 255); // Blue
+        
+        // Paint the text
+        super::paint_text_with_font(
+            &mut canvas, 
+            Rect { x: start_x, y: start_y, width: 200.0, height: 30.0 },
+            text,
+            font_size,
+            &font,
+            color,
+            None
+        );
+        
+        // Find leftmost and rightmost non-transparent pixel
+        let mut min_x = 200u32;
+        let mut max_x = 0u32;
+        for y in 0..30 {
+            for x in 0..200 {
+                let idx = ((y * 200 + x) * 4) as usize;
+                if idx + 3 < canvas.pixels.len() && canvas.pixels[idx + 3] > 0 {
+                    min_x = min_x.min(x);
+                    max_x = max_x.max(x);
+                }
+            }
+        }
+        
+        println!("Painted text spans from x={} to x={}", min_x, max_x);
+        println!("Expected width: {:.2}", font.measure_text_width(text, font_size));
+        println!("Actual pixel width: {}", max_x - min_x + 1);
+        
+        // Find where "World!" starts by looking for gap
+        for x in 45..60 {
+            let mut has_pixel = false;
+            for y in 0..30 {
+                let idx = ((y * 200 + x) * 4) as usize;
+                if idx + 3 < canvas.pixels.len() && canvas.pixels[idx + 3] > 0 {
+                    has_pixel = true;
+                    break;
+                }
+            }
+            if !has_pixel {
+                println!("First blank column after 'Hello' starts at x={}", x);
+                break;
+            }
+        }
+        
+        for x in 45..150 {
+            let mut has_pixel = false;
+            for y in 0..30 {
+                let idx = ((y * 200 + x) * 4) as usize;
+                if idx + 3 < canvas.pixels.len() && canvas.pixels[idx + 3] > 0 {
+                    has_pixel = true;
+                    break;
+                }
+            }
+            if has_pixel && x > 50 {
+                println!("'World!' starts at x={}", x);
+                break;
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "debug aid: always emit acid2 official-reference comparison PNGs"]
+    fn debug_write_acid2_official_reference_outputs() {
+        let acid2_html = fs::read_to_string(acid2_fixture_path()).unwrap();
+        let acid2_document = TreeBuilder::parse(&acid2_html).document();
+        let mut acid2_resolver = StyleResolver::new();
+        for stylesheet in extract_author_stylesheets(&acid2_document, None).unwrap() {
+            acid2_resolver.add_stylesheet(
+                Origin::Author,
+                parse_stylesheet_forgiving(&stylesheet).unwrap(),
+            );
+        }
+        let mut acid2_layout = crate::layout::layout_tree(
+            &acid2_document,
+            &mut acid2_resolver,
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 800.0,
+                height: 600.0,
+            },
+        )
+        .unwrap();
+
+        let reference_html = fs::read_to_string(acid2_official_reference_html_path()).unwrap();
+        let reference_document = TreeBuilder::parse(&reference_html).document();
+        materialize_local_assets(&reference_document, &acid2_fixture_dir()).unwrap();
+        let mut reference_resolver = StyleResolver::new();
+        for stylesheet in extract_author_stylesheets(&reference_document, None).unwrap() {
+            reference_resolver.add_stylesheet(
+                Origin::Author,
+                parse_stylesheet_forgiving(&stylesheet).unwrap(),
+            );
+        }
+        let reference_layout = crate::layout::layout_tree(
+            &reference_document,
+            &mut reference_resolver,
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 800.0,
+                height: 600.0,
+            },
+        )
+        .unwrap();
+
+        if let (Some((top_x, top_y)), Some((reference_x, reference_y))) = (
+            find_layout_box_by_id(&acid2_layout, "top")
+                .map(|top| (top.dimensions.content.x, top.dimensions.content.y)),
+            find_first_layout_box_by_tag(&reference_layout, "h2")
+                .map(|heading| (heading.dimensions.content.x, heading.dimensions.content.y)),
+        ) {
+            translate_layout_box_for_test(
+                &mut acid2_layout,
+                &mut acid2_resolver,
+                reference_x - top_x,
+                reference_y - top_y,
+            );
+        }
+
+        let actual = paint_layout(
+            &acid2_layout,
+            &mut acid2_resolver,
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 800.0,
+                height: 600.0,
+            },
+        );
+        let expected = paint_layout(
+            &reference_layout,
+            &mut reference_resolver,
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 800.0,
+                height: 600.0,
+            },
+        );
+
+        let (diff, changed) = diff_canvases_with_tolerance(&actual, &expected, 1);
+        fs::create_dir_all(acid2_output_dir()).unwrap();
+        fs::write(
+            acid2_output_dir().join("acid2.official-reference.actual.png"),
+            actual.encode_png(),
+        )
+        .unwrap();
+        fs::write(
+            acid2_output_dir().join("acid2.official-reference.expected.png"),
+            expected.encode_png(),
+        )
+        .unwrap();
+        fs::write(
+            acid2_output_dir().join("acid2.official-reference.diff.png"),
+            diff.encode_png(),
+        )
+        .unwrap();
+
+        println!(
+            "debug_write_acid2_official_reference_outputs: changed pixels = {} (tolerance=1)",
+            changed
+        );
+    }
