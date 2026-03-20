@@ -2961,6 +2961,62 @@ fn extract_stylesheets_limits_recursive_import_depth() {
 }
 
 #[test]
+fn extract_stylesheets_follows_imports_even_when_parent_css_is_partially_invalid() {
+    use std::io::{BufRead, BufReader, Write};
+    use std::net::TcpListener;
+
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+
+    std::thread::spawn(move || {
+        for _ in 0..2 {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut reader = BufReader::new(&stream);
+            let mut request_line = String::new();
+            reader.read_line(&mut request_line).unwrap();
+            let path = request_line
+                .split_whitespace()
+                .nth(1)
+                .unwrap_or_default()
+                .to_string();
+            loop {
+                let mut h = String::new();
+                reader.read_line(&mut h).unwrap();
+                if h.trim().is_empty() {
+                    break;
+                }
+            }
+
+            let css_content = match path.as_str() {
+                "/main.css" => r#"@import "nested.css"; .main { color: black; broken }"#,
+                "/nested.css" => ".nested { color: green; }",
+                _ => "",
+            };
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{}",
+                css_content.len(),
+                css_content
+            );
+            stream.write_all(resp.as_bytes()).unwrap();
+            stream.flush().unwrap();
+        }
+    });
+
+    let html = r#"<html><head>
+            <link rel="stylesheet" href="/main.css">
+        </head><body></body></html>"#;
+    let document = TreeBuilder::parse(html).document();
+    let base_url = format!("http://127.0.0.1:{}/index.html", port)
+        .parse::<crate::http::Url>()
+        .unwrap();
+    let stylesheets = extract_author_stylesheets(&document, Some(&base_url)).unwrap();
+
+    assert_eq!(stylesheets.len(), 2);
+    assert!(stylesheets[0].contains(".nested"));
+    assert!(stylesheets[1].contains(".main"));
+}
+
+#[test]
 fn extract_stylesheets_supports_unquoted_url_import() {
     use std::io::{BufRead, BufReader, Write};
     use std::net::TcpListener;

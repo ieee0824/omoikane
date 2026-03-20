@@ -2026,7 +2026,7 @@ fn collect_stylesheet_with_imports(
 
 fn extract_import_hrefs(css: &str) -> Vec<String> {
     let Ok(stylesheet) = parse_stylesheet(css) else {
-        return Vec::new();
+        return extract_import_hrefs_forgiving(css);
     };
 
     let mut hrefs = Vec::new();
@@ -2040,6 +2040,131 @@ fn extract_import_hrefs(css: &str) -> Vec<String> {
         }
     }
     hrefs
+}
+
+fn extract_import_hrefs_forgiving(css: &str) -> Vec<String> {
+    let mut hrefs = Vec::new();
+    let chars: Vec<char> = css.chars().collect();
+    let mut index = 0usize;
+    let mut in_string = None::<char>;
+    let mut paren_depth = 0usize;
+
+    while index < chars.len() {
+        let ch = chars[index];
+
+        if let Some(quote) = in_string {
+            if ch == '\\' && index + 1 < chars.len() {
+                index += 2;
+                continue;
+            }
+            if ch == quote {
+                in_string = None;
+            }
+            index += 1;
+            continue;
+        }
+
+        if ch == '/' && chars.get(index + 1) == Some(&'*') {
+            index += 2;
+            while index + 1 < chars.len() && !(chars[index] == '*' && chars[index + 1] == '/') {
+                index += 1;
+            }
+            index = (index + 2).min(chars.len());
+            continue;
+        }
+
+        match ch {
+            '"' | '\'' => {
+                in_string = Some(ch);
+                index += 1;
+                continue;
+            }
+            '(' => {
+                paren_depth += 1;
+                index += 1;
+                continue;
+            }
+            ')' => {
+                paren_depth = paren_depth.saturating_sub(1);
+                index += 1;
+                continue;
+            }
+            _ => {}
+        }
+
+        if paren_depth == 0 && at_import_starts_at(&chars, index) {
+            let mut prelude_start = index + 7;
+            while prelude_start < chars.len() && chars[prelude_start].is_ascii_whitespace() {
+                prelude_start += 1;
+            }
+            let mut cursor = prelude_start;
+            let mut local_in_string = None::<char>;
+            let mut local_paren_depth = 0usize;
+            while cursor < chars.len() {
+                let c = chars[cursor];
+                if let Some(quote) = local_in_string {
+                    if c == '\\' && cursor + 1 < chars.len() {
+                        cursor += 2;
+                        continue;
+                    }
+                    if c == quote {
+                        local_in_string = None;
+                    }
+                    cursor += 1;
+                    continue;
+                }
+                if c == '"' || c == '\'' {
+                    local_in_string = Some(c);
+                    cursor += 1;
+                    continue;
+                }
+                if c == '(' {
+                    local_paren_depth += 1;
+                    cursor += 1;
+                    continue;
+                }
+                if c == ')' {
+                    local_paren_depth = local_paren_depth.saturating_sub(1);
+                    cursor += 1;
+                    continue;
+                }
+                if c == ';' && local_paren_depth == 0 {
+                    let prelude: String = chars[prelude_start..cursor].iter().collect();
+                    if let Some(href) = parse_import_href(&prelude) {
+                        hrefs.push(href);
+                    }
+                    cursor += 1;
+                    break;
+                }
+                cursor += 1;
+            }
+            index = cursor;
+            continue;
+        }
+
+        index += 1;
+    }
+
+    hrefs
+}
+
+fn at_import_starts_at(chars: &[char], index: usize) -> bool {
+    let target: [char; 7] = ['@', 'i', 'm', 'p', 'o', 'r', 't'];
+    if index + target.len() > chars.len() {
+        return false;
+    }
+    for (offset, expected) in target.iter().enumerate() {
+        if chars[index + offset].to_ascii_lowercase() != *expected {
+            return false;
+        }
+    }
+    if index + target.len() < chars.len() {
+        let next = chars[index + target.len()];
+        if next.is_ascii_alphanumeric() || next == '-' || next == '_' {
+            return false;
+        }
+    }
+    true
 }
 
 fn parse_import_href(prelude: &str) -> Option<String> {
@@ -2062,6 +2187,9 @@ fn parse_import_href(prelude: &str) -> Option<String> {
         }
         if let Some(quoted) = unquote_css_token(content) {
             return Some(quoted);
+        }
+        if content.starts_with('"') || content.starts_with('\'') {
+            return None;
         }
         return non_empty_token(content);
     }
@@ -2113,6 +2241,9 @@ fn unquote_css_token(token: &str) -> Option<String> {
         if ch == first {
             let value = token[1..index].trim();
             if value.is_empty() {
+                return None;
+            }
+            if !token[index + ch.len_utf8()..].trim().is_empty() {
                 return None;
             }
             return Some(value.to_string());
