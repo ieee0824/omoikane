@@ -2,7 +2,7 @@
 number: 013-5
 slug: external-css-fetch-fixes
 parent: 013-real-world-rendering
-status: open
+status: closed
 ---
 
 # 外部CSSフェッチの修正・改善（PR#4コメント対応）
