@@ -219,9 +219,19 @@ impl std::str::FromStr for Url {
 pub fn resolve_url(base: &Url, reference: &str) -> Result<Url, UrlParseError> {
     let reference = reference.trim();
 
-    // Absolute URL — parse directly.
-    if reference.contains("://") {
+    // Absolute HTTP(S) URL — parse directly.
+    if reference.starts_with("http://") || reference.starts_with("https://") {
         return reference.parse();
+    }
+
+    // References with an explicit HTTP(S) scheme but missing "//" (e.g. "http:foo")
+    // are not supported by our URL type; let the parser return an error instead of
+    // treating them as relative.
+    if let Some(colon_idx) = reference.find(':') {
+        let scheme = &reference[..colon_idx];
+        if scheme.eq_ignore_ascii_case("http") || scheme.eq_ignore_ascii_case("https") {
+            return reference.parse();
+        }
     }
 
     // Protocol-relative URL (e.g. "//cdn.example.com/style.css").
@@ -231,12 +241,13 @@ pub fn resolve_url(base: &Url, reference: &str) -> Result<Url, UrlParseError> {
 
     // Absolute path (e.g. "/css/style.css").
     if reference.starts_with('/') {
-        let (path, query) = split_path_query(reference);
+        let (raw_path, query) = split_path_query(reference);
+        let normalized = normalize_path(&raw_path);
         return Ok(Url {
             scheme: base.scheme.clone(),
             host: base.host.clone(),
             port: base.port,
-            path,
+            path: normalized,
             query,
         });
     }

@@ -1579,7 +1579,10 @@ fn collect_author_stylesheets(
                 let attributes = node.attributes().unwrap_or_default();
                 let rel = attributes.get("rel").cloned().unwrap_or_default();
                 let href = attributes.get("href").cloned().unwrap_or_default();
-                if rel.contains("stylesheet") && !href.is_empty() {
+                if rel.split_whitespace()
+                    .any(|token| token.eq_ignore_ascii_case("stylesheet"))
+                    && !href.is_empty()
+                {
                     if href.starts_with("data:text/css") {
                         match parse_data_uri(&href)? {
                             DataUri::Text { data, .. } => out.push(data),
@@ -1588,18 +1591,21 @@ fn collect_author_stylesheets(
                             }
                         }
                     } else if let Some(base) = base_url {
-                        if let Ok(resolved) = resolve_url(base, &href) {
-                            let url_str = resolved.to_string();
-                            if let Some(c) = client {
-                                match c.get(&url_str) {
-                                    Ok(resp) if resp.status_code() == 200 => {
-                                        if let Ok(css) = String::from_utf8(
-                                            resp.body().to_vec(),
-                                        ) {
-                                            out.push(css);
+                        // Only fetch relative URLs to prevent SSRF attacks.
+                        // Absolute URLs (containing "://") and protocol-relative URLs ("//"")
+                        // are not fetched.
+                        if !href.contains("://") && !href.starts_with("//") {
+                            if let Ok(resolved) = resolve_url(base, &href) {
+                                let url_str = resolved.to_string();
+                                if let Some(c) = client {
+                                    match c.get(&url_str) {
+                                        Ok(resp) if resp.status_code() == 200 => {
+                                            if let Ok(css_str) = std::str::from_utf8(resp.body()) {
+                                                out.push(css_str.to_owned());
+                                            }
                                         }
+                                        _ => {} // Skip on fetch failure
                                     }
-                                    _ => {} // Skip on fetch failure
                                 }
                             }
                         }
