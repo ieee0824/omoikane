@@ -1578,7 +1578,7 @@ fn collect_author_stylesheets(
             Some("link") => {
                 let attributes = node.attributes().unwrap_or_default();
                 let rel = attributes.get("rel").cloned().unwrap_or_default();
-                let href = attributes.get("href").cloned().unwrap_or_default();
+                let href = attributes.get("href").cloned().unwrap_or_default().trim().to_string();
                 if rel.split_whitespace()
                     .any(|token| token.eq_ignore_ascii_case("stylesheet"))
                     && !href.is_empty()
@@ -1591,17 +1591,22 @@ fn collect_author_stylesheets(
                             }
                         }
                     } else if let Some(base) = base_url {
-                        // Only fetch relative URLs to prevent SSRF attacks.
-                        // Absolute URLs (containing "://") and protocol-relative URLs ("//"")
-                        // are not fetched.
+                        // Only fetch same-origin URLs that do not specify a scheme, to prevent SSRF attacks.
+                        // Absolute URLs (containing "://") and protocol-relative URLs ("//")
+                        // are skipped; this still allows relative and absolute-path references
+                        // like "/css/style.css".
                         if !href.contains("://") && !href.starts_with("//") {
                             if let Ok(resolved) = resolve_url(base, &href) {
                                 let url_str = resolved.to_string();
                                 if let Some(c) = client {
                                     match c.get(&url_str) {
                                         Ok(resp) if resp.status_code() == 200 => {
-                                            if let Ok(css_str) = std::str::from_utf8(resp.body()) {
-                                                out.push(css_str.to_owned());
+                                            let body = resp.body();
+                                            const MAX_EXTERNAL_STYLESHEET_BYTES: usize = 1024 * 1024; // 1 MiB limit
+                                            if body.len() <= MAX_EXTERNAL_STYLESHEET_BYTES {
+                                                if let Ok(css_str) = std::str::from_utf8(body) {
+                                                    out.push(css_str.to_owned());
+                                                }
                                             }
                                         }
                                         _ => {} // Skip on fetch failure
@@ -4558,5 +4563,120 @@ mod tests {
         assert_eq!(stylesheets.len(), 2);
         assert!(stylesheets[0].contains("margin"));
         assert!(stylesheets[1].contains("color"));
+    }
+
+    #[test]
+    fn extract_stylesheets_trims_whitespace_only_href() {
+        let html = r#"<html><head>
+            <link rel="stylesheet" href="   ">
+            <style>p { color: blue; }</style>
+        </head><body></body></html>"#;
+
+        let document = TreeBuilder::parse(html).document();
+        let stylesheets = extract_author_stylesheets(&document, None).unwrap();
+
+        // Only the <style> should be included, whitespace-only href is skipped
+        assert_eq!(stylesheets.len(), 1);
+        assert!(stylesheets[0].contains("color: blue"));
+    }
+
+    #[test]
+    fn resolve_url_strips_fragment() {
+        let base: crate::http::Url = "https://example.com/dir/page.html".parse().unwrap();
+
+        // Fragment should be stripped before resolution
+        let resolved = crate::http::url::resolve_url(&base, "style.css#v2").unwrap();
+        assert_eq!(resolved.path(), "/dir/style.css");
+        assert_eq!(resolved.query(), None);
+
+        // Absolute path with fragment
+        let resolved = crate::http::url::resolve_url(&base, "/css/style.css#v1").unwrap();
+        assert_eq!(resolved.path(), "/css/style.css");
+    }
+
+    #[test]
+    fn resolve_url_rejects_non_http_schemes() {
+        let base: crate::http::Url = "https://example.com/page.html".parse().unwrap();
+
+        // Non-HTTP(S) schemes should be rejected (mailto, data, etc.)
+        assert!(crate::http::url::resolve_url(&base, "mailto:foo@example.com").is_err());
+        assert!(crate::http::url::resolve_url(&base, "ftp://ftp.example.com/file.css").is_err());
+
+        // data: URIs with embedded scheme should also be rejected
+        assert!(crate::http::url::resolve_url(&base, "data:,foo").is_err());
+    }
+
+    #[test]
+    fn extract_stylesheets_respects_css_size_limit() {
+        use std::io::{BufRead, BufReader, Write};
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+
+        std::thread::spawn(move || {
+            // Large CSS (exceeds 1 MiB limit)
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut reader = BufReader::new(&stream);
+            let mut line = String::new();
+            reader.read_line(&mut line).unwrap();
+            // Consume headers
+            loop {
+                let mut h = String::new();
+                reader.read_line(&mut h).unwrap();
+                if h.trim().is_empty() {
+                    break;
+                }
+            }
+
+            // Create a response with oversized CSS
+            let large_css = "body { color: red; }".repeat(100_000); // ~2 MiB
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{}",
+                large_css.len(),
+                large_css
+            );
+            stream.write_all(resp.as_bytes()).unwrap();
+            stream.flush().unwrap();
+
+            // Small CSS (under limit)
+            let (mut stream2, _) = listener.accept().unwrap();
+            let mut reader2 = BufReader::new(&stream2);
+            let mut line2 = String::new();
+            reader2.read_line(&mut line2).unwrap();
+            // Consume headers
+            loop {
+                let mut h = String::new();
+                reader2.read_line(&mut h).unwrap();
+                if h.trim().is_empty() {
+                    break;
+                }
+            }
+
+            let css = "p { color: green; }";
+            let resp2 = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{}",
+                css.len(),
+                css
+            );
+            stream2.write_all(resp2.as_bytes()).unwrap();
+            stream2.flush().unwrap();
+        });
+
+        let html = r#"<html><head>
+            <link rel="stylesheet" href="/large.css">
+            <link rel="stylesheet" href="/small.css">
+        </head><body></body></html>"#;
+
+        let document = TreeBuilder::parse(html).document();
+        let base_url = format!("http://127.0.0.1:{}/page.html", port)
+            .parse::<crate::http::Url>()
+            .unwrap();
+
+        let stylesheets = extract_author_stylesheets(&document, Some(&base_url)).unwrap();
+
+        // Large CSS should be skipped, only small CSS should be included
+        assert_eq!(stylesheets.len(), 1);
+        assert!(stylesheets[0].contains("color: green"));
     }
 }

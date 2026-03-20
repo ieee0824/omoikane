@@ -219,17 +219,34 @@ impl std::str::FromStr for Url {
 pub fn resolve_url(base: &Url, reference: &str) -> Result<Url, UrlParseError> {
     let reference = reference.trim();
 
+    // Strip fragment first (fragments must not be sent in HTTP requests).
+    let reference = match reference.find('#') {
+        Some(i) => &reference[..i],
+        None => reference,
+    };
+
     // Absolute HTTP(S) URL — parse directly.
     if reference.starts_with("http://") || reference.starts_with("https://") {
         return reference.parse();
     }
 
-    // References with an explicit HTTP(S) scheme but missing "//" (e.g. "http:foo")
-    // are not supported by our URL type; let the parser return an error instead of
-    // treating them as relative.
+    // References with an explicit scheme followed by ":" before any "/", "?", or "#"
+    // are absolute URIs per RFC 3986 §3.1 and must not be treated as relative paths.
+    //
+    // For "http" or "https", hand off to the URL parser (which may still reject
+    // unusual forms like "http:foo"). For any other scheme (e.g. "mailto:foo"),
+    // also let the parser decide; since this crate only supports HTTP(S), such
+    // inputs will be rejected instead of incorrectly merged.
     if let Some(colon_idx) = reference.find(':') {
-        let scheme = &reference[..colon_idx];
-        if scheme.eq_ignore_ascii_case("http") || scheme.eq_ignore_ascii_case("https") {
+        let first_delim = reference
+            .find(|c| c == '/' || c == '?' || c == '#');
+        let colon_before_delim = match first_delim {
+            Some(idx) => colon_idx < idx,
+            None => true,
+        };
+
+        if colon_before_delim {
+            // Let the parser handle it (both HTTP(S) and non-HTTP(S) schemes).
             return reference.parse();
         }
     }
@@ -470,5 +487,47 @@ mod tests {
         let base: Url = "https://example.com/dir/page.html".parse().unwrap();
         let resolved = resolve_url(&base, "/style.css?v=1").unwrap();
         assert_eq!(resolved.to_string(), "https://example.com/style.css?v=1");
+    }
+
+    #[test]
+    fn resolve_strips_fragment() {
+        let base: Url = "https://example.com/dir/page.html".parse().unwrap();
+
+        // Fragment should be stripped before resolution
+        let resolved = resolve_url(&base, "style.css#v2").unwrap();
+        assert_eq!(resolved.path(), "/dir/style.css");
+        assert_eq!(resolved.query(), None);
+
+        // Absolute path with fragment
+        let resolved = resolve_url(&base, "/css/style.css#v1").unwrap();
+        assert_eq!(resolved.path(), "/css/style.css");
+
+        // Query + fragment (fragment should be discarded, query preserved)
+        let resolved = resolve_url(&base, "/style.css?v=2#section").unwrap();
+        assert_eq!(resolved.path(), "/style.css");
+        assert_eq!(resolved.query(), Some("v=2"));
+    }
+
+    #[test]
+    fn resolve_rejects_non_http_schemes() {
+        let base: Url = "https://example.com/page.html".parse().unwrap();
+
+        // Non-HTTP(S) schemes with explicit ":" should be rejected per RFC 3986
+        assert!(resolve_url(&base, "mailto:foo@example.com").is_err());
+        assert!(resolve_url(&base, "ftp://ftp.example.com/file.css").is_err());
+        assert!(resolve_url(&base, "data:,foo").is_err());
+    }
+
+    #[test]
+    fn resolve_edge_case_colon_in_path() {
+        let base: Url = "https://example.com/page.html".parse().unwrap();
+
+        // Colon after "/" or "?" should be treated as path content (relative)
+        // not as a scheme separator
+        let resolved = resolve_url(&base, "path/to:file.css").unwrap();
+        assert_eq!(resolved.path(), "/path/to:file.css");
+
+        // But colon before "/" should be a scheme
+        assert!(resolve_url(&base, "scheme:path/file.css").is_err());
     }
 }
