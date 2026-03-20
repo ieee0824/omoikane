@@ -7,6 +7,7 @@ use std::path::Path;
 
 use crate::css::{ComputedStyle, ComputedValue, Origin, PseudoElement, StyleResolver, Stylesheet, parse_stylesheet};
 use crate::dom::{Node, NodeHandle, NodeType};
+use crate::http::url::resolve_url;
 use crate::layout::{InlineFragmentContent, LayoutBox, Rect, Visibility};
 use base64::Engine;
 use flate2::read::ZlibDecoder;
@@ -280,8 +281,17 @@ pub fn paint_layout(layout: &LayoutBox, resolver: &mut StyleResolver, viewport: 
 
 /// Renders a DOM document into a canvas using inline and linked author stylesheets.
 pub fn render_document(document: &NodeHandle, viewport: Rect) -> Result<Canvas, PaintError> {
+    render_document_with_url(document, viewport, None)
+}
+
+/// Renders a DOM document into a canvas, fetching external stylesheets relative to `base_url`.
+pub fn render_document_with_url(
+    document: &NodeHandle,
+    viewport: Rect,
+    base_url: Option<&crate::http::Url>,
+) -> Result<Canvas, PaintError> {
     let mut resolver = StyleResolver::new();
-    for stylesheet in extract_author_stylesheets(document)? {
+    for stylesheet in extract_author_stylesheets(document, base_url)? {
         resolver.add_stylesheet(
             Origin::Author,
             parse_stylesheet_forgiving(&stylesheet)?,
@@ -295,6 +305,15 @@ pub fn render_document(document: &NodeHandle, viewport: Rect) -> Result<Canvas, 
 /// Encodes the rendered document directly as PNG.
 pub fn render_document_png(document: &NodeHandle, viewport: Rect) -> Result<Vec<u8>, PaintError> {
     Ok(render_document(document, viewport)?.encode_png())
+}
+
+/// Encodes the rendered document as PNG, fetching external stylesheets relative to `base_url`.
+pub fn render_document_png_with_url(
+    document: &NodeHandle,
+    viewport: Rect,
+    base_url: Option<&crate::http::Url>,
+) -> Result<Vec<u8>, PaintError> {
+    Ok(render_document_with_url(document, viewport, base_url)?.encode_png())
 }
 
 /// Renders a DOM document into a canvas, resolving local fixture assets from `base_path`.
@@ -1532,15 +1551,21 @@ fn crc32(data: &[u8]) -> u32 {
     !crc
 }
 
-fn extract_author_stylesheets(document: &NodeHandle) -> Result<Vec<String>, PaintError> {
+fn extract_author_stylesheets(
+    document: &NodeHandle,
+    base_url: Option<&crate::http::Url>,
+) -> Result<Vec<String>, PaintError> {
     let mut stylesheets = Vec::new();
-    collect_author_stylesheets(document, &mut stylesheets)?;
+    let mut client = base_url.map(|_| crate::http::Client::new());
+    collect_author_stylesheets(document, &mut stylesheets, base_url, &mut client)?;
     Ok(stylesheets)
 }
 
 fn collect_author_stylesheets(
     node: &NodeHandle,
     out: &mut Vec<String>,
+    base_url: Option<&crate::http::Url>,
+    client: &mut Option<crate::http::Client>,
 ) -> Result<(), PaintError> {
     if node.node_type() == NodeType::Element {
         match node.tag_name().as_deref() {
@@ -1554,11 +1579,29 @@ fn collect_author_stylesheets(
                 let attributes = node.attributes().unwrap_or_default();
                 let rel = attributes.get("rel").cloned().unwrap_or_default();
                 let href = attributes.get("href").cloned().unwrap_or_default();
-                if rel.contains("stylesheet") && href.starts_with("data:text/css") {
-                    match parse_data_uri(&href)? {
-                        DataUri::Text { data, .. } => out.push(data),
-                        DataUri::Binary { data, .. } => {
-                            out.push(String::from_utf8_lossy(&data).into_owned())
+                if rel.contains("stylesheet") && !href.is_empty() {
+                    if href.starts_with("data:text/css") {
+                        match parse_data_uri(&href)? {
+                            DataUri::Text { data, .. } => out.push(data),
+                            DataUri::Binary { data, .. } => {
+                                out.push(String::from_utf8_lossy(&data).into_owned())
+                            }
+                        }
+                    } else if let Some(base) = base_url {
+                        if let Ok(resolved) = resolve_url(base, &href) {
+                            let url_str = resolved.to_string();
+                            if let Some(c) = client {
+                                match c.get(&url_str) {
+                                    Ok(resp) if resp.status_code() == 200 => {
+                                        if let Ok(css) = String::from_utf8(
+                                            resp.body().to_vec(),
+                                        ) {
+                                            out.push(css);
+                                        }
+                                    }
+                                    _ => {} // Skip on fetch failure
+                                }
+                            }
                         }
                     }
                 }
@@ -1568,7 +1611,7 @@ fn collect_author_stylesheets(
     }
 
     for child in node.child_nodes() {
-        collect_author_stylesheets(&child, out)?;
+        collect_author_stylesheets(&child, out, base_url, client)?;
     }
 
     Ok(())
@@ -2502,7 +2545,7 @@ mod tests {
         let html = r#"<html><head><style>body { margin: 0; font: 2px/2px sans-serif; } object { display: inline; vertical-align: bottom; } object object object { background: url(data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAIAAAD91JpzAAAABnRSTlMAAAAAAABupgeRAAAABmJLR0QA%2FwD%2FAP%2BgvaeTAAAAEUlEQVR42mP4%2F58BCv7%2FZwAAHfAD%2FabwPj4AAAAASUVORK5CYII%3D) fixed 1px 0; }</style></head><body><object data="data:application/x-unknown,ERROR"><object data="data:application/x-unknown,ERROR" type="text/html"><object data="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAIAAAD91JpzAAAABnRSTlMAAAAAAABupgeRAAAABmJLR0QA%2FwD%2FAP%2BgvaeTAAAAEUlEQVR42mP4%2F58BCv7%2FZwAAHfAD%2FabwPj4AAAAASUVORK5CYII%3D"></object></object></object></body></html>"#;
         let document = TreeBuilder::parse(html).document();
         let mut resolver = StyleResolver::new();
-        for stylesheet in extract_author_stylesheets(&document).unwrap() {
+        for stylesheet in extract_author_stylesheets(&document, None).unwrap() {
             resolver.add_stylesheet(
                 Origin::Author,
                 parse_stylesheet_forgiving(&stylesheet).unwrap(),
@@ -3117,7 +3160,7 @@ mod tests {
         materialize_local_assets(&document, &acid2_fixture_dir()).unwrap();
 
         let mut resolver = StyleResolver::new();
-        for stylesheet in extract_author_stylesheets(&document).unwrap() {
+        for stylesheet in extract_author_stylesheets(&document, None).unwrap() {
             resolver.add_stylesheet(
                 Origin::Author,
                 parse_stylesheet_forgiving(&stylesheet).unwrap(),
@@ -3146,7 +3189,7 @@ mod tests {
         let acid2_html = fs::read_to_string(acid2_fixture_path()).unwrap();
         let acid2_document = TreeBuilder::parse(&acid2_html).document();
         let mut resolver = StyleResolver::new();
-        for stylesheet in extract_author_stylesheets(&acid2_document).unwrap() {
+        for stylesheet in extract_author_stylesheets(&acid2_document, None).unwrap() {
             resolver.add_stylesheet(
                 Origin::Author,
                 parse_stylesheet_forgiving(&stylesheet).unwrap(),
@@ -3194,7 +3237,7 @@ mod tests {
         let acid2_html = fs::read_to_string(acid2_fixture_path()).unwrap();
         let acid2_document = TreeBuilder::parse(&acid2_html).document();
         let mut resolver = StyleResolver::new();
-        for stylesheet in extract_author_stylesheets(&acid2_document).unwrap() {
+        for stylesheet in extract_author_stylesheets(&acid2_document, None).unwrap() {
             resolver.add_stylesheet(
                 Origin::Author,
                 parse_stylesheet_forgiving(&stylesheet).unwrap(),
@@ -3257,7 +3300,7 @@ mod tests {
         let acid2_html = fs::read_to_string(acid2_fixture_path()).unwrap();
         let acid2_document = TreeBuilder::parse(&acid2_html).document();
         let mut resolver = StyleResolver::new();
-        for stylesheet in extract_author_stylesheets(&acid2_document).unwrap() {
+        for stylesheet in extract_author_stylesheets(&acid2_document, None).unwrap() {
             resolver.add_stylesheet(
                 Origin::Author,
                 parse_stylesheet_forgiving(&stylesheet).unwrap(),
@@ -3292,7 +3335,7 @@ mod tests {
         let acid2_html = fs::read_to_string(acid2_fixture_path()).unwrap();
         let acid2_document = TreeBuilder::parse(&acid2_html).document();
         let mut resolver = StyleResolver::new();
-        for stylesheet in extract_author_stylesheets(&acid2_document).unwrap() {
+        for stylesheet in extract_author_stylesheets(&acid2_document, None).unwrap() {
             resolver.add_stylesheet(
                 Origin::Author,
                 parse_stylesheet_forgiving(&stylesheet).unwrap(),
@@ -3362,7 +3405,7 @@ mod tests {
         let acid2_html = fs::read_to_string(acid2_fixture_path()).unwrap();
         let acid2_document = TreeBuilder::parse(&acid2_html).document();
         let mut resolver = StyleResolver::new();
-        for stylesheet in extract_author_stylesheets(&acid2_document).unwrap() {
+        for stylesheet in extract_author_stylesheets(&acid2_document, None).unwrap() {
             resolver.add_stylesheet(
                 Origin::Author,
                 parse_stylesheet_forgiving(&stylesheet).unwrap(),
@@ -3401,7 +3444,7 @@ mod tests {
         let acid2_html = fs::read_to_string(acid2_fixture_path()).unwrap();
         let acid2_document = TreeBuilder::parse(&acid2_html).document();
         let mut resolver = StyleResolver::new();
-        for stylesheet in extract_author_stylesheets(&acid2_document).unwrap() {
+        for stylesheet in extract_author_stylesheets(&acid2_document, None).unwrap() {
             resolver.add_stylesheet(
                 Origin::Author,
                 parse_stylesheet_forgiving(&stylesheet).unwrap(),
@@ -3438,7 +3481,7 @@ mod tests {
         let acid2_html = fs::read_to_string(acid2_fixture_path()).unwrap();
         let acid2_document = TreeBuilder::parse(&acid2_html).document();
         let mut resolver = StyleResolver::new();
-        for stylesheet in extract_author_stylesheets(&acid2_document).unwrap() {
+        for stylesheet in extract_author_stylesheets(&acid2_document, None).unwrap() {
             resolver.add_stylesheet(
                 Origin::Author,
                 parse_stylesheet_forgiving(&stylesheet).unwrap(),
@@ -3475,7 +3518,7 @@ mod tests {
         let acid2_html = fs::read_to_string(acid2_fixture_path()).unwrap();
         let acid2_document = TreeBuilder::parse(&acid2_html).document();
         let mut resolver = StyleResolver::new();
-        for stylesheet in extract_author_stylesheets(&acid2_document).unwrap() {
+        for stylesheet in extract_author_stylesheets(&acid2_document, None).unwrap() {
             resolver.add_stylesheet(
                 Origin::Author,
                 parse_stylesheet_forgiving(&stylesheet).unwrap(),
@@ -3512,7 +3555,7 @@ mod tests {
         let acid2_html = fs::read_to_string(acid2_fixture_path()).unwrap();
         let acid2_document = TreeBuilder::parse(&acid2_html).document();
         let mut resolver = StyleResolver::new();
-        for stylesheet in extract_author_stylesheets(&acid2_document).unwrap() {
+        for stylesheet in extract_author_stylesheets(&acid2_document, None).unwrap() {
             resolver.add_stylesheet(
                 Origin::Author,
                 parse_stylesheet_forgiving(&stylesheet).unwrap(),
@@ -3558,7 +3601,7 @@ mod tests {
         let acid2_html = fs::read_to_string(acid2_fixture_path()).unwrap();
         let document = TreeBuilder::parse(&acid2_html).document();
         let mut resolver = StyleResolver::new();
-        for stylesheet in extract_author_stylesheets(&document).unwrap() {
+        for stylesheet in extract_author_stylesheets(&document, None).unwrap() {
             resolver.add_stylesheet(
                 Origin::Author,
                 parse_stylesheet_forgiving(&stylesheet).unwrap(),
@@ -3645,7 +3688,7 @@ mod tests {
     fn acid2_eyes_b_rule_survives_forgiving_stylesheet_parse() {
         let acid2_html = fs::read_to_string(acid2_fixture_path()).unwrap();
         let document = TreeBuilder::parse(&acid2_html).document();
-        let stylesheets = extract_author_stylesheets(&document).unwrap();
+        let stylesheets = extract_author_stylesheets(&document, None).unwrap();
         let joined = stylesheets.join("\n");
 
         assert!(joined.contains("#eyes-b"));
@@ -3685,7 +3728,7 @@ mod tests {
     fn acid2_link_stylesheet_overrides_picture_background_to_none() {
         let acid2_html = fs::read_to_string(acid2_fixture_path()).unwrap();
         let document = TreeBuilder::parse(&acid2_html).document();
-        let stylesheets = extract_author_stylesheets(&document).unwrap();
+        let stylesheets = extract_author_stylesheets(&document, None).unwrap();
         let has_background_none = stylesheets.iter().any(|css| {
             css.contains(".picture") && css.contains("background") && css.contains("none")
         });
@@ -3724,7 +3767,7 @@ mod tests {
         let acid2_html = fs::read_to_string(acid2_fixture_path()).unwrap();
         let acid2_document = TreeBuilder::parse(&acid2_html).document();
         let mut resolver = StyleResolver::new();
-        for stylesheet in extract_author_stylesheets(&acid2_document).unwrap() {
+        for stylesheet in extract_author_stylesheets(&acid2_document, None).unwrap() {
             resolver.add_stylesheet(
                 Origin::Author,
                 parse_stylesheet_forgiving(&stylesheet).unwrap(),
@@ -3758,7 +3801,7 @@ mod tests {
         let acid2_html = fs::read_to_string(acid2_fixture_path()).unwrap();
         let acid2_document = TreeBuilder::parse(&acid2_html).document();
         let mut resolver = StyleResolver::new();
-        for stylesheet in extract_author_stylesheets(&acid2_document).unwrap() {
+        for stylesheet in extract_author_stylesheets(&acid2_document, None).unwrap() {
             resolver.add_stylesheet(
                 Origin::Author,
                 parse_stylesheet_forgiving(&stylesheet).unwrap(),
@@ -3805,7 +3848,7 @@ mod tests {
         let acid2_html = fs::read_to_string(acid2_fixture_path()).unwrap();
         let acid2_document = TreeBuilder::parse(&acid2_html).document();
         let mut resolver = StyleResolver::new();
-        for stylesheet in extract_author_stylesheets(&acid2_document).unwrap() {
+        for stylesheet in extract_author_stylesheets(&acid2_document, None).unwrap() {
             resolver.add_stylesheet(
                 Origin::Author,
                 parse_stylesheet_forgiving(&stylesheet).unwrap(),
@@ -3834,7 +3877,7 @@ mod tests {
         let acid2_html = fs::read_to_string(acid2_fixture_path()).unwrap();
         let acid2_document = TreeBuilder::parse(&acid2_html).document();
         let mut resolver = StyleResolver::new();
-        for stylesheet in extract_author_stylesheets(&acid2_document).unwrap() {
+        for stylesheet in extract_author_stylesheets(&acid2_document, None).unwrap() {
             resolver.add_stylesheet(
                 Origin::Author,
                 parse_stylesheet_forgiving(&stylesheet).unwrap(),
@@ -3873,7 +3916,7 @@ mod tests {
         let acid2_html = fs::read_to_string(acid2_fixture_path()).unwrap();
         let document = TreeBuilder::parse(&acid2_html).document();
         let mut resolver = StyleResolver::new();
-        for stylesheet in extract_author_stylesheets(&document).unwrap() {
+        for stylesheet in extract_author_stylesheets(&document, None).unwrap() {
             resolver.add_stylesheet(
                 Origin::Author,
                 parse_stylesheet_forgiving(&stylesheet).unwrap(),
@@ -3897,7 +3940,7 @@ mod tests {
         let acid2_html = fs::read_to_string(acid2_fixture_path()).unwrap();
         let document = TreeBuilder::parse(&acid2_html).document();
         let mut resolver = StyleResolver::new();
-        for stylesheet in extract_author_stylesheets(&document).unwrap() {
+        for stylesheet in extract_author_stylesheets(&document, None).unwrap() {
             resolver.add_stylesheet(
                 Origin::Author,
                 parse_stylesheet_forgiving(&stylesheet).unwrap(),
@@ -3926,7 +3969,7 @@ mod tests {
         let acid2_html = fs::read_to_string(acid2_fixture_path()).unwrap();
         let document = TreeBuilder::parse(&acid2_html).document();
         let mut resolver = StyleResolver::new();
-        for stylesheet in extract_author_stylesheets(&document).unwrap() {
+        for stylesheet in extract_author_stylesheets(&document, None).unwrap() {
             resolver.add_stylesheet(
                 Origin::Author,
                 parse_stylesheet_forgiving(&stylesheet).unwrap(),
@@ -3952,7 +3995,7 @@ mod tests {
         let acid2_html = fs::read_to_string(acid2_fixture_path()).unwrap();
         let document = TreeBuilder::parse(&acid2_html).document();
         let mut resolver = StyleResolver::new();
-        for stylesheet in extract_author_stylesheets(&document).unwrap() {
+        for stylesheet in extract_author_stylesheets(&document, None).unwrap() {
             resolver.add_stylesheet(
                 Origin::Author,
                 parse_stylesheet_forgiving(&stylesheet).unwrap(),
@@ -4029,7 +4072,7 @@ mod tests {
         let acid2_html = fs::read_to_string(acid2_fixture_path()).unwrap();
         let acid2_document = TreeBuilder::parse(&acid2_html).document();
         let mut acid2_resolver = StyleResolver::new();
-        for stylesheet in extract_author_stylesheets(&acid2_document).unwrap() {
+        for stylesheet in extract_author_stylesheets(&acid2_document, None).unwrap() {
             acid2_resolver.add_stylesheet(
                 Origin::Author,
                 parse_stylesheet_forgiving(&stylesheet).unwrap(),
@@ -4051,7 +4094,7 @@ mod tests {
         let reference_document = TreeBuilder::parse(&reference_html).document();
         materialize_local_assets(&reference_document, &acid2_fixture_dir()).unwrap();
         let mut reference_resolver = StyleResolver::new();
-        for stylesheet in extract_author_stylesheets(&reference_document).unwrap() {
+        for stylesheet in extract_author_stylesheets(&reference_document, None).unwrap() {
             reference_resolver.add_stylesheet(
                 Origin::Author,
                 parse_stylesheet_forgiving(&stylesheet).unwrap(),
@@ -4363,5 +4406,42 @@ mod tests {
         for child in &mut layout.children {
             translate_layout_box_for_test(child, resolver, dx, dy);
         }
+    }
+
+    #[test]
+    fn extract_stylesheets_skips_http_link_without_base_url() {
+        let html = r#"<html><head>
+            <link rel="stylesheet" href="https://example.com/style.css">
+            <style>body { color: red; }</style>
+        </head><body></body></html>"#;
+        let document = TreeBuilder::parse(html).document();
+        let stylesheets = extract_author_stylesheets(&document, None).unwrap();
+        // Only the inline <style> should be extracted; the HTTP link is skipped
+        // because no base_url is provided.
+        assert_eq!(stylesheets.len(), 1);
+        assert!(stylesheets[0].contains("color: red"));
+    }
+
+    #[test]
+    fn extract_stylesheets_includes_data_uri_without_base_url() {
+        let html = r#"<html><head>
+            <link rel="stylesheet" href="data:text/css,body%7Bmargin%3A0%7D">
+            <style>p { color: blue; }</style>
+        </head><body></body></html>"#;
+        let document = TreeBuilder::parse(html).document();
+        let stylesheets = extract_author_stylesheets(&document, None).unwrap();
+        assert_eq!(stylesheets.len(), 2);
+        assert!(stylesheets[0].contains("margin"));
+        assert!(stylesheets[1].contains("color: blue"));
+    }
+
+    #[test]
+    fn extract_stylesheets_skips_empty_href() {
+        let html = r#"<html><head>
+            <link rel="stylesheet" href="">
+        </head><body></body></html>"#;
+        let document = TreeBuilder::parse(html).document();
+        let stylesheets = extract_author_stylesheets(&document, None).unwrap();
+        assert!(stylesheets.is_empty());
     }
 }

@@ -195,6 +195,99 @@ impl std::str::FromStr for Url {
     }
 }
 
+/// Resolves a potentially relative URL reference against a base URL.
+///
+/// Handles absolute URLs (returned as-is), protocol-relative (`//host/path`),
+/// absolute paths (`/path`), and relative paths (`path`, `../path`).
+///
+/// # Examples
+///
+/// ```
+/// use omoikane::http::Url;
+/// use omoikane::http::url::resolve_url;
+///
+/// let base: Url = "https://example.com/dir/page.html".parse().unwrap();
+/// assert_eq!(
+///     resolve_url(&base, "/css/style.css").unwrap().to_string(),
+///     "https://example.com/css/style.css",
+/// );
+/// assert_eq!(
+///     resolve_url(&base, "other.css").unwrap().to_string(),
+///     "https://example.com/dir/other.css",
+/// );
+/// ```
+pub fn resolve_url(base: &Url, reference: &str) -> Result<Url, UrlParseError> {
+    let reference = reference.trim();
+
+    // Absolute URL — parse directly.
+    if reference.contains("://") {
+        return reference.parse();
+    }
+
+    // Protocol-relative URL (e.g. "//cdn.example.com/style.css").
+    if let Some(rest) = reference.strip_prefix("//") {
+        return format!("{}://{}", base.scheme, rest).parse();
+    }
+
+    // Absolute path (e.g. "/css/style.css").
+    if reference.starts_with('/') {
+        let (path, query) = split_path_query(reference);
+        return Ok(Url {
+            scheme: base.scheme.clone(),
+            host: base.host.clone(),
+            port: base.port,
+            path,
+            query,
+        });
+    }
+
+    // Relative path (e.g. "style.css" or "../style.css").
+    let base_dir = match base.path.rfind('/') {
+        Some(i) => &base.path[..=i],
+        None => "/",
+    };
+    let merged = format!("{}{}", base_dir, reference);
+    let (raw_path, query) = split_path_query(&merged);
+    let normalized = normalize_path(&raw_path);
+    Ok(Url {
+        scheme: base.scheme.clone(),
+        host: base.host.clone(),
+        port: base.port,
+        path: normalized,
+        query,
+    })
+}
+
+/// Splits a path-and-query string into `(path, Option<query>)`.
+fn split_path_query(s: &str) -> (String, Option<String>) {
+    match s.find('?') {
+        Some(i) => {
+            let q = &s[i + 1..];
+            let query = if q.is_empty() { None } else { Some(q.to_string()) };
+            (s[..i].to_string(), query)
+        }
+        None => (s.to_string(), None),
+    }
+}
+
+/// Removes `.` and `..` segments from an absolute path (RFC 3986 §5.2.4).
+fn normalize_path(path: &str) -> String {
+    let mut segments: Vec<&str> = Vec::new();
+    for seg in path.split('/') {
+        match seg {
+            "." => {}
+            ".." => { segments.pop(); }
+            s => segments.push(s),
+        }
+    }
+    let result = segments.join("/");
+    if result.starts_with('/') {
+        result
+    } else {
+        format!("/{}", result)
+    }
+}
+
 fn default_port_for(scheme: &str) -> u16 {
     match scheme {
         "https" => 443,
@@ -324,5 +417,47 @@ mod tests {
     fn case_insensitive_scheme() {
         let url: Url = "HTTP://EXAMPLE.COM".parse().unwrap();
         assert_eq!(url.scheme(), "http");
+    }
+
+    #[test]
+    fn resolve_absolute_url() {
+        let base: Url = "https://example.com/dir/page.html".parse().unwrap();
+        let resolved = resolve_url(&base, "http://other.com/style.css").unwrap();
+        assert_eq!(resolved.to_string(), "http://other.com/style.css");
+    }
+
+    #[test]
+    fn resolve_protocol_relative() {
+        let base: Url = "https://example.com/dir/page.html".parse().unwrap();
+        let resolved = resolve_url(&base, "//cdn.example.com/style.css").unwrap();
+        assert_eq!(resolved.to_string(), "https://cdn.example.com/style.css");
+    }
+
+    #[test]
+    fn resolve_absolute_path() {
+        let base: Url = "https://example.com/dir/page.html".parse().unwrap();
+        let resolved = resolve_url(&base, "/css/style.css").unwrap();
+        assert_eq!(resolved.to_string(), "https://example.com/css/style.css");
+    }
+
+    #[test]
+    fn resolve_relative_path() {
+        let base: Url = "https://example.com/dir/page.html".parse().unwrap();
+        let resolved = resolve_url(&base, "other.css").unwrap();
+        assert_eq!(resolved.to_string(), "https://example.com/dir/other.css");
+    }
+
+    #[test]
+    fn resolve_parent_relative_path() {
+        let base: Url = "https://example.com/a/b/page.html".parse().unwrap();
+        let resolved = resolve_url(&base, "../style.css").unwrap();
+        assert_eq!(resolved.to_string(), "https://example.com/a/style.css");
+    }
+
+    #[test]
+    fn resolve_with_query() {
+        let base: Url = "https://example.com/dir/page.html".parse().unwrap();
+        let resolved = resolve_url(&base, "/style.css?v=1").unwrap();
+        assert_eq!(resolved.to_string(), "https://example.com/style.css?v=1");
     }
 }
