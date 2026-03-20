@@ -105,14 +105,17 @@ fn test_load_system_font_and_rasterize() {
         return;
     };
 
-    let font = Font::load_from_file(std::path::Path::new(&font_path))
-        .expect("Failed to load system font");
+    let font =
+        Font::load_from_file(std::path::Path::new(&font_path)).expect("Failed to load system font");
 
     // Rasterize a simple character
     let raster = font.rasterize('A', 20.0).expect("Failed to rasterize 'A'");
 
     // Check that rasterization produced non-zero dimensions
-    assert!(raster.width > 0 || raster.height == 0, "Width must be > 0 or height must be 0");
+    assert!(
+        raster.width > 0 || raster.height == 0,
+        "Width must be > 0 or height must be 0"
+    );
     assert!(raster.advance_x > 0.0, "Advance width must be positive");
 }
 
@@ -124,8 +127,8 @@ fn test_different_characters_different_advances() {
         return;
     };
 
-    let font = Font::load_from_file(std::path::Path::new(&font_path))
-        .expect("Failed to load system font");
+    let font =
+        Font::load_from_file(std::path::Path::new(&font_path)).expect("Failed to load system font");
 
     let size = 20.0;
     let advance_i = font.glyph_advance('i', size);
@@ -148,14 +151,19 @@ fn test_rasterize_space_character() {
         return;
     };
 
-    let font = Font::load_from_file(std::path::Path::new(&font_path))
-        .expect("Failed to load system font");
+    let font =
+        Font::load_from_file(std::path::Path::new(&font_path)).expect("Failed to load system font");
 
     // Space character should have zero bitmap but positive advance
-    let raster = font.rasterize(' ', 20.0).expect("Failed to rasterize space");
+    let raster = font
+        .rasterize(' ', 20.0)
+        .expect("Failed to rasterize space");
     assert_eq!(raster.width, 0);
     assert_eq!(raster.height, 0);
-    assert!(raster.advance_x > 0.0, "Space should have positive advance width");
+    assert!(
+        raster.advance_x > 0.0,
+        "Space should have positive advance width"
+    );
 }
 
 #[test]
@@ -166,23 +174,35 @@ fn test_advance_scales_with_size() {
         return;
     };
 
-    let font = Font::load_from_file(std::path::Path::new(&font_path))
-        .expect("Failed to load system font");
+    let font =
+        Font::load_from_file(std::path::Path::new(&font_path)).expect("Failed to load system font");
 
     let advance_10 = font.glyph_advance('A', 10.0);
     let advance_20 = font.glyph_advance('A', 20.0);
     let advance_40 = font.glyph_advance('A', 40.0);
 
     // Advances should be approximately proportional to size
-    assert!(advance_20 > advance_10, "Larger size should have larger advance");
-    assert!(advance_40 > advance_20, "Even larger size should have larger advance");
+    assert!(
+        advance_20 > advance_10,
+        "Larger size should have larger advance"
+    );
+    assert!(
+        advance_40 > advance_20,
+        "Even larger size should have larger advance"
+    );
 
     // Check approximate scaling (allowing 5% tolerance for rounding)
     let ratio_1 = advance_20 / advance_10;
     let ratio_2 = advance_40 / advance_20;
 
-    assert!(ratio_1 > 1.8 && ratio_1 < 2.2, "Advance should roughly double with 2x size");
-    assert!(ratio_2 > 1.8 && ratio_2 < 2.2, "Advance should roughly double with 2x size");
+    assert!(
+        ratio_1 > 1.8 && ratio_1 < 2.2,
+        "Advance should roughly double with 2x size"
+    );
+    assert!(
+        ratio_2 > 1.8 && ratio_2 < 2.2,
+        "Advance should roughly double with 2x size"
+    );
 }
 
 // ============================================================================
@@ -192,7 +212,10 @@ fn test_advance_scales_with_size() {
 #[test]
 fn test_generic_family_sans_serif_has_candidates() {
     let candidates = generic_family_fonts("sans-serif");
-    assert!(!candidates.is_empty(), "sans-serif should have font candidates");
+    assert!(
+        !candidates.is_empty(),
+        "sans-serif should have font candidates"
+    );
     assert!(candidates.contains(&"Helvetica") || candidates.contains(&"Arial"));
 }
 
@@ -205,7 +228,10 @@ fn test_generic_family_serif_has_candidates() {
 #[test]
 fn test_generic_family_monospace_has_candidates() {
     let candidates = generic_family_fonts("monospace");
-    assert!(!candidates.is_empty(), "monospace should have font candidates");
+    assert!(
+        !candidates.is_empty(),
+        "monospace should have font candidates"
+    );
 }
 
 #[test]
@@ -218,7 +244,10 @@ fn test_generic_family_unknown_returns_empty() {
 #[ignore] // Requires system fonts
 fn test_find_system_font_sans_serif() {
     let path = find_system_font("sans-serif");
-    assert!(path.is_some(), "Should find a sans-serif font on this system");
+    assert!(
+        path.is_some(),
+        "Should find a sans-serif font on this system"
+    );
 
     let path = path.unwrap();
     assert!(path.exists(), "Found font path should exist");
@@ -236,12 +265,19 @@ fn test_find_system_font_sans_serif() {
 #[ignore] // Requires system fonts
 fn test_load_system_font_by_generic_family() {
     let font = load_system_font("sans-serif");
-    assert!(font.is_ok(), "Should load sans-serif font: {:?}", font.err());
+    assert!(
+        font.is_ok(),
+        "Should load sans-serif font: {:?}",
+        font.err()
+    );
 
     let font = font.unwrap();
     // Verify it's a valid font by checking metrics
     let metrics = font.metrics();
-    assert!(metrics.units_per_em > 0.0, "Font should have valid units_per_em");
+    assert!(
+        metrics.units_per_em > 0.0,
+        "Font should have valid units_per_em"
+    );
 }
 
 #[test]
@@ -398,7 +434,10 @@ fn test_measure_text_width_scales() {
 
     // Width should roughly scale with size
     let ratio = width_20 / width_10;
-    assert!(ratio > 1.8 && ratio < 2.2, "Width should roughly double at 2x size");
+    assert!(
+        ratio > 1.8 && ratio < 2.2,
+        "Width should roughly double at 2x size"
+    );
 }
 
 #[test]
@@ -408,7 +447,10 @@ fn test_average_advance() {
 
     let avg = font.average_advance(16.0);
     assert!(avg > 0.0, "Average advance should be positive");
-    assert!(avg < 16.0, "Average advance should be less than font size for proportional fonts");
+    assert!(
+        avg < 16.0,
+        "Average advance should be less than font size for proportional fonts"
+    );
 }
 
 #[test]
@@ -421,56 +463,88 @@ fn test_layout_metrics() {
     assert_eq!(metrics.font_size, 16.0);
     assert!(metrics.ascent > 0.0, "Ascent should be positive");
     assert!(metrics.descent >= 0.0, "Descent should be non-negative");
-    assert!(metrics.average_advance > 0.0, "Average advance should be positive");
+    assert!(
+        metrics.average_advance > 0.0,
+        "Average advance should be positive"
+    );
 }
 
-    #[test]
-    #[ignore = "debug test"]
-    fn debug_hello_world_measurement() {
-        use crate::font::load_system_font;
-        
-        let font = load_system_font("sans-serif").unwrap();
-        let size = 32.0; // 2em = 32px
-        
-        // Check individual character advances
-        println!("Font size: {}px", size);
-        println!("' ' (space) advance: {:.2}px", font.glyph_advance(' ', size));
-        println!("'H' advance: {:.2}px", font.glyph_advance('H', size));
-        println!("'e' advance: {:.2}px", font.glyph_advance('e', size));
-        println!("'l' advance: {:.2}px", font.glyph_advance('l', size));
-        println!("'o' advance: {:.2}px", font.glyph_advance('o', size));
-        
-        // Measure text widths
-        let hello = "Hello";
-        let world = "World!";
-        let full = "Hello World!";
-        
-        println!("\"{}\" width: {:.2}px", hello, font.measure_text_width(hello, size));
-        println!("\"{}\" width: {:.2}px", world, font.measure_text_width(world, size));
-        println!("\"{}\" width: {:.2}px", full, font.measure_text_width(full, size));
-        println!("Sum Hello + space + World! = {:.2}px", 
-            font.measure_text_width(hello, size) + 
-            font.glyph_advance(' ', size) + 
-            font.measure_text_width(world, size));
-    }
+#[test]
+#[ignore = "debug test"]
+fn debug_hello_world_measurement() {
+    use crate::font::load_system_font;
 
-    #[test]
-    #[ignore = "debug test"]
-    fn debug_nbsp_vs_space() {
-        use crate::font::load_system_font;
-        
-        let font = load_system_font("sans-serif").unwrap();
-        let size = 24.0;
-        
-        let space = ' ';
-        let nbsp = '\u{00A0}';
-        
-        println!("Font size: {}px", size);
-        println!("Regular space ' ' advance: {:.2}px", font.glyph_advance(space, size));
-        println!("NBSP '\\u{{00A0}}' advance: {:.2}px", font.glyph_advance(nbsp, size));
-        println!("'H' advance: {:.2}px", font.glyph_advance('H', size));
-        
-        // Measure text width
-        println!("\"Hello World!\" (regular space): {:.2}px", font.measure_text_width("Hello World!", size));
-        println!("\"Hello\\u{{00A0}}World!\" (NBSP): {:.2}px", font.measure_text_width("Hello\u{00A0}World!", size));
-    }
+    let font = load_system_font("sans-serif").unwrap();
+    let size = 32.0; // 2em = 32px
+
+    // Check individual character advances
+    println!("Font size: {}px", size);
+    println!(
+        "' ' (space) advance: {:.2}px",
+        font.glyph_advance(' ', size)
+    );
+    println!("'H' advance: {:.2}px", font.glyph_advance('H', size));
+    println!("'e' advance: {:.2}px", font.glyph_advance('e', size));
+    println!("'l' advance: {:.2}px", font.glyph_advance('l', size));
+    println!("'o' advance: {:.2}px", font.glyph_advance('o', size));
+
+    // Measure text widths
+    let hello = "Hello";
+    let world = "World!";
+    let full = "Hello World!";
+
+    println!(
+        "\"{}\" width: {:.2}px",
+        hello,
+        font.measure_text_width(hello, size)
+    );
+    println!(
+        "\"{}\" width: {:.2}px",
+        world,
+        font.measure_text_width(world, size)
+    );
+    println!(
+        "\"{}\" width: {:.2}px",
+        full,
+        font.measure_text_width(full, size)
+    );
+    println!(
+        "Sum Hello + space + World! = {:.2}px",
+        font.measure_text_width(hello, size)
+            + font.glyph_advance(' ', size)
+            + font.measure_text_width(world, size)
+    );
+}
+
+#[test]
+#[ignore = "debug test"]
+fn debug_nbsp_vs_space() {
+    use crate::font::load_system_font;
+
+    let font = load_system_font("sans-serif").unwrap();
+    let size = 24.0;
+
+    let space = ' ';
+    let nbsp = '\u{00A0}';
+
+    println!("Font size: {}px", size);
+    println!(
+        "Regular space ' ' advance: {:.2}px",
+        font.glyph_advance(space, size)
+    );
+    println!(
+        "NBSP '\\u{{00A0}}' advance: {:.2}px",
+        font.glyph_advance(nbsp, size)
+    );
+    println!("'H' advance: {:.2}px", font.glyph_advance('H', size));
+
+    // Measure text width
+    println!(
+        "\"Hello World!\" (regular space): {:.2}px",
+        font.measure_text_width("Hello World!", size)
+    );
+    println!(
+        "\"Hello\\u{{00A0}}World!\" (NBSP): {:.2}px",
+        font.measure_text_width("Hello\u{00A0}World!", size)
+    );
+}

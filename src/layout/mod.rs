@@ -8,7 +8,7 @@ use std::collections::HashMap;
 
 use crate::css::{ComputedStyle, ComputedValue, PseudoElement, StyleResolver};
 use crate::dom::{Node, NodeHandle, NodeType};
-use crate::font::{load_system_font, Font};
+use crate::font::{Font, load_system_font};
 use crate::http::Client;
 use crate::paint::{DataUri, Image, parse_data_uri};
 
@@ -286,12 +286,20 @@ fn layout_node(
     positioned_ancestor: Option<BoxDimensions>,
 ) -> Option<LayoutBox> {
     match node.node_type() {
-        NodeType::Document => {
-            layout_document(node, resolver, containing_block, viewport, positioned_ancestor)
-        }
-        NodeType::Element => {
-            layout_element(node, resolver, containing_block, viewport, positioned_ancestor)
-        }
+        NodeType::Document => layout_document(
+            node,
+            resolver,
+            containing_block,
+            viewport,
+            positioned_ancestor,
+        ),
+        NodeType::Element => layout_element(
+            node,
+            resolver,
+            containing_block,
+            viewport,
+            positioned_ancestor,
+        ),
         _ => None,
     }
 }
@@ -335,9 +343,13 @@ fn layout_document(
             }
         }
 
-        if let Some(layout_child) =
-            layout_node(&child, resolver, child_containing, viewport, positioned_ancestor)
-        {
+        if let Some(layout_child) = layout_node(
+            &child,
+            resolver,
+            child_containing,
+            viewport,
+            positioned_ancestor,
+        ) {
             cursor_y += layout_child.total_height();
             previous_margin_bottom = Some(layout_child.dimensions.margin.bottom);
             children.push(layout_child);
@@ -357,16 +369,14 @@ fn layout_document(
         ..BoxDimensions::default()
     };
     for (child, style, static_position) in positioned_children {
-        if let Some(positioned) =
-            layout_positioned_child(
-                &child,
-                resolver,
-                &style,
-                positioned_ancestor.unwrap_or(document_box),
-                static_position,
-                viewport,
-            )
-        {
+        if let Some(positioned) = layout_positioned_child(
+            &child,
+            resolver,
+            &style,
+            positioned_ancestor.unwrap_or(document_box),
+            static_position,
+            viewport,
+        ) {
             children.push(positioned);
         }
     }
@@ -445,7 +455,10 @@ fn layout_element(
             let all_whitespace = pending_inline_nodes.iter().all(|n| {
                 n.node_type() == NodeType::Text
                     && n.data()
-                        .map(|t| t.bytes().all(|b| matches!(b, b' ' | b'\t' | b'\n' | b'\r' | b'\x0C')))
+                        .map(|t| {
+                            t.bytes()
+                                .all(|b| matches!(b, b' ' | b'\t' | b'\n' | b'\r' | b'\x0C'))
+                        })
                         .unwrap_or(true)
             });
             if !all_whitespace {
@@ -576,7 +589,8 @@ fn layout_element(
                             viewport,
                             positioned_ancestor,
                         ) {
-                            if resolved_length(child_style, "width", float_available_width).is_none()
+                            if resolved_length(child_style, "width", float_available_width)
+                                .is_none()
                             {
                                 layout_child.dimensions.content.width = float_width;
                             }
@@ -661,9 +675,13 @@ fn layout_element(
             width,
             height: 0.0,
         };
-        if let Some(layout_child) =
-            layout_node(&child, resolver, child_containing, viewport, positioned_ancestor)
-        {
+        if let Some(layout_child) = layout_node(
+            &child,
+            resolver,
+            child_containing,
+            viewport,
+            positioned_ancestor,
+        ) {
             if is_empty_for_margin_collapse(&layout_child) {
                 let prev = previous_margin_bottom.unwrap_or(0.0);
                 let empty_collapsed = collapse_through_empty(&layout_child);
@@ -683,7 +701,10 @@ fn layout_element(
         let all_whitespace = pending_inline_nodes.iter().all(|n| {
             n.node_type() == NodeType::Text
                 && n.data()
-                    .map(|t| t.bytes().all(|b| matches!(b, b' ' | b'\t' | b'\n' | b'\r' | b'\x0C')))
+                    .map(|t| {
+                        t.bytes()
+                            .all(|b| matches!(b, b' ' | b'\t' | b'\n' | b'\r' | b'\x0C'))
+                    })
                     .unwrap_or(true)
         });
         if !all_whitespace {
@@ -709,14 +730,10 @@ fn layout_element(
         .map(|region| region.outer.y + region.outer.height)
         .fold(y, f32::max);
     let auto_height = (cursor_y.max(float_bottom)) - y;
-    let mut content_height = resolved_length(&style, "height", containing_block.height)
-        .unwrap_or(auto_height);
-    let (min_height, max_height) = normalized_min_max_lengths(
-        &style,
-        "min-height",
-        "max-height",
-        containing_block.height,
-    );
+    let mut content_height =
+        resolved_length(&style, "height", containing_block.height).unwrap_or(auto_height);
+    let (min_height, max_height) =
+        normalized_min_max_lengths(&style, "min-height", "max-height", containing_block.height);
     if let Some(min_height) = min_height {
         content_height = content_height.max(min_height);
     }
@@ -962,8 +979,15 @@ fn layout_table_container(
 
     for entry in entries.drain(..) {
         let row_y = cursor_y;
-        let (row_box, row_height) =
-            layout_table_row_entry(&entry, resolver, x + spacing, row_y, column_width, spacing, viewport)?;
+        let (row_box, row_height) = layout_table_row_entry(
+            &entry,
+            resolver,
+            x + spacing,
+            row_y,
+            column_width,
+            spacing,
+            viewport,
+        )?;
         cursor_y += row_height + spacing;
 
         if let Some(group_node) = entry.row_group {
@@ -1000,7 +1024,8 @@ fn layout_table_container(
     }
 
     if let Some((group_node, rows, _, group_start_y)) = pending_group.take() {
-        let group_box = build_row_group_box(group_node, rows, x + spacing, group_start_y, inner_width);
+        let group_box =
+            build_row_group_box(group_node, rows, x + spacing, group_start_y, inner_width);
         children.push(group_box);
     }
 
@@ -1102,7 +1127,12 @@ fn flush_anonymous_row(entries: &mut Vec<TableRowEntry>, anonymous_cells: &mut V
 fn collect_row_cells(row: &NodeHandle, resolver: &mut StyleResolver) -> Vec<NodeHandle> {
     row.child_nodes()
         .into_iter()
-        .filter(|child| matches!(table_display_for_node(child, &resolver.computed_style(child)), Some(TableDisplay::Cell)))
+        .filter(|child| {
+            matches!(
+                table_display_for_node(child, &resolver.computed_style(child)),
+                Some(TableDisplay::Cell)
+            )
+        })
         .collect()
 }
 
@@ -1127,7 +1157,8 @@ fn layout_table_row_entry(
         };
         let mut layout_cell = layout_node(cell, resolver, cell_containing, viewport, None)?;
         let cell_style = resolver.computed_style(cell);
-        let cell_height = explicit_length(&cell_style, "height").unwrap_or(layout_cell.total_height());
+        let cell_height =
+            explicit_length(&cell_style, "height").unwrap_or(layout_cell.total_height());
         layout_cell.dimensions.content.width = column_width;
         layout_cell.dimensions.content.height = cell_height;
         row_height = row_height.max(layout_cell.total_height());
@@ -1158,7 +1189,8 @@ fn layout_table_row_entry(
     let row_width = if entry.cells.is_empty() {
         0.0
     } else {
-        entry.cells.len() as f32 * column_width + (entry.cells.len().saturating_sub(1)) as f32 * spacing
+        entry.cells.len() as f32 * column_width
+            + (entry.cells.len().saturating_sub(1)) as f32 * spacing
     };
     let row_box = LayoutBox {
         node: entry.row_node.clone(),
@@ -1288,7 +1320,9 @@ fn active_float_offsets(regions: &[FloatRegion], y: f32, x: f32, width: f32) -> 
         }
         match region.side {
             FloatSide::Left => {
-                offsets.left = offsets.left.max((region.outer.x + region.outer.width - x).max(0.0));
+                offsets.left = offsets
+                    .left
+                    .max((region.outer.x + region.outer.width - x).max(0.0));
             }
             FloatSide::Right => {
                 let right_edge = x + width;
@@ -1331,8 +1365,6 @@ fn clear_cursor_y_for_side(
     cursor_y.max(interfering_bottom + collapse_delta - child_margin_top)
 }
 
-
-
 fn edge_sizes(style: &ComputedStyle, prefix: &str) -> EdgeSizes {
     let shorthand_property = match prefix {
         "border" => "border-width",
@@ -1344,18 +1376,38 @@ fn edge_sizes(style: &ComputedStyle, prefix: &str) -> EdgeSizes {
     };
     let shorthand = explicit_length(style, shorthand_property).unwrap_or(0.0);
     EdgeSizes {
-        top: explicit_length(style, &side_property.replace("{}", "top").replace("{prefix}", prefix))
-            .or_else(|| explicit_length(style, &format!("{prefix}-top")))
-            .unwrap_or(shorthand),
-        right: explicit_length(style, &side_property.replace("{}", "right").replace("{prefix}", prefix))
-            .or_else(|| explicit_length(style, &format!("{prefix}-right")))
-            .unwrap_or(shorthand),
-        bottom: explicit_length(style, &side_property.replace("{}", "bottom").replace("{prefix}", prefix))
-            .or_else(|| explicit_length(style, &format!("{prefix}-bottom")))
-            .unwrap_or(shorthand),
-        left: explicit_length(style, &side_property.replace("{}", "left").replace("{prefix}", prefix))
-            .or_else(|| explicit_length(style, &format!("{prefix}-left")))
-            .unwrap_or(shorthand),
+        top: explicit_length(
+            style,
+            &side_property
+                .replace("{}", "top")
+                .replace("{prefix}", prefix),
+        )
+        .or_else(|| explicit_length(style, &format!("{prefix}-top")))
+        .unwrap_or(shorthand),
+        right: explicit_length(
+            style,
+            &side_property
+                .replace("{}", "right")
+                .replace("{prefix}", prefix),
+        )
+        .or_else(|| explicit_length(style, &format!("{prefix}-right")))
+        .unwrap_or(shorthand),
+        bottom: explicit_length(
+            style,
+            &side_property
+                .replace("{}", "bottom")
+                .replace("{prefix}", prefix),
+        )
+        .or_else(|| explicit_length(style, &format!("{prefix}-bottom")))
+        .unwrap_or(shorthand),
+        left: explicit_length(
+            style,
+            &side_property
+                .replace("{}", "left")
+                .replace("{prefix}", prefix),
+        )
+        .or_else(|| explicit_length(style, &format!("{prefix}-left")))
+        .unwrap_or(shorthand),
     }
 }
 
@@ -1411,7 +1463,10 @@ fn is_empty_for_margin_collapse(layout: &LayoutBox) -> bool {
         && layout.dimensions.border.top == 0.0
         && layout.dimensions.border.bottom == 0.0
         && layout.lines.is_empty()
-        && layout.children.iter().all(|c| is_empty_for_margin_collapse(c))
+        && layout
+            .children
+            .iter()
+            .all(|c| is_empty_for_margin_collapse(c))
 }
 
 /// Collapse all margins through an empty element and its empty descendants.
@@ -1483,7 +1538,11 @@ fn clear_side(style: &ComputedStyle) -> ClearSide {
     }
 }
 
-fn shrink_to_fit_width(node: &NodeHandle, resolver: &mut StyleResolver, available_width: f32) -> f32 {
+fn shrink_to_fit_width(
+    node: &NodeHandle,
+    resolver: &mut StyleResolver,
+    available_width: f32,
+) -> f32 {
     let outer = intrinsic_width(node, resolver);
     let style = resolver.computed_style(node);
     let padding = edge_sizes(&style, "padding");
@@ -1561,7 +1620,10 @@ fn intrinsic_width(node: &NodeHandle, resolver: &mut StyleResolver) -> f32 {
                     .parent_node()
                     .map(|parent| resolver.computed_style(&parent))
                     .unwrap_or_default();
-                measure_text_width(&normalize_text(&text, white_space(&parent_style)), font_metrics(&parent_style))
+                measure_text_width(
+                    &normalize_text(&text, white_space(&parent_style)),
+                    font_metrics(&parent_style),
+                )
             })
             .unwrap_or(0.0),
         NodeType::Element => {
@@ -1605,9 +1667,15 @@ fn intrinsic_width(node: &NodeHandle, resolver: &mut StyleResolver) -> f32 {
             if width == 0.0 {
                 width = generated_inline_segments(node, resolver, PseudoElement::Before)
                     .into_iter()
-                    .chain(generated_inline_segments(node, resolver, PseudoElement::After))
+                    .chain(generated_inline_segments(
+                        node,
+                        resolver,
+                        PseudoElement::After,
+                    ))
                     .map(|segment| match segment.content {
-                        InlineSegmentContent::Text(text) => measure_text_width(&text, segment.metrics),
+                        InlineSegmentContent::Text(text) => {
+                            measure_text_width(&text, segment.metrics)
+                        }
                         InlineSegmentContent::Image(image, style) => {
                             let padding = edge_sizes(&style, "padding");
                             let border = edge_sizes(&style, "border");
@@ -1692,7 +1760,13 @@ fn layout_positioned_child(
         width: child_width,
         height: origin.height,
     };
-    let mut layout_child = layout_node(child, resolver, child_containing, viewport, Some(parent_box))?;
+    let mut layout_child = layout_node(
+        child,
+        resolver,
+        child_containing,
+        viewport,
+        Some(parent_box),
+    )?;
     if specified_width.is_none() {
         let auto_width = auto_width_from_layout(&layout_child, child, resolver, origin.width);
         if (auto_width - layout_child.dimensions.content.width).abs() > 0.5 {
@@ -1700,8 +1774,13 @@ fn layout_positioned_child(
                 width: auto_width,
                 ..child_containing
             };
-            layout_child =
-                layout_node(child, resolver, relayout_containing, viewport, Some(parent_box))?;
+            layout_child = layout_node(
+                child,
+                resolver,
+                relayout_containing,
+                viewport,
+                Some(parent_box),
+            )?;
         }
         layout_child.dimensions.content.width =
             auto_width_from_layout(&layout_child, child, resolver, origin.width);
@@ -2057,8 +2136,7 @@ fn is_inline_child(node: &NodeHandle, resolver: &mut StyleResolver) -> bool {
                 return keyword.eq_ignore_ascii_case("inline")
                     || keyword.eq_ignore_ascii_case("inline-block");
             }
-            node
-                .tag_name()
+            node.tag_name()
                 .map(|tag| {
                     matches!(
                         tag.as_str(),
@@ -2085,7 +2163,14 @@ fn layout_inline_nodes(
         collect_inline_segments(node, resolver, &mut segments);
     }
 
-    layout_inline_segments(&segments, start_x, start_y, available_width, align, strut_line_height)
+    layout_inline_segments(
+        &segments,
+        start_x,
+        start_y,
+        available_width,
+        align,
+        strut_line_height,
+    )
 }
 
 #[derive(Debug, Clone)]
@@ -2137,7 +2222,11 @@ fn collect_inline_segments(
                 return;
             }
 
-            out.extend(generated_inline_segments(node, resolver, PseudoElement::Before));
+            out.extend(generated_inline_segments(
+                node,
+                resolver,
+                PseudoElement::Before,
+            ));
             if let Some((image_node, image)) = element_inline_image(node) {
                 let image_style = resolver.computed_style(&image_node);
                 let padding = edge_sizes(&image_style, "padding");
@@ -2155,7 +2244,11 @@ fn collect_inline_segments(
                     ),
                     vertical_align: vertical_align(&image_style),
                 });
-                out.extend(generated_inline_segments(node, resolver, PseudoElement::After));
+                out.extend(generated_inline_segments(
+                    node,
+                    resolver,
+                    PseudoElement::After,
+                ));
                 return;
             }
             for child in node.child_nodes() {
@@ -2180,7 +2273,11 @@ fn collect_inline_segments(
                     _ => {}
                 }
             }
-            out.extend(generated_inline_segments(node, resolver, PseudoElement::After));
+            out.extend(generated_inline_segments(
+                node,
+                resolver,
+                PseudoElement::After,
+            ));
         }
         _ => {}
     }
@@ -2343,7 +2440,9 @@ fn fetch_image_uncached(url: &str) -> Option<Image> {
         Image::decode_jpeg(body).ok()
     } else {
         // Try PNG first, then JPEG
-        Image::decode_png(body).ok().or_else(|| Image::decode_jpeg(body).ok())
+        Image::decode_png(body)
+            .ok()
+            .or_else(|| Image::decode_jpeg(body).ok())
     }
 }
 
@@ -2574,14 +2673,24 @@ enum InlinePiece {
 
 fn split_segment(segment: &InlineSegment) -> Vec<InlinePiece> {
     match &segment.content {
-        InlineSegmentContent::Text(text) => split_text_segment(text, segment.metrics, segment.line_height),
+        InlineSegmentContent::Text(text) => {
+            split_text_segment(text, segment.metrics, segment.line_height)
+        }
         InlineSegmentContent::Image(image, style) => {
             let padding = edge_sizes(style, "padding");
             let border = edge_sizes(style, "border");
             vec![InlinePiece::Fragment {
                 content: InlineFragmentContent::Image(image.clone(), style.clone()),
-                width: image.width() as f32 + padding.left + padding.right + border.left + border.right,
-                height: image.height() as f32 + padding.top + padding.bottom + border.top + border.bottom,
+                width: image.width() as f32
+                    + padding.left
+                    + padding.right
+                    + border.left
+                    + border.right,
+                height: image.height() as f32
+                    + padding.top
+                    + padding.bottom
+                    + border.top
+                    + border.bottom,
             }]
         }
         InlineSegmentContent::GeneratedBox(style) => {
@@ -2668,7 +2777,8 @@ fn is_cjk_char(ch: char) -> bool {
 /// Characters that must not appear at the start of a line (line-start prohibited).
 /// These are typically closing punctuation and certain symbols.
 fn is_line_start_prohibited(ch: char) -> bool {
-    matches!(ch,
+    matches!(
+        ch,
         // Japanese punctuation
         '。' | '、' | '，' | '．' | '・' | '：' | '；' | '！' | '？' |
         // Closing brackets
@@ -2684,7 +2794,8 @@ fn is_line_start_prohibited(ch: char) -> bool {
 /// Characters that must not appear at the end of a line (line-end prohibited).
 /// These are typically opening punctuation.
 fn is_line_end_prohibited(ch: char) -> bool {
-    matches!(ch,
+    matches!(
+        ch,
         // Opening brackets
         '（' | '「' | '『' | '【' | '〔' | '｛' | '［'
     )

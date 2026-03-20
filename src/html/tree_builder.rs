@@ -236,48 +236,48 @@ impl Builder {
                 }
 
                 match name.as_str() {
-                "html" => {}
-                "head" => {}
-                "body" => {
-                    if self.find_open_element("body").is_none() {
-                        let body = self.insert_element_with_attributes("body", &attributes);
-                        self.open_elements.push(body);
-                    }
-                }
-                "table" => {
-                    let table = self.insert_element_with_attributes("table", &attributes);
-                    if !self_closing {
-                        self.open_elements.push(table);
-                        self.mode = InsertionMode::InTable;
-                    }
-                }
-                "tr" => {
-                    let table = self.ensure_table_element();
-                    let tr = self.insert_into(&table, "tr", &attributes);
-                    self.open_elements.push(tr);
-                    self.mode = InsertionMode::InRow;
-                }
-                "td" | "th" => {
-                    let table = self.ensure_table_element();
-                    let tr = self.ensure_table_row(&table);
-                    let cell = self.insert_into(&tr, &name, &attributes);
-                    self.open_elements.push(cell);
-                    self.mode = InsertionMode::InCell;
-                }
-                "template" => {
-                    let template = self.insert_element_with_attributes("template", &attributes);
-                    self.open_elements.push(template);
-                    self.template_insertion_modes.push(self.mode);
-                }
-                _ => {
-                    let element = self.insert_element_with_attributes(&name, &attributes);
-                    if !self_closing && !is_void_element(&name) {
-                        if is_formatting_element(&name) {
-                            self.active_formatting_elements.push(element.clone());
+                    "html" => {}
+                    "head" => {}
+                    "body" => {
+                        if self.find_open_element("body").is_none() {
+                            let body = self.insert_element_with_attributes("body", &attributes);
+                            self.open_elements.push(body);
                         }
-                        self.open_elements.push(element);
                     }
-                }
+                    "table" => {
+                        let table = self.insert_element_with_attributes("table", &attributes);
+                        if !self_closing {
+                            self.open_elements.push(table);
+                            self.mode = InsertionMode::InTable;
+                        }
+                    }
+                    "tr" => {
+                        let table = self.ensure_table_element();
+                        let tr = self.insert_into(&table, "tr", &attributes);
+                        self.open_elements.push(tr);
+                        self.mode = InsertionMode::InRow;
+                    }
+                    "td" | "th" => {
+                        let table = self.ensure_table_element();
+                        let tr = self.ensure_table_row(&table);
+                        let cell = self.insert_into(&tr, &name, &attributes);
+                        self.open_elements.push(cell);
+                        self.mode = InsertionMode::InCell;
+                    }
+                    "template" => {
+                        let template = self.insert_element_with_attributes("template", &attributes);
+                        self.open_elements.push(template);
+                        self.template_insertion_modes.push(self.mode);
+                    }
+                    _ => {
+                        let element = self.insert_element_with_attributes(&name, &attributes);
+                        if !self_closing && !is_void_element(&name) {
+                            if is_formatting_element(&name) {
+                                self.active_formatting_elements.push(element.clone());
+                            }
+                            self.open_elements.push(element);
+                        }
+                    }
                 }
             }
             Token::EndTag { name } => match name.as_str() {
@@ -773,7 +773,10 @@ mod tests {
         let body = document.query_selector("body").unwrap();
 
         assert_eq!(title.parent_node(), Some(head));
-        assert_eq!(title.child_nodes()[0].data(), Some("The Second Acid Test".to_string()));
+        assert_eq!(
+            title.child_nodes()[0].data(),
+            Some("The Second Acid Test".to_string())
+        );
         assert_eq!(body.child_nodes()[0].tag_name().as_deref(), Some("p"));
     }
 

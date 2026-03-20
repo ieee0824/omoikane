@@ -1,13 +1,17 @@
 //! Pixel-based painting primitives and layout tree rendering.
 
+use std::collections::HashSet;
 use std::fs;
 use std::io::Cursor;
 use std::io::Read;
 use std::path::Path;
 
-use crate::css::{ComputedStyle, ComputedValue, Origin, PseudoElement, StyleResolver, Stylesheet, parse_stylesheet};
+use crate::css::{
+    ComputedStyle, ComputedValue, Origin, PseudoElement, StyleResolver, Stylesheet,
+    parse_stylesheet,
+};
 use crate::dom::{Node, NodeHandle, NodeType};
-use crate::font::{load_system_font, Font};
+use crate::font::{Font, load_system_font};
 use crate::http::url::resolve_url;
 use crate::layout::{InlineFragmentContent, LayoutBox, Rect, Visibility};
 use base64::Engine;
@@ -88,14 +92,8 @@ pub enum PaintError {
 /// Parsed contents of a `data:` URI.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DataUri {
-    Text {
-        mime_type: String,
-        data: String,
-    },
-    Binary {
-        mime_type: String,
-        data: Vec<u8>,
-    },
+    Text { mime_type: String, data: String },
+    Binary { mime_type: String, data: Vec<u8> },
 }
 
 impl Color {
@@ -260,8 +258,7 @@ impl Canvas {
                     continue;
                 }
 
-                let source_index =
-                    ((source_y as u32 * image.width + source_x as u32) * 4) as usize;
+                let source_index = ((source_y as u32 * image.width + source_x as u32) * 4) as usize;
                 let color = Color {
                     r: image.pixels[source_index],
                     g: image.pixels[source_index + 1],
@@ -373,10 +370,7 @@ pub fn render_document_with_url(
 ) -> Result<Canvas, PaintError> {
     let mut resolver = StyleResolver::new();
     for stylesheet in extract_author_stylesheets(document, base_url)? {
-        resolver.add_stylesheet(
-            Origin::Author,
-            parse_stylesheet_forgiving(&stylesheet)?,
-        );
+        resolver.add_stylesheet(Origin::Author, parse_stylesheet_forgiving(&stylesheet)?);
     }
     let layout = crate::layout::layout_tree(document, &mut resolver, viewport)
         .ok_or(PaintError::InvalidImageBuffer)?;
@@ -455,10 +449,7 @@ fn rewrite_local_asset_attribute(
 
     let data = fs::read(asset_path).map_err(|_| PaintError::InvalidDataUri)?;
     let encoded = base64::engine::general_purpose::STANDARD.encode(data);
-    node.set_attribute(
-        attribute_name,
-        format!("data:{mime_type};base64,{encoded}"),
-    );
+    node.set_attribute(attribute_name, format!("data:{mime_type};base64,{encoded}"));
 
     Ok(())
 }
@@ -470,7 +461,11 @@ pub fn diff_canvases(actual: &Canvas, expected: &Canvas) -> (Canvas, usize) {
 
 /// Same as [`diff_canvases`] but allows a per-channel tolerance when comparing pixels.
 /// A tolerance of 1 treats pixels that differ by at most 1 on every channel as matching.
-pub fn diff_canvases_with_tolerance(actual: &Canvas, expected: &Canvas, tolerance: u8) -> (Canvas, usize) {
+pub fn diff_canvases_with_tolerance(
+    actual: &Canvas,
+    expected: &Canvas,
+    tolerance: u8,
+) -> (Canvas, usize) {
     let width = actual.width().max(expected.width());
     let height = actual.height().max(expected.height());
     let mut diff = Canvas::new(width, height);
@@ -480,7 +475,8 @@ pub fn diff_canvases_with_tolerance(actual: &Canvas, expected: &Canvas, toleranc
         for x in 0..width {
             let left = actual.pixel(x, y).unwrap_or(Color::rgba(0, 0, 0, 0));
             let right = expected.pixel(x, y).unwrap_or(Color::rgba(0, 0, 0, 0));
-            let within_tolerance = (left.r as i16 - right.r as i16).unsigned_abs() <= tolerance as u16
+            let within_tolerance = (left.r as i16 - right.r as i16).unsigned_abs()
+                <= tolerance as u16
                 && (left.g as i16 - right.g as i16).unsigned_abs() <= tolerance as u16
                 && (left.b as i16 - right.b as i16).unsigned_abs() <= tolerance as u16
                 && (left.a as i16 - right.a as i16).unsigned_abs() <= tolerance as u16;
@@ -512,14 +508,7 @@ fn paint_box(
     inherited_clip: Option<Rect>,
     viewport: Rect,
 ) {
-    paint_box_internal(
-        canvas,
-        layout,
-        resolver,
-        inherited_clip,
-        viewport,
-        true,
-    );
+    paint_box_internal(canvas, layout, resolver, inherited_clip, viewport, true);
 }
 
 fn paint_box_internal(
@@ -631,7 +620,14 @@ fn paint_box_internal(
         paint_box_internal(canvas, child, resolver, clip, viewport, true);
     }
 
-    paint_block_generated_pseudo_box(canvas, layout, resolver, PseudoElement::After, clip, viewport);
+    paint_block_generated_pseudo_box(
+        canvas,
+        layout,
+        resolver,
+        PseudoElement::After,
+        clip,
+        viewport,
+    );
 }
 
 fn collect_phase_descendants<'a>(
@@ -795,14 +791,29 @@ fn paint_text(
 
                     if let Some(ref font) = font {
                         // Real glyph rendering
-                        paint_text_with_font(canvas, fragment.rect, text, font_size, font, color, clip);
+                        paint_text_with_font(
+                            canvas,
+                            fragment.rect,
+                            text,
+                            font_size,
+                            font,
+                            color,
+                            clip,
+                        );
                     } else {
                         // Fallback: placeholder rectangles
                         paint_text_placeholder(canvas, fragment.rect, text, font_size, color, clip);
                     }
                 }
                 InlineFragmentContent::Image(image, style) => {
-                    paint_inline_image_fragment(canvas, fragment.rect, image, style, clip, _viewport);
+                    paint_inline_image_fragment(
+                        canvas,
+                        fragment.rect,
+                        image,
+                        style,
+                        clip,
+                        _viewport,
+                    );
                 }
                 InlineFragmentContent::GeneratedBox(style) => {
                     paint_generated_box(canvas, fragment.rect, style, clip, _viewport);
@@ -916,12 +927,7 @@ fn paint_inline_image_fragment(
     }
 
     let content_rect = inline_fragment_content_rect(rect, style, border);
-    canvas.draw_image_clipped(
-        image,
-        content_rect.x,
-        content_rect.y,
-        clip,
-    );
+    canvas.draw_image_clipped(image, content_rect.x, content_rect.y, clip);
 }
 
 fn inline_fragment_content_rect(
@@ -1569,12 +1575,7 @@ fn fill_triangle_clipped_inner(
     }
 }
 
-fn point_in_triangle(
-    point: (f32, f32),
-    p0: (f32, f32),
-    p1: (f32, f32),
-    p2: (f32, f32),
-) -> bool {
+fn point_in_triangle(point: (f32, f32), p0: (f32, f32), p1: (f32, f32), p2: (f32, f32)) -> bool {
     let area = triangle_sign(p0, p1, p2);
     if area == 0.0 {
         return false;
@@ -1862,9 +1863,17 @@ fn extract_author_stylesheets(
 
     let mut stylesheets = Vec::new();
     let mut client = effective_base.as_ref().map(|_| crate::http::Client::new());
-    collect_author_stylesheets(document, &mut stylesheets, effective_base.as_ref(), &mut client)?;
+    collect_author_stylesheets(
+        document,
+        &mut stylesheets,
+        effective_base.as_ref(),
+        &mut client,
+    )?;
     Ok(stylesheets)
 }
+
+const MAX_EXTERNAL_STYLESHEET_BYTES: usize = 1024 * 1024; // 1 MiB limit
+const MAX_IMPORT_DEPTH: usize = 5;
 
 fn collect_author_stylesheets(
     node: &NodeHandle,
@@ -1877,50 +1886,71 @@ fn collect_author_stylesheets(
             Some("style") => {
                 let css = collect_text_contents(node);
                 if !css.trim().is_empty() {
-                    out.push(css);
+                    let mut active_import_urls = HashSet::new();
+                    collect_stylesheet_with_imports(
+                        css,
+                        base_url,
+                        base_url,
+                        out,
+                        client,
+                        0,
+                        &mut active_import_urls,
+                    )?;
                 }
             }
             Some("link") => {
                 let attributes = node.attributes().unwrap_or_default();
                 let rel = attributes.get("rel").cloned().unwrap_or_default();
-                let href = attributes.get("href").cloned().unwrap_or_default().trim().to_string();
+                let href = attributes
+                    .get("href")
+                    .cloned()
+                    .unwrap_or_default()
+                    .trim()
+                    .to_string();
                 let media = attributes.get("media").map(|s| s.as_str());
 
-                if rel.split_whitespace()
+                if rel
+                    .split_whitespace()
                     .any(|token| token.eq_ignore_ascii_case("stylesheet"))
                     && !href.is_empty()
                     && matches_screen_media(media)
                 {
                     if href.starts_with("data:text/css") {
+                        let mut active_import_urls = HashSet::new();
                         match parse_data_uri(&href)? {
-                            DataUri::Text { data, .. } => out.push(data),
-                            DataUri::Binary { data, .. } => {
-                                out.push(String::from_utf8_lossy(&data).into_owned())
-                            }
+                            DataUri::Text { data, .. } => collect_stylesheet_with_imports(
+                                data,
+                                None,
+                                base_url,
+                                out,
+                                client,
+                                0,
+                                &mut active_import_urls,
+                            )?,
+                            DataUri::Binary { data, .. } => collect_stylesheet_with_imports(
+                                String::from_utf8_lossy(&data).into_owned(),
+                                None,
+                                base_url,
+                                out,
+                                client,
+                                0,
+                                &mut active_import_urls,
+                            )?,
                         }
                     } else if let Some(base) = base_url {
-                        // Only fetch same-origin URLs that do not specify a scheme, to prevent SSRF attacks.
-                        // Absolute URLs (containing "://") and protocol-relative URLs ("//")
-                        // are skipped; this still allows relative and absolute-path references
-                        // like "/css/style.css".
-                        if !href.contains("://") && !href.starts_with("//") {
-                            if let Ok(resolved) = resolve_url(base, &href) {
-                                let url_str = resolved.to_string();
-                                if let Some(c) = client {
-                                    match c.get(&url_str) {
-                                        Ok(resp) if resp.status_code() == 200 => {
-                                            let body = resp.body();
-                                            const MAX_EXTERNAL_STYLESHEET_BYTES: usize = 1024 * 1024; // 1 MiB limit
-                                            if body.len() <= MAX_EXTERNAL_STYLESHEET_BYTES {
-                                                if let Ok(css_str) = std::str::from_utf8(body) {
-                                                    out.push(css_str.to_owned());
-                                                }
-                                            }
-                                        }
-                                        _ => {} // Skip on fetch failure
-                                    }
-                                }
-                            }
+                        if let Some((css, resolved)) =
+                            fetch_relative_stylesheet(base, &href, client, base_url)
+                        {
+                            let mut active_import_urls = HashSet::new();
+                            collect_stylesheet_with_imports(
+                                css,
+                                Some(&resolved),
+                                base_url,
+                                out,
+                                client,
+                                0,
+                                &mut active_import_urls,
+                            )?;
                         }
                     }
                 }
@@ -1934,6 +1964,143 @@ fn collect_author_stylesheets(
     }
 
     Ok(())
+}
+
+fn collect_stylesheet_with_imports(
+    css: String,
+    stylesheet_url: Option<&crate::http::Url>,
+    document_base: Option<&crate::http::Url>,
+    out: &mut Vec<String>,
+    client: &mut Option<crate::http::Client>,
+    depth: usize,
+    active_import_urls: &mut HashSet<String>,
+) -> Result<(), PaintError> {
+    if depth < MAX_IMPORT_DEPTH {
+        let import_base = stylesheet_url.or(document_base);
+        if let Some(base) = import_base {
+            for import_href in extract_import_hrefs(&css) {
+                if let Some((import_css, import_url)) =
+                    fetch_relative_stylesheet(base, &import_href, client, document_base)
+                {
+                    let import_url_string = import_url.to_string();
+                    if !active_import_urls.insert(import_url_string.clone()) {
+                        continue;
+                    }
+                    collect_stylesheet_with_imports(
+                        import_css,
+                        Some(&import_url),
+                        document_base,
+                        out,
+                        client,
+                        depth + 1,
+                        active_import_urls,
+                    )?;
+                    active_import_urls.remove(&import_url_string);
+                }
+            }
+        }
+    }
+
+    out.push(css);
+    Ok(())
+}
+
+fn extract_import_hrefs(css: &str) -> Vec<String> {
+    let Ok(stylesheet) = parse_stylesheet(css) else {
+        return Vec::new();
+    };
+
+    let mut hrefs = Vec::new();
+    for rule in stylesheet.rules {
+        if let crate::css::Rule::At(at_rule) = rule {
+            if at_rule.name.eq_ignore_ascii_case("import") {
+                if let Some(href) = parse_import_href(&at_rule.prelude) {
+                    hrefs.push(href);
+                }
+            }
+        }
+    }
+    hrefs
+}
+
+fn parse_import_href(prelude: &str) -> Option<String> {
+    let prelude = prelude.trim();
+    if prelude.is_empty() {
+        return None;
+    }
+
+    if prelude
+        .get(0..4)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("url("))
+    {
+        let rest = &prelude[4..];
+        let close = rest.find(')')?;
+        let content = rest[..close].trim();
+        return unquote_css_token(content);
+    }
+
+    unquote_css_token(prelude)
+}
+
+fn unquote_css_token(token: &str) -> Option<String> {
+    let token = token.trim();
+    let first = token.chars().next()?;
+    if first != '"' && first != '\'' {
+        return None;
+    }
+    let mut escaped = false;
+    for (index, ch) in token.char_indices().skip(1) {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        if ch == '\\' {
+            escaped = true;
+            continue;
+        }
+        if ch == first {
+            let value = token[1..index].trim();
+            if value.is_empty() {
+                return None;
+            }
+            return Some(value.to_string());
+        }
+    }
+    None
+}
+
+fn fetch_relative_stylesheet(
+    base: &crate::http::Url,
+    href: &str,
+    client: &mut Option<crate::http::Client>,
+    document_base: Option<&crate::http::Url>,
+) -> Option<(String, crate::http::Url)> {
+    // Only fetch same-origin URLs that do not specify a scheme, to prevent SSRF attacks.
+    // Absolute URLs (containing "://") and protocol-relative URLs ("//")
+    // are skipped; this still allows relative and absolute-path references.
+    if href.contains("://") || href.starts_with("//") {
+        return None;
+    }
+
+    let resolved = resolve_url(base, href).ok()?;
+    if let Some(document_base) = document_base {
+        if !same_origin(&resolved, document_base) {
+            return None;
+        }
+    }
+    let url_str = resolved.to_string();
+
+    let c = client.as_mut()?;
+    let resp = c.get(&url_str).ok()?;
+    if resp.status_code() != 200 {
+        return None;
+    }
+    let body = resp.body();
+    if body.len() > MAX_EXTERNAL_STYLESHEET_BYTES {
+        return None;
+    }
+    let css = std::str::from_utf8(body).ok()?.to_owned();
+    Some((css, resolved))
 }
 
 fn collect_text_contents(node: &NodeHandle) -> String {
@@ -2298,7 +2465,11 @@ fn unfilter_png_scanline(
         0 => dest.copy_from_slice(src),
         1 => {
             for index in 0..src.len() {
-                let left = if index >= bytes_per_pixel { dest[index - bytes_per_pixel] } else { 0 };
+                let left = if index >= bytes_per_pixel {
+                    dest[index - bytes_per_pixel]
+                } else {
+                    0
+                };
                 dest[index] = src[index].wrapping_add(left);
             }
         }
@@ -2310,14 +2481,22 @@ fn unfilter_png_scanline(
         }
         3 => {
             for index in 0..src.len() {
-                let left = if index >= bytes_per_pixel { dest[index - bytes_per_pixel] } else { 0 };
+                let left = if index >= bytes_per_pixel {
+                    dest[index - bytes_per_pixel]
+                } else {
+                    0
+                };
                 let up = prev.map(|row| row[index]).unwrap_or(0);
                 dest[index] = src[index].wrapping_add(((left as u16 + up as u16) / 2) as u8);
             }
         }
         4 => {
             for index in 0..src.len() {
-                let a = if index >= bytes_per_pixel { dest[index - bytes_per_pixel] } else { 0 };
+                let a = if index >= bytes_per_pixel {
+                    dest[index - bytes_per_pixel]
+                } else {
+                    0
+                };
                 let b = prev.map(|row| row[index]).unwrap_or(0);
                 let c = if index >= bytes_per_pixel {
                     prev.map(|row| row[index - bytes_per_pixel]).unwrap_or(0)
@@ -2433,7 +2612,9 @@ fn percent_decode(input: &str) -> String {
     let mut index = 0usize;
     while index < bytes.len() {
         if bytes[index] == b'%' && index + 2 < bytes.len() {
-            if let (Some(high), Some(low)) = (hex_value(bytes[index + 1]), hex_value(bytes[index + 2])) {
+            if let (Some(high), Some(low)) =
+                (hex_value(bytes[index + 1]), hex_value(bytes[index + 2]))
+            {
                 out.push((high << 4) | low);
                 index += 3;
                 continue;
@@ -2453,7 +2634,6 @@ fn hex_value(byte: u8) -> Option<u8> {
         _ => None,
     }
 }
-
 
 #[cfg(test)]
 mod tests;
