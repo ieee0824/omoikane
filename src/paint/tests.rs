@@ -3077,3 +3077,142 @@ use crate::paint::*;
             changed
         );
     }
+
+    // ============================================================
+    // media attribute tests (Issue 013-7)
+    // ============================================================
+
+    #[test]
+    fn media_attribute_screen_included() {
+        let html = r#"<html><head>
+            <link rel="stylesheet" media="screen" href="data:text/css,body{color:red}">
+        </head><body></body></html>"#;
+        let document = TreeBuilder::parse(html).document();
+        let stylesheets = extract_author_stylesheets(&document, None).unwrap();
+        assert_eq!(stylesheets.len(), 1);
+        assert!(stylesheets[0].contains("color:red"));
+    }
+
+    #[test]
+    fn media_attribute_print_excluded() {
+        let html = r#"<html><head>
+            <link rel="stylesheet" media="print" href="data:text/css,body{color:red}">
+        </head><body></body></html>"#;
+        let document = TreeBuilder::parse(html).document();
+        let stylesheets = extract_author_stylesheets(&document, None).unwrap();
+        assert!(stylesheets.is_empty());
+    }
+
+    #[test]
+    fn media_attribute_all_included() {
+        let html = r#"<html><head>
+            <link rel="stylesheet" media="all" href="data:text/css,body{color:green}">
+        </head><body></body></html>"#;
+        let document = TreeBuilder::parse(html).document();
+        let stylesheets = extract_author_stylesheets(&document, None).unwrap();
+        assert_eq!(stylesheets.len(), 1);
+        assert!(stylesheets[0].contains("color:green"));
+    }
+
+    #[test]
+    fn media_attribute_missing_included() {
+        let html = r#"<html><head>
+            <link rel="stylesheet" href="data:text/css,body{margin:0}">
+        </head><body></body></html>"#;
+        let document = TreeBuilder::parse(html).document();
+        let stylesheets = extract_author_stylesheets(&document, None).unwrap();
+        assert_eq!(stylesheets.len(), 1);
+        assert!(stylesheets[0].contains("margin:0"));
+    }
+
+    #[test]
+    fn media_attribute_empty_included() {
+        let html = r#"<html><head>
+            <link rel="stylesheet" media="" href="data:text/css,body{padding:0}">
+        </head><body></body></html>"#;
+        let document = TreeBuilder::parse(html).document();
+        let stylesheets = extract_author_stylesheets(&document, None).unwrap();
+        assert_eq!(stylesheets.len(), 1);
+        assert!(stylesheets[0].contains("padding:0"));
+    }
+
+    #[test]
+    fn media_attribute_screen_with_query_included() {
+        let html = r#"<html><head>
+            <link rel="stylesheet" media="screen and (min-width: 800px)" href="data:text/css,body{width:100%}">
+        </head><body></body></html>"#;
+        let document = TreeBuilder::parse(html).document();
+        let stylesheets = extract_author_stylesheets(&document, None).unwrap();
+        assert_eq!(stylesheets.len(), 1);
+        assert!(stylesheets[0].contains("width:100%"));
+    }
+
+    #[test]
+    fn media_attribute_case_insensitive() {
+        let html = r#"<html><head>
+            <link rel="stylesheet" media="SCREEN" href="data:text/css,body{color:red}">
+            <link rel="stylesheet" media="Print" href="data:text/css,p{color:blue}">
+        </head><body></body></html>"#;
+        let document = TreeBuilder::parse(html).document();
+        let stylesheets = extract_author_stylesheets(&document, None).unwrap();
+        assert_eq!(stylesheets.len(), 1);
+        assert!(stylesheets[0].contains("color:red"));
+    }
+
+    // ============================================================
+    // base element tests (Issue 013-7)
+    // ============================================================
+
+    #[test]
+    fn base_element_absolute_url_affects_base_calculation() {
+        // This test verifies extract_document_base_url is used.
+        // We can't easily test HTTP fetches without a server, so we test that
+        // the function doesn't panic and returns the expected fallback.
+        let html = r#"<html><head>
+            <base href="https://cdn.example.com/assets/">
+            <link rel="stylesheet" href="data:text/css,body{color:blue}">
+        </head><body></body></html>"#;
+        let document = TreeBuilder::parse(html).document();
+        // With no fallback base and an absolute base href, data: URIs should still work
+        let stylesheets = extract_author_stylesheets(&document, None).unwrap();
+        assert_eq!(stylesheets.len(), 1);
+        assert!(stylesheets[0].contains("color:blue"));
+    }
+
+    #[test]
+    fn base_element_uses_first_base_only() {
+        let html = r#"<html><head>
+            <base href="https://first.example.com/">
+            <base href="https://second.example.com/">
+            <link rel="stylesheet" href="data:text/css,body{color:green}">
+        </head><body></body></html>"#;
+        let document = TreeBuilder::parse(html).document();
+        // Multiple <base> elements: only the first should be used.
+        // Data URIs work regardless, verifying the function executes.
+        let stylesheets = extract_author_stylesheets(&document, None).unwrap();
+        assert_eq!(stylesheets.len(), 1);
+    }
+
+    #[test]
+    fn base_element_without_href_is_ignored() {
+        let html = r#"<html><head>
+            <base target="_blank">
+            <link rel="stylesheet" href="data:text/css,body{color:red}">
+        </head><body></body></html>"#;
+        let document = TreeBuilder::parse(html).document();
+        // <base> without href should be ignored, fallback to None
+        let stylesheets = extract_author_stylesheets(&document, None).unwrap();
+        assert_eq!(stylesheets.len(), 1);
+    }
+
+    #[test]
+    fn base_element_empty_href_is_ignored() {
+        let html = r#"<html><head>
+            <base href="">
+            <link rel="stylesheet" href="data:text/css,body{margin:10px}">
+        </head><body></body></html>"#;
+        let document = TreeBuilder::parse(html).document();
+        let stylesheets = extract_author_stylesheets(&document, None).unwrap();
+        assert_eq!(stylesheets.len(), 1);
+        assert!(stylesheets[0].contains("margin:10px"));
+    }

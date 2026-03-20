@@ -1708,13 +1708,87 @@ fn crc32(data: &[u8]) -> u32 {
     !crc
 }
 
+/// Returns true if the media attribute value applies to screen rendering.
+///
+/// Matches:
+/// - Empty string or missing attribute (defaults to "all")
+/// - "all"
+/// - "screen"
+/// - Media queries containing "screen" or "all" (e.g., "screen and (min-width: 800px)")
+fn matches_screen_media(media: Option<&str>) -> bool {
+    let media = match media {
+        None => return true, // No media attr = all media
+        Some(s) => s.trim(),
+    };
+
+    if media.is_empty() {
+        return true; // Empty media attr = all media
+    }
+
+    let media_lower = media.to_ascii_lowercase();
+
+    // "all" matches everything
+    if media_lower == "all" {
+        return true;
+    }
+
+    // Check for "screen" as a media type
+    if media_lower.contains("screen") {
+        return true;
+    }
+
+    // "all" can appear in media queries like "all and (min-width: ...)"
+    if media_lower.contains("all") {
+        return true;
+    }
+
+    // Exclude print-only and other non-screen media
+    false
+}
+
+/// Extracts the document's base URL from the first `<base href="...">` element.
+///
+/// If a `<base>` element with a non-empty `href` is found, the href is resolved
+/// against the provided `fallback_base` (if relative) or used directly (if absolute).
+/// Returns the fallback base if no valid `<base>` element is found.
+fn extract_document_base_url(
+    document: &NodeHandle,
+    fallback_base: Option<&crate::http::Url>,
+) -> Option<crate::http::Url> {
+    if let Some(base_elem) = document.query_selector("base") {
+        if let Some(attrs) = base_elem.attributes() {
+            if let Some(href) = attrs.get("href") {
+                let href = href.trim();
+                if !href.is_empty() {
+                    // Absolute URL
+                    if href.contains("://") {
+                        if let Ok(url) = href.parse() {
+                            return Some(url);
+                        }
+                    }
+                    // Relative URL (resolve against fallback_base)
+                    if let Some(base) = fallback_base {
+                        if let Ok(url) = resolve_url(base, href) {
+                            return Some(url);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    fallback_base.cloned()
+}
+
 fn extract_author_stylesheets(
     document: &NodeHandle,
     base_url: Option<&crate::http::Url>,
 ) -> Result<Vec<String>, PaintError> {
+    // Compute effective base URL considering <base> element
+    let effective_base = extract_document_base_url(document, base_url);
+
     let mut stylesheets = Vec::new();
-    let mut client = base_url.map(|_| crate::http::Client::new());
-    collect_author_stylesheets(document, &mut stylesheets, base_url, &mut client)?;
+    let mut client = effective_base.as_ref().map(|_| crate::http::Client::new());
+    collect_author_stylesheets(document, &mut stylesheets, effective_base.as_ref(), &mut client)?;
     Ok(stylesheets)
 }
 
@@ -1736,9 +1810,12 @@ fn collect_author_stylesheets(
                 let attributes = node.attributes().unwrap_or_default();
                 let rel = attributes.get("rel").cloned().unwrap_or_default();
                 let href = attributes.get("href").cloned().unwrap_or_default().trim().to_string();
+                let media = attributes.get("media").map(|s| s.as_str());
+
                 if rel.split_whitespace()
                     .any(|token| token.eq_ignore_ascii_case("stylesheet"))
                     && !href.is_empty()
+                    && matches_screen_media(media)
                 {
                     if href.starts_with("data:text/css") {
                         match parse_data_uri(&href)? {

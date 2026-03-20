@@ -2,7 +2,7 @@
 number: 013-7
 slug: base-element-media-attr
 parent: 013-real-world-rendering
-status: open
+status: closed
 ---
 
 # base要素とmedia属性対応
