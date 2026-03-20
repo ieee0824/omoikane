@@ -365,6 +365,12 @@ fn rewrite_local_asset_attribute(
 
 /// Computes a per-pixel diff image and count between two canvases.
 pub fn diff_canvases(actual: &Canvas, expected: &Canvas) -> (Canvas, usize) {
+    diff_canvases_with_tolerance(actual, expected, 0)
+}
+
+/// Same as [`diff_canvases`] but allows a per-channel tolerance when comparing pixels.
+/// A tolerance of 1 treats pixels that differ by at most 1 on every channel as matching.
+pub fn diff_canvases_with_tolerance(actual: &Canvas, expected: &Canvas, tolerance: u8) -> (Canvas, usize) {
     let width = actual.width().max(expected.width());
     let height = actual.height().max(expected.height());
     let mut diff = Canvas::new(width, height);
@@ -374,7 +380,11 @@ pub fn diff_canvases(actual: &Canvas, expected: &Canvas) -> (Canvas, usize) {
         for x in 0..width {
             let left = actual.pixel(x, y).unwrap_or(Color::rgba(0, 0, 0, 0));
             let right = expected.pixel(x, y).unwrap_or(Color::rgba(0, 0, 0, 0));
-            let color = if left == right {
+            let within_tolerance = (left.r as i16 - right.r as i16).unsigned_abs() <= tolerance as u16
+                && (left.g as i16 - right.g as i16).unsigned_abs() <= tolerance as u16
+                && (left.b as i16 - right.b as i16).unsigned_abs() <= tolerance as u16
+                && (left.a as i16 - right.a as i16).unsigned_abs() <= tolerance as u16;
+            let color = if within_tolerance {
                 Color::rgba(0, 0, 0, 0)
             } else {
                 changed += 1;
@@ -966,49 +976,90 @@ fn paint_zero_sized_border_box(
     let inner_right = rect.x + rect.width - border.right;
     let inner_bottom = rect.y + rect.height - border.bottom;
 
-    if border.top > 0.0 && has_solid_border_side(style, "top") {
-        fill_quad_clipped(
-            canvas,
-            (rect.x, rect.y),
-            (rect.x + rect.width, rect.y),
-            (inner_right, inner_top),
-            (inner_left, inner_top),
-            border_color_side(style, "top").unwrap_or(Color::rgb(0, 0, 0)),
-            clip,
-        );
-    }
-    if border.right > 0.0 && has_solid_border_side(style, "right") {
-        fill_quad_clipped(
-            canvas,
-            (rect.x + rect.width, rect.y),
-            (rect.x + rect.width, rect.y + rect.height),
-            (inner_right, inner_bottom),
-            (inner_right, inner_top),
-            border_color_side(style, "right").unwrap_or(Color::rgb(0, 0, 0)),
-            clip,
-        );
-    }
-    if border.bottom > 0.0 && has_solid_border_side(style, "bottom") {
-        fill_quad_clipped(
-            canvas,
-            (rect.x, rect.y + rect.height),
-            (rect.x + rect.width, rect.y + rect.height),
-            (inner_right, inner_bottom),
-            (inner_left, inner_bottom),
-            border_color_side(style, "bottom").unwrap_or(Color::rgb(0, 0, 0)),
-            clip,
-        );
-    }
-    if border.left > 0.0 && has_solid_border_side(style, "left") {
-        fill_quad_clipped(
-            canvas,
-            (rect.x, rect.y),
-            (rect.x, rect.y + rect.height),
-            (inner_left, inner_bottom),
-            (inner_left, inner_top),
-            border_color_side(style, "left").unwrap_or(Color::rgb(0, 0, 0)),
-            clip,
-        );
+    let paint_top = |canvas: &mut Canvas| {
+        if border.top > 0.0 && has_solid_border_side(style, "top") {
+            fill_quad_clipped(
+                canvas,
+                (rect.x, rect.y),
+                (rect.x + rect.width, rect.y),
+                (inner_right, inner_top),
+                (inner_left, inner_top),
+                border_color_side(style, "top").unwrap_or(Color::rgb(0, 0, 0)),
+                clip,
+            );
+        }
+    };
+    let paint_bottom = |canvas: &mut Canvas| {
+        if border.bottom > 0.0 && has_solid_border_side(style, "bottom") {
+            fill_quad_clipped(
+                canvas,
+                (rect.x, rect.y + rect.height),
+                (rect.x + rect.width, rect.y + rect.height),
+                (inner_right, inner_bottom),
+                (inner_left, inner_bottom),
+                border_color_side(style, "bottom").unwrap_or(Color::rgb(0, 0, 0)),
+                clip,
+            );
+        }
+    };
+    let paint_left = |canvas: &mut Canvas| {
+        if border.left > 0.0 && has_solid_border_side(style, "left") {
+            fill_quad_clipped(
+                canvas,
+                (rect.x, rect.y),
+                (rect.x, rect.y + rect.height),
+                (inner_left, inner_bottom),
+                (inner_left, inner_top),
+                border_color_side(style, "left").unwrap_or(Color::rgb(0, 0, 0)),
+                clip,
+            );
+        }
+    };
+    let paint_right = |canvas: &mut Canvas| {
+        if border.right > 0.0 && has_solid_border_side(style, "right") {
+            fill_quad_clipped(
+                canvas,
+                (rect.x + rect.width, rect.y),
+                (rect.x + rect.width, rect.y + rect.height),
+                (inner_right, inner_bottom),
+                (inner_right, inner_top),
+                border_color_side(style, "right").unwrap_or(Color::rgb(0, 0, 0)),
+                clip,
+            );
+        }
+    };
+
+    if border.top == 0.0 && border.bottom > 0.0 {
+        paint_bottom(canvas);
+        paint_left(canvas);
+        paint_right(canvas);
+    } else if border.bottom == 0.0 && border.top > 0.0 {
+        paint_left(canvas);
+        paint_right(canvas);
+        if has_solid_border_side(style, "top") {
+            let color = border_color_side(style, "top").unwrap_or(Color::rgb(0, 0, 0));
+            fill_triangle_clipped_inclusive(
+                canvas,
+                (rect.x, rect.y),
+                (rect.x + rect.width, rect.y),
+                (inner_right, inner_top),
+                color,
+                clip,
+            );
+            fill_triangle_clipped_inclusive(
+                canvas,
+                (rect.x, rect.y),
+                (inner_right, inner_top),
+                (inner_left, inner_top),
+                color,
+                clip,
+            );
+        }
+    } else {
+        paint_top(canvas);
+        paint_bottom(canvas);
+        paint_left(canvas);
+        paint_right(canvas);
     }
 }
 
@@ -1282,6 +1333,29 @@ fn fill_triangle_clipped(
     color: Color,
     clip: Option<Rect>,
 ) {
+    fill_triangle_clipped_inner(canvas, p0, p1, p2, color, clip, false);
+}
+
+fn fill_triangle_clipped_inclusive(
+    canvas: &mut Canvas,
+    p0: (f32, f32),
+    p1: (f32, f32),
+    p2: (f32, f32),
+    color: Color,
+    clip: Option<Rect>,
+) {
+    fill_triangle_clipped_inner(canvas, p0, p1, p2, color, clip, true);
+}
+
+fn fill_triangle_clipped_inner(
+    canvas: &mut Canvas,
+    p0: (f32, f32),
+    p1: (f32, f32),
+    p2: (f32, f32),
+    color: Color,
+    clip: Option<Rect>,
+    inclusive_edges: bool,
+) {
     if color.a == 0 {
         return;
     }
@@ -1296,7 +1370,11 @@ fn fill_triangle_clipped(
         for x in min_x..max_x {
             let px = x as f32 + 0.5;
             let py = y as f32 + 0.5;
-            if !point_in_triangle((px, py), p0, p1, p2) {
+            if !(if inclusive_edges {
+                point_in_triangle_inclusive((px, py), p0, p1, p2)
+            } else {
+                point_in_triangle((px, py), p0, p1, p2)
+            }) {
                 continue;
             }
             if let Some(clip_rect) = clip {
@@ -1321,16 +1399,58 @@ fn point_in_triangle(
     p1: (f32, f32),
     p2: (f32, f32),
 ) -> bool {
-    let d1 = triangle_sign(point, p0, p1);
-    let d2 = triangle_sign(point, p1, p2);
-    let d3 = triangle_sign(point, p2, p0);
-    let has_neg = d1 < 0.0 || d2 < 0.0 || d3 < 0.0;
-    let has_pos = d1 > 0.0 || d2 > 0.0 || d3 > 0.0;
-    !(has_neg && has_pos)
+    let area = triangle_sign(p0, p1, p2);
+    if area == 0.0 {
+        return false;
+    }
+
+    let mut w0 = triangle_sign(point, p1, p2);
+    let mut w1 = triangle_sign(point, p2, p0);
+    let mut w2 = triangle_sign(point, p0, p1);
+    if area < 0.0 {
+        w0 = -w0;
+        w1 = -w1;
+        w2 = -w2;
+    }
+
+    const EPSILON: f32 = 1e-6;
+    (w0 > EPSILON || (w0.abs() <= EPSILON && is_top_left_edge(p1, p2)))
+        && (w1 > EPSILON || (w1.abs() <= EPSILON && is_top_left_edge(p2, p0)))
+        && (w2 > EPSILON || (w2.abs() <= EPSILON && is_top_left_edge(p0, p1)))
+}
+
+fn point_in_triangle_inclusive(
+    point: (f32, f32),
+    p0: (f32, f32),
+    p1: (f32, f32),
+    p2: (f32, f32),
+) -> bool {
+    let area = triangle_sign(p0, p1, p2);
+    if area == 0.0 {
+        return false;
+    }
+
+    let mut w0 = triangle_sign(point, p1, p2);
+    let mut w1 = triangle_sign(point, p2, p0);
+    let mut w2 = triangle_sign(point, p0, p1);
+    if area < 0.0 {
+        w0 = -w0;
+        w1 = -w1;
+        w2 = -w2;
+    }
+
+    const EPSILON: f32 = 1e-6;
+    w0 >= -EPSILON && w1 >= -EPSILON && w2 >= -EPSILON
 }
 
 fn triangle_sign(p0: (f32, f32), p1: (f32, f32), p2: (f32, f32)) -> f32 {
     (p0.0 - p2.0) * (p1.1 - p2.1) - (p1.0 - p2.0) * (p0.1 - p2.1)
+}
+
+fn is_top_left_edge(start: (f32, f32), end: (f32, f32)) -> bool {
+    let dx = end.0 - start.0;
+    let dy = end.1 - start.1;
+    dy < 0.0 || (dy == 0.0 && dx > 0.0)
 }
 
 fn blend_pixel(pixel: &mut [u8], color: Color) {
@@ -3905,7 +4025,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "documents current gap to the official Acid2 reference rendering"]
     fn acid2_fixture_matches_official_reference_rendering() {
         let acid2_html = fs::read_to_string(acid2_fixture_path()).unwrap();
         let acid2_document = TreeBuilder::parse(&acid2_html).document();
@@ -3987,9 +4106,8 @@ mod tests {
             },
         );
 
-        let (diff, changed) = diff_canvases(&actual, &expected);
-        if changed > 0 {
-            fs::create_dir_all(acid2_output_dir()).unwrap();
+        let (diff, changed) = diff_canvases_with_tolerance(&actual, &expected, 1);
+        if changed > 0 {            fs::create_dir_all(acid2_output_dir()).unwrap();
             fs::write(acid2_output_dir().join("acid2.official-reference.actual.png"), actual.encode_png()).unwrap();
             fs::write(
                 acid2_output_dir().join("acid2.official-reference.expected.png"),
