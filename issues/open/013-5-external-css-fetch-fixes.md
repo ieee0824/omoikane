@@ -213,17 +213,31 @@ PR#4で実装した外部CSSフェッチ機能（013-2）に対して、Copilot 
 ## 実装計画（継続対応）
 
 **優先度順:**
-1. URLフラグメント処理（RFC準拠、requesttargetの正確性）
-2. 非HTTP(S)スキーム処理（RFC準拠、security）
-3. メモリ制限（DoS対策）
-4. href トリミング処理（エッジケース）
-5. コメント修正
-6. ドキュメント修正
-7. テスト追加
+1. URLフラグメント処理（RFC準拠、requesttargetの正確性） ✅ 完了
+2. 非HTTP(S)スキーム処理（RFC準拠、security） ✅ 完了
+3. メモリ制限（DoS対策） ✅ 完了
+4. href トリミング処理（エッジケース） ✅ 完了
+5. コメント修正 ✅ 完了
+6. ドキュメント修正 ✅ 完了
+7. テスト追加 ✅ 完了
 
-**コミット例:**
-1. fix: URLフラグメントと非HTTP(S)スキーム対応（RFC 3986準拠）
-2. feat: CSSサイズ制限でDoS対策（1 MiBまで）
-3. fix: href属性のトリミング処理追加
-4. docs: コメントとドキュメント修正
-5. test: 新規テストケース追加
+## ✅ 実装済み（第2次対応 - 新規指摘7項目）
+
+**コミット:** 5ed042f
+
+- 7. href属性の空白トリミング ✓
+- 8. コメント内のエスケープミス修正 ✓
+- 9. SSRF関連コメントの不正確さ改善 ✓
+- 10. メモリ枯渇DoS対策（CSS制限） ✓
+- 11. URLフラグメント処理 ✓
+- 12. 非HTTP(S)スキーム対応（RFC 3986準拠） ✓
+- 13. issue 013-2 ドキュメント修正 ✓
+
+**テスト追加:**
+- resolve_url_strips_fragment
+- resolve_url_rejects_non_http_schemes
+- resolve_edge_case_colon_in_path
+- extract_stylesheets_trims_whitespace_only_href
+- extract_stylesheets_respects_css_size_limit
+
+実行結果：全313テスト通過

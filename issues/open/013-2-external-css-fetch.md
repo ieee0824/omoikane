@@ -14,7 +14,10 @@ HTTP経由で取得し、カスケードに組み込む。現在は `data:` URI 
 
 ## スコープ
 
-- `<link rel="stylesheet" href="...">` の href が http/https の場合に HTTPフェッチ
+- `<link rel="stylesheet" href="...">` の href をHTTPフェッチし、カスケードに組み込む
+- **SSRF対策**: 同一オリジン URL のみをフェッチ（絶対URL / プロトコル相対URL はスキップ）
+  - 相対パス（`style.css`）、絶対パス（`/css/style.css`）のみが fetch対象
+  - 絶対URL（`https://other.com/style.css`）、プロトコル相対URL（`//cdn.com/style.css`）はスキップ
 - フェッチした CSS テキストを author stylesheet としてカスケードに追加
 - `<link>` の `media` 属性は初期段階では無視（全メディア適用）
 - 相対URLの解決（base URL の管理）
@@ -38,12 +41,20 @@ HTTP経由で取得し、カスケードに組み込む。現在は `data:` URI 
 - `resolve_url(base: &Url, reference: &str) -> Result<Url, UrlParseError>` を追加
 - 絶対URL、プロトコル相対(`//`)、絶対パス(`/path`)、相対パス(`../path`)に対応
 - RFC 3986 §5.2.4 準拠の `.` / `..` 正規化
+- RFC 3986 §3.1 準拠のスキーム判定（`:` が `/`, `?`, `#` より前を絶対URI判定）
+- URLフラグメント（`#`）を自動削除（HTTPリクエスト送信時に含めるべきでない）
 - `http::url` モジュールを `pub` に変更して外部公開
 
 ### 外部CSSフェッチ (`src/paint/mod.rs`)
 - `extract_author_stylesheets` に `base_url: Option<&Url>` 引数を追加
-- `collect_author_stylesheets` が HTTP/HTTPS の `<link>` href を検出した場合、`resolve_url` でURL解決後 `http::Client` でGETフェッチ
-- ステータス200 + UTF-8のレスポンスのみ採用、それ以外はスキップ
+- `collect_author_stylesheets` が `<link>` href を処理：
+  - `data:text/css` URIs を parse して直接適用
+  - 相対URL・絶対パスのみをHTTPフェッチ（SSRF対策）
+  - 絶対URL・プロトコル相対URLはスキップ
+  - ステータス200 + UTF-8のレスポンスのみ採用
+  - CSSサイズを 1 MiB に制限してDoS対策
+  - href の空白トリミング処理
+  - フェッチ失敗時はスキップ（エラーで全体を止めない）
 - `base_url=None` の場合はHTTP hrefをスキップ（data: URIのみ処理）
 
 ### 新規公開API
@@ -52,8 +63,24 @@ HTTP経由で取得し、カスケードに組み込む。現在は `data:` URI 
 - 既存の `render_document` / `render_document_png` は後方互換維持
 
 ### テスト
-- `resolve_url` のユニットテスト6件（絶対URL、プロトコル相対、絶対パス、相対パス、親相対、クエリ付き）
-- `extract_author_stylesheets` のテスト3件（HTTP linkスキップ、data URIとの混在、空href）
+- `resolve_url` のユニットテスト10件
+  - 絶対URL、プロトコル相対、絶対パス、相対パス、親相対、クエリ付き
+  - フラグメント関連（削除確認）
+  - 非HTTP(S)スキーム rejection
+  - パス内コロンのエッジケース
+- `extract_author_stylesheets` のテスト8件
+  - HTTP linkスキップ、data URIとの混在、空href
+  - 空白のみhref トリミング
+  - 絶対URL・プロトコル相対URLのスキップ
+  - 大文字小文字非区別rel判定
+  - 相対URL フェッチ確認
+  - CSSサイズ制限確認
+
+## セキュリティ考慮
+
+- **SSRF対策**: 同一オリジン（相対URL・絶対パス）のみをフェッチ
+- **DoS対策**: CSSサイズを 1 MiB に制限
+- **RFC準拠**: URLフラグメント削除、スキーム判定を RFC 3986 に準拠
 
 ## 未対応（スコープ外）
 
