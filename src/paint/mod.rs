@@ -1712,9 +1712,14 @@ fn crc32(data: &[u8]) -> u32 {
 ///
 /// Matches:
 /// - Empty string or missing attribute (defaults to "all")
-/// - "all"
-/// - "screen"
-/// - Media queries containing "screen" or "all" (e.g., "screen and (min-width: 800px)")
+/// - "all" or "screen" as whole-word media types
+/// - Comma-separated lists (e.g., "print, screen")
+/// - Media queries with "only" modifier (e.g., "only screen")
+///
+/// Does NOT match:
+/// - "print" or other non-screen media types
+/// - "not screen" (negated screen)
+/// - Substrings (e.g., "small" does NOT match just because it contains "all")
 fn matches_screen_media(media: Option<&str>) -> bool {
     let media = match media {
         None => return true, // No media attr = all media
@@ -1725,52 +1730,121 @@ fn matches_screen_media(media: Option<&str>) -> bool {
         return true; // Empty media attr = all media
     }
 
-    let media_lower = media.to_ascii_lowercase();
+    // Parse as comma-separated list of media queries
+    for query in media.split(',') {
+        let query = query.trim();
+        if query.is_empty() {
+            // Empty entry means "all"
+            return true;
+        }
 
-    // "all" matches everything
-    if media_lower == "all" {
-        return true;
+        let query_lower = query.to_ascii_lowercase();
+        let mut tokens = query_lower.split_whitespace();
+
+        let first = tokens.next();
+        let (modifier, media_type) = match first {
+            None => {
+                // Empty query -> defaults to "all"
+                (None::<&str>, Some("all"))
+            }
+            Some(tok) if tok == "not" || tok == "only" => {
+                // Modifier followed by media type
+                let mt = tokens.next();
+                (Some(tok), mt)
+            }
+            Some(tok) if tok.starts_with('(') => {
+                // Leading feature without explicit type (e.g., "(min-width: 800px)")
+                // defaults to "all"
+                (None::<&str>, Some("all"))
+            }
+            Some(tok) => {
+                // First token is the media type
+                (None::<&str>, Some(tok))
+            }
+        };
+
+        let media_type = media_type.unwrap_or("all");
+        let is_screen_like = media_type == "screen" || media_type == "all";
+
+        if !is_screen_like {
+            // Non-screen media type such as "print", "speech", etc.
+            continue;
+        }
+
+        match modifier {
+            Some("not") => {
+                // "not screen" or "not all" explicitly excludes screen
+                continue;
+            }
+            _ => {
+                // Matches screen/all (with or without "only")
+                return true;
+            }
+        }
     }
 
-    // Check for "screen" as a media type
-    if media_lower.contains("screen") {
-        return true;
-    }
-
-    // "all" can appear in media queries like "all and (min-width: ...)"
-    if media_lower.contains("all") {
-        return true;
-    }
-
-    // Exclude print-only and other non-screen media
+    // No query matched screen/all
     false
 }
 
-/// Extracts the document's base URL from the first `<base href="...">` element.
+/// Checks if two URLs have the same origin (scheme + host + port).
+fn same_origin(a: &crate::http::Url, b: &crate::http::Url) -> bool {
+    a.scheme() == b.scheme() && a.host() == b.host() && a.port() == b.port()
+}
+
+/// Recursively finds all `<base>` elements in document order.
+fn find_base_elements(node: &NodeHandle, result: &mut Vec<NodeHandle>) {
+    if node.node_type() == crate::dom::NodeType::Element {
+        if node.tag_name().as_deref() == Some("base") {
+            result.push(node.clone());
+        }
+    }
+    for child in node.child_nodes() {
+        find_base_elements(&child, result);
+    }
+}
+
+/// Extracts the document's base URL from the first `<base href="...">` element with a valid href.
 ///
-/// If a `<base>` element with a non-empty `href` is found, the href is resolved
-/// against the provided `fallback_base` (if relative) or used directly (if absolute).
-/// Returns the fallback base if no valid `<base>` element is found.
+/// Scans all `<base>` elements in document order and uses the first one with a
+/// non-empty, resolvable `href`. For SSRF protection, absolute URLs are only honored
+/// if they have the same origin (scheme + host + port) as the fallback_base.
+/// Returns the fallback base if no valid same-origin `<base>` is found.
 fn extract_document_base_url(
     document: &NodeHandle,
     fallback_base: Option<&crate::http::Url>,
 ) -> Option<crate::http::Url> {
-    if let Some(base_elem) = document.query_selector("base") {
+    let mut base_elements = Vec::new();
+    find_base_elements(document, &mut base_elements);
+
+    for base_elem in base_elements {
         if let Some(attrs) = base_elem.attributes() {
             if let Some(href) = attrs.get("href") {
                 let href = href.trim();
-                if !href.is_empty() {
-                    // Absolute URL
-                    if href.contains("://") {
-                        if let Ok(url) = href.parse() {
-                            return Some(url);
+                if href.is_empty() {
+                    continue; // Skip empty href, try next <base>
+                }
+
+                // Absolute URL
+                if href.contains("://") {
+                    if let Ok(url) = href.parse::<crate::http::Url>() {
+                        // SSRF protection: only honor same-origin absolute base URLs
+                        if let Some(ref original) = fallback_base {
+                            if same_origin(&url, original) {
+                                return Some(url);
+                            }
                         }
+                        // If no fallback_base provided, don't enable fetching via <base>
+                        continue;
                     }
-                    // Relative URL (resolve against fallback_base)
-                    if let Some(base) = fallback_base {
-                        if let Ok(url) = resolve_url(base, href) {
-                            return Some(url);
-                        }
+                    continue; // Invalid absolute URL, try next <base>
+                }
+
+                // Relative URL (resolve against fallback_base)
+                if let Some(base) = fallback_base {
+                    if let Ok(url) = resolve_url(base, href) {
+                        // Relative URLs always resolve to same origin
+                        return Some(url);
                     }
                 }
             }

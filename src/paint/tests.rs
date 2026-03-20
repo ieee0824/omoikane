@@ -3216,3 +3216,179 @@ use crate::paint::*;
         assert_eq!(stylesheets.len(), 1);
         assert!(stylesheets[0].contains("margin:10px"));
     }
+
+    // ============================================================
+    // Additional media attribute edge cases (Copilot review feedback)
+    // ============================================================
+
+    #[test]
+    fn media_attribute_small_not_matched_despite_containing_all() {
+        // "small" contains "all" as a substring, but should NOT be matched
+        let html = r#"<html><head>
+            <link rel="stylesheet" media="small" href="data:text/css,body{color:red}">
+        </head><body></body></html>"#;
+        let document = TreeBuilder::parse(html).document();
+        let stylesheets = extract_author_stylesheets(&document, None).unwrap();
+        assert!(stylesheets.is_empty(), "media='small' should not match screen");
+    }
+
+    #[test]
+    fn media_attribute_touchscreen_not_matched_despite_containing_screen() {
+        // "touchscreen" contains "screen" as a substring, but should NOT be matched
+        let html = r#"<html><head>
+            <link rel="stylesheet" media="touchscreen" href="data:text/css,body{color:red}">
+        </head><body></body></html>"#;
+        let document = TreeBuilder::parse(html).document();
+        let stylesheets = extract_author_stylesheets(&document, None).unwrap();
+        assert!(stylesheets.is_empty(), "media='touchscreen' should not match screen");
+    }
+
+    #[test]
+    fn media_attribute_not_screen_excluded() {
+        // "not screen" should NOT be included for screen rendering
+        let html = r#"<html><head>
+            <link rel="stylesheet" media="not screen" href="data:text/css,body{color:red}">
+        </head><body></body></html>"#;
+        let document = TreeBuilder::parse(html).document();
+        let stylesheets = extract_author_stylesheets(&document, None).unwrap();
+        assert!(stylesheets.is_empty(), "media='not screen' should not match screen");
+    }
+
+    #[test]
+    fn media_attribute_not_all_excluded() {
+        // "not all" should NOT be included
+        let html = r#"<html><head>
+            <link rel="stylesheet" media="not all" href="data:text/css,body{color:red}">
+        </head><body></body></html>"#;
+        let document = TreeBuilder::parse(html).document();
+        let stylesheets = extract_author_stylesheets(&document, None).unwrap();
+        assert!(stylesheets.is_empty(), "media='not all' should not match screen");
+    }
+
+    #[test]
+    fn media_attribute_only_screen_included() {
+        // "only screen" should be included
+        let html = r#"<html><head>
+            <link rel="stylesheet" media="only screen" href="data:text/css,body{color:green}">
+        </head><body></body></html>"#;
+        let document = TreeBuilder::parse(html).document();
+        let stylesheets = extract_author_stylesheets(&document, None).unwrap();
+        assert_eq!(stylesheets.len(), 1);
+        assert!(stylesheets[0].contains("color:green"));
+    }
+
+    #[test]
+    fn media_attribute_comma_separated_with_screen() {
+        // "print, screen" should be included because screen is one of the options
+        let html = r#"<html><head>
+            <link rel="stylesheet" media="print, screen" href="data:text/css,body{color:blue}">
+        </head><body></body></html>"#;
+        let document = TreeBuilder::parse(html).document();
+        let stylesheets = extract_author_stylesheets(&document, None).unwrap();
+        assert_eq!(stylesheets.len(), 1);
+        assert!(stylesheets[0].contains("color:blue"));
+    }
+
+    #[test]
+    fn media_attribute_comma_separated_print_only() {
+        // "print, speech" should NOT be included (no screen or all)
+        let html = r#"<html><head>
+            <link rel="stylesheet" media="print, speech" href="data:text/css,body{color:red}">
+        </head><body></body></html>"#;
+        let document = TreeBuilder::parse(html).document();
+        let stylesheets = extract_author_stylesheets(&document, None).unwrap();
+        assert!(stylesheets.is_empty(), "media='print, speech' should not match screen");
+    }
+
+    #[test]
+    fn media_attribute_feature_only_defaults_to_all() {
+        // "(min-width: 800px)" without explicit media type defaults to "all"
+        let html = r#"<html><head>
+            <link rel="stylesheet" media="(min-width: 800px)" href="data:text/css,body{width:100%}">
+        </head><body></body></html>"#;
+        let document = TreeBuilder::parse(html).document();
+        let stylesheets = extract_author_stylesheets(&document, None).unwrap();
+        assert_eq!(stylesheets.len(), 1);
+        assert!(stylesheets[0].contains("width:100%"));
+    }
+
+    // ============================================================
+    // Additional base element edge cases (Copilot review feedback)
+    // ============================================================
+
+    #[test]
+    fn base_element_first_without_href_uses_second_with_href() {
+        // First <base> has no href, second has href - should use second
+        let html = r#"<html><head>
+            <base target="_blank">
+            <base href="https://second.example.com/">
+            <link rel="stylesheet" href="data:text/css,body{color:green}">
+        </head><body></body></html>"#;
+        let document = TreeBuilder::parse(html).document();
+        // Data URIs should still work
+        let stylesheets = extract_author_stylesheets(&document, None).unwrap();
+        assert_eq!(stylesheets.len(), 1);
+    }
+
+    #[test]
+    fn base_element_first_empty_href_uses_second() {
+        // First <base> has empty href, second has valid href
+        let html = r#"<html><head>
+            <base href="">
+            <base href="https://second.example.com/">
+            <link rel="stylesheet" href="data:text/css,body{color:blue}">
+        </head><body></body></html>"#;
+        let document = TreeBuilder::parse(html).document();
+        let stylesheets = extract_author_stylesheets(&document, None).unwrap();
+        assert_eq!(stylesheets.len(), 1);
+    }
+
+    #[test]
+    fn base_element_ssrf_protection_different_origin_ignored() {
+        // <base> with different origin should be ignored for SSRF protection
+        use crate::http::Url;
+        let html = r#"<html><head>
+            <base href="https://evil.example.com/assets/">
+            <link rel="stylesheet" href="data:text/css,body{color:red}">
+        </head><body></body></html>"#;
+        let document = TreeBuilder::parse(html).document();
+        let original_base: Url = "https://original.example.com/page.html".parse().unwrap();
+
+        // The base URL extraction should ignore different-origin absolute URLs
+        let effective_base = extract_document_base_url(&document, Some(&original_base));
+        // Should fall back to original_base since evil.example.com is different origin
+        assert_eq!(effective_base.as_ref().map(|u| u.host()), Some("original.example.com"));
+    }
+
+    #[test]
+    fn base_element_same_origin_accepted() {
+        // <base> with same origin should be accepted
+        use crate::http::Url;
+        let html = r#"<html><head>
+            <base href="https://example.com/assets/">
+            <link rel="stylesheet" href="data:text/css,body{color:green}">
+        </head><body></body></html>"#;
+        let document = TreeBuilder::parse(html).document();
+        let original_base: Url = "https://example.com/page.html".parse().unwrap();
+
+        let effective_base = extract_document_base_url(&document, Some(&original_base));
+        // Should use the <base> href since it's same origin
+        assert_eq!(effective_base.as_ref().map(|u| u.path()), Some("/assets/"));
+    }
+
+    #[test]
+    fn base_element_relative_url_always_same_origin() {
+        // Relative <base> href is always resolved against original base (same origin)
+        use crate::http::Url;
+        let html = r#"<html><head>
+            <base href="/assets/">
+            <link rel="stylesheet" href="data:text/css,body{color:blue}">
+        </head><body></body></html>"#;
+        let document = TreeBuilder::parse(html).document();
+        let original_base: Url = "https://example.com/page.html".parse().unwrap();
+
+        let effective_base = extract_document_base_url(&document, Some(&original_base));
+        assert_eq!(effective_base.as_ref().map(|u| u.host()), Some("example.com"));
+        assert_eq!(effective_base.as_ref().map(|u| u.path()), Some("/assets/"));
+    }
+
