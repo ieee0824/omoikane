@@ -3,7 +3,7 @@
 //! Provides TrueType/OpenType font support using the `ab_glyph` crate.
 //! Handles font file loading, character-to-glyph mapping, and rasterization.
 
-use ab_glyph::{Font as AbGlyphFont, FontVec};
+use ab_glyph::{Font as AbGlyphFont, FontVec, ScaleFont};
 use std::path::Path;
 use std::{fmt, io};
 
@@ -67,14 +67,61 @@ impl Font {
     }
 
     /// Rasterize a character at a given font size.
-    pub fn rasterize(&self, _ch: char, size_px: f32) -> Result<GlyphRaster, FontError> {
-        // Placeholder implementation: return empty bitmap for now
-        // Full implementation deferred to Phase 1b after understanding ab_glyph's actual API
+    pub fn rasterize(&self, ch: char, size_px: f32) -> Result<GlyphRaster, FontError> {
+        // Get glyph ID for character
+        let glyph_id = self.inner.glyph_id(ch);
+
+        // Get scaled advance width for layout
+        let advance_x = {
+            let scaled = self.inner.as_scaled(size_px);
+            scaled.h_advance(glyph_id)
+        };
+
+        // Create a glyph with scale at position (0,0)
+        let glyph = glyph_id.with_scale(size_px);
+
+        // Get the outlined glyph (None for space characters and glyphs with no outline)
+        let Some(outlined) = self.inner.outline_glyph(glyph) else {
+            return Ok(GlyphRaster {
+                width: 0,
+                height: 0,
+                bitmap: vec![],
+                advance_x,
+                advance_y: 0.0,
+            });
+        };
+
+        // Get pixel bounds
+        let bounds = outlined.px_bounds();
+        let width = bounds.width().ceil() as u32;
+        let height = bounds.height().ceil() as u32;
+
+        // Zero-size glyphs return empty bitmap
+        if width == 0 || height == 0 {
+            return Ok(GlyphRaster {
+                width: 0,
+                height: 0,
+                bitmap: vec![],
+                advance_x,
+                advance_y: 0.0,
+            });
+        }
+
+        // Create bitmap buffer
+        let mut bitmap = vec![0u8; (width * height) as usize];
+
+        // Rasterize glyph by calling draw callback
+        outlined.draw(|x, y, coverage| {
+            if let Some(pixel) = bitmap.get_mut((y * width + x) as usize) {
+                *pixel = (coverage * 255.0).clamp(0.0, 255.0) as u8;
+            }
+        });
+
         Ok(GlyphRaster {
-            width: (size_px as u32).max(1),
-            height: (size_px as u32).max(1),
-            bitmap: vec![0u8; ((size_px * 0.6) as u32).max(1) as usize],
-            advance_x: size_px * 0.6,
+            width,
+            height,
+            bitmap,
+            advance_x,
             advance_y: 0.0,
         })
     }
@@ -82,20 +129,18 @@ impl Font {
     /// Get the horizontal advance width for a character at a given font size.
     pub fn glyph_advance(&self, ch: char, size_px: f32) -> f32 {
         let glyph_id = self.inner.glyph_id(ch);
-        let advance_unscaled = self.inner.h_advance_unscaled(glyph_id);
-        let upm = self.inner.units_per_em().unwrap_or(1000.0) as f32;
-        advance_unscaled * (size_px / upm)
+        let scaled = self.inner.as_scaled(size_px);
+        scaled.h_advance(glyph_id)
     }
 
     /// Get font metrics from the font tables.
     pub fn metrics(&self) -> FontMetricsTable {
-        let upm = self.inner.units_per_em().unwrap_or(1000.0) as f32;
-
+        let upm = self.inner.units_per_em().unwrap_or(1000.0);
         FontMetricsTable {
             units_per_em: upm,
-            ascender: upm * 0.8,
-            descender: upm * 0.2,
-            line_gap: upm * 0.2,
+            ascender: self.inner.ascent_unscaled(),
+            descender: self.inner.descent_unscaled(),
+            line_gap: self.inner.line_gap_unscaled(),
         }
     }
 }
