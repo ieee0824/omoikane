@@ -285,7 +285,7 @@ use crate::layout::*;
             Rect {
                 x: 0.0,
                 y: 0.0,
-                width: 70.0,
+                width: 50.0, // Narrower width to force 3 lines with real font metrics
                 height: 0.0,
             },
         )

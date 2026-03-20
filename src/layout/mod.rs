@@ -8,13 +8,15 @@ use std::collections::HashMap;
 
 use crate::css::{ComputedStyle, ComputedValue, PseudoElement, StyleResolver};
 use crate::dom::{Node, NodeHandle, NodeType};
+use crate::font::{load_system_font, Font};
 use crate::http::Client;
 use crate::paint::{DataUri, Image, parse_data_uri};
 
-// Thread-local cache for fetched images to avoid redundant fetches
+// Thread-local cache for fetched images and fonts to avoid redundant loads
 thread_local! {
     static IMAGE_CACHE: RefCell<HashMap<String, Option<Image>>> = RefCell::new(HashMap::new());
     static HTTP_CLIENT: RefCell<Client> = RefCell::new(Client::new());
+    static LAYOUT_FONT: RefCell<Option<Font>> = RefCell::new(None);
 }
 
 /// A rectangle in layout space.
@@ -2802,7 +2804,23 @@ fn push_line(
 }
 
 fn measure_text_width(text: &str, metrics: FontMetrics) -> f32 {
-    text.chars().count() as f32 * metrics.average_advance
+    // Try to use actual font glyph advances for accurate measurement
+    LAYOUT_FONT.with(|cell| {
+        let mut font_ref = cell.borrow_mut();
+
+        // Lazily load the font on first use
+        if font_ref.is_none() {
+            *font_ref = load_system_font("sans-serif").ok();
+        }
+
+        if let Some(ref font) = *font_ref {
+            // Use real glyph advances from the font
+            font.measure_text_width(text, metrics.font_size)
+        } else {
+            // Fallback to approximation when no font is available
+            text.chars().count() as f32 * metrics.average_advance
+        }
+    })
 }
 
 fn is_display_none(style: &ComputedStyle) -> bool {

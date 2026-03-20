@@ -147,6 +147,14 @@ impl Font {
         scaled.h_advance(glyph_id)
     }
 
+    /// Get additional horizontal kerning for a pair of characters at a given font size.
+    pub fn glyph_kerning(&self, previous: char, current: char, size_px: f32) -> f32 {
+        let prev_id = self.inner.glyph_id(previous);
+        let curr_id = self.inner.glyph_id(current);
+        let scaled = self.inner.as_scaled(size_px);
+        scaled.kern(prev_id, curr_id)
+    }
+
     /// Get font metrics from the font tables.
     pub fn metrics(&self) -> FontMetricsTable {
         let upm = self.inner.units_per_em().unwrap_or(1000.0);
@@ -555,11 +563,22 @@ impl Default for GlyphCache {
 impl Font {
     /// Measure the total width of a text string at a given font size.
     ///
-    /// This sums the advance widths of all characters in the string.
+    /// This sums advances and pair kerning for all characters in the string.
     pub fn measure_text_width(&self, text: &str, size_px: f32) -> f32 {
-        text.chars()
-            .map(|ch| self.glyph_advance(ch, size_px))
-            .sum()
+        let scaled = self.inner.as_scaled(size_px);
+        let mut width = 0.0;
+        let mut previous_id = None;
+
+        for ch in text.chars() {
+            let glyph_id = self.inner.glyph_id(ch);
+            if let Some(prev_id) = previous_id {
+                width += scaled.kern(prev_id, glyph_id);
+            }
+            width += scaled.h_advance(glyph_id);
+            previous_id = Some(glyph_id);
+        }
+
+        width
     }
 
     /// Calculate average character advance for a font at a given size.
