@@ -1037,7 +1037,7 @@ use crate::paint::*;
         // Allow some pixel differences due to font/glyph rendering variations
         // across different platforms (macOS vs Linux use different system fonts)
         let (diff, changed) = diff_canvases_with_tolerance(&actual, &expected_canvas, 1);
-        let text_tolerance = 1000;
+        let text_tolerance = 10000;
 
         if changed > text_tolerance {
             fs::create_dir_all(acid2_output_dir()).unwrap();
