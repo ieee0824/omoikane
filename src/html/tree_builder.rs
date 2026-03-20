@@ -165,7 +165,7 @@ impl Builder {
 
     fn handle_in_head(&mut self, token: Token, errors: &mut Vec<HtmlParseError>) {
         match token {
-            Token::Character(data) if data.trim().is_empty() => {
+            Token::Character(data) => {
                 self.insert_text(&data);
             }
             Token::Comment(data) => self.current_node().append_child(NodeHandle::comment(data)),
@@ -190,8 +190,10 @@ impl Builder {
                     }
                 } else if !self_closing && !is_void_head_tag(&name) {
                     self.open_elements.push(element);
-                    self.pop_matching(&name);
                 }
+            }
+            Token::EndTag { name } if matches!(name.as_str(), "title" | "style" | "script") => {
+                self.pop_matching(&name);
             }
             Token::EndTag { name } if name == "head" => {
                 self.pop_matching("head");
@@ -228,7 +230,12 @@ impl Builder {
                 name,
                 attributes,
                 self_closing,
-            } => match name.as_str() {
+            } => {
+                if should_close_p_before_start_tag(&name) && self.find_open_element("p").is_some() {
+                    self.pop_matching("p");
+                }
+
+                match name.as_str() {
                 "html" => {}
                 "head" => {}
                 "body" => {
@@ -271,7 +278,8 @@ impl Builder {
                         self.open_elements.push(element);
                     }
                 }
-            },
+                }
+            }
             Token::EndTag { name } => match name.as_str() {
                 "body" => {
                     self.pop_matching("body");
@@ -674,6 +682,38 @@ fn is_formatting_element(tag_name: &str) -> bool {
     )
 }
 
+fn should_close_p_before_start_tag(tag_name: &str) -> bool {
+    matches!(
+        tag_name,
+        "address"
+            | "article"
+            | "aside"
+            | "blockquote"
+            | "div"
+            | "dl"
+            | "fieldset"
+            | "footer"
+            | "form"
+            | "h1"
+            | "h2"
+            | "h3"
+            | "h4"
+            | "h5"
+            | "h6"
+            | "header"
+            | "hgroup"
+            | "hr"
+            | "main"
+            | "nav"
+            | "ol"
+            | "p"
+            | "pre"
+            | "section"
+            | "table"
+            | "ul"
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use crate::dom::Node;
@@ -723,6 +763,21 @@ mod tests {
     }
 
     #[test]
+    fn keeps_title_text_inside_head() {
+        let result = TreeBuilder::parse(
+            "<html><head><title>The Second Acid Test</title></head><body><p>visible</p></body></html>",
+        );
+        let document = result.document();
+        let head = document.query_selector("head").unwrap();
+        let title = document.query_selector("title").unwrap();
+        let body = document.query_selector("body").unwrap();
+
+        assert_eq!(title.parent_node(), Some(head));
+        assert_eq!(title.child_nodes()[0].data(), Some("The Second Acid Test".to_string()));
+        assert_eq!(body.child_nodes()[0].tag_name().as_deref(), Some("p"));
+    }
+
+    #[test]
     fn table_modes_create_rows_and_cells() {
         let result = TreeBuilder::parse("<table><tr><td>A</td><td>B</td></tr></table>");
         let table = result.document().query_selector("table").unwrap();
@@ -756,5 +811,40 @@ mod tests {
 
         assert_eq!(div.child_nodes()[0].data(), Some("inside".to_string()));
         assert_eq!(p.child_nodes()[0].data(), Some("after".to_string()));
+    }
+
+    #[test]
+    fn closes_paragraph_before_block_elements_in_body() {
+        let result = TreeBuilder::parse(
+            "<div class=\"picture\"><p><table><tr><td></table><p class=\"bad\"><div class=\"forehead\"></div></div>",
+        );
+        let document = result.document();
+        let bad = find_by_class(&document, "bad").unwrap();
+        let forehead = find_by_class(&document, "forehead").unwrap();
+
+        assert_ne!(forehead.parent_node(), Some(bad));
+        assert_eq!(
+            forehead.parent_node().and_then(|node| node.tag_name()),
+            Some("div".to_string())
+        );
+    }
+
+    fn find_by_class(node: &NodeHandle, class: &str) -> Option<NodeHandle> {
+        if node
+            .attributes()
+            .and_then(|attributes| attributes.get("class").cloned())
+            .map(|value| value.split_whitespace().any(|candidate| candidate == class))
+            .unwrap_or(false)
+        {
+            return Some(node.clone());
+        }
+
+        for child in node.child_nodes() {
+            if let Some(found) = find_by_class(&child, class) {
+                return Some(found);
+            }
+        }
+
+        None
     }
 }

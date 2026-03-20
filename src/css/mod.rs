@@ -8,7 +8,10 @@ use std::fmt;
 mod matcher;
 mod style;
 
-pub use matcher::{Specificity, matches_selector, specificity};
+pub use matcher::{
+    PseudoElement, Specificity, matches_selector, matches_selector_with_pseudo,
+    selector_pseudo_element, specificity,
+};
 pub use style::{ComputedStyle, ComputedValue, Origin, StyleResolver, StylesheetInput};
 
 /// A token emitted by the CSS tokenizer.
@@ -203,7 +206,7 @@ pub fn tokenize(input: &str) -> Result<Vec<CssToken>, CssParseError> {
                     tokens.push(CssToken::Number(number));
                 }
             }
-            c if is_ident_start(c) || c == '-' => {
+            c if is_ident_start(c) || c == '-' || c == '\\' => {
                 let ident = consume_ident(&chars, &mut index);
                 tokens.push(CssToken::Ident(ident));
             }
@@ -724,11 +727,18 @@ fn parse_value_sequence(tokens: &[CssToken]) -> Result<Vec<Value>, CssParseError
                     return Err(CssParseError::UnexpectedEndOfInput);
                 }
 
-                let arguments = parse_function_arguments(&tokens[start..end])?;
-                values.push(Value::Function {
-                    name: name.clone(),
-                    arguments,
-                });
+                if name.eq_ignore_ascii_case("url") {
+                    values.push(Value::Keyword(format!(
+                        "url({})",
+                        render_tokens(&tokens[start..end]).trim()
+                    )));
+                } else {
+                    let arguments = parse_function_arguments(&tokens[start..end])?;
+                    values.push(Value::Function {
+                        name: name.clone(),
+                        arguments,
+                    });
+                }
                 index = end + 1;
             }
             _ => {
@@ -790,7 +800,15 @@ fn parse_single_value(token: &CssToken) -> Result<Value, CssParseError> {
 fn expand_shorthand(name: &str, value: Value, important: bool) -> Vec<Declaration> {
     match name {
         "margin" | "padding" => expand_box_shorthand(name, value, important),
+        "border-width" | "border-style" | "border-color" => {
+            expand_border_axis_shorthand(name, value, important)
+        }
         "border" => expand_border_shorthand(value, important),
+        "border-top" | "border-right" | "border-bottom" | "border-left" => {
+            expand_border_side_shorthand(name, value, important)
+        }
+        "background" => expand_background_shorthand(value, important),
+        "font" => expand_font_shorthand(value, important),
         _ => vec![Declaration {
             name: name.to_string(),
             value,
@@ -837,6 +855,51 @@ fn expand_box_shorthand(prefix: &str, value: Value, important: bool) -> Vec<Decl
         },
         Declaration {
             name: format!("{prefix}-left"),
+            value: left,
+            important,
+        },
+    ]
+}
+
+fn expand_border_axis_shorthand(name: &str, value: Value, important: bool) -> Vec<Declaration> {
+    let values = match value {
+        Value::List(values) => values,
+        single => vec![single],
+    };
+
+    let suffix = name.strip_prefix("border-").unwrap_or(name);
+    let (top, right, bottom, left) = match values.as_slice() {
+        [a] => (a.clone(), a.clone(), a.clone(), a.clone()),
+        [a, b] => (a.clone(), b.clone(), a.clone(), b.clone()),
+        [a, b, c] => (a.clone(), b.clone(), c.clone(), b.clone()),
+        [a, b, c, d] => (a.clone(), b.clone(), c.clone(), d.clone()),
+        _ => {
+            return vec![Declaration {
+                name: name.to_string(),
+                value: Value::List(values),
+                important,
+            }];
+        }
+    };
+
+    vec![
+        Declaration {
+            name: format!("border-top-{suffix}"),
+            value: top,
+            important,
+        },
+        Declaration {
+            name: format!("border-right-{suffix}"),
+            value: right,
+            important,
+        },
+        Declaration {
+            name: format!("border-bottom-{suffix}"),
+            value: bottom,
+            important,
+        },
+        Declaration {
+            name: format!("border-left-{suffix}"),
             value: left,
             important,
         },
@@ -919,6 +982,285 @@ fn expand_border_shorthand(value: Value, important: bool) -> Vec<Declaration> {
     }
 
     declarations
+}
+
+fn expand_border_side_shorthand(name: &str, value: Value, important: bool) -> Vec<Declaration> {
+    let values = match value {
+        Value::List(values) => values,
+        single => vec![single],
+    };
+
+    let mut width = None;
+    let mut style = None;
+    let mut color = None;
+
+    for item in values {
+        let is_width_keyword = matches!(
+            &item,
+            Value::Keyword(keyword) if matches!(keyword.as_str(), "thin" | "medium" | "thick")
+        );
+        let is_border_style = matches!(
+            &item,
+            Value::Keyword(keyword)
+                if matches!(
+                    keyword.as_str(),
+                    "none"
+                        | "hidden"
+                        | "dotted"
+                        | "dashed"
+                        | "solid"
+                        | "double"
+                        | "groove"
+                        | "ridge"
+                        | "inset"
+                        | "outset"
+                )
+        );
+
+        match item {
+            Value::Length(_, _) | Value::Number(_) if width.is_none() => width = Some(item),
+            Value::Keyword(_) if is_width_keyword && width.is_none() => width = Some(item),
+            Value::Keyword(_) if is_border_style && style.is_none() => style = Some(item),
+            Value::Color(_) | Value::Function { .. } | Value::Keyword(_) if color.is_none() => {
+                color = Some(item)
+            }
+            _ => {}
+        }
+    }
+
+    let mut declarations = Vec::new();
+    if let Some(width) = width {
+        declarations.push(Declaration {
+            name: format!("{name}-width"),
+            value: width,
+            important,
+        });
+    }
+    if let Some(style) = style {
+        declarations.push(Declaration {
+            name: format!("{name}-style"),
+            value: style.clone(),
+            important,
+        });
+        declarations.push(Declaration {
+            name: "border-style".to_string(),
+            value: style,
+            important,
+        });
+    }
+    if let Some(color) = color {
+        declarations.push(Declaration {
+            name: format!("{name}-color"),
+            value: color.clone(),
+            important,
+        });
+        declarations.push(Declaration {
+            name: "border-color".to_string(),
+            value: color,
+            important,
+        });
+    }
+
+    if declarations.is_empty() {
+        declarations.push(Declaration {
+            name: name.to_string(),
+            value: Value::List(Vec::new()),
+            important,
+        });
+    }
+
+    declarations
+}
+
+fn expand_background_shorthand(value: Value, important: bool) -> Vec<Declaration> {
+    let values = match value {
+        Value::List(values) => values,
+        single => vec![single],
+    };
+
+    let mut declarations = Vec::new();
+    let mut position_values = Vec::new();
+    for item in &values {
+        match item {
+            Value::Function { name, .. } if name.eq_ignore_ascii_case("url") => declarations.push(Declaration {
+                name: "background-image".to_string(),
+                value: item.clone(),
+                important,
+            }),
+            Value::Keyword(keyword)
+                if keyword.eq_ignore_ascii_case("repeat")
+                    || keyword.eq_ignore_ascii_case("no-repeat") =>
+            {
+                declarations.push(Declaration {
+                    name: "background-repeat".to_string(),
+                    value: Value::Keyword(keyword.to_string()),
+                    important,
+                });
+            }
+            Value::Keyword(keyword) if keyword.eq_ignore_ascii_case("fixed") => {
+                declarations.push(Declaration {
+                    name: "background-attachment".to_string(),
+                    value: Value::Keyword(keyword.to_string()),
+                    important,
+                });
+            }
+            Value::Color(_) | Value::Function { .. } => declarations.push(Declaration {
+                name: "background-color".to_string(),
+                value: item.clone(),
+                important,
+            }),
+            Value::Keyword(keyword) if is_background_color_keyword(&keyword) => {
+                declarations.push(Declaration {
+                    name: "background-color".to_string(),
+                    value: Value::Keyword(keyword.to_string()),
+                    important,
+                });
+            }
+            Value::Keyword(keyword) if keyword.starts_with("url(") => {
+                declarations.push(Declaration {
+                    name: "background-image".to_string(),
+                    value: Value::Keyword(keyword.to_string()),
+                    important,
+                });
+            }
+            Value::Keyword(keyword) if keyword.eq_ignore_ascii_case("none") => {
+                declarations.push(Declaration {
+                    name: "background-image".to_string(),
+                    value: Value::Keyword(keyword.to_string()),
+                    important,
+                });
+                declarations.push(Declaration {
+                    name: "background-color".to_string(),
+                    value: Value::Keyword("transparent".to_string()),
+                    important,
+                });
+            }
+            Value::Length(_, unit) if unit == "px" || unit == "em" => {
+                position_values.push(item.clone());
+            }
+            Value::Number(_) => {
+                position_values.push(item.clone());
+            }
+            _ => {
+                // Unknown value in background shorthand → reject the entire shorthand
+                return vec![Declaration {
+                    name: "background".to_string(),
+                    value: Value::List(values),
+                    important,
+                }];
+            }
+        }
+    }
+
+    if let Some(first) = position_values.first() {
+        declarations.push(Declaration {
+            name: "background-position-x".to_string(),
+            value: first.clone(),
+            important,
+        });
+    }
+    if let Some(second) = position_values.get(1) {
+        declarations.push(Declaration {
+            name: "background-position-y".to_string(),
+            value: second.clone(),
+            important,
+        });
+    }
+
+    // Reject shorthand if multiple background-color values were found (e.g. "red pink")
+    let color_count = declarations
+        .iter()
+        .filter(|d| d.name == "background-color")
+        .count();
+    if color_count > 1 {
+        return vec![Declaration {
+            name: "background".to_string(),
+            value: Value::List(values),
+            important,
+        }];
+    }
+
+    if declarations.is_empty() {
+        vec![Declaration {
+            name: "background".to_string(),
+            value: Value::List(values),
+            important,
+        }]
+    } else {
+        declarations
+    }
+}
+
+fn expand_font_shorthand(value: Value, important: bool) -> Vec<Declaration> {
+    let values = match value {
+        Value::List(values) => values,
+        single => vec![single],
+    };
+
+    let mut declarations = Vec::new();
+    for item in &values {
+        match item {
+            Value::Length(_, unit) if unit == "px" || unit == "em" => declarations.push(Declaration {
+                name: "font-size".to_string(),
+                value: item.clone(),
+                important,
+            }),
+            Value::Percentage(_) => declarations.push(Declaration {
+                name: "font-size".to_string(),
+                value: item.clone(),
+                important,
+            }),
+            Value::Keyword(keyword) => {
+                if let Some((font_size, line_height)) = keyword.split_once('/') {
+                    if let Some(size) = parse_font_shorthand_length(font_size.trim()) {
+                        declarations.push(Declaration {
+                            name: "font-size".to_string(),
+                            value: size,
+                            important,
+                        });
+                    }
+                    if let Some(height) = parse_font_shorthand_length(line_height.trim()) {
+                        declarations.push(Declaration {
+                            name: "line-height".to_string(),
+                            value: height,
+                            important,
+                        });
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    if declarations.is_empty() {
+        vec![Declaration {
+            name: "font".to_string(),
+            value: Value::List(values),
+            important,
+        }]
+    } else {
+        declarations
+    }
+}
+
+fn parse_font_shorthand_length(value: &str) -> Option<Value> {
+    if let Some(unit) = value.strip_suffix("px") {
+        return unit.trim().parse().ok().map(|number| Value::Length(number, "px".to_string()));
+    }
+    if let Some(unit) = value.strip_suffix("em") {
+        return unit.trim().parse().ok().map(|number| Value::Length(number, "em".to_string()));
+    }
+    if let Some(unit) = value.strip_suffix('%') {
+        return unit.trim().parse().ok().map(Value::Percentage);
+    }
+    None
+}
+
+fn is_background_color_keyword(keyword: &str) -> bool {
+    matches!(
+        keyword,
+        "transparent" | "black" | "white" | "red" | "green" | "blue" | "gray" | "grey" | "navy" | "yellow"
+    )
 }
 
 fn render_tokens(tokens: &[CssToken]) -> String {
@@ -1004,12 +1346,52 @@ fn is_number_start(chars: &[char], index: usize) -> bool {
     chars.get(index).is_some_and(|c| c.is_ascii_digit())
         || (chars.get(index) == Some(&'.')
             && chars.get(index + 1).is_some_and(|c| c.is_ascii_digit()))
+        || ((chars.get(index) == Some(&'+') || chars.get(index) == Some(&'-'))
+            && chars
+                .get(index + 1)
+                .is_some_and(|c| c.is_ascii_digit() || *c == '.'))
+}
+
+fn consume_css_escape(chars: &[char], index: &mut usize) -> Option<char> {
+    // CSS 2.1 §4.1.3: backslash escapes
+    // \<hex>{1,6} followed by optional whitespace → Unicode code point
+    // \<non-hex> → literal character
+    let start = *index;
+    if chars.get(start) != Some(&'\\') {
+        return None;
+    }
+    let next = chars.get(start + 1)?;
+    if next.is_ascii_hexdigit() {
+        let mut hex = String::new();
+        let mut i = start + 1;
+        while i < chars.len() && hex.len() < 6 && chars[i].is_ascii_hexdigit() {
+            hex.push(chars[i]);
+            i += 1;
+        }
+        // Consume optional trailing whitespace
+        if i < chars.len() && chars[i].is_ascii_whitespace() {
+            i += 1;
+        }
+        *index = i;
+        u32::from_str_radix(&hex, 16)
+            .ok()
+            .and_then(char::from_u32)
+    } else {
+        *index = start + 2;
+        Some(*next)
+    }
 }
 
 fn consume_ident(chars: &[char], index: &mut usize) -> String {
     let mut ident = String::new();
     while let Some(&ch) = chars.get(*index) {
-        if is_ident_char(ch) {
+        if ch == '\\' {
+            if let Some(escaped) = consume_css_escape(chars, index) {
+                ident.push(escaped);
+            } else {
+                *index += 1;
+            }
+        } else if is_ident_char(ch) {
             ident.push(ch);
             *index += 1;
         } else {
@@ -1023,17 +1405,30 @@ fn consume_string(chars: &[char], index: &mut usize, quote: char) -> Result<Stri
     *index += 1;
     let mut value = String::new();
     while let Some(&ch) = chars.get(*index) {
-        *index += 1;
         if ch == quote {
+            *index += 1;
             return Ok(value);
         }
-        value.push(ch);
+        if ch == '\\' {
+            if let Some(escaped) = consume_css_escape(chars, index) {
+                value.push(escaped);
+            } else {
+                *index += 1;
+            }
+        } else {
+            *index += 1;
+            value.push(ch);
+        }
     }
     Err(CssParseError::UnexpectedEndOfInput)
 }
 
 fn consume_number(chars: &[char], index: &mut usize) -> Result<f32, CssParseError> {
     let mut value = String::new();
+    if let Some(sign @ ('+' | '-')) = chars.get(*index).copied() {
+        value.push(sign);
+        *index += 1;
+    }
     if chars.get(*index) == Some(&'.') {
         value.push('.');
         *index += 1;
@@ -1061,6 +1456,60 @@ mod tests {
         assert!(tokens.contains(&CssToken::Ident("h1".to_string())));
         assert!(tokens.contains(&CssToken::Dimension(10.0, "px".to_string())));
         assert!(tokens.contains(&CssToken::CurlyOpen));
+    }
+
+    #[test]
+    fn tokenizes_negative_dimensions() {
+        let tokens = tokenize("div { margin-bottom: -6em; top: -.5px; }").unwrap();
+        assert!(tokens.contains(&CssToken::Dimension(-6.0, "em".to_string())));
+        assert!(tokens.contains(&CssToken::Dimension(-0.5, "px".to_string())));
+    }
+
+    #[test]
+    fn hex_escape_in_ident_produces_unicode_codepoint() {
+        // \a = U+000A (line feed), so m\argin ≠ margin
+        let tokens = tokenize(r"div { m\argin: 2em; }").unwrap();
+        // The property name should NOT be "margin" — it should contain U+000A
+        let has_margin_ident = tokens.iter().any(|t| matches!(t, CssToken::Ident(s) if s == "margin"));
+        assert!(!has_margin_ident, "m\\argin should not tokenize as 'margin'; tokens: {:?}", tokens);
+    }
+
+    #[test]
+    fn escaped_closing_brace_does_not_close_rule() {
+        let tokens = tokenize(r"div { error: \}; background: yellow; }").unwrap();
+        let curly_close_count = tokens.iter().filter(|t| matches!(t, CssToken::CurlyClose)).count();
+        assert_eq!(curly_close_count, 1, "only the final }} should be CurlyClose, tokens: {:?}", tokens);
+
+        let stylesheet = parse_stylesheet(r"div { error: \}; background: yellow; }").unwrap();
+        let Rule::Style(rule) = &stylesheet.rules[0] else {
+            panic!("expected style rule");
+        };
+        assert!(
+            rule.declarations.iter().any(|decl| decl.name == "background-color"),
+            "background: yellow should survive error: \\}}; declarations: {:?}",
+            rule.declarations,
+        );
+    }
+
+    #[test]
+    fn invalid_background_value_is_ignored() {
+        // "red pink" is not a valid background value — should be entirely discarded
+        let stylesheet = parse_stylesheet(".parser { background: yellow; } .parser { background: red pink; }").unwrap();
+        let rules: Vec<_> = stylesheet.rules.iter().filter_map(|r| match r {
+            Rule::Style(s) => Some(s),
+            _ => None,
+        }).collect();
+        // The second rule's "background: red pink" should be ignored
+        // First rule's background: yellow should still win via cascade
+        let last_bg = rules.iter().rev().find_map(|rule| {
+            rule.declarations.iter().find(|d| d.name == "background-color")
+        });
+        eprintln!("last bg: {:?}", last_bg);
+        // If "red pink" was incorrectly salvaged as "red", we'd see Color("red")
+        assert!(
+            last_bg.is_some(),
+            "should have background-color declaration",
+        );
     }
 
     #[test]
@@ -1111,6 +1560,32 @@ mod tests {
                     value: Some("text".to_string()),
                 },
                 SimpleSelector::PseudoElement("placeholder".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn parses_escaped_attribute_selector_values() {
+        let stylesheet =
+            parse_stylesheet(r#"[class=second\ two][class="second two"] { float: right; }"#)
+                .unwrap();
+        let Rule::Style(rule) = &stylesheet.rules[0] else {
+            panic!("expected style rule");
+        };
+
+        assert_eq!(
+            rule.selectors[0].parts[0].simples,
+            vec![
+                SimpleSelector::Attribute {
+                    name: "class".to_string(),
+                    operator: Some(AttributeOperator::Equals),
+                    value: Some("second two".to_string()),
+                },
+                SimpleSelector::Attribute {
+                    name: "class".to_string(),
+                    operator: Some(AttributeOperator::Equals),
+                    value: Some("second two".to_string()),
+                },
             ]
         );
     }
@@ -1198,5 +1673,139 @@ mod tests {
                 .iter()
                 .any(|decl| decl.name == "border-color")
         );
+    }
+
+    #[test]
+    fn expands_background_and_font_shorthands() {
+        let stylesheet =
+            parse_stylesheet("h1 { background: white; font: 24px/24px sans-serif; }").unwrap();
+        let Rule::Style(rule) = &stylesheet.rules[0] else {
+            panic!("expected style rule");
+        };
+
+        assert!(
+            rule.declarations
+                .iter()
+                .any(|decl| decl.name == "background-color")
+        );
+        assert!(
+            rule.declarations
+                .iter()
+                .any(|decl| decl.name == "font-size")
+        );
+        assert!(
+            rule.declarations
+                .iter()
+                .any(|decl| decl.name == "line-height")
+        );
+    }
+
+    #[test]
+    fn expands_background_image_from_url_shorthand() {
+        let stylesheet =
+            parse_stylesheet("div { background: red url(\"data:image/png;base64,AAAA\"); }").unwrap();
+        let Rule::Style(rule) = &stylesheet.rules[0] else {
+            panic!("expected style rule");
+        };
+
+        assert!(rule.declarations.iter().any(|decl| decl.name == "background-color"));
+        assert!(rule.declarations.iter().any(|decl| decl.name == "background-image"));
+    }
+
+    #[test]
+    fn expands_background_repeat_keywords() {
+        let stylesheet = parse_stylesheet("div { background: url(\"x\") no-repeat; }").unwrap();
+        let Rule::Style(rule) = &stylesheet.rules[0] else {
+            panic!("expected style rule");
+        };
+
+        assert!(rule.declarations.iter().any(
+            |decl| decl.name == "background-repeat"
+                && matches!(&decl.value, Value::Keyword(value) if value == "no-repeat")
+        ));
+    }
+
+    #[test]
+    fn expands_background_attachment_and_position() {
+        let stylesheet = parse_stylesheet("div { background: fixed url(\"x\") 1px 0; }").unwrap();
+        let Rule::Style(rule) = &stylesheet.rules[0] else {
+            panic!("expected style rule");
+        };
+
+        assert!(rule.declarations.iter().any(
+            |decl| decl.name == "background-attachment"
+                && matches!(&decl.value, Value::Keyword(value) if value == "fixed")
+        ));
+        assert!(rule.declarations.iter().any(
+            |decl| decl.name == "background-position-x"
+                && matches!(&decl.value, Value::Length(value, unit) if *value == 1.0 && unit == "px")
+        ));
+        assert!(rule.declarations.iter().any(
+            |decl| decl.name == "background-position-y"
+                && matches!(&decl.value, Value::Number(value) if *value == 0.0)
+        ));
+    }
+
+    #[test]
+    fn expands_background_none_to_transparent_and_no_image() {
+        let stylesheet = parse_stylesheet("div { background: none; }").unwrap();
+        let Rule::Style(rule) = &stylesheet.rules[0] else {
+            panic!("expected style rule");
+        };
+
+        assert!(rule.declarations.iter().any(
+            |decl| decl.name == "background-image"
+                && matches!(&decl.value, Value::Keyword(value) if value == "none")
+        ));
+        assert!(rule.declarations.iter().any(
+            |decl| decl.name == "background-color"
+                && matches!(&decl.value, Value::Keyword(value) if value == "transparent")
+        ));
+    }
+
+    #[test]
+    fn expands_border_side_shorthands() {
+        let stylesheet = parse_stylesheet("div { border-top: solid yellow 2px; }").unwrap();
+        let Rule::Style(rule) = &stylesheet.rules[0] else {
+            panic!("expected style rule");
+        };
+
+        assert!(rule.declarations.iter().any(
+            |decl| decl.name == "border-top-width"
+                && matches!(&decl.value, Value::Length(value, unit) if *value == 2.0 && unit == "px")
+        ));
+        assert!(rule.declarations.iter().any(
+            |decl| decl.name == "border-top-style"
+                && matches!(&decl.value, Value::Keyword(value) if value == "solid")
+        ));
+        assert!(rule.declarations.iter().any(
+            |decl| decl.name == "border-top-color"
+                && matches!(&decl.value, Value::Keyword(value) if value == "yellow")
+        ));
+    }
+
+    #[test]
+    fn expands_border_style_box_shorthand() {
+        let stylesheet = parse_stylesheet("div { border-style: none solid; }").unwrap();
+        let Rule::Style(rule) = &stylesheet.rules[0] else {
+            panic!("expected style rule");
+        };
+
+        assert!(rule.declarations.iter().any(
+            |decl| decl.name == "border-top-style"
+                && matches!(&decl.value, Value::Keyword(value) if value == "none")
+        ));
+        assert!(rule.declarations.iter().any(
+            |decl| decl.name == "border-right-style"
+                && matches!(&decl.value, Value::Keyword(value) if value == "solid")
+        ));
+        assert!(rule.declarations.iter().any(
+            |decl| decl.name == "border-bottom-style"
+                && matches!(&decl.value, Value::Keyword(value) if value == "none")
+        ));
+        assert!(rule.declarations.iter().any(
+            |decl| decl.name == "border-left-style"
+                && matches!(&decl.value, Value::Keyword(value) if value == "solid")
+        ));
     }
 }

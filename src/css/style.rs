@@ -4,7 +4,9 @@ use std::collections::{BTreeMap, HashMap};
 
 use crate::dom::{Node, NodeHandle, NodeType};
 
-use super::{Rule, Specificity, Stylesheet, Value, matches_selector, specificity};
+use super::{
+    PseudoElement, Rule, Specificity, Stylesheet, Value, matches_selector_with_pseudo, specificity,
+};
 
 /// CSS origin.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -19,6 +21,7 @@ pub enum Origin {
 pub enum ComputedValue {
     Keyword(String),
     Px(f32),
+    Percentage(f32),
     Color(String),
     String(String),
     Number(f32),
@@ -54,6 +57,7 @@ pub struct StylesheetInput {
 pub struct StyleResolver {
     stylesheets: Vec<StylesheetInput>,
     cache: HashMap<usize, ComputedStyle>,
+    pseudo_cache: HashMap<(usize, PseudoElement), ComputedStyle>,
 }
 
 impl StyleResolver {
@@ -67,6 +71,7 @@ impl StyleResolver {
         self.stylesheets
             .push(StylesheetInput { origin, stylesheet });
         self.cache.clear();
+        self.pseudo_cache.clear();
     }
 
     /// Resolves computed style for `node`, using the cache when possible.
@@ -84,10 +89,40 @@ impl StyleResolver {
         style
     }
 
+    /// Resolves computed style for a pseudo-element attached to `node`.
+    pub fn computed_pseudo_style(
+        &mut self,
+        node: &NodeHandle,
+        pseudo: PseudoElement,
+    ) -> Option<ComputedStyle> {
+        let key = (node.identity(), pseudo);
+        if let Some(style) = self.pseudo_cache.get(&key) {
+            return Some(style.clone());
+        }
+
+        let parent_style = self.computed_style(node);
+        let style = self.compute_style_with_pseudo(node, Some(&parent_style), Some(pseudo));
+        if style.properties.is_empty() {
+            return None;
+        }
+
+        self.pseudo_cache.insert(key, style.clone());
+        Some(style)
+    }
+
     fn compute_style(
         &self,
         node: &NodeHandle,
         parent_style: Option<&ComputedStyle>,
+    ) -> ComputedStyle {
+        self.compute_style_with_pseudo(node, parent_style, None)
+    }
+
+    fn compute_style_with_pseudo(
+        &self,
+        node: &NodeHandle,
+        parent_style: Option<&ComputedStyle>,
+        pseudo: Option<PseudoElement>,
     ) -> ComputedStyle {
         let mut candidates = Vec::new();
         let mut source_order = 0usize;
@@ -97,6 +132,7 @@ impl StyleResolver {
                 node,
                 &input.stylesheet.rules,
                 input.origin,
+                pseudo,
                 &mut source_order,
                 &mut candidates,
             );
@@ -111,14 +147,44 @@ impl StyleResolver {
 
         let mut properties: BTreeMap<String, ComputedValue> = BTreeMap::new();
 
+        // Process font-size first so that em units in other properties
+        // resolve against the element's own computed font-size.
+        if let Some(fs_candidate) = candidates
+            .iter()
+            .filter(|c| c.name == "font-size")
+            .last()
+        {
+            let parent_fs = parent_style
+                .and_then(|ps| ps.get("font-size"))
+                .and_then(|v| match v {
+                    ComputedValue::Px(px) => Some(*px),
+                    _ => None,
+                })
+                .unwrap_or(16.0);
+            let computed = compute_value(&fs_candidate.value, "font-size", parent_fs);
+            properties.insert("font-size".to_string(), computed);
+        }
+
         for candidate in candidates {
+            if candidate.name == "font-size" {
+                continue; // already processed above
+            }
             let font_size = inherited_font_size(parent_style, &properties);
             let computed = compute_value(&candidate.value, &candidate.name, font_size);
+            // CSS 2.1: non-zero unitless numbers are invalid for length properties;
+            // skip them so they don't override valid length values in the cascade.
+            if matches!(computed, ComputedValue::Number(n) if n != 0.0)
+                && is_length_property(&candidate.name)
+            {
+                continue;
+            }
             properties.insert(candidate.name, computed);
         }
 
+        resolve_explicit_inherit(&mut properties, parent_style);
         apply_inheritance(&mut properties, parent_style);
         apply_initial_values(&mut properties);
+        zero_border_width_for_none_style(&mut properties);
 
         ComputedStyle { properties }
     }
@@ -138,6 +204,7 @@ fn collect_rule_candidates(
     node: &NodeHandle,
     rules: &[Rule],
     origin: Origin,
+    pseudo: Option<PseudoElement>,
     source_order: &mut usize,
     out: &mut Vec<Candidate>,
 ) {
@@ -151,7 +218,7 @@ fn collect_rule_candidates(
                 let matching_specificity = style_rule
                     .selectors
                     .iter()
-                    .filter(|selector| matches_selector(node, selector))
+                    .filter(|selector| matches_selector_with_pseudo(node, selector, pseudo))
                     .map(specificity)
                     .max();
 
@@ -173,13 +240,25 @@ fn collect_rule_candidates(
             }
             Rule::At(at_rule) => {
                 if let Some(block) = &at_rule.block {
-                    collect_rule_candidates(node, block, origin, source_order, out);
+                    collect_rule_candidates(node, block, origin, pseudo, source_order, out);
                 } else {
                     *source_order += at_rule.declarations.len();
                 }
             }
         }
     }
+}
+
+fn is_length_property(name: &str) -> bool {
+    matches!(
+        name,
+        "width" | "height" | "min-width" | "min-height" | "max-width" | "max-height"
+            | "margin-top" | "margin-right" | "margin-bottom" | "margin-left"
+            | "padding-top" | "padding-right" | "padding-bottom" | "padding-left"
+            | "border-top-width" | "border-right-width" | "border-bottom-width" | "border-left-width"
+            | "top" | "right" | "bottom" | "left"
+            | "border-spacing"
+    )
 }
 
 fn cascade_rank(candidate: &Candidate) -> (u8, u8) {
@@ -211,17 +290,22 @@ fn compute_value(value: &Value, property_name: &str, parent_font_size: f32) -> C
             let px = match unit.as_str() {
                 "px" => *number,
                 "em" => *number * parent_font_size,
+                "mm" => *number * (96.0 / 25.4),
+                "cm" => *number * (96.0 / 2.54),
+                "in" => *number * 96.0,
+                "pt" => *number * (96.0 / 72.0),
+                "pc" => *number * (96.0 / 6.0),
                 _ => *number,
             };
             ComputedValue::Px(px)
         }
         Value::Percentage(percent) => {
-            let px = if property_name == "font-size" {
-                parent_font_size * (*percent / 100.0)
+            if property_name == "font-size" {
+                let px = parent_font_size * (*percent / 100.0);
+                ComputedValue::Px(px)
             } else {
-                *percent
-            };
-            ComputedValue::Px(px)
+                ComputedValue::Percentage(*percent)
+            }
         }
         Value::Color(color) => ComputedValue::Color(color.clone()),
         Value::String(value) => ComputedValue::String(value.clone()),
@@ -261,6 +345,46 @@ fn apply_initial_values(properties: &mut BTreeMap<String, ComputedValue>) {
     properties
         .entry("font-size".to_string())
         .or_insert_with(|| ComputedValue::Px(16.0));
+}
+
+/// CSS 2.1 §8.5.3: If border-style is 'none', the computed border-width is 0.
+fn zero_border_width_for_none_style(properties: &mut BTreeMap<String, ComputedValue>) {
+    for side in ["top", "right", "bottom", "left"] {
+        let style_key = format!("border-{side}-style");
+        let is_none = matches!(
+            properties.get(&style_key),
+            Some(ComputedValue::Keyword(keyword)) if keyword.eq_ignore_ascii_case("none")
+        );
+        if is_none {
+            let width_key = format!("border-{side}-width");
+            properties.insert(width_key, ComputedValue::Px(0.0));
+        }
+    }
+}
+
+fn resolve_explicit_inherit(
+    properties: &mut BTreeMap<String, ComputedValue>,
+    parent_style: Option<&ComputedStyle>,
+) {
+    let inherited_names: Vec<String> = properties
+        .iter()
+        .filter_map(|(name, value)| match value {
+            ComputedValue::Keyword(keyword) if keyword.eq_ignore_ascii_case("inherit") => {
+                Some(name.clone())
+            }
+            _ => None,
+        })
+        .collect();
+
+    for name in inherited_names {
+        if let Some(parent_style) = parent_style {
+            if let Some(parent_value) = parent_style.get(&name) {
+                properties.insert(name, parent_value.clone());
+                continue;
+            }
+        }
+        properties.remove(&name);
+    }
 }
 
 fn apply_inheritance(
@@ -313,7 +437,7 @@ fn render_value(value: &Value) -> String {
                 .iter()
                 .map(render_value)
                 .collect::<Vec<_>>()
-                .join(", ")
+                .join(if name.eq_ignore_ascii_case("url") { "," } else { ", " })
         ),
         Value::List(values) => values
             .iter()
@@ -328,7 +452,7 @@ fn render_value(value: &Value) -> String {
 
 #[cfg(test)]
 mod tests {
-    use crate::css::parse_stylesheet;
+    use crate::css::{PseudoElement, parse_stylesheet};
     use crate::dom::NodeHandle;
 
     use super::*;
@@ -437,7 +561,8 @@ mod tests {
         let style = resolver.computed_style(&title);
 
         assert_eq!(style.get("font-size"), Some(&ComputedValue::Px(30.0)));
-        assert_eq!(style.get("margin-top"), Some(&ComputedValue::Px(40.0)));
+        // CSS 2.1 §4.3.2: em unit uses the element's own computed font-size
+        assert_eq!(style.get("margin-top"), Some(&ComputedValue::Px(60.0)));
     }
 
     #[test]
@@ -467,5 +592,85 @@ mod tests {
             Some(&ComputedValue::Color("black".to_string()))
         );
         assert_eq!(style.get("font-size"), Some(&ComputedValue::Px(16.0)));
+    }
+
+    #[test]
+    fn keeps_pseudo_element_rules_out_of_normal_computed_style() {
+        let (_document, _body, title, _html) = sample_tree();
+        let mut resolver = StyleResolver::new();
+        resolver.add_stylesheet(
+            Origin::Author,
+            parse_stylesheet("h1::before { content: \"prefix\"; color: red; }").unwrap(),
+        );
+
+        let style = resolver.computed_style(&title);
+        assert_eq!(style.get("content"), None);
+        assert_eq!(style.get("color"), Some(&ComputedValue::Color("black".to_string())));
+    }
+
+    #[test]
+    fn resolves_computed_style_for_pseudo_elements() {
+        let (_document, _body, title, _html) = sample_tree();
+        let mut resolver = StyleResolver::new();
+        resolver.add_stylesheet(
+            Origin::Author,
+            parse_stylesheet("h1 { color: blue; } h1::before { content: \"prefix\"; }").unwrap(),
+        );
+
+        let style = resolver
+            .computed_pseudo_style(&title, PseudoElement::Before)
+            .unwrap();
+        assert_eq!(
+            style.get("content"),
+            Some(&ComputedValue::String("prefix".to_string()))
+        );
+        assert_eq!(
+            style.get("color"),
+            Some(&ComputedValue::Color("blue".to_string()))
+        );
+    }
+
+    #[test]
+    fn resolves_explicit_inherit_keyword_from_parent() {
+        let (_document, body, title, _html) = sample_tree();
+        let mut resolver = StyleResolver::new();
+        resolver.add_stylesheet(
+            Origin::Author,
+            parse_stylesheet("body { float: right; } h1 { float: inherit; }").unwrap(),
+        );
+
+        let body_style = resolver.computed_style(&body);
+        let title_style = resolver.computed_style(&title);
+
+        assert_eq!(
+            body_style.get("float"),
+            Some(&ComputedValue::Keyword("right".to_string()))
+        );
+        assert_eq!(
+            title_style.get("float"),
+            Some(&ComputedValue::Keyword("right".to_string()))
+        );
+    }
+
+    #[test]
+    fn border_style_none_zeroes_side_width_even_when_width_only_comes_from_shorthand() {
+        let (_document, _body, title, _html) = sample_tree();
+        let mut resolver = StyleResolver::new();
+        resolver.add_stylesheet(
+            Origin::Author,
+            parse_stylesheet(
+                "h1 { border: solid 12px transparent; border-style: none solid; }",
+            )
+            .unwrap(),
+        );
+
+        let style = resolver.computed_style(&title);
+
+        assert_eq!(style.get("border-top-style"), Some(&ComputedValue::Keyword("none".to_string())));
+        assert_eq!(style.get("border-bottom-style"), Some(&ComputedValue::Keyword("none".to_string())));
+        assert_eq!(style.get("border-top-width"), Some(&ComputedValue::Px(0.0)));
+        assert_eq!(style.get("border-bottom-width"), Some(&ComputedValue::Px(0.0)));
+        assert_eq!(style.get("border-right-style"), Some(&ComputedValue::Keyword("solid".to_string())));
+        assert_eq!(style.get("border-left-style"), Some(&ComputedValue::Keyword("solid".to_string())));
     }
 }
