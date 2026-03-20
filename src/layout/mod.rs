@@ -5,6 +5,7 @@
 
 use crate::css::{ComputedStyle, ComputedValue, PseudoElement, StyleResolver};
 use crate::dom::{Node, NodeHandle, NodeType};
+use crate::http::Client;
 use crate::paint::{DataUri, Image, parse_data_uri};
 
 /// A rectangle in layout space.
@@ -2227,22 +2228,25 @@ fn element_inline_image(node: &NodeHandle) -> Option<(NodeHandle, Image)> {
     match tag_name.as_str() {
         "img" => {
             let src = attributes.get("src")?;
-            let data_uri = parse_data_uri(src).ok()?;
-            match data_uri {
-                DataUri::Binary { mime_type, data } if mime_type.eq_ignore_ascii_case("image/png") => {
-                    Image::decode_png(&data).ok().map(|image| (node.clone(), image))
-                }
-                _ => None,
+            // Try data: URI first
+            if src.starts_with("data:") {
+                return decode_data_uri_image(src).map(|image| (node.clone(), image));
             }
+            // Try HTTP/HTTPS URL
+            if src.starts_with("http://") || src.starts_with("https://") {
+                return fetch_image(src).map(|image| (node.clone(), image));
+            }
+            None
         }
         "object" => {
             if let Some(data) = attributes.get("data") {
-                let data_uri = parse_data_uri(data).ok();
-                if let Some(DataUri::Binary { mime_type, data }) = data_uri {
-                    if mime_type.eq_ignore_ascii_case("image/png") {
-                        if let Ok(image) = Image::decode_png(&data) {
-                            return Some((node.clone(), image));
-                        }
+                if data.starts_with("data:") {
+                    if let Some(image) = decode_data_uri_image(data) {
+                        return Some((node.clone(), image));
+                    }
+                } else if data.starts_with("http://") || data.starts_with("https://") {
+                    if let Some(image) = fetch_image(data) {
+                        return Some((node.clone(), image));
                     }
                 }
             }
@@ -2256,6 +2260,52 @@ fn element_inline_image(node: &NodeHandle) -> Option<(NodeHandle, Image)> {
             None
         }
         _ => None,
+    }
+}
+
+/// Decode an image from a data: URI (PNG or JPEG).
+fn decode_data_uri_image(uri: &str) -> Option<Image> {
+    let data_uri = parse_data_uri(uri).ok()?;
+    match data_uri {
+        DataUri::Binary { mime_type, data } => {
+            if mime_type.eq_ignore_ascii_case("image/png") {
+                Image::decode_png(&data).ok()
+            } else if mime_type.eq_ignore_ascii_case("image/jpeg")
+                || mime_type.eq_ignore_ascii_case("image/jpg")
+            {
+                Image::decode_jpeg(&data).ok()
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
+}
+
+/// Fetch an image from an HTTP/HTTPS URL.
+fn fetch_image(url: &str) -> Option<Image> {
+    let mut client = Client::new();
+    let response = client.get(url).ok()?;
+
+    if response.status_code() != 200 {
+        return None;
+    }
+
+    let content_type: String = response
+        .header("content-type")
+        .map(str::to_lowercase)
+        .unwrap_or_default();
+
+    let body = response.body();
+
+    // Determine image type from Content-Type header or try both decoders
+    if content_type.contains("image/png") {
+        Image::decode_png(body).ok()
+    } else if content_type.contains("image/jpeg") || content_type.contains("image/jpg") {
+        Image::decode_jpeg(body).ok()
+    } else {
+        // Try PNG first, then JPEG
+        Image::decode_png(body).ok().or_else(|| Image::decode_jpeg(body).ok())
     }
 }
 

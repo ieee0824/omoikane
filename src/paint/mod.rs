@@ -48,6 +48,11 @@ impl Image {
         decode_png(bytes)
     }
 
+    /// Decodes a JPEG image into RGBA pixels.
+    pub fn decode_jpeg(bytes: &[u8]) -> Result<Self, PaintError> {
+        decode_jpeg(bytes)
+    }
+
     /// Returns the image width in pixels.
     pub fn width(&self) -> u32 {
         self.width
@@ -76,6 +81,8 @@ pub enum PaintError {
     UnsupportedPngFormat,
     CorruptPng,
     DecompressionFailed,
+    InvalidJpeg,
+    UnsupportedJpegFormat,
 }
 
 /// Parsed contents of a `data:` URI.
@@ -2182,6 +2189,34 @@ fn paeth_predictor(a: u8, b: u8, c: u8) -> u8 {
     } else {
         c as u8
     }
+}
+
+fn decode_jpeg(bytes: &[u8]) -> Result<Image, PaintError> {
+    use jpeg_decoder::Decoder;
+
+    let mut decoder = Decoder::new(bytes);
+    let pixels = decoder.decode().map_err(|_| PaintError::InvalidJpeg)?;
+    let info = decoder.info().ok_or(PaintError::InvalidJpeg)?;
+
+    let rgba = match info.pixel_format {
+        jpeg_decoder::PixelFormat::RGB24 => {
+            let mut out = Vec::with_capacity(info.width as usize * info.height as usize * 4);
+            for chunk in pixels.chunks_exact(3) {
+                out.extend_from_slice(&[chunk[0], chunk[1], chunk[2], 255]);
+            }
+            out
+        }
+        jpeg_decoder::PixelFormat::L8 => {
+            let mut out = Vec::with_capacity(info.width as usize * info.height as usize * 4);
+            for value in pixels {
+                out.extend_from_slice(&[value, value, value, 255]);
+            }
+            out
+        }
+        _ => return Err(PaintError::UnsupportedJpegFormat),
+    };
+
+    Image::new(info.width as u32, info.height as u32, rgba)
 }
 
 /// Parses a `data:` URI into either text or binary content.
