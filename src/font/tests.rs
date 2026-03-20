@@ -111,10 +111,10 @@ fn test_load_system_font_and_rasterize() {
     // Rasterize a simple character
     let raster = font.rasterize('A', 20.0).expect("Failed to rasterize 'A'");
 
-    // Check that rasterization produced non-zero dimensions
+    // Check that rasterization produced non-zero dimensions for a visible glyph.
     assert!(
-        raster.width > 0 || raster.height == 0,
-        "Width must be > 0 or height must be 0"
+        raster.width > 0 && raster.height > 0,
+        "Expected non-zero raster dimensions for 'A'"
     );
     assert!(raster.advance_x > 0.0, "Advance width must be positive");
 }
