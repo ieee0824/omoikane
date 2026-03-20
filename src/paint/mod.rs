@@ -2198,16 +2198,31 @@ fn decode_jpeg(bytes: &[u8]) -> Result<Image, PaintError> {
     let pixels = decoder.decode().map_err(|_| PaintError::InvalidJpeg)?;
     let info = decoder.info().ok_or(PaintError::InvalidJpeg)?;
 
+    let expected_pixels = info.width as usize * info.height as usize;
+
     let rgba = match info.pixel_format {
         jpeg_decoder::PixelFormat::RGB24 => {
-            let mut out = Vec::with_capacity(info.width as usize * info.height as usize * 4);
-            for chunk in pixels.chunks_exact(3) {
+            // Validate buffer size matches expected RGB24 data
+            let expected_bytes = expected_pixels * 3;
+            if pixels.len() != expected_bytes {
+                return Err(PaintError::InvalidJpeg);
+            }
+            let chunks = pixels.chunks_exact(3);
+            if !chunks.remainder().is_empty() {
+                return Err(PaintError::InvalidJpeg);
+            }
+            let mut out = Vec::with_capacity(expected_pixels * 4);
+            for chunk in chunks {
                 out.extend_from_slice(&[chunk[0], chunk[1], chunk[2], 255]);
             }
             out
         }
         jpeg_decoder::PixelFormat::L8 => {
-            let mut out = Vec::with_capacity(info.width as usize * info.height as usize * 4);
+            // Validate buffer size matches expected grayscale data
+            if pixels.len() != expected_pixels {
+                return Err(PaintError::InvalidJpeg);
+            }
+            let mut out = Vec::with_capacity(expected_pixels * 4);
             for value in pixels {
                 out.extend_from_slice(&[value, value, value, 255]);
             }

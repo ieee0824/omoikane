@@ -3,10 +3,19 @@
 //! The layout phase consumes DOM nodes together with computed styles and
 //! produces a tree of rectangular block boxes.
 
+use std::cell::RefCell;
+use std::collections::HashMap;
+
 use crate::css::{ComputedStyle, ComputedValue, PseudoElement, StyleResolver};
 use crate::dom::{Node, NodeHandle, NodeType};
 use crate::http::Client;
 use crate::paint::{DataUri, Image, parse_data_uri};
+
+// Thread-local cache for fetched images to avoid redundant fetches
+thread_local! {
+    static IMAGE_CACHE: RefCell<HashMap<String, Option<Image>>> = RefCell::new(HashMap::new());
+    static HTTP_CLIENT: RefCell<Client> = RefCell::new(Client::new());
+}
 
 /// A rectangle in layout space.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
@@ -2282,12 +2291,41 @@ fn decode_data_uri_image(uri: &str) -> Option<Image> {
     }
 }
 
-/// Fetch an image from an HTTP/HTTPS URL.
+/// Maximum image size to fetch (10 MiB).
+const MAX_IMAGE_SIZE: usize = 10 * 1024 * 1024;
+
+/// Fetch an image from an HTTP/HTTPS URL with caching.
 fn fetch_image(url: &str) -> Option<Image> {
-    let mut client = Client::new();
-    let response = client.get(url).ok()?;
+    // Check cache first
+    let cached = IMAGE_CACHE.with(|cache| cache.borrow().get(url).cloned());
+    if let Some(result) = cached {
+        return result;
+    }
+
+    // Fetch and decode the image
+    let result = fetch_image_uncached(url);
+
+    // Cache the result (even if None, to avoid re-fetching failed URLs)
+    IMAGE_CACHE.with(|cache| {
+        cache.borrow_mut().insert(url.to_string(), result.clone());
+    });
+
+    result
+}
+
+/// Fetch an image without caching (internal helper).
+fn fetch_image_uncached(url: &str) -> Option<Image> {
+    // Use shared HTTP client for connection reuse and cookie sharing
+    let response = HTTP_CLIENT.with(|client| client.borrow_mut().get(url).ok())?;
 
     if response.status_code() != 200 {
+        return None;
+    }
+
+    let body = response.body();
+
+    // Enforce size limit to prevent DoS
+    if body.len() > MAX_IMAGE_SIZE {
         return None;
     }
 
@@ -2295,8 +2333,6 @@ fn fetch_image(url: &str) -> Option<Image> {
         .header("content-type")
         .map(str::to_lowercase)
         .unwrap_or_default();
-
-    let body = response.body();
 
     // Determine image type from Content-Type header or try both decoders
     if content_type.contains("image/png") {
