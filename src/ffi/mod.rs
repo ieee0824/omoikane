@@ -3,9 +3,11 @@
 use std::cell::RefCell;
 use std::ffi::{CStr, CString, c_char};
 
+use base64::Engine;
 use serde_json::json;
 
 use crate::cdp::CdpSession;
+use crate::layout::Rect;
 
 /// Opaque browser handle for the C ABI.
 #[repr(C)]
@@ -189,10 +191,39 @@ pub unsafe extern "C" fn omoikane_get_content(browser: *mut OmoikaneBrowser) -> 
     }
 }
 
-/// Placeholder screenshot API for the stable ABI surface.
+/// Captures the current page rendering and returns a base64-encoded PNG string.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn omoikane_screenshot_png(_browser: *mut OmoikaneBrowser) -> *mut c_char {
-    std::ptr::null_mut()
+pub unsafe extern "C" fn omoikane_screenshot_png(browser: *mut OmoikaneBrowser) -> *mut c_char {
+    let Some(browser) = browser_from_ptr(browser) else {
+        return std::ptr::null_mut();
+    };
+
+    let (document, base_url) = {
+        let session = browser.session.borrow();
+        let document = session.document();
+        let base_url = session.current_url().parse::<crate::http::Url>().ok();
+        (document, base_url)
+    };
+
+    let viewport = Rect {
+        x: 0.0,
+        y: 0.0,
+        width: 1280.0,
+        height: 720.0,
+    };
+    let rendered = crate::paint::render_document_png_with_url(&document, viewport, base_url.as_ref());
+
+    match rendered {
+        Ok(png) => {
+            let encoded = base64::engine::general_purpose::STANDARD.encode(png);
+            browser.clear_error();
+            into_c_string(encoded)
+        }
+        Err(error) => {
+            browser.set_error(format!("failed to render screenshot: {error:?}"));
+            std::ptr::null_mut()
+        }
+    }
 }
 
 /// Returns the last error message for the browser handle, if any.
@@ -262,6 +293,7 @@ fn into_c_string(value: String) -> *mut c_char {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use base64::Engine;
     use std::fs;
     use std::io::{BufRead, BufReader, Write};
     use std::net::TcpListener;
@@ -358,6 +390,33 @@ mod tests {
         let error = unsafe { omoikane_last_error(browser) };
         let message = unsafe { take_string(error) };
         assert!(message.contains("SyntaxError"));
+
+        unsafe { omoikane_free(browser) };
+    }
+
+    #[test]
+    fn ffi_can_capture_base64_png_screenshot() {
+        let browser = unsafe { omoikane_init() };
+        assert!(!browser.is_null());
+
+        let url = to_c_string(
+            "data:text/html,<html><head><style>html,body{margin:0;background:#123456;}</style></head><body></body></html>",
+        );
+        let ok = unsafe { omoikane_navigate(browser, url.as_ptr()) };
+        assert!(ok);
+
+        let screenshot = unsafe { omoikane_screenshot_png(browser) };
+        let payload = unsafe { take_string(screenshot) };
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(payload)
+            .unwrap();
+
+        assert!(bytes.starts_with(&[137, 80, 78, 71, 13, 10, 26, 10]));
+        assert!(bytes.len() > 24);
+        let width = u32::from_be_bytes([bytes[16], bytes[17], bytes[18], bytes[19]]);
+        let height = u32::from_be_bytes([bytes[20], bytes[21], bytes[22], bytes[23]]);
+        assert_eq!(width, 1280);
+        assert_eq!(height, 720);
 
         unsafe { omoikane_free(browser) };
     }

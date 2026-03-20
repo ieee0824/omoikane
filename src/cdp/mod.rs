@@ -601,6 +601,11 @@ impl CdpSession {
         self.runtime.document()
     }
 
+    /// Returns the URL of the currently loaded document.
+    pub fn current_url(&self) -> &str {
+        &self.current_url
+    }
+
     /// Sets the HTTP client `User-Agent` used for subsequent navigations.
     pub fn set_user_agent(&mut self, user_agent: impl Into<String>) {
         self.http_client.set_user_agent(user_agent);

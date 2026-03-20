@@ -53,9 +53,9 @@ char *omoikane_evaluate(struct OmoikaneBrowser *browser, const char *expression)
 char *omoikane_get_content(struct OmoikaneBrowser *browser);
 
 /**
- * Placeholder screenshot API for the stable ABI surface.
+ * Captures the current page rendering and returns a base64-encoded PNG string.
  */
-char *omoikane_screenshot_png(struct OmoikaneBrowser *_browser);
+char *omoikane_screenshot_png(struct OmoikaneBrowser *browser);
 
 /**
  * Returns the last error message for the browser handle, if any.

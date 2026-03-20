@@ -13,6 +13,7 @@ include = [
   "omoikane_init",
   "omoikane_free",
   "omoikane_navigate",
+  "omoikane_set_user_agent",
   "omoikane_evaluate",
   "omoikane_get_content",
   "omoikane_screenshot_png",
