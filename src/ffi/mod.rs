@@ -12,6 +12,7 @@ use crate::html::TreeBuilder;
 use crate::http::Client;
 use crate::http::url::resolve_url;
 use crate::layout::Rect;
+use crate::paint::{Canvas, Image, render_document_with_url};
 
 /// Opaque browser handle for the C ABI.
 #[repr(C)]
@@ -220,8 +221,12 @@ pub unsafe extern "C" fn omoikane_screenshot_png(browser: *mut OmoikaneBrowser) 
         width: 1280.0,
         height: 720.0,
     };
-    let rendered =
-        crate::paint::render_document_png_with_url(&render_document, viewport, render_base_url.as_ref());
+    let rendered = match render_frameset_screenshot_png(&document, base_url.as_ref(), viewport) {
+        Ok(Some(png)) => Ok(png),
+        Ok(None) | Err(_) => {
+            crate::paint::render_document_png_with_url(&render_document, viewport, render_base_url.as_ref())
+        }
+    };
 
     match rendered {
         Ok(png) => {
@@ -234,6 +239,177 @@ pub unsafe extern "C" fn omoikane_screenshot_png(browser: *mut OmoikaneBrowser) 
             std::ptr::null_mut()
         }
     }
+}
+
+fn render_frameset_screenshot_png(
+    document: &crate::dom::NodeHandle,
+    base_url: Option<&crate::http::Url>,
+    viewport: Rect,
+) -> Result<Option<Vec<u8>>, String> {
+    let Some(frameset) = document.query_selector("frameset") else {
+        return Ok(None);
+    };
+
+    let frame_nodes: Vec<crate::dom::NodeHandle> = frameset
+        .child_nodes()
+        .into_iter()
+        .filter(|node| node.tag_name().as_deref() == Some("frame"))
+        .filter(|node| {
+            node.attributes()
+                .and_then(|attrs| attrs.get("src").cloned())
+                .map(|src| !src.trim().is_empty())
+                .unwrap_or(false)
+        })
+        .collect();
+    if frame_nodes.is_empty() {
+        return Ok(None);
+    }
+
+    let total_width = viewport.width.max(1.0).round() as u32;
+    let total_height = viewport.height.max(1.0).round() as u32;
+    let cols_attr = frameset
+        .attributes()
+        .and_then(|attrs| attrs.get("cols").cloned());
+    let widths = parse_frameset_column_widths(cols_attr.as_deref(), frame_nodes.len(), total_width);
+    let mut composed = Canvas::new(total_width, total_height);
+    let mut x = 0u32;
+
+    for (index, frame) in frame_nodes.iter().enumerate() {
+        let width = widths.get(index).copied().unwrap_or(0);
+        if width == 0 {
+            continue;
+        }
+
+        let src = frame
+            .attributes()
+            .and_then(|attrs| attrs.get("src").cloned())
+            .map(|src| src.trim().to_string())
+            .filter(|src| !src.is_empty())
+            .ok_or_else(|| "frame src is missing".to_string())?;
+        let resolved = match base_url {
+            Some(base) => resolve_url(base, &src).map_err(|error| error.to_string())?,
+            None => src.parse::<crate::http::Url>().map_err(|error| error.to_string())?,
+        };
+        let response = Client::new()
+            .get(&resolved.to_string())
+            .map_err(|error| error.to_string())?;
+        let html = String::from_utf8_lossy(response.body()).to_string();
+        let frame_document = TreeBuilder::parse(&html).document();
+        let frame_canvas = render_document_with_url(
+            &frame_document,
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                width: width as f32,
+                height: total_height as f32,
+            },
+            Some(&resolved),
+        )
+        .map_err(|error| format!("failed to render frame: {error:?}"))?;
+        let frame_image = Image::decode_png(&frame_canvas.encode_png())
+            .map_err(|error| format!("failed to decode rendered frame png: {error:?}"))?;
+        composed.draw_image(&frame_image, x as f32, 0.0);
+        x = x.saturating_add(width);
+    }
+
+    Ok(Some(composed.encode_png()))
+}
+
+fn parse_frameset_column_widths(cols: Option<&str>, frame_count: usize, total_width: u32) -> Vec<u32> {
+    if frame_count == 0 {
+        return Vec::new();
+    }
+
+    let mut tokens: Vec<String> = cols
+        .unwrap_or("")
+        .split(',')
+        .map(|token| token.trim().to_string())
+        .filter(|token| !token.is_empty())
+        .collect();
+    if tokens.is_empty() {
+        tokens.resize(frame_count, "*".to_string());
+    }
+    if tokens.len() < frame_count {
+        tokens.resize(frame_count, "*".to_string());
+    }
+    if tokens.len() > frame_count {
+        tokens.truncate(frame_count);
+    }
+
+    let all_plain_numeric = tokens.iter().all(|token| {
+        !token.contains('*') && !token.ends_with('%') && token.parse::<f32>().is_ok()
+    });
+    let numeric_sum = tokens
+        .iter()
+        .filter_map(|token| token.parse::<f32>().ok())
+        .sum::<f32>();
+    let treat_plain_as_percent = all_plain_numeric && (numeric_sum - 100.0).abs() <= 0.5;
+
+    let mut widths = vec![0u32; frame_count];
+    let mut star_weights = vec![0f32; frame_count];
+    let mut assigned = 0u32;
+
+    for (index, token) in tokens.iter().enumerate() {
+        if let Some(percent) = token.strip_suffix('%').and_then(|v| v.parse::<f32>().ok()) {
+            let width = ((total_width as f32) * (percent / 100.0)).round().max(0.0) as u32;
+            widths[index] = width;
+            assigned = assigned.saturating_add(width);
+            continue;
+        }
+        if token.contains('*') {
+            let weight = token.replace('*', "").trim().parse::<f32>().unwrap_or(1.0);
+            star_weights[index] = weight.max(1.0);
+            continue;
+        }
+        if let Ok(value) = token.parse::<f32>() {
+            let width = if treat_plain_as_percent {
+                ((total_width as f32) * (value / 100.0)).round().max(0.0) as u32
+            } else {
+                value.round().max(0.0) as u32
+            };
+            widths[index] = width;
+            assigned = assigned.saturating_add(width);
+            continue;
+        }
+        star_weights[index] = 1.0;
+    }
+
+    let remaining = total_width.saturating_sub(assigned);
+    let total_star: f32 = star_weights.iter().sum();
+    if total_star > 0.0 && remaining > 0 {
+        for index in 0..frame_count {
+            if star_weights[index] == 0.0 {
+                continue;
+            }
+            let width = ((remaining as f32) * (star_weights[index] / total_star))
+                .round()
+                .max(0.0) as u32;
+            widths[index] = widths[index].saturating_add(width);
+        }
+        let consumed: u32 = widths.iter().sum();
+        if consumed < total_width {
+            let delta = total_width - consumed;
+            if let Some(last) = widths.last_mut() {
+                *last = last.saturating_add(delta);
+            }
+        }
+    } else if remaining > 0 {
+        if let Some(last) = widths.last_mut() {
+            *last = last.saturating_add(remaining);
+        }
+    }
+
+    if widths.iter().all(|&w| w == 0) {
+        let base = total_width / frame_count as u32;
+        let mut out = vec![base; frame_count];
+        let tail = total_width.saturating_sub(base * frame_count as u32);
+        if let Some(last) = out.last_mut() {
+            *last = last.saturating_add(tail);
+        }
+        return out;
+    }
+
+    widths
 }
 
 fn resolve_frameset_render_document(
@@ -504,7 +680,7 @@ mod tests {
         let requested_paths: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
         let requested_paths_for_thread = Arc::clone(&requested_paths);
         thread::spawn(move || {
-            for _ in 0..2 {
+            for _ in 0..3 {
                 let (mut stream, _) = listener.accept().unwrap();
                 let mut reader = BufReader::new(&stream);
                 let mut request_line = String::new();
@@ -552,8 +728,15 @@ mod tests {
         let _payload = unsafe { take_string(screenshot) };
         let paths = requested_paths.lock().unwrap().clone();
         assert!(paths.contains(&"/index.html".to_string()));
+        assert!(paths.contains(&"/left.htm".to_string()));
         assert!(paths.contains(&"/right.htm".to_string()));
 
         unsafe { omoikane_free(browser) };
+    }
+
+    #[test]
+    fn parses_frameset_columns_as_percentage_when_sum_is_100() {
+        let widths = parse_frameset_column_widths(Some("18,82"), 2, 1000);
+        assert_eq!(widths, vec![180, 820]);
     }
 }
