@@ -33,6 +33,8 @@ impl fmt::Display for FontError {
     }
 }
 
+impl std::error::Error for FontError {}
+
 impl From<io::Error> for FontError {
     fn from(err: io::Error) -> Self {
         FontError::IoError(err.to_string())
@@ -396,7 +398,7 @@ impl FontCache {
             return Ok(Arc::clone(font));
         }
 
-        // Evict oldest entry if at capacity (simple FIFO eviction)
+        // Evict an arbitrary entry if at capacity (HashMap iteration order is non-deterministic)
         if self.fonts.len() >= self.max_entries {
             if let Some(oldest_key) = self.fonts.keys().next().cloned() {
                 self.fonts.remove(&oldest_key);
@@ -440,10 +442,15 @@ struct GlyphCacheKey {
 
 impl GlyphCacheKey {
     fn new(ch: char, size_px: f32) -> Self {
-        Self {
-            ch,
-            size_tenths: (size_px * 10.0).round() as u32,
-        }
+        // Validate and normalize the size to avoid relying on implicit float-to-int
+        // casting behavior (NaN/∞/negative -> 0, large -> saturate).
+        let size_tenths = if size_px.is_finite() && size_px > 0.0 {
+            let scaled = (size_px * 10.0).round();
+            scaled.clamp(0.0, u32::MAX as f32) as u32
+        } else {
+            0
+        };
+        Self { ch, size_tenths }
     }
 }
 
@@ -473,7 +480,7 @@ impl GlyphCache {
 
     /// Insert a glyph raster into the cache.
     pub fn insert(&mut self, ch: char, size_px: f32, raster: GlyphRaster) {
-        // Evict if at capacity (simple FIFO)
+        // Evict an arbitrary entry if at capacity (HashMap iteration order is non-deterministic)
         if self.glyphs.len() >= self.max_entries {
             if let Some(oldest_key) = self.glyphs.keys().next().cloned() {
                 self.glyphs.remove(&oldest_key);
@@ -495,7 +502,7 @@ impl GlyphCache {
 
         // Use entry API for efficient get-or-insert
         if !self.glyphs.contains_key(&key) {
-            // Evict if at capacity
+            // Evict an arbitrary entry if at capacity
             if self.glyphs.len() >= self.max_entries {
                 if let Some(oldest_key) = self.glyphs.keys().next().cloned() {
                     self.glyphs.remove(&oldest_key);
