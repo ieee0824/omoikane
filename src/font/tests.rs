@@ -180,3 +180,73 @@ fn test_advance_scales_with_size() {
     assert!(ratio_1 > 1.8 && ratio_1 < 2.2, "Advance should roughly double with 2x size");
     assert!(ratio_2 > 1.8 && ratio_2 < 2.2, "Advance should roughly double with 2x size");
 }
+
+// ============================================================================
+// Phase 2: System Font Discovery Tests
+// ============================================================================
+
+#[test]
+fn test_generic_family_sans_serif_has_candidates() {
+    let candidates = generic_family_fonts("sans-serif");
+    assert!(!candidates.is_empty(), "sans-serif should have font candidates");
+    assert!(candidates.contains(&"Helvetica") || candidates.contains(&"Arial"));
+}
+
+#[test]
+fn test_generic_family_serif_has_candidates() {
+    let candidates = generic_family_fonts("serif");
+    assert!(!candidates.is_empty(), "serif should have font candidates");
+}
+
+#[test]
+fn test_generic_family_monospace_has_candidates() {
+    let candidates = generic_family_fonts("monospace");
+    assert!(!candidates.is_empty(), "monospace should have font candidates");
+}
+
+#[test]
+fn test_generic_family_unknown_returns_empty() {
+    let candidates = generic_family_fonts("comic-sans-fantasy");
+    assert!(candidates.is_empty(), "Unknown family should return empty");
+}
+
+#[test]
+#[ignore] // Requires system fonts
+fn test_find_system_font_sans_serif() {
+    let path = find_system_font("sans-serif");
+    assert!(path.is_some(), "Should find a sans-serif font on this system");
+
+    let path = path.unwrap();
+    assert!(path.exists(), "Found font path should exist");
+
+    // Should be a font file
+    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+    assert!(
+        ext == "ttf" || ext == "otf" || ext == "ttc",
+        "Should be a font file, got: {:?}",
+        path
+    );
+}
+
+#[test]
+#[ignore] // Requires system fonts
+fn test_load_system_font_by_generic_family() {
+    let font = load_system_font("sans-serif");
+    assert!(font.is_ok(), "Should load sans-serif font: {:?}", font.err());
+
+    let font = font.unwrap();
+    // Verify it's a valid font by checking metrics
+    let metrics = font.metrics();
+    assert!(metrics.units_per_em > 0.0, "Font should have valid units_per_em");
+}
+
+#[test]
+#[ignore] // Requires system fonts
+fn test_load_system_font_helvetica() {
+    // Only run on macOS where Helvetica is guaranteed
+    #[cfg(target_os = "macos")]
+    {
+        let font = load_system_font("Helvetica");
+        assert!(font.is_ok(), "Should find Helvetica on macOS");
+    }
+}

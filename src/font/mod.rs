@@ -4,7 +4,7 @@
 //! Handles font file loading, character-to-glyph mapping, and rasterization.
 
 use ab_glyph::{Font as AbGlyphFont, FontVec, ScaleFont};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::{fmt, io};
 
 #[cfg(test)]
@@ -179,4 +179,184 @@ pub struct FontMetricsPixel {
     pub descender: f32,
     /// Line gap in pixels.
     pub line_gap: f32,
+}
+
+// ============================================================================
+// System Font Discovery (Phase 2)
+// ============================================================================
+
+/// Get platform-specific system font directories.
+#[cfg(target_os = "macos")]
+fn system_font_dirs() -> Vec<PathBuf> {
+    let mut dirs = vec![
+        PathBuf::from("/System/Library/Fonts"),
+        PathBuf::from("/Library/Fonts"),
+    ];
+    if let Ok(home) = std::env::var("HOME") {
+        dirs.push(PathBuf::from(home).join("Library/Fonts"));
+    }
+    dirs
+}
+
+#[cfg(target_os = "linux")]
+fn system_font_dirs() -> Vec<PathBuf> {
+    let mut dirs = vec![
+        PathBuf::from("/usr/share/fonts"),
+        PathBuf::from("/usr/local/share/fonts"),
+    ];
+    if let Ok(home) = std::env::var("HOME") {
+        dirs.push(PathBuf::from(&home).join(".local/share/fonts"));
+        dirs.push(PathBuf::from(&home).join(".fonts"));
+    }
+    dirs
+}
+
+#[cfg(target_os = "windows")]
+fn system_font_dirs() -> Vec<PathBuf> {
+    vec![PathBuf::from("C:\\Windows\\Fonts")]
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+fn system_font_dirs() -> Vec<PathBuf> {
+    vec![]
+}
+
+/// Map generic font family names to platform-specific font names.
+fn generic_family_fonts(family: &str) -> Vec<&'static str> {
+    match family.to_lowercase().as_str() {
+        "sans-serif" => vec![
+            "Helvetica",
+            "Arial",
+            "Liberation Sans",
+            "DejaVu Sans",
+            "Nimbus Sans",
+            "FreeSans",
+        ],
+        "serif" => vec![
+            "Times New Roman",
+            "Times",
+            "Liberation Serif",
+            "DejaVu Serif",
+            "Nimbus Roman",
+            "FreeSerif",
+        ],
+        "monospace" | "mono" => vec![
+            "Courier New",
+            "Courier",
+            "Liberation Mono",
+            "DejaVu Sans Mono",
+            "Nimbus Mono",
+            "FreeMono",
+            "Menlo",
+            "Monaco",
+        ],
+        _ => vec![],
+    }
+}
+
+/// Find a system font file matching the given family name.
+///
+/// Searches platform-specific font directories for TTF/OTF files whose
+/// filename contains the requested family name (case-insensitive).
+///
+/// For generic families (sans-serif, serif, monospace), tries common
+/// font names for each platform.
+pub fn find_system_font(family: &str) -> Option<PathBuf> {
+    // First try generic family mapping
+    let candidates = generic_family_fonts(family);
+    if !candidates.is_empty() {
+        for candidate in candidates {
+            if let Some(path) = search_font_dirs(candidate) {
+                return Some(path);
+            }
+        }
+    }
+
+    // Then try direct family name search
+    search_font_dirs(family)
+}
+
+/// Search system font directories for a font matching the given name.
+fn search_font_dirs(name: &str) -> Option<PathBuf> {
+    let name_lower = name.to_lowercase();
+
+    for dir in system_font_dirs() {
+        if !dir.exists() {
+            continue;
+        }
+
+        if let Some(path) = search_font_dir_recursive(&dir, &name_lower) {
+            return Some(path);
+        }
+    }
+
+    None
+}
+
+/// Recursively search a directory for font files matching the name.
+fn search_font_dir_recursive(dir: &Path, name_lower: &str) -> Option<PathBuf> {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(_) => return None,
+    };
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+
+        if path.is_dir() {
+            // Recurse into subdirectories
+            if let Some(found) = search_font_dir_recursive(&path, name_lower) {
+                return Some(found);
+            }
+        } else if let Some(ext) = path.extension() {
+            // Check if it's a font file
+            let ext_lower = ext.to_string_lossy().to_lowercase();
+            if ext_lower == "ttf" || ext_lower == "otf" || ext_lower == "ttc" {
+                // Check if filename matches
+                if let Some(stem) = path.file_stem() {
+                    let stem_lower = stem.to_string_lossy().to_lowercase();
+                    // Match if stem contains the search name (handles "Arial-Bold.ttf" etc.)
+                    if stem_lower.contains(name_lower)
+                        || name_lower.contains(&stem_lower)
+                        || fuzzy_font_match(&stem_lower, name_lower)
+                    {
+                        return Some(path);
+                    }
+                }
+            }
+        }
+    }
+
+    None
+}
+
+/// Fuzzy matching for font names (handles common variations).
+fn fuzzy_font_match(filename: &str, query: &str) -> bool {
+    // Remove common suffixes and separators for comparison
+    let clean_filename = filename
+        .replace('-', "")
+        .replace('_', "")
+        .replace("regular", "")
+        .replace("bold", "")
+        .replace("italic", "")
+        .replace("oblique", "");
+
+    let clean_query = query
+        .replace('-', "")
+        .replace('_', "")
+        .replace(' ', "");
+
+    clean_filename.contains(&clean_query) || clean_query.contains(&clean_filename)
+}
+
+/// Load a system font by family name.
+///
+/// Searches system font directories and returns the first matching font.
+/// Supports generic families: sans-serif, serif, monospace.
+pub fn load_system_font(family: &str) -> Result<Font, FontError> {
+    let path = find_system_font(family).ok_or_else(|| {
+        FontError::Other(format!("System font '{}' not found", family))
+    })?;
+
+    Font::load_from_file(&path)
 }
