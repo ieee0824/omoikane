@@ -2,7 +2,7 @@
 number: 013-8
 slug: image-attributes-alt
 parent: 013-real-world-rendering
-status: open
+status: closed
 ---
 
 # 画像の相対URL・サイズ属性・alt表示

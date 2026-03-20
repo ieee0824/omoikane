@@ -368,12 +368,15 @@ pub fn render_document_with_url(
     viewport: Rect,
     base_url: Option<&crate::http::Url>,
 ) -> Result<Canvas, PaintError> {
+    let effective_base = extract_document_base_url(document, base_url);
     let mut resolver = StyleResolver::new();
-    for stylesheet in extract_author_stylesheets(document, base_url)? {
+    for stylesheet in extract_author_stylesheets(document, effective_base.as_ref())? {
         resolver.add_stylesheet(Origin::Author, parse_stylesheet_forgiving(&stylesheet)?);
     }
-    let layout = crate::layout::layout_tree(document, &mut resolver, viewport)
-        .ok_or(PaintError::InvalidImageBuffer)?;
+    let layout = crate::layout::with_image_base_url(effective_base, || {
+        crate::layout::layout_tree(document, &mut resolver, viewport)
+    })
+    .ok_or(PaintError::InvalidImageBuffer)?;
     Ok(paint_layout(&layout, &mut resolver, viewport))
 }
 

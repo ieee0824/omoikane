@@ -2,7 +2,7 @@
 number: 013
 slug: real-world-rendering
 parent:
-status: open
+status: closed
 ---
 
 # 実ページレンダリング対応
@@ -29,7 +29,7 @@ https://kasaneteto.jp/history/ をレンダリングした結果、HTMLパース
 - [013-5 paint_text()へのグリフ描画統合](../closed/013-5-paint-text-glyph-integration.md) ✅ 完了
 - [013-6 @import CSSルール対応](../closed/013-6-css-import-rule.md) ✅ 完了
 - [013-7 base要素とmedia属性対応](../closed/013-7-base-element-media-attr.md) ✅ 完了
-- [013-8 画像の相対URL・サイズ属性・alt表示](013-8-image-attributes-alt.md)
+- [013-8 画像の相対URL・サイズ属性・alt表示](../closed/013-8-image-attributes-alt.md) ✅ 完了
 
 ## 優先度
 
