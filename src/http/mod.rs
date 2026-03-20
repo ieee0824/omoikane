@@ -11,7 +11,7 @@ mod cookie;
 mod http2;
 mod request;
 mod response;
-mod url;
+pub mod url;
 
 #[cfg(test)]
 mod request_tests;
