@@ -2,7 +2,7 @@
 number: 013-6
 slug: css-import-rule
 parent: 013-real-world-rendering
-status: open
+status: closed
 ---
 
 # @import CSSルール対応

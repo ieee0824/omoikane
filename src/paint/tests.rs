@@ -2751,6 +2751,250 @@ fn extract_stylesheets_limits_recursive_import_depth() {
 }
 
 #[test]
+fn extract_stylesheets_supports_unquoted_url_import() {
+    use std::io::{BufRead, BufReader, Write};
+    use std::net::TcpListener;
+
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+
+    std::thread::spawn(move || {
+        for _ in 0..2 {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut reader = BufReader::new(&stream);
+            let mut request_line = String::new();
+            reader.read_line(&mut request_line).unwrap();
+            let path = request_line
+                .split_whitespace()
+                .nth(1)
+                .unwrap_or_default()
+                .to_string();
+            loop {
+                let mut h = String::new();
+                reader.read_line(&mut h).unwrap();
+                if h.trim().is_empty() {
+                    break;
+                }
+            }
+
+            let css_content = match path.as_str() {
+                "/main.css" => "@import url(nested.css); .main { color: black; }",
+                "/nested.css" => ".nested { color: green; }",
+                _ => "",
+            };
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{}",
+                css_content.len(),
+                css_content
+            );
+            stream.write_all(resp.as_bytes()).unwrap();
+            stream.flush().unwrap();
+        }
+    });
+
+    let html = r#"<html><head>
+            <link rel="stylesheet" href="/main.css">
+        </head><body></body></html>"#;
+    let document = TreeBuilder::parse(html).document();
+    let base_url = format!("http://127.0.0.1:{}/index.html", port)
+        .parse::<crate::http::Url>()
+        .unwrap();
+    let stylesheets = extract_author_stylesheets(&document, Some(&base_url)).unwrap();
+
+    assert_eq!(stylesheets.len(), 2);
+    assert!(stylesheets[0].contains(".nested"));
+    assert!(stylesheets[1].contains(".main"));
+}
+
+#[test]
+fn extract_stylesheets_skips_import_with_media_condition() {
+    use std::io::{BufRead, BufReader, Write};
+    use std::net::TcpListener;
+
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+
+    std::thread::spawn(move || {
+        for _ in 0..2 {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut reader = BufReader::new(&stream);
+            let mut request_line = String::new();
+            reader.read_line(&mut request_line).unwrap();
+            let path = request_line
+                .split_whitespace()
+                .nth(1)
+                .unwrap_or_default()
+                .to_string();
+            loop {
+                let mut h = String::new();
+                reader.read_line(&mut h).unwrap();
+                if h.trim().is_empty() {
+                    break;
+                }
+            }
+
+            let css_content = match path.as_str() {
+                "/main.css" => r#"@import "print.css" print; .main { color: black; }"#,
+                "/print.css" => ".print { color: red; }",
+                _ => "",
+            };
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{}",
+                css_content.len(),
+                css_content
+            );
+            stream.write_all(resp.as_bytes()).unwrap();
+            stream.flush().unwrap();
+        }
+    });
+
+    let html = r#"<html><head>
+            <link rel="stylesheet" href="/main.css">
+        </head><body></body></html>"#;
+    let document = TreeBuilder::parse(html).document();
+    let base_url = format!("http://127.0.0.1:{}/index.html", port)
+        .parse::<crate::http::Url>()
+        .unwrap();
+    let stylesheets = extract_author_stylesheets(&document, Some(&base_url)).unwrap();
+
+    assert_eq!(stylesheets.len(), 1);
+    assert!(stylesheets[0].contains(".main"));
+    assert!(!stylesheets.iter().any(|css| css.contains(".print")));
+}
+
+#[test]
+fn extract_stylesheets_handles_import_cycles_without_looping() {
+    use std::io::{BufRead, BufReader, Write};
+    use std::net::TcpListener;
+
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+
+    std::thread::spawn(move || {
+        for _ in 0..3 {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut reader = BufReader::new(&stream);
+            let mut request_line = String::new();
+            reader.read_line(&mut request_line).unwrap();
+            let path = request_line
+                .split_whitespace()
+                .nth(1)
+                .unwrap_or_default()
+                .to_string();
+            loop {
+                let mut h = String::new();
+                reader.read_line(&mut h).unwrap();
+                if h.trim().is_empty() {
+                    break;
+                }
+            }
+
+            let css_content = match path.as_str() {
+                "/main.css" => r#"@import "a.css"; .main { color: black; }"#,
+                "/a.css" => r#"@import "b.css"; .a { color: #111; }"#,
+                "/b.css" => r#"@import "a.css"; .b { color: #222; }"#,
+                _ => "",
+            };
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{}",
+                css_content.len(),
+                css_content
+            );
+            stream.write_all(resp.as_bytes()).unwrap();
+            stream.flush().unwrap();
+        }
+    });
+
+    let html = r#"<html><head>
+            <link rel="stylesheet" href="/main.css">
+        </head><body></body></html>"#;
+    let document = TreeBuilder::parse(html).document();
+    let base_url = format!("http://127.0.0.1:{}/index.html", port)
+        .parse::<crate::http::Url>()
+        .unwrap();
+    let stylesheets = extract_author_stylesheets(&document, Some(&base_url)).unwrap();
+
+    assert_eq!(stylesheets.len(), 3);
+    assert!(stylesheets[0].contains(".b"));
+    assert!(stylesheets[1].contains(".a"));
+    assert!(stylesheets[2].contains(".main"));
+}
+
+#[test]
+fn extract_stylesheets_skips_failed_import_fetch() {
+    use std::io::{BufRead, BufReader, Write};
+    use std::net::TcpListener;
+
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+
+    std::thread::spawn(move || {
+        for _ in 0..2 {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut reader = BufReader::new(&stream);
+            let mut request_line = String::new();
+            reader.read_line(&mut request_line).unwrap();
+            let path = request_line
+                .split_whitespace()
+                .nth(1)
+                .unwrap_or_default()
+                .to_string();
+            loop {
+                let mut h = String::new();
+                reader.read_line(&mut h).unwrap();
+                if h.trim().is_empty() {
+                    break;
+                }
+            }
+
+            let (status, css_content) = match path.as_str() {
+                "/main.css" => (
+                    "200 OK",
+                    r#"@import "missing.css"; .main { color: black; }"#,
+                ),
+                "/missing.css" => ("404 Not Found", ""),
+                _ => ("404 Not Found", ""),
+            };
+            let resp = format!(
+                "HTTP/1.1 {}\r\nContent-Length: {}\r\n\r\n{}",
+                status,
+                css_content.len(),
+                css_content
+            );
+            stream.write_all(resp.as_bytes()).unwrap();
+            stream.flush().unwrap();
+        }
+    });
+
+    let html = r#"<html><head>
+            <link rel="stylesheet" href="/main.css">
+        </head><body></body></html>"#;
+    let document = TreeBuilder::parse(html).document();
+    let base_url = format!("http://127.0.0.1:{}/index.html", port)
+        .parse::<crate::http::Url>()
+        .unwrap();
+    let stylesheets = extract_author_stylesheets(&document, Some(&base_url)).unwrap();
+
+    assert_eq!(stylesheets.len(), 1);
+    assert!(stylesheets[0].contains(".main"));
+}
+
+#[test]
+fn extract_stylesheets_skips_absolute_import_urls() {
+    let html = r#"<html><head>
+            <style>@import "https://example.com/remote.css"; .main { color: black; }</style>
+        </head><body></body></html>"#;
+    let document = TreeBuilder::parse(html).document();
+    let base_url = "http://127.0.0.1:80/index.html"
+        .parse::<crate::http::Url>()
+        .unwrap();
+    let stylesheets = extract_author_stylesheets(&document, Some(&base_url)).unwrap();
+
+    assert_eq!(stylesheets.len(), 1);
+    assert!(stylesheets[0].contains(".main"));
+}
+
+#[test]
 fn extract_stylesheets_skips_absolute_urls() {
     let html = r#"<html><head>
             <link rel="stylesheet" href="https://example.com/style.css">

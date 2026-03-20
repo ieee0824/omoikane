@@ -1979,13 +1979,16 @@ fn collect_stylesheet_with_imports(
         let import_base = stylesheet_url.or(document_base);
         if let Some(base) = import_base {
             for import_href in extract_import_hrefs(&css) {
-                if let Some((import_css, import_url)) =
-                    fetch_relative_stylesheet(base, &import_href, client, document_base)
-                {
-                    let import_url_string = import_url.to_string();
-                    if !active_import_urls.insert(import_url_string.clone()) {
-                        continue;
-                    }
+                let Some(import_url) =
+                    resolve_relative_stylesheet_url(base, &import_href, document_base)
+                else {
+                    continue;
+                };
+                let import_url_string = import_url.to_string();
+                if !active_import_urls.insert(import_url_string.clone()) {
+                    continue;
+                }
+                if let Some(import_css) = fetch_stylesheet_by_url(&import_url, client) {
                     collect_stylesheet_with_imports(
                         import_css,
                         Some(&import_url),
@@ -1995,8 +1998,8 @@ fn collect_stylesheet_with_imports(
                         depth + 1,
                         active_import_urls,
                     )?;
-                    active_import_urls.remove(&import_url_string);
                 }
+                active_import_urls.remove(&import_url_string);
             }
         }
     }
@@ -2036,10 +2039,43 @@ fn parse_import_href(prelude: &str) -> Option<String> {
         let rest = &prelude[4..];
         let close = rest.find(')')?;
         let content = rest[..close].trim();
-        return unquote_css_token(content);
+        // Media/supports conditions are out of scope for this phase.
+        // Ignore @import rules with trailing prelude tokens.
+        if !rest[close + 1..].trim().is_empty() {
+            return None;
+        }
+        if let Some(quoted) = unquote_css_token(content) {
+            return Some(quoted);
+        }
+        return non_empty_token(content);
     }
 
-    unquote_css_token(prelude)
+    if prelude.starts_with('"') || prelude.starts_with('\'') {
+        let quote = prelude.chars().next()?;
+        let mut escaped = false;
+        for (index, ch) in prelude.char_indices().skip(1) {
+            if escaped {
+                escaped = false;
+                continue;
+            }
+            if ch == '\\' {
+                escaped = true;
+                continue;
+            }
+            if ch == quote {
+                let value = prelude[1..index].trim();
+                if value.is_empty() {
+                    return None;
+                }
+                if !prelude[index + ch.len_utf8()..].trim().is_empty() {
+                    return None;
+                }
+                return Some(value.to_string());
+            }
+        }
+        return None;
+    }
+    None
 }
 
 fn unquote_css_token(token: &str) -> Option<String> {
@@ -2069,12 +2105,31 @@ fn unquote_css_token(token: &str) -> Option<String> {
     None
 }
 
+fn non_empty_token(token: &str) -> Option<String> {
+    let token = token.trim();
+    if token.is_empty() {
+        None
+    } else {
+        Some(token.to_string())
+    }
+}
+
 fn fetch_relative_stylesheet(
     base: &crate::http::Url,
     href: &str,
     client: &mut Option<crate::http::Client>,
     document_base: Option<&crate::http::Url>,
 ) -> Option<(String, crate::http::Url)> {
+    let resolved = resolve_relative_stylesheet_url(base, href, document_base)?;
+    let css = fetch_stylesheet_by_url(&resolved, client)?;
+    Some((css, resolved))
+}
+
+fn resolve_relative_stylesheet_url(
+    base: &crate::http::Url,
+    href: &str,
+    document_base: Option<&crate::http::Url>,
+) -> Option<crate::http::Url> {
     // Only fetch same-origin URLs that do not specify a scheme, to prevent SSRF attacks.
     // Absolute URLs (containing "://") and protocol-relative URLs ("//")
     // are skipped; this still allows relative and absolute-path references.
@@ -2088,8 +2143,14 @@ fn fetch_relative_stylesheet(
             return None;
         }
     }
-    let url_str = resolved.to_string();
+    Some(resolved)
+}
 
+fn fetch_stylesheet_by_url(
+    resolved: &crate::http::Url,
+    client: &mut Option<crate::http::Client>,
+) -> Option<String> {
+    let url_str = resolved.to_string();
     let c = client.as_mut()?;
     let resp = c.get(&url_str).ok()?;
     if resp.status_code() != 200 {
@@ -2099,8 +2160,7 @@ fn fetch_relative_stylesheet(
     if body.len() > MAX_EXTERNAL_STYLESHEET_BYTES {
         return None;
     }
-    let css = std::str::from_utf8(body).ok()?.to_owned();
-    Some((css, resolved))
+    std::str::from_utf8(body).ok().map(|s| s.to_owned())
 }
 
 fn collect_text_contents(node: &NodeHandle) -> String {
