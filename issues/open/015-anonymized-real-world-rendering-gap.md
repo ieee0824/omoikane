@@ -1,7 +1,7 @@
 ---
 number: 015
 slug: anonymized-real-world-rendering-gap
-parent: 013
+parent: 013-real-world-rendering
 status: open
 ---
 

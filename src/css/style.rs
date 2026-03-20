@@ -1,6 +1,8 @@
 //! CSS cascade and computed style resolution.
 
+use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::hash::{Hash, Hasher};
 use std::sync::{Mutex, OnceLock};
 
 use crate::dom::{Node, NodeHandle, NodeType};
@@ -64,7 +66,12 @@ pub struct StyleResolver {
 
 static UNSUPPORTED_CSS_LOGGED: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
 static SQLITE_LOG_ERRORS: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
-static SQLITE_LOG_INITIALIZED: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+const MAX_UNSUPPORTED_LOG_KEYS: usize = 4096;
+const MAX_UNSUPPORTED_LOG_VALUE_LEN: usize = 256;
+
+thread_local! {
+    static SQLITE_CONNECTIONS: RefCell<HashMap<String, Connection>> = RefCell::new(HashMap::new());
+}
 
 impl StyleResolver {
     /// Creates a new style resolver.
@@ -130,10 +137,6 @@ impl StyleResolver {
         parent_style: Option<&ComputedStyle>,
         pseudo: Option<PseudoElement>,
     ) -> ComputedStyle {
-        if let Some(path) = unsupported_css_sqlite_path() {
-            ensure_unsupported_css_sqlite_schema(&path);
-        }
-
         let mut candidates = Vec::new();
         let mut source_order = 0usize;
 
@@ -301,11 +304,7 @@ fn cascade_rank(candidate: &Candidate) -> (u8, u8) {
 
 fn log_unsupported_css_if_enabled(property: &str, value: &Value) {
     let sqlite_path = unsupported_css_sqlite_path();
-    if let Some(path) = sqlite_path.as_deref() {
-        ensure_unsupported_css_sqlite_schema(path);
-    }
-
-    if is_supported_property(property) {
+    if should_ignore_unsupported_css_logging(property) || is_supported_property(property) {
         return;
     }
 
@@ -315,11 +314,15 @@ fn log_unsupported_css_if_enabled(property: &str, value: &Value) {
     }
 
     if unsupported_css_logging_enabled() {
-        let key = format!("{property}={rendered_value}");
+        let key = unsupported_css_dedup_key(property, &rendered_value);
         let logged = UNSUPPORTED_CSS_LOGGED.get_or_init(|| Mutex::new(HashSet::new()));
         let mut logged = logged.lock().expect("unsupported css log lock poisoned");
-        if logged.insert(key.clone()) {
-            eprintln!("[omoikane][unsupported-css] {key}");
+        if logged.len() >= MAX_UNSUPPORTED_LOG_KEYS {
+            logged.clear();
+        }
+        if logged.insert(key) {
+            let value = truncate_log_value(&rendered_value, MAX_UNSUPPORTED_LOG_VALUE_LEN);
+            eprintln!("[omoikane][unsupported-css] {property}={value}");
         }
     }
 }
@@ -340,45 +343,34 @@ fn unsupported_css_sqlite_path() -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
-fn ensure_unsupported_css_sqlite_schema(path: &str) {
-    let initialized = SQLITE_LOG_INITIALIZED.get_or_init(|| Mutex::new(HashSet::new()));
-    let mut initialized = initialized
-        .lock()
-        .expect("sqlite css log init lock poisoned");
-    if initialized.contains(path) {
-        return;
-    }
-
-    let result = (|| -> Result<(), rusqlite::Error> {
-        let conn = Connection::open(path)?;
-        conn.execute_batch(
-            "CREATE TABLE IF NOT EXISTS unsupported_css_log (
-                property TEXT NOT NULL,
-                value TEXT NOT NULL,
-                first_seen_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                last_seen_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                occurrences INTEGER NOT NULL DEFAULT 0,
-                PRIMARY KEY (property, value)
-            );
-            CREATE INDEX IF NOT EXISTS idx_unsupported_css_log_occurrences
-            ON unsupported_css_log (occurrences DESC);",
-        )?;
-        Ok(())
-    })();
-
-    match result {
-        Ok(()) => {
-            initialized.insert(path.to_string());
-        }
-        Err(error) => log_sqlite_error(&error),
-    }
+fn ensure_unsupported_css_sqlite_schema(conn: &Connection) -> Result<(), rusqlite::Error> {
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS unsupported_css_log (
+            property TEXT NOT NULL,
+            value TEXT NOT NULL,
+            first_seen_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            last_seen_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            occurrences INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (property, value)
+        );
+        CREATE INDEX IF NOT EXISTS idx_unsupported_css_log_occurrences
+        ON unsupported_css_log (occurrences DESC);",
+    )?;
+    Ok(())
 }
 
 fn persist_unsupported_css_to_sqlite(path: &str, property: &str, value: &str) {
-    ensure_unsupported_css_sqlite_schema(path);
+    let result: Result<(), rusqlite::Error> = SQLITE_CONNECTIONS.with(|connections| {
+        let mut connections = connections.borrow_mut();
+        if !connections.contains_key(path) {
+            let conn = Connection::open(path)?;
+            ensure_unsupported_css_sqlite_schema(&conn)?;
+            connections.insert(path.to_string(), conn);
+        }
 
-    let result = (|| -> Result<(), rusqlite::Error> {
-        let conn = Connection::open(path)?;
+        let conn = connections
+            .get_mut(path)
+            .expect("sqlite connection must exist after initialization");
         conn.execute(
             "INSERT INTO unsupported_css_log (property, value, occurrences)
              VALUES (?1, ?2, 1)
@@ -388,7 +380,7 @@ fn persist_unsupported_css_to_sqlite(path: &str, property: &str, value: &str) {
             params![property, value],
         )?;
         Ok(())
-    })();
+    });
 
     if let Err(error) = result {
         log_sqlite_error(&error);
@@ -402,6 +394,25 @@ fn log_sqlite_error(error: &rusqlite::Error) {
     if errors.insert(error_key.clone()) {
         eprintln!("[omoikane][unsupported-css][sqlite-error] {error_key}");
     }
+}
+
+fn should_ignore_unsupported_css_logging(property: &str) -> bool {
+    property.starts_with("--")
+}
+
+fn unsupported_css_dedup_key(property: &str, value: &str) -> String {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    value.hash(&mut hasher);
+    format!("{property}#{}#{}", value.len(), hasher.finish())
+}
+
+fn truncate_log_value(value: &str, max_len: usize) -> String {
+    if value.chars().count() <= max_len {
+        return value.to_string();
+    }
+    let mut out = value.chars().take(max_len).collect::<String>();
+    out.push_str("...");
+    out
 }
 
 fn is_supported_property(name: &str) -> bool {
@@ -845,7 +856,6 @@ mod tests {
         let db_path = std::env::temp_dir().join(format!("omoikane-unsupported-css-{unique}.db"));
         let db_path_str = db_path.to_string_lossy().to_string();
 
-        ensure_unsupported_css_sqlite_schema(&db_path_str);
         persist_unsupported_css_to_sqlite(&db_path_str, "transform", "translateX(10px)");
         persist_unsupported_css_to_sqlite(&db_path_str, "transform", "translateX(10px)");
         persist_unsupported_css_to_sqlite(&db_path_str, "filter", "blur(4px)");
@@ -883,6 +893,12 @@ mod tests {
         drop(stmt);
         drop(conn);
         let _ = fs::remove_file(db_path);
+    }
+
+    #[test]
+    fn ignores_custom_properties_for_unsupported_logging() {
+        assert!(should_ignore_unsupported_css_logging("--brand-color"));
+        assert!(!should_ignore_unsupported_css_logging("transform"));
     }
 
     #[test]
