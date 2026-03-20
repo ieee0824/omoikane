@@ -22,10 +22,11 @@ https://kasaneteto.jp/history/ をレンダリングした結果、HTMLパース
 
 ## 子issue
 
-- [013-1 フォントグリフレンダリング](013-1-font-glyph-rendering.md)
-- [013-2 外部CSSのHTTPフェッチと適用](013-2-external-css-fetch.md)
+- [013-1 フォントグリフレンダリング](../closed/013-1-font-glyph-rendering.md) ✅ 完了
+- [013-2 外部CSSのHTTPフェッチと適用](../closed/013-2-external-css-fetch.md) ✅ 完了
 - [013-3 外部画像のHTTPフェッチと描画](013-3-external-image-fetch.md)
 - [013-4 CJKテキストの行折り返し・禁則処理](013-4-cjk-line-breaking.md)
+- [013-5 paint_text()へのグリフ描画統合](013-5-paint-text-glyph-integration.md) — 013-1 の残作業
 
 ## 優先度
 
