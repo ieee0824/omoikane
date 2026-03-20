@@ -20,12 +20,12 @@ https://kasaneteto.jp/history/ をレンダリングした結果、HTMLパース
 4. **CJKテキストの行折り返し** — 日本語テキスト固有の禁則処理がない
 5. **viewport meta** — `<meta name="viewport">` の解釈がない
 
-## 子issue候補
+## 子issue
 
-- 013-1: フォントグリフレンダリング（フォントファイル読み込み + グリフ描画）
-- 013-2: 外部CSSのHTTPフェッチと適用
-- 013-3: 外部画像のHTTPフェッチと描画
-- 013-4: CJKテキストの行折り返し・禁則処理
+- [013-1 フォントグリフレンダリング](013-1-font-glyph-rendering.md)
+- [013-2 外部CSSのHTTPフェッチと適用](013-2-external-css-fetch.md)
+- [013-3 外部画像のHTTPフェッチと描画](013-3-external-image-fetch.md)
+- [013-4 CJKテキストの行折り返し・禁則処理](013-4-cjk-line-breaking.md)
 
 ## 優先度
 
