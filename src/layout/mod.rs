@@ -9,7 +9,8 @@ use std::collections::HashMap;
 use crate::css::{ComputedStyle, ComputedValue, PseudoElement, StyleResolver};
 use crate::dom::{Node, NodeHandle, NodeType};
 use crate::font::{Font, load_system_font};
-use crate::http::Client;
+use crate::http::url::resolve_url;
+use crate::http::{Client, Url};
 use crate::paint::{DataUri, Image, parse_data_uri};
 
 // Thread-local cache for fetched images and fonts to avoid redundant loads
@@ -17,6 +18,26 @@ thread_local! {
     static IMAGE_CACHE: RefCell<HashMap<String, Option<Image>>> = RefCell::new(HashMap::new());
     static HTTP_CLIENT: RefCell<Client> = RefCell::new(Client::new());
     static LAYOUT_FONT: RefCell<Option<Font>> = RefCell::new(None);
+    static IMAGE_BASE_URL: RefCell<Option<Url>> = const { RefCell::new(None) };
+}
+
+/// Runs layout/image resolution with a temporary base URL used for relative image sources.
+pub fn with_image_base_url<T>(base_url: Option<Url>, f: impl FnOnce() -> T) -> T {
+    struct ImageBaseUrlGuard(Option<Url>);
+
+    impl Drop for ImageBaseUrlGuard {
+        fn drop(&mut self) {
+            IMAGE_BASE_URL.with(|cell| {
+                cell.replace(self.0.take());
+            });
+        }
+    }
+
+    IMAGE_BASE_URL.with(|cell| {
+        let previous = cell.replace(base_url);
+        let _guard = ImageBaseUrlGuard(previous);
+        f()
+    })
 }
 
 /// A rectangle in layout space.
@@ -1638,7 +1659,9 @@ fn intrinsic_width(node: &NodeHandle, resolver: &mut StyleResolver) -> f32 {
                 let image_style = resolver.computed_style(&image_node);
                 let img_padding = edge_sizes(&image_style, "padding");
                 let img_border = edge_sizes(&image_style, "border");
-                return image.width() as f32
+                let (rendered_width, _) =
+                    resolve_image_rendered_size(&image_node, &image, &image_style);
+                return rendered_width
                     + img_padding.left
                     + img_padding.right
                     + img_border.left
@@ -1676,10 +1699,10 @@ fn intrinsic_width(node: &NodeHandle, resolver: &mut StyleResolver) -> f32 {
                         InlineSegmentContent::Text(text) => {
                             measure_text_width(&text, segment.metrics)
                         }
-                        InlineSegmentContent::Image(image, style) => {
+                        InlineSegmentContent::Image(_, style, rendered_width, _) => {
                             let padding = edge_sizes(&style, "padding");
                             let border = edge_sizes(&style, "border");
-                            image.width() as f32
+                            rendered_width
                                 + padding.left
                                 + padding.right
                                 + border.left
@@ -2185,7 +2208,7 @@ struct InlineSegment {
 #[derive(Debug, Clone)]
 enum InlineSegmentContent {
     Text(String),
-    Image(Image, ComputedStyle),
+    Image(Image, ComputedStyle, f32, f32),
     GeneratedBox(ComputedStyle),
 }
 
@@ -2231,16 +2254,19 @@ fn collect_inline_segments(
                 let image_style = resolver.computed_style(&image_node);
                 let padding = edge_sizes(&image_style, "padding");
                 let border = edge_sizes(&image_style, "border");
+                let (rendered_width, rendered_height) =
+                    resolve_image_rendered_size(&image_node, &image, &image_style);
                 out.push(InlineSegment {
                     node: image_node,
-                    content: InlineSegmentContent::Image(image.clone(), image_style.clone()),
+                    content: InlineSegmentContent::Image(
+                        image.clone(),
+                        image_style.clone(),
+                        rendered_width,
+                        rendered_height,
+                    ),
                     metrics: font_metrics(&image_style),
                     line_height: line_height(&image_style).max(
-                        image.height() as f32
-                            + padding.top
-                            + padding.bottom
-                            + border.top
-                            + border.bottom,
+                        rendered_height + padding.top + padding.bottom + border.top + border.bottom,
                     ),
                     vertical_align: vertical_align(&image_style),
                 });
@@ -2250,6 +2276,24 @@ fn collect_inline_segments(
                     PseudoElement::After,
                 ));
                 return;
+            }
+
+            if node.tag_name().as_deref() == Some("img") {
+                if let Some(alt_text) = image_alt_fallback_text(node, &style) {
+                    out.push(InlineSegment {
+                        node: node.clone(),
+                        content: InlineSegmentContent::Text(alt_text),
+                        metrics: font_metrics(&style),
+                        line_height: line_height(&style),
+                        vertical_align: vertical_align(&style),
+                    });
+                    out.extend(generated_inline_segments(
+                        node,
+                        resolver,
+                        PseudoElement::After,
+                    ));
+                    return;
+                }
             }
             for child in node.child_nodes() {
                 match child.node_type() {
@@ -2316,7 +2360,12 @@ fn generated_inline_segments(
         }],
         Some(GeneratedContent::Image(image)) => vec![InlineSegment {
             node: node.clone(),
-            content: InlineSegmentContent::Image(image, style.clone()),
+            content: InlineSegmentContent::Image(
+                image.clone(),
+                style.clone(),
+                image.width() as f32,
+                image.height() as f32,
+            ),
             metrics,
             line_height: line_height.max(metrics.font_size),
             vertical_align,
@@ -2336,26 +2385,12 @@ fn element_inline_image(node: &NodeHandle) -> Option<(NodeHandle, Image)> {
     match tag_name.as_str() {
         "img" => {
             let src = attributes.get("src")?;
-            // Try data: URI first
-            if src.starts_with("data:") {
-                return decode_data_uri_image(src).map(|image| (node.clone(), image));
-            }
-            // Try HTTP/HTTPS URL
-            if src.starts_with("http://") || src.starts_with("https://") {
-                return fetch_image(src).map(|image| (node.clone(), image));
-            }
-            None
+            decode_or_fetch_image(src).map(|image| (node.clone(), image))
         }
         "object" => {
             if let Some(data) = attributes.get("data") {
-                if data.starts_with("data:") {
-                    if let Some(image) = decode_data_uri_image(data) {
-                        return Some((node.clone(), image));
-                    }
-                } else if data.starts_with("http://") || data.starts_with("https://") {
-                    if let Some(image) = fetch_image(data) {
-                        return Some((node.clone(), image));
-                    }
+                if let Some(image) = decode_or_fetch_image(data) {
+                    return Some((node.clone(), image));
                 }
             }
 
@@ -2443,6 +2478,91 @@ fn fetch_image_uncached(url: &str) -> Option<Image> {
         Image::decode_png(body)
             .ok()
             .or_else(|| Image::decode_jpeg(body).ok())
+    }
+}
+
+fn decode_or_fetch_image(url_like: &str) -> Option<Image> {
+    let url_like = url_like.trim();
+    if url_like.is_empty() {
+        return None;
+    }
+    if url_like.starts_with("data:") {
+        return decode_data_uri_image(url_like);
+    }
+    let resolved = resolve_image_url(url_like)?;
+    fetch_image(&resolved)
+}
+
+fn resolve_image_url(url_like: &str) -> Option<String> {
+    if url_like.starts_with("http://") || url_like.starts_with("https://") {
+        return Some(url_like.to_string());
+    }
+    if url_like.contains("://") || url_like.starts_with("//") {
+        return None;
+    }
+    IMAGE_BASE_URL.with(|cell| {
+        let base = cell.borrow().clone()?;
+        resolve_url(&base, url_like).ok().map(|url| url.to_string())
+    })
+}
+
+fn image_alt_fallback_text(node: &NodeHandle, style: &ComputedStyle) -> Option<String> {
+    let attributes = node.attributes().unwrap_or_default();
+    let alt = attributes.get("alt")?;
+    let normalized = normalize_text(alt, white_space(style));
+    if normalized.is_empty() {
+        None
+    } else {
+        Some(normalized)
+    }
+}
+
+fn html_image_dimension_attribute(node: &NodeHandle, name: &str) -> Option<f32> {
+    let attributes = node.attributes().unwrap_or_default();
+    let raw = attributes.get(name)?.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    let parsed = raw.parse::<f32>().ok()?;
+    if parsed.is_finite() && parsed > 0.0 {
+        Some(parsed)
+    } else {
+        None
+    }
+}
+
+fn resolve_image_rendered_size(
+    node: &NodeHandle,
+    image: &Image,
+    style: &ComputedStyle,
+) -> (f32, f32) {
+    let intrinsic_w = image.width() as f32;
+    let intrinsic_h = image.height() as f32;
+    let css_w = explicit_length(style, "width");
+    let css_h = explicit_length(style, "height");
+
+    match (css_w, css_h) {
+        (Some(w), Some(h)) => return (w, h),
+        (Some(w), None) => return (w, scale_with_aspect(intrinsic_h, intrinsic_w, w)),
+        (None, Some(h)) => return (scale_with_aspect(intrinsic_w, intrinsic_h, h), h),
+        (None, None) => {}
+    }
+
+    let attr_w = html_image_dimension_attribute(node, "width");
+    let attr_h = html_image_dimension_attribute(node, "height");
+    match (attr_w, attr_h) {
+        (Some(w), Some(h)) => (w, h),
+        (Some(w), None) => (w, scale_with_aspect(intrinsic_h, intrinsic_w, w)),
+        (None, Some(h)) => (scale_with_aspect(intrinsic_w, intrinsic_h, h), h),
+        (None, None) => (intrinsic_w, intrinsic_h),
+    }
+}
+
+fn scale_with_aspect(numerator: f32, denominator: f32, target: f32) -> f32 {
+    if denominator > 0.0 {
+        (numerator * target / denominator).max(0.0)
+    } else {
+        0.0
     }
 }
 
@@ -2676,17 +2796,13 @@ fn split_segment(segment: &InlineSegment) -> Vec<InlinePiece> {
         InlineSegmentContent::Text(text) => {
             split_text_segment(text, segment.metrics, segment.line_height)
         }
-        InlineSegmentContent::Image(image, style) => {
+        InlineSegmentContent::Image(image, style, rendered_width, rendered_height) => {
             let padding = edge_sizes(style, "padding");
             let border = edge_sizes(style, "border");
             vec![InlinePiece::Fragment {
                 content: InlineFragmentContent::Image(image.clone(), style.clone()),
-                width: image.width() as f32
-                    + padding.left
-                    + padding.right
-                    + border.left
-                    + border.right,
-                height: image.height() as f32
+                width: *rendered_width + padding.left + padding.right + border.left + border.right,
+                height: *rendered_height
                     + padding.top
                     + padding.bottom
                     + border.top

@@ -224,15 +224,26 @@ impl Canvas {
     }
 
     fn draw_image_clipped(&mut self, image: &Image, x: f32, y: f32, clip: Option<Rect>) {
-        let destination = Rect {
-            x,
-            y,
-            width: image.width as f32,
-            height: image.height as f32,
-        };
-        let Some(mut area) = normalize_rect(destination) else {
+        self.draw_image_scaled_clipped(
+            image,
+            Rect {
+                x,
+                y,
+                width: image.width as f32,
+                height: image.height as f32,
+            },
+            clip,
+        );
+    }
+
+    fn draw_image_scaled_clipped(&mut self, image: &Image, destination: Rect, clip: Option<Rect>) {
+        let Some(destination) = normalize_rect(destination) else {
             return;
         };
+        if destination.width <= 0.0 || destination.height <= 0.0 {
+            return;
+        };
+        let mut area = destination;
 
         if let Some(clip_rect) = clip.and_then(normalize_rect) {
             let Some(intersection) = intersect(area, clip_rect) else {
@@ -248,8 +259,10 @@ impl Canvas {
 
         for dest_y in y0..y1 {
             for dest_x in x0..x1 {
-                let source_x = (dest_x as f32 - x).floor() as i32;
-                let source_y = (dest_y as f32 - y).floor() as i32;
+                let u = (dest_x as f32 - destination.x) / destination.width;
+                let v = (dest_y as f32 - destination.y) / destination.height;
+                let source_x = (u * image.width as f32).floor() as i32;
+                let source_y = (v * image.height as f32).floor() as i32;
                 if source_x < 0
                     || source_y < 0
                     || source_x >= image.width as i32
@@ -368,12 +381,15 @@ pub fn render_document_with_url(
     viewport: Rect,
     base_url: Option<&crate::http::Url>,
 ) -> Result<Canvas, PaintError> {
+    let effective_base = extract_document_base_url(document, base_url);
     let mut resolver = StyleResolver::new();
     for stylesheet in extract_author_stylesheets(document, base_url)? {
         resolver.add_stylesheet(Origin::Author, parse_stylesheet_forgiving(&stylesheet)?);
     }
-    let layout = crate::layout::layout_tree(document, &mut resolver, viewport)
-        .ok_or(PaintError::InvalidImageBuffer)?;
+    let layout = crate::layout::with_image_base_url(effective_base, || {
+        crate::layout::layout_tree(document, &mut resolver, viewport)
+    })
+    .ok_or(PaintError::InvalidImageBuffer)?;
     Ok(paint_layout(&layout, &mut resolver, viewport))
 }
 
@@ -927,7 +943,7 @@ fn paint_inline_image_fragment(
     }
 
     let content_rect = inline_fragment_content_rect(rect, style, border);
-    canvas.draw_image_clipped(image, content_rect.x, content_rect.y, clip);
+    canvas.draw_image_scaled_clipped(image, content_rect, clip);
 }
 
 fn inline_fragment_content_rect(

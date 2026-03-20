@@ -215,6 +215,216 @@ fn paints_inline_text_fragments() {
 }
 
 #[test]
+fn renders_relative_image_src_with_base_url() {
+    use std::io::{BufRead, BufReader, Write};
+    use std::net::TcpListener;
+
+    let mut pixel_canvas = Canvas::new(1, 1);
+    pixel_canvas.fill_rect(
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 1.0,
+            height: 1.0,
+        },
+        Color::rgb(255, 0, 0),
+    );
+    let png_bytes = pixel_canvas.encode_png();
+
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut reader = BufReader::new(&stream);
+        let mut request_line = String::new();
+        reader.read_line(&mut request_line).unwrap();
+        loop {
+            let mut h = String::new();
+            reader.read_line(&mut h).unwrap();
+            if h.trim().is_empty() {
+                break;
+            }
+        }
+        let resp = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: image/png\r\nContent-Length: {}\r\n\r\n",
+            png_bytes.len()
+        );
+        stream.write_all(resp.as_bytes()).unwrap();
+        stream.write_all(&png_bytes).unwrap();
+        stream.flush().unwrap();
+    });
+
+    let html = r#"<html><head><style>body { margin: 0; }</style></head><body><img src="images/red.png"></body></html>"#;
+    let document = TreeBuilder::parse(html).document();
+    let base_url = format!("http://127.0.0.1:{}/page/index.html", port)
+        .parse::<crate::http::Url>()
+        .unwrap();
+    let canvas = render_document_with_url(
+        &document,
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 6.0,
+            height: 6.0,
+        },
+        Some(&base_url),
+    )
+    .unwrap();
+
+    assert!(count_pixels(&canvas, Color::rgb(255, 0, 0)) > 0);
+}
+
+#[test]
+fn img_width_and_height_attributes_define_intrinsic_size() {
+    let html = format!(
+        r#"<html><head><style>body {{ margin: 0; }}</style></head><body><img src="{}" width="4" height="2"></body></html>"#,
+        red_pixel_data_uri()
+    );
+    let document = TreeBuilder::parse(&html).document();
+    let mut resolver = StyleResolver::new();
+    for stylesheet in extract_author_stylesheets(&document, None).unwrap() {
+        resolver.add_stylesheet(
+            Origin::Author,
+            parse_stylesheet_forgiving(&stylesheet).unwrap(),
+        );
+    }
+    let layout = layout_tree(
+        &document,
+        &mut resolver,
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 20.0,
+            height: 20.0,
+        },
+    )
+    .unwrap();
+    let image_fragment = find_first_image_fragment(&layout).unwrap();
+    assert_eq!(image_fragment.rect.width, 4.0);
+    assert_eq!(image_fragment.rect.height, 2.0);
+    let sample_x = (image_fragment.rect.x + image_fragment.rect.width - 1.0)
+        .max(0.0)
+        .floor() as u32;
+    let sample_y = (image_fragment.rect.y + image_fragment.rect.height - 1.0)
+        .max(0.0)
+        .floor() as u32;
+
+    let canvas = paint_layout(
+        &layout,
+        &mut resolver,
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 20.0,
+            height: 20.0,
+        },
+    );
+    assert_eq!(
+        canvas.pixel(sample_x, sample_y),
+        Some(Color::rgb(255, 0, 0))
+    );
+}
+
+#[test]
+fn img_single_dimension_attribute_preserves_aspect_ratio() {
+    let mut canvas = Canvas::new(2, 1);
+    canvas.fill_rect(
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 2.0,
+            height: 1.0,
+        },
+        Color::rgb(255, 0, 0),
+    );
+    let encoded = base64::engine::general_purpose::STANDARD.encode(canvas.encode_png());
+    let data_uri = format!("data:image/png;base64,{encoded}");
+    let html = format!(
+        r#"<html><head><style>body {{ margin: 0; }}</style></head><body><img src="{}" width="4"></body></html>"#,
+        data_uri
+    );
+
+    let document = TreeBuilder::parse(&html).document();
+    let mut resolver = StyleResolver::new();
+    for stylesheet in extract_author_stylesheets(&document, None).unwrap() {
+        resolver.add_stylesheet(
+            Origin::Author,
+            parse_stylesheet_forgiving(&stylesheet).unwrap(),
+        );
+    }
+    let layout = layout_tree(
+        &document,
+        &mut resolver,
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 20.0,
+            height: 20.0,
+        },
+    )
+    .unwrap();
+    let image_fragment = find_first_image_fragment(&layout).unwrap();
+    assert_eq!(image_fragment.rect.width, 4.0);
+    assert_eq!(image_fragment.rect.height, 2.0);
+}
+
+#[test]
+fn img_uses_alt_text_when_image_fetch_fails() {
+    use std::io::{BufRead, BufReader, Write};
+    use std::net::TcpListener;
+
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut reader = BufReader::new(&stream);
+        let mut request_line = String::new();
+        reader.read_line(&mut request_line).unwrap();
+        loop {
+            let mut h = String::new();
+            reader.read_line(&mut h).unwrap();
+            if h.trim().is_empty() {
+                break;
+            }
+        }
+        let body = b"";
+        let resp = format!(
+            "HTTP/1.1 404 Not Found\r\nContent-Length: {}\r\n\r\n",
+            body.len()
+        );
+        stream.write_all(resp.as_bytes()).unwrap();
+        stream.flush().unwrap();
+    });
+
+    let html = format!(
+        r#"<html><head><style>body {{ margin: 0; }}</style></head><body><img src="http://127.0.0.1:{}/missing.png" alt="fallback text"></body></html>"#,
+        port
+    );
+    let document = TreeBuilder::parse(&html).document();
+    let mut resolver = StyleResolver::new();
+    for stylesheet in extract_author_stylesheets(&document, None).unwrap() {
+        resolver.add_stylesheet(
+            Origin::Author,
+            parse_stylesheet_forgiving(&stylesheet).unwrap(),
+        );
+    }
+    let layout = layout_tree(
+        &document,
+        &mut resolver,
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 100.0,
+            height: 20.0,
+        },
+    )
+    .unwrap();
+    let mut texts = Vec::new();
+    collect_layout_texts_into(&layout, &mut texts);
+    assert!(texts.iter().any(|text| text.contains("fallback")));
+}
+
+#[test]
 fn paints_tiled_background_images_from_data_uris() {
     let document = NodeHandle::document();
     let body = NodeHandle::element("body");
