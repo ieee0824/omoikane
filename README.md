@@ -14,8 +14,17 @@ Omoikane は、HTTP クライアント、HTML/CSS パーサー、DOM、レイア
 - `gzip` 圧縮レスポンスの自動展開
 - `User-Agent` の既定設定と上書き
 - HTML パースと DOM 構築
-- CSS パースと基本的なスタイル計算
-- ブロック、インライン、Flexbox を含む最小レイアウト
+- CSS パースとスタイル計算（カスケード、継承、em/px/mm 等の単位変換）
+- ブロック、インライン、Flexbox、テーブルを含むレイアウトエンジン
+- margin collapsing（empty element、parent-child、負margin）
+- float / clear / positioned element のレイアウトとペイント
+- CSS 2.1 Appendix E 準拠のスタッキング順序
+- `:before` / `:after` 擬似要素（border triangle 含む）
+- `overflow: hidden` クリッピング
+- **Acid2 テスト完全通過（差分 0px）**
+- 外部 CSS の HTTP フェッチと適用
+- PNG 画像デコード（data URI / ファイル / フォールバックデコーダ）
+- ページの PNG レンダリング出力
 - Boa ベースの JavaScript 実行
 - `document` / `window` / `console` / `fetch` などの最小 Web API バインディング
 - WebSocket + JSON-RPC ベースの最小 CDP サーバー
@@ -46,8 +55,9 @@ Omoikane は、HTTP クライアント、HTML/CSS パーサー、DOM、レイア
 - [`src/http`](/src/http) HTTP/1.1, HTTP/2
 - [`src/html`](/src/html) HTML パーサー
 - [`src/dom`](/src/dom) DOM
-- [`src/css`](/src/css) CSS パーサーとスタイル計算
-- [`src/layout`](/src/layout) レイアウトエンジン
+- [`src/css`](/src/css) CSS パーサー、スタイル計算、カスケード
+- [`src/layout`](/src/layout) レイアウトエンジン（block / inline / flex / table / float / positioned）
+- [`src/paint`](/src/paint) ペイント・レンダリング（Canvas / PNG 出力）
 - [`src/js`](/src/js) JavaScript ランタイム
 - [`src/cdp`](/src/cdp) CDP / WebSocket / JSON-RPC
 - [`src/ffi`](/src/ffi) C FFI
@@ -96,6 +106,12 @@ HTTP クライアントの現状仕様:
 
 サンプルは [`examples/ffi`](/examples/ffi) にあります。
 
+## Acid2 テスト
+
+[Acid2 テスト](https://www.webstandards.org/files/acid2/test.html)の公式リファレンスレンダリングとの比較で**差分 0px** を達成しています。
+
+CSS パーサー、レイアウトエンジン、ペイントシステムの統合テストとして、294 件のテストが常時通過しています。
+
 ## 進捗
 
 issue ベースの開発状況では、以下の大きな実装フェーズは完了済みです。
@@ -103,7 +119,8 @@ issue ベースの開発状況では、以下の大きな実装フェーズは�
 - HTTP クライアント
 - HTML パーサー
 - CSS パーサーとスタイル計算
-- レイアウトエンジン
+- レイアウトエンジン（Acid2 完全通過）
+- ペイント・レンダリングパイプライン
 - JavaScript エンジン統合
 - CDP 互換 API
 - C FFI
@@ -112,8 +129,10 @@ issue ベースの開発状況では、以下の大きな実装フェーズは�
 
 ## 制約
 
-- 描画パイプラインとスクリーンショット出力はまだ最小段階です
-- Web 標準の完全互換は目標であり、現状は必要最小限の実装です
+- フォントのグリフレンダリングは未実装（テキストは固定幅の矩形として描画）
+- 外部画像（`<img src="https://...">`) のフェッチは未実装
+- CJK テキストの禁則処理は未実装
+- Web 標準の完全互換は目標であり、現状は CSS 2.1 の主要機能を実装済みです
 - Puppeteer / Playwright 互換は段階的に拡張中です
 - Go 向けラッパーは同梱せず、必要に応じて別リポジトリや外部パッケージとして提供する方針です
 
