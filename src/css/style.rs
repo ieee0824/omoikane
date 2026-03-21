@@ -473,9 +473,7 @@ fn emit_unsupported_css_top_n_summary_if_updated(path: &str, top_n: usize) {
     }
     map.insert(key, digest);
 
-    eprintln!(
-        "[omoikane][unsupported-css][top-n] top {top_n} candidates (site/url anonymized)"
-    );
+    eprintln!("[omoikane][unsupported-css][top-n] top {top_n} candidates (site/url anonymized)");
     for (index, (property, value, occurrences)) in rows.iter().enumerate() {
         let value = truncate_log_value(value, MAX_UNSUPPORTED_LOG_VALUE_LEN);
         eprintln!(
@@ -576,7 +574,10 @@ fn sanitize_unsupported_css_log_value(value: &str) -> String {
             continue;
         }
 
-        let ch = tail.chars().next().expect("tail must have at least one char");
+        let ch = tail
+            .chars()
+            .next()
+            .expect("tail must have at least one char");
         out.push(ch);
         cursor += ch.len_utf8();
     }
@@ -745,9 +746,11 @@ fn compute_value(value: &Value, property_name: &str, parent_font_size: f32) -> C
         Value::List(values) => {
             if property_name.eq_ignore_ascii_case("transform")
                 || property_name.eq_ignore_ascii_case("overflow")
-                || property_name.eq_ignore_ascii_case("font-family")
             {
                 return ComputedValue::Keyword(render_value(value));
+            }
+            if property_name.eq_ignore_ascii_case("font-family") {
+                return ComputedValue::Keyword(render_font_family_value(values));
             }
             if let Some(first) = values.first() {
                 compute_value(first, property_name, parent_font_size)
@@ -947,7 +950,10 @@ fn apply_presentational_hints(
             .get("bgcolor")
             .and_then(|value| parse_legacy_color_hint(value))
         {
-            properties.insert("background-color".to_string(), ComputedValue::Color(background));
+            properties.insert(
+                "background-color".to_string(),
+                ComputedValue::Color(background),
+            );
         }
     }
 
@@ -1058,11 +1064,17 @@ fn parse_legacy_dimension_hint(value: &str) -> Option<ComputedValue> {
         return None;
     }
 
-    if let Some(percent) = value.strip_suffix('%').and_then(|v| v.trim().parse::<f32>().ok()) {
+    if let Some(percent) = value
+        .strip_suffix('%')
+        .and_then(|v| v.trim().parse::<f32>().ok())
+    {
         return Some(ComputedValue::Percentage(percent));
     }
 
-    if let Some(px) = value.strip_suffix("px").and_then(|v| v.trim().parse::<f32>().ok()) {
+    if let Some(px) = value
+        .strip_suffix("px")
+        .and_then(|v| v.trim().parse::<f32>().ok())
+    {
         return Some(ComputedValue::Px(px.max(0.0)));
     }
 
@@ -1203,6 +1215,14 @@ fn render_value(value: &Value) -> String {
     }
 }
 
+fn render_font_family_value(values: &[Value]) -> String {
+    values
+        .iter()
+        .map(render_value)
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 fn inherited_custom_properties(parent_style: Option<&ComputedStyle>) -> BTreeMap<String, Value> {
     let mut custom_properties = BTreeMap::new();
     let Some(parent_style) = parent_style else {
@@ -1304,9 +1324,9 @@ fn resolve_var_function(
         }
     }
 
-    arguments
-        .get(1)
-        .and_then(|fallback| resolve_value_with_custom_properties_inner(fallback, custom_properties, stack, depth))
+    arguments.get(1).and_then(|fallback| {
+        resolve_value_with_custom_properties_inner(fallback, custom_properties, stack, depth)
+    })
 }
 
 fn custom_property_reference_name(value: &Value) -> Option<&str> {

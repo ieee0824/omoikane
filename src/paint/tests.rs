@@ -3577,7 +3577,8 @@ fn debug_acid2_hello_world_layout() {
 #[test]
 #[ignore = "debug blog layout investigation"]
 fn debug_blog_ast_moe_layout_snapshot() {
-    let snapshot_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/output/blog-content.html");
+    let snapshot_path =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/output/blog-content.html");
     if !snapshot_path.exists() {
         // NOTE:
         // This is a local debugging helper that relies on an untracked snapshot

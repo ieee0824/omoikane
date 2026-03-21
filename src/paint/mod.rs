@@ -11,7 +11,7 @@ use crate::css::{
     parse_stylesheet,
 };
 use crate::dom::{Node, NodeHandle, NodeType};
-use crate::font::{Font, GlyphRaster, load_system_font};
+use crate::font::{Font, GlyphRaster, load_default_text_fonts};
 use crate::http::url::resolve_url;
 use crate::layout::{InlineFragmentContent, LayoutBox, Rect, Visibility};
 use base64::Engine;
@@ -898,31 +898,7 @@ fn paint_text_with_font(
 }
 
 fn load_text_fonts() -> Vec<Font> {
-    let mut fonts = Vec::new();
-    let mut loaded_families = HashSet::new();
-    let families = [
-        "sans-serif",
-        "Hiragino Sans",
-        "Hiragino Kaku Gothic ProN",
-        "Yu Gothic",
-        "Meiryo",
-        "MS Gothic",
-        "Noto Sans CJK JP",
-        "Noto Sans JP",
-        "IPA Gothic",
-        "IPAGothic",
-    ];
-
-    for family in families {
-        if !loaded_families.insert(family.to_ascii_lowercase()) {
-            continue;
-        }
-        if let Ok(font) = load_system_font(family) {
-            fonts.push(font);
-        }
-    }
-
-    fonts
+    load_default_text_fonts()
 }
 
 fn rasterize_with_fallback(

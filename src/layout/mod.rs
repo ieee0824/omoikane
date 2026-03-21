@@ -8,7 +8,7 @@ use std::collections::{HashMap, HashSet};
 
 use crate::css::{ComputedStyle, ComputedValue, PseudoElement, StyleResolver};
 use crate::dom::{Node, NodeHandle, NodeType};
-use crate::font::{Font, load_system_font};
+use crate::font::{Font, load_default_text_fonts};
 use crate::http::url::resolve_url;
 use crate::http::{Client, Url};
 use crate::paint::{DataUri, Image, parse_data_uri};
@@ -1215,7 +1215,9 @@ fn layout_table_row_entry(
             .unwrap_or(1)
             .max(1)
             .min(max_span);
-        let rowspan = html_table_span_attribute(cell, "rowspan").unwrap_or(1).max(1);
+        let rowspan = html_table_span_attribute(cell, "rowspan")
+            .unwrap_or(1)
+            .max(1);
         let cell_containing = Rect {
             x: 0.0,
             y: 0.0,
@@ -1262,12 +1264,9 @@ fn layout_table_row_entry(
         children.push(cell);
     }
 
-    let row_width = if entry.cells.is_empty() {
-        0.0
-    } else {
-        let used_columns = column_count;
-        used_columns as f32 * column_width + (used_columns.saturating_sub(1)) as f32 * spacing
-    };
+    let used_columns = column_count;
+    let row_width =
+        used_columns as f32 * column_width + (used_columns.saturating_sub(1)) as f32 * spacing;
     let row_box = LayoutBox {
         node: entry.row_node.clone(),
         dimensions: BoxDimensions {
@@ -3339,31 +3338,7 @@ fn measure_text_width(text: &str, metrics: FontMetrics) -> f32 {
 }
 
 fn load_layout_fonts() -> Vec<Font> {
-    let mut fonts = Vec::new();
-    let mut loaded_families = HashSet::new();
-    let families = [
-        "sans-serif",
-        "Hiragino Sans",
-        "Hiragino Kaku Gothic ProN",
-        "Yu Gothic",
-        "Meiryo",
-        "MS Gothic",
-        "Noto Sans CJK JP",
-        "Noto Sans JP",
-        "IPA Gothic",
-        "IPAGothic",
-    ];
-
-    for family in families {
-        if !loaded_families.insert(family.to_ascii_lowercase()) {
-            continue;
-        }
-        if let Ok(font) = load_system_font(family) {
-            fonts.push(font);
-        }
-    }
-
-    fonts
+    load_default_text_fonts()
 }
 
 fn measure_text_width_with_fallback(text: &str, font_size: f32, fonts: &[Font]) -> f32 {

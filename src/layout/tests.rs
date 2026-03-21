@@ -122,8 +122,10 @@ fn logical_auto_margins_center_fixed_width_blocks() {
     let mut resolver = StyleResolver::new();
     resolver.add_stylesheet(
         Origin::Author,
-        parse_stylesheet("div { width: 80px; margin-inline-start: auto; margin-inline-end: auto; }")
-            .unwrap(),
+        parse_stylesheet(
+            "div { width: 80px; margin-inline-start: auto; margin-inline-end: auto; }",
+        )
+        .unwrap(),
     );
 
     let layout = layout_tree(
@@ -1084,6 +1086,54 @@ fn lays_out_basic_table_rows_and_cells() {
     assert_eq!(row_box.children[0].dimensions.content.width, 54.0);
     assert_eq!(row_box.children[1].dimensions.content.x, 62.0);
     assert_eq!(table_box.dimensions.content.width, 120.0);
+}
+
+#[test]
+fn empty_table_row_keeps_table_content_width() {
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let table = NodeHandle::element("table");
+    let empty_row = NodeHandle::element("tr");
+    let filled_row = NodeHandle::element("tr");
+    let first = NodeHandle::element("td");
+    let second = NodeHandle::element("td");
+
+    first.append_child(NodeHandle::text("A"));
+    second.append_child(NodeHandle::text("B"));
+    document.append_child(body.clone());
+    body.append_child(table.clone());
+    table.append_child(empty_row.clone());
+    table.append_child(filled_row.clone());
+    filled_row.append_child(first);
+    filled_row.append_child(second);
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "table { display: table; width: 120px; border-spacing: 0; } \
+             tr { display: table-row; } \
+             td { display: table-cell; height: 10px; }",
+        )
+        .unwrap(),
+    );
+
+    let layout = layout_tree(
+        &body,
+        &mut resolver,
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 200.0,
+            height: 0.0,
+        },
+    )
+    .unwrap();
+
+    let table_box = &layout.children[0];
+    assert_eq!(table_box.children.len(), 2);
+    assert_eq!(table_box.children[0].dimensions.content.width, 120.0);
+    assert_eq!(table_box.children[1].dimensions.content.width, 120.0);
 }
 
 #[test]
