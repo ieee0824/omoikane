@@ -3575,6 +3575,94 @@ fn debug_acid2_hello_world_layout() {
 }
 
 #[test]
+#[ignore = "debug blog layout investigation"]
+fn debug_blog_ast_moe_layout_snapshot() {
+    let snapshot_path =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/output/blog-content.html");
+    if !snapshot_path.exists() {
+        // NOTE:
+        // This is a local debugging helper that relies on an untracked snapshot
+        // generated during manual rendering investigations.
+        // - On CI, the snapshot is intentionally absent, so we skip to keep
+        //   `cargo test -- --include-ignored` green.
+        // - Locally, we fail loudly so missing fixture setup is immediately visible.
+        if std::env::var_os("CI").is_some() {
+            eprintln!(
+                "skipping debug_blog_ast_moe_layout_snapshot on CI: missing {}",
+                snapshot_path.display()
+            );
+            return;
+        }
+        eprintln!(
+            "debug_blog_ast_moe_layout_snapshot requires local snapshot: {}",
+            snapshot_path.display()
+        );
+        panic!(
+            "missing required local snapshot for debug test: {}",
+            snapshot_path.display()
+        );
+    }
+    let html = fs::read_to_string(&snapshot_path).unwrap();
+    let document = TreeBuilder::parse(&html).document();
+    let base_url: crate::http::Url = "https://blog.ast.moe/blog/".parse().unwrap();
+
+    let mut resolver = StyleResolver::new();
+    for stylesheet in extract_author_stylesheets(&document, Some(&base_url)).unwrap() {
+        resolver.add_stylesheet(
+            Origin::Author,
+            parse_stylesheet_forgiving(&stylesheet).unwrap(),
+        );
+    }
+
+    let layout = crate::layout::layout_tree(
+        &document,
+        &mut resolver,
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 1366.0,
+            height: 900.0,
+        },
+    )
+    .unwrap();
+
+    println!(
+        "document content: x={:.1} y={:.1} w={:.1} h={:.1} children={}",
+        layout.dimensions.content.x,
+        layout.dimensions.content.y,
+        layout.dimensions.content.width,
+        layout.dimensions.content.height,
+        layout.children.len()
+    );
+
+    for child in &layout.children {
+        println!(
+            "child tag={:?} x={:.1} y={:.1} w={:.1} h={:.1} lines={} children={}",
+            child.node.tag_name(),
+            child.dimensions.content.x,
+            child.dimensions.content.y,
+            child.dimensions.content.width,
+            child.dimensions.content.height,
+            child.lines.len(),
+            child.children.len()
+        );
+    }
+
+    let body = find_first_descendant_by_tag(&document, "body").unwrap();
+    let body_style = resolver.computed_style(&body);
+    println!("body width={:?}", body_style.get("width"));
+    println!("body overflow={:?}", body_style.get("overflow"));
+    println!("body overflow-x={:?}", body_style.get("overflow-x"));
+    println!("body overflow-y={:?}", body_style.get("overflow-y"));
+
+    let main = find_first_descendant_by_tag(&document, "main").unwrap();
+    let main_style = resolver.computed_style(&main);
+    println!("main width={:?}", main_style.get("width"));
+    println!("main margin-left={:?}", main_style.get("margin-left"));
+    println!("main margin-right={:?}", main_style.get("margin-right"));
+}
+
+#[test]
 #[ignore = "debug test"]
 fn debug_paint_trace() {
     use crate::font::load_system_font;
@@ -3792,6 +3880,7 @@ fn debug_painted_pixel_positions() {
         },
         text,
         font_size,
+        font_size * 0.8,
         std::slice::from_ref(&font),
         color,
         None,

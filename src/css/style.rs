@@ -171,19 +171,29 @@ impl StyleResolver {
         });
 
         let mut properties: BTreeMap<String, ComputedValue> = BTreeMap::new();
+        let mut custom_properties = inherited_custom_properties(parent_style);
+        for candidate in &candidates {
+            if candidate.name.starts_with("--") {
+                custom_properties.insert(candidate.name.clone(), candidate.value.clone());
+            }
+        }
 
         // Process font-size first so that em units in other properties
         // resolve against the element's own computed font-size.
         if let Some(fs_candidate) = candidates.iter().filter(|c| c.name == "font-size").last() {
-            let parent_fs = parent_style
-                .and_then(|ps| ps.get("font-size"))
-                .and_then(|v| match v {
-                    ComputedValue::Px(px) => Some(*px),
-                    _ => None,
-                })
-                .unwrap_or(16.0);
-            let computed = compute_value(&fs_candidate.value, "font-size", parent_fs);
-            properties.insert("font-size".to_string(), computed);
+            if let Some(resolved_value) =
+                resolve_value_with_custom_properties(&fs_candidate.value, &custom_properties)
+            {
+                let parent_fs = parent_style
+                    .and_then(|ps| ps.get("font-size"))
+                    .and_then(|v| match v {
+                        ComputedValue::Px(px) => Some(*px),
+                        _ => None,
+                    })
+                    .unwrap_or(16.0);
+                let computed = compute_value(&resolved_value, "font-size", parent_fs);
+                properties.insert("font-size".to_string(), computed);
+            }
         }
 
         for candidate in candidates {
@@ -191,8 +201,13 @@ impl StyleResolver {
                 continue; // already processed above
             }
             log_unsupported_css_if_enabled(&candidate.name, &candidate.value);
+            let Some(resolved_value) =
+                resolve_value_with_custom_properties(&candidate.value, &custom_properties)
+            else {
+                continue;
+            };
             let font_size = inherited_font_size(parent_style, &properties);
-            let computed = compute_value(&candidate.value, &candidate.name, font_size);
+            let computed = compute_value(&resolved_value, &candidate.name, font_size);
             // CSS 2.1: non-zero unitless numbers are invalid for length properties;
             // skip them so they don't override valid length values in the cascade.
             if matches!(computed, ComputedValue::Number(n) if n != 0.0)
@@ -458,9 +473,7 @@ fn emit_unsupported_css_top_n_summary_if_updated(path: &str, top_n: usize) {
     }
     map.insert(key, digest);
 
-    eprintln!(
-        "[omoikane][unsupported-css][top-n] top {top_n} candidates (site/url anonymized)"
-    );
+    eprintln!("[omoikane][unsupported-css][top-n] top {top_n} candidates (site/url anonymized)");
     for (index, (property, value, occurrences)) in rows.iter().enumerate() {
         let value = truncate_log_value(value, MAX_UNSUPPORTED_LOG_VALUE_LEN);
         eprintln!(
@@ -561,7 +574,10 @@ fn sanitize_unsupported_css_log_value(value: &str) -> String {
             continue;
         }
 
-        let ch = tail.chars().next().expect("tail must have at least one char");
+        let ch = tail
+            .chars()
+            .next()
+            .expect("tail must have at least one char");
         out.push(ch);
         cursor += ch.len_utf8();
     }
@@ -707,12 +723,31 @@ fn compute_value(value: &Value, property_name: &str, parent_font_size: f32) -> C
                 ComputedValue::Keyword(name.clone())
             }
         }
+        Value::Function { name, arguments } if name.eq_ignore_ascii_case("calc") => {
+            if let Some(quantity) = evaluate_calc(arguments, parent_font_size) {
+                return match quantity.unit {
+                    CalcUnit::Px => ComputedValue::Px(quantity.value),
+                    CalcUnit::Percentage => {
+                        if property_name == "font-size" {
+                            ComputedValue::Px(parent_font_size * (quantity.value / 100.0))
+                        } else {
+                            ComputedValue::Percentage(quantity.value)
+                        }
+                    }
+                    CalcUnit::Unitless => ComputedValue::Number(quantity.value),
+                };
+            }
+            ComputedValue::Keyword(render_value(value))
+        }
         Value::Function { .. } => ComputedValue::Keyword(render_value(value)),
         Value::List(values) => {
             if property_name.eq_ignore_ascii_case("transform")
                 || property_name.eq_ignore_ascii_case("overflow")
             {
                 return ComputedValue::Keyword(render_value(value));
+            }
+            if property_name.eq_ignore_ascii_case("font-family") {
+                return ComputedValue::Keyword(render_font_family_value(values));
             }
             if let Some(first) = values.first() {
                 compute_value(first, property_name, parent_font_size)
@@ -721,6 +756,179 @@ fn compute_value(value: &Value, property_name: &str, parent_font_size: f32) -> C
             }
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum CalcUnit {
+    Px,
+    Percentage,
+    Unitless,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct CalcQuantity {
+    value: f32,
+    unit: CalcUnit,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum CalcToken {
+    Value(CalcQuantity),
+    Operator(char),
+}
+
+fn evaluate_calc(arguments: &[Value], parent_font_size: f32) -> Option<CalcQuantity> {
+    let expression = arguments.first()?;
+    let mut tokens = Vec::new();
+    collect_calc_tokens(expression, parent_font_size, &mut tokens)?;
+    if tokens.is_empty() {
+        return None;
+    }
+
+    let mut index = 0usize;
+    let value = parse_calc_add_sub(&tokens, &mut index)?;
+    if index == tokens.len() {
+        Some(value)
+    } else {
+        None
+    }
+}
+
+fn collect_calc_tokens(
+    value: &Value,
+    parent_font_size: f32,
+    out: &mut Vec<CalcToken>,
+) -> Option<()> {
+    match value {
+        Value::List(values) => {
+            for item in values {
+                collect_calc_tokens(item, parent_font_size, out)?;
+            }
+            Some(())
+        }
+        Value::Keyword(op) if matches!(op.as_str(), "+" | "-" | "*" | "/") => {
+            out.push(CalcToken::Operator(op.chars().next()?));
+            Some(())
+        }
+        Value::Length(number, unit) => {
+            let px = match unit.as_str() {
+                "px" => *number,
+                "em" => *number * parent_font_size,
+                "mm" => *number * (96.0 / 25.4),
+                "cm" => *number * (96.0 / 2.54),
+                "in" => *number * 96.0,
+                "pt" => *number * (96.0 / 72.0),
+                "pc" => *number * (96.0 / 6.0),
+                _ => return None,
+            };
+            out.push(CalcToken::Value(CalcQuantity {
+                value: px,
+                unit: CalcUnit::Px,
+            }));
+            Some(())
+        }
+        Value::Percentage(number) => {
+            out.push(CalcToken::Value(CalcQuantity {
+                value: *number,
+                unit: CalcUnit::Percentage,
+            }));
+            Some(())
+        }
+        Value::Number(number) => {
+            out.push(CalcToken::Value(CalcQuantity {
+                value: *number,
+                unit: CalcUnit::Unitless,
+            }));
+            Some(())
+        }
+        _ => None,
+    }
+}
+
+fn parse_calc_add_sub(tokens: &[CalcToken], index: &mut usize) -> Option<CalcQuantity> {
+    let mut left = parse_calc_mul_div(tokens, index)?;
+    loop {
+        let op = match tokens.get(*index) {
+            Some(CalcToken::Operator(op @ ('+' | '-'))) => *op,
+            _ => break,
+        };
+        *index += 1;
+        let right = parse_calc_mul_div(tokens, index)?;
+        left = apply_calc_operator(left, op, right)?;
+    }
+    Some(left)
+}
+
+fn parse_calc_mul_div(tokens: &[CalcToken], index: &mut usize) -> Option<CalcQuantity> {
+    let mut left = parse_calc_factor(tokens, index)?;
+    loop {
+        let op = match tokens.get(*index) {
+            Some(CalcToken::Operator(op @ ('*' | '/'))) => *op,
+            _ => break,
+        };
+        *index += 1;
+        let right = parse_calc_factor(tokens, index)?;
+        left = apply_calc_operator(left, op, right)?;
+    }
+    Some(left)
+}
+
+fn parse_calc_factor(tokens: &[CalcToken], index: &mut usize) -> Option<CalcQuantity> {
+    let value = match tokens.get(*index) {
+        Some(CalcToken::Value(value)) => *value,
+        _ => return None,
+    };
+    *index += 1;
+    Some(value)
+}
+
+fn apply_calc_operator(left: CalcQuantity, op: char, right: CalcQuantity) -> Option<CalcQuantity> {
+    match op {
+        '+' => add_or_sub_calc_quantities(left, right, false),
+        '-' => add_or_sub_calc_quantities(left, right, true),
+        '*' => multiply_calc_quantities(left, right),
+        '/' => divide_calc_quantities(left, right),
+        _ => None,
+    }
+}
+
+fn add_or_sub_calc_quantities(
+    left: CalcQuantity,
+    right: CalcQuantity,
+    subtract: bool,
+) -> Option<CalcQuantity> {
+    if left.unit != right.unit {
+        return None;
+    }
+    let rhs = if subtract { -right.value } else { right.value };
+    Some(CalcQuantity {
+        value: left.value + rhs,
+        unit: left.unit,
+    })
+}
+
+fn multiply_calc_quantities(left: CalcQuantity, right: CalcQuantity) -> Option<CalcQuantity> {
+    match (left.unit, right.unit) {
+        (CalcUnit::Unitless, unit) => Some(CalcQuantity {
+            value: left.value * right.value,
+            unit,
+        }),
+        (unit, CalcUnit::Unitless) => Some(CalcQuantity {
+            value: left.value * right.value,
+            unit,
+        }),
+        _ => None,
+    }
+}
+
+fn divide_calc_quantities(left: CalcQuantity, right: CalcQuantity) -> Option<CalcQuantity> {
+    if right.value == 0.0 || right.unit != CalcUnit::Unitless {
+        return None;
+    }
+    Some(CalcQuantity {
+        value: left.value / right.value,
+        unit: left.unit,
+    })
 }
 
 fn apply_presentational_hints(
@@ -739,7 +947,10 @@ fn apply_presentational_hints(
             .get("bgcolor")
             .and_then(|value| parse_legacy_color_hint(value))
         {
-            properties.insert("background-color".to_string(), ComputedValue::Color(background));
+            properties.insert(
+                "background-color".to_string(),
+                ComputedValue::Color(background),
+            );
         }
     }
 
@@ -780,6 +991,43 @@ fn apply_presentational_hints(
             properties.insert("text-align".to_string(), ComputedValue::Keyword(align));
         }
     }
+
+    if !properties.contains_key("width") {
+        if let Some(width) = attributes
+            .get("width")
+            .and_then(|value| parse_legacy_dimension_hint(value))
+        {
+            properties.insert("width".to_string(), width);
+        }
+    }
+
+    if !properties.contains_key("height") {
+        if let Some(height) = attributes
+            .get("height")
+            .and_then(|value| parse_legacy_dimension_hint(value))
+        {
+            properties.insert("height".to_string(), height);
+        }
+    }
+
+    if !properties.contains_key("color") {
+        if let Some(color) = attributes
+            .get("color")
+            .and_then(|value| parse_legacy_color_hint(value))
+        {
+            properties.insert("color".to_string(), ComputedValue::Color(color));
+        }
+    }
+
+    if !properties.contains_key("font-family") {
+        if let Some(face) = attributes
+            .get("face")
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+        {
+            properties.insert("font-family".to_string(), ComputedValue::Keyword(face));
+        }
+    }
 }
 
 fn parse_legacy_color_hint(value: &str) -> Option<String> {
@@ -805,6 +1053,32 @@ fn parse_legacy_color_hint(value: &str) -> Option<String> {
     }
 
     None
+}
+
+fn parse_legacy_dimension_hint(value: &str) -> Option<ComputedValue> {
+    let value = value.trim();
+    if value.is_empty() {
+        return None;
+    }
+
+    if let Some(percent) = value
+        .strip_suffix('%')
+        .and_then(|v| v.trim().parse::<f32>().ok())
+    {
+        return Some(ComputedValue::Percentage(percent));
+    }
+
+    if let Some(px) = value
+        .strip_suffix("px")
+        .and_then(|v| v.trim().parse::<f32>().ok())
+    {
+        return Some(ComputedValue::Px(px.max(0.0)));
+    }
+
+    value
+        .parse::<f32>()
+        .ok()
+        .map(|px| ComputedValue::Px(px.max(0.0)))
 }
 
 fn is_hex_color(value: &str) -> bool {
@@ -868,11 +1142,24 @@ fn apply_inheritance(
         return;
     };
 
-    for inherited_name in ["color", "font-size", "line-height", "white-space"] {
+    for inherited_name in [
+        "color",
+        "font-family",
+        "font-size",
+        "line-height",
+        "white-space",
+    ] {
         if !properties.contains_key(inherited_name) {
             if let Some(value) = parent_style.get(inherited_name) {
                 properties.insert(inherited_name.to_string(), value.clone());
             }
+        }
+    }
+
+    // CSS custom properties inherit by default.
+    for (name, value) in parent_style.properties() {
+        if name.starts_with("--") && !properties.contains_key(name) {
+            properties.insert(name.clone(), value.clone());
         }
     }
 }
@@ -922,6 +1209,127 @@ fn render_value(value: &Value) -> String {
         Value::String(value) => value.clone(),
         Value::Number(value) => value.to_string(),
         Value::Percentage(value) => format!("{value}%"),
+    }
+}
+
+fn render_font_family_value(values: &[Value]) -> String {
+    values
+        .iter()
+        .map(render_value)
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn inherited_custom_properties(parent_style: Option<&ComputedStyle>) -> BTreeMap<String, Value> {
+    let mut custom_properties = BTreeMap::new();
+    let Some(parent_style) = parent_style else {
+        return custom_properties;
+    };
+    for (name, value) in parent_style.properties() {
+        if !name.starts_with("--") {
+            continue;
+        }
+        custom_properties.insert(name.clone(), computed_to_value(value));
+    }
+    custom_properties
+}
+
+fn computed_to_value(value: &ComputedValue) -> Value {
+    match value {
+        ComputedValue::Keyword(value) => Value::Keyword(value.clone()),
+        ComputedValue::Px(value) => Value::Length(*value, "px".to_string()),
+        ComputedValue::Percentage(value) => Value::Percentage(*value),
+        ComputedValue::Color(value) => Value::Color(value.clone()),
+        ComputedValue::String(value) => Value::String(value.clone()),
+        ComputedValue::Number(value) => Value::Number(*value),
+    }
+}
+
+fn resolve_value_with_custom_properties(
+    value: &Value,
+    custom_properties: &BTreeMap<String, Value>,
+) -> Option<Value> {
+    let mut stack = Vec::new();
+    resolve_value_with_custom_properties_inner(value, custom_properties, &mut stack, 0)
+}
+
+fn resolve_value_with_custom_properties_inner(
+    value: &Value,
+    custom_properties: &BTreeMap<String, Value>,
+    stack: &mut Vec<String>,
+    depth: usize,
+) -> Option<Value> {
+    if depth > 32 {
+        return None;
+    }
+
+    match value {
+        Value::Function { name, arguments } if name.eq_ignore_ascii_case("var") => {
+            resolve_var_function(arguments, custom_properties, stack, depth + 1)
+        }
+        Value::Function { name, arguments } => {
+            let mut resolved_arguments = Vec::with_capacity(arguments.len());
+            for argument in arguments {
+                resolved_arguments.push(resolve_value_with_custom_properties_inner(
+                    argument,
+                    custom_properties,
+                    stack,
+                    depth + 1,
+                )?);
+            }
+            Some(Value::Function {
+                name: name.clone(),
+                arguments: resolved_arguments,
+            })
+        }
+        Value::List(values) => {
+            let mut resolved_values = Vec::with_capacity(values.len());
+            for item in values {
+                resolved_values.push(resolve_value_with_custom_properties_inner(
+                    item,
+                    custom_properties,
+                    stack,
+                    depth + 1,
+                )?);
+            }
+            Some(Value::List(resolved_values))
+        }
+        _ => Some(value.clone()),
+    }
+}
+
+fn resolve_var_function(
+    arguments: &[Value],
+    custom_properties: &BTreeMap<String, Value>,
+    stack: &mut Vec<String>,
+    depth: usize,
+) -> Option<Value> {
+    let reference_name = custom_property_reference_name(arguments.first()?)?;
+    if stack.iter().any(|name| name == reference_name) {
+        return arguments.get(1).and_then(|fallback| {
+            resolve_value_with_custom_properties_inner(fallback, custom_properties, stack, depth)
+        });
+    }
+
+    if let Some(referenced) = custom_properties.get(reference_name) {
+        stack.push(reference_name.to_string());
+        let resolved =
+            resolve_value_with_custom_properties_inner(referenced, custom_properties, stack, depth);
+        let _ = stack.pop();
+        if resolved.is_some() {
+            return resolved;
+        }
+    }
+
+    arguments.get(1).and_then(|fallback| {
+        resolve_value_with_custom_properties_inner(fallback, custom_properties, stack, depth)
+    })
+}
+
+fn custom_property_reference_name(value: &Value) -> Option<&str> {
+    match value {
+        Value::Keyword(name) if name.starts_with("--") => Some(name.as_str()),
+        _ => None,
     }
 }
 

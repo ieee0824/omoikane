@@ -520,8 +520,7 @@ mod tests {
         let browser = unsafe { omoikane_init() };
         assert!(!browser.is_null());
 
-        let screenshot =
-            unsafe { omoikane_screenshot_png_with_viewport(browser, 16_384, 16_384) };
+        let screenshot = unsafe { omoikane_screenshot_png_with_viewport(browser, 16_384, 16_384) };
         assert!(screenshot.is_null());
 
         let error = unsafe { omoikane_last_error(browser) };

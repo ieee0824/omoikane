@@ -4,7 +4,7 @@
 //! Handles font file loading, character-to-glyph mapping, and rasterization.
 
 use ab_glyph::{Font as AbGlyphFont, FontVec, ScaleFont};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::{fmt, io};
@@ -385,6 +385,38 @@ pub fn load_system_font(family: &str) -> Result<Font, FontError> {
         .ok_or_else(|| FontError::Other(format!("System font '{}' not found", family)))?;
 
     Font::load_from_file(&path)
+}
+
+/// Load default text fonts shared by layout and paint.
+///
+/// The first successfully loaded family becomes the primary font.
+/// Remaining fonts are fallback candidates (with CJK-preferred families included).
+pub fn load_default_text_fonts() -> Vec<Font> {
+    let mut fonts = Vec::new();
+    let mut loaded_families = HashSet::new();
+    let families = [
+        "sans-serif",
+        "Hiragino Sans",
+        "Hiragino Kaku Gothic ProN",
+        "Yu Gothic",
+        "Meiryo",
+        "MS Gothic",
+        "Noto Sans CJK JP",
+        "Noto Sans JP",
+        "IPA Gothic",
+        "IPAGothic",
+    ];
+
+    for family in families {
+        if !loaded_families.insert(family.to_ascii_lowercase()) {
+            continue;
+        }
+        if let Ok(font) = load_system_font(family) {
+            fonts.push(font);
+        }
+    }
+
+    fonts
 }
 
 // ============================================================================

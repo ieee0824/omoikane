@@ -11,7 +11,7 @@ use crate::css::{
     parse_stylesheet,
 };
 use crate::dom::{Node, NodeHandle, NodeType};
-use crate::font::{Font, GlyphRaster, load_system_font};
+use crate::font::{Font, GlyphRaster, load_default_text_fonts};
 use crate::http::url::resolve_url;
 use crate::layout::{InlineFragmentContent, LayoutBox, Rect, Visibility};
 use base64::Engine;
@@ -820,6 +820,7 @@ fn paint_text(
                             fragment.rect,
                             text,
                             font_size,
+                            fragment.metrics.ascent,
                             &fonts,
                             color,
                             clip,
@@ -853,14 +854,13 @@ fn paint_text_with_font(
     rect: Rect,
     text: &str,
     font_size: f32,
+    layout_ascent: f32,
     fonts: &[Font],
     color: Color,
     clip: Option<Rect>,
 ) {
-    let primary_font = &fonts[0];
-    let metrics = primary_font.metrics().at_size(font_size);
-    // Baseline is at rect.y + ascender (ascender is positive, descender is negative)
-    let baseline_y = rect.y + metrics.ascender;
+    // Align paint baseline with layout's line-box baseline model to avoid vertical drift.
+    let baseline_y = rect.y + layout_ascent;
     let mut cursor_x = rect.x;
     let mut previous_char: Option<(char, usize)> = None;
 
@@ -898,31 +898,7 @@ fn paint_text_with_font(
 }
 
 fn load_text_fonts() -> Vec<Font> {
-    let mut fonts = Vec::new();
-    let mut loaded_families = HashSet::new();
-    let families = [
-        "sans-serif",
-        "Hiragino Sans",
-        "Hiragino Kaku Gothic ProN",
-        "Yu Gothic",
-        "Meiryo",
-        "MS Gothic",
-        "Noto Sans CJK JP",
-        "Noto Sans JP",
-        "IPA Gothic",
-        "IPAGothic",
-    ];
-
-    for family in families {
-        if !loaded_families.insert(family.to_ascii_lowercase()) {
-            continue;
-        }
-        if let Ok(font) = load_system_font(family) {
-            fonts.push(font);
-        }
-    }
-
-    fonts
+    load_default_text_fonts()
 }
 
 fn rasterize_with_fallback(

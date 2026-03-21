@@ -59,7 +59,7 @@ pub fn matches_selector_with_pseudo(
         return false;
     }
 
-    matches_selector_part(node, selector, selector.parts.len() - 1)
+    matches_selector_part(node, selector, selector.parts.len() - 1, pseudo)
 }
 
 /// Returns the pseudo-element targeted by `selector`, if any.
@@ -116,9 +116,14 @@ pub fn specificity(selector: &Selector) -> Specificity {
     value
 }
 
-fn matches_selector_part(node: &NodeHandle, selector: &Selector, index: usize) -> bool {
+fn matches_selector_part(
+    node: &NodeHandle,
+    selector: &Selector,
+    index: usize,
+    pseudo: Option<PseudoElement>,
+) -> bool {
     let part = &selector.parts[index];
-    if !matches_compound(node, part) {
+    if !matches_compound(node, part, pseudo) {
         return false;
     }
 
@@ -134,7 +139,7 @@ fn matches_selector_part(node: &NodeHandle, selector: &Selector, index: usize) -
         Combinator::Descendant => {
             let mut ancestor = node.parent_node();
             while let Some(parent) = ancestor {
-                if matches_selector_part(&parent, selector, index - 1) {
+                if matches_selector_part(&parent, selector, index - 1, None) {
                     return true;
                 }
                 ancestor = parent.parent_node();
@@ -143,13 +148,13 @@ fn matches_selector_part(node: &NodeHandle, selector: &Selector, index: usize) -
         }
         Combinator::Child => node
             .parent_node()
-            .is_some_and(|parent| matches_selector_part(&parent, selector, index - 1)),
+            .is_some_and(|parent| matches_selector_part(&parent, selector, index - 1, None)),
         Combinator::AdjacentSibling => previous_element_sibling(node)
-            .is_some_and(|sibling| matches_selector_part(&sibling, selector, index - 1)),
+            .is_some_and(|sibling| matches_selector_part(&sibling, selector, index - 1, None)),
         Combinator::GeneralSibling => {
             let mut sibling = previous_element_sibling(node);
             while let Some(current) = sibling {
-                if matches_selector_part(&current, selector, index - 1) {
+                if matches_selector_part(&current, selector, index - 1, None) {
                     return true;
                 }
                 sibling = previous_element_sibling(&current);
@@ -159,13 +164,17 @@ fn matches_selector_part(node: &NodeHandle, selector: &Selector, index: usize) -
     }
 }
 
-fn matches_compound(node: &NodeHandle, part: &SelectorPart) -> bool {
+fn matches_compound(node: &NodeHandle, part: &SelectorPart, pseudo: Option<PseudoElement>) -> bool {
     part.simples
         .iter()
-        .all(|simple| matches_simple_selector(node, simple))
+        .all(|simple| matches_simple_selector(node, simple, pseudo))
 }
 
-fn matches_simple_selector(node: &NodeHandle, simple: &SimpleSelector) -> bool {
+fn matches_simple_selector(
+    node: &NodeHandle,
+    simple: &SimpleSelector,
+    pseudo: Option<PseudoElement>,
+) -> bool {
     match simple {
         SimpleSelector::Type(name) => node
             .tag_name()
@@ -187,8 +196,8 @@ fn matches_simple_selector(node: &NodeHandle, simple: &SimpleSelector) -> bool {
             operator,
             value,
         } => matches_attribute_selector(node, name, *operator, value.as_deref()),
-        SimpleSelector::PseudoClass(name) => matches_pseudo_class(node, name),
-        SimpleSelector::PseudoElement(_) => true,
+        SimpleSelector::PseudoClass(name) => matches_pseudo_class(node, name, pseudo),
+        SimpleSelector::PseudoElement(name) => matches_pseudo_element(name, pseudo),
     }
 }
 
@@ -213,7 +222,7 @@ fn matches_attribute_selector(
     }
 }
 
-fn matches_pseudo_class(node: &NodeHandle, name: &str) -> bool {
+fn matches_pseudo_class(node: &NodeHandle, name: &str, pseudo: Option<PseudoElement>) -> bool {
     if let Some(argument) = name
         .strip_prefix("nth-child(")
         .and_then(|rest| rest.strip_suffix(')'))
@@ -222,7 +231,11 @@ fn matches_pseudo_class(node: &NodeHandle, name: &str) -> bool {
     }
 
     match name {
-        "before" | "after" => true,
+        "before" => pseudo == Some(PseudoElement::Before),
+        "after" => pseudo == Some(PseudoElement::After),
+        "root" => node
+            .parent_node()
+            .is_some_and(|parent| parent.node_type() == NodeType::Document),
         "first-child" => element_index_in_parent(node) == Some(1),
         "last-child" => {
             let Some((index, total)) = element_position(node) else {
@@ -230,6 +243,14 @@ fn matches_pseudo_class(node: &NodeHandle, name: &str) -> bool {
             };
             index == total
         }
+        _ => false,
+    }
+}
+
+fn matches_pseudo_element(name: &str, pseudo: Option<PseudoElement>) -> bool {
+    match name {
+        "before" => pseudo == Some(PseudoElement::Before),
+        "after" => pseudo == Some(PseudoElement::After),
         _ => false,
     }
 }
@@ -365,13 +386,14 @@ mod tests {
 
     #[test]
     fn matches_pseudo_classes() {
-        let (_document, _html, _body, _main, lead, title, cta) = sample_tree();
+        let (_document, html, _body, _main, lead, title, cta) = sample_tree();
         let first_child = selector(":first-child {}");
         assert_eq!(
             first_child.parts[0].simples,
             vec![SimpleSelector::PseudoClass("first-child".to_string())]
         );
 
+        assert!(matches_selector(&html, &selector(":root {}")));
         assert!(matches_selector(&title, &first_child));
         assert!(matches_selector(&cta, &selector(":last-child {}")));
         assert!(matches_selector(&lead, &selector(":nth-child(2) {}")));

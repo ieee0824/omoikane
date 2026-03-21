@@ -125,9 +125,7 @@ impl Builder {
             Token::Comment(data) => self.document.append_child(NodeHandle::comment(data)),
             Token::Character(data) if data.trim().is_empty() => {}
             Token::StartTag {
-                name,
-                attributes,
-                ..
+                name, attributes, ..
             } if name == "html" => {
                 let html = self.insert_html_element_with_attributes("html", &attributes);
                 self.open_elements.push(html);
@@ -769,7 +767,8 @@ mod tests {
 
     #[test]
     fn preserves_body_attributes_when_body_was_inserted_implicitly() {
-        let result = TreeBuilder::parse("<meta charset=\"utf-8\"><body bgcolor=\"#f0f0ff\"></body>");
+        let result =
+            TreeBuilder::parse("<meta charset=\"utf-8\"><body bgcolor=\"#f0f0ff\"></body>");
         let body = result.document().query_selector("body").unwrap();
         let attrs = body.attributes().unwrap_or_default();
         assert_eq!(

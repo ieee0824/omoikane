@@ -37,3 +37,18 @@ CJK文字の表示改善により日本語の可読性は向上した一方で�
 - 混在テキスト行での不自然な行高/改行増加が抑制される
 - 既存レンダリング回帰テスト（Acid2系）が通過する
 - 同一テキストに対して layout/paint で実効フォント選択・文字幅計測の乖離が許容範囲内になる
+
+## 進捗メモ（2026-03-21）
+
+- layout 側の `measure_text_width` を単一 `sans-serif` 依存から複数候補フォント前提へ変更
+- 文字単位で CJK 優先選択を行う計測ロジックを追加し、paint 側方針と整合するよう調整
+- 実サイトAの確認用スクリーンショットを `tests/output/https-abehiroshi-la-coocan-jp.layout-paint-aligned.1366x900.actual.png` として出力
+- `::-webkit-scrollbar` のような未対応擬似要素セレクタが通常要素に誤マッチしていた問題を修正
+- 上記修正により `blog.ast.moe` で発生していた `body/main` 幅 `19px` への崩壊は解消（`@media ... ::-webkit-scrollbar { width: 19px }` の誤適用を防止）
+- `:root` 疑似クラス対応と CSS custom property（`--*`）の継承/`var()` 解決を導入し、黒背景のみ表示される状態を解消
+- `calc(var(--main-width) + var(--gap) * 2)` のような式を最小評価できるようにし、`max-width` などの長さ計算を一部復元
+- `blog.ast.moe` は主要コンテンツが描画される段階まで改善したが、Firefox比較ではヘッダー周辺（ロゴ縦積み・メニュー配置）にFlexレイアウト差分が残る
+- Flex item の auto basis を内容幅ベースに変更し、`display:flex` コンテナ配下の要素が 0 幅に潰れる経路を解消
+- ネストした flex コンテナ（`nav > #menu`）の intrinsic 幅見積もりを `max` から row 方向 `sum` に補正し、メニュー項目重なりを縮小
+- `margin-inline-start/end` の長さ反映と auto 判定を追加し、`max-width` と auto margin の併用時にセンタリングを再配分
+- `blog.ast.moe` は Firefox 参照にかなり近づいた（本文幅・全体配置が改善）。残差分はヘッダーの細部（ロゴの改行位置、メニュー間隔の微差）

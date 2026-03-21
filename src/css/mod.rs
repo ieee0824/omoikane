@@ -649,6 +649,13 @@ impl Parser {
 }
 
 fn parse_value_tokens(tokens: &[CssToken]) -> Result<Value, CssParseError> {
+    parse_value_tokens_with_mode(tokens, false)
+}
+
+fn parse_value_tokens_with_mode(
+    tokens: &[CssToken],
+    preserve_math_delims: bool,
+) -> Result<Value, CssParseError> {
     let tokens: Vec<CssToken> = tokens.to_vec();
 
     if tokens.is_empty() {
@@ -669,7 +676,7 @@ fn parse_value_tokens(tokens: &[CssToken]) -> Result<Value, CssParseError> {
         return Err(CssParseError::InvalidDeclaration);
     }
 
-    let values = parse_value_sequence(&tokens)?;
+    let values = parse_value_sequence_with_mode(&tokens, preserve_math_delims)?;
     if values.len() == 1 {
         Ok(values.into_iter().next().expect("single item must exist"))
     } else {
@@ -677,26 +684,44 @@ fn parse_value_tokens(tokens: &[CssToken]) -> Result<Value, CssParseError> {
     }
 }
 
-fn parse_function_arguments(tokens: &[CssToken]) -> Result<Vec<Value>, CssParseError> {
+fn parse_function_arguments_with_mode(
+    tokens: &[CssToken],
+    preserve_math_delims: bool,
+) -> Result<Vec<Value>, CssParseError> {
     let mut arguments = Vec::new();
+    let mut depth = 0usize;
     let mut segment = Vec::new();
     for token in tokens {
-        if matches!(token, CssToken::Comma) {
-            if !segment.is_empty() {
-                arguments.push(parse_value_tokens(&segment)?);
-                segment.clear();
+        match token {
+            CssToken::ParenOpen => depth += 1,
+            CssToken::ParenClose => depth = depth.saturating_sub(1),
+            CssToken::Comma if depth == 0 => {
+                if !segment.is_empty() {
+                    arguments.push(parse_value_tokens_with_mode(
+                        &segment,
+                        preserve_math_delims,
+                    )?);
+                    segment.clear();
+                }
+                continue;
             }
-            continue;
+            _ => {}
         }
         segment.push(token.clone());
     }
     if !segment.is_empty() {
-        arguments.push(parse_value_tokens(&segment)?);
+        arguments.push(parse_value_tokens_with_mode(
+            &segment,
+            preserve_math_delims,
+        )?);
     }
     Ok(arguments)
 }
 
-fn parse_value_sequence(tokens: &[CssToken]) -> Result<Vec<Value>, CssParseError> {
+fn parse_value_sequence_with_mode(
+    tokens: &[CssToken],
+    preserve_math_delims: bool,
+) -> Result<Vec<Value>, CssParseError> {
     let mut values = Vec::new();
     let mut index = 0;
 
@@ -733,7 +758,14 @@ fn parse_value_sequence(tokens: &[CssToken]) -> Result<Vec<Value>, CssParseError
                         render_tokens(&tokens[start..end]).trim()
                     )));
                 } else {
-                    let arguments = parse_function_arguments(&tokens[start..end])?;
+                    let arguments = if name.eq_ignore_ascii_case("calc") {
+                        parse_function_arguments_with_mode(&tokens[start..end], true)?
+                    } else {
+                        parse_function_arguments_with_mode(
+                            &tokens[start..end],
+                            preserve_math_delims,
+                        )?
+                    };
                     values.push(Value::Function {
                         name: name.clone(),
                         arguments,
@@ -752,6 +784,12 @@ fn parse_value_sequence(tokens: &[CssToken]) -> Result<Vec<Value>, CssParseError
                     ) {
                         break;
                     }
+                    if preserve_math_delims && is_math_operator_token(tokens.get(index)) {
+                        if index == start {
+                            index += 1;
+                        }
+                        break;
+                    }
                     index += 1;
                 }
                 let segment = &tokens[start..index];
@@ -768,6 +806,16 @@ fn parse_value_sequence(tokens: &[CssToken]) -> Result<Vec<Value>, CssParseError
     }
 
     Ok(values)
+}
+
+fn is_math_operator_token(token: Option<&CssToken>) -> bool {
+    matches!(
+        token,
+        Some(CssToken::Delim('+'))
+            | Some(CssToken::Delim('-'))
+            | Some(CssToken::Delim('*'))
+            | Some(CssToken::Delim('/'))
+    )
 }
 
 fn render_compound_value(tokens: &[CssToken]) -> Value {
@@ -793,6 +841,7 @@ fn parse_single_value(token: &CssToken) -> Result<Value, CssParseError> {
         CssToken::Number(value) => Ok(Value::Number(*value)),
         CssToken::Percentage(value) => Ok(Value::Percentage(*value)),
         CssToken::Dimension(value, unit) => Ok(Value::Length(*value, unit.clone())),
+        CssToken::Delim(ch) => Ok(Value::Keyword(ch.to_string())),
         _ => Err(CssParseError::InvalidDeclaration),
     }
 }
@@ -1653,6 +1702,62 @@ mod tests {
             Value::Function {
                 name: "rgb".to_string(),
                 arguments: vec![Value::Number(255.0), Value::Number(0.0), Value::Number(0.0)],
+            }
+        );
+    }
+
+    #[test]
+    fn parses_calc_expressions_with_operators() {
+        let stylesheet = parse_stylesheet("body { width: calc(100% - 24px); }").unwrap();
+        let Rule::Style(rule) = &stylesheet.rules[0] else {
+            panic!("expected style rule");
+        };
+
+        assert_eq!(
+            rule.declarations[0].value,
+            Value::Function {
+                name: "calc".to_string(),
+                arguments: vec![Value::List(vec![
+                    Value::Percentage(100.0),
+                    Value::Keyword("-".to_string()),
+                    Value::Length(24.0, "px".to_string()),
+                ])],
+            }
+        );
+    }
+
+    #[test]
+    fn parses_calc_operators_without_whitespace() {
+        let stylesheet =
+            parse_stylesheet("body { width: calc(var(--gap)*2); height: calc(100%/2); }").unwrap();
+        let Rule::Style(rule) = &stylesheet.rules[0] else {
+            panic!("expected style rule");
+        };
+
+        assert_eq!(
+            rule.declarations[0].value,
+            Value::Function {
+                name: "calc".to_string(),
+                arguments: vec![Value::List(vec![
+                    Value::Function {
+                        name: "var".to_string(),
+                        arguments: vec![Value::Keyword("--gap".to_string())],
+                    },
+                    Value::Keyword("*".to_string()),
+                    Value::Number(2.0),
+                ])],
+            }
+        );
+
+        assert_eq!(
+            rule.declarations[1].value,
+            Value::Function {
+                name: "calc".to_string(),
+                arguments: vec![Value::List(vec![
+                    Value::Percentage(100.0),
+                    Value::Keyword("/".to_string()),
+                    Value::Number(2.0),
+                ])],
             }
         );
     }
