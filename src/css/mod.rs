@@ -1424,6 +1424,30 @@ fn expand_flex_shorthand(value: Value, important: bool) -> Vec<Declaration> {
         single => vec![single],
     };
 
+    // CSS-wide keywords: propagate to all three longhands
+    if let [Value::Keyword(kw)] = values.as_slice() {
+        let lower = kw.to_ascii_lowercase();
+        if matches!(lower.as_str(), "inherit" | "initial" | "unset" | "revert") {
+            return vec![
+                Declaration {
+                    name: "flex-grow".to_string(),
+                    value: Value::Keyword(lower.clone()),
+                    important,
+                },
+                Declaration {
+                    name: "flex-shrink".to_string(),
+                    value: Value::Keyword(lower.clone()),
+                    important,
+                },
+                Declaration {
+                    name: "flex-basis".to_string(),
+                    value: Value::Keyword(lower),
+                    important,
+                },
+            ];
+        }
+    }
+
     // flex: none → 0 0 auto
     if let [Value::Keyword(kw)] = values.as_slice() {
         if kw == "none" {
@@ -1582,10 +1606,15 @@ fn expand_flex_shorthand(value: Value, important: bool) -> Vec<Declaration> {
         }
     }
 
-    // フォールバック: そのまま保持
+    // フォールバック: そのまま保持（単一値はListで包まない）
+    let fallback_value = if values.len() == 1 {
+        values.into_iter().next().unwrap()
+    } else {
+        Value::List(values)
+    };
     vec![Declaration {
         name: "flex".to_string(),
-        value: Value::List(values),
+        value: fallback_value,
         important,
     }]
 }
