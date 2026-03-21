@@ -421,17 +421,8 @@ impl Builder {
             other => {
                 self.mode = InsertionMode::InTable;
                 self.process_token(other, errors);
-                self.mode = if self.find_open_element("td").is_some()
-                    || self.find_open_element("th").is_some()
-                {
-                    InsertionMode::InCell
-                } else if self.find_open_element("tr").is_some() {
-                    InsertionMode::InRow
-                } else if self.current_table().is_some() {
-                    InsertionMode::InTable
-                } else {
-                    InsertionMode::InBody
-                };
+                // Reset mode based on open elements within the current table scope only.
+                self.mode = self.insertion_mode_for_current_table_scope();
             }
         }
     }
@@ -697,6 +688,21 @@ impl Builder {
                 _ => None,
             })
             .unwrap_or(InsertionMode::Initial);
+    }
+
+    /// Determine the insertion mode by scanning open elements only within
+    /// the innermost table scope. This prevents an outer table's td/tr
+    /// from affecting mode decisions inside a nested table.
+    fn insertion_mode_for_current_table_scope(&self) -> InsertionMode {
+        for node in self.open_elements.iter().rev() {
+            match node.tag_name().as_deref() {
+                Some("td" | "th") => return InsertionMode::InCell,
+                Some("tr") => return InsertionMode::InRow,
+                Some("table") => return InsertionMode::InTable,
+                _ => continue,
+            }
+        }
+        InsertionMode::InBody
     }
 }
 
