@@ -84,8 +84,12 @@ fn applies_legacy_html_presentational_hints() {
     let cell = NodeHandle::element("td");
     cell.set_attribute("bgcolor", "336699");
     cell.set_attribute("align", "center");
+    cell.set_attribute("width", "50%");
+    cell.set_attribute("height", "24px");
+    cell.set_attribute("face", "Hiragino Sans, sans-serif");
     body.set_attribute("text", "#112233");
     body.set_attribute("background", "legacy/wallpaper.png");
+    body.set_attribute("width", "640");
     document.append_child(html.clone());
     html.append_child(body.clone());
     body.append_child(cell.clone());
@@ -104,6 +108,7 @@ fn applies_legacy_html_presentational_hints() {
             "url(\"legacy/wallpaper.png\")".to_string()
         ))
     );
+    assert_eq!(body_style.get("width"), Some(&ComputedValue::Px(640.0)));
     assert_eq!(
         cell_style.get("background-color"),
         Some(&ComputedValue::Color("#336699".to_string()))
@@ -111,6 +116,52 @@ fn applies_legacy_html_presentational_hints() {
     assert_eq!(
         cell_style.get("text-align"),
         Some(&ComputedValue::Keyword("center".to_string()))
+    );
+    assert_eq!(
+        cell_style.get("width"),
+        Some(&ComputedValue::Percentage(50.0))
+    );
+    assert_eq!(cell_style.get("height"), Some(&ComputedValue::Px(24.0)));
+    assert_eq!(
+        cell_style.get("font-family"),
+        Some(&ComputedValue::Keyword(
+            "Hiragino Sans, sans-serif".to_string()
+        ))
+    );
+}
+
+#[test]
+fn ignores_invalid_legacy_dimension_hints() {
+    let document = NodeHandle::document();
+    let html = NodeHandle::element("html");
+    let body = NodeHandle::element("body");
+    let cell = NodeHandle::element("td");
+    cell.set_attribute("width", "abc");
+    cell.set_attribute("height", "");
+    document.append_child(html.clone());
+    html.append_child(body.clone());
+    body.append_child(cell.clone());
+
+    let mut resolver = StyleResolver::new();
+    let cell_style = resolver.computed_style(&cell);
+
+    assert!(!cell_style.properties().contains_key("width"));
+    assert!(!cell_style.properties().contains_key("height"));
+}
+
+#[test]
+fn keeps_comma_separated_font_family_value() {
+    let (_document, _body, title, _html) = sample_tree();
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet("h1 { font-family: Arial, sans-serif; }").unwrap(),
+    );
+
+    let style = resolver.computed_style(&title);
+    assert_eq!(
+        style.get("font-family"),
+        Some(&ComputedValue::Keyword("Arial, sans-serif".to_string()))
     );
 }
 
@@ -172,7 +223,11 @@ fn sqlite_logging_creates_schema_and_accumulates_occurrences() {
     );
     assert_eq!(
         rows[1],
-        ("transform".to_string(), "translateX(10px)".to_string(), 2_i64)
+        (
+            "transform".to_string(),
+            "translateX(10px)".to_string(),
+            2_i64
+        )
     );
 
     drop(stmt);

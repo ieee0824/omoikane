@@ -697,7 +697,10 @@ fn parse_function_arguments_with_mode(
             CssToken::ParenClose => depth = depth.saturating_sub(1),
             CssToken::Comma if depth == 0 => {
                 if !segment.is_empty() {
-                    arguments.push(parse_value_tokens_with_mode(&segment, preserve_math_delims)?);
+                    arguments.push(parse_value_tokens_with_mode(
+                        &segment,
+                        preserve_math_delims,
+                    )?);
                     segment.clear();
                 }
                 continue;
@@ -707,7 +710,10 @@ fn parse_function_arguments_with_mode(
         segment.push(token.clone());
     }
     if !segment.is_empty() {
-        arguments.push(parse_value_tokens_with_mode(&segment, preserve_math_delims)?);
+        arguments.push(parse_value_tokens_with_mode(
+            &segment,
+            preserve_math_delims,
+        )?);
     }
     Ok(arguments)
 }
@@ -755,7 +761,10 @@ fn parse_value_sequence_with_mode(
                     let arguments = if name.eq_ignore_ascii_case("calc") {
                         parse_function_arguments_with_mode(&tokens[start..end], true)?
                     } else {
-                        parse_function_arguments_with_mode(&tokens[start..end], preserve_math_delims)?
+                        parse_function_arguments_with_mode(
+                            &tokens[start..end],
+                            preserve_math_delims,
+                        )?
                     };
                     values.push(Value::Function {
                         name: name.clone(),
@@ -1719,10 +1728,8 @@ mod tests {
 
     #[test]
     fn parses_calc_operators_without_whitespace() {
-        let stylesheet = parse_stylesheet(
-            "body { width: calc(var(--gap)*2); height: calc(100%/2); }",
-        )
-        .unwrap();
+        let stylesheet =
+            parse_stylesheet("body { width: calc(var(--gap)*2); height: calc(100%/2); }").unwrap();
         let Rule::Style(rule) = &stylesheet.rules[0] else {
             panic!("expected style rule");
         };
