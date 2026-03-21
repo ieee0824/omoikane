@@ -1007,8 +1007,13 @@ fn layout_table_container(
     let collapse_spacing = spacing * 2.0;
     let mut entries = collect_table_entries(node, resolver);
     let column_count = table_column_count(&entries);
-    let column_width =
-        ((width - spacing * (column_count as f32 + 1.0)).max(0.0)) / column_count as f32;
+    let total_spacing = spacing * (column_count as f32 + 1.0);
+    let column_widths = compute_table_column_widths(
+        &entries,
+        resolver,
+        column_count,
+        (width - total_spacing).max(0.0),
+    );
     let inner_width = (width - collapse_spacing).max(0.0);
 
     let mut children = Vec::new();
@@ -1031,7 +1036,7 @@ fn layout_table_container(
             row_y,
             column_count,
             &mut occupied_columns,
-            column_width,
+            &column_widths,
             spacing,
             viewport,
         )?;
@@ -1183,6 +1188,21 @@ fn collect_row_cells(row: &NodeHandle, resolver: &mut StyleResolver) -> Vec<Node
         .collect()
 }
 
+fn spanned_cell_width(column_widths: &[f32], start: usize, span: usize, spacing: f32) -> f32 {
+    let end = (start + span).min(column_widths.len());
+    let content: f32 = column_widths[start..end].iter().sum();
+    let gaps = span.saturating_sub(1) as f32 * spacing;
+    content + gaps
+}
+
+fn column_x_offset(column_widths: &[f32], column: usize, spacing: f32) -> f32 {
+    let mut offset = 0.0;
+    for i in 0..column.min(column_widths.len()) {
+        offset += column_widths[i] + spacing;
+    }
+    offset
+}
+
 fn layout_table_row_entry(
     entry: &TableRowEntry,
     resolver: &mut StyleResolver,
@@ -1190,7 +1210,7 @@ fn layout_table_row_entry(
     y: f32,
     column_count: usize,
     occupied_columns: &mut [usize],
-    column_width: f32,
+    column_widths: &[f32],
     spacing: f32,
     viewport: Rect,
 ) -> Option<(LayoutBox, f32)> {
@@ -1214,18 +1234,18 @@ fn layout_table_row_entry(
         let rowspan = html_table_span_attribute(cell, "rowspan")
             .unwrap_or(1)
             .max(1);
+        let cell_width = spanned_cell_width(column_widths, column_cursor, span, spacing);
         let cell_containing = Rect {
             x: 0.0,
             y: 0.0,
-            width: column_width * span as f32 + spacing * span.saturating_sub(1) as f32,
+            width: cell_width,
             height: 0.0,
         };
         let mut layout_cell = layout_node(cell, resolver, cell_containing, viewport, None)?;
         let cell_style = resolver.computed_style(cell);
         let cell_height =
             explicit_length(&cell_style, "height").unwrap_or(layout_cell.total_height());
-        layout_cell.dimensions.content.width =
-            column_width * span as f32 + spacing * span.saturating_sub(1) as f32;
+        layout_cell.dimensions.content.width = cell_width;
         layout_cell.dimensions.content.height = cell_height;
         row_height = row_height.max(layout_cell.total_height());
         measured.push((column_cursor, span, layout_cell, cell_style));
@@ -1241,7 +1261,7 @@ fn layout_table_row_entry(
 
     let mut children = Vec::new();
     for (column_start, _span, mut cell, cell_style) in measured {
-        let outer_x = x + column_start as f32 * (column_width + spacing);
+        let outer_x = x + column_x_offset(column_widths, column_start, spacing);
         let original_total_height = cell.total_height();
         let extra_height = (row_height - original_total_height).max(0.0);
         if extra_height > 0.0 {
@@ -1260,9 +1280,8 @@ fn layout_table_row_entry(
         children.push(cell);
     }
 
-    let used_columns = column_count;
-    let row_width =
-        used_columns as f32 * column_width + (used_columns.saturating_sub(1)) as f32 * spacing;
+    let row_width: f32 = column_widths.iter().sum::<f32>()
+        + column_count.saturating_sub(1) as f32 * spacing;
     let row_box = LayoutBox {
         node: entry.row_node.clone(),
         dimensions: BoxDimensions {
@@ -1323,6 +1342,55 @@ fn table_column_count(entries: &[TableRowEntry]) -> usize {
     }
 
     max_columns.max(1)
+}
+
+fn compute_table_column_widths(
+    entries: &[TableRowEntry],
+    resolver: &mut StyleResolver,
+    column_count: usize,
+    available_width: f32,
+) -> Vec<f32> {
+    let mut column_hints = vec![0.0f32; column_count];
+
+    // Scan all rows to find explicit width hints per column (from colspan=1 cells only)
+    for entry in entries {
+        let mut col = 0usize;
+        for cell in &entry.cells {
+            if col >= column_count {
+                break;
+            }
+            let span = html_table_span_attribute(cell, "colspan")
+                .unwrap_or(1)
+                .max(1);
+            if span == 1 {
+                let cell_style = resolver.computed_style(cell);
+                if let Some(w) = explicit_length(&cell_style, "width") {
+                    column_hints[col] = column_hints[col].max(w);
+                }
+            }
+            col += span;
+        }
+    }
+
+    let fixed_total: f32 = column_hints.iter().sum();
+    let auto_count = column_hints.iter().filter(|&&w| w == 0.0).count();
+
+    if auto_count == 0 {
+        // All columns have explicit widths; scale if needed
+        if fixed_total > 0.0 {
+            let scale = available_width / fixed_total;
+            return column_hints.iter().map(|w| w * scale).collect();
+        }
+        let equal = available_width / column_count as f32;
+        return vec![equal; column_count];
+    }
+
+    let remaining = (available_width - fixed_total).max(0.0);
+    let auto_width = remaining / auto_count as f32;
+    column_hints
+        .iter()
+        .map(|&w| if w == 0.0 { auto_width } else { w })
+        .collect()
 }
 
 fn html_table_span_attribute(node: &NodeHandle, name: &str) -> Option<usize> {

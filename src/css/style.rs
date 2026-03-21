@@ -1042,13 +1042,42 @@ fn apply_presentational_hints(
         }
     }
 
-    if !properties.contains_key("text-align") {
-        if let Some(align) = attributes
-            .get("align")
-            .map(|value| value.trim().to_ascii_lowercase())
-            .filter(|value| matches!(value.as_str(), "left" | "right" | "center" | "justify"))
-        {
-            properties.insert("text-align".to_string(), ComputedValue::Keyword(align));
+    if let Some(align) = attributes
+        .get("align")
+        .map(|value| value.trim().to_ascii_lowercase())
+        .filter(|value| matches!(value.as_str(), "left" | "right" | "center" | "justify"))
+    {
+        if !properties.contains_key("text-align") {
+            properties.insert(
+                "text-align".to_string(),
+                ComputedValue::Keyword(align.clone()),
+            );
+        }
+        // For block/table elements, align="center" means auto margins (structural centering)
+        if align == "center" {
+            let is_table_or_block = node
+                .tag_name()
+                .as_deref()
+                .is_some_and(|tag| {
+                    matches!(
+                        tag.to_ascii_lowercase().as_str(),
+                        "table" | "div" | "h1" | "h2" | "h3" | "h4" | "h5" | "h6" | "p"
+                    )
+                });
+            if is_table_or_block {
+                if !properties.contains_key("margin-left") {
+                    properties.insert(
+                        "margin-left".to_string(),
+                        ComputedValue::Keyword("auto".to_string()),
+                    );
+                }
+                if !properties.contains_key("margin-right") {
+                    properties.insert(
+                        "margin-right".to_string(),
+                        ComputedValue::Keyword("auto".to_string()),
+                    );
+                }
+            }
         }
     }
 

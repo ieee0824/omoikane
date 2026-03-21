@@ -1255,9 +1255,10 @@ fn rowspan_keeps_following_row_cells_in_later_columns() {
     assert_eq!(first_row_box.children.len(), 2);
     assert_eq!(second_row_box.children.len(), 2);
     assert_eq!(first_row_box.children[0].dimensions.content.x, 0.0);
-    assert_eq!(first_row_box.children[1].dimensions.content.x, 100.0);
-    assert_eq!(second_row_box.children[0].dimensions.content.x, 100.0);
-    assert_eq!(second_row_box.children[1].dimensions.content.x, 200.0);
+    // hero has explicit width 150px; remaining 150px is split between 2 auto columns (75px each)
+    assert_eq!(first_row_box.children[1].dimensions.content.x, 150.0);
+    assert_eq!(second_row_box.children[0].dimensions.content.x, 150.0);
+    assert_eq!(second_row_box.children[1].dimensions.content.x, 225.0);
 }
 
 #[test]
