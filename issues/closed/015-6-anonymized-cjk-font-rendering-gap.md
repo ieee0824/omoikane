@@ -2,7 +2,7 @@
 number: 015-6
 slug: anonymized-cjk-font-rendering-gap
 parent: 015-anonymized-real-world-rendering-gap
-status: open
+status: closed
 ---
 
 # CJK文字の描画品質ギャップ（文字化け様に見える問題の切り分け）
@@ -34,3 +34,9 @@ HTMLデコード（Shift_JIS）は正常であり、`get_content` 上の文字�
 - 文字化け様表示が「デコード問題ではない」ことが issue 内で明示される
 - 再現fixtureで差分を継続観測できる
 - 次実装に着手できる具体的な改善候補が列挙される
+
+## 進捗メモ（2026-03-21）
+
+- `paint` のテキスト描画を単一フォント固定から「複数候補フォントの文字単位フォールバック」へ変更
+- CJK向け候補（`Hiragino Sans` / `Yu Gothic` / `Noto Sans CJK JP` など）を追加
+- フォールバック適用後の匿名化対象ページレンダリングを `tests/output` に保存して比較可能化
