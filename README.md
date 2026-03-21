@@ -11,28 +11,38 @@ Omoikane は、HTTP クライアント、HTML/CSS パーサー、DOM、レイア
 ## 現在できること
 
 ### レンダリングエンジン
-- CSS パースとスタイル計算（カスケード、継承、em/px/mm 等の単位変換）
+- CSS パースとスタイル計算（カスケード、継承、em/px/mm/rem/vw/vh 等の単位変換）
 - `@import` ルールによる外部 CSS の再帰的読み込み
+- UA stylesheet デフォルト（h1〜h6 フォントサイズ・太字・margin、p、b/strong、i/em、hr）
 - ブロック、インライン、Flexbox、テーブルを含むレイアウトエンジン
+- テーブルの `colspan` / `rowspan` 対応、カラム幅の intrinsic hint + 均等余剰分配
 - margin collapsing（empty element、parent-child、負margin）
 - float / clear / positioned element のレイアウトとペイント
+- CSS `transform`（`translate` / `translateX` / `translateY` / `translate3d` / `matrix` の平行移動成分）
 - CSS 2.1 Appendix E 準拠のスタッキング順序
 - `:before` / `:after` 擬似要素（border triangle 含む）
-- `overflow: hidden` クリッピング
+- `overflow: hidden` / `overflow-x` / `overflow-y` クリッピング
 - **Acid2 テスト完全通過（差分 0px）**
+
+### CSS 色・値
+- `rgba()` / `hsl()` / `hsla()` 色関数（アルファチャンネル対応）
+- `rgb()` 現代構文（`rgb(r g b / a)` スラッシュ形式）
+- 8桁 / 4桁 hex カラー（`#RRGGBBAA` / `#RGBA`）
+- CSS Level 4 の 140+ named color
 
 ### フォント・テキスト
 - ab_glyph によるフォントファイル読み込みとグリフラスタライズ
 - macOS / Linux のシステムフォント自動検索
 - フォントキャッシュ・グリフキャッシュ
 - グリフベースのテキスト幅計測とカーニング
-- CJK テキストの行折り返し・禁則処理
+- CJK テキストの行折り返し・禁則処理・フォールバック
 
 ### 画像・メディア
 - PNG / JPEG 画像デコード（data URI / ファイル / HTTP フェッチ）
 - `<img>` の `width` / `height` 属性によるサイズ指定
 - 画像の相対 URL 解決（`<base>` 要素対応）
 - 画像読み込み失敗時の `alt` 属性テキスト表示
+- `<frameset>` / `<frame>` の合成レンダリング（rows/cols 属性によるグリッド分割）
 - ページの PNG スクリーンショット出力
 
 ### ネットワーク
@@ -43,10 +53,11 @@ Omoikane は、HTTP クライアント、HTML/CSS パーサー、DOM、レイア
 
 ### HTML
 - HTML パースと DOM 構築
+- `<meta charset>` / `Content-Type` ヘッダによる文字エンコーディング自動検出（encoding_rs）
 - `<base>` 要素による URL 解決
 - `<link rel="stylesheet">` による外部 CSS 読み込み
 - `media` 属性による screen/print 判定
-- HTML presentational hints（`bgcolor` / `text` / `align` 属性）
+- HTML presentational hints（`bgcolor` / `text` / `align` / `width` / `height` 属性）
 
 ### JavaScript・API
 - Boa ベースの JavaScript 実行
@@ -80,12 +91,13 @@ Omoikane は、HTTP クライアント、HTML/CSS パーサー、DOM、レイア
 主要モジュール:
 
 - [`src/http`](/src/http) HTTP/1.1, HTTP/2
-- [`src/html`](/src/html) HTML パーサー
+- [`src/html`](/src/html) HTML パーサー・文字エンコーディング検出
 - [`src/dom`](/src/dom) DOM
 - [`src/css`](/src/css) CSS パーサー、スタイル計算、カスケード
 - [`src/layout`](/src/layout) レイアウトエンジン（block / inline / flex / table / float / positioned）
 - [`src/font`](/src/font) フォント読み込み・グリフラスタライズ・キャッシュ
 - [`src/paint`](/src/paint) ペイント・レンダリング（Canvas / PNG 出力）
+- [`src/screenshot`](/src/screenshot) スクリーンショット合成（frameset 対応含む）
 - [`src/js`](/src/js) JavaScript ランタイム
 - [`src/cdp`](/src/cdp) CDP / WebSocket / JSON-RPC
 - [`src/ffi`](/src/ffi) C FFI
@@ -144,19 +156,25 @@ HTTP クライアントの現状仕様:
 
 [Acid2 テスト](https://www.webstandards.org/files/acid2/test.html)の公式リファレンスレンダリングとの比較で**差分 0px** を達成しています。
 
-CSS パーサー、レイアウトエンジン、ペイントシステムの統合テストとして、372 件以上のテストが常時通過しています。
+CSS パーサー、レイアウトエンジン、ペイントシステムの統合テストとして、445 件以上のテストが常時通過しています（lib テスト 445 件 + doc テスト 9 件）。
 
 ## 進捗
 
-issue ベースの開発状況では、以下の大きな実装フェーズは完了済みです。
+issue ベースの開発状況では、以下の大きな実装フェーズは完了済みです（closed issue 65 件）。
 
 - HTTP クライアント
-- HTML パーサー
+- HTML パーサー・文字エンコーディング検出
 - CSS パーサーとスタイル計算
+- UA stylesheet デフォルト
+- CSS 色関数（rgba / hsl / hsla / 8桁hex / Level 4 色名）
+- CSS transform（平行移動成分）
 - レイアウトエンジン（Acid2 完全通過）
+- テーブル colspan / rowspan 対応
 - ペイント・レンダリングパイプライン
+- frameset / frame 合成レンダリング
+- スクリーンショット出力モジュール（`src/screenshot`）
 - フォントグリフレンダリング・システムフォント検索
-- CJK テキスト行折り返し・禁則処理
+- CJK テキスト行折り返し・禁則処理・フォールバック
 - 外部 CSS / 画像の HTTP フェッチ
 - 画像サイズ属性・alt フォールバック
 - JavaScript エンジン統合
@@ -164,11 +182,12 @@ issue ベースの開発状況では、以下の大きな実装フェーズは�
 - C FFI（スクリーンショット API）
 - 未対応 CSS 観測ログ基盤
 
-現在の open issue は [`issues/open`](/issues/open) を参照してください。
+現在の open issue は [`issues/open`](/issues/open) を参照してください（open issue 13 件）。
 
 ## 制約
 
-- CSS 3 の主要機能（Grid、アニメーション、カスタムプロパティ等）は未実装
+- CSS 3 の主要機能（Grid、アニメーション、カスタムプロパティ、border-radius、box-shadow、グラデーション等）は未実装
+- rem / viewport 単位（vw / vh）は実装済みだが、メディアクエリ評価は未対応
 - Web フォント（`@font-face`）は未対応（システムフォントのみ）
 - Web 標準の完全互換は目標であり、現状は CSS 2.1 の主要機能を実装済みです
 - Puppeteer / Playwright 互換は段階的に拡張中です
