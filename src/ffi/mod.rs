@@ -217,7 +217,7 @@ pub unsafe extern "C" fn omoikane_screenshot_png(browser: *mut OmoikaneBrowser) 
             into_c_string(encoded)
         }
         Err(error) => {
-            browser.set_error(format!("failed to render screenshot: {error:?}"));
+            browser.set_error(format!("failed to render screenshot: {error}"));
             std::ptr::null_mut()
         }
     }
