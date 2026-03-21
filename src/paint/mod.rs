@@ -1548,21 +1548,17 @@ fn parse_color(value: &str) -> Option<Color> {
     }
 
     let lower = value.to_ascii_lowercase();
-    match lower.as_str() {
-        "black" => return Some(Color::rgb(0, 0, 0)),
-        "white" => return Some(Color::rgb(255, 255, 255)),
-        "red" => return Some(Color::rgb(255, 0, 0)),
-        "green" => return Some(Color::rgb(0, 128, 0)),
-        "blue" => return Some(Color::rgb(0, 0, 255)),
-        "yellow" => return Some(Color::rgb(255, 255, 0)),
-        "navy" => return Some(Color::rgb(0, 0, 128)),
-        "purple" => return Some(Color::rgb(128, 0, 128)),
-        "maroon" => return Some(Color::rgb(128, 0, 0)),
-        "gray" | "grey" => return Some(Color::rgb(128, 128, 128)),
-        _ => {}
+
+    // Named color lookup (CSS Level 4 extended set)
+    if let Some(c) = named_color(&lower) {
+        return Some(c);
     }
 
+    // Hex colors: #RGB, #RGBA, #RRGGBB, #RRGGBBAA
     if let Some(hex) = lower.strip_prefix('#') {
+        if !hex.is_ascii() || !hex.chars().all(|c| c.is_ascii_hexdigit()) {
+            return None;
+        }
         return match hex.len() {
             3 => {
                 let r = u8::from_str_radix(&hex[0..1].repeat(2), 16).ok()?;
@@ -1570,17 +1566,275 @@ fn parse_color(value: &str) -> Option<Color> {
                 let b = u8::from_str_radix(&hex[2..3].repeat(2), 16).ok()?;
                 Some(Color::rgb(r, g, b))
             }
+            4 => {
+                let r = u8::from_str_radix(&hex[0..1].repeat(2), 16).ok()?;
+                let g = u8::from_str_radix(&hex[1..2].repeat(2), 16).ok()?;
+                let b = u8::from_str_radix(&hex[2..3].repeat(2), 16).ok()?;
+                let a = u8::from_str_radix(&hex[3..4].repeat(2), 16).ok()?;
+                Some(Color::rgba(r, g, b, a))
+            }
             6 => {
                 let r = u8::from_str_radix(&hex[0..2], 16).ok()?;
                 let g = u8::from_str_radix(&hex[2..4], 16).ok()?;
                 let b = u8::from_str_radix(&hex[4..6], 16).ok()?;
                 Some(Color::rgb(r, g, b))
             }
+            8 => {
+                let r = u8::from_str_radix(&hex[0..2], 16).ok()?;
+                let g = u8::from_str_radix(&hex[2..4], 16).ok()?;
+                let b = u8::from_str_radix(&hex[4..6], 16).ok()?;
+                let a = u8::from_str_radix(&hex[6..8], 16).ok()?;
+                Some(Color::rgba(r, g, b, a))
+            }
             _ => None,
         };
     }
 
+    // Functional color notations handled directly for robustness
+    if let Some(color) = parse_color_function(&lower) {
+        return Some(color);
+    }
+
     None
+}
+
+/// Parses `rgb()`, `rgba()`, `hsl()`, `hsla()` function notation from a string.
+fn parse_color_function(value: &str) -> Option<Color> {
+    let (name, args_str) = parse_function_call(value)?;
+
+    match name {
+        "rgb" | "rgba" => parse_rgb_args(args_str),
+        "hsl" | "hsla" => parse_hsl_args(args_str),
+        _ => None,
+    }
+}
+
+/// Splits a CSS function call string into `(name, args)`.
+fn parse_function_call(value: &str) -> Option<(&str, &str)> {
+    let paren = value.find('(')?;
+    let name = value[..paren].trim();
+    if !value.ends_with(')') {
+        return None;
+    }
+    let args = &value[paren + 1..value.len() - 1];
+    Some((name, args))
+}
+
+/// Parses `rgb()` / `rgba()` argument string.
+///
+/// Supports both comma-separated `rgb(r, g, b)` / `rgba(r, g, b, a)` and
+/// modern space-separated `rgb(r g b / a)` syntax.
+fn parse_rgb_args(args: &str) -> Option<Color> {
+    let parts = split_color_args(args);
+    let nums: Vec<f32> = parts.iter().filter_map(|s| s.parse().ok()).collect();
+    match nums.as_slice() {
+        [r, g, b] => Some(Color::rgb(*r as u8, *g as u8, *b as u8)),
+        [r, g, b, a] => {
+            let alpha = (a.clamp(0.0, 1.0) * 255.0).round() as u8;
+            Some(Color::rgba(*r as u8, *g as u8, *b as u8, alpha))
+        }
+        _ => None,
+    }
+}
+
+/// Parses `hsl()` / `hsla()` argument string.
+fn parse_hsl_args(args: &str) -> Option<Color> {
+    let parts = split_color_args(args);
+    let nums: Vec<f32> = parts
+        .iter()
+        .filter_map(|s| s.trim_end_matches('%').parse().ok())
+        .collect();
+
+    match nums.as_slice() {
+        [h, s, l] => {
+            let (r, g, b) = hsl_to_rgb(*h, *s / 100.0, *l / 100.0);
+            Some(Color::rgb(r, g, b))
+        }
+        [h, s, l, a] => {
+            let (r, g, b) = hsl_to_rgb(*h, *s / 100.0, *l / 100.0);
+            let alpha = (a.clamp(0.0, 1.0) * 255.0).round() as u8;
+            Some(Color::rgba(r, g, b, alpha))
+        }
+        _ => None,
+    }
+}
+
+/// Splits a CSS color function argument string by commas or whitespace+slash.
+///
+/// Handles both `255, 0, 0, 0.5` and `255 0 0 / 0.5` forms.
+fn split_color_args(args: &str) -> Vec<String> {
+    if args.contains(',') {
+        args.split(',').map(|s| s.trim().to_string()).collect()
+    } else {
+        // Modern syntax: "r g b / a" — strip "/" and split by whitespace
+        args.split_whitespace()
+            .filter(|s| *s != "/")
+            .map(|s| s.to_string())
+            .collect()
+    }
+}
+
+// HSL→RGB conversion is shared with src/css/style.rs
+use crate::css::style::hsl_to_rgb;
+
+/// Returns the RGB color for a CSS named color keyword.
+///
+/// Supports CSS Level 4 named colors (140+ colors).
+#[allow(clippy::too_many_lines)]
+fn named_color(name: &str) -> Option<Color> {
+    let c = match name {
+        // CSS Level 1 / basic
+        "black" => Color::rgb(0, 0, 0),
+        "white" => Color::rgb(255, 255, 255),
+        "red" => Color::rgb(255, 0, 0),
+        "green" => Color::rgb(0, 128, 0),
+        "blue" => Color::rgb(0, 0, 255),
+        "yellow" => Color::rgb(255, 255, 0),
+        "navy" => Color::rgb(0, 0, 128),
+        "purple" => Color::rgb(128, 0, 128),
+        "maroon" => Color::rgb(128, 0, 0),
+        "gray" | "grey" => Color::rgb(128, 128, 128),
+        "silver" => Color::rgb(192, 192, 192),
+        "aqua" | "cyan" => Color::rgb(0, 255, 255),
+        "teal" => Color::rgb(0, 128, 128),
+        "lime" => Color::rgb(0, 255, 0),
+        "fuchsia" | "magenta" => Color::rgb(255, 0, 255),
+        "olive" => Color::rgb(128, 128, 0),
+        // Orange / red family
+        "orange" => Color::rgb(255, 165, 0),
+        "orangered" => Color::rgb(255, 69, 0),
+        "darkorange" => Color::rgb(255, 140, 0),
+        "coral" => Color::rgb(255, 127, 80),
+        "tomato" => Color::rgb(255, 99, 71),
+        "salmon" => Color::rgb(250, 128, 114),
+        "lightsalmon" => Color::rgb(255, 160, 122),
+        "darksalmon" => Color::rgb(233, 150, 122),
+        "crimson" => Color::rgb(220, 20, 60),
+        "firebrick" => Color::rgb(178, 34, 34),
+        "darkred" => Color::rgb(139, 0, 0),
+        "indianred" => Color::rgb(205, 92, 92),
+        // Pink family
+        "pink" => Color::rgb(255, 192, 203),
+        "lightpink" => Color::rgb(255, 182, 193),
+        "hotpink" => Color::rgb(255, 105, 180),
+        "deeppink" => Color::rgb(255, 20, 147),
+        "palevioletred" => Color::rgb(219, 112, 147),
+        "mediumvioletred" => Color::rgb(199, 21, 133),
+        // Gold / yellow / brown
+        "gold" => Color::rgb(255, 215, 0),
+        "goldenrod" => Color::rgb(218, 165, 32),
+        "darkgoldenrod" => Color::rgb(184, 134, 11),
+        "palegoldenrod" => Color::rgb(238, 232, 170),
+        "peru" => Color::rgb(205, 133, 63),
+        "chocolate" => Color::rgb(210, 105, 30),
+        "sienna" => Color::rgb(160, 82, 45),
+        "saddlebrown" => Color::rgb(139, 69, 19),
+        "brown" => Color::rgb(165, 42, 42),
+        "tan" => Color::rgb(210, 180, 140),
+        "burlywood" => Color::rgb(222, 184, 135),
+        "wheat" => Color::rgb(245, 222, 179),
+        "sandybrown" => Color::rgb(244, 164, 96),
+        "rosybrown" => Color::rgb(188, 143, 143),
+        // Purple / violet
+        "lavender" => Color::rgb(230, 230, 250),
+        "thistle" => Color::rgb(216, 191, 216),
+        "plum" => Color::rgb(221, 160, 221),
+        "violet" => Color::rgb(238, 130, 238),
+        "orchid" => Color::rgb(218, 112, 214),
+        "mediumorchid" => Color::rgb(186, 85, 211),
+        "darkorchid" => Color::rgb(153, 50, 204),
+        "darkviolet" => Color::rgb(148, 0, 211),
+        "blueviolet" => Color::rgb(138, 43, 226),
+        "indigo" => Color::rgb(75, 0, 130),
+        "slateblue" => Color::rgb(106, 90, 205),
+        "darkslateblue" => Color::rgb(72, 61, 139),
+        "mediumpurple" => Color::rgb(147, 112, 219),
+        "rebeccapurple" => Color::rgb(102, 51, 153),
+        // Blue family
+        "lightblue" => Color::rgb(173, 216, 230),
+        "powderblue" => Color::rgb(176, 224, 230),
+        "lightskyblue" => Color::rgb(135, 206, 250),
+        "skyblue" => Color::rgb(135, 206, 235),
+        "deepskyblue" => Color::rgb(0, 191, 255),
+        "dodgerblue" => Color::rgb(30, 144, 255),
+        "cornflowerblue" => Color::rgb(100, 149, 237),
+        "steelblue" => Color::rgb(70, 130, 180),
+        "royalblue" => Color::rgb(65, 105, 225),
+        "mediumblue" => Color::rgb(0, 0, 205),
+        "darkblue" => Color::rgb(0, 0, 139),
+        "midnightblue" => Color::rgb(25, 25, 112),
+        "azure" => Color::rgb(240, 255, 255),
+        "aliceblue" => Color::rgb(240, 248, 255),
+        "ghostwhite" => Color::rgb(248, 248, 255),
+        "lavenderblush" => Color::rgb(255, 240, 245),
+        // Green family
+        "mintcream" => Color::rgb(245, 255, 250),
+        "honeydew" => Color::rgb(240, 255, 240),
+        "lightgreen" => Color::rgb(144, 238, 144),
+        "palegreen" => Color::rgb(152, 251, 152),
+        "limegreen" => Color::rgb(50, 205, 50),
+        "mediumseagreen" => Color::rgb(60, 179, 113),
+        "seagreen" => Color::rgb(46, 139, 87),
+        "forestgreen" => Color::rgb(34, 139, 34),
+        "darkgreen" => Color::rgb(0, 100, 0),
+        "yellowgreen" => Color::rgb(154, 205, 50),
+        "olivedrab" => Color::rgb(107, 142, 35),
+        "darkolivegreen" => Color::rgb(85, 107, 47),
+        "mediumaquamarine" => Color::rgb(102, 205, 170),
+        "aquamarine" => Color::rgb(127, 255, 212),
+        "turquoise" => Color::rgb(64, 224, 208),
+        "mediumturquoise" => Color::rgb(72, 209, 204),
+        "darkturquoise" => Color::rgb(0, 206, 209),
+        "lightseagreen" => Color::rgb(32, 178, 170),
+        "cadetblue" => Color::rgb(95, 158, 160),
+        "darkcyan" => Color::rgb(0, 139, 139),
+        "darkslategray" | "darkslategrey" => Color::rgb(47, 79, 79),
+        "slategray" | "slategrey" => Color::rgb(112, 128, 144),
+        "lightslategray" | "lightslategrey" => Color::rgb(119, 136, 153),
+        // Gray shades
+        "darkgray" | "darkgrey" => Color::rgb(169, 169, 169),
+        "dimgray" | "dimgrey" => Color::rgb(105, 105, 105),
+        "lightgray" | "lightgrey" => Color::rgb(211, 211, 211),
+        "gainsboro" => Color::rgb(220, 220, 220),
+        "whitesmoke" => Color::rgb(245, 245, 245),
+        "snow" => Color::rgb(255, 250, 250),
+        "seashell" => Color::rgb(255, 245, 238),
+        "floralwhite" => Color::rgb(255, 250, 240),
+        "ivory" => Color::rgb(255, 255, 240),
+        "linen" => Color::rgb(250, 240, 230),
+        "oldlace" => Color::rgb(253, 245, 230),
+        "antiquewhite" => Color::rgb(250, 235, 215),
+        "bisque" => Color::rgb(255, 228, 196),
+        "blanchedalmond" => Color::rgb(255, 235, 205),
+        "moccasin" => Color::rgb(255, 228, 181),
+        "navajowhite" => Color::rgb(255, 222, 173),
+        "peachpuff" => Color::rgb(255, 218, 185),
+        "mistyrose" => Color::rgb(255, 228, 225),
+        "papayawhip" => Color::rgb(255, 239, 213),
+        "lightyellow" => Color::rgb(255, 255, 224),
+        "lemonchiffon" => Color::rgb(255, 250, 205),
+        "cornsilk" => Color::rgb(255, 248, 220),
+        "beige" => Color::rgb(245, 245, 220),
+        "khaki" => Color::rgb(240, 230, 140),
+        "darkkhaki" => Color::rgb(189, 183, 107),
+        // Chartreuse / spring
+        "chartreuse" => Color::rgb(127, 255, 0),
+        "lawngreen" => Color::rgb(124, 252, 0),
+        "greenyellow" => Color::rgb(173, 255, 47),
+        "springgreen" => Color::rgb(0, 255, 127),
+        "mediumslateblue" => Color::rgb(123, 104, 238),
+        "mediumspringgreen" => Color::rgb(0, 250, 154),
+        // Missing CSS Level 4 colors
+        "darkmagenta" => Color::rgb(139, 0, 139),
+        "darkseagreen" => Color::rgb(143, 188, 143),
+        "lightcoral" => Color::rgb(240, 128, 128),
+        "lightcyan" => Color::rgb(224, 255, 255),
+        "lightgoldenrodyellow" => Color::rgb(250, 250, 210),
+        "lightsteelblue" => Color::rgb(176, 196, 222),
+        "paleturquoise" => Color::rgb(175, 238, 238),
+        _ => return None,
+    };
+    Some(c)
 }
 
 fn normalize_rect(rect: Rect) -> Option<Rect> {

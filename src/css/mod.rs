@@ -6,7 +6,7 @@
 use std::fmt;
 
 mod matcher;
-mod style;
+pub(crate) mod style;
 
 pub use matcher::{
     PseudoElement, Specificity, matches_selector, matches_selector_with_pseudo,
