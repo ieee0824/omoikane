@@ -52,3 +52,6 @@ CJK文字の表示改善により日本語の可読性は向上した一方で�
 - ネストした flex コンテナ（`nav > #menu`）の intrinsic 幅見積もりを `max` から row 方向 `sum` に補正し、メニュー項目重なりを縮小
 - `margin-inline-start/end` の長さ反映と auto 判定を追加し、`max-width` と auto margin の併用時にセンタリングを再配分
 - `blog.ast.moe` は Firefox 参照にかなり近づいた（本文幅・全体配置が改善）。残差分はヘッダーの細部（ロゴの改行位置、メニュー間隔の微差）
+- Flex コンテナで `gap` / `column-gap` / `row-gap` を解釈し、子要素間・折り返し行間に反映するよう修正
+- `justify-content` との併用時に fixed gap を先に確保して余剰スペース配分するよう補正し、メニュー間隔の過不足を縮小
+- 回帰防止として `layout::tests` に `column-gap` と `row-gap` の単体テストを追加し、既存 `layout::tests` 一式が通過

@@ -184,6 +184,21 @@ fn keeps_transform_list_values_in_computed_style() {
 }
 
 #[test]
+fn expands_two_value_gap_shorthand_into_row_and_column_gap() {
+    let (_document, _body, title, _html) = sample_tree();
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet("h1 { gap: 10px 20px; }").unwrap(),
+    );
+
+    let style = resolver.computed_style(&title);
+    assert_eq!(style.get("row-gap"), Some(&ComputedValue::Px(10.0)));
+    assert_eq!(style.get("column-gap"), Some(&ComputedValue::Px(20.0)));
+    assert_eq!(style.get("gap"), None);
+}
+
+#[test]
 fn sqlite_logging_creates_schema_and_accumulates_occurrences() {
     let unique = SystemTime::now()
         .duration_since(UNIX_EPOCH)

@@ -116,6 +116,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
+スクリーンショット取得の例:
+
+```bash
+cargo run --example screenshot -- "https://example.com/" tests/output/example.png 1366 900
+```
+
 `Client::new()` の既定 `User-Agent` は `Omoikane/{version} {OS}` 形式です。
 必要に応じて [`src/http/client.rs`](/src/http/client.rs) の `set_user_agent` で上書きできます。
 

@@ -207,15 +207,17 @@ impl StyleResolver {
                 continue;
             };
             let font_size = inherited_font_size(parent_style, &properties);
-            let computed = compute_value(&resolved_value, &candidate.name, font_size);
-            // CSS 2.1: non-zero unitless numbers are invalid for length properties;
-            // skip them so they don't override valid length values in the cascade.
-            if matches!(computed, ComputedValue::Number(n) if n != 0.0)
-                && is_length_property(&candidate.name)
-            {
+            if candidate.name == "gap" {
+                if let Some((row_gap, column_gap)) =
+                    compute_gap_shorthand(&resolved_value, font_size)
+                {
+                    insert_computed_property(&mut properties, "row-gap", row_gap);
+                    insert_computed_property(&mut properties, "column-gap", column_gap);
+                }
                 continue;
             }
-            properties.insert(candidate.name, computed);
+            let computed = compute_value(&resolved_value, &candidate.name, font_size);
+            insert_computed_property(&mut properties, &candidate.name, computed);
         }
 
         apply_presentational_hints(node, &mut properties, pseudo);
@@ -226,6 +228,61 @@ impl StyleResolver {
 
         ComputedStyle { properties }
     }
+}
+
+fn compute_gap_shorthand(
+    value: &Value,
+    parent_font_size: f32,
+) -> Option<(ComputedValue, ComputedValue)> {
+    match value {
+        Value::List(values) => match values.as_slice() {
+            [single] => {
+                let computed = compute_value(single, "row-gap", parent_font_size);
+                if should_skip_computed_property("row-gap", &computed) {
+                    None
+                } else {
+                    Some((computed.clone(), computed))
+                }
+            }
+            [row, column] => {
+                let row_gap = compute_value(row, "row-gap", parent_font_size);
+                let column_gap = compute_value(column, "column-gap", parent_font_size);
+                if should_skip_computed_property("row-gap", &row_gap)
+                    || should_skip_computed_property("column-gap", &column_gap)
+                {
+                    None
+                } else {
+                    Some((row_gap, column_gap))
+                }
+            }
+            _ => None,
+        },
+        _ => {
+            let computed = compute_value(value, "row-gap", parent_font_size);
+            if should_skip_computed_property("row-gap", &computed) {
+                None
+            } else {
+                Some((computed.clone(), computed))
+            }
+        }
+    }
+}
+
+fn insert_computed_property(
+    properties: &mut BTreeMap<String, ComputedValue>,
+    name: &str,
+    computed: ComputedValue,
+) {
+    if should_skip_computed_property(name, &computed) {
+        return;
+    }
+    properties.insert(name.to_string(), computed);
+}
+
+fn should_skip_computed_property(name: &str, computed: &ComputedValue) -> bool {
+    // CSS 2.1: non-zero unitless numbers are invalid for length properties;
+    // skip them so they don't override valid length values in the cascade.
+    matches!(computed, ComputedValue::Number(n) if *n != 0.0) && is_length_property(name)
 }
 
 #[derive(Debug, Clone)]
@@ -638,6 +695,7 @@ fn is_supported_property(name: &str) -> bool {
             | "font-size"
             | "font-style"
             | "font-weight"
+            | "gap"
             | "height"
             | "justify-content"
             | "left"
@@ -650,6 +708,7 @@ fn is_supported_property(name: &str) -> bool {
             | "max-width"
             | "min-height"
             | "min-width"
+            | "column-gap"
             | "overflow"
             | "overflow-x"
             | "overflow-y"
@@ -659,6 +718,7 @@ fn is_supported_property(name: &str) -> bool {
             | "padding-top"
             | "position"
             | "right"
+            | "row-gap"
             | "transform"
             | "text-align"
             | "top"
