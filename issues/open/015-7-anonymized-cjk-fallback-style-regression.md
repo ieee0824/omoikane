@@ -45,5 +45,7 @@ CJK文字の表示改善により日本語の可読性は向上した一方で�
 - 実サイトAの確認用スクリーンショットを `tests/output/https-abehiroshi-la-coocan-jp.layout-paint-aligned.1366x900.actual.png` として出力
 - `::-webkit-scrollbar` のような未対応擬似要素セレクタが通常要素に誤マッチしていた問題を修正
 - 上記修正により `blog.ast.moe` で発生していた `body/main` 幅 `19px` への崩壊は解消（`@media ... ::-webkit-scrollbar { width: 19px }` の誤適用を防止）
-- ただし `blog.ast.moe` は依然として黒背景で主要コンテンツが視認しづらく、CSSカスタムプロパティ（`var(--theme)` など）未対応/未解決が主因候補
-- 次ステップ: カスタムプロパティの最小解決（`--*` 定義 + `var()` 参照）を導入し、背景色・文字色の復元を優先して比較差分を再計測する
+- `:root` 疑似クラス対応と CSS custom property（`--*`）の継承/`var()` 解決を導入し、黒背景のみ表示される状態を解消
+- `calc(var(--main-width) + var(--gap) * 2)` のような式を最小評価できるようにし、`max-width` などの長さ計算を一部復元
+- `blog.ast.moe` は主要コンテンツが描画される段階まで改善したが、Firefox比較ではヘッダー周辺（ロゴ縦積み・メニュー配置）にFlexレイアウト差分が残る
+- 次ステップ: Flex item の縮小/自動幅解決（`display:flex` + `margin:auto` + `justify-content: space-between` 組み合わせ）を実装差分の主対象として追う

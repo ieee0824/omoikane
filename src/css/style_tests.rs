@@ -396,3 +396,82 @@ fn border_style_none_zeroes_side_width_even_when_width_only_comes_from_shorthand
         Some(&ComputedValue::Keyword("solid".to_string()))
     );
 }
+
+#[test]
+fn resolves_var_from_inherited_root_custom_properties() {
+    let (_document, body, title, _html) = sample_tree();
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            ":root { --theme: rgb(255, 255, 255); --primary: #123456; } \
+             body { background-color: var(--theme); color: var(--primary); }",
+        )
+        .unwrap(),
+    );
+
+    let body_style = resolver.computed_style(&body);
+    let title_style = resolver.computed_style(&title);
+
+    assert_eq!(
+        body_style.get("background-color"),
+        Some(&ComputedValue::Color("#ffffff".to_string()))
+    );
+    assert_eq!(
+        body_style.get("color"),
+        Some(&ComputedValue::Color("#123456".to_string()))
+    );
+    assert_eq!(
+        title_style.get("color"),
+        Some(&ComputedValue::Color("#123456".to_string()))
+    );
+}
+
+#[test]
+fn resolves_var_with_fallback_for_missing_custom_property() {
+    let (_document, _body, title, _html) = sample_tree();
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet("h1 { color: var(--missing-color, blue); }").unwrap(),
+    );
+
+    let style = resolver.computed_style(&title);
+    assert_eq!(
+        style.get("color"),
+        Some(&ComputedValue::Color("blue".to_string()))
+    );
+}
+
+#[test]
+fn drops_declaration_when_var_cannot_be_resolved() {
+    let (_document, _body, title, _html) = sample_tree();
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet("h1 { color: var(--missing-color); }").unwrap(),
+    );
+
+    let style = resolver.computed_style(&title);
+    assert_eq!(
+        style.get("color"),
+        Some(&ComputedValue::Color("black".to_string()))
+    );
+}
+
+#[test]
+fn resolves_calc_with_var_lengths() {
+    let (_document, body, _title, _html) = sample_tree();
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            ":root { --main-width: 720px; --gap: 24px; } \
+             body { max-width: calc(var(--main-width) + var(--gap) * 2); }",
+        )
+        .unwrap(),
+    );
+
+    let style = resolver.computed_style(&body);
+    assert_eq!(style.get("max-width"), Some(&ComputedValue::Px(768.0)));
+}

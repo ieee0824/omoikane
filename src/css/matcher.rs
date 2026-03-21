@@ -233,6 +233,9 @@ fn matches_pseudo_class(node: &NodeHandle, name: &str, pseudo: Option<PseudoElem
     match name {
         "before" => pseudo == Some(PseudoElement::Before),
         "after" => pseudo == Some(PseudoElement::After),
+        "root" => node
+            .parent_node()
+            .is_some_and(|parent| parent.node_type() == NodeType::Document),
         "first-child" => element_index_in_parent(node) == Some(1),
         "last-child" => {
             let Some((index, total)) = element_position(node) else {
@@ -383,13 +386,14 @@ mod tests {
 
     #[test]
     fn matches_pseudo_classes() {
-        let (_document, _html, _body, _main, lead, title, cta) = sample_tree();
+        let (_document, html, _body, _main, lead, title, cta) = sample_tree();
         let first_child = selector(":first-child {}");
         assert_eq!(
             first_child.parts[0].simples,
             vec![SimpleSelector::PseudoClass("first-child".to_string())]
         );
 
+        assert!(matches_selector(&html, &selector(":root {}")));
         assert!(matches_selector(&title, &first_child));
         assert!(matches_selector(&cta, &selector(":last-child {}")));
         assert!(matches_selector(&lead, &selector(":nth-child(2) {}")));

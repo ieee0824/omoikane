@@ -793,6 +793,7 @@ fn parse_single_value(token: &CssToken) -> Result<Value, CssParseError> {
         CssToken::Number(value) => Ok(Value::Number(*value)),
         CssToken::Percentage(value) => Ok(Value::Percentage(*value)),
         CssToken::Dimension(value, unit) => Ok(Value::Length(*value, unit.clone())),
+        CssToken::Delim(ch) => Ok(Value::Keyword(ch.to_string())),
         _ => Err(CssParseError::InvalidDeclaration),
     }
 }
@@ -1653,6 +1654,26 @@ mod tests {
             Value::Function {
                 name: "rgb".to_string(),
                 arguments: vec![Value::Number(255.0), Value::Number(0.0), Value::Number(0.0)],
+            }
+        );
+    }
+
+    #[test]
+    fn parses_calc_expressions_with_operators() {
+        let stylesheet = parse_stylesheet("body { width: calc(100% - 24px); }").unwrap();
+        let Rule::Style(rule) = &stylesheet.rules[0] else {
+            panic!("expected style rule");
+        };
+
+        assert_eq!(
+            rule.declarations[0].value,
+            Value::Function {
+                name: "calc".to_string(),
+                arguments: vec![Value::List(vec![
+                    Value::Percentage(100.0),
+                    Value::Keyword("-".to_string()),
+                    Value::Length(24.0, "px".to_string()),
+                ])],
             }
         );
     }
