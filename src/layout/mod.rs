@@ -1006,12 +1006,7 @@ fn layout_table_container(
     let spacing = table_border_spacing(&style);
     let collapse_spacing = spacing * 2.0;
     let mut entries = collect_table_entries(node, resolver);
-    let column_count = entries
-        .iter()
-        .map(table_row_column_span_count)
-        .max()
-        .unwrap_or(0)
-        .max(1);
+    let column_count = table_column_count(&entries);
     let column_width =
         ((width - spacing * (column_count as f32 + 1.0)).max(0.0)) / column_count as f32;
     let inner_width = (width - collapse_spacing).max(0.0);
@@ -1237,7 +1232,7 @@ fn layout_table_row_entry(
         if rowspan > 1 {
             for column in column_cursor..column_cursor.saturating_add(span) {
                 if let Some(occupied) = occupied_columns.get_mut(column) {
-                    *occupied = (*occupied).max(rowspan.saturating_sub(1));
+                    *occupied = (*occupied).max(rowspan);
                 }
             }
         }
@@ -1289,12 +1284,45 @@ fn layout_table_row_entry(
     Some((row_box, row_height))
 }
 
-fn table_row_column_span_count(entry: &TableRowEntry) -> usize {
-    let mut columns = 0usize;
-    for cell in &entry.cells {
-        columns = columns.saturating_add(html_table_span_attribute(cell, "colspan").unwrap_or(1));
+fn table_column_count(entries: &[TableRowEntry]) -> usize {
+    let mut occupied_columns = Vec::<usize>::new();
+    let mut max_columns = 0usize;
+
+    for entry in entries {
+        for occupied in &mut occupied_columns {
+            if *occupied > 0 {
+                *occupied -= 1;
+            }
+        }
+
+        let mut column_cursor = 0usize;
+        for cell in &entry.cells {
+            while column_cursor < occupied_columns.len() && occupied_columns[column_cursor] > 0 {
+                column_cursor += 1;
+            }
+
+            let span = html_table_span_attribute(cell, "colspan")
+                .unwrap_or(1)
+                .max(1);
+            let rowspan = html_table_span_attribute(cell, "rowspan")
+                .unwrap_or(1)
+                .max(1);
+            let end = column_cursor.saturating_add(span);
+            if end > occupied_columns.len() {
+                occupied_columns.resize(end, 0);
+            }
+            if rowspan > 1 {
+                for occupied in &mut occupied_columns[column_cursor..end] {
+                    *occupied = (*occupied).max(rowspan);
+                }
+            }
+            column_cursor = end;
+        }
+
+        max_columns = max_columns.max(column_cursor.max(occupied_columns.len()));
     }
-    columns.max(1)
+
+    max_columns.max(1)
 }
 
 fn html_table_span_attribute(node: &NodeHandle, name: &str) -> Option<usize> {

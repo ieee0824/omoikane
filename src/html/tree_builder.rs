@@ -300,15 +300,15 @@ impl Builder {
                 }
                 "table" => {
                     self.pop_matching("table");
-                    self.mode = InsertionMode::InBody;
+                    self.reset_insertion_mode();
                 }
                 "tr" => {
                     self.pop_matching("tr");
-                    self.mode = InsertionMode::InTable;
+                    self.reset_insertion_mode();
                 }
                 "td" | "th" => {
                     self.pop_matching(&name);
-                    self.mode = InsertionMode::InRow;
+                    self.reset_insertion_mode();
                 }
                 "template" => {
                     self.pop_matching("template");
@@ -376,7 +376,7 @@ impl Builder {
             },
             Token::EndTag { name } if name == "table" => {
                 self.pop_matching("table");
-                self.mode = InsertionMode::InBody;
+                self.reset_insertion_mode();
             }
             Token::EndTag { name } if name == "template" => {
                 self.pop_matching("template");
@@ -411,12 +411,12 @@ impl Builder {
             }
             Token::EndTag { name } if name == "tr" => {
                 self.pop_matching("tr");
-                self.mode = InsertionMode::InTable;
+                self.reset_insertion_mode();
             }
             Token::EndTag { name } if name == "table" => {
                 self.pop_matching("tr");
                 self.pop_matching("table");
-                self.mode = InsertionMode::InBody;
+                self.reset_insertion_mode();
             }
             other => {
                 self.mode = InsertionMode::InTable;
@@ -440,15 +440,18 @@ impl Builder {
         match token {
             Token::EndTag { name } if name == "td" || name == "th" => {
                 self.pop_matching(&name);
-                self.mode = InsertionMode::InRow;
+                self.reset_insertion_mode();
             }
             Token::EndTag { name } if name == "tr" => {
                 self.pop_matching("td");
                 self.pop_matching("th");
                 self.pop_matching("tr");
-                self.mode = InsertionMode::InTable;
+                self.reset_insertion_mode();
             }
-            other => self.handle_in_body(other, errors),
+            other => {
+                self.handle_in_body(other, errors);
+                self.reset_insertion_mode();
+            }
         }
     }
 
@@ -678,6 +681,23 @@ impl Builder {
     fn current_table(&self) -> Option<NodeHandle> {
         self.find_open_element("table")
     }
+
+    fn reset_insertion_mode(&mut self) {
+        self.mode = self
+            .open_elements
+            .iter()
+            .rev()
+            .find_map(|node| match node.tag_name().as_deref() {
+                Some("td" | "th") => Some(InsertionMode::InCell),
+                Some("tr") => Some(InsertionMode::InRow),
+                Some("table") => Some(InsertionMode::InTable),
+                Some("body") => Some(InsertionMode::InBody),
+                Some("head") => Some(InsertionMode::InHead),
+                Some("html") => Some(InsertionMode::BeforeHead),
+                _ => None,
+            })
+            .unwrap_or(InsertionMode::Initial);
+    }
 }
 
 fn is_void_element(tag_name: &str) -> bool {
@@ -843,6 +863,30 @@ mod tests {
         assert_eq!(children[0].node_name(), "#text");
         assert_eq!(children[0].data(), Some("hello".to_string()));
         assert_eq!(children[1].tag_name().as_deref(), Some("table"));
+    }
+
+    #[test]
+    fn nested_table_close_keeps_following_rows_in_outer_table() {
+        let html = "<table><tr><td rowspan='2'><table><tr><td>a</td><td>b</tr></table></td></tr><tr><td>c</td><td>d</td></tr></table>";
+        let result = TreeBuilder::parse(html);
+        let table = result.document().query_selector("table").unwrap();
+        let rows: Vec<_> = table
+            .child_nodes()
+            .into_iter()
+            .filter(|node| node.tag_name().as_deref() == Some("tr"))
+            .collect();
+
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].child_nodes().len(), 1);
+        assert_eq!(rows[1].child_nodes().len(), 2);
+        assert_eq!(
+            rows[1].child_nodes()[0].child_nodes()[0].data(),
+            Some("c".to_string())
+        );
+        assert_eq!(
+            rows[1].child_nodes()[1].child_nodes()[0].data(),
+            Some("d".to_string())
+        );
     }
 
     #[test]
