@@ -761,3 +761,354 @@ fn computes_hsl_wraps_negative_hue() {
         Some(&ComputedValue::Color("#0000ff".to_string()))
     );
 }
+
+// --- shorthand 展開テスト ---
+
+#[test]
+fn expands_margin_1_value() {
+    let stylesheet = parse_stylesheet("div { margin: 10px; }").unwrap();
+    let Rule::Style(rule) = &stylesheet.rules[0] else {
+        panic!("expected style rule");
+    };
+    for side in ["margin-top", "margin-right", "margin-bottom", "margin-left"] {
+        assert!(
+            rule.declarations
+                .iter()
+                .any(|d| d.name == side && matches!(&d.value, Value::Length(v, u) if *v == 10.0 && u == "px")),
+            "{side} not found with 10px"
+        );
+    }
+}
+
+#[test]
+fn expands_margin_2_values() {
+    let stylesheet = parse_stylesheet("div { margin: 10px 20px; }").unwrap();
+    let Rule::Style(rule) = &stylesheet.rules[0] else {
+        panic!("expected style rule");
+    };
+    // top/bottom = 10px, right/left = 20px
+    for side in ["margin-top", "margin-bottom"] {
+        assert!(
+            rule.declarations
+                .iter()
+                .any(|d| d.name == side && matches!(&d.value, Value::Length(v, u) if *v == 10.0 && u == "px")),
+            "{side} not found with 10px"
+        );
+    }
+    for side in ["margin-right", "margin-left"] {
+        assert!(
+            rule.declarations
+                .iter()
+                .any(|d| d.name == side && matches!(&d.value, Value::Length(v, u) if *v == 20.0 && u == "px")),
+            "{side} not found with 20px"
+        );
+    }
+}
+
+#[test]
+fn expands_margin_3_values() {
+    let stylesheet = parse_stylesheet("div { margin: 10px 20px 30px; }").unwrap();
+    let Rule::Style(rule) = &stylesheet.rules[0] else {
+        panic!("expected style rule");
+    };
+    // top=10px, right/left=20px, bottom=30px
+    assert!(rule.declarations.iter().any(
+        |d| d.name == "margin-top" && matches!(&d.value, Value::Length(v, u) if *v == 10.0 && u == "px")
+    ));
+    assert!(rule.declarations.iter().any(
+        |d| d.name == "margin-right" && matches!(&d.value, Value::Length(v, u) if *v == 20.0 && u == "px")
+    ));
+    assert!(rule.declarations.iter().any(
+        |d| d.name == "margin-bottom" && matches!(&d.value, Value::Length(v, u) if *v == 30.0 && u == "px")
+    ));
+    assert!(rule.declarations.iter().any(
+        |d| d.name == "margin-left" && matches!(&d.value, Value::Length(v, u) if *v == 20.0 && u == "px")
+    ));
+}
+
+#[test]
+fn expands_margin_4_values() {
+    let stylesheet = parse_stylesheet("div { margin: 1px 2px 3px 4px; }").unwrap();
+    let Rule::Style(rule) = &stylesheet.rules[0] else {
+        panic!("expected style rule");
+    };
+    let expected = [
+        ("margin-top", 1.0f32),
+        ("margin-right", 2.0),
+        ("margin-bottom", 3.0),
+        ("margin-left", 4.0),
+    ];
+    for (side, px) in &expected {
+        assert!(
+            rule.declarations
+                .iter()
+                .any(|d| d.name == *side && matches!(&d.value, Value::Length(v, u) if *v == *px && u == "px")),
+            "{side} not found with {px}px"
+        );
+    }
+}
+
+#[test]
+fn expands_padding_4_values() {
+    let stylesheet = parse_stylesheet("div { padding: 1px 2px 3px 4px; }").unwrap();
+    let Rule::Style(rule) = &stylesheet.rules[0] else {
+        panic!("expected style rule");
+    };
+    let expected = [
+        ("padding-top", 1.0f32),
+        ("padding-right", 2.0),
+        ("padding-bottom", 3.0),
+        ("padding-left", 4.0),
+    ];
+    for (side, px) in &expected {
+        assert!(
+            rule.declarations
+                .iter()
+                .any(|d| d.name == *side && matches!(&d.value, Value::Length(v, u) if *v == *px && u == "px")),
+            "{side} not found with {px}px"
+        );
+    }
+}
+
+#[test]
+fn expands_border_width_4_values() {
+    let stylesheet = parse_stylesheet("div { border-width: 1px 2px 3px 4px; }").unwrap();
+    let Rule::Style(rule) = &stylesheet.rules[0] else {
+        panic!("expected style rule");
+    };
+    let expected = [
+        ("border-top-width", 1.0f32),
+        ("border-right-width", 2.0),
+        ("border-bottom-width", 3.0),
+        ("border-left-width", 4.0),
+    ];
+    for (side, px) in &expected {
+        assert!(
+            rule.declarations
+                .iter()
+                .any(|d| d.name == *side && matches!(&d.value, Value::Length(v, u) if *v == *px && u == "px")),
+            "{side} not found with {px}px"
+        );
+    }
+}
+
+#[test]
+fn expands_border_color_2_values() {
+    let stylesheet = parse_stylesheet("div { border-color: red blue; }").unwrap();
+    let Rule::Style(rule) = &stylesheet.rules[0] else {
+        panic!("expected style rule");
+    };
+    for side in ["border-top-color", "border-bottom-color"] {
+        assert!(
+            rule.declarations
+                .iter()
+                .any(|d| d.name == side && matches!(&d.value, Value::Keyword(v) if v == "red")),
+            "{side} not found with red"
+        );
+    }
+    for side in ["border-right-color", "border-left-color"] {
+        assert!(
+            rule.declarations
+                .iter()
+                .any(|d| d.name == side && matches!(&d.value, Value::Keyword(v) if v == "blue")),
+            "{side} not found with blue"
+        );
+    }
+}
+
+#[test]
+fn expands_overflow_1_value() {
+    let stylesheet = parse_stylesheet("div { overflow: hidden; }").unwrap();
+    let Rule::Style(rule) = &stylesheet.rules[0] else {
+        panic!("expected style rule");
+    };
+    for prop in ["overflow-x", "overflow-y"] {
+        assert!(
+            rule.declarations
+                .iter()
+                .any(|d| d.name == prop && matches!(&d.value, Value::Keyword(v) if v == "hidden")),
+            "{prop} not found with hidden"
+        );
+    }
+}
+
+#[test]
+fn expands_overflow_2_values() {
+    let stylesheet = parse_stylesheet("div { overflow: auto scroll; }").unwrap();
+    let Rule::Style(rule) = &stylesheet.rules[0] else {
+        panic!("expected style rule");
+    };
+    assert!(
+        rule.declarations
+            .iter()
+            .any(|d| d.name == "overflow-x" && matches!(&d.value, Value::Keyword(v) if v == "auto")),
+        "overflow-x not found with auto"
+    );
+    assert!(
+        rule.declarations
+            .iter()
+            .any(|d| d.name == "overflow-y" && matches!(&d.value, Value::Keyword(v) if v == "scroll")),
+        "overflow-y not found with scroll"
+    );
+}
+
+#[test]
+fn expands_flex_shorthand_grow_shrink_basis() {
+    let stylesheet = parse_stylesheet("div { flex: 2 1 100px; }").unwrap();
+    let Rule::Style(rule) = &stylesheet.rules[0] else {
+        panic!("expected style rule");
+    };
+    assert!(
+        rule.declarations
+            .iter()
+            .any(|d| d.name == "flex-grow" && matches!(&d.value, Value::Number(v) if *v == 2.0)),
+        "flex-grow not found with 2"
+    );
+    assert!(
+        rule.declarations
+            .iter()
+            .any(|d| d.name == "flex-shrink" && matches!(&d.value, Value::Number(v) if *v == 1.0)),
+        "flex-shrink not found with 1"
+    );
+    assert!(
+        rule.declarations
+            .iter()
+            .any(|d| d.name == "flex-basis" && matches!(&d.value, Value::Length(v, u) if *v == 100.0 && u == "px")),
+        "flex-basis not found with 100px"
+    );
+}
+
+#[test]
+fn expands_flex_shorthand_1_value_number() {
+    // flex: 2 → flex-grow: 2, flex-shrink: 1, flex-basis: 0
+    let stylesheet = parse_stylesheet("div { flex: 2; }").unwrap();
+    let Rule::Style(rule) = &stylesheet.rules[0] else {
+        panic!("expected style rule");
+    };
+    assert!(
+        rule.declarations
+            .iter()
+            .any(|d| d.name == "flex-grow" && matches!(&d.value, Value::Number(v) if *v == 2.0)),
+        "flex-grow not found with 2"
+    );
+    assert!(
+        rule.declarations
+            .iter()
+            .any(|d| d.name == "flex-shrink" && matches!(&d.value, Value::Number(v) if *v == 1.0)),
+        "flex-shrink not found with 1"
+    );
+    assert!(
+        rule.declarations
+            .iter()
+            .any(|d| d.name == "flex-basis" && matches!(&d.value, Value::Number(v) if *v == 0.0)),
+        "flex-basis not found with 0"
+    );
+}
+
+#[test]
+fn expands_flex_shorthand_none() {
+    // flex: none → flex-grow: 0, flex-shrink: 0, flex-basis: auto
+    let stylesheet = parse_stylesheet("div { flex: none; }").unwrap();
+    let Rule::Style(rule) = &stylesheet.rules[0] else {
+        panic!("expected style rule");
+    };
+    assert!(
+        rule.declarations
+            .iter()
+            .any(|d| d.name == "flex-grow" && matches!(&d.value, Value::Number(v) if *v == 0.0)),
+        "flex-grow not found with 0"
+    );
+    assert!(
+        rule.declarations
+            .iter()
+            .any(|d| d.name == "flex-shrink" && matches!(&d.value, Value::Number(v) if *v == 0.0)),
+        "flex-shrink not found with 0"
+    );
+    assert!(
+        rule.declarations
+            .iter()
+            .any(|d| d.name == "flex-basis" && matches!(&d.value, Value::Keyword(v) if v == "auto")),
+        "flex-basis not found with auto"
+    );
+}
+
+#[test]
+fn expands_flex_shorthand_auto() {
+    // flex: auto → flex-grow: 1, flex-shrink: 1, flex-basis: auto
+    let stylesheet = parse_stylesheet("div { flex: auto; }").unwrap();
+    let Rule::Style(rule) = &stylesheet.rules[0] else {
+        panic!("expected style rule");
+    };
+    assert!(
+        rule.declarations
+            .iter()
+            .any(|d| d.name == "flex-grow" && matches!(&d.value, Value::Number(v) if *v == 1.0)),
+        "flex-grow not found with 1"
+    );
+    assert!(
+        rule.declarations
+            .iter()
+            .any(|d| d.name == "flex-shrink" && matches!(&d.value, Value::Number(v) if *v == 1.0)),
+        "flex-shrink not found with 1"
+    );
+    assert!(
+        rule.declarations
+            .iter()
+            .any(|d| d.name == "flex-basis" && matches!(&d.value, Value::Keyword(v) if v == "auto")),
+        "flex-basis not found with auto"
+    );
+}
+
+#[test]
+fn expands_flex_shorthand_basis_only() {
+    // flex: 100px → flex-grow: 1, flex-shrink: 1, flex-basis: 100px
+    let stylesheet = parse_stylesheet("div { flex: 100px; }").unwrap();
+    let Rule::Style(rule) = &stylesheet.rules[0] else {
+        panic!("expected style rule");
+    };
+    assert!(
+        rule.declarations
+            .iter()
+            .any(|d| d.name == "flex-grow" && matches!(&d.value, Value::Number(v) if *v == 1.0)),
+        "flex-grow not found with 1"
+    );
+    assert!(
+        rule.declarations
+            .iter()
+            .any(|d| d.name == "flex-shrink" && matches!(&d.value, Value::Number(v) if *v == 1.0)),
+        "flex-shrink not found with 1"
+    );
+    assert!(
+        rule.declarations
+            .iter()
+            .any(|d| d.name == "flex-basis" && matches!(&d.value, Value::Length(v, u) if *v == 100.0 && u == "px")),
+        "flex-basis not found with 100px"
+    );
+}
+
+#[test]
+fn expands_flex_shorthand_grow_basis() {
+    // flex: 2 100px → flex-grow: 2, flex-shrink: 1, flex-basis: 100px
+    let stylesheet = parse_stylesheet("div { flex: 2 100px; }").unwrap();
+    let Rule::Style(rule) = &stylesheet.rules[0] else {
+        panic!("expected style rule");
+    };
+    assert!(
+        rule.declarations
+            .iter()
+            .any(|d| d.name == "flex-grow" && matches!(&d.value, Value::Number(v) if *v == 2.0)),
+        "flex-grow not found with 2"
+    );
+    assert!(
+        rule.declarations
+            .iter()
+            .any(|d| d.name == "flex-shrink" && matches!(&d.value, Value::Number(v) if *v == 1.0)),
+        "flex-shrink not found with 1"
+    );
+    assert!(
+        rule.declarations
+            .iter()
+            .any(|d| d.name == "flex-basis" && matches!(&d.value, Value::Length(v, u) if *v == 100.0 && u == "px")),
+        "flex-basis not found with 100px"
+    );
+}

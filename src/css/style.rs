@@ -371,6 +371,7 @@ fn is_length_property(name: &str) -> bool {
             | "bottom"
             | "left"
             | "border-spacing"
+            | "flex-basis"
     )
 }
 
@@ -687,6 +688,7 @@ fn is_supported_property(name: &str) -> bool {
             | "color"
             | "content"
             | "display"
+            | "flex-basis"
             | "flex-direction"
             | "flex-grow"
             | "flex-shrink"
