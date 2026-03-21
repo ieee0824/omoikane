@@ -23,5 +23,5 @@ Thumbs.db
 .env
 .env.*
 
-# Claude agents
-/.claude/agents
+# Claude
+/.claude/
