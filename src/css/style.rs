@@ -570,7 +570,7 @@ fn sanitize_unsupported_css_log_value(value: &str) -> String {
 }
 
 fn is_url_terminator(ch: char) -> bool {
-    ch.is_ascii_whitespace() || matches!(ch, '"' | '\'' | ')' | '(' | '<' | '>' | ',')
+    ch.is_ascii_whitespace() || matches!(ch, '"' | '\'' | ')' | '(' | '<' | '>')
 }
 
 fn truncate_log_value(value: &str, max_len: usize) -> String {
@@ -1115,10 +1115,11 @@ mod tests {
 
     #[test]
     fn sanitizes_url_like_values_in_unsupported_css_logging() {
-        let value = "url(\"https://example.com/a?x=1\") blur(4px) data:image/png;base64,AAA";
+        let value = "url(\"https://example.com/a?x=1\") blur(4px) data:image/png;base64,AAAABBBB";
         let sanitized = sanitize_unsupported_css_log_value(value);
         assert!(!sanitized.contains("example.com"));
         assert!(!sanitized.contains("data:image"));
+        assert!(!sanitized.contains("AAAABBBB"));
         assert!(sanitized.contains("[redacted-url]"));
     }
 
