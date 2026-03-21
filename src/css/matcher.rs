@@ -98,22 +98,34 @@ pub fn specificity(selector: &Selector) -> Specificity {
 
     for part in &selector.parts {
         for simple in &part.simples {
-            match simple {
-                SimpleSelector::Id(_) => value.ids += 1,
-                SimpleSelector::Class(_) | SimpleSelector::Attribute { .. } => value.classes += 1,
-                SimpleSelector::PseudoClass(name)
-                    if matches!(name.as_str(), "before" | "after") =>
-                {
-                    value.elements += 1
-                }
-                SimpleSelector::PseudoClass(_) => value.classes += 1,
-                SimpleSelector::Type(_) | SimpleSelector::PseudoElement(_) => value.elements += 1,
-                SimpleSelector::Universal => {}
-            }
+            add_simple_specificity(&mut value, simple);
         }
     }
 
     value
+}
+
+fn add_simple_specificity(value: &mut Specificity, simple: &SimpleSelector) {
+    match simple {
+        SimpleSelector::Id(_) => value.ids += 1,
+        SimpleSelector::Class(_) | SimpleSelector::Attribute { .. } => value.classes += 1,
+        SimpleSelector::PseudoClass(name) if matches!(name.as_str(), "before" | "after") => {
+            value.elements += 1
+        }
+        SimpleSelector::PseudoClass(_) => value.classes += 1,
+        SimpleSelector::Type(_) | SimpleSelector::PseudoElement(_) => value.elements += 1,
+        SimpleSelector::Universal => {}
+        SimpleSelector::Not(inner) => {
+            // :not() specificity is the maximum of its arguments' specificities.
+            let max_inner = inner.iter().fold(Specificity::zero(), |mut acc, s| {
+                add_simple_specificity(&mut acc, s);
+                acc
+            });
+            value.ids += max_inner.ids;
+            value.classes += max_inner.classes;
+            value.elements += max_inner.elements;
+        }
+    }
 }
 
 fn matches_selector_part(
@@ -198,6 +210,12 @@ fn matches_simple_selector(
         } => matches_attribute_selector(node, name, *operator, value.as_deref()),
         SimpleSelector::PseudoClass(name) => matches_pseudo_class(node, name, pseudo),
         SimpleSelector::PseudoElement(name) => matches_pseudo_element(name, pseudo),
+        SimpleSelector::Not(inner) => {
+            // The node must not match any of the inner simple selectors.
+            !inner
+                .iter()
+                .any(|s| matches_simple_selector(node, s, pseudo))
+        }
     }
 }
 
@@ -218,6 +236,18 @@ fn matches_attribute_selector(
             actual
                 .split_ascii_whitespace()
                 .any(|token| token == expected)
+        }),
+        Some(AttributeOperator::StartsWith) => {
+            value.is_some_and(|expected| !expected.is_empty() && actual.starts_with(expected))
+        }
+        Some(AttributeOperator::EndsWith) => {
+            value.is_some_and(|expected| !expected.is_empty() && actual.ends_with(expected))
+        }
+        Some(AttributeOperator::Contains) => {
+            value.is_some_and(|expected| !expected.is_empty() && actual.contains(expected))
+        }
+        Some(AttributeOperator::DashMatch) => value.is_some_and(|expected| {
+            actual == expected || actual.starts_with(&format!("{expected}-"))
         }),
     }
 }
@@ -450,6 +480,99 @@ mod tests {
                 ids: 0,
                 classes: 0,
                 elements: 2,
+            }
+        );
+    }
+
+    #[test]
+    fn matches_attribute_selector_starts_with() {
+        let (_, _, _, _, lead, _, _) = sample_tree();
+
+        // data-kind="intro hero" → starts with "intro"
+        assert!(matches_selector(&lead, &selector("[data-kind^=intro] {}")));
+        assert!(!matches_selector(&lead, &selector("[data-kind^=hero] {}")));
+    }
+
+    #[test]
+    fn matches_attribute_selector_ends_with() {
+        let (_, _, _, _, lead, _, _) = sample_tree();
+
+        // data-kind="intro hero" → ends with "hero"
+        assert!(matches_selector(&lead, &selector("[data-kind$=hero] {}")));
+        assert!(!matches_selector(&lead, &selector("[data-kind$=intro] {}")));
+    }
+
+    #[test]
+    fn matches_attribute_selector_contains() {
+        let (_, _, _, _, lead, _, _) = sample_tree();
+
+        // data-kind="intro hero" → contains "ro h"
+        assert!(matches_selector(&lead, &selector("[data-kind*=intro] {}")));
+        assert!(matches_selector(&lead, &selector(r#"[data-kind*="ro h"] {}"#)));
+        assert!(!matches_selector(&lead, &selector("[data-kind*=missing] {}")));
+    }
+
+    #[test]
+    fn matches_attribute_selector_dash_match() {
+        let document = NodeHandle::document();
+        let html = NodeHandle::element("html");
+        let en = NodeHandle::element("p");
+        let en_us = NodeHandle::element("p");
+        let fr = NodeHandle::element("p");
+
+        en.set_attribute("lang", "en");
+        en_us.set_attribute("lang", "en-US");
+        fr.set_attribute("lang", "fr");
+
+        document.append_child(html.clone());
+        html.append_child(en.clone());
+        html.append_child(en_us.clone());
+        html.append_child(fr.clone());
+
+        // [lang|=en] should match lang="en" and lang="en-US" but not lang="fr"
+        assert!(matches_selector(&en, &selector("[lang|=en] {}")));
+        assert!(matches_selector(&en_us, &selector("[lang|=en] {}")));
+        assert!(!matches_selector(&fr, &selector("[lang|=en] {}")));
+    }
+
+    #[test]
+    fn matches_not_pseudo_class() {
+        let (_, _, _, main, lead, title, cta) = sample_tree();
+
+        // :not(p) matches elements that are not <p>
+        assert!(matches_selector(&main, &selector(":not(p) {}")));
+        assert!(matches_selector(&title, &selector(":not(p) {}")));
+        assert!(!matches_selector(&lead, &selector(":not(p) {}")));
+
+        // :not(.button) matches elements without class "button"
+        assert!(matches_selector(&main, &selector(":not(.button) {}")));
+        assert!(!matches_selector(&cta, &selector(":not(.button) {}")));
+
+        // :not(#app) matches elements without id "app"
+        assert!(!matches_selector(&main, &selector(":not(#app) {}")));
+        assert!(matches_selector(&lead, &selector(":not(#app) {}")));
+    }
+
+    #[test]
+    fn not_selector_specificity() {
+        // :not() specificity counts the inner selector's specificity
+        let value = specificity(&selector(":not(p) {}"));
+        assert_eq!(
+            value,
+            Specificity {
+                ids: 0,
+                classes: 0,
+                elements: 1,
+            }
+        );
+
+        let value = specificity(&selector(":not(.foo) {}"));
+        assert_eq!(
+            value,
+            Specificity {
+                ids: 0,
+                classes: 1,
+                elements: 0,
             }
         );
     }
