@@ -68,9 +68,11 @@ pub struct StyleResolver {
 static UNSUPPORTED_CSS_LOGGED: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
 static UNSUPPORTED_CSS_CONFIG: OnceLock<UnsupportedCssConfig> = OnceLock::new();
 static SQLITE_LOG_ERRORS: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+static UNSUPPORTED_CSS_TOP_N_LAST_DIGEST: OnceLock<Mutex<HashMap<String, u64>>> = OnceLock::new();
 const MAX_UNSUPPORTED_LOG_KEYS: usize = 4096;
 const MAX_UNSUPPORTED_LOG_VALUE_LEN: usize = 256;
 const MAX_SQLITE_LOG_ERRORS: usize = 1024;
+const DEFAULT_UNSUPPORTED_CSS_TOP_N: usize = 20;
 
 thread_local! {
     static SQLITE_CONNECTIONS: RefCell<HashMap<String, Connection>> = RefCell::new(HashMap::new());
@@ -80,6 +82,7 @@ thread_local! {
 struct UnsupportedCssConfig {
     logging_enabled: bool,
     sqlite_path: Option<String>,
+    top_n: Option<usize>,
 }
 
 impl StyleResolver {
@@ -321,9 +324,12 @@ fn log_unsupported_css_if_enabled(property: &str, value: &Value) {
         return;
     }
 
-    let rendered_value = render_value(value);
+    let rendered_value = sanitize_unsupported_css_log_value(&render_value(value));
     if let Some(path) = config.sqlite_path.as_deref() {
         persist_unsupported_css_to_sqlite(path, property, &rendered_value);
+        if let Some(top_n) = config.top_n {
+            emit_unsupported_css_top_n_summary_if_updated(path, top_n);
+        }
     }
 
     if config.logging_enabled {
@@ -347,6 +353,17 @@ fn unsupported_css_config() -> &'static UnsupportedCssConfig {
             .ok()
             .map(|value| value.trim().to_string())
             .filter(|value| !value.is_empty()),
+        top_n: std::env::var("OMOIKANE_UNSUPPORTED_CSS_TOP_N")
+            .ok()
+            .and_then(|value| value.trim().parse::<usize>().ok())
+            .filter(|value| *value > 0)
+            .or_else(|| {
+                if env_flag_true("OMOIKANE_LOG_UNSUPPORTED_CSS_TOP_N") {
+                    Some(DEFAULT_UNSUPPORTED_CSS_TOP_N)
+                } else {
+                    None
+                }
+            }),
     })
 }
 
@@ -404,6 +421,79 @@ fn persist_unsupported_css_to_sqlite(path: &str, property: &str, value: &str) {
     }
 }
 
+fn emit_unsupported_css_top_n_summary_if_updated(path: &str, top_n: usize) {
+    let rows = SQLITE_CONNECTIONS.with(|connections| {
+        let mut connections = connections.borrow_mut();
+        let Some(conn) = connections.get_mut(path) else {
+            return Ok(Vec::new());
+        };
+        query_unsupported_css_top_n(conn, top_n)
+    });
+    let Ok(rows) = rows else {
+        if let Err(error) = rows {
+            log_sqlite_error(&error);
+        }
+        return;
+    };
+    if rows.is_empty() {
+        return;
+    }
+
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    path.hash(&mut hasher);
+    top_n.hash(&mut hasher);
+    for (property, value, occurrences) in &rows {
+        property.hash(&mut hasher);
+        value.hash(&mut hasher);
+        occurrences.hash(&mut hasher);
+    }
+    let digest = hasher.finish();
+    let key = format!("{path}#{top_n}");
+    let map = UNSUPPORTED_CSS_TOP_N_LAST_DIGEST.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut map = map
+        .lock()
+        .expect("unsupported css top-n digest lock poisoned");
+    if map.get(&key).copied() == Some(digest) {
+        return;
+    }
+    map.insert(key, digest);
+
+    eprintln!(
+        "[omoikane][unsupported-css][top-n] top {top_n} candidates (site/url anonymized)"
+    );
+    for (index, (property, value, occurrences)) in rows.iter().enumerate() {
+        let value = truncate_log_value(value, MAX_UNSUPPORTED_LOG_VALUE_LEN);
+        eprintln!(
+            "[omoikane][unsupported-css][top-n] {}. {}={} (count={})",
+            index + 1,
+            property,
+            value,
+            occurrences
+        );
+    }
+}
+
+fn query_unsupported_css_top_n(
+    conn: &Connection,
+    top_n: usize,
+) -> Result<Vec<(String, String, i64)>, rusqlite::Error> {
+    let limit = i64::try_from(top_n).unwrap_or(i64::MAX);
+    let mut stmt = conn.prepare(
+        "SELECT property, value, occurrences
+         FROM unsupported_css_log
+         ORDER BY occurrences DESC, property ASC, value ASC
+         LIMIT ?1",
+    )?;
+    stmt.query_map(params![limit], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, i64>(2)?,
+        ))
+    })?
+    .collect::<Result<Vec<_>, _>>()
+}
+
 fn configure_sqlite_connection(conn: &mut Connection) -> Result<(), rusqlite::Error> {
     conn.busy_timeout(Duration::from_millis(5000))?;
     conn.execute_batch(
@@ -442,6 +532,45 @@ fn unsupported_css_dedup_key(property: &str, value: &str) -> String {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     value.hash(&mut hasher);
     format!("{property}#{}#{}", value.len(), hasher.finish())
+}
+
+fn sanitize_unsupported_css_log_value(value: &str) -> String {
+    const URL_PREFIXES: [&str; 6] = ["http://", "https://", "ws://", "wss://", "ftp://", "data:"];
+    let mut out = String::with_capacity(value.len());
+    let mut cursor = 0usize;
+
+    while cursor < value.len() {
+        let tail = &value[cursor..];
+        let mut matched_prefix = false;
+        for prefix in URL_PREFIXES {
+            if tail.len() >= prefix.len() && tail[..prefix.len()].eq_ignore_ascii_case(prefix) {
+                matched_prefix = true;
+                out.push_str("[redacted-url]");
+                let mut consumed = 0usize;
+                for (offset, ch) in tail.char_indices() {
+                    if offset > 0 && is_url_terminator(ch) {
+                        break;
+                    }
+                    consumed = offset + ch.len_utf8();
+                }
+                cursor += consumed.max(prefix.len());
+                break;
+            }
+        }
+        if matched_prefix {
+            continue;
+        }
+
+        let ch = tail.chars().next().expect("tail must have at least one char");
+        out.push(ch);
+        cursor += ch.len_utf8();
+    }
+
+    out
+}
+
+fn is_url_terminator(ch: char) -> bool {
+    ch.is_ascii_whitespace() || matches!(ch, '"' | '\'' | ')' | '(' | '<' | '>')
 }
 
 fn truncate_log_value(value: &str, max_len: usize) -> String {
@@ -953,6 +1082,45 @@ mod tests {
         drop(conn);
         close_sqlite_connection_for_path(&db_path_str);
         let _ = fs::remove_file(db_path);
+    }
+
+    #[test]
+    fn sqlite_top_n_query_orders_by_occurrences() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let db_path = std::env::temp_dir().join(format!("omoikane-unsupported-css-topn-{unique}.db"));
+        let db_path_str = db_path.to_string_lossy().to_string();
+
+        persist_unsupported_css_to_sqlite(&db_path_str, "transform", "translateX(10px)");
+        persist_unsupported_css_to_sqlite(&db_path_str, "transform", "translateX(10px)");
+        persist_unsupported_css_to_sqlite(&db_path_str, "filter", "blur(4px)");
+        persist_unsupported_css_to_sqlite(&db_path_str, "backdrop-filter", "blur(4px)");
+        persist_unsupported_css_to_sqlite(&db_path_str, "backdrop-filter", "blur(4px)");
+        persist_unsupported_css_to_sqlite(&db_path_str, "backdrop-filter", "blur(4px)");
+
+        let conn = Connection::open(&db_path_str).unwrap();
+        let rows = query_unsupported_css_top_n(&conn, 2).unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].0, "backdrop-filter");
+        assert_eq!(rows[0].2, 3);
+        assert_eq!(rows[1].0, "transform");
+        assert_eq!(rows[1].2, 2);
+
+        drop(conn);
+        close_sqlite_connection_for_path(&db_path_str);
+        let _ = fs::remove_file(db_path);
+    }
+
+    #[test]
+    fn sanitizes_url_like_values_in_unsupported_css_logging() {
+        let value = "url(\"https://example.com/a?x=1\") blur(4px) data:image/png;base64,AAAABBBB";
+        let sanitized = sanitize_unsupported_css_log_value(value);
+        assert!(!sanitized.contains("example.com"));
+        assert!(!sanitized.contains("data:image"));
+        assert!(!sanitized.contains("AAAABBBB"));
+        assert!(sanitized.contains("[redacted-url]"));
     }
 
     #[test]

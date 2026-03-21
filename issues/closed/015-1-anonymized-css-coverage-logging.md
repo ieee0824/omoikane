@@ -2,7 +2,7 @@
 number: 015-1
 slug: anonymized-css-coverage-logging
 parent: 015-anonymized-real-world-rendering-gap
-status: open
+status: closed
 ---
 
 # 未対応CSSプロパティ観測ログ
@@ -23,3 +23,14 @@ CSS解釈時に未対応プロパティ/値を収集する診断ログを追加�
 
 - 匿名化ページを1回レンダリングして、優先実装候補トップNを出力できる
 - サイト名/URLを含む情報がログに残らない
+
+## 実施結果
+
+- 未対応CSSログのSQLite集計基盤を活用し、`OMOIKANE_UNSUPPORTED_CSS_TOP_N` で上位N件を出力する経路を追加
+- `OMOIKANE_LOG_UNSUPPORTED_CSS_TOP_N=1` でも既定上位件数（20件）を出力できるよう対応
+- 未対応値ログに URL 匿名化を追加（`http(s)://`, `ws(s)://`, `ftp://`, `data:` を `[redacted-url]` に置換）
+- top-N 集計の順序検証テストと匿名化テストを追加
+
+## 検証
+
+- `cargo test css::style::` 通過
