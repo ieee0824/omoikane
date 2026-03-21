@@ -1737,6 +1737,7 @@ fn z_index(style: &ComputedStyle) -> i32 {
 
 fn apply_relative_offset(layout: &mut LayoutBox, style: &ComputedStyle) {
     if position_scheme(style) != PositionScheme::Relative {
+        apply_transform_offset(layout, style);
         return;
     }
 
@@ -1748,6 +1749,116 @@ fn apply_relative_offset(layout: &mut LayoutBox, style: &ComputedStyle) {
     if dx != 0.0 || dy != 0.0 {
         translate_layout_box(layout, dx, dy);
     }
+    apply_transform_offset(layout, style);
+}
+
+fn apply_transform_offset(layout: &mut LayoutBox, style: &ComputedStyle) {
+    let (dx, dy) = transform_translate_offset(style);
+    if dx != 0.0 || dy != 0.0 {
+        translate_layout_box(layout, dx, dy);
+    }
+}
+
+fn transform_translate_offset(style: &ComputedStyle) -> (f32, f32) {
+    let value = match style.get("transform") {
+        Some(ComputedValue::Keyword(keyword)) => keyword.as_str(),
+        Some(ComputedValue::String(value)) => value.as_str(),
+        _ => return (0.0, 0.0),
+    };
+    let value = value.trim();
+    if value.is_empty() || value.eq_ignore_ascii_case("none") {
+        return (0.0, 0.0);
+    }
+
+    let mut dx = 0.0;
+    let mut dy = 0.0;
+    let mut cursor = 0usize;
+    while cursor < value.len() {
+        let tail = &value[cursor..];
+        let Some(open_rel) = tail.find('(') else {
+            break;
+        };
+        let name = tail[..open_rel].trim();
+        let args_start = open_rel + 1;
+        let Some(close_rel) = tail[args_start..].find(')') else {
+            break;
+        };
+        let args = &tail[args_start..args_start + close_rel];
+        let (x, y) = parse_transform_translate_function(name, args);
+        dx += x;
+        dy += y;
+        cursor += args_start + close_rel + 1;
+    }
+
+    (dx, dy)
+}
+
+fn parse_transform_translate_function(name: &str, args: &str) -> (f32, f32) {
+    let name = name.trim();
+    let args = split_transform_args(args);
+    if name.eq_ignore_ascii_case("translatex") {
+        let dx = args
+            .first()
+            .and_then(|value| parse_transform_length(value))
+            .unwrap_or(0.0);
+        return (dx, 0.0);
+    }
+    if name.eq_ignore_ascii_case("translatey") {
+        let dy = args
+            .first()
+            .and_then(|value| parse_transform_length(value))
+            .unwrap_or(0.0);
+        return (0.0, dy);
+    }
+    if name.eq_ignore_ascii_case("translate") || name.eq_ignore_ascii_case("translate3d") {
+        let dx = args
+            .first()
+            .and_then(|value| parse_transform_length(value))
+            .unwrap_or(0.0);
+        let dy = args
+            .get(1)
+            .and_then(|value| parse_transform_length(value))
+            .unwrap_or(0.0);
+        return (dx, dy);
+    }
+    if name.eq_ignore_ascii_case("matrix") {
+        let tx = args
+            .get(4)
+            .and_then(|value| parse_transform_length(value))
+            .unwrap_or(0.0);
+        let ty = args
+            .get(5)
+            .and_then(|value| parse_transform_length(value))
+            .unwrap_or(0.0);
+        return (tx, ty);
+    }
+    (0.0, 0.0)
+}
+
+fn split_transform_args(args: &str) -> Vec<&str> {
+    let comma_separated = args
+        .split(',')
+        .map(str::trim)
+        .filter(|token| !token.is_empty())
+        .collect::<Vec<_>>();
+    if comma_separated.len() > 1 {
+        return comma_separated;
+    }
+    args.split_whitespace()
+        .map(str::trim)
+        .filter(|token| !token.is_empty())
+        .collect()
+}
+
+fn parse_transform_length(token: &str) -> Option<f32> {
+    let token = token.trim();
+    if token.is_empty() {
+        return None;
+    }
+    if let Some(px) = token.strip_suffix("px") {
+        return px.trim().parse::<f32>().ok();
+    }
+    token.parse::<f32>().ok()
 }
 
 fn layout_positioned_child(
@@ -3071,12 +3182,15 @@ fn visibility(style: &ComputedStyle) -> Visibility {
 }
 
 fn overflow(style: &ComputedStyle) -> Overflow {
-    match style.get("overflow") {
-        Some(ComputedValue::Keyword(keyword)) if keyword.eq_ignore_ascii_case("hidden") => {
-            Overflow::Hidden
+    for property in ["overflow", "overflow-x", "overflow-y"] {
+        if matches!(
+            style.get(property),
+            Some(ComputedValue::Keyword(keyword)) if keyword.eq_ignore_ascii_case("hidden")
+        ) {
+            return Overflow::Hidden;
         }
-        _ => Overflow::Visible,
     }
+    Overflow::Visible
 }
 
 #[cfg(test)]

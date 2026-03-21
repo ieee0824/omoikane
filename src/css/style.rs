@@ -635,12 +635,15 @@ fn is_supported_property(name: &str) -> bool {
             | "min-height"
             | "min-width"
             | "overflow"
+            | "overflow-x"
+            | "overflow-y"
             | "padding-bottom"
             | "padding-left"
             | "padding-right"
             | "padding-top"
             | "position"
             | "right"
+            | "transform"
             | "text-align"
             | "top"
             | "vertical-align"
@@ -993,7 +996,7 @@ mod tests {
     fn identifies_supported_property_names() {
         assert!(is_supported_property("background-color"));
         assert!(is_supported_property("position"));
-        assert!(!is_supported_property("transform"));
+        assert!(is_supported_property("transform"));
         assert!(!is_supported_property("filter"));
     }
 
