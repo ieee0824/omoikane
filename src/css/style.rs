@@ -4,6 +4,7 @@ use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::sync::{Mutex, OnceLock};
+use std::time::Duration;
 
 use crate::dom::{Node, NodeHandle, NodeType};
 use rusqlite::{Connection, params};
@@ -65,12 +66,20 @@ pub struct StyleResolver {
 }
 
 static UNSUPPORTED_CSS_LOGGED: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+static UNSUPPORTED_CSS_CONFIG: OnceLock<UnsupportedCssConfig> = OnceLock::new();
 static SQLITE_LOG_ERRORS: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
 const MAX_UNSUPPORTED_LOG_KEYS: usize = 4096;
 const MAX_UNSUPPORTED_LOG_VALUE_LEN: usize = 256;
+const MAX_SQLITE_LOG_ERRORS: usize = 1024;
 
 thread_local! {
     static SQLITE_CONNECTIONS: RefCell<HashMap<String, Connection>> = RefCell::new(HashMap::new());
+}
+
+#[derive(Debug, Clone)]
+struct UnsupportedCssConfig {
+    logging_enabled: bool,
+    sqlite_path: Option<String>,
 }
 
 impl StyleResolver {
@@ -303,17 +312,21 @@ fn cascade_rank(candidate: &Candidate) -> (u8, u8) {
 }
 
 fn log_unsupported_css_if_enabled(property: &str, value: &Value) {
-    let sqlite_path = unsupported_css_sqlite_path();
     if should_ignore_unsupported_css_logging(property) || is_supported_property(property) {
         return;
     }
 
+    let config = unsupported_css_config();
+    if !config.logging_enabled && config.sqlite_path.is_none() {
+        return;
+    }
+
     let rendered_value = render_value(value);
-    if let Some(path) = sqlite_path.as_deref() {
+    if let Some(path) = config.sqlite_path.as_deref() {
         persist_unsupported_css_to_sqlite(path, property, &rendered_value);
     }
 
-    if unsupported_css_logging_enabled() {
+    if config.logging_enabled {
         let key = unsupported_css_dedup_key(property, &rendered_value);
         let logged = UNSUPPORTED_CSS_LOGGED.get_or_init(|| Mutex::new(HashSet::new()));
         let mut logged = logged.lock().expect("unsupported css log lock poisoned");
@@ -327,20 +340,23 @@ fn log_unsupported_css_if_enabled(property: &str, value: &Value) {
     }
 }
 
-fn unsupported_css_logging_enabled() -> bool {
-    std::env::var("OMOIKANE_LOG_UNSUPPORTED_CSS")
+fn unsupported_css_config() -> &'static UnsupportedCssConfig {
+    UNSUPPORTED_CSS_CONFIG.get_or_init(|| UnsupportedCssConfig {
+        logging_enabled: env_flag_true("OMOIKANE_LOG_UNSUPPORTED_CSS"),
+        sqlite_path: std::env::var("OMOIKANE_UNSUPPORTED_CSS_SQLITE")
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty()),
+    })
+}
+
+fn env_flag_true(name: &str) -> bool {
+    std::env::var(name)
         .map(|value| {
             let value = value.trim();
             value == "1" || value.eq_ignore_ascii_case("true") || value.eq_ignore_ascii_case("yes")
         })
         .unwrap_or(false)
-}
-
-fn unsupported_css_sqlite_path() -> Option<String> {
-    std::env::var("OMOIKANE_UNSUPPORTED_CSS_SQLITE")
-        .ok()
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
 }
 
 fn ensure_unsupported_css_sqlite_schema(conn: &Connection) -> Result<(), rusqlite::Error> {
@@ -363,7 +379,8 @@ fn persist_unsupported_css_to_sqlite(path: &str, property: &str, value: &str) {
     let result: Result<(), rusqlite::Error> = SQLITE_CONNECTIONS.with(|connections| {
         let mut connections = connections.borrow_mut();
         if !connections.contains_key(path) {
-            let conn = Connection::open(path)?;
+            let mut conn = Connection::open(path)?;
+            configure_sqlite_connection(&mut conn)?;
             ensure_unsupported_css_sqlite_schema(&conn)?;
             connections.insert(path.to_string(), conn);
         }
@@ -387,13 +404,34 @@ fn persist_unsupported_css_to_sqlite(path: &str, property: &str, value: &str) {
     }
 }
 
+fn configure_sqlite_connection(conn: &mut Connection) -> Result<(), rusqlite::Error> {
+    conn.busy_timeout(Duration::from_millis(5000))?;
+    conn.execute_batch(
+        "PRAGMA journal_mode=WAL;
+         PRAGMA synchronous=NORMAL;",
+    )?;
+    Ok(())
+}
+
+#[cfg(test)]
+fn close_sqlite_connection_for_path(path: &str) {
+    SQLITE_CONNECTIONS.with(|connections| {
+        connections.borrow_mut().remove(path);
+    });
+}
+
 fn log_sqlite_error(error: &rusqlite::Error) {
     let error_key = format!("{error}");
     let errors = SQLITE_LOG_ERRORS.get_or_init(|| Mutex::new(HashSet::new()));
     let mut errors = errors.lock().expect("sqlite css log error lock poisoned");
-    if errors.insert(error_key.clone()) {
-        eprintln!("[omoikane][unsupported-css][sqlite-error] {error_key}");
+    if errors.contains(&error_key) {
+        return;
     }
+    if errors.len() >= MAX_SQLITE_LOG_ERRORS {
+        return;
+    }
+    errors.insert(error_key.clone());
+    eprintln!("[omoikane][unsupported-css][sqlite-error] {error_key}");
 }
 
 fn should_ignore_unsupported_css_logging(property: &str) -> bool {
@@ -565,6 +603,20 @@ fn apply_presentational_hints(
             .and_then(|value| parse_legacy_color_hint(value))
         {
             properties.insert("background-color".to_string(), ComputedValue::Color(background));
+        }
+    }
+
+    if !properties.contains_key("background-image") {
+        if let Some(background) = attributes
+            .get("background")
+            .map(|value| value.trim())
+            .filter(|value| !value.is_empty())
+        {
+            let escaped = background.replace('\\', "\\\\").replace('"', "\\\"");
+            properties.insert(
+                "background-image".to_string(),
+                ComputedValue::Keyword(format!("url(\"{escaped}\")")),
+            );
         }
     }
 
@@ -825,6 +877,7 @@ mod tests {
         cell.set_attribute("bgcolor", "336699");
         cell.set_attribute("align", "center");
         body.set_attribute("text", "#112233");
+        body.set_attribute("background", "legacy/wallpaper.png");
         document.append_child(html.clone());
         html.append_child(body.clone());
         body.append_child(cell.clone());
@@ -836,6 +889,12 @@ mod tests {
         assert_eq!(
             body_style.get("color"),
             Some(&ComputedValue::Color("#112233".to_string()))
+        );
+        assert_eq!(
+            body_style.get("background-image"),
+            Some(&ComputedValue::Keyword(
+                "url(\"legacy/wallpaper.png\")".to_string()
+            ))
         );
         assert_eq!(
             cell_style.get("background-color"),
@@ -892,6 +951,7 @@ mod tests {
 
         drop(stmt);
         drop(conn);
+        close_sqlite_connection_for_path(&db_path_str);
         let _ = fs::remove_file(db_path);
     }
 

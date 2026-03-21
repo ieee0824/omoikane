@@ -8,7 +8,7 @@ use serde_json::{Value, json};
 use sha1::{Digest, Sha1};
 
 use crate::dom::{Node, NodeHandle, NodeType};
-use crate::html::TreeBuilder;
+use crate::html::{TreeBuilder, decode_html_response};
 use crate::http::Client;
 use crate::js::JsRuntime;
 
@@ -611,6 +611,10 @@ impl CdpSession {
         self.http_client.set_user_agent(user_agent);
     }
 
+    pub(crate) fn http_client_mut(&mut self) -> &mut Client {
+        &mut self.http_client
+    }
+
     fn page_navigate(&mut self, params: &Value) -> Result<Value, JsonRpcError> {
         let url = require_string(params, "url")?;
         let loader_id = self.next_loader_id.to_string();
@@ -866,10 +870,7 @@ impl CdpSession {
             .http_client
             .get(url)
             .map_err(|error| error.to_string())?;
-        Ok((
-            String::from_utf8_lossy(response.body()).to_string(),
-            response.status_code(),
-        ))
+        Ok((decode_html_response(&response), response.status_code()))
     }
 
     fn install_document(&mut self, url: &str, html: &str) -> Result<(), String> {

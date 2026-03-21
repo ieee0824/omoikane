@@ -386,11 +386,11 @@ pub fn render_document_with_url(
     for stylesheet in extract_author_stylesheets(document, base_url)? {
         resolver.add_stylesheet(Origin::Author, parse_stylesheet_forgiving(&stylesheet)?);
     }
-    let layout = crate::layout::with_image_base_url(effective_base, || {
-        crate::layout::layout_tree(document, &mut resolver, viewport)
+    crate::layout::with_image_base_url(effective_base, || {
+        let layout = crate::layout::layout_tree(document, &mut resolver, viewport)?;
+        Some(paint_layout(&layout, &mut resolver, viewport))
     })
-    .ok_or(PaintError::InvalidImageBuffer)?;
-    Ok(paint_layout(&layout, &mut resolver, viewport))
+    .ok_or(PaintError::InvalidImageBuffer)
 }
 
 /// Encodes the rendered document directly as PNG.
@@ -1346,13 +1346,21 @@ fn parse_background_image_value(value: &str) -> Option<Image> {
         .trim_end_matches("\\\"")
         .trim_start_matches("\\'")
         .trim_end_matches("\\'");
-    let data_uri = parse_data_uri(url).ok()?;
-    match data_uri {
-        DataUri::Binary { mime_type, data } if mime_type.eq_ignore_ascii_case("image/png") => {
-            Image::decode_png(&data).ok()
+    crate::layout::decode_or_fetch_image_asset(url).or_else(|| {
+        let data_uri = parse_data_uri(url).ok()?;
+        match data_uri {
+            DataUri::Binary { mime_type, data } if mime_type.eq_ignore_ascii_case("image/png") => {
+                Image::decode_png(&data).ok()
+            }
+            DataUri::Binary { mime_type, data }
+                if mime_type.eq_ignore_ascii_case("image/jpeg")
+                    || mime_type.eq_ignore_ascii_case("image/jpg") =>
+            {
+                Image::decode_jpeg(&data).ok()
+            }
+            _ => None,
         }
-        _ => None,
-    }
+    })
 }
 
 fn border_color(style: &ComputedStyle) -> Option<Color> {

@@ -2493,6 +2493,10 @@ fn decode_or_fetch_image(url_like: &str) -> Option<Image> {
     fetch_image(&resolved)
 }
 
+pub(crate) fn decode_or_fetch_image_asset(url_like: &str) -> Option<Image> {
+    decode_or_fetch_image(url_like)
+}
+
 fn resolve_image_url(url_like: &str) -> Option<String> {
     if url_like.starts_with("http://") || url_like.starts_with("https://") {
         return Some(url_like.to_string());
