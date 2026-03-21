@@ -711,6 +711,7 @@ fn compute_value(value: &Value, property_name: &str, parent_font_size: f32) -> C
         Value::List(values) => {
             if property_name.eq_ignore_ascii_case("transform")
                 || property_name.eq_ignore_ascii_case("overflow")
+                || property_name.eq_ignore_ascii_case("font-family")
             {
                 return ComputedValue::Keyword(render_value(value));
             }
@@ -780,6 +781,43 @@ fn apply_presentational_hints(
             properties.insert("text-align".to_string(), ComputedValue::Keyword(align));
         }
     }
+
+    if !properties.contains_key("width") {
+        if let Some(width) = attributes
+            .get("width")
+            .and_then(|value| parse_legacy_dimension_hint(value))
+        {
+            properties.insert("width".to_string(), width);
+        }
+    }
+
+    if !properties.contains_key("height") {
+        if let Some(height) = attributes
+            .get("height")
+            .and_then(|value| parse_legacy_dimension_hint(value))
+        {
+            properties.insert("height".to_string(), height);
+        }
+    }
+
+    if !properties.contains_key("color") {
+        if let Some(color) = attributes
+            .get("color")
+            .and_then(|value| parse_legacy_color_hint(value))
+        {
+            properties.insert("color".to_string(), ComputedValue::Color(color));
+        }
+    }
+
+    if !properties.contains_key("font-family") {
+        if let Some(face) = attributes
+            .get("face")
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+        {
+            properties.insert("font-family".to_string(), ComputedValue::Keyword(face));
+        }
+    }
 }
 
 fn parse_legacy_color_hint(value: &str) -> Option<String> {
@@ -805,6 +843,26 @@ fn parse_legacy_color_hint(value: &str) -> Option<String> {
     }
 
     None
+}
+
+fn parse_legacy_dimension_hint(value: &str) -> Option<ComputedValue> {
+    let value = value.trim();
+    if value.is_empty() {
+        return None;
+    }
+
+    if let Some(percent) = value.strip_suffix('%').and_then(|v| v.trim().parse::<f32>().ok()) {
+        return Some(ComputedValue::Percentage(percent));
+    }
+
+    if let Some(px) = value.strip_suffix("px").and_then(|v| v.trim().parse::<f32>().ok()) {
+        return Some(ComputedValue::Px(px.max(0.0)));
+    }
+
+    value
+        .parse::<f32>()
+        .ok()
+        .map(|px| ComputedValue::Px(px.max(0.0)))
 }
 
 fn is_hex_color(value: &str) -> bool {
@@ -868,7 +926,13 @@ fn apply_inheritance(
         return;
     };
 
-    for inherited_name in ["color", "font-size", "line-height", "white-space"] {
+    for inherited_name in [
+        "color",
+        "font-family",
+        "font-size",
+        "line-height",
+        "white-space",
+    ] {
         if !properties.contains_key(inherited_name) {
             if let Some(value) = parent_style.get(inherited_name) {
                 properties.insert(inherited_name.to_string(), value.clone());
