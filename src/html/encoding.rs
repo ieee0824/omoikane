@@ -153,3 +153,38 @@ fn parse_html_attributes(tag: &str) -> Option<std::collections::BTreeMap<String,
     Some(attributes)
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use encoding_rs::SHIFT_JIS;
+
+    #[test]
+    fn decodes_html_response_using_content_type_charset() {
+        let (encoded, _, _) = SHIFT_JIS.encode("阿部寛");
+        let response = crate::http::HttpResponse::new(
+            200,
+            "OK",
+            vec![(
+                "Content-Type".to_string(),
+                "text/html; charset=Shift_JIS".to_string(),
+            )],
+            encoded.into_owned(),
+        );
+        let decoded = decode_html_response(&response);
+        assert_eq!(decoded, "阿部寛");
+    }
+
+    #[test]
+    fn detects_charset_from_meta_http_equiv_content_type() {
+        let html = br#"<html><head><meta http-equiv="Content-Type" content="text/html; charset=Shift_JIS"></head></html>"#;
+        let detected = detect_charset_from_html_meta(html);
+        assert_eq!(detected.as_deref(), Some("shift_jis"));
+    }
+
+    #[test]
+    fn detects_charset_from_meta_charset_attribute() {
+        let html = br#"<html><head><meta charset="EUC-JP"></head></html>"#;
+        let detected = detect_charset_from_html_meta(html);
+        assert_eq!(detected.as_deref(), Some("euc-jp"));
+    }
+}
