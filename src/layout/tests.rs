@@ -117,6 +117,63 @@ fn auto_margins_center_fixed_width_blocks() {
 }
 
 #[test]
+fn logical_auto_margins_center_fixed_width_blocks() {
+    let (_document, _html, body, _card) = sample_tree();
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet("div { width: 80px; margin-inline-start: auto; margin-inline-end: auto; }")
+            .unwrap(),
+    );
+
+    let layout = layout_tree(
+        &body,
+        &mut resolver,
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 200.0,
+            height: 0.0,
+        },
+    )
+    .unwrap();
+
+    let child = &layout.children[0];
+    assert_eq!(child.dimensions.margin.left, 60.0);
+    assert_eq!(child.dimensions.margin.right, 60.0);
+}
+
+#[test]
+fn logical_auto_margins_center_with_max_width() {
+    let (_document, _html, body, _card) = sample_tree();
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "div { max-width: 80px; margin-inline-start: auto; margin-inline-end: auto; }",
+        )
+        .unwrap(),
+    );
+
+    let layout = layout_tree(
+        &body,
+        &mut resolver,
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 200.0,
+            height: 0.0,
+        },
+    )
+    .unwrap();
+
+    let child = &layout.children[0];
+    assert_eq!(child.dimensions.content.width, 80.0);
+    assert_eq!(child.dimensions.margin.left, 60.0);
+    assert_eq!(child.dimensions.margin.right, 60.0);
+}
+
+#[test]
 fn omits_display_none_nodes() {
     let (_document, _html, body, _card) = sample_tree();
     let hidden = NodeHandle::element("aside");
@@ -1339,6 +1396,152 @@ fn aligns_flex_items_with_align_items_and_align_self() {
     let container_box = &layout.children[0];
     assert_eq!(container_box.children[0].dimensions.content.y, 0.0);
     assert_eq!(container_box.children[1].dimensions.content.y, 10.0);
+}
+
+#[test]
+fn flex_row_uses_intrinsic_width_for_auto_basis_items() {
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let container = NodeHandle::element("div");
+    let first = NodeHandle::element("a");
+    let second = NodeHandle::element("a");
+
+    first.append_child(NodeHandle::text("五里霧中"));
+    second.append_child(NodeHandle::text("blog"));
+    document.append_child(body.clone());
+    body.append_child(container.clone());
+    container.append_child(first);
+    container.append_child(second);
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "body { word-break: break-word; } \
+                 div { display: flex; width: 300px; justify-content: space-between; } \
+                 a { display: block; }",
+        )
+        .unwrap(),
+    );
+
+    let layout = layout_tree(
+        &body,
+        &mut resolver,
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 300.0,
+            height: 0.0,
+        },
+    )
+    .unwrap();
+
+    let container_box = &layout.children[0];
+    assert_eq!(container_box.children.len(), 2);
+    assert!(container_box.children[0].dimensions.content.width > 0.0);
+    assert!(container_box.children[1].dimensions.content.width > 0.0);
+    assert!(
+        container_box.children[1].dimensions.content.x
+            >= container_box.children[0].dimensions.content.x
+                + container_box.children[0].dimensions.content.width
+    );
+}
+
+#[test]
+fn nested_flex_container_keeps_menu_items_separated() {
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let nav = NodeHandle::element("nav");
+    let logo = NodeHandle::element("div");
+    let menu = NodeHandle::element("ul");
+    let item_a = NodeHandle::element("li");
+    let item_b = NodeHandle::element("li");
+    let item_c = NodeHandle::element("li");
+
+    logo.append_child(NodeHandle::text("logo"));
+    item_a.append_child(NodeHandle::text("top"));
+    item_b.append_child(NodeHandle::text("blog"));
+    item_c.append_child(NodeHandle::text("tags"));
+    menu.append_child(item_a);
+    menu.append_child(item_b);
+    menu.append_child(item_c);
+    nav.append_child(logo);
+    nav.append_child(menu);
+    document.append_child(body.clone());
+    body.append_child(nav.clone());
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "nav { display: flex; width: 600px; justify-content: space-between; } \
+             ul { display: flex; } \
+             body { word-break: break-word; }",
+        )
+        .unwrap(),
+    );
+
+    let layout = layout_tree(
+        &body,
+        &mut resolver,
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 600.0,
+            height: 0.0,
+        },
+    )
+    .unwrap();
+
+    let nav_box = &layout.children[0];
+    assert_eq!(nav_box.children.len(), 2);
+    let menu_box = &nav_box.children[1];
+    assert_eq!(menu_box.children.len(), 3);
+    assert!(menu_box.children[1].dimensions.content.x > menu_box.children[0].dimensions.content.x);
+    assert!(menu_box.children[2].dimensions.content.x > menu_box.children[1].dimensions.content.x);
+}
+
+#[test]
+fn logical_margin_inline_start_offsets_flex_item() {
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let container = NodeHandle::element("div");
+    let first = NodeHandle::element("article");
+    let second = NodeHandle::element("article");
+
+    second.set_attribute("class", "spaced");
+    document.append_child(body.clone());
+    body.append_child(container.clone());
+    container.append_child(first);
+    container.append_child(second);
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "div { display: flex; width: 200px; } \
+                 article { width: 40px; height: 10px; } \
+                 .spaced { margin-inline-start: 20px; }",
+        )
+        .unwrap(),
+    );
+
+    let layout = layout_tree(
+        &body,
+        &mut resolver,
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 200.0,
+            height: 0.0,
+        },
+    )
+    .unwrap();
+
+    let container_box = &layout.children[0];
+    assert_eq!(container_box.children.len(), 2);
+    assert_eq!(container_box.children[0].dimensions.content.x, 0.0);
+    assert_eq!(container_box.children[1].dimensions.content.x, 60.0);
 }
 
 #[test]
