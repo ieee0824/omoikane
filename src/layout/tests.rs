@@ -221,6 +221,137 @@ fn keeps_visibility_hidden_boxes_in_layout() {
 }
 
 #[test]
+fn transform_translate_offsets_layout_box() {
+    let (_document, _html, body, _card) = sample_tree();
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet("div { width: 50px; height: 20px; transform: translate(10px, 6px); }")
+            .unwrap(),
+    );
+
+    let layout = layout_tree(
+        &body,
+        &mut resolver,
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 200.0,
+            height: 0.0,
+        },
+    )
+    .unwrap();
+
+    let child = &layout.children[0];
+    assert_eq!(child.dimensions.content.x, 10.0);
+    assert_eq!(child.dimensions.content.y, 6.0);
+}
+
+#[test]
+fn transform_translate_function_variants_and_matrix_accumulate_offsets() {
+    let (_document, _html, body, _card) = sample_tree();
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "div { width: 50px; height: 20px; transform: translateX(10px) translateY(6px) translate3d(4px, 5px, 0) matrix(1, 0, 0, 1, 3, 2); }",
+        )
+        .unwrap(),
+    );
+
+    let layout = layout_tree(
+        &body,
+        &mut resolver,
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 200.0,
+            height: 0.0,
+        },
+    )
+    .unwrap();
+
+    let child = &layout.children[0];
+    assert_eq!(child.dimensions.content.x, 17.0);
+    assert_eq!(child.dimensions.content.y, 13.0);
+}
+
+#[test]
+fn overflow_axis_hidden_sets_hidden_overflow_state() {
+    let (_document, _html, body, _card) = sample_tree();
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet("div { overflow-x: hidden; width: 50px; height: 20px; }").unwrap(),
+    );
+
+    let layout = layout_tree(
+        &body,
+        &mut resolver,
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 200.0,
+            height: 0.0,
+        },
+    )
+    .unwrap();
+
+    let child = &layout.children[0];
+    assert_eq!(child.overflow, Overflow::Hidden);
+}
+
+#[test]
+fn overflow_y_hidden_sets_hidden_overflow_state() {
+    let (_document, _html, body, _card) = sample_tree();
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet("div { overflow-y: hidden; width: 50px; height: 20px; }").unwrap(),
+    );
+
+    let layout = layout_tree(
+        &body,
+        &mut resolver,
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 200.0,
+            height: 0.0,
+        },
+    )
+    .unwrap();
+
+    let child = &layout.children[0];
+    assert_eq!(child.overflow, Overflow::Hidden);
+}
+
+#[test]
+fn overflow_shorthand_two_values_marks_hidden_axis() {
+    let (_document, _html, body, _card) = sample_tree();
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet("div { overflow: visible hidden; width: 50px; height: 20px; }").unwrap(),
+    );
+
+    let layout = layout_tree(
+        &body,
+        &mut resolver,
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 200.0,
+            height: 0.0,
+        },
+    )
+    .unwrap();
+
+    let child = &layout.children[0];
+    assert_eq!(child.overflow, Overflow::Hidden);
+}
+
+#[test]
 fn collapses_vertical_margins_between_siblings() {
     let document = NodeHandle::document();
     let body = NodeHandle::element("body");
