@@ -37,3 +37,9 @@ CJK文字の表示改善により日本語の可読性は向上した一方で�
 - 混在テキスト行での不自然な行高/改行増加が抑制される
 - 既存レンダリング回帰テスト（Acid2系）が通過する
 - 同一テキストに対して layout/paint で実効フォント選択・文字幅計測の乖離が許容範囲内になる
+
+## 進捗メモ（2026-03-21）
+
+- layout 側の `measure_text_width` を単一 `sans-serif` 依存から複数候補フォント前提へ変更
+- 文字単位で CJK 優先選択を行う計測ロジックを追加し、paint 側方針と整合するよう調整
+- 実サイトAの確認用スクリーンショットを `tests/output/https-abehiroshi-la-coocan-jp.layout-paint-aligned.1366x900.actual.png` として出力

@@ -820,6 +820,7 @@ fn paint_text(
                             fragment.rect,
                             text,
                             font_size,
+                            fragment.metrics.ascent,
                             &fonts,
                             color,
                             clip,
@@ -853,14 +854,13 @@ fn paint_text_with_font(
     rect: Rect,
     text: &str,
     font_size: f32,
+    layout_ascent: f32,
     fonts: &[Font],
     color: Color,
     clip: Option<Rect>,
 ) {
-    let primary_font = &fonts[0];
-    let metrics = primary_font.metrics().at_size(font_size);
-    // Baseline is at rect.y + ascender (ascender is positive, descender is negative)
-    let baseline_y = rect.y + metrics.ascender;
+    // Align paint baseline with layout's line-box baseline model to avoid vertical drift.
+    let baseline_y = rect.y + layout_ascent;
     let mut cursor_x = rect.x;
     let mut previous_char: Option<(char, usize)> = None;
 
