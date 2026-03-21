@@ -247,11 +247,11 @@ impl Builder {
                     }
                     "head" => {}
                     "body" => {
-                        if self.find_open_element("body").is_none() {
+                        if let Some(body) = self.find_open_element("body") {
+                            self.merge_missing_attributes(&body, &attributes);
+                        } else {
                             let body = self.insert_element_with_attributes("body", &attributes);
                             self.open_elements.push(body);
-                        } else if let Some(body) = self.find_open_element("body") {
-                            self.merge_missing_attributes(&body, &attributes);
                         }
                     }
                     "table" => {
