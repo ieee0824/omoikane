@@ -1006,14 +1006,14 @@ fn layout_table_container(
     let spacing = table_border_spacing(&style);
     let collapse_spacing = spacing * 2.0;
     let mut entries = collect_table_entries(node, resolver);
-    let column_count = entries
-        .iter()
-        .map(table_row_column_span_count)
-        .max()
-        .unwrap_or(0)
-        .max(1);
-    let column_width =
-        ((width - spacing * (column_count as f32 + 1.0)).max(0.0)) / column_count as f32;
+    let column_count = table_column_count(&entries);
+    let total_spacing = spacing * (column_count as f32 + 1.0);
+    let column_widths = compute_table_column_widths(
+        &entries,
+        resolver,
+        column_count,
+        (width - total_spacing).max(0.0),
+    );
     let inner_width = (width - collapse_spacing).max(0.0);
 
     let mut children = Vec::new();
@@ -1036,7 +1036,7 @@ fn layout_table_container(
             row_y,
             column_count,
             &mut occupied_columns,
-            column_width,
+            &column_widths,
             spacing,
             viewport,
         )?;
@@ -1188,6 +1188,21 @@ fn collect_row_cells(row: &NodeHandle, resolver: &mut StyleResolver) -> Vec<Node
         .collect()
 }
 
+fn spanned_cell_width(column_widths: &[f32], start: usize, span: usize, spacing: f32) -> f32 {
+    let end = (start + span).min(column_widths.len());
+    let content: f32 = column_widths[start..end].iter().sum();
+    let gaps = span.saturating_sub(1) as f32 * spacing;
+    content + gaps
+}
+
+fn column_x_offset(column_widths: &[f32], column: usize, spacing: f32) -> f32 {
+    let mut offset = 0.0;
+    for i in 0..column.min(column_widths.len()) {
+        offset += column_widths[i] + spacing;
+    }
+    offset
+}
+
 fn layout_table_row_entry(
     entry: &TableRowEntry,
     resolver: &mut StyleResolver,
@@ -1195,7 +1210,7 @@ fn layout_table_row_entry(
     y: f32,
     column_count: usize,
     occupied_columns: &mut [usize],
-    column_width: f32,
+    column_widths: &[f32],
     spacing: f32,
     viewport: Rect,
 ) -> Option<(LayoutBox, f32)> {
@@ -1219,25 +1234,25 @@ fn layout_table_row_entry(
         let rowspan = html_table_span_attribute(cell, "rowspan")
             .unwrap_or(1)
             .max(1);
+        let cell_width = spanned_cell_width(column_widths, column_cursor, span, spacing);
         let cell_containing = Rect {
             x: 0.0,
             y: 0.0,
-            width: column_width * span as f32 + spacing * span.saturating_sub(1) as f32,
+            width: cell_width,
             height: 0.0,
         };
         let mut layout_cell = layout_node(cell, resolver, cell_containing, viewport, None)?;
         let cell_style = resolver.computed_style(cell);
         let cell_height =
             explicit_length(&cell_style, "height").unwrap_or(layout_cell.total_height());
-        layout_cell.dimensions.content.width =
-            column_width * span as f32 + spacing * span.saturating_sub(1) as f32;
+        layout_cell.dimensions.content.width = cell_width;
         layout_cell.dimensions.content.height = cell_height;
         row_height = row_height.max(layout_cell.total_height());
         measured.push((column_cursor, span, layout_cell, cell_style));
         if rowspan > 1 {
             for column in column_cursor..column_cursor.saturating_add(span) {
                 if let Some(occupied) = occupied_columns.get_mut(column) {
-                    *occupied = (*occupied).max(rowspan.saturating_sub(1));
+                    *occupied = (*occupied).max(rowspan);
                 }
             }
         }
@@ -1246,7 +1261,7 @@ fn layout_table_row_entry(
 
     let mut children = Vec::new();
     for (column_start, _span, mut cell, cell_style) in measured {
-        let outer_x = x + column_start as f32 * (column_width + spacing);
+        let outer_x = x + column_x_offset(column_widths, column_start, spacing);
         let original_total_height = cell.total_height();
         let extra_height = (row_height - original_total_height).max(0.0);
         if extra_height > 0.0 {
@@ -1265,9 +1280,8 @@ fn layout_table_row_entry(
         children.push(cell);
     }
 
-    let used_columns = column_count;
-    let row_width =
-        used_columns as f32 * column_width + (used_columns.saturating_sub(1)) as f32 * spacing;
+    let row_width: f32 = column_widths.iter().sum::<f32>()
+        + column_count.saturating_sub(1) as f32 * spacing;
     let row_box = LayoutBox {
         node: entry.row_node.clone(),
         dimensions: BoxDimensions {
@@ -1289,12 +1303,151 @@ fn layout_table_row_entry(
     Some((row_box, row_height))
 }
 
-fn table_row_column_span_count(entry: &TableRowEntry) -> usize {
-    let mut columns = 0usize;
-    for cell in &entry.cells {
-        columns = columns.saturating_add(html_table_span_attribute(cell, "colspan").unwrap_or(1));
+fn table_column_count(entries: &[TableRowEntry]) -> usize {
+    let mut occupied_columns = Vec::<usize>::new();
+    let mut max_columns = 0usize;
+
+    for entry in entries {
+        for occupied in &mut occupied_columns {
+            if *occupied > 0 {
+                *occupied -= 1;
+            }
+        }
+
+        let mut column_cursor = 0usize;
+        for cell in &entry.cells {
+            while column_cursor < occupied_columns.len() && occupied_columns[column_cursor] > 0 {
+                column_cursor += 1;
+            }
+
+            let span = html_table_span_attribute(cell, "colspan")
+                .unwrap_or(1)
+                .max(1);
+            let rowspan = html_table_span_attribute(cell, "rowspan")
+                .unwrap_or(1)
+                .max(1);
+            let end = column_cursor.saturating_add(span);
+            if end > occupied_columns.len() {
+                occupied_columns.resize(end, 0);
+            }
+            if rowspan > 1 {
+                for occupied in &mut occupied_columns[column_cursor..end] {
+                    *occupied = (*occupied).max(rowspan);
+                }
+            }
+            column_cursor = end;
+        }
+
+        max_columns = max_columns.max(column_cursor.max(occupied_columns.len()));
     }
-    columns.max(1)
+
+    max_columns.max(1)
+}
+
+fn compute_table_column_widths(
+    entries: &[TableRowEntry],
+    resolver: &mut StyleResolver,
+    column_count: usize,
+    available_width: f32,
+) -> Vec<f32> {
+    let mut column_hints = vec![0.0f32; column_count];
+
+    // Single pass: scan all rows with rowspan tracking to collect hints and explicit flags
+    let mut explicit_flags = vec![false; column_count];
+    let mut occupied_columns = vec![0usize; column_count];
+    for entry in entries {
+        for occupied in &mut occupied_columns {
+            if *occupied > 0 {
+                *occupied -= 1;
+            }
+        }
+        let mut col = 0usize;
+        for cell in &entry.cells {
+            while col < column_count && occupied_columns[col] > 0 {
+                col += 1;
+            }
+            if col >= column_count {
+                break;
+            }
+            let span = html_table_span_attribute(cell, "colspan")
+                .unwrap_or(1)
+                .max(1);
+            let rowspan = html_table_span_attribute(cell, "rowspan")
+                .unwrap_or(1)
+                .max(1);
+            let end = (col + span).min(column_count);
+            if span == 1 {
+                let cell_style = resolver.computed_style(cell);
+                if let Some(w) = explicit_length(&cell_style, "width") {
+                    column_hints[col] = column_hints[col].max(w);
+                    explicit_flags[col] = true;
+                } else {
+                    let w = intrinsic_width(cell, resolver);
+                    column_hints[col] = column_hints[col].max(w);
+                }
+            }
+            if rowspan > 1 {
+                for occupied in &mut occupied_columns[col..end] {
+                    *occupied = (*occupied).max(rowspan);
+                }
+            }
+            col = end;
+        }
+    }
+
+    let fixed_total: f32 = column_hints
+        .iter()
+        .zip(explicit_flags.iter())
+        .filter(|&(_, &is_explicit)| is_explicit)
+        .map(|(&w, _)| w)
+        .sum();
+    let auto_hints: Vec<(usize, f32)> = column_hints
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| !explicit_flags[*i])
+        .map(|(i, &w)| (i, w))
+        .collect();
+    let auto_hint_total: f32 = auto_hints.iter().map(|(_, w)| w).sum();
+    let auto_count = auto_hints.len();
+
+    let remaining = (available_width - fixed_total).max(0.0);
+
+    // Distribute remaining width among auto columns:
+    // Each auto column gets at least its intrinsic hint, then leftover is split equally
+    let mut widths = column_hints.clone();
+    if auto_count > 0 {
+        if auto_hint_total <= remaining {
+            let leftover = remaining - auto_hint_total;
+            let equal_extra = leftover / auto_count as f32;
+            for &(i, hint) in &auto_hints {
+                widths[i] = hint + equal_extra;
+            }
+        } else if auto_hint_total > 0.0 {
+            for &(i, hint) in &auto_hints {
+                widths[i] = remaining * (hint / auto_hint_total);
+            }
+        } else {
+            let equal = remaining / auto_count as f32;
+            for &(i, _) in &auto_hints {
+                widths[i] = equal;
+            }
+        }
+    }
+
+    // If auto columns pushed total over available, scale only auto columns down
+    let total: f32 = widths.iter().sum();
+    if total > available_width && total > 0.0 {
+        let auto_total: f32 = auto_hints.iter().map(|&(i, _)| widths[i]).sum();
+        let target_auto = (available_width - fixed_total).max(0.0);
+        if auto_total > 0.0 {
+            let scale = target_auto / auto_total;
+            for &(i, _) in &auto_hints {
+                widths[i] *= scale;
+            }
+        }
+    }
+
+    widths
 }
 
 fn html_table_span_attribute(node: &NodeHandle, name: &str) -> Option<usize> {

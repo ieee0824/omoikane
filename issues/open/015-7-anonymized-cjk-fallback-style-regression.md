@@ -55,3 +55,7 @@ CJK文字の表示改善により日本語の可読性は向上した一方で�
 - Flex コンテナで `gap` / `column-gap` / `row-gap` を解釈し、子要素間・折り返し行間に反映するよう修正
 - `justify-content` との併用時に fixed gap を先に確保して余剰スペース配分するよう補正し、メニュー間隔の過不足を縮小
 - 回帰防止として `layout::tests` に `column-gap` と `row-gap` の単体テストを追加し、既存 `layout::tests` 一式が通過
+- PR #25 レビュー対応として `gap: <row> <column>` shorthand を `row-gap` / `column-gap` に展開し、2値指定の取りこぼしを解消
+- `flex-direction: column` では main axis の利用可能サイズに `width` ではなく `height`（未指定時は内容高さ）を用いるよう補正し、`justify-content` と gap の縦方向配置を修正
+- `examples/screenshot.rs` で `out.png` のような親ディレクトリなし出力先でも失敗しないようにし、`src/css/style.rs` のインデントずれと `src/layout/mod.rs` の未使用 import も整理
+- 回帰防止として `css::style::style_tests` に 2値 `gap` 展開テスト、`layout::tests` に縦 flex + `justify-content` + gap のテストを追加

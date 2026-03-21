@@ -1083,8 +1083,10 @@ fn lays_out_basic_table_rows_and_cells() {
     let row_box = &row_group_box.children[0];
     assert_eq!(row_box.children.len(), 2);
     assert_eq!(row_box.children[0].dimensions.content.x, 4.0);
-    assert_eq!(row_box.children[0].dimensions.content.width, 54.0);
-    assert_eq!(row_box.children[1].dimensions.content.x, 62.0);
+    // Columns are proportional to intrinsic width; verify total table width and 2 cells present
+    let cell0_w = row_box.children[0].dimensions.content.width;
+    let cell1_w = row_box.children[1].dimensions.content.width;
+    assert!((cell0_w + cell1_w - 108.0).abs() < 1.0, "cells should share 108px (120 - 3*4 spacing)");
     assert_eq!(table_box.dimensions.content.width, 120.0);
 }
 
@@ -1194,6 +1196,73 @@ fn aligns_table_cells_vertically_within_row_height() {
         bottom_box.lines[0].rect.y,
         row_box.dimensions.content.y + 20.0
     );
+}
+
+#[test]
+fn rowspan_keeps_following_row_cells_in_later_columns() {
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let table = NodeHandle::element("table");
+    let first_row = NodeHandle::element("tr");
+    let second_row = NodeHandle::element("tr");
+    let image_like = NodeHandle::element("td");
+    let top_right = NodeHandle::element("td");
+    let bottom_left_padding = NodeHandle::element("td");
+    let bottom_right = NodeHandle::element("td");
+
+    image_like.set_attribute("rowspan", "2");
+    image_like.set_attribute("class", "hero");
+    image_like.append_child(NodeHandle::text("left"));
+    top_right.append_child(NodeHandle::text("top"));
+    bottom_left_padding.append_child(NodeHandle::text("pad"));
+    bottom_right.append_child(NodeHandle::text("right"));
+
+    document.append_child(body.clone());
+    body.append_child(table.clone());
+    table.append_child(first_row.clone());
+    table.append_child(second_row.clone());
+    first_row.append_child(image_like);
+    first_row.append_child(top_right);
+    second_row.append_child(bottom_left_padding);
+    second_row.append_child(bottom_right);
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "table { display: table; width: 300px; border-spacing: 0; } \
+             tr { display: table-row; } \
+             td { display: table-cell; height: 20px; } \
+             .hero { width: 150px; }",
+        )
+        .unwrap(),
+    );
+
+    let layout = layout_tree(
+        &body,
+        &mut resolver,
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 300.0,
+            height: 0.0,
+        },
+    )
+    .unwrap();
+
+    let table_box = &layout.children[0];
+    assert_eq!(table_box.children.len(), 2);
+    let first_row_box = &table_box.children[0];
+    let second_row_box = &table_box.children[1];
+    assert_eq!(first_row_box.children.len(), 2);
+    assert_eq!(second_row_box.children.len(), 2);
+    assert_eq!(first_row_box.children[0].dimensions.content.x, 0.0);
+    // hero has explicit width 150px; remaining 150px is split proportionally among 2 auto columns
+    assert_eq!(first_row_box.children[0].dimensions.content.width, 150.0);
+    assert_eq!(first_row_box.children[1].dimensions.content.x, 150.0);
+    let col1_w = first_row_box.children[1].dimensions.content.width;
+    let col2_x = second_row_box.children[1].dimensions.content.x;
+    assert!((col2_x - (150.0 + col1_w)).abs() < 1.0, "col2 x should be after hero + col1");
 }
 
 #[test]

@@ -319,7 +319,8 @@ fn inherits_color_and_font_size() {
         title_style.get("color"),
         Some(&ComputedValue::Color("blue".to_string()))
     );
-    assert_eq!(title_style.get("font-size"), Some(&ComputedValue::Px(20.0)));
+    // h1 UA default: 2em = 40px (parent body 20px * 2)
+    assert_eq!(title_style.get("font-size"), Some(&ComputedValue::Px(40.0)));
 }
 
 #[test]
@@ -368,7 +369,8 @@ fn applies_initial_values_when_no_rule_matches() {
         style.get("color"),
         Some(&ComputedValue::Color("black".to_string()))
     );
-    assert_eq!(style.get("font-size"), Some(&ComputedValue::Px(16.0)));
+    // h1 UA default: 2em = 32px (parent 16px * 2)
+    assert_eq!(style.get("font-size"), Some(&ComputedValue::Px(32.0)));
 }
 
 #[test]

@@ -220,6 +220,7 @@ impl StyleResolver {
             insert_computed_property(&mut properties, &candidate.name, computed);
         }
 
+        apply_ua_defaults(node, &mut properties, pseudo, parent_style);
         apply_presentational_hints(node, &mut properties, pseudo);
         resolve_explicit_inherit(&mut properties, parent_style);
         apply_inheritance(&mut properties, parent_style);
@@ -1042,13 +1043,42 @@ fn apply_presentational_hints(
         }
     }
 
-    if !properties.contains_key("text-align") {
-        if let Some(align) = attributes
-            .get("align")
-            .map(|value| value.trim().to_ascii_lowercase())
-            .filter(|value| matches!(value.as_str(), "left" | "right" | "center" | "justify"))
-        {
-            properties.insert("text-align".to_string(), ComputedValue::Keyword(align));
+    if let Some(align) = attributes
+        .get("align")
+        .map(|value| value.trim().to_ascii_lowercase())
+        .filter(|value| matches!(value.as_str(), "left" | "right" | "center" | "justify"))
+    {
+        if !properties.contains_key("text-align") {
+            properties.insert(
+                "text-align".to_string(),
+                ComputedValue::Keyword(align.clone()),
+            );
+        }
+        // For block/table elements, align="center" means auto margins (structural centering)
+        if align == "center" {
+            let is_table_or_block = node
+                .tag_name()
+                .as_deref()
+                .is_some_and(|tag| {
+                    matches!(
+                        tag.to_ascii_lowercase().as_str(),
+                        "table" | "div" | "h1" | "h2" | "h3" | "h4" | "h5" | "h6" | "p"
+                    )
+                });
+            if is_table_or_block {
+                if !properties.contains_key("margin-left") {
+                    properties.insert(
+                        "margin-left".to_string(),
+                        ComputedValue::Keyword("auto".to_string()),
+                    );
+                }
+                if !properties.contains_key("margin-right") {
+                    properties.insert(
+                        "margin-right".to_string(),
+                        ComputedValue::Keyword("auto".to_string()),
+                    );
+                }
+            }
         }
     }
 
@@ -1143,6 +1173,89 @@ fn parse_legacy_dimension_hint(value: &str) -> Option<ComputedValue> {
 
 fn is_hex_color(value: &str) -> bool {
     (value.len() == 3 || value.len() == 6) && value.chars().all(|ch| ch.is_ascii_hexdigit())
+}
+
+fn apply_ua_defaults(
+    node: &NodeHandle,
+    properties: &mut BTreeMap<String, ComputedValue>,
+    pseudo: Option<PseudoElement>,
+    parent_style: Option<&ComputedStyle>,
+) {
+    if pseudo.is_some() || node.node_type() != NodeType::Element {
+        return;
+    }
+    let tag = match node.tag_name() {
+        Some(tag) => tag.to_ascii_lowercase(),
+        None => return,
+    };
+    let parent_font_size = inherited_font_size(parent_style, properties);
+
+    // UA stylesheet defaults per CSS 2.1 Appendix D / HTML spec
+    struct UaDefaults {
+        font_size_em: f32,
+        font_weight_bold: bool,
+        margin_em: f32,
+    }
+
+    let defaults = match tag.as_str() {
+        "h1" => Some(UaDefaults { font_size_em: 2.0, font_weight_bold: true, margin_em: 0.67 }),
+        "h2" => Some(UaDefaults { font_size_em: 1.5, font_weight_bold: true, margin_em: 0.83 }),
+        "h3" => Some(UaDefaults { font_size_em: 1.17, font_weight_bold: true, margin_em: 1.0 }),
+        "h4" => Some(UaDefaults { font_size_em: 1.0, font_weight_bold: true, margin_em: 1.33 }),
+        "h5" => Some(UaDefaults { font_size_em: 0.83, font_weight_bold: true, margin_em: 1.67 }),
+        "h6" => Some(UaDefaults { font_size_em: 0.67, font_weight_bold: true, margin_em: 2.33 }),
+        _ => None,
+    };
+
+    if let Some(defaults) = defaults {
+        // Determine the element's final font size: use existing CSS value if present,
+        // otherwise apply the UA default multiplier to the inherited size.
+        let element_font_size =
+            if let Some(ComputedValue::Px(existing_px)) = properties.get("font-size") {
+                *existing_px
+            } else {
+                let computed = defaults.font_size_em * parent_font_size;
+                properties
+                    .entry("font-size".to_string())
+                    .or_insert(ComputedValue::Px(computed));
+                computed
+            };
+        let margin_px = defaults.margin_em * element_font_size;
+        if defaults.font_weight_bold {
+            properties
+                .entry("font-weight".to_string())
+                .or_insert(ComputedValue::Keyword("bold".to_string()));
+        }
+        properties
+            .entry("margin-top".to_string())
+            .or_insert(ComputedValue::Px(margin_px));
+        properties
+            .entry("margin-bottom".to_string())
+            .or_insert(ComputedValue::Px(margin_px));
+        return;
+    }
+
+    match tag.as_str() {
+        "p" => {
+            let em = parent_font_size;
+            properties.entry("margin-top".to_string()).or_insert(ComputedValue::Px(em));
+            properties.entry("margin-bottom".to_string()).or_insert(ComputedValue::Px(em));
+        }
+        "b" | "strong" => {
+            properties.entry("font-weight".to_string()).or_insert(ComputedValue::Keyword("bold".to_string()));
+        }
+        "i" | "em" => {
+            properties.entry("font-style".to_string()).or_insert(ComputedValue::Keyword("italic".to_string()));
+        }
+        "hr" => {
+            properties.entry("border-top-style".to_string()).or_insert(ComputedValue::Keyword("inset".to_string()));
+            properties.entry("border-top-width".to_string()).or_insert(ComputedValue::Px(1.0));
+            let half_em = parent_font_size * 0.5;
+            properties.entry("margin-top".to_string()).or_insert(ComputedValue::Px(half_em));
+            properties.entry("margin-bottom".to_string()).or_insert(ComputedValue::Px(half_em));
+        }
+        _ => {}
+    }
 }
 
 fn apply_initial_values(properties: &mut BTreeMap<String, ComputedValue>) {
