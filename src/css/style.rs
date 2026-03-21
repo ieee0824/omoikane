@@ -1208,11 +1208,19 @@ fn apply_ua_defaults(
     };
 
     if let Some(defaults) = defaults {
-        let font_size_px = defaults.font_size_em * parent_font_size;
-        let margin_px = defaults.margin_em * font_size_px;
-        properties
-            .entry("font-size".to_string())
-            .or_insert(ComputedValue::Px(font_size_px));
+        // Determine the element's final font size: use existing CSS value if present,
+        // otherwise apply the UA default multiplier to the inherited size.
+        let element_font_size =
+            if let Some(ComputedValue::Px(existing_px)) = properties.get("font-size") {
+                *existing_px
+            } else {
+                let computed = defaults.font_size_em * parent_font_size;
+                properties
+                    .entry("font-size".to_string())
+                    .or_insert(ComputedValue::Px(computed));
+                computed
+            };
+        let margin_px = defaults.margin_em * element_font_size;
         if defaults.font_weight_bold {
             properties
                 .entry("font-weight".to_string())

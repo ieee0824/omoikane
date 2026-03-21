@@ -1352,44 +1352,46 @@ fn compute_table_column_widths(
 ) -> Vec<f32> {
     let mut column_hints = vec![0.0f32; column_count];
 
-    // Scan all rows to find width hints per column (from colspan=1 cells only)
-    for entry in entries {
-        let mut col = 0usize;
-        for cell in &entry.cells {
-            if col >= column_count {
-                break;
-            }
-            let span = html_table_span_attribute(cell, "colspan")
-                .unwrap_or(1)
-                .max(1);
-            if span == 1 {
-                let cell_style = resolver.computed_style(cell);
-                let hint = explicit_length(&cell_style, "width")
-                    .unwrap_or_else(|| intrinsic_width(cell, resolver));
-                column_hints[col] = column_hints[col].max(hint);
-            }
-            col += span;
-        }
-    }
-
-    // Separate columns with explicit CSS width from auto columns
+    // Single pass: scan all rows with rowspan tracking to collect hints and explicit flags
     let mut explicit_flags = vec![false; column_count];
+    let mut occupied_columns = vec![0usize; column_count];
     for entry in entries {
+        for occupied in &mut occupied_columns {
+            if *occupied > 0 {
+                *occupied -= 1;
+            }
+        }
         let mut col = 0usize;
         for cell in &entry.cells {
+            while col < column_count && occupied_columns[col] > 0 {
+                col += 1;
+            }
             if col >= column_count {
                 break;
             }
             let span = html_table_span_attribute(cell, "colspan")
                 .unwrap_or(1)
                 .max(1);
+            let rowspan = html_table_span_attribute(cell, "rowspan")
+                .unwrap_or(1)
+                .max(1);
+            let end = (col + span).min(column_count);
             if span == 1 {
                 let cell_style = resolver.computed_style(cell);
-                if explicit_length(&cell_style, "width").is_some() {
+                if let Some(w) = explicit_length(&cell_style, "width") {
+                    column_hints[col] = column_hints[col].max(w);
                     explicit_flags[col] = true;
+                } else {
+                    let w = intrinsic_width(cell, resolver);
+                    column_hints[col] = column_hints[col].max(w);
                 }
             }
-            col += span;
+            if rowspan > 1 {
+                for occupied in &mut occupied_columns[col..end] {
+                    *occupied = (*occupied).max(rowspan);
+                }
+            }
+            col = end;
         }
     }
 
@@ -1415,33 +1417,33 @@ fn compute_table_column_widths(
     let mut widths = column_hints.clone();
     if auto_count > 0 {
         if auto_hint_total <= remaining {
-            // All hints fit; assign hints as minimums, split leftover equally
             let leftover = remaining - auto_hint_total;
             let equal_extra = leftover / auto_count as f32;
             for &(i, hint) in &auto_hints {
                 widths[i] = hint + equal_extra;
             }
+        } else if auto_hint_total > 0.0 {
+            for &(i, hint) in &auto_hints {
+                widths[i] = remaining * (hint / auto_hint_total);
+            }
         } else {
-            // Hints exceed remaining; scale down proportionally
-            if auto_hint_total > 0.0 {
-                for &(i, hint) in &auto_hints {
-                    widths[i] = remaining * (hint / auto_hint_total);
-                }
-            } else {
-                let equal = remaining / auto_count as f32;
-                for &(i, _) in &auto_hints {
-                    widths[i] = equal;
-                }
+            let equal = remaining / auto_count as f32;
+            for &(i, _) in &auto_hints {
+                widths[i] = equal;
             }
         }
     }
 
-    // If total exceeds available, scale down proportionally
+    // If auto columns pushed total over available, scale only auto columns down
     let total: f32 = widths.iter().sum();
     if total > available_width && total > 0.0 {
-        let scale = available_width / total;
-        for w in &mut widths {
-            *w *= scale;
+        let auto_total: f32 = auto_hints.iter().map(|&(i, _)| widths[i]).sum();
+        let target_auto = (available_width - fixed_total).max(0.0);
+        if auto_total > 0.0 {
+            let scale = target_auto / auto_total;
+            for &(i, _) in &auto_hints {
+                widths[i] *= scale;
+            }
         }
     }
 
