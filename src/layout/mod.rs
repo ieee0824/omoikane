@@ -1372,7 +1372,7 @@ fn compute_table_column_widths(
         }
     }
 
-    // Separate columns with explicit CSS width from those using intrinsic hints
+    // Separate columns with explicit CSS width from auto columns
     let mut explicit_flags = vec![false; column_count];
     for entry in entries {
         let mut col = 0usize;
@@ -1399,26 +1399,53 @@ fn compute_table_column_widths(
         .filter(|&(_, &is_explicit)| is_explicit)
         .map(|(&w, _)| w)
         .sum();
-    let auto_count = explicit_flags.iter().filter(|&&f| !f).count();
+    let auto_hints: Vec<(usize, f32)> = column_hints
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| !explicit_flags[*i])
+        .map(|(i, &w)| (i, w))
+        .collect();
+    let auto_hint_total: f32 = auto_hints.iter().map(|(_, w)| w).sum();
+    let auto_count = auto_hints.len();
 
-    if auto_count == 0 {
-        // All columns have explicit widths
-        let hint_total: f32 = column_hints.iter().sum();
-        if hint_total > 0.0 && hint_total > available_width {
-            let scale = available_width / hint_total;
-            return column_hints.iter().map(|w| w * scale).collect();
+    let remaining = (available_width - fixed_total).max(0.0);
+
+    // Distribute remaining width among auto columns:
+    // Each auto column gets at least its intrinsic hint, then leftover is split equally
+    let mut widths = column_hints.clone();
+    if auto_count > 0 {
+        if auto_hint_total <= remaining {
+            // All hints fit; assign hints as minimums, split leftover equally
+            let leftover = remaining - auto_hint_total;
+            let equal_extra = leftover / auto_count as f32;
+            for &(i, hint) in &auto_hints {
+                widths[i] = hint + equal_extra;
+            }
+        } else {
+            // Hints exceed remaining; scale down proportionally
+            if auto_hint_total > 0.0 {
+                for &(i, hint) in &auto_hints {
+                    widths[i] = remaining * (hint / auto_hint_total);
+                }
+            } else {
+                let equal = remaining / auto_count as f32;
+                for &(i, _) in &auto_hints {
+                    widths[i] = equal;
+                }
+            }
         }
-        return column_hints;
     }
 
-    // Distribute remaining width among auto columns
-    let remaining = (available_width - fixed_total).max(0.0);
-    let auto_equal = remaining / auto_count as f32;
-    column_hints
-        .iter()
-        .zip(explicit_flags.iter())
-        .map(|(&w, &is_explicit)| if is_explicit { w } else { auto_equal })
-        .collect()
+    // If total exceeds available, scale down proportionally
+    let total: f32 = widths.iter().sum();
+    if total > available_width && total > 0.0 {
+        let scale = available_width / total;
+        for w in &mut widths {
+            *w *= scale;
+        }
+    }
+
+    widths
 }
 
 fn html_table_span_attribute(node: &NodeHandle, name: &str) -> Option<usize> {
