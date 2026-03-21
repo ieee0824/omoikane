@@ -3185,12 +3185,18 @@ fn overflow(style: &ComputedStyle) -> Overflow {
     for property in ["overflow", "overflow-x", "overflow-y"] {
         if matches!(
             style.get(property),
-            Some(ComputedValue::Keyword(keyword)) if keyword.eq_ignore_ascii_case("hidden")
+            Some(ComputedValue::Keyword(keyword)) if overflow_keyword_sets_hidden(keyword)
         ) {
             return Overflow::Hidden;
         }
     }
     Overflow::Visible
+}
+
+fn overflow_keyword_sets_hidden(keyword: &str) -> bool {
+    keyword
+        .split(|ch: char| ch.is_ascii_whitespace() || ch == ',')
+        .any(|token| token.eq_ignore_ascii_case("hidden"))
 }
 
 #[cfg(test)]

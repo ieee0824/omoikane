@@ -36,6 +36,7 @@ status: open
 - [015-3 screenshot API の viewport 指定](../closed/015-3-ffi-screenshot-viewport-control.md)
 - [015-4 匿名化fixtureと差分比較基盤](./015-4-anonymized-fixture-diff-baseline.md)
 - [015-5 FFI境界の責務整理](../closed/015-5-ffi-boundary-refactor.md)
+- [015-6 CJK文字の描画品質ギャップ](./015-6-anonymized-cjk-font-rendering-gap.md)
 
 ## 受け入れ条件
 

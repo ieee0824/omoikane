@@ -709,6 +709,11 @@ fn compute_value(value: &Value, property_name: &str, parent_font_size: f32) -> C
         }
         Value::Function { .. } => ComputedValue::Keyword(render_value(value)),
         Value::List(values) => {
+            if property_name.eq_ignore_ascii_case("transform")
+                || property_name.eq_ignore_ascii_case("overflow")
+            {
+                return ComputedValue::Keyword(render_value(value));
+            }
             if let Some(first) = values.first() {
                 compute_value(first, property_name, parent_font_size)
             } else {
@@ -1036,6 +1041,24 @@ mod tests {
             cell_style.get("text-align"),
             Some(&ComputedValue::Keyword("center".to_string()))
         );
+    }
+
+    #[test]
+    fn keeps_transform_list_values_in_computed_style() {
+        let (_document, _body, title, _html) = sample_tree();
+        let mut resolver = StyleResolver::new();
+        resolver.add_stylesheet(
+            Origin::Author,
+            parse_stylesheet("h1 { transform: translateX(10px) translateY(6px); }").unwrap(),
+        );
+
+        let style = resolver.computed_style(&title);
+        let value = match style.get("transform") {
+            Some(ComputedValue::Keyword(value)) => value.to_ascii_lowercase(),
+            other => panic!("unexpected transform value: {other:?}"),
+        };
+        assert!(value.contains("translatex(10px)"));
+        assert!(value.contains("translatey(6px)"));
     }
 
     #[test]
