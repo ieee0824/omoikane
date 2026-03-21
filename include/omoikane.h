@@ -61,8 +61,8 @@ char *omoikane_screenshot_png(struct OmoikaneBrowser *browser);
  * Captures the current page rendering using an explicit viewport and returns a base64-encoded PNG string.
  */
 char *omoikane_screenshot_png_with_viewport(struct OmoikaneBrowser *browser,
-                                            int32_t width,
-                                            int32_t height);
+                                            uint32_t width,
+                                            uint32_t height);
 
 /**
  * Returns the last error message for the browser handle, if any.

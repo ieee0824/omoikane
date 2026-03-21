@@ -10,8 +10,10 @@ use crate::cdp::CdpSession;
 use crate::layout::Rect;
 use crate::screenshot::capture_session_screenshot_png;
 
-const DEFAULT_SCREENSHOT_WIDTH: i32 = 1280;
-const DEFAULT_SCREENSHOT_HEIGHT: i32 = 720;
+const DEFAULT_SCREENSHOT_WIDTH: u32 = 1280;
+const DEFAULT_SCREENSHOT_HEIGHT: u32 = 720;
+const MAX_SCREENSHOT_DIMENSION: u32 = 16_384;
+const MAX_SCREENSHOT_PIXELS: u64 = 67_108_864;
 
 /// Opaque browser handle for the C ABI.
 #[repr(C)]
@@ -211,15 +213,29 @@ pub unsafe extern "C" fn omoikane_screenshot_png(browser: *mut OmoikaneBrowser) 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn omoikane_screenshot_png_with_viewport(
     browser: *mut OmoikaneBrowser,
-    width: i32,
-    height: i32,
+    width: u32,
+    height: u32,
 ) -> *mut c_char {
     let Some(browser) = browser_from_ptr(browser) else {
         return std::ptr::null_mut();
     };
 
-    if width <= 0 || height <= 0 {
-        browser.set_error("viewport width and height must be positive integers");
+    if width == 0 || height == 0 {
+        browser.set_error("viewport width and height must be greater than zero");
+        return std::ptr::null_mut();
+    }
+    if width > MAX_SCREENSHOT_DIMENSION || height > MAX_SCREENSHOT_DIMENSION {
+        browser.set_error(format!(
+            "viewport width and height must be at most {}",
+            MAX_SCREENSHOT_DIMENSION
+        ));
+        return std::ptr::null_mut();
+    }
+    let pixel_count = u64::from(width) * u64::from(height);
+    if pixel_count > MAX_SCREENSHOT_PIXELS {
+        browser.set_error(format!(
+            "viewport area exceeds maximum pixel budget ({MAX_SCREENSHOT_PIXELS})"
+        ));
         return std::ptr::null_mut();
     }
 
@@ -479,7 +495,38 @@ mod tests {
 
         let error = unsafe { omoikane_last_error(browser) };
         let message = unsafe { take_string(error) };
-        assert!(message.contains("viewport width and height must be positive integers"));
+        assert!(message.contains("viewport width and height must be greater than zero"));
+
+        unsafe { omoikane_free(browser) };
+    }
+
+    #[test]
+    fn ffi_rejects_oversized_viewport_dimension_for_screenshot() {
+        let browser = unsafe { omoikane_init() };
+        assert!(!browser.is_null());
+
+        let screenshot = unsafe { omoikane_screenshot_png_with_viewport(browser, 20_000, 720) };
+        assert!(screenshot.is_null());
+
+        let error = unsafe { omoikane_last_error(browser) };
+        let message = unsafe { take_string(error) };
+        assert!(message.contains("viewport width and height must be at most"));
+
+        unsafe { omoikane_free(browser) };
+    }
+
+    #[test]
+    fn ffi_rejects_oversized_viewport_pixel_budget_for_screenshot() {
+        let browser = unsafe { omoikane_init() };
+        assert!(!browser.is_null());
+
+        let screenshot =
+            unsafe { omoikane_screenshot_png_with_viewport(browser, 16_384, 16_384) };
+        assert!(screenshot.is_null());
+
+        let error = unsafe { omoikane_last_error(browser) };
+        let message = unsafe { take_string(error) };
+        assert!(message.contains("viewport area exceeds maximum pixel budget"));
 
         unsafe { omoikane_free(browser) };
     }
