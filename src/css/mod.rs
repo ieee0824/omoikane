@@ -1442,10 +1442,16 @@ fn render_tokens(tokens: &[CssToken]) -> String {
 /// combinators) are supported here, which is sufficient for CSS Selectors Level 3.
 fn parse_not_argument(argument: &str) -> Result<Vec<SimpleSelector>, CssParseError> {
     // Re-tokenize the argument and parse it as simple selectors.
+    // Reject if trailing tokens remain (commas, combinators, etc.).
     let tokens = tokenize(argument)?;
     let mut parser = Parser::new(tokens);
     parser.skip_whitespace();
-    parser.parse_simple_selectors()
+    let selectors = parser.parse_simple_selectors()?;
+    parser.skip_whitespace();
+    if parser.peek().is_some() {
+        return Err(CssParseError::InvalidSelector);
+    }
+    Ok(selectors)
 }
 
 fn split_important(tokens: &[CssToken]) -> (Vec<CssToken>, bool) {

@@ -211,10 +211,11 @@ fn matches_simple_selector(
         SimpleSelector::PseudoClass(name) => matches_pseudo_class(node, name, pseudo),
         SimpleSelector::PseudoElement(name) => matches_pseudo_element(name, pseudo),
         SimpleSelector::Not(inner) => {
-            // The node must not match any of the inner simple selectors.
+            // CSS :not() negates the entire compound argument.
+            // The node must not match ALL of the inner simple selectors simultaneously.
             !inner
                 .iter()
-                .any(|s| matches_simple_selector(node, s, pseudo))
+                .all(|s| matches_simple_selector(node, s, pseudo))
         }
     }
 }
