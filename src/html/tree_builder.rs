@@ -124,8 +124,12 @@ impl Builder {
         match token {
             Token::Comment(data) => self.document.append_child(NodeHandle::comment(data)),
             Token::Character(data) if data.trim().is_empty() => {}
-            Token::StartTag { name, .. } if name == "html" => {
-                let html = self.insert_html_element("html");
+            Token::StartTag {
+                name,
+                attributes,
+                ..
+            } if name == "html" => {
+                let html = self.insert_html_element_with_attributes("html", &attributes);
                 self.open_elements.push(html);
                 self.mode = InsertionMode::BeforeHead;
             }
@@ -236,12 +240,18 @@ impl Builder {
                 }
 
                 match name.as_str() {
-                    "html" => {}
+                    "html" => {
+                        if let Some(html) = self.find_open_element("html") {
+                            self.merge_missing_attributes(&html, &attributes);
+                        }
+                    }
                     "head" => {}
                     "body" => {
                         if self.find_open_element("body").is_none() {
                             let body = self.insert_element_with_attributes("body", &attributes);
                             self.open_elements.push(body);
+                        } else if let Some(body) = self.find_open_element("body") {
+                            self.merge_missing_attributes(&body, &attributes);
                         }
                     }
                     "table" => {
@@ -527,7 +537,18 @@ impl Builder {
     }
 
     fn insert_html_element(&mut self, name: &str) -> NodeHandle {
+        self.insert_html_element_with_attributes(name, &[])
+    }
+
+    fn insert_html_element_with_attributes(
+        &mut self,
+        name: &str,
+        attributes: &[super::Attribute],
+    ) -> NodeHandle {
         let node = NodeHandle::element(name);
+        for attribute in attributes {
+            node.set_attribute(attribute.name(), attribute.value());
+        }
         self.document.append_child(node.clone());
         node
     }
@@ -561,6 +582,15 @@ impl Builder {
         }
         parent.append_child(element.clone());
         element
+    }
+
+    fn merge_missing_attributes(&self, element: &NodeHandle, attributes: &[super::Attribute]) {
+        let existing = element.attributes().unwrap_or_default();
+        for attribute in attributes {
+            if !existing.contains_key(attribute.name()) {
+                element.set_attribute(attribute.name(), attribute.value());
+            }
+        }
     }
 
     fn insert_text(&mut self, text: &str) {
@@ -735,6 +765,17 @@ mod tests {
         assert_eq!(body.parent_node(), Some(html));
         assert_eq!(p.parent_node(), Some(body));
         assert!(result.errors().is_empty());
+    }
+
+    #[test]
+    fn preserves_body_attributes_when_body_was_inserted_implicitly() {
+        let result = TreeBuilder::parse("<meta charset=\"utf-8\"><body bgcolor=\"#f0f0ff\"></body>");
+        let body = result.document().query_selector("body").unwrap();
+        let attrs = body.attributes().unwrap_or_default();
+        assert_eq!(
+            attrs.get("bgcolor").map(|value| value.as_str()),
+            Some("#f0f0ff")
+        );
     }
 
     #[test]

@@ -4,6 +4,7 @@ use std::cell::RefCell;
 use std::ffi::{CStr, CString, c_char};
 
 use base64::Engine;
+use encoding_rs::Encoding;
 use serde_json::json;
 
 use crate::cdp::CdpSession;
@@ -13,6 +14,8 @@ use crate::http::Client;
 use crate::http::url::resolve_url;
 use crate::layout::Rect;
 use crate::paint::{Canvas, Image, render_document_with_url};
+
+const MAX_FRAMESET_DEPTH: usize = 4;
 
 /// Opaque browser handle for the C ABI.
 #[repr(C)]
@@ -245,13 +248,28 @@ fn render_frameset_screenshot_png(
     base_url: Option<&crate::http::Url>,
     viewport: Rect,
 ) -> Result<Option<Vec<u8>>, String> {
-    let Some(frameset) = document.query_selector("frameset") else {
+    let Some(canvas) = render_frameset_canvas(document, base_url, viewport, 0)? else {
+        return Ok(None);
+    };
+    Ok(Some(canvas.encode_png()))
+}
+
+fn render_frameset_canvas(
+    node: &crate::dom::NodeHandle,
+    base_url: Option<&crate::http::Url>,
+    viewport: Rect,
+    depth: usize,
+) -> Result<Option<Canvas>, String> {
+    if depth > MAX_FRAMESET_DEPTH {
+        return Ok(None);
+    }
+    let Some(frameset) = node.query_selector("frameset") else {
         return Ok(None);
     };
 
-    let mut frame_nodes = Vec::new();
-    collect_frame_nodes_with_src(&frameset, &mut frame_nodes);
-    if frame_nodes.is_empty() {
+    let layout_children = collect_frameset_layout_children(&frameset);
+
+    if layout_children.is_empty() {
         return Ok(None);
     }
 
@@ -270,54 +288,64 @@ fn render_frameset_screenshot_png(
             .unwrap_or(true);
 
     let tracks = if use_rows {
-        parse_frameset_track_sizes(rows_attr.as_deref(), frame_nodes.len(), total_height)
+        parse_frameset_track_sizes(rows_attr.as_deref(), layout_children.len(), total_height)
     } else {
-        parse_frameset_track_sizes(cols_attr.as_deref(), frame_nodes.len(), total_width)
+        parse_frameset_track_sizes(cols_attr.as_deref(), layout_children.len(), total_width)
     };
     let mut composed = Canvas::new(total_width, total_height);
     let mut offset = 0u32;
 
-    for (index, frame) in frame_nodes.iter().enumerate() {
+    for (index, child) in layout_children.iter().enumerate() {
         let track = tracks.get(index).copied().unwrap_or(0);
         if track == 0 {
             continue;
         }
 
-        let src = frame
-            .attributes()
-            .and_then(|attrs| attrs.get("src").cloned())
-            .map(|src| src.trim().to_string())
-            .filter(|src| !src.is_empty())
-            .ok_or_else(|| "frame src is missing".to_string())?;
-        let resolved = match base_url {
-            Some(base) => resolve_url(base, &src).map_err(|error| error.to_string())?,
-            None => src.parse::<crate::http::Url>().map_err(|error| error.to_string())?,
-        };
-        let response = Client::new()
-            .get(&resolved.to_string())
-            .map_err(|error| error.to_string())?;
-        let html = String::from_utf8_lossy(response.body()).to_string();
-        let frame_document = TreeBuilder::parse(&html).document();
-        let frame_canvas = render_document_with_url(
-            &frame_document,
-            Rect {
-                x: 0.0,
-                y: 0.0,
-                width: if use_rows {
-                    total_width as f32
-                } else {
-                    track as f32
-                },
-                height: if use_rows {
-                    track as f32
-                } else {
-                    total_height as f32
-                },
+        let child_viewport = Rect {
+            x: 0.0,
+            y: 0.0,
+            width: if use_rows {
+                total_width as f32
+            } else {
+                track as f32
             },
-            Some(&resolved),
-        )
-        .map_err(|error| format!("failed to render frame: {error:?}"))?;
-        let frame_image = Image::decode_png(&frame_canvas.encode_png())
+            height: if use_rows {
+                track as f32
+            } else {
+                total_height as f32
+            },
+        };
+
+        let child_canvas = if child.tag_name().as_deref() == Some("frameset") {
+            match render_frameset_canvas(child, base_url, child_viewport, depth + 1)? {
+                Some(canvas) => canvas,
+                None => continue,
+            }
+        } else {
+            let src = child
+                .attributes()
+                .and_then(|attrs| attrs.get("src").cloned())
+                .map(|src| src.trim().to_string())
+                .filter(|src| !src.is_empty())
+                .ok_or_else(|| "frame src is missing".to_string())?;
+            let resolved = match base_url {
+                Some(base) => resolve_url(base, &src).map_err(|error| error.to_string())?,
+                None => src.parse::<crate::http::Url>().map_err(|error| error.to_string())?,
+            };
+            let response = Client::new()
+                .get(&resolved.to_string())
+                .map_err(|error| error.to_string())?;
+            let html = decode_html_response(&response);
+            let frame_document = TreeBuilder::parse(&html).document();
+            render_document_or_frameset_canvas(
+                &frame_document,
+                Some(&resolved),
+                child_viewport,
+                depth + 1,
+            )?
+        };
+
+        let frame_image = Image::decode_png(&child_canvas.encode_png())
             .map_err(|error| format!("failed to decode rendered frame png: {error:?}"))?;
         if use_rows {
             composed.draw_image(&frame_image, 0.0, offset as f32);
@@ -327,7 +355,64 @@ fn render_frameset_screenshot_png(
         offset = offset.saturating_add(track);
     }
 
-    Ok(Some(composed.encode_png()))
+    Ok(Some(composed))
+}
+
+fn render_document_or_frameset_canvas(
+    document: &crate::dom::NodeHandle,
+    base_url: Option<&crate::http::Url>,
+    viewport: Rect,
+    depth: usize,
+) -> Result<Canvas, String> {
+    if let Some(canvas) = render_frameset_canvas(document, base_url, viewport, depth)? {
+        return Ok(canvas);
+    }
+    render_document_with_url(document, viewport, base_url)
+        .map_err(|error| format!("failed to render frame document: {error:?}"))
+}
+
+fn collect_frameset_layout_children(frameset: &crate::dom::NodeHandle) -> Vec<crate::dom::NodeHandle> {
+    let mut out = Vec::new();
+    for child in frameset.child_nodes() {
+        collect_frameset_layout_children_from_node(&child, &mut out);
+    }
+    out
+}
+
+fn collect_frameset_layout_children_from_node(
+    node: &crate::dom::NodeHandle,
+    out: &mut Vec<crate::dom::NodeHandle>,
+) {
+    if node.node_type() != crate::dom::NodeType::Element {
+        return;
+    }
+
+    match node.tag_name().as_deref() {
+        Some("frame") => {
+            let has_src = node
+                .attributes()
+                .and_then(|attrs| attrs.get("src").cloned())
+                .map(|src| !src.trim().is_empty())
+                .unwrap_or(false);
+            if has_src {
+                out.push(node.clone());
+            }
+            // Old frameset markup can be mis-nested by permissive parsing.
+            // Keep walking through <frame> descendants to recover sibling frames.
+            for child in node.child_nodes() {
+                collect_frameset_layout_children_from_node(&child, out);
+            }
+        }
+        Some("frameset") => {
+            // Keep nested framesets as a single layout item; inner frames are handled recursively.
+            out.push(node.clone());
+        }
+        _ => {
+            for child in node.child_nodes() {
+                collect_frameset_layout_children_from_node(&child, out);
+            }
+        }
+    }
 }
 
 fn parse_frameset_track_sizes(spec: Option<&str>, frame_count: usize, total_size: u32) -> Vec<u32> {
@@ -427,6 +512,160 @@ fn parse_frameset_track_sizes(spec: Option<&str>, frame_count: usize, total_size
     widths
 }
 
+fn decode_html_response(response: &crate::http::HttpResponse) -> String {
+    let body = response.body();
+    let charset = response
+        .header("content-type")
+        .and_then(parse_charset_from_content_type)
+        .or_else(|| detect_charset_from_html_meta(body));
+
+    if let Some(label) = charset.as_deref() {
+        if let Some(encoding) = Encoding::for_label(label.as_bytes()) {
+            let (decoded, _, _) = encoding.decode(body);
+            return decoded.into_owned();
+        }
+    }
+
+    String::from_utf8_lossy(body).to_string()
+}
+
+fn parse_charset_from_content_type(content_type: &str) -> Option<String> {
+    content_type.split(';').skip(1).find_map(|part| {
+        let (name, value) = part.split_once('=')?;
+        if !name.trim().eq_ignore_ascii_case("charset") {
+            return None;
+        }
+        let value = value.trim().trim_matches('"').trim_matches('\'');
+        if value.is_empty() {
+            None
+        } else {
+            Some(value.to_ascii_lowercase())
+        }
+    })
+}
+
+fn detect_charset_from_html_meta(body: &[u8]) -> Option<String> {
+    let head = String::from_utf8_lossy(&body[..body.len().min(8192)]).to_string();
+    let lower = head.to_ascii_lowercase();
+    let mut cursor = 0usize;
+    while let Some(relative) = lower[cursor..].find("<meta") {
+        let start = cursor + relative;
+        let Some(end_rel) = lower[start..].find('>') else {
+            break;
+        };
+        let end = start + end_rel + 1;
+        let tag = &head[start..end];
+        if let Some(attributes) = parse_html_attributes(tag) {
+            if let Some(charset) = attributes
+                .get("charset")
+                .map(|value| value.trim().to_ascii_lowercase())
+                .filter(|value| !value.is_empty())
+            {
+                return Some(charset);
+            }
+            let has_content_type_equiv = attributes
+                .get("http-equiv")
+                .map(|value| value.trim().eq_ignore_ascii_case("content-type"))
+                .unwrap_or(false);
+            if has_content_type_equiv {
+                if let Some(content) = attributes.get("content") {
+                    if let Some(charset) = parse_charset_from_content_type(content) {
+                        return Some(charset);
+                    }
+                }
+            }
+        }
+        cursor = end;
+    }
+    None
+}
+
+fn parse_html_attributes(tag: &str) -> Option<std::collections::BTreeMap<String, String>> {
+    let mut attributes = std::collections::BTreeMap::new();
+    let open = tag.find('<')?;
+    let close = tag.rfind('>')?;
+    if close <= open {
+        return None;
+    }
+    let mut chars = tag[open + 1..close].chars().peekable();
+
+    while let Some(ch) = chars.peek() {
+        if ch.is_ascii_whitespace() {
+            chars.next();
+        } else {
+            break;
+        }
+    }
+
+    while let Some(ch) = chars.peek() {
+        if ch.is_ascii_whitespace() {
+            break;
+        }
+        chars.next();
+    }
+
+    loop {
+        while let Some(ch) = chars.peek() {
+            if ch.is_ascii_whitespace() {
+                chars.next();
+            } else {
+                break;
+            }
+        }
+        let mut name = String::new();
+        while let Some(ch) = chars.peek() {
+            if ch.is_ascii_whitespace() || *ch == '=' || *ch == '/' {
+                break;
+            }
+            name.push(*ch);
+            chars.next();
+        }
+        if name.is_empty() {
+            break;
+        }
+        while let Some(ch) = chars.peek() {
+            if ch.is_ascii_whitespace() {
+                chars.next();
+            } else {
+                break;
+            }
+        }
+        let mut value = String::new();
+        if chars.peek() == Some(&'=') {
+            chars.next();
+            while let Some(ch) = chars.peek() {
+                if ch.is_ascii_whitespace() {
+                    chars.next();
+                } else {
+                    break;
+                }
+            }
+            if let Some(quote) = chars.peek().copied().filter(|c| *c == '"' || *c == '\'') {
+                chars.next();
+                while let Some(ch) = chars.peek() {
+                    if *ch == quote {
+                        chars.next();
+                        break;
+                    }
+                    value.push(*ch);
+                    chars.next();
+                }
+            } else {
+                while let Some(ch) = chars.peek() {
+                    if ch.is_ascii_whitespace() || *ch == '/' {
+                        break;
+                    }
+                    value.push(*ch);
+                    chars.next();
+                }
+            }
+        }
+        attributes.insert(name.to_ascii_lowercase(), value);
+    }
+
+    Some(attributes)
+}
+
 fn resolve_frameset_render_document(
     document: &crate::dom::NodeHandle,
     base_url: Option<&crate::http::Url>,
@@ -457,7 +696,7 @@ fn resolve_frameset_render_document(
     let response = Client::new()
         .get(&resolved.to_string())
         .map_err(|error| error.to_string())?;
-    let html = String::from_utf8_lossy(response.body()).to_string();
+    let html = decode_html_response(&response);
     let frame_document = TreeBuilder::parse(&html).document();
     Ok((frame_document, Some(resolved)))
 }
@@ -480,26 +719,6 @@ fn find_first_frame_with_src(node: &crate::dom::NodeHandle) -> Option<crate::dom
         }
     }
     None
-}
-
-fn collect_frame_nodes_with_src(
-    node: &crate::dom::NodeHandle,
-    out: &mut Vec<crate::dom::NodeHandle>,
-) {
-    if node.node_type() == crate::dom::NodeType::Element
-        && node.tag_name().as_deref() == Some("frame")
-        && node
-            .attributes()
-            .and_then(|attrs| attrs.get("src").cloned())
-            .map(|src| !src.trim().is_empty())
-            .unwrap_or(false)
-    {
-        out.push(node.clone());
-    }
-
-    for child in node.child_nodes() {
-        collect_frame_nodes_with_src(&child, out);
-    }
 }
 
 /// Returns the last error message for the browser handle, if any.
@@ -570,6 +789,7 @@ fn into_c_string(value: String) -> *mut c_char {
 mod tests {
     use super::*;
     use base64::Engine;
+    use encoding_rs::SHIFT_JIS;
     use std::fs;
     use std::io::{BufRead, BufReader, Write};
     use std::net::TcpListener;
@@ -762,9 +982,21 @@ mod tests {
         let screenshot = unsafe { omoikane_screenshot_png(browser) };
         let _payload = unsafe { take_string(screenshot) };
         let paths = requested_paths.lock().unwrap().clone();
-        assert!(paths.contains(&"/index.html".to_string()));
-        assert!(paths.contains(&"/left.htm".to_string()));
-        assert!(paths.contains(&"/right.htm".to_string()));
+        assert!(
+            paths.contains(&"/index.html".to_string()),
+            "requested paths: {:?}",
+            paths
+        );
+        assert!(
+            paths.contains(&"/left.htm".to_string()),
+            "requested paths: {:?}",
+            paths
+        );
+        assert!(
+            paths.contains(&"/right.htm".to_string()),
+            "requested paths: {:?}",
+            paths
+        );
 
         unsafe { omoikane_free(browser) };
     }
@@ -835,10 +1067,52 @@ mod tests {
         let screenshot = unsafe { omoikane_screenshot_png(browser) };
         let _payload = unsafe { take_string(screenshot) };
         let paths = requested_paths.lock().unwrap().clone();
-        assert!(paths.contains(&"/index.html".to_string()));
-        assert!(paths.contains(&"/top.htm".to_string()));
-        assert!(paths.contains(&"/bottom.htm".to_string()));
+        assert!(
+            paths.contains(&"/index.html".to_string()),
+            "requested paths: {:?}",
+            paths
+        );
+        assert!(
+            paths.contains(&"/top.htm".to_string()),
+            "requested paths: {:?}",
+            paths
+        );
+        assert!(
+            paths.contains(&"/bottom.htm".to_string()),
+            "requested paths: {:?}",
+            paths
+        );
 
         unsafe { omoikane_free(browser) };
+    }
+
+    #[test]
+    fn decodes_html_response_using_content_type_charset() {
+        let (encoded, _, _) = SHIFT_JIS.encode("阿部寛");
+        let response = crate::http::HttpResponse::new(
+            200,
+            "OK",
+            vec![(
+                "Content-Type".to_string(),
+                "text/html; charset=Shift_JIS".to_string(),
+            )],
+            encoded.into_owned(),
+        );
+        let decoded = decode_html_response(&response);
+        assert_eq!(decoded, "阿部寛");
+    }
+
+    #[test]
+    fn detects_charset_from_meta_http_equiv_content_type() {
+        let html = br#"<html><head><meta http-equiv="Content-Type" content="text/html; charset=Shift_JIS"></head></html>"#;
+        let detected = detect_charset_from_html_meta(html);
+        assert_eq!(detected.as_deref(), Some("shift_jis"));
+    }
+
+    #[test]
+    fn detects_charset_from_meta_charset_attribute() {
+        let html = br#"<html><head><meta charset="EUC-JP"></head></html>"#;
+        let detected = detect_charset_from_html_meta(html);
+        assert_eq!(detected.as_deref(), Some("euc-jp"));
     }
 }

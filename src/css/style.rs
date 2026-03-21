@@ -606,6 +606,20 @@ fn apply_presentational_hints(
         }
     }
 
+    if !properties.contains_key("background-image") {
+        if let Some(background) = attributes
+            .get("background")
+            .map(|value| value.trim())
+            .filter(|value| !value.is_empty())
+        {
+            let escaped = background.replace('\\', "\\\\").replace('"', "\\\"");
+            properties.insert(
+                "background-image".to_string(),
+                ComputedValue::Keyword(format!("url(\"{escaped}\")")),
+            );
+        }
+    }
+
     if !properties.contains_key("color")
         && node
             .tag_name()
@@ -863,6 +877,7 @@ mod tests {
         cell.set_attribute("bgcolor", "336699");
         cell.set_attribute("align", "center");
         body.set_attribute("text", "#112233");
+        body.set_attribute("background", "legacy/wallpaper.png");
         document.append_child(html.clone());
         html.append_child(body.clone());
         body.append_child(cell.clone());
@@ -874,6 +889,12 @@ mod tests {
         assert_eq!(
             body_style.get("color"),
             Some(&ComputedValue::Color("#112233".to_string()))
+        );
+        assert_eq!(
+            body_style.get("background-image"),
+            Some(&ComputedValue::Keyword(
+                "url(\"legacy/wallpaper.png\")".to_string()
+            ))
         );
         assert_eq!(
             cell_style.get("background-color"),
