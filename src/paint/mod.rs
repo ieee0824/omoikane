@@ -366,7 +366,8 @@ pub fn paint_layout(layout: &LayoutBox, resolver: &mut StyleResolver, viewport: 
     if let Some(background) = viewport_background_color(layout, resolver) {
         canvas.fill_rect(viewport, background);
     }
-    paint_box(&mut canvas, layout, resolver, None, viewport);
+    let text_fonts = load_text_fonts();
+    paint_box(&mut canvas, layout, resolver, None, viewport, &text_fonts);
     canvas
 }
 
@@ -523,8 +524,17 @@ fn paint_box(
     resolver: &mut StyleResolver,
     inherited_clip: Option<Rect>,
     viewport: Rect,
+    text_fonts: &[Font],
 ) {
-    paint_box_internal(canvas, layout, resolver, inherited_clip, viewport, true);
+    paint_box_internal(
+        canvas,
+        layout,
+        resolver,
+        inherited_clip,
+        viewport,
+        true,
+        text_fonts,
+    );
 }
 
 fn paint_box_internal(
@@ -534,6 +544,7 @@ fn paint_box_internal(
     inherited_clip: Option<Rect>,
     viewport: Rect,
     include_phase_descendants: bool,
+    text_fonts: &[Font],
 ) {
     if layout.visibility == Visibility::Hidden {
         return;
@@ -617,23 +628,23 @@ fn paint_box_internal(
     positive_positioned_children.sort_by_key(|child| child.z_index);
 
     for child in negative_positioned_children {
-        paint_box_internal(canvas, child, resolver, clip, viewport, true);
+        paint_box_internal(canvas, child, resolver, clip, viewport, true, text_fonts);
     }
     for child in normal_block_children {
-        paint_box_internal(canvas, child, resolver, clip, viewport, false);
+        paint_box_internal(canvas, child, resolver, clip, viewport, false, text_fonts);
     }
     for child in float_children {
-        paint_box_internal(canvas, child, resolver, clip, viewport, true);
+        paint_box_internal(canvas, child, resolver, clip, viewport, true, text_fonts);
     }
-    paint_text(canvas, layout, &style, clip, viewport);
+    paint_text(canvas, layout, &style, clip, viewport, text_fonts);
     for child in inline_children {
-        paint_box_internal(canvas, child, resolver, clip, viewport, false);
+        paint_box_internal(canvas, child, resolver, clip, viewport, false, text_fonts);
     }
     for child in auto_positioned_children {
-        paint_box_internal(canvas, child, resolver, clip, viewport, true);
+        paint_box_internal(canvas, child, resolver, clip, viewport, true, text_fonts);
     }
     for child in positive_positioned_children {
-        paint_box_internal(canvas, child, resolver, clip, viewport, true);
+        paint_box_internal(canvas, child, resolver, clip, viewport, true, text_fonts);
     }
 
     paint_block_generated_pseudo_box(
@@ -793,11 +804,9 @@ fn paint_text(
     style: &ComputedStyle,
     clip: Option<Rect>,
     _viewport: Rect,
+    fonts: &[Font],
 ) {
     let color = text_color(style).unwrap_or(Color::rgb(0, 0, 0));
-
-    // Try to load multiple system fonts and use per-glyph fallback.
-    let fonts = load_text_fonts();
 
     for line in &layout.lines {
         for fragment in &line.fragments {
@@ -921,23 +930,12 @@ fn rasterize_with_fallback(
     ch: char,
     font_size: f32,
 ) -> (usize, Option<GlyphRaster>, f32) {
-    let prefer_cjk = is_cjk_character(ch);
-    let mut search_order = Vec::with_capacity(fonts.len());
-    if prefer_cjk && fonts.len() > 1 {
-        for index in 1..fonts.len() {
-            search_order.push(index);
-        }
-        search_order.push(0);
-    } else {
-        for index in 0..fonts.len() {
-            search_order.push(index);
-        }
-    }
-
-    for index in search_order {
+    let prefer_cjk = is_cjk_preferred_character(ch);
+    let try_index = |index: usize| -> Option<(usize, Option<GlyphRaster>, f32)> {
         let font = &fonts[index];
-        if !ch.is_whitespace() && !font.has_glyph(ch) {
-            continue;
+        // Allow primary font to render .notdef as a visible last resort.
+        if index != 0 && !ch.is_whitespace() && !font.has_glyph(ch) {
+            return None;
         }
         match font.rasterize(ch, font_size) {
             Ok(glyph) => {
@@ -947,15 +945,33 @@ fn rasterize_with_fallback(
                     } else {
                         font.glyph_advance(ch, font_size)
                     };
-                    return (index, Some(glyph), advance);
+                    return Some((index, Some(glyph), advance));
                 }
 
                 // Whitespace and control-like glyphs can be outline-less but still have advance.
                 if ch.is_whitespace() {
-                    return (index, None, font.glyph_advance(ch, font_size));
+                    return Some((index, None, font.glyph_advance(ch, font_size)));
                 }
             }
-            Err(_) => continue,
+            Err(_) => return None,
+        }
+        None
+    };
+
+    if prefer_cjk && fonts.len() > 1 {
+        for index in 1..fonts.len() {
+            if let Some(result) = try_index(index) {
+                return result;
+            }
+        }
+        if let Some(result) = try_index(0) {
+            return result;
+        }
+    } else {
+        for index in 0..fonts.len() {
+            if let Some(result) = try_index(index) {
+                return result;
+            }
         }
     }
 
@@ -967,7 +983,7 @@ fn rasterize_with_fallback(
     (0, None, primary_advance)
 }
 
-fn is_cjk_character(ch: char) -> bool {
+fn is_cjk_preferred_character(ch: char) -> bool {
     matches!(
         ch as u32,
         0x3000..=0x30FF // CJK Symbols/Punctuation, Hiragana, Katakana
