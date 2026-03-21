@@ -4,7 +4,7 @@
 //! produces a tree of rectangular block boxes.
 
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use crate::css::{ComputedStyle, ComputedValue, PseudoElement, StyleResolver};
 use crate::dom::{Node, NodeHandle, NodeType};
@@ -850,7 +850,8 @@ fn layout_flex_container(
         });
     }
 
-    let lines = build_flex_lines(&items, width, wrap, main_gap);
+    let available_main_size = flex_available_main_size(&style, direction, width, &items, main_gap);
+    let lines = build_flex_lines(&items, available_main_size, wrap, main_gap);
     let mut children = Vec::new();
     let mut cross_cursor = y;
     let line_count = lines.len();
@@ -862,7 +863,7 @@ fn layout_flex_container(
         } else {
             0.0
         };
-        let available_main_for_items = (width - fixed_main_gap).max(0.0);
+        let available_main_for_items = (available_main_size - fixed_main_gap).max(0.0);
         let resolved_main_sizes = resolve_flex_main_sizes(&line.items, available_main_for_items);
         let mut laid_out = Vec::new();
         let mut line_cross_size = 0.0f32;
@@ -904,7 +905,7 @@ fn layout_flex_container(
             .sum();
         let used_main_size = total_main_size + fixed_main_gap;
         let (line_start, justify_gap) =
-            justify_offsets(justify, width, used_main_size, laid_out.len());
+            justify_offsets(justify, available_main_size, used_main_size, laid_out.len());
 
         let mut main_cursor = match direction {
             FlexDirection::Row => x + line_start,
@@ -2278,6 +2279,27 @@ fn explicit_cross_size(style: &ComputedStyle, direction: FlexDirection) -> Optio
 
 fn flex_basis(style: &ComputedStyle, direction: FlexDirection) -> Option<f32> {
     explicit_length(style, "flex-basis").or_else(|| explicit_main_size(style, direction))
+}
+
+fn flex_available_main_size(
+    style: &ComputedStyle,
+    direction: FlexDirection,
+    width: f32,
+    items: &[FlexItemSpec],
+    main_gap: f32,
+) -> f32 {
+    match direction {
+        FlexDirection::Row => width,
+        FlexDirection::Column => explicit_main_size(style, direction).unwrap_or_else(|| {
+            let item_count = items.len();
+            let gap_total = if item_count > 1 {
+                main_gap * (item_count.saturating_sub(1)) as f32
+            } else {
+                0.0
+            };
+            items.iter().map(|item| item.base_main_size).sum::<f32>() + gap_total
+        }),
+    }
 }
 
 fn auto_flex_base_main_size(

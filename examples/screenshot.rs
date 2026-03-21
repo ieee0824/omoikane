@@ -66,8 +66,10 @@ fn run_screenshot(
         .map_err(|error| format!("failed to decode screenshot payload: {error}"))?;
 
     if let Some(parent) = output_path.parent() {
-        fs::create_dir_all(parent)
-            .map_err(|error| format!("failed to create output directory: {error}"))?;
+        if !parent.as_os_str().is_empty() {
+            fs::create_dir_all(parent)
+                .map_err(|error| format!("failed to create output directory: {error}"))?;
+        }
     }
     fs::write(output_path, png).map_err(|error| format!("failed to write output PNG: {error}"))?;
 
