@@ -35,7 +35,7 @@ status: open
 - [015-2 主要CSS不足の優先実装](./015-2-anonymized-priority-css-implementation.md)
 - [015-3 screenshot API の viewport 指定](./015-3-ffi-screenshot-viewport-control.md)
 - [015-4 匿名化fixtureと差分比較基盤](./015-4-anonymized-fixture-diff-baseline.md)
-- [015-5 FFI境界の責務整理](./015-5-ffi-boundary-refactor.md)
+- [015-5 FFI境界の責務整理](../closed/015-5-ffi-boundary-refactor.md)
 
 ## 受け入れ条件
 

@@ -2,7 +2,7 @@
 number: 015-5
 slug: ffi-boundary-refactor
 parent: 015-anonymized-real-world-rendering-gap
-status: open
+status: closed
 ---
 
 # FFI境界の責務整理（ffi肥大化の解消）
@@ -45,3 +45,15 @@ Rust APIとして再利用したい処理までFFI層に依存してしまう構
 
 - 大規模な一括移動は避け、機能単位で段階的に進める
 - PRでは「移動のみ」と「機能変更」を可能な限り分離する
+
+## 実施結果
+
+- `src/screenshot/mod.rs` を新設し、スクリーンショット実処理（frameset解決/描画ロジック）をFFI層から移設
+- `src/ffi/mod.rs` は C ABI の入出力変換とエラー橋渡しを中心とした薄いラッパー構成へ簡素化
+- コア処理テストを責務に合わせて再配置（`screenshot`/`html::encoding`）
+
+## 検証
+
+- `cargo test ffi::` 通過
+- `cargo test screenshot::` 通過
+- `cargo test html::encoding::` 通過

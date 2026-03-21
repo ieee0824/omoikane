@@ -10,3 +10,4 @@ pub mod http;
 pub mod js;
 pub mod layout;
 pub mod paint;
+mod screenshot;
