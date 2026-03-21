@@ -835,11 +835,12 @@ fn layout_flex_container(
             positioned_children.push((child, child_style));
             continue;
         }
+        let base_main_size = flex_basis(&child_style, direction)
+            .or_else(|| explicit_main_size(&child_style, direction))
+            .unwrap_or_else(|| auto_flex_base_main_size(&child, resolver, direction));
         items.push(FlexItemSpec {
             node: child,
-            base_main_size: flex_basis(&child_style, direction)
-                .or_else(|| explicit_main_size(&child_style, direction))
-                .unwrap_or(0.0),
+            base_main_size,
             explicit_cross_size: explicit_cross_size(&child_style, direction),
             flex_grow: flex_grow(&child_style),
             flex_shrink: flex_shrink(&child_style),
@@ -1324,8 +1325,8 @@ fn compute_width(
     margin: &mut EdgeSizes,
 ) -> f32 {
     let specified_width = resolved_length(style, "width", containing_width);
-    let margin_left_auto = is_auto(style.get("margin-left"));
-    let margin_right_auto = is_auto(style.get("margin-right"));
+    let margin_left_auto = margin_start_is_auto(style);
+    let margin_right_auto = margin_end_is_auto(style);
 
     let mut width = if let Some(width) = specified_width {
         let remaining =
@@ -1365,6 +1366,24 @@ fn compute_width(
     }
     if let Some(max_width) = max_width {
         width = width.min(max_width);
+    }
+
+    if margin_left_auto || margin_right_auto {
+        let remaining =
+            (containing_width - width - padding.horizontal() - border.horizontal()).max(0.0);
+        match (margin_left_auto, margin_right_auto) {
+            (true, true) => {
+                margin.left = remaining / 2.0;
+                margin.right = remaining / 2.0;
+            }
+            (true, false) => {
+                margin.left = (remaining - margin.right).max(0.0);
+            }
+            (false, true) => {
+                margin.right = (remaining - margin.left).max(0.0);
+            }
+            (false, false) => {}
+        }
     }
 
     width
@@ -1463,6 +1482,7 @@ fn edge_sizes(style: &ComputedStyle, prefix: &str) -> EdgeSizes {
                 .replace("{prefix}", prefix),
         )
         .or_else(|| explicit_length(style, &format!("{prefix}-right")))
+        .or_else(|| logical_inline_end_length(style, prefix))
         .unwrap_or(shorthand),
         bottom: explicit_length(
             style,
@@ -1479,7 +1499,24 @@ fn edge_sizes(style: &ComputedStyle, prefix: &str) -> EdgeSizes {
                 .replace("{prefix}", prefix),
         )
         .or_else(|| explicit_length(style, &format!("{prefix}-left")))
+        .or_else(|| logical_inline_start_length(style, prefix))
         .unwrap_or(shorthand),
+    }
+}
+
+fn logical_inline_start_length(style: &ComputedStyle, prefix: &str) -> Option<f32> {
+    match prefix {
+        "margin" => explicit_length(style, "margin-inline-start"),
+        "padding" => explicit_length(style, "padding-inline-start"),
+        _ => None,
+    }
+}
+
+fn logical_inline_end_length(style: &ComputedStyle, prefix: &str) -> Option<f32> {
+    match prefix {
+        "margin" => explicit_length(style, "margin-inline-end"),
+        "padding" => explicit_length(style, "padding-inline-end"),
+        _ => None,
     }
 }
 
@@ -1513,6 +1550,14 @@ fn resolved_length(style: &ComputedStyle, property: &str, basis: f32) -> Option<
 
 fn is_auto(value: Option<&ComputedValue>) -> bool {
     matches!(value, Some(ComputedValue::Keyword(keyword)) if keyword.eq_ignore_ascii_case("auto"))
+}
+
+fn margin_start_is_auto(style: &ComputedStyle) -> bool {
+    is_auto(style.get("margin-left")) || is_auto(style.get("margin-inline-start"))
+}
+
+fn margin_end_is_auto(style: &ComputedStyle) -> bool {
+    is_auto(style.get("margin-right")) || is_auto(style.get("margin-inline-end"))
 }
 
 fn collapse_margins(first: f32, second: f32) -> f32 {
@@ -1633,10 +1678,10 @@ fn shrink_to_fit_layout_width(
     let padding = edge_sizes(&style, "padding");
     let border = edge_sizes(&style, "border");
     let mut margin = edge_sizes(&style, "margin");
-    if is_auto(style.get("margin-left")) {
+    if margin_start_is_auto(&style) {
         margin.left = 0.0;
     }
-    if is_auto(style.get("margin-right")) {
+    if margin_end_is_auto(&style) {
         margin.right = 0.0;
     }
 
@@ -1717,6 +1762,25 @@ fn intrinsic_width(node: &NodeHandle, resolver: &mut StyleResolver) -> f32 {
                     + img_padding.right
                     + img_border.left
                     + img_border.right;
+            }
+            if is_flex_container(&style) {
+                let direction = flex_direction(&style);
+                let mut content_width = 0.0f32;
+                for child in node.child_nodes() {
+                    if child.node_type() != NodeType::Element {
+                        continue;
+                    }
+                    let child_style = resolver.computed_style(&child);
+                    if is_display_none(&child_style) {
+                        continue;
+                    }
+                    let child_width = intrinsic_width(&child, resolver);
+                    match direction {
+                        FlexDirection::Row => content_width += child_width,
+                        FlexDirection::Column => content_width = content_width.max(child_width),
+                    }
+                }
+                return content_width + padding.horizontal() + border.horizontal();
             }
             // Content width = max of children's outer widths
             let mut content_width: f32 = 0.0;
@@ -2169,6 +2233,17 @@ fn explicit_cross_size(style: &ComputedStyle, direction: FlexDirection) -> Optio
 
 fn flex_basis(style: &ComputedStyle, direction: FlexDirection) -> Option<f32> {
     explicit_length(style, "flex-basis").or_else(|| explicit_main_size(style, direction))
+}
+
+fn auto_flex_base_main_size(
+    node: &NodeHandle,
+    resolver: &mut StyleResolver,
+    direction: FlexDirection,
+) -> f32 {
+    match direction {
+        FlexDirection::Row => intrinsic_width(node, resolver),
+        FlexDirection::Column => 0.0,
+    }
 }
 
 fn flex_grow(style: &ComputedStyle) -> f32 {
