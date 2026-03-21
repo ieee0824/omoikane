@@ -1556,6 +1556,9 @@ fn parse_color(value: &str) -> Option<Color> {
 
     // Hex colors: #RGB, #RGBA, #RRGGBB, #RRGGBBAA
     if let Some(hex) = lower.strip_prefix('#') {
+        if !hex.is_ascii() || !hex.chars().all(|c| c.is_ascii_hexdigit()) {
+            return None;
+        }
         return match hex.len() {
             3 => {
                 let r = u8::from_str_radix(&hex[0..1].repeat(2), 16).ok()?;
@@ -1671,58 +1674,8 @@ fn split_color_args(args: &str) -> Vec<String> {
     }
 }
 
-/// Converts HSL to RGB.
-///
-/// - `h`: hue in degrees (0–360)
-/// - `s`: saturation as fraction (0.0–1.0)
-/// - `l`: lightness as fraction (0.0–1.0)
-fn hsl_to_rgb(h: f32, s: f32, l: f32) -> (u8, u8, u8) {
-    let h = ((h % 360.0) + 360.0) % 360.0;
-    let s = s.clamp(0.0, 1.0);
-    let l = l.clamp(0.0, 1.0);
-
-    if s == 0.0 {
-        let v = (l * 255.0).round() as u8;
-        return (v, v, v);
-    }
-
-    let q = if l < 0.5 {
-        l * (1.0 + s)
-    } else {
-        l + s - l * s
-    };
-    let p = 2.0 * l - q;
-    let h_norm = h / 360.0;
-
-    let r = hue_to_rgb(p, q, h_norm + 1.0 / 3.0);
-    let g = hue_to_rgb(p, q, h_norm);
-    let b = hue_to_rgb(p, q, h_norm - 1.0 / 3.0);
-
-    (
-        (r * 255.0).round() as u8,
-        (g * 255.0).round() as u8,
-        (b * 255.0).round() as u8,
-    )
-}
-
-fn hue_to_rgb(p: f32, q: f32, mut t: f32) -> f32 {
-    if t < 0.0 {
-        t += 1.0;
-    }
-    if t > 1.0 {
-        t -= 1.0;
-    }
-    if t < 1.0 / 6.0 {
-        return p + (q - p) * 6.0 * t;
-    }
-    if t < 1.0 / 2.0 {
-        return q;
-    }
-    if t < 2.0 / 3.0 {
-        return p + (q - p) * (2.0 / 3.0 - t) * 6.0;
-    }
-    p
-}
+// HSL→RGB conversion is shared with src/css/style.rs
+use crate::css::style::hsl_to_rgb;
 
 /// Returns the RGB color for a CSS named color keyword.
 ///
@@ -1869,7 +1822,16 @@ fn named_color(name: &str) -> Option<Color> {
         "lawngreen" => Color::rgb(124, 252, 0),
         "greenyellow" => Color::rgb(173, 255, 47),
         "springgreen" => Color::rgb(0, 255, 127),
+        "mediumslateblue" => Color::rgb(123, 104, 238),
         "mediumspringgreen" => Color::rgb(0, 250, 154),
+        // Missing CSS Level 4 colors
+        "darkmagenta" => Color::rgb(139, 0, 139),
+        "darkseagreen" => Color::rgb(143, 188, 143),
+        "lightcoral" => Color::rgb(240, 128, 128),
+        "lightcyan" => Color::rgb(224, 255, 255),
+        "lightgoldenrodyellow" => Color::rgb(250, 250, 210),
+        "lightsteelblue" => Color::rgb(176, 196, 222),
+        "paleturquoise" => Color::rgb(175, 238, 238),
         _ => return None,
     };
     Some(c)

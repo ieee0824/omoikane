@@ -773,7 +773,7 @@ fn compute_value(value: &Value, property_name: &str, parent_font_size: f32) -> C
             if let Some(hex) = compute_rgb_function(arguments) {
                 ComputedValue::Color(hex)
             } else {
-                ComputedValue::Keyword(name.clone())
+                ComputedValue::Keyword(render_value(value))
             }
         }
         Value::Function { name, arguments }
@@ -782,7 +782,7 @@ fn compute_value(value: &Value, property_name: &str, parent_font_size: f32) -> C
             if let Some(hex) = compute_hsl_function(arguments) {
                 ComputedValue::Color(hex)
             } else {
-                ComputedValue::Keyword(name.clone())
+                ComputedValue::Keyword(render_value(value))
             }
         }
         Value::Function { name, arguments } if name.eq_ignore_ascii_case("calc") => {
@@ -1547,7 +1547,7 @@ fn compute_rgb_function(arguments: &[Value]) -> Option<String> {
     });
 
     let (r, g, b) = match channels.as_slice() {
-        [r, g, b, ..] => (*r as u8, *g as u8, *b as u8),
+        [r, g, b] | [r, g, b, _] => (*r as u8, *g as u8, *b as u8),
         _ => return None,
     };
 
@@ -1575,7 +1575,7 @@ fn compute_hsl_function(arguments: &[Value]) -> Option<String> {
     });
 
     let (h, s, l) = match numbers.as_slice() {
-        [h, s, l, ..] => (*h, *s, *l),
+        [h, s, l] | [h, s, l, _] => (*h, *s, *l),
         _ => return None,
     };
 
@@ -1618,7 +1618,7 @@ fn split_slash<'a>(flat: &[&'a Value]) -> (Vec<&'a Value>, Option<f32>) {
 /// - `h`: hue in degrees (0–360)
 /// - `s`: saturation as fraction (0.0–1.0)
 /// - `l`: lightness as fraction (0.0–1.0)
-fn hsl_to_rgb(h: f32, s: f32, l: f32) -> (u8, u8, u8) {
+pub(crate) fn hsl_to_rgb(h: f32, s: f32, l: f32) -> (u8, u8, u8) {
     // CSS allows hue values outside 0-360; wrap to canonical range
     let h = ((h % 360.0) + 360.0) % 360.0;
     let s = s.clamp(0.0, 1.0);
