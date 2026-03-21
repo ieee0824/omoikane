@@ -43,3 +43,7 @@ CJK文字の表示改善により日本語の可読性は向上した一方で�
 - layout 側の `measure_text_width` を単一 `sans-serif` 依存から複数候補フォント前提へ変更
 - 文字単位で CJK 優先選択を行う計測ロジックを追加し、paint 側方針と整合するよう調整
 - 実サイトAの確認用スクリーンショットを `tests/output/https-abehiroshi-la-coocan-jp.layout-paint-aligned.1366x900.actual.png` として出力
+- `::-webkit-scrollbar` のような未対応擬似要素セレクタが通常要素に誤マッチしていた問題を修正
+- 上記修正により `blog.ast.moe` で発生していた `body/main` 幅 `19px` への崩壊は解消（`@media ... ::-webkit-scrollbar { width: 19px }` の誤適用を防止）
+- ただし `blog.ast.moe` は依然として黒背景で主要コンテンツが視認しづらく、CSSカスタムプロパティ（`var(--theme)` など）未対応/未解決が主因候補
+- 次ステップ: カスタムプロパティの最小解決（`--*` 定義 + `var()` 参照）を導入し、背景色・文字色の復元を優先して比較差分を再計測する
