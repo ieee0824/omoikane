@@ -73,13 +73,25 @@ pub enum SimpleSelector {
     },
     PseudoClass(String),
     PseudoElement(String),
+    /// `:not(<compound-selector>)` — negation pseudo-class (single compound, no commas).
+    Not(Vec<SimpleSelector>),
 }
 
 /// Attribute selector operators.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AttributeOperator {
+    /// `=` — exact match.
     Equals,
+    /// `~=` — value is in whitespace-separated list.
     Includes,
+    /// `^=` — value starts with.
+    StartsWith,
+    /// `$=` — value ends with.
+    EndsWith,
+    /// `*=` — value contains.
+    Contains,
+    /// `|=` — value equals or starts with followed by a hyphen.
+    DashMatch,
 }
 
 /// A stylesheet rule.
@@ -486,6 +498,26 @@ impl Parser {
                             self.expect_delim('=')?;
                             Some(AttributeOperator::Includes)
                         }
+                        Some(CssToken::Delim('^')) => {
+                            self.next();
+                            self.expect_delim('=')?;
+                            Some(AttributeOperator::StartsWith)
+                        }
+                        Some(CssToken::Delim('$')) => {
+                            self.next();
+                            self.expect_delim('=')?;
+                            Some(AttributeOperator::EndsWith)
+                        }
+                        Some(CssToken::Delim('*')) => {
+                            self.next();
+                            self.expect_delim('=')?;
+                            Some(AttributeOperator::Contains)
+                        }
+                        Some(CssToken::Delim('|')) => {
+                            self.next();
+                            self.expect_delim('=')?;
+                            Some(AttributeOperator::DashMatch)
+                        }
                         _ => None,
                     };
                     self.skip_whitespace();
@@ -512,16 +544,44 @@ impl Parser {
                         if matches!(self.peek(), Some(CssToken::ParenOpen)) {
                             self.next();
                             let mut argument_tokens = Vec::new();
-                            while !matches!(self.peek(), Some(CssToken::ParenClose) | None) {
-                                argument_tokens
-                                    .push(self.next().expect("peeked token should exist"));
+                            let mut depth = 0usize;
+                            loop {
+                                match self.peek() {
+                                    Some(CssToken::ParenOpen) => {
+                                        depth += 1;
+                                        argument_tokens.push(
+                                            self.next().expect("peeked token should exist"),
+                                        );
+                                    }
+                                    Some(CssToken::ParenClose) if depth > 0 => {
+                                        depth -= 1;
+                                        argument_tokens.push(
+                                            self.next().expect("peeked token should exist"),
+                                        );
+                                    }
+                                    Some(CssToken::ParenClose) | None => break,
+                                    _ => {
+                                        argument_tokens.push(
+                                            self.next().expect("peeked token should exist"),
+                                        );
+                                    }
+                                }
                             }
                             match self.next() {
                                 Some(CssToken::ParenClose) => {}
                                 _ => return Err(CssParseError::ExpectedToken(")")),
                             }
-                            let argument = render_tokens(&argument_tokens).trim().to_string();
-                            SimpleSelector::PseudoClass(format!("{name}({argument})"))
+                            if name == "not" {
+                                // Parse the argument as a list of simple selectors
+                                let argument_str =
+                                    render_tokens(&argument_tokens).trim().to_string();
+                                let inner = parse_not_argument(&argument_str)?;
+                                SimpleSelector::Not(inner)
+                            } else {
+                                let argument =
+                                    render_tokens(&argument_tokens).trim().to_string();
+                                SimpleSelector::PseudoClass(format!("{name}({argument})"))
+                            }
                         } else {
                             SimpleSelector::PseudoClass(name)
                         }
@@ -1374,6 +1434,24 @@ fn render_tokens(tokens: &[CssToken]) -> String {
         }
     }
     rendered
+}
+
+/// Parses the argument of a `:not()` pseudo-class into a list of simple selectors.
+///
+/// The argument is a forgiving selector list; only simple selectors (no
+/// combinators) are supported here, which is sufficient for CSS Selectors Level 3.
+fn parse_not_argument(argument: &str) -> Result<Vec<SimpleSelector>, CssParseError> {
+    // Re-tokenize the argument and parse it as simple selectors.
+    // Reject if trailing tokens remain (commas, combinators, etc.).
+    let tokens = tokenize(argument)?;
+    let mut parser = Parser::new(tokens);
+    parser.skip_whitespace();
+    let selectors = parser.parse_simple_selectors()?;
+    parser.skip_whitespace();
+    if parser.peek().is_some() {
+        return Err(CssParseError::InvalidSelector);
+    }
+    Ok(selectors)
 }
 
 fn split_important(tokens: &[CssToken]) -> (Vec<CssToken>, bool) {
