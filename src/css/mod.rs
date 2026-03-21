@@ -918,6 +918,8 @@ fn expand_shorthand(name: &str, value: Value, important: bool) -> Vec<Declaratio
         }
         "background" => expand_background_shorthand(value, important),
         "font" => expand_font_shorthand(value, important),
+        "overflow" => expand_overflow_shorthand(value, important),
+        "flex" => expand_flex_shorthand(value, important),
         _ => vec![Declaration {
             name: name.to_string(),
             value,
@@ -1375,6 +1377,246 @@ fn parse_font_shorthand_length(value: &str) -> Option<Value> {
         return unit.trim().parse().ok().map(Value::Percentage);
     }
     None
+}
+
+fn expand_overflow_shorthand(value: Value, important: bool) -> Vec<Declaration> {
+    let values = match value {
+        Value::List(values) => values,
+        single => vec![single],
+    };
+
+    match values.as_slice() {
+        [a] => vec![
+            Declaration {
+                name: "overflow-x".to_string(),
+                value: a.clone(),
+                important,
+            },
+            Declaration {
+                name: "overflow-y".to_string(),
+                value: a.clone(),
+                important,
+            },
+        ],
+        [x, y] => vec![
+            Declaration {
+                name: "overflow-x".to_string(),
+                value: x.clone(),
+                important,
+            },
+            Declaration {
+                name: "overflow-y".to_string(),
+                value: y.clone(),
+                important,
+            },
+        ],
+        _ => vec![Declaration {
+            name: "overflow".to_string(),
+            value: Value::List(values),
+            important,
+        }],
+    }
+}
+
+fn expand_flex_shorthand(value: Value, important: bool) -> Vec<Declaration> {
+    let values = match value {
+        Value::List(values) => values,
+        single => vec![single],
+    };
+
+    // CSS-wide keywords: propagate to all three longhands
+    if let [Value::Keyword(kw)] = values.as_slice() {
+        let lower = kw.to_ascii_lowercase();
+        if matches!(lower.as_str(), "inherit" | "initial" | "unset" | "revert") {
+            return vec![
+                Declaration {
+                    name: "flex-grow".to_string(),
+                    value: Value::Keyword(lower.clone()),
+                    important,
+                },
+                Declaration {
+                    name: "flex-shrink".to_string(),
+                    value: Value::Keyword(lower.clone()),
+                    important,
+                },
+                Declaration {
+                    name: "flex-basis".to_string(),
+                    value: Value::Keyword(lower),
+                    important,
+                },
+            ];
+        }
+    }
+
+    // flex: none → 0 0 auto
+    if let [Value::Keyword(kw)] = values.as_slice() {
+        if kw == "none" {
+            return vec![
+                Declaration {
+                    name: "flex-grow".to_string(),
+                    value: Value::Number(0.0),
+                    important,
+                },
+                Declaration {
+                    name: "flex-shrink".to_string(),
+                    value: Value::Number(0.0),
+                    important,
+                },
+                Declaration {
+                    name: "flex-basis".to_string(),
+                    value: Value::Keyword("auto".to_string()),
+                    important,
+                },
+            ];
+        }
+        // flex: auto → 1 1 auto
+        if kw == "auto" {
+            return vec![
+                Declaration {
+                    name: "flex-grow".to_string(),
+                    value: Value::Number(1.0),
+                    important,
+                },
+                Declaration {
+                    name: "flex-shrink".to_string(),
+                    value: Value::Number(1.0),
+                    important,
+                },
+                Declaration {
+                    name: "flex-basis".to_string(),
+                    value: Value::Keyword("auto".to_string()),
+                    important,
+                },
+            ];
+        }
+    }
+
+    // flex: <grow> → grow shrink=1 basis=0  (単独の数値)
+    if let [Value::Number(grow)] = values.as_slice() {
+        return vec![
+            Declaration {
+                name: "flex-grow".to_string(),
+                value: Value::Number(*grow),
+                important,
+            },
+            Declaration {
+                name: "flex-shrink".to_string(),
+                value: Value::Number(1.0),
+                important,
+            },
+            Declaration {
+                name: "flex-basis".to_string(),
+                value: Value::Number(0.0),
+                important,
+            },
+        ];
+    }
+
+    // flex: <basis> → grow=1 shrink=1 basis  (単独の length/percentage)
+    if let [basis] = values.as_slice() {
+        if matches!(basis, Value::Length(_, _) | Value::Percentage(_)) {
+            return vec![
+                Declaration {
+                    name: "flex-grow".to_string(),
+                    value: Value::Number(1.0),
+                    important,
+                },
+                Declaration {
+                    name: "flex-shrink".to_string(),
+                    value: Value::Number(1.0),
+                    important,
+                },
+                Declaration {
+                    name: "flex-basis".to_string(),
+                    value: basis.clone(),
+                    important,
+                },
+            ];
+        }
+    }
+
+    // flex: <grow> <shrink> <basis>
+    if let [grow, shrink, basis] = values.as_slice() {
+        if matches!(grow, Value::Number(_)) && matches!(shrink, Value::Number(_)) {
+            return vec![
+                Declaration {
+                    name: "flex-grow".to_string(),
+                    value: grow.clone(),
+                    important,
+                },
+                Declaration {
+                    name: "flex-shrink".to_string(),
+                    value: shrink.clone(),
+                    important,
+                },
+                Declaration {
+                    name: "flex-basis".to_string(),
+                    value: basis.clone(),
+                    important,
+                },
+            ];
+        }
+    }
+
+    // flex: <grow> <basis>  (数値 + length/percentage)
+    if let [grow, basis] = values.as_slice() {
+        if matches!(grow, Value::Number(_))
+            && matches!(basis, Value::Length(_, _) | Value::Percentage(_))
+        {
+            return vec![
+                Declaration {
+                    name: "flex-grow".to_string(),
+                    value: grow.clone(),
+                    important,
+                },
+                Declaration {
+                    name: "flex-shrink".to_string(),
+                    value: Value::Number(1.0),
+                    important,
+                },
+                Declaration {
+                    name: "flex-basis".to_string(),
+                    value: basis.clone(),
+                    important,
+                },
+            ];
+        }
+    }
+
+    // flex: <grow> <shrink>  (2値でどちらも数値)
+    if let [grow, shrink] = values.as_slice() {
+        if matches!(grow, Value::Number(_)) && matches!(shrink, Value::Number(_)) {
+            return vec![
+                Declaration {
+                    name: "flex-grow".to_string(),
+                    value: grow.clone(),
+                    important,
+                },
+                Declaration {
+                    name: "flex-shrink".to_string(),
+                    value: shrink.clone(),
+                    important,
+                },
+                Declaration {
+                    name: "flex-basis".to_string(),
+                    value: Value::Number(0.0),
+                    important,
+                },
+            ];
+        }
+    }
+
+    // フォールバック: そのまま保持（単一値はListで包まない）
+    let fallback_value = if values.len() == 1 {
+        values.into_iter().next().unwrap()
+    } else {
+        Value::List(values)
+    };
+    vec![Declaration {
+        name: "flex".to_string(),
+        value: fallback_value,
+        important,
+    }]
 }
 
 fn is_background_color_keyword(keyword: &str) -> bool {
