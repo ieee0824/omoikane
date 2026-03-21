@@ -3577,10 +3577,31 @@ fn debug_acid2_hello_world_layout() {
 #[test]
 #[ignore = "debug blog layout investigation"]
 fn debug_blog_ast_moe_layout_snapshot() {
-    let html = fs::read_to_string(
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/output/blog-content.html"),
-    )
-    .unwrap();
+    let snapshot_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/output/blog-content.html");
+    if !snapshot_path.exists() {
+        // NOTE:
+        // This is a local debugging helper that relies on an untracked snapshot
+        // generated during manual rendering investigations.
+        // - On CI, the snapshot is intentionally absent, so we skip to keep
+        //   `cargo test -- --include-ignored` green.
+        // - Locally, we fail loudly so missing fixture setup is immediately visible.
+        if std::env::var_os("CI").is_some() {
+            eprintln!(
+                "skipping debug_blog_ast_moe_layout_snapshot on CI: missing {}",
+                snapshot_path.display()
+            );
+            return;
+        }
+        eprintln!(
+            "debug_blog_ast_moe_layout_snapshot requires local snapshot: {}",
+            snapshot_path.display()
+        );
+        panic!(
+            "missing required local snapshot for debug test: {}",
+            snapshot_path.display()
+        );
+    }
+    let html = fs::read_to_string(&snapshot_path).unwrap();
     let document = TreeBuilder::parse(&html).document();
     let base_url: crate::http::Url = "https://blog.ast.moe/blog/".parse().unwrap();
 
