@@ -1352,7 +1352,7 @@ fn compute_table_column_widths(
 ) -> Vec<f32> {
     let mut column_hints = vec![0.0f32; column_count];
 
-    // Scan all rows to find explicit width hints per column (from colspan=1 cells only)
+    // Scan all rows to find width hints per column (from colspan=1 cells only)
     for entry in entries {
         let mut col = 0usize;
         for cell in &entry.cells {
@@ -1364,32 +1364,60 @@ fn compute_table_column_widths(
                 .max(1);
             if span == 1 {
                 let cell_style = resolver.computed_style(cell);
-                if let Some(w) = explicit_length(&cell_style, "width") {
-                    column_hints[col] = column_hints[col].max(w);
+                let hint = explicit_length(&cell_style, "width")
+                    .unwrap_or_else(|| intrinsic_width(cell, resolver));
+                column_hints[col] = column_hints[col].max(hint);
+            }
+            col += span;
+        }
+    }
+
+    // Separate columns with explicit CSS width from those using intrinsic hints
+    let mut explicit_flags = vec![false; column_count];
+    for entry in entries {
+        let mut col = 0usize;
+        for cell in &entry.cells {
+            if col >= column_count {
+                break;
+            }
+            let span = html_table_span_attribute(cell, "colspan")
+                .unwrap_or(1)
+                .max(1);
+            if span == 1 {
+                let cell_style = resolver.computed_style(cell);
+                if explicit_length(&cell_style, "width").is_some() {
+                    explicit_flags[col] = true;
                 }
             }
             col += span;
         }
     }
 
-    let fixed_total: f32 = column_hints.iter().sum();
-    let auto_count = column_hints.iter().filter(|&&w| w == 0.0).count();
+    let fixed_total: f32 = column_hints
+        .iter()
+        .zip(explicit_flags.iter())
+        .filter(|&(_, &is_explicit)| is_explicit)
+        .map(|(&w, _)| w)
+        .sum();
+    let auto_count = explicit_flags.iter().filter(|&&f| !f).count();
 
     if auto_count == 0 {
-        // All columns have explicit widths; scale if needed
-        if fixed_total > 0.0 {
-            let scale = available_width / fixed_total;
+        // All columns have explicit widths
+        let hint_total: f32 = column_hints.iter().sum();
+        if hint_total > 0.0 && hint_total > available_width {
+            let scale = available_width / hint_total;
             return column_hints.iter().map(|w| w * scale).collect();
         }
-        let equal = available_width / column_count as f32;
-        return vec![equal; column_count];
+        return column_hints;
     }
 
+    // Distribute remaining width among auto columns
     let remaining = (available_width - fixed_total).max(0.0);
-    let auto_width = remaining / auto_count as f32;
+    let auto_equal = remaining / auto_count as f32;
     column_hints
         .iter()
-        .map(|&w| if w == 0.0 { auto_width } else { w })
+        .zip(explicit_flags.iter())
+        .map(|(&w, &is_explicit)| if is_explicit { w } else { auto_equal })
         .collect()
 }
 
