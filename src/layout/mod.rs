@@ -820,6 +820,8 @@ fn layout_flex_container(
     let wrap = flex_wrap(&style);
     let justify = justify_content(&style);
     let align = align_items(&style);
+    let main_gap = flex_main_axis_gap(&style, direction);
+    let line_gap = flex_cross_axis_gap(&style, direction);
 
     let mut items = Vec::new();
     let mut positioned_children = Vec::new();
@@ -848,12 +850,20 @@ fn layout_flex_container(
         });
     }
 
-    let lines = build_flex_lines(&items, width, wrap);
+    let lines = build_flex_lines(&items, width, wrap, main_gap);
     let mut children = Vec::new();
     let mut cross_cursor = y;
+    let line_count = lines.len();
 
-    for line in lines {
-        let resolved_main_sizes = resolve_flex_main_sizes(&line.items, width);
+    for (line_index, line) in lines.into_iter().enumerate() {
+        let line_item_count = line.items.len();
+        let fixed_main_gap = if line_item_count > 1 {
+            main_gap * (line_item_count.saturating_sub(1)) as f32
+        } else {
+            0.0
+        };
+        let available_main_for_items = (width - fixed_main_gap).max(0.0);
+        let resolved_main_sizes = resolve_flex_main_sizes(&line.items, available_main_for_items);
         let mut laid_out = Vec::new();
         let mut line_cross_size = 0.0f32;
 
@@ -892,14 +902,17 @@ fn layout_flex_container(
                 FlexDirection::Column => child.total_height(),
             })
             .sum();
-        let (line_start, gap) = justify_offsets(justify, width, total_main_size, laid_out.len());
+        let used_main_size = total_main_size + fixed_main_gap;
+        let (line_start, justify_gap) =
+            justify_offsets(justify, width, used_main_size, laid_out.len());
 
         let mut main_cursor = match direction {
             FlexDirection::Row => x + line_start,
             FlexDirection::Column => y + line_start,
         };
 
-        for (item, mut child) in laid_out {
+        let laid_out_count = laid_out.len();
+        for (index, (item, mut child)) in laid_out.into_iter().enumerate() {
             let child_main_size = match direction {
                 FlexDirection::Row => child.total_width(),
                 FlexDirection::Column => child.total_height(),
@@ -918,10 +931,17 @@ fn layout_flex_container(
             translate_layout_box_to_outer(&mut child, outer_x, outer_y);
             children.push(child);
 
-            main_cursor += child_main_size + gap;
+            if index + 1 < laid_out_count {
+                main_cursor += child_main_size + main_gap + justify_gap;
+            } else {
+                main_cursor += child_main_size;
+            }
         }
 
         cross_cursor += line_cross_size;
+        if line_index + 1 < line_count {
+            cross_cursor += line_gap;
+        }
     }
 
     let auto_height = cross_cursor - y;
@@ -2166,6 +2186,32 @@ fn flex_wrap(style: &ComputedStyle) -> FlexWrap {
     }
 }
 
+fn flex_gap(style: &ComputedStyle) -> Option<f32> {
+    explicit_length(style, "gap")
+}
+
+fn flex_main_axis_gap(style: &ComputedStyle, direction: FlexDirection) -> f32 {
+    match direction {
+        FlexDirection::Row => explicit_length(style, "column-gap")
+            .or_else(|| flex_gap(style))
+            .unwrap_or(0.0),
+        FlexDirection::Column => explicit_length(style, "row-gap")
+            .or_else(|| flex_gap(style))
+            .unwrap_or(0.0),
+    }
+}
+
+fn flex_cross_axis_gap(style: &ComputedStyle, direction: FlexDirection) -> f32 {
+    match direction {
+        FlexDirection::Row => explicit_length(style, "row-gap")
+            .or_else(|| flex_gap(style))
+            .unwrap_or(0.0),
+        FlexDirection::Column => explicit_length(style, "column-gap")
+            .or_else(|| flex_gap(style))
+            .unwrap_or(0.0),
+    }
+}
+
 fn justify_content(style: &ComputedStyle) -> JustifyContent {
     match style.get("justify-content") {
         Some(ComputedValue::Keyword(keyword)) if keyword.eq_ignore_ascii_case("center") => {
@@ -2266,6 +2312,7 @@ fn build_flex_lines<'a>(
     items: &'a [FlexItemSpec],
     available_main_size: f32,
     wrap: FlexWrap,
+    main_gap: f32,
 ) -> Vec<FlexLine<'a>> {
     let mut lines = Vec::new();
     let mut current = Vec::new();
@@ -2273,15 +2320,17 @@ fn build_flex_lines<'a>(
 
     for item in items {
         let item_size = item.base_main_size;
+        let gap = if current.is_empty() { 0.0 } else { main_gap };
         let would_wrap = wrap == FlexWrap::Wrap
             && !current.is_empty()
-            && occupied + item_size > available_main_size;
+            && occupied + gap + item_size > available_main_size;
         if would_wrap {
             lines.push(FlexLine { items: current });
             current = Vec::new();
             occupied = 0.0;
         }
-        occupied += item_size;
+        let leading_gap = if current.is_empty() { 0.0 } else { main_gap };
+        occupied += leading_gap + item_size;
         current.push(item);
     }
 

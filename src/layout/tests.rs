@@ -1545,6 +1545,91 @@ fn logical_margin_inline_start_offsets_flex_item() {
 }
 
 #[test]
+fn flex_row_honors_column_gap_between_items() {
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let container = NodeHandle::element("div");
+    let first = NodeHandle::element("article");
+    let second = NodeHandle::element("article");
+
+    document.append_child(body.clone());
+    body.append_child(container.clone());
+    container.append_child(first);
+    container.append_child(second);
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "div { display: flex; width: 200px; column-gap: 12px; } \
+             article { width: 40px; height: 10px; }",
+        )
+        .unwrap(),
+    );
+
+    let layout = layout_tree(
+        &body,
+        &mut resolver,
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 200.0,
+            height: 0.0,
+        },
+    )
+    .unwrap();
+
+    let container_box = &layout.children[0];
+    assert_eq!(container_box.children.len(), 2);
+    assert_eq!(container_box.children[0].dimensions.content.x, 0.0);
+    assert_eq!(container_box.children[1].dimensions.content.x, 52.0);
+}
+
+#[test]
+fn wrapped_flex_rows_honor_row_gap() {
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let container = NodeHandle::element("div");
+    let first = NodeHandle::element("article");
+    let second = NodeHandle::element("article");
+    let third = NodeHandle::element("article");
+
+    document.append_child(body.clone());
+    body.append_child(container.clone());
+    container.append_child(first);
+    container.append_child(second);
+    container.append_child(third);
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "div { display: flex; width: 120px; flex-wrap: wrap; row-gap: 8px; } \
+             article { width: 60px; height: 10px; }",
+        )
+        .unwrap(),
+    );
+
+    let layout = layout_tree(
+        &body,
+        &mut resolver,
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 120.0,
+            height: 0.0,
+        },
+    )
+    .unwrap();
+
+    let container_box = &layout.children[0];
+    assert_eq!(container_box.children.len(), 3);
+    assert_eq!(container_box.children[0].dimensions.content.y, 0.0);
+    assert_eq!(container_box.children[1].dimensions.content.y, 0.0);
+    assert_eq!(container_box.children[2].dimensions.content.y, 18.0);
+}
+
+#[test]
 fn absolutely_positions_child_relative_to_parent_content_box() {
     let document = NodeHandle::document();
     let body = NodeHandle::element("body");
