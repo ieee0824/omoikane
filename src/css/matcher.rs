@@ -116,7 +116,8 @@ fn add_simple_specificity(value: &mut Specificity, simple: &SimpleSelector) {
         SimpleSelector::Type(_) | SimpleSelector::PseudoElement(_) => value.elements += 1,
         SimpleSelector::Universal => {}
         SimpleSelector::Not(inner) => {
-            // :not() specificity is the maximum of its arguments' specificities.
+            // :not() is modeled as a single compound selector, so its
+            // specificity is the sum of the specificities of its inner simple selectors.
             let max_inner = inner.iter().fold(Specificity::zero(), |mut acc, s| {
                 add_simple_specificity(&mut acc, s);
                 acc
@@ -239,16 +240,17 @@ fn matches_attribute_selector(
                 .any(|token| token == expected)
         }),
         Some(AttributeOperator::StartsWith) => {
-            value.is_some_and(|expected| !expected.is_empty() && actual.starts_with(expected))
+            value.is_some_and(|expected| actual.starts_with(expected))
         }
         Some(AttributeOperator::EndsWith) => {
-            value.is_some_and(|expected| !expected.is_empty() && actual.ends_with(expected))
+            value.is_some_and(|expected| actual.ends_with(expected))
         }
         Some(AttributeOperator::Contains) => {
-            value.is_some_and(|expected| !expected.is_empty() && actual.contains(expected))
+            value.is_some_and(|expected| actual.contains(expected))
         }
         Some(AttributeOperator::DashMatch) => value.is_some_and(|expected| {
-            actual == expected || actual.starts_with(&format!("{expected}-"))
+            !expected.is_empty()
+                && (actual == expected || actual.starts_with(&format!("{expected}-")))
         }),
     }
 }

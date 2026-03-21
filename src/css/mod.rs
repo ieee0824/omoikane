@@ -73,7 +73,7 @@ pub enum SimpleSelector {
     },
     PseudoClass(String),
     PseudoElement(String),
-    /// `:not(<selector-list>)` — negation pseudo-class.
+    /// `:not(<compound-selector>)` — negation pseudo-class (single compound, no commas).
     Not(Vec<SimpleSelector>),
 }
 
