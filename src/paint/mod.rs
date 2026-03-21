@@ -11,7 +11,7 @@ use crate::css::{
     parse_stylesheet,
 };
 use crate::dom::{Node, NodeHandle, NodeType};
-use crate::font::{Font, load_system_font};
+use crate::font::{Font, GlyphRaster, load_system_font};
 use crate::http::url::resolve_url;
 use crate::layout::{InlineFragmentContent, LayoutBox, Rect, Visibility};
 use base64::Engine;
@@ -796,8 +796,8 @@ fn paint_text(
 ) {
     let color = text_color(style).unwrap_or(Color::rgb(0, 0, 0));
 
-    // Try to load a system font, fall back to placeholder rendering if unavailable
-    let font = load_system_font("sans-serif").ok();
+    // Try to load multiple system fonts and use per-glyph fallback.
+    let fonts = load_text_fonts();
 
     for line in &layout.lines {
         for fragment in &line.fragments {
@@ -805,14 +805,13 @@ fn paint_text(
                 InlineFragmentContent::Text(text) => {
                     let font_size = fragment.metrics.font_size.max(1.0);
 
-                    if let Some(ref font) = font {
-                        // Real glyph rendering
+                    if !fonts.is_empty() {
                         paint_text_with_font(
                             canvas,
                             fragment.rect,
                             text,
                             font_size,
-                            font,
+                            &fonts,
                             color,
                             clip,
                         );
@@ -845,29 +844,26 @@ fn paint_text_with_font(
     rect: Rect,
     text: &str,
     font_size: f32,
-    font: &Font,
+    fonts: &[Font],
     color: Color,
     clip: Option<Rect>,
 ) {
-    let metrics = font.metrics().at_size(font_size);
+    let primary_font = &fonts[0];
+    let metrics = primary_font.metrics().at_size(font_size);
     // Baseline is at rect.y + ascender (ascender is positive, descender is negative)
     let baseline_y = rect.y + metrics.ascender;
     let mut cursor_x = rect.x;
-    let mut previous_char = None;
+    let mut previous_char: Option<(char, usize)> = None;
 
     for ch in text.chars() {
-        if let Some(prev) = previous_char {
-            cursor_x += font.glyph_kerning(prev, ch, font_size);
+        let (font_index, glyph, advance_x) = rasterize_with_fallback(fonts, ch, font_size);
+        if let Some((prev, prev_font_index)) = previous_char
+            && prev_font_index == font_index
+        {
+            cursor_x += fonts[font_index].glyph_kerning(prev, ch, font_size);
         }
 
-        if ch.is_whitespace() {
-            // For whitespace, just advance the cursor
-            cursor_x += font.glyph_advance(ch, font_size);
-            previous_char = Some(ch);
-            continue;
-        }
-
-        if let Ok(glyph) = font.rasterize(ch, font_size) {
+        if let Some(glyph) = glyph {
             if glyph.width > 0 && glyph.height > 0 && !glyph.bitmap.is_empty() {
                 // Calculate glyph position
                 // offset_y is from baseline to bitmap top (typically negative for glyphs above baseline)
@@ -884,13 +880,102 @@ fn paint_text_with_font(
                     clip,
                 );
             }
-            cursor_x += glyph.advance_x;
-        } else {
-            // If rasterization fails, use fallback advance
-            cursor_x += font.glyph_advance(ch, font_size);
         }
-        previous_char = Some(ch);
+
+        // Keep text flow moving even if a glyph cannot be rasterized by any candidate font.
+        cursor_x += advance_x;
+        previous_char = Some((ch, font_index));
     }
+}
+
+fn load_text_fonts() -> Vec<Font> {
+    let mut fonts = Vec::new();
+    let mut loaded_families = HashSet::new();
+    let families = [
+        "sans-serif",
+        "Hiragino Sans",
+        "Hiragino Kaku Gothic ProN",
+        "Yu Gothic",
+        "Meiryo",
+        "MS Gothic",
+        "Noto Sans CJK JP",
+        "Noto Sans JP",
+        "IPA Gothic",
+        "IPAGothic",
+    ];
+
+    for family in families {
+        if !loaded_families.insert(family.to_ascii_lowercase()) {
+            continue;
+        }
+        if let Ok(font) = load_system_font(family) {
+            fonts.push(font);
+        }
+    }
+
+    fonts
+}
+
+fn rasterize_with_fallback(
+    fonts: &[Font],
+    ch: char,
+    font_size: f32,
+) -> (usize, Option<GlyphRaster>, f32) {
+    let prefer_cjk = is_cjk_character(ch);
+    let mut search_order = Vec::with_capacity(fonts.len());
+    if prefer_cjk && fonts.len() > 1 {
+        for index in 1..fonts.len() {
+            search_order.push(index);
+        }
+        search_order.push(0);
+    } else {
+        for index in 0..fonts.len() {
+            search_order.push(index);
+        }
+    }
+
+    for index in search_order {
+        let font = &fonts[index];
+        if !ch.is_whitespace() && !font.has_glyph(ch) {
+            continue;
+        }
+        match font.rasterize(ch, font_size) {
+            Ok(glyph) => {
+                if glyph.width > 0 && glyph.height > 0 && !glyph.bitmap.is_empty() {
+                    let advance = if glyph.advance_x > 0.0 {
+                        glyph.advance_x
+                    } else {
+                        font.glyph_advance(ch, font_size)
+                    };
+                    return (index, Some(glyph), advance);
+                }
+
+                // Whitespace and control-like glyphs can be outline-less but still have advance.
+                if ch.is_whitespace() {
+                    return (index, None, font.glyph_advance(ch, font_size));
+                }
+            }
+            Err(_) => continue,
+        }
+    }
+
+    // Fallback to the primary font advance to avoid collapsing text runs.
+    let primary_advance = fonts
+        .first()
+        .map(|font| font.glyph_advance(ch, font_size))
+        .unwrap_or((font_size * 0.6).max(1.0));
+    (0, None, primary_advance)
+}
+
+fn is_cjk_character(ch: char) -> bool {
+    matches!(
+        ch as u32,
+        0x3000..=0x30FF // CJK Symbols/Punctuation, Hiragana, Katakana
+            | 0x3400..=0x4DBF // CJK Unified Ideographs Extension A
+            | 0x4E00..=0x9FFF // CJK Unified Ideographs
+            | 0xF900..=0xFAFF // CJK Compatibility Ideographs
+            | 0xFF66..=0xFF9F // Half-width Katakana
+    )
 }
 
 /// Paint text as placeholder rectangles (fallback when no font available).

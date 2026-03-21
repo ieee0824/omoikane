@@ -140,6 +140,14 @@ impl Font {
         })
     }
 
+    /// Returns true when this font has a dedicated glyph for `ch`.
+    ///
+    /// `ab_glyph` returns glyph id 0 when a code point is missing and the
+    /// font falls back to `.notdef`.
+    pub fn has_glyph(&self, ch: char) -> bool {
+        self.inner.glyph_id(ch).0 != 0
+    }
+
     /// Get the horizontal advance width for a character at a given font size.
     pub fn glyph_advance(&self, ch: char, size_px: f32) -> f32 {
         let glyph_id = self.inner.glyph_id(ch);
