@@ -4377,3 +4377,162 @@ fn base_element_relative_url_always_same_origin() {
     );
     assert_eq!(effective_base.as_ref().map(|u| u.path()), Some("/assets/"));
 }
+
+/// Helper: paint a single div with the given background-color CSS value and return the canvas.
+fn paint_single_div_with_color(color_value: &str) -> Canvas {
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let panel = NodeHandle::element("div");
+    document.append_child(body.clone());
+    body.append_child(panel);
+
+    let stylesheet = format!(
+        "body {{ margin: 0; }} div {{ width: 10px; height: 10px; background-color: {color_value}; }}"
+    );
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(Origin::Author, parse_stylesheet(&stylesheet).unwrap());
+    let layout = layout_tree(
+        &document,
+        &mut resolver,
+        Rect { x: 0.0, y: 0.0, width: 20.0, height: 20.0 },
+    )
+    .unwrap();
+
+    let mut paint_resolver = StyleResolver::new();
+    paint_resolver.add_stylesheet(Origin::Author, parse_stylesheet(&stylesheet).unwrap());
+    paint_layout(
+        &layout,
+        &mut paint_resolver,
+        Rect { x: 0.0, y: 0.0, width: 20.0, height: 20.0 },
+    )
+}
+
+#[test]
+fn parses_rgba_color_with_alpha() {
+    // rgba(255, 0, 0, 0.5) → semi-transparent red (alpha=128)
+    let canvas = paint_single_div_with_color("rgba(255, 0, 0, 0.5)");
+    let pixel = canvas.pixel(5, 5).unwrap();
+    assert_eq!(pixel.r, 255);
+    assert_eq!(pixel.g, 0);
+    assert_eq!(pixel.b, 0);
+    // alpha blended onto transparent background: out_a ≈ 128
+    assert!(pixel.a > 100 && pixel.a < 150, "expected alpha ~128, got {}", pixel.a);
+}
+
+#[test]
+fn parses_rgba_fully_opaque() {
+    let canvas = paint_single_div_with_color("rgba(0, 128, 64, 1)");
+    assert_eq!(canvas.pixel(5, 5), Some(Color::rgba(0, 128, 64, 255)));
+}
+
+#[test]
+fn parses_rgba_fully_transparent() {
+    let canvas = paint_single_div_with_color("rgba(255, 0, 0, 0)");
+    // fully transparent → pixel stays transparent
+    assert_eq!(canvas.pixel(5, 5), Some(Color::rgba(0, 0, 0, 0)));
+}
+
+#[test]
+fn parses_hsl_red() {
+    // hsl(0, 100%, 50%) → pure red
+    let canvas = paint_single_div_with_color("hsl(0, 100%, 50%)");
+    assert_eq!(canvas.pixel(5, 5), Some(Color::rgb(255, 0, 0)));
+}
+
+#[test]
+fn parses_hsl_green() {
+    // hsl(120, 100%, 50%) → pure green
+    let canvas = paint_single_div_with_color("hsl(120, 100%, 50%)");
+    assert_eq!(canvas.pixel(5, 5), Some(Color::rgb(0, 255, 0)));
+}
+
+#[test]
+fn parses_hsl_blue() {
+    // hsl(240, 100%, 50%) → pure blue
+    let canvas = paint_single_div_with_color("hsl(240, 100%, 50%)");
+    assert_eq!(canvas.pixel(5, 5), Some(Color::rgb(0, 0, 255)));
+}
+
+#[test]
+fn parses_hsl_white() {
+    // hsl(0, 0%, 100%) → white
+    let canvas = paint_single_div_with_color("hsl(0, 0%, 100%)");
+    assert_eq!(canvas.pixel(5, 5), Some(Color::rgb(255, 255, 255)));
+}
+
+#[test]
+fn parses_hsl_black() {
+    // hsl(0, 0%, 0%) → black
+    let canvas = paint_single_div_with_color("hsl(0, 0%, 0%)");
+    assert_eq!(canvas.pixel(5, 5), Some(Color::rgb(0, 0, 0)));
+}
+
+#[test]
+fn parses_hsla_semi_transparent() {
+    // hsla(0, 100%, 50%, 0) → fully transparent red
+    let canvas = paint_single_div_with_color("hsla(0, 100%, 50%, 0)");
+    assert_eq!(canvas.pixel(5, 5), Some(Color::rgba(0, 0, 0, 0)));
+}
+
+#[test]
+fn parses_hsla_opaque() {
+    // hsla(240, 100%, 50%, 1) → fully opaque blue
+    let canvas = paint_single_div_with_color("hsla(240, 100%, 50%, 1)");
+    assert_eq!(canvas.pixel(5, 5), Some(Color::rgb(0, 0, 255)));
+}
+
+#[test]
+fn parses_8digit_hex_color() {
+    // #ff0000ff → fully opaque red
+    let canvas = paint_single_div_with_color("#ff0000ff");
+    assert_eq!(canvas.pixel(5, 5), Some(Color::rgb(255, 0, 0)));
+}
+
+#[test]
+fn parses_8digit_hex_color_transparent() {
+    // #ff000000 → fully transparent red → transparent pixel
+    let canvas = paint_single_div_with_color("#ff000000");
+    assert_eq!(canvas.pixel(5, 5), Some(Color::rgba(0, 0, 0, 0)));
+}
+
+#[test]
+fn parses_4digit_hex_color() {
+    // #f00f → fully opaque red (#ff0000ff)
+    let canvas = paint_single_div_with_color("#f00f");
+    assert_eq!(canvas.pixel(5, 5), Some(Color::rgb(255, 0, 0)));
+}
+
+#[test]
+fn parses_4digit_hex_color_transparent() {
+    // #f000 → fully transparent red → transparent pixel
+    let canvas = paint_single_div_with_color("#f000");
+    assert_eq!(canvas.pixel(5, 5), Some(Color::rgba(0, 0, 0, 0)));
+}
+
+#[test]
+fn parses_named_color_coral() {
+    // coral = rgb(255, 127, 80)
+    let canvas = paint_single_div_with_color("coral");
+    assert_eq!(canvas.pixel(5, 5), Some(Color::rgb(255, 127, 80)));
+}
+
+#[test]
+fn parses_named_color_crimson() {
+    // crimson = rgb(220, 20, 60)
+    let canvas = paint_single_div_with_color("crimson");
+    assert_eq!(canvas.pixel(5, 5), Some(Color::rgb(220, 20, 60)));
+}
+
+#[test]
+fn parses_named_color_orange() {
+    // orange = rgb(255, 165, 0)
+    let canvas = paint_single_div_with_color("orange");
+    assert_eq!(canvas.pixel(5, 5), Some(Color::rgb(255, 165, 0)));
+}
+
+#[test]
+fn parses_named_color_pink() {
+    // pink = rgb(255, 192, 203)
+    let canvas = paint_single_div_with_color("pink");
+    assert_eq!(canvas.pixel(5, 5), Some(Color::rgb(255, 192, 203)));
+}

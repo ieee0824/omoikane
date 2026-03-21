@@ -767,19 +767,20 @@ fn compute_value(value: &Value, property_name: &str, parent_font_size: f32) -> C
         Value::Color(color) => ComputedValue::Color(color.clone()),
         Value::String(value) => ComputedValue::String(value.clone()),
         Value::Number(value) => ComputedValue::Number(*value),
-        Value::Function { name, arguments } if name.eq_ignore_ascii_case("rgb") => {
-            let channels: Vec<u8> = arguments
-                .iter()
-                .map(|argument| match argument {
-                    Value::Number(number) => *number as u8,
-                    _ => 0,
-                })
-                .collect();
-            if channels.len() == 3 {
-                ComputedValue::Color(format!(
-                    "#{:02x}{:02x}{:02x}",
-                    channels[0], channels[1], channels[2]
-                ))
+        Value::Function { name, arguments }
+            if name.eq_ignore_ascii_case("rgb") || name.eq_ignore_ascii_case("rgba") =>
+        {
+            if let Some(hex) = compute_rgb_function(arguments) {
+                ComputedValue::Color(hex)
+            } else {
+                ComputedValue::Keyword(name.clone())
+            }
+        }
+        Value::Function { name, arguments }
+            if name.eq_ignore_ascii_case("hsl") || name.eq_ignore_ascii_case("hsla") =>
+        {
+            if let Some(hex) = compute_hsl_function(arguments) {
+                ComputedValue::Color(hex)
             } else {
                 ComputedValue::Keyword(name.clone())
             }
@@ -1355,8 +1356,315 @@ fn inherited_font_size(
 fn is_color_keyword(keyword: &str) -> bool {
     matches!(
         keyword,
-        "black" | "white" | "red" | "green" | "blue" | "gray" | "grey"
+        "black"
+            | "white"
+            | "red"
+            | "green"
+            | "blue"
+            | "gray"
+            | "grey"
+            | "silver"
+            | "aqua"
+            | "teal"
+            | "lime"
+            | "fuchsia"
+            | "olive"
+            | "navy"
+            | "purple"
+            | "maroon"
+            | "yellow"
+            | "orange"
+            | "coral"
+            | "salmon"
+            | "tomato"
+            | "orangered"
+            | "darkorange"
+            | "gold"
+            | "goldenrod"
+            | "darkgoldenrod"
+            | "peru"
+            | "chocolate"
+            | "sienna"
+            | "saddlebrown"
+            | "brown"
+            | "firebrick"
+            | "darkred"
+            | "crimson"
+            | "pink"
+            | "lightpink"
+            | "hotpink"
+            | "deeppink"
+            | "palevioletred"
+            | "mediumvioletred"
+            | "lavender"
+            | "thistle"
+            | "plum"
+            | "violet"
+            | "orchid"
+            | "magenta"
+            | "mediumorchid"
+            | "darkorchid"
+            | "darkviolet"
+            | "blueviolet"
+            | "indigo"
+            | "slateblue"
+            | "darkslateblue"
+            | "mediumpurple"
+            | "rebeccapurple"
+            | "lightblue"
+            | "powderblue"
+            | "lightskyblue"
+            | "skyblue"
+            | "deepskyblue"
+            | "dodgerblue"
+            | "cornflowerblue"
+            | "steelblue"
+            | "royalblue"
+            | "mediumblue"
+            | "darkblue"
+            | "midnightblue"
+            | "azure"
+            | "aliceblue"
+            | "ghostwhite"
+            | "mintcream"
+            | "honeydew"
+            | "lightgreen"
+            | "palegreen"
+            | "limegreen"
+            | "mediumseagreen"
+            | "seagreen"
+            | "forestgreen"
+            | "darkgreen"
+            | "yellowgreen"
+            | "olivedrab"
+            | "darkolivegreen"
+            | "mediumaquamarine"
+            | "aquamarine"
+            | "turquoise"
+            | "mediumturquoise"
+            | "darkturquoise"
+            | "lightseagreen"
+            | "cadetblue"
+            | "darkcyan"
+            | "cyan"
+            | "darkslategray"
+            | "darkslategrey"
+            | "slategray"
+            | "slategrey"
+            | "lightslategray"
+            | "lightslategrey"
+            | "darkgray"
+            | "darkgrey"
+            | "dimgray"
+            | "dimgrey"
+            | "lightgray"
+            | "lightgrey"
+            | "gainsboro"
+            | "whitesmoke"
+            | "snow"
+            | "seashell"
+            | "floralwhite"
+            | "ivory"
+            | "linen"
+            | "oldlace"
+            | "antiquewhite"
+            | "bisque"
+            | "blanchedalmond"
+            | "wheat"
+            | "moccasin"
+            | "navajowhite"
+            | "peachpuff"
+            | "mistyrose"
+            | "papayawhip"
+            | "lightyellow"
+            | "lemonchiffon"
+            | "khaki"
+            | "darkkhaki"
+            | "palegoldenrod"
+            | "beige"
+            | "cornsilk"
+            | "chartreuse"
+            | "greenyellow"
+            | "lawngreen"
+            | "springgreen"
+            | "mediumspringgreen"
+            | "transparent"
     )
+}
+
+/// Extracts a numeric channel value from a CSS `Value`.
+/// Handles `Value::Number` directly and `Value::Percentage` by clamping to 0–255.
+fn extract_channel(v: &Value) -> Option<f32> {
+    match v {
+        Value::Number(n) => Some(*n),
+        Value::Percentage(p) => Some(p * 255.0 / 100.0),
+        _ => None,
+    }
+}
+
+/// Extracts an alpha value (0.0–1.0) from a CSS `Value`.
+fn extract_alpha(v: &Value) -> Option<f32> {
+    match v {
+        Value::Number(n) => Some(n.clamp(0.0, 1.0)),
+        Value::Percentage(p) => Some((p / 100.0).clamp(0.0, 1.0)),
+        _ => None,
+    }
+}
+
+/// Flattens function arguments by expanding a single-argument `Value::List`.
+///
+/// Modern CSS color syntax `rgb(r g b / a)` is parsed as one argument that is
+/// a `Value::List`.  This helper normalises both forms — comma-separated and
+/// space-separated — into a flat slice.
+fn flatten_color_args(arguments: &[Value]) -> Vec<&Value> {
+    if arguments.len() == 1 {
+        if let Value::List(items) = &arguments[0] {
+            return items.iter().collect();
+        }
+    }
+    arguments.iter().collect()
+}
+
+/// Converts an `rgb()` or `rgba()` argument list into a hex color string.
+///
+/// Handles both the legacy comma-separated syntax and the modern
+/// space-separated syntax with an optional `/ alpha` component.
+fn compute_rgb_function(arguments: &[Value]) -> Option<String> {
+    let flat = flatten_color_args(arguments);
+    let (rgb_values, alpha) = split_slash(&flat);
+
+    // rgb_values are the channels before "/"
+    let channels: Vec<f32> = rgb_values
+        .iter()
+        .filter_map(|v| extract_channel(v))
+        .collect();
+
+    // Use the 4th channel as alpha for rgba(r,g,b,a) comma form
+    let a = alpha.or_else(|| {
+        if channels.len() == 4 {
+            Some(channels[3].clamp(0.0, 1.0))
+        } else {
+            None
+        }
+    });
+
+    let (r, g, b) = match channels.as_slice() {
+        [r, g, b, ..] => (*r as u8, *g as u8, *b as u8),
+        _ => return None,
+    };
+
+    format_color_hex(r, g, b, a)
+}
+
+/// Converts an `hsl()` or `hsla()` argument list into a hex color string.
+fn compute_hsl_function(arguments: &[Value]) -> Option<String> {
+    let flat = flatten_color_args(arguments);
+    let (hsl_values, alpha) = split_slash(&flat);
+
+    let numbers: Vec<f32> = hsl_values
+        .iter()
+        .filter_map(|v| match v {
+            Value::Number(n) => Some(*n),
+            Value::Percentage(p) => Some(*p),
+            _ => None,
+        })
+        .collect();
+
+    // Use 4th value as alpha for hsla(h,s%,l%,a) comma form
+    let a = alpha.or_else(|| {
+        if numbers.len() == 4 {
+            Some(numbers[3].clamp(0.0, 1.0))
+        } else {
+            None
+        }
+    });
+
+    let (h, s, l) = match numbers.as_slice() {
+        [h, s, l, ..] => (*h, *s, *l),
+        _ => return None,
+    };
+
+    let (r, g, b) = hsl_to_rgb(h, s / 100.0, l / 100.0);
+    format_color_hex(r, g, b, a)
+}
+
+/// Formats an RGBA color as a hex string.
+///
+/// Omits the alpha byte when fully opaque to produce the shorter `#rrggbb` form.
+fn format_color_hex(r: u8, g: u8, b: u8, a: Option<f32>) -> Option<String> {
+    match a {
+        Some(a) if a < 1.0 - f32::EPSILON => {
+            let a_byte = (a * 255.0).round() as u8;
+            Some(format!("#{r:02x}{g:02x}{b:02x}{a_byte:02x}"))
+        }
+        _ => Some(format!("#{r:02x}{g:02x}{b:02x}")),
+    }
+}
+
+/// Splits a flat argument list around the `/` keyword into the before and after parts.
+///
+/// Returns the values before `/`, and the alpha value after `/` (if any).
+fn split_slash<'a>(flat: &[&'a Value]) -> (Vec<&'a Value>, Option<f32>) {
+    let slash_pos = flat
+        .iter()
+        .position(|v| matches!(v, Value::Keyword(k) if k == "/"));
+
+    if let Some(pos) = slash_pos {
+        let before = flat[..pos].to_vec();
+        let alpha = flat.get(pos + 1).and_then(|v| extract_alpha(v));
+        (before, alpha)
+    } else {
+        (flat.to_vec(), None)
+    }
+}
+
+/// Converts HSL to RGB.  All inputs and outputs are in the 0–255 / 0–360 range.
+///
+/// - `h`: hue in degrees (0–360)
+/// - `s`: saturation as fraction (0.0–1.0)
+/// - `l`: lightness as fraction (0.0–1.0)
+fn hsl_to_rgb(h: f32, s: f32, l: f32) -> (u8, u8, u8) {
+    if s == 0.0 {
+        let v = (l * 255.0).round() as u8;
+        return (v, v, v);
+    }
+
+    let q = if l < 0.5 {
+        l * (1.0 + s)
+    } else {
+        l + s - l * s
+    };
+    let p = 2.0 * l - q;
+    let h = h / 360.0;
+
+    let r = hue_to_rgb(p, q, h + 1.0 / 3.0);
+    let g = hue_to_rgb(p, q, h);
+    let b = hue_to_rgb(p, q, h - 1.0 / 3.0);
+
+    (
+        (r * 255.0).round() as u8,
+        (g * 255.0).round() as u8,
+        (b * 255.0).round() as u8,
+    )
+}
+
+fn hue_to_rgb(p: f32, q: f32, mut t: f32) -> f32 {
+    if t < 0.0 {
+        t += 1.0;
+    }
+    if t > 1.0 {
+        t -= 1.0;
+    }
+    if t < 1.0 / 6.0 {
+        return p + (q - p) * 6.0 * t;
+    }
+    if t < 1.0 / 2.0 {
+        return q;
+    }
+    if t < 2.0 / 3.0 {
+        return p + (q - p) * (2.0 / 3.0 - t) * 6.0;
+    }
+    p
 }
 
 fn render_value(value: &Value) -> String {
