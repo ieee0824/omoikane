@@ -475,3 +475,20 @@ fn resolves_calc_with_var_lengths() {
     let style = resolver.computed_style(&body);
     assert_eq!(style.get("max-width"), Some(&ComputedValue::Px(768.0)));
 }
+
+#[test]
+fn resolves_calc_with_var_lengths_without_operator_whitespace() {
+    let (_document, body, _title, _html) = sample_tree();
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            ":root { --main-width: 720px; --gap: 24px; } \
+             body { max-width: calc(var(--main-width)+var(--gap)*2); }",
+        )
+        .unwrap(),
+    );
+
+    let style = resolver.computed_style(&body);
+    assert_eq!(style.get("max-width"), Some(&ComputedValue::Px(768.0)));
+}
