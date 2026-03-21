@@ -17,6 +17,7 @@ include = [
   "omoikane_evaluate",
   "omoikane_get_content",
   "omoikane_screenshot_png",
+  "omoikane_screenshot_png_with_viewport",
   "omoikane_last_error",
   "omoikane_string_free",
 ]
