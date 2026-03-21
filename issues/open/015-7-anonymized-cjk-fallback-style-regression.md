@@ -48,4 +48,7 @@ CJK文字の表示改善により日本語の可読性は向上した一方で�
 - `:root` 疑似クラス対応と CSS custom property（`--*`）の継承/`var()` 解決を導入し、黒背景のみ表示される状態を解消
 - `calc(var(--main-width) + var(--gap) * 2)` のような式を最小評価できるようにし、`max-width` などの長さ計算を一部復元
 - `blog.ast.moe` は主要コンテンツが描画される段階まで改善したが、Firefox比較ではヘッダー周辺（ロゴ縦積み・メニュー配置）にFlexレイアウト差分が残る
-- 次ステップ: Flex item の縮小/自動幅解決（`display:flex` + `margin:auto` + `justify-content: space-between` 組み合わせ）を実装差分の主対象として追う
+- Flex item の auto basis を内容幅ベースに変更し、`display:flex` コンテナ配下の要素が 0 幅に潰れる経路を解消
+- ネストした flex コンテナ（`nav > #menu`）の intrinsic 幅見積もりを `max` から row 方向 `sum` に補正し、メニュー項目重なりを縮小
+- `margin-inline-start/end` の長さ反映と auto 判定を追加し、`max-width` と auto margin の併用時にセンタリングを再配分
+- `blog.ast.moe` は Firefox 参照にかなり近づいた（本文幅・全体配置が改善）。残差分はヘッダーの細部（ロゴの改行位置、メニュー間隔の微差）
