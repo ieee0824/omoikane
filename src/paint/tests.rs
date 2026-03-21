@@ -3792,6 +3792,7 @@ fn debug_painted_pixel_positions() {
         },
         text,
         font_size,
+        font_size * 0.8,
         std::slice::from_ref(&font),
         color,
         None,

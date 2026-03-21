@@ -4,7 +4,7 @@
 //! produces a tree of rectangular block boxes.
 
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::css::{ComputedStyle, ComputedValue, PseudoElement, StyleResolver};
 use crate::dom::{Node, NodeHandle, NodeType};
@@ -17,7 +17,7 @@ use crate::paint::{DataUri, Image, parse_data_uri};
 thread_local! {
     static IMAGE_CACHE: RefCell<HashMap<String, Option<Image>>> = RefCell::new(HashMap::new());
     static HTTP_CLIENT: RefCell<Client> = RefCell::new(Client::new());
-    static LAYOUT_FONT: RefCell<Option<Font>> = RefCell::new(None);
+    static LAYOUT_FONTS: RefCell<Option<Vec<Font>>> = RefCell::new(None);
     static IMAGE_BASE_URL: RefCell<Option<Url>> = const { RefCell::new(None) };
 }
 
@@ -3146,23 +3146,103 @@ fn push_line(
 }
 
 fn measure_text_width(text: &str, metrics: FontMetrics) -> f32 {
-    // Try to use actual font glyph advances for accurate measurement
-    LAYOUT_FONT.with(|cell| {
-        let mut font_ref = cell.borrow_mut();
-
-        // Lazily load the font on first use
-        if font_ref.is_none() {
-            *font_ref = load_system_font("sans-serif").ok();
+    LAYOUT_FONTS.with(|cell| {
+        let mut fonts_ref = cell.borrow_mut();
+        if fonts_ref.is_none() {
+            *fonts_ref = Some(load_layout_fonts());
         }
 
-        if let Some(ref font) = *font_ref {
-            // Use real glyph advances from the font
-            font.measure_text_width(text, metrics.font_size)
-        } else {
-            // Fallback to approximation when no font is available
-            text.chars().count() as f32 * metrics.average_advance
+        if let Some(ref fonts) = *fonts_ref {
+            if !fonts.is_empty() {
+                return measure_text_width_with_fallback(text, metrics.font_size, fonts);
+            }
         }
+
+        // Fallback to approximation when no font is available
+        text.chars().count() as f32 * metrics.average_advance
     })
+}
+
+fn load_layout_fonts() -> Vec<Font> {
+    let mut fonts = Vec::new();
+    let mut loaded_families = HashSet::new();
+    let families = [
+        "sans-serif",
+        "Hiragino Sans",
+        "Hiragino Kaku Gothic ProN",
+        "Yu Gothic",
+        "Meiryo",
+        "MS Gothic",
+        "Noto Sans CJK JP",
+        "Noto Sans JP",
+        "IPA Gothic",
+        "IPAGothic",
+    ];
+
+    for family in families {
+        if !loaded_families.insert(family.to_ascii_lowercase()) {
+            continue;
+        }
+        if let Ok(font) = load_system_font(family) {
+            fonts.push(font);
+        }
+    }
+
+    fonts
+}
+
+fn measure_text_width_with_fallback(text: &str, font_size: f32, fonts: &[Font]) -> f32 {
+    let mut width = 0.0;
+    let mut previous: Option<(char, usize)> = None;
+
+    for ch in text.chars() {
+        let font_index = select_layout_font_index(fonts, ch);
+
+        if let Some((prev_char, prev_index)) = previous
+            && prev_index == font_index
+        {
+            width += fonts[font_index].glyph_kerning(prev_char, ch, font_size);
+        }
+
+        let advance = fonts[font_index].glyph_advance(ch, font_size);
+        width += if advance > 0.0 { advance } else { 0.0 };
+        previous = Some((ch, font_index));
+    }
+
+    width
+}
+
+fn select_layout_font_index(fonts: &[Font], ch: char) -> usize {
+    let prefer_cjk = is_cjk_preferred_character(ch);
+    if prefer_cjk && fonts.len() > 1 {
+        for index in 1..fonts.len() {
+            if !ch.is_whitespace() && !fonts[index].has_glyph(ch) {
+                continue;
+            }
+            return index;
+        }
+        return 0;
+    }
+
+    for index in 0..fonts.len() {
+        if index != 0 && !ch.is_whitespace() && !fonts[index].has_glyph(ch) {
+            continue;
+        }
+        return index;
+    }
+
+    0
+}
+
+fn is_cjk_preferred_character(ch: char) -> bool {
+    matches!(
+        ch as u32,
+        0x3000..=0x30FF // CJK Symbols/Punctuation, Hiragana, Katakana
+            | 0x3400..=0x4DBF // CJK Unified Ideographs Extension A
+            | 0x4E00..=0x9FFF // CJK Unified Ideographs
+            | 0xF900..=0xFAFF // CJK Compatibility Ideographs
+            | 0xFF66..=0xFF9F // Half-width Katakana
+    )
 }
 
 fn is_display_none(style: &ComputedStyle) -> bool {
