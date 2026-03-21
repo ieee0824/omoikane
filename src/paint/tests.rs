@@ -1290,11 +1290,20 @@ fn acid2_fixture_matches_local_baseline_png() {
     if changed > text_tolerance {
         fs::create_dir_all(acid2_output_dir()).unwrap();
         fs::write(
-            acid2_output_dir().join("acid2.actual.png"),
+            fixture_output_image_path("acid2", "local-baseline", "actual"),
             actual.encode_png(),
         )
         .unwrap();
-        fs::write(acid2_output_dir().join("acid2.diff.png"), diff.encode_png()).unwrap();
+        fs::write(
+            fixture_output_image_path("acid2", "local-baseline", "expected"),
+            expected_png,
+        )
+        .unwrap();
+        fs::write(
+            fixture_output_image_path("acid2", "local-baseline", "diff"),
+            diff.encode_png(),
+        )
+        .unwrap();
         panic!(
             "acid2 rendering diverged from the checked-in local baseline ({} pixels differ, tolerance {}); wrote diff assets to tests/output/acid2",
             changed, text_tolerance
@@ -2470,17 +2479,17 @@ fn acid2_fixture_matches_official_reference_rendering() {
     if changed > text_tolerance {
         fs::create_dir_all(acid2_output_dir()).unwrap();
         fs::write(
-            acid2_output_dir().join("acid2.official-reference.actual.png"),
+            fixture_output_image_path("acid2", "official-reference", "actual"),
             actual.encode_png(),
         )
         .unwrap();
         fs::write(
-            acid2_output_dir().join("acid2.official-reference.expected.png"),
+            fixture_output_image_path("acid2", "official-reference", "expected"),
             expected.encode_png(),
         )
         .unwrap();
         fs::write(
-            acid2_output_dir().join("acid2.official-reference.diff.png"),
+            fixture_output_image_path("acid2", "official-reference", "diff"),
             diff.encode_png(),
         )
         .unwrap();
@@ -2515,7 +2524,7 @@ fn refresh_acid2_baseline_png() {
 }
 
 fn acid2_fixture_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/acid2")
+    fixture_dir("acid2")
 }
 
 fn acid2_fixture_path() -> PathBuf {
@@ -2535,7 +2544,39 @@ fn acid2_official_reference_png_path() -> PathBuf {
 }
 
 fn acid2_output_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/output/acid2")
+    fixture_output_dir("acid2")
+}
+
+fn fixture_dir(fixture: &str) -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures")
+        .join(fixture)
+}
+
+fn fixture_output_dir(fixture: &str) -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/output")
+        .join(fixture)
+}
+
+fn fixture_output_image_path(fixture: &str, scenario: &str, variant: &str) -> PathBuf {
+    fixture_output_dir(fixture).join(format!("{fixture}.{scenario}.{variant}.png"))
+}
+
+fn baseline_image_path(fixture: &str, filename: &str) -> PathBuf {
+    fixture_dir(fixture).join(filename)
+}
+
+#[test]
+fn fixture_paths_follow_anonymized_diff_convention() {
+    let output_path = fixture_output_image_path("anonymized-site-a", "viewport-1366x900", "diff");
+    let expected = fixture_output_dir("anonymized-site-a")
+        .join("anonymized-site-a.viewport-1366x900.diff.png");
+    assert_eq!(output_path, expected);
+
+    let baseline_path = baseline_image_path("anonymized-site-a", "render.baseline.png");
+    let expected_baseline = fixture_dir("anonymized-site-a").join("render.baseline.png");
+    assert_eq!(baseline_path, expected_baseline);
 }
 
 fn collect_layout_texts(layout: &LayoutBox) -> Vec<String> {
@@ -3892,17 +3933,17 @@ fn debug_write_acid2_official_reference_outputs() {
     let (diff, changed) = diff_canvases_with_tolerance(&actual, &expected, 1);
     fs::create_dir_all(acid2_output_dir()).unwrap();
     fs::write(
-        acid2_output_dir().join("acid2.official-reference.actual.png"),
+        fixture_output_image_path("acid2", "official-reference", "actual"),
         actual.encode_png(),
     )
     .unwrap();
     fs::write(
-        acid2_output_dir().join("acid2.official-reference.expected.png"),
+        fixture_output_image_path("acid2", "official-reference", "expected"),
         expected.encode_png(),
     )
     .unwrap();
     fs::write(
-        acid2_output_dir().join("acid2.official-reference.diff.png"),
+        fixture_output_image_path("acid2", "official-reference", "diff"),
         diff.encode_png(),
     )
     .unwrap();
