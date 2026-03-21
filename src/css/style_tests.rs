@@ -713,3 +713,51 @@ fn computes_named_color_crimson() {
         Some(&ComputedValue::Color("crimson".to_string()))
     );
 }
+
+#[test]
+fn computes_rgba_percentage_alpha() {
+    let (_document, _body, title, _html) = sample_tree();
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet("h1 { color: rgba(255, 0, 0, 50%); }").unwrap(),
+    );
+    let style = resolver.computed_style(&title);
+    // 50% alpha = 0.5 → hex alpha 80
+    assert_eq!(
+        style.get("color"),
+        Some(&ComputedValue::Color("#ff000080".to_string()))
+    );
+}
+
+#[test]
+fn computes_hsl_wraps_hue_above_360() {
+    let (_document, _body, title, _html) = sample_tree();
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet("h1 { color: hsl(720, 100%, 50%); }").unwrap(),
+    );
+    let style = resolver.computed_style(&title);
+    // 720 mod 360 = 0 → red
+    assert_eq!(
+        style.get("color"),
+        Some(&ComputedValue::Color("#ff0000".to_string()))
+    );
+}
+
+#[test]
+fn computes_hsl_wraps_negative_hue() {
+    let (_document, _body, title, _html) = sample_tree();
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet("h1 { color: hsl(-120, 100%, 50%); }").unwrap(),
+    );
+    let style = resolver.computed_style(&title);
+    // -120 mod 360 = 240 → blue
+    assert_eq!(
+        style.get("color"),
+        Some(&ComputedValue::Color("#0000ff".to_string()))
+    );
+}

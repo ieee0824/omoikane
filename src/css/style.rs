@@ -1539,13 +1539,11 @@ fn compute_rgb_function(arguments: &[Value]) -> Option<String> {
         .filter_map(|v| extract_channel(v))
         .collect();
 
-    // Use the 4th channel as alpha for rgba(r,g,b,a) comma form
+    // Use the 4th value as alpha for rgba(r,g,b,a) comma form.
+    // Extract via extract_alpha (not extract_channel) so percentages are 0-1.
     let a = alpha.or_else(|| {
-        if channels.len() == 4 {
-            Some(channels[3].clamp(0.0, 1.0))
-        } else {
-            None
-        }
+        let flat = flatten_color_args(arguments);
+        flat.get(3).and_then(|v| extract_alpha(v))
     });
 
     let (r, g, b) = match channels.as_slice() {
@@ -1570,13 +1568,10 @@ fn compute_hsl_function(arguments: &[Value]) -> Option<String> {
         })
         .collect();
 
-    // Use 4th value as alpha for hsla(h,s%,l%,a) comma form
+    // Use 4th value as alpha for hsla(h,s%,l%,a) comma form.
+    // Extract via extract_alpha so percentages are 0-1.
     let a = alpha.or_else(|| {
-        if numbers.len() == 4 {
-            Some(numbers[3].clamp(0.0, 1.0))
-        } else {
-            None
-        }
+        flat.get(3).and_then(|v| extract_alpha(v))
     });
 
     let (h, s, l) = match numbers.as_slice() {
@@ -1624,6 +1619,11 @@ fn split_slash<'a>(flat: &[&'a Value]) -> (Vec<&'a Value>, Option<f32>) {
 /// - `s`: saturation as fraction (0.0–1.0)
 /// - `l`: lightness as fraction (0.0–1.0)
 fn hsl_to_rgb(h: f32, s: f32, l: f32) -> (u8, u8, u8) {
+    // CSS allows hue values outside 0-360; wrap to canonical range
+    let h = ((h % 360.0) + 360.0) % 360.0;
+    let s = s.clamp(0.0, 1.0);
+    let l = l.clamp(0.0, 1.0);
+
     if s == 0.0 {
         let v = (l * 255.0).round() as u8;
         return (v, v, v);

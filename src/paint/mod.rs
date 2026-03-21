@@ -1677,6 +1677,10 @@ fn split_color_args(args: &str) -> Vec<String> {
 /// - `s`: saturation as fraction (0.0–1.0)
 /// - `l`: lightness as fraction (0.0–1.0)
 fn hsl_to_rgb(h: f32, s: f32, l: f32) -> (u8, u8, u8) {
+    let h = ((h % 360.0) + 360.0) % 360.0;
+    let s = s.clamp(0.0, 1.0);
+    let l = l.clamp(0.0, 1.0);
+
     if s == 0.0 {
         let v = (l * 255.0).round() as u8;
         return (v, v, v);
