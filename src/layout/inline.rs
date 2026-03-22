@@ -62,6 +62,42 @@ pub(super) fn layout_inline_nodes(
 
 // ── Inline segment types ────────────────────────────────────────────────────
 
+/// CSS `word-break` property values.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(super) enum WordBreak {
+    #[default]
+    Normal,
+    BreakAll,
+    KeepAll,
+    BreakWord,
+}
+
+/// CSS `overflow-wrap` property values.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(super) enum OverflowWrap {
+    #[default]
+    Normal,
+    BreakWord,
+    Anywhere,
+}
+
+pub(super) fn word_break(style: &ComputedStyle) -> WordBreak {
+    match style.get("word-break") {
+        Some(ComputedValue::Keyword(kw)) if kw.eq_ignore_ascii_case("break-all") => WordBreak::BreakAll,
+        Some(ComputedValue::Keyword(kw)) if kw.eq_ignore_ascii_case("keep-all") => WordBreak::KeepAll,
+        Some(ComputedValue::Keyword(kw)) if kw.eq_ignore_ascii_case("break-word") => WordBreak::BreakWord,
+        _ => WordBreak::Normal,
+    }
+}
+
+pub(super) fn overflow_wrap(style: &ComputedStyle) -> OverflowWrap {
+    match style.get("overflow-wrap") {
+        Some(ComputedValue::Keyword(kw)) if kw.eq_ignore_ascii_case("break-word") => OverflowWrap::BreakWord,
+        Some(ComputedValue::Keyword(kw)) if kw.eq_ignore_ascii_case("anywhere") => OverflowWrap::Anywhere,
+        _ => OverflowWrap::Normal,
+    }
+}
+
 #[derive(Debug, Clone)]
 pub(super) struct InlineSegment {
     pub(super) node: NodeHandle,
@@ -73,6 +109,10 @@ pub(super) struct InlineSegment {
     /// `ComputedStyle` — forwarded to `InlineFragment` so that paint can
     /// apply per-fragment text-transform / text-decoration / color.
     pub(super) style: FragmentStyle,
+    /// CSS `word-break` value resolved from the owning element's computed style.
+    pub(super) word_break: WordBreak,
+    /// CSS `overflow-wrap` value resolved from the owning element's computed style.
+    pub(super) overflow_wrap: OverflowWrap,
 }
 
 #[derive(Debug, Clone)]
@@ -106,6 +146,8 @@ fn collect_inline_segments(
                         line_height: line_height(&parent_style),
                         vertical_align: vertical_align(&parent_style),
                         style: FragmentStyle::from_computed(&parent_style),
+                        word_break: word_break(&parent_style),
+                        overflow_wrap: overflow_wrap(&parent_style),
                     });
                 }
             }
@@ -139,6 +181,8 @@ fn collect_inline_segments(
                         rendered_height,
                     ),
                     metrics: font_metrics(&image_style),
+                    word_break: word_break(&image_style),
+                    overflow_wrap: overflow_wrap(&image_style),
                     line_height: line_height(&image_style).max(
                         rendered_height + padding.top + padding.bottom + border.top + border.bottom,
                     ),
@@ -162,6 +206,8 @@ fn collect_inline_segments(
                         line_height: line_height(&style),
                         vertical_align: vertical_align(&style),
                         style: FragmentStyle::from_computed(&style),
+                        word_break: word_break(&style),
+                        overflow_wrap: overflow_wrap(&style),
                     });
                     out.extend(generated_inline_segments(
                         node,
@@ -185,6 +231,8 @@ fn collect_inline_segments(
                                     line_height: line_height(&style),
                                     vertical_align: vertical_align(&style),
                                     style: FragmentStyle::from_computed(&style),
+                                    word_break: word_break(&style),
+                                    overflow_wrap: overflow_wrap(&style),
                                 });
                             }
                         }
@@ -223,6 +271,8 @@ pub(super) fn generated_inline_segments(
     let metrics = font_metrics(&style);
     let line_height = line_height(&style);
     let vertical_align = vertical_align(&style);
+    let wb = word_break(&style);
+    let ow = overflow_wrap(&style);
 
     match generated_content_value(content) {
         Some(GeneratedContent::Text(text)) => vec![InlineSegment {
@@ -240,6 +290,8 @@ pub(super) fn generated_inline_segments(
             line_height,
             vertical_align,
             style: FragmentStyle::from_computed(&style),
+            word_break: wb,
+            overflow_wrap: ow,
         }],
         Some(GeneratedContent::Image(image)) => vec![InlineSegment {
             node: node.clone(),
@@ -253,6 +305,8 @@ pub(super) fn generated_inline_segments(
             line_height: line_height.max(metrics.font_size),
             vertical_align,
             style: FragmentStyle::from_computed(&style),
+            word_break: wb,
+            overflow_wrap: ow,
         }],
         None => Vec::new(),
     }
@@ -625,6 +679,7 @@ fn layout_inline_segments(
     let mut current_line_height: f32 = strut_line_height;
 
     for segment in segments {
+        let overflow_wrap = segment.overflow_wrap;
         for piece in split_segment(segment) {
             match piece {
                 InlinePiece::Newline => {
@@ -661,6 +716,60 @@ fn layout_inline_segments(
                         cursor_y += current_line_height.max(segment.line_height);
                         cursor_x = start_x;
                         current_line_height = strut_line_height;
+                    }
+
+                    // overflow-wrap: break-word / anywhere, and the non-standard
+                    // word-break: break-word — if the fragment still doesn't fit
+                    // even at the start of a fresh line, break it character by
+                    // character.
+                    let needs_char_break = (matches!(
+                        overflow_wrap,
+                        OverflowWrap::BreakWord | OverflowWrap::Anywhere
+                    ) || segment.word_break == WordBreak::BreakWord)
+                        && cursor_x == start_x
+                        && width > available_width
+                        && available_width > 0.0;
+
+                    if needs_char_break {
+                        if let InlineFragmentContent::Text(text) = content {
+                            for ch_str in split_chars(&text) {
+                                let ch_width = measure_text_width(&ch_str, segment.metrics);
+                                if cursor_x > start_x
+                                    && cursor_x + ch_width > start_x + available_width
+                                {
+                                    push_line(
+                                        &mut lines,
+                                        &mut current_fragments,
+                                        start_x,
+                                        cursor_y,
+                                        cursor_x - start_x,
+                                        current_line_height.max(segment.line_height),
+                                        available_width,
+                                        align,
+                                    );
+                                    cursor_y += current_line_height.max(segment.line_height);
+                                    cursor_x = start_x;
+                                    current_line_height = strut_line_height;
+                                }
+                                current_fragments.push(InlineFragment {
+                                    node: segment.node.clone(),
+                                    content: InlineFragmentContent::Text(ch_str),
+                                    rect: Rect {
+                                        x: cursor_x,
+                                        y: cursor_y,
+                                        width: ch_width,
+                                        height,
+                                    },
+                                    metrics: segment.metrics,
+                                    vertical_align: segment.vertical_align,
+                                    style: segment.style.clone(),
+                                });
+                                cursor_x += ch_width;
+                                current_line_height =
+                                    current_line_height.max(segment.line_height.max(height));
+                            }
+                            continue;
+                        }
                     }
 
                     current_fragments.push(InlineFragment {
@@ -711,7 +820,12 @@ enum InlinePiece {
 fn split_segment(segment: &InlineSegment) -> Vec<InlinePiece> {
     match &segment.content {
         InlineSegmentContent::Text(text) => {
-            split_text_segment(text, segment.metrics, segment.line_height)
+            split_text_segment(
+                text,
+                segment.metrics,
+                segment.line_height,
+                segment.word_break,
+            )
         }
         InlineSegmentContent::Image(image, style, rendered_width, rendered_height) => {
             let padding = edge_sizes(style, "padding");
@@ -749,14 +863,29 @@ fn split_segment(segment: &InlineSegment) -> Vec<InlinePiece> {
     }
 }
 
-fn split_text_segment(text: &str, metrics: FontMetrics, line_height: f32) -> Vec<InlinePiece> {
+fn split_text_segment(
+    text: &str,
+    metrics: FontMetrics,
+    line_height: f32,
+    wb: WordBreak,
+) -> Vec<InlinePiece> {
+    // `word-break: break-word` is a non-standard value treated identically to
+    // `word-break: normal` for segment-level splitting; the actual emergency
+    // break behaviour is handled in the line-building loop (same as
+    // `overflow-wrap: break-word`).
+    let split_fn: fn(&str) -> Vec<String> = match wb {
+        WordBreak::BreakAll => split_chars,
+        WordBreak::KeepAll => split_words_no_cjk_break,
+        WordBreak::Normal | WordBreak::BreakWord => split_words_preserving_spaces_cjk,
+    };
+
     if text.contains('\n') {
         let mut pieces = Vec::new();
         let line_count = text.split('\n').count();
         for (index, part) in text.split('\n').enumerate() {
             if !part.is_empty() {
                 pieces.extend(
-                    split_words_preserving_spaces_cjk(part)
+                    split_fn(part)
                         .into_iter()
                         .map(|piece| InlinePiece::Fragment {
                             width: measure_text_width(&piece, metrics),
@@ -771,7 +900,7 @@ fn split_text_segment(text: &str, metrics: FontMetrics, line_height: f32) -> Vec
         }
         pieces
     } else {
-        split_words_preserving_spaces_cjk(text)
+        split_fn(text)
             .into_iter()
             .map(|piece| InlinePiece::Fragment {
                 width: measure_text_width(&piece, metrics),
@@ -780,6 +909,58 @@ fn split_text_segment(text: &str, metrics: FontMetrics, line_height: f32) -> Vec
             })
             .collect()
     }
+}
+
+/// Split text into individual characters for `word-break: break-all`.
+/// Exported for tests.
+/// Spaces remain as their own piece so that trailing-space collapsing still works.
+pub(crate) fn split_chars(text: &str) -> Vec<String> {
+    let mut pieces: Vec<String> = Vec::new();
+    let mut current = String::new();
+
+    for ch in text.chars() {
+        if ch == ' ' {
+            if !current.is_empty() {
+                pieces.push(std::mem::take(&mut current));
+            }
+            // keep space as its own piece
+            pieces.push(" ".to_string());
+        } else {
+            if !current.is_empty() {
+                // Each non-space character becomes its own breakable unit
+                pieces.push(std::mem::take(&mut current));
+            }
+            current.push(ch);
+        }
+    }
+    if !current.is_empty() {
+        pieces.push(current);
+    }
+    pieces
+}
+
+/// Split text without allowing breaks between CJK characters (`word-break: keep-all`).
+/// CJK characters are treated like non-CJK word characters; breaks only occur at spaces.
+pub(crate) fn split_words_no_cjk_break(text: &str) -> Vec<String> {
+    let mut pieces = Vec::new();
+    let mut current = String::new();
+
+    for ch in text.chars() {
+        if ch == ' ' {
+            // Break before space
+            if !current.is_empty() {
+                pieces.push(std::mem::take(&mut current));
+            }
+            pieces.push(" ".to_string());
+        } else {
+            // All non-space characters (including CJK) stay together
+            current.push(ch);
+        }
+    }
+    if !current.is_empty() {
+        pieces.push(current);
+    }
+    pieces
 }
 
 // ── CJK text breaking ───────────────────────────────────────────────────────

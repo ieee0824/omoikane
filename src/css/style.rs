@@ -969,6 +969,9 @@ fn is_supported_property(name: &str) -> bool {
             | "visibility"
             | "white-space"
             | "width"
+            | "word-break"
+            | "overflow-wrap"
+            | "word-wrap"
             | "z-index"
             | "box-shadow"
             | "opacity"
@@ -1615,6 +1618,8 @@ fn apply_inheritance(
         "list-style-position",
         "text-transform",
         "white-space",
+        "word-break",
+        "overflow-wrap",
         "word-spacing",
     ] {
         if !properties.contains_key(inherited_name) {
