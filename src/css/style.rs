@@ -57,12 +57,45 @@ pub struct StylesheetInput {
     pub stylesheet: Stylesheet,
 }
 
+/// Context used when converting CSS values to computed px values.
+#[derive(Debug, Clone, Copy)]
+struct ResolutionContext {
+    /// The parent element's computed font-size in px (used for `em` units).
+    parent_font_size: f32,
+    /// The root element's computed font-size in px (used for `rem` units).
+    root_font_size: f32,
+    /// Viewport width in px (used for `vw`, `vmin`, `vmax`).
+    viewport_width: f32,
+    /// Viewport height in px (used for `vh`, `vmin`, `vmax`).
+    viewport_height: f32,
+}
+
+impl Default for ResolutionContext {
+    fn default() -> Self {
+        Self {
+            parent_font_size: 16.0,
+            root_font_size: 16.0,
+            viewport_width: 0.0,
+            viewport_height: 0.0,
+        }
+    }
+}
+
 /// Computes styles and caches results per node.
 #[derive(Debug, Default)]
 pub struct StyleResolver {
     stylesheets: Vec<StylesheetInput>,
     cache: HashMap<usize, ComputedStyle>,
     pseudo_cache: HashMap<(usize, PseudoElement), ComputedStyle>,
+    /// Root element's computed font-size in px (for `rem` unit resolution).
+    root_font_size: f32,
+    /// `true` when `root_font_size` was explicitly set via `set_root_font_size()`,
+    /// preventing auto-update from the computed root element style.
+    root_font_size_explicit: bool,
+    /// Viewport width in px (for `vw`, `vmin`, `vmax` resolution).
+    viewport_width: f32,
+    /// Viewport height in px (for `vh`, `vmin`, `vmax` resolution).
+    viewport_height: f32,
 }
 
 static UNSUPPORTED_CSS_LOGGED: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
@@ -91,6 +124,28 @@ impl StyleResolver {
         Self::default()
     }
 
+    /// Sets the root element's computed font-size in px.
+    ///
+    /// This value is used to resolve `rem` units. Defaults to 16px when not set.
+    /// Calling this explicitly prevents the resolver from auto-deriving the root
+    /// font size from the computed style of the root element.
+    pub fn set_root_font_size(&mut self, px: f32) {
+        self.root_font_size = px;
+        self.root_font_size_explicit = true;
+        self.cache.clear();
+        self.pseudo_cache.clear();
+    }
+
+    /// Sets the viewport dimensions in px.
+    ///
+    /// These values are used to resolve `vw`, `vh`, `vmin`, and `vmax` units.
+    pub fn set_viewport(&mut self, width: f32, height: f32) {
+        self.viewport_width = width;
+        self.viewport_height = height;
+        self.cache.clear();
+        self.pseudo_cache.clear();
+    }
+
     /// Adds a stylesheet with its origin.
     pub fn add_stylesheet(&mut self, origin: Origin, stylesheet: Stylesheet) {
         self.stylesheets
@@ -110,6 +165,28 @@ impl StyleResolver {
             .parent_node()
             .map(|parent| self.computed_style(&parent));
         let style = self.compute_style(node, inherited.as_ref());
+
+        // Auto-update root_font_size from the root element's computed font-size so that
+        // `rem` units in descendant elements resolve correctly even without an explicit
+        // set_root_font_size() call. Skip if the caller already provided an explicit value.
+        if !self.root_font_size_explicit {
+            let is_root = node.node_type() == NodeType::Element
+                && node
+                    .tag_name()
+                    .as_deref()
+                    .map(|t| t.eq_ignore_ascii_case("html"))
+                    .unwrap_or(false)
+                && node
+                    .parent_node()
+                    .map(|p| p.node_type() == NodeType::Document)
+                    .unwrap_or(false);
+            if is_root {
+                if let Some(ComputedValue::Px(px)) = style.get("font-size") {
+                    self.root_font_size = *px;
+                }
+            }
+        }
+
         self.cache.insert(key, style.clone());
         style
     }
@@ -178,6 +255,14 @@ impl StyleResolver {
             }
         }
 
+        // Effective root font-size for rem resolution: use the resolver's configured value,
+        // falling back to the CSS default of 16px.
+        let root_font_size = if self.root_font_size > 0.0 {
+            self.root_font_size
+        } else {
+            16.0
+        };
+
         // Process font-size first so that em units in other properties
         // resolve against the element's own computed font-size.
         if let Some(fs_candidate) = candidates.iter().filter(|c| c.name == "font-size").last() {
@@ -191,7 +276,13 @@ impl StyleResolver {
                         _ => None,
                     })
                     .unwrap_or(16.0);
-                let computed = compute_value(&resolved_value, "font-size", parent_fs);
+                let ctx = ResolutionContext {
+                    parent_font_size: parent_fs,
+                    root_font_size,
+                    viewport_width: self.viewport_width,
+                    viewport_height: self.viewport_height,
+                };
+                let computed = compute_value(&resolved_value, "font-size", ctx);
                 properties.insert("font-size".to_string(), computed);
             }
         }
@@ -207,16 +298,22 @@ impl StyleResolver {
                 continue;
             };
             let font_size = inherited_font_size(parent_style, &properties);
+            let ctx = ResolutionContext {
+                parent_font_size: font_size,
+                root_font_size,
+                viewport_width: self.viewport_width,
+                viewport_height: self.viewport_height,
+            };
             if candidate.name == "gap" {
                 if let Some((row_gap, column_gap)) =
-                    compute_gap_shorthand(&resolved_value, font_size)
+                    compute_gap_shorthand(&resolved_value, ctx)
                 {
                     insert_computed_property(&mut properties, "row-gap", row_gap);
                     insert_computed_property(&mut properties, "column-gap", column_gap);
                 }
                 continue;
             }
-            let computed = compute_value(&resolved_value, &candidate.name, font_size);
+            let computed = compute_value(&resolved_value, &candidate.name, ctx);
             insert_computed_property(&mut properties, &candidate.name, computed);
         }
 
@@ -233,12 +330,12 @@ impl StyleResolver {
 
 fn compute_gap_shorthand(
     value: &Value,
-    parent_font_size: f32,
+    ctx: ResolutionContext,
 ) -> Option<(ComputedValue, ComputedValue)> {
     match value {
         Value::List(values) => match values.as_slice() {
             [single] => {
-                let computed = compute_value(single, "row-gap", parent_font_size);
+                let computed = compute_value(single, "row-gap", ctx);
                 if should_skip_computed_property("row-gap", &computed) {
                     None
                 } else {
@@ -246,8 +343,8 @@ fn compute_gap_shorthand(
                 }
             }
             [row, column] => {
-                let row_gap = compute_value(row, "row-gap", parent_font_size);
-                let column_gap = compute_value(column, "column-gap", parent_font_size);
+                let row_gap = compute_value(row, "row-gap", ctx);
+                let column_gap = compute_value(column, "column-gap", ctx);
                 if should_skip_computed_property("row-gap", &row_gap)
                     || should_skip_computed_property("column-gap", &column_gap)
                 {
@@ -259,7 +356,7 @@ fn compute_gap_shorthand(
             _ => None,
         },
         _ => {
-            let computed = compute_value(value, "row-gap", parent_font_size);
+            let computed = compute_value(value, "row-gap", ctx);
             if should_skip_computed_property("row-gap", &computed) {
                 None
             } else {
@@ -739,7 +836,7 @@ fn is_supported_property(name: &str) -> bool {
     )
 }
 
-fn compute_value(value: &Value, property_name: &str, parent_font_size: f32) -> ComputedValue {
+fn compute_value(value: &Value, property_name: &str, ctx: ResolutionContext) -> ComputedValue {
     match value {
         Value::Keyword(keyword) => {
             if is_color_keyword(keyword)
@@ -754,7 +851,12 @@ fn compute_value(value: &Value, property_name: &str, parent_font_size: f32) -> C
         Value::Length(number, unit) => {
             let px = match unit.as_str() {
                 "px" => *number,
-                "em" => *number * parent_font_size,
+                "em" => *number * ctx.parent_font_size,
+                "rem" => *number * ctx.root_font_size,
+                "vw" => *number * ctx.viewport_width / 100.0,
+                "vh" => *number * ctx.viewport_height / 100.0,
+                "vmin" => *number * ctx.viewport_width.min(ctx.viewport_height) / 100.0,
+                "vmax" => *number * ctx.viewport_width.max(ctx.viewport_height) / 100.0,
                 "mm" => *number * (96.0 / 25.4),
                 "cm" => *number * (96.0 / 2.54),
                 "in" => *number * 96.0,
@@ -766,7 +868,7 @@ fn compute_value(value: &Value, property_name: &str, parent_font_size: f32) -> C
         }
         Value::Percentage(percent) => {
             if property_name == "font-size" {
-                let px = parent_font_size * (*percent / 100.0);
+                let px = ctx.parent_font_size * (*percent / 100.0);
                 ComputedValue::Px(px)
             } else {
                 ComputedValue::Percentage(*percent)
@@ -794,12 +896,12 @@ fn compute_value(value: &Value, property_name: &str, parent_font_size: f32) -> C
             }
         }
         Value::Function { name, arguments } if name.eq_ignore_ascii_case("calc") => {
-            if let Some(quantity) = evaluate_calc(arguments, parent_font_size) {
+            if let Some(quantity) = evaluate_calc(arguments, ctx) {
                 return match quantity.unit {
                     CalcUnit::Px => ComputedValue::Px(quantity.value),
                     CalcUnit::Percentage => {
                         if property_name == "font-size" {
-                            ComputedValue::Px(parent_font_size * (quantity.value / 100.0))
+                            ComputedValue::Px(ctx.parent_font_size * (quantity.value / 100.0))
                         } else {
                             ComputedValue::Percentage(quantity.value)
                         }
@@ -820,7 +922,7 @@ fn compute_value(value: &Value, property_name: &str, parent_font_size: f32) -> C
                 return ComputedValue::Keyword(render_font_family_value(values));
             }
             if let Some(first) = values.first() {
-                compute_value(first, property_name, parent_font_size)
+                compute_value(first, property_name, ctx)
             } else {
                 ComputedValue::Keyword(String::new())
             }
@@ -847,10 +949,10 @@ enum CalcToken {
     Operator(char),
 }
 
-fn evaluate_calc(arguments: &[Value], parent_font_size: f32) -> Option<CalcQuantity> {
+fn evaluate_calc(arguments: &[Value], ctx: ResolutionContext) -> Option<CalcQuantity> {
     let expression = arguments.first()?;
     let mut tokens = Vec::new();
-    collect_calc_tokens(expression, parent_font_size, &mut tokens)?;
+    collect_calc_tokens(expression, ctx, &mut tokens)?;
     if tokens.is_empty() {
         return None;
     }
@@ -866,13 +968,13 @@ fn evaluate_calc(arguments: &[Value], parent_font_size: f32) -> Option<CalcQuant
 
 fn collect_calc_tokens(
     value: &Value,
-    parent_font_size: f32,
+    ctx: ResolutionContext,
     out: &mut Vec<CalcToken>,
 ) -> Option<()> {
     match value {
         Value::List(values) => {
             for item in values {
-                collect_calc_tokens(item, parent_font_size, out)?;
+                collect_calc_tokens(item, ctx, out)?;
             }
             Some(())
         }
@@ -883,7 +985,12 @@ fn collect_calc_tokens(
         Value::Length(number, unit) => {
             let px = match unit.as_str() {
                 "px" => *number,
-                "em" => *number * parent_font_size,
+                "em" => *number * ctx.parent_font_size,
+                "rem" => *number * ctx.root_font_size,
+                "vw" => *number * ctx.viewport_width / 100.0,
+                "vh" => *number * ctx.viewport_height / 100.0,
+                "vmin" => *number * ctx.viewport_width.min(ctx.viewport_height) / 100.0,
+                "vmax" => *number * ctx.viewport_width.max(ctx.viewport_height) / 100.0,
                 "mm" => *number * (96.0 / 25.4),
                 "cm" => *number * (96.0 / 2.54),
                 "in" => *number * 96.0,

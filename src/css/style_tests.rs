@@ -1250,3 +1250,209 @@ fn word_spacing_inherits_from_parent() {
         "word-spacing should inherit from parent"
     );
 }
+
+// --- rem / viewport unit tests ---
+
+#[test]
+fn resolves_rem_using_root_font_size() {
+    // rem は root element の font-size (デフォルト 16px) を基準にする
+    let document = NodeHandle::document();
+    let html = NodeHandle::element("html");
+    let body = NodeHandle::element("body");
+    let div = NodeHandle::element("div");
+    document.append_child(html.clone());
+    html.append_child(body.clone());
+    body.append_child(div.clone());
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet("div { margin-top: 2rem; }").unwrap(),
+    );
+    // root font-size = 20px → 2rem = 40px
+    resolver.set_root_font_size(20.0);
+    let style = resolver.computed_style(&div);
+    assert_eq!(
+        style.get("margin-top"),
+        Some(&ComputedValue::Px(40.0)),
+        "2rem with root font-size 20px should be 40px"
+    );
+}
+
+#[test]
+fn resolves_rem_default_root_font_size() {
+    // root font-size が未設定の場合はデフォルト 16px を使う
+    let document = NodeHandle::document();
+    let html = NodeHandle::element("html");
+    let body = NodeHandle::element("body");
+    let div = NodeHandle::element("div");
+    document.append_child(html.clone());
+    html.append_child(body.clone());
+    body.append_child(div.clone());
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet("div { padding-left: 1.5rem; }").unwrap(),
+    );
+    // デフォルト root font-size 16px → 1.5rem = 24px
+    let style = resolver.computed_style(&div);
+    assert_eq!(
+        style.get("padding-left"),
+        Some(&ComputedValue::Px(24.0)),
+        "1.5rem with default root font-size 16px should be 24px"
+    );
+}
+
+#[test]
+fn resolves_vw_unit() {
+    let document = NodeHandle::document();
+    let html = NodeHandle::element("html");
+    let body = NodeHandle::element("body");
+    let div = NodeHandle::element("div");
+    document.append_child(html.clone());
+    html.append_child(body.clone());
+    body.append_child(div.clone());
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet("div { width: 50vw; }").unwrap(),
+    );
+    // viewport 幅 1000px → 50vw = 500px
+    resolver.set_viewport(1000.0, 800.0);
+    let style = resolver.computed_style(&div);
+    assert_eq!(
+        style.get("width"),
+        Some(&ComputedValue::Px(500.0)),
+        "50vw with viewport width 1000px should be 500px"
+    );
+}
+
+#[test]
+fn resolves_vh_unit() {
+    let document = NodeHandle::document();
+    let html = NodeHandle::element("html");
+    let body = NodeHandle::element("body");
+    let div = NodeHandle::element("div");
+    document.append_child(html.clone());
+    html.append_child(body.clone());
+    body.append_child(div.clone());
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet("div { height: 100vh; }").unwrap(),
+    );
+    // viewport 高さ 600px → 100vh = 600px
+    resolver.set_viewport(1200.0, 600.0);
+    let style = resolver.computed_style(&div);
+    assert_eq!(
+        style.get("height"),
+        Some(&ComputedValue::Px(600.0)),
+        "100vh with viewport height 600px should be 600px"
+    );
+}
+
+#[test]
+fn resolves_vmin_unit() {
+    let document = NodeHandle::document();
+    let html = NodeHandle::element("html");
+    let body = NodeHandle::element("body");
+    let div = NodeHandle::element("div");
+    document.append_child(html.clone());
+    html.append_child(body.clone());
+    body.append_child(div.clone());
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet("div { width: 10vmin; }").unwrap(),
+    );
+    // viewport 1000x600 → vmin = 600px の 1% → 10vmin = 60px
+    resolver.set_viewport(1000.0, 600.0);
+    let style = resolver.computed_style(&div);
+    assert_eq!(
+        style.get("width"),
+        Some(&ComputedValue::Px(60.0)),
+        "10vmin with viewport 1000x600 should be 60px"
+    );
+}
+
+#[test]
+fn resolves_vmax_unit() {
+    let document = NodeHandle::document();
+    let html = NodeHandle::element("html");
+    let body = NodeHandle::element("body");
+    let div = NodeHandle::element("div");
+    document.append_child(html.clone());
+    html.append_child(body.clone());
+    body.append_child(div.clone());
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet("div { width: 10vmax; }").unwrap(),
+    );
+    // viewport 1000x600 → vmax = 1000px の 1% → 10vmax = 100px
+    resolver.set_viewport(1000.0, 600.0);
+    let style = resolver.computed_style(&div);
+    assert_eq!(
+        style.get("width"),
+        Some(&ComputedValue::Px(100.0)),
+        "10vmax with viewport 1000x600 should be 100px"
+    );
+}
+
+#[test]
+fn resolves_rem_in_font_size() {
+    // font-size に rem を使った場合
+    let document = NodeHandle::document();
+    let html = NodeHandle::element("html");
+    let body = NodeHandle::element("body");
+    let div = NodeHandle::element("div");
+    document.append_child(html.clone());
+    html.append_child(body.clone());
+    body.append_child(div.clone());
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet("div { font-size: 1.5rem; }").unwrap(),
+    );
+    // root font-size = 16px → 1.5rem = 24px
+    resolver.set_root_font_size(16.0);
+    let style = resolver.computed_style(&div);
+    assert_eq!(
+        style.get("font-size"),
+        Some(&ComputedValue::Px(24.0)),
+        "1.5rem font-size with root font-size 16px should be 24px"
+    );
+}
+
+#[test]
+fn rem_resolves_from_css_defined_root_font_size() {
+    // html の font-size が CSS で指定されていれば、rem はその値を使う
+    let document = NodeHandle::document();
+    let html = NodeHandle::element("html");
+    let body = NodeHandle::element("body");
+    let div = NodeHandle::element("div");
+    document.append_child(html.clone());
+    html.append_child(body.clone());
+    body.append_child(div.clone());
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        // html の font-size を 20px に設定
+        parse_stylesheet("html { font-size: 20px; } div { margin-top: 2rem; }").unwrap(),
+    );
+    // set_root_font_size() を呼ばなくても CSS の html font-size から自動計算される
+    let _ = resolver.computed_style(&html); // html のスタイルを先に解決
+    let style = resolver.computed_style(&div);
+    assert_eq!(
+        style.get("margin-top"),
+        Some(&ComputedValue::Px(40.0)),
+        "2rem should resolve from CSS-defined root font-size of 20px"
+    );
+}
