@@ -113,43 +113,29 @@ pub(crate) fn paint_text(
 }
 
 /// Returns the `text-transform` value from style.
-#[allow(dead_code)]
-pub(crate) fn text_transform_value(style: &ComputedStyle) -> &'static str {
-    match style.get("text-transform") {
-        Some(ComputedValue::Keyword(kw)) => match kw.to_ascii_lowercase().as_str() {
-            "uppercase" => "uppercase",
-            "lowercase" => "lowercase",
-            "capitalize" => "capitalize",
-            _ => "none",
-        },
-        _ => "none",
-    }
-}
-
 /// Returns the `color` from a `FragmentStyle`, if present.
 fn fragment_text_color(style: &FragmentStyle) -> Option<Color> {
     style.color.as_deref().and_then(parse_color)
 }
 
 /// Returns the `text-transform` keyword from a `FragmentStyle`.
+/// The value is pre-normalized to lowercase in `FragmentStyle::from_computed`.
 fn fragment_text_transform(style: &FragmentStyle) -> &'static str {
     match style.text_transform.as_deref() {
-        Some(kw) => match kw.to_ascii_lowercase().as_str() {
-            "uppercase" => "uppercase",
-            "lowercase" => "lowercase",
-            "capitalize" => "capitalize",
-            _ => "none",
-        },
-        None => "none",
+        Some("uppercase") => "uppercase",
+        Some("lowercase") => "lowercase",
+        Some("capitalize") => "capitalize",
+        _ => "none",
     }
 }
 
 /// Returns `text-decoration-line` flags from a `FragmentStyle`.
+/// The value is pre-normalized to lowercase in `FragmentStyle::from_computed`.
 fn fragment_decoration_line(style: &FragmentStyle) -> TextDecorationLines {
     let mut lines = TextDecorationLines::default();
     if let Some(ref kw) = style.text_decoration_line {
         for part in kw.split_whitespace() {
-            match part.to_ascii_lowercase().as_str() {
+            match part {
                 "underline" => lines.underline = true,
                 "overline" => lines.overline = true,
                 "line-through" => lines.line_through = true,
