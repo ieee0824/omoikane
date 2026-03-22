@@ -145,6 +145,8 @@ pub struct FontMetrics {
     pub descent: f32,
     pub line_gap: f32,
     pub average_advance: f32,
+    /// Extra spacing to add between each character (CSS `letter-spacing`).
+    pub letter_spacing: f32,
 }
 
 impl FontMetrics {
@@ -156,6 +158,7 @@ impl FontMetrics {
             descent: font_size * 0.2,
             line_gap: font_size * 0.2,
             average_advance: font_size * 0.6,
+            letter_spacing: 0.0,
         }
     }
 }
@@ -3115,7 +3118,17 @@ fn font_size(style: &ComputedStyle) -> f32 {
 }
 
 fn font_metrics(style: &ComputedStyle) -> FontMetrics {
-    FontMetrics::from_font_size(font_size(style))
+    let mut metrics = FontMetrics::from_font_size(font_size(style));
+    metrics.letter_spacing = letter_spacing(style);
+    metrics
+}
+
+fn letter_spacing(style: &ComputedStyle) -> f32 {
+    match style.get("letter-spacing") {
+        Some(ComputedValue::Px(value)) => *value,
+        Some(ComputedValue::Keyword(keyword)) if keyword.eq_ignore_ascii_case("normal") => 0.0,
+        _ => 0.0,
+    }
 }
 
 fn line_height(style: &ComputedStyle) -> f32 {
@@ -3503,12 +3516,26 @@ fn measure_text_width(text: &str, metrics: FontMetrics) -> f32 {
 
         if let Some(ref fonts) = *fonts_ref {
             if !fonts.is_empty() {
-                return measure_text_width_with_fallback(text, metrics.font_size, fonts);
+                let base = measure_text_width_with_fallback(text, metrics.font_size, fonts);
+                let char_count = text.chars().count();
+                let spacing = if char_count > 1 {
+                    metrics.letter_spacing * (char_count - 1) as f32
+                } else {
+                    0.0
+                };
+                return base + spacing;
             }
         }
 
         // Fallback to approximation when no font is available
-        text.chars().count() as f32 * metrics.average_advance
+        let char_count = text.chars().count();
+        let base = char_count as f32 * metrics.average_advance;
+        let spacing = if char_count > 1 {
+            metrics.letter_spacing * (char_count - 1) as f32
+        } else {
+            0.0
+        };
+        base + spacing
     })
 }
 

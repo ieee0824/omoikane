@@ -2904,3 +2904,79 @@ fn cjk_small_kana_stays_with_previous() {
     assert_eq!(pieces[1], "本っ");
     assert_eq!(pieces[2], "語");
 }
+
+// ===== letter-spacing tests =====
+
+#[test]
+fn letter_spacing_increases_text_width() {
+    let document = NodeHandle::document();
+    let html = NodeHandle::element("html");
+    let body = NodeHandle::element("body");
+    let p = NodeHandle::element("p");
+    let text = NodeHandle::text("hello");
+    document.append_child(html.clone());
+    html.append_child(body.clone());
+    body.append_child(p.clone());
+    p.append_child(text);
+
+    let mut resolver_no_spacing = StyleResolver::new();
+    resolver_no_spacing.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet("body { margin: 0; } p { font-size: 16px; }").unwrap(),
+    );
+    let layout_no_spacing = layout_tree(
+        &document,
+        &mut resolver_no_spacing,
+        Rect { x: 0.0, y: 0.0, width: 500.0, height: 0.0 },
+    );
+
+    let mut resolver_with_spacing = StyleResolver::new();
+    resolver_with_spacing.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet("body { margin: 0; } p { font-size: 16px; letter-spacing: 10px; }").unwrap(),
+    );
+    let layout_with_spacing = layout_tree(
+        &document,
+        &mut resolver_with_spacing,
+        Rect { x: 0.0, y: 0.0, width: 500.0, height: 0.0 },
+    );
+
+    // Find the p box width in both layouts to compare text widths
+    fn find_p_box(layout: &LayoutBox) -> Option<&LayoutBox> {
+        if layout.node.tag_name().as_deref() == Some("p") {
+            return Some(layout);
+        }
+        for child in &layout.children {
+            if let Some(found) = find_p_box(child) {
+                return Some(found);
+            }
+        }
+        None
+    }
+
+    let width_no_spacing = layout_no_spacing
+        .as_ref()
+        .and_then(|l| find_p_box(l))
+        .and_then(|p| p.lines.first())
+        .map(|l| l.rect.width)
+        .unwrap_or(0.0);
+
+    let width_with_spacing = layout_with_spacing
+        .as_ref()
+        .and_then(|l| find_p_box(l))
+        .and_then(|p| p.lines.first())
+        .map(|l| l.rect.width)
+        .unwrap_or(0.0);
+
+    // "hello" has 5 chars → 4 gaps × 10px = 40px extra
+    assert!(
+        width_with_spacing > width_no_spacing,
+        "letter-spacing should increase text width: no_spacing={width_no_spacing}, with_spacing={width_with_spacing}"
+    );
+    // Exact delta should be 40px (4 inter-char gaps × 10px)
+    let delta = width_with_spacing - width_no_spacing;
+    assert!(
+        (delta - 40.0).abs() < 2.0,
+        "expected ~40px letter-spacing increase but got {delta}"
+    );
+}

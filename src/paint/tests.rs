@@ -4536,3 +4536,66 @@ fn parses_named_color_pink() {
     let canvas = paint_single_div_with_color("pink");
     assert_eq!(canvas.pixel(5, 5), Some(Color::rgb(255, 192, 203)));
 }
+
+// ===== text-transform tests =====
+
+#[test]
+fn apply_text_transform_uppercase() {
+    let result = super::apply_text_transform("hello world", "uppercase");
+    assert_eq!(result.as_deref(), Some("HELLO WORLD"));
+}
+
+#[test]
+fn apply_text_transform_lowercase() {
+    let result = super::apply_text_transform("HELLO WORLD", "lowercase");
+    assert_eq!(result.as_deref(), Some("hello world"));
+}
+
+#[test]
+fn apply_text_transform_capitalize() {
+    let result = super::apply_text_transform("hello world", "capitalize");
+    assert_eq!(result.as_deref(), Some("Hello World"));
+}
+
+#[test]
+fn apply_text_transform_none_returns_none() {
+    let result = super::apply_text_transform("hello", "none");
+    assert!(result.is_none(), "transform:none should return None");
+}
+
+// ===== text-decoration paint tests =====
+
+#[test]
+fn text_decoration_underline_draws_pixels_below_text() {
+    // Build a simple layout with text-decoration: underline
+    let document = NodeHandle::document();
+    let html = NodeHandle::element("html");
+    let body = NodeHandle::element("body");
+    let p = NodeHandle::element("p");
+    let text = NodeHandle::text("Hi");
+    document.append_child(html.clone());
+    html.append_child(body.clone());
+    body.append_child(p.clone());
+    p.append_child(text);
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "body { margin: 0; } \
+             p { text-decoration: underline; color: #ff0000; font-size: 20px; }",
+        )
+        .unwrap(),
+    );
+
+    let viewport = Rect { x: 0.0, y: 0.0, width: 200.0, height: 100.0 };
+    let layout = layout_tree(&document, &mut resolver, viewport).expect("layout should succeed");
+    let canvas = paint_layout(&layout, &mut resolver, viewport);
+
+    // The canvas should have some non-transparent pixels (the underline)
+    let has_colored_pixel = (0..canvas.width())
+        .flat_map(|x| (0..canvas.height()).map(move |y| (x, y)))
+        .any(|(x, y)| canvas.pixel(x, y).map_or(false, |c| c.a > 0));
+
+    assert!(has_colored_pixel, "text-decoration: underline should produce colored pixels");
+}
