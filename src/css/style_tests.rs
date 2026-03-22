@@ -2036,3 +2036,99 @@ fn media_without_viewport_max_width_zero_matches() {
         "max-width: 0px should match a 0-width viewport"
     );
 }
+
+// ── media query parse cache tests ────────────────────────────────────────────
+
+/// Builds a DOM tree with multiple sibling div elements under a common parent.
+fn make_multi_div_tree(count: usize) -> (NodeHandle, Vec<NodeHandle>) {
+    let document = NodeHandle::document();
+    let html = NodeHandle::element("html");
+    let body = NodeHandle::element("body");
+    document.append_child(html.clone());
+    html.append_child(body.clone());
+    let mut divs = Vec::with_capacity(count);
+    for _ in 0..count {
+        let div = NodeHandle::element("div");
+        body.append_child(div.clone());
+        divs.push(div);
+    }
+    (document, divs)
+}
+
+#[test]
+fn media_query_cache_populated_after_resolution() {
+    // After resolving styles for any node, the media query cache must contain
+    // an entry for each distinct @media prelude string encountered.
+    let (_document, divs) = make_multi_div_tree(3);
+    let mut resolver = StyleResolver::new();
+    resolver.set_viewport(1024.0, 768.0);
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet("@media screen { div { color: red; } }").unwrap(),
+    );
+    // Before resolving, cache is empty.
+    assert_eq!(resolver.media_query_cache_len(), 0, "cache should be empty before first resolution");
+
+    // Resolve the first div — cache should be populated.
+    let _ = resolver.computed_style(&divs[0]);
+    assert_eq!(
+        resolver.media_query_cache_len(),
+        1,
+        "cache should contain one entry after resolving the first div"
+    );
+
+    // Resolve remaining divs — cache must not grow (same prelude string).
+    let _ = resolver.computed_style(&divs[1]);
+    let _ = resolver.computed_style(&divs[2]);
+    assert_eq!(
+        resolver.media_query_cache_len(),
+        1,
+        "cache size must remain 1 when the same @media prelude is reused"
+    );
+}
+
+#[test]
+fn media_query_cache_consistent_results_across_nodes() {
+    // Results computed with and without the cache must be identical.
+    // We verify by resolving the same stylesheet for many sibling nodes and
+    // checking that all nodes receive the expected computed value.
+    let (_document, divs) = make_multi_div_tree(5);
+    let mut resolver = StyleResolver::new();
+    resolver.set_viewport(800.0, 600.0);
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet("@media (max-width: 1024px) { div { color: blue; } }").unwrap(),
+    );
+
+    for (i, div) in divs.iter().enumerate() {
+        let style = resolver.computed_style(div);
+        assert_eq!(
+            style.get("color"),
+            Some(&ComputedValue::Color("blue".to_string())),
+            "div[{}] should have color:blue (viewport 800px ≤ max-width 1024px)", i
+        );
+    }
+}
+
+#[test]
+fn media_query_cache_multiple_preludes() {
+    // Two distinct @media blocks must each get their own cache entry.
+    let (_document, divs) = make_multi_div_tree(2);
+    let mut resolver = StyleResolver::new();
+    resolver.set_viewport(1024.0, 768.0);
+    // Two different prelude strings.
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "@media screen { div { color: red; } } @media print { div { color: blue; } }",
+        )
+        .unwrap(),
+    );
+
+    let _ = resolver.computed_style(&divs[0]);
+    assert_eq!(
+        resolver.media_query_cache_len(),
+        2,
+        "two distinct @media preludes should produce two cache entries"
+    );
+}
