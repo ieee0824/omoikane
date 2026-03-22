@@ -921,6 +921,7 @@ fn expand_shorthand(name: &str, value: Value, important: bool) -> Vec<Declaratio
         "overflow" => expand_overflow_shorthand(value, important),
         "flex" => expand_flex_shorthand(value, important),
         "text-decoration" => expand_text_decoration_shorthand(value, important),
+        "border-radius" => expand_border_radius_shorthand(value, important),
         _ => vec![Declaration {
             name: name.to_string(),
             value,
@@ -968,6 +969,55 @@ fn expand_box_shorthand(prefix: &str, value: Value, important: bool) -> Vec<Decl
         Declaration {
             name: format!("{prefix}-left"),
             value: left,
+            important,
+        },
+    ]
+}
+
+fn expand_border_radius_shorthand(value: Value, important: bool) -> Vec<Declaration> {
+    let values = match value {
+        Value::List(values) => values,
+        single => vec![single],
+    };
+
+    // CSS border-radius shorthand order: TL TR BR BL
+    // 1値: 全角丸同じ
+    // 2値: TL/BR = 1st, TR/BL = 2nd
+    // 3値: TL=1st, TR/BL=2nd, BR=3rd
+    // 4値: TL/TR/BR/BL それぞれ指定
+    let (tl, tr, br, bl) = match values.as_slice() {
+        [a] => (a.clone(), a.clone(), a.clone(), a.clone()),
+        [a, b] => (a.clone(), b.clone(), a.clone(), b.clone()),
+        [a, b, c] => (a.clone(), b.clone(), c.clone(), b.clone()),
+        [a, b, c, d] => (a.clone(), b.clone(), c.clone(), d.clone()),
+        _ => {
+            return vec![Declaration {
+                name: "border-radius".to_string(),
+                value: Value::List(values),
+                important,
+            }];
+        }
+    };
+
+    vec![
+        Declaration {
+            name: "border-top-left-radius".to_string(),
+            value: tl,
+            important,
+        },
+        Declaration {
+            name: "border-top-right-radius".to_string(),
+            value: tr,
+            important,
+        },
+        Declaration {
+            name: "border-bottom-right-radius".to_string(),
+            value: br,
+            important,
+        },
+        Declaration {
+            name: "border-bottom-left-radius".to_string(),
+            value: bl,
             important,
         },
     ]

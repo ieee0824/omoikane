@@ -4600,3 +4600,56 @@ fn text_decoration_underline_draws_pixels_below_text() {
 
     assert!(has_colored_pixel, "text-decoration: underline should produce colored pixels");
 }
+
+// --- border-radius 描画テスト ---
+
+#[test]
+fn fill_rounded_rect_clips_corners() {
+    // 20x20 のキャンバスに 20x20 の角丸矩形（radius=5）を描画する。
+    // 4コーナーの最外ピクセルは透明のまま残るはず。
+    let mut canvas = Canvas::new(20, 20);
+    canvas.fill_rounded_rect(
+        Rect { x: 0.0, y: 0.0, width: 20.0, height: 20.0 },
+        Color::rgb(255, 0, 0),
+        5.0, 5.0, 5.0, 5.0,
+        None,
+    );
+
+    // 中央はぬりつぶされている
+    assert_eq!(canvas.pixel(10, 10), Some(Color::rgb(255, 0, 0)));
+
+    // 4コーナーの最外ピクセルは透明
+    assert_eq!(canvas.pixel(0, 0), Some(Color::rgba(0, 0, 0, 0)));
+    assert_eq!(canvas.pixel(19, 0), Some(Color::rgba(0, 0, 0, 0)));
+    assert_eq!(canvas.pixel(0, 19), Some(Color::rgba(0, 0, 0, 0)));
+    assert_eq!(canvas.pixel(19, 19), Some(Color::rgba(0, 0, 0, 0)));
+}
+
+#[test]
+fn paint_border_radius_clips_background_corners() {
+    // div に border-radius を指定すると、4コーナーのピクセルが背景色で塗られない
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let div = NodeHandle::element("div");
+    document.append_child(body.clone());
+    body.append_child(div);
+
+    let css = "body { margin: 0; } \
+               div { width: 20px; height: 20px; background-color: #ff0000; border-radius: 5px; }";
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(Origin::Author, parse_stylesheet(css).unwrap());
+
+    let viewport = Rect { x: 0.0, y: 0.0, width: 40.0, height: 40.0 };
+    let layout = layout_tree(&document, &mut resolver, viewport).unwrap();
+    let canvas = paint_layout(&layout, &mut resolver, viewport);
+
+    // 中央は赤
+    assert_eq!(canvas.pixel(10, 10), Some(Color::rgb(255, 0, 0)));
+
+    // 4コーナーの最外ピクセルは透明（角丸でクリップ）
+    assert_eq!(canvas.pixel(0, 0), Some(Color::rgba(0, 0, 0, 0)));
+    assert_eq!(canvas.pixel(19, 0), Some(Color::rgba(0, 0, 0, 0)));
+    assert_eq!(canvas.pixel(0, 19), Some(Color::rgba(0, 0, 0, 0)));
+    assert_eq!(canvas.pixel(19, 19), Some(Color::rgba(0, 0, 0, 0)));
+}

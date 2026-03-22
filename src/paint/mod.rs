@@ -96,6 +96,15 @@ pub enum DataUri {
     Binary { mime_type: String, data: Vec<u8> },
 }
 
+/// ボーダー描画で使う領域区分（角丸ボーダー時の色割り当て用）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BorderRegion {
+    Top,
+    Bottom,
+    Left,
+    Right,
+}
+
 impl Color {
     /// Creates an opaque color.
     pub const fn rgb(r: u8, g: u8, b: u8) -> Self {
@@ -159,6 +168,180 @@ impl Canvas {
     /// Fills a rectangle, alpha-blending it over the existing pixels.
     pub fn fill_rect(&mut self, rect: Rect, color: Color) {
         self.fill_rect_clipped(rect, color, None);
+    }
+
+    /// Fills a rectangle with rounded corners. Each corner radius (tl, tr, br, bl) is in pixels.
+    /// Pixels outside the rounded corners are not drawn.
+    #[allow(clippy::too_many_arguments)]
+    pub fn fill_rounded_rect(
+        &mut self,
+        rect: Rect,
+        color: Color,
+        tl: f32,
+        tr: f32,
+        br: f32,
+        bl: f32,
+        clip: Option<Rect>,
+    ) {
+        if color.a == 0 {
+            return;
+        }
+        let Some(area) = normalize_rect(rect) else {
+            return;
+        };
+
+        // クリップ矩形とのインターセクションを求める（描画範囲の制限のみ、形状は保持）
+        let clip_area = clip.and_then(normalize_rect);
+
+        let x0 = area.x.floor().max(0.0) as i32;
+        let y0 = area.y.floor().max(0.0) as i32;
+        let x1 = (area.x + area.width).ceil().min(self.width as f32) as i32;
+        let y1 = (area.y + area.height).ceil().min(self.height as f32) as i32;
+
+        let rx = area.x;
+        let ry = area.y;
+        let rw = area.width;
+        let rh = area.height;
+
+        // 各コーナーの半径を矩形の半分に収める
+        let tl = tl.min(rw / 2.0).min(rh / 2.0).max(0.0);
+        let tr = tr.min(rw / 2.0).min(rh / 2.0).max(0.0);
+        let br = br.min(rw / 2.0).min(rh / 2.0).max(0.0);
+        let bl = bl.min(rw / 2.0).min(rh / 2.0).max(0.0);
+
+        for py in y0..y1 {
+            for px in x0..x1 {
+                // クリップチェック
+                if let Some(ca) = clip_area {
+                    if (px as f32) < ca.x
+                        || (px as f32) >= ca.x + ca.width
+                        || (py as f32) < ca.y
+                        || (py as f32) >= ca.y + ca.height
+                    {
+                        continue;
+                    }
+                }
+
+                let fx = px as f32 + 0.5;
+                let fy = py as f32 + 0.5;
+
+                // ピクセル中心が角丸矩形の内側かどうか判定
+                if !point_in_rounded_rect(fx, fy, rx, ry, rw, rh, tl, tr, br, bl) {
+                    continue;
+                }
+
+                let index = ((py as u32 * self.width + px as u32) * 4) as usize;
+                blend_pixel(&mut self.pixels[index..index + 4], color);
+            }
+        }
+    }
+
+    /// 角丸ボーダーの1辺を描画する。
+    /// outer_rect/outer_radii: ボーダー外枠（border_box）の角丸形状
+    /// inner_rect/inner_radii: ボーダー内枠（padding_box）の角丸形状
+    /// border_region と border_width: どの辺をどの幅で描画するか
+    /// 「outer の内側かつ inner の外側」のピクセルのみ color で塗る。
+    #[allow(clippy::too_many_arguments)]
+    fn fill_rounded_rect_annulus(
+        &mut self,
+        outer_rect: Rect,
+        outer_tl: f32,
+        outer_tr: f32,
+        outer_br: f32,
+        outer_bl: f32,
+        inner_rect: Rect,
+        inner_tl: f32,
+        inner_tr: f32,
+        inner_br: f32,
+        inner_bl: f32,
+        color: Color,
+        clip: Option<Rect>,
+        region: BorderRegion,
+        border_width: f32,
+    ) {
+        if color.a == 0 {
+            return;
+        }
+        let Some(outer) = normalize_rect(outer_rect) else {
+            return;
+        };
+
+        let clip_area = clip.and_then(normalize_rect);
+
+        // 辺ごとに描画範囲を絞る（Left/Right はフル高さ、コーナーは Top/Bottom が後から上書き）
+        let strip = match region {
+            BorderRegion::Top => Rect {
+                x: outer.x,
+                y: outer.y,
+                width: outer.width,
+                height: border_width,
+            },
+            BorderRegion::Bottom => Rect {
+                x: outer.x,
+                y: outer.y + outer.height - border_width,
+                width: outer.width,
+                height: border_width,
+            },
+            BorderRegion::Left => Rect {
+                x: outer.x,
+                y: outer.y,
+                width: border_width,
+                height: outer.height,
+            },
+            BorderRegion::Right => Rect {
+                x: outer.x + outer.width - border_width,
+                y: outer.y,
+                width: border_width,
+                height: outer.height,
+            },
+        };
+        let Some(strip) = normalize_rect(strip) else {
+            return;
+        };
+
+        let outer_tl = outer_tl.min(outer.width / 2.0).min(outer.height / 2.0).max(0.0);
+        let outer_tr = outer_tr.min(outer.width / 2.0).min(outer.height / 2.0).max(0.0);
+        let outer_br = outer_br.min(outer.width / 2.0).min(outer.height / 2.0).max(0.0);
+        let outer_bl = outer_bl.min(outer.width / 2.0).min(outer.height / 2.0).max(0.0);
+
+        let inner = inner_rect;
+        let inner_tl = inner_tl.min(inner.width / 2.0).min(inner.height / 2.0).max(0.0);
+        let inner_tr = inner_tr.min(inner.width / 2.0).min(inner.height / 2.0).max(0.0);
+        let inner_br = inner_br.min(inner.width / 2.0).min(inner.height / 2.0).max(0.0);
+        let inner_bl = inner_bl.min(inner.width / 2.0).min(inner.height / 2.0).max(0.0);
+
+        let x0 = strip.x.floor().max(0.0) as i32;
+        let y0 = strip.y.floor().max(0.0) as i32;
+        let x1 = (strip.x + strip.width).ceil().min(self.width as f32) as i32;
+        let y1 = (strip.y + strip.height).ceil().min(self.height as f32) as i32;
+
+        for py in y0..y1 {
+            for px in x0..x1 {
+                if let Some(ca) = clip_area {
+                    if (px as f32) < ca.x
+                        || (px as f32) >= ca.x + ca.width
+                        || (py as f32) < ca.y
+                        || (py as f32) >= ca.y + ca.height
+                    {
+                        continue;
+                    }
+                }
+
+                let fx = px as f32 + 0.5;
+                let fy = py as f32 + 0.5;
+
+                // outer の内側かつ inner の外側
+                if !point_in_rounded_rect(fx, fy, outer.x, outer.y, outer.width, outer.height, outer_tl, outer_tr, outer_br, outer_bl) {
+                    continue;
+                }
+                if point_in_rounded_rect(fx, fy, inner.x, inner.y, inner.width, inner.height, inner_tl, inner_tr, inner_br, inner_bl) {
+                    continue;
+                }
+
+                let index = ((py as u32 * self.width + px as u32) * 4) as usize;
+                blend_pixel(&mut self.pixels[index..index + 4], color);
+            }
+        }
     }
 
     /// Encodes the canvas as a PNG image.
@@ -556,7 +739,12 @@ fn paint_box_internal(
     let padding_box = padding_box_rect(layout);
 
     if let Some(background) = background_color(&style) {
-        canvas.fill_rect_clipped(border_box, background, inherited_clip);
+        if has_border_radius(&style) {
+            let (tl, tr, br, bl) = border_radius_corners(&style);
+            canvas.fill_rounded_rect(border_box, background, tl, tr, br, bl, inherited_clip);
+        } else {
+            canvas.fill_rect_clipped(border_box, background, inherited_clip);
+        }
     }
     paint_background_image(canvas, &style, border_box, inherited_clip, viewport);
     paint_block_generated_pseudo_box(
@@ -748,6 +936,76 @@ fn paint_borders(
     let border_box = border_box_rect(layout);
     let padding_box = padding_box_rect(layout);
     let border = layout.dimensions.border;
+
+    if has_border_radius(style) {
+        // 角丸ありのボーダー: ボーダー領域（border_box の角丸内 かつ padding_box の角丸外）を
+        // 各サイドの色で塗る。
+        let (tl, tr, br, bl) = border_radius_corners(style);
+        // 内側コーナー半径（paddingbox側）
+        let inner_tl = (tl - border.left.min(border.top)).max(0.0);
+        let inner_tr = (tr - border.right.min(border.top)).max(0.0);
+        let inner_br = (br - border.right.min(border.bottom)).max(0.0);
+        let inner_bl = (bl - border.left.min(border.bottom)).max(0.0);
+
+        // 描画順: Left/Right を先（フル高さで描画）、その後 Top/Bottom でコーナーを上書きして色が勝つ
+        // left border
+        if border.left > 0.0 && has_solid_border_side(style, "left") {
+            let color = border_color_side(style, "left").unwrap_or(Color::rgb(0, 0, 0));
+            canvas.fill_rounded_rect_annulus(
+                border_box,
+                tl, tr, br, bl,
+                padding_box,
+                inner_tl, inner_tr, inner_br, inner_bl,
+                color,
+                clip,
+                BorderRegion::Left,
+                border.left,
+            );
+        }
+        // right border
+        if border.right > 0.0 && has_solid_border_side(style, "right") {
+            let color = border_color_side(style, "right").unwrap_or(Color::rgb(0, 0, 0));
+            canvas.fill_rounded_rect_annulus(
+                border_box,
+                tl, tr, br, bl,
+                padding_box,
+                inner_tl, inner_tr, inner_br, inner_bl,
+                color,
+                clip,
+                BorderRegion::Right,
+                border.right,
+            );
+        }
+        // top border（コーナー優先）
+        if border.top > 0.0 && has_solid_border_side(style, "top") {
+            let color = border_color_side(style, "top").unwrap_or(Color::rgb(0, 0, 0));
+            canvas.fill_rounded_rect_annulus(
+                border_box,
+                tl, tr, br, bl,
+                padding_box,
+                inner_tl, inner_tr, inner_br, inner_bl,
+                color,
+                clip,
+                BorderRegion::Top,
+                border.top,
+            );
+        }
+        // bottom border（コーナー優先）
+        if border.bottom > 0.0 && has_solid_border_side(style, "bottom") {
+            let color = border_color_side(style, "bottom").unwrap_or(Color::rgb(0, 0, 0));
+            canvas.fill_rounded_rect_annulus(
+                border_box,
+                tl, tr, br, bl,
+                padding_box,
+                inner_tl, inner_tr, inner_br, inner_bl,
+                color,
+                clip,
+                BorderRegion::Bottom,
+                border.bottom,
+            );
+        }
+        return;
+    }
 
     if border.top > 0.0 && has_solid_border_side(style, "top") {
         canvas.fill_rect_clipped(
@@ -1605,6 +1863,21 @@ fn length_property(style: &ComputedStyle, name: &str) -> Option<f32> {
     }
 }
 
+/// スタイルから各コーナーの border-radius を返す（TL, TR, BR, BL）。
+fn border_radius_corners(style: &ComputedStyle) -> (f32, f32, f32, f32) {
+    let tl = length_property(style, "border-top-left-radius").unwrap_or(0.0);
+    let tr = length_property(style, "border-top-right-radius").unwrap_or(0.0);
+    let br = length_property(style, "border-bottom-right-radius").unwrap_or(0.0);
+    let bl = length_property(style, "border-bottom-left-radius").unwrap_or(0.0);
+    (tl, tr, br, bl)
+}
+
+/// border-radius が設定されているか確認する。
+fn has_border_radius(style: &ComputedStyle) -> bool {
+    let (tl, tr, br, bl) = border_radius_corners(style);
+    tl > 0.0 || tr > 0.0 || br > 0.0 || bl > 0.0
+}
+
 fn paint_background_image(
     canvas: &mut Canvas,
     style: &ComputedStyle,
@@ -1980,6 +2253,54 @@ fn normalize_rect(rect: Rect) -> Option<Rect> {
     } else {
         Some(rect)
     }
+}
+
+/// 点 (px, py) が角丸矩形の内側にあるか判定する。
+/// 矩形の左上 (rx, ry)、サイズ (rw, rh)、各コーナー半径 (tl, tr, br, bl)。
+#[allow(clippy::too_many_arguments)]
+fn point_in_rounded_rect(
+    px: f32,
+    py: f32,
+    rx: f32,
+    ry: f32,
+    rw: f32,
+    rh: f32,
+    tl: f32,
+    tr: f32,
+    br: f32,
+    bl: f32,
+) -> bool {
+    // 矩形の外側は除外
+    if px < rx || px > rx + rw || py < ry || py > ry + rh {
+        return false;
+    }
+
+    // 左上コーナー
+    if px < rx + tl && py < ry + tl {
+        let dx = px - (rx + tl);
+        let dy = py - (ry + tl);
+        return dx * dx + dy * dy <= tl * tl;
+    }
+    // 右上コーナー
+    if px > rx + rw - tr && py < ry + tr {
+        let dx = px - (rx + rw - tr);
+        let dy = py - (ry + tr);
+        return dx * dx + dy * dy <= tr * tr;
+    }
+    // 右下コーナー
+    if px > rx + rw - br && py > ry + rh - br {
+        let dx = px - (rx + rw - br);
+        let dy = py - (ry + rh - br);
+        return dx * dx + dy * dy <= br * br;
+    }
+    // 左下コーナー
+    if px < rx + bl && py > ry + rh - bl {
+        let dx = px - (rx + bl);
+        let dy = py - (ry + rh - bl);
+        return dx * dx + dy * dy <= bl * bl;
+    }
+
+    true
 }
 
 fn intersect(left: Rect, right: Rect) -> Option<Rect> {
