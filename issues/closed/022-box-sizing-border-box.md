@@ -2,7 +2,7 @@
 number: 022
 slug: box-sizing-border-box
 parent:
-status: open
+status: closed
 ---
 
 # box-sizing: border-box 対応
