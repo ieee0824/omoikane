@@ -1,7 +1,7 @@
 //! Text painting, text decoration, list markers, and inline image fragments.
 
 use crate::css::{ComputedStyle, ComputedValue};
-use crate::font::{Font, GlyphRaster, load_default_text_fonts};
+use crate::font::{Font, FontStyle, FontWeight, GlyphRaster, WebFontRegistry, load_default_text_fonts};
 use crate::layout::{FragmentStyle, InlineFragmentContent, LayoutBox, ListMarker, Rect};
 
 use super::border::{EdgeSizesForPaint, paint_rect_borders};
@@ -18,6 +18,23 @@ pub(crate) fn paint_text(
     clip: Option<Rect>,
     _viewport: Rect,
     fonts: &[Font],
+) {
+    paint_text_with_registry(canvas, layout, style, clip, _viewport, fonts, None)
+}
+
+/// Paint text using the provided fonts and an optional web font registry.
+///
+/// When `web_fonts` is `Some`, the fragment's `font_family`, `font_weight`, and
+/// `font_style` are used to select the best web font variant before falling back
+/// to the global `fonts` list.
+pub(crate) fn paint_text_with_registry(
+    canvas: &mut Canvas,
+    layout: &LayoutBox,
+    style: &ComputedStyle,
+    clip: Option<Rect>,
+    _viewport: Rect,
+    fonts: &[Font],
+    web_fonts: Option<&WebFontRegistry>,
 ) {
     // Fallback color from the containing block's style (used when fragment
     // style has no explicit color).
@@ -57,14 +74,43 @@ pub(crate) fn paint_text(
                     let transformed = apply_text_transform(text, text_transform);
                     let display_text = transformed.as_deref().unwrap_or(text.as_str());
 
-                    if !fonts.is_empty() {
+                    // Try to resolve the best web font variant for this fragment.
+                    // If the fragment has a registered web-font family, use it as the
+                    // primary font and fall back to the global system font list.
+                    let web_font_for_fragment = web_fonts.and_then(|registry| {
+                        let family = fragment.style.font_family.as_deref()?;
+                        let weight = FontWeight::parse(
+                            fragment.style.font_weight.as_deref().unwrap_or("normal"),
+                        );
+                        let style = FontStyle::parse(
+                            fragment.style.font_style.as_deref().unwrap_or("normal"),
+                        );
+                        registry.select_best(family, weight, style)
+                    });
+
+                    if let Some(web_font) = web_font_for_fragment {
+                        // Build a temporary font list: web variant first, then fallbacks
+                        let mut variant_fonts: Vec<&Font> = vec![web_font];
+                        variant_fonts.extend(fonts.iter());
+                        paint_text_with_font_refs(
+                            canvas,
+                            fragment.rect,
+                            display_text,
+                            font_size,
+                            fragment.metrics.ascent,
+                            &variant_fonts,
+                            frag_color,
+                            clip,
+                            fragment.metrics.letter_spacing,
+                        );
+                    } else if !fonts.is_empty() {
                         paint_text_with_font(
                             canvas,
                             fragment.rect,
                             display_text,
                             font_size,
                             fragment.metrics.ascent,
-                            &fonts,
+                            fonts,
                             frag_color,
                             clip,
                             fragment.metrics.letter_spacing,
@@ -311,6 +357,60 @@ pub(crate) fn paint_text_with_font(
     }
 }
 
+/// Paint text using actual font glyphs, with fonts passed as references.
+///
+/// Identical to `paint_text_with_font` but accepts `&[&Font]` so that a
+/// web-font variant can be prepended without cloning.
+pub(crate) fn paint_text_with_font_refs(
+    canvas: &mut Canvas,
+    rect: Rect,
+    text: &str,
+    font_size: f32,
+    layout_ascent: f32,
+    fonts: &[&Font],
+    color: Color,
+    clip: Option<Rect>,
+    letter_spacing: f32,
+) {
+    let baseline_y = rect.y + layout_ascent;
+    let mut cursor_x = rect.x;
+    let mut previous_char: Option<(char, usize)> = None;
+
+    let chars: Vec<char> = text.chars().collect();
+    let char_count = chars.len();
+    for (i, &ch) in chars.iter().enumerate() {
+        let (font_index, glyph, advance_x) = rasterize_with_fallback_refs(fonts, ch, font_size);
+        if let Some((prev, prev_font_index)) = previous_char
+            && prev_font_index == font_index
+        {
+            cursor_x += fonts[font_index].glyph_kerning(prev, ch, font_size);
+        }
+
+        if let Some(glyph) = glyph {
+            if glyph.width > 0 && glyph.height > 0 && !glyph.bitmap.is_empty() {
+                let glyph_x = cursor_x + glyph.offset_x;
+                let glyph_y = baseline_y + glyph.offset_y;
+
+                canvas.draw_glyph_mask(
+                    glyph_x,
+                    glyph_y,
+                    glyph.width,
+                    glyph.height,
+                    &glyph.bitmap,
+                    color,
+                    clip,
+                );
+            }
+        }
+
+        cursor_x += advance_x;
+        if i + 1 < char_count {
+            cursor_x += letter_spacing;
+        }
+        previous_char = Some((ch, font_index));
+    }
+}
+
 pub(crate) fn load_text_fonts() -> Vec<Font> {
     load_default_text_fonts()
 }
@@ -366,6 +466,61 @@ pub(crate) fn rasterize_with_fallback(
     }
 
     // Fallback to the primary font advance to avoid collapsing text runs.
+    let primary_advance = fonts
+        .first()
+        .map(|font| font.glyph_advance(ch, font_size))
+        .unwrap_or((font_size * 0.6).max(1.0));
+    (0, None, primary_advance)
+}
+
+/// Like `rasterize_with_fallback` but accepts `&[&Font]` references.
+pub(crate) fn rasterize_with_fallback_refs(
+    fonts: &[&Font],
+    ch: char,
+    font_size: f32,
+) -> (usize, Option<GlyphRaster>, f32) {
+    let prefer_cjk = is_cjk_preferred_character(ch);
+    let try_index = |index: usize| -> Option<(usize, Option<GlyphRaster>, f32)> {
+        let font = fonts[index];
+        if index != 0 && !ch.is_whitespace() && !font.has_glyph(ch) {
+            return None;
+        }
+        match font.rasterize(ch, font_size) {
+            Ok(glyph) => {
+                if glyph.width > 0 && glyph.height > 0 && !glyph.bitmap.is_empty() {
+                    let advance = if glyph.advance_x > 0.0 {
+                        glyph.advance_x
+                    } else {
+                        font.glyph_advance(ch, font_size)
+                    };
+                    return Some((index, Some(glyph), advance));
+                }
+                if ch.is_whitespace() {
+                    return Some((index, None, font.glyph_advance(ch, font_size)));
+                }
+            }
+            Err(_) => return None,
+        }
+        None
+    };
+
+    if prefer_cjk && fonts.len() > 1 {
+        for index in 1..fonts.len() {
+            if let Some(result) = try_index(index) {
+                return result;
+            }
+        }
+        if let Some(result) = try_index(0) {
+            return result;
+        }
+    } else {
+        for index in 0..fonts.len() {
+            if let Some(result) = try_index(index) {
+                return result;
+            }
+        }
+    }
+
     let primary_advance = fonts
         .first()
         .map(|font| font.glyph_advance(ch, font_size))

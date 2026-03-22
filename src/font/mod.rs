@@ -945,15 +945,105 @@ pub fn load_default_text_fonts() -> Vec<Font> {
 }
 
 // ============================================================================
+// Font Variant Key (weight / style)
+// ============================================================================
+
+/// Parsed font-weight value normalised to a numeric value (100–900).
+///
+/// CSS Fonts Module Level 3 §5.2 defines numeric weights 100–900.
+/// The keywords `normal` and `bold` map to 400 and 700 respectively.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct FontWeight(pub u16);
+
+impl FontWeight {
+    /// Parse a CSS font-weight descriptor value (e.g. `"bold"`, `"400"`).
+    ///
+    /// Returns `FontWeight(400)` (normal) when the value cannot be parsed.
+    pub fn parse(value: &str) -> Self {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "normal" => Self(400),
+            "bold" => Self(700),
+            "bolder" => Self(700), // simplified — treat as bold
+            "lighter" => Self(300), // simplified
+            s => {
+                if let Ok(n) = s.parse::<u16>() {
+                    Self(n.clamp(1, 1000))
+                } else {
+                    Self(400)
+                }
+            }
+        }
+    }
+}
+
+impl Default for FontWeight {
+    fn default() -> Self {
+        Self(400)
+    }
+}
+
+/// Parsed font-style value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum FontStyle {
+    Normal,
+    Italic,
+    Oblique,
+}
+
+impl FontStyle {
+    /// Parse a CSS font-style descriptor value.
+    pub fn parse(value: &str) -> Self {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "italic" => Self::Italic,
+            "oblique" => Self::Oblique,
+            _ => Self::Normal,
+        }
+    }
+}
+
+impl Default for FontStyle {
+    fn default() -> Self {
+        Self::Normal
+    }
+}
+
+/// Cache key for a specific font variant (weight + style).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct FontVariantKey {
+    pub weight: FontWeight,
+    pub style: FontStyle,
+}
+
+impl FontVariantKey {
+    /// Create a new variant key.
+    pub fn new(weight: FontWeight, style: FontStyle) -> Self {
+        Self { weight, style }
+    }
+
+    /// Normal weight (400), normal style.
+    pub fn normal() -> Self {
+        Self {
+            weight: FontWeight(400),
+            style: FontStyle::Normal,
+        }
+    }
+}
+
+// ============================================================================
 // Font and Glyph Caching (Phase 3)
 // ============================================================================
 
-/// Cache for loaded fonts, keyed by family name.
+/// Cache for loaded fonts, keyed by family name and variant (weight + style).
 ///
 /// Fonts are expensive to load from disk, so we cache them by family name.
 /// Uses `Arc<Font>` to allow sharing across multiple users.
+///
+/// Each family can have multiple variants (e.g. weight 400/700, italic/normal).
+/// `select_best_variant` implements the CSS Fonts Module Level 3 §5.2 matching
+/// algorithm to pick the closest available variant for a requested weight/style.
 pub struct FontCache {
-    fonts: HashMap<String, Arc<Font>>,
+    /// `(family_lowercase, variant_key) -> Arc<Font>`
+    fonts: HashMap<(String, FontVariantKey), Arc<Font>>,
     max_entries: usize,
 }
 
@@ -966,18 +1056,36 @@ impl FontCache {
         }
     }
 
-    /// Get or load a font by family name.
+    /// Get or load a font by family name with the default variant (normal weight/style).
     ///
     /// If the font is already cached, returns a clone of the Arc.
     /// Otherwise, loads the font from the system and caches it.
     pub fn get_or_load(&mut self, family: &str) -> Result<Arc<Font>, FontError> {
-        let key = family.to_lowercase();
+        self.get_or_load_variant(family, FontVariantKey::normal())
+    }
+
+    /// Get or load a font by family name and variant.
+    ///
+    /// If the font is already cached for the exact variant, returns a clone of the Arc.
+    /// Otherwise, falls back to any cached variant for the same family, or loads from
+    /// the system.
+    pub fn get_or_load_variant(
+        &mut self,
+        family: &str,
+        variant: FontVariantKey,
+    ) -> Result<Arc<Font>, FontError> {
+        let key = (family.to_lowercase(), variant);
 
         if let Some(font) = self.fonts.get(&key) {
             return Ok(Arc::clone(font));
         }
 
-        // Evict an arbitrary entry if at capacity (HashMap iteration order is non-deterministic)
+        // Try any cached variant of this family before hitting disk
+        if let Some(font) = self.select_best_variant(family, variant.weight, variant.style) {
+            return Ok(Arc::clone(&font));
+        }
+
+        // Evict an arbitrary entry if at capacity
         if self.fonts.len() >= self.max_entries {
             if let Some(oldest_key) = self.fonts.keys().next().cloned() {
                 self.fonts.remove(&oldest_key);
@@ -989,14 +1097,28 @@ impl FontCache {
         Ok(font)
     }
 
-    /// Register a web font by family name from raw font bytes.
+    /// Register a web font by family name with the default variant (normal weight/style).
     ///
     /// The font data can be TTF, OTF, WOFF (zlib-compressed), or WOFF2 (brotli-compressed).
     /// Web fonts take priority over system fonts in `get_or_load`.
     /// If the cache is at capacity, an existing entry is evicted to make room.
     pub fn register_web_font(&mut self, family: &str, data: Vec<u8>) -> Result<Arc<Font>, FontError> {
-        let key = family.to_lowercase();
-        // Evict an arbitrary entry if at capacity and this family is not already cached
+        self.register_web_font_with_variant(family, FontWeight::default(), FontStyle::default(), data)
+    }
+
+    /// Register a web font with explicit weight and style descriptors.
+    ///
+    /// Allows the same family to have multiple variants loaded side-by-side.
+    /// The weight/style values match those declared in the `@font-face` rule.
+    pub fn register_web_font_with_variant(
+        &mut self,
+        family: &str,
+        weight: FontWeight,
+        style: FontStyle,
+        data: Vec<u8>,
+    ) -> Result<Arc<Font>, FontError> {
+        let key = (family.to_lowercase(), FontVariantKey::new(weight, style));
+        // Evict an arbitrary entry if at capacity and this variant is not already cached
         if !self.fonts.contains_key(&key) && self.fonts.len() >= self.max_entries {
             if let Some(oldest_key) = self.fonts.keys().next().cloned() {
                 self.fonts.remove(&oldest_key);
@@ -1007,9 +1129,91 @@ impl FontCache {
         Ok(font)
     }
 
-    /// Check if a font for the given family is already cached (system or web).
+    /// Select the best available variant for the given family, target weight, and style.
+    ///
+    /// Implements a simplified version of CSS Fonts Module Level 3 §5.2:
+    /// 1. If an exact match exists, return it.
+    /// 2. Style matching: italic/oblique are interchangeable; normal is separate.
+    /// 3. Weight matching: for bold requests (≥600) prefer heavier variants first;
+    ///    for light requests (≤400) prefer lighter variants first.
+    ///
+    /// Returns `None` when the family has no registered variants at all.
+    pub fn select_best_variant(
+        &self,
+        family: &str,
+        target_weight: FontWeight,
+        target_style: FontStyle,
+    ) -> Option<Arc<Font>> {
+        let family_lower = family.to_lowercase();
+
+        // Collect all variants for this family
+        let variants: Vec<(FontVariantKey, Arc<Font>)> = self
+            .fonts
+            .iter()
+            .filter(|((fam, _), _)| fam == &family_lower)
+            .map(|((_, vk), font)| (*vk, Arc::clone(font)))
+            .collect();
+
+        if variants.is_empty() {
+            return None;
+        }
+
+        // Exact match
+        if let Some((_, font)) = variants
+            .iter()
+            .find(|(vk, _)| vk.weight == target_weight && vk.style == target_style)
+        {
+            return Some(Arc::clone(font));
+        }
+
+        // Style-matching pass: prefer matching style, then compatible style
+        let style_score = |s: FontStyle| -> u8 {
+            match (target_style, s) {
+                (a, b) if a == b => 0,
+                // italic <-> oblique are close
+                (FontStyle::Italic, FontStyle::Oblique)
+                | (FontStyle::Oblique, FontStyle::Italic) => 1,
+                _ => 2,
+            }
+        };
+
+        // Weight-matching score: lower is better
+        let weight_score = |w: FontWeight| -> u16 {
+            let tw = target_weight.0;
+            let cw = w.0;
+            if cw >= tw {
+                // CSS: for weights ≥600, prefer upward first; for ≤400, prefer downward first
+                if tw >= 600 {
+                    cw - tw // prefer the smallest amount above target
+                } else {
+                    // downward preferred for thin/normal; upward is distant
+                    (cw - tw).saturating_add(500)
+                }
+            } else {
+                // cw < tw
+                if tw <= 400 {
+                    tw - cw // prefer closest below for thin weights
+                } else {
+                    (tw - cw).saturating_add(500)
+                }
+            }
+        };
+
+        // Pick the best-scoring variant
+        variants
+            .into_iter()
+            .min_by_key(|(vk, _)| {
+                let ss = style_score(vk.style) as u32 * 100_000;
+                let ws = weight_score(vk.weight) as u32;
+                ss + ws
+            })
+            .map(|(_, font)| font)
+    }
+
+    /// Check if a font for the given family is already cached (any variant).
     pub fn contains(&self, family: &str) -> bool {
-        self.fonts.contains_key(&family.to_lowercase())
+        let family_lower = family.to_lowercase();
+        self.fonts.keys().any(|(fam, _)| fam == &family_lower)
     }
 
     /// Clear all cached fonts.
@@ -1017,7 +1221,7 @@ impl FontCache {
         self.fonts.clear();
     }
 
-    /// Get the number of cached fonts.
+    /// Get the number of cached font variants.
     pub fn len(&self) -> usize {
         self.fonts.len()
     }
@@ -1030,7 +1234,114 @@ impl FontCache {
 
 impl Default for FontCache {
     fn default() -> Self {
-        Self::new(20) // Default to 20 fonts
+        Self::new(20) // Default to 20 font variants
+    }
+}
+
+// ============================================================================
+// Web Font Registry
+// ============================================================================
+
+/// Registry of web fonts loaded from `@font-face` rules.
+///
+/// Stores multiple variants (weight + style) per font family, and exposes
+/// `select_best` to pick the closest variant for a requested weight/style pair
+/// using the CSS Fonts Module Level 3 §5.2 matching algorithm.
+///
+/// Use `WebFontRegistry::push` to add variants after loading, then pass a reference
+/// to the paint stage for per-fragment font selection.
+#[derive(Default)]
+pub struct WebFontRegistry {
+    /// `family_lowercase -> Vec<(key, font)>`
+    entries: HashMap<String, Vec<(FontVariantKey, Arc<Font>)>>,
+}
+
+impl WebFontRegistry {
+    /// Create an empty registry.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Add a font variant to the registry.
+    pub fn push(&mut self, family: &str, weight: FontWeight, style: FontStyle, font: Font) {
+        let key = FontVariantKey::new(weight, style);
+        self.entries
+            .entry(family.to_lowercase())
+            .or_default()
+            .push((key, Arc::new(font)));
+    }
+
+    /// Select the best available font for the given family, weight, and style.
+    ///
+    /// Returns `None` when no variant for the family is registered.
+    pub fn select_best(
+        &self,
+        family: &str,
+        target_weight: FontWeight,
+        target_style: FontStyle,
+    ) -> Option<&Font> {
+        let variants = self.entries.get(&family.to_lowercase())?;
+        if variants.is_empty() {
+            return None;
+        }
+
+        // Exact match shortcut
+        if let Some((_, font)) = variants
+            .iter()
+            .find(|(k, _)| k.weight == target_weight && k.style == target_style)
+        {
+            return Some(font.as_ref());
+        }
+
+        // Scoring: style score dominates, weight score breaks ties
+        let style_score = |s: FontStyle| -> u8 {
+            match (target_style, s) {
+                (a, b) if a == b => 0,
+                (FontStyle::Italic, FontStyle::Oblique)
+                | (FontStyle::Oblique, FontStyle::Italic) => 1,
+                _ => 2,
+            }
+        };
+
+        let weight_score = |w: FontWeight| -> u16 {
+            let tw = target_weight.0;
+            let cw = w.0;
+            if cw >= tw {
+                if tw >= 600 {
+                    cw - tw
+                } else {
+                    (cw - tw).saturating_add(500)
+                }
+            } else {
+                // cw < tw
+                if tw <= 400 {
+                    tw - cw
+                } else {
+                    (tw - cw).saturating_add(500)
+                }
+            }
+        };
+
+        variants
+            .iter()
+            .min_by_key(|(k, _)| {
+                (style_score(k.style) as u32) * 100_000 + weight_score(k.weight) as u32
+            })
+            .map(|(_, font)| font.as_ref())
+    }
+
+    /// Returns `true` when any variant for the family is registered.
+    pub fn contains_family(&self, family: &str) -> bool {
+        self.entries.contains_key(&family.to_lowercase())
+    }
+
+    /// Returns an iterator over all registered (family, variant_key, font) tuples.
+    ///
+    /// Useful for building a flat `Vec<Font>` for APIs that do not support registries.
+    pub fn iter_fonts(&self) -> impl Iterator<Item = &Font> {
+        self.entries
+            .values()
+            .flat_map(|variants| variants.iter().map(|(_, font)| font.as_ref()))
     }
 }
 
