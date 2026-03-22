@@ -7,31 +7,49 @@ use std::path::PathBuf;
 use base64::Engine;
 use omoikane::ffi::{
     OmoikaneBrowser, omoikane_free, omoikane_init, omoikane_last_error, omoikane_navigate,
-    omoikane_screenshot_png_with_viewport, omoikane_string_free,
+    omoikane_screenshot_png_with_viewport, omoikane_set_insecure, omoikane_string_free,
 };
 
 const DEFAULT_WIDTH: u32 = 1280;
 const DEFAULT_HEIGHT: u32 = 720;
 
 fn main() -> Result<(), String> {
-    let mut args = env::args().skip(1);
-    let Some(url) = args.next() else {
-        return Err(usage());
-    };
-    let Some(output) = args.next() else {
-        return Err(usage());
-    };
+    let raw_args: Vec<String> = env::args().skip(1).collect();
+    let mut args_iter = raw_args.iter().peekable();
 
-    let width = parse_dimension(args.next(), DEFAULT_WIDTH, "width")?;
-    let height = parse_dimension(args.next(), DEFAULT_HEIGHT, "height")?;
+    let mut insecure = false;
+
+    // Parse flags before positional arguments
+    while let Some(arg) = args_iter.peek() {
+        match arg.as_str() {
+            "--insecure" | "-k" => {
+                insecure = true;
+                args_iter.next();
+            }
+            _ => break,
+        }
+    }
+
+    let remaining: Vec<&str> = args_iter.map(String::as_str).collect();
+
+    let url = remaining.first().copied().ok_or_else(usage)?;
+    let output = remaining.get(1).copied().ok_or_else(usage)?;
+
+    let width = parse_dimension(remaining.get(2).copied(), DEFAULT_WIDTH, "width")?;
+    let height = parse_dimension(remaining.get(3).copied(), DEFAULT_HEIGHT, "height")?;
     let output_path = PathBuf::from(output);
 
-    let url_c = CString::new(url.as_str()).map_err(|_| "url contains interior NUL byte")?;
+    let url_c = CString::new(url).map_err(|_| "url contains interior NUL byte")?;
 
     // SAFETY: FFI calls are wrapped and pointers are validated before use.
     let browser = unsafe { omoikane_init() };
     if browser.is_null() {
         return Err("failed to initialize Omoikane browser".to_string());
+    }
+
+    if insecure {
+        // SAFETY: `browser` is a valid handle and `insecure` is a plain bool.
+        unsafe { omoikane_set_insecure(browser, true) };
     }
 
     let run_result = run_screenshot(browser, &url_c, &output_path, width, height);
@@ -82,7 +100,7 @@ fn run_screenshot(
     Ok(())
 }
 
-fn parse_dimension(raw: Option<String>, default_value: u32, label: &str) -> Result<u32, String> {
+fn parse_dimension(raw: Option<&str>, default_value: u32, label: &str) -> Result<u32, String> {
     match raw {
         Some(value) => value
             .parse::<u32>()
@@ -113,5 +131,6 @@ fn take_owned_string(ptr: *mut c_char) -> Result<String, String> {
 }
 
 fn usage() -> String {
-    "usage: cargo run --example screenshot -- <url> <output.png> [width] [height]".to_string()
+    "usage: cargo run --example screenshot -- [--insecure|-k] <url> <output.png> [width] [height]"
+        .to_string()
 }

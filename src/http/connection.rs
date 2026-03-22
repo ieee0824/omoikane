@@ -6,6 +6,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use rustls::ClientConfig;
+use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
+use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
 
 use super::http2;
 use super::request::HttpRequest;
@@ -13,6 +15,65 @@ use super::response::{HttpParseError, HttpResponse};
 
 /// Default timeout in seconds for both connection and read operations.
 const DEFAULT_TIMEOUT_SECS: u64 = 30;
+
+/// A [`ServerCertVerifier`] that accepts any server certificate without validation.
+///
+/// **Security warning**: This verifier disables all certificate checks, including
+/// expiry, hostname matching, and chain-of-trust. Use only in development or
+/// testing environments where you explicitly accept this risk.
+#[derive(Debug)]
+struct InsecureCertVerifier;
+
+impl ServerCertVerifier for InsecureCertVerifier {
+    fn verify_server_cert(
+        &self,
+        _end_entity: &CertificateDer<'_>,
+        _intermediates: &[CertificateDer<'_>],
+        _server_name: &ServerName<'_>,
+        _ocsp_response: &[u8],
+        _now: UnixTime,
+    ) -> Result<ServerCertVerified, rustls::Error> {
+        Ok(ServerCertVerified::assertion())
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        _message: &[u8],
+        _cert: &CertificateDer<'_>,
+        _dss: &rustls::DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+        Ok(HandshakeSignatureValid::assertion())
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        _message: &[u8],
+        _cert: &CertificateDer<'_>,
+        _dss: &rustls::DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+        Ok(HandshakeSignatureValid::assertion())
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+        rustls::crypto::aws_lc_rs::default_provider()
+            .signature_verification_algorithms
+            .supported_schemes()
+    }
+}
+
+/// Builds a [`ClientConfig`] that skips all TLS certificate verification.
+fn insecure_client_config(enable_http2: bool) -> ClientConfig {
+    let mut config = ClientConfig::builder()
+        .dangerous()
+        .with_custom_certificate_verifier(Arc::new(InsecureCertVerifier))
+        .with_no_client_auth();
+    config.alpn_protocols = if enable_http2 {
+        vec![b"h2".to_vec(), b"http/1.1".to_vec()]
+    } else {
+        vec![b"http/1.1".to_vec()]
+    };
+    config
+}
 
 /// Sends an HTTP request over a new TCP connection and returns the response.
 ///
@@ -41,12 +102,29 @@ const DEFAULT_TIMEOUT_SECS: u64 = 30;
 /// println!("Status: {}", resp.status_code());
 /// ```
 pub fn send(request: &HttpRequest) -> Result<HttpResponse, HttpParseError> {
+    send_with_options(request, false)
+}
+
+/// Sends an HTTP request like [`send`], but optionally skips TLS certificate verification.
+///
+/// When `insecure` is `true`, expired, self-signed, or otherwise invalid certificates
+/// are accepted. **Use only in development and testing.**
+pub fn send_with_options(
+    request: &HttpRequest,
+    insecure: bool,
+) -> Result<HttpResponse, HttpParseError> {
     let url = request.url();
     if url.scheme() == "https" {
         send_https_with_fallback(
             request,
             || connect_stream(request),
-            |enable_http2| Arc::new(default_client_config(enable_http2)),
+            |enable_http2| {
+                if insecure {
+                    Arc::new(insecure_client_config(enable_http2))
+                } else {
+                    Arc::new(default_client_config(enable_http2))
+                }
+            },
         )
     } else {
         let stream = connect_stream(request)?;
@@ -503,5 +581,79 @@ mod tests {
 
         assert_eq!(response.status_code(), 200);
         assert_eq!(response.body(), b"fallback");
+    }
+
+    /// Helper: connect to a TLS server with the insecure verifier (no trusted roots required).
+    fn send_insecure_to_local_tls_server(
+        request: &HttpRequest,
+        port: u16,
+    ) -> Result<HttpResponse, HttpParseError> {
+        let addr: std::net::SocketAddr = format!("127.0.0.1:{}", port).parse().unwrap();
+
+        let stream = TcpStream::connect_timeout(&addr, Duration::from_secs(DEFAULT_TIMEOUT_SECS))
+            .map_err(HttpParseError::Io)?;
+        stream
+            .set_read_timeout(Some(Duration::from_secs(DEFAULT_TIMEOUT_SECS)))
+            .map_err(HttpParseError::Io)?;
+
+        let config = insecure_client_config(false);
+        send_over_tls_with_config(stream, request, Arc::new(config))
+    }
+
+    #[test]
+    fn insecure_mode_accepts_self_signed_cert() {
+        // Self-signed cert is not in the Mozilla root store, but insecure mode
+        // should still succeed.
+        let (port, _ca_cert) = start_tls_test_server("localhost", "insecure-ok");
+
+        let url = format!("https://localhost:{}/", port);
+        let req = HttpRequest::get(&url).unwrap();
+        let resp = send_insecure_to_local_tls_server(&req, port).unwrap();
+
+        assert_eq!(resp.status_code(), 200);
+        assert_eq!(resp.body(), b"insecure-ok");
+    }
+
+    #[test]
+    fn insecure_mode_accepts_hostname_mismatch() {
+        // Certificate is for "correct-host.test" but we connect as "localhost".
+        // In insecure mode this should be accepted.
+        let (port, _ca_cert) = start_tls_test_server("correct-host.test", "mismatch-ok");
+
+        let url = format!("https://localhost:{}/", port);
+        let req = HttpRequest::get(&url).unwrap();
+        let resp = send_insecure_to_local_tls_server(&req, port).unwrap();
+
+        assert_eq!(resp.status_code(), 200);
+        assert_eq!(resp.body(), b"mismatch-ok");
+    }
+
+    #[test]
+    fn default_mode_still_rejects_untrusted_cert_after_insecure_added() {
+        // Ensure the default (secure) path is not affected by the insecure code path.
+        let (port, _ca_cert) = start_tls_test_server("localhost", "should-not-reach");
+
+        let addr: std::net::SocketAddr = format!("127.0.0.1:{}", port).parse().unwrap();
+        let stream = TcpStream::connect_timeout(&addr, Duration::from_secs(5)).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+
+        let root_store =
+            rustls::RootCertStore::from_iter(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+        let config = ClientConfig::builder()
+            .with_root_certificates(root_store)
+            .with_no_client_auth();
+        let server_name = ServerName::try_from("localhost".to_string()).unwrap();
+        let conn = ClientConnection::new(Arc::new(config), server_name).unwrap();
+        let mut tls_stream = StreamOwned::new(conn, stream);
+
+        let req = HttpRequest::get(&format!("https://localhost:{}/", port)).unwrap();
+        let result = tls_stream.write_all(&req.serialize());
+
+        assert!(
+            result.is_err(),
+            "secure mode should still reject untrusted cert"
+        );
     }
 }

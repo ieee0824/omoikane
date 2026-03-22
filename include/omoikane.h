@@ -43,6 +43,16 @@ bool omoikane_navigate(struct OmoikaneBrowser *browser, const char *url);
 bool omoikane_set_user_agent(struct OmoikaneBrowser *browser, const char *user_agent);
 
 /**
+ * Disables TLS certificate verification when `insecure` is `true`.
+ *
+ * When enabled, expired certificates, self-signed certificates, and hostname
+ * mismatches are silently accepted.
+ *
+ * **Security warning**: Only use this in development or testing environments.
+ */
+bool omoikane_set_insecure(struct OmoikaneBrowser *browser, bool insecure);
+
+/**
  * Evaluates JavaScript in the current page and returns a JSON payload string.
  */
 char *omoikane_evaluate(struct OmoikaneBrowser *browser, const char *expression);
