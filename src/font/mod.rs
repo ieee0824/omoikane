@@ -330,14 +330,18 @@ fn decode_woff1(data: Vec<u8>) -> Result<Vec<u8>, FontError> {
 
         if entry.comp_length >= entry.orig_length {
             // Not compressed — copy raw
-            let end = entry.comp_offset + entry.orig_length;
+            let end = entry.comp_offset
+                .checked_add(entry.orig_length)
+                .ok_or_else(|| FontError::InvalidFont("WOFF table offset overflow".to_string()))?;
             if end > data.len() {
                 return Err(FontError::InvalidFont("WOFF table data out of bounds".to_string()));
             }
             sfnt.extend_from_slice(&data[entry.comp_offset..end]);
         } else {
             // Zlib compressed
-            let end = entry.comp_offset + entry.comp_length;
+            let end = entry.comp_offset
+                .checked_add(entry.comp_length)
+                .ok_or_else(|| FontError::InvalidFont("WOFF table offset overflow".to_string()))?;
             if end > data.len() {
                 return Err(FontError::InvalidFont("WOFF table data out of bounds".to_string()));
             }
@@ -346,6 +350,13 @@ fn decode_woff1(data: Vec<u8>) -> Result<Vec<u8>, FontError> {
             decoder.read_to_end(&mut decompressed).map_err(|e| {
                 FontError::InvalidFont(format!("WOFF zlib decompression failed: {}", e))
             })?;
+            if decompressed.len() != entry.orig_length {
+                return Err(FontError::InvalidFont(format!(
+                    "WOFF decompressed size mismatch: expected {}, got {}",
+                    entry.orig_length,
+                    decompressed.len()
+                )));
+            }
             sfnt.extend_from_slice(&decompressed);
         }
 
@@ -645,8 +656,15 @@ impl FontCache {
     /// The font data can be TTF, OTF, or WOFF (zlib-compressed).
     /// WOFF2 is not yet supported.
     /// Web fonts take priority over system fonts in `get_or_load`.
+    /// If the cache is at capacity, an existing entry is evicted to make room.
     pub fn register_web_font(&mut self, family: &str, data: Vec<u8>) -> Result<Arc<Font>, FontError> {
         let key = family.to_lowercase();
+        // Evict an arbitrary entry if at capacity and this family is not already cached
+        if !self.fonts.contains_key(&key) && self.fonts.len() >= self.max_entries {
+            if let Some(oldest_key) = self.fonts.keys().next().cloned() {
+                self.fonts.remove(&oldest_key);
+            }
+        }
         let font = Arc::new(Font::load_from_bytes(data)?);
         self.fonts.insert(key, Arc::clone(&font));
         Ok(font)

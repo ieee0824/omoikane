@@ -759,6 +759,28 @@ fn extract_string_value(value: &Value) -> String {
     match value {
         Value::String(s) => s.clone(),
         Value::Keyword(k) => k.clone(),
+        Value::Number(n) => {
+            // Format without trailing ".0" for integer-valued floats
+            if *n == n.floor() && n.is_finite() {
+                format!("{}", *n as i64)
+            } else {
+                format!("{}", n)
+            }
+        }
+        Value::Percentage(p) => {
+            if *p == p.floor() && p.is_finite() {
+                format!("{}%", *p as i64)
+            } else {
+                format!("{}%", p)
+            }
+        }
+        Value::Length(v, unit) => {
+            if *v == v.floor() && v.is_finite() {
+                format!("{}{}", *v as i64, unit)
+            } else {
+                format!("{}{}", v, unit)
+            }
+        }
         Value::List(items) => {
             // font-family can be a list of keywords like `Noto Sans`
             items
@@ -791,12 +813,16 @@ fn extract_src_descriptor(
             for item in items {
                 match item {
                     Value::Function { name, arguments } if name.eq_ignore_ascii_case("url") => {
-                        if let Some(arg) = arguments.first() {
-                            *out_url = Some(extract_string_value(arg));
+                        if out_url.is_none() {
+                            if let Some(arg) = arguments.first() {
+                                *out_url = Some(extract_string_value(arg));
+                            }
                         }
                     }
                     Value::Keyword(k) if k.starts_with("url(") => {
-                        *out_url = Some(extract_url_from_keyword(k));
+                        if out_url.is_none() {
+                            *out_url = Some(extract_url_from_keyword(k));
+                        }
                     }
                     Value::Function { name, arguments }
                         if name.eq_ignore_ascii_case("format") =>

@@ -866,11 +866,7 @@ pub(crate) fn fetch_font_face_fonts(
 
     for sheet in stylesheets {
         for ff_rule in extract_font_face_rules(sheet) {
-            // Avoid fetching the same family twice
             let key = ff_rule.font_family.to_lowercase();
-            if !seen_families.insert(key) {
-                continue;
-            }
 
             // Skip WOFF2 when format hint says so (not supported yet)
             if let Some(ref fmt) = ff_rule.format {
@@ -881,14 +877,25 @@ pub(crate) fn fetch_font_face_fonts(
 
             let url_str = &ff_rule.src_url;
 
-            // Try to resolve relative URL
-            let resolved = if let Some(base) = base_url {
-                match resolve_url(base, url_str) {
-                    Ok(u) => u.to_string(),
-                    Err(_) => url_str.clone(),
-                }
-            } else {
-                url_str.clone()
+            // SSRF protection: reject absolute URLs and protocol-relative URLs.
+            // Only relative URLs that resolve to the same origin are allowed.
+            if url_str.contains("://") || url_str.starts_with("//") {
+                continue;
+            }
+
+            // Try to resolve relative URL; skip if no base is available
+            let resolved = match base_url {
+                Some(base) => match resolve_url(base, url_str) {
+                    Ok(u) => {
+                        // Same-origin check
+                        if !same_origin(&u, base) {
+                            continue;
+                        }
+                        u.to_string()
+                    }
+                    Err(_) => continue,
+                },
+                None => continue,
             };
 
             // Fetch font data
@@ -897,9 +904,14 @@ pub(crate) fn fetch_font_face_fonts(
                 None => continue,
             };
 
-            // Load font
+            // Load font — only mark family as seen when loading succeeds
             match Font::load_from_bytes(data) {
-                Ok(font) => fonts.push(font),
+                Ok(font) => {
+                    // Avoid loading the same family twice (insert after success)
+                    if seen_families.insert(key) {
+                        fonts.push(font);
+                    }
+                }
                 Err(_) => continue,
             }
         }
@@ -907,6 +919,9 @@ pub(crate) fn fetch_font_face_fonts(
 
     fonts
 }
+
+/// Maximum allowed font file size in bytes (10 MB).
+const MAX_FONT_BYTES: usize = 10_000_000;
 
 /// Fetch raw bytes from a URL (HTTP/HTTPS).
 fn fetch_font_bytes(
@@ -924,5 +939,10 @@ fn fetch_font_bytes(
         return None;
     }
 
-    Some(response.body().to_vec())
+    let body = response.body();
+    if body.len() > MAX_FONT_BYTES {
+        return None;
+    }
+
+    Some(body.to_vec())
 }
