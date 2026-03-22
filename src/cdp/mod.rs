@@ -611,6 +611,15 @@ impl CdpSession {
         self.http_client.set_user_agent(user_agent);
     }
 
+    /// When `true`, disables TLS certificate verification for all subsequent
+    /// navigations. Expired certificates, self-signed certificates, and hostname
+    /// mismatches are silently accepted.
+    ///
+    /// **Security warning**: Only use this in development or testing environments.
+    pub fn set_insecure(&mut self, insecure: bool) {
+        self.http_client.set_insecure(insecure);
+    }
+
     pub(crate) fn http_client_mut(&mut self) -> &mut Client {
         &mut self.http_client
     }

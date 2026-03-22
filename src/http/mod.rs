@@ -19,7 +19,7 @@ mod request_tests;
 mod response_tests;
 
 pub use client::Client;
-pub use connection::send;
+pub use connection::{send, send_with_options};
 pub use cookie::{Cookie, CookieJar, SameSite};
 pub use request::{HttpRequest, Method, default_user_agent};
 pub use response::HttpResponse;

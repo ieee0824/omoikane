@@ -115,6 +115,26 @@ pub unsafe extern "C" fn omoikane_set_user_agent(
     true
 }
 
+/// Disables TLS certificate verification when `insecure` is `true`.
+///
+/// When enabled, expired certificates, self-signed certificates, and hostname
+/// mismatches are silently accepted.
+///
+/// **Security warning**: Only use this in development or testing environments.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn omoikane_set_insecure(
+    browser: *mut OmoikaneBrowser,
+    insecure: bool,
+) -> bool {
+    let Some(browser) = browser_from_ptr(browser) else {
+        return false;
+    };
+
+    browser.session.borrow_mut().set_insecure(insecure);
+    browser.clear_error();
+    true
+}
+
 /// Evaluates JavaScript in the current page and returns a JSON payload string.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn omoikane_evaluate(

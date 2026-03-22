@@ -26,6 +26,7 @@ pub struct Client {
     cookie_jar: CookieJar,
     max_redirects: u32,
     user_agent: String,
+    insecure: bool,
 }
 
 impl Client {
@@ -35,6 +36,7 @@ impl Client {
             cookie_jar: CookieJar::new(),
             max_redirects: DEFAULT_MAX_REDIRECTS,
             user_agent: default_user_agent(),
+            insecure: false,
         }
     }
 
@@ -51,6 +53,20 @@ impl Client {
     /// Sets the client-wide `User-Agent` value.
     pub fn set_user_agent(&mut self, user_agent: impl Into<String>) {
         self.user_agent = user_agent.into();
+    }
+
+    /// Returns whether TLS certificate verification is disabled.
+    pub fn insecure(&self) -> bool {
+        self.insecure
+    }
+
+    /// When `true`, disables TLS certificate verification for all subsequent
+    /// requests. Expired certificates, self-signed certificates, and hostname
+    /// mismatches are silently accepted.
+    ///
+    /// **Security warning**: Only use this in development or testing environments.
+    pub fn set_insecure(&mut self, insecure: bool) {
+        self.insecure = insecure;
     }
 
     /// Returns a reference to the client's cookie jar.
@@ -94,7 +110,7 @@ impl Client {
                 request.add_header("Cookie", cookie_header);
             }
 
-            let response = connection::send(&request)?;
+            let response = connection::send_with_options(&request, self.insecure)?;
 
             // Store Set-Cookie headers
             let origin = request.url().clone();

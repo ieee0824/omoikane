@@ -64,7 +64,8 @@ Omoikane は、HTTP クライアント、HTML/CSS パーサー、DOM、レイア
 - HTTP/1.1 と最小の HTTP/2 クライアント
 - `gzip` 圧縮レスポンスの自動展開
 - `User-Agent` の既定設定と上書き
-- 外部 CSS / 画像の HTTP フェッチ
+- 外部 CSS / 画像 / Web フォントの HTTP フェッチ
+- TLS 証明書検証スキップオプション（`--insecure` / `-k`）
 
 ### HTML
 - HTML パースと DOM 構築
@@ -147,6 +148,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ```bash
 cargo run --example screenshot -- "https://example.com/" tests/output/example.png 1366 900
+
+# 証明書エラーを無視して取得
+cargo run --example screenshot -- --insecure "https://expired.example.com/" out.png
 ```
 
 `Client::new()` の既定 `User-Agent` は `Omoikane/{version} {OS}` 形式です。
@@ -171,11 +175,11 @@ HTTP クライアントの現状仕様:
 
 [Acid2 テスト](https://www.webstandards.org/files/acid2/test.html)の公式リファレンスレンダリングとの比較で**差分 0px** を達成しています。
 
-CSS パーサー、レイアウトエンジン、ペイントシステムの統合テストとして、591 件以上のテストが常時通過しています（lib テスト 591 件 + doc テスト 9 件）。
+CSS パーサー、レイアウトエンジン、ペイントシステムの統合テストとして、608 件以上のテストが常時通過しています（lib テスト 608 件 + doc テスト 9 件）。
 
 ## 進捗
 
-issue ベースの開発状況では、以下の大きな実装フェーズは完了済みです（closed issue 81 件）。
+issue ベースの開発状況では、以下の大きな実装フェーズは完了済みです（closed issue 85 件）。
 
 - HTTP クライアント
 - HTML パーサー・文字エンコーディング検出
@@ -199,14 +203,16 @@ issue ベースの開発状況では、以下の大きな実装フェーズは�
 - CSS 未実装機能の段階的補完（017 シリーズ: 色関数、セレクタ、shorthand、border-radius、box-shadow、opacity、text-decoration、list-style、gradient、media query）
 - 大規模ファイル分割リファクタリング（paint/layout/css モジュール）
 - per-fragment inline styling（ネスト inline 要素の個別スタイル適用）
-- `@font-face` Web フォント対応（TTF / OTF / WOFF フェッチ・デコード）
+- `@font-face` Web フォント対応（TTF / OTF / WOFF / WOFF2 フェッチ・デコード）
+- font-weight / font-style バリアント選択
+- TLS 証明書検証スキップオプション
 
-現在の open issue は [`issues/open`](/issues/open) を参照してください（open issue 7 件）。
+現在の open issue は [`issues/open`](/issues/open) を参照してください（open issue 6 件）。
 
 ## 制約
 
 - CSS 3 の一部機能（Grid、アニメーション、`position: sticky`）は未実装
-- WOFF2 フォント（brotli 圧縮）は未対応（TTF / OTF / WOFF1 は対応済み）
+- WOFF2 の glyf/loca transform 逆変換は未対応（transform なしの WOFF2 は対応済み）
 - Web フォント（`@font-face`）は未対応（システムフォントのみ）
 - Web 標準の完全互換は目標であり、現状は CSS 2.1 の主要機能を実装済みです
 - Puppeteer / Playwright 互換は段階的に拡張中です
