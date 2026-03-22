@@ -914,6 +914,19 @@ pub fn load_system_font(family: &str) -> Result<Font, FontError> {
 
 /// Load default text fonts shared by layout and paint.
 ///
+/// Returns `true` if the character is in a CJK Unicode block and should
+/// preferentially use a CJK-capable font.
+pub fn is_cjk_preferred_character(ch: char) -> bool {
+    matches!(
+        ch as u32,
+        0x3000..=0x30FF // CJK Symbols/Punctuation, Hiragana, Katakana
+            | 0x3400..=0x4DBF // CJK Unified Ideographs Extension A
+            | 0x4E00..=0x9FFF // CJK Unified Ideographs
+            | 0xF900..=0xFAFF // CJK Compatibility Ideographs
+            | 0xFF66..=0xFF9F // Half-width Katakana
+    )
+}
+
 /// The first successfully loaded family becomes the primary font.
 /// Remaining fonts are fallback candidates (with CJK-preferred families included).
 pub fn load_default_text_fonts() -> Vec<Font> {

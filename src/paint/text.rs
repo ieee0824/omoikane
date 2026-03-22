@@ -523,16 +523,7 @@ pub(crate) fn rasterize_with_fallback_refs(
     (0, None, primary_advance)
 }
 
-pub(crate) fn is_cjk_preferred_character(ch: char) -> bool {
-    matches!(
-        ch as u32,
-        0x3000..=0x30FF // CJK Symbols/Punctuation, Hiragana, Katakana
-            | 0x3400..=0x4DBF // CJK Unified Ideographs Extension A
-            | 0x4E00..=0x9FFF // CJK Unified Ideographs
-            | 0xF900..=0xFAFF // CJK Compatibility Ideographs
-            | 0xFF66..=0xFF9F // Half-width Katakana
-    )
-}
+pub(crate) use crate::font::is_cjk_preferred_character;
 
 /// Paint text as placeholder rectangles (fallback when no font available).
 ///
