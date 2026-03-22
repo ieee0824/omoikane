@@ -287,6 +287,21 @@ impl StyleResolver {
             }
         }
 
+        // For the root element, update root_font_size from its computed font-size
+        // so that rem-based properties on the root itself resolve correctly.
+        let mut root_font_size = root_font_size;
+        if !self.root_font_size_explicit {
+            let is_root = node
+                .tag_name()
+                .as_deref()
+                .is_some_and(|t| t.eq_ignore_ascii_case("html"));
+            if is_root {
+                if let Some(ComputedValue::Px(px)) = properties.get("font-size") {
+                    root_font_size = *px;
+                }
+            }
+        }
+
         for candidate in candidates {
             if candidate.name == "font-size" {
                 continue; // already processed above

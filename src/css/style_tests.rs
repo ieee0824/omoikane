@@ -1456,3 +1456,49 @@ fn rem_resolves_from_css_defined_root_font_size() {
         "2rem should resolve from CSS-defined root font-size of 20px"
     );
 }
+
+#[test]
+fn rem_on_root_element_uses_own_computed_font_size() {
+    let document = NodeHandle::document();
+    let html = NodeHandle::element("html");
+    let body = NodeHandle::element("body");
+    document.append_child(html.clone());
+    html.append_child(body.clone());
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet("html { font-size: 20px; margin-top: 2rem; }").unwrap(),
+    );
+
+    let style = resolver.computed_style(&html);
+    assert_eq!(style.get("font-size"), Some(&ComputedValue::Px(20.0)));
+    // rem on root should use the root's own computed font-size (20px), not the default 16px
+    assert_eq!(
+        style.get("margin-top"),
+        Some(&ComputedValue::Px(40.0)),
+        "2rem on html should be 2 * 20px = 40px"
+    );
+}
+
+#[test]
+fn calc_with_viewport_units() {
+    let document = NodeHandle::document();
+    let html = NodeHandle::element("html");
+    let body = NodeHandle::element("body");
+    document.append_child(html.clone());
+    html.append_child(body.clone());
+
+    let mut resolver = StyleResolver::new();
+    resolver.set_viewport(1000.0, 800.0);
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet("body { width: calc(50vw - 10px); height: calc(10vh + 1rem); }").unwrap(),
+    );
+
+    let style = resolver.computed_style(&body);
+    // 50vw = 500, - 10px = 490
+    assert_eq!(style.get("width"), Some(&ComputedValue::Px(490.0)));
+    // 10vh = 80, + 1rem = 16 → 96
+    assert_eq!(style.get("height"), Some(&ComputedValue::Px(96.0)));
+}
