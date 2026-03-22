@@ -779,31 +779,85 @@ fn paint_box_internal(
 
     if needs_offscreen {
         let opacity_value = opacity.unwrap_or(1.0);
-        // キャンバスと同サイズのオフスクリーンバッファを作成
-        let mut offscreen = Canvas::new(canvas.width(), canvas.height());
+        // オフスクリーンバッファはキャンバス全体サイズで作成する。
+        // border_box に限定すると、子孫要素が border_box 外にはみ出した場合（例: overflow: visible の
+        // 子孫や box-shadow）に正しく合成できなくなるため、キャンバス全体を使う必要がある。
+        let buf_x = 0i32;
+        let buf_y = 0i32;
+        let buf_w = canvas.width();
+        let buf_h = canvas.height();
+        if buf_w == 0 || buf_h == 0 {
+            return;
+        }
+        // オフスクリーンバッファはキャンバス全体と同一座標系（原点は (0, 0)）
+        let offset_border_box = Rect {
+            x: border_box.x - buf_x as f32,
+            y: border_box.y - buf_y as f32,
+            width: border_box.width,
+            height: border_box.height,
+        };
+        let offset_padding_box = Rect {
+            x: padding_box.x - buf_x as f32,
+            y: padding_box.y - buf_y as f32,
+            width: padding_box.width,
+            height: padding_box.height,
+        };
+        let offset_inherited_clip = inherited_clip.map(|c| Rect {
+            x: c.x - buf_x as f32,
+            y: c.y - buf_y as f32,
+            width: c.width,
+            height: c.height,
+        });
+        let offset_viewport = Rect {
+            x: viewport.x - buf_x as f32,
+            y: viewport.y - buf_y as f32,
+            width: viewport.width,
+            height: viewport.height,
+        };
+        let mut offscreen = Canvas::new(buf_w, buf_h);
         paint_box_internal_to(
             &mut offscreen,
             layout,
             resolver,
-            inherited_clip,
-            viewport,
+            offset_inherited_clip,
+            offset_viewport,
             include_phase_descendants,
             text_fonts,
             web_fonts,
             &style,
-            border_box,
-            padding_box,
+            offset_border_box,
+            offset_padding_box,
         );
         offscreen.multiply_alpha(opacity_value);
         // メインキャンバスに合成
-        for (i, chunk) in offscreen.pixels().chunks_exact(4).enumerate() {
-            let a = chunk[3];
-            if a == 0 {
+        let dst_w = canvas.width() as i32;
+        let dst_h = canvas.height() as i32;
+        let src_w = buf_w as i32;
+        let src_h = buf_h as i32;
+        for sy in 0..src_h {
+            let dy = buf_y + sy;
+            if dy < 0 || dy >= dst_h {
                 continue;
             }
-            let color = Color { r: chunk[0], g: chunk[1], b: chunk[2], a };
-            let base = i * 4;
-            blend_pixel(&mut canvas.pixels[base..base + 4], color);
+            for sx in 0..src_w {
+                let dx = buf_x + sx;
+                if dx < 0 || dx >= dst_w {
+                    continue;
+                }
+                let src_idx = (sy * src_w + sx) as usize * 4;
+                let a = offscreen.pixels[src_idx + 3];
+                if a == 0 {
+                    continue;
+                }
+                let color = Color {
+                    r: offscreen.pixels[src_idx],
+                    g: offscreen.pixels[src_idx + 1],
+                    b: offscreen.pixels[src_idx + 2],
+                    a,
+                };
+                let dst_idx = (dy * dst_w + dx) as usize * 4;
+                blend_pixel(&mut canvas.pixels[dst_idx..dst_idx + 4], color);
+            }
         }
         return;
     }
@@ -1218,6 +1272,21 @@ fn border_radius_corners(style: &ComputedStyle) -> (f32, f32, f32, f32) {
 fn has_border_radius(style: &ComputedStyle) -> bool {
     let (tl, tr, br, bl) = border_radius_corners(style);
     tl > 0.0 || tr > 0.0 || br > 0.0 || bl > 0.0
+}
+
+/// opacity オフスクリーンバッファ用の box-shadow 余白を返す。
+/// box-shadow の blur + spread + |offset| の最大値をマージンとして使う。
+fn element_shadow_margin(style: &ComputedStyle) -> f32 {
+    let shadow_value = match style.get("box-shadow") {
+        Some(ComputedValue::Keyword(v)) => v.clone(),
+        _ => return 0.0,
+    };
+    let shadows = border::parse_box_shadow(&shadow_value);
+    shadows.iter().fold(0.0f32, |acc, s| {
+        // blur_radius は ceil + 1 のパディングを加算する（ブラー拡散の安全マージン）
+        let margin = s.blur_radius.ceil() + 1.0 + s.spread_radius + s.offset_x.abs() + s.offset_y.abs();
+        acc.max(margin)
+    })
 }
 
 /// `opacity` プロパティの値を返す（0.0〜1.0）。未指定の場合は `None`。
@@ -1666,6 +1735,8 @@ fn paint_background_image(
 
 impl Canvas {
     /// alpha チャンネルにのみ box blur を適用する（色成分は影の色のまま、アルファだけ拡散）。
+    ///
+    /// カーネルは常に `2r+1` ピクセル幅だが、端ではクランプして実効カーネルサイズを動的に計算する。
     pub(crate) fn box_blur_alpha(&mut self, radius: u32) {
         if radius == 0 {
             return;
@@ -1680,22 +1751,24 @@ impl Canvas {
         for y in 0..h {
             let row_start = y * w;
             let mut sum: u32 = 0;
-            // 初期ウィンドウ
-            for x in 0..=r.min(w.saturating_sub(1)) {
+            // x=0 の初期ウィンドウ: [max(0, 0-r), min(w-1, 0+r)] = [0, min(r, w-1)]
+            let init_right = r.min(w.saturating_sub(1));
+            for x in 0..=init_right {
                 sum += alphas[row_start + x] as u32;
             }
-            let kernel_size = (r + 1).min(w) as u32;
             for x in 0..w {
+                // 実効カーネルサイズ: min(w-1, x+r) - max(0, x-r) + 1
+                let left = x.saturating_sub(r);
+                let right = (x + r).min(w.saturating_sub(1));
+                let kernel_size = (right - left + 1) as u32;
                 blurred[row_start + x] = (sum / kernel_size) as u8;
-                // ウィンドウを右にずらす
+                // ウィンドウを右にずらす: 右端を追加、左端を除去
                 if x + r + 1 < w {
                     sum += alphas[row_start + x + r + 1] as u32;
                 }
-                if x >= r && x.saturating_sub(r) < w {
-                    sum = sum.saturating_sub(alphas[row_start + x.saturating_sub(r)] as u32);
+                if x >= r {
+                    sum = sum.saturating_sub(alphas[row_start + x - r] as u32);
                 }
-                // kernel_size の更新（端での調整）
-                let _ = kernel_size; // kernel_size は平均を正しく出すために動的計算が必要だが簡略化
             }
         }
 
@@ -1703,11 +1776,15 @@ impl Canvas {
         alphas = blurred.clone();
         for x in 0..w {
             let mut sum: u32 = 0;
-            for y in 0..=r.min(h.saturating_sub(1)) {
+            // y=0 の初期ウィンドウ
+            let init_bottom = r.min(h.saturating_sub(1));
+            for y in 0..=init_bottom {
                 sum += alphas[y * w + x] as u32;
             }
-            let kernel_size = (r + 1).min(h) as u32;
             for y in 0..h {
+                let top = y.saturating_sub(r);
+                let bottom = (y + r).min(h.saturating_sub(1));
+                let kernel_size = (bottom - top + 1) as u32;
                 blurred[y * w + x] = (sum / kernel_size) as u8;
                 if y + r + 1 < h {
                     sum += alphas[(y + r + 1) * w + x] as u32;
@@ -1715,7 +1792,6 @@ impl Canvas {
                 if y >= r {
                     sum = sum.saturating_sub(alphas[(y - r) * w + x] as u32);
                 }
-                let _ = kernel_size;
             }
         }
 

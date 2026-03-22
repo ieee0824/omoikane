@@ -5459,3 +5459,234 @@ fn tiled_linear_gradient_no_repeat_paints_once() {
     let outside = canvas.pixel(6, 0).expect("pixel at (6,0)");
     assert_eq!(outside.a, 0, "outside tile area should be transparent with no-repeat, got {:?}", outside);
 }
+
+// --- box_blur_alpha カーネルサイズ修正テスト ---
+
+#[test]
+fn box_blur_alpha_uniform_field_stays_uniform() {
+    // 全ピクセルが同一アルファ値のキャンバスに box_blur_alpha を適用しても値が変わらないこと。
+    // 端のカーネルサイズが中央と異なる場合、端のピクセルが変化してしまうバグの検証。
+    let w = 8u32;
+    let h = 8u32;
+    let mut canvas = Canvas::new(w, h);
+    // 全ピクセルを alpha=200 に設定
+    for i in 0..w as usize * h as usize {
+        canvas.pixels[i * 4 + 3] = 200;
+    }
+    canvas.box_blur_alpha(2);
+    // 端を含む全ピクセルが 200 のまま（±1 許容）
+    for y in 0..h {
+        for x in 0..w {
+            let a = canvas.pixel(x, y).unwrap().a;
+            assert!(
+                (a as i32 - 200).abs() <= 1,
+                "box_blur_alpha should preserve uniform field; pixel ({x},{y}) a={a}"
+            );
+        }
+    }
+}
+
+#[test]
+fn box_blur_alpha_edge_equals_center_for_uniform_input() {
+    // 全アルファ=128 のキャンバスで、blur後に端ピクセルと中央ピクセルが同じ値になること。
+    let mut canvas = Canvas::new(10, 10);
+    for i in 0..100usize {
+        canvas.pixels[i * 4 + 3] = 128;
+    }
+    canvas.box_blur_alpha(3);
+    let center = canvas.pixel(5, 5).unwrap().a;
+    let corner = canvas.pixel(0, 0).unwrap().a;
+    assert!(
+        (center as i32 - corner as i32).abs() <= 1,
+        "edge and center should be equal for uniform input after blur; center={center}, corner={corner}"
+    );
+}
+
+// --- opacity オフスクリーンバッファサイズのテスト ---
+
+#[test]
+fn opacity_offscreen_buffer_does_not_crash_on_small_element() {
+    // 大きいビューポートに小さい要素を opacity で描画した場合クラッシュしない。
+    // また、要素の外側のキャンバスは変化しないこと。
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let div = NodeHandle::element("div");
+    document.append_child(body.clone());
+    body.append_child(div);
+
+    let css = "body { margin: 0; } \
+               div { width: 10px; height: 10px; background-color: #ff0000; opacity: 0.5; }";
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(Origin::Author, parse_stylesheet(css).unwrap());
+
+    // 要素より大幅に大きいビューポート
+    let viewport = Rect { x: 0.0, y: 0.0, width: 200.0, height: 200.0 };
+    let layout = layout_tree(&document, &mut resolver, viewport).unwrap();
+    let canvas = paint_layout(&layout, &mut resolver, viewport);
+
+    // 要素内のピクセルは半透明の赤
+    let inside = canvas.pixel(5, 5).unwrap();
+    assert!(inside.a > 0 && inside.a < 255, "element should be semi-transparent, got a={}", inside.a);
+
+    // 要素の外側は透明なまま
+    let outside = canvas.pixel(50, 50).unwrap();
+    assert_eq!(outside.a, 0, "outside element should be transparent, got {:?}", outside);
+}
+
+// --- overflow: hidden での box-shadow クリップテスト ---
+
+#[test]
+fn box_shadow_of_overflow_hidden_element_still_renders_outside() {
+    // overflow: hidden の要素自身に付いた box-shadow は要素の外側に描画されるべき。
+    // CSS仕様: overflow:hidden は要素自身のbox-shadowには影響しない。
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let div = NodeHandle::element("div");
+    document.append_child(body.clone());
+    body.append_child(div);
+
+    let css = "body { margin: 0; } \
+               div { width: 20px; height: 20px; background-color: #ffffff; \
+                     overflow: hidden; box-shadow: 5px 5px 0px 0px #000000; }";
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(Origin::Author, parse_stylesheet(css).unwrap());
+
+    let viewport = Rect { x: 0.0, y: 0.0, width: 60.0, height: 60.0 };
+    let layout = layout_tree(&document, &mut resolver, viewport).unwrap();
+    let canvas = paint_layout(&layout, &mut resolver, viewport);
+
+    // shadow_rect = (5,5)-(25,25) なので (22,22) はシャドウ内
+    let shadow_pixel = canvas.pixel(22, 22);
+    assert!(
+        shadow_pixel.map_or(false, |c| c.a > 0),
+        "box-shadow should render outside element even with overflow:hidden, got {:?}",
+        shadow_pixel
+    );
+}
+
+#[test]
+fn child_box_shadow_clipped_by_overflow_hidden_parent() {
+    // overflow: hidden の親要素が持つ overflow clip によって、
+    // 子要素の box-shadow が親の外に漏れないこと。
+    // 子要素は親からはみ出ており、その box-shadow も親の外には描画されない。
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let parent = NodeHandle::element("div");
+    let child = NodeHandle::element("div");
+    document.append_child(body.clone());
+    body.append_child(parent.clone());
+    parent.append_child(child.clone());
+    parent.set_attribute("class", "parent");
+    child.set_attribute("class", "child");
+
+    // 親: 20x20, overflow: hidden
+    // 子: 10x10, 親の右端まぎわに配置し、box-shadow: 8px 0px 0px 0px red で右に伸ばす
+    // → 子の box-shadow は親の外 (x>20) に出ようとするが、inherited_clip で clip される
+    let css = "body { margin: 0; } \
+               .parent { width: 20px; height: 20px; overflow: hidden; background-color: white; } \
+               .child { width: 10px; height: 10px; margin-left: 10px; background-color: blue; \
+                        box-shadow: 8px 0px 0px 0px #ff0000; }";
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(Origin::Author, parse_stylesheet(css).unwrap());
+
+    let viewport = Rect { x: 0.0, y: 0.0, width: 60.0, height: 60.0 };
+    let layout = layout_tree(&document, &mut resolver, viewport).unwrap();
+    let canvas = paint_layout(&layout, &mut resolver, viewport);
+
+    // 子の box-shadow は x=18..28 の範囲になるが、親の overflow:hidden クリップ(x<20) により x>20 は描画されない
+    // x=25 (親の外) は透明なはず
+    let outside = canvas.pixel(25, 5);
+    assert_eq!(
+        outside.map(|c| c.a),
+        Some(0),
+        "child box-shadow should be clipped by parent overflow:hidden, got {:?}", outside
+    );
+}
+
+// --- blur=0 の角丸 box-shadow テスト ---
+
+#[test]
+fn box_shadow_no_blur_rounded_corners_do_not_paint_outside_shadow_shape() {
+    // blur=0 の box-shadow で border-radius がある場合、
+    // シャドウの角丸コーナー外側（矩形角だが円弧外）にピクセルが描画されないこと。
+    //
+    // 設定: width=20px, height=20px, border-radius=5px, box-shadow: 0 0 0 2px black
+    // shadow_rect = (-2,-2,24,24), shadow_radius = 5+2=7
+    // 左上コーナーの円弧中心 = (-2+7, -2+7) = (5, 5) in canvas coords
+    // pixel (0, 0): ピクセル中心 (0.5, 0.5), distance to (5,5) = sqrt(4.5^2+4.5^2) ≈ 6.36 < 7 → 円内
+    // pixel (-2,-2) はキャンバス外なので (0,0) が shadow_rect 内かつ角丸外に相当する座標を使う
+    // => spread=2px のみ、radius=5+2=7 の場合、矩形バンド先端は shadow_rect.y=-2 から border_box.y=0 まで
+    //    (0,0) は top band に含まれるが角丸外: ピクセル中心(0.5,0.5)の角丸距離 ≈ 6.36 < 7 なので内側
+    //    もっと端を確認: spread=2, radius=5 で shadow_rect=(-2,-2,24,24), shadow_radius=7
+    //    top-left corner center at (5,5). pixel (-1,-1) はキャンバス外 -> 確認できない
+    //    代わりに: border-radius=8px, spread=3px → shadow_radius=11, shadow_rect=(-3,-3)
+    //    corner center at (-3+11,-3+11)=(8,8). pixel(0,0): distance(0.5,0.5 to 8,8)=sqrt(7.5^2+7.5^2)≈10.6 < 11 → 内側
+    //    もっと大きいspread: border-radius=10px, spread=5px → shadow_radius=15, shadow_rect=(-5,-5)
+    //    corner center at (10,10). pixel(0,0): distance(0.5,0.5 to 10,10)=sqrt(9.5^2+9.5^2)≈13.4 < 15 → 内側
+    //    ↑ border_box の原点から shadow_rect まで offset=spread なので、(0,0) は常に border_box 内に含まれ影の外
+    //    最もシンプルなケース: no offset, spread=0 で blur=0 → shadow は border_box と同一形状
+    //    → border_box の外に影なし。角丸が効いていれば角が透明
+    //
+    // テスト方針: offset=3px, spread=0, blur=0, border-radius=5px の場合
+    // shadow_rect = (3,3,23,23), shadow_radius=5
+    // corner center at (3+5,3+5)=(8,8). pixel(3,3) の中心(3.5,3.5), distance to (8,8)=sqrt(4.5^2+4.5^2)≈6.36 < 5? No, 6.36 > 5 → outside!
+    // 矩形バンド時: top band y=3..20 の部分なし (shadow_rect.y=3, border_box.y=0 なので top_band.height=0-3=-3 < 0)
+    // → 矩形バンドでも描画なし
+    //
+    // 再考: offset=0, spread=3px, border-radius=5px, blur=0
+    // shadow_rect = (-3,-3,26,26), shadow_radius=5+3=8
+    // top-left corner center at (-3+8,-3+8) = (5,5)
+    // pixel(1,1): center(1.5,1.5), distance to(5,5)=sqrt(3.5^2+3.5^2)≈4.95 < 8 → inside (OK, shadow painted)
+    // pixel(0,0): center(0.5,0.5), distance to(5,5)=sqrt(4.5^2+4.5^2)≈6.36 < 8 → inside (OK, shadow painted)
+    // (キャンバス外の corner は確認不可)
+    //
+    // 最終方針: キャンバス内で shadow の角丸 outside にあるピクセルが透明かを確認する
+    // offset=4px right-down, spread=0, border-radius=8px, blur=0
+    // shadow_rect=(4,4,24,24), border_box=(0,0,20,20)
+    // top band: shadow_rect.y=4 > border_box.y=0 → top band なし
+    // bottom band: shadow_rect_bottom=24 > box_bottom=20 → y=20..24, x=4..24
+    // right band: shadow_rect_right=24 > box_right=20 → x=20..24, y=4(max(4,0))..20(min(20,24))
+    // shadow_radius=8, corner center of bottom-right: (24-8,24-8)=(16,16)
+    // pixel(23,23): center(23.5,23.5), distance to(16,16)=sqrt(7.5^2+7.5^2)≈10.6 > 8 → outside!
+    // 矩形バンド時: pixel(23,23) は bottom band (y=20..24) に入る → 黒
+    // 角丸対応時: pixel(23,23) は角丸外 → 透明
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let div = NodeHandle::element("div");
+    document.append_child(body.clone());
+    body.append_child(div);
+
+    let css = "body { margin: 0; } \
+               div { width: 20px; height: 20px; background-color: transparent; \
+                     border-radius: 8px; \
+                     box-shadow: 4px 4px 0px 0px #000000; }";
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(Origin::Author, parse_stylesheet(css).unwrap());
+
+    let viewport = Rect { x: 0.0, y: 0.0, width: 40.0, height: 40.0 };
+    let layout = layout_tree(&document, &mut resolver, viewport).unwrap();
+    let canvas = paint_layout(&layout, &mut resolver, viewport);
+
+    // shadow_rect = (4,4,24,24), shadow_radius=8
+    // corner center of bottom-right: (24-8,24-8)=(16,16)
+    // pixel(23,23): center(23.5,23.5), distance to(16,16)≈10.6 > 8 → outside rounded shadow
+    // 矩形バンド実装: pixel(23,23) は bottom band に含まれ黒 → a > 0 (バグ)
+    // 角丸対応実装: pixel(23,23) は角丸外 → a == 0 (正常)
+    let corner = canvas.pixel(23, 23);
+    assert_eq!(
+        corner.map(|c| c.a),
+        Some(0),
+        "blur=0 rounded box-shadow corner pixel should be transparent (outside arc), got {:?}", corner
+    );
+
+    // 影の中央部分は描画されているはず (bottom band の中央)
+    let shadow_mid = canvas.pixel(12, 23);
+    assert!(
+        shadow_mid.map_or(false, |c| c.a > 0),
+        "blur=0 rounded box-shadow should paint center of bottom band at (12,23), got {:?}", shadow_mid
+    );
+}

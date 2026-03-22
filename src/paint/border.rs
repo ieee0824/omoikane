@@ -574,63 +574,120 @@ pub(crate) fn paint_outer_box_shadow(
         height: border_box.height + spread * 2.0,
     };
 
+    // 負の spread により shadow が縮んで消滅した場合は描画をスキップする
+    if shadow_rect.width <= 0.0 || shadow_rect.height <= 0.0 {
+        return;
+    }
+
     let color = shadow.color;
 
     if blur <= 0.0 {
-        // blur なし: shadow_rect のうち border_box の外側のみを描画する。
-        // 4つの矩形（上下左右バンド）に分割して塗る。
-        let sx = shadow_rect.x;
-        let sy = shadow_rect.y;
-        let sw = shadow_rect.width;
-        let sh = shadow_rect.height;
-        let bx = border_box.x;
-        let by = border_box.y;
-        let bw = border_box.width;
-        let bh = border_box.height;
+        if let Some((tl, tr, br, bl)) = radii {
+            // blur=0 かつ border-radius あり: 一時バッファに rounded rect を描画し、
+            // border_box 内側のアルファを消去してから合成する（矩形バンドでは角丸が反映されない）。
+            let buf_x = shadow_rect.x.floor() as i32;
+            let buf_y = shadow_rect.y.floor() as i32;
+            let buf_w = shadow_rect.width.ceil() as u32 + 2;
+            let buf_h = shadow_rect.height.ceil() as u32 + 2;
+            if buf_w == 0 || buf_h == 0 {
+                return;
+            }
+            let mut shadow_buf = Canvas::new(buf_w, buf_h);
+            let local_rect = Rect {
+                x: shadow_rect.x - buf_x as f32,
+                y: shadow_rect.y - buf_y as f32,
+                width: shadow_rect.width,
+                height: shadow_rect.height,
+            };
+            shadow_buf.fill_rounded_rect(
+                local_rect,
+                Color::rgba(color.r, color.g, color.b, 255),
+                tl + spread,
+                tr + spread,
+                br + spread,
+                bl + spread,
+                None,
+            );
+            // border_box 内側のアルファをゼロにして要素本体を除外する
+            let box_local = Rect {
+                x: border_box.x - buf_x as f32,
+                y: border_box.y - buf_y as f32,
+                width: border_box.width,
+                height: border_box.height,
+            };
+            if let Some(box_local_n) = normalize_rect(box_local) {
+                let x0 = box_local_n.x.floor().max(0.0) as i32;
+                let y0 = box_local_n.y.floor().max(0.0) as i32;
+                let x1 = (box_local_n.x + box_local_n.width).ceil().min(buf_w as f32) as i32;
+                let y1 = (box_local_n.y + box_local_n.height).ceil().min(buf_h as f32) as i32;
+                for py in y0..y1 {
+                    for px in x0..x1 {
+                        let idx = (py as u32 * buf_w + px as u32) as usize * 4;
+                        shadow_buf.pixels[idx + 3] = 0;
+                    }
+                }
+            }
+            // color.a を alpha スケールとして適用
+            let alpha_scale = color.a as f32 / 255.0;
+            if alpha_scale < 1.0 {
+                shadow_buf.multiply_alpha(alpha_scale);
+            }
+            canvas.composite_canvas_clipped(&shadow_buf, buf_x, buf_y, color.r, color.g, color.b, clip);
+        } else {
+            // blur なし・角丸なし: shadow_rect のうち border_box の外側のみを矩形バンドで描画する。
+            let sx = shadow_rect.x;
+            let sy = shadow_rect.y;
+            let sw = shadow_rect.width;
+            let sh = shadow_rect.height;
+            let bx = border_box.x;
+            let by = border_box.y;
+            let bw = border_box.width;
+            let bh = border_box.height;
 
-        // top band: shadow の上端から border_box の上端まで
-        if sy < by {
-            canvas.fill_rect_clipped(
-                Rect { x: sx, y: sy, width: sw, height: by - sy },
-                color,
-                clip,
-            );
-        }
-        // bottom band: border_box の下端から shadow の下端まで
-        let shadow_bottom = sy + sh;
-        let box_bottom = by + bh;
-        if shadow_bottom > box_bottom {
-            canvas.fill_rect_clipped(
-                Rect { x: sx, y: box_bottom, width: sw, height: shadow_bottom - box_bottom },
-                color,
-                clip,
-            );
-        }
-        // left band: border_box の高さ範囲で左側
-        let band_top = by.max(sy);
-        let band_bottom = box_bottom.min(shadow_bottom);
-        if band_bottom > band_top {
-            if sx < bx {
+            // top band: shadow の上端から border_box の上端まで
+            if sy < by {
                 canvas.fill_rect_clipped(
-                    Rect { x: sx, y: band_top, width: bx - sx, height: band_bottom - band_top },
+                    Rect { x: sx, y: sy, width: sw, height: by - sy },
                     color,
                     clip,
                 );
             }
-            // right band: border_box の高さ範囲で右側
-            let box_right = bx + bw;
-            let shadow_right = sx + sw;
-            if shadow_right > box_right {
+            // bottom band: border_box の下端から shadow の下端まで
+            let shadow_bottom = sy + sh;
+            let box_bottom = by + bh;
+            if shadow_bottom > box_bottom {
                 canvas.fill_rect_clipped(
-                    Rect {
-                        x: box_right,
-                        y: band_top,
-                        width: shadow_right - box_right,
-                        height: band_bottom - band_top,
-                    },
+                    Rect { x: sx, y: box_bottom, width: sw, height: shadow_bottom - box_bottom },
                     color,
                     clip,
                 );
+            }
+            // left band: border_box の高さ範囲で左側
+            let band_top = by.max(sy);
+            let band_bottom = box_bottom.min(shadow_bottom);
+            if band_bottom > band_top {
+                if sx < bx {
+                    canvas.fill_rect_clipped(
+                        Rect { x: sx, y: band_top, width: bx - sx, height: band_bottom - band_top },
+                        color,
+                        clip,
+                    );
+                }
+                // right band: border_box の高さ範囲で右側
+                let box_right = bx + bw;
+                let shadow_right = sx + sw;
+                if shadow_right > box_right {
+                    canvas.fill_rect_clipped(
+                        Rect {
+                            x: box_right,
+                            y: band_top,
+                            width: shadow_right - box_right,
+                            height: band_bottom - band_top,
+                        },
+                        color,
+                        clip,
+                    );
+                }
             }
         }
     } else {
