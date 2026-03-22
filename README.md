@@ -11,9 +11,12 @@ Omoikane は、HTTP クライアント、HTML/CSS パーサー、DOM、レイア
 ## 現在できること
 
 ### レンダリングエンジン
-- CSS パースとスタイル計算（カスケード、継承、em/px/mm/rem/vw/vh 等の単位変換）
+- CSS パースとスタイル計算（カスケード、継承、em/px/mm/rem/vw/vh/vmin/vmax 等の単位変換）
 - `@import` ルールによる外部 CSS の再帰的読み込み
+- `@media` 条件評価（max-width / min-width / orientation / prefers-color-scheme / and / not）
 - UA stylesheet デフォルト（h1〜h6 フォントサイズ・太字・margin、p、b/strong、i/em、hr）
+- shorthand 完全展開（margin / padding / border-width / border-color / border-style / overflow / flex / border-radius / list-style / text-decoration）
+- 高度セレクタ（`:not()` / `[attr^=]` / `[attr$=]` / `[attr*=]` / `[attr|=]`）
 - ブロック、インライン、Flexbox、テーブルを含むレイアウトエンジン
 - テーブルの `colspan` / `rowspan` 対応、カラム幅の intrinsic hint + 均等余剰分配
 - margin collapsing（empty element、parent-child、負margin）
@@ -24,11 +27,16 @@ Omoikane は、HTTP クライアント、HTML/CSS パーサー、DOM、レイア
 - `overflow: hidden` / `overflow-x` / `overflow-y` クリッピング
 - **Acid2 テスト完全通過（差分 0px）**
 
-### CSS 色・値
+### CSS 色・値・視覚効果
 - `rgba()` / `hsl()` / `hsla()` 色関数（アルファチャンネル対応）
 - `rgb()` 現代構文（`rgb(r g b / a)` スラッシュ形式）
 - 8桁 / 4桁 hex カラー（`#RRGGBBAA` / `#RGBA`）
 - CSS Level 4 の 140+ named color
+- `border-radius`（角丸描画、背景・ボーダー対応）
+- `box-shadow`（offset / blur / spread / color / inset、複数影対応）
+- `opacity`（オフスクリーンバッファ + alpha 乗算）
+- `linear-gradient()`（方向指定 + 複数カラーストップ）
+- `background-size`（cover / contain / length / percentage）
 
 ### フォント・テキスト
 - ab_glyph によるフォントファイル読み込みとグリフラスタライズ
@@ -36,6 +44,11 @@ Omoikane は、HTTP クライアント、HTML/CSS パーサー、DOM、レイア
 - フォントキャッシュ・グリフキャッシュ
 - グリフベースのテキスト幅計測とカーニング
 - CJK テキストの行折り返し・禁則処理・フォールバック
+- `text-decoration`（underline / overline / line-through、per-fragment 対応）
+- `text-transform`（uppercase / lowercase / capitalize）
+- `letter-spacing` / `word-spacing`
+- `list-style-type`（disc / circle / square / decimal / roman / alpha）
+- `list-style-position`（outside / inside）
 
 ### 画像・メディア
 - PNG / JPEG 画像デコード（data URI / ファイル / HTTP フェッチ）
@@ -156,11 +169,11 @@ HTTP クライアントの現状仕様:
 
 [Acid2 テスト](https://www.webstandards.org/files/acid2/test.html)の公式リファレンスレンダリングとの比較で**差分 0px** を達成しています。
 
-CSS パーサー、レイアウトエンジン、ペイントシステムの統合テストとして、445 件以上のテストが常時通過しています（lib テスト 445 件 + doc テスト 9 件）。
+CSS パーサー、レイアウトエンジン、ペイントシステムの統合テストとして、576 件以上のテストが常時通過しています（lib テスト 576 件 + doc テスト 9 件）。
 
 ## 進捗
 
-issue ベースの開発状況では、以下の大きな実装フェーズは完了済みです（closed issue 65 件）。
+issue ベースの開発状況では、以下の大きな実装フェーズは完了済みです（closed issue 79 件）。
 
 - HTTP クライアント
 - HTML パーサー・文字エンコーディング検出
@@ -181,13 +194,15 @@ issue ベースの開発状況では、以下の大きな実装フェーズは�
 - CDP 互換 API
 - C FFI（スクリーンショット API）
 - 未対応 CSS 観測ログ基盤
+- CSS 未実装機能の段階的補完（017 シリーズ: 色関数、セレクタ、shorthand、border-radius、box-shadow、opacity、text-decoration、list-style、gradient、media query）
+- 大規模ファイル分割リファクタリング（paint/layout/css モジュール）
+- per-fragment inline styling（ネスト inline 要素の個別スタイル適用）
 
-現在の open issue は [`issues/open`](/issues/open) を参照してください（open issue 13 件）。
+現在の open issue は [`issues/open`](/issues/open) を参照してください（open issue 8 件）。
 
 ## 制約
 
-- CSS 3 の主要機能（Grid、アニメーション、カスタムプロパティ、border-radius、box-shadow、グラデーション等）は未実装
-- rem / viewport 単位（vw / vh）は実装済みだが、メディアクエリ評価は未対応
+- CSS 3 の一部機能（Grid、アニメーション、`position: sticky`）は未実装
 - Web フォント（`@font-face`）は未対応（システムフォントのみ）
 - Web 標準の完全互換は目標であり、現状は CSS 2.1 の主要機能を実装済みです
 - Puppeteer / Playwright 互換は段階的に拡張中です
