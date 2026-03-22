@@ -1,29 +1,66 @@
 //! Pixel-based painting primitives and layout tree rendering.
 
-use std::collections::HashSet;
-use std::fs;
-use std::io::Cursor;
-use std::io::Read;
+pub(crate) mod border;
+pub(crate) mod color;
+pub(crate) mod image;
+pub(crate) mod stylesheet;
+pub(crate) mod text;
+
 use std::path::Path;
 
+#[allow(unused_imports)]
+use base64::Engine;
+
 use crate::css::{
-    ComputedStyle, ComputedValue, Origin, PseudoElement, StyleResolver, Stylesheet,
-    parse_stylesheet,
+    ComputedStyle, ComputedValue, Origin, PseudoElement, StyleResolver,
 };
 use crate::dom::{Node, NodeHandle, NodeType};
-use crate::font::{Font, GlyphRaster, load_default_text_fonts};
-use crate::http::url::resolve_url;
-use crate::layout::{InlineFragmentContent, LayoutBox, ListMarker, Rect, Visibility};
-use base64::Engine;
-use flate2::read::ZlibDecoder;
-/// An RGBA color.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Color {
-    pub r: u8,
-    pub g: u8,
-    pub b: u8,
-    pub a: u8,
-}
+use crate::font::Font;
+#[allow(unused_imports)]
+use crate::layout::{InlineFragmentContent, LayoutBox, Rect, Visibility};
+
+// Re-export public types from submodules
+pub use color::Color;
+pub use image::parse_data_uri;
+
+// Re-export crate-internal items so that `use crate::paint::*` in tests and sibling modules works.
+// Many of these are only referenced from test code, hence the allow.
+#[allow(unused_imports)]
+pub(crate) use border::{EdgeSizesForPaint, has_solid_border_side, border_color_side};
+#[allow(unused_imports)]
+pub(crate) use color::{
+    parse_color, named_color, split_gradient_args, parse_linear_gradient, parse_gradient_direction,
+    interpolate_gradient_color, paint_linear_gradient, ColorStop, LinearGradient,
+};
+#[allow(unused_imports)]
+pub(crate) use image::{
+    decode_png, decode_png_fallback, unfilter_png_scanline, paeth_predictor, decode_jpeg,
+    percent_decode, hex_value, parse_background_image_value, parse_size_token,
+};
+#[allow(unused_imports)]
+pub(crate) use text::{
+    paint_text, paint_text_with_font, paint_text_placeholder, text_transform_value,
+    apply_text_transform, TextDecorationLines, text_decoration_line, text_decoration_color,
+    paint_text_decoration, paint_list_marker, paint_list_marker_placeholder, load_text_fonts,
+    rasterize_with_fallback, is_cjk_preferred_character, paint_inline_image_fragment,
+    inline_fragment_content_rect, text_color,
+};
+#[allow(unused_imports)]
+pub(crate) use border::{
+    paint_borders, paint_rect_borders, paint_zero_sized_border_box, fill_quad_clipped,
+    has_any_solid_border, BoxShadow, parse_box_shadow, split_box_shadow_layers,
+    paint_box_shadow, paint_outer_box_shadow,
+};
+#[allow(unused_imports)]
+pub(crate) use stylesheet::{
+    extract_author_stylesheets, collect_author_stylesheets, collect_stylesheet_with_imports,
+    extract_import_hrefs, extract_import_hrefs_forgiving, at_import_starts_at,
+    parse_import_href, unquote_css_token, non_empty_token, fetch_relative_stylesheet,
+    resolve_relative_stylesheet_url, fetch_stylesheet_by_url, parse_stylesheet_forgiving,
+    salvage_style_rule, normalize_unquoted_urls, split_declarations_forgiving,
+    matches_screen_media, same_origin, find_base_elements, extract_document_base_url,
+    collect_text_contents, materialize_local_assets, rewrite_local_asset_attribute,
+};
 
 /// A decoded RGBA image.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -49,12 +86,12 @@ impl Image {
 
     /// Decodes a PNG image into RGBA pixels.
     pub fn decode_png(bytes: &[u8]) -> Result<Self, PaintError> {
-        decode_png(bytes)
+        image::decode_png(bytes)
     }
 
     /// Decodes a JPEG image into RGBA pixels.
     pub fn decode_jpeg(bytes: &[u8]) -> Result<Self, PaintError> {
-        decode_jpeg(bytes)
+        image::decode_jpeg(bytes)
     }
 
     /// Returns the image width in pixels.
@@ -96,41 +133,13 @@ pub enum DataUri {
     Binary { mime_type: String, data: Vec<u8> },
 }
 
-/// A color stop in a CSS gradient.
-#[derive(Debug, Clone, PartialEq)]
-struct ColorStop {
-    color: Color,
-    /// Position in the range [0.0, 1.0].
-    position: f32,
-}
-
-/// A parsed CSS `linear-gradient()`.
-#[derive(Debug, Clone, PartialEq)]
-struct LinearGradient {
-    /// Gradient angle in degrees (0° = to top, 90° = to right, 180° = to bottom, 270° = to left).
-    angle_deg: f32,
-    stops: Vec<ColorStop>,
-}
-
 /// ボーダー描画で使う領域区分（角丸ボーダー時の色割り当て用）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum BorderRegion {
+pub(crate) enum BorderRegion {
     Top,
     Bottom,
     Left,
     Right,
-}
-
-impl Color {
-    /// Creates an opaque color.
-    pub const fn rgb(r: u8, g: u8, b: u8) -> Self {
-        Self { r, g, b, a: 255 }
-    }
-
-    /// Creates a color with an explicit alpha channel.
-    pub const fn rgba(r: u8, g: u8, b: u8, a: u8) -> Self {
-        Self { r, g, b, a }
-    }
 }
 
 /// A simple RGBA bitmap canvas.
@@ -258,7 +267,7 @@ impl Canvas {
     /// border_region と border_width: どの辺をどの幅で描画するか
     /// 「outer の内側かつ inner の外側」のピクセルのみ color で塗る。
     #[allow(clippy::too_many_arguments)]
-    fn fill_rounded_rect_annulus(
+    pub(crate) fn fill_rounded_rect_annulus(
         &mut self,
         outer_rect: Rect,
         outer_tl: f32,
@@ -394,7 +403,7 @@ impl Canvas {
         self.draw_image_clipped(image, x, y, None);
     }
 
-    fn fill_rect_clipped(&mut self, rect: Rect, color: Color, clip: Option<Rect>) {
+    pub(crate) fn fill_rect_clipped(&mut self, rect: Rect, color: Color, clip: Option<Rect>) {
         if color.a == 0 {
             return;
         }
@@ -436,7 +445,7 @@ impl Canvas {
         );
     }
 
-    fn draw_image_scaled_clipped(&mut self, image: &Image, destination: Rect, clip: Option<Rect>) {
+    pub(crate) fn draw_image_scaled_clipped(&mut self, image: &Image, destination: Rect, clip: Option<Rect>) {
         let Some(destination) = normalize_rect(destination) else {
             return;
         };
@@ -488,7 +497,7 @@ impl Canvas {
     ///
     /// The `mask` is a single-channel alpha bitmap (one u8 per pixel, row-major order).
     /// Each mask value is multiplied with the color's alpha to produce the final alpha.
-    fn draw_glyph_mask(
+    pub(crate) fn draw_glyph_mask(
         &mut self,
         x: f32,
         y: f32,
@@ -566,7 +575,7 @@ pub fn paint_layout(layout: &LayoutBox, resolver: &mut StyleResolver, viewport: 
     if let Some(background) = viewport_background_color(layout, resolver) {
         canvas.fill_rect(viewport, background);
     }
-    let text_fonts = load_text_fonts();
+    let text_fonts = text::load_text_fonts();
     paint_box(&mut canvas, layout, resolver, None, viewport, &text_fonts);
     canvas
 }
@@ -582,11 +591,11 @@ pub fn render_document_with_url(
     viewport: Rect,
     base_url: Option<&crate::http::Url>,
 ) -> Result<Canvas, PaintError> {
-    let effective_base = extract_document_base_url(document, base_url);
+    let effective_base = stylesheet::extract_document_base_url(document, base_url);
     let mut resolver = StyleResolver::new();
     resolver.set_viewport(viewport.width, viewport.height);
-    for stylesheet in extract_author_stylesheets(document, base_url)? {
-        resolver.add_stylesheet(Origin::Author, parse_stylesheet_forgiving(&stylesheet)?);
+    for stylesheet in stylesheet::extract_author_stylesheets(document, base_url)? {
+        resolver.add_stylesheet(Origin::Author, stylesheet::parse_stylesheet_forgiving(&stylesheet)?);
     }
     crate::layout::with_image_base_url(effective_base, || {
         let layout = crate::layout::layout_tree(document, &mut resolver, viewport)?;
@@ -615,61 +624,8 @@ pub fn render_document_with_base_path(
     viewport: Rect,
     base_path: &Path,
 ) -> Result<Canvas, PaintError> {
-    materialize_local_assets(document, base_path)?;
+    stylesheet::materialize_local_assets(document, base_path)?;
     render_document(document, viewport)
-}
-
-fn materialize_local_assets(node: &NodeHandle, base_path: &Path) -> Result<(), PaintError> {
-    if node.node_type() == NodeType::Element {
-        match node.tag_name().as_deref() {
-            Some("img") => rewrite_local_asset_attribute(node, "src", base_path)?,
-            Some("link") => rewrite_local_asset_attribute(node, "href", base_path)?,
-            _ => {}
-        }
-    }
-
-    for child in node.child_nodes() {
-        materialize_local_assets(&child, base_path)?;
-    }
-
-    Ok(())
-}
-
-fn rewrite_local_asset_attribute(
-    node: &NodeHandle,
-    attribute_name: &str,
-    base_path: &Path,
-) -> Result<(), PaintError> {
-    let attributes = node.attributes().unwrap_or_default();
-    let Some(value) = attributes.get(attribute_name) else {
-        return Ok(());
-    };
-    if value.is_empty()
-        || value.starts_with("data:")
-        || value.starts_with("http://")
-        || value.starts_with("https://")
-        || value.starts_with('#')
-        || value.contains(':')
-    {
-        return Ok(());
-    }
-
-    let asset_path = base_path.join(value);
-    if !asset_path.is_file() {
-        return Ok(());
-    }
-
-    let mime_type = match asset_path.extension().and_then(|ext| ext.to_str()) {
-        Some(ext) if ext.eq_ignore_ascii_case("png") => "image/png",
-        Some(ext) if ext.eq_ignore_ascii_case("css") => "text/css",
-        _ => return Ok(()),
-    };
-
-    let data = fs::read(asset_path).map_err(|_| PaintError::InvalidDataUri)?;
-    let encoded = base64::engine::general_purpose::STANDARD.encode(data);
-    node.set_attribute(attribute_name, format!("data:{mime_type};base64,{encoded}"));
-
-    Ok(())
 }
 
 /// Computes a per-pixel diff image and count between two canvases.
@@ -817,7 +773,7 @@ fn paint_box_internal_to(
     padding_box: Rect,
 ) {
     // box-shadow を背景より前（下）に描画する
-    paint_box_shadow(canvas, style, border_box, inherited_clip);
+    border::paint_box_shadow(canvas, style, border_box, inherited_clip);
 
     if let Some(background) = background_color(style) {
         if has_border_radius(style) {
@@ -837,7 +793,7 @@ fn paint_box_internal_to(
         viewport,
     );
 
-    paint_borders(canvas, layout, style, inherited_clip);
+    border::paint_borders(canvas, layout, style, inherited_clip);
 
     let clip = if layout.overflow == crate::layout::Overflow::Hidden {
         match inherited_clip {
@@ -906,8 +862,8 @@ fn paint_box_internal_to(
     for child in float_children {
         paint_box_internal(canvas, child, resolver, clip, viewport, true, text_fonts);
     }
-    paint_text(canvas, layout, style, clip, viewport, text_fonts);
-    paint_list_marker(canvas, layout, style, clip, text_fonts);
+    text::paint_text(canvas, layout, style, clip, viewport, text_fonts);
+    text::paint_list_marker(canvas, layout, style, clip, text_fonts);
     for child in inline_children {
         paint_box_internal(canvas, child, resolver, clip, viewport, false, text_fonts);
     }
@@ -1006,591 +962,6 @@ fn viewport_background_color(layout: &LayoutBox, resolver: &mut StyleResolver) -
     background_color(&body_style)
 }
 
-fn paint_borders(
-    canvas: &mut Canvas,
-    layout: &LayoutBox,
-    style: &ComputedStyle,
-    clip: Option<Rect>,
-) {
-    if !has_any_solid_border(style) {
-        return;
-    }
-    let border_box = border_box_rect(layout);
-    let padding_box = padding_box_rect(layout);
-    let border = layout.dimensions.border;
-
-    if has_border_radius(style) {
-        // 角丸ありのボーダー: ボーダー領域（border_box の角丸内 かつ padding_box の角丸外）を
-        // 各サイドの色で塗る。
-        let (tl, tr, br, bl) = border_radius_corners(style);
-        // 内側コーナー半径（paddingbox側）
-        let inner_tl = (tl - border.left.min(border.top)).max(0.0);
-        let inner_tr = (tr - border.right.min(border.top)).max(0.0);
-        let inner_br = (br - border.right.min(border.bottom)).max(0.0);
-        let inner_bl = (bl - border.left.min(border.bottom)).max(0.0);
-
-        // 描画順: Left/Right を先（フル高さで描画）、その後 Top/Bottom でコーナーを上書きして色が勝つ
-        // left border
-        if border.left > 0.0 && has_solid_border_side(style, "left") {
-            let color = border_color_side(style, "left").unwrap_or(Color::rgb(0, 0, 0));
-            canvas.fill_rounded_rect_annulus(
-                border_box,
-                tl, tr, br, bl,
-                padding_box,
-                inner_tl, inner_tr, inner_br, inner_bl,
-                color,
-                clip,
-                BorderRegion::Left,
-                border.left,
-            );
-        }
-        // right border
-        if border.right > 0.0 && has_solid_border_side(style, "right") {
-            let color = border_color_side(style, "right").unwrap_or(Color::rgb(0, 0, 0));
-            canvas.fill_rounded_rect_annulus(
-                border_box,
-                tl, tr, br, bl,
-                padding_box,
-                inner_tl, inner_tr, inner_br, inner_bl,
-                color,
-                clip,
-                BorderRegion::Right,
-                border.right,
-            );
-        }
-        // top border（コーナー優先）
-        if border.top > 0.0 && has_solid_border_side(style, "top") {
-            let color = border_color_side(style, "top").unwrap_or(Color::rgb(0, 0, 0));
-            canvas.fill_rounded_rect_annulus(
-                border_box,
-                tl, tr, br, bl,
-                padding_box,
-                inner_tl, inner_tr, inner_br, inner_bl,
-                color,
-                clip,
-                BorderRegion::Top,
-                border.top,
-            );
-        }
-        // bottom border（コーナー優先）
-        if border.bottom > 0.0 && has_solid_border_side(style, "bottom") {
-            let color = border_color_side(style, "bottom").unwrap_or(Color::rgb(0, 0, 0));
-            canvas.fill_rounded_rect_annulus(
-                border_box,
-                tl, tr, br, bl,
-                padding_box,
-                inner_tl, inner_tr, inner_br, inner_bl,
-                color,
-                clip,
-                BorderRegion::Bottom,
-                border.bottom,
-            );
-        }
-        return;
-    }
-
-    if border.top > 0.0 && has_solid_border_side(style, "top") {
-        canvas.fill_rect_clipped(
-            Rect {
-                x: border_box.x,
-                y: border_box.y,
-                width: border_box.width,
-                height: border.top,
-            },
-            border_color_side(style, "top").unwrap_or(Color::rgb(0, 0, 0)),
-            clip,
-        );
-    }
-    if border.bottom > 0.0 && has_solid_border_side(style, "bottom") {
-        canvas.fill_rect_clipped(
-            Rect {
-                x: border_box.x,
-                y: padding_box.y + padding_box.height,
-                width: border_box.width,
-                height: border.bottom,
-            },
-            border_color_side(style, "bottom").unwrap_or(Color::rgb(0, 0, 0)),
-            clip,
-        );
-    }
-    if border.left > 0.0 && has_solid_border_side(style, "left") {
-        canvas.fill_rect_clipped(
-            Rect {
-                x: border_box.x,
-                y: border_box.y + border.top,
-                width: border.left,
-                height: border_box.height - border.top - border.bottom,
-            },
-            border_color_side(style, "left").unwrap_or(Color::rgb(0, 0, 0)),
-            clip,
-        );
-    }
-    if border.right > 0.0 && has_solid_border_side(style, "right") {
-        canvas.fill_rect_clipped(
-            Rect {
-                x: padding_box.x + padding_box.width,
-                y: border_box.y + border.top,
-                width: border.right,
-                height: border_box.height - border.top - border.bottom,
-            },
-            border_color_side(style, "right").unwrap_or(Color::rgb(0, 0, 0)),
-            clip,
-        );
-    }
-}
-
-fn paint_text(
-    canvas: &mut Canvas,
-    layout: &LayoutBox,
-    style: &ComputedStyle,
-    clip: Option<Rect>,
-    _viewport: Rect,
-    fonts: &[Font],
-) {
-    let color = text_color(style).unwrap_or(Color::rgb(0, 0, 0));
-    let text_transform = text_transform_value(style);
-    let decoration_line = text_decoration_line(style);
-    let decoration_color = text_decoration_color(style, color);
-
-    for line in &layout.lines {
-        for fragment in &line.fragments {
-            match &fragment.content {
-                InlineFragmentContent::Text(text) => {
-                    let font_size = fragment.metrics.font_size.max(1.0);
-                    let transformed = apply_text_transform(text, text_transform);
-                    let display_text = transformed.as_deref().unwrap_or(text.as_str());
-
-                    if !fonts.is_empty() {
-                        paint_text_with_font(
-                            canvas,
-                            fragment.rect,
-                            display_text,
-                            font_size,
-                            fragment.metrics.ascent,
-                            &fonts,
-                            color,
-                            clip,
-                            fragment.metrics.letter_spacing,
-                        );
-                    } else {
-                        // Fallback: placeholder rectangles
-                        paint_text_placeholder(canvas, fragment.rect, display_text, font_size, color, clip);
-                    }
-
-                    // Draw text decorations after text
-                    paint_text_decoration(
-                        canvas,
-                        fragment.rect,
-                        fragment.metrics.ascent,
-                        fragment.metrics.descent,
-                        font_size,
-                        decoration_line,
-                        decoration_color,
-                        clip,
-                    );
-                }
-                InlineFragmentContent::Image(image, style) => {
-                    paint_inline_image_fragment(
-                        canvas,
-                        fragment.rect,
-                        image,
-                        style,
-                        clip,
-                        _viewport,
-                    );
-                }
-                InlineFragmentContent::GeneratedBox(style) => {
-                    paint_generated_box(canvas, fragment.rect, style, clip, _viewport);
-                }
-            }
-        }
-    }
-}
-
-/// Returns the `text-transform` value from style.
-fn text_transform_value(style: &ComputedStyle) -> &'static str {
-    match style.get("text-transform") {
-        Some(ComputedValue::Keyword(kw)) => match kw.to_ascii_lowercase().as_str() {
-            "uppercase" => "uppercase",
-            "lowercase" => "lowercase",
-            "capitalize" => "capitalize",
-            _ => "none",
-        },
-        _ => "none",
-    }
-}
-
-/// Apply text-transform to the given text, returning Some(transformed) or None if no change.
-fn apply_text_transform(text: &str, transform: &str) -> Option<String> {
-    match transform {
-        "uppercase" => Some(text.to_uppercase()),
-        "lowercase" => Some(text.to_lowercase()),
-        "capitalize" => {
-            let mut result = String::with_capacity(text.len());
-            let mut capitalize_next = true;
-            for ch in text.chars() {
-                if ch.is_whitespace() {
-                    capitalize_next = true;
-                    result.push(ch);
-                } else if capitalize_next {
-                    for c in ch.to_uppercase() {
-                        result.push(c);
-                    }
-                    capitalize_next = false;
-                } else {
-                    result.push(ch);
-                }
-            }
-            Some(result)
-        }
-        _ => None,
-    }
-}
-
-/// Text decoration line flags (supports multiple values like "underline line-through").
-#[derive(Debug, Clone, Copy, Default)]
-struct TextDecorationLines {
-    underline: bool,
-    overline: bool,
-    line_through: bool,
-}
-
-impl TextDecorationLines {
-    fn is_none(&self) -> bool {
-        !self.underline && !self.overline && !self.line_through
-    }
-}
-
-/// Returns the text-decoration-line flags from style.
-fn text_decoration_line(style: &ComputedStyle) -> TextDecorationLines {
-    let mut lines = TextDecorationLines::default();
-    if let Some(ComputedValue::Keyword(kw)) = style.get("text-decoration-line") {
-        for part in kw.split_whitespace() {
-            match part.to_ascii_lowercase().as_str() {
-                "underline" => lines.underline = true,
-                "overline" => lines.overline = true,
-                "line-through" => lines.line_through = true,
-                _ => {}
-            }
-        }
-    }
-    lines
-}
-
-/// Returns the text-decoration-color, falling back to the text color.
-fn text_decoration_color(style: &ComputedStyle, fallback: Color) -> Color {
-    match style.get("text-decoration-color") {
-        Some(ComputedValue::Color(c)) => parse_color(c).unwrap_or(fallback),
-        Some(ComputedValue::Keyword(c)) => parse_color(c).unwrap_or(fallback),
-        _ => fallback,
-    }
-}
-
-/// Draw text decoration lines (underline, overline, line-through) for a fragment.
-fn paint_text_decoration(
-    canvas: &mut Canvas,
-    rect: Rect,
-    ascent: f32,
-    descent: f32,
-    font_size: f32,
-    decoration: TextDecorationLines,
-    color: Color,
-    clip: Option<Rect>,
-) {
-    if decoration.is_none() {
-        return;
-    }
-
-    let line_thickness = (font_size * 0.075).max(1.0);
-
-    let mut draw_line = |line_y: f32| {
-        let line_rect = Rect {
-            x: rect.x,
-            y: line_y,
-            width: rect.width,
-            height: line_thickness,
-        };
-        canvas.fill_rect_clipped(line_rect, color, clip);
-    };
-
-    if decoration.underline {
-        draw_line(rect.y + ascent + descent * 0.5);
-    }
-    if decoration.overline {
-        draw_line(rect.y);
-    }
-    if decoration.line_through {
-        draw_line(rect.y + ascent * 0.6);
-    }
-}
-
-/// Paint text using actual font glyphs.
-fn paint_text_with_font(
-    canvas: &mut Canvas,
-    rect: Rect,
-    text: &str,
-    font_size: f32,
-    layout_ascent: f32,
-    fonts: &[Font],
-    color: Color,
-    clip: Option<Rect>,
-    letter_spacing: f32,
-) {
-    // Align paint baseline with layout's line-box baseline model to avoid vertical drift.
-    let baseline_y = rect.y + layout_ascent;
-    let mut cursor_x = rect.x;
-    let mut previous_char: Option<(char, usize)> = None;
-
-    for ch in text.chars() {
-        let (font_index, glyph, advance_x) = rasterize_with_fallback(fonts, ch, font_size);
-        if let Some((prev, prev_font_index)) = previous_char
-            && prev_font_index == font_index
-        {
-            cursor_x += fonts[font_index].glyph_kerning(prev, ch, font_size);
-        }
-
-        if let Some(glyph) = glyph {
-            if glyph.width > 0 && glyph.height > 0 && !glyph.bitmap.is_empty() {
-                // Calculate glyph position
-                // offset_y is from baseline to bitmap top (typically negative for glyphs above baseline)
-                let glyph_x = cursor_x + glyph.offset_x;
-                let glyph_y = baseline_y + glyph.offset_y;
-
-                canvas.draw_glyph_mask(
-                    glyph_x,
-                    glyph_y,
-                    glyph.width,
-                    glyph.height,
-                    &glyph.bitmap,
-                    color,
-                    clip,
-                );
-            }
-        }
-
-        // Keep text flow moving even if a glyph cannot be rasterized by any candidate font.
-        cursor_x += advance_x + letter_spacing;
-        previous_char = Some((ch, font_index));
-    }
-}
-
-fn load_text_fonts() -> Vec<Font> {
-    load_default_text_fonts()
-}
-
-fn rasterize_with_fallback(
-    fonts: &[Font],
-    ch: char,
-    font_size: f32,
-) -> (usize, Option<GlyphRaster>, f32) {
-    let prefer_cjk = is_cjk_preferred_character(ch);
-    let try_index = |index: usize| -> Option<(usize, Option<GlyphRaster>, f32)> {
-        let font = &fonts[index];
-        // Allow primary font to render .notdef as a visible last resort.
-        if index != 0 && !ch.is_whitespace() && !font.has_glyph(ch) {
-            return None;
-        }
-        match font.rasterize(ch, font_size) {
-            Ok(glyph) => {
-                if glyph.width > 0 && glyph.height > 0 && !glyph.bitmap.is_empty() {
-                    let advance = if glyph.advance_x > 0.0 {
-                        glyph.advance_x
-                    } else {
-                        font.glyph_advance(ch, font_size)
-                    };
-                    return Some((index, Some(glyph), advance));
-                }
-
-                // Whitespace and control-like glyphs can be outline-less but still have advance.
-                if ch.is_whitespace() {
-                    return Some((index, None, font.glyph_advance(ch, font_size)));
-                }
-            }
-            Err(_) => return None,
-        }
-        None
-    };
-
-    if prefer_cjk && fonts.len() > 1 {
-        for index in 1..fonts.len() {
-            if let Some(result) = try_index(index) {
-                return result;
-            }
-        }
-        if let Some(result) = try_index(0) {
-            return result;
-        }
-    } else {
-        for index in 0..fonts.len() {
-            if let Some(result) = try_index(index) {
-                return result;
-            }
-        }
-    }
-
-    // Fallback to the primary font advance to avoid collapsing text runs.
-    let primary_advance = fonts
-        .first()
-        .map(|font| font.glyph_advance(ch, font_size))
-        .unwrap_or((font_size * 0.6).max(1.0));
-    (0, None, primary_advance)
-}
-
-fn is_cjk_preferred_character(ch: char) -> bool {
-    matches!(
-        ch as u32,
-        0x3000..=0x30FF // CJK Symbols/Punctuation, Hiragana, Katakana
-            | 0x3400..=0x4DBF // CJK Unified Ideographs Extension A
-            | 0x4E00..=0x9FFF // CJK Unified Ideographs
-            | 0xF900..=0xFAFF // CJK Compatibility Ideographs
-            | 0xFF66..=0xFF9F // Half-width Katakana
-    )
-}
-
-/// Paint text as placeholder rectangles (fallback when no font available).
-fn paint_text_placeholder(
-    canvas: &mut Canvas,
-    rect: Rect,
-    text: &str,
-    font_size: f32,
-    color: Color,
-    clip: Option<Rect>,
-) {
-    let mut cursor_x = rect.x;
-    let advance = (font_size * 0.6).max(1.0); // Approximate advance
-    let glyph_height = (font_size * 0.7).max(1.0);
-    let glyph_y = rect.y + (font_size - glyph_height) * 0.5;
-
-    for ch in text.chars() {
-        if !ch.is_whitespace() {
-            canvas.fill_rect_clipped(
-                Rect {
-                    x: cursor_x,
-                    y: glyph_y,
-                    width: (advance * 0.7).max(1.0),
-                    height: glyph_height,
-                },
-                color,
-                clip,
-            );
-        }
-        cursor_x += advance;
-    }
-}
-
-/// Paints the list marker (if any) for a `display: list-item` box.
-fn paint_list_marker(
-    canvas: &mut Canvas,
-    layout: &LayoutBox,
-    style: &ComputedStyle,
-    clip: Option<Rect>,
-    fonts: &[Font],
-) {
-    let Some(marker) = &layout.marker else {
-        return;
-    };
-
-    let color = text_color(style).unwrap_or(Color::rgb(0, 0, 0));
-    let font_size = marker.font_size.max(1.0);
-    let ascent = font_size * 0.8;
-
-    let rect = Rect {
-        x: marker.x,
-        y: marker.y,
-        width: font_size * (marker.text.chars().count() as f32) * 0.6,
-        height: font_size,
-    };
-
-    if !fonts.is_empty() {
-        paint_text_with_font(
-            canvas,
-            rect,
-            &marker.text,
-            font_size,
-            ascent,
-            fonts,
-            color,
-            clip,
-            0.0,
-        );
-    } else {
-        paint_list_marker_placeholder(canvas, marker, font_size, color, clip);
-    }
-}
-
-/// Paints a list marker as a simple filled shape (fallback when no font is loaded).
-fn paint_list_marker_placeholder(
-    canvas: &mut Canvas,
-    marker: &ListMarker,
-    font_size: f32,
-    color: Color,
-    clip: Option<Rect>,
-) {
-    let size = (font_size * 0.35).max(2.0);
-    let cx = marker.x + size * 0.5;
-    let cy = marker.y + font_size * 0.5;
-
-    // Render disc/circle/square as a filled square for simplicity in placeholder mode.
-    canvas.fill_rect_clipped(
-        Rect {
-            x: cx - size * 0.5,
-            y: cy - size * 0.5,
-            width: size,
-            height: size,
-        },
-        color,
-        clip,
-    );
-}
-
-fn paint_inline_image_fragment(
-    canvas: &mut Canvas,
-    rect: Rect,
-    image: &Image,
-    style: &ComputedStyle,
-    clip: Option<Rect>,
-    viewport: Rect,
-) {
-    if let Some(background) = background_color(style) {
-        canvas.fill_rect_clipped(rect, background, clip);
-    }
-    paint_background_image(canvas, style, rect, clip, viewport);
-
-    let border = EdgeSizesForPaint::from_style(style);
-    if border.total_horizontal() > 0.0 || border.total_vertical() > 0.0 {
-        paint_rect_borders(canvas, rect, style, border, clip);
-    }
-
-    let content_rect = inline_fragment_content_rect(rect, style, border);
-    canvas.draw_image_scaled_clipped(image, content_rect, clip);
-}
-
-fn inline_fragment_content_rect(
-    rect: Rect,
-    style: &ComputedStyle,
-    border: EdgeSizesForPaint,
-) -> Rect {
-    let padding_left = length_property(style, "padding-left")
-        .or_else(|| length_property(style, "padding"))
-        .unwrap_or(0.0);
-    let padding_right = length_property(style, "padding-right")
-        .or_else(|| length_property(style, "padding"))
-        .unwrap_or(0.0);
-    let padding_top = length_property(style, "padding-top")
-        .or_else(|| length_property(style, "padding"))
-        .unwrap_or(0.0);
-    let padding_bottom = length_property(style, "padding-bottom")
-        .or_else(|| length_property(style, "padding"))
-        .unwrap_or(0.0);
-
-    Rect {
-        x: rect.x + border.left + padding_left,
-        y: rect.y + border.top + padding_top,
-        width: (rect.width - border.left - border.right - padding_left - padding_right).max(0.0),
-        height: (rect.height - border.top - border.bottom - padding_top - padding_bottom).max(0.0),
-    }
-}
-
 fn paint_generated_box(
     canvas: &mut Canvas,
     rect: Rect,
@@ -1604,17 +975,17 @@ fn paint_generated_box(
 
     paint_background_image(canvas, style, rect, clip, viewport);
 
-    let border = EdgeSizesForPaint::from_style(style);
+    let border = border::EdgeSizesForPaint::from_style(style);
     if border.total_horizontal() == 0.0 && border.total_vertical() == 0.0 {
         return;
     }
 
     if rect.width == border.total_horizontal() && rect.height == border.total_vertical() {
-        paint_zero_sized_border_box(canvas, rect, style, border, clip);
+        border::paint_zero_sized_border_box(canvas, rect, style, border, clip);
         return;
     }
 
-    paint_rect_borders(canvas, rect, style, border, clip);
+    border::paint_rect_borders(canvas, rect, style, border, clip);
 }
 
 fn paint_block_generated_pseudo_box(
@@ -1641,7 +1012,7 @@ fn paint_block_generated_pseudo_box(
         return;
     }
 
-    let border = EdgeSizesForPaint::from_style(&style);
+    let border = border::EdgeSizesForPaint::from_style(&style);
     let padding_left = length_property(&style, "padding-left")
         .or_else(|| length_property(&style, "padding"))
         .unwrap_or(0.0);
@@ -1689,210 +1060,6 @@ fn paint_block_generated_pseudo_box(
     );
 }
 
-#[derive(Clone, Copy)]
-struct EdgeSizesForPaint {
-    top: f32,
-    right: f32,
-    bottom: f32,
-    left: f32,
-}
-
-impl EdgeSizesForPaint {
-    fn from_style(style: &ComputedStyle) -> Self {
-        Self {
-            top: length_property(style, "border-top-width")
-                .or_else(|| length_property(style, "border-width"))
-                .unwrap_or(0.0),
-            right: length_property(style, "border-right-width")
-                .or_else(|| length_property(style, "border-width"))
-                .unwrap_or(0.0),
-            bottom: length_property(style, "border-bottom-width")
-                .or_else(|| length_property(style, "border-width"))
-                .unwrap_or(0.0),
-            left: length_property(style, "border-left-width")
-                .or_else(|| length_property(style, "border-width"))
-                .unwrap_or(0.0),
-        }
-    }
-
-    fn total_horizontal(self) -> f32 {
-        self.left + self.right
-    }
-
-    fn total_vertical(self) -> f32 {
-        self.top + self.bottom
-    }
-}
-
-fn paint_rect_borders(
-    canvas: &mut Canvas,
-    rect: Rect,
-    style: &ComputedStyle,
-    border: EdgeSizesForPaint,
-    clip: Option<Rect>,
-) {
-    if border.top > 0.0 && has_solid_border_side(style, "top") {
-        canvas.fill_rect_clipped(
-            Rect {
-                x: rect.x,
-                y: rect.y,
-                width: rect.width,
-                height: border.top,
-            },
-            border_color_side(style, "top").unwrap_or(Color::rgb(0, 0, 0)),
-            clip,
-        );
-    }
-    if border.bottom > 0.0 && has_solid_border_side(style, "bottom") {
-        canvas.fill_rect_clipped(
-            Rect {
-                x: rect.x,
-                y: rect.y + rect.height - border.bottom,
-                width: rect.width,
-                height: border.bottom,
-            },
-            border_color_side(style, "bottom").unwrap_or(Color::rgb(0, 0, 0)),
-            clip,
-        );
-    }
-    if border.left > 0.0 && has_solid_border_side(style, "left") {
-        canvas.fill_rect_clipped(
-            Rect {
-                x: rect.x,
-                y: rect.y + border.top,
-                width: border.left,
-                height: (rect.height - border.top - border.bottom).max(0.0),
-            },
-            border_color_side(style, "left").unwrap_or(Color::rgb(0, 0, 0)),
-            clip,
-        );
-    }
-    if border.right > 0.0 && has_solid_border_side(style, "right") {
-        canvas.fill_rect_clipped(
-            Rect {
-                x: rect.x + rect.width - border.right,
-                y: rect.y + border.top,
-                width: border.right,
-                height: (rect.height - border.top - border.bottom).max(0.0),
-            },
-            border_color_side(style, "right").unwrap_or(Color::rgb(0, 0, 0)),
-            clip,
-        );
-    }
-}
-
-fn paint_zero_sized_border_box(
-    canvas: &mut Canvas,
-    rect: Rect,
-    style: &ComputedStyle,
-    border: EdgeSizesForPaint,
-    clip: Option<Rect>,
-) {
-    let inner_left = rect.x + border.left;
-    let inner_top = rect.y + border.top;
-    let inner_right = rect.x + rect.width - border.right;
-    let inner_bottom = rect.y + rect.height - border.bottom;
-
-    let paint_top = |canvas: &mut Canvas| {
-        if border.top > 0.0 && has_solid_border_side(style, "top") {
-            fill_quad_clipped(
-                canvas,
-                (rect.x, rect.y),
-                (rect.x + rect.width, rect.y),
-                (inner_right, inner_top),
-                (inner_left, inner_top),
-                border_color_side(style, "top").unwrap_or(Color::rgb(0, 0, 0)),
-                clip,
-            );
-        }
-    };
-    let paint_bottom = |canvas: &mut Canvas| {
-        if border.bottom > 0.0 && has_solid_border_side(style, "bottom") {
-            fill_quad_clipped(
-                canvas,
-                (rect.x, rect.y + rect.height),
-                (rect.x + rect.width, rect.y + rect.height),
-                (inner_right, inner_bottom),
-                (inner_left, inner_bottom),
-                border_color_side(style, "bottom").unwrap_or(Color::rgb(0, 0, 0)),
-                clip,
-            );
-        }
-    };
-    let paint_left = |canvas: &mut Canvas| {
-        if border.left > 0.0 && has_solid_border_side(style, "left") {
-            fill_quad_clipped(
-                canvas,
-                (rect.x, rect.y),
-                (rect.x, rect.y + rect.height),
-                (inner_left, inner_bottom),
-                (inner_left, inner_top),
-                border_color_side(style, "left").unwrap_or(Color::rgb(0, 0, 0)),
-                clip,
-            );
-        }
-    };
-    let paint_right = |canvas: &mut Canvas| {
-        if border.right > 0.0 && has_solid_border_side(style, "right") {
-            fill_quad_clipped(
-                canvas,
-                (rect.x + rect.width, rect.y),
-                (rect.x + rect.width, rect.y + rect.height),
-                (inner_right, inner_bottom),
-                (inner_right, inner_top),
-                border_color_side(style, "right").unwrap_or(Color::rgb(0, 0, 0)),
-                clip,
-            );
-        }
-    };
-
-    if border.top == 0.0 && border.bottom > 0.0 {
-        paint_bottom(canvas);
-        paint_left(canvas);
-        paint_right(canvas);
-    } else if border.bottom == 0.0 && border.top > 0.0 {
-        paint_left(canvas);
-        paint_right(canvas);
-        if has_solid_border_side(style, "top") {
-            let color = border_color_side(style, "top").unwrap_or(Color::rgb(0, 0, 0));
-            fill_triangle_clipped_inclusive(
-                canvas,
-                (rect.x, rect.y),
-                (rect.x + rect.width, rect.y),
-                (inner_right, inner_top),
-                color,
-                clip,
-            );
-            fill_triangle_clipped_inclusive(
-                canvas,
-                (rect.x, rect.y),
-                (inner_right, inner_top),
-                (inner_left, inner_top),
-                color,
-                clip,
-            );
-        }
-    } else {
-        paint_top(canvas);
-        paint_bottom(canvas);
-        paint_left(canvas);
-        paint_right(canvas);
-    }
-}
-
-fn fill_quad_clipped(
-    canvas: &mut Canvas,
-    p1: (f32, f32),
-    p2: (f32, f32),
-    p3: (f32, f32),
-    p4: (f32, f32),
-    color: Color,
-    clip: Option<Rect>,
-) {
-    fill_triangle_clipped(canvas, p1, p2, p3, color, clip);
-    fill_triangle_clipped(canvas, p1, p3, p4, color, clip);
-}
-
 fn border_box_rect(layout: &LayoutBox) -> Rect {
     let content = layout.dimensions.content;
     let padding = layout.dimensions.padding;
@@ -1922,8 +1089,8 @@ fn background_color(style: &ComputedStyle) -> Option<Color> {
 
 fn background_image(style: &ComputedStyle) -> Option<Image> {
     match style.get("background-image") {
-        Some(ComputedValue::Keyword(keyword)) => parse_background_image_value(keyword),
-        Some(ComputedValue::String(value)) => parse_background_image_value(value),
+        Some(ComputedValue::Keyword(keyword)) => image::parse_background_image_value(keyword),
+        Some(ComputedValue::String(value)) => image::parse_background_image_value(value),
         _ => None,
     }
 }
@@ -1949,379 +1116,12 @@ fn background_position(style: &ComputedStyle) -> (f32, f32) {
     )
 }
 
-fn parse_background_image_value(value: &str) -> Option<Image> {
-    let trimmed = value.trim();
-    if trimmed.eq_ignore_ascii_case("none") {
-        return None;
-    }
-    let url = trimmed
-        .strip_prefix("url(")
-        .and_then(|value| value.strip_suffix(')'))
-        .unwrap_or(trimmed)
-        .trim()
-        .trim_matches('"')
-        .trim_matches('\'')
-        .trim_start_matches("\\\"")
-        .trim_end_matches("\\\"")
-        .trim_start_matches("\\'")
-        .trim_end_matches("\\'");
-    crate::layout::decode_or_fetch_image_asset(url).or_else(|| {
-        let data_uri = parse_data_uri(url).ok()?;
-        match data_uri {
-            DataUri::Binary { mime_type, data } if mime_type.eq_ignore_ascii_case("image/png") => {
-                Image::decode_png(&data).ok()
-            }
-            DataUri::Binary { mime_type, data }
-                if mime_type.eq_ignore_ascii_case("image/jpeg")
-                    || mime_type.eq_ignore_ascii_case("image/jpg") =>
-            {
-                Image::decode_jpeg(&data).ok()
-            }
-            _ => None,
-        }
-    })
-}
-
-/// Splits gradient arguments at the top-level commas (skipping nested parens).
-fn split_gradient_args(args: &str) -> Vec<&str> {
-    let mut parts = Vec::new();
-    let mut depth: usize = 0;
-    let mut start = 0;
-    for (i, ch) in args.char_indices() {
-        match ch {
-            '(' => depth += 1,
-            ')' => {
-                if depth > 0 {
-                    depth -= 1;
-                }
-            }
-            ',' if depth == 0 => {
-                parts.push(args[start..i].trim());
-                start = i + 1;
-            }
-            _ => {}
-        }
-    }
-    parts.push(args[start..].trim());
-    parts
-}
-
-/// Parses a `linear-gradient(...)` string value into a [`LinearGradient`], or returns `None`
-/// if the string is not a valid linear-gradient.
-///
-/// Supported direction forms:
-/// - `to right`, `to left`, `to top`, `to bottom`
-/// - `to top right`, `to top left`, `to bottom right`, `to bottom left`
-/// - `<angle>deg` (e.g. `45deg`, `180deg`)
-///
-/// If no direction is given the default is `to bottom` (180°).
-fn parse_linear_gradient(value: &str) -> Option<LinearGradient> {
-    let value = value.trim();
-    let args_str = value
-        .strip_prefix("linear-gradient(")
-        .and_then(|s| s.strip_suffix(')'))?;
-
-    let parts = split_gradient_args(args_str);
-    if parts.is_empty() {
-        return None;
-    }
-
-    // Determine angle and where color stops start
-    let (angle_deg, stop_start) = parse_gradient_direction(parts[0])
-        .map(|a| (a, 1usize))
-        .unwrap_or((180.0, 0usize));
-
-    let stop_parts = &parts[stop_start..];
-    if stop_parts.is_empty() {
-        return None;
-    }
-
-    // Parse color stops; explicit positions (like `red 50%`) not yet supported — auto-space them.
-    // If any stop can't be parsed as a color, treat the whole gradient as invalid.
-    let mut colors = Vec::new();
-    for s in stop_parts {
-        match parse_color(s.trim()) {
-            Some(c) => colors.push(c),
-            None => return None,
-        }
-    }
-
-    if colors.len() < 2 {
-        return None;
-    }
-
-    let n = colors.len();
-    let stops = colors
-        .into_iter()
-        .enumerate()
-        .map(|(i, color)| {
-            let position = i as f32 / (n - 1) as f32;
-            ColorStop { color, position }
-        })
-        .collect::<Vec<_>>();
-
-    Some(LinearGradient { angle_deg, stops })
-}
-
-/// Parses the direction part of a linear-gradient (e.g. `"to right"`, `"45deg"`).
-/// Returns the angle in degrees (CSS convention: 0° = to top, 90° = to right).
-fn parse_gradient_direction(part: &str) -> Option<f32> {
-    let part = part.trim();
-
-    // Angle: "<number>deg" (or grad/turn/rad — only deg is common)
-    if let Some(deg_str) = part.strip_suffix("deg") {
-        return deg_str.trim().parse::<f32>().ok();
-    }
-    if let Some(turn_str) = part.strip_suffix("turn") {
-        return turn_str.trim().parse::<f32>().ok().map(|t| t * 360.0);
-    }
-    if let Some(rad_str) = part.strip_suffix("rad") {
-        return rad_str
-            .trim()
-            .parse::<f32>()
-            .ok()
-            .map(|r| r.to_degrees());
-    }
-    if let Some(grad_str) = part.strip_suffix("grad") {
-        return grad_str.trim().parse::<f32>().ok().map(|g| g * 0.9);
-    }
-
-    // Keyword: "to <side>" or "to <side> <side>"
-    let lower = part.to_ascii_lowercase();
-    match lower.as_str() {
-        "to top" => Some(0.0),
-        "to right" => Some(90.0),
-        "to bottom" => Some(180.0),
-        "to left" => Some(270.0),
-        "to top right" | "to right top" => Some(45.0),
-        "to bottom right" | "to right bottom" => Some(135.0),
-        "to bottom left" | "to left bottom" => Some(225.0),
-        "to top left" | "to left top" => Some(315.0),
-        _ => None,
-    }
-}
-
-/// Computes the background-size dimensions given the style and the painting area.
-/// Returns `(tile_width, tile_height)`.
 fn background_size(style: &ComputedStyle, area: Rect, image_w: f32, image_h: f32) -> (f32, f32) {
-    // Single Px value (e.g. background-size: 100px — width only, height auto)
-    if let Some(ComputedValue::Px(px)) = style.get("background-size") {
-        let w = *px;
-        let h = if image_w > 0.0 {
-            image_h * (w / image_w)
-        } else {
-            image_h
-        };
-        return (w, h);
-    }
-
-    // Single Percentage value (e.g. background-size: 50% — width only, height auto)
-    if let Some(ComputedValue::Percentage(pct)) = style.get("background-size") {
-        let w = area.width * (*pct / 100.0);
-        let h = if image_w > 0.0 {
-            image_h * (w / image_w)
-        } else {
-            image_h
-        };
-        return (w, h);
-    }
-
-    let kw = match style.get("background-size") {
-        Some(ComputedValue::Keyword(kw)) => kw.clone(),
-        _ => return (image_w, image_h),
-    };
-
-    let kw_lower = kw.to_ascii_lowercase();
-    match kw_lower.as_str() {
-        "cover" => {
-            if image_w <= 0.0 || image_h <= 0.0 {
-                return (area.width, area.height);
-            }
-            let scale_w = area.width / image_w;
-            let scale_h = area.height / image_h;
-            let scale = scale_w.max(scale_h);
-            (image_w * scale, image_h * scale)
-        }
-        "contain" => {
-            if image_w <= 0.0 || image_h <= 0.0 {
-                return (area.width, area.height);
-            }
-            let scale_w = area.width / image_w;
-            let scale_h = area.height / image_h;
-            let scale = scale_w.min(scale_h);
-            (image_w * scale, image_h * scale)
-        }
-        "auto" | "" => (image_w, image_h),
-        other => {
-            // Try to parse "Wpx Hpx" or "W% H%" etc. from a keyword string
-            // (e.g. when background-size: 100px 50px is stored as keyword "100px 50px")
-            let mut parts = other.split_whitespace();
-            let w = parts
-                .next()
-                .and_then(|t| parse_size_token(t, area.width))
-                .unwrap_or(image_w);
-            let h = parts
-                .next()
-                .and_then(|t| parse_size_token(t, area.height))
-                .unwrap_or_else(|| {
-                    if image_w > 0.0 {
-                        image_h * (w / image_w)
-                    } else {
-                        image_h
-                    }
-                });
-            (w, h)
-        }
-    }
-}
-
-/// Parses a single background-size value like "100px", "50%", "auto".
-/// `container` is the relevant container dimension for percentage resolution.
-fn parse_size_token(part: &str, container: f32) -> Option<f32> {
-    if part == "auto" {
-        return None;
-    }
-    if let Some(px) = part.strip_suffix("px") {
-        return px.parse::<f32>().ok();
-    }
-    if let Some(pct) = part.strip_suffix('%') {
-        return pct.parse::<f32>().ok().map(|p| container * p / 100.0);
-    }
-    None
-}
-
-/// Draws a `LinearGradient` into the canvas over the given `area`, clipped to `clip`.
-fn paint_linear_gradient(
-    canvas: &mut Canvas,
-    gradient: &LinearGradient,
-    area: Rect,
-    clip: Option<Rect>,
-) {
-    let Some(area) = normalize_rect(area) else {
-        return;
-    };
-
-    // Effective clip region
-    let draw_area = if let Some(clip_rect) = clip.and_then(normalize_rect) {
-        match intersect(area, clip_rect) {
-            Some(r) => r,
-            None => return,
-        }
-    } else {
-        area
-    };
-
-    // Convert CSS angle convention to math angle:
-    // CSS 0° = "to top" (gradient goes upward, so color flows from bottom to top)
-    // CSS 90° = "to right"
-    // Math: angle measured counter-clockwise from positive X-axis
-    //
-    // For a gradient direction of angle_deg (CSS):
-    //   unit vector pointing *toward* the end color:
-    //   dx = sin(angle_deg), dy = -cos(angle_deg)
-    //   (dy is negative because CSS Y axis is downward)
-    let angle_rad = gradient.angle_deg.to_radians();
-    let dir_x = angle_rad.sin();
-    let dir_y = -angle_rad.cos();
-
-    // Center of the box
-    let cx = area.x + area.width * 0.5;
-    let cy = area.y + area.height * 0.5;
-
-    // Gradient length: distance from center to the "end" corner of the box
-    // (CSS spec: the gradient line goes through the center and touches the side
-    //  perpendicular to the gradient direction at the ending-point corner)
-    // Simplified: half-length = |dx| * W/2 + |dy| * H/2
-    let half_len = dir_x.abs() * area.width * 0.5 + dir_y.abs() * area.height * 0.5;
-    let grad_len = half_len * 2.0;
-
-    let x0 = area.x.floor().max(0.0) as i32;
-    let y0 = area.y.floor().max(0.0) as i32;
-    let x1 = (draw_area.x + draw_area.width)
-        .ceil()
-        .min(canvas.width as f32) as i32;
-    let y1 = (draw_area.y + draw_area.height)
-        .ceil()
-        .min(canvas.height as f32) as i32;
-    let x0 = x0.max(draw_area.x.floor() as i32);
-    let y0 = y0.max(draw_area.y.floor() as i32);
-
-    for py in y0..y1 {
-        for px in x0..x1 {
-            // Project pixel center onto gradient line
-            let rel_x = px as f32 + 0.5 - cx;
-            let rel_y = py as f32 + 0.5 - cy;
-            let proj = rel_x * dir_x + rel_y * dir_y;
-
-            // Normalize to [0, 1] along the gradient
-            let t = if grad_len > 0.0 {
-                (proj / grad_len + 0.5).clamp(0.0, 1.0)
-            } else {
-                0.0
-            };
-
-            let color = interpolate_gradient_color(&gradient.stops, t);
-            let dest_index = ((py as u32 * canvas.width + px as u32) * 4) as usize;
-            if dest_index + 3 < canvas.pixels.len() {
-                blend_pixel(&mut canvas.pixels[dest_index..dest_index + 4], color);
-            }
-        }
-    }
-}
-
-/// Linearly interpolates a color from gradient stops at position `t` ∈ [0, 1].
-fn interpolate_gradient_color(stops: &[ColorStop], t: f32) -> Color {
-    if stops.is_empty() {
-        return Color::rgba(0, 0, 0, 0);
-    }
-    if stops.len() == 1 || t <= stops[0].position {
-        return stops[0].color;
-    }
-    let last = stops.last().unwrap();
-    if t >= last.position {
-        return last.color;
-    }
-
-    // Find the two surrounding stops
-    let mut a = &stops[0];
-    let mut b = &stops[1];
-    for i in 0..stops.len() - 1 {
-        if t >= stops[i].position && t <= stops[i + 1].position {
-            a = &stops[i];
-            b = &stops[i + 1];
-            break;
-        }
-    }
-
-    let range = b.position - a.position;
-    let f = if range > 0.0 {
-        (t - a.position) / range
-    } else {
-        0.0
-    };
-
-    Color::rgba(
-        lerp_u8(a.color.r, b.color.r, f),
-        lerp_u8(a.color.g, b.color.g, f),
-        lerp_u8(a.color.b, b.color.b, f),
-        lerp_u8(a.color.a, b.color.a, f),
-    )
-}
-
-fn lerp_u8(a: u8, b: u8, t: f32) -> u8 {
-    (a as f32 + (b as f32 - a as f32) * t).round().clamp(0.0, 255.0) as u8
+    image::background_size(style, area, image_w, image_h)
 }
 
 fn border_color(style: &ComputedStyle) -> Option<Color> {
     color_property(style.get("border-color")).or_else(|| color_property(style.get("color")))
-}
-
-fn border_color_side(style: &ComputedStyle, side: &str) -> Option<Color> {
-    color_property(style.get(&format!("border-{side}-color"))).or_else(|| border_color(style))
-}
-
-fn text_color(style: &ComputedStyle) -> Option<Color> {
-    color_property(style.get("color"))
 }
 
 fn color_property(value: Option<&ComputedValue>) -> Option<Color> {
@@ -2363,900 +1163,6 @@ fn element_opacity(style: &ComputedStyle) -> Option<f32> {
         Some(ComputedValue::Keyword(k)) if k == "1" || k == "1.0" => Some(1.0),
         _ => None,
     }
-}
-
-/// `box-shadow` 宣言から解析した影のパラメータ。
-#[derive(Debug, Clone)]
-struct BoxShadow {
-    offset_x: f32,
-    offset_y: f32,
-    blur_radius: f32,
-    spread_radius: f32,
-    color: Color,
-    inset: bool,
-}
-
-/// `box-shadow` プロパティ値の文字列を解析して `BoxShadow` のリストを返す。
-///
-/// 書式: `[inset] <offset-x> <offset-y> [<blur>] [<spread>] [<color>]`
-/// 複数の影はカンマ区切りで指定できる（rgba()/rgb() など関数の引数内のカンマは区切りとして扱わない）。
-fn parse_box_shadow(value: &str) -> Vec<BoxShadow> {
-    let trimmed = value.trim();
-    if trimmed.eq_ignore_ascii_case("none") || trimmed.is_empty() {
-        return Vec::new();
-    }
-
-    // カンマ区切りで複数の影に分割（rgba() 内のカンマは無視）
-    let shadow_strs = split_box_shadow_layers(trimmed);
-
-    let mut shadows = Vec::new();
-    for shadow_str in &shadow_strs {
-        if let Some(shadow) = parse_single_box_shadow(shadow_str.trim()) {
-            shadows.push(shadow);
-        }
-    }
-    shadows
-}
-
-/// box-shadow 値をカンマで分割する（関数内のカンマは無視）。
-fn split_box_shadow_layers(value: &str) -> Vec<String> {
-    let mut layers = Vec::new();
-    let mut current = String::new();
-    let mut depth = 0usize;
-    for ch in value.chars() {
-        match ch {
-            '(' => {
-                depth += 1;
-                current.push(ch);
-            }
-            ')' => {
-                depth = depth.saturating_sub(1);
-                current.push(ch);
-            }
-            ',' if depth == 0 => {
-                layers.push(current.trim().to_string());
-                current.clear();
-            }
-            _ => current.push(ch),
-        }
-    }
-    if !current.trim().is_empty() {
-        layers.push(current.trim().to_string());
-    }
-    layers
-}
-
-/// 単一の box-shadow トークン列を解析する。
-fn parse_single_box_shadow(value: &str) -> Option<BoxShadow> {
-    // トークン化: 数値（px付き）、色文字列、キーワードに分割
-    let tokens = tokenize_shadow_value(value);
-
-    let mut inset = false;
-    let mut lengths: Vec<f32> = Vec::new();
-    let mut color: Option<Color> = None;
-
-    for token in &tokens {
-        let lower = token.to_ascii_lowercase();
-        if lower == "inset" {
-            inset = true;
-        } else if let Some(px) = parse_shadow_length(token) {
-            lengths.push(px);
-        } else if let Some(c) = parse_color(token) {
-            color = Some(c);
-        }
-    }
-
-    // offset-x, offset-y は必須
-    if lengths.len() < 2 {
-        return None;
-    }
-
-    let offset_x = lengths[0];
-    let offset_y = lengths[1];
-    let blur_radius = lengths.get(2).copied().unwrap_or(0.0).max(0.0);
-    let spread_radius = lengths.get(3).copied().unwrap_or(0.0);
-    let color = color.unwrap_or(Color::rgba(0, 0, 0, 255));
-
-    Some(BoxShadow {
-        offset_x,
-        offset_y,
-        blur_radius,
-        spread_radius,
-        color,
-        inset,
-    })
-}
-
-/// shadow 値文字列を空白で分割（関数呼び出しはひとまとめに）。
-fn tokenize_shadow_value(value: &str) -> Vec<String> {
-    let mut tokens = Vec::new();
-    let mut current = String::new();
-    let mut depth = 0usize;
-    for ch in value.chars() {
-        match ch {
-            '(' => {
-                depth += 1;
-                current.push(ch);
-            }
-            ')' => {
-                depth = depth.saturating_sub(1);
-                current.push(ch);
-                if depth == 0 && !current.is_empty() {
-                    tokens.push(current.trim().to_string());
-                    current.clear();
-                }
-            }
-            ' ' | '\t' if depth == 0 => {
-                let tok = current.trim().to_string();
-                if !tok.is_empty() {
-                    tokens.push(tok);
-                }
-                current.clear();
-            }
-            _ => current.push(ch),
-        }
-    }
-    let tok = current.trim().to_string();
-    if !tok.is_empty() {
-        tokens.push(tok);
-    }
-    tokens
-}
-
-/// CSS length 文字列（例: "10px", "-5px", "0"）を px 値として解析する。
-fn parse_shadow_length(s: &str) -> Option<f32> {
-    let s = s.trim();
-    if s.ends_with("px") {
-        s[..s.len() - 2].parse::<f32>().ok()
-    } else if s == "0" {
-        Some(0.0)
-    } else {
-        // 単純な数値（単位なし）も許容
-        let v: Result<f32, _> = s.parse();
-        v.ok()
-    }
-}
-
-/// box-shadow をキャンバスに描画する（背景・ボーダーの前に描画）。
-fn paint_box_shadow(
-    canvas: &mut Canvas,
-    style: &ComputedStyle,
-    border_box: Rect,
-    clip: Option<Rect>,
-) {
-    let shadow_value = match style.get("box-shadow") {
-        Some(ComputedValue::Keyword(v)) => v.clone(),
-        _ => return,
-    };
-
-    let shadows = parse_box_shadow(&shadow_value);
-    let radii = if has_border_radius(style) {
-        let (tl, tr, br, bl) = border_radius_corners(style);
-        Some((tl, tr, br, bl))
-    } else {
-        None
-    };
-
-    // CSS 仕様では後ろに書いた影ほど下に描画される（逆順で描画）
-    for shadow in shadows.iter().rev() {
-        if shadow.inset {
-            // inset shadow は未実装（スキップ）
-            continue;
-        }
-        paint_outer_box_shadow(canvas, border_box, shadow, clip, radii);
-    }
-}
-
-/// アウター box-shadow を描画する。
-/// border_box の内側は描画しない（外側のみ）。
-fn paint_outer_box_shadow(
-    canvas: &mut Canvas,
-    border_box: Rect,
-    shadow: &BoxShadow,
-    clip: Option<Rect>,
-    radii: Option<(f32, f32, f32, f32)>,
-) {
-    let spread = shadow.spread_radius;
-    let blur = shadow.blur_radius;
-
-    // shadow の矩形（spread 分だけ拡張）
-    let shadow_rect = Rect {
-        x: border_box.x + shadow.offset_x - spread,
-        y: border_box.y + shadow.offset_y - spread,
-        width: border_box.width + spread * 2.0,
-        height: border_box.height + spread * 2.0,
-    };
-
-    let color = shadow.color;
-
-    if blur <= 0.0 {
-        // blur なし: shadow_rect のうち border_box の外側のみを描画する。
-        // 4つの矩形（上下左右バンド）に分割して塗る。
-        let sx = shadow_rect.x;
-        let sy = shadow_rect.y;
-        let sw = shadow_rect.width;
-        let sh = shadow_rect.height;
-        let bx = border_box.x;
-        let by = border_box.y;
-        let bw = border_box.width;
-        let bh = border_box.height;
-
-        // top band: shadow の上端から border_box の上端まで
-        if sy < by {
-            canvas.fill_rect_clipped(
-                Rect { x: sx, y: sy, width: sw, height: by - sy },
-                color,
-                clip,
-            );
-        }
-        // bottom band: border_box の下端から shadow の下端まで
-        let shadow_bottom = sy + sh;
-        let box_bottom = by + bh;
-        if shadow_bottom > box_bottom {
-            canvas.fill_rect_clipped(
-                Rect { x: sx, y: box_bottom, width: sw, height: shadow_bottom - box_bottom },
-                color,
-                clip,
-            );
-        }
-        // left band: border_box の高さ範囲で左側
-        let band_top = by.max(sy);
-        let band_bottom = box_bottom.min(shadow_bottom);
-        if band_bottom > band_top {
-            if sx < bx {
-                canvas.fill_rect_clipped(
-                    Rect { x: sx, y: band_top, width: bx - sx, height: band_bottom - band_top },
-                    color,
-                    clip,
-                );
-            }
-            // right band: border_box の高さ範囲で右側
-            let box_right = bx + bw;
-            let shadow_right = sx + sw;
-            if shadow_right > box_right {
-                canvas.fill_rect_clipped(
-                    Rect {
-                        x: box_right,
-                        y: band_top,
-                        width: shadow_right - box_right,
-                        height: band_bottom - band_top,
-                    },
-                    color,
-                    clip,
-                );
-            }
-        }
-    } else {
-        // blur あり: 影の領域を含む一時バッファに描画し、
-        // border_box 部分のアルファをゼロにしてから blur を適用する。
-        let margin = blur.ceil() as i32 + 1;
-        let buf_x = (shadow_rect.x - margin as f32).floor() as i32;
-        let buf_y = (shadow_rect.y - margin as f32).floor() as i32;
-        let buf_w = (shadow_rect.width + margin as f32 * 2.0).ceil() as u32 + 2;
-        let buf_h = (shadow_rect.height + margin as f32 * 2.0).ceil() as u32 + 2;
-
-        if buf_w == 0 || buf_h == 0 {
-            return;
-        }
-
-        let mut shadow_buf = Canvas::new(buf_w, buf_h);
-        let local_rect = Rect {
-            x: shadow_rect.x - buf_x as f32,
-            y: shadow_rect.y - buf_y as f32,
-            width: shadow_rect.width,
-            height: shadow_rect.height,
-        };
-        // 影の shape を描画（border_radius あれば rounded）
-        if let Some((tl, tr, br, bl)) = radii {
-            shadow_buf.fill_rounded_rect(
-                local_rect,
-                Color::rgba(color.r, color.g, color.b, 255),
-                tl + spread,
-                tr + spread,
-                br + spread,
-                bl + spread,
-                None,
-            );
-        } else {
-            shadow_buf.fill_rect(local_rect, Color::rgba(color.r, color.g, color.b, 255));
-        }
-
-        // border_box に対応するバッファ内領域のアルファをゼロにする（要素内側を除外）
-        let box_local = Rect {
-            x: border_box.x - buf_x as f32,
-            y: border_box.y - buf_y as f32,
-            width: border_box.width,
-            height: border_box.height,
-        };
-        if let Some(box_local_n) = normalize_rect(box_local) {
-            let x0 = box_local_n.x.floor().max(0.0) as i32;
-            let y0 = box_local_n.y.floor().max(0.0) as i32;
-            let x1 = (box_local_n.x + box_local_n.width).ceil().min(buf_w as f32) as i32;
-            let y1 = (box_local_n.y + box_local_n.height).ceil().min(buf_h as f32) as i32;
-            for py in y0..y1 {
-                for px in x0..x1 {
-                    let idx = (py as u32 * buf_w + px as u32) as usize * 4;
-                    shadow_buf.pixels[idx + 3] = 0;
-                }
-            }
-        }
-
-        // 簡易 box blur: 半径 r = ceil(blur) のボックスで 3 回適用
-        let r = blur.ceil() as u32;
-        shadow_buf.box_blur_alpha(r);
-        shadow_buf.box_blur_alpha(r);
-        shadow_buf.box_blur_alpha(r);
-
-        // color.a を alpha のスケールとして合成
-        let alpha_scale = color.a as f32 / 255.0;
-        if alpha_scale < 1.0 {
-            shadow_buf.multiply_alpha(alpha_scale);
-        }
-
-        // メインキャンバスに合成（clip 適用）
-        canvas.composite_canvas_clipped(&shadow_buf, buf_x, buf_y, color.r, color.g, color.b, clip);
-    }
-}
-
-impl Canvas {
-    /// alpha チャンネルにのみ box blur を適用する（色成分は影の色のまま、アルファだけ拡散）。
-    fn box_blur_alpha(&mut self, radius: u32) {
-        if radius == 0 {
-            return;
-        }
-        let w = self.width as usize;
-        let h = self.height as usize;
-        let r = radius as usize;
-
-        // 水平方向 blur
-        let mut alphas: Vec<u8> = self.pixels.iter().skip(3).step_by(4).copied().collect();
-        let mut blurred = vec![0u8; w * h];
-        for y in 0..h {
-            let row_start = y * w;
-            let mut sum: u32 = 0;
-            // 初期ウィンドウ
-            for x in 0..=r.min(w.saturating_sub(1)) {
-                sum += alphas[row_start + x] as u32;
-            }
-            let kernel_size = (r + 1).min(w) as u32;
-            for x in 0..w {
-                blurred[row_start + x] = (sum / kernel_size) as u8;
-                // ウィンドウを右にずらす
-                if x + r + 1 < w {
-                    sum += alphas[row_start + x + r + 1] as u32;
-                }
-                if x >= r && x.saturating_sub(r) < w {
-                    sum = sum.saturating_sub(alphas[row_start + x.saturating_sub(r)] as u32);
-                }
-                // kernel_size の更新（端での調整）
-                let _ = kernel_size; // kernel_size は平均を正しく出すために動的計算が必要だが簡略化
-            }
-        }
-
-        // 垂直方向 blur
-        alphas = blurred.clone();
-        for x in 0..w {
-            let mut sum: u32 = 0;
-            for y in 0..=r.min(h.saturating_sub(1)) {
-                sum += alphas[y * w + x] as u32;
-            }
-            let kernel_size = (r + 1).min(h) as u32;
-            for y in 0..h {
-                blurred[y * w + x] = (sum / kernel_size) as u8;
-                if y + r + 1 < h {
-                    sum += alphas[(y + r + 1) * w + x] as u32;
-                }
-                if y >= r {
-                    sum = sum.saturating_sub(alphas[(y - r) * w + x] as u32);
-                }
-                let _ = kernel_size;
-            }
-        }
-
-        // blurred alpha をピクセルに書き戻す
-        for (i, &a) in blurred.iter().enumerate() {
-            self.pixels[i * 4 + 3] = a;
-        }
-    }
-
-    /// 別キャンバス（shadow_buf）をメインキャンバスに合成する（clip あり）。
-    /// `r`, `g`, `b` は合成時に使う色成分（影の色）。
-    /// `offset_x`, `offset_y` は shadow_buf の左上隅がメインキャンバスのどこに対応するか。
-    fn composite_canvas_clipped(&mut self, src: &Canvas, offset_x: i32, offset_y: i32, r: u8, g: u8, b: u8, clip: Option<Rect>) {
-        let dst_w = self.width as i32;
-        let dst_h = self.height as i32;
-        let src_w = src.width as i32;
-        let src_h = src.height as i32;
-
-        let clip_area = clip.and_then(normalize_rect);
-
-        for sy in 0..src_h {
-            let dy = offset_y + sy;
-            if dy < 0 || dy >= dst_h {
-                continue;
-            }
-            for sx in 0..src_w {
-                let dx = offset_x + sx;
-                if dx < 0 || dx >= dst_w {
-                    continue;
-                }
-
-                // clip チェック
-                if let Some(ca) = clip_area {
-                    let fx = dx as f32 + 0.5;
-                    let fy = dy as f32 + 0.5;
-                    if fx < ca.x || fx >= ca.x + ca.width || fy < ca.y || fy >= ca.y + ca.height {
-                        continue;
-                    }
-                }
-
-                let src_idx = (sy * src_w + sx) as usize * 4;
-                let src_a = src.pixels[src_idx + 3];
-                if src_a == 0 {
-                    continue;
-                }
-                let color = Color { r, g, b, a: src_a };
-                let dst_idx = (dy * dst_w + dx) as usize * 4;
-                blend_pixel(&mut self.pixels[dst_idx..dst_idx + 4], color);
-            }
-        }
-    }
-
-    /// キャンバスの全ピクセルの alpha に `factor` (0.0〜1.0) を乗算する。
-    pub fn multiply_alpha(&mut self, factor: f32) {
-        let factor = factor.clamp(0.0, 1.0);
-        for pixel in self.pixels.chunks_exact_mut(4) {
-            let a = pixel[3] as f32;
-            pixel[3] = (a * factor).round() as u8;
-        }
-    }
-}
-
-fn paint_background_image(
-    canvas: &mut Canvas,
-    style: &ComputedStyle,
-    rect: Rect,
-    clip: Option<Rect>,
-    viewport: Rect,
-) {
-    let Some(area) = normalize_rect(rect) else {
-        return;
-    };
-
-    // Check if the background-image is a linear-gradient
-    let bg_image_value = style.get("background-image");
-    let raw_bg_str: Option<String> = match bg_image_value {
-        Some(ComputedValue::Keyword(kw)) => Some(kw.clone()),
-        Some(ComputedValue::String(s)) => Some(s.clone()),
-        _ => None,
-    };
-    let gradient_str = raw_bg_str.as_deref().and_then(|s| {
-        let lower = s.trim_start().to_ascii_lowercase();
-        if lower.starts_with("linear-gradient(") {
-            Some(s.trim_start())
-        } else {
-            None
-        }
-    });
-
-    if let Some(gradient_str) = gradient_str {
-        // Normalise to lowercase for parsing (function names are case-insensitive in CSS)
-        let normalised = gradient_str.to_ascii_lowercase();
-        if let Some(gradient) = parse_linear_gradient(&normalised) {
-            // Check if a background-size is set to tile the gradient
-            let has_explicit_size = match style.get("background-size") {
-                None => false,
-                Some(ComputedValue::Keyword(kw)) => !kw.eq_ignore_ascii_case("auto"),
-                _ => true,
-            };
-            if has_explicit_size {
-                // Gradient with explicit tile size — render into a tile then repeat like an image
-                let (tile_w, tile_h) =
-                    background_size(style, area, area.width, area.height);
-                let tile_w = tile_w.max(1.0);
-                let tile_h = tile_h.max(1.0);
-                let repeat = background_repeat(style);
-                let (position_x, position_y) = background_position(style);
-                let fixed = background_attachment_fixed(style);
-                let anchor_x = if fixed { viewport.x + position_x } else { area.x + position_x };
-                let anchor_y = if fixed { viewport.y + position_y } else { area.y + position_y };
-                let x_end = area.x + area.width;
-                let y_end = area.y + area.height;
-                let mut ty = if repeat {
-                    anchor_y + ((area.y - anchor_y) / tile_h).floor() * tile_h
-                } else {
-                    anchor_y
-                };
-                while ty < y_end {
-                    let mut tx = if repeat {
-                        anchor_x + ((area.x - anchor_x) / tile_w).floor() * tile_w
-                    } else {
-                        anchor_x
-                    };
-                    while tx < x_end {
-                        let tile_rect = Rect { x: tx, y: ty, width: tile_w, height: tile_h };
-                        paint_linear_gradient(canvas, &gradient, tile_rect, clip.or(Some(area)));
-                        if !repeat {
-                            return;
-                        }
-                        tx += tile_w;
-                    }
-                    ty += tile_h;
-                }
-            } else {
-                // Default: gradient fills the entire area
-                paint_linear_gradient(canvas, &gradient, area, clip.or(Some(area)));
-            }
-            return;
-        }
-    }
-
-    // Regular image
-    let Some(image) = background_image(style) else {
-        return;
-    };
-
-    let (tile_width, tile_height) =
-        background_size(style, area, image.width().max(1) as f32, image.height().max(1) as f32);
-    let tile_width = tile_width.max(1.0);
-    let tile_height = tile_height.max(1.0);
-    let x_end = area.x + area.width;
-    let y_end = area.y + area.height;
-    let repeat = background_repeat(style);
-    let (position_x, position_y) = background_position(style);
-    let fixed = background_attachment_fixed(style);
-    let anchor_x = if fixed {
-        viewport.x + position_x
-    } else {
-        area.x + position_x
-    };
-    let anchor_y = if fixed {
-        viewport.y + position_y
-    } else {
-        area.y + position_y
-    };
-    let mut y = if repeat {
-        anchor_y + ((area.y - anchor_y) / tile_height).floor() * tile_height
-    } else {
-        anchor_y
-    };
-    while y < y_end {
-        let mut x = if repeat {
-            anchor_x + ((area.x - anchor_x) / tile_width).floor() * tile_width
-        } else {
-            anchor_x
-        };
-        while x < x_end {
-            let dest = Rect {
-                x,
-                y,
-                width: tile_width,
-                height: tile_height,
-            };
-            canvas.draw_image_scaled_clipped(&image, dest, clip.or(Some(area)));
-            if !repeat {
-                return;
-            }
-            x += tile_width;
-        }
-        y += tile_height;
-    }
-}
-
-fn has_any_solid_border(style: &ComputedStyle) -> bool {
-    ["top", "right", "bottom", "left"]
-        .into_iter()
-        .any(|side| has_solid_border_side(style, side))
-}
-
-fn has_solid_border_side(style: &ComputedStyle, side: &str) -> bool {
-    if matches!(
-        style.get(&format!("border-{side}-style")),
-        Some(ComputedValue::Keyword(keyword)) if keyword.eq_ignore_ascii_case("solid")
-    ) {
-        return true;
-    }
-
-    matches!(
-        style.get("border-style"),
-        Some(ComputedValue::Keyword(keyword)) if keyword.eq_ignore_ascii_case("solid")
-    )
-}
-
-fn parse_color(value: &str) -> Option<Color> {
-    let value = value.trim();
-    if value.eq_ignore_ascii_case("transparent") {
-        return Some(Color::rgba(0, 0, 0, 0));
-    }
-
-    let lower = value.to_ascii_lowercase();
-
-    // Named color lookup (CSS Level 4 extended set)
-    if let Some(c) = named_color(&lower) {
-        return Some(c);
-    }
-
-    // Hex colors: #RGB, #RGBA, #RRGGBB, #RRGGBBAA
-    if let Some(hex) = lower.strip_prefix('#') {
-        if !hex.is_ascii() || !hex.chars().all(|c| c.is_ascii_hexdigit()) {
-            return None;
-        }
-        return match hex.len() {
-            3 => {
-                let r = u8::from_str_radix(&hex[0..1].repeat(2), 16).ok()?;
-                let g = u8::from_str_radix(&hex[1..2].repeat(2), 16).ok()?;
-                let b = u8::from_str_radix(&hex[2..3].repeat(2), 16).ok()?;
-                Some(Color::rgb(r, g, b))
-            }
-            4 => {
-                let r = u8::from_str_radix(&hex[0..1].repeat(2), 16).ok()?;
-                let g = u8::from_str_radix(&hex[1..2].repeat(2), 16).ok()?;
-                let b = u8::from_str_radix(&hex[2..3].repeat(2), 16).ok()?;
-                let a = u8::from_str_radix(&hex[3..4].repeat(2), 16).ok()?;
-                Some(Color::rgba(r, g, b, a))
-            }
-            6 => {
-                let r = u8::from_str_radix(&hex[0..2], 16).ok()?;
-                let g = u8::from_str_radix(&hex[2..4], 16).ok()?;
-                let b = u8::from_str_radix(&hex[4..6], 16).ok()?;
-                Some(Color::rgb(r, g, b))
-            }
-            8 => {
-                let r = u8::from_str_radix(&hex[0..2], 16).ok()?;
-                let g = u8::from_str_radix(&hex[2..4], 16).ok()?;
-                let b = u8::from_str_radix(&hex[4..6], 16).ok()?;
-                let a = u8::from_str_radix(&hex[6..8], 16).ok()?;
-                Some(Color::rgba(r, g, b, a))
-            }
-            _ => None,
-        };
-    }
-
-    // Functional color notations handled directly for robustness
-    if let Some(color) = parse_color_function(&lower) {
-        return Some(color);
-    }
-
-    None
-}
-
-/// Parses `rgb()`, `rgba()`, `hsl()`, `hsla()` function notation from a string.
-fn parse_color_function(value: &str) -> Option<Color> {
-    let (name, args_str) = parse_function_call(value)?;
-
-    match name {
-        "rgb" | "rgba" => parse_rgb_args(args_str),
-        "hsl" | "hsla" => parse_hsl_args(args_str),
-        _ => None,
-    }
-}
-
-/// Splits a CSS function call string into `(name, args)`.
-fn parse_function_call(value: &str) -> Option<(&str, &str)> {
-    let paren = value.find('(')?;
-    let name = value[..paren].trim();
-    if !value.ends_with(')') {
-        return None;
-    }
-    let args = &value[paren + 1..value.len() - 1];
-    Some((name, args))
-}
-
-/// Parses `rgb()` / `rgba()` argument string.
-///
-/// Supports both comma-separated `rgb(r, g, b)` / `rgba(r, g, b, a)` and
-/// modern space-separated `rgb(r g b / a)` syntax.
-fn parse_rgb_args(args: &str) -> Option<Color> {
-    let parts = split_color_args(args);
-    let nums: Vec<f32> = parts.iter().filter_map(|s| s.parse().ok()).collect();
-    match nums.as_slice() {
-        [r, g, b] => Some(Color::rgb(*r as u8, *g as u8, *b as u8)),
-        [r, g, b, a] => {
-            let alpha = (a.clamp(0.0, 1.0) * 255.0).round() as u8;
-            Some(Color::rgba(*r as u8, *g as u8, *b as u8, alpha))
-        }
-        _ => None,
-    }
-}
-
-/// Parses `hsl()` / `hsla()` argument string.
-fn parse_hsl_args(args: &str) -> Option<Color> {
-    let parts = split_color_args(args);
-    let nums: Vec<f32> = parts
-        .iter()
-        .filter_map(|s| s.trim_end_matches('%').parse().ok())
-        .collect();
-
-    match nums.as_slice() {
-        [h, s, l] => {
-            let (r, g, b) = hsl_to_rgb(*h, *s / 100.0, *l / 100.0);
-            Some(Color::rgb(r, g, b))
-        }
-        [h, s, l, a] => {
-            let (r, g, b) = hsl_to_rgb(*h, *s / 100.0, *l / 100.0);
-            let alpha = (a.clamp(0.0, 1.0) * 255.0).round() as u8;
-            Some(Color::rgba(r, g, b, alpha))
-        }
-        _ => None,
-    }
-}
-
-/// Splits a CSS color function argument string by commas or whitespace+slash.
-///
-/// Handles both `255, 0, 0, 0.5` and `255 0 0 / 0.5` forms.
-fn split_color_args(args: &str) -> Vec<String> {
-    if args.contains(',') {
-        args.split(',').map(|s| s.trim().to_string()).collect()
-    } else {
-        // Modern syntax: "r g b / a" — strip "/" and split by whitespace
-        args.split_whitespace()
-            .filter(|s| *s != "/")
-            .map(|s| s.to_string())
-            .collect()
-    }
-}
-
-// HSL→RGB conversion is shared with src/css/style.rs
-use crate::css::style::hsl_to_rgb;
-
-/// Returns the RGB color for a CSS named color keyword.
-///
-/// Supports CSS Level 4 named colors (140+ colors).
-#[allow(clippy::too_many_lines)]
-fn named_color(name: &str) -> Option<Color> {
-    let c = match name {
-        // CSS Level 1 / basic
-        "black" => Color::rgb(0, 0, 0),
-        "white" => Color::rgb(255, 255, 255),
-        "red" => Color::rgb(255, 0, 0),
-        "green" => Color::rgb(0, 128, 0),
-        "blue" => Color::rgb(0, 0, 255),
-        "yellow" => Color::rgb(255, 255, 0),
-        "navy" => Color::rgb(0, 0, 128),
-        "purple" => Color::rgb(128, 0, 128),
-        "maroon" => Color::rgb(128, 0, 0),
-        "gray" | "grey" => Color::rgb(128, 128, 128),
-        "silver" => Color::rgb(192, 192, 192),
-        "aqua" | "cyan" => Color::rgb(0, 255, 255),
-        "teal" => Color::rgb(0, 128, 128),
-        "lime" => Color::rgb(0, 255, 0),
-        "fuchsia" | "magenta" => Color::rgb(255, 0, 255),
-        "olive" => Color::rgb(128, 128, 0),
-        // Orange / red family
-        "orange" => Color::rgb(255, 165, 0),
-        "orangered" => Color::rgb(255, 69, 0),
-        "darkorange" => Color::rgb(255, 140, 0),
-        "coral" => Color::rgb(255, 127, 80),
-        "tomato" => Color::rgb(255, 99, 71),
-        "salmon" => Color::rgb(250, 128, 114),
-        "lightsalmon" => Color::rgb(255, 160, 122),
-        "darksalmon" => Color::rgb(233, 150, 122),
-        "crimson" => Color::rgb(220, 20, 60),
-        "firebrick" => Color::rgb(178, 34, 34),
-        "darkred" => Color::rgb(139, 0, 0),
-        "indianred" => Color::rgb(205, 92, 92),
-        // Pink family
-        "pink" => Color::rgb(255, 192, 203),
-        "lightpink" => Color::rgb(255, 182, 193),
-        "hotpink" => Color::rgb(255, 105, 180),
-        "deeppink" => Color::rgb(255, 20, 147),
-        "palevioletred" => Color::rgb(219, 112, 147),
-        "mediumvioletred" => Color::rgb(199, 21, 133),
-        // Gold / yellow / brown
-        "gold" => Color::rgb(255, 215, 0),
-        "goldenrod" => Color::rgb(218, 165, 32),
-        "darkgoldenrod" => Color::rgb(184, 134, 11),
-        "palegoldenrod" => Color::rgb(238, 232, 170),
-        "peru" => Color::rgb(205, 133, 63),
-        "chocolate" => Color::rgb(210, 105, 30),
-        "sienna" => Color::rgb(160, 82, 45),
-        "saddlebrown" => Color::rgb(139, 69, 19),
-        "brown" => Color::rgb(165, 42, 42),
-        "tan" => Color::rgb(210, 180, 140),
-        "burlywood" => Color::rgb(222, 184, 135),
-        "wheat" => Color::rgb(245, 222, 179),
-        "sandybrown" => Color::rgb(244, 164, 96),
-        "rosybrown" => Color::rgb(188, 143, 143),
-        // Purple / violet
-        "lavender" => Color::rgb(230, 230, 250),
-        "thistle" => Color::rgb(216, 191, 216),
-        "plum" => Color::rgb(221, 160, 221),
-        "violet" => Color::rgb(238, 130, 238),
-        "orchid" => Color::rgb(218, 112, 214),
-        "mediumorchid" => Color::rgb(186, 85, 211),
-        "darkorchid" => Color::rgb(153, 50, 204),
-        "darkviolet" => Color::rgb(148, 0, 211),
-        "blueviolet" => Color::rgb(138, 43, 226),
-        "indigo" => Color::rgb(75, 0, 130),
-        "slateblue" => Color::rgb(106, 90, 205),
-        "darkslateblue" => Color::rgb(72, 61, 139),
-        "mediumpurple" => Color::rgb(147, 112, 219),
-        "rebeccapurple" => Color::rgb(102, 51, 153),
-        // Blue family
-        "lightblue" => Color::rgb(173, 216, 230),
-        "powderblue" => Color::rgb(176, 224, 230),
-        "lightskyblue" => Color::rgb(135, 206, 250),
-        "skyblue" => Color::rgb(135, 206, 235),
-        "deepskyblue" => Color::rgb(0, 191, 255),
-        "dodgerblue" => Color::rgb(30, 144, 255),
-        "cornflowerblue" => Color::rgb(100, 149, 237),
-        "steelblue" => Color::rgb(70, 130, 180),
-        "royalblue" => Color::rgb(65, 105, 225),
-        "mediumblue" => Color::rgb(0, 0, 205),
-        "darkblue" => Color::rgb(0, 0, 139),
-        "midnightblue" => Color::rgb(25, 25, 112),
-        "azure" => Color::rgb(240, 255, 255),
-        "aliceblue" => Color::rgb(240, 248, 255),
-        "ghostwhite" => Color::rgb(248, 248, 255),
-        "lavenderblush" => Color::rgb(255, 240, 245),
-        // Green family
-        "mintcream" => Color::rgb(245, 255, 250),
-        "honeydew" => Color::rgb(240, 255, 240),
-        "lightgreen" => Color::rgb(144, 238, 144),
-        "palegreen" => Color::rgb(152, 251, 152),
-        "limegreen" => Color::rgb(50, 205, 50),
-        "mediumseagreen" => Color::rgb(60, 179, 113),
-        "seagreen" => Color::rgb(46, 139, 87),
-        "forestgreen" => Color::rgb(34, 139, 34),
-        "darkgreen" => Color::rgb(0, 100, 0),
-        "yellowgreen" => Color::rgb(154, 205, 50),
-        "olivedrab" => Color::rgb(107, 142, 35),
-        "darkolivegreen" => Color::rgb(85, 107, 47),
-        "mediumaquamarine" => Color::rgb(102, 205, 170),
-        "aquamarine" => Color::rgb(127, 255, 212),
-        "turquoise" => Color::rgb(64, 224, 208),
-        "mediumturquoise" => Color::rgb(72, 209, 204),
-        "darkturquoise" => Color::rgb(0, 206, 209),
-        "lightseagreen" => Color::rgb(32, 178, 170),
-        "cadetblue" => Color::rgb(95, 158, 160),
-        "darkcyan" => Color::rgb(0, 139, 139),
-        "darkslategray" | "darkslategrey" => Color::rgb(47, 79, 79),
-        "slategray" | "slategrey" => Color::rgb(112, 128, 144),
-        "lightslategray" | "lightslategrey" => Color::rgb(119, 136, 153),
-        // Gray shades
-        "darkgray" | "darkgrey" => Color::rgb(169, 169, 169),
-        "dimgray" | "dimgrey" => Color::rgb(105, 105, 105),
-        "lightgray" | "lightgrey" => Color::rgb(211, 211, 211),
-        "gainsboro" => Color::rgb(220, 220, 220),
-        "whitesmoke" => Color::rgb(245, 245, 245),
-        "snow" => Color::rgb(255, 250, 250),
-        "seashell" => Color::rgb(255, 245, 238),
-        "floralwhite" => Color::rgb(255, 250, 240),
-        "ivory" => Color::rgb(255, 255, 240),
-        "linen" => Color::rgb(250, 240, 230),
-        "oldlace" => Color::rgb(253, 245, 230),
-        "antiquewhite" => Color::rgb(250, 235, 215),
-        "bisque" => Color::rgb(255, 228, 196),
-        "blanchedalmond" => Color::rgb(255, 235, 205),
-        "moccasin" => Color::rgb(255, 228, 181),
-        "navajowhite" => Color::rgb(255, 222, 173),
-        "peachpuff" => Color::rgb(255, 218, 185),
-        "mistyrose" => Color::rgb(255, 228, 225),
-        "papayawhip" => Color::rgb(255, 239, 213),
-        "lightyellow" => Color::rgb(255, 255, 224),
-        "lemonchiffon" => Color::rgb(255, 250, 205),
-        "cornsilk" => Color::rgb(255, 248, 220),
-        "beige" => Color::rgb(245, 245, 220),
-        "khaki" => Color::rgb(240, 230, 140),
-        "darkkhaki" => Color::rgb(189, 183, 107),
-        // Chartreuse / spring
-        "chartreuse" => Color::rgb(127, 255, 0),
-        "lawngreen" => Color::rgb(124, 252, 0),
-        "greenyellow" => Color::rgb(173, 255, 47),
-        "springgreen" => Color::rgb(0, 255, 127),
-        "mediumslateblue" => Color::rgb(123, 104, 238),
-        "mediumspringgreen" => Color::rgb(0, 250, 154),
-        // Missing CSS Level 4 colors
-        "darkmagenta" => Color::rgb(139, 0, 139),
-        "darkseagreen" => Color::rgb(143, 188, 143),
-        "lightcoral" => Color::rgb(240, 128, 128),
-        "lightcyan" => Color::rgb(224, 255, 255),
-        "lightgoldenrodyellow" => Color::rgb(250, 250, 210),
-        "lightsteelblue" => Color::rgb(176, 196, 222),
-        "paleturquoise" => Color::rgb(175, 238, 238),
-        _ => return None,
-    };
-    Some(c)
 }
 
 fn normalize_rect(rect: Rect) -> Option<Rect> {
@@ -3534,1120 +1440,248 @@ fn crc32(data: &[u8]) -> u32 {
     !crc
 }
 
-/// Returns true if the media attribute value applies to screen rendering.
-///
-/// Matches:
-/// - Empty string or missing attribute (defaults to "all")
-/// - "all" or "screen" as whole-word media types
-/// - Comma-separated lists (e.g., "print, screen")
-/// - Media queries with "only" modifier (e.g., "only screen")
-///
-/// Does NOT match:
-/// - "print" or other non-screen media types
-/// - "not screen" (negated screen)
-/// - Substrings (e.g., "small" does NOT match just because it contains "all")
-fn matches_screen_media(media: Option<&str>) -> bool {
-    let media = match media {
-        None => return true, // No media attr = all media
-        Some(s) => s.trim(),
+fn paint_background_image(
+    canvas: &mut Canvas,
+    style: &ComputedStyle,
+    rect: Rect,
+    clip: Option<Rect>,
+    viewport: Rect,
+) {
+    let Some(area) = normalize_rect(rect) else {
+        return;
     };
 
-    if media.is_empty() {
-        return true; // Empty media attr = all media
-    }
-
-    // Parse as comma-separated list of media queries
-    for query in media.split(',') {
-        let query = query.trim();
-        if query.is_empty() {
-            // Empty entry means "all"
-            return true;
-        }
-
-        let query_lower = query.to_ascii_lowercase();
-        let mut tokens = query_lower.split_whitespace();
-
-        let first = tokens.next();
-        let (modifier, media_type) = match first {
-            None => {
-                // Empty query -> defaults to "all"
-                (None::<&str>, Some("all"))
-            }
-            Some(tok) if tok == "not" || tok == "only" => {
-                // Modifier followed by media type
-                let mt = tokens.next();
-                (Some(tok), mt)
-            }
-            Some(tok) if tok.starts_with('(') => {
-                // Leading feature without explicit type (e.g., "(min-width: 800px)")
-                // defaults to "all"
-                (None::<&str>, Some("all"))
-            }
-            Some(tok) => {
-                // First token is the media type
-                (None::<&str>, Some(tok))
-            }
-        };
-
-        let media_type = media_type.unwrap_or("all");
-        let is_screen_like = media_type == "screen" || media_type == "all";
-
-        if !is_screen_like {
-            // Non-screen media type such as "print", "speech", etc.
-            continue;
-        }
-
-        match modifier {
-            Some("not") => {
-                // "not screen" or "not all" explicitly excludes screen
-                continue;
-            }
-            _ => {
-                // Matches screen/all (with or without "only")
-                return true;
-            }
-        }
-    }
-
-    // No query matched screen/all
-    false
-}
-
-/// Checks if two URLs have the same origin (scheme + host + port).
-fn same_origin(a: &crate::http::Url, b: &crate::http::Url) -> bool {
-    a.scheme() == b.scheme() && a.host() == b.host() && a.port() == b.port()
-}
-
-/// Recursively finds all `<base>` elements in document order.
-fn find_base_elements(node: &NodeHandle, result: &mut Vec<NodeHandle>) {
-    if node.node_type() == crate::dom::NodeType::Element {
-        if node.tag_name().as_deref() == Some("base") {
-            result.push(node.clone());
-        }
-    }
-    for child in node.child_nodes() {
-        find_base_elements(&child, result);
-    }
-}
-
-/// Extracts the document's base URL from the first `<base href="...">` element with a valid href.
-///
-/// Scans all `<base>` elements in document order and uses the first one with a
-/// non-empty, resolvable `href`. For SSRF protection, absolute URLs are only honored
-/// if they have the same origin (scheme + host + port) as the fallback_base.
-/// Returns the fallback base if no valid same-origin `<base>` is found.
-fn extract_document_base_url(
-    document: &NodeHandle,
-    fallback_base: Option<&crate::http::Url>,
-) -> Option<crate::http::Url> {
-    let mut base_elements = Vec::new();
-    find_base_elements(document, &mut base_elements);
-
-    for base_elem in base_elements {
-        if let Some(attrs) = base_elem.attributes() {
-            if let Some(href) = attrs.get("href") {
-                let href = href.trim();
-                if href.is_empty() {
-                    continue; // Skip empty href, try next <base>
-                }
-
-                // Absolute URL
-                if href.contains("://") {
-                    if let Ok(url) = href.parse::<crate::http::Url>() {
-                        // SSRF protection: only honor same-origin absolute base URLs
-                        if let Some(ref original) = fallback_base {
-                            if same_origin(&url, original) {
-                                return Some(url);
-                            }
-                        }
-                        // If no fallback_base provided, don't enable fetching via <base>
-                        continue;
-                    }
-                    continue; // Invalid absolute URL, try next <base>
-                }
-
-                // Relative URL (resolve against fallback_base)
-                if let Some(base) = fallback_base {
-                    if let Ok(url) = resolve_url(base, href) {
-                        // Relative URLs always resolve to same origin
-                        return Some(url);
-                    }
-                }
-            }
-        }
-    }
-    fallback_base.cloned()
-}
-
-fn extract_author_stylesheets(
-    document: &NodeHandle,
-    base_url: Option<&crate::http::Url>,
-) -> Result<Vec<String>, PaintError> {
-    // Compute effective base URL considering <base> element
-    let effective_base = extract_document_base_url(document, base_url);
-
-    let mut stylesheets = Vec::new();
-    let mut client = effective_base.as_ref().map(|_| crate::http::Client::new());
-    collect_author_stylesheets(
-        document,
-        &mut stylesheets,
-        effective_base.as_ref(),
-        &mut client,
-    )?;
-    Ok(stylesheets)
-}
-
-const MAX_EXTERNAL_STYLESHEET_BYTES: usize = 1024 * 1024; // 1 MiB limit
-const MAX_IMPORT_DEPTH: usize = 5;
-
-fn collect_author_stylesheets(
-    node: &NodeHandle,
-    out: &mut Vec<String>,
-    base_url: Option<&crate::http::Url>,
-    client: &mut Option<crate::http::Client>,
-) -> Result<(), PaintError> {
-    if node.node_type() == NodeType::Element {
-        match node.tag_name().as_deref() {
-            Some("style") => {
-                let css = collect_text_contents(node);
-                if !css.trim().is_empty() {
-                    let mut active_import_urls = HashSet::new();
-                    collect_stylesheet_with_imports(
-                        css,
-                        base_url,
-                        base_url,
-                        out,
-                        client,
-                        0,
-                        &mut active_import_urls,
-                    )?;
-                }
-            }
-            Some("link") => {
-                let attributes = node.attributes().unwrap_or_default();
-                let rel = attributes.get("rel").cloned().unwrap_or_default();
-                let href = attributes
-                    .get("href")
-                    .cloned()
-                    .unwrap_or_default()
-                    .trim()
-                    .to_string();
-                let media = attributes.get("media").map(|s| s.as_str());
-
-                if rel
-                    .split_whitespace()
-                    .any(|token| token.eq_ignore_ascii_case("stylesheet"))
-                    && !href.is_empty()
-                    && matches_screen_media(media)
-                {
-                    if href.starts_with("data:text/css") {
-                        let mut active_import_urls = HashSet::new();
-                        match parse_data_uri(&href)? {
-                            DataUri::Text { data, .. } => collect_stylesheet_with_imports(
-                                data,
-                                None,
-                                base_url,
-                                out,
-                                client,
-                                0,
-                                &mut active_import_urls,
-                            )?,
-                            DataUri::Binary { data, .. } => collect_stylesheet_with_imports(
-                                String::from_utf8_lossy(&data).into_owned(),
-                                None,
-                                base_url,
-                                out,
-                                client,
-                                0,
-                                &mut active_import_urls,
-                            )?,
-                        }
-                    } else if let Some(base) = base_url {
-                        if let Some((css, resolved)) =
-                            fetch_relative_stylesheet(base, &href, client, base_url)
-                        {
-                            let mut active_import_urls = HashSet::new();
-                            collect_stylesheet_with_imports(
-                                css,
-                                Some(&resolved),
-                                base_url,
-                                out,
-                                client,
-                                0,
-                                &mut active_import_urls,
-                            )?;
-                        }
-                    }
-                }
-            }
-            _ => {}
-        }
-    }
-
-    for child in node.child_nodes() {
-        collect_author_stylesheets(&child, out, base_url, client)?;
-    }
-
-    Ok(())
-}
-
-fn collect_stylesheet_with_imports(
-    css: String,
-    stylesheet_url: Option<&crate::http::Url>,
-    document_base: Option<&crate::http::Url>,
-    out: &mut Vec<String>,
-    client: &mut Option<crate::http::Client>,
-    depth: usize,
-    active_import_urls: &mut HashSet<String>,
-) -> Result<(), PaintError> {
-    if depth < MAX_IMPORT_DEPTH {
-        let import_base = stylesheet_url.or(document_base);
-        if let Some(base) = import_base {
-            for import_href in extract_import_hrefs(&css) {
-                let Some(import_url) =
-                    resolve_relative_stylesheet_url(base, &import_href, document_base)
-                else {
-                    continue;
-                };
-                let import_url_string = import_url.to_string();
-                if !active_import_urls.insert(import_url_string.clone()) {
-                    continue;
-                }
-                if let Some(import_css) = fetch_stylesheet_by_url(&import_url, client) {
-                    collect_stylesheet_with_imports(
-                        import_css,
-                        Some(&import_url),
-                        document_base,
-                        out,
-                        client,
-                        depth + 1,
-                        active_import_urls,
-                    )?;
-                }
-                active_import_urls.remove(&import_url_string);
-            }
-        }
-    }
-
-    out.push(css);
-    Ok(())
-}
-
-fn extract_import_hrefs(css: &str) -> Vec<String> {
-    let Ok(stylesheet) = parse_stylesheet(css) else {
-        return extract_import_hrefs_forgiving(css);
-    };
-
-    let mut hrefs = Vec::new();
-    for rule in stylesheet.rules {
-        if let crate::css::Rule::At(at_rule) = rule {
-            if at_rule.name.eq_ignore_ascii_case("import") {
-                if let Some(href) = parse_import_href(&at_rule.prelude) {
-                    hrefs.push(href);
-                }
-            }
-        }
-    }
-    hrefs
-}
-
-fn extract_import_hrefs_forgiving(css: &str) -> Vec<String> {
-    let mut hrefs = Vec::new();
-    let chars: Vec<char> = css.chars().collect();
-    let mut index = 0usize;
-    let mut in_string = None::<char>;
-    let mut paren_depth = 0usize;
-
-    while index < chars.len() {
-        let ch = chars[index];
-
-        if let Some(quote) = in_string {
-            if ch == '\\' && index + 1 < chars.len() {
-                index += 2;
-                continue;
-            }
-            if ch == quote {
-                in_string = None;
-            }
-            index += 1;
-            continue;
-        }
-
-        if ch == '/' && chars.get(index + 1) == Some(&'*') {
-            index += 2;
-            while index + 1 < chars.len() && !(chars[index] == '*' && chars[index + 1] == '/') {
-                index += 1;
-            }
-            index = (index + 2).min(chars.len());
-            continue;
-        }
-
-        match ch {
-            '"' | '\'' => {
-                in_string = Some(ch);
-                index += 1;
-                continue;
-            }
-            '(' => {
-                paren_depth += 1;
-                index += 1;
-                continue;
-            }
-            ')' => {
-                paren_depth = paren_depth.saturating_sub(1);
-                index += 1;
-                continue;
-            }
-            _ => {}
-        }
-
-        if paren_depth == 0 && at_import_starts_at(&chars, index) {
-            let mut prelude_start = index + 7;
-            while prelude_start < chars.len() && chars[prelude_start].is_ascii_whitespace() {
-                prelude_start += 1;
-            }
-            let mut cursor = prelude_start;
-            let mut local_in_string = None::<char>;
-            let mut local_paren_depth = 0usize;
-            while cursor < chars.len() {
-                let c = chars[cursor];
-                if let Some(quote) = local_in_string {
-                    if c == '\\' && cursor + 1 < chars.len() {
-                        cursor += 2;
-                        continue;
-                    }
-                    if c == quote {
-                        local_in_string = None;
-                    }
-                    cursor += 1;
-                    continue;
-                }
-                if c == '"' || c == '\'' {
-                    local_in_string = Some(c);
-                    cursor += 1;
-                    continue;
-                }
-                if c == '(' {
-                    local_paren_depth += 1;
-                    cursor += 1;
-                    continue;
-                }
-                if c == ')' {
-                    local_paren_depth = local_paren_depth.saturating_sub(1);
-                    cursor += 1;
-                    continue;
-                }
-                if c == ';' && local_paren_depth == 0 {
-                    let prelude: String = chars[prelude_start..cursor].iter().collect();
-                    if let Some(href) = parse_import_href(&prelude) {
-                        hrefs.push(href);
-                    }
-                    cursor += 1;
-                    break;
-                }
-                cursor += 1;
-            }
-            index = cursor;
-            continue;
-        }
-
-        index += 1;
-    }
-
-    hrefs
-}
-
-fn at_import_starts_at(chars: &[char], index: usize) -> bool {
-    let target: [char; 7] = ['@', 'i', 'm', 'p', 'o', 'r', 't'];
-    if index + target.len() > chars.len() {
-        return false;
-    }
-    for (offset, expected) in target.iter().enumerate() {
-        if chars[index + offset].to_ascii_lowercase() != *expected {
-            return false;
-        }
-    }
-    if index + target.len() < chars.len() {
-        let next = chars[index + target.len()];
-        if next.is_ascii_alphanumeric() || next == '-' || next == '_' {
-            return false;
-        }
-    }
-    true
-}
-
-fn parse_import_href(prelude: &str) -> Option<String> {
-    let prelude = prelude.trim();
-    if prelude.is_empty() {
-        return None;
-    }
-
-    if prelude
-        .get(0..4)
-        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("url("))
-    {
-        let rest = &prelude[4..];
-        let close = rest.find(')')?;
-        let content = rest[..close].trim();
-        // Media/supports conditions are out of scope for this phase.
-        // Ignore @import rules with trailing prelude tokens.
-        if !rest[close + 1..].trim().is_empty() {
-            return None;
-        }
-        if let Some(quoted) = unquote_css_token(content) {
-            return Some(quoted);
-        }
-        if content.starts_with('"') || content.starts_with('\'') {
-            return None;
-        }
-        return non_empty_token(content);
-    }
-
-    if prelude.starts_with('"') || prelude.starts_with('\'') {
-        let quote = prelude.chars().next()?;
-        let mut escaped = false;
-        for (index, ch) in prelude.char_indices().skip(1) {
-            if escaped {
-                escaped = false;
-                continue;
-            }
-            if ch == '\\' {
-                escaped = true;
-                continue;
-            }
-            if ch == quote {
-                let value = prelude[1..index].trim();
-                if value.is_empty() {
-                    return None;
-                }
-                if !prelude[index + ch.len_utf8()..].trim().is_empty() {
-                    return None;
-                }
-                return Some(value.to_string());
-            }
-        }
-        return None;
-    }
-    None
-}
-
-fn unquote_css_token(token: &str) -> Option<String> {
-    let token = token.trim();
-    let first = token.chars().next()?;
-    if first != '"' && first != '\'' {
-        return None;
-    }
-    let mut escaped = false;
-    for (index, ch) in token.char_indices().skip(1) {
-        if escaped {
-            escaped = false;
-            continue;
-        }
-        if ch == '\\' {
-            escaped = true;
-            continue;
-        }
-        if ch == first {
-            let value = token[1..index].trim();
-            if value.is_empty() {
-                return None;
-            }
-            if !token[index + ch.len_utf8()..].trim().is_empty() {
-                return None;
-            }
-            return Some(value.to_string());
-        }
-    }
-    None
-}
-
-fn non_empty_token(token: &str) -> Option<String> {
-    let token = token.trim();
-    if token.is_empty() {
-        None
-    } else {
-        Some(token.to_string())
-    }
-}
-
-fn fetch_relative_stylesheet(
-    base: &crate::http::Url,
-    href: &str,
-    client: &mut Option<crate::http::Client>,
-    document_base: Option<&crate::http::Url>,
-) -> Option<(String, crate::http::Url)> {
-    let resolved = resolve_relative_stylesheet_url(base, href, document_base)?;
-    let css = fetch_stylesheet_by_url(&resolved, client)?;
-    Some((css, resolved))
-}
-
-fn resolve_relative_stylesheet_url(
-    base: &crate::http::Url,
-    href: &str,
-    document_base: Option<&crate::http::Url>,
-) -> Option<crate::http::Url> {
-    // Only fetch same-origin URLs that do not specify a scheme, to prevent SSRF attacks.
-    // Absolute URLs (containing "://") and protocol-relative URLs ("//")
-    // are skipped; this still allows relative and absolute-path references.
-    if href.contains("://") || href.starts_with("//") {
-        return None;
-    }
-
-    let resolved = resolve_url(base, href).ok()?;
-    if let Some(document_base) = document_base {
-        if !same_origin(&resolved, document_base) {
-            return None;
-        }
-    }
-    Some(resolved)
-}
-
-fn fetch_stylesheet_by_url(
-    resolved: &crate::http::Url,
-    client: &mut Option<crate::http::Client>,
-) -> Option<String> {
-    let url_str = resolved.to_string();
-    let c = client.as_mut()?;
-    let resp = c.get(&url_str).ok()?;
-    if resp.status_code() != 200 {
-        return None;
-    }
-    let body = resp.body();
-    if body.len() > MAX_EXTERNAL_STYLESHEET_BYTES {
-        return None;
-    }
-    std::str::from_utf8(body).ok().map(|s| s.to_owned())
-}
-
-fn collect_text_contents(node: &NodeHandle) -> String {
-    let mut text = String::new();
-    for child in node.child_nodes() {
-        match child.node_type() {
-            NodeType::Text => {
-                if let Some(data) = child.data() {
-                    text.push_str(&data);
-                }
-            }
-            NodeType::Element => text.push_str(&collect_text_contents(&child)),
-            _ => {}
-        }
-    }
-    text
-}
-
-fn parse_stylesheet_forgiving(input: &str) -> Result<Stylesheet, PaintError> {
-    if let Ok(stylesheet) = parse_stylesheet(input) {
-        return Ok(stylesheet);
-    }
-
-    let mut rules = Vec::new();
-    let mut current = String::new();
-    let mut depth = 0usize;
-    let mut prev_backslash = false;
-
-    for ch in input.chars() {
-        current.push(ch);
-        if prev_backslash {
-            prev_backslash = false;
-            continue;
-        }
-        if ch == '\\' {
-            prev_backslash = true;
-            continue;
-        }
-        match ch {
-            '{' => depth += 1,
-            '}' => {
-                if depth > 0 {
-                    depth -= 1;
-                }
-                if depth == 0 {
-                    let trimmed = current.trim_start_matches(|c: char| c.is_ascii_whitespace());
-                    if !trimmed.is_empty() {
-                        if let Ok(stylesheet) = parse_stylesheet(trimmed) {
-                            rules.extend(stylesheet.rules);
-                        } else if let Some(rule) = salvage_style_rule(trimmed) {
-                            rules.push(crate::css::Rule::Style(rule));
-                        }
-                    }
-                    current.clear();
-                }
-            }
-            _ => {}
-        }
-    }
-
-    if rules.is_empty() {
-        Err(PaintError::InvalidStylesheet)
-    } else {
-        Ok(Stylesheet { rules })
-    }
-}
-
-fn salvage_style_rule(input: &str) -> Option<crate::css::StyleRule> {
-    let open = input.find('{')?;
-    let close = input.rfind('}')?;
-    if close <= open {
-        return None;
-    }
-
-    let selector = input[..open].trim();
-    let body = &input[open + 1..close];
-    let mut selectors = None;
-    let mut declarations = Vec::new();
-
-    for declaration in split_declarations_forgiving(body) {
-        let normalized = normalize_unquoted_urls(&declaration);
-        let candidate = format!("{selector} {{ {normalized}; }}");
-        let Ok(stylesheet) = parse_stylesheet(&candidate) else {
-            continue;
-        };
-        let Some(crate::css::Rule::Style(rule)) = stylesheet.rules.into_iter().next() else {
-            continue;
-        };
-        if selectors.is_none() {
-            selectors = Some(rule.selectors);
-        }
-        declarations.extend(rule.declarations);
-    }
-
-    if declarations.is_empty() {
-        return None;
-    }
-
-    Some(crate::css::StyleRule {
-        selectors: selectors?,
-        declarations,
-    })
-}
-
-fn normalize_unquoted_urls(input: &str) -> String {
-    let mut output = String::new();
-    let mut index = 0usize;
-
-    while let Some(relative_start) = input[index..].find("url(") {
-        let start = index + relative_start;
-        output.push_str(&input[index..start + 4]);
-        let content_start = start + 4;
-        let Some(relative_end) = input[content_start..].find(')') else {
-            output.push_str(&input[content_start..]);
-            return output;
-        };
-        let end = content_start + relative_end;
-        let content = input[content_start..end].trim();
-        if content.starts_with('"') || content.starts_with('\'') {
-            output.push_str(content);
-        } else {
-            output.push('"');
-            output.push_str(content);
-            output.push('"');
-        }
-        output.push(')');
-        index = end + 1;
-    }
-
-    output.push_str(&input[index..]);
-    output
-}
-
-fn split_declarations_forgiving(input: &str) -> Vec<String> {
-    let mut declarations = Vec::new();
-    let mut current = String::new();
-    let mut paren_depth = 0usize;
-    let mut bracket_depth = 0usize;
-    let mut in_string = None::<char>;
-    let chars: Vec<char> = input.chars().collect();
-    let mut index = 0usize;
-
-    while index < chars.len() {
-        let ch = chars[index];
-        if let Some(quote) = in_string {
-            current.push(ch);
-            if ch == quote {
-                in_string = None;
-            } else if ch == '\\' && index + 1 < chars.len() {
-                index += 1;
-                current.push(chars[index]);
-            }
-            index += 1;
-            continue;
-        }
-
-        if ch == '/' && chars.get(index + 1) == Some(&'*') {
-            index += 2;
-            while index + 1 < chars.len() && !(chars[index] == '*' && chars[index + 1] == '/') {
-                index += 1;
-            }
-            index = (index + 2).min(chars.len());
-            continue;
-        }
-
-        match ch {
-            '"' | '\'' => {
-                in_string = Some(ch);
-                current.push(ch);
-            }
-            '(' => {
-                paren_depth += 1;
-                current.push(ch);
-            }
-            ')' => {
-                paren_depth = paren_depth.saturating_sub(1);
-                current.push(ch);
-            }
-            '[' => {
-                bracket_depth += 1;
-                current.push(ch);
-            }
-            ']' => {
-                bracket_depth = bracket_depth.saturating_sub(1);
-                current.push(ch);
-            }
-            ';' if paren_depth == 0 && bracket_depth == 0 => {
-                let trimmed = current.trim();
-                if !trimmed.is_empty() {
-                    declarations.push(trimmed.to_string());
-                }
-                current.clear();
-            }
-            _ => current.push(ch),
-        }
-        index += 1;
-    }
-
-    let trimmed = current.trim();
-    if !trimmed.is_empty() {
-        declarations.push(trimmed.to_string());
-    }
-
-    declarations
-}
-
-fn decode_png(bytes: &[u8]) -> Result<Image, PaintError> {
-    let mut decoder = png::Decoder::new(Cursor::new(bytes));
-    decoder.set_transformations(png::Transformations::EXPAND | png::Transformations::STRIP_16);
-    let mut reader = match decoder.read_info() {
-        Ok(reader) => reader,
-        Err(_) => return decode_png_fallback(bytes),
-    };
-    let mut buffer = vec![0; reader.output_buffer_size()];
-    let info = match reader.next_frame(&mut buffer) {
-        Ok(info) => info,
-        Err(_) => return decode_png_fallback(bytes),
-    };
-    let pixels = &buffer[..info.buffer_size()];
-
-    let rgba = match info.color_type {
-        png::ColorType::Rgba => pixels.to_vec(),
-        png::ColorType::Rgb => {
-            let mut out = Vec::with_capacity(info.width as usize * info.height as usize * 4);
-            for chunk in pixels.chunks_exact(3) {
-                out.extend_from_slice(&[chunk[0], chunk[1], chunk[2], 255]);
-            }
-            out
-        }
-        png::ColorType::GrayscaleAlpha => {
-            let mut out = Vec::with_capacity(info.width as usize * info.height as usize * 4);
-            for chunk in pixels.chunks_exact(2) {
-                out.extend_from_slice(&[chunk[0], chunk[0], chunk[0], chunk[1]]);
-            }
-            out
-        }
-        png::ColorType::Grayscale => {
-            let mut out = Vec::with_capacity(info.width as usize * info.height as usize * 4);
-            for value in pixels {
-                out.extend_from_slice(&[*value, *value, *value, 255]);
-            }
-            out
-        }
-        _ => return Err(PaintError::UnsupportedPngFormat),
-    };
-
-    Image::new(info.width, info.height, rgba)
-}
-
-fn decode_png_fallback(bytes: &[u8]) -> Result<Image, PaintError> {
-    const SIGNATURE: &[u8; 8] = b"\x89PNG\r\n\x1a\n";
-    if bytes.len() < SIGNATURE.len() || &bytes[..8] != SIGNATURE {
-        return Err(PaintError::InvalidPngSignature);
-    }
-
-    let mut index = 8usize;
-    let mut width = None;
-    let mut height = None;
-    let mut bit_depth = 0u8;
-    let mut color_type = 0u8;
-    let mut interlace = 0u8;
-    let mut compressed = Vec::new();
-
-    while index + 8 <= bytes.len() {
-        let length = u32::from_be_bytes(bytes[index..index + 4].try_into().unwrap()) as usize;
-        index += 4;
-        let chunk_type = &bytes[index..index + 4];
-        index += 4;
-        if index + length + 4 > bytes.len() {
-            return Err(PaintError::CorruptPng);
-        }
-        let data = &bytes[index..index + length];
-        index += length;
-        index += 4;
-
-        match chunk_type {
-            b"IHDR" => {
-                if data.len() < 13 {
-                    return Err(PaintError::MissingPngHeader);
-                }
-                width = Some(u32::from_be_bytes(data[0..4].try_into().unwrap()));
-                height = Some(u32::from_be_bytes(data[4..8].try_into().unwrap()));
-                bit_depth = data[8];
-                color_type = data[9];
-                interlace = data[12];
-            }
-            b"IDAT" => compressed.extend_from_slice(data),
-            b"IEND" => break,
-            _ => {}
-        }
-    }
-
-    let width = width.ok_or(PaintError::MissingPngHeader)?;
-    let height = height.ok_or(PaintError::MissingPngHeader)?;
-    if bit_depth != 8 || interlace != 0 {
-        return Err(PaintError::UnsupportedPngFormat);
-    }
-
-    let bytes_per_pixel = match color_type {
-        0 => 1usize,
-        2 => 3usize,
-        4 => 2usize,
-        6 => 4usize,
-        _ => return Err(PaintError::UnsupportedPngFormat),
-    };
-    let stride = width as usize * bytes_per_pixel;
-    let expected = height as usize * (1 + stride);
-    let mut decompressed = Vec::new();
-    ZlibDecoder::new(Cursor::new(compressed))
-        .read_to_end(&mut decompressed)
-        .map_err(|_| PaintError::DecompressionFailed)?;
-    if decompressed.len() < expected {
-        return Err(PaintError::CorruptPng);
-    }
-
-    let mut raw = vec![0u8; height as usize * stride];
-    for row in 0..height as usize {
-        let filter = decompressed[row * (stride + 1)];
-        let src = &decompressed[row * (stride + 1) + 1..row * (stride + 1) + 1 + stride];
-        let (previous_rows, current_and_rest) = raw.split_at_mut(row * stride);
-        let dest = &mut current_and_rest[..stride];
-        let prev = if row == 0 {
-            None
-        } else {
-            Some(&previous_rows[(row - 1) * stride..row * stride])
-        };
-        unfilter_png_scanline(filter, src, prev, dest, bytes_per_pixel)?;
-    }
-
-    let mut rgba = Vec::with_capacity(width as usize * height as usize * 4);
-    match color_type {
-        0 => {
-            for &value in &raw {
-                rgba.extend_from_slice(&[value, value, value, 255]);
-            }
-        }
-        2 => {
-            for chunk in raw.chunks_exact(3) {
-                rgba.extend_from_slice(&[chunk[0], chunk[1], chunk[2], 255]);
-            }
-        }
-        4 => {
-            for chunk in raw.chunks_exact(2) {
-                rgba.extend_from_slice(&[chunk[0], chunk[0], chunk[0], chunk[1]]);
-            }
-        }
-        6 => rgba = raw,
-        _ => return Err(PaintError::UnsupportedPngFormat),
-    }
-
-    Image::new(width, height, rgba)
-}
-
-fn unfilter_png_scanline(
-    filter: u8,
-    src: &[u8],
-    prev: Option<&[u8]>,
-    dest: &mut [u8],
-    bytes_per_pixel: usize,
-) -> Result<(), PaintError> {
-    match filter {
-        0 => dest.copy_from_slice(src),
-        1 => {
-            for index in 0..src.len() {
-                let left = if index >= bytes_per_pixel {
-                    dest[index - bytes_per_pixel]
-                } else {
-                    0
-                };
-                dest[index] = src[index].wrapping_add(left);
-            }
-        }
-        2 => {
-            for index in 0..src.len() {
-                let up = prev.map(|row| row[index]).unwrap_or(0);
-                dest[index] = src[index].wrapping_add(up);
-            }
-        }
-        3 => {
-            for index in 0..src.len() {
-                let left = if index >= bytes_per_pixel {
-                    dest[index - bytes_per_pixel]
-                } else {
-                    0
-                };
-                let up = prev.map(|row| row[index]).unwrap_or(0);
-                dest[index] = src[index].wrapping_add(((left as u16 + up as u16) / 2) as u8);
-            }
-        }
-        4 => {
-            for index in 0..src.len() {
-                let a = if index >= bytes_per_pixel {
-                    dest[index - bytes_per_pixel]
-                } else {
-                    0
-                };
-                let b = prev.map(|row| row[index]).unwrap_or(0);
-                let c = if index >= bytes_per_pixel {
-                    prev.map(|row| row[index - bytes_per_pixel]).unwrap_or(0)
-                } else {
-                    0
-                };
-                dest[index] = src[index].wrapping_add(paeth_predictor(a, b, c));
-            }
-        }
-        _ => return Err(PaintError::UnsupportedPngFormat),
-    }
-    Ok(())
-}
-
-fn paeth_predictor(a: u8, b: u8, c: u8) -> u8 {
-    let a = a as i32;
-    let b = b as i32;
-    let c = c as i32;
-    let p = a + b - c;
-    let pa = (p - a).abs();
-    let pb = (p - b).abs();
-    let pc = (p - c).abs();
-    if pa <= pb && pa <= pc {
-        a as u8
-    } else if pb <= pc {
-        b as u8
-    } else {
-        c as u8
-    }
-}
-
-fn decode_jpeg(bytes: &[u8]) -> Result<Image, PaintError> {
-    use jpeg_decoder::Decoder;
-
-    let mut decoder = Decoder::new(bytes);
-    let pixels = decoder.decode().map_err(|_| PaintError::InvalidJpeg)?;
-    let info = decoder.info().ok_or(PaintError::InvalidJpeg)?;
-
-    let expected_pixels = info.width as usize * info.height as usize;
-
-    let rgba = match info.pixel_format {
-        jpeg_decoder::PixelFormat::RGB24 => {
-            // Validate buffer size matches expected RGB24 data
-            let expected_bytes = expected_pixels * 3;
-            if pixels.len() != expected_bytes {
-                return Err(PaintError::InvalidJpeg);
-            }
-            let chunks = pixels.chunks_exact(3);
-            if !chunks.remainder().is_empty() {
-                return Err(PaintError::InvalidJpeg);
-            }
-            let mut out = Vec::with_capacity(expected_pixels * 4);
-            for chunk in chunks {
-                out.extend_from_slice(&[chunk[0], chunk[1], chunk[2], 255]);
-            }
-            out
-        }
-        jpeg_decoder::PixelFormat::L8 => {
-            // Validate buffer size matches expected grayscale data
-            if pixels.len() != expected_pixels {
-                return Err(PaintError::InvalidJpeg);
-            }
-            let mut out = Vec::with_capacity(expected_pixels * 4);
-            for value in pixels {
-                out.extend_from_slice(&[value, value, value, 255]);
-            }
-            out
-        }
-        _ => return Err(PaintError::UnsupportedJpegFormat),
-    };
-
-    Image::new(info.width as u32, info.height as u32, rgba)
-}
-
-/// Parses a `data:` URI into either text or binary content.
-pub fn parse_data_uri(uri: &str) -> Result<DataUri, PaintError> {
-    let payload = uri
-        .strip_prefix("data:")
-        .ok_or(PaintError::InvalidDataUri)?;
-    let (metadata, data) = payload.split_once(',').ok_or(PaintError::InvalidDataUri)?;
-    let mut mime_type = "text/plain".to_string();
-    let mut is_base64 = false;
-
-    if !metadata.is_empty() {
-        for (index, part) in metadata.split(';').enumerate() {
-            if index == 0 && !part.is_empty() {
-                mime_type = part.to_string();
-                continue;
-            }
-            if part.eq_ignore_ascii_case("base64") {
-                is_base64 = true;
-            }
-        }
-    }
-
-    if is_base64 {
-        let decoded_payload = percent_decode(data);
-        let data = base64::engine::general_purpose::STANDARD
-            .decode(decoded_payload)
-            .map_err(|_| PaintError::InvalidBase64)?;
-        Ok(DataUri::Binary { mime_type, data })
-    } else {
-        Ok(DataUri::Text {
-            mime_type,
-            data: percent_decode(data),
-        })
-    }
-}
-
-fn percent_decode(input: &str) -> String {
-    let bytes = input.as_bytes();
-    let mut out = Vec::with_capacity(bytes.len());
-    let mut index = 0usize;
-    while index < bytes.len() {
-        if bytes[index] == b'%' && index + 2 < bytes.len() {
-            if let (Some(high), Some(low)) =
-                (hex_value(bytes[index + 1]), hex_value(bytes[index + 2]))
-            {
-                out.push((high << 4) | low);
-                index += 3;
-                continue;
-            }
-        }
-        out.push(bytes[index]);
-        index += 1;
-    }
-    String::from_utf8_lossy(&out).into_owned()
-}
-
-fn hex_value(byte: u8) -> Option<u8> {
-    match byte {
-        b'0'..=b'9' => Some(byte - b'0'),
-        b'a'..=b'f' => Some(byte - b'a' + 10),
-        b'A'..=b'F' => Some(byte - b'A' + 10),
+    // Check if the background-image is a linear-gradient
+    let bg_image_value = style.get("background-image");
+    let raw_bg_str: Option<String> = match bg_image_value {
+        Some(ComputedValue::Keyword(kw)) => Some(kw.clone()),
+        Some(ComputedValue::String(s)) => Some(s.clone()),
         _ => None,
+    };
+    let gradient_str = raw_bg_str.as_deref().and_then(|s| {
+        let lower = s.trim_start().to_ascii_lowercase();
+        if lower.starts_with("linear-gradient(") {
+            Some(s.trim_start())
+        } else {
+            None
+        }
+    });
+
+    if let Some(gradient_str) = gradient_str {
+        // Normalise to lowercase for parsing (function names are case-insensitive in CSS)
+        let normalised = gradient_str.to_ascii_lowercase();
+        if let Some(gradient) = color::parse_linear_gradient(&normalised) {
+            // Check if a background-size is set to tile the gradient
+            let has_explicit_size = match style.get("background-size") {
+                None => false,
+                Some(ComputedValue::Keyword(kw)) => !kw.eq_ignore_ascii_case("auto"),
+                _ => true,
+            };
+            if has_explicit_size {
+                // Gradient with explicit tile size — render into a tile then repeat like an image
+                let (tile_w, tile_h) =
+                    background_size(style, area, area.width, area.height);
+                let tile_w = tile_w.max(1.0);
+                let tile_h = tile_h.max(1.0);
+                let repeat = background_repeat(style);
+                let (position_x, position_y) = background_position(style);
+                let fixed = background_attachment_fixed(style);
+                let anchor_x = if fixed { viewport.x + position_x } else { area.x + position_x };
+                let anchor_y = if fixed { viewport.y + position_y } else { area.y + position_y };
+                let x_end = area.x + area.width;
+                let y_end = area.y + area.height;
+                let mut ty = if repeat {
+                    anchor_y + ((area.y - anchor_y) / tile_h).floor() * tile_h
+                } else {
+                    anchor_y
+                };
+                while ty < y_end {
+                    let mut tx = if repeat {
+                        anchor_x + ((area.x - anchor_x) / tile_w).floor() * tile_w
+                    } else {
+                        anchor_x
+                    };
+                    while tx < x_end {
+                        let tile_rect = Rect { x: tx, y: ty, width: tile_w, height: tile_h };
+                        color::paint_linear_gradient(canvas, &gradient, tile_rect, clip.or(Some(area)));
+                        if !repeat {
+                            return;
+                        }
+                        tx += tile_w;
+                    }
+                    ty += tile_h;
+                }
+            } else {
+                // Default: gradient fills the entire area
+                color::paint_linear_gradient(canvas, &gradient, area, clip.or(Some(area)));
+            }
+            return;
+        }
+    }
+
+    // Regular image
+    let Some(image) = background_image(style) else {
+        return;
+    };
+
+    let (tile_width, tile_height) =
+        background_size(style, area, image.width().max(1) as f32, image.height().max(1) as f32);
+    let tile_width = tile_width.max(1.0);
+    let tile_height = tile_height.max(1.0);
+    let x_end = area.x + area.width;
+    let y_end = area.y + area.height;
+    let repeat = background_repeat(style);
+    let (position_x, position_y) = background_position(style);
+    let fixed = background_attachment_fixed(style);
+    let anchor_x = if fixed {
+        viewport.x + position_x
+    } else {
+        area.x + position_x
+    };
+    let anchor_y = if fixed {
+        viewport.y + position_y
+    } else {
+        area.y + position_y
+    };
+    let mut y = if repeat {
+        anchor_y + ((area.y - anchor_y) / tile_height).floor() * tile_height
+    } else {
+        anchor_y
+    };
+    while y < y_end {
+        let mut x = if repeat {
+            anchor_x + ((area.x - anchor_x) / tile_width).floor() * tile_width
+        } else {
+            anchor_x
+        };
+        while x < x_end {
+            let dest = Rect {
+                x,
+                y,
+                width: tile_width,
+                height: tile_height,
+            };
+            canvas.draw_image_scaled_clipped(&image, dest, clip.or(Some(area)));
+            if !repeat {
+                return;
+            }
+            x += tile_width;
+        }
+        y += tile_height;
+    }
+}
+
+impl Canvas {
+    /// alpha チャンネルにのみ box blur を適用する（色成分は影の色のまま、アルファだけ拡散）。
+    pub(crate) fn box_blur_alpha(&mut self, radius: u32) {
+        if radius == 0 {
+            return;
+        }
+        let w = self.width as usize;
+        let h = self.height as usize;
+        let r = radius as usize;
+
+        // 水平方向 blur
+        let mut alphas: Vec<u8> = self.pixels.iter().skip(3).step_by(4).copied().collect();
+        let mut blurred = vec![0u8; w * h];
+        for y in 0..h {
+            let row_start = y * w;
+            let mut sum: u32 = 0;
+            // 初期ウィンドウ
+            for x in 0..=r.min(w.saturating_sub(1)) {
+                sum += alphas[row_start + x] as u32;
+            }
+            let kernel_size = (r + 1).min(w) as u32;
+            for x in 0..w {
+                blurred[row_start + x] = (sum / kernel_size) as u8;
+                // ウィンドウを右にずらす
+                if x + r + 1 < w {
+                    sum += alphas[row_start + x + r + 1] as u32;
+                }
+                if x >= r && x.saturating_sub(r) < w {
+                    sum = sum.saturating_sub(alphas[row_start + x.saturating_sub(r)] as u32);
+                }
+                // kernel_size の更新（端での調整）
+                let _ = kernel_size; // kernel_size は平均を正しく出すために動的計算が必要だが簡略化
+            }
+        }
+
+        // 垂直方向 blur
+        alphas = blurred.clone();
+        for x in 0..w {
+            let mut sum: u32 = 0;
+            for y in 0..=r.min(h.saturating_sub(1)) {
+                sum += alphas[y * w + x] as u32;
+            }
+            let kernel_size = (r + 1).min(h) as u32;
+            for y in 0..h {
+                blurred[y * w + x] = (sum / kernel_size) as u8;
+                if y + r + 1 < h {
+                    sum += alphas[(y + r + 1) * w + x] as u32;
+                }
+                if y >= r {
+                    sum = sum.saturating_sub(alphas[(y - r) * w + x] as u32);
+                }
+                let _ = kernel_size;
+            }
+        }
+
+        // blurred alpha をピクセルに書き戻す
+        for (i, &a) in blurred.iter().enumerate() {
+            self.pixels[i * 4 + 3] = a;
+        }
+    }
+
+    /// 別キャンバス（shadow_buf）をメインキャンバスに合成する（clip あり）。
+    /// `r`, `g`, `b` は合成時に使う色成分（影の色）。
+    /// `offset_x`, `offset_y` は shadow_buf の左上隅がメインキャンバスのどこに対応するか。
+    pub(crate) fn composite_canvas_clipped(&mut self, src: &Canvas, offset_x: i32, offset_y: i32, r: u8, g: u8, b: u8, clip: Option<Rect>) {
+        let dst_w = self.width as i32;
+        let dst_h = self.height as i32;
+        let src_w = src.width as i32;
+        let src_h = src.height as i32;
+
+        let clip_area = clip.and_then(normalize_rect);
+
+        for sy in 0..src_h {
+            let dy = offset_y + sy;
+            if dy < 0 || dy >= dst_h {
+                continue;
+            }
+            for sx in 0..src_w {
+                let dx = offset_x + sx;
+                if dx < 0 || dx >= dst_w {
+                    continue;
+                }
+
+                // clip チェック
+                if let Some(ca) = clip_area {
+                    let fx = dx as f32 + 0.5;
+                    let fy = dy as f32 + 0.5;
+                    if fx < ca.x || fx >= ca.x + ca.width || fy < ca.y || fy >= ca.y + ca.height {
+                        continue;
+                    }
+                }
+
+                let src_idx = (sy * src_w + sx) as usize * 4;
+                let src_a = src.pixels[src_idx + 3];
+                if src_a == 0 {
+                    continue;
+                }
+                let color = Color { r, g, b, a: src_a };
+                let dst_idx = (dy * dst_w + dx) as usize * 4;
+                blend_pixel(&mut self.pixels[dst_idx..dst_idx + 4], color);
+            }
+        }
+    }
+
+    /// キャンバスの全ピクセルの alpha に `factor` (0.0〜1.0) を乗算する。
+    pub fn multiply_alpha(&mut self, factor: f32) {
+        let factor = factor.clamp(0.0, 1.0);
+        for pixel in self.pixels.chunks_exact_mut(4) {
+            let a = pixel[3] as f32;
+            pixel[3] = (a * factor).round() as u8;
+        }
     }
 }
 

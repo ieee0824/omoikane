@@ -6,13 +6,20 @@
 use std::fmt;
 
 mod matcher;
+mod media;
+mod parser;
+mod shorthand;
 pub(crate) mod style;
+mod tokenizer;
 
 pub use matcher::{
     PseudoElement, Specificity, matches_selector, matches_selector_with_pseudo,
     selector_pseudo_element, specificity,
 };
+pub use media::{evaluate_media_query, parse_media_query_list};
+pub use parser::parse_stylesheet;
 pub use style::{ComputedStyle, ComputedValue, Origin, StyleResolver, StylesheetInput};
+pub use tokenizer::tokenize;
 
 /// A token emitted by the CSS tokenizer.
 #[derive(Debug, Clone, PartialEq)]
@@ -73,24 +80,24 @@ pub enum SimpleSelector {
     },
     PseudoClass(String),
     PseudoElement(String),
-    /// `:not(<compound-selector>)` — negation pseudo-class (single compound, no commas).
+    /// `:not(<compound-selector>)` -- negation pseudo-class (single compound, no commas).
     Not(Vec<SimpleSelector>),
 }
 
 /// Attribute selector operators.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AttributeOperator {
-    /// `=` — exact match.
+    /// `=` -- exact match.
     Equals,
-    /// `~=` — value is in whitespace-separated list.
+    /// `~=` -- value is in whitespace-separated list.
     Includes,
-    /// `^=` — value starts with.
+    /// `^=` -- value starts with.
     StartsWith,
-    /// `$=` — value ends with.
+    /// `$=` -- value ends with.
     EndsWith,
-    /// `*=` — value contains.
+    /// `*=` -- value contains.
     Contains,
-    /// `|=` — value equals or starts with followed by a hyphen.
+    /// `|=` -- value equals or starts with followed by a hyphen.
     DashMatch,
 }
 
@@ -135,266 +142,24 @@ pub struct MediaQuery {
 /// A single `@media` feature condition, e.g. `(max-width: 768px)`.
 #[derive(Debug, Clone, PartialEq)]
 pub enum MediaCondition {
-    /// `(max-width: <length>)` — viewport width ≤ value.
+    /// `(max-width: <length>)` -- viewport width <= value.
     MaxWidth(f32),
-    /// `(min-width: <length>)` — viewport width ≥ value.
+    /// `(min-width: <length>)` -- viewport width >= value.
     MinWidth(f32),
-    /// `(max-height: <length>)` — viewport height ≤ value.
+    /// `(max-height: <length>)` -- viewport height <= value.
     MaxHeight(f32),
-    /// `(min-height: <length>)` — viewport height ≥ value.
+    /// `(min-height: <length>)` -- viewport height >= value.
     MinHeight(f32),
-    /// `(orientation: portrait)` — height ≥ width.
+    /// `(orientation: portrait)` -- height >= width.
     OrientationPortrait,
-    /// `(orientation: landscape)` — width > height.
+    /// `(orientation: landscape)` -- width > height.
     OrientationLandscape,
     /// `(prefers-color-scheme: dark)`.
     PrefersColorSchemeDark,
     /// `(prefers-color-scheme: light)`.
     PrefersColorSchemeLight,
-    /// An unrecognised condition — treated as matching to be forward-compatible.
+    /// An unrecognised condition -- treated as matching to be forward-compatible.
     Unknown,
-}
-
-/// Evaluates a `@media` query against the given viewport dimensions.
-///
-/// Returns `true` when the query matches (i.e. its rules should apply).
-///
-/// `color_scheme_dark` indicates whether the system is in dark mode.
-pub fn evaluate_media_query(
-    query: &MediaQuery,
-    viewport_width: f32,
-    viewport_height: f32,
-    color_scheme_dark: bool,
-) -> bool {
-    let type_matches = match query.media_type.as_deref() {
-        None | Some("all") => true,
-        Some("screen") => true,
-        Some("print") => false,
-        Some(_) => false,
-    };
-
-    if !type_matches {
-        return query.negated;
-    }
-
-    let conditions_match = query.conditions.iter().all(|cond| match cond {
-        MediaCondition::MaxWidth(px) => viewport_width <= *px,
-        MediaCondition::MinWidth(px) => viewport_width >= *px,
-        MediaCondition::MaxHeight(px) => viewport_height <= *px,
-        MediaCondition::MinHeight(px) => viewport_height >= *px,
-        MediaCondition::OrientationPortrait => viewport_height >= viewport_width,
-        MediaCondition::OrientationLandscape => viewport_width > viewport_height,
-        MediaCondition::PrefersColorSchemeDark => color_scheme_dark,
-        MediaCondition::PrefersColorSchemeLight => !color_scheme_dark,
-        MediaCondition::Unknown => false,
-    });
-
-    if query.negated {
-        !conditions_match
-    } else {
-        conditions_match
-    }
-}
-
-/// Parses a `@media` prelude string (the part between `@media` and `{`) into a list
-/// of [`MediaQuery`] values separated by commas.
-///
-/// Returns `None` on parse failure.
-pub fn parse_media_query_list(prelude: &str) -> Option<Vec<MediaQuery>> {
-    let prelude = prelude.trim();
-    if prelude.is_empty() {
-        return None;
-    }
-    let queries: Option<Vec<MediaQuery>> = prelude
-        .split(',')
-        .map(|part| parse_single_media_query(part.trim()))
-        .collect();
-    queries
-}
-
-fn parse_single_media_query(input: &str) -> Option<MediaQuery> {
-    let input = input.trim();
-    let (negated, rest) = if input.len() >= 3
-        && input[..3].eq_ignore_ascii_case("not")
-    {
-        let after = &input[3..];
-        let next = after.chars().next();
-        if next.is_none() || next == Some(' ') || next == Some('\t') || next == Some('(') {
-            (true, after.trim_start())
-        } else {
-            (false, input)
-        }
-    } else {
-        (false, input)
-    };
-
-    // Collect tokens: media type idents and feature conditions in parentheses.
-    let mut media_type: Option<String> = None;
-    let mut conditions = Vec::new();
-    let mut remaining = rest.trim();
-
-    // Try to read leading media type (an ident before any `(` or `and`).
-    if !remaining.starts_with('(') {
-        let end = remaining
-            .find(|c: char| !c.is_alphanumeric() && c != '-' && c != '_')
-            .unwrap_or(remaining.len());
-        let word = &remaining[..end];
-        if !word.is_empty() && !word.eq_ignore_ascii_case("and") {
-            // Strip the CSS `only` modifier (e.g. `only screen and ...`).
-            // `only` is a syntactic hint for older user agents; we ignore it
-            // and continue parsing the actual media type that follows.
-            if word.eq_ignore_ascii_case("only") {
-                remaining = remaining[end..].trim_start();
-                // Read the actual media type after `only`.
-                let end2 = remaining
-                    .find(|c: char| !c.is_alphanumeric() && c != '-' && c != '_')
-                    .unwrap_or(remaining.len());
-                let type_word = &remaining[..end2];
-                if !type_word.is_empty() && !type_word.eq_ignore_ascii_case("and") {
-                    media_type = Some(type_word.to_ascii_lowercase());
-                    remaining = remaining[end2..].trim_start();
-                }
-            } else {
-                media_type = Some(word.to_ascii_lowercase());
-                remaining = remaining[end..].trim_start();
-            }
-            // Consume optional `and` keyword.
-            if let Some(after_and) = strip_keyword_prefix(remaining, "and") {
-                let after_and = after_and.trim_start();
-                if after_and.starts_with('(') || after_and.is_empty() {
-                    remaining = after_and;
-                }
-            }
-        }
-    }
-
-    // Parse zero or more feature conditions joined by `and`.
-    loop {
-        remaining = remaining.trim_start();
-        if remaining.is_empty() {
-            break;
-        }
-        if !remaining.starts_with('(') {
-            // Skip unknown tokens (e.g. bare `and`).
-            if let Some(after_and) = strip_keyword_prefix(remaining, "and") {
-                remaining = after_and.trim_start();
-                continue;
-            }
-            // Unrecognised token — stop parsing.
-            break;
-        }
-        // Find matching closing paren.
-        let close = find_matching_paren(remaining)?;
-        let inner = remaining[1..close].trim();
-        conditions.push(parse_media_feature(inner));
-        remaining = &remaining[close + 1..];
-        remaining = remaining.trim_start();
-        // Consume optional `and` between features.
-        if let Some(after_and) = strip_keyword_prefix(remaining, "and") {
-            remaining = after_and.trim_start();
-        }
-    }
-
-    Some(MediaQuery {
-        negated,
-        media_type,
-        conditions,
-    })
-}
-
-/// Returns the index of the closing `)` that matches the opening `(` at index 0.
-fn find_matching_paren(s: &str) -> Option<usize> {
-    let mut depth = 0usize;
-    for (i, ch) in s.char_indices() {
-        match ch {
-            '(' => depth += 1,
-            ')' => {
-                depth -= 1;
-                if depth == 0 {
-                    return Some(i);
-                }
-            }
-            _ => {}
-        }
-    }
-    None
-}
-
-fn parse_media_feature(inner: &str) -> MediaCondition {
-    // inner is e.g. "max-width: 768px" or "orientation: portrait"
-    let mut parts = inner.splitn(2, ':');
-    let feature = parts.next().unwrap_or("").trim().to_ascii_lowercase();
-    let value_str = parts.next().unwrap_or("").trim();
-
-    match feature.as_str() {
-        "max-width" => {
-            if let Some(px) = parse_length_to_px(value_str) {
-                return MediaCondition::MaxWidth(px);
-            }
-        }
-        "min-width" => {
-            if let Some(px) = parse_length_to_px(value_str) {
-                return MediaCondition::MinWidth(px);
-            }
-        }
-        "max-height" => {
-            if let Some(px) = parse_length_to_px(value_str) {
-                return MediaCondition::MaxHeight(px);
-            }
-        }
-        "min-height" => {
-            if let Some(px) = parse_length_to_px(value_str) {
-                return MediaCondition::MinHeight(px);
-            }
-        }
-        "orientation" => match value_str.to_ascii_lowercase().as_str() {
-            "portrait" => return MediaCondition::OrientationPortrait,
-            "landscape" => return MediaCondition::OrientationLandscape,
-            _ => {}
-        },
-        "prefers-color-scheme" => match value_str.to_ascii_lowercase().as_str() {
-            "dark" => return MediaCondition::PrefersColorSchemeDark,
-            "light" => return MediaCondition::PrefersColorSchemeLight,
-            _ => {}
-        },
-        _ => {}
-    }
-    MediaCondition::Unknown
-}
-
-/// Strips a case-insensitive keyword prefix with word boundary check.
-fn strip_keyword_prefix<'a>(input: &'a str, keyword: &str) -> Option<&'a str> {
-    let len = keyword.len();
-    if input.len() >= len && input[..len].eq_ignore_ascii_case(keyword) {
-        let after = &input[len..];
-        let next = after.chars().next();
-        if next.is_none() || next == Some(' ') || next == Some('\t') || next == Some('(') {
-            Some(after)
-        } else {
-            None
-        }
-    } else {
-        None
-    }
-}
-
-/// Parses a CSS length value like `768px` or `48em` and converts it to pixels.
-/// Supports `px`, `em`, and `rem` (at 16px per em/rem); other units return `None`.
-fn parse_length_to_px(s: &str) -> Option<f32> {
-    let lower = s.trim().to_ascii_lowercase();
-    if let Some(num_str) = lower.strip_suffix("px") {
-        return num_str.trim().parse::<f32>().ok();
-    }
-    if let Some(num_str) = lower.strip_suffix("rem") {
-        return num_str.trim().parse::<f32>().ok().map(|n| n * 16.0);
-    }
-    if let Some(num_str) = lower.strip_suffix("em") {
-        return num_str.trim().parse::<f32>().ok().map(|n| n * 16.0);
-    }
-    if lower == "0" {
-        return Some(0.0);
-    }
-    None
 }
 
 /// A CSS declaration.
@@ -448,1964 +213,6 @@ impl fmt::Display for CssParseError {
 
 impl std::error::Error for CssParseError {}
 
-/// Tokenizes a CSS string.
-pub fn tokenize(input: &str) -> Result<Vec<CssToken>, CssParseError> {
-    let chars: Vec<char> = input.chars().collect();
-    let mut index = 0;
-    let mut tokens = Vec::new();
-
-    while let Some(&ch) = chars.get(index) {
-        match ch {
-            c if c.is_ascii_whitespace() => {
-                while chars.get(index).is_some_and(|c| c.is_ascii_whitespace()) {
-                    index += 1;
-                }
-                tokens.push(CssToken::Whitespace);
-            }
-            '/' if chars.get(index + 1) == Some(&'*') => {
-                index += 2;
-                while index + 1 < chars.len() && !(chars[index] == '*' && chars[index + 1] == '/') {
-                    index += 1;
-                }
-                if index + 1 >= chars.len() {
-                    return Err(CssParseError::UnexpectedEndOfInput);
-                }
-                index += 2;
-            }
-            '@' => {
-                index += 1;
-                let ident = consume_ident(&chars, &mut index);
-                tokens.push(CssToken::AtKeyword(ident));
-            }
-            '#' => {
-                index += 1;
-                let ident = consume_ident(&chars, &mut index);
-                tokens.push(CssToken::Hash(ident));
-            }
-            '"' | '\'' => {
-                let string = consume_string(&chars, &mut index, ch)?;
-                tokens.push(CssToken::String(string));
-            }
-            _ if is_number_start(&chars, index) => {
-                let number = consume_number(&chars, &mut index)?;
-                if chars.get(index) == Some(&'%') {
-                    index += 1;
-                    tokens.push(CssToken::Percentage(number));
-                } else if chars.get(index).is_some_and(|c| is_ident_start(*c)) {
-                    let unit = consume_ident(&chars, &mut index);
-                    tokens.push(CssToken::Dimension(number, unit));
-                } else {
-                    tokens.push(CssToken::Number(number));
-                }
-            }
-            c if is_ident_start(c) || c == '-' || c == '\\' => {
-                let ident = consume_ident(&chars, &mut index);
-                tokens.push(CssToken::Ident(ident));
-            }
-            ':' => {
-                index += 1;
-                tokens.push(CssToken::Colon);
-            }
-            ';' => {
-                index += 1;
-                tokens.push(CssToken::Semicolon);
-            }
-            ',' => {
-                index += 1;
-                tokens.push(CssToken::Comma);
-            }
-            '{' => {
-                index += 1;
-                tokens.push(CssToken::CurlyOpen);
-            }
-            '}' => {
-                index += 1;
-                tokens.push(CssToken::CurlyClose);
-            }
-            '(' => {
-                index += 1;
-                tokens.push(CssToken::ParenOpen);
-            }
-            ')' => {
-                index += 1;
-                tokens.push(CssToken::ParenClose);
-            }
-            '[' => {
-                index += 1;
-                tokens.push(CssToken::BracketOpen);
-            }
-            ']' => {
-                index += 1;
-                tokens.push(CssToken::BracketClose);
-            }
-            _ => {
-                index += 1;
-                tokens.push(CssToken::Delim(ch));
-            }
-        }
-    }
-
-    Ok(tokens)
-}
-
-/// Parses a stylesheet from CSS source.
-pub fn parse_stylesheet(input: &str) -> Result<Stylesheet, CssParseError> {
-    let tokens = tokenize(input)?;
-    Parser::new(tokens).parse_stylesheet()
-}
-
-struct Parser {
-    tokens: Vec<CssToken>,
-    index: usize,
-}
-
-impl Parser {
-    fn new(tokens: Vec<CssToken>) -> Self {
-        Self { tokens, index: 0 }
-    }
-
-    fn parse_stylesheet(&mut self) -> Result<Stylesheet, CssParseError> {
-        let mut rules = Vec::new();
-        while self.peek().is_some() {
-            self.skip_whitespace();
-            if self.peek().is_none() {
-                break;
-            }
-            rules.push(self.parse_rule()?);
-            self.skip_whitespace();
-        }
-        Ok(Stylesheet { rules })
-    }
-
-    fn parse_rule(&mut self) -> Result<Rule, CssParseError> {
-        match self.peek() {
-            Some(CssToken::AtKeyword(_)) => self.parse_at_rule(),
-            _ => self.parse_style_rule(),
-        }
-    }
-
-    fn parse_at_rule(&mut self) -> Result<Rule, CssParseError> {
-        let name = match self.next() {
-            Some(CssToken::AtKeyword(name)) => name,
-            _ => return Err(CssParseError::ExpectedToken("@keyword")),
-        };
-
-        let mut prelude_tokens = Vec::new();
-        while let Some(token) = self.peek() {
-            match token {
-                CssToken::Semicolon => {
-                    self.next();
-                    return Ok(Rule::At(AtRule {
-                        name,
-                        prelude: render_tokens(&prelude_tokens).trim().to_string(),
-                        block: None,
-                        declarations: Vec::new(),
-                    }));
-                }
-                CssToken::CurlyOpen => {
-                    self.next();
-                    if name == "import" {
-                        return Err(CssParseError::InvalidDeclaration);
-                    }
-
-                    if name == "media" {
-                        let block = self.parse_rule_block()?;
-                        return Ok(Rule::At(AtRule {
-                            name,
-                            prelude: render_tokens(&prelude_tokens).trim().to_string(),
-                            block: Some(block),
-                            declarations: Vec::new(),
-                        }));
-                    }
-
-                    let declarations = self.parse_declaration_list()?;
-                    return Ok(Rule::At(AtRule {
-                        name,
-                        prelude: render_tokens(&prelude_tokens).trim().to_string(),
-                        block: None,
-                        declarations,
-                    }));
-                }
-                _ => prelude_tokens.push(self.next().expect("peeked token should exist")),
-            }
-        }
-
-        Ok(Rule::At(AtRule {
-            name,
-            prelude: render_tokens(&prelude_tokens).trim().to_string(),
-            block: None,
-            declarations: Vec::new(),
-        }))
-    }
-
-    fn parse_rule_block(&mut self) -> Result<Vec<Rule>, CssParseError> {
-        let mut rules = Vec::new();
-        loop {
-            self.skip_whitespace();
-            match self.peek() {
-                Some(CssToken::CurlyClose) => {
-                    self.next();
-                    break;
-                }
-                None => return Err(CssParseError::UnexpectedEndOfInput),
-                _ => rules.push(self.parse_rule()?),
-            }
-        }
-        Ok(rules)
-    }
-
-    fn parse_style_rule(&mut self) -> Result<Rule, CssParseError> {
-        let selectors = self.parse_selector_list()?;
-        self.expect_curly_open()?;
-        let declarations = self.parse_declaration_list()?;
-        Ok(Rule::Style(StyleRule {
-            selectors,
-            declarations,
-        }))
-    }
-
-    fn parse_selector_list(&mut self) -> Result<Vec<Selector>, CssParseError> {
-        let mut selectors = Vec::new();
-        loop {
-            selectors.push(self.parse_selector()?);
-            self.skip_whitespace();
-            match self.peek() {
-                Some(CssToken::Comma) => {
-                    self.next();
-                    self.skip_whitespace();
-                }
-                Some(CssToken::CurlyOpen) => break,
-                _ => break,
-            }
-        }
-        Ok(selectors)
-    }
-
-    fn parse_selector(&mut self) -> Result<Selector, CssParseError> {
-        let mut parts = Vec::new();
-        let mut combinator = None;
-
-        loop {
-            let saw_whitespace = self.consume_whitespace();
-            if saw_whitespace
-                && !parts.is_empty()
-                && combinator.is_none()
-                && !matches!(
-                    self.peek(),
-                    Some(
-                        CssToken::Delim('>')
-                            | CssToken::Delim('+')
-                            | CssToken::Delim('~')
-                            | CssToken::CurlyOpen
-                            | CssToken::Comma
-                    ) | None
-                )
-            {
-                combinator = Some(Combinator::Descendant);
-            }
-
-            match self.peek() {
-                Some(CssToken::CurlyOpen) | Some(CssToken::Comma) | None => break,
-                Some(CssToken::Delim('>')) => {
-                    self.next();
-                    combinator = Some(Combinator::Child);
-                    continue;
-                }
-                Some(CssToken::Delim('+')) => {
-                    self.next();
-                    combinator = Some(Combinator::AdjacentSibling);
-                    continue;
-                }
-                Some(CssToken::Delim('~')) => {
-                    self.next();
-                    combinator = Some(Combinator::GeneralSibling);
-                    continue;
-                }
-                _ => {}
-            }
-
-            let simples = self.parse_simple_selectors()?;
-            parts.push(SelectorPart {
-                combinator,
-                simples,
-            });
-            combinator = None;
-        }
-
-        if parts.is_empty() {
-            return Err(CssParseError::InvalidSelector);
-        }
-
-        Ok(Selector { parts })
-    }
-
-    fn parse_simple_selectors(&mut self) -> Result<Vec<SimpleSelector>, CssParseError> {
-        let mut simples = Vec::new();
-
-        loop {
-            match self.peek() {
-                Some(CssToken::Ident(name)) => {
-                    let name = name.clone();
-                    self.next();
-                    simples.push(SimpleSelector::Type(name));
-                }
-                Some(CssToken::Delim('*')) => {
-                    self.next();
-                    simples.push(SimpleSelector::Universal);
-                }
-                Some(CssToken::Delim('.')) => {
-                    self.next();
-                    let class_name = self.expect_ident()?;
-                    simples.push(SimpleSelector::Class(class_name));
-                }
-                Some(CssToken::Hash(id)) => {
-                    let id = id.clone();
-                    self.next();
-                    simples.push(SimpleSelector::Id(id));
-                }
-                Some(CssToken::BracketOpen) => {
-                    self.next();
-                    self.skip_whitespace();
-                    let name = self.expect_ident()?;
-                    self.skip_whitespace();
-                    let operator = match self.peek() {
-                        Some(CssToken::Delim('=')) => {
-                            self.next();
-                            Some(AttributeOperator::Equals)
-                        }
-                        Some(CssToken::Delim('~')) => {
-                            self.next();
-                            self.expect_delim('=')?;
-                            Some(AttributeOperator::Includes)
-                        }
-                        Some(CssToken::Delim('^')) => {
-                            self.next();
-                            self.expect_delim('=')?;
-                            Some(AttributeOperator::StartsWith)
-                        }
-                        Some(CssToken::Delim('$')) => {
-                            self.next();
-                            self.expect_delim('=')?;
-                            Some(AttributeOperator::EndsWith)
-                        }
-                        Some(CssToken::Delim('*')) => {
-                            self.next();
-                            self.expect_delim('=')?;
-                            Some(AttributeOperator::Contains)
-                        }
-                        Some(CssToken::Delim('|')) => {
-                            self.next();
-                            self.expect_delim('=')?;
-                            Some(AttributeOperator::DashMatch)
-                        }
-                        _ => None,
-                    };
-                    self.skip_whitespace();
-                    let value = if operator.is_some() {
-                        Some(self.expect_ident_or_string()?)
-                    } else {
-                        None
-                    };
-                    self.skip_whitespace();
-                    self.expect_bracket_close()?;
-                    simples.push(SimpleSelector::Attribute {
-                        name,
-                        operator,
-                        value,
-                    });
-                }
-                Some(CssToken::Colon) => {
-                    self.next();
-                    let pseudo = if matches!(self.peek(), Some(CssToken::Colon)) {
-                        self.next();
-                        SimpleSelector::PseudoElement(self.expect_ident()?)
-                    } else {
-                        let name = self.expect_ident()?;
-                        if matches!(self.peek(), Some(CssToken::ParenOpen)) {
-                            self.next();
-                            let mut argument_tokens = Vec::new();
-                            let mut depth = 0usize;
-                            loop {
-                                match self.peek() {
-                                    Some(CssToken::ParenOpen) => {
-                                        depth += 1;
-                                        argument_tokens.push(
-                                            self.next().expect("peeked token should exist"),
-                                        );
-                                    }
-                                    Some(CssToken::ParenClose) if depth > 0 => {
-                                        depth -= 1;
-                                        argument_tokens.push(
-                                            self.next().expect("peeked token should exist"),
-                                        );
-                                    }
-                                    Some(CssToken::ParenClose) | None => break,
-                                    _ => {
-                                        argument_tokens.push(
-                                            self.next().expect("peeked token should exist"),
-                                        );
-                                    }
-                                }
-                            }
-                            match self.next() {
-                                Some(CssToken::ParenClose) => {}
-                                _ => return Err(CssParseError::ExpectedToken(")")),
-                            }
-                            if name == "not" {
-                                // Parse the argument as a list of simple selectors
-                                let argument_str =
-                                    render_tokens(&argument_tokens).trim().to_string();
-                                let inner = parse_not_argument(&argument_str)?;
-                                SimpleSelector::Not(inner)
-                            } else {
-                                let argument =
-                                    render_tokens(&argument_tokens).trim().to_string();
-                                SimpleSelector::PseudoClass(format!("{name}({argument})"))
-                            }
-                        } else {
-                            SimpleSelector::PseudoClass(name)
-                        }
-                    };
-                    simples.push(pseudo);
-                }
-                _ => break,
-            }
-        }
-
-        if simples.is_empty() {
-            return Err(CssParseError::InvalidSelector);
-        }
-
-        Ok(simples)
-    }
-
-    fn parse_declaration_list(&mut self) -> Result<Vec<Declaration>, CssParseError> {
-        let mut declarations = Vec::new();
-        loop {
-            self.skip_whitespace();
-            match self.peek() {
-                Some(CssToken::CurlyClose) => {
-                    self.next();
-                    break;
-                }
-                None => return Err(CssParseError::UnexpectedEndOfInput),
-                _ => {
-                    let mut parsed = self.parse_declaration()?;
-                    declarations.append(&mut parsed);
-                    self.skip_whitespace();
-                    if matches!(self.peek(), Some(CssToken::Semicolon)) {
-                        self.next();
-                    }
-                }
-            }
-        }
-        Ok(declarations)
-    }
-
-    fn parse_declaration(&mut self) -> Result<Vec<Declaration>, CssParseError> {
-        let name = self.expect_ident()?.to_ascii_lowercase();
-        self.skip_whitespace();
-        self.expect_colon()?;
-        self.skip_whitespace();
-
-        let mut value_tokens = Vec::new();
-        while let Some(token) = self.peek() {
-            match token {
-                CssToken::Semicolon | CssToken::CurlyClose => break,
-                _ => value_tokens.push(self.next().expect("peeked token should exist")),
-            }
-        }
-
-        let (value_tokens, important) = split_important(&value_tokens);
-        let value = parse_value_tokens(&value_tokens)?;
-        Ok(expand_shorthand(&name, value, important))
-    }
-
-    fn consume_whitespace(&mut self) -> bool {
-        let mut consumed = false;
-        while matches!(self.peek(), Some(CssToken::Whitespace)) {
-            consumed = true;
-            self.next();
-        }
-        consumed
-    }
-
-    fn skip_whitespace(&mut self) {
-        let _ = self.consume_whitespace();
-    }
-
-    fn expect_ident(&mut self) -> Result<String, CssParseError> {
-        match self.next() {
-            Some(CssToken::Ident(name)) => Ok(name),
-            _ => Err(CssParseError::ExpectedToken("identifier")),
-        }
-    }
-
-    fn expect_ident_or_string(&mut self) -> Result<String, CssParseError> {
-        match self.next() {
-            Some(CssToken::Ident(value)) | Some(CssToken::String(value)) => Ok(value),
-            Some(CssToken::Hash(value)) => Ok(value),
-            _ => Err(CssParseError::ExpectedToken("identifier or string")),
-        }
-    }
-
-    fn expect_colon(&mut self) -> Result<(), CssParseError> {
-        match self.next() {
-            Some(CssToken::Colon) => Ok(()),
-            _ => Err(CssParseError::ExpectedToken(":")),
-        }
-    }
-
-    fn expect_curly_open(&mut self) -> Result<(), CssParseError> {
-        match self.next() {
-            Some(CssToken::CurlyOpen) => Ok(()),
-            _ => Err(CssParseError::ExpectedToken("{")),
-        }
-    }
-
-    fn expect_bracket_close(&mut self) -> Result<(), CssParseError> {
-        match self.next() {
-            Some(CssToken::BracketClose) => Ok(()),
-            _ => Err(CssParseError::ExpectedToken("]")),
-        }
-    }
-
-    fn expect_delim(&mut self, expected: char) -> Result<(), CssParseError> {
-        match self.next() {
-            Some(CssToken::Delim(found)) if found == expected => Ok(()),
-            _ => Err(CssParseError::ExpectedToken("delimiter")),
-        }
-    }
-
-    fn peek(&self) -> Option<&CssToken> {
-        self.tokens.get(self.index)
-    }
-
-    fn next(&mut self) -> Option<CssToken> {
-        let token = self.tokens.get(self.index).cloned()?;
-        self.index += 1;
-        Some(token)
-    }
-}
-
-fn parse_value_tokens(tokens: &[CssToken]) -> Result<Value, CssParseError> {
-    parse_value_tokens_with_mode(tokens, false)
-}
-
-fn parse_value_tokens_with_mode(
-    tokens: &[CssToken],
-    preserve_math_delims: bool,
-) -> Result<Value, CssParseError> {
-    let tokens: Vec<CssToken> = tokens.to_vec();
-
-    if tokens.is_empty() {
-        return Err(CssParseError::InvalidDeclaration);
-    }
-
-    let non_whitespace: Vec<CssToken> = tokens
-        .iter()
-        .filter(|token| !matches!(token, CssToken::Whitespace))
-        .cloned()
-        .collect();
-
-    if non_whitespace.len() == 1 {
-        return parse_single_value(&non_whitespace[0]);
-    }
-
-    if non_whitespace.is_empty() {
-        return Err(CssParseError::InvalidDeclaration);
-    }
-
-    let values = parse_value_sequence_with_mode(&tokens, preserve_math_delims)?;
-    if values.len() == 1 {
-        Ok(values.into_iter().next().expect("single item must exist"))
-    } else {
-        Ok(Value::List(values))
-    }
-}
-
-fn parse_function_arguments_with_mode(
-    tokens: &[CssToken],
-    preserve_math_delims: bool,
-) -> Result<Vec<Value>, CssParseError> {
-    let mut arguments = Vec::new();
-    let mut depth = 0usize;
-    let mut segment = Vec::new();
-    for token in tokens {
-        match token {
-            CssToken::ParenOpen => depth += 1,
-            CssToken::ParenClose => depth = depth.saturating_sub(1),
-            CssToken::Comma if depth == 0 => {
-                if !segment.is_empty() {
-                    arguments.push(parse_value_tokens_with_mode(
-                        &segment,
-                        preserve_math_delims,
-                    )?);
-                    segment.clear();
-                }
-                continue;
-            }
-            _ => {}
-        }
-        segment.push(token.clone());
-    }
-    if !segment.is_empty() {
-        arguments.push(parse_value_tokens_with_mode(
-            &segment,
-            preserve_math_delims,
-        )?);
-    }
-    Ok(arguments)
-}
-
-fn parse_value_sequence_with_mode(
-    tokens: &[CssToken],
-    preserve_math_delims: bool,
-) -> Result<Vec<Value>, CssParseError> {
-    let mut values = Vec::new();
-    let mut index = 0;
-
-    while index < tokens.len() {
-        match &tokens[index] {
-            CssToken::Whitespace | CssToken::Comma => {
-                index += 1;
-            }
-            CssToken::Ident(name) if matches!(tokens.get(index + 1), Some(CssToken::ParenOpen)) => {
-                let mut depth = 0usize;
-                let start = index + 2;
-                let mut end = start;
-                while end < tokens.len() {
-                    match &tokens[end] {
-                        CssToken::ParenOpen => depth += 1,
-                        CssToken::ParenClose => {
-                            if depth == 0 {
-                                break;
-                            }
-                            depth -= 1;
-                        }
-                        _ => {}
-                    }
-                    end += 1;
-                }
-
-                if end >= tokens.len() {
-                    return Err(CssParseError::UnexpectedEndOfInput);
-                }
-
-                if name.eq_ignore_ascii_case("url") {
-                    values.push(Value::Keyword(format!(
-                        "url({})",
-                        render_tokens(&tokens[start..end]).trim()
-                    )));
-                } else {
-                    let arguments = if name.eq_ignore_ascii_case("calc") {
-                        parse_function_arguments_with_mode(&tokens[start..end], true)?
-                    } else {
-                        parse_function_arguments_with_mode(
-                            &tokens[start..end],
-                            preserve_math_delims,
-                        )?
-                    };
-                    values.push(Value::Function {
-                        name: name.clone(),
-                        arguments,
-                    });
-                }
-                index = end + 1;
-            }
-            _ => {
-                let start = index;
-                while index < tokens.len()
-                    && !matches!(tokens[index], CssToken::Whitespace | CssToken::Comma)
-                {
-                    if matches!(
-                        tokens.get(index),
-                        Some(CssToken::Ident(_)) if matches!(tokens.get(index + 1), Some(CssToken::ParenOpen))
-                    ) {
-                        break;
-                    }
-                    if preserve_math_delims && is_math_operator_token(tokens.get(index)) {
-                        if index == start {
-                            index += 1;
-                        }
-                        break;
-                    }
-                    index += 1;
-                }
-                let segment = &tokens[start..index];
-                if segment.is_empty() {
-                    continue;
-                }
-                if segment.len() == 1 {
-                    values.push(parse_single_value(&segment[0])?);
-                } else {
-                    values.push(render_compound_value(segment));
-                }
-            }
-        }
-    }
-
-    Ok(values)
-}
-
-fn is_math_operator_token(token: Option<&CssToken>) -> bool {
-    matches!(
-        token,
-        Some(CssToken::Delim('+'))
-            | Some(CssToken::Delim('-'))
-            | Some(CssToken::Delim('*'))
-            | Some(CssToken::Delim('/'))
-    )
-}
-
-fn render_compound_value(tokens: &[CssToken]) -> Value {
-    let rendered = render_tokens(tokens);
-    if rendered.starts_with('#') {
-        Value::Color(rendered)
-    } else {
-        Value::Keyword(rendered)
-    }
-}
-
-fn parse_single_value(token: &CssToken) -> Result<Value, CssParseError> {
-    match token {
-        CssToken::Ident(value) => {
-            if value.starts_with('#') {
-                Ok(Value::Color(value.clone()))
-            } else {
-                Ok(Value::Keyword(value.clone()))
-            }
-        }
-        CssToken::Hash(value) => Ok(Value::Color(format!("#{value}"))),
-        CssToken::String(value) => Ok(Value::String(value.clone())),
-        CssToken::Number(value) => Ok(Value::Number(*value)),
-        CssToken::Percentage(value) => Ok(Value::Percentage(*value)),
-        CssToken::Dimension(value, unit) => Ok(Value::Length(*value, unit.clone())),
-        CssToken::Delim(ch) => Ok(Value::Keyword(ch.to_string())),
-        _ => Err(CssParseError::InvalidDeclaration),
-    }
-}
-
-fn expand_shorthand(name: &str, value: Value, important: bool) -> Vec<Declaration> {
-    match name {
-        "margin" | "padding" => expand_box_shorthand(name, value, important),
-        "border-width" | "border-style" | "border-color" => {
-            expand_border_axis_shorthand(name, value, important)
-        }
-        "border" => expand_border_shorthand(value, important),
-        "border-top" | "border-right" | "border-bottom" | "border-left" => {
-            expand_border_side_shorthand(name, value, important)
-        }
-        "background" => expand_background_shorthand(value, important),
-        "font" => expand_font_shorthand(value, important),
-        "overflow" => expand_overflow_shorthand(value, important),
-        "flex" => expand_flex_shorthand(value, important),
-        "text-decoration" => expand_text_decoration_shorthand(value, important),
-        "border-radius" => expand_border_radius_shorthand(value, important),
-        "box-shadow" => expand_box_shadow_shorthand(value, important),
-        "list-style" => expand_list_style_shorthand(value, important),
-        _ => vec![Declaration {
-            name: name.to_string(),
-            value,
-            important,
-        }],
-    }
-}
-
-fn expand_box_shorthand(prefix: &str, value: Value, important: bool) -> Vec<Declaration> {
-    let values = match value {
-        Value::List(values) => values,
-        single => vec![single],
-    };
-
-    let (top, right, bottom, left) = match values.as_slice() {
-        [a] => (a.clone(), a.clone(), a.clone(), a.clone()),
-        [a, b] => (a.clone(), b.clone(), a.clone(), b.clone()),
-        [a, b, c] => (a.clone(), b.clone(), c.clone(), b.clone()),
-        [a, b, c, d] => (a.clone(), b.clone(), c.clone(), d.clone()),
-        _ => {
-            return vec![Declaration {
-                name: prefix.to_string(),
-                value: Value::List(values),
-                important,
-            }];
-        }
-    };
-
-    vec![
-        Declaration {
-            name: format!("{prefix}-top"),
-            value: top,
-            important,
-        },
-        Declaration {
-            name: format!("{prefix}-right"),
-            value: right,
-            important,
-        },
-        Declaration {
-            name: format!("{prefix}-bottom"),
-            value: bottom,
-            important,
-        },
-        Declaration {
-            name: format!("{prefix}-left"),
-            value: left,
-            important,
-        },
-    ]
-}
-
-fn expand_border_radius_shorthand(value: Value, important: bool) -> Vec<Declaration> {
-    let values = match value {
-        Value::List(values) => values,
-        single => vec![single],
-    };
-
-    // CSS border-radius shorthand order: TL TR BR BL
-    // 1値: 全角丸同じ
-    // 2値: TL/BR = 1st, TR/BL = 2nd
-    // 3値: TL=1st, TR/BL=2nd, BR=3rd
-    // 4値: TL/TR/BR/BL それぞれ指定
-    let (tl, tr, br, bl) = match values.as_slice() {
-        [a] => (a.clone(), a.clone(), a.clone(), a.clone()),
-        [a, b] => (a.clone(), b.clone(), a.clone(), b.clone()),
-        [a, b, c] => (a.clone(), b.clone(), c.clone(), b.clone()),
-        [a, b, c, d] => (a.clone(), b.clone(), c.clone(), d.clone()),
-        _ => {
-            return vec![Declaration {
-                name: "border-radius".to_string(),
-                value: Value::List(values),
-                important,
-            }];
-        }
-    };
-
-    vec![
-        Declaration {
-            name: "border-top-left-radius".to_string(),
-            value: tl,
-            important,
-        },
-        Declaration {
-            name: "border-top-right-radius".to_string(),
-            value: tr,
-            important,
-        },
-        Declaration {
-            name: "border-bottom-right-radius".to_string(),
-            value: br,
-            important,
-        },
-        Declaration {
-            name: "border-bottom-left-radius".to_string(),
-            value: bl,
-            important,
-        },
-    ]
-}
-
-fn expand_border_axis_shorthand(name: &str, value: Value, important: bool) -> Vec<Declaration> {
-    let values = match value {
-        Value::List(values) => values,
-        single => vec![single],
-    };
-
-    let suffix = name.strip_prefix("border-").unwrap_or(name);
-    let (top, right, bottom, left) = match values.as_slice() {
-        [a] => (a.clone(), a.clone(), a.clone(), a.clone()),
-        [a, b] => (a.clone(), b.clone(), a.clone(), b.clone()),
-        [a, b, c] => (a.clone(), b.clone(), c.clone(), b.clone()),
-        [a, b, c, d] => (a.clone(), b.clone(), c.clone(), d.clone()),
-        _ => {
-            return vec![Declaration {
-                name: name.to_string(),
-                value: Value::List(values),
-                important,
-            }];
-        }
-    };
-
-    vec![
-        Declaration {
-            name: format!("border-top-{suffix}"),
-            value: top,
-            important,
-        },
-        Declaration {
-            name: format!("border-right-{suffix}"),
-            value: right,
-            important,
-        },
-        Declaration {
-            name: format!("border-bottom-{suffix}"),
-            value: bottom,
-            important,
-        },
-        Declaration {
-            name: format!("border-left-{suffix}"),
-            value: left,
-            important,
-        },
-    ]
-}
-
-fn expand_border_shorthand(value: Value, important: bool) -> Vec<Declaration> {
-    let values = match value {
-        Value::List(values) => values,
-        single => vec![single],
-    };
-
-    let mut width = None;
-    let mut style = None;
-    let mut color = None;
-
-    for item in values {
-        let is_width_keyword = matches!(
-            &item,
-            Value::Keyword(keyword) if matches!(keyword.as_str(), "thin" | "medium" | "thick")
-        );
-        let is_border_style = matches!(
-            &item,
-            Value::Keyword(keyword)
-                if matches!(
-                    keyword.as_str(),
-                    "none"
-                        | "hidden"
-                        | "dotted"
-                        | "dashed"
-                        | "solid"
-                        | "double"
-                        | "groove"
-                        | "ridge"
-                        | "inset"
-                        | "outset"
-                )
-        );
-
-        match item {
-            Value::Length(_, _) if width.is_none() => width = Some(item),
-            Value::Keyword(_) if is_width_keyword && width.is_none() => width = Some(item),
-            Value::Keyword(_) if is_border_style && style.is_none() => style = Some(item),
-            Value::Color(_) | Value::Function { .. } | Value::Keyword(_) if color.is_none() => {
-                color = Some(item)
-            }
-            _ => {}
-        }
-    }
-
-    let mut declarations = Vec::new();
-    if let Some(width) = width {
-        declarations.push(Declaration {
-            name: "border-width".to_string(),
-            value: width,
-            important,
-        });
-    }
-    if let Some(style) = style {
-        declarations.push(Declaration {
-            name: "border-style".to_string(),
-            value: style,
-            important,
-        });
-    }
-    if let Some(color) = color {
-        declarations.push(Declaration {
-            name: "border-color".to_string(),
-            value: color,
-            important,
-        });
-    }
-
-    if declarations.is_empty() {
-        declarations.push(Declaration {
-            name: "border".to_string(),
-            value: Value::List(Vec::new()),
-            important,
-        });
-    }
-
-    declarations
-}
-
-fn expand_border_side_shorthand(name: &str, value: Value, important: bool) -> Vec<Declaration> {
-    let values = match value {
-        Value::List(values) => values,
-        single => vec![single],
-    };
-
-    let mut width = None;
-    let mut style = None;
-    let mut color = None;
-
-    for item in values {
-        let is_width_keyword = matches!(
-            &item,
-            Value::Keyword(keyword) if matches!(keyword.as_str(), "thin" | "medium" | "thick")
-        );
-        let is_border_style = matches!(
-            &item,
-            Value::Keyword(keyword)
-                if matches!(
-                    keyword.as_str(),
-                    "none"
-                        | "hidden"
-                        | "dotted"
-                        | "dashed"
-                        | "solid"
-                        | "double"
-                        | "groove"
-                        | "ridge"
-                        | "inset"
-                        | "outset"
-                )
-        );
-
-        match item {
-            Value::Length(_, _) | Value::Number(_) if width.is_none() => width = Some(item),
-            Value::Keyword(_) if is_width_keyword && width.is_none() => width = Some(item),
-            Value::Keyword(_) if is_border_style && style.is_none() => style = Some(item),
-            Value::Color(_) | Value::Function { .. } | Value::Keyword(_) if color.is_none() => {
-                color = Some(item)
-            }
-            _ => {}
-        }
-    }
-
-    let mut declarations = Vec::new();
-    if let Some(width) = width {
-        declarations.push(Declaration {
-            name: format!("{name}-width"),
-            value: width,
-            important,
-        });
-    }
-    if let Some(style) = style {
-        declarations.push(Declaration {
-            name: format!("{name}-style"),
-            value: style.clone(),
-            important,
-        });
-        declarations.push(Declaration {
-            name: "border-style".to_string(),
-            value: style,
-            important,
-        });
-    }
-    if let Some(color) = color {
-        declarations.push(Declaration {
-            name: format!("{name}-color"),
-            value: color.clone(),
-            important,
-        });
-        declarations.push(Declaration {
-            name: "border-color".to_string(),
-            value: color,
-            important,
-        });
-    }
-
-    if declarations.is_empty() {
-        declarations.push(Declaration {
-            name: name.to_string(),
-            value: Value::List(Vec::new()),
-            important,
-        });
-    }
-
-    declarations
-}
-
-fn expand_background_shorthand(value: Value, important: bool) -> Vec<Declaration> {
-    let values = match value {
-        Value::List(values) => values,
-        single => vec![single],
-    };
-
-    let mut declarations = Vec::new();
-    let mut position_values = Vec::new();
-    for item in &values {
-        match item {
-            Value::Function { name, .. } if name.eq_ignore_ascii_case("url") => {
-                declarations.push(Declaration {
-                    name: "background-image".to_string(),
-                    value: item.clone(),
-                    important,
-                })
-            }
-            Value::Keyword(keyword)
-                if keyword.eq_ignore_ascii_case("repeat")
-                    || keyword.eq_ignore_ascii_case("no-repeat") =>
-            {
-                declarations.push(Declaration {
-                    name: "background-repeat".to_string(),
-                    value: Value::Keyword(keyword.to_string()),
-                    important,
-                });
-            }
-            Value::Keyword(keyword) if keyword.eq_ignore_ascii_case("fixed") => {
-                declarations.push(Declaration {
-                    name: "background-attachment".to_string(),
-                    value: Value::Keyword(keyword.to_string()),
-                    important,
-                });
-            }
-            Value::Function { name, .. }
-                if name.eq_ignore_ascii_case("linear-gradient")
-                    || name.eq_ignore_ascii_case("radial-gradient")
-                    || name.eq_ignore_ascii_case("conic-gradient")
-                    || name.eq_ignore_ascii_case("repeating-linear-gradient")
-                    || name.eq_ignore_ascii_case("repeating-radial-gradient") =>
-            {
-                declarations.push(Declaration {
-                    name: "background-image".to_string(),
-                    value: item.clone(),
-                    important,
-                })
-            }
-            Value::Color(_) | Value::Function { .. } => declarations.push(Declaration {
-                name: "background-color".to_string(),
-                value: item.clone(),
-                important,
-            }),
-            Value::Keyword(keyword) if is_background_color_keyword(&keyword) => {
-                declarations.push(Declaration {
-                    name: "background-color".to_string(),
-                    value: Value::Keyword(keyword.to_string()),
-                    important,
-                });
-            }
-            Value::Keyword(keyword) if keyword.starts_with("url(") => {
-                declarations.push(Declaration {
-                    name: "background-image".to_string(),
-                    value: Value::Keyword(keyword.to_string()),
-                    important,
-                });
-            }
-            Value::Keyword(keyword) if keyword.eq_ignore_ascii_case("none") => {
-                declarations.push(Declaration {
-                    name: "background-image".to_string(),
-                    value: Value::Keyword(keyword.to_string()),
-                    important,
-                });
-                declarations.push(Declaration {
-                    name: "background-color".to_string(),
-                    value: Value::Keyword("transparent".to_string()),
-                    important,
-                });
-            }
-            Value::Length(_, unit) if unit == "px" || unit == "em" => {
-                position_values.push(item.clone());
-            }
-            Value::Number(_) => {
-                position_values.push(item.clone());
-            }
-            _ => {
-                // Unknown value in background shorthand → reject the entire shorthand
-                return vec![Declaration {
-                    name: "background".to_string(),
-                    value: Value::List(values),
-                    important,
-                }];
-            }
-        }
-    }
-
-    if let Some(first) = position_values.first() {
-        declarations.push(Declaration {
-            name: "background-position-x".to_string(),
-            value: first.clone(),
-            important,
-        });
-    }
-    if let Some(second) = position_values.get(1) {
-        declarations.push(Declaration {
-            name: "background-position-y".to_string(),
-            value: second.clone(),
-            important,
-        });
-    }
-
-    // Reject shorthand if multiple background-color values were found (e.g. "red pink")
-    let color_count = declarations
-        .iter()
-        .filter(|d| d.name == "background-color")
-        .count();
-    if color_count > 1 {
-        return vec![Declaration {
-            name: "background".to_string(),
-            value: Value::List(values),
-            important,
-        }];
-    }
-
-    if declarations.is_empty() {
-        vec![Declaration {
-            name: "background".to_string(),
-            value: Value::List(values),
-            important,
-        }]
-    } else {
-        declarations
-    }
-}
-
-fn expand_font_shorthand(value: Value, important: bool) -> Vec<Declaration> {
-    let values = match value {
-        Value::List(values) => values,
-        single => vec![single],
-    };
-
-    let mut declarations = Vec::new();
-    for item in &values {
-        match item {
-            Value::Length(_, unit) if unit == "px" || unit == "em" => {
-                declarations.push(Declaration {
-                    name: "font-size".to_string(),
-                    value: item.clone(),
-                    important,
-                })
-            }
-            Value::Percentage(_) => declarations.push(Declaration {
-                name: "font-size".to_string(),
-                value: item.clone(),
-                important,
-            }),
-            Value::Keyword(keyword) => {
-                if let Some((font_size, line_height)) = keyword.split_once('/') {
-                    if let Some(size) = parse_font_shorthand_length(font_size.trim()) {
-                        declarations.push(Declaration {
-                            name: "font-size".to_string(),
-                            value: size,
-                            important,
-                        });
-                    }
-                    if let Some(height) = parse_font_shorthand_length(line_height.trim()) {
-                        declarations.push(Declaration {
-                            name: "line-height".to_string(),
-                            value: height,
-                            important,
-                        });
-                    }
-                }
-            }
-            _ => {}
-        }
-    }
-
-    if declarations.is_empty() {
-        vec![Declaration {
-            name: "font".to_string(),
-            value: Value::List(values),
-            important,
-        }]
-    } else {
-        declarations
-    }
-}
-
-fn parse_font_shorthand_length(value: &str) -> Option<Value> {
-    if let Some(unit) = value.strip_suffix("px") {
-        return unit
-            .trim()
-            .parse()
-            .ok()
-            .map(|number| Value::Length(number, "px".to_string()));
-    }
-    if let Some(unit) = value.strip_suffix("em") {
-        return unit
-            .trim()
-            .parse()
-            .ok()
-            .map(|number| Value::Length(number, "em".to_string()));
-    }
-    if let Some(unit) = value.strip_suffix('%') {
-        return unit.trim().parse().ok().map(Value::Percentage);
-    }
-    None
-}
-
-fn expand_overflow_shorthand(value: Value, important: bool) -> Vec<Declaration> {
-    let values = match value {
-        Value::List(values) => values,
-        single => vec![single],
-    };
-
-    match values.as_slice() {
-        [a] => vec![
-            Declaration {
-                name: "overflow-x".to_string(),
-                value: a.clone(),
-                important,
-            },
-            Declaration {
-                name: "overflow-y".to_string(),
-                value: a.clone(),
-                important,
-            },
-        ],
-        [x, y] => vec![
-            Declaration {
-                name: "overflow-x".to_string(),
-                value: x.clone(),
-                important,
-            },
-            Declaration {
-                name: "overflow-y".to_string(),
-                value: y.clone(),
-                important,
-            },
-        ],
-        _ => vec![Declaration {
-            name: "overflow".to_string(),
-            value: Value::List(values),
-            important,
-        }],
-    }
-}
-
-fn expand_flex_shorthand(value: Value, important: bool) -> Vec<Declaration> {
-    let values = match value {
-        Value::List(values) => values,
-        single => vec![single],
-    };
-
-    // CSS-wide keywords: propagate to all three longhands
-    if let [Value::Keyword(kw)] = values.as_slice() {
-        let lower = kw.to_ascii_lowercase();
-        if matches!(lower.as_str(), "inherit" | "initial" | "unset" | "revert") {
-            return vec![
-                Declaration {
-                    name: "flex-grow".to_string(),
-                    value: Value::Keyword(lower.clone()),
-                    important,
-                },
-                Declaration {
-                    name: "flex-shrink".to_string(),
-                    value: Value::Keyword(lower.clone()),
-                    important,
-                },
-                Declaration {
-                    name: "flex-basis".to_string(),
-                    value: Value::Keyword(lower),
-                    important,
-                },
-            ];
-        }
-    }
-
-    // flex: none → 0 0 auto
-    if let [Value::Keyword(kw)] = values.as_slice() {
-        if kw == "none" {
-            return vec![
-                Declaration {
-                    name: "flex-grow".to_string(),
-                    value: Value::Number(0.0),
-                    important,
-                },
-                Declaration {
-                    name: "flex-shrink".to_string(),
-                    value: Value::Number(0.0),
-                    important,
-                },
-                Declaration {
-                    name: "flex-basis".to_string(),
-                    value: Value::Keyword("auto".to_string()),
-                    important,
-                },
-            ];
-        }
-        // flex: auto → 1 1 auto
-        if kw == "auto" {
-            return vec![
-                Declaration {
-                    name: "flex-grow".to_string(),
-                    value: Value::Number(1.0),
-                    important,
-                },
-                Declaration {
-                    name: "flex-shrink".to_string(),
-                    value: Value::Number(1.0),
-                    important,
-                },
-                Declaration {
-                    name: "flex-basis".to_string(),
-                    value: Value::Keyword("auto".to_string()),
-                    important,
-                },
-            ];
-        }
-    }
-
-    // flex: <grow> → grow shrink=1 basis=0  (単独の数値)
-    if let [Value::Number(grow)] = values.as_slice() {
-        return vec![
-            Declaration {
-                name: "flex-grow".to_string(),
-                value: Value::Number(*grow),
-                important,
-            },
-            Declaration {
-                name: "flex-shrink".to_string(),
-                value: Value::Number(1.0),
-                important,
-            },
-            Declaration {
-                name: "flex-basis".to_string(),
-                value: Value::Number(0.0),
-                important,
-            },
-        ];
-    }
-
-    // flex: <basis> → grow=1 shrink=1 basis  (単独の length/percentage)
-    if let [basis] = values.as_slice() {
-        if matches!(basis, Value::Length(_, _) | Value::Percentage(_)) {
-            return vec![
-                Declaration {
-                    name: "flex-grow".to_string(),
-                    value: Value::Number(1.0),
-                    important,
-                },
-                Declaration {
-                    name: "flex-shrink".to_string(),
-                    value: Value::Number(1.0),
-                    important,
-                },
-                Declaration {
-                    name: "flex-basis".to_string(),
-                    value: basis.clone(),
-                    important,
-                },
-            ];
-        }
-    }
-
-    // flex: <grow> <shrink> <basis>
-    if let [grow, shrink, basis] = values.as_slice() {
-        if matches!(grow, Value::Number(_)) && matches!(shrink, Value::Number(_)) {
-            return vec![
-                Declaration {
-                    name: "flex-grow".to_string(),
-                    value: grow.clone(),
-                    important,
-                },
-                Declaration {
-                    name: "flex-shrink".to_string(),
-                    value: shrink.clone(),
-                    important,
-                },
-                Declaration {
-                    name: "flex-basis".to_string(),
-                    value: basis.clone(),
-                    important,
-                },
-            ];
-        }
-    }
-
-    // flex: <grow> <basis>  (数値 + length/percentage)
-    if let [grow, basis] = values.as_slice() {
-        if matches!(grow, Value::Number(_))
-            && matches!(basis, Value::Length(_, _) | Value::Percentage(_))
-        {
-            return vec![
-                Declaration {
-                    name: "flex-grow".to_string(),
-                    value: grow.clone(),
-                    important,
-                },
-                Declaration {
-                    name: "flex-shrink".to_string(),
-                    value: Value::Number(1.0),
-                    important,
-                },
-                Declaration {
-                    name: "flex-basis".to_string(),
-                    value: basis.clone(),
-                    important,
-                },
-            ];
-        }
-    }
-
-    // flex: <grow> <shrink>  (2値でどちらも数値)
-    if let [grow, shrink] = values.as_slice() {
-        if matches!(grow, Value::Number(_)) && matches!(shrink, Value::Number(_)) {
-            return vec![
-                Declaration {
-                    name: "flex-grow".to_string(),
-                    value: grow.clone(),
-                    important,
-                },
-                Declaration {
-                    name: "flex-shrink".to_string(),
-                    value: shrink.clone(),
-                    important,
-                },
-                Declaration {
-                    name: "flex-basis".to_string(),
-                    value: Value::Number(0.0),
-                    important,
-                },
-            ];
-        }
-    }
-
-    // フォールバック: そのまま保持（単一値はListで包まない）
-    let fallback_value = if values.len() == 1 {
-        values.into_iter().next().unwrap()
-    } else {
-        Value::List(values)
-    };
-    vec![Declaration {
-        name: "flex".to_string(),
-        value: fallback_value,
-        important,
-    }]
-}
-
-/// Expand `text-decoration` shorthand into its longhands.
-///
-/// CSS spec: `text-decoration` is a shorthand for `text-decoration-line`,
-/// `text-decoration-style`, and `text-decoration-color`. The values can appear
-/// in any order. Unknown values are left as-is.
-fn expand_text_decoration_shorthand(value: Value, important: bool) -> Vec<Declaration> {
-    let values = match value {
-        Value::List(values) => values,
-        single => vec![single],
-    };
-
-    // CSS-wide keywords: propagate to all three longhands
-    if let [Value::Keyword(kw)] = values.as_slice() {
-        let lower = kw.to_ascii_lowercase();
-        if matches!(lower.as_str(), "inherit" | "initial" | "unset" | "revert") {
-            return vec![
-                Declaration {
-                    name: "text-decoration-line".to_string(),
-                    value: Value::Keyword(lower.clone()),
-                    important,
-                },
-                Declaration {
-                    name: "text-decoration-style".to_string(),
-                    value: Value::Keyword(lower.clone()),
-                    important,
-                },
-                Declaration {
-                    name: "text-decoration-color".to_string(),
-                    value: Value::Keyword(lower),
-                    important,
-                },
-            ];
-        }
-    }
-
-    let mut line_parts: Vec<String> = Vec::new();
-    let mut style: Option<Value> = None;
-    let mut color: Option<Value> = None;
-
-    for item in &values {
-        match item {
-            Value::Keyword(kw) => {
-                let lower = kw.to_ascii_lowercase();
-                match lower.as_str() {
-                    "none" | "underline" | "overline" | "line-through" | "blink" => {
-                        line_parts.push(lower);
-                    }
-                    "solid" | "dashed" | "dotted" | "double" | "wavy" => {
-                        if style.is_none() {
-                            style = Some(Value::Keyword(lower));
-                        }
-                    }
-                    _ if crate::css::style::is_color_keyword(&lower) => {
-                        if color.is_none() {
-                            color = Some(Value::Keyword(lower));
-                        }
-                    }
-                    _ => {}
-                }
-            }
-            Value::Color(_) | Value::Function { .. } => {
-                if color.is_none() {
-                    color = Some(item.clone());
-                }
-            }
-            _ => {}
-        }
-    }
-
-    let mut decls = Vec::new();
-    if !line_parts.is_empty() {
-        let line_value = line_parts.join(" ");
-        decls.push(Declaration {
-            name: "text-decoration-line".to_string(),
-            value: Value::Keyword(line_value),
-            important,
-        });
-    }
-    if let Some(v) = style {
-        decls.push(Declaration {
-            name: "text-decoration-style".to_string(),
-            value: v,
-            important,
-        });
-    }
-    if let Some(v) = color {
-        decls.push(Declaration {
-            name: "text-decoration-color".to_string(),
-            value: v,
-            important,
-        });
-    }
-
-    // Fallback: preserve original if nothing matched
-    if decls.is_empty() {
-        let fallback_value = if values.len() == 1 {
-            values.into_iter().next().unwrap()
-        } else {
-            Value::List(values)
-        };
-        return vec![Declaration {
-            name: "text-decoration".to_string(),
-            value: fallback_value,
-            important,
-        }];
-    }
-
-    decls
-}
-
-/// box-shadow 宣言を単一の Declaration に変換する。
-/// 値はそのまま保持し、paint 側でパースする。
-fn expand_box_shadow_shorthand(value: Value, important: bool) -> Vec<Declaration> {
-    vec![Declaration {
-        name: "box-shadow".to_string(),
-        value,
-        important,
-    }]
-}
-
-/// Expands `list-style` shorthand into `list-style-type`, `list-style-position`,
-/// and `list-style-image` longhands.
-///
-/// Syntax: `list-style: <type> || <position> || <image>`
-/// where type is a keyword (disc, circle, square, decimal, none, …),
-/// position is `inside` or `outside`, and image is `none` or a `url(…)`.
-fn expand_list_style_shorthand(value: Value, important: bool) -> Vec<Declaration> {
-    const POSITION_KEYWORDS: &[&str] = &["inside", "outside"];
-    const TYPE_KEYWORDS: &[&str] = &[
-        "disc", "circle", "square", "decimal", "lower-roman", "upper-roman",
-        "lower-alpha", "upper-alpha", "lower-latin", "upper-latin", "none",
-    ];
-
-    let values: Vec<Value> = match value {
-        Value::List(items) => items,
-        single => vec![single],
-    };
-
-    let mut list_style_type: Option<Value> = None;
-    let mut list_style_position: Option<Value> = None;
-    let mut list_style_image: Option<Value> = None;
-
-    // Check for bare `none` — sets both type and image to none
-    if values.len() == 1 {
-        if let Value::Keyword(kw) = &values[0] {
-            if kw.eq_ignore_ascii_case("none") {
-                return vec![
-                    Declaration {
-                        name: "list-style-type".to_string(),
-                        value: Value::Keyword("none".to_string()),
-                        important,
-                    },
-                    Declaration {
-                        name: "list-style-position".to_string(),
-                        value: Value::Keyword("outside".to_string()),
-                        important,
-                    },
-                    Declaration {
-                        name: "list-style-image".to_string(),
-                        value: Value::Keyword("none".to_string()),
-                        important,
-                    },
-                ];
-            }
-        }
-    }
-
-    // First pass: detect if a non-none type keyword is present (order-independent)
-    let has_explicit_type = values.iter().any(|v| {
-        matches!(v, Value::Keyword(kw) if {
-            let lc = kw.to_ascii_lowercase();
-            lc != "none" && !POSITION_KEYWORDS.contains(&lc.as_str()) && TYPE_KEYWORDS.contains(&lc.as_str())
-        })
-    });
-
-    for val in values {
-        match &val {
-            Value::Keyword(kw) => {
-                let lc = kw.to_ascii_lowercase();
-                if POSITION_KEYWORDS.contains(&lc.as_str()) {
-                    list_style_position.get_or_insert(val);
-                } else if lc == "none" {
-                    // `none` can appear as list-style-type OR list-style-image.
-                    // If a non-none type keyword is present elsewhere, treat `none` as image=none.
-                    if has_explicit_type || list_style_type.is_some() {
-                        list_style_image.get_or_insert(val);
-                    } else {
-                        list_style_type.get_or_insert(val);
-                    }
-                } else if TYPE_KEYWORDS.contains(&lc.as_str()) {
-                    list_style_type.get_or_insert(val);
-                } else {
-                    list_style_type.get_or_insert(val);
-                }
-            }
-            Value::Function { name, .. } if name.eq_ignore_ascii_case("url") => {
-                list_style_image.get_or_insert(val);
-            }
-            _ => {}
-        }
-    }
-
-    // CSS shorthand rule: always emit all three longhands, using initial values
-    // for any subproperty that was not explicitly present in the shorthand.
-    // Initial values: list-style-type = disc, list-style-position = outside, list-style-image = none
-    let mut decls = Vec::new();
-
-    decls.push(Declaration {
-        name: "list-style-type".to_string(),
-        value: list_style_type.unwrap_or(Value::Keyword("disc".to_string())),
-        important,
-    });
-    decls.push(Declaration {
-        name: "list-style-position".to_string(),
-        value: list_style_position.unwrap_or(Value::Keyword("outside".to_string())),
-        important,
-    });
-    decls.push(Declaration {
-        name: "list-style-image".to_string(),
-        value: list_style_image.unwrap_or(Value::Keyword("none".to_string())),
-        important,
-    });
-
-    decls
-}
-
-fn is_background_color_keyword(keyword: &str) -> bool {
-    matches!(
-        keyword,
-        "transparent"
-            | "black"
-            | "white"
-            | "red"
-            | "green"
-            | "blue"
-            | "gray"
-            | "grey"
-            | "navy"
-            | "yellow"
-    )
-}
-
-fn render_tokens(tokens: &[CssToken]) -> String {
-    let mut rendered = String::new();
-    for token in tokens {
-        match token {
-            CssToken::Ident(value) => rendered.push_str(value),
-            CssToken::AtKeyword(value) => {
-                rendered.push('@');
-                rendered.push_str(value);
-            }
-            CssToken::Hash(value) => {
-                rendered.push('#');
-                rendered.push_str(value);
-            }
-            CssToken::String(value) => {
-                rendered.push('"');
-                rendered.push_str(value);
-                rendered.push('"');
-            }
-            CssToken::Number(value) => rendered.push_str(&trimmed_number(*value)),
-            CssToken::Percentage(value) => {
-                rendered.push_str(&trimmed_number(*value));
-                rendered.push('%');
-            }
-            CssToken::Dimension(value, unit) => {
-                rendered.push_str(&trimmed_number(*value));
-                rendered.push_str(unit);
-            }
-            CssToken::Colon => rendered.push(':'),
-            CssToken::Semicolon => rendered.push(';'),
-            CssToken::Comma => rendered.push(','),
-            CssToken::CurlyOpen => rendered.push('{'),
-            CssToken::CurlyClose => rendered.push('}'),
-            CssToken::ParenOpen => rendered.push('('),
-            CssToken::ParenClose => rendered.push(')'),
-            CssToken::BracketOpen => rendered.push('['),
-            CssToken::BracketClose => rendered.push(']'),
-            CssToken::Delim(ch) => rendered.push(*ch),
-            CssToken::Whitespace => rendered.push(' '),
-        }
-    }
-    rendered
-}
-
-/// Parses the argument of a `:not()` pseudo-class into a list of simple selectors.
-///
-/// The argument is a forgiving selector list; only simple selectors (no
-/// combinators) are supported here, which is sufficient for CSS Selectors Level 3.
-fn parse_not_argument(argument: &str) -> Result<Vec<SimpleSelector>, CssParseError> {
-    // Re-tokenize the argument and parse it as simple selectors.
-    // Reject if trailing tokens remain (commas, combinators, etc.).
-    let tokens = tokenize(argument)?;
-    let mut parser = Parser::new(tokens);
-    parser.skip_whitespace();
-    let selectors = parser.parse_simple_selectors()?;
-    parser.skip_whitespace();
-    if parser.peek().is_some() {
-        return Err(CssParseError::InvalidSelector);
-    }
-    Ok(selectors)
-}
-
-fn split_important(tokens: &[CssToken]) -> (Vec<CssToken>, bool) {
-    let compact: Vec<CssToken> = tokens
-        .iter()
-        .filter(|token| !matches!(token, CssToken::Whitespace))
-        .cloned()
-        .collect();
-
-    if compact.len() >= 2
-        && matches!(compact[compact.len() - 2], CssToken::Delim('!'))
-        && matches!(
-            &compact[compact.len() - 1],
-            CssToken::Ident(keyword) if keyword.eq_ignore_ascii_case("important")
-        )
-    {
-        return (compact[..compact.len() - 2].to_vec(), true);
-    }
-
-    (tokens.to_vec(), false)
-}
-
-fn trimmed_number(value: f32) -> String {
-    let mut text = value.to_string();
-    if text.ends_with(".0") {
-        text.truncate(text.len() - 2);
-    }
-    text
-}
-
-fn is_ident_start(ch: char) -> bool {
-    ch.is_ascii_alphabetic() || ch == '_' || ch == '-'
-}
-
-fn is_ident_char(ch: char) -> bool {
-    is_ident_start(ch) || ch.is_ascii_digit()
-}
-
-fn is_number_start(chars: &[char], index: usize) -> bool {
-    chars.get(index).is_some_and(|c| c.is_ascii_digit())
-        || (chars.get(index) == Some(&'.')
-            && chars.get(index + 1).is_some_and(|c| c.is_ascii_digit()))
-        || ((chars.get(index) == Some(&'+') || chars.get(index) == Some(&'-'))
-            && chars
-                .get(index + 1)
-                .is_some_and(|c| c.is_ascii_digit() || *c == '.'))
-}
-
-fn consume_css_escape(chars: &[char], index: &mut usize) -> Option<char> {
-    // CSS 2.1 §4.1.3: backslash escapes
-    // \<hex>{1,6} followed by optional whitespace → Unicode code point
-    // \<non-hex> → literal character
-    let start = *index;
-    if chars.get(start) != Some(&'\\') {
-        return None;
-    }
-    let next = chars.get(start + 1)?;
-    if next.is_ascii_hexdigit() {
-        let mut hex = String::new();
-        let mut i = start + 1;
-        while i < chars.len() && hex.len() < 6 && chars[i].is_ascii_hexdigit() {
-            hex.push(chars[i]);
-            i += 1;
-        }
-        // Consume optional trailing whitespace
-        if i < chars.len() && chars[i].is_ascii_whitespace() {
-            i += 1;
-        }
-        *index = i;
-        u32::from_str_radix(&hex, 16).ok().and_then(char::from_u32)
-    } else {
-        *index = start + 2;
-        Some(*next)
-    }
-}
-
-fn consume_ident(chars: &[char], index: &mut usize) -> String {
-    let mut ident = String::new();
-    while let Some(&ch) = chars.get(*index) {
-        if ch == '\\' {
-            if let Some(escaped) = consume_css_escape(chars, index) {
-                ident.push(escaped);
-            } else {
-                *index += 1;
-            }
-        } else if is_ident_char(ch) {
-            ident.push(ch);
-            *index += 1;
-        } else {
-            break;
-        }
-    }
-    ident
-}
-
-fn consume_string(chars: &[char], index: &mut usize, quote: char) -> Result<String, CssParseError> {
-    *index += 1;
-    let mut value = String::new();
-    while let Some(&ch) = chars.get(*index) {
-        if ch == quote {
-            *index += 1;
-            return Ok(value);
-        }
-        if ch == '\\' {
-            if let Some(escaped) = consume_css_escape(chars, index) {
-                value.push(escaped);
-            } else {
-                *index += 1;
-            }
-        } else {
-            *index += 1;
-            value.push(ch);
-        }
-    }
-    Err(CssParseError::UnexpectedEndOfInput)
-}
-
-fn consume_number(chars: &[char], index: &mut usize) -> Result<f32, CssParseError> {
-    let mut value = String::new();
-    if let Some(sign @ ('+' | '-')) = chars.get(*index).copied() {
-        value.push(sign);
-        *index += 1;
-    }
-    if chars.get(*index) == Some(&'.') {
-        value.push('.');
-        *index += 1;
-    }
-    while let Some(&ch) = chars.get(*index) {
-        if ch.is_ascii_digit() || ch == '.' {
-            value.push(ch);
-            *index += 1;
-        } else {
-            break;
-        }
-    }
-    value
-        .parse::<f32>()
-        .map_err(|_| CssParseError::InvalidNumber)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2427,9 +234,7 @@ mod tests {
 
     #[test]
     fn hex_escape_in_ident_produces_unicode_codepoint() {
-        // \a = U+000A (line feed), so m\argin ≠ margin
         let tokens = tokenize(r"div { m\argin: 2em; }").unwrap();
-        // The property name should NOT be "margin" — it should contain U+000A
         let has_margin_ident = tokens
             .iter()
             .any(|t| matches!(t, CssToken::Ident(s) if s == "margin"));
@@ -2468,7 +273,6 @@ mod tests {
 
     #[test]
     fn invalid_background_value_is_ignored() {
-        // "red pink" is not a valid background value — should be entirely discarded
         let stylesheet =
             parse_stylesheet(".parser { background: yellow; } .parser { background: red pink; }")
                 .unwrap();
@@ -2480,15 +284,12 @@ mod tests {
                 _ => None,
             })
             .collect();
-        // The second rule's "background: red pink" should be ignored
-        // First rule's background: yellow should still win via cascade
         let last_bg = rules.iter().rev().find_map(|rule| {
             rule.declarations
                 .iter()
                 .find(|d| d.name == "background-color")
         });
         eprintln!("last bg: {:?}", last_bg);
-        // If "red pink" was incorrectly salvaged as "red", we'd see Color("red")
         assert!(
             last_bg.is_some(),
             "should have background-color declaration",
@@ -2687,31 +488,11 @@ mod tests {
             panic!("expected style rule");
         };
 
-        assert!(
-            rule.declarations
-                .iter()
-                .any(|decl| decl.name == "margin-top")
-        );
-        assert!(
-            rule.declarations
-                .iter()
-                .any(|decl| decl.name == "margin-right")
-        );
-        assert!(
-            rule.declarations
-                .iter()
-                .any(|decl| decl.name == "border-width")
-        );
-        assert!(
-            rule.declarations
-                .iter()
-                .any(|decl| decl.name == "border-style")
-        );
-        assert!(
-            rule.declarations
-                .iter()
-                .any(|decl| decl.name == "border-color")
-        );
+        assert!(rule.declarations.iter().any(|decl| decl.name == "margin-top"));
+        assert!(rule.declarations.iter().any(|decl| decl.name == "margin-right"));
+        assert!(rule.declarations.iter().any(|decl| decl.name == "border-width"));
+        assert!(rule.declarations.iter().any(|decl| decl.name == "border-style"));
+        assert!(rule.declarations.iter().any(|decl| decl.name == "border-color"));
     }
 
     #[test]
@@ -2722,21 +503,9 @@ mod tests {
             panic!("expected style rule");
         };
 
-        assert!(
-            rule.declarations
-                .iter()
-                .any(|decl| decl.name == "background-color")
-        );
-        assert!(
-            rule.declarations
-                .iter()
-                .any(|decl| decl.name == "font-size")
-        );
-        assert!(
-            rule.declarations
-                .iter()
-                .any(|decl| decl.name == "line-height")
-        );
+        assert!(rule.declarations.iter().any(|decl| decl.name == "background-color"));
+        assert!(rule.declarations.iter().any(|decl| decl.name == "font-size"));
+        assert!(rule.declarations.iter().any(|decl| decl.name == "line-height"));
     }
 
     #[test]
@@ -2748,16 +517,8 @@ mod tests {
             panic!("expected style rule");
         };
 
-        assert!(
-            rule.declarations
-                .iter()
-                .any(|decl| decl.name == "background-color")
-        );
-        assert!(
-            rule.declarations
-                .iter()
-                .any(|decl| decl.name == "background-image")
-        );
+        assert!(rule.declarations.iter().any(|decl| decl.name == "background-color"));
+        assert!(rule.declarations.iter().any(|decl| decl.name == "background-image"));
     }
 
     #[test]
@@ -2768,10 +529,8 @@ mod tests {
         };
 
         assert!(
-            rule.declarations
-                .iter()
-                .any(|decl| decl.name == "background-repeat"
-                    && matches!(&decl.value, Value::Keyword(value) if value == "no-repeat"))
+            rule.declarations.iter().any(|decl| decl.name == "background-repeat"
+                && matches!(&decl.value, Value::Keyword(value) if value == "no-repeat"))
         );
     }
 
@@ -2782,22 +541,14 @@ mod tests {
             panic!("expected style rule");
         };
 
-        assert!(
-            rule.declarations
-                .iter()
-                .any(|decl| decl.name == "background-attachment"
-                    && matches!(&decl.value, Value::Keyword(value) if value == "fixed"))
-        );
+        assert!(rule.declarations.iter().any(|decl| decl.name == "background-attachment"
+            && matches!(&decl.value, Value::Keyword(value) if value == "fixed")));
         assert!(rule.declarations.iter().any(
             |decl| decl.name == "background-position-x"
                 && matches!(&decl.value, Value::Length(value, unit) if *value == 1.0 && unit == "px")
         ));
-        assert!(
-            rule.declarations
-                .iter()
-                .any(|decl| decl.name == "background-position-y"
-                    && matches!(&decl.value, Value::Number(value) if *value == 0.0))
-        );
+        assert!(rule.declarations.iter().any(|decl| decl.name == "background-position-y"
+            && matches!(&decl.value, Value::Number(value) if *value == 0.0)));
     }
 
     #[test]
@@ -2807,18 +558,10 @@ mod tests {
             panic!("expected style rule");
         };
 
-        assert!(
-            rule.declarations
-                .iter()
-                .any(|decl| decl.name == "background-image"
-                    && matches!(&decl.value, Value::Keyword(value) if value == "none"))
-        );
-        assert!(
-            rule.declarations
-                .iter()
-                .any(|decl| decl.name == "background-color"
-                    && matches!(&decl.value, Value::Keyword(value) if value == "transparent"))
-        );
+        assert!(rule.declarations.iter().any(|decl| decl.name == "background-image"
+            && matches!(&decl.value, Value::Keyword(value) if value == "none")));
+        assert!(rule.declarations.iter().any(|decl| decl.name == "background-color"
+            && matches!(&decl.value, Value::Keyword(value) if value == "transparent")));
     }
 
     #[test]
@@ -2832,18 +575,10 @@ mod tests {
             |decl| decl.name == "border-top-width"
                 && matches!(&decl.value, Value::Length(value, unit) if *value == 2.0 && unit == "px")
         ));
-        assert!(
-            rule.declarations
-                .iter()
-                .any(|decl| decl.name == "border-top-style"
-                    && matches!(&decl.value, Value::Keyword(value) if value == "solid"))
-        );
-        assert!(
-            rule.declarations
-                .iter()
-                .any(|decl| decl.name == "border-top-color"
-                    && matches!(&decl.value, Value::Keyword(value) if value == "yellow"))
-        );
+        assert!(rule.declarations.iter().any(|decl| decl.name == "border-top-style"
+            && matches!(&decl.value, Value::Keyword(value) if value == "solid")));
+        assert!(rule.declarations.iter().any(|decl| decl.name == "border-top-color"
+            && matches!(&decl.value, Value::Keyword(value) if value == "yellow")));
     }
 
     #[test]
@@ -2853,59 +588,29 @@ mod tests {
             panic!("expected style rule");
         };
 
-        assert!(
-            rule.declarations
-                .iter()
-                .any(|decl| decl.name == "border-top-style"
-                    && matches!(&decl.value, Value::Keyword(value) if value == "none"))
-        );
-        assert!(
-            rule.declarations
-                .iter()
-                .any(|decl| decl.name == "border-right-style"
-                    && matches!(&decl.value, Value::Keyword(value) if value == "solid"))
-        );
-        assert!(
-            rule.declarations
-                .iter()
-                .any(|decl| decl.name == "border-bottom-style"
-                    && matches!(&decl.value, Value::Keyword(value) if value == "none"))
-        );
-        assert!(
-            rule.declarations
-                .iter()
-                .any(|decl| decl.name == "border-left-style"
-                    && matches!(&decl.value, Value::Keyword(value) if value == "solid"))
-        );
+        assert!(rule.declarations.iter().any(|decl| decl.name == "border-top-style"
+            && matches!(&decl.value, Value::Keyword(value) if value == "none")));
+        assert!(rule.declarations.iter().any(|decl| decl.name == "border-right-style"
+            && matches!(&decl.value, Value::Keyword(value) if value == "solid")));
+        assert!(rule.declarations.iter().any(|decl| decl.name == "border-bottom-style"
+            && matches!(&decl.value, Value::Keyword(value) if value == "none")));
+        assert!(rule.declarations.iter().any(|decl| decl.name == "border-left-style"
+            && matches!(&decl.value, Value::Keyword(value) if value == "solid")));
     }
 
     #[test]
     fn expands_list_style_shorthand_all_three() {
-        // list-style shorthand expands into type, position, and image
-        let stylesheet =
-            parse_stylesheet("ul { list-style: disc inside none; }").unwrap();
+        let stylesheet = parse_stylesheet("ul { list-style: disc inside none; }").unwrap();
         let Rule::Style(rule) = &stylesheet.rules[0] else {
             panic!("expected style rule");
         };
 
-        assert!(
-            rule.declarations
-                .iter()
-                .any(|decl| decl.name == "list-style-type"
-                    && matches!(&decl.value, Value::Keyword(v) if v == "disc"))
-        );
-        assert!(
-            rule.declarations
-                .iter()
-                .any(|decl| decl.name == "list-style-position"
-                    && matches!(&decl.value, Value::Keyword(v) if v == "inside"))
-        );
-        assert!(
-            rule.declarations
-                .iter()
-                .any(|decl| decl.name == "list-style-image"
-                    && matches!(&decl.value, Value::Keyword(v) if v == "none"))
-        );
+        assert!(rule.declarations.iter().any(|decl| decl.name == "list-style-type"
+            && matches!(&decl.value, Value::Keyword(v) if v == "disc")));
+        assert!(rule.declarations.iter().any(|decl| decl.name == "list-style-position"
+            && matches!(&decl.value, Value::Keyword(v) if v == "inside")));
+        assert!(rule.declarations.iter().any(|decl| decl.name == "list-style-image"
+            && matches!(&decl.value, Value::Keyword(v) if v == "none")));
     }
 
     #[test]
@@ -2915,12 +620,8 @@ mod tests {
             panic!("expected style rule");
         };
 
-        assert!(
-            rule.declarations
-                .iter()
-                .any(|decl| decl.name == "list-style-type"
-                    && matches!(&decl.value, Value::Keyword(v) if v == "decimal"))
-        );
+        assert!(rule.declarations.iter().any(|decl| decl.name == "list-style-type"
+            && matches!(&decl.value, Value::Keyword(v) if v == "decimal")));
     }
 
     #[test]
@@ -2930,17 +631,12 @@ mod tests {
             panic!("expected style rule");
         };
 
-        assert!(
-            rule.declarations
-                .iter()
-                .any(|decl| decl.name == "list-style-type"
-                    && matches!(&decl.value, Value::Keyword(v) if v == "none"))
-        );
+        assert!(rule.declarations.iter().any(|decl| decl.name == "list-style-type"
+            && matches!(&decl.value, Value::Keyword(v) if v == "none")));
     }
 
     #[test]
     fn expands_linear_gradient_as_background_image() {
-        // linear-gradient() 関数は background-image に展開される
         let stylesheet =
             parse_stylesheet("div { background: linear-gradient(to right, red, blue); }")
                 .unwrap();
@@ -2948,39 +644,22 @@ mod tests {
             panic!("expected style rule");
         };
 
-        assert!(
-            rule.declarations
-                .iter()
-                .any(|decl| decl.name == "background-image"),
-            "linear-gradient() should expand to background-image; got: {:?}",
-            rule.declarations
-        );
-        // background-color には展開されないこと
-        assert!(
-            !rule
-                .declarations
-                .iter()
-                .any(|decl| decl.name == "background-color"),
-            "linear-gradient() should NOT expand to background-color"
-        );
+        assert!(rule.declarations.iter().any(|decl| decl.name == "background-image"),
+            "linear-gradient() should expand to background-image; got: {:?}", rule.declarations);
+        assert!(!rule.declarations.iter().any(|decl| decl.name == "background-color"),
+            "linear-gradient() should NOT expand to background-color");
     }
 
     #[test]
     fn background_size_standalone_property() {
-        // background-size は単独プロパティとして認識される
         let stylesheet = parse_stylesheet("div { background-size: cover; }").unwrap();
         let Rule::Style(rule) = &stylesheet.rules[0] else {
             panic!("expected style rule");
         };
 
-        assert!(
-            rule.declarations
-                .iter()
-                .any(|decl| decl.name == "background-size"
-                    && matches!(&decl.value, Value::Keyword(v) if v == "cover")),
-            "background-size: cover should be parsed; got: {:?}",
-            rule.declarations
-        );
+        assert!(rule.declarations.iter().any(|decl| decl.name == "background-size"
+            && matches!(&decl.value, Value::Keyword(v) if v == "cover")),
+            "background-size: cover should be parsed; got: {:?}", rule.declarations);
     }
 
     #[test]
@@ -2990,12 +669,8 @@ mod tests {
             panic!("expected style rule");
         };
 
-        assert!(
-            rule.declarations
-                .iter()
-                .any(|decl| decl.name == "background-size"
-                    && matches!(&decl.value, Value::Keyword(v) if v == "contain")),
-        );
+        assert!(rule.declarations.iter().any(|decl| decl.name == "background-size"
+            && matches!(&decl.value, Value::Keyword(v) if v == "contain")));
     }
 
     #[test]
@@ -3005,16 +680,11 @@ mod tests {
             panic!("expected style rule");
         };
 
-        assert!(
-            rule.declarations
-                .iter()
-                .any(|decl| decl.name == "background-size"),
-            "background-size with lengths should be parsed; got: {:?}",
-            rule.declarations
-        );
+        assert!(rule.declarations.iter().any(|decl| decl.name == "background-size"),
+            "background-size with lengths should be parsed; got: {:?}", rule.declarations);
     }
 
-    // ── @media query parsing ──────────────────────────────────────────────────
+    // -- @media query parsing --
 
     #[test]
     fn parse_media_query_screen_type() {
@@ -3069,7 +739,6 @@ mod tests {
 
     #[test]
     fn parse_media_query_only_screen_strips_modifier() {
-        // `only` is a CSS2 modifier that should be stripped; the media type is `screen`.
         let queries = parse_media_query_list("only screen and (max-width: 768px)").unwrap();
         assert_eq!(queries.len(), 1);
         assert_eq!(queries[0].media_type.as_deref(), Some("screen"),
@@ -3111,12 +780,11 @@ mod tests {
 
     #[test]
     fn parse_media_query_em_unit() {
-        // 48em = 768px at 16px/em
         let queries = parse_media_query_list("(max-width: 48em)").unwrap();
         assert_eq!(queries[0].conditions, vec![MediaCondition::MaxWidth(768.0)]);
     }
 
-    // ── @media query evaluation ───────────────────────────────────────────────
+    // -- @media query evaluation --
 
     #[test]
     fn evaluate_screen_matches() {
@@ -3156,7 +824,7 @@ mod tests {
     fn evaluate_orientation_portrait() {
         let queries = parse_media_query_list("(orientation: portrait)").unwrap();
         assert!(evaluate_media_query(&queries[0], 600.0, 900.0, false));
-        assert!(evaluate_media_query(&queries[0], 768.0, 768.0, false)); // square = portrait
+        assert!(evaluate_media_query(&queries[0], 768.0, 768.0, false));
         assert!(!evaluate_media_query(&queries[0], 1024.0, 768.0, false));
     }
 
@@ -3165,7 +833,7 @@ mod tests {
         let queries = parse_media_query_list("(orientation: landscape)").unwrap();
         assert!(evaluate_media_query(&queries[0], 1024.0, 768.0, false));
         assert!(!evaluate_media_query(&queries[0], 600.0, 900.0, false));
-        assert!(!evaluate_media_query(&queries[0], 768.0, 768.0, false)); // square = not landscape
+        assert!(!evaluate_media_query(&queries[0], 768.0, 768.0, false));
     }
 
     #[test]
@@ -3177,7 +845,6 @@ mod tests {
 
     #[test]
     fn evaluate_comma_list_any_match() {
-        // "print, screen" — screen matches so the list matches.
         let queries = parse_media_query_list("print, screen").unwrap();
         let matches = queries
             .iter()
