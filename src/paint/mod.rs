@@ -1558,15 +1558,21 @@ fn paint_background_image(
                 let x_end = area.x + area.width;
                 let y_end = area.y + area.height;
 
-                // Render one tile at origin (0,0) into an offscreen canvas
-                let tile_px_w = tile_w.ceil() as u32;
-                let tile_px_h = tile_h.ceil() as u32;
+                // Render one tile at origin (0,0) into an offscreen canvas.
+                // Guard with a maximum pixel budget to avoid OOM on huge background-size.
+                const MAX_TILE_PIXELS: u64 = 16_777_216; // 4096 x 4096
                 let tile_image = if repeat {
-                    let mut tile_canvas = Canvas::new(tile_px_w, tile_px_h);
-                    let origin_rect = Rect { x: 0.0, y: 0.0, width: tile_w, height: tile_h };
-                    color::paint_linear_gradient(&mut tile_canvas, &gradient, origin_rect, None);
-                    Image::new(tile_px_w, tile_px_h, tile_canvas.pixels)
-                        .ok()
+                    let tw = tile_w.ceil().max(1.0) as u32;
+                    let th = tile_h.ceil().max(1.0) as u32;
+                    let pixels = tw as u64 * th as u64;
+                    if pixels <= MAX_TILE_PIXELS && tw > 0 && th > 0 {
+                        let mut tile_canvas = Canvas::new(tw, th);
+                        let origin_rect = Rect { x: 0.0, y: 0.0, width: tile_w, height: tile_h };
+                        color::paint_linear_gradient(&mut tile_canvas, &gradient, origin_rect, None);
+                        Image::new(tw, th, tile_canvas.pixels).ok()
+                    } else {
+                        None // tile too large, fall back to per-tile rendering
+                    }
                 } else {
                     None
                 };
@@ -1588,7 +1594,7 @@ fn paint_background_image(
                             // Fast path: blit pre-rendered tile buffer
                             canvas.draw_image_scaled_clipped(img, tile_rect, clip.or(Some(area)));
                         } else {
-                            // Fallback (no-repeat or buffer allocation failed): render directly
+                            // Fallback (no-repeat, tile too large, or image validation failed): render directly
                             color::paint_linear_gradient(canvas, &gradient, tile_rect, clip.or(Some(area)));
                         }
                         if !repeat {
