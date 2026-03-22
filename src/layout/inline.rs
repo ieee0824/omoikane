@@ -83,23 +83,17 @@ pub(super) enum OverflowWrap {
 
 pub(super) fn word_break(style: &ComputedStyle) -> WordBreak {
     match style.get("word-break") {
-        Some(ComputedValue::Keyword(kw)) => match kw.to_ascii_lowercase().as_str() {
-            "break-all" => WordBreak::BreakAll,
-            "keep-all" => WordBreak::KeepAll,
-            "break-word" => WordBreak::BreakWord,
-            _ => WordBreak::Normal,
-        },
+        Some(ComputedValue::Keyword(kw)) if kw.eq_ignore_ascii_case("break-all") => WordBreak::BreakAll,
+        Some(ComputedValue::Keyword(kw)) if kw.eq_ignore_ascii_case("keep-all") => WordBreak::KeepAll,
+        Some(ComputedValue::Keyword(kw)) if kw.eq_ignore_ascii_case("break-word") => WordBreak::BreakWord,
         _ => WordBreak::Normal,
     }
 }
 
 pub(super) fn overflow_wrap(style: &ComputedStyle) -> OverflowWrap {
     match style.get("overflow-wrap") {
-        Some(ComputedValue::Keyword(kw)) => match kw.to_ascii_lowercase().as_str() {
-            "break-word" => OverflowWrap::BreakWord,
-            "anywhere" => OverflowWrap::Anywhere,
-            _ => OverflowWrap::Normal,
-        },
+        Some(ComputedValue::Keyword(kw)) if kw.eq_ignore_ascii_case("break-word") => OverflowWrap::BreakWord,
+        Some(ComputedValue::Keyword(kw)) if kw.eq_ignore_ascii_case("anywhere") => OverflowWrap::Anywhere,
         _ => OverflowWrap::Normal,
     }
 }
@@ -879,10 +873,10 @@ fn split_text_segment(
     // `word-break: normal` for segment-level splitting; the actual emergency
     // break behaviour is handled in the line-building loop (same as
     // `overflow-wrap: break-word`).
-    let split_fn: &dyn Fn(&str) -> Vec<String> = match wb {
-        WordBreak::BreakAll => &split_chars,
-        WordBreak::KeepAll => &split_words_no_cjk_break,
-        WordBreak::Normal | WordBreak::BreakWord => &split_words_preserving_spaces_cjk,
+    let split_fn: fn(&str) -> Vec<String> = match wb {
+        WordBreak::BreakAll => split_chars,
+        WordBreak::KeepAll => split_words_no_cjk_break,
+        WordBreak::Normal | WordBreak::BreakWord => split_words_preserving_spaces_cjk,
     };
 
     if text.contains('\n') {
