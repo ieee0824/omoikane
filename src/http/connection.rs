@@ -38,26 +38,40 @@ impl ServerCertVerifier for InsecureCertVerifier {
 
     fn verify_tls12_signature(
         &self,
-        _message: &[u8],
-        _cert: &CertificateDer<'_>,
-        _dss: &rustls::DigitallySignedStruct,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &rustls::DigitallySignedStruct,
     ) -> Result<HandshakeSignatureValid, rustls::Error> {
-        Ok(HandshakeSignatureValid::assertion())
+        let provider = rustls::crypto::CryptoProvider::get_default()
+            .map(|p| p.signature_verification_algorithms)
+            .unwrap_or_else(|| {
+                rustls::crypto::aws_lc_rs::default_provider().signature_verification_algorithms
+            });
+        rustls::crypto::verify_tls12_signature(message, cert, dss, &provider)
     }
 
     fn verify_tls13_signature(
         &self,
-        _message: &[u8],
-        _cert: &CertificateDer<'_>,
-        _dss: &rustls::DigitallySignedStruct,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &rustls::DigitallySignedStruct,
     ) -> Result<HandshakeSignatureValid, rustls::Error> {
-        Ok(HandshakeSignatureValid::assertion())
+        let provider = rustls::crypto::CryptoProvider::get_default()
+            .map(|p| p.signature_verification_algorithms)
+            .unwrap_or_else(|| {
+                rustls::crypto::aws_lc_rs::default_provider().signature_verification_algorithms
+            });
+        rustls::crypto::verify_tls13_signature(message, cert, dss, &provider)
     }
 
     fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
-        rustls::crypto::aws_lc_rs::default_provider()
-            .signature_verification_algorithms
-            .supported_schemes()
+        rustls::crypto::CryptoProvider::get_default()
+            .map(|p| p.signature_verification_algorithms.supported_schemes())
+            .unwrap_or_else(|| {
+                rustls::crypto::aws_lc_rs::default_provider()
+                    .signature_verification_algorithms
+                    .supported_schemes()
+            })
     }
 }
 
@@ -379,6 +393,9 @@ mod tests {
     /// Starts a local TLS server that accepts one connection, reads an HTTP
     /// request, and responds with a fixed 200 OK response. Returns the port
     /// and the CA certificate DER (for client trust).
+    ///
+    /// The server listens on `[::1]:0` so that `localhost` (which resolves to
+    /// `::1` on macOS) can connect via `send_with_options`.
     fn start_tls_test_server(
         hostname: &str,
         response_body: &str,
@@ -391,7 +408,7 @@ mod tests {
             .with_single_cert(vec![cert_der], key_der)
             .unwrap();
 
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let listener = TcpListener::bind("[::1]:0").unwrap();
         let port = listener.local_addr().unwrap().port();
         let response_body = response_body.to_string();
 
@@ -424,7 +441,7 @@ mod tests {
         port: u16,
         ca_cert: &CertificateDer<'_>,
     ) -> Result<HttpResponse, HttpParseError> {
-        let addr: std::net::SocketAddr = format!("127.0.0.1:{}", port).parse().unwrap();
+        let addr: std::net::SocketAddr = format!("[::1]:{}", port).parse().unwrap();
 
         let stream = TcpStream::connect_timeout(&addr, Duration::from_secs(DEFAULT_TIMEOUT_SECS))
             .map_err(HttpParseError::Io)?;
@@ -459,8 +476,8 @@ mod tests {
         // default Mozilla root store — the cert won't be trusted.
         let (port, _ca_cert) = start_tls_test_server("localhost", "should-not-reach");
 
-        // Connect directly to 127.0.0.1 to avoid DNS issues, using default roots.
-        let addr: std::net::SocketAddr = format!("127.0.0.1:{}", port).parse().unwrap();
+        // Connect directly to [::1] to match the test server's bind address.
+        let addr: std::net::SocketAddr = format!("[::1]:{}", port).parse().unwrap();
         let stream = TcpStream::connect_timeout(&addr, Duration::from_secs(5)).unwrap();
         stream
             .set_read_timeout(Some(Duration::from_secs(5)))
@@ -498,7 +515,7 @@ mod tests {
     #[test]
     fn tls_falls_back_to_http11_when_http2_header_decode_fails() {
         let (cert_der, key_der) = generate_test_cert("localhost");
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let listener = TcpListener::bind("[::1]:0").unwrap();
         let port = listener.local_addr().unwrap().port();
 
         let server_config = rustls::ServerConfig::builder()
@@ -549,7 +566,7 @@ mod tests {
             tls_stream.flush().unwrap();
         });
 
-        let addr: std::net::SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
+        let addr: std::net::SocketAddr = format!("[::1]:{port}").parse().unwrap();
         let req = HttpRequest::get(&format!("https://localhost:{port}/")).unwrap();
         let mut root_store = rustls::RootCertStore::empty();
         root_store.add(cert_der).unwrap();
@@ -586,18 +603,9 @@ mod tests {
     /// Helper: connect to a TLS server with the insecure verifier (no trusted roots required).
     fn send_insecure_to_local_tls_server(
         request: &HttpRequest,
-        port: u16,
+        _port: u16,
     ) -> Result<HttpResponse, HttpParseError> {
-        let addr: std::net::SocketAddr = format!("127.0.0.1:{}", port).parse().unwrap();
-
-        let stream = TcpStream::connect_timeout(&addr, Duration::from_secs(DEFAULT_TIMEOUT_SECS))
-            .map_err(HttpParseError::Io)?;
-        stream
-            .set_read_timeout(Some(Duration::from_secs(DEFAULT_TIMEOUT_SECS)))
-            .map_err(HttpParseError::Io)?;
-
-        let config = insecure_client_config(false);
-        send_over_tls_with_config(stream, request, Arc::new(config))
+        send_with_options(request, true)
     }
 
     #[test]
@@ -633,7 +641,7 @@ mod tests {
         // Ensure the default (secure) path is not affected by the insecure code path.
         let (port, _ca_cert) = start_tls_test_server("localhost", "should-not-reach");
 
-        let addr: std::net::SocketAddr = format!("127.0.0.1:{}", port).parse().unwrap();
+        let addr: std::net::SocketAddr = format!("[::1]:{}", port).parse().unwrap();
         let stream = TcpStream::connect_timeout(&addr, Duration::from_secs(5)).unwrap();
         stream
             .set_read_timeout(Some(Duration::from_secs(5)))
