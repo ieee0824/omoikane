@@ -768,6 +768,7 @@ fn absolute_inline_content_paints_above_float_siblings() {
                 z_index: 0,
                 lines: Vec::new(),
                 children: Vec::new(),
+                marker: None,
             },
             LayoutBox {
                 node: overlay,
@@ -805,8 +806,10 @@ fn absolute_inline_content_paints_above_float_siblings() {
                     }],
                 }],
                 children: Vec::new(),
+                marker: None,
             },
         ],
+        marker: None,
     };
     let canvas = paint_layout(
         &layout,
@@ -936,7 +939,9 @@ fn float_grandchild_paints_above_block_uncle() {
                     z_index: 0,
                     lines: Vec::new(),
                     children: Vec::new(),
+                    marker: None,
                 }],
+                marker: None,
             },
             LayoutBox {
                 node: block,
@@ -954,8 +959,10 @@ fn float_grandchild_paints_above_block_uncle() {
                 z_index: 0,
                 lines: Vec::new(),
                 children: Vec::new(),
+                marker: None,
             },
         ],
+        marker: None,
     };
 
     let mut paint_resolver = StyleResolver::new();

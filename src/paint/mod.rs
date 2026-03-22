@@ -13,7 +13,7 @@ use crate::css::{
 use crate::dom::{Node, NodeHandle, NodeType};
 use crate::font::{Font, GlyphRaster, load_default_text_fonts};
 use crate::http::url::resolve_url;
-use crate::layout::{InlineFragmentContent, LayoutBox, Rect, Visibility};
+use crate::layout::{InlineFragmentContent, LayoutBox, ListMarker, Rect, Visibility};
 use base64::Engine;
 use flate2::read::ZlibDecoder;
 /// An RGBA color.
@@ -891,6 +891,7 @@ fn paint_box_internal_to(
         paint_box_internal(canvas, child, resolver, clip, viewport, true, text_fonts);
     }
     paint_text(canvas, layout, style, clip, viewport, text_fonts);
+    paint_list_marker(canvas, layout, style, clip, text_fonts);
     for child in inline_children {
         paint_box_internal(canvas, child, resolver, clip, viewport, false, text_fonts);
     }
@@ -1459,6 +1460,71 @@ fn paint_text_placeholder(
         }
         cursor_x += advance;
     }
+}
+
+/// Paints the list marker (if any) for a `display: list-item` box.
+fn paint_list_marker(
+    canvas: &mut Canvas,
+    layout: &LayoutBox,
+    style: &ComputedStyle,
+    clip: Option<Rect>,
+    fonts: &[Font],
+) {
+    let Some(marker) = &layout.marker else {
+        return;
+    };
+
+    let color = text_color(style).unwrap_or(Color::rgb(0, 0, 0));
+    let font_size = marker.font_size.max(1.0);
+    let ascent = font_size * 0.8;
+
+    let rect = Rect {
+        x: marker.x,
+        y: marker.y,
+        width: font_size * (marker.text.chars().count() as f32) * 0.6,
+        height: font_size,
+    };
+
+    if !fonts.is_empty() {
+        paint_text_with_font(
+            canvas,
+            rect,
+            &marker.text,
+            font_size,
+            ascent,
+            fonts,
+            color,
+            clip,
+            0.0,
+        );
+    } else {
+        paint_list_marker_placeholder(canvas, marker, font_size, color, clip);
+    }
+}
+
+/// Paints a list marker as a simple filled shape (fallback when no font is loaded).
+fn paint_list_marker_placeholder(
+    canvas: &mut Canvas,
+    marker: &ListMarker,
+    font_size: f32,
+    color: Color,
+    clip: Option<Rect>,
+) {
+    let size = (font_size * 0.35).max(2.0);
+    let cx = marker.x + size * 0.5;
+    let cy = marker.y + font_size * 0.5;
+
+    // Render disc/circle/square as a filled square for simplicity in placeholder mode.
+    canvas.fill_rect_clipped(
+        Rect {
+            x: cx - size * 0.5,
+            y: cy - size * 0.5,
+            width: size,
+            height: size,
+        },
+        color,
+        clip,
+    );
 }
 
 fn paint_inline_image_fragment(

@@ -1602,3 +1602,123 @@ fn border_radius_longhand_supported_properties() {
     assert!(is_supported_property("border-bottom-right-radius"));
     assert!(is_supported_property("border-bottom-left-radius"));
 }
+
+// ---- list-style tests ----
+
+#[test]
+fn list_style_type_and_position_are_supported_properties() {
+    assert!(is_supported_property("list-style-type"));
+    assert!(is_supported_property("list-style-position"));
+    assert!(is_supported_property("list-style-image"));
+}
+
+#[test]
+fn ua_defaults_set_disc_for_ul() {
+    let document = NodeHandle::document();
+    let html = NodeHandle::element("html");
+    let body = NodeHandle::element("body");
+    let ul = NodeHandle::element("ul");
+    document.append_child(html.clone());
+    html.append_child(body.clone());
+    body.append_child(ul.clone());
+
+    let mut resolver = StyleResolver::new();
+    let style = resolver.computed_style(&ul);
+
+    assert_eq!(
+        style.get("list-style-type"),
+        Some(&ComputedValue::Keyword("disc".to_string()))
+    );
+    assert_eq!(
+        style.get("list-style-position"),
+        Some(&ComputedValue::Keyword("outside".to_string()))
+    );
+}
+
+#[test]
+fn ua_defaults_set_decimal_for_ol() {
+    let document = NodeHandle::document();
+    let html = NodeHandle::element("html");
+    let body = NodeHandle::element("body");
+    let ol = NodeHandle::element("ol");
+    document.append_child(html.clone());
+    html.append_child(body.clone());
+    body.append_child(ol.clone());
+
+    let mut resolver = StyleResolver::new();
+    let style = resolver.computed_style(&ol);
+
+    assert_eq!(
+        style.get("list-style-type"),
+        Some(&ComputedValue::Keyword("decimal".to_string()))
+    );
+}
+
+#[test]
+fn ua_defaults_set_display_list_item_for_li() {
+    let document = NodeHandle::document();
+    let html = NodeHandle::element("html");
+    let body = NodeHandle::element("body");
+    let ul = NodeHandle::element("ul");
+    let li = NodeHandle::element("li");
+    document.append_child(html.clone());
+    html.append_child(body.clone());
+    body.append_child(ul.clone());
+    ul.append_child(li.clone());
+
+    let mut resolver = StyleResolver::new();
+    let style = resolver.computed_style(&li);
+
+    assert_eq!(
+        style.get("display"),
+        Some(&ComputedValue::Keyword("list-item".to_string()))
+    );
+}
+
+#[test]
+fn list_style_type_inherits_from_parent() {
+    let document = NodeHandle::document();
+    let html = NodeHandle::element("html");
+    let body = NodeHandle::element("body");
+    let ul = NodeHandle::element("ul");
+    let li = NodeHandle::element("li");
+    document.append_child(html.clone());
+    html.append_child(body.clone());
+    body.append_child(ul.clone());
+    ul.append_child(li.clone());
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet("ul { list-style-type: square; }").unwrap(),
+    );
+    let li_style = resolver.computed_style(&li);
+
+    assert_eq!(
+        li_style.get("list-style-type"),
+        Some(&ComputedValue::Keyword("square".to_string()))
+    );
+}
+
+#[test]
+fn list_style_type_none_overrides_ua_default() {
+    let document = NodeHandle::document();
+    let html = NodeHandle::element("html");
+    let body = NodeHandle::element("body");
+    let ul = NodeHandle::element("ul");
+    document.append_child(html.clone());
+    html.append_child(body.clone());
+    body.append_child(ul.clone());
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet("ul { list-style-type: none; }").unwrap(),
+    );
+    let style = resolver.computed_style(&ul);
+
+    assert_eq!(
+        style.get("list-style-type"),
+        Some(&ComputedValue::Keyword("none".to_string()))
+    );
+}
