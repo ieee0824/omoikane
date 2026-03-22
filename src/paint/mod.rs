@@ -60,6 +60,7 @@ pub(crate) use stylesheet::{
     salvage_style_rule, normalize_unquoted_urls, split_declarations_forgiving,
     matches_screen_media, same_origin, find_base_elements, extract_document_base_url,
     collect_text_contents, materialize_local_assets, rewrite_local_asset_attribute,
+    fetch_font_face_fonts,
 };
 
 /// A decoded RGBA image.
@@ -569,14 +570,26 @@ impl Canvas {
 
 /// Paints a layout tree into a new canvas using the provided viewport size.
 pub fn paint_layout(layout: &LayoutBox, resolver: &mut StyleResolver, viewport: Rect) -> Canvas {
+    let text_fonts = text::load_text_fonts();
+    paint_layout_with_fonts(layout, resolver, viewport, text_fonts)
+}
+
+/// Paints a layout tree using the provided font list for text rendering.
+///
+/// Web fonts should be placed before system fonts in the list for priority.
+pub fn paint_layout_with_fonts(
+    layout: &LayoutBox,
+    resolver: &mut StyleResolver,
+    viewport: Rect,
+    fonts: Vec<Font>,
+) -> Canvas {
     let width = viewport.width.ceil().max(1.0) as u32;
     let height = viewport.height.ceil().max(1.0) as u32;
     let mut canvas = Canvas::new(width, height);
     if let Some(background) = viewport_background_color(layout, resolver) {
         canvas.fill_rect(viewport, background);
     }
-    let text_fonts = text::load_text_fonts();
-    paint_box(&mut canvas, layout, resolver, None, viewport, &text_fonts);
+    paint_box(&mut canvas, layout, resolver, None, viewport, &fonts);
     canvas
 }
 
@@ -594,12 +607,26 @@ pub fn render_document_with_url(
     let effective_base = stylesheet::extract_document_base_url(document, base_url);
     let mut resolver = StyleResolver::new();
     resolver.set_viewport(viewport.width, viewport.height);
-    for stylesheet in stylesheet::extract_author_stylesheets(document, base_url)? {
-        resolver.add_stylesheet(Origin::Author, stylesheet::parse_stylesheet_forgiving(&stylesheet)?);
+
+    let mut parsed_sheets = Vec::new();
+    for css_text in stylesheet::extract_author_stylesheets(document, base_url)? {
+        let sheet = stylesheet::parse_stylesheet_forgiving(&css_text)?;
+        parsed_sheets.push(sheet);
     }
+    for sheet in &parsed_sheets {
+        resolver.add_stylesheet(Origin::Author, sheet.clone());
+    }
+
+    // Collect @font-face rules and fetch web fonts
+    let web_fonts = stylesheet::fetch_font_face_fonts(&parsed_sheets, effective_base.as_ref());
+
+    // Build combined font list: web fonts first, then system fonts
+    let mut all_fonts = web_fonts;
+    all_fonts.extend(text::load_text_fonts());
+
     crate::layout::with_image_base_url(effective_base, || {
         let layout = crate::layout::layout_tree(document, &mut resolver, viewport)?;
-        Some(paint_layout(&layout, &mut resolver, viewport))
+        Some(paint_layout_with_fonts(&layout, &mut resolver, viewport, all_fonts))
     })
     .ok_or(PaintError::InvalidImageBuffer)
 }

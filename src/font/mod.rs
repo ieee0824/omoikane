@@ -69,6 +69,15 @@ impl Font {
     /// Load a font from a file path.
     pub fn load_from_file(path: &Path) -> Result<Self, FontError> {
         let data = std::fs::read(path)?;
+        Self::load_from_bytes(data)
+    }
+
+    /// Load a font from raw bytes (TTF, OTF, or WOFF).
+    ///
+    /// WOFF fonts are decompressed (zlib) before parsing.
+    /// WOFF2 is not yet supported; use TTF/OTF directly.
+    pub fn load_from_bytes(data: Vec<u8>) -> Result<Self, FontError> {
+        let data = decode_font_data(data)?;
         let font_vec = FontVec::try_from_vec_and_index(data, 0)
             .map_err(|_| FontError::InvalidFont("Failed to parse font data".to_string()))?;
         Ok(Font { inner: font_vec })
@@ -209,6 +218,184 @@ pub struct FontMetricsPixel {
     pub descender: f32,
     /// Line gap in pixels.
     pub line_gap: f32,
+}
+
+// ============================================================================
+// Font Data Decoding (WOFF / raw TTF/OTF)
+// ============================================================================
+
+/// Detect font format from magic bytes and decode if necessary.
+///
+/// - `wOFF` (WOFF1): decompress each table with zlib/flate2
+/// - `wOF2` (WOFF2): not yet supported, returns an error
+/// - Otherwise: assume raw TTF/OTF and return as-is
+fn decode_font_data(data: Vec<u8>) -> Result<Vec<u8>, FontError> {
+    if data.len() < 4 {
+        return Err(FontError::InvalidFont("Font data too short".to_string()));
+    }
+    let magic = &data[..4];
+    if magic == b"wOF2" {
+        return Err(FontError::InvalidFont(
+            "WOFF2 format is not yet supported; use TTF/OTF".to_string(),
+        ));
+    }
+    if magic == b"wOFF" {
+        return decode_woff1(data);
+    }
+    // Raw TTF/OTF (or TTC)
+    Ok(data)
+}
+
+/// Decode a WOFF1 container into raw OpenType/TrueType data.
+///
+/// WOFF1 spec: <https://www.w3.org/TR/WOFF/>
+fn decode_woff1(data: Vec<u8>) -> Result<Vec<u8>, FontError> {
+    use flate2::read::ZlibDecoder;
+    use std::io::Read;
+
+    if data.len() < 44 {
+        return Err(FontError::InvalidFont("WOFF header too short".to_string()));
+    }
+
+    let read_u16 = |off: usize| -> u16 { u16::from_be_bytes([data[off], data[off + 1]]) };
+    let read_u32 = |off: usize| -> u32 {
+        u32::from_be_bytes([data[off], data[off + 1], data[off + 2], data[off + 3]])
+    };
+
+    let sfnt_flavor = read_u32(4);
+    let num_tables = read_u16(12) as usize;
+    let _total_sfnt_size = read_u32(16) as usize;
+
+    // Build the output sfnt
+    // sfnt header: 12 bytes + 16 bytes per table record
+    let header_size = 12 + 16 * num_tables;
+    let mut sfnt = Vec::new();
+
+    // Write sfnt header
+    sfnt.extend_from_slice(&sfnt_flavor.to_be_bytes());
+    sfnt.extend_from_slice(&(num_tables as u16).to_be_bytes());
+    // searchRange, entrySelector, rangeShift — compute from numTables
+    let entry_selector = (num_tables as f64).log2().floor() as u16;
+    let search_range = (1u16 << entry_selector) * 16;
+    let range_shift = (num_tables as u16) * 16 - search_range;
+    sfnt.extend_from_slice(&search_range.to_be_bytes());
+    sfnt.extend_from_slice(&entry_selector.to_be_bytes());
+    sfnt.extend_from_slice(&range_shift.to_be_bytes());
+
+    // Parse WOFF table directory (starts at offset 44)
+    struct WoffTableEntry {
+        tag: [u8; 4],
+        comp_offset: usize,
+        comp_length: usize,
+        orig_length: usize,
+        orig_checksum: u32,
+    }
+
+    let mut entries = Vec::with_capacity(num_tables);
+    for i in 0..num_tables {
+        let base = 44 + i * 20;
+        if base + 20 > data.len() {
+            return Err(FontError::InvalidFont("WOFF table directory truncated".to_string()));
+        }
+        let mut tag = [0u8; 4];
+        tag.copy_from_slice(&data[base..base + 4]);
+        entries.push(WoffTableEntry {
+            tag,
+            comp_offset: read_u32(base + 4) as usize,
+            comp_length: read_u32(base + 8) as usize,
+            orig_length: read_u32(base + 12) as usize,
+            orig_checksum: read_u32(base + 16),
+        });
+    }
+
+    // Reserve space for table records (we'll fill offsets later)
+    let table_records_start = sfnt.len();
+    sfnt.resize(header_size, 0);
+
+    // Decompress each table and write it, recording offsets
+    struct SfntRecord {
+        tag: [u8; 4],
+        checksum: u32,
+        offset: u32,
+        length: u32,
+    }
+    let mut records = Vec::with_capacity(num_tables);
+
+    for entry in &entries {
+        // Pad to 4-byte boundary
+        while sfnt.len() % 4 != 0 {
+            sfnt.push(0);
+        }
+        let offset = sfnt.len() as u32;
+
+        if entry.comp_length >= entry.orig_length {
+            // Not compressed — copy raw
+            let end = entry.comp_offset
+                .checked_add(entry.orig_length)
+                .ok_or_else(|| FontError::InvalidFont("WOFF table offset overflow".to_string()))?;
+            if end > data.len() {
+                return Err(FontError::InvalidFont("WOFF table data out of bounds".to_string()));
+            }
+            sfnt.extend_from_slice(&data[entry.comp_offset..end]);
+        } else {
+            // Zlib compressed
+            let end = entry.comp_offset
+                .checked_add(entry.comp_length)
+                .ok_or_else(|| FontError::InvalidFont("WOFF table offset overflow".to_string()))?;
+            if end > data.len() {
+                return Err(FontError::InvalidFont("WOFF table data out of bounds".to_string()));
+            }
+            let mut decoder = ZlibDecoder::new(&data[entry.comp_offset..end]);
+            let mut decompressed = Vec::with_capacity(entry.orig_length);
+            decoder.read_to_end(&mut decompressed).map_err(|e| {
+                FontError::InvalidFont(format!("WOFF zlib decompression failed: {}", e))
+            })?;
+            if decompressed.len() != entry.orig_length {
+                return Err(FontError::InvalidFont(format!(
+                    "WOFF decompressed size mismatch: expected {}, got {}",
+                    entry.orig_length,
+                    decompressed.len()
+                )));
+            }
+            sfnt.extend_from_slice(&decompressed);
+        }
+
+        records.push(SfntRecord {
+            tag: entry.tag,
+            checksum: entry.orig_checksum,
+            offset,
+            length: entry.orig_length as u32,
+        });
+    }
+
+    // Write table records
+    for (i, rec) in records.iter().enumerate() {
+        let base = table_records_start + i * 16;
+        sfnt[base..base + 4].copy_from_slice(&rec.tag);
+        sfnt[base + 4..base + 8].copy_from_slice(&rec.checksum.to_be_bytes());
+        sfnt[base + 8..base + 12].copy_from_slice(&rec.offset.to_be_bytes());
+        sfnt[base + 12..base + 16].copy_from_slice(&rec.length.to_be_bytes());
+    }
+
+    Ok(sfnt)
+}
+
+/// Detect font format from raw bytes.
+///
+/// Returns `"woff"`, `"woff2"`, `"ttf"`, `"otf"`, or `"unknown"`.
+pub fn detect_font_format(data: &[u8]) -> &'static str {
+    if data.len() < 4 {
+        return "unknown";
+    }
+    match &data[..4] {
+        b"wOFF" => "woff",
+        b"wOF2" => "woff2",
+        [0x00, 0x01, 0x00, 0x00] => "ttf",
+        b"OTTO" => "otf",
+        b"true" => "ttf",
+        b"ttcf" => "ttf", // TrueType Collection
+        _ => "unknown",
+    }
 }
 
 // ============================================================================
@@ -462,6 +649,30 @@ impl FontCache {
         let font = Arc::new(load_system_font(family)?);
         self.fonts.insert(key, Arc::clone(&font));
         Ok(font)
+    }
+
+    /// Register a web font by family name from raw font bytes.
+    ///
+    /// The font data can be TTF, OTF, or WOFF (zlib-compressed).
+    /// WOFF2 is not yet supported.
+    /// Web fonts take priority over system fonts in `get_or_load`.
+    /// If the cache is at capacity, an existing entry is evicted to make room.
+    pub fn register_web_font(&mut self, family: &str, data: Vec<u8>) -> Result<Arc<Font>, FontError> {
+        let key = family.to_lowercase();
+        // Evict an arbitrary entry if at capacity and this family is not already cached
+        if !self.fonts.contains_key(&key) && self.fonts.len() >= self.max_entries {
+            if let Some(oldest_key) = self.fonts.keys().next().cloned() {
+                self.fonts.remove(&oldest_key);
+            }
+        }
+        let font = Arc::new(Font::load_from_bytes(data)?);
+        self.fonts.insert(key, Arc::clone(&font));
+        Ok(font)
+    }
+
+    /// Check if a font for the given family is already cached (system or web).
+    pub fn contains(&self, family: &str) -> bool {
+        self.fonts.contains_key(&family.to_lowercase())
     }
 
     /// Clear all cached fonts.

@@ -1,8 +1,32 @@
 //! CSS parser: selectors, declarations, and value parsing.
 
-use super::{CssParseError, CssToken, Selector, SelectorPart, SimpleSelector, AttributeOperator, Combinator, Declaration, Value, Rule, StyleRule, AtRule, Stylesheet};
+use super::{CssParseError, CssToken, Selector, SelectorPart, SimpleSelector, AttributeOperator, Combinator, Declaration, Value, Rule, StyleRule, AtRule, FontFaceRule, Stylesheet};
 use super::tokenizer::{tokenize, render_tokens};
 use super::shorthand::expand_shorthand;
+
+/// Extract all `@font-face` rules from a stylesheet.
+///
+/// Returns a list of `FontFaceRule` values with the font-family, src URL,
+/// optional format hint, font-weight, and font-style descriptors.
+pub fn extract_font_face_rules(stylesheet: &Stylesheet) -> Vec<FontFaceRule> {
+    let mut rules = Vec::new();
+    collect_font_face_rules_recursive(&stylesheet.rules, &mut rules);
+    rules
+}
+
+fn collect_font_face_rules_recursive(rules: &[Rule], out: &mut Vec<FontFaceRule>) {
+    for rule in rules {
+        match rule {
+            Rule::FontFace(ff) => out.push(ff.clone()),
+            Rule::At(at) => {
+                if let Some(block) = &at.block {
+                    collect_font_face_rules_recursive(block, out);
+                }
+            }
+            _ => {}
+        }
+    }
+}
 
 /// Parses a stylesheet from CSS source.
 pub fn parse_stylesheet(input: &str) -> Result<Stylesheet, CssParseError> {
@@ -75,6 +99,14 @@ impl Parser {
                     }
 
                     let declarations = self.parse_declaration_list()?;
+
+                    // Produce a structured FontFace rule when possible.
+                    if name.eq_ignore_ascii_case("font-face") {
+                        if let Some(ff) = build_font_face_rule(&declarations) {
+                            return Ok(Rule::FontFace(ff));
+                        }
+                    }
+
                     return Ok(Rule::At(AtRule {
                         name,
                         prelude: render_tokens(&prelude_tokens).trim().to_string(),
@@ -678,4 +710,150 @@ fn split_important(tokens: &[CssToken]) -> (Vec<CssToken>, bool) {
     }
 
     (tokens.to_vec(), false)
+}
+
+/// Attempt to build a structured `FontFaceRule` from `@font-face` declarations.
+///
+/// Returns `None` when the required descriptors (`font-family` and a `src` with
+/// a `url()`) are missing.
+fn build_font_face_rule(declarations: &[Declaration]) -> Option<FontFaceRule> {
+    let mut font_family: Option<String> = None;
+    let mut src_url: Option<String> = None;
+    let mut format: Option<String> = None;
+    let mut font_weight: Option<String> = None;
+    let mut font_style: Option<String> = None;
+
+    for decl in declarations {
+        match decl.name.as_str() {
+            "font-family" => {
+                font_family = Some(extract_string_value(&decl.value));
+            }
+            "src" => {
+                // Extract url() and optional format() from src value.
+                extract_src_descriptor(&decl.value, &mut src_url, &mut format);
+            }
+            "font-weight" => {
+                font_weight = Some(extract_string_value(&decl.value));
+            }
+            "font-style" => {
+                font_style = Some(extract_string_value(&decl.value));
+            }
+            _ => {}
+        }
+    }
+
+    let font_family = font_family?;
+    let src_url = src_url?;
+
+    Some(FontFaceRule {
+        font_family,
+        src_url,
+        format,
+        font_weight,
+        font_style,
+    })
+}
+
+/// Extract a plain string from a CSS value (handles both `String` and `Keyword`).
+fn extract_string_value(value: &Value) -> String {
+    match value {
+        Value::String(s) => s.clone(),
+        Value::Keyword(k) => k.clone(),
+        Value::Number(n) => {
+            // Format without trailing ".0" for integer-valued floats
+            if *n == n.floor() && n.is_finite() {
+                format!("{}", *n as i64)
+            } else {
+                format!("{}", n)
+            }
+        }
+        Value::Percentage(p) => {
+            if *p == p.floor() && p.is_finite() {
+                format!("{}%", *p as i64)
+            } else {
+                format!("{}%", p)
+            }
+        }
+        Value::Length(v, unit) => {
+            if *v == v.floor() && v.is_finite() {
+                format!("{}{}", *v as i64, unit)
+            } else {
+                format!("{}{}", v, unit)
+            }
+        }
+        Value::List(items) => {
+            // font-family can be a list of keywords like `Noto Sans`
+            items
+                .iter()
+                .map(|v| extract_string_value(v))
+                .collect::<Vec<_>>()
+                .join(" ")
+        }
+        _ => format!("{:?}", value),
+    }
+}
+
+/// Parse `src: url(...) format(...)` descriptor.
+fn extract_src_descriptor(
+    value: &Value,
+    out_url: &mut Option<String>,
+    out_format: &mut Option<String>,
+) {
+    match value {
+        Value::Function { name, arguments } if name.eq_ignore_ascii_case("url") => {
+            if let Some(arg) = arguments.first() {
+                *out_url = Some(extract_string_value(arg));
+            }
+        }
+        // The parser produces url() as Keyword("url(...)") — extract the inner URL.
+        Value::Keyword(k) if k.starts_with("url(") => {
+            *out_url = Some(extract_url_from_keyword(k));
+        }
+        Value::List(items) => {
+            for item in items {
+                match item {
+                    Value::Function { name, arguments } if name.eq_ignore_ascii_case("url") => {
+                        if out_url.is_none() {
+                            if let Some(arg) = arguments.first() {
+                                *out_url = Some(extract_string_value(arg));
+                            }
+                        }
+                    }
+                    Value::Keyword(k) if k.starts_with("url(") => {
+                        if out_url.is_none() {
+                            *out_url = Some(extract_url_from_keyword(k));
+                        }
+                    }
+                    Value::Function { name, arguments }
+                        if name.eq_ignore_ascii_case("format") =>
+                    {
+                        if let Some(arg) = arguments.first() {
+                            *out_format = Some(extract_string_value(arg));
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Extract the inner URL string from a `"url(...)"` keyword value.
+///
+/// Handles both `url(foo.ttf)` and `url("foo.ttf")` forms.
+fn extract_url_from_keyword(keyword: &str) -> String {
+    let inner = keyword
+        .strip_prefix("url(")
+        .and_then(|s| s.strip_suffix(')'))
+        .unwrap_or(keyword)
+        .trim();
+    // Remove surrounding quotes if present
+    if (inner.starts_with('"') && inner.ends_with('"'))
+        || (inner.starts_with('\'') && inner.ends_with('\''))
+    {
+        inner[1..inner.len() - 1].to_string()
+    } else {
+        inner.to_string()
+    }
 }

@@ -526,6 +526,8 @@ fn collect_rule_candidates(
                     *source_order += at_rule.declarations.len();
                 }
             }
+            // @font-face rules are handled by the font loading layer, not style resolution.
+            Rule::FontFace(_) => {}
         }
     }
 }
@@ -567,6 +569,7 @@ fn count_declarations(rules: &[Rule]) -> usize {
             a.declarations.len()
                 + a.block.as_deref().map(count_declarations).unwrap_or(0)
         }
+        Rule::FontFace(_) => 0,
     }).sum()
 }
 

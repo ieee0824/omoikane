@@ -40,6 +40,8 @@ Omoikane は、HTTP クライアント、HTML/CSS パーサー、DOM、レイア
 
 ### フォント・テキスト
 - ab_glyph によるフォントファイル読み込みとグリフラスタライズ
+- **`@font-face` Web フォント対応**（TTF / OTF / WOFF の HTTP フェッチ・デコード・登録）
+- `font-family` 優先順位に従うフォント選択（Web フォント → システムフォント → フォールバック）
 - macOS / Linux のシステムフォント自動検索
 - フォントキャッシュ・グリフキャッシュ
 - グリフベースのテキスト幅計測とカーニング
@@ -169,11 +171,11 @@ HTTP クライアントの現状仕様:
 
 [Acid2 テスト](https://www.webstandards.org/files/acid2/test.html)の公式リファレンスレンダリングとの比較で**差分 0px** を達成しています。
 
-CSS パーサー、レイアウトエンジン、ペイントシステムの統合テストとして、576 件以上のテストが常時通過しています（lib テスト 576 件 + doc テスト 9 件）。
+CSS パーサー、レイアウトエンジン、ペイントシステムの統合テストとして、591 件以上のテストが常時通過しています（lib テスト 591 件 + doc テスト 9 件）。
 
 ## 進捗
 
-issue ベースの開発状況では、以下の大きな実装フェーズは完了済みです（closed issue 79 件）。
+issue ベースの開発状況では、以下の大きな実装フェーズは完了済みです（closed issue 81 件）。
 
 - HTTP クライアント
 - HTML パーサー・文字エンコーディング検出
@@ -197,12 +199,14 @@ issue ベースの開発状況では、以下の大きな実装フェーズは�
 - CSS 未実装機能の段階的補完（017 シリーズ: 色関数、セレクタ、shorthand、border-radius、box-shadow、opacity、text-decoration、list-style、gradient、media query）
 - 大規模ファイル分割リファクタリング（paint/layout/css モジュール）
 - per-fragment inline styling（ネスト inline 要素の個別スタイル適用）
+- `@font-face` Web フォント対応（TTF / OTF / WOFF フェッチ・デコード）
 
-現在の open issue は [`issues/open`](/issues/open) を参照してください（open issue 8 件）。
+現在の open issue は [`issues/open`](/issues/open) を参照してください（open issue 7 件）。
 
 ## 制約
 
 - CSS 3 の一部機能（Grid、アニメーション、`position: sticky`）は未実装
+- WOFF2 フォント（brotli 圧縮）は未対応（TTF / OTF / WOFF1 は対応済み）
 - Web フォント（`@font-face`）は未対応（システムフォントのみ）
 - Web 標準の完全互換は目標であり、現状は CSS 2.1 の主要機能を実装済みです
 - Puppeteer / Playwright 互換は段階的に拡張中です

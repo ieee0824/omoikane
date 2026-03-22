@@ -18,6 +18,7 @@ pub use matcher::{
 };
 pub use media::{evaluate_media_query, parse_media_query_list};
 pub use parser::parse_stylesheet;
+pub use parser::extract_font_face_rules;
 pub use style::{ComputedStyle, ComputedValue, Origin, StyleResolver, StylesheetInput};
 pub use tokenizer::tokenize;
 
@@ -106,6 +107,24 @@ pub enum AttributeOperator {
 pub enum Rule {
     Style(StyleRule),
     At(AtRule),
+    FontFace(FontFaceRule),
+}
+
+/// A parsed `@font-face` rule.
+///
+/// Holds the descriptors needed to register and select a web font.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FontFaceRule {
+    /// The font family name declared in `font-family`.
+    pub font_family: String,
+    /// The URL of the font file from `src: url(...)`.
+    pub src_url: String,
+    /// Optional format hint, e.g. `"woff2"`, `"truetype"`.
+    pub format: Option<String>,
+    /// Optional font-weight descriptor (e.g. `"bold"`, `"400"`).
+    pub font_weight: Option<String>,
+    /// Optional font-style descriptor (e.g. `"italic"`, `"normal"`).
+    pub font_style: Option<String>,
 }
 
 /// A regular style rule.
@@ -469,10 +488,11 @@ mod tests {
         assert_eq!(import_rule.name, "import");
         assert_eq!(import_rule.prelude, "\"base.css\"");
 
-        let Rule::At(font_face) = &stylesheet.rules[1] else {
-            panic!("expected font-face rule");
+        let Rule::FontFace(font_face) = &stylesheet.rules[1] else {
+            panic!("expected font-face rule, got {:?}", stylesheet.rules[1]);
         };
-        assert_eq!(font_face.declarations.len(), 2);
+        assert_eq!(font_face.font_family, "Demo");
+        assert_eq!(font_face.src_url, "font.woff2");
 
         let Rule::At(media_rule) = &stylesheet.rules[2] else {
             panic!("expected media rule");
@@ -880,5 +900,82 @@ mod tests {
             .iter()
             .any(|q| evaluate_media_query(q, 1024.0, 768.0, false));
         assert!(matches);
+    }
+
+    // -- @font-face parsing --
+
+    #[test]
+    fn parses_font_face_with_format_hint() {
+        let stylesheet = parse_stylesheet(
+            r#"@font-face { font-family: "MyFont"; src: url("https://example.com/font.woff2") format("woff2"); }"#,
+        )
+        .unwrap();
+
+        assert_eq!(stylesheet.rules.len(), 1);
+        let Rule::FontFace(ff) = &stylesheet.rules[0] else {
+            panic!("expected FontFace rule, got {:?}", stylesheet.rules[0]);
+        };
+        assert_eq!(ff.font_family, "MyFont");
+        assert_eq!(ff.src_url, "https://example.com/font.woff2");
+        assert_eq!(ff.format.as_deref(), Some("woff2"));
+    }
+
+    #[test]
+    fn parses_font_face_with_weight_and_style() {
+        let stylesheet = parse_stylesheet(
+            r#"@font-face { font-family: "MyFont"; src: url(font.ttf); font-weight: bold; font-style: italic; }"#,
+        )
+        .unwrap();
+
+        let Rule::FontFace(ff) = &stylesheet.rules[0] else {
+            panic!("expected FontFace rule");
+        };
+        assert_eq!(ff.font_family, "MyFont");
+        assert_eq!(ff.src_url, "font.ttf");
+        assert_eq!(ff.font_weight.as_deref(), Some("bold"));
+        assert_eq!(ff.font_style.as_deref(), Some("italic"));
+    }
+
+    #[test]
+    fn parses_font_face_unquoted_family() {
+        let stylesheet = parse_stylesheet(
+            r#"@font-face { font-family: CustomFont; src: url(custom.otf); }"#,
+        )
+        .unwrap();
+
+        let Rule::FontFace(ff) = &stylesheet.rules[0] else {
+            panic!("expected FontFace rule");
+        };
+        assert_eq!(ff.font_family, "CustomFont");
+    }
+
+    #[test]
+    fn extract_font_face_rules_collects_all() {
+        let stylesheet = parse_stylesheet(
+            r#"
+            body { color: black; }
+            @font-face { font-family: "A"; src: url(a.ttf); }
+            h1 { font-size: 24px; }
+            @font-face { font-family: "B"; src: url(b.woff) format("woff"); }
+            "#,
+        )
+        .unwrap();
+
+        let ff_rules = extract_font_face_rules(&stylesheet);
+        assert_eq!(ff_rules.len(), 2);
+        assert_eq!(ff_rules[0].font_family, "A");
+        assert_eq!(ff_rules[1].font_family, "B");
+        assert_eq!(ff_rules[1].format.as_deref(), Some("woff"));
+    }
+
+    #[test]
+    fn font_face_without_src_falls_back_to_at_rule() {
+        let stylesheet = parse_stylesheet(
+            r#"@font-face { font-family: "NoSrc"; }"#,
+        )
+        .unwrap();
+
+        // Without src, it should fall back to a generic AtRule
+        assert!(matches!(&stylesheet.rules[0], Rule::At(_)));
     }
 }
