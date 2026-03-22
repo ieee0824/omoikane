@@ -47,12 +47,17 @@ status: open
 - フォントフェッチは既存の HTTP クライアントを使用
 - CORS 制約は初期段階では無視（same-origin のみ対応でも可）
 
-## 子 issue（必要に応じて分割）
+## 進捗
 
-- 019-1: @font-face パースと URL 抽出
-- 019-2: WOFF2/WOFF デコード
-- 019-3: font-family マッチングとフォールバック
-- 019-4: font-weight / font-style バリアント選択
+- Phase 1: @font-face パースと URL 抽出 ✅ 完了（PR #44）
+- Phase 2: フォントフェッチとデコード — TTF/OTF/WOFF1 ✅、WOFF2 ❌
+- Phase 3: font-family マッチングとフォールバック ✅ 完了（PR #44）
+- Phase 4: font-weight / font-style バリアント選択 ❌
+
+## 子 issue
+
+- [019-1](019-1-woff2-decode.md): WOFF2 デコード対応（brotli 展開）
+- [019-2](019-2-font-weight-style-matching.md): font-weight / font-style バリアント選択
 
 ## 受け入れ条件
 
