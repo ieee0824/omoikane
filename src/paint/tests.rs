@@ -2555,6 +2555,31 @@ fn acid2_output_dir() -> PathBuf {
     fixture_output_dir("acid2")
 }
 
+// Issue 026: CSS パースエラーがあってもレンダリングが中断しない
+#[test]
+fn renders_despite_unparseable_css() {
+    // <style> に構文的に無効なCSS（ルール0件になるケース）を含む HTML
+    let html = r#"<html><head>
+        <style>@@@@invalid css garbage !!!</style>
+        <style>body { margin: 0; } div { background-color: #ff0000; width: 4px; height: 4px; }</style>
+    </head><body><div></div></body></html>"#;
+    let document = TreeBuilder::parse(html).document();
+    let canvas = render_document(
+        &document,
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 100.0,
+            height: 100.0,
+        },
+    );
+    // パース不能な CSS があっても Result::Ok が返る
+    assert!(canvas.is_ok(), "render_document should succeed even if one <style> block is unparseable");
+    // パース可能なCSSは適用されている
+    let canvas = canvas.unwrap();
+    assert_eq!(canvas.pixel(0, 0), Some(Color::rgb(255, 0, 0)));
+}
+
 fn fixture_dir(fixture: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("tests/fixtures")

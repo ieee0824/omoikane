@@ -625,7 +625,9 @@ pub fn render_document_with_url(
 
     let mut parsed_sheets = Vec::new();
     for css_text in stylesheet::extract_author_stylesheets(document, base_url)? {
-        let sheet = stylesheet::parse_stylesheet_forgiving(&css_text)?;
+        let Ok(sheet) = stylesheet::parse_stylesheet_forgiving(&css_text) else {
+            continue; // パース失敗したCSSはスキップ
+        };
         parsed_sheets.push(sheet);
     }
     for sheet in &parsed_sheets {

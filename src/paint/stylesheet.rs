@@ -492,11 +492,7 @@ pub(crate) fn parse_stylesheet_forgiving(input: &str) -> Result<Stylesheet, Pain
         }
     }
 
-    if rules.is_empty() {
-        Err(PaintError::InvalidStylesheet)
-    } else {
-        Ok(Stylesheet { rules })
-    }
+    Ok(Stylesheet { rules })
 }
 
 pub(crate) fn salvage_style_rule(input: &str) -> Option<crate::css::StyleRule> {
