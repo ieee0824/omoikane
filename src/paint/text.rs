@@ -213,7 +213,9 @@ pub(crate) fn paint_text_with_font(
     let mut cursor_x = rect.x;
     let mut previous_char: Option<(char, usize)> = None;
 
-    for ch in text.chars() {
+    let chars: Vec<char> = text.chars().collect();
+    let char_count = chars.len();
+    for (i, &ch) in chars.iter().enumerate() {
         let (font_index, glyph, advance_x) = rasterize_with_fallback(fonts, ch, font_size);
         if let Some((prev, prev_font_index)) = previous_char
             && prev_font_index == font_index
@@ -223,8 +225,6 @@ pub(crate) fn paint_text_with_font(
 
         if let Some(glyph) = glyph {
             if glyph.width > 0 && glyph.height > 0 && !glyph.bitmap.is_empty() {
-                // Calculate glyph position
-                // offset_y is from baseline to bitmap top (typically negative for glyphs above baseline)
                 let glyph_x = cursor_x + glyph.offset_x;
                 let glyph_y = baseline_y + glyph.offset_y;
 
@@ -240,8 +240,11 @@ pub(crate) fn paint_text_with_font(
             }
         }
 
-        // Keep text flow moving even if a glyph cannot be rasterized by any candidate font.
-        cursor_x += advance_x + letter_spacing;
+        cursor_x += advance_x;
+        // Apply letter-spacing between characters only (not after the last one)
+        if i + 1 < char_count {
+            cursor_x += letter_spacing;
+        }
         previous_char = Some((ch, font_index));
     }
 }
