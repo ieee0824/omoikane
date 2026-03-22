@@ -285,7 +285,7 @@ fn img_width_and_height_attributes_define_intrinsic_size() {
     for stylesheet in extract_author_stylesheets(&document, None).unwrap() {
         resolver.add_stylesheet(
             Origin::Author,
-            parse_stylesheet_forgiving(&stylesheet).unwrap(),
+            parse_stylesheet_forgiving(&stylesheet),
         );
     }
     let layout = layout_tree(
@@ -349,7 +349,7 @@ fn img_single_dimension_attribute_preserves_aspect_ratio() {
     for stylesheet in extract_author_stylesheets(&document, None).unwrap() {
         resolver.add_stylesheet(
             Origin::Author,
-            parse_stylesheet_forgiving(&stylesheet).unwrap(),
+            parse_stylesheet_forgiving(&stylesheet),
         );
     }
     let layout = layout_tree(
@@ -405,7 +405,7 @@ fn img_uses_alt_text_when_image_fetch_fails() {
     for stylesheet in extract_author_stylesheets(&document, None).unwrap() {
         resolver.add_stylesheet(
             Origin::Author,
-            parse_stylesheet_forgiving(&stylesheet).unwrap(),
+            parse_stylesheet_forgiving(&stylesheet),
         );
     }
     let layout = layout_tree(
@@ -557,7 +557,7 @@ fn zero_height_border_box_paints_top_and_bottom_bands_across_full_width() {
 #[test]
 fn forgiving_parse_preserves_valid_declarations_in_partially_invalid_rule() {
     let stylesheet = "#eyes-b { float: left; width: 10em; height: 2em; background: fixed url(data:image/png;base64,AAAA); border-left: solid 1em black; border-right: solid 1em red; }";
-    let parsed = parse_stylesheet_forgiving(stylesheet).unwrap();
+    let parsed = parse_stylesheet_forgiving(stylesheet);
     let crate::css::Rule::Style(rule) = parsed.rules.into_iter().next().unwrap() else {
         panic!("expected style rule");
     };
@@ -676,7 +676,7 @@ fn nested_object_fallback_preserves_fixed_background_on_inline_image_fragment() 
     for stylesheet in extract_author_stylesheets(&document, None).unwrap() {
         resolver.add_stylesheet(
             Origin::Author,
-            parse_stylesheet_forgiving(&stylesheet).unwrap(),
+            parse_stylesheet_forgiving(&stylesheet),
         );
     }
     let layout = crate::layout::layout_tree(
@@ -1340,7 +1340,7 @@ fn official_reference_fixture_only_lays_out_hello_world_text() {
     for stylesheet in extract_author_stylesheets(&document, None).unwrap() {
         resolver.add_stylesheet(
             Origin::Author,
-            parse_stylesheet_forgiving(&stylesheet).unwrap(),
+            parse_stylesheet_forgiving(&stylesheet),
         );
     }
 
@@ -1369,7 +1369,7 @@ fn acid2_eyes_layout_contains_expected_boxes() {
     for stylesheet in extract_author_stylesheets(&acid2_document, None).unwrap() {
         resolver.add_stylesheet(
             Origin::Author,
-            parse_stylesheet_forgiving(&stylesheet).unwrap(),
+            parse_stylesheet_forgiving(&stylesheet),
         );
     }
 
@@ -1429,7 +1429,7 @@ fn acid2_eyes_inline_layer_stays_at_same_origin_as_float_and_block_layers() {
     for stylesheet in extract_author_stylesheets(&acid2_document, None).unwrap() {
         resolver.add_stylesheet(
             Origin::Author,
-            parse_stylesheet_forgiving(&stylesheet).unwrap(),
+            parse_stylesheet_forgiving(&stylesheet),
         );
     }
 
@@ -1492,7 +1492,7 @@ fn acid2_eyes_block_layer_stays_overlapping_float_layer() {
     for stylesheet in extract_author_stylesheets(&acid2_document, None).unwrap() {
         resolver.add_stylesheet(
             Origin::Author,
-            parse_stylesheet_forgiving(&stylesheet).unwrap(),
+            parse_stylesheet_forgiving(&stylesheet),
         );
     }
 
@@ -1527,7 +1527,7 @@ fn acid2_smile_layout_contains_positioned_and_floated_descendants() {
     for stylesheet in extract_author_stylesheets(&acid2_document, None).unwrap() {
         resolver.add_stylesheet(
             Origin::Author,
-            parse_stylesheet_forgiving(&stylesheet).unwrap(),
+            parse_stylesheet_forgiving(&stylesheet),
         );
     }
 
@@ -1616,7 +1616,7 @@ fn acid2_lower_face_boxes_keep_expected_vertical_order() {
     for stylesheet in extract_author_stylesheets(&acid2_document, None).unwrap() {
         resolver.add_stylesheet(
             Origin::Author,
-            parse_stylesheet_forgiving(&stylesheet).unwrap(),
+            parse_stylesheet_forgiving(&stylesheet),
         );
     }
 
@@ -1667,7 +1667,7 @@ fn acid2_empty_block_creates_large_gap_before_smile() {
     for stylesheet in extract_author_stylesheets(&acid2_document, None).unwrap() {
         resolver.add_stylesheet(
             Origin::Author,
-            parse_stylesheet_forgiving(&stylesheet).unwrap(),
+            parse_stylesheet_forgiving(&stylesheet),
         );
     }
 
@@ -1708,7 +1708,7 @@ fn acid2_empty_block_starts_shortly_after_nose() {
     for stylesheet in extract_author_stylesheets(&acid2_document, None).unwrap() {
         resolver.add_stylesheet(
             Origin::Author,
-            parse_stylesheet_forgiving(&stylesheet).unwrap(),
+            parse_stylesheet_forgiving(&stylesheet),
         );
     }
 
@@ -1749,7 +1749,7 @@ fn acid2_second_line_absolute_shrink_wraps_float() {
     for stylesheet in extract_author_stylesheets(&acid2_document, None).unwrap() {
         resolver.add_stylesheet(
             Origin::Author,
-            parse_stylesheet_forgiving(&stylesheet).unwrap(),
+            parse_stylesheet_forgiving(&stylesheet),
         );
     }
 
@@ -1786,7 +1786,7 @@ fn acid2_smile_nested_float_keeps_block_width_source_descendant() {
     for stylesheet in extract_author_stylesheets(&acid2_document, None).unwrap() {
         resolver.add_stylesheet(
             Origin::Author,
-            parse_stylesheet_forgiving(&stylesheet).unwrap(),
+            parse_stylesheet_forgiving(&stylesheet),
         );
     }
 
@@ -1835,7 +1835,7 @@ fn acid2_smile_nested_float_uses_side_borders_only_on_span_and_top_bottom_on_em(
     for stylesheet in extract_author_stylesheets(&document, None).unwrap() {
         resolver.add_stylesheet(
             Origin::Author,
-            parse_stylesheet_forgiving(&stylesheet).unwrap(),
+            parse_stylesheet_forgiving(&stylesheet),
         );
     }
 
@@ -1940,7 +1940,7 @@ fn acid2_eyes_b_rule_survives_forgiving_stylesheet_parse() {
     let joined = stylesheets.join("\n");
 
     assert!(joined.contains("#eyes-b"));
-    let parsed = parse_stylesheet_forgiving(&joined).unwrap();
+    let parsed = parse_stylesheet_forgiving(&joined);
     let mut found = false;
     for rule in parsed.rules {
         let crate::css::Rule::Style(rule) = rule else {
@@ -1997,7 +1997,7 @@ fn acid2_link_stylesheet_overrides_picture_background_to_none() {
     for stylesheet in &stylesheets {
         resolver.add_stylesheet(
             Origin::Author,
-            parse_stylesheet_forgiving(stylesheet).unwrap(),
+            parse_stylesheet_forgiving(stylesheet),
         );
     }
     let picture = find_first_descendant_by_class(&document, "picture").unwrap();
@@ -2025,7 +2025,7 @@ fn acid2_chin_negative_margin_pulls_it_toward_smile() {
     for stylesheet in extract_author_stylesheets(&acid2_document, None).unwrap() {
         resolver.add_stylesheet(
             Origin::Author,
-            parse_stylesheet_forgiving(&stylesheet).unwrap(),
+            parse_stylesheet_forgiving(&stylesheet),
         );
     }
     let layout = crate::layout::layout_tree(
@@ -2071,7 +2071,7 @@ fn acid2_chin_height_includes_strut_from_parent_line_height() {
     for stylesheet in extract_author_stylesheets(&acid2_document, None).unwrap() {
         resolver.add_stylesheet(
             Origin::Author,
-            parse_stylesheet_forgiving(&stylesheet).unwrap(),
+            parse_stylesheet_forgiving(&stylesheet),
         );
     }
     let layout = crate::layout::layout_tree(
@@ -2102,7 +2102,7 @@ fn stray_semicolon_between_rules_invalidates_next_selector() {
             .a { color: red; };
             .a { height: 99px; }
         "#;
-    let parsed = parse_stylesheet_forgiving(css).unwrap();
+    let parsed = parse_stylesheet_forgiving(css);
     // The stray ';' after '}' is consumed into the next rule's selector
     // prelude, making it '; .a' which is invalid. The rule is dropped.
     let has_height = parsed.rules.iter().any(|rule| {
@@ -2126,7 +2126,7 @@ fn acid2_ul_table_cells_cover_red_background() {
     for stylesheet in extract_author_stylesheets(&acid2_document, None).unwrap() {
         resolver.add_stylesheet(
             Origin::Author,
-            parse_stylesheet_forgiving(&stylesheet).unwrap(),
+            parse_stylesheet_forgiving(&stylesheet),
         );
     }
     let layout = crate::layout::layout_tree(
@@ -2163,7 +2163,7 @@ fn acid2_eyes_positioned_above_nose() {
     for stylesheet in extract_author_stylesheets(&acid2_document, None).unwrap() {
         resolver.add_stylesheet(
             Origin::Author,
-            parse_stylesheet_forgiving(&stylesheet).unwrap(),
+            parse_stylesheet_forgiving(&stylesheet),
         );
     }
     let layout = crate::layout::layout_tree(
@@ -2207,7 +2207,7 @@ fn acid2_p_bad_has_margin_top_from_adjacent_sibling_selector() {
     for stylesheet in extract_author_stylesheets(&document, None).unwrap() {
         resolver.add_stylesheet(
             Origin::Author,
-            parse_stylesheet_forgiving(&stylesheet).unwrap(),
+            parse_stylesheet_forgiving(&stylesheet),
         );
     }
     let p_bad = find_first_descendant_by_class(&document, "bad").unwrap();
@@ -2231,7 +2231,7 @@ fn acid2_parser_has_yellow_background_and_correct_size() {
     for stylesheet in extract_author_stylesheets(&document, None).unwrap() {
         resolver.add_stylesheet(
             Origin::Author,
-            parse_stylesheet_forgiving(&stylesheet).unwrap(),
+            parse_stylesheet_forgiving(&stylesheet),
         );
     }
     let parser = find_first_descendant_by_class(&document, "parser").unwrap();
@@ -2269,7 +2269,7 @@ fn acid2_forehead_background_image_decodes_to_yellow_pixel() {
     for stylesheet in extract_author_stylesheets(&document, None).unwrap() {
         resolver.add_stylesheet(
             Origin::Author,
-            parse_stylesheet_forgiving(&stylesheet).unwrap(),
+            parse_stylesheet_forgiving(&stylesheet),
         );
     }
     let forehead = find_first_descendant_by_class(&document, "forehead").unwrap();
@@ -2295,7 +2295,7 @@ fn acid2_nose_inner_div_has_before_and_after_pseudo_with_border() {
     for stylesheet in extract_author_stylesheets(&document, None).unwrap() {
         resolver.add_stylesheet(
             Origin::Author,
-            parse_stylesheet_forgiving(&stylesheet).unwrap(),
+            parse_stylesheet_forgiving(&stylesheet),
         );
     }
     // .nose > div > div is the inner red square
@@ -2410,7 +2410,7 @@ fn acid2_fixture_matches_official_reference_rendering() {
     for stylesheet in extract_author_stylesheets(&acid2_document, None).unwrap() {
         acid2_resolver.add_stylesheet(
             Origin::Author,
-            parse_stylesheet_forgiving(&stylesheet).unwrap(),
+            parse_stylesheet_forgiving(&stylesheet),
         );
     }
     let mut acid2_layout = crate::layout::layout_tree(
@@ -2432,7 +2432,7 @@ fn acid2_fixture_matches_official_reference_rendering() {
     for stylesheet in extract_author_stylesheets(&reference_document, None).unwrap() {
         reference_resolver.add_stylesheet(
             Origin::Author,
-            parse_stylesheet_forgiving(&stylesheet).unwrap(),
+            parse_stylesheet_forgiving(&stylesheet),
         );
     }
     let reference_layout = crate::layout::layout_tree(
@@ -3496,7 +3496,7 @@ fn debug_hello_world_layout() {
     for stylesheet in extract_author_stylesheets(&document, None).unwrap() {
         resolver.add_stylesheet(
             Origin::Author,
-            parse_stylesheet_forgiving(&stylesheet).unwrap(),
+            parse_stylesheet_forgiving(&stylesheet),
         );
     }
 
@@ -3557,7 +3557,7 @@ fn debug_acid2_hello_world_layout() {
     for stylesheet in extract_author_stylesheets(&document, None).unwrap() {
         resolver.add_stylesheet(
             Origin::Author,
-            parse_stylesheet_forgiving(&stylesheet).unwrap(),
+            parse_stylesheet_forgiving(&stylesheet),
         );
     }
 
@@ -3643,7 +3643,7 @@ fn debug_blog_ast_moe_layout_snapshot() {
     for stylesheet in extract_author_stylesheets(&document, Some(&base_url)).unwrap() {
         resolver.add_stylesheet(
             Origin::Author,
-            parse_stylesheet_forgiving(&stylesheet).unwrap(),
+            parse_stylesheet_forgiving(&stylesheet),
         );
     }
 
@@ -3827,7 +3827,7 @@ fn debug_reference_paint() {
     for stylesheet in extract_author_stylesheets(&document, None).unwrap() {
         resolver.add_stylesheet(
             Origin::Author,
-            parse_stylesheet_forgiving(&stylesheet).unwrap(),
+            parse_stylesheet_forgiving(&stylesheet),
         );
     }
 
@@ -3981,7 +3981,7 @@ fn debug_write_acid2_official_reference_outputs() {
     for stylesheet in extract_author_stylesheets(&acid2_document, None).unwrap() {
         acid2_resolver.add_stylesheet(
             Origin::Author,
-            parse_stylesheet_forgiving(&stylesheet).unwrap(),
+            parse_stylesheet_forgiving(&stylesheet),
         );
     }
     let mut acid2_layout = crate::layout::layout_tree(
@@ -4003,7 +4003,7 @@ fn debug_write_acid2_official_reference_outputs() {
     for stylesheet in extract_author_stylesheets(&reference_document, None).unwrap() {
         reference_resolver.add_stylesheet(
             Origin::Author,
-            parse_stylesheet_forgiving(&stylesheet).unwrap(),
+            parse_stylesheet_forgiving(&stylesheet),
         );
     }
     let reference_layout = crate::layout::layout_tree(

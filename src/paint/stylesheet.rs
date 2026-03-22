@@ -450,9 +450,9 @@ pub(crate) fn fetch_stylesheet_by_url(
     std::str::from_utf8(body).ok().map(|s| s.to_owned())
 }
 
-pub(crate) fn parse_stylesheet_forgiving(input: &str) -> Result<Stylesheet, PaintError> {
+pub(crate) fn parse_stylesheet_forgiving(input: &str) -> Stylesheet {
     if let Ok(stylesheet) = parse_stylesheet(input) {
-        return Ok(stylesheet);
+        return stylesheet;
     }
 
     let mut rules = Vec::new();
@@ -492,7 +492,7 @@ pub(crate) fn parse_stylesheet_forgiving(input: &str) -> Result<Stylesheet, Pain
         }
     }
 
-    Ok(Stylesheet { rules })
+    Stylesheet { rules }
 }
 
 pub(crate) fn salvage_style_rule(input: &str) -> Option<crate::css::StyleRule> {
