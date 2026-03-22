@@ -93,6 +93,7 @@ fn collect_inline_segments(
                     .map(|parent| resolver.computed_style(&parent))
                     .unwrap_or_default();
                 let text = normalize_text(&text, white_space(&parent_style));
+                let text = apply_text_transform_layout(&text, &parent_style);
                 if !text.is_empty() {
                     out.push(InlineSegment {
                         node: node.clone(),

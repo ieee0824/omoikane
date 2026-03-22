@@ -299,11 +299,6 @@ fn expand_border_side_shorthand(name: &str, value: Value, important: bool) -> Ve
     if let Some(style) = style {
         declarations.push(Declaration {
             name: format!("{name}-style"),
-            value: style.clone(),
-            important,
-        });
-        declarations.push(Declaration {
-            name: "border-style".to_string(),
             value: style,
             important,
         });
@@ -311,11 +306,6 @@ fn expand_border_side_shorthand(name: &str, value: Value, important: bool) -> Ve
     if let Some(color) = color {
         declarations.push(Declaration {
             name: format!("{name}-color"),
-            value: color.clone(),
-            important,
-        });
-        declarations.push(Declaration {
-            name: "border-color".to_string(),
             value: color,
             important,
         });
