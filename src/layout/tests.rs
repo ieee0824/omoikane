@@ -3140,6 +3140,63 @@ fn inside_marker_position() {
     assert!(!marker.outside, "list-style-position:inside should set outside=false");
 }
 
+/// text-transform must be applied even when the text node is the direct child of
+/// an element that itself is passed as the root to layout_tree (i.e., the text
+/// node is handled via the NodeType::Text branch of collect_inline_segments).
+#[test]
+fn text_transform_applied_to_direct_text_node() {
+    let document = NodeHandle::document();
+    let html = NodeHandle::element("html");
+    let body = NodeHandle::element("body");
+    let p = NodeHandle::element("p");
+    let text = NodeHandle::text("hello world");
+    document.append_child(html.clone());
+    html.append_child(body.clone());
+    body.append_child(p.clone());
+    p.append_child(text);
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet("body { margin: 0; } p { text-transform: uppercase; }").unwrap(),
+    );
+
+    let layout = layout_tree(
+        &document,
+        &mut resolver,
+        Rect { x: 0.0, y: 0.0, width: 500.0, height: 0.0 },
+    )
+    .unwrap();
+
+    // Collect all text fragments from the layout tree
+    fn collect_text(layout: &LayoutBox, out: &mut Vec<String>) {
+        for line in &layout.lines {
+            for fragment in &line.fragments {
+                if let Some(t) = fragment.text() {
+                    out.push(t.to_string());
+                }
+            }
+        }
+        for child in &layout.children {
+            collect_text(child, out);
+        }
+    }
+
+    let mut texts = Vec::new();
+    collect_text(&layout, &mut texts);
+    let combined = texts.join("");
+
+    assert!(
+        !combined.is_empty(),
+        "expected text fragments in layout, got none"
+    );
+    assert_eq!(
+        combined, "HELLO WORLD",
+        "text-transform:uppercase should uppercase the text node content, got {:?}",
+        combined
+    );
+}
+
 fn collect_markers_by_tag<'a>(layout: &'a LayoutBox, tag: &str, out: &mut Vec<String>) {
     if layout.node.tag_name().as_deref() == Some(tag) {
         if let Some(marker) = &layout.marker {

@@ -581,6 +581,36 @@ mod tests {
             && matches!(&decl.value, Value::Keyword(value) if value == "yellow")));
     }
 
+    /// `border-top: 1px solid red` must NOT emit global `border-style` / `border-color`
+    /// properties, which would otherwise override the other three sides.
+    #[test]
+    fn border_side_shorthand_does_not_emit_global_border_style_or_color() {
+        let stylesheet = parse_stylesheet("div { border-top: 1px solid red; }").unwrap();
+        let Rule::Style(rule) = &stylesheet.rules[0] else {
+            panic!("expected style rule");
+        };
+
+        // Must NOT contain global border-style or border-color
+        assert!(
+            !rule.declarations.iter().any(|decl| decl.name == "border-style"),
+            "border-top shorthand should NOT emit global 'border-style'"
+        );
+        assert!(
+            !rule.declarations.iter().any(|decl| decl.name == "border-color"),
+            "border-top shorthand should NOT emit global 'border-color'"
+        );
+
+        // Must still contain the side-specific properties
+        assert!(rule.declarations.iter().any(|decl| decl.name == "border-top-style"
+            && matches!(&decl.value, Value::Keyword(v) if v == "solid")));
+        assert!(rule.declarations.iter().any(|decl| decl.name == "border-top-color"
+            && matches!(&decl.value, Value::Keyword(v) if v == "red")));
+        assert!(rule.declarations.iter().any(
+            |decl| decl.name == "border-top-width"
+                && matches!(&decl.value, Value::Length(v, unit) if *v == 1.0 && unit == "px")
+        ));
+    }
+
     #[test]
     fn expands_border_style_box_shorthand() {
         let stylesheet = parse_stylesheet("div { border-style: none solid; }").unwrap();

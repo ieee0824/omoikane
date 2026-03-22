@@ -46,7 +46,15 @@ pub(crate) fn paint_text(
                         );
                     } else {
                         // Fallback: placeholder rectangles
-                        paint_text_placeholder(canvas, fragment.rect, display_text, font_size, color, clip);
+                        paint_text_placeholder(
+                            canvas,
+                            fragment.rect,
+                            display_text,
+                            font_size,
+                            color,
+                            clip,
+                            fragment.metrics.letter_spacing,
+                        );
                     }
 
                     // Draw text decorations after text
@@ -323,6 +331,10 @@ pub(crate) fn is_cjk_preferred_character(ch: char) -> bool {
 }
 
 /// Paint text as placeholder rectangles (fallback when no font available).
+///
+/// `letter_spacing` is added between characters (after each character advance),
+/// matching the CSS `letter-spacing` property so that the placeholder width
+/// stays consistent with the layout-computed text width.
 pub(crate) fn paint_text_placeholder(
     canvas: &mut Canvas,
     rect: Rect,
@@ -330,13 +342,16 @@ pub(crate) fn paint_text_placeholder(
     font_size: f32,
     color: Color,
     clip: Option<Rect>,
+    letter_spacing: f32,
 ) {
     let mut cursor_x = rect.x;
     let advance = (font_size * 0.6).max(1.0); // Approximate advance
     let glyph_height = (font_size * 0.7).max(1.0);
     let glyph_y = rect.y + (font_size - glyph_height) * 0.5;
 
-    for ch in text.chars() {
+    let chars: Vec<char> = text.chars().collect();
+    let char_count = chars.len();
+    for (i, ch) in chars.iter().enumerate() {
         if !ch.is_whitespace() {
             canvas.fill_rect_clipped(
                 Rect {
@@ -350,6 +365,9 @@ pub(crate) fn paint_text_placeholder(
             );
         }
         cursor_x += advance;
+        if i + 1 < char_count {
+            cursor_x += letter_spacing;
+        }
     }
 }
 
@@ -442,7 +460,8 @@ pub(crate) fn paint_list_marker_placeholder(
             width: 0.0,
             height: font_size,
         };
-        paint_text_placeholder(canvas, rect, &marker.text, font_size, color, clip);
+        // List markers do not have letter-spacing applied, so pass 0.0.
+        paint_text_placeholder(canvas, rect, &marker.text, font_size, color, clip, 0.0);
     }
 }
 

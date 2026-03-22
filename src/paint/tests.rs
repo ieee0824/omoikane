@@ -5144,6 +5144,39 @@ fn text_marker_placeholder_renders_per_character_rectangles() {
     );
 }
 
+/// `paint_text_placeholder` with a positive letter_spacing should spread pixels
+/// further right than with zero letter_spacing for the same text.
+#[test]
+fn placeholder_letter_spacing_shifts_pixels_right() {
+    let font_size = 16.0_f32;
+    let color = Color::rgb(0, 0, 0);
+    let canvas_w = 300_u32;
+    let canvas_h = 30_u32;
+    let rect = Rect { x: 0.0, y: 0.0, width: canvas_w as f32, height: canvas_h as f32 };
+
+    let rightmost_filled = |canvas: &Canvas| -> u32 {
+        (0..canvas_w)
+            .rev()
+            .find(|&x| (0..canvas_h).any(|y| canvas.pixel(x, y).map_or(false, |p| p.a > 0)))
+            .unwrap_or(0)
+    };
+
+    let mut canvas_no_spacing = Canvas::new(canvas_w, canvas_h);
+    paint_text_placeholder(&mut canvas_no_spacing, rect, "hello", font_size, color, None, 0.0);
+    let right_no_spacing = rightmost_filled(&canvas_no_spacing);
+
+    let mut canvas_with_spacing = Canvas::new(canvas_w, canvas_h);
+    paint_text_placeholder(&mut canvas_with_spacing, rect, "hello", font_size, color, None, 20.0);
+    let right_with_spacing = rightmost_filled(&canvas_with_spacing);
+
+    assert!(
+        right_with_spacing > right_no_spacing,
+        "letter_spacing=20 (rightmost={}) should extend further than letter_spacing=0 (rightmost={})",
+        right_with_spacing,
+        right_no_spacing,
+    );
+}
+
 /// Decimal marker should NOT look like a single bullet square:
 /// it should spread pixels across a wider x range than a bullet marker would.
 #[test]
