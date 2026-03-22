@@ -10,7 +10,7 @@ use crate::dom::{Node, NodeHandle, NodeType};
 use rusqlite::{Connection, params};
 
 use super::{
-    PseudoElement, Rule, Specificity, Stylesheet, Value, evaluate_media_query,
+    MediaQuery, PseudoElement, Rule, Specificity, Stylesheet, Value, evaluate_media_query,
     matches_selector_with_pseudo, parse_media_query_list, specificity,
 };
 
@@ -99,6 +99,15 @@ pub struct StyleResolver {
     viewport_height: f32,
     /// `true` when the system is in dark mode (affects `prefers-color-scheme` evaluation).
     color_scheme_dark: bool,
+    /// Cache of parsed media query lists keyed by the normalized (trimmed) prelude string.
+    ///
+    /// Avoids re-parsing the same `@media` prelude string for every node that
+    /// is matched against the stylesheet.  The cache is intentionally separate
+    /// from the per-node `cache` so it survives `cache.clear()` calls (e.g.
+    /// after `set_color_scheme_dark`).  The parsed `Vec<MediaQuery>` is stable:
+    /// it depends only on the prelude text, not on viewport dimensions or
+    /// color-scheme settings.
+    media_query_cache: HashMap<String, Vec<MediaQuery>>,
 }
 
 static UNSUPPORTED_CSS_LOGGED: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
@@ -125,6 +134,15 @@ impl StyleResolver {
     /// Creates a new style resolver.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Returns the number of distinct `@media` prelude strings currently held
+    /// in the parse cache.
+    ///
+    /// Primarily useful for testing and diagnostic purposes.
+    #[cfg(test)]
+    pub(crate) fn media_query_cache_len(&self) -> usize {
+        self.media_query_cache.len()
     }
 
     /// Sets the root element's computed font-size in px.
@@ -228,7 +246,7 @@ impl StyleResolver {
     }
 
     fn compute_style(
-        &self,
+        &mut self,
         node: &NodeHandle,
         parent_style: Option<&ComputedStyle>,
     ) -> ComputedStyle {
@@ -236,13 +254,16 @@ impl StyleResolver {
     }
 
     fn compute_style_with_pseudo(
-        &self,
+        &mut self,
         node: &NodeHandle,
         parent_style: Option<&ComputedStyle>,
         pseudo: Option<PseudoElement>,
     ) -> ComputedStyle {
         let mut candidates = Vec::new();
         let mut source_order = 0usize;
+        let viewport_width = self.viewport_width;
+        let viewport_height = self.viewport_height;
+        let color_scheme_dark = self.color_scheme_dark;
 
         for input in &self.stylesheets {
             collect_rule_candidates(
@@ -252,9 +273,10 @@ impl StyleResolver {
                 pseudo,
                 &mut source_order,
                 &mut candidates,
-                self.viewport_width,
-                self.viewport_height,
-                self.color_scheme_dark,
+                viewport_width,
+                viewport_height,
+                color_scheme_dark,
+                &mut self.media_query_cache,
             );
         }
 
@@ -436,6 +458,7 @@ fn collect_rule_candidates(
     viewport_width: f32,
     viewport_height: f32,
     color_scheme_dark: bool,
+    media_cache: &mut HashMap<String, Vec<MediaQuery>>,
 ) {
     if node.node_type() != NodeType::Element {
         return;
@@ -476,6 +499,7 @@ fn collect_rule_candidates(
                             viewport_width,
                             viewport_height,
                             color_scheme_dark,
+                            media_cache,
                         )
                     } else {
                         // Non-media at-rules (e.g. @keyframes, @supports) are passed through.
@@ -492,6 +516,7 @@ fn collect_rule_candidates(
                             viewport_width,
                             viewport_height,
                             color_scheme_dark,
+                            media_cache,
                         );
                     } else {
                         // Count the rules inside for correct source_order numbering.
@@ -506,25 +531,30 @@ fn collect_rule_candidates(
 }
 
 /// Returns `true` when at least one query in a comma-separated media query list
-/// matches the given viewport.  Falls back to `true` when the list cannot be
-/// parsed (forward-compatible behaviour).
+/// matches the given viewport.  Falls back to `false` when the list cannot be
+/// parsed (conservative, forward-compatible behaviour).
+///
+/// The `cache` parameter is a mutable reference to a parse-result cache keyed
+/// by the normalized (trimmed) prelude string.  On a cache miss the prelude is
+/// parsed and the result is stored so that subsequent calls with the same string
+/// skip parsing.
 fn media_query_matches(
     prelude: &str,
     viewport_width: f32,
     viewport_height: f32,
     color_scheme_dark: bool,
+    cache: &mut HashMap<String, Vec<MediaQuery>>,
 ) -> bool {
     let prelude = prelude.trim();
-    // Empty prelude — treat as unconditional (matches anything).
     if prelude.is_empty() {
         return true;
     }
-    match parse_media_query_list(prelude) {
-        Some(queries) => queries
-            .iter()
-            .any(|q| evaluate_media_query(q, viewport_width, viewport_height, color_scheme_dark)),
-        None => false,
-    }
+    let queries = cache
+        .entry(prelude.to_owned())
+        .or_insert_with(|| parse_media_query_list(prelude).unwrap_or_default());
+    queries
+        .iter()
+        .any(|q| evaluate_media_query(q, viewport_width, viewport_height, color_scheme_dark))
 }
 
 /// Counts the total number of declarations inside a rule list (used for
