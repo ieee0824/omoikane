@@ -135,6 +135,56 @@ pub enum Overflow {
     Hidden,
 }
 
+/// Minimal style information carried by each inline fragment.
+///
+/// Rather than cloning the full `ComputedStyle` (a `BTreeMap`) for every
+/// fragment produced from a text node, we extract only the properties needed
+/// by the paint stage.  This reduces per-fragment memory allocation when a
+/// text run is split into many pieces (e.g. word-wrapped lines).
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct FragmentStyle {
+    /// CSS `color` value (raw keyword or color string) from the computed style.
+    /// May come from an explicit declaration, inheritance, or an initial value.
+    pub color: Option<String>,
+    /// CSS `text-transform` keyword from the computed style (pre-normalized to lowercase).
+    /// May reflect an explicitly set value or one inherited from an ancestor.
+    pub text_transform: Option<String>,
+    /// CSS `text-decoration-line` keyword from the computed style (pre-normalized to lowercase).
+    /// May include values originating from explicit declarations or initial defaults.
+    pub text_decoration_line: Option<String>,
+    /// CSS `text-decoration-color` value (raw string) from the computed style.
+    pub text_decoration_color: Option<String>,
+}
+
+impl FragmentStyle {
+    /// Build a `FragmentStyle` from a full `ComputedStyle`.
+    /// Keywords for `text-transform` and `text-decoration-line` are pre-normalized
+    /// to lowercase to avoid per-paint allocation.
+    pub fn from_computed(style: &ComputedStyle) -> Self {
+        use crate::css::ComputedValue;
+
+        let extract_str = |key: &str| -> Option<String> {
+            match style.get(key) {
+                Some(ComputedValue::Keyword(s)) => Some(s.clone()),
+                Some(ComputedValue::Color(s)) => Some(s.clone()),
+                Some(ComputedValue::String(s)) => Some(s.clone()),
+                _ => None,
+            }
+        };
+
+        let normalize_lower = |key: &str| -> Option<String> {
+            extract_str(key).map(|s| s.to_ascii_lowercase())
+        };
+
+        Self {
+            color: extract_str("color"),
+            text_transform: normalize_lower("text-transform"),
+            text_decoration_line: normalize_lower("text-decoration-line"),
+            text_decoration_color: extract_str("text-decoration-color"),
+        }
+    }
+}
+
 /// A laid out fragment of inline text.
 #[derive(Debug, Clone, PartialEq)]
 pub struct InlineFragment {
@@ -143,11 +193,11 @@ pub struct InlineFragment {
     pub rect: Rect,
     pub metrics: FontMetrics,
     pub vertical_align: VerticalAlign,
-    /// Computed style of the element that owns this fragment.
+    /// Minimal style information extracted from the element's `ComputedStyle`.
     /// Used by the paint stage to apply per-fragment `text-transform`,
     /// `text-decoration`, and `color` rather than inheriting from the
     /// containing block's style.
-    pub style: ComputedStyle,
+    pub style: FragmentStyle,
 }
 
 /// A laid out inline fragment payload.

@@ -39,7 +39,7 @@ pub(crate) use image::{
 };
 #[allow(unused_imports)]
 pub(crate) use text::{
-    paint_text, paint_text_with_font, paint_text_placeholder, text_transform_value,
+    paint_text, paint_text_with_font, paint_text_placeholder,
     apply_text_transform, TextDecorationLines, text_decoration_line, text_decoration_color,
     paint_text_decoration, paint_list_marker, paint_list_marker_placeholder, load_text_fonts,
     rasterize_with_fallback, is_cjk_preferred_character, paint_inline_image_fragment,
