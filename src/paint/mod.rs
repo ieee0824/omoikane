@@ -96,6 +96,22 @@ pub enum DataUri {
     Binary { mime_type: String, data: Vec<u8> },
 }
 
+/// A color stop in a CSS gradient.
+#[derive(Debug, Clone, PartialEq)]
+struct ColorStop {
+    color: Color,
+    /// Position in the range [0.0, 1.0].
+    position: f32,
+}
+
+/// A parsed CSS `linear-gradient()`.
+#[derive(Debug, Clone, PartialEq)]
+struct LinearGradient {
+    /// Gradient angle in degrees (0° = to top, 90° = to right, 180° = to bottom, 270° = to left).
+    angle_deg: f32,
+    stops: Vec<ColorStop>,
+}
+
 /// ボーダー描画で使う領域区分（角丸ボーダー時の色割り当て用）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum BorderRegion {
@@ -1966,6 +1982,336 @@ fn parse_background_image_value(value: &str) -> Option<Image> {
     })
 }
 
+/// Splits gradient arguments at the top-level commas (skipping nested parens).
+fn split_gradient_args(args: &str) -> Vec<&str> {
+    let mut parts = Vec::new();
+    let mut depth: usize = 0;
+    let mut start = 0;
+    for (i, ch) in args.char_indices() {
+        match ch {
+            '(' => depth += 1,
+            ')' => {
+                if depth > 0 {
+                    depth -= 1;
+                }
+            }
+            ',' if depth == 0 => {
+                parts.push(args[start..i].trim());
+                start = i + 1;
+            }
+            _ => {}
+        }
+    }
+    parts.push(args[start..].trim());
+    parts
+}
+
+/// Parses a `linear-gradient(...)` string value into a [`LinearGradient`], or returns `None`
+/// if the string is not a valid linear-gradient.
+///
+/// Supported direction forms:
+/// - `to right`, `to left`, `to top`, `to bottom`
+/// - `to top right`, `to top left`, `to bottom right`, `to bottom left`
+/// - `<angle>deg` (e.g. `45deg`, `180deg`)
+///
+/// If no direction is given the default is `to bottom` (180°).
+fn parse_linear_gradient(value: &str) -> Option<LinearGradient> {
+    let value = value.trim();
+    let args_str = value
+        .strip_prefix("linear-gradient(")
+        .and_then(|s| s.strip_suffix(')'))?;
+
+    let parts = split_gradient_args(args_str);
+    if parts.is_empty() {
+        return None;
+    }
+
+    // Determine angle and where color stops start
+    let (angle_deg, stop_start) = parse_gradient_direction(parts[0])
+        .map(|a| (a, 1usize))
+        .unwrap_or((180.0, 0usize));
+
+    let stop_parts = &parts[stop_start..];
+    if stop_parts.is_empty() {
+        return None;
+    }
+
+    // Parse color stops; explicit positions (like `red 50%`) not yet supported — auto-space them.
+    // If any stop can't be parsed as a color, treat the whole gradient as invalid.
+    let mut colors = Vec::new();
+    for s in stop_parts {
+        match parse_color(s.trim()) {
+            Some(c) => colors.push(c),
+            None => return None,
+        }
+    }
+
+    if colors.len() < 2 {
+        return None;
+    }
+
+    let n = colors.len();
+    let stops = colors
+        .into_iter()
+        .enumerate()
+        .map(|(i, color)| {
+            let position = i as f32 / (n - 1) as f32;
+            ColorStop { color, position }
+        })
+        .collect::<Vec<_>>();
+
+    Some(LinearGradient { angle_deg, stops })
+}
+
+/// Parses the direction part of a linear-gradient (e.g. `"to right"`, `"45deg"`).
+/// Returns the angle in degrees (CSS convention: 0° = to top, 90° = to right).
+fn parse_gradient_direction(part: &str) -> Option<f32> {
+    let part = part.trim();
+
+    // Angle: "<number>deg" (or grad/turn/rad — only deg is common)
+    if let Some(deg_str) = part.strip_suffix("deg") {
+        return deg_str.trim().parse::<f32>().ok();
+    }
+    if let Some(turn_str) = part.strip_suffix("turn") {
+        return turn_str.trim().parse::<f32>().ok().map(|t| t * 360.0);
+    }
+    if let Some(rad_str) = part.strip_suffix("rad") {
+        return rad_str
+            .trim()
+            .parse::<f32>()
+            .ok()
+            .map(|r| r.to_degrees());
+    }
+    if let Some(grad_str) = part.strip_suffix("grad") {
+        return grad_str.trim().parse::<f32>().ok().map(|g| g * 0.9);
+    }
+
+    // Keyword: "to <side>" or "to <side> <side>"
+    let lower = part.to_ascii_lowercase();
+    match lower.as_str() {
+        "to top" => Some(0.0),
+        "to right" => Some(90.0),
+        "to bottom" => Some(180.0),
+        "to left" => Some(270.0),
+        "to top right" | "to right top" => Some(45.0),
+        "to bottom right" | "to right bottom" => Some(135.0),
+        "to bottom left" | "to left bottom" => Some(225.0),
+        "to top left" | "to left top" => Some(315.0),
+        _ => None,
+    }
+}
+
+/// Computes the background-size dimensions given the style and the painting area.
+/// Returns `(tile_width, tile_height)`.
+fn background_size(style: &ComputedStyle, area: Rect, image_w: f32, image_h: f32) -> (f32, f32) {
+    // Single Px value (e.g. background-size: 100px — width only, height auto)
+    if let Some(ComputedValue::Px(px)) = style.get("background-size") {
+        let w = *px;
+        let h = if image_w > 0.0 {
+            image_h * (w / image_w)
+        } else {
+            image_h
+        };
+        return (w, h);
+    }
+
+    // Single Percentage value (e.g. background-size: 50% — width only, height auto)
+    if let Some(ComputedValue::Percentage(pct)) = style.get("background-size") {
+        let w = area.width * (*pct / 100.0);
+        let h = if image_w > 0.0 {
+            image_h * (w / image_w)
+        } else {
+            image_h
+        };
+        return (w, h);
+    }
+
+    let kw = match style.get("background-size") {
+        Some(ComputedValue::Keyword(kw)) => kw.clone(),
+        _ => return (image_w, image_h),
+    };
+
+    let kw_lower = kw.to_ascii_lowercase();
+    match kw_lower.as_str() {
+        "cover" => {
+            if image_w <= 0.0 || image_h <= 0.0 {
+                return (area.width, area.height);
+            }
+            let scale_w = area.width / image_w;
+            let scale_h = area.height / image_h;
+            let scale = scale_w.max(scale_h);
+            (image_w * scale, image_h * scale)
+        }
+        "contain" => {
+            if image_w <= 0.0 || image_h <= 0.0 {
+                return (area.width, area.height);
+            }
+            let scale_w = area.width / image_w;
+            let scale_h = area.height / image_h;
+            let scale = scale_w.min(scale_h);
+            (image_w * scale, image_h * scale)
+        }
+        "auto" | "" => (image_w, image_h),
+        other => {
+            // Try to parse "Wpx Hpx" or "W% H%" etc. from a keyword string
+            // (e.g. when background-size: 100px 50px is stored as keyword "100px 50px")
+            let mut parts = other.split_whitespace();
+            let w = parts
+                .next()
+                .and_then(|t| parse_size_token(t, area.width))
+                .unwrap_or(image_w);
+            let h = parts
+                .next()
+                .and_then(|t| parse_size_token(t, area.height))
+                .unwrap_or_else(|| {
+                    if image_w > 0.0 {
+                        image_h * (w / image_w)
+                    } else {
+                        image_h
+                    }
+                });
+            (w, h)
+        }
+    }
+}
+
+/// Parses a single background-size value like "100px", "50%", "auto".
+/// `container` is the relevant container dimension for percentage resolution.
+fn parse_size_token(part: &str, container: f32) -> Option<f32> {
+    if part == "auto" {
+        return None;
+    }
+    if let Some(px) = part.strip_suffix("px") {
+        return px.parse::<f32>().ok();
+    }
+    if let Some(pct) = part.strip_suffix('%') {
+        return pct.parse::<f32>().ok().map(|p| container * p / 100.0);
+    }
+    None
+}
+
+/// Draws a `LinearGradient` into the canvas over the given `area`, clipped to `clip`.
+fn paint_linear_gradient(
+    canvas: &mut Canvas,
+    gradient: &LinearGradient,
+    area: Rect,
+    clip: Option<Rect>,
+) {
+    let Some(area) = normalize_rect(area) else {
+        return;
+    };
+
+    // Effective clip region
+    let draw_area = if let Some(clip_rect) = clip.and_then(normalize_rect) {
+        match intersect(area, clip_rect) {
+            Some(r) => r,
+            None => return,
+        }
+    } else {
+        area
+    };
+
+    // Convert CSS angle convention to math angle:
+    // CSS 0° = "to top" (gradient goes upward, so color flows from bottom to top)
+    // CSS 90° = "to right"
+    // Math: angle measured counter-clockwise from positive X-axis
+    //
+    // For a gradient direction of angle_deg (CSS):
+    //   unit vector pointing *toward* the end color:
+    //   dx = sin(angle_deg), dy = -cos(angle_deg)
+    //   (dy is negative because CSS Y axis is downward)
+    let angle_rad = gradient.angle_deg.to_radians();
+    let dir_x = angle_rad.sin();
+    let dir_y = -angle_rad.cos();
+
+    // Center of the box
+    let cx = area.x + area.width * 0.5;
+    let cy = area.y + area.height * 0.5;
+
+    // Gradient length: distance from center to the "end" corner of the box
+    // (CSS spec: the gradient line goes through the center and touches the side
+    //  perpendicular to the gradient direction at the ending-point corner)
+    // Simplified: half-length = |dx| * W/2 + |dy| * H/2
+    let half_len = dir_x.abs() * area.width * 0.5 + dir_y.abs() * area.height * 0.5;
+    let grad_len = half_len * 2.0;
+
+    let x0 = area.x.floor().max(0.0) as i32;
+    let y0 = area.y.floor().max(0.0) as i32;
+    let x1 = (draw_area.x + draw_area.width)
+        .ceil()
+        .min(canvas.width as f32) as i32;
+    let y1 = (draw_area.y + draw_area.height)
+        .ceil()
+        .min(canvas.height as f32) as i32;
+    let x0 = x0.max(draw_area.x.floor() as i32);
+    let y0 = y0.max(draw_area.y.floor() as i32);
+
+    for py in y0..y1 {
+        for px in x0..x1 {
+            // Project pixel center onto gradient line
+            let rel_x = px as f32 + 0.5 - cx;
+            let rel_y = py as f32 + 0.5 - cy;
+            let proj = rel_x * dir_x + rel_y * dir_y;
+
+            // Normalize to [0, 1] along the gradient
+            let t = if grad_len > 0.0 {
+                (proj / grad_len + 0.5).clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
+
+            let color = interpolate_gradient_color(&gradient.stops, t);
+            let dest_index = ((py as u32 * canvas.width + px as u32) * 4) as usize;
+            if dest_index + 3 < canvas.pixels.len() {
+                blend_pixel(&mut canvas.pixels[dest_index..dest_index + 4], color);
+            }
+        }
+    }
+}
+
+/// Linearly interpolates a color from gradient stops at position `t` ∈ [0, 1].
+fn interpolate_gradient_color(stops: &[ColorStop], t: f32) -> Color {
+    if stops.is_empty() {
+        return Color::rgba(0, 0, 0, 0);
+    }
+    if stops.len() == 1 || t <= stops[0].position {
+        return stops[0].color;
+    }
+    let last = stops.last().unwrap();
+    if t >= last.position {
+        return last.color;
+    }
+
+    // Find the two surrounding stops
+    let mut a = &stops[0];
+    let mut b = &stops[1];
+    for i in 0..stops.len() - 1 {
+        if t >= stops[i].position && t <= stops[i + 1].position {
+            a = &stops[i];
+            b = &stops[i + 1];
+            break;
+        }
+    }
+
+    let range = b.position - a.position;
+    let f = if range > 0.0 {
+        (t - a.position) / range
+    } else {
+        0.0
+    };
+
+    Color::rgba(
+        lerp_u8(a.color.r, b.color.r, f),
+        lerp_u8(a.color.g, b.color.g, f),
+        lerp_u8(a.color.b, b.color.b, f),
+        lerp_u8(a.color.a, b.color.a, f),
+    )
+}
+
+fn lerp_u8(a: u8, b: u8, t: f32) -> u8 {
+    (a as f32 + (b as f32 - a as f32) * t).round().clamp(0.0, 255.0) as u8
+}
+
 fn border_color(style: &ComputedStyle) -> Option<Color> {
     color_property(style.get("border-color")).or_else(|| color_property(style.get("color")))
 }
@@ -2473,15 +2819,87 @@ fn paint_background_image(
     clip: Option<Rect>,
     viewport: Rect,
 ) {
-    let Some(image) = background_image(style) else {
-        return;
-    };
     let Some(area) = normalize_rect(rect) else {
         return;
     };
 
-    let tile_width = image.width().max(1) as f32;
-    let tile_height = image.height().max(1) as f32;
+    // Check if the background-image is a linear-gradient
+    let bg_image_value = style.get("background-image");
+    let raw_bg_str: Option<String> = match bg_image_value {
+        Some(ComputedValue::Keyword(kw)) => Some(kw.clone()),
+        Some(ComputedValue::String(s)) => Some(s.clone()),
+        _ => None,
+    };
+    let gradient_str = raw_bg_str.as_deref().and_then(|s| {
+        let lower = s.trim_start().to_ascii_lowercase();
+        if lower.starts_with("linear-gradient(") {
+            Some(s.trim_start())
+        } else {
+            None
+        }
+    });
+
+    if let Some(gradient_str) = gradient_str {
+        // Normalise to lowercase for parsing (function names are case-insensitive in CSS)
+        let normalised = gradient_str.to_ascii_lowercase();
+        if let Some(gradient) = parse_linear_gradient(&normalised) {
+            // Check if a background-size is set to tile the gradient
+            let has_explicit_size = match style.get("background-size") {
+                None => false,
+                Some(ComputedValue::Keyword(kw)) => !kw.eq_ignore_ascii_case("auto"),
+                _ => true,
+            };
+            if has_explicit_size {
+                // Gradient with explicit tile size — render into a tile then repeat like an image
+                let (tile_w, tile_h) =
+                    background_size(style, area, area.width, area.height);
+                let tile_w = tile_w.max(1.0);
+                let tile_h = tile_h.max(1.0);
+                let repeat = background_repeat(style);
+                let (position_x, position_y) = background_position(style);
+                let fixed = background_attachment_fixed(style);
+                let anchor_x = if fixed { viewport.x + position_x } else { area.x + position_x };
+                let anchor_y = if fixed { viewport.y + position_y } else { area.y + position_y };
+                let x_end = area.x + area.width;
+                let y_end = area.y + area.height;
+                let mut ty = if repeat {
+                    anchor_y + ((area.y - anchor_y) / tile_h).floor() * tile_h
+                } else {
+                    anchor_y
+                };
+                while ty < y_end {
+                    let mut tx = if repeat {
+                        anchor_x + ((area.x - anchor_x) / tile_w).floor() * tile_w
+                    } else {
+                        anchor_x
+                    };
+                    while tx < x_end {
+                        let tile_rect = Rect { x: tx, y: ty, width: tile_w, height: tile_h };
+                        paint_linear_gradient(canvas, &gradient, tile_rect, clip.or(Some(area)));
+                        if !repeat {
+                            return;
+                        }
+                        tx += tile_w;
+                    }
+                    ty += tile_h;
+                }
+            } else {
+                // Default: gradient fills the entire area
+                paint_linear_gradient(canvas, &gradient, area, clip.or(Some(area)));
+            }
+            return;
+        }
+    }
+
+    // Regular image
+    let Some(image) = background_image(style) else {
+        return;
+    };
+
+    let (tile_width, tile_height) =
+        background_size(style, area, image.width().max(1) as f32, image.height().max(1) as f32);
+    let tile_width = tile_width.max(1.0);
+    let tile_height = tile_height.max(1.0);
     let x_end = area.x + area.width;
     let y_end = area.y + area.height;
     let repeat = background_repeat(style);
@@ -2509,7 +2927,13 @@ fn paint_background_image(
             anchor_x
         };
         while x < x_end {
-            canvas.draw_image_clipped(&image, x, y, clip.or(Some(area)));
+            let dest = Rect {
+                x,
+                y,
+                width: tile_width,
+                height: tile_height,
+            };
+            canvas.draw_image_scaled_clipped(&image, dest, clip.or(Some(area)));
             if !repeat {
                 return;
             }

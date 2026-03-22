@@ -780,6 +780,7 @@ fn is_supported_property(name: &str) -> bool {
             | "background-position-x"
             | "background-position-y"
             | "background-repeat"
+            | "background-size"
             | "border-bottom-color"
             | "border-bottom-style"
             | "border-bottom-width"
@@ -940,6 +941,7 @@ fn compute_value(value: &Value, property_name: &str, ctx: ResolutionContext) -> 
             if property_name.eq_ignore_ascii_case("transform")
                 || property_name.eq_ignore_ascii_case("overflow")
                 || property_name.eq_ignore_ascii_case("box-shadow")
+                || property_name.eq_ignore_ascii_case("background-size")
             {
                 return ComputedValue::Keyword(render_value(value));
             }

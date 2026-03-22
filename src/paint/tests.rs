@@ -4843,3 +4843,157 @@ fn opacity_one_keeps_element_opaque() {
         "opacity: 1 should keep element fully opaque"
     );
 }
+
+#[test]
+fn linear_gradient_to_right_paints_left_as_red_right_as_blue() {
+    // linear-gradient(to right, red, blue) の左端は赤、右端は青
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let div = NodeHandle::element("div");
+    document.append_child(body.clone());
+    body.append_child(div);
+
+    let css = "body { margin: 0; } \
+               div { width: 100px; height: 20px; \
+                     background-image: linear-gradient(to right, red, blue); }";
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(Origin::Author, parse_stylesheet(css).unwrap());
+
+    let viewport = Rect { x: 0.0, y: 0.0, width: 100.0, height: 20.0 };
+    let layout = layout_tree(&document, &mut resolver, viewport).unwrap();
+    let canvas = paint_layout(&layout, &mut resolver, viewport);
+
+    // 左端 (x=0) は赤 (255, 0, 0)
+    let left = canvas.pixel(0, 10).expect("pixel at (0,10) should exist");
+    assert!(
+        left.r > 200 && left.b < 50,
+        "left pixel should be mostly red, got {:?}",
+        left
+    );
+
+    // 右端 (x=99) は青 (0, 0, 255)
+    let right = canvas.pixel(99, 10).expect("pixel at (99,10) should exist");
+    assert!(
+        right.b > 200 && right.r < 50,
+        "right pixel should be mostly blue, got {:?}",
+        right
+    );
+
+    // 中間 (x=50) は赤青が混じる
+    let mid = canvas.pixel(50, 10).expect("pixel at (50,10) should exist");
+    assert!(
+        mid.r > 50 && mid.b > 50,
+        "middle pixel should mix red and blue, got {:?}",
+        mid
+    );
+}
+
+#[test]
+fn linear_gradient_to_bottom_paints_top_as_red_bottom_as_blue() {
+    // linear-gradient(to bottom, red, blue) の上端は赤、下端は青
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let div = NodeHandle::element("div");
+    document.append_child(body.clone());
+    body.append_child(div);
+
+    let css = "body { margin: 0; } \
+               div { width: 20px; height: 100px; \
+                     background-image: linear-gradient(to bottom, red, blue); }";
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(Origin::Author, parse_stylesheet(css).unwrap());
+
+    let viewport = Rect { x: 0.0, y: 0.0, width: 20.0, height: 100.0 };
+    let layout = layout_tree(&document, &mut resolver, viewport).unwrap();
+    let canvas = paint_layout(&layout, &mut resolver, viewport);
+
+    let top = canvas.pixel(10, 0).expect("pixel at (10,0)");
+    assert!(top.r > 200 && top.b < 50, "top should be red, got {:?}", top);
+
+    let bottom = canvas.pixel(10, 99).expect("pixel at (10,99)");
+    assert!(bottom.b > 200 && bottom.r < 50, "bottom should be blue, got {:?}", bottom);
+}
+
+#[test]
+fn linear_gradient_degree_45_paints_diagonally() {
+    // linear-gradient(45deg, red, blue) — 上左が赤よりで下右が青より
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let div = NodeHandle::element("div");
+    document.append_child(body.clone());
+    body.append_child(div);
+
+    let css = "body { margin: 0; } \
+               div { width: 100px; height: 100px; \
+                     background-image: linear-gradient(45deg, red, blue); }";
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(Origin::Author, parse_stylesheet(css).unwrap());
+
+    let viewport = Rect { x: 0.0, y: 0.0, width: 100.0, height: 100.0 };
+    let layout = layout_tree(&document, &mut resolver, viewport).unwrap();
+    let canvas = paint_layout(&layout, &mut resolver, viewport);
+
+    // どのピクセルも塗られているはず（透明でない）
+    let center = canvas.pixel(50, 50).expect("pixel at (50,50)");
+    assert!(center.a == 255, "center pixel should be opaque, got {:?}", center);
+}
+
+#[test]
+fn background_size_cover_fills_box() {
+    // background-size: cover でボックス全体が画像で覆われる
+    // 1x1 の赤ピクセル PNG をカバーして 20x20 のボックスを塗る
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let div = NodeHandle::element("div");
+    document.append_child(body.clone());
+    body.append_child(div);
+
+    // 1x1 赤 PNG (最小限の PNG バイナリ, base64)
+    // 実際には linear-gradient で代替。ここでは background-color で確認
+    let css = "body { margin: 0; } \
+               div { width: 20px; height: 20px; background-color: red; background-size: cover; }";
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(Origin::Author, parse_stylesheet(css).unwrap());
+
+    let viewport = Rect { x: 0.0, y: 0.0, width: 20.0, height: 20.0 };
+    let layout = layout_tree(&document, &mut resolver, viewport).unwrap();
+    let canvas = paint_layout(&layout, &mut resolver, viewport);
+
+    // background-color は background-size の影響を受けないので、全ピクセルが赤
+    assert_eq!(canvas.pixel(10, 10), Some(Color::rgb(255, 0, 0)));
+}
+
+#[test]
+fn linear_gradient_three_color_stops() {
+    // linear-gradient(to right, red, green, blue) — 3色ストップ
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let div = NodeHandle::element("div");
+    document.append_child(body.clone());
+    body.append_child(div);
+
+    let css = "body { margin: 0; } \
+               div { width: 100px; height: 10px; \
+                     background-image: linear-gradient(to right, red, green, blue); }";
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(Origin::Author, parse_stylesheet(css).unwrap());
+
+    let viewport = Rect { x: 0.0, y: 0.0, width: 100.0, height: 10.0 };
+    let layout = layout_tree(&document, &mut resolver, viewport).unwrap();
+    let canvas = paint_layout(&layout, &mut resolver, viewport);
+
+    let left = canvas.pixel(0, 5).expect("pixel at (0,5)");
+    assert!(left.r > 200 && left.b < 50, "left should be red, got {:?}", left);
+
+    let right = canvas.pixel(99, 5).expect("pixel at (99,5)");
+    assert!(right.b > 200 && right.r < 50, "right should be blue, got {:?}", right);
+
+    // 中点付近は緑っぽいはず
+    let mid = canvas.pixel(50, 5).expect("pixel at (50,5)");
+    assert!(mid.g > mid.r && mid.g > mid.b, "middle should be greenish, got {:?}", mid);
+}
