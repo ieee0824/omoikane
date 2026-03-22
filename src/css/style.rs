@@ -917,6 +917,7 @@ fn is_supported_property(name: &str) -> bool {
             | "border-top-style"
             | "border-top-width"
             | "bottom"
+            | "box-sizing"
             | "clear"
             | "color"
             | "content"

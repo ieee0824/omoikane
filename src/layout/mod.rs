@@ -857,15 +857,34 @@ fn layout_element(
         .map(|region| region.outer.y + region.outer.height)
         .fold(y, f32::max);
     let auto_height = (cursor_y.max(float_bottom)) - y;
-    let mut content_height =
-        resolved_length(&style, "height", containing_block.height).unwrap_or(auto_height);
+    let border_box = is_border_box(&style);
+    let pb_vertical = padding.vertical() + border.vertical();
+    let mut content_height = resolved_length(&style, "height", containing_block.height)
+        .map(|h| {
+            if border_box {
+                (h - pb_vertical).max(0.0)
+            } else {
+                h
+            }
+        })
+        .unwrap_or(auto_height);
     let (min_height, max_height) =
         normalized_min_max_lengths(&style, "min-height", "max-height", containing_block.height);
     if let Some(min_height) = min_height {
-        content_height = content_height.max(min_height);
+        let content_min = if border_box {
+            (min_height - pb_vertical).max(0.0)
+        } else {
+            min_height
+        };
+        content_height = content_height.max(content_min);
     }
     if let Some(max_height) = max_height {
-        content_height = content_height.min(max_height);
+        let content_max = if border_box {
+            (max_height - pb_vertical).max(0.0)
+        } else {
+            max_height
+        };
+        content_height = content_height.min(content_max);
     }
     let dimensions = BoxDimensions {
         content: Rect {
@@ -914,6 +933,14 @@ fn layout_element(
 
 // ── Width computation ───────────────────────────────────────────────────────
 
+/// Returns `true` when `box-sizing: border-box` is set on the element.
+fn is_border_box(style: &ComputedStyle) -> bool {
+    matches!(
+        style.get("box-sizing"),
+        Some(ComputedValue::Keyword(kw)) if kw.eq_ignore_ascii_case("border-box")
+    )
+}
+
 fn compute_width(
     style: &ComputedStyle,
     containing_width: f32,
@@ -921,13 +948,25 @@ fn compute_width(
     border: EdgeSizes,
     margin: &mut EdgeSizes,
 ) -> f32 {
-    let specified_width = resolved_length(style, "width", containing_width);
+    let border_box = is_border_box(style);
+    let pb_horizontal = padding.horizontal() + border.horizontal();
+
+    // `specified_width` is the value given to the `width` property.
+    // For border-box, that value already includes padding + border, so we
+    // convert it to a content-box width immediately.
+    let specified_width = resolved_length(style, "width", containing_width).map(|w| {
+        if border_box {
+            (w - pb_horizontal).max(0.0)
+        } else {
+            w
+        }
+    });
     let margin_left_auto = margin_start_is_auto(style);
     let margin_right_auto = margin_end_is_auto(style);
 
     let mut width = if let Some(width) = specified_width {
         let remaining =
-            (containing_width - width - padding.horizontal() - border.horizontal()).max(0.0);
+            (containing_width - width - pb_horizontal).max(0.0);
 
         match (margin_left_auto, margin_right_auto) {
             (true, true) => {
@@ -952,22 +991,33 @@ fn compute_width(
             margin.right = 0.0;
         }
 
-        (containing_width - padding.horizontal() - border.horizontal() - margin.horizontal())
-            .max(0.0)
+        (containing_width - pb_horizontal - margin.horizontal()).max(0.0)
     };
 
+    // For border-box, min-width / max-width also refer to the outer (border)
+    // box, so subtract padding + border before comparing.
     let (min_width, max_width) =
         normalized_min_max_lengths(style, "min-width", "max-width", containing_width);
     if let Some(min_width) = min_width {
-        width = width.max(min_width);
+        let content_min = if border_box {
+            (min_width - pb_horizontal).max(0.0)
+        } else {
+            min_width
+        };
+        width = width.max(content_min);
     }
     if let Some(max_width) = max_width {
-        width = width.min(max_width);
+        let content_max = if border_box {
+            (max_width - pb_horizontal).max(0.0)
+        } else {
+            max_width
+        };
+        width = width.min(content_max);
     }
 
     if margin_left_auto || margin_right_auto {
         let remaining =
-            (containing_width - width - padding.horizontal() - border.horizontal()).max(0.0);
+            (containing_width - width - pb_horizontal).max(0.0);
         match (margin_left_auto, margin_right_auto) {
             (true, true) => {
                 margin.left = remaining / 2.0;
