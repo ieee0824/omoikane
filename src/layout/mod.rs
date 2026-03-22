@@ -145,6 +145,8 @@ pub struct FontMetrics {
     pub descent: f32,
     pub line_gap: f32,
     pub average_advance: f32,
+    /// Extra spacing to add between each character (CSS `letter-spacing`).
+    pub letter_spacing: f32,
 }
 
 impl FontMetrics {
@@ -156,6 +158,7 @@ impl FontMetrics {
             descent: font_size * 0.2,
             line_gap: font_size * 0.2,
             average_advance: font_size * 0.6,
+            letter_spacing: 0.0,
         }
     }
 }
@@ -2760,6 +2763,7 @@ fn collect_inline_segments(
                     NodeType::Text => {
                         if let Some(text) = child.data() {
                             let text = normalize_text(&text, white_space(&style));
+                            let text = apply_text_transform_layout(&text, &style);
                             if !text.is_empty() {
                                 out.push(InlineSegment {
                                     node: child,
@@ -3082,6 +3086,35 @@ fn white_space(style: &ComputedStyle) -> WhiteSpaceMode {
     }
 }
 
+fn apply_text_transform_layout(text: &str, style: &ComputedStyle) -> String {
+    match style.get("text-transform") {
+        Some(ComputedValue::Keyword(kw)) => match kw.to_ascii_lowercase().as_str() {
+            "uppercase" => text.to_uppercase(),
+            "lowercase" => text.to_lowercase(),
+            "capitalize" => {
+                let mut result = String::with_capacity(text.len());
+                let mut cap_next = true;
+                for ch in text.chars() {
+                    if ch.is_whitespace() {
+                        cap_next = true;
+                        result.push(ch);
+                    } else if cap_next {
+                        for c in ch.to_uppercase() {
+                            result.push(c);
+                        }
+                        cap_next = false;
+                    } else {
+                        result.push(ch);
+                    }
+                }
+                result
+            }
+            _ => text.to_string(),
+        },
+        _ => text.to_string(),
+    }
+}
+
 fn normalize_text(text: &str, mode: WhiteSpaceMode) -> String {
     match mode {
         WhiteSpaceMode::Normal => collapse_white_space(text),
@@ -3115,7 +3148,17 @@ fn font_size(style: &ComputedStyle) -> f32 {
 }
 
 fn font_metrics(style: &ComputedStyle) -> FontMetrics {
-    FontMetrics::from_font_size(font_size(style))
+    let mut metrics = FontMetrics::from_font_size(font_size(style));
+    metrics.letter_spacing = letter_spacing(style);
+    metrics
+}
+
+fn letter_spacing(style: &ComputedStyle) -> f32 {
+    match style.get("letter-spacing") {
+        Some(ComputedValue::Px(value)) => *value,
+        Some(ComputedValue::Keyword(keyword)) if keyword.eq_ignore_ascii_case("normal") => 0.0,
+        _ => 0.0,
+    }
 }
 
 fn line_height(style: &ComputedStyle) -> f32 {
@@ -3503,12 +3546,26 @@ fn measure_text_width(text: &str, metrics: FontMetrics) -> f32 {
 
         if let Some(ref fonts) = *fonts_ref {
             if !fonts.is_empty() {
-                return measure_text_width_with_fallback(text, metrics.font_size, fonts);
+                let base = measure_text_width_with_fallback(text, metrics.font_size, fonts);
+                let char_count = text.chars().count();
+                let spacing = if char_count > 1 {
+                    metrics.letter_spacing * (char_count - 1) as f32
+                } else {
+                    0.0
+                };
+                return base + spacing;
             }
         }
 
         // Fallback to approximation when no font is available
-        text.chars().count() as f32 * metrics.average_advance
+        let char_count = text.chars().count();
+        let base = char_count as f32 * metrics.average_advance;
+        let spacing = if char_count > 1 {
+            metrics.letter_spacing * (char_count - 1) as f32
+        } else {
+            0.0
+        };
+        base + spacing
     })
 }
 

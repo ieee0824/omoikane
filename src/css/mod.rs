@@ -920,6 +920,7 @@ fn expand_shorthand(name: &str, value: Value, important: bool) -> Vec<Declaratio
         "font" => expand_font_shorthand(value, important),
         "overflow" => expand_overflow_shorthand(value, important),
         "flex" => expand_flex_shorthand(value, important),
+        "text-decoration" => expand_text_decoration_shorthand(value, important),
         _ => vec![Declaration {
             name: name.to_string(),
             value,
@@ -1617,6 +1618,116 @@ fn expand_flex_shorthand(value: Value, important: bool) -> Vec<Declaration> {
         value: fallback_value,
         important,
     }]
+}
+
+/// Expand `text-decoration` shorthand into its longhands.
+///
+/// CSS spec: `text-decoration` is a shorthand for `text-decoration-line`,
+/// `text-decoration-style`, and `text-decoration-color`. The values can appear
+/// in any order. Unknown values are left as-is.
+fn expand_text_decoration_shorthand(value: Value, important: bool) -> Vec<Declaration> {
+    let values = match value {
+        Value::List(values) => values,
+        single => vec![single],
+    };
+
+    // CSS-wide keywords: propagate to all three longhands
+    if let [Value::Keyword(kw)] = values.as_slice() {
+        let lower = kw.to_ascii_lowercase();
+        if matches!(lower.as_str(), "inherit" | "initial" | "unset" | "revert") {
+            return vec![
+                Declaration {
+                    name: "text-decoration-line".to_string(),
+                    value: Value::Keyword(lower.clone()),
+                    important,
+                },
+                Declaration {
+                    name: "text-decoration-style".to_string(),
+                    value: Value::Keyword(lower.clone()),
+                    important,
+                },
+                Declaration {
+                    name: "text-decoration-color".to_string(),
+                    value: Value::Keyword(lower),
+                    important,
+                },
+            ];
+        }
+    }
+
+    let mut line_parts: Vec<String> = Vec::new();
+    let mut style: Option<Value> = None;
+    let mut color: Option<Value> = None;
+
+    for item in &values {
+        match item {
+            Value::Keyword(kw) => {
+                let lower = kw.to_ascii_lowercase();
+                match lower.as_str() {
+                    "none" | "underline" | "overline" | "line-through" | "blink" => {
+                        line_parts.push(lower);
+                    }
+                    "solid" | "dashed" | "dotted" | "double" | "wavy" => {
+                        if style.is_none() {
+                            style = Some(Value::Keyword(lower));
+                        }
+                    }
+                    _ if crate::css::style::is_color_keyword(&lower) => {
+                        if color.is_none() {
+                            color = Some(Value::Keyword(lower));
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            Value::Color(_) | Value::Function { .. } => {
+                if color.is_none() {
+                    color = Some(item.clone());
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let mut decls = Vec::new();
+    if !line_parts.is_empty() {
+        let line_value = line_parts.join(" ");
+        decls.push(Declaration {
+            name: "text-decoration-line".to_string(),
+            value: Value::Keyword(line_value),
+            important,
+        });
+    }
+    if let Some(v) = style {
+        decls.push(Declaration {
+            name: "text-decoration-style".to_string(),
+            value: v,
+            important,
+        });
+    }
+    if let Some(v) = color {
+        decls.push(Declaration {
+            name: "text-decoration-color".to_string(),
+            value: v,
+            important,
+        });
+    }
+
+    // Fallback: preserve original if nothing matched
+    if decls.is_empty() {
+        let fallback_value = if values.len() == 1 {
+            values.into_iter().next().unwrap()
+        } else {
+            Value::List(values)
+        };
+        return vec![Declaration {
+            name: "text-decoration".to_string(),
+            value: fallback_value,
+            important,
+        }];
+    }
+
+    decls
 }
 
 fn is_background_color_keyword(keyword: &str) -> bool {

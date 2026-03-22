@@ -807,28 +807,46 @@ fn paint_text(
     fonts: &[Font],
 ) {
     let color = text_color(style).unwrap_or(Color::rgb(0, 0, 0));
+    let text_transform = text_transform_value(style);
+    let decoration_line = text_decoration_line(style);
+    let decoration_color = text_decoration_color(style, color);
 
     for line in &layout.lines {
         for fragment in &line.fragments {
             match &fragment.content {
                 InlineFragmentContent::Text(text) => {
                     let font_size = fragment.metrics.font_size.max(1.0);
+                    let transformed = apply_text_transform(text, text_transform);
+                    let display_text = transformed.as_deref().unwrap_or(text.as_str());
 
                     if !fonts.is_empty() {
                         paint_text_with_font(
                             canvas,
                             fragment.rect,
-                            text,
+                            display_text,
                             font_size,
                             fragment.metrics.ascent,
                             &fonts,
                             color,
                             clip,
+                            fragment.metrics.letter_spacing,
                         );
                     } else {
                         // Fallback: placeholder rectangles
-                        paint_text_placeholder(canvas, fragment.rect, text, font_size, color, clip);
+                        paint_text_placeholder(canvas, fragment.rect, display_text, font_size, color, clip);
                     }
+
+                    // Draw text decorations after text
+                    paint_text_decoration(
+                        canvas,
+                        fragment.rect,
+                        fragment.metrics.ascent,
+                        fragment.metrics.descent,
+                        font_size,
+                        decoration_line,
+                        decoration_color,
+                        clip,
+                    );
                 }
                 InlineFragmentContent::Image(image, style) => {
                     paint_inline_image_fragment(
@@ -848,6 +866,123 @@ fn paint_text(
     }
 }
 
+/// Returns the `text-transform` value from style.
+fn text_transform_value(style: &ComputedStyle) -> &'static str {
+    match style.get("text-transform") {
+        Some(ComputedValue::Keyword(kw)) => match kw.to_ascii_lowercase().as_str() {
+            "uppercase" => "uppercase",
+            "lowercase" => "lowercase",
+            "capitalize" => "capitalize",
+            _ => "none",
+        },
+        _ => "none",
+    }
+}
+
+/// Apply text-transform to the given text, returning Some(transformed) or None if no change.
+fn apply_text_transform(text: &str, transform: &str) -> Option<String> {
+    match transform {
+        "uppercase" => Some(text.to_uppercase()),
+        "lowercase" => Some(text.to_lowercase()),
+        "capitalize" => {
+            let mut result = String::with_capacity(text.len());
+            let mut capitalize_next = true;
+            for ch in text.chars() {
+                if ch.is_whitespace() {
+                    capitalize_next = true;
+                    result.push(ch);
+                } else if capitalize_next {
+                    for c in ch.to_uppercase() {
+                        result.push(c);
+                    }
+                    capitalize_next = false;
+                } else {
+                    result.push(ch);
+                }
+            }
+            Some(result)
+        }
+        _ => None,
+    }
+}
+
+/// Text decoration line flags (supports multiple values like "underline line-through").
+#[derive(Debug, Clone, Copy, Default)]
+struct TextDecorationLines {
+    underline: bool,
+    overline: bool,
+    line_through: bool,
+}
+
+impl TextDecorationLines {
+    fn is_none(&self) -> bool {
+        !self.underline && !self.overline && !self.line_through
+    }
+}
+
+/// Returns the text-decoration-line flags from style.
+fn text_decoration_line(style: &ComputedStyle) -> TextDecorationLines {
+    let mut lines = TextDecorationLines::default();
+    if let Some(ComputedValue::Keyword(kw)) = style.get("text-decoration-line") {
+        for part in kw.split_whitespace() {
+            match part.to_ascii_lowercase().as_str() {
+                "underline" => lines.underline = true,
+                "overline" => lines.overline = true,
+                "line-through" => lines.line_through = true,
+                _ => {}
+            }
+        }
+    }
+    lines
+}
+
+/// Returns the text-decoration-color, falling back to the text color.
+fn text_decoration_color(style: &ComputedStyle, fallback: Color) -> Color {
+    match style.get("text-decoration-color") {
+        Some(ComputedValue::Color(c)) => parse_color(c).unwrap_or(fallback),
+        Some(ComputedValue::Keyword(c)) => parse_color(c).unwrap_or(fallback),
+        _ => fallback,
+    }
+}
+
+/// Draw text decoration lines (underline, overline, line-through) for a fragment.
+fn paint_text_decoration(
+    canvas: &mut Canvas,
+    rect: Rect,
+    ascent: f32,
+    descent: f32,
+    font_size: f32,
+    decoration: TextDecorationLines,
+    color: Color,
+    clip: Option<Rect>,
+) {
+    if decoration.is_none() {
+        return;
+    }
+
+    let line_thickness = (font_size * 0.075).max(1.0);
+
+    let mut draw_line = |line_y: f32| {
+        let line_rect = Rect {
+            x: rect.x,
+            y: line_y,
+            width: rect.width,
+            height: line_thickness,
+        };
+        canvas.fill_rect_clipped(line_rect, color, clip);
+    };
+
+    if decoration.underline {
+        draw_line(rect.y + ascent + descent * 0.5);
+    }
+    if decoration.overline {
+        draw_line(rect.y);
+    }
+    if decoration.line_through {
+        draw_line(rect.y + ascent * 0.6);
+    }
+}
+
 /// Paint text using actual font glyphs.
 fn paint_text_with_font(
     canvas: &mut Canvas,
@@ -858,6 +993,7 @@ fn paint_text_with_font(
     fonts: &[Font],
     color: Color,
     clip: Option<Rect>,
+    letter_spacing: f32,
 ) {
     // Align paint baseline with layout's line-box baseline model to avoid vertical drift.
     let baseline_y = rect.y + layout_ascent;
@@ -892,7 +1028,7 @@ fn paint_text_with_font(
         }
 
         // Keep text flow moving even if a glyph cannot be rasterized by any candidate font.
-        cursor_x += advance_x;
+        cursor_x += advance_x + letter_spacing;
         previous_char = Some((ch, font_index));
     }
 }

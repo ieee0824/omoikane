@@ -1112,3 +1112,141 @@ fn expands_flex_shorthand_grow_basis() {
         "flex-basis not found with 100px"
     );
 }
+
+// ===== text-decoration shorthand tests =====
+
+#[test]
+fn expands_text_decoration_shorthand_underline() {
+    let stylesheet = parse_stylesheet("a { text-decoration: underline; }").unwrap();
+    let rule = match &stylesheet.rules[0] {
+        crate::css::Rule::Style(r) => r,
+        _ => panic!("expected style rule"),
+    };
+    assert!(
+        rule.declarations
+            .iter()
+            .any(|d| d.name == "text-decoration-line"
+                && matches!(&d.value, Value::Keyword(v) if v == "underline")),
+        "text-decoration-line: underline not found"
+    );
+}
+
+#[test]
+fn expands_text_decoration_shorthand_line_through_with_color() {
+    let stylesheet =
+        parse_stylesheet("del { text-decoration: line-through red; }").unwrap();
+    let rule = match &stylesheet.rules[0] {
+        crate::css::Rule::Style(r) => r,
+        _ => panic!("expected style rule"),
+    };
+    assert!(
+        rule.declarations
+            .iter()
+            .any(|d| d.name == "text-decoration-line"
+                && matches!(&d.value, Value::Keyword(v) if v == "line-through")),
+        "text-decoration-line: line-through not found"
+    );
+    assert!(
+        rule.declarations
+            .iter()
+            .any(|d| d.name == "text-decoration-color"),
+        "text-decoration-color not found"
+    );
+}
+
+#[test]
+fn expands_text_decoration_shorthand_solid_style() {
+    let stylesheet = parse_stylesheet("u { text-decoration: underline solid; }").unwrap();
+    let rule = match &stylesheet.rules[0] {
+        crate::css::Rule::Style(r) => r,
+        _ => panic!("expected style rule"),
+    };
+    assert!(
+        rule.declarations
+            .iter()
+            .any(|d| d.name == "text-decoration-style"
+                && matches!(&d.value, Value::Keyword(v) if v == "solid")),
+        "text-decoration-style: solid not found"
+    );
+}
+
+#[test]
+fn expands_text_decoration_shorthand_none() {
+    let stylesheet = parse_stylesheet("a { text-decoration: none; }").unwrap();
+    let rule = match &stylesheet.rules[0] {
+        crate::css::Rule::Style(r) => r,
+        _ => panic!("expected style rule"),
+    };
+    assert!(
+        rule.declarations
+            .iter()
+            .any(|d| d.name == "text-decoration-line"
+                && matches!(&d.value, Value::Keyword(v) if v == "none")),
+        "text-decoration-line: none not found"
+    );
+}
+
+// ===== text-transform compute tests =====
+
+#[test]
+fn computes_text_transform_uppercase() {
+    let (_document, _body, title, _html) = sample_tree();
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet("h1 { text-transform: uppercase; }").unwrap(),
+    );
+    let style = resolver.computed_style(&title);
+    assert_eq!(
+        style.get("text-transform"),
+        Some(&ComputedValue::Keyword("uppercase".to_string()))
+    );
+}
+
+// ===== letter-spacing inheritance tests =====
+
+#[test]
+fn letter_spacing_inherits_from_parent() {
+    let document = NodeHandle::document();
+    let html = NodeHandle::element("html");
+    let body = NodeHandle::element("body");
+    let span = NodeHandle::element("span");
+    document.append_child(html.clone());
+    html.append_child(body.clone());
+    body.append_child(span.clone());
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet("body { letter-spacing: 2px; }").unwrap(),
+    );
+    let style = resolver.computed_style(&span);
+    assert_eq!(
+        style.get("letter-spacing"),
+        Some(&ComputedValue::Px(2.0)),
+        "letter-spacing should inherit from parent"
+    );
+}
+
+#[test]
+fn word_spacing_inherits_from_parent() {
+    let document = NodeHandle::document();
+    let html = NodeHandle::element("html");
+    let body = NodeHandle::element("body");
+    let p = NodeHandle::element("p");
+    document.append_child(html.clone());
+    html.append_child(body.clone());
+    body.append_child(p.clone());
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet("body { word-spacing: 4px; }").unwrap(),
+    );
+    let style = resolver.computed_style(&p);
+    assert_eq!(
+        style.get("word-spacing"),
+        Some(&ComputedValue::Px(4.0)),
+        "word-spacing should inherit from parent"
+    );
+}

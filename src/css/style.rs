@@ -724,6 +724,12 @@ fn is_supported_property(name: &str) -> bool {
             | "row-gap"
             | "transform"
             | "text-align"
+            | "text-decoration-line"
+            | "text-decoration-color"
+            | "text-decoration-style"
+            | "text-transform"
+            | "letter-spacing"
+            | "word-spacing"
             | "top"
             | "vertical-align"
             | "visibility"
@@ -1322,8 +1328,11 @@ fn apply_inheritance(
         "color",
         "font-family",
         "font-size",
+        "letter-spacing",
         "line-height",
+        "text-transform",
         "white-space",
+        "word-spacing",
     ] {
         if !properties.contains_key(inherited_name) {
             if let Some(value) = parent_style.get(inherited_name) {
@@ -1355,7 +1364,7 @@ fn inherited_font_size(
     16.0
 }
 
-fn is_color_keyword(keyword: &str) -> bool {
+pub(crate) fn is_color_keyword(keyword: &str) -> bool {
     matches!(
         keyword,
         "black"
