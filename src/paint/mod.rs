@@ -2036,35 +2036,29 @@ fn parse_linear_gradient(value: &str) -> Option<LinearGradient> {
         return None;
     }
 
-    // Parse color stops; explicit positions (like `red 50%`) not yet supported — auto-space them
-    let raw_stops: Vec<Option<Color>> = stop_parts
-        .iter()
-        .map(|s| parse_color(s.trim()))
-        .collect();
+    // Parse color stops; explicit positions (like `red 50%`) not yet supported — auto-space them.
+    // If any stop can't be parsed as a color, treat the whole gradient as invalid.
+    let mut colors = Vec::new();
+    for s in stop_parts {
+        match parse_color(s.trim()) {
+            Some(c) => colors.push(c),
+            None => return None,
+        }
+    }
 
-    // Require at least two colors
-    if raw_stops.iter().filter(|c| c.is_some()).count() < 2 {
+    if colors.len() < 2 {
         return None;
     }
 
-    let n = raw_stops.len();
-    let stops = raw_stops
+    let n = colors.len();
+    let stops = colors
         .into_iter()
         .enumerate()
-        .filter_map(|(i, color)| {
-            let color = color?;
-            let position = if n == 1 {
-                0.0
-            } else {
-                i as f32 / (n - 1) as f32
-            };
-            Some(ColorStop { color, position })
+        .map(|(i, color)| {
+            let position = i as f32 / (n - 1) as f32;
+            ColorStop { color, position }
         })
         .collect::<Vec<_>>();
-
-    if stops.len() < 2 {
-        return None;
-    }
 
     Some(LinearGradient { angle_deg, stops })
 }
@@ -2137,7 +2131,8 @@ fn background_size(style: &ComputedStyle, area: Rect, image_w: f32, image_h: f32
         _ => return (image_w, image_h),
     };
 
-    match kw.as_str() {
+    let kw_lower = kw.to_ascii_lowercase();
+    match kw_lower.as_str() {
         "cover" => {
             if image_w <= 0.0 || image_h <= 0.0 {
                 return (area.width, area.height);
