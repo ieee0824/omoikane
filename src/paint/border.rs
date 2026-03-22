@@ -574,6 +574,11 @@ pub(crate) fn paint_outer_box_shadow(
         height: border_box.height + spread * 2.0,
     };
 
+    // 負の spread により shadow が縮んで消滅した場合は描画をスキップする
+    if shadow_rect.width <= 0.0 || shadow_rect.height <= 0.0 {
+        return;
+    }
+
     let color = shadow.color;
 
     if blur <= 0.0 {

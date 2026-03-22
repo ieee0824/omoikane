@@ -779,21 +779,17 @@ fn paint_box_internal(
 
     if needs_offscreen {
         let opacity_value = opacity.unwrap_or(1.0);
-        // 要素の border_box + box-shadow 余白に限定したオフスクリーンバッファを作成する。
-        // キャンバス全体ではなく最小限のサイズを使うことで O(N * W * H) を回避する。
-        let shadow_margin = element_shadow_margin(&style);
-        let buf_x = (border_box.x - shadow_margin).floor().max(0.0) as i32;
-        let buf_y = (border_box.y - shadow_margin).floor().max(0.0) as i32;
-        let buf_x2 = ((border_box.x + border_box.width + shadow_margin).ceil() as i32)
-            .min(canvas.width() as i32);
-        let buf_y2 = ((border_box.y + border_box.height + shadow_margin).ceil() as i32)
-            .min(canvas.height() as i32);
-        let buf_w = (buf_x2 - buf_x).max(0) as u32;
-        let buf_h = (buf_y2 - buf_y).max(0) as u32;
+        // オフスクリーンバッファはキャンバス全体サイズで作成する。
+        // border_box に限定すると、子孫要素が border_box 外にはみ出した場合（例: overflow: visible の
+        // 子孫や box-shadow）に正しく合成できなくなるため、キャンバス全体を使う必要がある。
+        let buf_x = 0i32;
+        let buf_y = 0i32;
+        let buf_w = canvas.width();
+        let buf_h = canvas.height();
         if buf_w == 0 || buf_h == 0 {
             return;
         }
-        // オフスクリーンバッファはキャンバス座標 (buf_x, buf_y) を原点とする
+        // オフスクリーンバッファはキャンバス全体と同一座標系（原点は (0, 0)）
         let offset_border_box = Rect {
             x: border_box.x - buf_x as f32,
             y: border_box.y - buf_y as f32,
@@ -1278,7 +1274,7 @@ fn has_border_radius(style: &ComputedStyle) -> bool {
     tl > 0.0 || tr > 0.0 || br > 0.0 || bl > 0.0
 }
 
-/// opacity オフスクリーンバッファ用の shadow/filter 余白を返す。
+/// opacity オフスクリーンバッファ用の box-shadow 余白を返す。
 /// box-shadow の blur + spread + |offset| の最大値をマージンとして使う。
 fn element_shadow_margin(style: &ComputedStyle) -> f32 {
     let shadow_value = match style.get("box-shadow") {
@@ -1287,7 +1283,8 @@ fn element_shadow_margin(style: &ComputedStyle) -> f32 {
     };
     let shadows = border::parse_box_shadow(&shadow_value);
     shadows.iter().fold(0.0f32, |acc, s| {
-        let margin = s.blur_radius + s.spread_radius + s.offset_x.abs() + s.offset_y.abs();
+        // blur_radius は ceil + 1 のパディングを加算する（ブラー拡散の安全マージン）
+        let margin = s.blur_radius.ceil() + 1.0 + s.spread_radius + s.offset_x.abs() + s.offset_y.abs();
         acc.max(margin)
     })
 }
