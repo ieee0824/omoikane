@@ -391,7 +391,7 @@ fn decode_woff1(data: Vec<u8>) -> Result<Vec<u8>, FontError> {
 /// Note: the `glyf`/`loca` transform (WOFF2 §5) is not applied. Fonts that
 /// use the transformed format will fail to load; TTF/OTF equivalents should
 /// be used in that case.
-pub fn decode_woff2(data: &[u8]) -> Result<Vec<u8>, FontError> {
+pub(crate) fn decode_woff2(data: &[u8]) -> Result<Vec<u8>, FontError> {
     use std::io::Read;
 
     // --- WOFF2 Header (48 bytes) ---
@@ -524,19 +524,36 @@ pub fn decode_woff2(data: &[u8]) -> Result<Vec<u8>, FontError> {
 
         let orig_length = read_uint_base128(data, &mut pos)?;
 
-        // transform_length is present when transform_version != 0
+        // WOFF2 spec §5.2 — transform_version semantics:
         // For glyf (tag index 10) and loca (tag index 11):
-        //   transform_version 0 means the transform IS applied (transformed format)
-        //   transform_version 3 means no transform
+        //   transform_version 0 = transformed (transform_length field IS present)
+        //   transform_version 3 = no transform (transform_length field absent)
+        //   transform_version 1/2 = reserved → reject
         // For all other tables:
-        //   transform_version 0 means no transform
-        //   transform_version 1/2/3 means transform is applied (reserved, not used in practice)
+        //   transform_version 0 = no transform (transform_length field absent)
+        //   transform_version 3 = transform applied (unsupported) → reject
+        //   transform_version 1/2 = reserved → reject
         let is_glyf_or_loca = tag == *b"glyf" || tag == *b"loca";
         let has_transform = if is_glyf_or_loca {
-            // transform_version 0 = transformed, 3 = no transform
-            transform_version == 0
+            match transform_version {
+                0 => true,  // transformed format (transform_length present)
+                3 => false, // no transform
+                v => return Err(FontError::InvalidFont(format!(
+                    "WOFF2 glyf/loca reserved transform_version {}", v
+                ))),
+            }
         } else {
-            transform_version != 0
+            match transform_version {
+                0 => false, // no transform
+                3 => return Err(FontError::InvalidFont(format!(
+                    "WOFF2 table '{}' transform version 3 is not supported",
+                    std::str::from_utf8(&tag).unwrap_or("????")
+                ))),
+                v => return Err(FontError::InvalidFont(format!(
+                    "WOFF2 table '{}' reserved transform_version {}",
+                    std::str::from_utf8(&tag).unwrap_or("????"), v
+                ))),
+            }
         };
 
         let transform_length = if has_transform {
@@ -564,11 +581,18 @@ pub fn decode_woff2(data: &[u8]) -> Result<Vec<u8>, FontError> {
     }
 
     // Decompress the data block with brotli
-    let total_orig: usize = entries.iter().map(|e| {
-        // Use transform_length as the stored size when a transform is present,
-        // otherwise use orig_length.
-        e.transform_length.unwrap_or(e.orig_length)
-    }).sum();
+    // Use checked_add to avoid overflow, and cap at 100 MB as a sanity limit.
+    const MAX_ORIG_SIZE: usize = 100 * 1024 * 1024; // 100 MB
+    let total_orig: usize = entries.iter().try_fold(0usize, |acc, e| {
+        let stored = e.transform_length.unwrap_or(e.orig_length);
+        acc.checked_add(stored)
+    }).ok_or_else(|| FontError::InvalidFont("WOFF2 total decompressed size overflow".to_string()))?;
+    if total_orig > MAX_ORIG_SIZE {
+        return Err(FontError::InvalidFont(format!(
+            "WOFF2 total decompressed size {} exceeds limit {}",
+            total_orig, MAX_ORIG_SIZE
+        )));
+    }
 
     let mut decompressed = Vec::with_capacity(total_orig);
     {
@@ -634,13 +658,12 @@ pub fn decode_woff2(data: &[u8]) -> Result<Vec<u8>, FontError> {
                 ))
             })?;
 
-        // If a transform was applied to glyf/loca, we cannot reverse it here.
-        // Return an error asking the caller to use a non-transformed font.
-        if entry.transform_length.is_some() && (entry.tag == *b"glyf" || entry.tag == *b"loca") {
-            return Err(FontError::InvalidFont(
-                "WOFF2 glyf/loca transform is not supported; use TTF/OTF or untransformed WOFF2"
-                    .to_string(),
-            ));
+        // If any transform is present we cannot reverse it; reject the font.
+        if entry.transform_length.is_some() {
+            return Err(FontError::InvalidFont(format!(
+                "WOFF2 table '{}' transform is not supported; use TTF/OTF or untransformed WOFF2",
+                std::str::from_utf8(&entry.tag).unwrap_or("????")
+            )));
         }
 
         // Pad to 4-byte boundary
@@ -661,7 +684,9 @@ pub fn decode_woff2(data: &[u8]) -> Result<Vec<u8>, FontError> {
             length: entry.orig_length as u32,
         });
 
-        decomp_offset += stored_len;
+        decomp_offset = decomp_offset.checked_add(stored_len).ok_or_else(|| {
+            FontError::InvalidFont("WOFF2 decompressed offset overflow".to_string())
+        })?;
     }
 
     // Write table records into the reserved area
