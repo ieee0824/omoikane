@@ -349,7 +349,9 @@ pub(crate) fn paint_text_placeholder(
     let glyph_height = (font_size * 0.7).max(1.0);
     let glyph_y = rect.y + (font_size - glyph_height) * 0.5;
 
-    for ch in text.chars() {
+    let chars: Vec<char> = text.chars().collect();
+    let char_count = chars.len();
+    for (i, ch) in chars.iter().enumerate() {
         if !ch.is_whitespace() {
             canvas.fill_rect_clipped(
                 Rect {
@@ -362,7 +364,10 @@ pub(crate) fn paint_text_placeholder(
                 clip,
             );
         }
-        cursor_x += advance + letter_spacing;
+        cursor_x += advance;
+        if i + 1 < char_count {
+            cursor_x += letter_spacing;
+        }
     }
 }
 
