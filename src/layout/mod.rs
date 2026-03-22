@@ -941,6 +941,21 @@ fn is_border_box(style: &ComputedStyle) -> bool {
     )
 }
 
+/// Convert a specified height value from border-box to content-box if needed.
+/// Returns the content height after subtracting padding and border for border-box elements.
+pub(crate) fn border_box_adjust_height(
+    style: &ComputedStyle,
+    specified: f32,
+    padding: &EdgeSizes,
+    border: &EdgeSizes,
+) -> f32 {
+    if is_border_box(style) {
+        (specified - padding.top - padding.bottom - border.top - border.bottom).max(0.0)
+    } else {
+        specified
+    }
+}
+
 fn compute_width(
     style: &ComputedStyle,
     containing_width: f32,

@@ -103,14 +103,18 @@ pub(super) fn layout_table_container(
     }
 
     let auto_height = (cursor_y - y).max(spacing);
-    let mut content_height = resolved_length(&style, "height", 0.0).unwrap_or(auto_height);
+    let mut content_height = resolved_length(&style, "height", 0.0)
+        .map(|h| super::border_box_adjust_height(&style, h, &padding, &border))
+        .unwrap_or(auto_height);
     let (min_height, max_height) =
         normalized_min_max_lengths(&style, "min-height", "max-height", 0.0);
     if let Some(min_height) = min_height {
-        content_height = content_height.max(min_height);
+        let min_h = super::border_box_adjust_height(&style, min_height, &padding, &border);
+        content_height = content_height.max(min_h);
     }
     if let Some(max_height) = max_height {
-        content_height = content_height.min(max_height);
+        let max_h = super::border_box_adjust_height(&style, max_height, &padding, &border);
+        content_height = content_height.min(max_h);
     }
     Some(LayoutBox {
         node: node.clone(),
