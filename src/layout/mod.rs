@@ -143,6 +143,11 @@ pub struct InlineFragment {
     pub rect: Rect,
     pub metrics: FontMetrics,
     pub vertical_align: VerticalAlign,
+    /// Computed style of the element that owns this fragment.
+    /// Used by the paint stage to apply per-fragment `text-transform`,
+    /// `text-decoration`, and `color` rather than inheriting from the
+    /// containing block's style.
+    pub style: ComputedStyle,
 }
 
 /// A laid out inline fragment payload.

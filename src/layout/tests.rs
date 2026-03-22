@@ -3197,6 +3197,180 @@ fn text_transform_applied_to_direct_text_node() {
     );
 }
 
+/// Each `InlineFragment` should carry the computed style of its owning element
+/// so that paint can apply per-fragment text-transform / text-decoration without
+/// re-resolving styles.
+#[test]
+fn inline_fragment_carries_per_element_style() {
+    // Build: <p>normal <span style="text-transform:uppercase">upper</span></p>
+    let document = NodeHandle::document();
+    let html = NodeHandle::element("html");
+    let body = NodeHandle::element("body");
+    let p = NodeHandle::element("p");
+    let text_normal = NodeHandle::text("normal ");
+    let span = NodeHandle::element("span");
+    let text_upper = NodeHandle::text("upper");
+    document.append_child(html.clone());
+    html.append_child(body.clone());
+    body.append_child(p.clone());
+    p.append_child(text_normal);
+    p.append_child(span.clone());
+    span.append_child(text_upper);
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "body { margin: 0; } \
+             p { font-size: 16px; } \
+             span { text-transform: uppercase; }",
+        )
+        .unwrap(),
+    );
+
+    let layout = layout_tree(
+        &document,
+        &mut resolver,
+        Rect { x: 0.0, y: 0.0, width: 500.0, height: 0.0 },
+    )
+    .unwrap();
+
+    // Collect all text fragments with their text-transform style value.
+    fn collect_fragments(layout: &LayoutBox, out: &mut Vec<(String, String)>) {
+        for line in &layout.lines {
+            for fragment in &line.fragments {
+                if let Some(t) = fragment.text() {
+                    use crate::css::ComputedValue;
+                    let transform = match fragment.style.get("text-transform") {
+                        Some(ComputedValue::Keyword(kw)) => kw.to_ascii_lowercase(),
+                        _ => "none".to_string(),
+                    };
+                    out.push((t.to_string(), transform));
+                }
+            }
+        }
+        for child in &layout.children {
+            collect_fragments(child, out);
+        }
+    }
+
+    let mut fragments = Vec::new();
+    collect_fragments(&layout, &mut fragments);
+
+    // There should be at least two text fragments.
+    assert!(
+        fragments.len() >= 2,
+        "expected at least two text fragments, got {:?}",
+        fragments
+    );
+
+    // The fragment for "normal " should NOT have text-transform:uppercase.
+    let normal_frag = fragments.iter().find(|(text, _)| text.contains("normal"));
+    assert!(
+        normal_frag.is_some(),
+        "expected a fragment containing \"normal\""
+    );
+    assert_ne!(
+        normal_frag.unwrap().1,
+        "uppercase",
+        "\"normal \" fragment should not have text-transform:uppercase"
+    );
+
+    // The fragment for "UPPER" (already transformed in layout) should carry
+    // text-transform:uppercase in its style.
+    let upper_frag = fragments.iter().find(|(text, _)| *text == text.to_uppercase() && text.contains("UPPER"));
+    assert!(
+        upper_frag.is_some(),
+        "expected a fragment containing \"UPPER\" (text after transform), got {:?}",
+        fragments
+    );
+    assert_eq!(
+        upper_frag.unwrap().1,
+        "uppercase",
+        "span fragment should carry text-transform:uppercase in its style"
+    );
+}
+
+/// Nested inline elements with different `text-decoration` values must each
+/// carry their own style on the fragment so paint can apply them independently.
+#[test]
+fn inline_fragment_carries_per_element_text_decoration() {
+    let document = NodeHandle::document();
+    let html = NodeHandle::element("html");
+    let body = NodeHandle::element("body");
+    let p = NodeHandle::element("p");
+    let text_plain = NodeHandle::text("plain ");
+    let span = NodeHandle::element("span");
+    let text_decorated = NodeHandle::text("decorated");
+    document.append_child(html.clone());
+    html.append_child(body.clone());
+    body.append_child(p.clone());
+    p.append_child(text_plain);
+    p.append_child(span.clone());
+    span.append_child(text_decorated);
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "body { margin: 0; } \
+             p { font-size: 16px; } \
+             span { text-decoration-line: underline; }",
+        )
+        .unwrap(),
+    );
+
+    let layout = layout_tree(
+        &document,
+        &mut resolver,
+        Rect { x: 0.0, y: 0.0, width: 500.0, height: 0.0 },
+    )
+    .unwrap();
+
+    fn collect_fragments(layout: &LayoutBox, out: &mut Vec<(String, String)>) {
+        for line in &layout.lines {
+            for fragment in &line.fragments {
+                if let Some(t) = fragment.text() {
+                    use crate::css::ComputedValue;
+                    let decoration = match fragment.style.get("text-decoration-line") {
+                        Some(ComputedValue::Keyword(kw)) => kw.to_ascii_lowercase(),
+                        _ => "none".to_string(),
+                    };
+                    out.push((t.to_string(), decoration));
+                }
+            }
+        }
+        for child in &layout.children {
+            collect_fragments(child, out);
+        }
+    }
+
+    let mut fragments = Vec::new();
+    collect_fragments(&layout, &mut fragments);
+
+    assert!(
+        fragments.len() >= 2,
+        "expected at least two text fragments, got {:?}",
+        fragments
+    );
+
+    let plain_frag = fragments.iter().find(|(text, _)| text.contains("plain"));
+    assert!(plain_frag.is_some(), "expected fragment containing \"plain\"");
+    assert_ne!(
+        plain_frag.unwrap().1,
+        "underline",
+        "\"plain\" fragment should not have text-decoration-line:underline"
+    );
+
+    let decorated_frag = fragments.iter().find(|(text, _)| text.contains("decorated"));
+    assert!(decorated_frag.is_some(), "expected fragment containing \"decorated\"");
+    assert_eq!(
+        decorated_frag.unwrap().1,
+        "underline",
+        "span fragment should carry text-decoration-line:underline in its style"
+    );
+}
+
 fn collect_markers_by_tag<'a>(layout: &'a LayoutBox, tag: &str, out: &mut Vec<String>) {
     if layout.node.tag_name().as_deref() == Some(tag) {
         if let Some(marker) = &layout.marker {

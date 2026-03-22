@@ -19,16 +19,41 @@ pub(crate) fn paint_text(
     _viewport: Rect,
     fonts: &[Font],
 ) {
-    let color = text_color(style).unwrap_or(Color::rgb(0, 0, 0));
-    let text_transform = text_transform_value(style);
-    let decoration_line = text_decoration_line(style);
-    let decoration_color = text_decoration_color(style, color);
+    // Fallback color from the containing block's style (used when fragment
+    // style has no explicit color).
+    let fallback_color = text_color(style).unwrap_or(Color::rgb(0, 0, 0));
+    // Containing-block decoration: `text-decoration-*` is NOT a CSS inherited
+    // property, but decorations set on an ancestor box visually propagate to
+    // descendant inline content.  We use the box-level style as a fallback so
+    // that existing cases like `<p style="text-decoration:underline"><span>…</span></p>`
+    // continue to work when the span itself has no explicit decoration.
+    let block_decoration_line = text_decoration_line(style);
+    let block_decoration_color = text_decoration_color(style, fallback_color);
 
     for line in &layout.lines {
         for fragment in &line.fragments {
             match &fragment.content {
                 InlineFragmentContent::Text(text) => {
                     let font_size = fragment.metrics.font_size.max(1.0);
+
+                    // Per-fragment style is used for text-transform and color so
+                    // that nested inline elements (e.g. <span>) can have
+                    // independent styling.
+                    let frag_color = text_color(&fragment.style)
+                        .unwrap_or(fallback_color);
+                    let text_transform = text_transform_value(&fragment.style);
+
+                    // For text-decoration, distinguish "property not present" from
+                    // "present but none". If the fragment has an explicit
+                    // text-decoration-line (even none), use it; otherwise fall back
+                    // to the containing block's decoration.
+                    let has_frag_decoration = fragment.style.get("text-decoration-line").is_some();
+                    let (decoration_line, decoration_color) = if has_frag_decoration {
+                        (text_decoration_line(&fragment.style), text_decoration_color(&fragment.style, frag_color))
+                    } else {
+                        (block_decoration_line, block_decoration_color)
+                    };
+
                     let transformed = apply_text_transform(text, text_transform);
                     let display_text = transformed.as_deref().unwrap_or(text.as_str());
 
@@ -40,7 +65,7 @@ pub(crate) fn paint_text(
                             font_size,
                             fragment.metrics.ascent,
                             &fonts,
-                            color,
+                            frag_color,
                             clip,
                             fragment.metrics.letter_spacing,
                         );
@@ -51,7 +76,7 @@ pub(crate) fn paint_text(
                             fragment.rect,
                             display_text,
                             font_size,
-                            color,
+                            frag_color,
                             clip,
                             fragment.metrics.letter_spacing,
                         );
