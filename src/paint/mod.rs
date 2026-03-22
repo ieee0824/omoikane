@@ -1543,7 +1543,9 @@ fn paint_background_image(
                 _ => true,
             };
             if has_explicit_size {
-                // Gradient with explicit tile size — render into a tile then repeat like an image
+                // Gradient with explicit tile size — render into an offscreen tile buffer once,
+                // then blit (draw_image_scaled_clipped) for each repeated position.
+                // This avoids per-pixel gradient computation for every tile copy.
                 let (tile_w, tile_h) =
                     background_size(style, area, area.width, area.height);
                 let tile_w = tile_w.max(1.0);
@@ -1555,6 +1557,26 @@ fn paint_background_image(
                 let anchor_y = if fixed { viewport.y + position_y } else { area.y + position_y };
                 let x_end = area.x + area.width;
                 let y_end = area.y + area.height;
+
+                // Render one tile at origin (0,0) into an offscreen canvas.
+                // Guard with a maximum pixel budget to avoid OOM on huge background-size.
+                const MAX_TILE_PIXELS: u64 = 16_777_216; // 4096 x 4096
+                let tile_image = if repeat {
+                    let tw = tile_w.ceil().max(1.0) as u32;
+                    let th = tile_h.ceil().max(1.0) as u32;
+                    let pixels = tw as u64 * th as u64;
+                    if pixels <= MAX_TILE_PIXELS && tw > 0 && th > 0 {
+                        let mut tile_canvas = Canvas::new(tw, th);
+                        let origin_rect = Rect { x: 0.0, y: 0.0, width: tile_w, height: tile_h };
+                        color::paint_linear_gradient(&mut tile_canvas, &gradient, origin_rect, None);
+                        Image::new(tw, th, tile_canvas.pixels).ok()
+                    } else {
+                        None // tile too large, fall back to per-tile rendering
+                    }
+                } else {
+                    None
+                };
+
                 let mut ty = if repeat {
                     anchor_y + ((area.y - anchor_y) / tile_h).floor() * tile_h
                 } else {
@@ -1568,7 +1590,13 @@ fn paint_background_image(
                     };
                     while tx < x_end {
                         let tile_rect = Rect { x: tx, y: ty, width: tile_w, height: tile_h };
-                        color::paint_linear_gradient(canvas, &gradient, tile_rect, clip.or(Some(area)));
+                        if let Some(ref img) = tile_image {
+                            // Fast path: blit pre-rendered tile buffer
+                            canvas.draw_image_scaled_clipped(img, tile_rect, clip.or(Some(area)));
+                        } else {
+                            // Fallback (no-repeat, tile too large, or image validation failed): render directly
+                            color::paint_linear_gradient(canvas, &gradient, tile_rect, clip.or(Some(area)));
+                        }
                         if !repeat {
                             return;
                         }
