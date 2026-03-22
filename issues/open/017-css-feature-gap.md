@@ -15,18 +15,22 @@ status: open
 ## 子issue
 
 ### 高優先度（実サイト頻出）
-- [017-1](017-1-css-units-rem-viewport.md): rem / vw / vh 等の単位対応
-- [017-2](017-2-css-color-functions.md): rgba() / hsl() / hsla() / 8桁hex 色関数
-- [017-3](017-3-border-radius.md): border-radius（角丸）
+- [017-1](../closed/017-1-css-units-rem-viewport.md): rem / vw / vh 等の単位対応 ✅ 完了
+- [017-2](../closed/017-2-css-color-functions.md): rgba() / hsl() / hsla() / 8桁hex 色関数 ✅ 完了
+- [017-3](017-3-border-radius.md): border-radius（角丸）🔄 PR#32
 - [017-4](017-4-box-shadow-opacity.md): box-shadow / opacity
-- [017-5](017-5-text-decoration-transform.md): text-decoration / text-transform / letter-spacing
-- [017-6](017-6-shorthand-expansion.md): margin / padding 等の shorthand 完全展開
-- [017-7](017-7-advanced-selectors.md): :not() / :is() / 属性セレクタ ^= $= *=
+- [017-5](../closed/017-5-text-decoration-transform.md): text-decoration / text-transform / letter-spacing ✅ 完了
+- [017-6](../closed/017-6-shorthand-expansion.md): margin / padding 等の shorthand 完全展開 ✅ 完了
+- [017-7](../closed/017-7-advanced-selectors.md): :not() / :is() / 属性セレクタ ^= $= *= ✅ 完了
 
 ### 中優先度
 - [017-8](017-8-list-style.md): list-style-type / list-style-position
 - [017-9](017-9-gradient-background-size.md): linear-gradient() / background-size
 - [017-10](017-10-media-query-evaluation.md): @media 条件評価
+
+### レビュー派生
+- [017-11](017-11-text-decoration-test-isolation.md): text-decoration underline テストの分離検証
+- [017-12](017-12-per-fragment-inline-styling.md): ネスト inline 要素の per-fragment スタイリング
 
 ## 進め方
 

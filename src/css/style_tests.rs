@@ -1502,3 +1502,103 @@ fn calc_with_viewport_units() {
     // 10vh = 80, + 1rem = 16 → 96
     assert_eq!(style.get("height"), Some(&ComputedValue::Px(96.0)));
 }
+
+// --- border-radius shorthand 展開テスト ---
+
+#[test]
+fn expands_border_radius_1_value() {
+    let stylesheet = parse_stylesheet("div { border-radius: 8px; }").unwrap();
+    let Rule::Style(rule) = &stylesheet.rules[0] else {
+        panic!("expected style rule");
+    };
+    for corner in [
+        "border-top-left-radius",
+        "border-top-right-radius",
+        "border-bottom-right-radius",
+        "border-bottom-left-radius",
+    ] {
+        assert!(
+            rule.declarations
+                .iter()
+                .any(|d| d.name == corner && matches!(&d.value, Value::Length(v, u) if *v == 8.0 && u == "px")),
+            "{corner} not found with 8px"
+        );
+    }
+}
+
+#[test]
+fn expands_border_radius_2_values() {
+    // 2値: TL/BR = 10px, TR/BL = 20px
+    let stylesheet = parse_stylesheet("div { border-radius: 10px 20px; }").unwrap();
+    let Rule::Style(rule) = &stylesheet.rules[0] else {
+        panic!("expected style rule");
+    };
+    for corner in ["border-top-left-radius", "border-bottom-right-radius"] {
+        assert!(
+            rule.declarations
+                .iter()
+                .any(|d| d.name == corner && matches!(&d.value, Value::Length(v, u) if *v == 10.0 && u == "px")),
+            "{corner} not found with 10px"
+        );
+    }
+    for corner in ["border-top-right-radius", "border-bottom-left-radius"] {
+        assert!(
+            rule.declarations
+                .iter()
+                .any(|d| d.name == corner && matches!(&d.value, Value::Length(v, u) if *v == 20.0 && u == "px")),
+            "{corner} not found with 20px"
+        );
+    }
+}
+
+#[test]
+fn expands_border_radius_3_values() {
+    // 3値: TL=10px, TR/BL=20px, BR=30px
+    let stylesheet = parse_stylesheet("div { border-radius: 10px 20px 30px; }").unwrap();
+    let Rule::Style(rule) = &stylesheet.rules[0] else {
+        panic!("expected style rule");
+    };
+    assert!(rule.declarations.iter().any(
+        |d| d.name == "border-top-left-radius" && matches!(&d.value, Value::Length(v, u) if *v == 10.0 && u == "px")
+    ));
+    assert!(rule.declarations.iter().any(
+        |d| d.name == "border-top-right-radius" && matches!(&d.value, Value::Length(v, u) if *v == 20.0 && u == "px")
+    ));
+    assert!(rule.declarations.iter().any(
+        |d| d.name == "border-bottom-right-radius" && matches!(&d.value, Value::Length(v, u) if *v == 30.0 && u == "px")
+    ));
+    assert!(rule.declarations.iter().any(
+        |d| d.name == "border-bottom-left-radius" && matches!(&d.value, Value::Length(v, u) if *v == 20.0 && u == "px")
+    ));
+}
+
+#[test]
+fn expands_border_radius_4_values() {
+    // 4値: TL/TR/BR/BL = 1/2/3/4px
+    let stylesheet = parse_stylesheet("div { border-radius: 1px 2px 3px 4px; }").unwrap();
+    let Rule::Style(rule) = &stylesheet.rules[0] else {
+        panic!("expected style rule");
+    };
+    let expected = [
+        ("border-top-left-radius", 1.0f32),
+        ("border-top-right-radius", 2.0),
+        ("border-bottom-right-radius", 3.0),
+        ("border-bottom-left-radius", 4.0),
+    ];
+    for (corner, px) in &expected {
+        assert!(
+            rule.declarations
+                .iter()
+                .any(|d| d.name == *corner && matches!(&d.value, Value::Length(v, u) if *v == *px && u == "px")),
+            "{corner} not found with {px}px"
+        );
+    }
+}
+
+#[test]
+fn border_radius_longhand_supported_properties() {
+    assert!(is_supported_property("border-top-left-radius"));
+    assert!(is_supported_property("border-top-right-radius"));
+    assert!(is_supported_property("border-bottom-right-radius"));
+    assert!(is_supported_property("border-bottom-left-radius"));
+}
