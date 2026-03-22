@@ -5377,3 +5377,85 @@ fn nested_inline_span_text_transform_differs_from_parent() {
     // Also verify paint runs without panic.
     paint_layout(&layout, &mut resolver, viewport);
 }
+
+// ── gradient tile repeat tests ────────────────────────────────────────────────
+
+/// background-size で小さなタイルを指定した linear-gradient が background-repeat で
+/// 繰り返し描画されること。タイルのオフスクリーンバッファ最適化後も描画結果は変わらない。
+#[test]
+fn tiled_linear_gradient_repeats_correctly() {
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let div = NodeHandle::element("div");
+    document.append_child(body.clone());
+    body.append_child(div);
+
+    // 10x10 の領域に 5x5 のタイルを敷き詰める (4タイル)
+    let css = "body { margin: 0; } \
+               div { width: 10px; height: 10px; \
+                     background-image: linear-gradient(to right, red, blue); \
+                     background-size: 5px 5px; \
+                     background-repeat: repeat; }";
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(Origin::Author, parse_stylesheet(css).unwrap());
+
+    let viewport = Rect { x: 0.0, y: 0.0, width: 10.0, height: 10.0 };
+    let layout = layout_tree(&document, &mut resolver, viewport).unwrap();
+    let canvas = paint_layout(&layout, &mut resolver, viewport);
+
+    // 各タイルの左端は赤系、右端は青系
+    let top_left = canvas.pixel(0, 0).expect("pixel at (0,0)");
+    assert!(top_left.r > 150, "top-left of tile should be red-ish, got {:?}", top_left);
+
+    let top_right_of_first_tile = canvas.pixel(4, 0).expect("pixel at (4,0)");
+    assert!(
+        top_right_of_first_tile.b > 150,
+        "right end of first tile should be blue-ish, got {:?}",
+        top_right_of_first_tile
+    );
+
+    // 2枚目タイルの左端も赤系（繰り返しが機能している）
+    let second_tile_left = canvas.pixel(5, 0).expect("pixel at (5,0)");
+    assert!(
+        second_tile_left.r > 150,
+        "left of second tile should be red-ish (repeat working), got {:?}",
+        second_tile_left
+    );
+
+    // 下段タイルも同様に存在する
+    let bottom_tile = canvas.pixel(0, 5).expect("pixel at (0,5)");
+    assert!(bottom_tile.r > 150, "bottom-row tile left should be red-ish, got {:?}", bottom_tile);
+}
+
+/// background-repeat: no-repeat のとき、gradient タイルは1枚だけ描画される。
+#[test]
+fn tiled_linear_gradient_no_repeat_paints_once() {
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let div = NodeHandle::element("div");
+    document.append_child(body.clone());
+    body.append_child(div);
+
+    // 10x10 の領域に 5x5 タイル1枚だけ（no-repeat）
+    let css = "body { margin: 0; } \
+               div { width: 10px; height: 10px; \
+                     background-image: linear-gradient(to right, red, blue); \
+                     background-size: 5px 5px; \
+                     background-repeat: no-repeat; }";
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(Origin::Author, parse_stylesheet(css).unwrap());
+
+    let viewport = Rect { x: 0.0, y: 0.0, width: 10.0, height: 10.0 };
+    let layout = layout_tree(&document, &mut resolver, viewport).unwrap();
+    let canvas = paint_layout(&layout, &mut resolver, viewport);
+
+    // 第1タイル内は描画済み
+    let first = canvas.pixel(0, 0).expect("pixel at (0,0)");
+    assert!(first.a > 0, "first tile should be painted, got {:?}", first);
+
+    // 第1タイルの外（右側）は透明なまま
+    let outside = canvas.pixel(6, 0).expect("pixel at (6,0)");
+    assert_eq!(outside.a, 0, "outside tile area should be transparent with no-repeat, got {:?}", outside);
+}
