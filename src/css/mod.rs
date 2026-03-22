@@ -1270,6 +1270,19 @@ fn expand_background_shorthand(value: Value, important: bool) -> Vec<Declaration
                     important,
                 });
             }
+            Value::Function { name, .. }
+                if name.eq_ignore_ascii_case("linear-gradient")
+                    || name.eq_ignore_ascii_case("radial-gradient")
+                    || name.eq_ignore_ascii_case("conic-gradient")
+                    || name.eq_ignore_ascii_case("repeating-linear-gradient")
+                    || name.eq_ignore_ascii_case("repeating-radial-gradient") =>
+            {
+                declarations.push(Declaration {
+                    name: "background-image".to_string(),
+                    value: item.clone(),
+                    important,
+                })
+            }
             Value::Color(_) | Value::Function { .. } => declarations.push(Declaration {
                 name: "background-color".to_string(),
                 value: item.clone(),
@@ -2642,6 +2655,82 @@ mod tests {
                 .iter()
                 .any(|decl| decl.name == "list-style-type"
                     && matches!(&decl.value, Value::Keyword(v) if v == "none"))
+        );
+    }
+
+    #[test]
+    fn expands_linear_gradient_as_background_image() {
+        // linear-gradient() 関数は background-image に展開される
+        let stylesheet =
+            parse_stylesheet("div { background: linear-gradient(to right, red, blue); }")
+                .unwrap();
+        let Rule::Style(rule) = &stylesheet.rules[0] else {
+            panic!("expected style rule");
+        };
+
+        assert!(
+            rule.declarations
+                .iter()
+                .any(|decl| decl.name == "background-image"),
+            "linear-gradient() should expand to background-image; got: {:?}",
+            rule.declarations
+        );
+        // background-color には展開されないこと
+        assert!(
+            !rule
+                .declarations
+                .iter()
+                .any(|decl| decl.name == "background-color"),
+            "linear-gradient() should NOT expand to background-color"
+        );
+    }
+
+    #[test]
+    fn background_size_standalone_property() {
+        // background-size は単独プロパティとして認識される
+        let stylesheet = parse_stylesheet("div { background-size: cover; }").unwrap();
+        let Rule::Style(rule) = &stylesheet.rules[0] else {
+            panic!("expected style rule");
+        };
+
+        assert!(
+            rule.declarations
+                .iter()
+                .any(|decl| decl.name == "background-size"
+                    && matches!(&decl.value, Value::Keyword(v) if v == "cover")),
+            "background-size: cover should be parsed; got: {:?}",
+            rule.declarations
+        );
+    }
+
+    #[test]
+    fn background_size_contain_standalone() {
+        let stylesheet = parse_stylesheet("div { background-size: contain; }").unwrap();
+        let Rule::Style(rule) = &stylesheet.rules[0] else {
+            panic!("expected style rule");
+        };
+
+        assert!(
+            rule.declarations
+                .iter()
+                .any(|decl| decl.name == "background-size"
+                    && matches!(&decl.value, Value::Keyword(v) if v == "contain")),
+        );
+    }
+
+    #[test]
+    fn background_size_length_standalone() {
+        let stylesheet = parse_stylesheet("div { background-size: 100px 50px; }").unwrap();
+        let Rule::Style(rule) = &stylesheet.rules[0] else {
+            panic!("expected style rule");
+        };
+
+        assert!(
+            rule.declarations
+                .iter()
+                .any(|decl| decl.name == "background-size"),
+            "background-size with lengths should be parsed; got: {:?}",
+            rule.declarations
         );
     }
 }
