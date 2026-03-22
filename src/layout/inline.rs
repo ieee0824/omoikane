@@ -69,6 +69,9 @@ pub(super) struct InlineSegment {
     pub(super) metrics: FontMetrics,
     pub(super) line_height: f32,
     pub(super) vertical_align: VerticalAlign,
+    /// Computed style of the owning element — forwarded to `InlineFragment`
+    /// so that paint can apply per-fragment text-transform / text-decoration.
+    pub(super) style: ComputedStyle,
 }
 
 #[derive(Debug, Clone)]
@@ -101,6 +104,7 @@ fn collect_inline_segments(
                         metrics: font_metrics(&parent_style),
                         line_height: line_height(&parent_style),
                         vertical_align: vertical_align(&parent_style),
+                        style: parent_style,
                     });
                 }
             }
@@ -138,6 +142,7 @@ fn collect_inline_segments(
                         rendered_height + padding.top + padding.bottom + border.top + border.bottom,
                     ),
                     vertical_align: vertical_align(&image_style),
+                    style: image_style,
                 });
                 out.extend(generated_inline_segments(
                     node,
@@ -155,6 +160,7 @@ fn collect_inline_segments(
                         metrics: font_metrics(&style),
                         line_height: line_height(&style),
                         vertical_align: vertical_align(&style),
+                        style: style.clone(),
                     });
                     out.extend(generated_inline_segments(
                         node,
@@ -177,6 +183,7 @@ fn collect_inline_segments(
                                     metrics: font_metrics(&style),
                                     line_height: line_height(&style),
                                     vertical_align: vertical_align(&style),
+                                    style: style.clone(),
                                 });
                             }
                         }
@@ -222,11 +229,16 @@ pub(super) fn generated_inline_segments(
             content: if text.is_empty() {
                 InlineSegmentContent::GeneratedBox(style.clone())
             } else {
-                InlineSegmentContent::Text(normalize_text(&text, white_space(&style)))
+                let normalized = normalize_text(&text, white_space(&style));
+                // Apply text-transform during layout (same as regular text nodes)
+                // so that layout width measurements use the transformed form.
+                let transformed = apply_text_transform_layout(&normalized, &style);
+                InlineSegmentContent::Text(transformed)
             },
             metrics,
             line_height,
             vertical_align,
+            style: style.clone(),
         }],
         Some(GeneratedContent::Image(image)) => vec![InlineSegment {
             node: node.clone(),
@@ -239,6 +251,7 @@ pub(super) fn generated_inline_segments(
             metrics,
             line_height: line_height.max(metrics.font_size),
             vertical_align,
+            style: style.clone(),
         }],
         None => Vec::new(),
     }
@@ -660,6 +673,7 @@ fn layout_inline_segments(
                         },
                         metrics: segment.metrics,
                         vertical_align: segment.vertical_align,
+                        style: segment.style.clone(),
                     });
                     cursor_x += width;
                     current_line_height = current_line_height.max(segment.line_height.max(height));

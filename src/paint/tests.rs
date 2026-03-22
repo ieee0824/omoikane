@@ -1,7 +1,7 @@
 use std::fs;
 use std::path::PathBuf;
 
-use crate::css::{Origin, StyleResolver, parse_stylesheet};
+use crate::css::{ComputedStyle, Origin, StyleResolver, parse_stylesheet};
 use crate::dom::NodeHandle;
 use crate::html::TreeBuilder;
 use crate::layout::{
@@ -803,6 +803,7 @@ fn absolute_inline_content_paints_above_float_siblings() {
                         },
                         metrics: FontMetrics::from_font_size(8.0),
                         vertical_align: VerticalAlign::Top,
+                        style: ComputedStyle::default(),
                     }],
                 }],
                 children: Vec::new(),
@@ -5229,4 +5230,152 @@ fn decimal_marker_placeholder_is_wider_than_bullet_placeholder() {
         decimal_right,
         bullet_right
     );
+}
+
+// ===== Per-fragment inline styling tests =====
+
+/// When a `<span>` inside a `<p>` has `text-decoration-line: underline`, painting
+/// must apply the decoration only to the span's fragments.  We verify this by
+/// comparing two renders: one where the whole paragraph has underline and one where
+/// only the span does — both should produce at least some pixels below the text.
+#[test]
+fn nested_inline_span_text_decoration_applied_per_fragment() {
+    // Build: <p>normal <span>decorated</span></p>
+    // where only <span> has text-decoration-line: underline.
+    let build_doc = || {
+        let document = NodeHandle::document();
+        let html = NodeHandle::element("html");
+        let body = NodeHandle::element("body");
+        let p = NodeHandle::element("p");
+        let text_normal = NodeHandle::text("ab ");
+        let span = NodeHandle::element("span");
+        let text_span = NodeHandle::text("cd");
+        document.append_child(html.clone());
+        html.append_child(body.clone());
+        body.append_child(p.clone());
+        p.append_child(text_normal);
+        p.append_child(span.clone());
+        span.append_child(text_span);
+        document
+    };
+
+    let render = |css: &str| {
+        let document = build_doc();
+        let mut resolver = StyleResolver::new();
+        resolver.add_stylesheet(Origin::Author, parse_stylesheet(css).unwrap());
+        let viewport = Rect { x: 0.0, y: 0.0, width: 200.0, height: 60.0 };
+        let layout = layout_tree(&document, &mut resolver, viewport).expect("layout");
+        paint_layout(&layout, &mut resolver, viewport)
+    };
+
+    let css_span_underline =
+        "body { margin: 0; } p { color: #ff0000; font-size: 20px; } \
+         span { text-decoration-line: underline; }";
+    let css_no_decoration =
+        "body { margin: 0; } p { color: #ff0000; font-size: 20px; }";
+
+    let canvas_with = render(css_span_underline);
+    let canvas_without = render(css_no_decoration);
+
+    // At least one pixel row should differ between the two renders — the
+    // underline decoration row introduced by the span.
+    let (w, h) = (canvas_with.width(), canvas_with.height());
+    let any_diff = (0..h).any(|y| {
+        (0..w).any(|x| {
+            let a = canvas_with.pixel(x, y).map_or(0, |c| c.a);
+            let b = canvas_without.pixel(x, y).map_or(0, |c| c.a);
+            a != b
+        })
+    });
+    assert!(
+        any_diff,
+        "renders with and without span underline should differ; \
+         per-fragment decoration must be painted"
+    );
+}
+
+/// When a `<span>` inside a `<p>` has `text-transform: uppercase`, the span's
+/// fragment text must be uppercased in the layout tree (via `collect_inline_segments`),
+/// and the fragment must carry the span's style so paint can verify the transform.
+/// This test confirms the end-to-end path via `paint_layout`.
+#[test]
+fn nested_inline_span_text_transform_differs_from_parent() {
+    // <p>ab <span style="text-transform:uppercase">cd</span></p>
+    let document = NodeHandle::document();
+    let html = NodeHandle::element("html");
+    let body = NodeHandle::element("body");
+    let p = NodeHandle::element("p");
+    let text_normal = NodeHandle::text("ab ");
+    let span = NodeHandle::element("span");
+    let text_span = NodeHandle::text("cd");
+    document.append_child(html.clone());
+    html.append_child(body.clone());
+    body.append_child(p.clone());
+    p.append_child(text_normal);
+    p.append_child(span.clone());
+    span.append_child(text_span);
+
+    let css = "body { margin: 0; } p { color: #ff0000; font-size: 20px; } \
+               span { text-transform: uppercase; }";
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(Origin::Author, parse_stylesheet(css).unwrap());
+
+    let viewport = Rect { x: 0.0, y: 0.0, width: 200.0, height: 60.0 };
+    let layout = layout_tree(&document, &mut resolver, viewport).expect("layout");
+
+    // Collect all text fragments and check that the span's fragment carries
+    // text-transform:uppercase and that its text has been transformed.
+    fn collect_text_fragments<'a>(
+        layout: &'a crate::layout::LayoutBox,
+        out: &mut Vec<(&'static str, String)>,
+    ) {
+        use crate::css::ComputedValue;
+        for line in &layout.lines {
+            for frag in &line.fragments {
+                if let Some(t) = frag.text() {
+                    let transform = match frag.style.get("text-transform") {
+                        Some(ComputedValue::Keyword(kw)) => kw.to_ascii_lowercase().leak(),
+                        _ => "none",
+                    };
+                    out.push((transform, t.to_string()));
+                }
+            }
+        }
+        for child in &layout.children {
+            collect_text_fragments(child, out);
+        }
+    }
+
+    let mut fragments = Vec::new();
+    collect_text_fragments(&layout, &mut fragments);
+
+    // The "CD" fragment should have text-transform:uppercase.
+    let upper_frag = fragments.iter().find(|(_, text)| text.contains("CD"));
+    assert!(
+        upper_frag.is_some(),
+        "expected a fragment with text \"CD\" (uppercased), got {:?}",
+        fragments
+    );
+    assert_eq!(
+        upper_frag.unwrap().0,
+        "uppercase",
+        "span fragment should carry text-transform:uppercase; got {:?}",
+        fragments
+    );
+
+    // The "ab" fragment should NOT have text-transform:uppercase.
+    let normal_frag = fragments.iter().find(|(_, text)| text.contains("ab"));
+    assert!(
+        normal_frag.is_some(),
+        "expected a fragment with text \"ab\", got {:?}",
+        fragments
+    );
+    assert_ne!(
+        normal_frag.unwrap().0,
+        "uppercase",
+        "\"ab\" fragment should not carry text-transform:uppercase"
+    );
+
+    // Also verify paint runs without panic.
+    paint_layout(&layout, &mut resolver, viewport);
 }
