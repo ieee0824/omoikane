@@ -449,13 +449,16 @@ pub(crate) fn rasterize_with_fallback(
     };
 
     if prefer_cjk && fonts.len() > 1 {
+        // Web fonts (index 0) are tried first so that explicit @font-face
+        // declarations take priority even for CJK characters.
+        // If the web font has no glyph, fall through to CJK-capable system fonts.
+        if let Some(result) = try_index(0) {
+            return result;
+        }
         for index in 1..fonts.len() {
             if let Some(result) = try_index(index) {
                 return result;
             }
-        }
-        if let Some(result) = try_index(0) {
-            return result;
         }
     } else {
         for index in 0..fonts.len() {
@@ -505,13 +508,16 @@ pub(crate) fn rasterize_with_fallback_refs(
     };
 
     if prefer_cjk && fonts.len() > 1 {
+        // Web fonts (index 0) are tried first so that explicit @font-face
+        // declarations take priority even for CJK characters.
+        // If the web font has no glyph, fall through to CJK-capable system fonts.
+        if let Some(result) = try_index(0) {
+            return result;
+        }
         for index in 1..fonts.len() {
             if let Some(result) = try_index(index) {
                 return result;
             }
-        }
-        if let Some(result) = try_index(0) {
-            return result;
         }
     } else {
         for index in 0..fonts.len() {

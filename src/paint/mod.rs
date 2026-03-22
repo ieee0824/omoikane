@@ -643,6 +643,13 @@ pub fn render_document_with_url(
     // Build combined system font list for glyph fallback
     let all_fonts = text::load_text_fonts();
 
+    // Avoid passing an empty registry to skip unnecessary lookups.
+    let web_font_registry_opt = if web_font_registry.is_empty() {
+        None
+    } else {
+        Some(&web_font_registry)
+    };
+
     crate::layout::with_image_base_url(effective_base, || {
         let layout = crate::layout::layout_tree(document, &mut resolver, viewport)?;
         Some(paint_layout_with_web_fonts(
@@ -650,7 +657,7 @@ pub fn render_document_with_url(
             &mut resolver,
             viewport,
             all_fonts,
-            Some(&web_font_registry),
+            web_font_registry_opt,
         ))
     })
     .ok_or(PaintError::InvalidImageBuffer)

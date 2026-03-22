@@ -924,7 +924,7 @@ pub(crate) fn fetch_font_face_fonts(
                 crate::font::FontStyle::Oblique => 2,
             };
             let variant_key = (family_lower.clone(), weight.0, style_ord);
-            if !seen_variants.insert(variant_key) {
+            if seen_variants.contains(&variant_key) {
                 continue;
             }
 
@@ -934,9 +934,11 @@ pub(crate) fn fetch_font_face_fonts(
                 None => continue,
             };
 
-            // Load font
+            // Load font — insert into seen_variants only on success to allow
+            // retrying with a different src URL if this one fails to parse.
             match Font::load_from_bytes(data) {
                 Ok(font) => {
+                    seen_variants.insert(variant_key);
                     web_fonts.push(WebFont {
                         family: ff_rule.font_family.clone(),
                         weight,

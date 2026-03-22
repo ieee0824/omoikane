@@ -969,18 +969,19 @@ impl FontWeight {
     ///
     /// Returns `FontWeight(400)` (normal) when the value cannot be parsed.
     pub fn parse(value: &str) -> Self {
-        match value.trim().to_ascii_lowercase().as_str() {
-            "normal" => Self(400),
-            "bold" => Self(700),
-            "bolder" => Self(700), // simplified — treat as bold
-            "lighter" => Self(300), // simplified
-            s => {
-                if let Ok(n) = s.parse::<u16>() {
-                    Self(n.clamp(1, 1000))
-                } else {
-                    Self(400)
-                }
-            }
+        let trimmed = value.trim();
+        if trimmed.eq_ignore_ascii_case("normal") {
+            Self(400)
+        } else if trimmed.eq_ignore_ascii_case("bold") {
+            Self(700)
+        } else if trimmed.eq_ignore_ascii_case("bolder") {
+            Self(700) // simplified — treat as bold
+        } else if trimmed.eq_ignore_ascii_case("lighter") {
+            Self(300) // simplified
+        } else if let Ok(n) = trimmed.parse::<u16>() {
+            Self(n.clamp(1, 1000))
+        } else {
+            Self(400)
         }
     }
 }
@@ -1002,10 +1003,13 @@ pub enum FontStyle {
 impl FontStyle {
     /// Parse a CSS font-style descriptor value.
     pub fn parse(value: &str) -> Self {
-        match value.trim().to_ascii_lowercase().as_str() {
-            "italic" => Self::Italic,
-            "oblique" => Self::Oblique,
-            _ => Self::Normal,
+        let trimmed = value.trim();
+        if trimmed.eq_ignore_ascii_case("italic") {
+            Self::Italic
+        } else if trimmed.eq_ignore_ascii_case("oblique") {
+            Self::Oblique
+        } else {
+            Self::Normal
         }
     }
 }
@@ -1091,7 +1095,7 @@ impl FontCache {
 
         // Try any cached variant of this family before hitting disk
         if let Some(font) = self.select_best_variant(family, variant.weight, variant.style) {
-            return Ok(Arc::clone(&font));
+            return Ok(font);
         }
 
         // Evict an arbitrary entry if at capacity
@@ -1155,26 +1159,6 @@ impl FontCache {
     ) -> Option<Arc<Font>> {
         let family_lower = family.to_lowercase();
 
-        // Collect all variants for this family
-        let variants: Vec<(FontVariantKey, Arc<Font>)> = self
-            .fonts
-            .iter()
-            .filter(|((fam, _), _)| fam == &family_lower)
-            .map(|((_, vk), font)| (*vk, Arc::clone(font)))
-            .collect();
-
-        if variants.is_empty() {
-            return None;
-        }
-
-        // Exact match
-        if let Some((_, font)) = variants
-            .iter()
-            .find(|(vk, _)| vk.weight == target_weight && vk.style == target_style)
-        {
-            return Some(Arc::clone(font));
-        }
-
         // Style-matching pass: prefer matching style, then compatible style
         let style_score = |s: FontStyle| -> u8 {
             match (target_style, s) {
@@ -1208,15 +1192,16 @@ impl FontCache {
             }
         };
 
-        // Pick the best-scoring variant
-        variants
-            .into_iter()
-            .min_by_key(|(vk, _)| {
+        // Iterate directly without collecting — clone only the winning Arc.
+        self.fonts
+            .iter()
+            .filter(|((fam, _), _)| fam == &family_lower)
+            .min_by_key(|((_, vk), _)| {
                 let ss = style_score(vk.style) as u32 * 100_000;
                 let ws = weight_score(vk.weight) as u32;
                 ss + ws
             })
-            .map(|(_, font)| font)
+            .map(|(_, font)| Arc::clone(font))
     }
 
     /// Check if a font for the given family is already cached (any variant).
@@ -1342,6 +1327,11 @@ impl WebFontRegistry {
     /// Returns `true` when any variant for the family is registered.
     pub fn contains_family(&self, family: &str) -> bool {
         self.entries.contains_key(&family.to_lowercase())
+    }
+
+    /// Returns `true` when no fonts have been registered.
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
     }
 
     /// Returns an iterator over all registered (family, variant_key, font) tuples.
