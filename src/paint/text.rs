@@ -11,17 +11,6 @@ use super::{
     Canvas, Image,
 };
 
-pub(crate) fn paint_text(
-    canvas: &mut Canvas,
-    layout: &LayoutBox,
-    style: &ComputedStyle,
-    clip: Option<Rect>,
-    _viewport: Rect,
-    fonts: &[Font],
-) {
-    paint_text_with_registry(canvas, layout, style, clip, _viewport, fonts, None)
-}
-
 /// Paint text using the provided fonts and an optional web font registry.
 ///
 /// When `web_fonts` is `Some`, the fragment's `font_family`, `font_weight`, and
