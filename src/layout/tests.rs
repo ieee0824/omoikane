@@ -3377,3 +3377,158 @@ fn collect_markers_by_tag<'a>(layout: &'a LayoutBox, tag: &str, out: &mut Vec<St
         collect_markers_by_tag(child, tag, out);
     }
 }
+
+// ── box-sizing: border-box ───────────────────────────────────────────────────
+
+/// width: 100px, padding: 10px each side, border: 5px each side
+/// border-box → content_width = 100 - 20 - 10 = 70
+#[test]
+fn border_box_width_subtracts_padding_and_border() {
+    let (_document, _html, body, _card) = sample_tree();
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "body { width: 400px; } \
+             div { box-sizing: border-box; width: 100px; \
+                   padding-left: 10px; padding-right: 10px; \
+                   border-left-width: 5px; border-right-width: 5px; \
+                   border-left-style: solid; border-right-style: solid; }",
+        )
+        .unwrap(),
+    );
+
+    let layout = layout_tree(
+        &body,
+        &mut resolver,
+        Rect { x: 0.0, y: 0.0, width: 400.0, height: 0.0 },
+    )
+    .unwrap();
+
+    let child = &layout.children[0];
+    // content_width = 100 - (10+10) - (5+5) = 70
+    assert_eq!(child.dimensions.content.width, 70.0);
+    assert_eq!(child.dimensions.padding.left, 10.0);
+    assert_eq!(child.dimensions.padding.right, 10.0);
+    assert_eq!(child.dimensions.border.left, 5.0);
+    assert_eq!(child.dimensions.border.right, 5.0);
+}
+
+/// With content-box (default), width: 100px → content_width = 100px
+/// regardless of padding / border.
+#[test]
+fn content_box_width_is_unchanged() {
+    let (_document, _html, body, _card) = sample_tree();
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "body { width: 400px; } \
+             div { box-sizing: content-box; width: 100px; \
+                   padding-left: 10px; padding-right: 10px; \
+                   border-left-width: 5px; border-right-width: 5px; \
+                   border-left-style: solid; border-right-style: solid; }",
+        )
+        .unwrap(),
+    );
+
+    let layout = layout_tree(
+        &body,
+        &mut resolver,
+        Rect { x: 0.0, y: 0.0, width: 400.0, height: 0.0 },
+    )
+    .unwrap();
+
+    let child = &layout.children[0];
+    assert_eq!(child.dimensions.content.width, 100.0);
+}
+
+/// border-box height: 100px, padding: 10px each side, border: 5px each side
+/// → content_height = 100 - 20 - 10 = 70
+#[test]
+fn border_box_height_subtracts_padding_and_border() {
+    let (_document, _html, body, _card) = sample_tree();
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "body { width: 400px; } \
+             div { box-sizing: border-box; width: 200px; height: 100px; \
+                   padding-top: 10px; padding-bottom: 10px; \
+                   border-top-width: 5px; border-bottom-width: 5px; \
+                   border-top-style: solid; border-bottom-style: solid; }",
+        )
+        .unwrap(),
+    );
+
+    let layout = layout_tree(
+        &body,
+        &mut resolver,
+        Rect { x: 0.0, y: 0.0, width: 400.0, height: 0.0 },
+    )
+    .unwrap();
+
+    let child = &layout.children[0];
+    // content_height = 100 - (10+10) - (5+5) = 70
+    assert_eq!(child.dimensions.content.height, 70.0);
+}
+
+/// border-box with min-width: 120px means content_min = 120 - 20 - 10 = 90.
+/// Since the specified content_width (70) < 90, it gets clamped to 90.
+#[test]
+fn border_box_min_width_is_applied_in_content_space() {
+    let (_document, _html, body, _card) = sample_tree();
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "body { width: 400px; } \
+             div { box-sizing: border-box; width: 100px; min-width: 120px; \
+                   padding-left: 10px; padding-right: 10px; \
+                   border-left-width: 5px; border-right-width: 5px; \
+                   border-left-style: solid; border-right-style: solid; }",
+        )
+        .unwrap(),
+    );
+
+    let layout = layout_tree(
+        &body,
+        &mut resolver,
+        Rect { x: 0.0, y: 0.0, width: 400.0, height: 0.0 },
+    )
+    .unwrap();
+
+    let child = &layout.children[0];
+    // content_min = 120 - (10+10) - (5+5) = 90
+    assert_eq!(child.dimensions.content.width, 90.0);
+}
+
+/// border-box with max-width: 80px means content_max = 80 - 20 - 10 = 50.
+/// Since the specified content_width (70) > 50, it gets clamped to 50.
+#[test]
+fn border_box_max_width_is_applied_in_content_space() {
+    let (_document, _html, body, _card) = sample_tree();
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "body { width: 400px; } \
+             div { box-sizing: border-box; width: 100px; max-width: 80px; \
+                   padding-left: 10px; padding-right: 10px; \
+                   border-left-width: 5px; border-right-width: 5px; \
+                   border-left-style: solid; border-right-style: solid; }",
+        )
+        .unwrap(),
+    );
+
+    let layout = layout_tree(
+        &body,
+        &mut resolver,
+        Rect { x: 0.0, y: 0.0, width: 400.0, height: 0.0 },
+    )
+    .unwrap();
+
+    let child = &layout.children[0];
+    // content_max = 80 - (10+10) - (5+5) = 50
+    assert_eq!(child.dimensions.content.width, 50.0);
+}
