@@ -3240,11 +3240,9 @@ fn inline_fragment_carries_per_element_style() {
         for line in &layout.lines {
             for fragment in &line.fragments {
                 if let Some(t) = fragment.text() {
-                    use crate::css::ComputedValue;
-                    let transform = match fragment.style.get("text-transform") {
-                        Some(ComputedValue::Keyword(kw)) => kw.to_ascii_lowercase(),
-                        _ => "none".to_string(),
-                    };
+                    let transform = fragment.style.text_transform.as_deref()
+                        .map(|kw| kw.to_ascii_lowercase())
+                        .unwrap_or_else(|| "none".to_string());
                     out.push((t.to_string(), transform));
                 }
             }
@@ -3331,11 +3329,9 @@ fn inline_fragment_carries_per_element_text_decoration() {
         for line in &layout.lines {
             for fragment in &line.fragments {
                 if let Some(t) = fragment.text() {
-                    use crate::css::ComputedValue;
-                    let decoration = match fragment.style.get("text-decoration-line") {
-                        Some(ComputedValue::Keyword(kw)) => kw.to_ascii_lowercase(),
-                        _ => "none".to_string(),
-                    };
+                    let decoration = fragment.style.text_decoration_line.as_deref()
+                        .map(|kw| kw.to_ascii_lowercase())
+                        .unwrap_or_else(|| "none".to_string());
                     out.push((t.to_string(), decoration));
                 }
             }

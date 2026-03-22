@@ -1,11 +1,11 @@
 use std::fs;
 use std::path::PathBuf;
 
-use crate::css::{ComputedStyle, Origin, StyleResolver, parse_stylesheet};
+use crate::css::{Origin, StyleResolver, parse_stylesheet};
 use crate::dom::NodeHandle;
 use crate::html::TreeBuilder;
 use crate::layout::{
-    BoxDimensions, FontMetrics, InlineFragment, LineBox, Rect, VerticalAlign, layout_tree,
+    BoxDimensions, FontMetrics, FragmentStyle, InlineFragment, LineBox, Rect, VerticalAlign, layout_tree,
 };
 use crate::paint::*;
 
@@ -803,7 +803,7 @@ fn absolute_inline_content_paints_above_float_siblings() {
                         },
                         metrics: FontMetrics::from_font_size(8.0),
                         vertical_align: VerticalAlign::Top,
-                        style: ComputedStyle::default(),
+                        style: FragmentStyle::default(),
                     }],
                 }],
                 children: Vec::new(),
@@ -5329,14 +5329,12 @@ fn nested_inline_span_text_transform_differs_from_parent() {
         layout: &crate::layout::LayoutBox,
         out: &mut Vec<(String, String)>,
     ) {
-        use crate::css::ComputedValue;
         for line in &layout.lines {
             for frag in &line.fragments {
                 if let Some(t) = frag.text() {
-                    let transform = match frag.style.get("text-transform") {
-                        Some(ComputedValue::Keyword(kw)) => kw.to_ascii_lowercase(),
-                        _ => "none".to_string(),
-                    };
+                    let transform = frag.style.text_transform.as_deref()
+                        .map(|kw| kw.to_ascii_lowercase())
+                        .unwrap_or_else(|| "none".to_string());
                     out.push((transform, t.to_string()));
                 }
             }

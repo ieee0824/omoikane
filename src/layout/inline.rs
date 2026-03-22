@@ -7,7 +7,7 @@ use crate::http::url::resolve_url;
 use crate::paint::{DataUri, Image, parse_data_uri};
 
 use super::{
-    FontMetrics, InlineFragment, InlineFragmentContent,
+    FontMetrics, FragmentStyle, InlineFragment, InlineFragmentContent,
     LineBox, Rect, VerticalAlign,
     edge_sizes, explicit_length, is_display_none, is_inline_child, is_non_rendered_html_element,
     IMAGE_BASE_URL, IMAGE_CACHE, HTTP_CLIENT, LAYOUT_FONTS,
@@ -69,9 +69,10 @@ pub(super) struct InlineSegment {
     pub(super) metrics: FontMetrics,
     pub(super) line_height: f32,
     pub(super) vertical_align: VerticalAlign,
-    /// Computed style of the owning element — forwarded to `InlineFragment`
-    /// so that paint can apply per-fragment text-transform / text-decoration.
-    pub(super) style: ComputedStyle,
+    /// Minimal style information extracted from the owning element's
+    /// `ComputedStyle` — forwarded to `InlineFragment` so that paint can
+    /// apply per-fragment text-transform / text-decoration / color.
+    pub(super) style: FragmentStyle,
 }
 
 #[derive(Debug, Clone)]
@@ -104,7 +105,7 @@ fn collect_inline_segments(
                         metrics: font_metrics(&parent_style),
                         line_height: line_height(&parent_style),
                         vertical_align: vertical_align(&parent_style),
-                        style: parent_style,
+                        style: FragmentStyle::from_computed(&parent_style),
                     });
                 }
             }
@@ -142,7 +143,7 @@ fn collect_inline_segments(
                         rendered_height + padding.top + padding.bottom + border.top + border.bottom,
                     ),
                     vertical_align: vertical_align(&image_style),
-                    style: image_style,
+                    style: FragmentStyle::from_computed(&image_style),
                 });
                 out.extend(generated_inline_segments(
                     node,
@@ -160,7 +161,7 @@ fn collect_inline_segments(
                         metrics: font_metrics(&style),
                         line_height: line_height(&style),
                         vertical_align: vertical_align(&style),
-                        style: style.clone(),
+                        style: FragmentStyle::from_computed(&style),
                     });
                     out.extend(generated_inline_segments(
                         node,
@@ -183,7 +184,7 @@ fn collect_inline_segments(
                                     metrics: font_metrics(&style),
                                     line_height: line_height(&style),
                                     vertical_align: vertical_align(&style),
-                                    style: style.clone(),
+                                    style: FragmentStyle::from_computed(&style),
                                 });
                             }
                         }
@@ -238,7 +239,7 @@ pub(super) fn generated_inline_segments(
             metrics,
             line_height,
             vertical_align,
-            style: style.clone(),
+            style: FragmentStyle::from_computed(&style),
         }],
         Some(GeneratedContent::Image(image)) => vec![InlineSegment {
             node: node.clone(),
@@ -251,7 +252,7 @@ pub(super) fn generated_inline_segments(
             metrics,
             line_height: line_height.max(metrics.font_size),
             vertical_align,
-            style: style.clone(),
+            style: FragmentStyle::from_computed(&style),
         }],
         None => Vec::new(),
     }

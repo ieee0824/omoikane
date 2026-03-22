@@ -2,7 +2,7 @@
 
 use crate::css::{ComputedStyle, ComputedValue};
 use crate::font::{Font, GlyphRaster, load_default_text_fonts};
-use crate::layout::{InlineFragmentContent, LayoutBox, ListMarker, Rect};
+use crate::layout::{FragmentStyle, InlineFragmentContent, LayoutBox, ListMarker, Rect};
 
 use super::border::{EdgeSizesForPaint, paint_rect_borders};
 use super::color::{parse_color, Color};
@@ -39,17 +39,17 @@ pub(crate) fn paint_text(
                     // Per-fragment style is used for text-transform and color so
                     // that nested inline elements (e.g. <span>) can have
                     // independent styling.
-                    let frag_color = text_color(&fragment.style)
+                    let frag_color = fragment_text_color(&fragment.style)
                         .unwrap_or(fallback_color);
-                    let text_transform = text_transform_value(&fragment.style);
+                    let text_transform = fragment_text_transform(&fragment.style);
 
                     // For text-decoration, distinguish "property not present" from
                     // "present but none". If the fragment has an explicit
                     // text-decoration-line (even none), use it; otherwise fall back
                     // to the containing block's decoration.
-                    let has_frag_decoration = fragment.style.get("text-decoration-line").is_some();
+                    let has_frag_decoration = fragment.style.text_decoration_line.is_some();
                     let (decoration_line, decoration_color) = if has_frag_decoration {
-                        (text_decoration_line(&fragment.style), text_decoration_color(&fragment.style, frag_color))
+                        (fragment_decoration_line(&fragment.style), fragment_decoration_color(&fragment.style, frag_color))
                     } else {
                         (block_decoration_line, block_decoration_color)
                     };
@@ -113,6 +113,7 @@ pub(crate) fn paint_text(
 }
 
 /// Returns the `text-transform` value from style.
+#[allow(dead_code)]
 pub(crate) fn text_transform_value(style: &ComputedStyle) -> &'static str {
     match style.get("text-transform") {
         Some(ComputedValue::Keyword(kw)) => match kw.to_ascii_lowercase().as_str() {
@@ -122,6 +123,48 @@ pub(crate) fn text_transform_value(style: &ComputedStyle) -> &'static str {
             _ => "none",
         },
         _ => "none",
+    }
+}
+
+/// Returns the `color` from a `FragmentStyle`, if present.
+fn fragment_text_color(style: &FragmentStyle) -> Option<Color> {
+    style.color.as_deref().and_then(parse_color)
+}
+
+/// Returns the `text-transform` keyword from a `FragmentStyle`.
+fn fragment_text_transform(style: &FragmentStyle) -> &'static str {
+    match style.text_transform.as_deref() {
+        Some(kw) => match kw.to_ascii_lowercase().as_str() {
+            "uppercase" => "uppercase",
+            "lowercase" => "lowercase",
+            "capitalize" => "capitalize",
+            _ => "none",
+        },
+        None => "none",
+    }
+}
+
+/// Returns `text-decoration-line` flags from a `FragmentStyle`.
+fn fragment_decoration_line(style: &FragmentStyle) -> TextDecorationLines {
+    let mut lines = TextDecorationLines::default();
+    if let Some(ref kw) = style.text_decoration_line {
+        for part in kw.split_whitespace() {
+            match part.to_ascii_lowercase().as_str() {
+                "underline" => lines.underline = true,
+                "overline" => lines.overline = true,
+                "line-through" => lines.line_through = true,
+                _ => {}
+            }
+        }
+    }
+    lines
+}
+
+/// Returns the `text-decoration-color` from a `FragmentStyle`, falling back to `fallback`.
+fn fragment_decoration_color(style: &FragmentStyle, fallback: Color) -> Color {
+    match &style.text_decoration_color {
+        Some(s) => parse_color(s).unwrap_or(fallback),
+        None => fallback,
     }
 }
 
