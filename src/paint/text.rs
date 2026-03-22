@@ -393,7 +393,22 @@ pub(crate) fn paint_list_marker(
     }
 }
 
+/// Returns `true` when the marker text is a bullet symbol (disc/circle/square).
+///
+/// These characters are Unicode glyphs that cannot be meaningfully rendered with
+/// the placeholder-rectangle approach, so they fall back to a filled square.
+/// Text-based markers (decimal, roman, alpha) can be rendered as rectangles with
+/// `paint_text_placeholder`, which preserves the correct character count.
+fn is_bullet_marker(text: &str) -> bool {
+    // disc (U+2022 •), circle (U+25E6 ◦), square (U+25A0 ■)
+    matches!(text, "\u{2022}" | "\u{25e6}" | "\u{25a0}")
+}
+
 /// Paints a list marker as a simple filled shape (fallback when no font is loaded).
+///
+/// - Bullet markers (disc/circle/square): rendered as a filled square.
+/// - Text markers (decimal/roman/alpha): delegated to `paint_text_placeholder`
+///   so that the correct number of character-width rectangles is drawn.
 pub(crate) fn paint_list_marker_placeholder(
     canvas: &mut Canvas,
     marker: &ListMarker,
@@ -401,21 +416,34 @@ pub(crate) fn paint_list_marker_placeholder(
     color: Color,
     clip: Option<Rect>,
 ) {
-    let size = (font_size * 0.35).max(2.0);
-    let cx = marker.x + size * 0.5;
-    let cy = marker.y + font_size * 0.5;
+    if is_bullet_marker(&marker.text) {
+        let size = (font_size * 0.35).max(2.0);
+        let cx = marker.x + size * 0.5;
+        let cy = marker.y + font_size * 0.5;
 
-    // Render disc/circle/square as a filled square for simplicity in placeholder mode.
-    canvas.fill_rect_clipped(
-        Rect {
-            x: cx - size * 0.5,
-            y: cy - size * 0.5,
-            width: size,
-            height: size,
-        },
-        color,
-        clip,
-    );
+        // Render disc/circle/square as a filled square for simplicity in placeholder mode.
+        canvas.fill_rect_clipped(
+            Rect {
+                x: cx - size * 0.5,
+                y: cy - size * 0.5,
+                width: size,
+                height: size,
+            },
+            color,
+            clip,
+        );
+    } else {
+        // Text-based markers (e.g. "1.", "ii.", "a."): draw placeholder rectangles
+        // per character. paint_text_placeholder sizes each char internally, so
+        // rect.width is not used for rendering — we pass 0.0 to avoid confusion.
+        let rect = Rect {
+            x: marker.x,
+            y: marker.y,
+            width: 0.0,
+            height: font_size,
+        };
+        paint_text_placeholder(canvas, rect, &marker.text, font_size, color, clip);
+    }
 }
 
 pub(crate) fn paint_inline_image_fragment(
