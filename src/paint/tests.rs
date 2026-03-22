@@ -5046,9 +5046,8 @@ fn linear_gradient_three_color_stops() {
 // ── paint_list_marker_placeholder tests ─────────────────────────────────────
 
 /// Bullet markers (disc/circle/square) should render as a single filled square.
-/// The canvas width equals `2 * size` where `size = (font_size * 0.35).max(2.0)`,
-/// so at font_size=16 size=5.6 → ceil→6, we check only that at least one pixel is
-/// filled and that the total filled area is much smaller than a text run would be.
+/// Uses a fixed 30x30 canvas with font_size=20.0. Checks that at least one pixel
+/// is filled and that the total filled area is much smaller than a text run would be.
 #[test]
 fn bullet_marker_placeholder_renders_filled_square() {
     use crate::layout::ListMarker;

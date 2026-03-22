@@ -434,11 +434,12 @@ pub(crate) fn paint_list_marker_placeholder(
         );
     } else {
         // Text-based markers (e.g. "1.", "ii.", "a."): draw placeholder rectangles
-        // per character so the visual width matches the marker text length.
+        // per character. paint_text_placeholder sizes each char internally, so
+        // rect.width is not used for rendering — we pass 0.0 to avoid confusion.
         let rect = Rect {
             x: marker.x,
             y: marker.y,
-            width: font_size * (marker.text.chars().count() as f32) * 0.6,
+            width: 0.0,
             height: font_size,
         };
         paint_text_placeholder(canvas, rect, &marker.text, font_size, color, clip);
