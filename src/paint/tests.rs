@@ -5042,3 +5042,159 @@ fn linear_gradient_three_color_stops() {
     let mid = canvas.pixel(50, 5).expect("pixel at (50,5)");
     assert!(mid.g > mid.r && mid.g > mid.b, "middle should be greenish, got {:?}", mid);
 }
+
+// ── paint_list_marker_placeholder tests ─────────────────────────────────────
+
+/// Bullet markers (disc/circle/square) should render as a single filled square.
+/// The canvas width equals `2 * size` where `size = (font_size * 0.35).max(2.0)`,
+/// so at font_size=16 size=5.6 → ceil→6, we check only that at least one pixel is
+/// filled and that the total filled area is much smaller than a text run would be.
+#[test]
+fn bullet_marker_placeholder_renders_filled_square() {
+    use crate::layout::ListMarker;
+
+    let font_size = 20.0_f32;
+    let color = Color::rgb(0, 0, 0);
+
+    for text in ["\u{2022}", "\u{25e6}", "\u{25a0}"] {
+        let marker = ListMarker {
+            text: text.to_string(),
+            font_size,
+            outside: true,
+            x: 0.0,
+            y: 0.0,
+        };
+
+        let canvas_w = 30;
+        let canvas_h = 30;
+        let mut canvas = Canvas::new(canvas_w, canvas_h);
+        paint_list_marker_placeholder(&mut canvas, &marker, font_size, color, None);
+
+        let filled: usize = (0..canvas_w)
+            .flat_map(|x| (0..canvas_h).map(move |y| (x, y)))
+            .filter(|&(x, y)| {
+                canvas
+                    .pixel(x as u32, y as u32)
+                    .map_or(false, |p| p.a > 0)
+            })
+            .count();
+
+        assert!(filled > 0, "bullet marker '{}' should draw at least one pixel", text);
+
+        // A bullet placeholder draws only a small square, not a full glyph-width strip.
+        // At font_size=20, size ≈ 7px → area ≈ 49 pixels at most.
+        assert!(
+            filled <= 100,
+            "bullet marker '{}' should draw a small square, got {} filled pixels",
+            text,
+            filled
+        );
+    }
+}
+
+/// Text markers (decimal/roman/alpha) should render character-count placeholder
+/// rectangles via `paint_text_placeholder`.  Verify that:
+/// - at least one pixel is filled (something was drawn)
+/// - more pixels are filled for a longer marker text (proportional to char count)
+#[test]
+fn text_marker_placeholder_renders_per_character_rectangles() {
+    use crate::layout::ListMarker;
+
+    let font_size = 16.0_f32;
+    let color = Color::rgb(0, 0, 0);
+
+    let marker_short = ListMarker {
+        text: "1.".to_string(),
+        font_size,
+        outside: true,
+        x: 0.0,
+        y: 0.0,
+    };
+    let marker_long = ListMarker {
+        text: "viii.".to_string(),
+        font_size,
+        outside: true,
+        x: 0.0,
+        y: 0.0,
+    };
+
+    let canvas_w = 120_u32;
+    let canvas_h = 30_u32;
+
+    let count_filled = |marker: &ListMarker| -> usize {
+        let mut canvas = Canvas::new(canvas_w, canvas_h);
+        paint_list_marker_placeholder(&mut canvas, marker, font_size, color, None);
+        (0..canvas_w)
+            .flat_map(|x| (0..canvas_h).map(move |y| (x, y)))
+            .filter(|&(x, y)| canvas.pixel(x, y).map_or(false, |p| p.a > 0))
+            .count()
+    };
+
+    let filled_short = count_filled(&marker_short);
+    let filled_long = count_filled(&marker_long);
+
+    assert!(filled_short > 0, "short text marker should draw pixels");
+    assert!(filled_long > 0, "long text marker should draw pixels");
+    assert!(
+        filled_long > filled_short,
+        "longer marker text '{}' ({} px) should fill more pixels than '{}' ({} px)",
+        marker_long.text,
+        filled_long,
+        marker_short.text,
+        filled_short
+    );
+}
+
+/// Decimal marker should NOT look like a single bullet square:
+/// it should spread pixels across a wider x range than a bullet marker would.
+#[test]
+fn decimal_marker_placeholder_is_wider_than_bullet_placeholder() {
+    use crate::layout::ListMarker;
+
+    let font_size = 16.0_f32;
+    let color = Color::rgb(0, 0, 0);
+    let canvas_w = 120_u32;
+    let canvas_h = 30_u32;
+
+    let make_canvas = |marker: &ListMarker| -> Canvas {
+        let mut canvas = Canvas::new(canvas_w, canvas_h);
+        paint_list_marker_placeholder(&mut canvas, marker, font_size, color, None);
+        canvas
+    };
+
+    let bullet = ListMarker {
+        text: "\u{2022}".to_string(),
+        font_size,
+        outside: true,
+        x: 0.0,
+        y: 0.0,
+    };
+    let decimal = ListMarker {
+        text: "1.".to_string(),
+        font_size,
+        outside: true,
+        x: 0.0,
+        y: 0.0,
+    };
+
+    let rightmost_filled = |canvas: &Canvas| -> u32 {
+        (0..canvas_w)
+            .rev()
+            .find(|&x| (0..canvas_h).any(|y| canvas.pixel(x, y).map_or(false, |p| p.a > 0)))
+            .unwrap_or(0)
+    };
+
+    let bullet_canvas = make_canvas(&bullet);
+    let decimal_canvas = make_canvas(&decimal);
+
+    let bullet_right = rightmost_filled(&bullet_canvas);
+    let decimal_right = rightmost_filled(&decimal_canvas);
+
+    assert!(
+        decimal_right > bullet_right,
+        "decimal marker placeholder (rightmost filled col={}) should be wider \
+         than bullet placeholder (rightmost filled col={})",
+        decimal_right,
+        bullet_right
+    );
+}
