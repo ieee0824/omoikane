@@ -2,8 +2,9 @@
 
 use std::collections::HashSet;
 
-use crate::css::{Stylesheet, parse_stylesheet};
+use crate::css::{Stylesheet, parse_stylesheet, extract_font_face_rules};
 use crate::dom::{Node, NodeHandle, NodeType};
+use crate::font::Font;
 use crate::http::url::resolve_url;
 
 use super::image::parse_data_uri;
@@ -849,4 +850,79 @@ pub(crate) fn rewrite_local_asset_attribute(
     node.set_attribute(attribute_name, format!("data:{mime_type};base64,{encoded}"));
 
     Ok(())
+}
+
+/// Extract `@font-face` rules from parsed stylesheets, fetch the font files
+/// via HTTP, and return loaded `Font` objects.
+///
+/// Fonts that fail to fetch or parse are silently skipped (fallback to system fonts).
+pub(crate) fn fetch_font_face_fonts(
+    stylesheets: &[Stylesheet],
+    base_url: Option<&crate::http::Url>,
+) -> Vec<Font> {
+    let mut fonts = Vec::new();
+    let mut client: Option<crate::http::Client> = None;
+    let mut seen_families = HashSet::new();
+
+    for sheet in stylesheets {
+        for ff_rule in extract_font_face_rules(sheet) {
+            // Avoid fetching the same family twice
+            let key = ff_rule.font_family.to_lowercase();
+            if !seen_families.insert(key) {
+                continue;
+            }
+
+            // Skip WOFF2 when format hint says so (not supported yet)
+            if let Some(ref fmt) = ff_rule.format {
+                if fmt.eq_ignore_ascii_case("woff2") {
+                    continue;
+                }
+            }
+
+            let url_str = &ff_rule.src_url;
+
+            // Try to resolve relative URL
+            let resolved = if let Some(base) = base_url {
+                match resolve_url(base, url_str) {
+                    Ok(u) => u.to_string(),
+                    Err(_) => url_str.clone(),
+                }
+            } else {
+                url_str.clone()
+            };
+
+            // Fetch font data
+            let data = match fetch_font_bytes(&resolved, &mut client) {
+                Some(d) => d,
+                None => continue,
+            };
+
+            // Load font
+            match Font::load_from_bytes(data) {
+                Ok(font) => fonts.push(font),
+                Err(_) => continue,
+            }
+        }
+    }
+
+    fonts
+}
+
+/// Fetch raw bytes from a URL (HTTP/HTTPS).
+fn fetch_font_bytes(
+    url: &str,
+    client: &mut Option<crate::http::Client>,
+) -> Option<Vec<u8>> {
+    if client.is_none() {
+        *client = Some(crate::http::Client::new());
+    }
+    let c = client.as_mut()?;
+
+    let response = c.get(url).ok()?;
+
+    if response.status_code() < 200 || response.status_code() >= 300 {
+        return None;
+    }
+
+    Some(response.body().to_vec())
 }

@@ -548,3 +548,100 @@ fn debug_nbsp_vs_space() {
         font.measure_text_width("Hello\u{00A0}World!", size)
     );
 }
+
+// ============================================================================
+// Web font / load_from_bytes tests
+// ============================================================================
+
+#[test]
+fn detect_font_format_ttf() {
+    // TTF magic bytes: 00 01 00 00
+    let data = vec![0x00, 0x01, 0x00, 0x00, 0x00, 0x00];
+    assert_eq!(detect_font_format(&data), "ttf");
+}
+
+#[test]
+fn detect_font_format_otf() {
+    let data = b"OTTO\x00\x00".to_vec();
+    assert_eq!(detect_font_format(&data), "otf");
+}
+
+#[test]
+fn detect_font_format_woff() {
+    let data = b"wOFF\x00\x00".to_vec();
+    assert_eq!(detect_font_format(&data), "woff");
+}
+
+#[test]
+fn detect_font_format_woff2() {
+    let data = b"wOF2\x00\x00".to_vec();
+    assert_eq!(detect_font_format(&data), "woff2");
+}
+
+#[test]
+fn detect_font_format_unknown() {
+    let data = vec![0xFF, 0xFE, 0x00, 0x00];
+    assert_eq!(detect_font_format(&data), "unknown");
+}
+
+#[test]
+fn detect_font_format_short_data() {
+    assert_eq!(detect_font_format(&[0x00]), "unknown");
+    assert_eq!(detect_font_format(&[]), "unknown");
+}
+
+#[test]
+fn load_from_bytes_ttf_system_font() {
+    let font_path = match find_test_font() {
+        Some(p) => p,
+        None => {
+            eprintln!("Skipping load_from_bytes_ttf_system_font: no system font found");
+            return;
+        }
+    };
+
+    let data = std::fs::read(&font_path).unwrap();
+    let font = Font::load_from_bytes(data).unwrap();
+    // Verify basic font operations work
+    let advance = font.glyph_advance('A', 16.0);
+    assert!(advance > 0.0, "advance should be positive, got {}", advance);
+}
+
+#[test]
+fn load_from_bytes_invalid_data_returns_error() {
+    let data = vec![0x00, 0x01, 0x00, 0x00, 0xFF, 0xFF]; // TTF magic but invalid content
+    let result = Font::load_from_bytes(data);
+    assert!(result.is_err());
+}
+
+#[test]
+fn load_from_bytes_woff2_returns_error() {
+    let data = b"wOF2\x00\x00\x00\x00".to_vec();
+    let result = Font::load_from_bytes(data);
+    assert!(result.is_err());
+    let err_msg = format!("{}", result.err().expect("should be error"));
+    assert!(err_msg.contains("WOFF2"), "error should mention WOFF2: {}", err_msg);
+}
+
+#[test]
+fn font_cache_register_web_font() {
+    let font_path = match find_test_font() {
+        Some(p) => p,
+        None => {
+            eprintln!("Skipping font_cache_register_web_font: no system font found");
+            return;
+        }
+    };
+
+    let data = std::fs::read(&font_path).unwrap();
+    let mut cache = FontCache::new(10);
+    assert!(!cache.contains("TestWebFont"));
+
+    let font = cache.register_web_font("TestWebFont", data).unwrap();
+    assert!(cache.contains("TestWebFont"));
+    assert!(cache.contains("testwebfont")); // case insensitive
+
+    // Should be retrievable via get_or_load (returns the cached web font)
+    let font2 = cache.get_or_load("TestWebFont").unwrap();
+    assert!(Arc::ptr_eq(&font, &font2));
+}
