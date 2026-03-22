@@ -72,10 +72,10 @@ impl Font {
         Self::load_from_bytes(data)
     }
 
-    /// Load a font from raw bytes (TTF, OTF, or WOFF).
+    /// Load a font from raw bytes (TTF, OTF, WOFF, or WOFF2).
     ///
     /// WOFF fonts are decompressed (zlib) before parsing.
-    /// WOFF2 is not yet supported; use TTF/OTF directly.
+    /// WOFF2 fonts are decompressed (brotli) and reconstructed as sfnt before parsing.
     pub fn load_from_bytes(data: Vec<u8>) -> Result<Self, FontError> {
         let data = decode_font_data(data)?;
         let font_vec = FontVec::try_from_vec_and_index(data, 0)
@@ -227,7 +227,7 @@ pub struct FontMetricsPixel {
 /// Detect font format from magic bytes and decode if necessary.
 ///
 /// - `wOFF` (WOFF1): decompress each table with zlib/flate2
-/// - `wOF2` (WOFF2): not yet supported, returns an error
+/// - `wOF2` (WOFF2): decompress with brotli, reconstruct sfnt
 /// - Otherwise: assume raw TTF/OTF and return as-is
 fn decode_font_data(data: Vec<u8>) -> Result<Vec<u8>, FontError> {
     if data.len() < 4 {
@@ -235,9 +235,7 @@ fn decode_font_data(data: Vec<u8>) -> Result<Vec<u8>, FontError> {
     }
     let magic = &data[..4];
     if magic == b"wOF2" {
-        return Err(FontError::InvalidFont(
-            "WOFF2 format is not yet supported; use TTF/OTF".to_string(),
-        ));
+        return decode_woff2(&data);
     }
     if magic == b"wOFF" {
         return decode_woff1(data);
@@ -378,6 +376,321 @@ fn decode_woff1(data: Vec<u8>) -> Result<Vec<u8>, FontError> {
     }
 
     Ok(sfnt)
+}
+
+/// Decode a WOFF2 container into raw OpenType/TrueType (sfnt) data.
+///
+/// WOFF2 spec: <https://www.w3.org/TR/WOFF2/>
+///
+/// The process is:
+/// 1. Parse the 48-byte WOFF2 header.
+/// 2. Parse the variable-length table directory entries (UIntBase128 encoded sizes).
+/// 3. Brotli-decompress the compressed font data block.
+/// 4. Reassemble an sfnt binary from the decompressed table data.
+///
+/// Note: the `glyf`/`loca` transform (WOFF2 §5) is not applied. Fonts that
+/// use the transformed format will fail to load; TTF/OTF equivalents should
+/// be used in that case.
+pub fn decode_woff2(data: &[u8]) -> Result<Vec<u8>, FontError> {
+    use std::io::Read;
+
+    // --- WOFF2 Header (48 bytes) ---
+    // Offset  Size  Field
+    //  0       4    signature (= 0x774F4632 "wOF2")
+    //  4       4    flavor (sfnt version tag)
+    //  8       4    length (total WOFF2 file size)
+    // 12       2    numTables
+    // 14       2    reserved
+    // 16       4    totalSfntSize
+    // 20       4    totalCompressedSize
+    // 24       2    majorVersion
+    // 26       2    minorVersion
+    // 28       4    metaOffset
+    // 32       4    metaLength
+    // 36       4    metaOrigLength
+    // 40       4    privOffset
+    // 44       4    privLength
+    if data.len() < 48 {
+        return Err(FontError::InvalidFont("WOFF2 header too short".to_string()));
+    }
+
+    let read_u16 = |off: usize| -> u16 { u16::from_be_bytes([data[off], data[off + 1]]) };
+    let read_u32 = |off: usize| -> u32 {
+        u32::from_be_bytes([data[off], data[off + 1], data[off + 2], data[off + 3]])
+    };
+
+    let sfnt_flavor = read_u32(4);
+    let num_tables = read_u16(12) as usize;
+    let total_compressed_size = read_u32(20) as usize;
+
+    if num_tables == 0 {
+        return Err(FontError::InvalidFont("WOFF2 has no tables".to_string()));
+    }
+
+    // --- Parse table directory (variable-length entries) ---
+    // Each entry:
+    //   flags      1 byte  (bits 0-5: table tag index, bits 6-7: transform version)
+    //   tag        0 or 4 bytes  (only present when flags & 0x3f == 0x3f)
+    //   origLength UIntBase128
+    //   transformLength UIntBase128  (only when transform != 0)
+    //
+    // Known tag indices (WOFF2 spec Table 3):
+    const KNOWN_TAGS: [&[u8; 4]; 63] = [
+        b"cmap", b"head", b"hhea", b"hmtx", b"maxp", b"name", b"OS/2", b"post",
+        b"cvt ", b"fpgm", b"glyf", b"loca", b"prep", b"CFF ", b"VORG", b"EBDT",
+        b"EBLC", b"gasp", b"hdmx", b"kern", b"LTSH", b"PCLT", b"VDMX", b"vhea",
+        b"vmtx", b"BASE", b"GDEF", b"GPOS", b"GSUB", b"EBSC", b"JSTF", b"MATH",
+        b"CBDT", b"CBLC", b"COLR", b"CPAL", b"SVG ", b"sbix", b"acnt", b"avar",
+        b"bdat", b"bloc", b"bsln", b"cvar", b"fdsc", b"feat", b"fmtx", b"fvar",
+        b"gvar", b"hsty", b"just", b"lcar", b"mort", b"morx", b"opbd", b"prop",
+        b"trak", b"Zapf", b"Silf", b"Glat", b"Gloc", b"Feat", b"Sill",
+    ];
+
+    struct Woff2TableEntry {
+        tag: [u8; 4],
+        orig_length: usize,
+        transform_length: Option<usize>, // Some when transform is applied
+    }
+
+    /// Decode a UIntBase128 value from `data` starting at `*pos`.
+    /// Returns the decoded value and advances `*pos`.
+    fn read_uint_base128(data: &[u8], pos: &mut usize) -> Result<usize, FontError> {
+        let mut accum: u32 = 0;
+        for i in 0..5 {
+            if *pos >= data.len() {
+                return Err(FontError::InvalidFont(
+                    "WOFF2 UIntBase128: unexpected end of data".to_string(),
+                ));
+            }
+            let byte = data[*pos];
+            *pos += 1;
+            // Leading zeros are invalid for multi-byte sequences
+            if i == 0 && byte == 0x80 {
+                return Err(FontError::InvalidFont(
+                    "WOFF2 UIntBase128: leading zero byte".to_string(),
+                ));
+            }
+            // Overflow check: top 7 bits of accum must be 0 before shifting
+            if accum & 0xfe00_0000 != 0 {
+                return Err(FontError::InvalidFont(
+                    "WOFF2 UIntBase128: value overflow".to_string(),
+                ));
+            }
+            accum = (accum << 7) | (byte & 0x7f) as u32;
+            if byte & 0x80 == 0 {
+                return Ok(accum as usize);
+            }
+        }
+        Err(FontError::InvalidFont(
+            "WOFF2 UIntBase128: sequence too long".to_string(),
+        ))
+    }
+
+    let mut pos = 48usize; // start of table directory
+    let mut entries: Vec<Woff2TableEntry> = Vec::with_capacity(num_tables);
+
+    for _ in 0..num_tables {
+        if pos >= data.len() {
+            return Err(FontError::InvalidFont(
+                "WOFF2 table directory truncated".to_string(),
+            ));
+        }
+        let flags = data[pos];
+        pos += 1;
+
+        let tag_index = (flags & 0x3f) as usize;
+        let transform_version = (flags >> 6) & 0x03;
+
+        // Resolve the 4-byte tag
+        let tag: [u8; 4] = if tag_index == 0x3f {
+            // Arbitrary tag follows
+            if pos + 4 > data.len() {
+                return Err(FontError::InvalidFont(
+                    "WOFF2 table tag truncated".to_string(),
+                ));
+            }
+            let mut t = [0u8; 4];
+            t.copy_from_slice(&data[pos..pos + 4]);
+            pos += 4;
+            t
+        } else if tag_index < KNOWN_TAGS.len() {
+            *KNOWN_TAGS[tag_index]
+        } else {
+            return Err(FontError::InvalidFont(format!(
+                "WOFF2 unknown tag index: {}",
+                tag_index
+            )));
+        };
+
+        let orig_length = read_uint_base128(data, &mut pos)?;
+
+        // transform_length is present when transform_version != 0
+        // For glyf (tag index 10) and loca (tag index 11):
+        //   transform_version 0 means the transform IS applied (transformed format)
+        //   transform_version 3 means no transform
+        // For all other tables:
+        //   transform_version 0 means no transform
+        //   transform_version 1/2/3 means transform is applied (reserved, not used in practice)
+        let is_glyf_or_loca = tag == *b"glyf" || tag == *b"loca";
+        let has_transform = if is_glyf_or_loca {
+            // transform_version 0 = transformed, 3 = no transform
+            transform_version == 0
+        } else {
+            transform_version != 0
+        };
+
+        let transform_length = if has_transform {
+            Some(read_uint_base128(data, &mut pos)?)
+        } else {
+            None
+        };
+
+        entries.push(Woff2TableEntry {
+            tag,
+            orig_length,
+            transform_length,
+        });
+    }
+
+    // Compressed data follows the table directory
+    let compressed_start = pos;
+    let compressed_end = compressed_start
+        .checked_add(total_compressed_size)
+        .ok_or_else(|| FontError::InvalidFont("WOFF2 compressed data overflow".to_string()))?;
+    if compressed_end > data.len() {
+        return Err(FontError::InvalidFont(
+            "WOFF2 compressed data out of bounds".to_string(),
+        ));
+    }
+
+    // Decompress the data block with brotli
+    let total_orig: usize = entries.iter().map(|e| {
+        // Use transform_length as the stored size when a transform is present,
+        // otherwise use orig_length.
+        e.transform_length.unwrap_or(e.orig_length)
+    }).sum();
+
+    let mut decompressed = Vec::with_capacity(total_orig);
+    {
+        let mut reader = brotli::Decompressor::new(
+            &data[compressed_start..compressed_end],
+            4096,
+        );
+        reader.read_to_end(&mut decompressed).map_err(|e| {
+            FontError::InvalidFont(format!("WOFF2 brotli decompression failed: {}", e))
+        })?;
+    }
+
+    if decompressed.len() < total_orig {
+        return Err(FontError::InvalidFont(format!(
+            "WOFF2 decompressed size too small: expected at least {}, got {}",
+            total_orig,
+            decompressed.len()
+        )));
+    }
+
+    // --- Rebuild sfnt binary ---
+    let sfnt_num_tables = num_tables;
+    let entry_selector = if sfnt_num_tables > 0 {
+        (sfnt_num_tables as f64).log2().floor() as u16
+    } else {
+        0
+    };
+    let search_range = (1u16 << entry_selector) * 16;
+    let range_shift = (sfnt_num_tables as u16) * 16 - search_range;
+    let header_size = 12 + 16 * sfnt_num_tables;
+
+    let mut sfnt = Vec::new();
+    // sfnt header
+    sfnt.extend_from_slice(&sfnt_flavor.to_be_bytes());
+    sfnt.extend_from_slice(&(sfnt_num_tables as u16).to_be_bytes());
+    sfnt.extend_from_slice(&search_range.to_be_bytes());
+    sfnt.extend_from_slice(&entry_selector.to_be_bytes());
+    sfnt.extend_from_slice(&range_shift.to_be_bytes());
+    // Reserve space for table records
+    let table_records_start = sfnt.len();
+    sfnt.resize(header_size, 0);
+
+    struct SfntRecord {
+        tag: [u8; 4],
+        checksum: u32,
+        offset: u32,
+        length: u32,
+    }
+    let mut records: Vec<SfntRecord> = Vec::with_capacity(sfnt_num_tables);
+
+    let mut decomp_offset = 0usize;
+
+    for entry in &entries {
+        // The stored (possibly transformed) byte count
+        let stored_len = entry.transform_length.unwrap_or(entry.orig_length);
+
+        let table_data = decompressed
+            .get(decomp_offset..decomp_offset + stored_len)
+            .ok_or_else(|| {
+                FontError::InvalidFont(format!(
+                    "WOFF2 decompressed data too short for table '{}'",
+                    std::str::from_utf8(&entry.tag).unwrap_or("????")
+                ))
+            })?;
+
+        // If a transform was applied to glyf/loca, we cannot reverse it here.
+        // Return an error asking the caller to use a non-transformed font.
+        if entry.transform_length.is_some() && (entry.tag == *b"glyf" || entry.tag == *b"loca") {
+            return Err(FontError::InvalidFont(
+                "WOFF2 glyf/loca transform is not supported; use TTF/OTF or untransformed WOFF2"
+                    .to_string(),
+            ));
+        }
+
+        // Pad to 4-byte boundary
+        while sfnt.len() % 4 != 0 {
+            sfnt.push(0);
+        }
+        let offset = sfnt.len() as u32;
+
+        sfnt.extend_from_slice(table_data);
+
+        // Calculate sfnt checksum for this table
+        let checksum = sfnt_table_checksum(table_data);
+
+        records.push(SfntRecord {
+            tag: entry.tag,
+            checksum,
+            offset,
+            length: entry.orig_length as u32,
+        });
+
+        decomp_offset += stored_len;
+    }
+
+    // Write table records into the reserved area
+    for (i, rec) in records.iter().enumerate() {
+        let base = table_records_start + i * 16;
+        sfnt[base..base + 4].copy_from_slice(&rec.tag);
+        sfnt[base + 4..base + 8].copy_from_slice(&rec.checksum.to_be_bytes());
+        sfnt[base + 8..base + 12].copy_from_slice(&rec.offset.to_be_bytes());
+        sfnt[base + 12..base + 16].copy_from_slice(&rec.length.to_be_bytes());
+    }
+
+    Ok(sfnt)
+}
+
+/// Compute the sfnt table checksum (sum of 32-bit big-endian words, wrapping).
+fn sfnt_table_checksum(data: &[u8]) -> u32 {
+    let mut sum: u32 = 0;
+    let chunks = data.chunks(4);
+    for chunk in chunks {
+        let word = match chunk.len() {
+            4 => u32::from_be_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]),
+            3 => u32::from_be_bytes([chunk[0], chunk[1], chunk[2], 0]),
+            2 => u32::from_be_bytes([chunk[0], chunk[1], 0, 0]),
+            1 => u32::from_be_bytes([chunk[0], 0, 0, 0]),
+            _ => 0,
+        };
+        sum = sum.wrapping_add(word);
+    }
+    sum
 }
 
 /// Detect font format from raw bytes.
@@ -653,8 +966,7 @@ impl FontCache {
 
     /// Register a web font by family name from raw font bytes.
     ///
-    /// The font data can be TTF, OTF, or WOFF (zlib-compressed).
-    /// WOFF2 is not yet supported.
+    /// The font data can be TTF, OTF, WOFF (zlib-compressed), or WOFF2 (brotli-compressed).
     /// Web fonts take priority over system fonts in `get_or_load`.
     /// If the cache is at capacity, an existing entry is evicted to make room.
     pub fn register_web_font(&mut self, family: &str, data: Vec<u8>) -> Result<Arc<Font>, FontError> {

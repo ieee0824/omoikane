@@ -614,13 +614,120 @@ fn load_from_bytes_invalid_data_returns_error() {
     assert!(result.is_err());
 }
 
+/// WOFF2 magic bytes are detected by `detect_font_format`.
 #[test]
-fn load_from_bytes_woff2_returns_error() {
+fn detect_font_format_woff2_magic() {
+    let data = b"wOF2XXXX".to_vec();
+    assert_eq!(detect_font_format(&data), "woff2");
+}
+
+/// A truncated WOFF2 payload (header too short) must return an error.
+#[test]
+fn load_from_bytes_woff2_truncated_header_returns_error() {
+    // "wOF2" magic + 4 bytes — shorter than the 48-byte WOFF2 header.
     let data = b"wOF2\x00\x00\x00\x00".to_vec();
     let result = Font::load_from_bytes(data);
-    assert!(result.is_err());
-    let err_msg = format!("{}", result.err().expect("should be error"));
-    assert!(err_msg.contains("WOFF2"), "error should mention WOFF2: {}", err_msg);
+    assert!(result.is_err(), "expected error for truncated WOFF2 header");
+    let err_msg = format!("{}", result.err().unwrap());
+    assert!(
+        err_msg.contains("WOFF2") || err_msg.contains("header"),
+        "error should mention WOFF2 or header: {}",
+        err_msg
+    );
+}
+
+/// Build a minimal but structurally valid WOFF2 payload and verify that
+/// `decode_woff2` at least accepts the header and table directory without
+/// crashing, even though the resulting sfnt may not be loadable by ab_glyph.
+///
+/// This test exercises the brotli decompression and sfnt reconstruction paths.
+#[test]
+fn decode_woff2_minimal_valid_structure() {
+    use brotli::enc::BrotliEncoderParams;
+
+    // We will create a WOFF2 with a single `name` table (tag index 5)
+    // containing 4 dummy bytes (one 32-bit word) so we can compute a
+    // deterministic checksum.
+    let table_data: &[u8] = b"TEST"; // 4 bytes
+
+    // Compress the table data with brotli.
+    let mut compressed = Vec::new();
+    brotli::enc::BrotliCompress(
+        &mut std::io::Cursor::new(table_data),
+        &mut compressed,
+        &BrotliEncoderParams::default(),
+    )
+    .expect("brotli compress failed");
+
+    // --- Build WOFF2 header (48 bytes) ---
+    let num_tables: u16 = 1;
+    let sfnt_flavor: u32 = 0x0001_0000; // TrueType
+    let total_compressed_size = compressed.len() as u32;
+
+    // Table directory: flags byte + origLength (UIntBase128)
+    // `name` tag = index 5 in KNOWN_TAGS
+    let flags_byte: u8 = 5u8; // tag index 5, transform_version = 0 (no transform for non-glyf/loca)
+    // UIntBase128 for 4: single byte 0x04
+    let orig_length_base128: u8 = 4;
+
+    let table_dir: Vec<u8> = vec![flags_byte, orig_length_base128];
+
+    // Total file length
+    let file_length = 48u32 + table_dir.len() as u32 + total_compressed_size;
+
+    let mut woff2 = Vec::new();
+    // signature
+    woff2.extend_from_slice(b"wOF2");
+    // flavor
+    woff2.extend_from_slice(&sfnt_flavor.to_be_bytes());
+    // length
+    woff2.extend_from_slice(&file_length.to_be_bytes());
+    // numTables
+    woff2.extend_from_slice(&num_tables.to_be_bytes());
+    // reserved
+    woff2.extend_from_slice(&0u16.to_be_bytes());
+    // totalSfntSize (approximate: sfnt header + 1 table record + padded data)
+    let total_sfnt_size: u32 = 12 + 16 + 4;
+    woff2.extend_from_slice(&total_sfnt_size.to_be_bytes());
+    // totalCompressedSize
+    woff2.extend_from_slice(&total_compressed_size.to_be_bytes());
+    // majorVersion, minorVersion
+    woff2.extend_from_slice(&1u16.to_be_bytes());
+    woff2.extend_from_slice(&0u16.to_be_bytes());
+    // metaOffset, metaLength, metaOrigLength
+    woff2.extend_from_slice(&0u32.to_be_bytes());
+    woff2.extend_from_slice(&0u32.to_be_bytes());
+    woff2.extend_from_slice(&0u32.to_be_bytes());
+    // privOffset, privLength
+    woff2.extend_from_slice(&0u32.to_be_bytes());
+    woff2.extend_from_slice(&0u32.to_be_bytes());
+    // table directory
+    woff2.extend_from_slice(&table_dir);
+    // compressed data
+    woff2.extend_from_slice(&compressed);
+
+    assert_eq!(woff2[..4], *b"wOF2");
+    assert_eq!(detect_font_format(&woff2), "woff2");
+
+    // decode_woff2 should succeed and produce a valid sfnt-shaped buffer.
+    let sfnt = decode_woff2(&woff2);
+    assert!(
+        sfnt.is_ok(),
+        "decode_woff2 failed: {}",
+        sfnt.err().unwrap()
+    );
+
+    let sfnt = sfnt.unwrap();
+    // sfnt header: 4 (flavor) + 2 (numTables) + 2 + 2 + 2 = 12 bytes
+    // table record: 16 bytes
+    // total at least 28 bytes before the actual table data
+    assert!(sfnt.len() >= 28, "sfnt too short: {} bytes", sfnt.len());
+    // sfnt flavor should match
+    let flavor = u32::from_be_bytes([sfnt[0], sfnt[1], sfnt[2], sfnt[3]]);
+    assert_eq!(flavor, sfnt_flavor);
+    // numTables should match
+    let nt = u16::from_be_bytes([sfnt[4], sfnt[5]]);
+    assert_eq!(nt as usize, num_tables as usize);
 }
 
 #[test]
