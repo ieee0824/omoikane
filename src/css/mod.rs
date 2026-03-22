@@ -117,6 +117,267 @@ pub struct AtRule {
     pub declarations: Vec<Declaration>,
 }
 
+/// A parsed `@media` query.
+///
+/// A query is a media type combined with zero or more feature conditions.
+/// All conditions must match for the query to evaluate to `true`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MediaQuery {
+    /// `true` when the query is prefixed with `not`.
+    pub negated: bool,
+    /// Media type (e.g. `"screen"`, `"print"`, `"all"`).
+    /// `None` means the type was omitted (equivalent to `"all"`).
+    pub media_type: Option<String>,
+    /// Feature conditions combined with `and`.
+    pub conditions: Vec<MediaCondition>,
+}
+
+/// A single `@media` feature condition, e.g. `(max-width: 768px)`.
+#[derive(Debug, Clone, PartialEq)]
+pub enum MediaCondition {
+    /// `(max-width: <length>)` — viewport width ≤ value.
+    MaxWidth(f32),
+    /// `(min-width: <length>)` — viewport width ≥ value.
+    MinWidth(f32),
+    /// `(max-height: <length>)` — viewport height ≤ value.
+    MaxHeight(f32),
+    /// `(min-height: <length>)` — viewport height ≥ value.
+    MinHeight(f32),
+    /// `(orientation: portrait)` — height ≥ width.
+    OrientationPortrait,
+    /// `(orientation: landscape)` — width > height.
+    OrientationLandscape,
+    /// `(prefers-color-scheme: dark)`.
+    PrefersColorSchemeDark,
+    /// `(prefers-color-scheme: light)`.
+    PrefersColorSchemeLight,
+    /// An unrecognised condition — treated as matching to be forward-compatible.
+    Unknown,
+}
+
+/// Evaluates a `@media` query against the given viewport dimensions.
+///
+/// Returns `true` when the query matches (i.e. its rules should apply).
+///
+/// `color_scheme_dark` indicates whether the system is in dark mode.
+pub fn evaluate_media_query(
+    query: &MediaQuery,
+    viewport_width: f32,
+    viewport_height: f32,
+    color_scheme_dark: bool,
+) -> bool {
+    let type_matches = match query.media_type.as_deref() {
+        None | Some("all") => true,
+        Some("screen") => true,
+        Some("print") => false,
+        Some(_) => false,
+    };
+
+    if !type_matches {
+        return query.negated;
+    }
+
+    let conditions_match = query.conditions.iter().all(|cond| match cond {
+        MediaCondition::MaxWidth(px) => viewport_width <= *px,
+        MediaCondition::MinWidth(px) => viewport_width >= *px,
+        MediaCondition::MaxHeight(px) => viewport_height <= *px,
+        MediaCondition::MinHeight(px) => viewport_height >= *px,
+        MediaCondition::OrientationPortrait => viewport_height >= viewport_width,
+        MediaCondition::OrientationLandscape => viewport_width > viewport_height,
+        MediaCondition::PrefersColorSchemeDark => color_scheme_dark,
+        MediaCondition::PrefersColorSchemeLight => !color_scheme_dark,
+        MediaCondition::Unknown => true,
+    });
+
+    if query.negated {
+        !conditions_match
+    } else {
+        conditions_match
+    }
+}
+
+/// Parses a `@media` prelude string (the part between `@media` and `{`) into a list
+/// of [`MediaQuery`] values separated by commas.
+///
+/// Returns `None` on parse failure.
+pub fn parse_media_query_list(prelude: &str) -> Option<Vec<MediaQuery>> {
+    let prelude = prelude.trim();
+    if prelude.is_empty() {
+        return None;
+    }
+    let queries: Option<Vec<MediaQuery>> = prelude
+        .split(',')
+        .map(|part| parse_single_media_query(part.trim()))
+        .collect();
+    queries
+}
+
+fn parse_single_media_query(input: &str) -> Option<MediaQuery> {
+    let input = input.trim();
+    let (negated, rest) = if let Some(after) = input.strip_prefix("not") {
+        let after = after.trim_start();
+        if after.is_empty() || after.starts_with('(') || after.chars().next().map(|c| c.is_alphabetic()).unwrap_or(false) {
+            (true, after)
+        } else {
+            (false, input)
+        }
+    } else {
+        (false, input)
+    };
+
+    // Collect tokens: media type idents and feature conditions in parentheses.
+    let mut media_type: Option<String> = None;
+    let mut conditions = Vec::new();
+    let mut remaining = rest.trim();
+
+    // Try to read leading media type (an ident before any `(` or `and`).
+    if !remaining.starts_with('(') {
+        let end = remaining
+            .find(|c: char| !c.is_alphanumeric() && c != '-' && c != '_')
+            .unwrap_or(remaining.len());
+        let word = &remaining[..end];
+        if !word.is_empty() && !word.eq_ignore_ascii_case("and") {
+            // Strip the CSS `only` modifier (e.g. `only screen and ...`).
+            // `only` is a syntactic hint for older user agents; we ignore it
+            // and continue parsing the actual media type that follows.
+            if word.eq_ignore_ascii_case("only") {
+                remaining = remaining[end..].trim_start();
+                // Read the actual media type after `only`.
+                let end2 = remaining
+                    .find(|c: char| !c.is_alphanumeric() && c != '-' && c != '_')
+                    .unwrap_or(remaining.len());
+                let type_word = &remaining[..end2];
+                if !type_word.is_empty() && !type_word.eq_ignore_ascii_case("and") {
+                    media_type = Some(type_word.to_ascii_lowercase());
+                    remaining = remaining[end2..].trim_start();
+                }
+            } else {
+                media_type = Some(word.to_ascii_lowercase());
+                remaining = remaining[end..].trim_start();
+            }
+            // Consume optional `and` keyword.
+            if let Some(after_and) = remaining.strip_prefix("and") {
+                let after_and = after_and.trim_start();
+                if after_and.starts_with('(') || after_and.is_empty() {
+                    remaining = after_and;
+                }
+            }
+        }
+    }
+
+    // Parse zero or more feature conditions joined by `and`.
+    loop {
+        remaining = remaining.trim_start();
+        if remaining.is_empty() {
+            break;
+        }
+        if !remaining.starts_with('(') {
+            // Skip unknown tokens (e.g. bare `and`).
+            if let Some(after_and) = remaining.strip_prefix("and") {
+                remaining = after_and.trim_start();
+                continue;
+            }
+            // Unrecognised token — stop parsing.
+            break;
+        }
+        // Find matching closing paren.
+        let close = find_matching_paren(remaining)?;
+        let inner = remaining[1..close].trim();
+        conditions.push(parse_media_feature(inner));
+        remaining = &remaining[close + 1..];
+        remaining = remaining.trim_start();
+        // Consume optional `and` between features.
+        if let Some(after_and) = remaining.strip_prefix("and") {
+            remaining = after_and.trim_start();
+        }
+    }
+
+    Some(MediaQuery {
+        negated,
+        media_type,
+        conditions,
+    })
+}
+
+/// Returns the index of the closing `)` that matches the opening `(` at index 0.
+fn find_matching_paren(s: &str) -> Option<usize> {
+    let mut depth = 0usize;
+    for (i, ch) in s.char_indices() {
+        match ch {
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(i);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn parse_media_feature(inner: &str) -> MediaCondition {
+    // inner is e.g. "max-width: 768px" or "orientation: portrait"
+    let mut parts = inner.splitn(2, ':');
+    let feature = parts.next().unwrap_or("").trim().to_ascii_lowercase();
+    let value_str = parts.next().unwrap_or("").trim();
+
+    match feature.as_str() {
+        "max-width" => {
+            if let Some(px) = parse_length_to_px(value_str) {
+                return MediaCondition::MaxWidth(px);
+            }
+        }
+        "min-width" => {
+            if let Some(px) = parse_length_to_px(value_str) {
+                return MediaCondition::MinWidth(px);
+            }
+        }
+        "max-height" => {
+            if let Some(px) = parse_length_to_px(value_str) {
+                return MediaCondition::MaxHeight(px);
+            }
+        }
+        "min-height" => {
+            if let Some(px) = parse_length_to_px(value_str) {
+                return MediaCondition::MinHeight(px);
+            }
+        }
+        "orientation" => match value_str.to_ascii_lowercase().as_str() {
+            "portrait" => return MediaCondition::OrientationPortrait,
+            "landscape" => return MediaCondition::OrientationLandscape,
+            _ => {}
+        },
+        "prefers-color-scheme" => match value_str.to_ascii_lowercase().as_str() {
+            "dark" => return MediaCondition::PrefersColorSchemeDark,
+            "light" => return MediaCondition::PrefersColorSchemeLight,
+            _ => {}
+        },
+        _ => {}
+    }
+    MediaCondition::Unknown
+}
+
+/// Parses a CSS length value like `768px` or `48em` and converts it to pixels.
+/// Only `px` and `em` (at 16px/em) are supported; other units return `None`.
+fn parse_length_to_px(s: &str) -> Option<f32> {
+    if let Some(num_str) = s.strip_suffix("px") {
+        return num_str.trim().parse::<f32>().ok();
+    }
+    if let Some(num_str) = s.strip_suffix("em") {
+        return num_str.trim().parse::<f32>().ok().map(|n| n * 16.0);
+    }
+    if let Some(num_str) = s.strip_suffix("rem") {
+        return num_str.trim().parse::<f32>().ok().map(|n| n * 16.0);
+    }
+    // Unitless zero is valid.
+    if s.trim() == "0" {
+        return Some(0.0);
+    }
+    None
+}
+
 /// A CSS declaration.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Declaration {
@@ -2732,5 +2993,176 @@ mod tests {
             "background-size with lengths should be parsed; got: {:?}",
             rule.declarations
         );
+    }
+
+    // ── @media query parsing ──────────────────────────────────────────────────
+
+    #[test]
+    fn parse_media_query_screen_type() {
+        let queries = parse_media_query_list("screen").unwrap();
+        assert_eq!(queries.len(), 1);
+        assert!(!queries[0].negated);
+        assert_eq!(queries[0].media_type.as_deref(), Some("screen"));
+        assert!(queries[0].conditions.is_empty());
+    }
+
+    #[test]
+    fn parse_media_query_all_type() {
+        let queries = parse_media_query_list("all").unwrap();
+        assert_eq!(queries.len(), 1);
+        assert_eq!(queries[0].media_type.as_deref(), Some("all"));
+    }
+
+    #[test]
+    fn parse_media_query_max_width() {
+        let queries = parse_media_query_list("(max-width: 768px)").unwrap();
+        assert_eq!(queries.len(), 1);
+        assert_eq!(queries[0].conditions, vec![MediaCondition::MaxWidth(768.0)]);
+        assert!(queries[0].media_type.is_none());
+    }
+
+    #[test]
+    fn parse_media_query_min_width() {
+        let queries = parse_media_query_list("(min-width: 1024px)").unwrap();
+        assert_eq!(queries.len(), 1);
+        assert_eq!(queries[0].conditions, vec![MediaCondition::MinWidth(1024.0)]);
+    }
+
+    #[test]
+    fn parse_media_query_orientation_portrait() {
+        let queries = parse_media_query_list("(orientation: portrait)").unwrap();
+        assert_eq!(queries[0].conditions, vec![MediaCondition::OrientationPortrait]);
+    }
+
+    #[test]
+    fn parse_media_query_orientation_landscape() {
+        let queries = parse_media_query_list("(orientation: landscape)").unwrap();
+        assert_eq!(queries[0].conditions, vec![MediaCondition::OrientationLandscape]);
+    }
+
+    #[test]
+    fn parse_media_query_screen_and_max_width() {
+        let queries = parse_media_query_list("screen and (max-width: 768px)").unwrap();
+        assert_eq!(queries.len(), 1);
+        assert_eq!(queries[0].media_type.as_deref(), Some("screen"));
+        assert_eq!(queries[0].conditions, vec![MediaCondition::MaxWidth(768.0)]);
+    }
+
+    #[test]
+    fn parse_media_query_only_screen_strips_modifier() {
+        // `only` is a CSS2 modifier that should be stripped; the media type is `screen`.
+        let queries = parse_media_query_list("only screen and (max-width: 768px)").unwrap();
+        assert_eq!(queries.len(), 1);
+        assert_eq!(queries[0].media_type.as_deref(), Some("screen"),
+            "media type should be 'screen', not 'only'");
+        assert_eq!(queries[0].conditions, vec![MediaCondition::MaxWidth(768.0)]);
+    }
+
+    #[test]
+    fn parse_media_query_not_print() {
+        let queries = parse_media_query_list("not print").unwrap();
+        assert_eq!(queries.len(), 1);
+        assert!(queries[0].negated);
+        assert_eq!(queries[0].media_type.as_deref(), Some("print"));
+    }
+
+    #[test]
+    fn parse_media_query_comma_separated() {
+        let queries = parse_media_query_list("screen, print").unwrap();
+        assert_eq!(queries.len(), 2);
+        assert_eq!(queries[0].media_type.as_deref(), Some("screen"));
+        assert_eq!(queries[1].media_type.as_deref(), Some("print"));
+    }
+
+    #[test]
+    fn parse_media_query_and_multiple_conditions() {
+        let queries =
+            parse_media_query_list("screen and (min-width: 600px) and (max-width: 1200px)")
+                .unwrap();
+        assert_eq!(queries.len(), 1);
+        assert_eq!(queries[0].media_type.as_deref(), Some("screen"));
+        assert_eq!(
+            queries[0].conditions,
+            vec![
+                MediaCondition::MinWidth(600.0),
+                MediaCondition::MaxWidth(1200.0),
+            ]
+        );
+    }
+
+    #[test]
+    fn parse_media_query_em_unit() {
+        // 48em = 768px at 16px/em
+        let queries = parse_media_query_list("(max-width: 48em)").unwrap();
+        assert_eq!(queries[0].conditions, vec![MediaCondition::MaxWidth(768.0)]);
+    }
+
+    // ── @media query evaluation ───────────────────────────────────────────────
+
+    #[test]
+    fn evaluate_screen_matches() {
+        let queries = parse_media_query_list("screen").unwrap();
+        assert!(evaluate_media_query(&queries[0], 1024.0, 768.0, false));
+    }
+
+    #[test]
+    fn evaluate_print_does_not_match() {
+        let queries = parse_media_query_list("print").unwrap();
+        assert!(!evaluate_media_query(&queries[0], 1024.0, 768.0, false));
+    }
+
+    #[test]
+    fn evaluate_not_print_matches() {
+        let queries = parse_media_query_list("not print").unwrap();
+        assert!(evaluate_media_query(&queries[0], 1024.0, 768.0, false));
+    }
+
+    #[test]
+    fn evaluate_max_width_match() {
+        let queries = parse_media_query_list("(max-width: 768px)").unwrap();
+        assert!(evaluate_media_query(&queries[0], 768.0, 1024.0, false));
+        assert!(evaluate_media_query(&queries[0], 600.0, 1024.0, false));
+        assert!(!evaluate_media_query(&queries[0], 1024.0, 768.0, false));
+    }
+
+    #[test]
+    fn evaluate_min_width_match() {
+        let queries = parse_media_query_list("(min-width: 1024px)").unwrap();
+        assert!(evaluate_media_query(&queries[0], 1024.0, 768.0, false));
+        assert!(evaluate_media_query(&queries[0], 1280.0, 768.0, false));
+        assert!(!evaluate_media_query(&queries[0], 800.0, 600.0, false));
+    }
+
+    #[test]
+    fn evaluate_orientation_portrait() {
+        let queries = parse_media_query_list("(orientation: portrait)").unwrap();
+        assert!(evaluate_media_query(&queries[0], 600.0, 900.0, false));
+        assert!(evaluate_media_query(&queries[0], 768.0, 768.0, false)); // square = portrait
+        assert!(!evaluate_media_query(&queries[0], 1024.0, 768.0, false));
+    }
+
+    #[test]
+    fn evaluate_orientation_landscape() {
+        let queries = parse_media_query_list("(orientation: landscape)").unwrap();
+        assert!(evaluate_media_query(&queries[0], 1024.0, 768.0, false));
+        assert!(!evaluate_media_query(&queries[0], 600.0, 900.0, false));
+        assert!(!evaluate_media_query(&queries[0], 768.0, 768.0, false)); // square = not landscape
+    }
+
+    #[test]
+    fn evaluate_prefers_color_scheme_dark() {
+        let queries = parse_media_query_list("(prefers-color-scheme: dark)").unwrap();
+        assert!(evaluate_media_query(&queries[0], 1024.0, 768.0, true));
+        assert!(!evaluate_media_query(&queries[0], 1024.0, 768.0, false));
+    }
+
+    #[test]
+    fn evaluate_comma_list_any_match() {
+        // "print, screen" — screen matches so the list matches.
+        let queries = parse_media_query_list("print, screen").unwrap();
+        let matches = queries
+            .iter()
+            .any(|q| evaluate_media_query(q, 1024.0, 768.0, false));
+        assert!(matches);
     }
 }
