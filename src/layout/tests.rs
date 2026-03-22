@@ -2980,3 +2980,173 @@ fn letter_spacing_increases_text_width() {
         "expected ~40px letter-spacing increase but got {delta}"
     );
 }
+
+// ---- list-style layout tests ----
+
+fn build_ul_with_items(item_count: usize) -> (NodeHandle, NodeHandle, Vec<NodeHandle>) {
+    let document = NodeHandle::document();
+    let html = NodeHandle::element("html");
+    let body = NodeHandle::element("body");
+    let ul = NodeHandle::element("ul");
+    document.append_child(html.clone());
+    html.append_child(body.clone());
+    body.append_child(ul.clone());
+    let mut items = Vec::new();
+    for i in 0..item_count {
+        let li = NodeHandle::element("li");
+        let text = NodeHandle::text(format!("Item {}", i + 1));
+        li.append_child(text);
+        ul.append_child(li.clone());
+        items.push(li);
+    }
+    (document, body, items)
+}
+
+#[test]
+fn list_item_generates_disc_marker() {
+    let (document, _body, items) = build_ul_with_items(1);
+    let mut resolver = StyleResolver::new();
+    let layout = layout_tree(
+        &document,
+        &mut resolver,
+        Rect { x: 0.0, y: 0.0, width: 300.0, height: 0.0 },
+    )
+    .unwrap();
+
+    let li = &items[0];
+    let li_box = find_layout_box_by_tag(&layout, "li").unwrap();
+    assert!(
+        li_box.marker.is_some(),
+        "li should have a marker for display:list-item"
+    );
+    let marker = li_box.marker.as_ref().unwrap();
+    assert_eq!(marker.text, "\u{2022}", "ul default marker should be disc (•)");
+    assert!(marker.outside, "default list-style-position is outside");
+    let _ = li;
+}
+
+#[test]
+fn list_item_marker_none_produces_no_marker() {
+    let (document, _body, _items) = build_ul_with_items(1);
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet("ul { list-style-type: none; }").unwrap(),
+    );
+    let layout = layout_tree(
+        &document,
+        &mut resolver,
+        Rect { x: 0.0, y: 0.0, width: 300.0, height: 0.0 },
+    )
+    .unwrap();
+
+    let li_box = find_layout_box_by_tag(&layout, "li").unwrap();
+    assert!(
+        li_box.marker.is_none(),
+        "list-style-type:none should produce no marker"
+    );
+}
+
+#[test]
+fn ol_list_items_get_decimal_markers() {
+    let document = NodeHandle::document();
+    let html = NodeHandle::element("html");
+    let body = NodeHandle::element("body");
+    let ol = NodeHandle::element("ol");
+    document.append_child(html.clone());
+    html.append_child(body.clone());
+    body.append_child(ol.clone());
+    let mut lis = Vec::new();
+    for i in 0..3usize {
+        let li = NodeHandle::element("li");
+        li.append_child(NodeHandle::text(format!("item {}", i + 1)));
+        ol.append_child(li.clone());
+        lis.push(li);
+    }
+
+    let mut resolver = StyleResolver::new();
+    let layout = layout_tree(
+        &document,
+        &mut resolver,
+        Rect { x: 0.0, y: 0.0, width: 300.0, height: 0.0 },
+    )
+    .unwrap();
+
+    let mut found = Vec::new();
+    collect_markers_by_tag(&layout, "li", &mut found);
+    assert_eq!(found.len(), 3, "should have 3 li markers");
+    assert_eq!(found[0], "1.");
+    assert_eq!(found[1], "2.");
+    assert_eq!(found[2], "3.");
+}
+
+#[test]
+fn circle_marker_type() {
+    let (document, _body, _items) = build_ul_with_items(1);
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet("ul { list-style-type: circle; }").unwrap(),
+    );
+    let layout = layout_tree(
+        &document,
+        &mut resolver,
+        Rect { x: 0.0, y: 0.0, width: 300.0, height: 0.0 },
+    )
+    .unwrap();
+
+    let li_box = find_layout_box_by_tag(&layout, "li").unwrap();
+    let marker = li_box.marker.as_ref().unwrap();
+    assert_eq!(marker.text, "\u{25e6}");
+}
+
+#[test]
+fn square_marker_type() {
+    let (document, _body, _items) = build_ul_with_items(1);
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet("ul { list-style-type: square; }").unwrap(),
+    );
+    let layout = layout_tree(
+        &document,
+        &mut resolver,
+        Rect { x: 0.0, y: 0.0, width: 300.0, height: 0.0 },
+    )
+    .unwrap();
+
+    let li_box = find_layout_box_by_tag(&layout, "li").unwrap();
+    let marker = li_box.marker.as_ref().unwrap();
+    assert_eq!(marker.text, "\u{25a0}");
+}
+
+#[test]
+fn inside_marker_position() {
+    let (document, _body, _items) = build_ul_with_items(1);
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet("ul { list-style-position: inside; }").unwrap(),
+    );
+    let layout = layout_tree(
+        &document,
+        &mut resolver,
+        Rect { x: 0.0, y: 0.0, width: 300.0, height: 0.0 },
+    )
+    .unwrap();
+
+    let li_box = find_layout_box_by_tag(&layout, "li").unwrap();
+    let marker = li_box.marker.as_ref().unwrap();
+    assert!(!marker.outside, "list-style-position:inside should set outside=false");
+}
+
+fn collect_markers_by_tag<'a>(layout: &'a LayoutBox, tag: &str, out: &mut Vec<String>) {
+    if layout.node.tag_name().as_deref() == Some(tag) {
+        if let Some(marker) = &layout.marker {
+            out.push(marker.text.clone());
+        }
+    }
+    for child in &layout.children {
+        collect_markers_by_tag(child, tag, out);
+    }
+}

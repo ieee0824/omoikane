@@ -854,6 +854,9 @@ fn is_supported_property(name: &str) -> bool {
             | "z-index"
             | "box-shadow"
             | "opacity"
+            | "list-style-type"
+            | "list-style-position"
+            | "list-style-image"
     )
 }
 
@@ -1392,6 +1395,35 @@ fn apply_ua_defaults(
             properties.entry("margin-top".to_string()).or_insert(ComputedValue::Px(half_em));
             properties.entry("margin-bottom".to_string()).or_insert(ComputedValue::Px(half_em));
         }
+        "ul" => {
+            properties
+                .entry("list-style-type".to_string())
+                .or_insert(ComputedValue::Keyword("disc".to_string()));
+            properties
+                .entry("list-style-position".to_string())
+                .or_insert(ComputedValue::Keyword("outside".to_string()));
+            let em = parent_font_size;
+            properties.entry("margin-top".to_string()).or_insert(ComputedValue::Px(em));
+            properties.entry("margin-bottom".to_string()).or_insert(ComputedValue::Px(em));
+            properties.entry("padding-left".to_string()).or_insert(ComputedValue::Px(em * 2.5));
+        }
+        "ol" => {
+            properties
+                .entry("list-style-type".to_string())
+                .or_insert(ComputedValue::Keyword("decimal".to_string()));
+            properties
+                .entry("list-style-position".to_string())
+                .or_insert(ComputedValue::Keyword("outside".to_string()));
+            let em = parent_font_size;
+            properties.entry("margin-top".to_string()).or_insert(ComputedValue::Px(em));
+            properties.entry("margin-bottom".to_string()).or_insert(ComputedValue::Px(em));
+            properties.entry("padding-left".to_string()).or_insert(ComputedValue::Px(em * 2.5));
+        }
+        "li" => {
+            properties
+                .entry("display".to_string())
+                .or_insert(ComputedValue::Keyword("list-item".to_string()));
+        }
         _ => {}
     }
 }
@@ -1459,6 +1491,9 @@ fn apply_inheritance(
         "font-size",
         "letter-spacing",
         "line-height",
+        "list-style-image",
+        "list-style-type",
+        "list-style-position",
         "text-transform",
         "white-space",
         "word-spacing",

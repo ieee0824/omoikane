@@ -923,6 +923,7 @@ fn expand_shorthand(name: &str, value: Value, important: bool) -> Vec<Declaratio
         "text-decoration" => expand_text_decoration_shorthand(value, important),
         "border-radius" => expand_border_radius_shorthand(value, important),
         "box-shadow" => expand_box_shadow_shorthand(value, important),
+        "list-style" => expand_list_style_shorthand(value, important),
         _ => vec![Declaration {
             name: name.to_string(),
             value,
@@ -1791,6 +1792,112 @@ fn expand_box_shadow_shorthand(value: Value, important: bool) -> Vec<Declaration
     }]
 }
 
+/// Expands `list-style` shorthand into `list-style-type`, `list-style-position`,
+/// and `list-style-image` longhands.
+///
+/// Syntax: `list-style: <type> || <position> || <image>`
+/// where type is a keyword (disc, circle, square, decimal, none, …),
+/// position is `inside` or `outside`, and image is `none` or a `url(…)`.
+fn expand_list_style_shorthand(value: Value, important: bool) -> Vec<Declaration> {
+    const POSITION_KEYWORDS: &[&str] = &["inside", "outside"];
+    const TYPE_KEYWORDS: &[&str] = &[
+        "disc", "circle", "square", "decimal", "lower-roman", "upper-roman",
+        "lower-alpha", "upper-alpha", "lower-latin", "upper-latin", "none",
+    ];
+
+    let values: Vec<Value> = match value {
+        Value::List(items) => items,
+        single => vec![single],
+    };
+
+    let mut list_style_type: Option<Value> = None;
+    let mut list_style_position: Option<Value> = None;
+    let mut list_style_image: Option<Value> = None;
+
+    // Check for bare `none` — sets both type and image to none
+    if values.len() == 1 {
+        if let Value::Keyword(kw) = &values[0] {
+            if kw.eq_ignore_ascii_case("none") {
+                return vec![
+                    Declaration {
+                        name: "list-style-type".to_string(),
+                        value: Value::Keyword("none".to_string()),
+                        important,
+                    },
+                    Declaration {
+                        name: "list-style-position".to_string(),
+                        value: Value::Keyword("outside".to_string()),
+                        important,
+                    },
+                    Declaration {
+                        name: "list-style-image".to_string(),
+                        value: Value::Keyword("none".to_string()),
+                        important,
+                    },
+                ];
+            }
+        }
+    }
+
+    // First pass: detect if a non-none type keyword is present (order-independent)
+    let has_explicit_type = values.iter().any(|v| {
+        matches!(v, Value::Keyword(kw) if {
+            let lc = kw.to_ascii_lowercase();
+            lc != "none" && !POSITION_KEYWORDS.contains(&lc.as_str()) && TYPE_KEYWORDS.contains(&lc.as_str())
+        })
+    });
+
+    for val in values {
+        match &val {
+            Value::Keyword(kw) => {
+                let lc = kw.to_ascii_lowercase();
+                if POSITION_KEYWORDS.contains(&lc.as_str()) {
+                    list_style_position.get_or_insert(val);
+                } else if lc == "none" {
+                    // `none` can appear as list-style-type OR list-style-image.
+                    // If a non-none type keyword is present elsewhere, treat `none` as image=none.
+                    if has_explicit_type || list_style_type.is_some() {
+                        list_style_image.get_or_insert(val);
+                    } else {
+                        list_style_type.get_or_insert(val);
+                    }
+                } else if TYPE_KEYWORDS.contains(&lc.as_str()) {
+                    list_style_type.get_or_insert(val);
+                } else {
+                    list_style_type.get_or_insert(val);
+                }
+            }
+            Value::Function { name, .. } if name.eq_ignore_ascii_case("url") => {
+                list_style_image.get_or_insert(val);
+            }
+            _ => {}
+        }
+    }
+
+    // CSS shorthand rule: always emit all three longhands, using initial values
+    // for any subproperty that was not explicitly present in the shorthand.
+    // Initial values: list-style-type = disc, list-style-position = outside, list-style-image = none
+    let mut decls = Vec::new();
+
+    decls.push(Declaration {
+        name: "list-style-type".to_string(),
+        value: list_style_type.unwrap_or(Value::Keyword("disc".to_string())),
+        important,
+    });
+    decls.push(Declaration {
+        name: "list-style-position".to_string(),
+        value: list_style_position.unwrap_or(Value::Keyword("outside".to_string())),
+        important,
+    });
+    decls.push(Declaration {
+        name: "list-style-image".to_string(),
+        value: list_style_image.unwrap_or(Value::Keyword("none".to_string())),
+        important,
+    });
+
+    decls
+}
+
 fn is_background_color_keyword(keyword: &str) -> bool {
     matches!(
         keyword,
@@ -2476,6 +2583,65 @@ mod tests {
                 .iter()
                 .any(|decl| decl.name == "border-left-style"
                     && matches!(&decl.value, Value::Keyword(value) if value == "solid"))
+        );
+    }
+
+    #[test]
+    fn expands_list_style_shorthand_all_three() {
+        // list-style shorthand expands into type, position, and image
+        let stylesheet =
+            parse_stylesheet("ul { list-style: disc inside none; }").unwrap();
+        let Rule::Style(rule) = &stylesheet.rules[0] else {
+            panic!("expected style rule");
+        };
+
+        assert!(
+            rule.declarations
+                .iter()
+                .any(|decl| decl.name == "list-style-type"
+                    && matches!(&decl.value, Value::Keyword(v) if v == "disc"))
+        );
+        assert!(
+            rule.declarations
+                .iter()
+                .any(|decl| decl.name == "list-style-position"
+                    && matches!(&decl.value, Value::Keyword(v) if v == "inside"))
+        );
+        assert!(
+            rule.declarations
+                .iter()
+                .any(|decl| decl.name == "list-style-image"
+                    && matches!(&decl.value, Value::Keyword(v) if v == "none"))
+        );
+    }
+
+    #[test]
+    fn expands_list_style_shorthand_type_only() {
+        let stylesheet = parse_stylesheet("ol { list-style: decimal; }").unwrap();
+        let Rule::Style(rule) = &stylesheet.rules[0] else {
+            panic!("expected style rule");
+        };
+
+        assert!(
+            rule.declarations
+                .iter()
+                .any(|decl| decl.name == "list-style-type"
+                    && matches!(&decl.value, Value::Keyword(v) if v == "decimal"))
+        );
+    }
+
+    #[test]
+    fn expands_list_style_none_shorthand() {
+        let stylesheet = parse_stylesheet("li { list-style: none; }").unwrap();
+        let Rule::Style(rule) = &stylesheet.rules[0] else {
+            panic!("expected style rule");
+        };
+
+        assert!(
+            rule.declarations
+                .iter()
+                .any(|decl| decl.name == "list-style-type"
+                    && matches!(&decl.value, Value::Keyword(v) if v == "none"))
         );
     }
 }

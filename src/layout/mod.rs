@@ -256,6 +256,22 @@ enum TextAlign {
     Center,
 }
 
+/// A list marker attached to a `display: list-item` box.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ListMarker {
+    /// The rendered marker string (e.g. "•", "○", "■", "1.", …).
+    pub text: String,
+    /// Font size in px to use when rendering the marker.
+    pub font_size: f32,
+    /// Whether the marker is positioned outside the content box (`outside`)
+    /// or inside the content flow (`inside`).
+    pub outside: bool,
+    /// The x/y position of the marker (content box origin for outside markers,
+    /// inline cursor for inside markers).
+    pub x: f32,
+    pub y: f32,
+}
+
 /// A block layout box derived from a DOM node.
 #[derive(Debug, Clone, PartialEq)]
 pub struct LayoutBox {
@@ -266,6 +282,8 @@ pub struct LayoutBox {
     pub z_index: i32,
     pub lines: Vec<LineBox>,
     pub children: Vec<LayoutBox>,
+    /// List marker for `display: list-item` elements.
+    pub marker: Option<ListMarker>,
 }
 
 impl LayoutBox {
@@ -414,6 +432,7 @@ fn layout_document(
         z_index: 0,
         lines: Vec::new(),
         children,
+        marker: None,
     })
 }
 
@@ -793,6 +812,7 @@ fn layout_element(
         }
     }
     sort_children_by_z_index(&mut children);
+    let marker = build_list_marker(node, &style, x, y);
     let mut layout = LayoutBox {
         node: node.clone(),
         dimensions,
@@ -801,6 +821,7 @@ fn layout_element(
         z_index: z_index(&style),
         lines,
         children,
+        marker,
     };
     apply_relative_offset(&mut layout, &style);
 
@@ -991,6 +1012,7 @@ fn layout_flex_container(
         z_index: z_index(&style),
         lines: Vec::new(),
         children,
+        marker: None,
     })
 }
 
@@ -1112,6 +1134,7 @@ fn layout_table_container(
         z_index: z_index(&style),
         lines: Vec::new(),
         children,
+        marker: None,
     })
 }
 
@@ -1301,6 +1324,7 @@ fn layout_table_row_entry(
         z_index: 0,
         lines: Vec::new(),
         children,
+        marker: None,
     };
 
     Some((row_box, row_height))
@@ -1490,6 +1514,7 @@ fn build_row_group_box(
         z_index: 0,
         lines: Vec::new(),
         children: rows,
+        marker: None,
     }
 }
 
@@ -2605,6 +2630,10 @@ fn translate_layout_contents(layout: &mut LayoutBox, dx: f32, dy: f32) {
     for child in &mut layout.children {
         translate_layout_box(child, dx, dy);
     }
+    if let Some(marker) = &mut layout.marker {
+        marker.x += dx;
+        marker.y += dy;
+    }
 }
 
 fn is_inline_child(node: &NodeHandle, resolver: &mut StyleResolver) -> bool {
@@ -3659,6 +3688,163 @@ fn overflow_keyword_sets_hidden(keyword: &str) -> bool {
     keyword
         .split(|ch: char| ch.is_ascii_whitespace() || ch == ',')
         .any(|token| token.eq_ignore_ascii_case("hidden"))
+}
+
+/// Returns a `ListMarker` for a `display: list-item` element, or `None` if no
+/// marker should be rendered (e.g. `list-style-type: none`).
+fn build_list_marker(
+    node: &NodeHandle,
+    style: &ComputedStyle,
+    content_x: f32,
+    content_y: f32,
+) -> Option<ListMarker> {
+    // Only `display: list-item` generates a marker.
+    let display_is_list_item = matches!(
+        style.get("display"),
+        Some(ComputedValue::Keyword(kw)) if kw.eq_ignore_ascii_case("list-item")
+    );
+    if !display_is_list_item {
+        return None;
+    }
+
+    // Determine list-style-type.
+    let list_style_type = match style.get("list-style-type") {
+        Some(ComputedValue::Keyword(kw)) => kw.to_ascii_lowercase(),
+        _ => "disc".to_string(),
+    };
+
+    if list_style_type == "none" {
+        return None;
+    }
+
+    let font_size = match style.get("font-size") {
+        Some(ComputedValue::Px(px)) => *px,
+        _ => 16.0,
+    };
+
+    let outside = !matches!(
+        style.get("list-style-position"),
+        Some(ComputedValue::Keyword(kw)) if kw.eq_ignore_ascii_case("inside")
+    );
+
+    // Build the marker string.
+    let text = match list_style_type.as_str() {
+        "disc" => "\u{2022}".to_string(),   // •
+        "circle" => "\u{25e6}".to_string(), // ◦
+        "square" => "\u{25a0}".to_string(), // ■
+        "decimal" => {
+            let ordinal = list_item_ordinal(node);
+            format!("{ordinal}.")
+        }
+        "lower-roman" => {
+            let ordinal = list_item_ordinal(node);
+            format!("{}.", to_roman_lower(ordinal))
+        }
+        "upper-roman" => {
+            let ordinal = list_item_ordinal(node);
+            format!("{}.", to_roman_upper(ordinal))
+        }
+        "lower-alpha" | "lower-latin" => {
+            let ordinal = list_item_ordinal(node);
+            format!("{}.", to_alpha_lower(ordinal))
+        }
+        "upper-alpha" | "upper-latin" => {
+            let ordinal = list_item_ordinal(node);
+            format!("{}.", to_alpha_upper(ordinal))
+        }
+        _ => "\u{2022}".to_string(), // fallback to disc
+    };
+
+    // For `outside`, position the marker to the left of the content box (1em offset).
+    // For `inside`, ideally the marker participates in the inline line box and
+    // shifts subsequent text to the right.  Full inline integration requires
+    // layout-engine changes that are tracked separately.  For now we record the
+    // marker at the content-box origin; the paint layer renders it there and the
+    // first text fragment may overlap it.
+    let (x, y) = if outside {
+        (content_x - font_size, content_y)
+    } else {
+        (content_x, content_y)
+    };
+
+    Some(ListMarker { text, font_size, outside, x, y })
+}
+
+/// Returns the 1-based ordinal position of `node` among its `li` siblings.
+fn list_item_ordinal(node: &NodeHandle) -> usize {
+    let Some(parent) = node.parent_node() else {
+        return 1;
+    };
+    let mut count = 0usize;
+    for sibling in parent.child_nodes() {
+        if sibling.node_type() == NodeType::Element {
+            if sibling
+                .tag_name()
+                .as_deref()
+                .map(|t| t.eq_ignore_ascii_case("li"))
+                .unwrap_or(false)
+            {
+                count += 1;
+            }
+        }
+        if sibling.identity() == node.identity() {
+            break;
+        }
+    }
+    count.max(1)
+}
+
+/// Converts a number to lowercase Roman numerals.
+fn to_roman_lower(n: usize) -> String {
+    to_roman_inner(n).to_ascii_lowercase()
+}
+
+/// Converts a number to uppercase Roman numerals.
+fn to_roman_upper(n: usize) -> String {
+    to_roman_inner(n)
+}
+
+fn to_roman_inner(mut n: usize) -> String {
+    if n == 0 {
+        return "0".to_string();
+    }
+    const VALUES: &[(usize, &str)] = &[
+        (1000, "M"), (900, "CM"), (500, "D"), (400, "CD"),
+        (100, "C"),  (90, "XC"),  (50, "L"),  (40, "XL"),
+        (10, "X"),   (9, "IX"),   (5, "V"),   (4, "IV"),
+        (1, "I"),
+    ];
+    let mut result = String::new();
+    for &(value, symbol) in VALUES {
+        while n >= value {
+            result.push_str(symbol);
+            n -= value;
+        }
+    }
+    result
+}
+
+/// Converts a 1-based number to a lowercase Latin letter (a, b, …, z, aa, …).
+fn to_alpha_lower(n: usize) -> String {
+    to_alpha_inner(n).to_ascii_lowercase()
+}
+
+/// Converts a 1-based number to an uppercase Latin letter (A, B, …, Z, AA, …).
+fn to_alpha_upper(n: usize) -> String {
+    to_alpha_inner(n)
+}
+
+fn to_alpha_inner(mut n: usize) -> String {
+    if n == 0 {
+        return "a".to_string();
+    }
+    let mut result = String::new();
+    while n > 0 {
+        n -= 1;
+        result.insert(0, char::from_u32(b'A' as u32 + (n % 26) as u32).unwrap_or('A'));
+        n /= 26;
+    }
+    result
 }
 
 #[cfg(test)]
