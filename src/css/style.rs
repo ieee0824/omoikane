@@ -10,7 +10,8 @@ use crate::dom::{Node, NodeHandle, NodeType};
 use rusqlite::{Connection, params};
 
 use super::{
-    PseudoElement, Rule, Specificity, Stylesheet, Value, matches_selector_with_pseudo, specificity,
+    PseudoElement, Rule, Specificity, Stylesheet, Value, evaluate_media_query,
+    matches_selector_with_pseudo, parse_media_query_list, specificity,
 };
 
 /// CSS origin.
@@ -96,6 +97,8 @@ pub struct StyleResolver {
     viewport_width: f32,
     /// Viewport height in px (for `vh`, `vmin`, `vmax` resolution).
     viewport_height: f32,
+    /// `true` when the system is in dark mode (affects `prefers-color-scheme` evaluation).
+    color_scheme_dark: bool,
 }
 
 static UNSUPPORTED_CSS_LOGGED: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
@@ -142,6 +145,18 @@ impl StyleResolver {
     pub fn set_viewport(&mut self, width: f32, height: f32) {
         self.viewport_width = width;
         self.viewport_height = height;
+        self.cache.clear();
+        self.pseudo_cache.clear();
+    }
+
+    /// Sets whether the system is in dark mode.
+    ///
+    /// When `true`, `@media (prefers-color-scheme: dark)` queries match and
+    /// `@media (prefers-color-scheme: light)` queries do not.  Defaults to
+    /// `false` (light mode).  Clears the style cache so that subsequent calls
+    /// to [`StyleResolver::computed_style`] reflect the new scheme.
+    pub fn set_color_scheme_dark(&mut self, dark: bool) {
+        self.color_scheme_dark = dark;
         self.cache.clear();
         self.pseudo_cache.clear();
     }
@@ -237,6 +252,9 @@ impl StyleResolver {
                 pseudo,
                 &mut source_order,
                 &mut candidates,
+                self.viewport_width,
+                self.viewport_height,
+                self.color_scheme_dark,
             );
         }
 
@@ -415,6 +433,9 @@ fn collect_rule_candidates(
     pseudo: Option<PseudoElement>,
     source_order: &mut usize,
     out: &mut Vec<Candidate>,
+    viewport_width: f32,
+    viewport_height: f32,
+    color_scheme_dark: bool,
 ) {
     if node.node_type() != NodeType::Element {
         return;
@@ -448,13 +469,75 @@ fn collect_rule_candidates(
             }
             Rule::At(at_rule) => {
                 if let Some(block) = &at_rule.block {
-                    collect_rule_candidates(node, block, origin, pseudo, source_order, out);
+                    // Evaluate @media queries before descending into the block.
+                    let should_apply = if at_rule.name == "media" {
+                        media_query_matches(
+                            &at_rule.prelude,
+                            viewport_width,
+                            viewport_height,
+                            color_scheme_dark,
+                        )
+                    } else {
+                        // Non-media at-rules (e.g. @keyframes, @supports) are passed through.
+                        true
+                    };
+                    if should_apply {
+                        collect_rule_candidates(
+                            node,
+                            block,
+                            origin,
+                            pseudo,
+                            source_order,
+                            out,
+                            viewport_width,
+                            viewport_height,
+                            color_scheme_dark,
+                        );
+                    } else {
+                        // Count the rules inside for correct source_order numbering.
+                        *source_order += count_declarations(block);
+                    }
                 } else {
                     *source_order += at_rule.declarations.len();
                 }
             }
         }
     }
+}
+
+/// Returns `true` when at least one query in a comma-separated media query list
+/// matches the given viewport.  Falls back to `true` when the list cannot be
+/// parsed (forward-compatible behaviour).
+fn media_query_matches(
+    prelude: &str,
+    viewport_width: f32,
+    viewport_height: f32,
+    color_scheme_dark: bool,
+) -> bool {
+    let prelude = prelude.trim();
+    // Empty prelude — treat as unconditional (matches anything).
+    if prelude.is_empty() {
+        return true;
+    }
+    match parse_media_query_list(prelude) {
+        Some(queries) => queries
+            .iter()
+            .any(|q| evaluate_media_query(q, viewport_width, viewport_height, color_scheme_dark)),
+        None => false,
+    }
+}
+
+/// Counts the total number of declarations inside a rule list (used for
+/// source_order bookkeeping when a block is skipped due to a non-matching
+/// media query).
+fn count_declarations(rules: &[Rule]) -> usize {
+    rules.iter().map(|r| match r {
+        Rule::Style(s) => s.declarations.len(),
+        Rule::At(a) => {
+            a.declarations.len()
+                + a.block.as_deref().map(count_declarations).unwrap_or(0)
+        }
+    }).sum()
 }
 
 fn is_length_property(name: &str) -> bool {

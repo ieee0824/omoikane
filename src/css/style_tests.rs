@@ -1722,3 +1722,317 @@ fn list_style_type_none_overrides_ua_default() {
         Some(&ComputedValue::Keyword("none".to_string()))
     );
 }
+
+// ── @media query integration tests ───────────────────────────────────────────
+
+fn make_div_tree() -> (NodeHandle, NodeHandle) {
+    let document = NodeHandle::document();
+    let html = NodeHandle::element("html");
+    let body = NodeHandle::element("body");
+    let div = NodeHandle::element("div");
+    document.append_child(html.clone());
+    html.append_child(body.clone());
+    body.append_child(div.clone());
+    (document, div)
+}
+
+#[test]
+fn media_screen_type_applies() {
+    let (_document, div) = make_div_tree();
+    let mut resolver = StyleResolver::new();
+    resolver.set_viewport(1024.0, 768.0);
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet("@media screen { div { color: red; } }").unwrap(),
+    );
+    let style = resolver.computed_style(&div);
+    assert_eq!(
+        style.get("color"),
+        Some(&ComputedValue::Color("red".to_string())),
+        "@media screen should apply on a screen viewport"
+    );
+}
+
+#[test]
+fn media_print_type_does_not_apply() {
+    let (_document, div) = make_div_tree();
+    let mut resolver = StyleResolver::new();
+    resolver.set_viewport(1024.0, 768.0);
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet("@media print { div { color: red; } }").unwrap(),
+    );
+    let style = resolver.computed_style(&div);
+    // color should not be "red" (print rule must not apply on screen)
+    assert_ne!(
+        style.get("color"),
+        Some(&ComputedValue::Color("red".to_string())),
+        "@media print should not apply on a screen viewport"
+    );
+}
+
+#[test]
+fn media_max_width_applies_when_viewport_fits() {
+    let (_document, div) = make_div_tree();
+    let mut resolver = StyleResolver::new();
+    // viewport width (600) ≤ max-width (768) → should apply.
+    resolver.set_viewport(600.0, 900.0);
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet("@media (max-width: 768px) { div { color: blue; } }").unwrap(),
+    );
+    let style = resolver.computed_style(&div);
+    assert_eq!(
+        style.get("color"),
+        Some(&ComputedValue::Color("blue".to_string())),
+        "rule should apply when viewport width ≤ max-width"
+    );
+}
+
+#[test]
+fn media_max_width_does_not_apply_when_viewport_too_wide() {
+    let (_document, div) = make_div_tree();
+    let mut resolver = StyleResolver::new();
+    // viewport width (1024) > max-width (768) → should NOT apply.
+    resolver.set_viewport(1024.0, 768.0);
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet("@media (max-width: 768px) { div { color: blue; } }").unwrap(),
+    );
+    let style = resolver.computed_style(&div);
+    assert_ne!(
+        style.get("color"),
+        Some(&ComputedValue::Color("blue".to_string())),
+        "rule should not apply when viewport width > max-width"
+    );
+}
+
+#[test]
+fn media_min_width_applies_when_viewport_wide_enough() {
+    let (_document, div) = make_div_tree();
+    let mut resolver = StyleResolver::new();
+    resolver.set_viewport(1280.0, 800.0);
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet("@media (min-width: 1024px) { div { color: green; } }").unwrap(),
+    );
+    let style = resolver.computed_style(&div);
+    assert_eq!(
+        style.get("color"),
+        Some(&ComputedValue::Color("green".to_string())),
+        "rule should apply when viewport width ≥ min-width"
+    );
+}
+
+#[test]
+fn media_min_width_does_not_apply_when_viewport_too_narrow() {
+    let (_document, div) = make_div_tree();
+    let mut resolver = StyleResolver::new();
+    resolver.set_viewport(800.0, 600.0);
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet("@media (min-width: 1024px) { div { color: green; } }").unwrap(),
+    );
+    let style = resolver.computed_style(&div);
+    assert_ne!(
+        style.get("color"),
+        Some(&ComputedValue::Color("green".to_string())),
+        "rule should not apply when viewport width < min-width"
+    );
+}
+
+#[test]
+fn media_orientation_portrait_applies() {
+    let (_document, div) = make_div_tree();
+    let mut resolver = StyleResolver::new();
+    // height (900) > width (600) → portrait.
+    resolver.set_viewport(600.0, 900.0);
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet("@media (orientation: portrait) { div { color: purple; } }").unwrap(),
+    );
+    let style = resolver.computed_style(&div);
+    assert_eq!(
+        style.get("color"),
+        Some(&ComputedValue::Color("purple".to_string())),
+        "@media (orientation: portrait) should apply in portrait viewport"
+    );
+}
+
+#[test]
+fn media_orientation_portrait_does_not_apply_in_landscape() {
+    let (_document, div) = make_div_tree();
+    let mut resolver = StyleResolver::new();
+    // width (1024) > height (768) → landscape.
+    resolver.set_viewport(1024.0, 768.0);
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet("@media (orientation: portrait) { div { color: purple; } }").unwrap(),
+    );
+    let style = resolver.computed_style(&div);
+    assert_ne!(
+        style.get("color"),
+        Some(&ComputedValue::Color("purple".to_string())),
+        "@media (orientation: portrait) should not apply in landscape viewport"
+    );
+}
+
+#[test]
+fn media_not_print_applies_on_screen() {
+    let (_document, div) = make_div_tree();
+    let mut resolver = StyleResolver::new();
+    resolver.set_viewport(1024.0, 768.0);
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet("@media not print { div { color: teal; } }").unwrap(),
+    );
+    let style = resolver.computed_style(&div);
+    assert_eq!(
+        style.get("color"),
+        Some(&ComputedValue::Color("teal".to_string())),
+        "@media not print should apply on a screen viewport"
+    );
+}
+
+#[test]
+fn media_and_conditions_all_must_match() {
+    let (_document, div) = make_div_tree();
+    let mut resolver = StyleResolver::new();
+    // Both min-width (600) and max-width (1200) satisfied at 1024.
+    resolver.set_viewport(1024.0, 768.0);
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "@media (min-width: 600px) and (max-width: 1200px) { div { color: orange; } }",
+        )
+        .unwrap(),
+    );
+    let style = resolver.computed_style(&div);
+    assert_eq!(
+        style.get("color"),
+        Some(&ComputedValue::Color("orange".to_string())),
+        "all conditions must be met for the rule to apply"
+    );
+}
+
+#[test]
+fn media_and_conditions_one_mismatch_blocks_rule() {
+    let (_document, div) = make_div_tree();
+    let mut resolver = StyleResolver::new();
+    // min-width (600) satisfied but max-width (1200) NOT satisfied at 1400.
+    resolver.set_viewport(1400.0, 768.0);
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "@media (min-width: 600px) and (max-width: 1200px) { div { color: orange; } }",
+        )
+        .unwrap(),
+    );
+    let style = resolver.computed_style(&div);
+    assert_ne!(
+        style.get("color"),
+        Some(&ComputedValue::Color("orange".to_string())),
+        "rule should not apply when one condition is not met"
+    );
+}
+
+#[test]
+fn media_comma_list_applies_when_any_query_matches() {
+    let (_document, div) = make_div_tree();
+    let mut resolver = StyleResolver::new();
+    // "print" doesn't match, but "screen" does.
+    resolver.set_viewport(1024.0, 768.0);
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet("@media print, screen { div { color: navy; } }").unwrap(),
+    );
+    let style = resolver.computed_style(&div);
+    assert_eq!(
+        style.get("color"),
+        Some(&ComputedValue::Color("navy".to_string())),
+        "comma-separated media query should apply when any query matches"
+    );
+}
+
+#[test]
+fn media_only_screen_applies() {
+    // `only screen and (max-width: 768px)` — `only` is a CSS2 modifier and must
+    // be stripped; the rule should behave exactly like `screen and (max-width: 768px)`.
+    let (_document, div) = make_div_tree();
+    let mut resolver = StyleResolver::new();
+    resolver.set_viewport(600.0, 900.0);
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "@media only screen and (max-width: 768px) { div { color: magenta; } }",
+        )
+        .unwrap(),
+    );
+    let style = resolver.computed_style(&div);
+    assert_eq!(
+        style.get("color"),
+        Some(&ComputedValue::Color("magenta".to_string())),
+        "@media only screen should apply on a screen viewport narrower than max-width"
+    );
+}
+
+#[test]
+fn media_prefers_color_scheme_dark_applies_in_dark_mode() {
+    let (_document, div) = make_div_tree();
+    let mut resolver = StyleResolver::new();
+    resolver.set_viewport(1024.0, 768.0);
+    resolver.set_color_scheme_dark(true);
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "@media (prefers-color-scheme: dark) { div { color: white; } }",
+        )
+        .unwrap(),
+    );
+    let style = resolver.computed_style(&div);
+    assert_eq!(
+        style.get("color"),
+        Some(&ComputedValue::Color("white".to_string())),
+        "@media (prefers-color-scheme: dark) should apply when dark mode is set"
+    );
+}
+
+#[test]
+fn media_prefers_color_scheme_dark_does_not_apply_in_light_mode() {
+    let (_document, div) = make_div_tree();
+    let mut resolver = StyleResolver::new();
+    resolver.set_viewport(1024.0, 768.0);
+    // Default is light mode (color_scheme_dark = false).
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "@media (prefers-color-scheme: dark) { div { color: white; } }",
+        )
+        .unwrap(),
+    );
+    let style = resolver.computed_style(&div);
+    assert_ne!(
+        style.get("color"),
+        Some(&ComputedValue::Color("white".to_string())),
+        "@media (prefers-color-scheme: dark) must not apply in light mode"
+    );
+}
+
+#[test]
+fn media_without_viewport_max_width_zero_matches() {
+    // When no viewport is set (0×0), a (max-width: 0px) query should match
+    // because viewport_width (0) ≤ 0.
+    let (_document, div) = make_div_tree();
+    let mut resolver = StyleResolver::new();
+    // No set_viewport call → defaults to 0×0.
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet("@media (max-width: 0px) { div { color: pink; } }").unwrap(),
+    );
+    let style = resolver.computed_style(&div);
+    assert_eq!(
+        style.get("color"),
+        Some(&ComputedValue::Color("pink".to_string())),
+        "max-width: 0px should match a 0-width viewport"
+    );
+}
