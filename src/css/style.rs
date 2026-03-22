@@ -1364,7 +1364,7 @@ fn inherited_font_size(
     16.0
 }
 
-fn is_color_keyword(keyword: &str) -> bool {
+pub(crate) fn is_color_keyword(keyword: &str) -> bool {
     matches!(
         keyword,
         "black"

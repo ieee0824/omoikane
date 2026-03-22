@@ -1672,7 +1672,7 @@ fn expand_text_decoration_shorthand(value: Value, important: bool) -> Vec<Declar
                             style = Some(Value::Keyword(lower));
                         }
                     }
-                    _ if is_background_color_keyword(&lower) => {
+                    _ if crate::css::style::is_color_keyword(&lower) => {
                         if color.is_none() {
                             color = Some(Value::Keyword(lower));
                         }
