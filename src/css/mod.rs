@@ -1825,6 +1825,11 @@ fn expand_list_style_shorthand(value: Value, important: bool) -> Vec<Declaration
                         important,
                     },
                     Declaration {
+                        name: "list-style-position".to_string(),
+                        value: Value::Keyword("outside".to_string()),
+                        important,
+                    },
+                    Declaration {
                         name: "list-style-image".to_string(),
                         value: Value::Keyword("none".to_string()),
                         important,
@@ -1834,6 +1839,14 @@ fn expand_list_style_shorthand(value: Value, important: bool) -> Vec<Declaration
         }
     }
 
+    // First pass: detect if a non-none type keyword is present (order-independent)
+    let has_explicit_type = values.iter().any(|v| {
+        matches!(v, Value::Keyword(kw) if {
+            let lc = kw.to_ascii_lowercase();
+            lc != "none" && !POSITION_KEYWORDS.contains(&lc.as_str()) && TYPE_KEYWORDS.contains(&lc.as_str())
+        })
+    });
+
     for val in values {
         match &val {
             Value::Keyword(kw) => {
@@ -1842,19 +1855,15 @@ fn expand_list_style_shorthand(value: Value, important: bool) -> Vec<Declaration
                     list_style_position.get_or_insert(val);
                 } else if lc == "none" {
                     // `none` can appear as list-style-type OR list-style-image.
-                    // CSS spec says: if only one `none` is present it resets both
-                    // type and image; if paired with a type keyword it resets only image.
-                    if list_style_type.is_some() {
-                        // A real type is already set — treat this `none` as image=none.
+                    // If a non-none type keyword is present elsewhere, treat `none` as image=none.
+                    if has_explicit_type || list_style_type.is_some() {
                         list_style_image.get_or_insert(val);
                     } else {
-                        // No type yet — treat as type=none (image stays unset → none by default).
                         list_style_type.get_or_insert(val);
                     }
                 } else if TYPE_KEYWORDS.contains(&lc.as_str()) {
                     list_style_type.get_or_insert(val);
                 } else {
-                    // Unknown keyword — treat as type fallback
                     list_style_type.get_or_insert(val);
                 }
             }

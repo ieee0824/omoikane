@@ -1491,6 +1491,7 @@ fn apply_inheritance(
         "font-size",
         "letter-spacing",
         "line-height",
+        "list-style-image",
         "list-style-type",
         "list-style-position",
         "text-transform",
