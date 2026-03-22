@@ -919,18 +919,27 @@ pub fn load_system_font(family: &str) -> Result<Font, FontError> {
 pub fn load_default_text_fonts() -> Vec<Font> {
     let mut fonts = Vec::new();
     let mut loaded_families = HashSet::new();
-    let families = [
-        "sans-serif",
-        "Hiragino Sans",
-        "Hiragino Kaku Gothic ProN",
-        "Yu Gothic",
-        "Meiryo",
-        "MS Gothic",
-        "Noto Sans CJK JP",
-        "Noto Sans JP",
-        "IPA Gothic",
-        "IPAGothic",
-    ];
+    let families = if cfg!(target_os = "macos") {
+        &[
+            "Hiragino Kaku Gothic ProN",
+            "Hiragino Sans",
+            "sans-serif",
+            "Yu Gothic",
+            "Noto Sans CJK JP",
+            "Noto Sans JP",
+        ][..]
+    } else {
+        &[
+            "sans-serif",
+            "Noto Sans CJK JP",
+            "Noto Sans JP",
+            "Yu Gothic",
+            "Meiryo",
+            "MS Gothic",
+            "IPA Gothic",
+            "IPAGothic",
+        ][..]
+    };
 
     for family in families {
         if !loaded_families.insert(family.to_ascii_lowercase()) {
