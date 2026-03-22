@@ -384,6 +384,7 @@ pub fn render_document_with_url(
 ) -> Result<Canvas, PaintError> {
     let effective_base = extract_document_base_url(document, base_url);
     let mut resolver = StyleResolver::new();
+    resolver.set_viewport(viewport.width, viewport.height);
     for stylesheet in extract_author_stylesheets(document, base_url)? {
         resolver.add_stylesheet(Origin::Author, parse_stylesheet_forgiving(&stylesheet)?);
     }
