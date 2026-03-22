@@ -4573,9 +4573,8 @@ fn apply_text_transform_none_returns_none() {
 
 // ===== text-decoration paint tests =====
 
-#[test]
-fn text_decoration_underline_draws_pixels_below_text() {
-    // Build a simple layout with text-decoration: underline
+/// Helper: build a canvas rendering "Hi" with the given text-decoration CSS value.
+fn render_text_with_decoration(decoration: &str) -> Canvas {
     let document = NodeHandle::document();
     let html = NodeHandle::element("html");
     let body = NodeHandle::element("body");
@@ -4589,23 +4588,69 @@ fn text_decoration_underline_draws_pixels_below_text() {
     let mut resolver = StyleResolver::new();
     resolver.add_stylesheet(
         Origin::Author,
-        parse_stylesheet(
-            "body { margin: 0; } \
-             p { text-decoration: underline; color: #ff0000; font-size: 20px; }",
-        )
+        parse_stylesheet(&format!(
+            "body {{ margin: 0; }} \
+             p {{ text-decoration: {}; color: #ff0000; font-size: 20px; }}",
+            decoration
+        ))
         .unwrap(),
     );
 
     let viewport = Rect { x: 0.0, y: 0.0, width: 200.0, height: 100.0 };
-    let layout = layout_tree(&document, &mut resolver, viewport).expect("layout should succeed");
-    let canvas = paint_layout(&layout, &mut resolver, viewport);
+    let layout =
+        layout_tree(&document, &mut resolver, viewport).expect("layout should succeed");
+    paint_layout(&layout, &mut resolver, viewport)
+}
 
-    // The canvas should have some non-transparent pixels (the underline)
-    let has_colored_pixel = (0..canvas.width())
-        .flat_map(|x| (0..canvas.height()).map(move |y| (x, y)))
-        .any(|(x, y)| canvas.pixel(x, y).map_or(false, |c| c.a > 0));
+#[test]
+fn text_decoration_underline_draws_pixels_below_text() {
+    // Render the same text with and without underline.
+    let canvas_underline = render_text_with_decoration("underline");
+    let canvas_none = render_text_with_decoration("none");
 
-    assert!(has_colored_pixel, "text-decoration: underline should produce colored pixels");
+    let w = canvas_underline.width();
+    let h = canvas_underline.height();
+
+    // Find the bottom-most row that contains colored pixels in the no-underline render.
+    // This is the lower boundary of the text glyph area.
+    let glyph_bottom: u32 = (0..h)
+        .filter(|&y| {
+            (0..w).any(|x| canvas_none.pixel(x, y).map_or(false, |c| c.a > 0))
+        })
+        .last()
+        .expect("no-decoration render must contain at least one colored pixel");
+
+    // Rows strictly below the glyph area.
+    let below_glyph_start = glyph_bottom + 1;
+
+    // Compare the two canvases: all differing pixels must be strictly below glyph_bottom,
+    // and at least one differing pixel must exist there.
+    let mut diff_below = false;
+    let mut diff_at_or_above = false;
+    for y in 0..h {
+        for x in 0..w {
+            let a_ul = canvas_underline.pixel(x, y).map_or(0, |c| c.a);
+            let a_none = canvas_none.pixel(x, y).map_or(0, |c| c.a);
+            if a_ul != a_none {
+                if y > glyph_bottom {
+                    diff_below = true;
+                } else {
+                    diff_at_or_above = true;
+                }
+            }
+        }
+    }
+
+    assert!(
+        diff_below,
+        "text-decoration: underline must introduce pixel differences below the glyph area \
+         (glyph_bottom={glyph_bottom}, checked rows {below_glyph_start}..{h})"
+    );
+    assert!(
+        !diff_at_or_above,
+        "text-decoration: underline should only differ from none below the glyph area \
+         (glyph_bottom={glyph_bottom})"
+    );
 }
 
 // --- border-radius 描画テスト ---
