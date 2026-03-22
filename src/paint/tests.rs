@@ -4623,25 +4623,32 @@ fn text_decoration_underline_draws_pixels_below_text() {
     // Rows strictly below the glyph area.
     let below_glyph_start = glyph_bottom + 1;
 
-    // The underline render must have at least one colored pixel below the glyph area.
-    let underline_below = (below_glyph_start..h).any(|y| {
-        (0..w).any(|x| canvas_underline.pixel(x, y).map_or(false, |c| c.a > 0))
-    });
+    // Compare the two canvases: all differing pixels must be strictly below glyph_bottom,
+    // and at least one differing pixel must exist there.
+    let mut diff_below = false;
+    let mut diff_at_or_above = false;
+    for y in 0..h {
+        for x in 0..w {
+            let a_ul = canvas_underline.pixel(x, y).map_or(0, |c| c.a);
+            let a_none = canvas_none.pixel(x, y).map_or(0, |c| c.a);
+            if a_ul != a_none {
+                if y > glyph_bottom {
+                    diff_below = true;
+                } else {
+                    diff_at_or_above = true;
+                }
+            }
+        }
+    }
 
     assert!(
-        underline_below,
-        "text-decoration: underline must paint pixels below the glyph area \
+        diff_below,
+        "text-decoration: underline must introduce pixel differences below the glyph area \
          (glyph_bottom={glyph_bottom}, checked rows {below_glyph_start}..{h})"
     );
-
-    // The no-underline render must NOT have colored pixels below the glyph area.
-    let none_below = (below_glyph_start..h).any(|y| {
-        (0..w).any(|x| canvas_none.pixel(x, y).map_or(false, |c| c.a > 0))
-    });
-
     assert!(
-        !none_below,
-        "text-decoration: none must NOT paint pixels below the glyph area \
+        !diff_at_or_above,
+        "text-decoration: underline should only differ from none below the glyph area \
          (glyph_bottom={glyph_bottom})"
     );
 }
