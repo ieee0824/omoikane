@@ -186,7 +186,7 @@ pub fn evaluate_media_query(
         MediaCondition::OrientationLandscape => viewport_width > viewport_height,
         MediaCondition::PrefersColorSchemeDark => color_scheme_dark,
         MediaCondition::PrefersColorSchemeLight => !color_scheme_dark,
-        MediaCondition::Unknown => true,
+        MediaCondition::Unknown => false,
     });
 
     if query.negated {
@@ -214,10 +214,13 @@ pub fn parse_media_query_list(prelude: &str) -> Option<Vec<MediaQuery>> {
 
 fn parse_single_media_query(input: &str) -> Option<MediaQuery> {
     let input = input.trim();
-    let (negated, rest) = if let Some(after) = input.strip_prefix("not") {
-        let after = after.trim_start();
-        if after.is_empty() || after.starts_with('(') || after.chars().next().map(|c| c.is_alphabetic()).unwrap_or(false) {
-            (true, after)
+    let (negated, rest) = if input.len() >= 3
+        && input[..3].eq_ignore_ascii_case("not")
+    {
+        let after = &input[3..];
+        let next = after.chars().next();
+        if next.is_none() || next == Some(' ') || next == Some('\t') || next == Some('(') {
+            (true, after.trim_start())
         } else {
             (false, input)
         }
@@ -256,7 +259,7 @@ fn parse_single_media_query(input: &str) -> Option<MediaQuery> {
                 remaining = remaining[end..].trim_start();
             }
             // Consume optional `and` keyword.
-            if let Some(after_and) = remaining.strip_prefix("and") {
+            if let Some(after_and) = strip_keyword_prefix(remaining, "and") {
                 let after_and = after_and.trim_start();
                 if after_and.starts_with('(') || after_and.is_empty() {
                     remaining = after_and;
@@ -273,7 +276,7 @@ fn parse_single_media_query(input: &str) -> Option<MediaQuery> {
         }
         if !remaining.starts_with('(') {
             // Skip unknown tokens (e.g. bare `and`).
-            if let Some(after_and) = remaining.strip_prefix("and") {
+            if let Some(after_and) = strip_keyword_prefix(remaining, "and") {
                 remaining = after_and.trim_start();
                 continue;
             }
@@ -287,7 +290,7 @@ fn parse_single_media_query(input: &str) -> Option<MediaQuery> {
         remaining = &remaining[close + 1..];
         remaining = remaining.trim_start();
         // Consume optional `and` between features.
-        if let Some(after_and) = remaining.strip_prefix("and") {
+        if let Some(after_and) = strip_keyword_prefix(remaining, "and") {
             remaining = after_and.trim_start();
         }
     }
@@ -359,20 +362,36 @@ fn parse_media_feature(inner: &str) -> MediaCondition {
     MediaCondition::Unknown
 }
 
+/// Strips a case-insensitive keyword prefix with word boundary check.
+fn strip_keyword_prefix<'a>(input: &'a str, keyword: &str) -> Option<&'a str> {
+    let len = keyword.len();
+    if input.len() >= len && input[..len].eq_ignore_ascii_case(keyword) {
+        let after = &input[len..];
+        let next = after.chars().next();
+        if next.is_none() || next == Some(' ') || next == Some('\t') || next == Some('(') {
+            Some(after)
+        } else {
+            None
+        }
+    } else {
+        None
+    }
+}
+
 /// Parses a CSS length value like `768px` or `48em` and converts it to pixels.
-/// Only `px` and `em` (at 16px/em) are supported; other units return `None`.
+/// Supports `px`, `em`, and `rem` (at 16px per em/rem); other units return `None`.
 fn parse_length_to_px(s: &str) -> Option<f32> {
-    if let Some(num_str) = s.strip_suffix("px") {
+    let lower = s.trim().to_ascii_lowercase();
+    if let Some(num_str) = lower.strip_suffix("px") {
         return num_str.trim().parse::<f32>().ok();
     }
-    if let Some(num_str) = s.strip_suffix("em") {
+    if let Some(num_str) = lower.strip_suffix("rem") {
         return num_str.trim().parse::<f32>().ok().map(|n| n * 16.0);
     }
-    if let Some(num_str) = s.strip_suffix("rem") {
+    if let Some(num_str) = lower.strip_suffix("em") {
         return num_str.trim().parse::<f32>().ok().map(|n| n * 16.0);
     }
-    // Unitless zero is valid.
-    if s.trim() == "0" {
+    if lower == "0" {
         return Some(0.0);
     }
     None

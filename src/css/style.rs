@@ -523,7 +523,7 @@ fn media_query_matches(
         Some(queries) => queries
             .iter()
             .any(|q| evaluate_media_query(q, viewport_width, viewport_height, color_scheme_dark)),
-        None => true,
+        None => false,
     }
 }
 
