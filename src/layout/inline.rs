@@ -1012,12 +1012,20 @@ fn measure_text_width_with_fallback(text: &str, font_size: f32, fonts: &[Font]) 
 
 fn select_layout_font_index(fonts: &[Font], ch: char) -> usize {
     let prefer_cjk = is_cjk_preferred_character(ch);
+
+    // Always try the primary font (index 0) first, even for CJK characters.
+    // This matches the paint-side rasterize_with_fallback logic so that
+    // layout measurement and paint rendering use the same font for each glyph.
     if prefer_cjk && fonts.len() > 1 {
+        // Try primary font first
+        if ch.is_whitespace() || fonts[0].has_glyph(ch) {
+            return 0;
+        }
+        // Fall back to CJK-capable fonts
         for index in 1..fonts.len() {
-            if !ch.is_whitespace() && !fonts[index].has_glyph(ch) {
-                continue;
+            if fonts[index].has_glyph(ch) {
+                return index;
             }
-            return index;
         }
         return 0;
     }
