@@ -852,21 +852,32 @@ pub(crate) fn rewrite_local_asset_attribute(
     Ok(())
 }
 
+/// A loaded web font together with its `@font-face` variant descriptors.
+pub(crate) struct WebFont {
+    pub family: String,
+    pub weight: crate::font::FontWeight,
+    pub style: crate::font::FontStyle,
+    pub font: Font,
+}
+
 /// Extract `@font-face` rules from parsed stylesheets, fetch the font files
-/// via HTTP, and return loaded `Font` objects.
+/// via HTTP, and return loaded `WebFont` objects with variant information.
 ///
+/// Unlike the previous implementation, the same family can appear multiple
+/// times with different weight/style variants (e.g. regular + bold + italic).
 /// Fonts that fail to fetch or parse are silently skipped (fallback to system fonts).
 pub(crate) fn fetch_font_face_fonts(
     stylesheets: &[Stylesheet],
     base_url: Option<&crate::http::Url>,
-) -> Vec<Font> {
-    let mut fonts = Vec::new();
+) -> Vec<WebFont> {
+    let mut web_fonts = Vec::new();
     let mut client: Option<crate::http::Client> = None;
-    let mut seen_families = HashSet::new();
+    // Deduplicate by (family, weight, style) tuple so we don't re-fetch the same variant
+    let mut seen_variants: HashSet<(String, u16, u8)> = HashSet::new();
 
     for sheet in stylesheets {
         for ff_rule in extract_font_face_rules(sheet) {
-            let key = ff_rule.font_family.to_lowercase();
+            let family_lower = ff_rule.font_family.to_lowercase();
 
             // Skip WOFF2 when format hint says so (not supported yet)
             if let Some(ref fmt) = ff_rule.format {
@@ -898,26 +909,49 @@ pub(crate) fn fetch_font_face_fonts(
                 None => continue,
             };
 
+            // Parse variant descriptors
+            let weight = crate::font::FontWeight::parse(
+                ff_rule.font_weight.as_deref().unwrap_or("normal"),
+            );
+            let style = crate::font::FontStyle::parse(
+                ff_rule.font_style.as_deref().unwrap_or("normal"),
+            );
+
+            // Deduplicate: encode style as u8 (0=normal, 1=italic, 2=oblique)
+            let style_ord: u8 = match style {
+                crate::font::FontStyle::Normal => 0,
+                crate::font::FontStyle::Italic => 1,
+                crate::font::FontStyle::Oblique => 2,
+            };
+            let variant_key = (family_lower.clone(), weight.0, style_ord);
+            if seen_variants.contains(&variant_key) {
+                continue;
+            }
+
             // Fetch font data
             let data = match fetch_font_bytes(&resolved, &mut client) {
                 Some(d) => d,
                 None => continue,
             };
 
-            // Load font — only mark family as seen when loading succeeds
+            // Load font — insert into seen_variants only on success to allow
+            // retrying with a different src URL if this one fails to parse.
             match Font::load_from_bytes(data) {
                 Ok(font) => {
-                    // Avoid loading the same family twice (insert after success)
-                    if seen_families.insert(key) {
-                        fonts.push(font);
-                    }
+                    seen_variants.insert(variant_key);
+                    web_fonts.push(WebFont {
+                        family: ff_rule.font_family.clone(),
+                        weight,
+                        style,
+                        font,
+                    });
                 }
                 Err(_) => continue,
             }
         }
     }
 
-    fonts
+    web_fonts
 }
 
 /// Maximum allowed font file size in bytes (10 MB).

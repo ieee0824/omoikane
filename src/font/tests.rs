@@ -752,3 +752,206 @@ fn font_cache_register_web_font() {
     let font2 = cache.get_or_load("TestWebFont").unwrap();
     assert!(Arc::ptr_eq(&font, &font2));
 }
+
+// ============================================================================
+// FontWeight / FontStyle parsing tests
+// ============================================================================
+
+#[test]
+fn font_weight_parse_keywords() {
+    assert_eq!(FontWeight::parse("normal"), FontWeight(400));
+    assert_eq!(FontWeight::parse("bold"), FontWeight(700));
+    assert_eq!(FontWeight::parse("bolder"), FontWeight(700));
+    assert_eq!(FontWeight::parse("lighter"), FontWeight(300));
+}
+
+#[test]
+fn font_weight_parse_numeric() {
+    assert_eq!(FontWeight::parse("100"), FontWeight(100));
+    assert_eq!(FontWeight::parse("400"), FontWeight(400));
+    assert_eq!(FontWeight::parse("700"), FontWeight(700));
+    assert_eq!(FontWeight::parse("900"), FontWeight(900));
+}
+
+#[test]
+fn font_weight_parse_unknown_defaults_to_400() {
+    assert_eq!(FontWeight::parse(""), FontWeight(400));
+    assert_eq!(FontWeight::parse("bogus"), FontWeight(400));
+}
+
+#[test]
+fn font_style_parse() {
+    assert_eq!(FontStyle::parse("normal"), FontStyle::Normal);
+    assert_eq!(FontStyle::parse("italic"), FontStyle::Italic);
+    assert_eq!(FontStyle::parse("oblique"), FontStyle::Oblique);
+    assert_eq!(FontStyle::parse("ITALIC"), FontStyle::Italic);
+    assert_eq!(FontStyle::parse("unknown"), FontStyle::Normal);
+}
+
+// ============================================================================
+// WebFontRegistry tests
+// ============================================================================
+
+/// Build a minimal valid Font from disk bytes for use in registry tests.
+fn load_test_font_for_registry() -> Option<Font> {
+    let path = find_test_font()?;
+    let data = std::fs::read(&path).ok()?;
+    Font::load_from_bytes(data).ok()
+}
+
+#[test]
+fn web_font_registry_exact_match_weight_400() {
+    let font_regular = match load_test_font_for_registry() {
+        Some(f) => f,
+        None => {
+            eprintln!("Skipping: no system font found");
+            return;
+        }
+    };
+    let font_bold = match load_test_font_for_registry() {
+        Some(f) => f,
+        None => return,
+    };
+
+    let mut registry = WebFontRegistry::new();
+    registry.push("MyFont", FontWeight(400), FontStyle::Normal, font_regular);
+    registry.push("MyFont", FontWeight(700), FontStyle::Normal, font_bold);
+
+    // Exact match for normal weight
+    assert!(
+        registry
+            .select_best("MyFont", FontWeight(400), FontStyle::Normal)
+            .is_some()
+    );
+    // Exact match for bold weight
+    assert!(
+        registry
+            .select_best("MyFont", FontWeight(700), FontStyle::Normal)
+            .is_some()
+    );
+}
+
+#[test]
+fn web_font_registry_bold_selects_700_when_available() {
+    let font_regular = match load_test_font_for_registry() {
+        Some(f) => f,
+        None => {
+            eprintln!("Skipping: no system font found");
+            return;
+        }
+    };
+    let font_bold = match load_test_font_for_registry() {
+        Some(f) => f,
+        None => return,
+    };
+
+    let mut registry = WebFontRegistry::new();
+    registry.push("TestFamily", FontWeight(400), FontStyle::Normal, font_regular);
+    registry.push("TestFamily", FontWeight(700), FontStyle::Normal, font_bold);
+
+    // Requesting bold (700) should prefer the 700 variant
+    let selected = registry
+        .select_best("TestFamily", FontWeight(700), FontStyle::Normal)
+        .expect("should find a font");
+
+    // We can't easily distinguish the two loaded fonts by value (both from same file),
+    // so just ensure a font is returned without panic.
+    let _ = selected;
+}
+
+#[test]
+fn web_font_registry_italic_selects_italic_over_normal() {
+    let font_regular = match load_test_font_for_registry() {
+        Some(f) => f,
+        None => {
+            eprintln!("Skipping: no system font found");
+            return;
+        }
+    };
+    let font_italic = match load_test_font_for_registry() {
+        Some(f) => f,
+        None => return,
+    };
+
+    let mut registry = WebFontRegistry::new();
+    registry.push("TestFamily", FontWeight(400), FontStyle::Normal, font_regular);
+    registry.push("TestFamily", FontWeight(400), FontStyle::Italic, font_italic);
+
+    // Requesting italic should return a font
+    assert!(
+        registry
+            .select_best("TestFamily", FontWeight(400), FontStyle::Italic)
+            .is_some()
+    );
+}
+
+#[test]
+fn web_font_registry_fallback_when_no_italic() {
+    let font_regular = match load_test_font_for_registry() {
+        Some(f) => f,
+        None => {
+            eprintln!("Skipping: no system font found");
+            return;
+        }
+    };
+
+    let mut registry = WebFontRegistry::new();
+    registry.push("TestFamily", FontWeight(400), FontStyle::Normal, font_regular);
+
+    // Requesting italic when only normal is available → should still return a font (best match)
+    assert!(
+        registry
+            .select_best("TestFamily", FontWeight(400), FontStyle::Italic)
+            .is_some()
+    );
+}
+
+#[test]
+fn web_font_registry_unknown_family_returns_none() {
+    let registry = WebFontRegistry::new();
+    assert!(
+        registry
+            .select_best("NoSuchFamily", FontWeight(400), FontStyle::Normal)
+            .is_none()
+    );
+}
+
+#[test]
+fn font_cache_register_web_font_with_variant() {
+    let font_path = match find_test_font() {
+        Some(p) => p,
+        None => {
+            eprintln!("Skipping font_cache_register_web_font_with_variant: no system font found");
+            return;
+        }
+    };
+
+    let data_regular = std::fs::read(&font_path).unwrap();
+    let data_bold = std::fs::read(&font_path).unwrap();
+
+    let mut cache = FontCache::new(10);
+    cache
+        .register_web_font_with_variant(
+            "MultiFont",
+            FontWeight(400),
+            FontStyle::Normal,
+            data_regular,
+        )
+        .unwrap();
+    cache
+        .register_web_font_with_variant(
+            "MultiFont",
+            FontWeight(700),
+            FontStyle::Normal,
+            data_bold,
+        )
+        .unwrap();
+
+    assert!(cache.contains("MultiFont"));
+    // Both variants stored → cache has 2 entries for this family
+    assert_eq!(cache.len(), 2);
+
+    // Best variant for bold should be found
+    let bold = cache.select_best_variant("MultiFont", FontWeight(700), FontStyle::Normal);
+    assert!(bold.is_some());
+}

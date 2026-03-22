@@ -15,7 +15,7 @@ use crate::css::{
     ComputedStyle, ComputedValue, Origin, PseudoElement, StyleResolver,
 };
 use crate::dom::{Node, NodeHandle, NodeType};
-use crate::font::Font;
+use crate::font::{Font, WebFontRegistry};
 #[allow(unused_imports)]
 use crate::layout::{InlineFragmentContent, LayoutBox, Rect, Visibility};
 
@@ -39,11 +39,12 @@ pub(crate) use image::{
 };
 #[allow(unused_imports)]
 pub(crate) use text::{
-    paint_text, paint_text_with_font, paint_text_placeholder,
+    paint_text, paint_text_with_font, paint_text_with_font_refs, paint_text_with_registry,
+    paint_text_placeholder,
     apply_text_transform, TextDecorationLines, text_decoration_line, text_decoration_color,
     paint_text_decoration, paint_list_marker, paint_list_marker_placeholder, load_text_fonts,
-    rasterize_with_fallback, is_cjk_preferred_character, paint_inline_image_fragment,
-    inline_fragment_content_rect, text_color,
+    rasterize_with_fallback, rasterize_with_fallback_refs, is_cjk_preferred_character,
+    paint_inline_image_fragment, inline_fragment_content_rect, text_color,
 };
 #[allow(unused_imports)]
 pub(crate) use border::{
@@ -60,7 +61,7 @@ pub(crate) use stylesheet::{
     salvage_style_rule, normalize_unquoted_urls, split_declarations_forgiving,
     matches_screen_media, same_origin, find_base_elements, extract_document_base_url,
     collect_text_contents, materialize_local_assets, rewrite_local_asset_attribute,
-    fetch_font_face_fonts,
+    fetch_font_face_fonts, WebFont,
 };
 
 /// A decoded RGBA image.
@@ -583,13 +584,27 @@ pub fn paint_layout_with_fonts(
     viewport: Rect,
     fonts: Vec<Font>,
 ) -> Canvas {
+    paint_layout_with_web_fonts(layout, resolver, viewport, fonts, None)
+}
+
+/// Paints a layout tree using the provided font list and an optional web font registry.
+///
+/// When `web_fonts` is `Some`, per-fragment font-weight and font-style are used to
+/// select the best variant from the registry before falling back to `fonts`.
+pub fn paint_layout_with_web_fonts(
+    layout: &LayoutBox,
+    resolver: &mut StyleResolver,
+    viewport: Rect,
+    fonts: Vec<Font>,
+    web_fonts: Option<&WebFontRegistry>,
+) -> Canvas {
     let width = viewport.width.ceil().max(1.0) as u32;
     let height = viewport.height.ceil().max(1.0) as u32;
     let mut canvas = Canvas::new(width, height);
     if let Some(background) = viewport_background_color(layout, resolver) {
         canvas.fill_rect(viewport, background);
     }
-    paint_box(&mut canvas, layout, resolver, None, viewport, &fonts);
+    paint_box(&mut canvas, layout, resolver, None, viewport, &fonts, web_fonts);
     canvas
 }
 
@@ -617,16 +632,33 @@ pub fn render_document_with_url(
         resolver.add_stylesheet(Origin::Author, sheet.clone());
     }
 
-    // Collect @font-face rules and fetch web fonts
-    let web_fonts = stylesheet::fetch_font_face_fonts(&parsed_sheets, effective_base.as_ref());
+    // Collect @font-face rules and fetch web fonts, building a variant registry
+    let fetched_web_fonts = stylesheet::fetch_font_face_fonts(&parsed_sheets, effective_base.as_ref());
 
-    // Build combined font list: web fonts first, then system fonts
-    let mut all_fonts = web_fonts;
-    all_fonts.extend(text::load_text_fonts());
+    let mut web_font_registry = WebFontRegistry::new();
+    for wf in fetched_web_fonts {
+        web_font_registry.push(&wf.family, wf.weight, wf.style, wf.font);
+    }
+
+    // Build combined system font list for glyph fallback
+    let all_fonts = text::load_text_fonts();
+
+    // Avoid passing an empty registry to skip unnecessary lookups.
+    let web_font_registry_opt = if web_font_registry.is_empty() {
+        None
+    } else {
+        Some(&web_font_registry)
+    };
 
     crate::layout::with_image_base_url(effective_base, || {
         let layout = crate::layout::layout_tree(document, &mut resolver, viewport)?;
-        Some(paint_layout_with_fonts(&layout, &mut resolver, viewport, all_fonts))
+        Some(paint_layout_with_web_fonts(
+            &layout,
+            &mut resolver,
+            viewport,
+            all_fonts,
+            web_font_registry_opt,
+        ))
     })
     .ok_or(PaintError::InvalidImageBuffer)
 }
@@ -709,6 +741,7 @@ fn paint_box(
     inherited_clip: Option<Rect>,
     viewport: Rect,
     text_fonts: &[Font],
+    web_fonts: Option<&WebFontRegistry>,
 ) {
     paint_box_internal(
         canvas,
@@ -718,6 +751,7 @@ fn paint_box(
         viewport,
         true,
         text_fonts,
+        web_fonts,
     );
 }
 
@@ -729,6 +763,7 @@ fn paint_box_internal(
     viewport: Rect,
     include_phase_descendants: bool,
     text_fonts: &[Font],
+    web_fonts: Option<&WebFontRegistry>,
 ) {
     if layout.visibility == Visibility::Hidden {
         return;
@@ -754,6 +789,7 @@ fn paint_box_internal(
             viewport,
             include_phase_descendants,
             text_fonts,
+            web_fonts,
             &style,
             border_box,
             padding_box,
@@ -780,6 +816,7 @@ fn paint_box_internal(
         viewport,
         include_phase_descendants,
         text_fonts,
+        web_fonts,
         &style,
         border_box,
         padding_box,
@@ -795,6 +832,7 @@ fn paint_box_internal_to(
     viewport: Rect,
     include_phase_descendants: bool,
     text_fonts: &[Font],
+    web_fonts: Option<&WebFontRegistry>,
     style: &ComputedStyle,
     border_box: Rect,
     padding_box: Rect,
@@ -881,24 +919,24 @@ fn paint_box_internal_to(
     positive_positioned_children.sort_by_key(|child| child.z_index);
 
     for child in negative_positioned_children {
-        paint_box_internal(canvas, child, resolver, clip, viewport, true, text_fonts);
+        paint_box_internal(canvas, child, resolver, clip, viewport, true, text_fonts, web_fonts);
     }
     for child in normal_block_children {
-        paint_box_internal(canvas, child, resolver, clip, viewport, false, text_fonts);
+        paint_box_internal(canvas, child, resolver, clip, viewport, false, text_fonts, web_fonts);
     }
     for child in float_children {
-        paint_box_internal(canvas, child, resolver, clip, viewport, true, text_fonts);
+        paint_box_internal(canvas, child, resolver, clip, viewport, true, text_fonts, web_fonts);
     }
-    text::paint_text(canvas, layout, style, clip, viewport, text_fonts);
+    text::paint_text_with_registry(canvas, layout, style, clip, viewport, text_fonts, web_fonts);
     text::paint_list_marker(canvas, layout, style, clip, text_fonts);
     for child in inline_children {
-        paint_box_internal(canvas, child, resolver, clip, viewport, false, text_fonts);
+        paint_box_internal(canvas, child, resolver, clip, viewport, false, text_fonts, web_fonts);
     }
     for child in auto_positioned_children {
-        paint_box_internal(canvas, child, resolver, clip, viewport, true, text_fonts);
+        paint_box_internal(canvas, child, resolver, clip, viewport, true, text_fonts, web_fonts);
     }
     for child in positive_positioned_children {
-        paint_box_internal(canvas, child, resolver, clip, viewport, true, text_fonts);
+        paint_box_internal(canvas, child, resolver, clip, viewport, true, text_fonts, web_fonts);
     }
 
     paint_block_generated_pseudo_box(

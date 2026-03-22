@@ -154,6 +154,15 @@ pub struct FragmentStyle {
     pub text_decoration_line: Option<String>,
     /// CSS `text-decoration-color` value (raw string) from the computed style.
     pub text_decoration_color: Option<String>,
+    /// CSS `font-weight` value (raw string, e.g. `"bold"`, `"400"`), pre-normalized to lowercase.
+    /// Used by the paint stage to select the appropriate web font variant.
+    pub font_weight: Option<String>,
+    /// CSS `font-style` value (raw string, e.g. `"italic"`, `"normal"`), pre-normalized to lowercase.
+    /// Used by the paint stage to select the appropriate web font variant.
+    pub font_style: Option<String>,
+    /// CSS `font-family` value (raw string, first family in list).
+    /// Used by the paint stage to look up web font variants.
+    pub font_family: Option<String>,
 }
 
 impl FragmentStyle {
@@ -176,11 +185,22 @@ impl FragmentStyle {
             extract_str(key).map(|s| s.to_ascii_lowercase())
         };
 
+        // Extract the first font-family name from the CSS value.
+        // The value may be quoted (e.g. `"My Font"`) or unquoted (e.g. `sans-serif`).
+        let font_family = extract_str("font-family").map(|s| {
+            // Take the first comma-separated entry and strip quotes
+            let first = s.splitn(2, ',').next().unwrap_or(&s).trim().to_string();
+            first.trim_matches('"').trim_matches('\'').to_string()
+        });
+
         Self {
             color: extract_str("color"),
             text_transform: normalize_lower("text-transform"),
             text_decoration_line: normalize_lower("text-decoration-line"),
             text_decoration_color: extract_str("text-decoration-color"),
+            font_weight: normalize_lower("font-weight"),
+            font_style: normalize_lower("font-style"),
+            font_family,
         }
     }
 }

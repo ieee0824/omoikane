@@ -2,7 +2,7 @@
 number: 019-2
 slug: font-weight-style-matching
 parent: 019-web-font-face
-status: open
+status: closed
 ---
 
 # font-weight / font-style バリアント選択
