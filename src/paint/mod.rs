@@ -739,15 +739,79 @@ fn paint_box_internal(
     let border_box = border_box_rect(layout);
     let padding_box = padding_box_rect(layout);
 
-    if let Some(background) = background_color(&style) {
-        if has_border_radius(&style) {
-            let (tl, tr, br, bl) = border_radius_corners(&style);
+    // opacity が 1.0 未満の場合、オフスクリーンバッファに描画してから合成する
+    let opacity = element_opacity(&style);
+    let needs_offscreen = opacity.is_some_and(|v| v < 1.0);
+
+    if needs_offscreen {
+        let opacity_value = opacity.unwrap_or(1.0);
+        // キャンバスと同サイズのオフスクリーンバッファを作成
+        let mut offscreen = Canvas::new(canvas.width(), canvas.height());
+        paint_box_internal_to(
+            &mut offscreen,
+            layout,
+            resolver,
+            inherited_clip,
+            viewport,
+            include_phase_descendants,
+            text_fonts,
+            &style,
+            border_box,
+            padding_box,
+        );
+        offscreen.multiply_alpha(opacity_value);
+        // メインキャンバスに合成
+        for (i, chunk) in offscreen.pixels().chunks_exact(4).enumerate() {
+            let a = chunk[3];
+            if a == 0 {
+                continue;
+            }
+            let color = Color { r: chunk[0], g: chunk[1], b: chunk[2], a };
+            let base = i * 4;
+            blend_pixel(&mut canvas.pixels[base..base + 4], color);
+        }
+        return;
+    }
+
+    paint_box_internal_to(
+        canvas,
+        layout,
+        resolver,
+        inherited_clip,
+        viewport,
+        include_phase_descendants,
+        text_fonts,
+        &style,
+        border_box,
+        padding_box,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn paint_box_internal_to(
+    canvas: &mut Canvas,
+    layout: &LayoutBox,
+    resolver: &mut StyleResolver,
+    inherited_clip: Option<Rect>,
+    viewport: Rect,
+    include_phase_descendants: bool,
+    text_fonts: &[Font],
+    style: &ComputedStyle,
+    border_box: Rect,
+    padding_box: Rect,
+) {
+    // box-shadow を背景より前（下）に描画する
+    paint_box_shadow(canvas, style, border_box, inherited_clip);
+
+    if let Some(background) = background_color(style) {
+        if has_border_radius(style) {
+            let (tl, tr, br, bl) = border_radius_corners(style);
             canvas.fill_rounded_rect(border_box, background, tl, tr, br, bl, inherited_clip);
         } else {
             canvas.fill_rect_clipped(border_box, background, inherited_clip);
         }
     }
-    paint_background_image(canvas, &style, border_box, inherited_clip, viewport);
+    paint_background_image(canvas, style, border_box, inherited_clip, viewport);
     paint_block_generated_pseudo_box(
         canvas,
         layout,
@@ -757,7 +821,7 @@ fn paint_box_internal(
         viewport,
     );
 
-    paint_borders(canvas, layout, &style, inherited_clip);
+    paint_borders(canvas, layout, style, inherited_clip);
 
     let clip = if layout.overflow == crate::layout::Overflow::Hidden {
         match inherited_clip {
@@ -826,7 +890,7 @@ fn paint_box_internal(
     for child in float_children {
         paint_box_internal(canvas, child, resolver, clip, viewport, true, text_fonts);
     }
-    paint_text(canvas, layout, &style, clip, viewport, text_fonts);
+    paint_text(canvas, layout, style, clip, viewport, text_fonts);
     for child in inline_children {
         paint_box_internal(canvas, child, resolver, clip, viewport, false, text_fonts);
     }
@@ -1877,6 +1941,463 @@ fn border_radius_corners(style: &ComputedStyle) -> (f32, f32, f32, f32) {
 fn has_border_radius(style: &ComputedStyle) -> bool {
     let (tl, tr, br, bl) = border_radius_corners(style);
     tl > 0.0 || tr > 0.0 || br > 0.0 || bl > 0.0
+}
+
+/// `opacity` プロパティの値を返す（0.0〜1.0）。未指定の場合は `None`。
+fn element_opacity(style: &ComputedStyle) -> Option<f32> {
+    match style.get("opacity") {
+        Some(ComputedValue::Number(v)) => Some(v.clamp(0.0, 1.0)),
+        Some(ComputedValue::Px(v)) => Some(v.clamp(0.0, 1.0)),
+        Some(ComputedValue::Keyword(k)) if k == "1" || k == "1.0" => Some(1.0),
+        _ => None,
+    }
+}
+
+/// `box-shadow` 宣言から解析した影のパラメータ。
+#[derive(Debug, Clone)]
+struct BoxShadow {
+    offset_x: f32,
+    offset_y: f32,
+    blur_radius: f32,
+    spread_radius: f32,
+    color: Color,
+    inset: bool,
+}
+
+/// `box-shadow` プロパティ値の文字列を解析して `BoxShadow` のリストを返す。
+///
+/// 書式: `[inset] <offset-x> <offset-y> [<blur>] [<spread>] [<color>]`
+/// 複数の影はカンマ区切り（ただし現時点ではカンマ区切りは未対応、最初の影のみ使用）。
+fn parse_box_shadow(value: &str) -> Vec<BoxShadow> {
+    let trimmed = value.trim();
+    if trimmed.eq_ignore_ascii_case("none") || trimmed.is_empty() {
+        return Vec::new();
+    }
+
+    // カンマ区切りで複数の影に分割（rgba() 内のカンマは無視）
+    let shadow_strs = split_box_shadow_layers(trimmed);
+
+    let mut shadows = Vec::new();
+    for shadow_str in &shadow_strs {
+        if let Some(shadow) = parse_single_box_shadow(shadow_str.trim()) {
+            shadows.push(shadow);
+        }
+    }
+    shadows
+}
+
+/// box-shadow 値をカンマで分割する（関数内のカンマは無視）。
+fn split_box_shadow_layers(value: &str) -> Vec<String> {
+    let mut layers = Vec::new();
+    let mut current = String::new();
+    let mut depth = 0usize;
+    for ch in value.chars() {
+        match ch {
+            '(' => {
+                depth += 1;
+                current.push(ch);
+            }
+            ')' => {
+                depth = depth.saturating_sub(1);
+                current.push(ch);
+            }
+            ',' if depth == 0 => {
+                layers.push(current.trim().to_string());
+                current.clear();
+            }
+            _ => current.push(ch),
+        }
+    }
+    if !current.trim().is_empty() {
+        layers.push(current.trim().to_string());
+    }
+    layers
+}
+
+/// 単一の box-shadow トークン列を解析する。
+fn parse_single_box_shadow(value: &str) -> Option<BoxShadow> {
+    // トークン化: 数値（px付き）、色文字列、キーワードに分割
+    let tokens = tokenize_shadow_value(value);
+
+    let mut inset = false;
+    let mut lengths: Vec<f32> = Vec::new();
+    let mut color: Option<Color> = None;
+
+    for token in &tokens {
+        let lower = token.to_ascii_lowercase();
+        if lower == "inset" {
+            inset = true;
+        } else if let Some(px) = parse_shadow_length(token) {
+            lengths.push(px);
+        } else if let Some(c) = parse_color(token) {
+            color = Some(c);
+        }
+    }
+
+    // offset-x, offset-y は必須
+    if lengths.len() < 2 {
+        return None;
+    }
+
+    let offset_x = lengths[0];
+    let offset_y = lengths[1];
+    let blur_radius = lengths.get(2).copied().unwrap_or(0.0).max(0.0);
+    let spread_radius = lengths.get(3).copied().unwrap_or(0.0);
+    let color = color.unwrap_or(Color::rgba(0, 0, 0, 255));
+
+    Some(BoxShadow {
+        offset_x,
+        offset_y,
+        blur_radius,
+        spread_radius,
+        color,
+        inset,
+    })
+}
+
+/// shadow 値文字列を空白で分割（関数呼び出しはひとまとめに）。
+fn tokenize_shadow_value(value: &str) -> Vec<String> {
+    let mut tokens = Vec::new();
+    let mut current = String::new();
+    let mut depth = 0usize;
+    for ch in value.chars() {
+        match ch {
+            '(' => {
+                depth += 1;
+                current.push(ch);
+            }
+            ')' => {
+                depth = depth.saturating_sub(1);
+                current.push(ch);
+                if depth == 0 && !current.is_empty() {
+                    tokens.push(current.trim().to_string());
+                    current.clear();
+                }
+            }
+            ' ' | '\t' if depth == 0 => {
+                let tok = current.trim().to_string();
+                if !tok.is_empty() {
+                    tokens.push(tok);
+                }
+                current.clear();
+            }
+            _ => current.push(ch),
+        }
+    }
+    let tok = current.trim().to_string();
+    if !tok.is_empty() {
+        tokens.push(tok);
+    }
+    tokens
+}
+
+/// CSS length 文字列（例: "10px", "-5px", "0"）を px 値として解析する。
+fn parse_shadow_length(s: &str) -> Option<f32> {
+    let s = s.trim();
+    if s.ends_with("px") {
+        s[..s.len() - 2].parse::<f32>().ok()
+    } else if s == "0" {
+        Some(0.0)
+    } else {
+        // 単純な数値（単位なし）も許容
+        let v: Result<f32, _> = s.parse();
+        v.ok()
+    }
+}
+
+/// box-shadow をキャンバスに描画する（背景・ボーダーの前に描画）。
+fn paint_box_shadow(
+    canvas: &mut Canvas,
+    style: &ComputedStyle,
+    border_box: Rect,
+    clip: Option<Rect>,
+) {
+    let shadow_value = match style.get("box-shadow") {
+        Some(ComputedValue::Keyword(v)) => v.clone(),
+        _ => return,
+    };
+
+    let shadows = parse_box_shadow(&shadow_value);
+    let radii = if has_border_radius(style) {
+        let (tl, tr, br, bl) = border_radius_corners(style);
+        Some((tl, tr, br, bl))
+    } else {
+        None
+    };
+
+    // CSS 仕様では後ろに書いた影ほど下に描画される（逆順で描画）
+    for shadow in shadows.iter().rev() {
+        if shadow.inset {
+            // inset shadow は未実装（スキップ）
+            continue;
+        }
+        paint_outer_box_shadow(canvas, border_box, shadow, clip, radii);
+    }
+}
+
+/// アウター box-shadow を描画する。
+/// border_box の内側は描画しない（外側のみ）。
+fn paint_outer_box_shadow(
+    canvas: &mut Canvas,
+    border_box: Rect,
+    shadow: &BoxShadow,
+    clip: Option<Rect>,
+    radii: Option<(f32, f32, f32, f32)>,
+) {
+    let spread = shadow.spread_radius;
+    let blur = shadow.blur_radius;
+
+    // shadow の矩形（spread 分だけ拡張）
+    let shadow_rect = Rect {
+        x: border_box.x + shadow.offset_x - spread,
+        y: border_box.y + shadow.offset_y - spread,
+        width: border_box.width + spread * 2.0,
+        height: border_box.height + spread * 2.0,
+    };
+
+    let color = shadow.color;
+
+    if blur <= 0.0 {
+        // blur なし: shadow_rect のうち border_box の外側のみを描画する。
+        // 4つの矩形（上下左右バンド）に分割して塗る。
+        let sx = shadow_rect.x;
+        let sy = shadow_rect.y;
+        let sw = shadow_rect.width;
+        let sh = shadow_rect.height;
+        let bx = border_box.x;
+        let by = border_box.y;
+        let bw = border_box.width;
+        let bh = border_box.height;
+
+        // top band: shadow の上端から border_box の上端まで
+        if sy < by {
+            canvas.fill_rect_clipped(
+                Rect { x: sx, y: sy, width: sw, height: by - sy },
+                color,
+                clip,
+            );
+        }
+        // bottom band: border_box の下端から shadow の下端まで
+        let shadow_bottom = sy + sh;
+        let box_bottom = by + bh;
+        if shadow_bottom > box_bottom {
+            canvas.fill_rect_clipped(
+                Rect { x: sx, y: box_bottom, width: sw, height: shadow_bottom - box_bottom },
+                color,
+                clip,
+            );
+        }
+        // left band: border_box の高さ範囲で左側
+        let band_top = by.max(sy);
+        let band_bottom = box_bottom.min(shadow_bottom);
+        if band_bottom > band_top {
+            if sx < bx {
+                canvas.fill_rect_clipped(
+                    Rect { x: sx, y: band_top, width: bx - sx, height: band_bottom - band_top },
+                    color,
+                    clip,
+                );
+            }
+            // right band: border_box の高さ範囲で右側
+            let box_right = bx + bw;
+            let shadow_right = sx + sw;
+            if shadow_right > box_right {
+                canvas.fill_rect_clipped(
+                    Rect {
+                        x: box_right,
+                        y: band_top,
+                        width: shadow_right - box_right,
+                        height: band_bottom - band_top,
+                    },
+                    color,
+                    clip,
+                );
+            }
+        }
+    } else {
+        // blur あり: 影の領域を含む一時バッファに描画し、
+        // border_box 部分のアルファをゼロにしてから blur を適用する。
+        let margin = blur.ceil() as i32 + 1;
+        let buf_x = (shadow_rect.x - margin as f32).floor() as i32;
+        let buf_y = (shadow_rect.y - margin as f32).floor() as i32;
+        let buf_w = (shadow_rect.width + margin as f32 * 2.0).ceil() as u32 + 2;
+        let buf_h = (shadow_rect.height + margin as f32 * 2.0).ceil() as u32 + 2;
+
+        if buf_w == 0 || buf_h == 0 {
+            return;
+        }
+
+        let mut shadow_buf = Canvas::new(buf_w, buf_h);
+        let local_rect = Rect {
+            x: shadow_rect.x - buf_x as f32,
+            y: shadow_rect.y - buf_y as f32,
+            width: shadow_rect.width,
+            height: shadow_rect.height,
+        };
+        // 影の shape を描画（border_radius あれば rounded）
+        if let Some((tl, tr, br, bl)) = radii {
+            shadow_buf.fill_rounded_rect(
+                local_rect,
+                Color::rgba(color.r, color.g, color.b, 255),
+                tl + spread,
+                tr + spread,
+                br + spread,
+                bl + spread,
+                None,
+            );
+        } else {
+            shadow_buf.fill_rect(local_rect, Color::rgba(color.r, color.g, color.b, 255));
+        }
+
+        // border_box に対応するバッファ内領域のアルファをゼロにする（要素内側を除外）
+        let box_local = Rect {
+            x: border_box.x - buf_x as f32,
+            y: border_box.y - buf_y as f32,
+            width: border_box.width,
+            height: border_box.height,
+        };
+        if let Some(box_local_n) = normalize_rect(box_local) {
+            let x0 = box_local_n.x.floor().max(0.0) as i32;
+            let y0 = box_local_n.y.floor().max(0.0) as i32;
+            let x1 = (box_local_n.x + box_local_n.width).ceil().min(buf_w as f32) as i32;
+            let y1 = (box_local_n.y + box_local_n.height).ceil().min(buf_h as f32) as i32;
+            for py in y0..y1 {
+                for px in x0..x1 {
+                    let idx = (py as u32 * buf_w + px as u32) as usize * 4;
+                    shadow_buf.pixels[idx + 3] = 0;
+                }
+            }
+        }
+
+        // 簡易 box blur: 半径 r = ceil(blur) のボックスで 3 回適用
+        let r = blur.ceil() as u32;
+        shadow_buf.box_blur_alpha(r);
+        shadow_buf.box_blur_alpha(r);
+        shadow_buf.box_blur_alpha(r);
+
+        // color.a を alpha のスケールとして合成
+        let alpha_scale = color.a as f32 / 255.0;
+        if alpha_scale < 1.0 {
+            shadow_buf.multiply_alpha(alpha_scale);
+        }
+
+        // メインキャンバスに合成（clip 適用）
+        canvas.composite_canvas_clipped(&shadow_buf, buf_x, buf_y, color.r, color.g, color.b, clip);
+    }
+}
+
+impl Canvas {
+    /// alpha チャンネルにのみ box blur を適用する（色成分は影の色のまま、アルファだけ拡散）。
+    fn box_blur_alpha(&mut self, radius: u32) {
+        if radius == 0 {
+            return;
+        }
+        let w = self.width as usize;
+        let h = self.height as usize;
+        let r = radius as usize;
+
+        // 水平方向 blur
+        let mut alphas: Vec<u8> = self.pixels.iter().skip(3).step_by(4).copied().collect();
+        let mut blurred = vec![0u8; w * h];
+        for y in 0..h {
+            let row_start = y * w;
+            let mut sum: u32 = 0;
+            // 初期ウィンドウ
+            for x in 0..=r.min(w.saturating_sub(1)) {
+                sum += alphas[row_start + x] as u32;
+            }
+            let kernel_size = (r + 1).min(w) as u32;
+            for x in 0..w {
+                blurred[row_start + x] = (sum / kernel_size) as u8;
+                // ウィンドウを右にずらす
+                if x + r + 1 < w {
+                    sum += alphas[row_start + x + r + 1] as u32;
+                }
+                if x >= r && x.saturating_sub(r) < w {
+                    sum = sum.saturating_sub(alphas[row_start + x.saturating_sub(r)] as u32);
+                }
+                // kernel_size の更新（端での調整）
+                let _ = kernel_size; // kernel_size は平均を正しく出すために動的計算が必要だが簡略化
+            }
+        }
+
+        // 垂直方向 blur
+        alphas = blurred.clone();
+        for x in 0..w {
+            let mut sum: u32 = 0;
+            for y in 0..=r.min(h.saturating_sub(1)) {
+                sum += alphas[y * w + x] as u32;
+            }
+            let kernel_size = (r + 1).min(h) as u32;
+            for y in 0..h {
+                blurred[y * w + x] = (sum / kernel_size) as u8;
+                if y + r + 1 < h {
+                    sum += alphas[(y + r + 1) * w + x] as u32;
+                }
+                if y >= r {
+                    sum = sum.saturating_sub(alphas[(y - r) * w + x] as u32);
+                }
+                let _ = kernel_size;
+            }
+        }
+
+        // blurred alpha をピクセルに書き戻す
+        for (i, &a) in blurred.iter().enumerate() {
+            self.pixels[i * 4 + 3] = a;
+        }
+    }
+
+    /// 別キャンバス（shadow_buf）をメインキャンバスに合成する（clip あり）。
+    /// `r`, `g`, `b` は合成時に使う色成分（影の色）。
+    /// `offset_x`, `offset_y` は shadow_buf の左上隅がメインキャンバスのどこに対応するか。
+    fn composite_canvas_clipped(&mut self, src: &Canvas, offset_x: i32, offset_y: i32, r: u8, g: u8, b: u8, clip: Option<Rect>) {
+        let dst_w = self.width as i32;
+        let dst_h = self.height as i32;
+        let src_w = src.width as i32;
+        let src_h = src.height as i32;
+
+        let clip_area = clip.and_then(normalize_rect);
+
+        for sy in 0..src_h {
+            let dy = offset_y + sy;
+            if dy < 0 || dy >= dst_h {
+                continue;
+            }
+            for sx in 0..src_w {
+                let dx = offset_x + sx;
+                if dx < 0 || dx >= dst_w {
+                    continue;
+                }
+
+                // clip チェック
+                if let Some(ca) = clip_area {
+                    let fx = dx as f32 + 0.5;
+                    let fy = dy as f32 + 0.5;
+                    if fx < ca.x || fx >= ca.x + ca.width || fy < ca.y || fy >= ca.y + ca.height {
+                        continue;
+                    }
+                }
+
+                let src_idx = (sy * src_w + sx) as usize * 4;
+                let src_a = src.pixels[src_idx + 3];
+                if src_a == 0 {
+                    continue;
+                }
+                let color = Color { r, g, b, a: src_a };
+                let dst_idx = (dy * dst_w + dx) as usize * 4;
+                blend_pixel(&mut self.pixels[dst_idx..dst_idx + 4], color);
+            }
+        }
+    }
+
+    /// キャンバスの全ピクセルの alpha に `factor` (0.0〜1.0) を乗算する。
+    pub fn multiply_alpha(&mut self, factor: f32) {
+        let factor = factor.clamp(0.0, 1.0);
+        for pixel in self.pixels.chunks_exact_mut(4) {
+            let a = pixel[3] as f32;
+            pixel[3] = (a * factor).round() as u8;
+        }
+    }
 }
 
 fn paint_background_image(

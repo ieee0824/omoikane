@@ -852,6 +852,8 @@ fn is_supported_property(name: &str) -> bool {
             | "white-space"
             | "width"
             | "z-index"
+            | "box-shadow"
+            | "opacity"
     )
 }
 
@@ -934,6 +936,7 @@ fn compute_value(value: &Value, property_name: &str, ctx: ResolutionContext) -> 
         Value::List(values) => {
             if property_name.eq_ignore_ascii_case("transform")
                 || property_name.eq_ignore_ascii_case("overflow")
+                || property_name.eq_ignore_ascii_case("box-shadow")
             {
                 return ComputedValue::Keyword(render_value(value));
             }

@@ -922,6 +922,7 @@ fn expand_shorthand(name: &str, value: Value, important: bool) -> Vec<Declaratio
         "flex" => expand_flex_shorthand(value, important),
         "text-decoration" => expand_text_decoration_shorthand(value, important),
         "border-radius" => expand_border_radius_shorthand(value, important),
+        "box-shadow" => expand_box_shadow_shorthand(value, important),
         _ => vec![Declaration {
             name: name.to_string(),
             value,
@@ -1778,6 +1779,16 @@ fn expand_text_decoration_shorthand(value: Value, important: bool) -> Vec<Declar
     }
 
     decls
+}
+
+/// box-shadow 宣言を単一の Declaration に変換する。
+/// 値はそのまま保持し、paint 側でパースする。
+fn expand_box_shadow_shorthand(value: Value, important: bool) -> Vec<Declaration> {
+    vec![Declaration {
+        name: "box-shadow".to_string(),
+        value,
+        important,
+    }]
 }
 
 fn is_background_color_keyword(keyword: &str) -> bool {

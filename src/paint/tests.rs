@@ -4653,3 +4653,186 @@ fn paint_border_radius_clips_background_corners() {
     assert_eq!(canvas.pixel(0, 19), Some(Color::rgba(0, 0, 0, 0)));
     assert_eq!(canvas.pixel(19, 19), Some(Color::rgba(0, 0, 0, 0)));
 }
+
+// --- box-shadow テスト ---
+
+#[test]
+fn box_shadow_renders_shadow_pixels() {
+    // div に box-shadow を指定すると、div 外側にシャドウのピクセルが描画される。
+    // シャドウは div の下・右にオフセットする。
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let div = NodeHandle::element("div");
+    document.append_child(body.clone());
+    body.append_child(div);
+
+    // 20x20 の白い div、右下 5px オフセット、blur=0、黒いシャドウ
+    let css = "body { margin: 0; } \
+               div { width: 20px; height: 20px; background-color: #ffffff; \
+                     box-shadow: 5px 5px 0px 0px #000000; }";
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(Origin::Author, parse_stylesheet(css).unwrap());
+
+    let viewport = Rect { x: 0.0, y: 0.0, width: 60.0, height: 60.0 };
+    let layout = layout_tree(&document, &mut resolver, viewport).unwrap();
+    let canvas = paint_layout(&layout, &mut resolver, viewport);
+
+    // シャドウ部分（x=20, y=20 あたり）に不透明なピクセルがあるはず
+    // shadow_rect = (5,5)-(25,25) なので、中間の (20,20) はシャドウ内
+    let shadow_pixel = canvas.pixel(20, 20);
+    assert!(
+        shadow_pixel.map_or(false, |c| c.a > 0),
+        "box-shadow should render shadow at offset position, got {:?}",
+        shadow_pixel
+    );
+
+    // div 本体の左上コーナー (0, 0) は白いはず
+    let body_pixel = canvas.pixel(0, 0);
+    assert_eq!(
+        body_pixel,
+        Some(Color::rgb(255, 255, 255)),
+        "div body should be white at (0,0), got {:?}",
+        body_pixel
+    );
+}
+
+#[test]
+fn box_shadow_none_renders_no_extra_pixels() {
+    // box-shadow: none を指定した場合、div の外側に余分なピクセルがないこと。
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let div = NodeHandle::element("div");
+    document.append_child(body.clone());
+    body.append_child(div);
+
+    let css = "body { margin: 0; } \
+               div { width: 20px; height: 20px; background-color: #ff0000; \
+                     box-shadow: none; }";
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(Origin::Author, parse_stylesheet(css).unwrap());
+
+    let viewport = Rect { x: 0.0, y: 0.0, width: 40.0, height: 40.0 };
+    let layout = layout_tree(&document, &mut resolver, viewport).unwrap();
+    let canvas = paint_layout(&layout, &mut resolver, viewport);
+
+    // div 右外のピクセルは透明のはず
+    assert_eq!(
+        canvas.pixel(25, 10),
+        Some(Color::rgba(0, 0, 0, 0)),
+        "no shadow pixels outside div when box-shadow: none"
+    );
+}
+
+#[test]
+fn box_shadow_with_blur_renders_blurred_shadow() {
+    // blur 付きの box-shadow が描画されること。
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let div = NodeHandle::element("div");
+    document.append_child(body.clone());
+    body.append_child(div);
+
+    let css = "body { margin: 0; } \
+               div { width: 20px; height: 20px; background-color: #ffffff; \
+                     box-shadow: 4px 4px 4px 0px rgba(0, 0, 0, 128); }";
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(Origin::Author, parse_stylesheet(css).unwrap());
+
+    let viewport = Rect { x: 0.0, y: 0.0, width: 60.0, height: 60.0 };
+    let layout = layout_tree(&document, &mut resolver, viewport).unwrap();
+    let canvas = paint_layout(&layout, &mut resolver, viewport);
+
+    // シャドウの中心付近にピクセルがあるはず（blur があるのでいくらかアルファがある）
+    let has_shadow = (20..35u32).flat_map(|x| (20..35u32).map(move |y| (x, y)))
+        .any(|(x, y)| canvas.pixel(x, y).map_or(false, |c| c.a > 0));
+    assert!(has_shadow, "box-shadow with blur should render some pixels in shadow area");
+}
+
+// --- opacity テスト ---
+
+#[test]
+fn opacity_reduces_element_alpha() {
+    // opacity: 0.5 を指定すると、要素の描画結果の alpha が半分になる。
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let div = NodeHandle::element("div");
+    document.append_child(body.clone());
+    body.append_child(div);
+
+    let css = "body { margin: 0; } \
+               div { width: 20px; height: 20px; background-color: #ff0000; opacity: 0.5; }";
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(Origin::Author, parse_stylesheet(css).unwrap());
+
+    let viewport = Rect { x: 0.0, y: 0.0, width: 40.0, height: 40.0 };
+    let layout = layout_tree(&document, &mut resolver, viewport).unwrap();
+    let canvas = paint_layout(&layout, &mut resolver, viewport);
+
+    // opacity 0.5 では中央ピクセルの alpha が 255 未満になるはず
+    let center = canvas.pixel(10, 10);
+    assert!(
+        center.map_or(false, |c| c.a > 0 && c.a < 255),
+        "opacity: 0.5 should produce semi-transparent pixel at center, got {:?}",
+        center
+    );
+}
+
+#[test]
+fn opacity_zero_makes_element_invisible() {
+    // opacity: 0 を指定すると、要素が完全に透明になる。
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let div = NodeHandle::element("div");
+    document.append_child(body.clone());
+    body.append_child(div);
+
+    let css = "body { margin: 0; } \
+               div { width: 20px; height: 20px; background-color: #ff0000; opacity: 0; }";
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(Origin::Author, parse_stylesheet(css).unwrap());
+
+    let viewport = Rect { x: 0.0, y: 0.0, width: 40.0, height: 40.0 };
+    let layout = layout_tree(&document, &mut resolver, viewport).unwrap();
+    let canvas = paint_layout(&layout, &mut resolver, viewport);
+
+    // opacity: 0 では全ピクセルが透明
+    let center = canvas.pixel(10, 10);
+    assert_eq!(
+        center.map(|c| c.a),
+        Some(0),
+        "opacity: 0 should make element completely transparent, got {:?}",
+        center
+    );
+}
+
+#[test]
+fn opacity_one_keeps_element_opaque() {
+    // opacity: 1 (デフォルト) では要素が完全不透明。
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let div = NodeHandle::element("div");
+    document.append_child(body.clone());
+    body.append_child(div);
+
+    let css = "body { margin: 0; } \
+               div { width: 20px; height: 20px; background-color: #ff0000; opacity: 1; }";
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(Origin::Author, parse_stylesheet(css).unwrap());
+
+    let viewport = Rect { x: 0.0, y: 0.0, width: 40.0, height: 40.0 };
+    let layout = layout_tree(&document, &mut resolver, viewport).unwrap();
+    let canvas = paint_layout(&layout, &mut resolver, viewport);
+
+    // opacity: 1 では中央ピクセルが完全不透明の赤
+    assert_eq!(
+        canvas.pixel(10, 10),
+        Some(Color::rgb(255, 0, 0)),
+        "opacity: 1 should keep element fully opaque"
+    );
+}
