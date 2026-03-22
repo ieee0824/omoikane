@@ -36,6 +36,10 @@ pub(crate) use inline::element_inline_image;
 pub(crate) use crate::paint::{DataUri, parse_data_uri};
 #[cfg(test)]
 pub(crate) use inline::split_words_preserving_spaces_cjk;
+#[cfg(test)]
+pub(crate) use inline::split_chars;
+#[cfg(test)]
+pub(crate) use inline::split_words_no_cjk_break;
 
 // Thread-local cache for fetched images and fonts to avoid redundant loads
 thread_local! {

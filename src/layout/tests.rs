@@ -3532,3 +3532,211 @@ fn border_box_max_width_is_applied_in_content_space() {
     // content_max = 80 - (10+10) - (5+5) = 50
     assert_eq!(child.dimensions.content.width, 50.0);
 }
+
+// ── word-break / overflow-wrap unit tests ───────────────────────────────────
+
+#[test]
+fn split_chars_produces_individual_characters() {
+    let pieces = super::split_chars("abc");
+    assert_eq!(pieces, vec!["a", "b", "c"]);
+}
+
+#[test]
+fn split_chars_keeps_spaces_as_own_piece() {
+    let pieces = super::split_chars("a b");
+    assert_eq!(pieces, vec!["a", " ", "b"]);
+}
+
+#[test]
+fn split_chars_handles_cjk_characters() {
+    let pieces = super::split_chars("日本語");
+    assert_eq!(pieces, vec!["日", "本", "語"]);
+}
+
+#[test]
+fn split_words_no_cjk_break_treats_cjk_as_word() {
+    // CJK chars should NOT break between them — the whole run is one piece
+    let pieces = super::split_words_no_cjk_break("日本語");
+    assert_eq!(pieces, vec!["日本語"]);
+}
+
+#[test]
+fn split_words_no_cjk_break_breaks_at_spaces() {
+    let pieces = super::split_words_no_cjk_break("日本 語");
+    assert_eq!(pieces, vec!["日本", " ", "語"]);
+}
+
+#[test]
+fn split_words_no_cjk_break_mixed_ascii_cjk() {
+    // ASCII word followed by CJK — the whole run after a space should be one piece
+    let pieces = super::split_words_no_cjk_break("hello 日本語 world");
+    assert_eq!(pieces, vec!["hello", " ", "日本語", " ", "world"]);
+}
+
+// ── word-break layout tests ──────────────────────────────────────────────────
+
+#[test]
+fn word_break_break_all_wraps_between_any_characters() {
+    // With word-break: break-all, a long English word should be split into
+    // individual characters, producing multiple line boxes on a narrow width.
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let p = NodeHandle::element("p");
+    let text = NodeHandle::text("abcdefgh");
+
+    document.append_child(body.clone());
+    body.append_child(p.clone());
+    p.append_child(text);
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet("p { word-break: break-all; line-height: 20px; }").unwrap(),
+    );
+
+    let layout = layout_tree(
+        &body,
+        &mut resolver,
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 1.0, // Extremely narrow to force per-character wrapping
+            height: 0.0,
+        },
+    )
+    .unwrap();
+
+    let p_box = &layout.children[0];
+    // Each character should be on its own line (or at least more than 1 line)
+    assert!(
+        p_box.lines.len() > 1,
+        "expected multiple lines with word-break: break-all, got {}",
+        p_box.lines.len()
+    );
+}
+
+#[test]
+fn word_break_keep_all_treats_cjk_as_unit() {
+    // With word-break: keep-all, CJK text should NOT break between characters —
+    // the whole run should remain on one line if it fits.
+    // We use a wide container so the CJK text easily fits.
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let p = NodeHandle::element("p");
+    let text = NodeHandle::text("日本語");
+
+    document.append_child(body.clone());
+    body.append_child(p.clone());
+    p.append_child(text);
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet("p { word-break: keep-all; line-height: 20px; }").unwrap(),
+    );
+
+    let layout = layout_tree(
+        &body,
+        &mut resolver,
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 800.0,
+            height: 0.0,
+        },
+    )
+    .unwrap();
+
+    let p_box = &layout.children[0];
+    // With wide container, all 3 CJK chars fit in one piece → one line box
+    assert_eq!(
+        p_box.lines.len(),
+        1,
+        "expected 1 line with word-break: keep-all on wide container, got {}",
+        p_box.lines.len()
+    );
+    // The fragment text should be the entire word
+    let text_rendered: String = p_box.lines[0]
+        .fragments
+        .iter()
+        .filter_map(|f| f.text())
+        .collect();
+    assert_eq!(text_rendered, "日本語");
+}
+
+#[test]
+fn overflow_wrap_break_word_wraps_long_word() {
+    // With overflow-wrap: break-word, a single long word that exceeds the container
+    // width should be broken at character boundaries.
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let p = NodeHandle::element("p");
+    let text = NodeHandle::text("abcdefghij");
+
+    document.append_child(body.clone());
+    body.append_child(p.clone());
+    p.append_child(text);
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet("p { overflow-wrap: break-word; line-height: 20px; }").unwrap(),
+    );
+
+    let layout = layout_tree(
+        &body,
+        &mut resolver,
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 1.0, // Narrow enough to force wrapping
+            height: 0.0,
+        },
+    )
+    .unwrap();
+
+    let p_box = &layout.children[0];
+    assert!(
+        p_box.lines.len() > 1,
+        "expected multiple lines with overflow-wrap: break-word, got {}",
+        p_box.lines.len()
+    );
+}
+
+#[test]
+fn word_wrap_alias_behaves_like_overflow_wrap() {
+    // word-wrap is a legacy alias for overflow-wrap and should behave identically.
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let p = NodeHandle::element("p");
+    let text = NodeHandle::text("abcdefghij");
+
+    document.append_child(body.clone());
+    body.append_child(p.clone());
+    p.append_child(text);
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet("p { word-wrap: break-word; line-height: 20px; }").unwrap(),
+    );
+
+    let layout = layout_tree(
+        &body,
+        &mut resolver,
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 1.0,
+            height: 0.0,
+        },
+    )
+    .unwrap();
+
+    let p_box = &layout.children[0];
+    assert!(
+        p_box.lines.len() > 1,
+        "expected multiple lines with word-wrap: break-word (alias), got {}",
+        p_box.lines.len()
+    );
+}

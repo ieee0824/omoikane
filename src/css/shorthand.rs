@@ -20,6 +20,12 @@ pub(super) fn expand_shorthand(name: &str, value: Value, important: bool) -> Vec
         "border-radius" => expand_border_radius_shorthand(value, important),
         "box-shadow" => expand_box_shadow_shorthand(value, important),
         "list-style" => expand_list_style_shorthand(value, important),
+        // `word-wrap` is a legacy alias for `overflow-wrap`
+        "word-wrap" => vec![Declaration {
+            name: "overflow-wrap".to_string(),
+            value,
+            important,
+        }],
         _ => vec![Declaration {
             name: name.to_string(),
             value,
