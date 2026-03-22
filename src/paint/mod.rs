@@ -211,19 +211,19 @@ impl Canvas {
 
         for py in y0..y1 {
             for px in x0..x1 {
-                // クリップチェック
+                let fx = px as f32 + 0.5;
+                let fy = py as f32 + 0.5;
+
+                // クリップチェック（ピクセル中心を基準に判定）
                 if let Some(ca) = clip_area {
-                    if (px as f32) < ca.x
-                        || (px as f32) >= ca.x + ca.width
-                        || (py as f32) < ca.y
-                        || (py as f32) >= ca.y + ca.height
+                    if fx < ca.x
+                        || fx >= ca.x + ca.width
+                        || fy < ca.y
+                        || fy >= ca.y + ca.height
                     {
                         continue;
                     }
                 }
-
-                let fx = px as f32 + 0.5;
-                let fy = py as f32 + 0.5;
 
                 // ピクセル中心が角丸矩形の内側かどうか判定
                 if !point_in_rounded_rect(fx, fy, rx, ry, rw, rh, tl, tr, br, bl) {
@@ -317,18 +317,19 @@ impl Canvas {
 
         for py in y0..y1 {
             for px in x0..x1 {
+                let fx = px as f32 + 0.5;
+                let fy = py as f32 + 0.5;
+
+                // クリップチェック（ピクセル中心を基準に判定）
                 if let Some(ca) = clip_area {
-                    if (px as f32) < ca.x
-                        || (px as f32) >= ca.x + ca.width
-                        || (py as f32) < ca.y
-                        || (py as f32) >= ca.y + ca.height
+                    if fx < ca.x
+                        || fx >= ca.x + ca.width
+                        || fy < ca.y
+                        || fy >= ca.y + ca.height
                     {
                         continue;
                     }
                 }
-
-                let fx = px as f32 + 0.5;
-                let fy = py as f32 + 0.5;
 
                 // outer の内側かつ inner の外側
                 if !point_in_rounded_rect(fx, fy, outer.x, outer.y, outer.width, outer.height, outer_tl, outer_tr, outer_br, outer_bl) {
