@@ -415,6 +415,11 @@ pub(super) fn compute_table_column_widths(
                 } else {
                     let w = intrinsic_width(cell, resolver);
                     column_hints[col] = column_hints[col].max(w);
+                    // Treat cells containing images as having a fixed minimum
+                    // width so they are not compressed by text-heavy siblings.
+                    if cell_contains_image(cell) {
+                        explicit_flags[col] = true;
+                    }
                 }
             }
             if rowspan > 1 {
@@ -589,4 +594,20 @@ pub(super) fn table_border_spacing(style: &ComputedStyle) -> f32 {
     }
 
     explicit_length(style, "border-spacing").unwrap_or(0.0)
+}
+
+/// Returns `true` if the node (or any direct child) contains an `<img>` element.
+fn cell_contains_image(node: &NodeHandle) -> bool {
+    if node.tag_name().as_deref() == Some("img") {
+        return true;
+    }
+    for child in node.child_nodes() {
+        if child.tag_name().as_deref() == Some("img") {
+            return true;
+        }
+        if child.node_type() == NodeType::Element && cell_contains_image(&child) {
+            return true;
+        }
+    }
+    false
 }

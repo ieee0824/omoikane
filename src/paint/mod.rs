@@ -39,7 +39,7 @@ pub(crate) use image::{
 };
 #[allow(unused_imports)]
 pub(crate) use text::{
-    paint_text, paint_text_with_font, paint_text_with_font_refs, paint_text_with_registry,
+    paint_text_with_font, paint_text_with_font_refs, paint_text_with_registry,
     paint_text_placeholder,
     apply_text_transform, TextDecorationLines, text_decoration_line, text_decoration_color,
     paint_text_decoration, paint_list_marker, paint_list_marker_placeholder, load_text_fonts,
@@ -1272,21 +1272,6 @@ fn border_radius_corners(style: &ComputedStyle) -> (f32, f32, f32, f32) {
 fn has_border_radius(style: &ComputedStyle) -> bool {
     let (tl, tr, br, bl) = border_radius_corners(style);
     tl > 0.0 || tr > 0.0 || br > 0.0 || bl > 0.0
-}
-
-/// opacity オフスクリーンバッファ用の box-shadow 余白を返す。
-/// box-shadow の blur + spread + |offset| の最大値をマージンとして使う。
-fn element_shadow_margin(style: &ComputedStyle) -> f32 {
-    let shadow_value = match style.get("box-shadow") {
-        Some(ComputedValue::Keyword(v)) => v.clone(),
-        _ => return 0.0,
-    };
-    let shadows = border::parse_box_shadow(&shadow_value);
-    shadows.iter().fold(0.0f32, |acc, s| {
-        // blur_radius は ceil + 1 のパディングを加算する（ブラー拡散の安全マージン）
-        let margin = s.blur_radius.ceil() + 1.0 + s.spread_radius + s.offset_x.abs() + s.offset_y.abs();
-        acc.max(margin)
-    })
 }
 
 /// `opacity` プロパティの値を返す（0.0〜1.0）。未指定の場合は `None`。
