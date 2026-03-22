@@ -829,6 +829,7 @@ fn paint_text(
                             &fonts,
                             color,
                             clip,
+                            fragment.metrics.letter_spacing,
                         );
                     } else {
                         // Fallback: placeholder rectangles
@@ -905,26 +906,34 @@ fn apply_text_transform(text: &str, transform: &str) -> Option<String> {
     }
 }
 
-/// Text decoration line kinds.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum TextDecorationLine {
-    None,
-    Underline,
-    Overline,
-    LineThrough,
+/// Text decoration line flags (supports multiple values like "underline line-through").
+#[derive(Debug, Clone, Copy, Default)]
+struct TextDecorationLines {
+    underline: bool,
+    overline: bool,
+    line_through: bool,
 }
 
-/// Returns the text-decoration-line value from style.
-fn text_decoration_line(style: &ComputedStyle) -> TextDecorationLine {
-    match style.get("text-decoration-line") {
-        Some(ComputedValue::Keyword(kw)) => match kw.to_ascii_lowercase().as_str() {
-            "underline" => TextDecorationLine::Underline,
-            "overline" => TextDecorationLine::Overline,
-            "line-through" => TextDecorationLine::LineThrough,
-            _ => TextDecorationLine::None,
-        },
-        _ => TextDecorationLine::None,
+impl TextDecorationLines {
+    fn is_none(&self) -> bool {
+        !self.underline && !self.overline && !self.line_through
     }
+}
+
+/// Returns the text-decoration-line flags from style.
+fn text_decoration_line(style: &ComputedStyle) -> TextDecorationLines {
+    let mut lines = TextDecorationLines::default();
+    if let Some(ComputedValue::Keyword(kw)) = style.get("text-decoration-line") {
+        for part in kw.split_whitespace() {
+            match part.to_ascii_lowercase().as_str() {
+                "underline" => lines.underline = true,
+                "overline" => lines.overline = true,
+                "line-through" => lines.line_through = true,
+                _ => {}
+            }
+        }
+    }
+    lines
 }
 
 /// Returns the text-decoration-color, falling back to the text color.
@@ -943,31 +952,35 @@ fn paint_text_decoration(
     ascent: f32,
     descent: f32,
     font_size: f32,
-    decoration: TextDecorationLine,
+    decoration: TextDecorationLines,
     color: Color,
     clip: Option<Rect>,
 ) {
-    if decoration == TextDecorationLine::None {
+    if decoration.is_none() {
         return;
     }
 
     let line_thickness = (font_size * 0.075).max(1.0);
 
-    let line_y = match decoration {
-        TextDecorationLine::Underline => rect.y + ascent + descent * 0.5,
-        TextDecorationLine::Overline => rect.y,
-        TextDecorationLine::LineThrough => rect.y + ascent * 0.6,
-        TextDecorationLine::None => return,
+    let mut draw_line = |line_y: f32| {
+        let line_rect = Rect {
+            x: rect.x,
+            y: line_y,
+            width: rect.width,
+            height: line_thickness,
+        };
+        canvas.fill_rect_clipped(line_rect, color, clip);
     };
 
-    let line_rect = Rect {
-        x: rect.x,
-        y: line_y,
-        width: rect.width,
-        height: line_thickness,
-    };
-
-    canvas.fill_rect_clipped(line_rect, color, clip);
+    if decoration.underline {
+        draw_line(rect.y + ascent + descent * 0.5);
+    }
+    if decoration.overline {
+        draw_line(rect.y);
+    }
+    if decoration.line_through {
+        draw_line(rect.y + ascent * 0.6);
+    }
 }
 
 /// Paint text using actual font glyphs.
@@ -980,6 +993,7 @@ fn paint_text_with_font(
     fonts: &[Font],
     color: Color,
     clip: Option<Rect>,
+    letter_spacing: f32,
 ) {
     // Align paint baseline with layout's line-box baseline model to avoid vertical drift.
     let baseline_y = rect.y + layout_ascent;
@@ -1014,7 +1028,7 @@ fn paint_text_with_font(
         }
 
         // Keep text flow moving even if a glyph cannot be rasterized by any candidate font.
-        cursor_x += advance_x;
+        cursor_x += advance_x + letter_spacing;
         previous_char = Some((ch, font_index));
     }
 }

@@ -1655,7 +1655,7 @@ fn expand_text_decoration_shorthand(value: Value, important: bool) -> Vec<Declar
         }
     }
 
-    let mut line: Option<Value> = None;
+    let mut line_parts: Vec<String> = Vec::new();
     let mut style: Option<Value> = None;
     let mut color: Option<Value> = None;
 
@@ -1665,9 +1665,7 @@ fn expand_text_decoration_shorthand(value: Value, important: bool) -> Vec<Declar
                 let lower = kw.to_ascii_lowercase();
                 match lower.as_str() {
                     "none" | "underline" | "overline" | "line-through" | "blink" => {
-                        if line.is_none() {
-                            line = Some(Value::Keyword(lower));
-                        }
+                        line_parts.push(lower);
                     }
                     "solid" | "dashed" | "dotted" | "double" | "wavy" => {
                         if style.is_none() {
@@ -1692,10 +1690,11 @@ fn expand_text_decoration_shorthand(value: Value, important: bool) -> Vec<Declar
     }
 
     let mut decls = Vec::new();
-    if let Some(v) = line {
+    if !line_parts.is_empty() {
+        let line_value = line_parts.join(" ");
         decls.push(Declaration {
             name: "text-decoration-line".to_string(),
-            value: v,
+            value: Value::Keyword(line_value),
             important,
         });
     }

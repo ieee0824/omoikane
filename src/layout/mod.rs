@@ -2763,6 +2763,7 @@ fn collect_inline_segments(
                     NodeType::Text => {
                         if let Some(text) = child.data() {
                             let text = normalize_text(&text, white_space(&style));
+                            let text = apply_text_transform_layout(&text, &style);
                             if !text.is_empty() {
                                 out.push(InlineSegment {
                                     node: child,
@@ -3082,6 +3083,35 @@ fn white_space(style: &ComputedStyle) -> WhiteSpaceMode {
             WhiteSpaceMode::Pre
         }
         _ => WhiteSpaceMode::Normal,
+    }
+}
+
+fn apply_text_transform_layout(text: &str, style: &ComputedStyle) -> String {
+    match style.get("text-transform") {
+        Some(ComputedValue::Keyword(kw)) => match kw.to_ascii_lowercase().as_str() {
+            "uppercase" => text.to_uppercase(),
+            "lowercase" => text.to_lowercase(),
+            "capitalize" => {
+                let mut result = String::with_capacity(text.len());
+                let mut cap_next = true;
+                for ch in text.chars() {
+                    if ch.is_whitespace() {
+                        cap_next = true;
+                        result.push(ch);
+                    } else if cap_next {
+                        for c in ch.to_uppercase() {
+                            result.push(c);
+                        }
+                        cap_next = false;
+                    } else {
+                        result.push(ch);
+                    }
+                }
+                result
+            }
+            _ => text.to_string(),
+        },
+        _ => text.to_string(),
     }
 }
 

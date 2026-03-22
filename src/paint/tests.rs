@@ -3884,6 +3884,7 @@ fn debug_painted_pixel_positions() {
         std::slice::from_ref(&font),
         color,
         None,
+        0.0,
     );
 
     // Find leftmost and rightmost non-transparent pixel
