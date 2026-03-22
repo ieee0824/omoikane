@@ -43,13 +43,13 @@ pub(crate) fn paint_text(
                         .unwrap_or(fallback_color);
                     let text_transform = text_transform_value(&fragment.style);
 
-                    // For text-decoration, prefer the fragment's own decoration
-                    // when explicitly set; otherwise fall back to the containing
-                    // block's decoration so that ancestor-applied decorations
-                    // continue to propagate to nested inline content.
-                    let frag_decoration = text_decoration_line(&fragment.style);
-                    let (decoration_line, decoration_color) = if !frag_decoration.is_none() {
-                        (frag_decoration, text_decoration_color(&fragment.style, frag_color))
+                    // For text-decoration, distinguish "property not present" from
+                    // "present but none". If the fragment has an explicit
+                    // text-decoration-line (even none), use it; otherwise fall back
+                    // to the containing block's decoration.
+                    let has_frag_decoration = fragment.style.get("text-decoration-line").is_some();
+                    let (decoration_line, decoration_color) = if has_frag_decoration {
+                        (text_decoration_line(&fragment.style), text_decoration_color(&fragment.style, frag_color))
                     } else {
                         (block_decoration_line, block_decoration_color)
                     };

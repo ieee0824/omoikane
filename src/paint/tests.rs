@@ -5236,8 +5236,8 @@ fn decimal_marker_placeholder_is_wider_than_bullet_placeholder() {
 
 /// When a `<span>` inside a `<p>` has `text-decoration-line: underline`, painting
 /// must apply the decoration only to the span's fragments.  We verify this by
-/// comparing two renders: one where the whole paragraph has underline and one where
-/// only the span does — both should produce at least some pixels below the text.
+/// comparing two renders: one where only the span is underlined and one with no
+/// text decoration at all; they should differ by at least some pixels below the text.
 #[test]
 fn nested_inline_span_text_decoration_applied_per_fragment() {
     // Build: <p>normal <span>decorated</span></p>
@@ -5325,17 +5325,17 @@ fn nested_inline_span_text_transform_differs_from_parent() {
 
     // Collect all text fragments and check that the span's fragment carries
     // text-transform:uppercase and that its text has been transformed.
-    fn collect_text_fragments<'a>(
-        layout: &'a crate::layout::LayoutBox,
-        out: &mut Vec<(&'static str, String)>,
+    fn collect_text_fragments(
+        layout: &crate::layout::LayoutBox,
+        out: &mut Vec<(String, String)>,
     ) {
         use crate::css::ComputedValue;
         for line in &layout.lines {
             for frag in &line.fragments {
                 if let Some(t) = frag.text() {
                     let transform = match frag.style.get("text-transform") {
-                        Some(ComputedValue::Keyword(kw)) => kw.to_ascii_lowercase().leak(),
-                        _ => "none",
+                        Some(ComputedValue::Keyword(kw)) => kw.to_ascii_lowercase(),
+                        _ => "none".to_string(),
                     };
                     out.push((transform, t.to_string()));
                 }

@@ -3278,7 +3278,7 @@ fn inline_fragment_carries_per_element_style() {
 
     // The fragment for "UPPER" (already transformed in layout) should carry
     // text-transform:uppercase in its style.
-    let upper_frag = fragments.iter().find(|(text, _)| text.to_uppercase() == text.to_uppercase() && text.contains("UPPER"));
+    let upper_frag = fragments.iter().find(|(text, _)| *text == text.to_uppercase() && text.contains("UPPER"));
     assert!(
         upper_frag.is_some(),
         "expected a fragment containing \"UPPER\" (text after transform), got {:?}",
