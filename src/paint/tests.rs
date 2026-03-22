@@ -4736,7 +4736,7 @@ fn box_shadow_with_blur_renders_blurred_shadow() {
 
     let css = "body { margin: 0; } \
                div { width: 20px; height: 20px; background-color: #ffffff; \
-                     box-shadow: 4px 4px 4px 0px rgba(0, 0, 0, 128); }";
+                     box-shadow: 4px 4px 4px 0px rgba(0, 0, 0, 0.5); }";
 
     let mut resolver = StyleResolver::new();
     resolver.add_stylesheet(Origin::Author, parse_stylesheet(css).unwrap());

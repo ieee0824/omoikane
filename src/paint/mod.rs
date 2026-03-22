@@ -1967,7 +1967,7 @@ struct BoxShadow {
 /// `box-shadow` プロパティ値の文字列を解析して `BoxShadow` のリストを返す。
 ///
 /// 書式: `[inset] <offset-x> <offset-y> [<blur>] [<spread>] [<color>]`
-/// 複数の影はカンマ区切り（ただし現時点ではカンマ区切りは未対応、最初の影のみ使用）。
+/// 複数の影はカンマ区切りで指定できる（rgba()/rgb() など関数の引数内のカンマは区切りとして扱わない）。
 fn parse_box_shadow(value: &str) -> Vec<BoxShadow> {
     let trimmed = value.trim();
     if trimmed.eq_ignore_ascii_case("none") || trimmed.is_empty() {
