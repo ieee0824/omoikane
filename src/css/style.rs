@@ -99,7 +99,7 @@ pub struct StyleResolver {
     viewport_height: f32,
     /// `true` when the system is in dark mode (affects `prefers-color-scheme` evaluation).
     color_scheme_dark: bool,
-    /// Cache of parsed media query lists keyed by the raw prelude string.
+    /// Cache of parsed media query lists keyed by the normalized (trimmed) prelude string.
     ///
     /// Avoids re-parsing the same `@media` prelude string for every node that
     /// is matched against the stylesheet.  The cache is intentionally separate
@@ -140,7 +140,8 @@ impl StyleResolver {
     /// in the parse cache.
     ///
     /// Primarily useful for testing and diagnostic purposes.
-    pub fn media_query_cache_len(&self) -> usize {
+    #[cfg(test)]
+    pub(crate) fn media_query_cache_len(&self) -> usize {
         self.media_query_cache.len()
     }
 
@@ -530,12 +531,13 @@ fn collect_rule_candidates(
 }
 
 /// Returns `true` when at least one query in a comma-separated media query list
-/// matches the given viewport.  Falls back to `true` when the list cannot be
-/// parsed (forward-compatible behaviour).
+/// matches the given viewport.  Falls back to `false` when the list cannot be
+/// parsed (conservative, forward-compatible behaviour).
 ///
 /// The `cache` parameter is a mutable reference to a parse-result cache keyed
-/// by the raw prelude string.  On a cache miss the prelude is parsed and the
-/// result is stored so that subsequent calls with the same string skip parsing.
+/// by the normalized (trimmed) prelude string.  On a cache miss the prelude is
+/// parsed and the result is stored so that subsequent calls with the same string
+/// skip parsing.
 fn media_query_matches(
     prelude: &str,
     viewport_width: f32,
@@ -544,23 +546,12 @@ fn media_query_matches(
     cache: &mut HashMap<String, Vec<MediaQuery>>,
 ) -> bool {
     let prelude = prelude.trim();
-    // Empty prelude — treat as unconditional (matches anything).
     if prelude.is_empty() {
         return true;
     }
-    // Look up previously parsed result; parse and cache on a miss.
-    let queries = if let Some(cached) = cache.get(prelude) {
-        cached
-    } else {
-        match parse_media_query_list(prelude) {
-            Some(parsed) => {
-                cache.insert(prelude.to_owned(), parsed);
-                // SAFETY: we just inserted the key, so it must be present.
-                cache.get(prelude).unwrap()
-            }
-            None => return false,
-        }
-    };
+    let queries = cache
+        .entry(prelude.to_owned())
+        .or_insert_with(|| parse_media_query_list(prelude).unwrap_or_default());
     queries
         .iter()
         .any(|q| evaluate_media_query(q, viewport_width, viewport_height, color_scheme_dark))
