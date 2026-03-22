@@ -20,6 +20,7 @@ pub(super) fn expand_shorthand(name: &str, value: Value, important: bool) -> Vec
         "border-radius" => expand_border_radius_shorthand(value, important),
         "box-shadow" => expand_box_shadow_shorthand(value, important),
         "list-style" => expand_list_style_shorthand(value, important),
+        "flex-flow" => expand_flex_flow_shorthand(value, important),
         // `word-wrap` is a legacy alias for `overflow-wrap`
         "word-wrap" => vec![Declaration {
             name: "overflow-wrap".to_string(),
@@ -1001,6 +1002,72 @@ fn expand_list_style_shorthand(value: Value, important: bool) -> Vec<Declaration
     });
 
     decls
+}
+
+/// Expands `flex-flow` shorthand into `flex-direction` and `flex-wrap` longhands.
+///
+/// Syntax: `flex-flow: <flex-direction> || <flex-wrap>`
+///
+/// direction keywords: `row`, `row-reverse`, `column`, `column-reverse`
+/// wrap keywords: `nowrap`, `wrap`, `wrap-reverse`
+///
+/// Any omitted subproperty receives its initial value:
+/// - `flex-direction` initial: `row`
+/// - `flex-wrap` initial: `nowrap`
+fn expand_flex_flow_shorthand(value: Value, important: bool) -> Vec<Declaration> {
+    const DIRECTION_KEYWORDS: &[&str] = &["row", "row-reverse", "column", "column-reverse"];
+    const WRAP_KEYWORDS: &[&str] = &["nowrap", "wrap", "wrap-reverse"];
+
+    let values = match value {
+        Value::List(values) => values,
+        single => vec![single],
+    };
+
+    // CSS-wide keywords: propagate to both longhands
+    if let [Value::Keyword(kw)] = values.as_slice() {
+        let lower = kw.to_ascii_lowercase();
+        if matches!(lower.as_str(), "inherit" | "initial" | "unset" | "revert") {
+            return vec![
+                Declaration {
+                    name: "flex-direction".to_string(),
+                    value: Value::Keyword(lower.clone()),
+                    important,
+                },
+                Declaration {
+                    name: "flex-wrap".to_string(),
+                    value: Value::Keyword(lower),
+                    important,
+                },
+            ];
+        }
+    }
+
+    let mut direction: Option<Value> = None;
+    let mut wrap: Option<Value> = None;
+
+    for item in values {
+        if let Value::Keyword(kw) = &item {
+            let lower = kw.to_ascii_lowercase();
+            if DIRECTION_KEYWORDS.contains(&lower.as_str()) && direction.is_none() {
+                direction = Some(Value::Keyword(lower));
+            } else if WRAP_KEYWORDS.contains(&lower.as_str()) && wrap.is_none() {
+                wrap = Some(Value::Keyword(lower));
+            }
+        }
+    }
+
+    vec![
+        Declaration {
+            name: "flex-direction".to_string(),
+            value: direction.unwrap_or(Value::Keyword("row".to_string())),
+            important,
+        },
+        Declaration {
+            name: "flex-wrap".to_string(),
+            value: wrap.unwrap_or(Value::Keyword("nowrap".to_string())),
+            important,
+        },
+    ]
 }
 
 fn is_background_color_keyword(keyword: &str) -> bool {

@@ -2132,3 +2132,120 @@ fn media_query_cache_multiple_preludes() {
         "two distinct @media preludes should produce two cache entries"
     );
 }
+
+// ===== flex-flow shorthand tests =====
+
+#[test]
+fn expands_flex_flow_shorthand_direction_and_wrap() {
+    // flex-flow: row wrap → flex-direction: row, flex-wrap: wrap
+    let stylesheet = parse_stylesheet("div { flex-flow: row wrap; }").unwrap();
+    let Rule::Style(rule) = &stylesheet.rules[0] else {
+        panic!("expected style rule");
+    };
+    assert!(
+        rule.declarations
+            .iter()
+            .any(|d| d.name == "flex-direction"
+                && matches!(&d.value, Value::Keyword(v) if v == "row")),
+        "flex-direction: row not found"
+    );
+    assert!(
+        rule.declarations
+            .iter()
+            .any(|d| d.name == "flex-wrap"
+                && matches!(&d.value, Value::Keyword(v) if v == "wrap")),
+        "flex-wrap: wrap not found"
+    );
+}
+
+#[test]
+fn expands_flex_flow_shorthand_direction_only() {
+    // flex-flow: column → flex-direction: column, flex-wrap: nowrap (initial)
+    let stylesheet = parse_stylesheet("div { flex-flow: column; }").unwrap();
+    let Rule::Style(rule) = &stylesheet.rules[0] else {
+        panic!("expected style rule");
+    };
+    assert!(
+        rule.declarations
+            .iter()
+            .any(|d| d.name == "flex-direction"
+                && matches!(&d.value, Value::Keyword(v) if v == "column")),
+        "flex-direction: column not found"
+    );
+    assert!(
+        rule.declarations
+            .iter()
+            .any(|d| d.name == "flex-wrap"
+                && matches!(&d.value, Value::Keyword(v) if v == "nowrap")),
+        "flex-wrap: nowrap (initial) not found"
+    );
+}
+
+#[test]
+fn expands_flex_flow_shorthand_wrap_only() {
+    // flex-flow: wrap → flex-direction: row (initial), flex-wrap: wrap
+    let stylesheet = parse_stylesheet("div { flex-flow: wrap; }").unwrap();
+    let Rule::Style(rule) = &stylesheet.rules[0] else {
+        panic!("expected style rule");
+    };
+    assert!(
+        rule.declarations
+            .iter()
+            .any(|d| d.name == "flex-direction"
+                && matches!(&d.value, Value::Keyword(v) if v == "row")),
+        "flex-direction: row (initial) not found"
+    );
+    assert!(
+        rule.declarations
+            .iter()
+            .any(|d| d.name == "flex-wrap"
+                && matches!(&d.value, Value::Keyword(v) if v == "wrap")),
+        "flex-wrap: wrap not found"
+    );
+}
+
+#[test]
+fn expands_flex_flow_shorthand_column_reverse_wrap_reverse() {
+    // flex-flow: column-reverse wrap-reverse
+    let stylesheet = parse_stylesheet("div { flex-flow: column-reverse wrap-reverse; }").unwrap();
+    let Rule::Style(rule) = &stylesheet.rules[0] else {
+        panic!("expected style rule");
+    };
+    assert!(
+        rule.declarations
+            .iter()
+            .any(|d| d.name == "flex-direction"
+                && matches!(&d.value, Value::Keyword(v) if v == "column-reverse")),
+        "flex-direction: column-reverse not found"
+    );
+    assert!(
+        rule.declarations
+            .iter()
+            .any(|d| d.name == "flex-wrap"
+                && matches!(&d.value, Value::Keyword(v) if v == "wrap-reverse")),
+        "flex-wrap: wrap-reverse not found"
+    );
+}
+
+#[test]
+fn expands_flex_flow_shorthand_initial_keyword() {
+    // flex-flow: initial → both longhands receive initial
+    let stylesheet = parse_stylesheet("div { flex-flow: initial; }").unwrap();
+    let Rule::Style(rule) = &stylesheet.rules[0] else {
+        panic!("expected style rule");
+    };
+    assert!(
+        rule.declarations
+            .iter()
+            .any(|d| d.name == "flex-direction"
+                && matches!(&d.value, Value::Keyword(v) if v == "initial")),
+        "flex-direction: initial not found"
+    );
+    assert!(
+        rule.declarations
+            .iter()
+            .any(|d| d.name == "flex-wrap"
+                && matches!(&d.value, Value::Keyword(v) if v == "initial")),
+        "flex-wrap: initial not found"
+    );
+}
