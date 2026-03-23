@@ -1564,6 +1564,7 @@ fn apply_ua_defaults(
         }
         "code" | "kbd" | "samp" | "tt" => {
             properties.entry("font-family".to_string()).or_insert(ComputedValue::Keyword("monospace".to_string()));
+            properties.entry("display".to_string()).or_insert(ComputedValue::Keyword("inline".to_string()));
         }
         "dd" => {
             properties.entry("margin-left".to_string()).or_insert(ComputedValue::Px(40.0));
@@ -1581,15 +1582,21 @@ fn apply_ua_defaults(
             properties.entry("color".to_string()).or_insert(ComputedValue::Color("#0000ee".to_string()));
         }
         "sub" => {
+            properties.entry("display".to_string()).or_insert(ComputedValue::Keyword("inline".to_string()));
             properties.entry("vertical-align".to_string()).or_insert(ComputedValue::Keyword("sub".to_string()));
-            properties.entry("font-size".to_string()).or_insert(ComputedValue::Keyword("smaller".to_string()));
+            let smaller = parent_font_size * 0.833;
+            properties.entry("font-size".to_string()).or_insert(ComputedValue::Px(smaller));
         }
         "sup" => {
+            properties.entry("display".to_string()).or_insert(ComputedValue::Keyword("inline".to_string()));
             properties.entry("vertical-align".to_string()).or_insert(ComputedValue::Keyword("super".to_string()));
-            properties.entry("font-size".to_string()).or_insert(ComputedValue::Keyword("smaller".to_string()));
+            let smaller = parent_font_size * 0.833;
+            properties.entry("font-size".to_string()).or_insert(ComputedValue::Px(smaller));
         }
         "small" => {
-            properties.entry("font-size".to_string()).or_insert(ComputedValue::Keyword("smaller".to_string()));
+            properties.entry("display".to_string()).or_insert(ComputedValue::Keyword("inline".to_string()));
+            let smaller = parent_font_size * 0.833;
+            properties.entry("font-size".to_string()).or_insert(ComputedValue::Px(smaller));
         }
         "center" => {
             properties.entry("text-align".to_string()).or_insert(ComputedValue::Keyword("center".to_string()));
@@ -1600,8 +1607,14 @@ fn apply_ua_defaults(
         "tr" => {
             properties.entry("display".to_string()).or_insert(ComputedValue::Keyword("table-row".to_string()));
         }
-        "thead" | "tbody" | "tfoot" => {
+        "thead" => {
+            properties.entry("display".to_string()).or_insert(ComputedValue::Keyword("table-header-group".to_string()));
+        }
+        "tbody" => {
             properties.entry("display".to_string()).or_insert(ComputedValue::Keyword("table-row-group".to_string()));
+        }
+        "tfoot" => {
+            properties.entry("display".to_string()).or_insert(ComputedValue::Keyword("table-footer-group".to_string()));
         }
         _ => {}
     }
