@@ -4244,7 +4244,7 @@ fn unsupported_html_tag_sqlite_logging() {
 
     drop(stmt);
     drop(conn);
-    super::HTML_TAG_SQLITE_CONNECTIONS.with(|c| { c.borrow_mut().remove(&db_path_str); });
+    super::close_html_sqlite_connection_for_path(&db_path_str);
     let _ = std::fs::remove_file(db_path);
 }
 

@@ -126,6 +126,13 @@ fn log_unsupported_html_tag(tag: &str, parent_tag: Option<&str>) {
     }
 }
 
+#[cfg(test)]
+fn close_html_sqlite_connection_for_path(path: &str) {
+    HTML_TAG_SQLITE_CONNECTIONS.with(|c| {
+        c.borrow_mut().remove(path);
+    });
+}
+
 fn persist_unsupported_html_to_sqlite(path: &str, tag: &str, parent_tag: Option<&str>) {
     let result: Result<(), rusqlite::Error> = HTML_TAG_SQLITE_CONNECTIONS.with(|connections| {
         let mut connections = connections.borrow_mut();
@@ -137,7 +144,7 @@ fn persist_unsupported_html_to_sqlite(path: &str, tag: &str, parent_tag: Option<
                  PRAGMA synchronous=NORMAL;
                  CREATE TABLE IF NOT EXISTS unsupported_html_log (
                      tag TEXT NOT NULL,
-                     parent_tag TEXT,
+                     parent_tag TEXT NOT NULL DEFAULT '',
                      first_seen_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                      last_seen_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                      occurrences INTEGER NOT NULL DEFAULT 0,
@@ -655,16 +662,18 @@ fn layout_element(
         return None;
     }
 
-    if let Some(tag) = node.tag_name() {
-        let parent_tag = node
-            .parent_node()
-            .and_then(|p| p.tag_name());
-        log_unsupported_html_tag(&tag.to_ascii_lowercase(), parent_tag.as_deref());
-    }
-
     let style = resolver.computed_style(node);
     if is_display_none(&style) {
         return None;
+    }
+
+    // Log unsupported tags only for rendered elements and only when logging is enabled
+    let config = unsupported_html_config();
+    if config.logging_enabled || config.sqlite_path.is_some() {
+        if let Some(tag) = node.tag_name() {
+            let parent_tag = node.parent_node().and_then(|p| p.tag_name());
+            log_unsupported_html_tag(&tag, parent_tag.as_deref());
+        }
     }
 
     let padding = edge_sizes(&style, "padding");
