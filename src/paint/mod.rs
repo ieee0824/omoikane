@@ -1272,7 +1272,7 @@ fn background_attachment_fixed(style: &ComputedStyle) -> bool {
 
 /// Returns background-position as `(x, y)` pixel offsets.
 ///
-/// Supports px values and percentage values.
+/// Supports px values, percentage values, and keywords (center/left/right/top/bottom).
 /// For percentages: `position = (container_size - image_size) * percentage / 100`
 fn background_position(
     style: &ComputedStyle,
@@ -1292,14 +1292,18 @@ fn resolve_bg_position(
     container_size: f32,
     image_size: f32,
 ) -> f32 {
+    let is_x = property.ends_with("-x");
     match style.get(property) {
         Some(ComputedValue::Px(v)) => *v,
-        Some(ComputedValue::Number(v)) => *v,
+        Some(ComputedValue::Number(v)) if *v == 0.0 => 0.0,
         Some(ComputedValue::Percentage(p)) => (container_size - image_size) * p / 100.0,
         Some(ComputedValue::Keyword(k)) => {
             match k.to_ascii_lowercase().as_str() {
                 "center" => (container_size - image_size) * 0.5,
-                "right" | "bottom" => container_size - image_size,
+                "right" if is_x => container_size - image_size,
+                "left" if is_x => 0.0,
+                "bottom" if !is_x => container_size - image_size,
+                "top" if !is_x => 0.0,
                 _ => 0.0,
             }
         }
