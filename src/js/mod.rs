@@ -289,10 +289,16 @@ const DOM_BOOTSTRAP: &str = r#"
     }
   }
 
-  globalThis.IntersectionObserverEntry = IntersectionObserverEntry;
+  if (!globalThis.IntersectionObserverEntry) {
+    globalThis.IntersectionObserverEntry = IntersectionObserverEntry;
+  }
 
-  globalThis.IntersectionObserver = class IntersectionObserver {
+  if (!globalThis.IntersectionObserver) {
+    globalThis.IntersectionObserver = class IntersectionObserver {
     constructor(callback, options = {}) {
+      if (typeof callback !== "function") {
+        throw new TypeError("IntersectionObserver constructor: callback must be a function");
+      }
       this._callback = callback;
       this._options = options;
       this._targets = new Set();
@@ -321,6 +327,7 @@ const DOM_BOOTSTRAP: &str = r#"
       return [];
     }
   };
+  } // end if (!globalThis.IntersectionObserver)
 })();
 "#;
 
@@ -1764,7 +1771,7 @@ mod tests {
     }
 
     #[test]
-    fn intersection_observer_unobserve_prevents_duplicate() {
+    fn intersection_observer_reobserve_fires_callback_again() {
         let doc = NodeHandle::document();
         let div = NodeHandle::element("div");
         doc.append_child(div.clone());
