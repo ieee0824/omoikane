@@ -2249,3 +2249,145 @@ fn expands_flex_flow_shorthand_initial_keyword() {
         "flex-wrap: initial not found"
     );
 }
+
+#[test]
+fn inherits_font_weight_from_parent() {
+    let document = NodeHandle::document();
+    let html = NodeHandle::element("html");
+    let body = NodeHandle::element("body");
+    let child = NodeHandle::element("span");
+    document.append_child(html.clone());
+    html.append_child(body.clone());
+    body.append_child(child.clone());
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet("body { font-weight: bold; }").unwrap(),
+    );
+    let style = resolver.computed_style(&child);
+    assert_eq!(
+        style.get("font-weight"),
+        Some(&ComputedValue::Keyword("bold".to_string())),
+        "font-weight should inherit from parent"
+    );
+}
+
+#[test]
+fn inherits_font_style_from_parent() {
+    let document = NodeHandle::document();
+    let html = NodeHandle::element("html");
+    let body = NodeHandle::element("body");
+    let child = NodeHandle::element("span");
+    document.append_child(html.clone());
+    html.append_child(body.clone());
+    body.append_child(child.clone());
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet("body { font-style: italic; }").unwrap(),
+    );
+    let style = resolver.computed_style(&child);
+    assert_eq!(
+        style.get("font-style"),
+        Some(&ComputedValue::Keyword("italic".to_string())),
+        "font-style should inherit from parent"
+    );
+}
+
+#[test]
+fn inherits_text_align_from_parent() {
+    let document = NodeHandle::document();
+    let html = NodeHandle::element("html");
+    let body = NodeHandle::element("body");
+    let child = NodeHandle::element("div");
+    document.append_child(html.clone());
+    html.append_child(body.clone());
+    body.append_child(child.clone());
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet("body { text-align: center; }").unwrap(),
+    );
+    let style = resolver.computed_style(&child);
+    assert_eq!(
+        style.get("text-align"),
+        Some(&ComputedValue::Keyword("center".to_string())),
+        "text-align should inherit from parent"
+    );
+}
+
+#[test]
+fn inherits_visibility_from_parent() {
+    let document = NodeHandle::document();
+    let html = NodeHandle::element("html");
+    let body = NodeHandle::element("body");
+    let child = NodeHandle::element("span");
+    document.append_child(html.clone());
+    html.append_child(body.clone());
+    body.append_child(child.clone());
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet("body { visibility: hidden; }").unwrap(),
+    );
+    let style = resolver.computed_style(&child);
+    assert_eq!(
+        style.get("visibility"),
+        Some(&ComputedValue::Keyword("hidden".to_string())),
+        "visibility should inherit from parent"
+    );
+}
+
+#[test]
+fn inherits_border_collapse_from_parent() {
+    let document = NodeHandle::document();
+    let html = NodeHandle::element("html");
+    let body = NodeHandle::element("body");
+    let table = NodeHandle::element("table");
+    let tr = NodeHandle::element("tr");
+    let td = NodeHandle::element("td");
+    document.append_child(html.clone());
+    html.append_child(body.clone());
+    body.append_child(table.clone());
+    table.append_child(tr.clone());
+    tr.append_child(td.clone());
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet("table { border-collapse: collapse; }").unwrap(),
+    );
+    let style = resolver.computed_style(&td);
+    assert_eq!(
+        style.get("border-collapse"),
+        Some(&ComputedValue::Keyword("collapse".to_string())),
+        "border-collapse should inherit from table to td"
+    );
+}
+
+#[test]
+fn child_override_prevents_inheritance() {
+    let document = NodeHandle::document();
+    let html = NodeHandle::element("html");
+    let body = NodeHandle::element("body");
+    let child = NodeHandle::element("span");
+    document.append_child(html.clone());
+    html.append_child(body.clone());
+    body.append_child(child.clone());
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet("body { font-weight: bold; } span { font-weight: normal; }").unwrap(),
+    );
+    let style = resolver.computed_style(&child);
+    assert_eq!(
+        style.get("font-weight"),
+        Some(&ComputedValue::Keyword("normal".to_string())),
+        "explicit child font-weight should override inherited value"
+    );
+}
