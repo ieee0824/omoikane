@@ -30,6 +30,7 @@ struct NodeInner {
 #[derive(Debug, Clone)]
 enum NodeData {
     Document(Document),
+    DocumentFragment,
     Element(Element),
     Text(Text),
     Comment(Comment),
@@ -40,6 +41,7 @@ enum NodeData {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NodeType {
     Document,
+    DocumentFragment,
     Element,
     Text,
     Comment,
@@ -186,6 +188,11 @@ impl NodeHandle {
         Self::new(NodeData::Document(Document))
     }
 
+    /// Creates a document fragment node.
+    pub fn document_fragment() -> Self {
+        Self::new(NodeData::DocumentFragment)
+    }
+
     /// Creates an element node.
     pub fn element(tag_name: impl Into<String>) -> Self {
         Self::new(NodeData::Element(Element::new(tag_name)))
@@ -286,12 +293,28 @@ impl NodeHandle {
         }
     }
 
+    /// Removes an attribute from an element node. No-op for other node kinds.
+    pub fn remove_attribute(&self, name: &str) {
+        if let NodeData::Element(element) = &mut self.0.borrow_mut().data {
+            element.attributes.remove(&name.to_ascii_lowercase());
+        }
+    }
+
+    /// Sets the data for a text, comment, or document type node.
+    pub fn set_data(&self, data: &str) {
+        match &mut self.0.borrow_mut().data {
+            NodeData::Text(text) => text.data = data.to_string(),
+            NodeData::Comment(comment) => comment.data = data.to_string(),
+            _ => {}
+        }
+    }
+
     /// Returns the text/comment/doctype data for leaf nodes when applicable.
     pub fn data(&self) -> Option<String> {
         match &self.0.borrow().data {
-            NodeData::Text(text) => Some(text.data.clone()),
-            NodeData::Comment(comment) => Some(comment.data.clone()),
-            NodeData::DocumentType(doctype) => Some(doctype.name.clone()),
+            NodeData::Text(text) => Some(text.data().to_string()),
+            NodeData::Comment(comment) => Some(comment.data().to_string()),
+            NodeData::DocumentType(doctype) => Some(doctype.name().to_string()),
             _ => None,
         }
     }
@@ -320,6 +343,7 @@ impl Node for NodeHandle {
     fn node_type(&self) -> NodeType {
         match &self.0.borrow().data {
             NodeData::Document(_) => NodeType::Document,
+            NodeData::DocumentFragment => NodeType::DocumentFragment,
             NodeData::Element(_) => NodeType::Element,
             NodeData::Text(_) => NodeType::Text,
             NodeData::Comment(_) => NodeType::Comment,
@@ -330,6 +354,7 @@ impl Node for NodeHandle {
     fn node_name(&self) -> String {
         match &self.0.borrow().data {
             NodeData::Document(_) => "#document".to_string(),
+            NodeData::DocumentFragment => "#document-fragment".to_string(),
             NodeData::Element(element) => element.tag_name.to_ascii_uppercase(),
             NodeData::Text(_) => "#text".to_string(),
             NodeData::Comment(_) => "#comment".to_string(),

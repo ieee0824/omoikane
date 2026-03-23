@@ -225,7 +225,8 @@
     }
 
     set textContent(value) {
-      __omoikane_set_text_content(this.__id, String(value));
+      const text = value == null ? "" : String(value);
+      __omoikane_set_text_content(this.__id, text);
     }
 
     get innerHTML() {
@@ -233,7 +234,8 @@
     }
 
     set innerHTML(value) {
-      __omoikane_set_inner_html(this.__id, String(value));
+      const html = value == null ? "" : String(value);
+      __omoikane_set_inner_html(this.__id, html);
     }
 
     get childNodes() {
