@@ -59,8 +59,12 @@ pub(super) fn layout_flex_container(
             positioned_children.push((child, child_style));
             continue;
         }
+        let main_basis = match direction {
+            FlexDirection::Row => width,
+            FlexDirection::Column => 0.0, // Height percentage basis is unknown at this point
+        };
         let base_main_size = flex_basis(&child_style, direction)
-            .or_else(|| explicit_main_size(&child_style, direction))
+            .or_else(|| resolved_main_size(&child_style, direction, main_basis))
             .unwrap_or_else(|| auto_flex_base_main_size(&child, resolver, direction));
         items.push(FlexItemSpec {
             node: child,
@@ -324,6 +328,15 @@ fn explicit_main_size(style: &ComputedStyle, direction: FlexDirection) -> Option
     match direction {
         FlexDirection::Row => explicit_length(style, "width"),
         FlexDirection::Column => explicit_length(style, "height"),
+    }
+}
+
+/// Like `explicit_main_size` but also resolves percentages and `calc(% + px)` using the
+/// container's main axis size as basis.
+fn resolved_main_size(style: &ComputedStyle, direction: FlexDirection, basis: f32) -> Option<f32> {
+    match direction {
+        FlexDirection::Row => resolved_length(style, "width", basis),
+        FlexDirection::Column => resolved_length(style, "height", basis),
     }
 }
 
