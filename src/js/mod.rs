@@ -567,15 +567,16 @@ impl JsRuntime {
 
             // Skip non-JavaScript types
             if let Some(ref t) = script_type {
-                if !t.is_empty()
-                    && t != "text/javascript"
-                    && t != "application/javascript"
-                    && t != "module"
+                // Strip MIME parameters (e.g., "text/javascript; charset=utf-8" → "text/javascript")
+                let mime = t.split(';').next().unwrap_or("").trim();
+                if !mime.is_empty()
+                    && mime != "text/javascript"
+                    && mime != "application/javascript"
+                    && mime != "module"
                 {
                     continue;
                 }
-                // Skip ES modules for now
-                if t == "module" {
+                if mime == "module" {
                     continue;
                 }
             }
@@ -611,7 +612,9 @@ impl JsRuntime {
             if let Err(err) = self.eval_safe(&source_code) {
                 errors.push(err);
             }
-            let _ = self.run_jobs();
+            if let Err(err) = self.run_jobs() {
+                errors.push(format!("{err}"));
+            }
         }
 
         // Execute deferred scripts
@@ -619,11 +622,15 @@ impl JsRuntime {
             if let Err(err) = self.eval_safe(&source_code) {
                 errors.push(err);
             }
-            let _ = self.run_jobs();
+            if let Err(err) = self.run_jobs() {
+                errors.push(format!("{err}"));
+            }
         }
 
         // Fire DOMContentLoaded
-        let _ = self.fire_dom_content_loaded();
+        if let Err(err) = self.fire_dom_content_loaded() {
+            errors.push(format!("{err}"));
+        }
 
         errors
     }
@@ -656,14 +663,19 @@ fn collect_script_elements_recursive(node: &NodeHandle, out: &mut Vec<NodeHandle
     }
 }
 
-/// Collects text content from a node's children (for inline script content).
+/// Collects text content from a node's text-node children (for inline script content).
+/// Only includes Text nodes, not comments or other node types.
 fn collect_text_content(node: &NodeHandle) -> String {
+    use crate::dom::NodeType;
     let mut text = String::new();
     for child in node.child_nodes() {
-        if let Some(data) = child.data() {
-            text.push_str(&data);
+        if child.node_type() == NodeType::Text {
+            if let Some(data) = child.data() {
+                text.push_str(&data);
+            }
+        } else {
+            text.push_str(&collect_text_content(&child));
         }
-        text.push_str(&collect_text_content(&child));
     }
     text
 }
