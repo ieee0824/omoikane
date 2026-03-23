@@ -5716,3 +5716,30 @@ fn box_shadow_no_blur_rounded_corners_do_not_paint_outside_shadow_shape() {
     );
 }
 
+#[test]
+fn force_opacity_makes_opacity_zero_element_visible() {
+    let html = r#"<html><head><style>
+body { margin: 0; background: white; }
+div { width: 10px; height: 10px; background: red; opacity: 0; }
+</style></head><body><div></div></body></html>"#;
+    let document = TreeBuilder::parse(html).document();
+    let viewport = Rect { x: 0.0, y: 0.0, width: 10.0, height: 10.0 };
+
+    // Without force_opacity: div is invisible
+    let canvas_normal = render_document(&document, viewport).unwrap();
+    assert_eq!(canvas_normal.pixel(5, 5), Some(Color::rgb(255, 255, 255)),
+        "opacity:0 element should be invisible without force_opacity");
+
+    // With force_opacity: div is visible
+    let canvas_forced = crate::paint::with_force_opacity(|| {
+        render_document(&document, viewport).unwrap()
+    });
+    assert_eq!(canvas_forced.pixel(5, 5), Some(Color::rgb(255, 0, 0)),
+        "opacity:0 element should be visible with force_opacity");
+
+    // After with_force_opacity: flag should not leak
+    let canvas_after = render_document(&document, viewport).unwrap();
+    assert_eq!(canvas_after.pixel(5, 5), Some(Color::rgb(255, 255, 255)),
+        "force_opacity should not leak outside the closure");
+}
+

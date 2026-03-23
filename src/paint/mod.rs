@@ -6,7 +6,32 @@ pub(crate) mod image;
 pub(crate) mod stylesheet;
 pub(crate) mod text;
 
+use std::cell::Cell;
 use std::path::Path;
+
+thread_local! {
+    static FORCE_OPACITY: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Runs the given closure with `opacity: 0` overridden to `opacity: 1`.
+/// Useful for rendering pages that use JS-driven fade-in animations.
+pub fn with_force_opacity<T>(f: impl FnOnce() -> T) -> T {
+    struct ForceOpacityGuard(bool);
+    impl Drop for ForceOpacityGuard {
+        fn drop(&mut self) {
+            FORCE_OPACITY.with(|cell| cell.set(self.0));
+        }
+    }
+    FORCE_OPACITY.with(|cell| {
+        let _guard = ForceOpacityGuard(cell.get());
+        cell.set(true);
+        f()
+    })
+}
+
+fn force_opacity_enabled() -> bool {
+    FORCE_OPACITY.with(|cell| cell.get())
+}
 
 #[allow(unused_imports)]
 use base64::Engine;
@@ -1275,13 +1300,18 @@ fn has_border_radius(style: &ComputedStyle) -> bool {
 }
 
 /// `opacity` プロパティの値を返す（0.0〜1.0）。未指定の場合は `None`。
+/// `with_force_opacity` が有効な場合、0.0 の値は 1.0 に上書きされる。
 fn element_opacity(style: &ComputedStyle) -> Option<f32> {
-    match style.get("opacity") {
+    let value = match style.get("opacity") {
         Some(ComputedValue::Number(v)) => Some(v.clamp(0.0, 1.0)),
         Some(ComputedValue::Px(v)) => Some(v.clamp(0.0, 1.0)),
         Some(ComputedValue::Keyword(k)) if k == "1" || k == "1.0" => Some(1.0),
         _ => None,
+    };
+    if value == Some(0.0) && force_opacity_enabled() {
+        return Some(1.0);
     }
+    value
 }
 
 fn normalize_rect(rect: Rect) -> Option<Rect> {

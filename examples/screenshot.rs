@@ -18,12 +18,17 @@ fn main() -> Result<(), String> {
     let mut args_iter = raw_args.iter().peekable();
 
     let mut insecure = false;
+    let mut force_opacity = false;
 
     // Parse flags before positional arguments
     while let Some(arg) = args_iter.peek() {
         match arg.as_str() {
             "--insecure" | "-k" => {
                 insecure = true;
+                args_iter.next();
+            }
+            "--force-opacity" => {
+                force_opacity = true;
                 args_iter.next();
             }
             _ => break,
@@ -52,7 +57,13 @@ fn main() -> Result<(), String> {
         unsafe { omoikane_set_insecure(browser, true) };
     }
 
-    let run_result = run_screenshot(browser, &url_c, &output_path, width, height);
+    let run_result = if force_opacity {
+        omoikane::paint::with_force_opacity(|| {
+            run_screenshot(browser, &url_c, &output_path, width, height)
+        })
+    } else {
+        run_screenshot(browser, &url_c, &output_path, width, height)
+    };
 
     // SAFETY: `browser` was allocated by `omoikane_init`.
     unsafe { omoikane_free(browser) };
@@ -131,6 +142,6 @@ fn take_owned_string(ptr: *mut c_char) -> Result<String, String> {
 }
 
 fn usage() -> String {
-    "usage: cargo run --example screenshot -- [--insecure|-k] <url> <output.png> [width] [height]"
+    "usage: cargo run --example screenshot -- [--insecure|-k] [--force-opacity] <url> <output.png> [width] [height]"
         .to_string()
 }
