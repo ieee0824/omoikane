@@ -690,7 +690,8 @@ fn layout_element(
     let y = containing_block.y + margin.top + border.top + padding.top;
 
     if is_table_container_element(node, &style) {
-        if resolved_length(&style, "width", containing_block.width).is_none() {
+        let is_shrink_to_fit = resolved_length(&style, "width", containing_block.width).is_none();
+        if is_shrink_to_fit {
             width = shrink_to_fit_width(node, resolver, containing_block.width);
             // Re-distribute auto margins now that shrink-to-fit width is known.
             // Floated tables keep auto margins as zero (CSS 2.1 §10.3.5).
@@ -713,6 +714,7 @@ fn layout_element(
         let x = containing_block.x + margin.left + border.left + padding.left;
         return layout_table_container(
             node, resolver, style, margin, padding, border, x, y, width, viewport,
+            is_shrink_to_fit,
         );
     }
 

@@ -23,6 +23,7 @@ pub(super) fn layout_table_container(
     y: f32,
     width: f32,
     viewport: Rect,
+    shrink_to_fit: bool,
 ) -> Option<LayoutBox> {
     let spacing = table_border_spacing(&style);
     let collapse_spacing = spacing * 2.0;
@@ -34,6 +35,7 @@ pub(super) fn layout_table_container(
         resolver,
         column_count,
         (width - total_spacing).max(0.0),
+        shrink_to_fit,
     );
     let inner_width = (width - collapse_spacing).max(0.0);
 
@@ -539,6 +541,7 @@ pub(super) fn compute_table_column_widths(
     resolver: &mut StyleResolver,
     column_count: usize,
     available_width: f32,
+    shrink_to_fit: bool,
 ) -> Vec<f32> {
     let mut column_hints = vec![0.0f32; column_count];
 
@@ -608,15 +611,20 @@ pub(super) fn compute_table_column_widths(
     let remaining = (available_width - fixed_total).max(0.0);
 
     // Distribute remaining width among auto columns:
-    // Each auto column gets at least its intrinsic hint, then leftover is split equally
+    // For shrink-to-fit tables, auto columns use their intrinsic hint width only.
+    // If hints exceed the remaining space, scale them down proportionally.
     let mut widths = column_hints.clone();
     if auto_count > 0 {
         if auto_hint_total <= remaining {
-            let leftover = remaining - auto_hint_total;
-            let equal_extra = leftover / auto_count as f32;
-            for &(i, hint) in &auto_hints {
-                widths[i] = hint + equal_extra;
+            if !shrink_to_fit {
+                // Explicit-width tables: distribute leftover equally among auto columns.
+                let leftover = remaining - auto_hint_total;
+                let equal_extra = leftover / auto_count as f32;
+                for &(i, hint) in &auto_hints {
+                    widths[i] = hint + equal_extra;
+                }
             }
+            // shrink-to-fit tables: auto columns keep their intrinsic hints only.
         } else if auto_hint_total > 0.0 {
             for &(i, hint) in &auto_hints {
                 widths[i] = remaining * (hint / auto_hint_total);
