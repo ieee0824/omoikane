@@ -4341,3 +4341,78 @@ fn line_height_percentage_scales_by_font_size() {
         p_box.dimensions.content.height,
     );
 }
+
+#[test]
+fn nowrap_prevents_line_wrapping() {
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let div = NodeHandle::element("div");
+    div.set_attribute("class", "nowrap");
+    div.append_child(NodeHandle::text("Hello world this is a long line of text that should not wrap"));
+    document.append_child(body.clone());
+    body.append_child(div.clone());
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "body { margin: 0; } .nowrap { white-space: nowrap; width: 100px; font-size: 10px; line-height: 10px; }",
+        )
+        .unwrap(),
+    );
+
+    let layout = layout_tree(
+        &body,
+        &mut resolver,
+        Rect { x: 0.0, y: 0.0, width: 200.0, height: 0.0 },
+    )
+    .unwrap();
+
+    let div_box = find_layout_box_by_tag(&layout, "div").unwrap();
+    // With nowrap, all text should be on a single line
+    assert_eq!(
+        div_box.lines.len(),
+        1,
+        "white-space: nowrap should prevent line wrapping, got {} lines",
+        div_box.lines.len(),
+    );
+}
+
+#[test]
+fn nowrap_with_inline_elements_stays_on_one_line() {
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let div = NodeHandle::element("div");
+    div.set_attribute("class", "nowrap");
+    let em = NodeHandle::element("em");
+    div.append_child(NodeHandle::text("Hello "));
+    em.append_child(NodeHandle::text("world"));
+    div.append_child(em);
+    div.append_child(NodeHandle::text(" this is long text"));
+    document.append_child(body.clone());
+    body.append_child(div.clone());
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "body { margin: 0; } .nowrap { white-space: nowrap; width: 50px; font-size: 10px; line-height: 10px; }",
+        )
+        .unwrap(),
+    );
+
+    let layout = layout_tree(
+        &body,
+        &mut resolver,
+        Rect { x: 0.0, y: 0.0, width: 200.0, height: 0.0 },
+    )
+    .unwrap();
+
+    let div_box = find_layout_box_by_tag(&layout, "div").unwrap();
+    assert_eq!(
+        div_box.lines.len(),
+        1,
+        "nowrap with <em> should stay on one line, got {} lines",
+        div_box.lines.len(),
+    );
+}

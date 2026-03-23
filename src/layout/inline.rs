@@ -803,6 +803,7 @@ fn layout_inline_segments(
 
     for segment in segments {
         let overflow_wrap = segment.overflow_wrap;
+        let allows_wrapping = segment.white_space_mode.allows_wrapping();
         for piece in split_segment(segment) {
             match piece {
                 InlinePiece::Newline => {
@@ -825,7 +826,7 @@ fn layout_inline_segments(
                     width,
                     height,
                 } => {
-                    if cursor_x > start_x && cursor_x + width > start_x + available_width {
+                    if allows_wrapping && cursor_x > start_x && cursor_x + width > start_x + available_width {
                         push_line(
                             &mut lines,
                             &mut current_fragments,
