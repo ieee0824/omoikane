@@ -31,6 +31,9 @@ pub enum ComputedValue {
     Color(String),
     String(String),
     Number(f32),
+    /// `calc()` expression with mixed px and percentage: `px_value + percent_value% of basis`.
+    /// Resolved at layout time using `resolved_length(basis)`.
+    CalcPxPercent(f32, f32),
 }
 
 /// Resolved computed style for a node.
@@ -1248,6 +1251,10 @@ fn compute_value(value: &Value, property_name: &str, ctx: ResolutionContext) -> 
                     CalcUnit::Unitless => ComputedValue::Number(quantity.value),
                 };
             }
+            // Try to extract mixed px + percentage from calc() arguments.
+            if let Some((px, pct)) = try_extract_calc_px_percent(arguments, ctx) {
+                return ComputedValue::CalcPxPercent(px, pct);
+            }
             ComputedValue::Keyword(render_value(value))
         }
         Value::Function { .. } => ComputedValue::Keyword(render_value(value)),
@@ -1289,6 +1296,50 @@ struct CalcQuantity {
 enum CalcToken {
     Value(CalcQuantity),
     Operator(char),
+}
+
+/// Tries to extract a simple `px + percent` or `percent - px` form from calc() arguments.
+/// Returns `(px_component, percent_component)` if successful.
+fn try_extract_calc_px_percent(arguments: &[Value], ctx: ResolutionContext) -> Option<(f32, f32)> {
+    let mut tokens = Vec::new();
+    collect_calc_tokens(arguments.first()?, ctx, &mut tokens)?;
+
+    let mut px_total = 0.0f32;
+    let mut pct_total = 0.0f32;
+    let mut sign = 1.0f32;
+    let mut saw_px = false;
+    let mut saw_pct = false;
+
+    for token in &tokens {
+        match token {
+            CalcToken::Value(q) => {
+                match q.unit {
+                    CalcUnit::Px => {
+                        px_total += sign * q.value;
+                        saw_px = true;
+                    }
+                    CalcUnit::Percentage => {
+                        pct_total += sign * q.value;
+                        saw_pct = true;
+                    }
+                    // Only accept unitless zero; reject other unitless values.
+                    CalcUnit::Unitless if q.value == 0.0 => {}
+                    CalcUnit::Unitless => return None,
+                }
+                sign = 1.0;
+            }
+            CalcToken::Operator('+') => sign = 1.0,
+            CalcToken::Operator('-') => sign = -1.0,
+            CalcToken::Operator(_) => return None,
+        }
+    }
+
+    // Only return if we actually saw both px and percentage tokens.
+    if saw_px && saw_pct {
+        Some((px_total, pct_total))
+    } else {
+        None
+    }
 }
 
 fn evaluate_calc(arguments: &[Value], ctx: ResolutionContext) -> Option<CalcQuantity> {
@@ -2340,6 +2391,9 @@ fn computed_to_value(value: &ComputedValue) -> Value {
         ComputedValue::Color(value) => Value::Color(value.clone()),
         ComputedValue::String(value) => Value::String(value.clone()),
         ComputedValue::Number(value) => Value::Number(*value),
+        ComputedValue::CalcPxPercent(px, pct) => {
+            Value::Keyword(format!("calc({}px + {}%)", px, pct))
+        }
     }
 }
 
@@ -2352,6 +2406,9 @@ fn computed_value_to_value(cv: &ComputedValue) -> Value {
         ComputedValue::Color(c) => Value::Keyword(c.clone()),
         ComputedValue::Keyword(k) => Value::Keyword(k.clone()),
         ComputedValue::String(s) => Value::Keyword(s.clone()),
+        ComputedValue::CalcPxPercent(px, pct) => {
+            Value::Keyword(format!("calc({}px + {}%)", px, pct))
+        }
     }
 }
 

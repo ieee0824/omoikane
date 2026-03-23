@@ -1363,15 +1363,26 @@ fn percentage_length(style: &ComputedStyle, property: &str) -> Option<f32> {
 }
 
 fn resolved_length(style: &ComputedStyle, property: &str, basis: f32) -> Option<f32> {
-    explicit_length(style, property).or_else(|| {
-        percentage_length(style, property).and_then(|percent| {
-            if basis > 0.0 {
-                Some(basis * (percent / 100.0))
-            } else {
-                None
+    explicit_length(style, property)
+        .or_else(|| {
+            percentage_length(style, property).and_then(|percent| {
+                if basis > 0.0 {
+                    Some(basis * (percent / 100.0))
+                } else {
+                    None
+                }
+            })
+        })
+        .or_else(|| {
+            // Resolve calc(px + %) using the provided basis.
+            // Only resolve when basis is known (> 0); otherwise leave unresolved.
+            match style.get(property) {
+                Some(ComputedValue::CalcPxPercent(px, pct)) if basis > 0.0 => {
+                    Some(px + basis * (pct / 100.0))
+                }
+                _ => None,
             }
         })
-    })
 }
 
 fn is_auto(value: Option<&ComputedValue>) -> bool {

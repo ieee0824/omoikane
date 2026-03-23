@@ -2766,6 +2766,31 @@ fn font_size_larger_resolves_to_px() {
 }
 
 #[test]
+fn calc_mixed_percent_and_px_produces_calc_px_percent() {
+    let document = NodeHandle::document();
+    let html = NodeHandle::element("html");
+    let body = NodeHandle::element("body");
+    let div = NodeHandle::element("div");
+    document.append_child(html.clone());
+    html.append_child(body.clone());
+    body.append_child(div.clone());
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet("div { width: calc(100% - 165px); }").unwrap(),
+    );
+    let style = resolver.computed_style(&div);
+    match style.get("width") {
+        Some(ComputedValue::CalcPxPercent(px, pct)) => {
+            assert!((*px - (-165.0)).abs() < 0.1, "px should be -165, got {px}");
+            assert!((*pct - 100.0).abs() < 0.1, "pct should be 100, got {pct}");
+        }
+        other => panic!("expected CalcPxPercent, got {other:?}"),
+    }
+}
+
+#[test]
 fn outline_shorthand_expands_to_longhands_with_correct_values() {
     use crate::css::{Rule, Value, parse_stylesheet};
 
