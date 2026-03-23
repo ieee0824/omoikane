@@ -2766,24 +2766,29 @@ fn font_size_larger_resolves_to_px() {
 }
 
 #[test]
-fn outline_shorthand_expands_to_longhands() {
-    use crate::css::{Rule, parse_stylesheet};
+fn outline_shorthand_expands_to_longhands_with_correct_values() {
+    use crate::css::{Rule, Value, parse_stylesheet};
 
     let stylesheet = parse_stylesheet("div { outline: 2px solid red; }").unwrap();
     let Rule::Style(rule) = &stylesheet.rules[0] else {
         panic!("expected style rule");
     };
 
-    assert!(rule.declarations.iter().any(|d| d.name == "outline-style"),
-        "outline shorthand should expand outline-style");
-    assert!(rule.declarations.iter().any(|d| d.name == "outline-width"),
-        "outline shorthand should expand outline-width");
-    assert!(rule.declarations.iter().any(|d| d.name == "outline-color"),
-        "outline shorthand should expand outline-color");
+    let style_decl = rule.declarations.iter().find(|d| d.name == "outline-style")
+        .expect("should have outline-style");
+    assert_eq!(style_decl.value, Value::Keyword("solid".to_string()));
+
+    let width_decl = rule.declarations.iter().find(|d| d.name == "outline-width")
+        .expect("should have outline-width");
+    assert_eq!(width_decl.value, Value::Length(2.0, "px".to_string()));
+
+    let color_decl = rule.declarations.iter().find(|d| d.name == "outline-color")
+        .expect("should have outline-color");
+    assert_eq!(color_decl.value, Value::Keyword("red".to_string()));
 }
 
 #[test]
-fn outline_none_expands_to_outline_style_none() {
+fn outline_none_resets_all_longhands() {
     use crate::css::{Rule, Value, parse_stylesheet};
 
     let stylesheet = parse_stylesheet("div { outline: none; }").unwrap();
@@ -2791,8 +2796,33 @@ fn outline_none_expands_to_outline_style_none() {
         panic!("expected style rule");
     };
 
-    let style_decl = rule.declarations.iter()
-        .find(|d| d.name == "outline-style")
+    let style_decl = rule.declarations.iter().find(|d| d.name == "outline-style")
         .expect("outline: none should produce outline-style");
     assert_eq!(style_decl.value, Value::Keyword("none".to_string()));
+
+    // outline: none should also reset width and color to initial values
+    let width_decl = rule.declarations.iter().find(|d| d.name == "outline-width")
+        .expect("outline: none should reset outline-width");
+    assert_eq!(width_decl.value, Value::Keyword("medium".to_string()));
+
+    let color_decl = rule.declarations.iter().find(|d| d.name == "outline-color")
+        .expect("outline: none should reset outline-color");
+    assert_eq!(color_decl.value, Value::Keyword("currentcolor".to_string()));
+}
+
+#[test]
+fn outline_inherit_applies_to_all_longhands() {
+    use crate::css::{Rule, Value, parse_stylesheet};
+
+    let stylesheet = parse_stylesheet("div { outline: inherit; }").unwrap();
+    let Rule::Style(rule) = &stylesheet.rules[0] else {
+        panic!("expected style rule");
+    };
+
+    for longhand in ["outline-style", "outline-width", "outline-color"] {
+        let decl = rule.declarations.iter().find(|d| d.name == longhand)
+            .unwrap_or_else(|| panic!("outline: inherit should produce {longhand}"));
+        assert_eq!(decl.value, Value::Keyword("inherit".to_string()),
+            "{longhand} should be inherit");
+    }
 }
