@@ -3996,3 +3996,86 @@ fn table_align_center_centers_with_auto_margins() {
         "table should be centered: left={table_left}, expected_margin={expected_margin}, table_width={table_outer_width}"
     );
 }
+
+#[test]
+fn rowspan_cell_distributes_height_evenly_across_spanned_rows() {
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let table = NodeHandle::element("table");
+
+    // Row 1: [td rowspan=2 height=200] [td height=50]
+    let row1 = NodeHandle::element("tr");
+    let tall_cell = NodeHandle::element("td");
+    tall_cell.set_attribute("rowspan", "2");
+    tall_cell.set_attribute("rowspan", "2");
+    tall_cell.set_attribute("class", "tall");
+    tall_cell.append_child(NodeHandle::text("tall"));
+    let short_cell1 = NodeHandle::element("td");
+    short_cell1.set_attribute("class", "short");
+    short_cell1.append_child(NodeHandle::text("row1"));
+    row1.append_child(tall_cell);
+    row1.append_child(short_cell1);
+
+    // Row 2: [td height=50]
+    let row2 = NodeHandle::element("tr");
+    let short_cell2 = NodeHandle::element("td");
+    short_cell2.set_attribute("class", "short");
+    short_cell2.append_child(NodeHandle::text("row2"));
+    row2.append_child(short_cell2);
+
+    document.append_child(body.clone());
+    body.append_child(table.clone());
+    table.append_child(row1);
+    table.append_child(row2);
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "body { margin: 0; } \
+             table { display: table; } \
+             tr { display: table-row; } \
+             td { display: table-cell; } \
+             .tall { height: 200px; } \
+             .short { height: 50px; }",
+        )
+        .unwrap(),
+    );
+
+    let layout = layout_tree(
+        &body,
+        &mut resolver,
+        Rect { x: 0.0, y: 0.0, width: 400.0, height: 0.0 },
+    ).unwrap();
+
+    let table_box = find_layout_box_by_tag(&layout, "table").unwrap();
+    let row1_box = &table_box.children[0];
+    let row2_box = &table_box.children[1];
+
+    // Row 1 + Row 2 should together be at least 200px (rowspan cell height)
+    let row1_h = row1_box.dimensions.content.height;
+    let row2_h = row2_box.dimensions.content.height;
+    assert!(
+        row1_h + row2_h >= 200.0 - 1.0,
+        "rows should total >= 200px, got {row1_h} + {row2_h} = {}",
+        row1_h + row2_h
+    );
+
+    // Each row should get at least 100px (200 / 2 = 100, initial 50 + 50 extra)
+    assert!(
+        row1_h >= 95.0,
+        "row1 should be ~100px, got {row1_h}"
+    );
+    assert!(
+        row2_h >= 95.0,
+        "row2 should be ~100px, got {row2_h}"
+    );
+
+    // Row 2 should start below row 1
+    assert!(
+        row2_box.dimensions.content.y > row1_box.dimensions.content.y,
+        "row2 y ({}) should be below row1 y ({})",
+        row2_box.dimensions.content.y,
+        row1_box.dimensions.content.y
+    );
+}
