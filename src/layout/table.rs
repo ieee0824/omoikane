@@ -37,20 +37,23 @@ pub(super) fn layout_table_container(
     );
     let inner_width = (width - collapse_spacing).max(0.0);
 
-    let mut children = Vec::new();
-    let mut cursor_y = y + spacing;
-    let mut pending_group: Option<(NodeHandle, Vec<LayoutBox>, f32, f32)> = None;
+    // === Pass 1: Layout all rows and collect rowspan info ===
+    let mut row_boxes = Vec::new();
+    let mut row_heights = Vec::new();
+    let mut all_rowspan_cells: Vec<(usize, RowspanCellInfo)> = Vec::new(); // (start_row, info)
+    let mut row_groups: Vec<Option<NodeHandle>> = Vec::new();
     let mut occupied_columns = vec![0usize; column_count];
 
-    for entry in entries.drain(..) {
+    let mut pass1_cursor_y = y + spacing;
+    for (row_index, entry) in entries.drain(..).enumerate() {
         for occupied in &mut occupied_columns {
             if *occupied > 0 {
                 *occupied -= 1;
             }
         }
 
-        let row_y = cursor_y;
-        let (row_box, row_height) = layout_table_row_entry(
+        let row_y = pass1_cursor_y;
+        let (row_box, row_height, rowspan_cells) = layout_table_row_entry(
             &entry,
             resolver,
             x + spacing,
@@ -61,13 +64,74 @@ pub(super) fn layout_table_container(
             spacing,
             viewport,
         )?;
-        cursor_y += row_height + spacing;
+        row_boxes.push(row_box);
+        row_heights.push(row_height);
+        row_groups.push(entry.row_group);
+        pass1_cursor_y += row_height + spacing;
 
-        if let Some(group_node) = entry.row_group {
+        for cell_info in rowspan_cells {
+            all_rowspan_cells.push((row_index, cell_info));
+        }
+    }
+
+    // === Pass 2: Distribute rowspan cell heights ===
+    for (start_row, cell_info) in &all_rowspan_cells {
+        let end_row = (*start_row + cell_info.rowspan).min(row_heights.len());
+        let spanned_height: f32 = row_heights[*start_row..end_row].iter().sum();
+        let spanned_spacing = (end_row - *start_row).saturating_sub(1) as f32 * spacing;
+        let total_spanned = spanned_height + spanned_spacing;
+        if cell_info.cell_height > total_spanned {
+            let deficit = cell_info.cell_height - total_spanned;
+            let per_row = deficit / (end_row - *start_row) as f32;
+            for row_h in &mut row_heights[*start_row..end_row] {
+                *row_h += per_row;
+            }
+        }
+    }
+
+    // === Pass 3: Adjust row positions and cell heights after redistribution ===
+    let mut cursor_y = y + spacing;
+    let mut children = Vec::new();
+    let mut pending_group: Option<(NodeHandle, Vec<LayoutBox>, f32, f32)> = None;
+
+    for (row_index, mut row_box) in row_boxes.into_iter().enumerate() {
+        let final_height = row_heights[row_index];
+        let dy = cursor_y - row_box.dimensions.content.y;
+        if dy.abs() > 0.01 {
+            let row_x = row_box.dimensions.content.x;
+            translate_layout_box_to_outer(&mut row_box, row_x, cursor_y);
+            // Re-translate children to new row y
+            for child in &mut row_box.children {
+                let cx = child.dimensions.content.x;
+                translate_layout_box_to_outer(child, cx, cursor_y);
+            }
+        }
+        // Stretch row and cells to final height
+        let height_increase = final_height - row_box.dimensions.content.height;
+        if height_increase > 0.01 {
+            row_box.dimensions.content.height = final_height;
+        }
+        for child in &mut row_box.children {
+            let rs = html_table_span_attribute(&child.node, "rowspan").unwrap_or(1);
+            if rs <= 1 {
+                // Non-rowspan cells stretch to match the row height
+                if height_increase > 0.01 {
+                    child.dimensions.content.height += height_increase;
+                }
+            } else {
+                // Rowspan cells stretch to span all their rows
+                let end = (row_index + rs).min(row_heights.len());
+                let spanned: f32 = row_heights[row_index..end].iter().sum();
+                let spanned_spacing = (end - row_index).saturating_sub(1) as f32 * spacing;
+                child.dimensions.content.height = spanned + spanned_spacing;
+            }
+        }
+        cursor_y += final_height + spacing;
+
+        if let Some(group_node) = row_groups[row_index].clone() {
             match &mut pending_group {
-                Some((current_group, rows, _, group_start_y)) if *current_group == group_node => {
+                Some((current_group, rows, _, _group_start_y)) if *current_group == group_node => {
                     rows.push(row_box);
-                    let _ = group_start_y;
                 }
                 Some((current_group, rows, _, group_start_y)) => {
                     let group_box = build_row_group_box(
@@ -79,11 +143,11 @@ pub(super) fn layout_table_container(
                     );
                     children.push(group_box);
                     *current_group = group_node.clone();
-                    *group_start_y = row_y;
+                    *group_start_y = cursor_y - final_height - spacing;
                     rows.push(row_box);
                 }
                 None => {
-                    pending_group = Some((group_node, vec![row_box], inner_width, row_y));
+                    pending_group = Some((group_node, vec![row_box], inner_width, cursor_y - final_height - spacing));
                 }
             }
         } else {
@@ -247,7 +311,7 @@ fn layout_table_row_entry(
     column_widths: &[f32],
     spacing: f32,
     viewport: Rect,
-) -> Option<(LayoutBox, f32)> {
+) -> Option<(LayoutBox, f32, Vec<RowspanCellInfo>)> {
     let mut measured = Vec::new();
     let mut row_height = 0.0f32;
     let mut column_cursor = 0usize;
@@ -281,8 +345,12 @@ fn layout_table_row_entry(
             explicit_length(&cell_style, "height").unwrap_or(layout_cell.total_height());
         layout_cell.dimensions.content.width = cell_width;
         layout_cell.dimensions.content.height = cell_height;
-        row_height = row_height.max(layout_cell.total_height());
-        measured.push((column_cursor, span, layout_cell, cell_style));
+        // Only non-rowspan cells contribute to the row's initial height.
+        // Rowspan cells will be distributed in a second pass.
+        if rowspan <= 1 {
+            row_height = row_height.max(layout_cell.total_height());
+        }
+        measured.push((column_cursor, span, rowspan, layout_cell, cell_style));
         if rowspan > 1 {
             for column in column_cursor..column_cursor.saturating_add(span) {
                 if let Some(occupied) = occupied_columns.get_mut(column) {
@@ -294,7 +362,7 @@ fn layout_table_row_entry(
     }
 
     let mut children = Vec::new();
-    for (column_start, _span, mut cell, cell_style) in measured {
+    for (column_start, _span, _rowspan, mut cell, cell_style) in measured {
         let outer_x = x + column_x_offset(column_widths, column_start, spacing);
         let original_total_height = cell.total_height();
         let extra_height = (row_height - original_total_height).max(0.0);
@@ -335,7 +403,24 @@ fn layout_table_row_entry(
         marker: None,
     };
 
-    Some((row_box, row_height))
+    // Collect rowspan cell heights for second-pass distribution
+    let mut rowspan_cells = Vec::new();
+    for child in &row_box.children {
+        let rs = html_table_span_attribute(&child.node, "rowspan").unwrap_or(1);
+        if rs > 1 {
+            rowspan_cells.push(RowspanCellInfo {
+                rowspan: rs,
+                cell_height: child.total_height(),
+            });
+        }
+    }
+
+    Some((row_box, row_height, rowspan_cells))
+}
+
+struct RowspanCellInfo {
+    rowspan: usize,
+    cell_height: f32,
 }
 
 pub(super) fn table_column_count(entries: &[TableRowEntry]) -> usize {
