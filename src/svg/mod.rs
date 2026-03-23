@@ -16,8 +16,8 @@ pub fn render_svg_to_image(svg_node: &NodeHandle) -> Option<Image> {
 
     // Determine SVG canvas size from width/height attributes or viewBox.
     let (vb_x, vb_y, vb_w, vb_h) = parse_viewbox(attrs.get("viewBox").or(attrs.get("viewbox")));
-    let width = parse_svg_length(attrs.get("width")).unwrap_or(vb_w).max(1.0);
-    let height = parse_svg_length(attrs.get("height")).unwrap_or(vb_h).max(1.0);
+    let width = parse_svg_size(attrs.get("width")).unwrap_or(vb_w);
+    let height = parse_svg_size(attrs.get("height")).unwrap_or(vb_h);
 
     if width <= 0.0 || height <= 0.0 || width > 4096.0 || height > 4096.0 {
         return None;
@@ -42,8 +42,8 @@ pub fn render_svg_to_image(svg_node: &NodeHandle) -> Option<Image> {
 pub fn svg_display_size(svg_node: &NodeHandle) -> Option<(f32, f32)> {
     let attrs = svg_node.attributes().unwrap_or_default();
     let (_, _, vb_w, vb_h) = parse_viewbox(attrs.get("viewBox").or(attrs.get("viewbox")));
-    let width = parse_svg_length(attrs.get("width")).unwrap_or(vb_w);
-    let height = parse_svg_length(attrs.get("height")).unwrap_or(vb_h);
+    let width = parse_svg_size(attrs.get("width")).unwrap_or(vb_w);
+    let height = parse_svg_size(attrs.get("height")).unwrap_or(vb_h);
     if width > 0.0 && height > 0.0 {
         Some((width, height))
     } else {
@@ -69,20 +69,25 @@ fn render_svg_children(
             None => continue,
         };
         let attrs = child.attributes().unwrap_or_default();
-        let fill = attrs
-            .get("fill")
-            .and_then(|v| parse_color(v))
-            .unwrap_or(inherited_fill);
+        let fill_attr = attrs.get("fill").map(|s| s.as_str());
+        // fill="none" means do not fill (transparent).
+        let fill = match fill_attr {
+            Some(v) if v.eq_ignore_ascii_case("none") => None,
+            Some(v) => Some(parse_color(v).unwrap_or(inherited_fill)),
+            None => Some(inherited_fill),
+        };
 
         match tag.as_str() {
             "g" => {
-                render_svg_children(&child, canvas, sx, sy, tx, ty, fill);
+                let g_fill = fill.unwrap_or(inherited_fill);
+                render_svg_children(&child, canvas, sx, sy, tx, ty, g_fill);
             }
             "rect" => {
-                let rx = parse_svg_length(attrs.get("x")).unwrap_or(0.0) * sx + tx;
-                let ry = parse_svg_length(attrs.get("y")).unwrap_or(0.0) * sy + ty;
-                let rw = parse_svg_length(attrs.get("width")).unwrap_or(0.0) * sx;
-                let rh = parse_svg_length(attrs.get("height")).unwrap_or(0.0) * sy;
+                let Some(fill_color) = fill else { continue };
+                let rx = parse_svg_coord(attrs.get("x")).unwrap_or(0.0) * sx + tx;
+                let ry = parse_svg_coord(attrs.get("y")).unwrap_or(0.0) * sy + ty;
+                let rw = parse_svg_size(attrs.get("width")).unwrap_or(0.0) * sx;
+                let rh = parse_svg_size(attrs.get("height")).unwrap_or(0.0) * sy;
                 if rw > 0.0 && rh > 0.0 {
                     canvas.fill_rect(
                         crate::layout::Rect {
@@ -91,26 +96,29 @@ fn render_svg_children(
                             width: rw,
                             height: rh,
                         },
-                        fill,
+                        fill_color,
                     );
                 }
             }
             "circle" => {
-                let cx = parse_svg_length(attrs.get("cx")).unwrap_or(0.0) * sx + tx;
-                let cy = parse_svg_length(attrs.get("cy")).unwrap_or(0.0) * sy + ty;
-                let r = parse_svg_length(attrs.get("r")).unwrap_or(0.0) * sx.min(sy);
+                let Some(fill_color) = fill else { continue };
+                let cx = parse_svg_coord(attrs.get("cx")).unwrap_or(0.0) * sx + tx;
+                let cy = parse_svg_coord(attrs.get("cy")).unwrap_or(0.0) * sy + ty;
+                let r = parse_svg_size(attrs.get("r")).unwrap_or(0.0) * sx.min(sy);
                 if r > 0.0 {
-                    fill_circle(canvas, cx, cy, r, fill);
+                    fill_circle(canvas, cx, cy, r, fill_color);
                 }
             }
             "path" => {
+                let Some(fill_color) = fill else { continue };
                 if let Some(d) = attrs.get("d") {
-                    render_path(canvas, d, sx, sy, tx, ty, fill);
+                    render_path(canvas, d, sx, sy, tx, ty, fill_color);
                 }
             }
             _ => {
+                let recurse_fill = fill.unwrap_or(inherited_fill);
                 // Recurse into unknown elements (may contain renderable children)
-                render_svg_children(&child, canvas, sx, sy, tx, ty, fill);
+                render_svg_children(&child, canvas, sx, sy, tx, ty, recurse_fill);
             }
         }
     }
@@ -149,6 +157,11 @@ fn render_path(canvas: &mut Canvas, d: &str, sx: f32, sy: f32, tx: f32, ty: f32,
     for cmd in &commands {
         match cmd {
             PathCommand::MoveTo(x, y) => {
+                // Flush previous subpath
+                if points.len() >= 3 {
+                    fill_polygon(canvas, &points, fill);
+                }
+                points.clear();
                 cx = *x;
                 cy = *y;
                 points.push((cx * sx + tx, cy * sy + ty));
@@ -167,16 +180,20 @@ fn render_path(canvas: &mut Canvas, d: &str, sx: f32, sy: f32, tx: f32, ty: f32,
                 points.push((cx * sx + tx, cy * sy + ty));
             }
             PathCommand::CurveTo(_, _, _, _, x, y) => {
-                // Approximate cubic bezier as line to endpoint
                 cx = *x;
                 cy = *y;
                 points.push((cx * sx + tx, cy * sy + ty));
             }
-            PathCommand::Close => {}
+            PathCommand::Close => {
+                if points.len() >= 3 {
+                    fill_polygon(canvas, &points, fill);
+                }
+                points.clear();
+            }
         }
     }
 
-    // Fill the polygon using scanline
+    // Flush remaining subpath
     if points.len() >= 3 {
         fill_polygon(canvas, &points, fill);
     }
@@ -203,6 +220,7 @@ fn parse_path_data(d: &str) -> Vec<PathCommand> {
     let mut cy = 0.0f32;
 
     while chars.peek().is_some() {
+        let remaining_before = chars.clone().count();
         skip_whitespace_and_commas(&mut chars);
         if let Some(&ch) = chars.peek() {
             if ch.is_ascii_alphabetic() {
@@ -324,6 +342,12 @@ fn parse_path_data(d: &str) -> Vec<PathCommand> {
                 chars.next();
             }
         }
+
+        // Prevent infinite loops on malformed input
+        let remaining_after = chars.clone().count();
+        if remaining_after >= remaining_before {
+            chars.next(); // Force progress
+        }
     }
 
     commands
@@ -421,7 +445,8 @@ fn parse_viewbox(value: Option<&String>) -> (f32, f32, f32, f32) {
     }
 }
 
-fn parse_svg_length(value: Option<&String>) -> Option<f32> {
+/// Parses a non-negative SVG length (for width, height, r, etc.).
+fn parse_svg_size(value: Option<&String>) -> Option<f32> {
     let s = value?.trim();
     s.strip_suffix("px")
         .unwrap_or(s)
@@ -430,10 +455,19 @@ fn parse_svg_length(value: Option<&String>) -> Option<f32> {
         .filter(|v| *v > 0.0)
 }
 
+/// Parses an SVG coordinate (may be negative, for x, y, cx, cy, etc.).
+fn parse_svg_coord(value: Option<&String>) -> Option<f32> {
+    let s = value?.trim();
+    s.strip_suffix("px")
+        .unwrap_or(s)
+        .parse::<f32>()
+        .ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::dom::Node;
+    use crate::dom::{Node, NodeHandle};
     use crate::html::TreeBuilder;
 
     fn find_svg(node: &NodeHandle) -> Option<NodeHandle> {

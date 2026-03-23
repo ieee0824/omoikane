@@ -88,7 +88,7 @@ fn is_supported_html_tag(tag: &str) -> bool {
             | "br" | "strong" | "em" | "b" | "i" | "u" | "s" | "a" | "pre" | "code"
             | "ul" | "ol" | "li"
             | "table" | "thead" | "tbody" | "tfoot" | "tr" | "td" | "th"
-            | "img" | "object" | "svg" | "path" | "circle" | "rect" | "g"
+            | "img" | "object" | "svg"
             | "style" | "link" | "meta" | "title" | "script" | "noscript"
             | "font" | "blockquote" | "hr" | "address"
             | "dl" | "dt" | "dd" | "figure" | "figcaption"
@@ -1955,7 +1955,7 @@ fn is_inline_child(node: &NodeHandle, resolver: &mut StyleResolver) -> bool {
                 .map(|tag| {
                     matches!(
                         tag.as_str(),
-                        "span" | "a" | "em" | "strong" | "b" | "i" | "img" | "object"
+                        "span" | "a" | "em" | "strong" | "b" | "i" | "img" | "object" | "svg"
                     )
                 })
                 .unwrap_or(false)
