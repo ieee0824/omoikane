@@ -1265,7 +1265,8 @@ fn background_size(style: &ComputedStyle, area: Rect, image_w: f32, image_h: f32
 }
 
 fn border_color(style: &ComputedStyle) -> Option<Color> {
-    color_property(style.get("border-color")).or_else(|| color_property(style.get("color")))
+    resolve_color_value(style.get("border-color"), style)
+        .or_else(|| color_property(style.get("color")))
 }
 
 fn color_property(value: Option<&ComputedValue>) -> Option<Color> {
@@ -1273,6 +1274,22 @@ fn color_property(value: Option<&ComputedValue>) -> Option<Color> {
         Some(ComputedValue::Color(color)) => parse_color(color),
         Some(ComputedValue::Keyword(color)) => parse_color(color),
         _ => None,
+    }
+}
+
+/// Resolves a color value, handling `currentColor` by looking up the element's `color` property.
+pub(crate) fn resolve_color_value(
+    value: Option<&ComputedValue>,
+    style: &ComputedStyle,
+) -> Option<Color> {
+    match value {
+        Some(ComputedValue::Color(c)) if c.eq_ignore_ascii_case("currentcolor") => {
+            color_property(style.get("color"))
+        }
+        Some(ComputedValue::Keyword(k)) if k.eq_ignore_ascii_case("currentcolor") => {
+            color_property(style.get("color"))
+        }
+        _ => color_property(value),
     }
 }
 

@@ -1667,6 +1667,9 @@ fn inherited_font_size(
 }
 
 pub(crate) fn is_color_keyword(keyword: &str) -> bool {
+    if keyword.eq_ignore_ascii_case("currentcolor") {
+        return true;
+    }
     matches!(
         keyword,
         "black"
