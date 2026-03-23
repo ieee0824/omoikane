@@ -16,12 +16,16 @@ thread_local! {
 /// Runs the given closure with `opacity: 0` overridden to `opacity: 1`.
 /// Useful for rendering pages that use JS-driven fade-in animations.
 pub fn with_force_opacity<T>(f: impl FnOnce() -> T) -> T {
+    struct ForceOpacityGuard(bool);
+    impl Drop for ForceOpacityGuard {
+        fn drop(&mut self) {
+            FORCE_OPACITY.with(|cell| cell.set(self.0));
+        }
+    }
     FORCE_OPACITY.with(|cell| {
-        let previous = cell.get();
+        let _guard = ForceOpacityGuard(cell.get());
         cell.set(true);
-        let result = f();
-        cell.set(previous);
-        result
+        f()
     })
 }
 
@@ -1304,8 +1308,8 @@ fn element_opacity(style: &ComputedStyle) -> Option<f32> {
         Some(ComputedValue::Keyword(k)) if k == "1" || k == "1.0" => Some(1.0),
         _ => None,
     };
-    if force_opacity_enabled() {
-        return value.map(|v| if v == 0.0 { 1.0 } else { v });
+    if value == Some(0.0) && force_opacity_enabled() {
+        return Some(1.0);
     }
     value
 }
