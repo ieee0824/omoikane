@@ -280,6 +280,14 @@
       return ids ? ids.map(id => wrapNode(id)) : [];
     }
 
+    getElementsByTagName(tag) {
+      return this.querySelectorAll(String(tag));
+    }
+
+    getElementsByClassName(cls) {
+      return this.querySelectorAll("." + String(cls));
+    }
+
     get ownerDocument() {
       return globalThis.document;
     }
