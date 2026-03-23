@@ -692,6 +692,30 @@ pub fn render_document_with_url(
         Some(&web_font_registry)
     };
 
+    // Execute <script> tags and fire DOMContentLoaded before layout.
+    // JS may modify the DOM (e.g., classList.add for fade-in animations,
+    // injecting <style> elements), so this must happen before layout.
+    if let Ok(mut runtime) = crate::js::JsRuntime::with_document(document.clone()) {
+        let errors = runtime.execute_document_scripts(effective_base.as_ref());
+        for err in &errors {
+            eprintln!("[omoikane][js-error] {err}");
+        }
+        // Re-extract stylesheets and rebuild resolver after JS may have
+        // modified the DOM (inserted/removed <style>/<link> elements).
+        resolver = StyleResolver::new();
+        resolver.set_viewport(viewport.width, viewport.height);
+        parsed_sheets.clear();
+        if let Ok(css_texts) = stylesheet::extract_author_stylesheets(document, base_url) {
+            for css_text in css_texts {
+                let sheet = stylesheet::parse_stylesheet_forgiving(&css_text);
+                parsed_sheets.push(sheet);
+            }
+        }
+        for sheet in &parsed_sheets {
+            resolver.add_stylesheet(Origin::Author, sheet.clone());
+        }
+    }
+
     crate::layout::with_image_base_url(effective_base, || {
         let layout = crate::layout::layout_tree(document, &mut resolver, viewport)?;
         Some(paint_layout_with_web_fonts(
