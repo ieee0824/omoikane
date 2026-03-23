@@ -4078,3 +4078,132 @@ fn rowspan_cell_distributes_height_evenly_across_spanned_rows() {
         row1_box.dimensions.content.y
     );
 }
+
+#[test]
+fn rowspan_expanded_row_preserves_vertical_align_bottom() {
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let table = NodeHandle::element("table");
+
+    let row1 = NodeHandle::element("tr");
+    let tall = NodeHandle::element("td");
+    tall.set_attribute("rowspan", "2");
+    tall.set_attribute("class", "tall");
+    tall.append_child(NodeHandle::text("tall"));
+    let bottom_cell = NodeHandle::element("td");
+    bottom_cell.set_attribute("class", "bottom");
+    bottom_cell.append_child(NodeHandle::text("x"));
+    row1.append_child(tall);
+    row1.append_child(bottom_cell);
+
+    let row2 = NodeHandle::element("tr");
+    let cell2 = NodeHandle::element("td");
+    cell2.append_child(NodeHandle::text("r2"));
+    row2.append_child(cell2);
+
+    document.append_child(body.clone());
+    body.append_child(table.clone());
+    table.append_child(row1);
+    table.append_child(row2);
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "body { margin: 0; } \
+             table { display: table; } \
+             tr { display: table-row; } \
+             td { display: table-cell; font-size: 10px; line-height: 10px; } \
+             .tall { height: 100px; } \
+             .bottom { vertical-align: bottom; }",
+        )
+        .unwrap(),
+    );
+
+    let layout = layout_tree(
+        &body,
+        &mut resolver,
+        Rect { x: 0.0, y: 0.0, width: 400.0, height: 0.0 },
+    ).unwrap();
+
+    let table_box = find_layout_box_by_tag(&layout, "table").unwrap();
+    let row1_box = &table_box.children[0];
+    let bottom_cell_box = &row1_box.children[1];
+
+    // The bottom-aligned cell's text should be near the bottom of the cell
+    let cell_bottom = bottom_cell_box.dimensions.content.y + bottom_cell_box.dimensions.content.height;
+    let line = &bottom_cell_box.lines[0];
+    let line_bottom = line.rect.y + line.rect.height;
+    assert!(
+        (cell_bottom - line_bottom).abs() < 2.0,
+        "text should be near cell bottom: cell_bottom={cell_bottom}, line_bottom={line_bottom}"
+    );
+}
+
+#[test]
+fn rowspan_second_pass_preserves_vertical_align_bottom_with_initial_offset() {
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let table = NodeHandle::element("table");
+
+    let row1 = NodeHandle::element("tr");
+    let tall_non_rowspan = NodeHandle::element("td");
+    tall_non_rowspan.set_attribute("class", "tall-non-rowspan");
+    tall_non_rowspan.append_child(NodeHandle::text("tall"));
+    let bottom_cell = NodeHandle::element("td");
+    bottom_cell.set_attribute("class", "bottom");
+    bottom_cell.append_child(NodeHandle::text("x"));
+    let rowspan_tall = NodeHandle::element("td");
+    rowspan_tall.set_attribute("rowspan", "2");
+    rowspan_tall.set_attribute("class", "rowspan-tall");
+    rowspan_tall.append_child(NodeHandle::text("rowspan"));
+    row1.append_child(tall_non_rowspan);
+    row1.append_child(bottom_cell);
+    row1.append_child(rowspan_tall);
+
+    let row2 = NodeHandle::element("tr");
+    let r2c1 = NodeHandle::element("td");
+    r2c1.append_child(NodeHandle::text("r2c1"));
+    let r2c2 = NodeHandle::element("td");
+    r2c2.append_child(NodeHandle::text("r2c2"));
+    row2.append_child(r2c1);
+    row2.append_child(r2c2);
+
+    document.append_child(body.clone());
+    body.append_child(table.clone());
+    table.append_child(row1);
+    table.append_child(row2);
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "body { margin: 0; } \
+             table { display: table; } \
+             tr { display: table-row; } \
+             td { display: table-cell; font-size: 10px; line-height: 10px; } \
+             .tall-non-rowspan { height: 50px; } \
+             .rowspan-tall { height: 200px; } \
+             .bottom { vertical-align: bottom; }",
+        )
+        .unwrap(),
+    );
+
+    let layout = layout_tree(
+        &body,
+        &mut resolver,
+        Rect { x: 0.0, y: 0.0, width: 400.0, height: 0.0 },
+    ).unwrap();
+
+    let table_box = find_layout_box_by_tag(&layout, "table").unwrap();
+    let row1_box = &table_box.children[0];
+    let bottom_cell_box = &row1_box.children[1];
+
+    let cell_bottom = bottom_cell_box.dimensions.content.y + bottom_cell_box.dimensions.content.height;
+    let line = &bottom_cell_box.lines[0];
+    let line_bottom = line.rect.y + line.rect.height;
+    assert!(
+        (cell_bottom - line_bottom).abs() < 2.0,
+        "text should remain near cell bottom after second-pass: cell_bottom={cell_bottom}, line_bottom={line_bottom}"
+    );
+}

@@ -113,17 +113,47 @@ pub(super) fn layout_table_container(
         }
         for child in &mut row_box.children {
             let rs = html_table_span_attribute(&child.node, "rowspan").unwrap_or(1);
+            let cell_style = resolver.computed_style(&child.node);
+            let valign = vertical_align(&cell_style);
             if rs <= 1 {
                 // Non-rowspan cells stretch to match the row height
                 if height_increase > 0.01 {
+                    // Reset contents to top first so used_content_height is accurate
+                    reset_content_to_top(child);
+                    let content_used_height = used_content_height(child);
                     child.dimensions.content.height += height_increase;
+                    // Re-apply vertical-align offset for middle/bottom
+                    let extra = (child.dimensions.content.height - content_used_height).max(0.0);
+                    let offset = match valign {
+                        VerticalAlign::Bottom => extra,
+                        VerticalAlign::Middle => extra / 2.0,
+                        _ => 0.0,
+                    };
+                    if offset > 0.01 {
+                        translate_layout_contents(child, 0.0, offset);
+                    }
                 }
             } else {
                 // Rowspan cells stretch to span all their rows
                 let end = (row_index + rs).min(row_heights.len());
                 let spanned: f32 = row_heights[row_index..end].iter().sum();
                 let spanned_spacing = (end - row_index).saturating_sub(1) as f32 * spacing;
+                let old_height = child.dimensions.content.height;
                 child.dimensions.content.height = spanned + spanned_spacing;
+                let new_height = child.dimensions.content.height;
+                if (new_height - old_height).abs() > 0.01 {
+                    reset_content_to_top(child);
+                    let content_used_height = used_content_height(child);
+                    let extra = (new_height - content_used_height).max(0.0);
+                    let offset = match valign {
+                        VerticalAlign::Bottom => extra,
+                        VerticalAlign::Middle => extra / 2.0,
+                        _ => 0.0,
+                    };
+                    if offset > 0.01 {
+                        translate_layout_contents(child, 0.0, offset);
+                    }
+                }
             }
         }
         cursor_y += final_height + spacing;
@@ -421,6 +451,46 @@ fn layout_table_row_entry(
 struct RowspanCellInfo {
     rowspan: usize,
     cell_height: f32,
+}
+
+/// Compute the actual content height used by children/lines inside a cell.
+fn used_content_height(layout: &LayoutBox) -> f32 {
+    let top = layout.dimensions.content.y;
+    let mut bottom = top;
+    for child in &layout.children {
+        let child_bottom = child.dimensions.content.y
+            + child.dimensions.content.height
+            + child.dimensions.padding.bottom
+            + child.dimensions.border.bottom
+            + child.dimensions.margin.bottom;
+        bottom = bottom.max(child_bottom);
+    }
+    for line in &layout.lines {
+        bottom = bottom.max(line.rect.y + line.rect.height);
+    }
+    (bottom - top).max(0.0)
+}
+
+/// Reset cell contents to the top of the content box (undo previous vertical offsets).
+fn reset_content_to_top(layout: &mut LayoutBox) {
+    let cell_top = layout.dimensions.content.y;
+    // Find the current topmost content position
+    let mut current_top = f32::INFINITY;
+    for child in &layout.children {
+        current_top = current_top.min(
+            child.dimensions.content.y
+                - child.dimensions.margin.top
+                - child.dimensions.border.top
+                - child.dimensions.padding.top,
+        );
+    }
+    for line in &layout.lines {
+        current_top = current_top.min(line.rect.y);
+    }
+    if current_top.is_finite() && (current_top - cell_top).abs() > 0.01 {
+        let dy = cell_top - current_top;
+        translate_layout_contents(layout, 0.0, dy);
+    }
 }
 
 pub(super) fn table_column_count(entries: &[TableRowEntry]) -> usize {
