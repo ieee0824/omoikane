@@ -126,15 +126,54 @@ fn parse_function_call(value: &str) -> Option<(&str, &str)> {
 /// modern space-separated `rgb(r g b / a)` syntax.
 fn parse_rgb_args(args: &str) -> Option<Color> {
     let parts = split_color_args(args);
-    let nums: Vec<f32> = parts.iter().filter_map(|s| s.parse().ok()).collect();
-    match nums.as_slice() {
-        [r, g, b] => Some(Color::rgb(*r as u8, *g as u8, *b as u8)),
-        [r, g, b, a] => {
-            let alpha = (a.clamp(0.0, 1.0) * 255.0).round() as u8;
-            Some(Color::rgba(*r as u8, *g as u8, *b as u8, alpha))
-        }
-        _ => None,
+
+    // Parse first 3 parts as RGB channels (support %)
+    if parts.len() < 3 {
+        return None;
     }
+    let r = parse_rgb_channel(parts[0].trim())?;
+    let g = parse_rgb_channel(parts[1].trim())?;
+    let b = parse_rgb_channel(parts[2].trim())?;
+
+    if parts.len() == 3 {
+        return Some(Color::rgb(clamp_channel(r), clamp_channel(g), clamp_channel(b)));
+    }
+
+    // 4th part is alpha (0-1 or percentage)
+    if parts.len() >= 4 {
+        let alpha = parse_alpha_value(parts[3].trim())?;
+        return Some(Color::rgba(
+            clamp_channel(r),
+            clamp_channel(g),
+            clamp_channel(b),
+            (alpha * 255.0).round() as u8,
+        ));
+    }
+
+    None
+}
+
+/// Parses an RGB channel value: plain number (0-255) or percentage (0%-100%).
+fn parse_rgb_channel(s: &str) -> Option<f32> {
+    if let Some(pct) = s.strip_suffix('%') {
+        pct.parse::<f32>().ok().map(|p| p * 255.0 / 100.0)
+    } else {
+        s.parse().ok()
+    }
+}
+
+/// Parses an alpha value: plain number (0-1) or percentage (0%-100%).
+fn parse_alpha_value(s: &str) -> Option<f32> {
+    if let Some(pct) = s.strip_suffix('%') {
+        pct.parse::<f32>().ok().map(|p| (p / 100.0).clamp(0.0, 1.0))
+    } else {
+        s.parse::<f32>().ok().map(|v| v.clamp(0.0, 1.0))
+    }
+}
+
+/// Clamps a color channel value to [0, 255] and rounds to u8.
+fn clamp_channel(v: f32) -> u8 {
+    v.round().clamp(0.0, 255.0) as u8
 }
 
 /// Parses `hsl()` / `hsla()` argument string.

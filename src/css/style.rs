@@ -1860,7 +1860,11 @@ fn compute_rgb_function(arguments: &[Value]) -> Option<String> {
     });
 
     let (r, g, b) = match channels.as_slice() {
-        [r, g, b] | [r, g, b, _] => (*r as u8, *g as u8, *b as u8),
+        [r, g, b] | [r, g, b, _] => (
+            r.round().clamp(0.0, 255.0) as u8,
+            g.round().clamp(0.0, 255.0) as u8,
+            b.round().clamp(0.0, 255.0) as u8,
+        ),
         _ => return None,
     };
 

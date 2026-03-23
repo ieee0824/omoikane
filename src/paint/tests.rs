@@ -5743,3 +5743,45 @@ div { width: 10px; height: 10px; background: red; opacity: 0; }
         "force_opacity should not leak outside the closure");
 }
 
+#[test]
+fn rgb_out_of_range_channels_are_clamped() {
+    let html = r#"<html><head><style>
+body { margin: 0; }
+div { width: 10px; height: 10px; background: rgb(300, -50, 128); }
+</style></head><body><div></div></body></html>"#;
+    let document = TreeBuilder::parse(html).document();
+    let viewport = Rect { x: 0.0, y: 0.0, width: 10.0, height: 10.0 };
+    let canvas = render_document(&document, viewport).unwrap();
+    assert_eq!(canvas.pixel(5, 5), Some(Color::rgb(255, 0, 128)),
+        "rgb(300,-50,128) should clamp to rgb(255,0,128)");
+}
+
+#[test]
+fn rgba_percentage_alpha_is_parsed_correctly() {
+    let html = r#"<html><head><style>
+body { margin: 0; background: white; }
+div { width: 10px; height: 10px; background: rgba(255, 0, 0, 50%); }
+</style></head><body><div></div></body></html>"#;
+    let document = TreeBuilder::parse(html).document();
+    let viewport = Rect { x: 0.0, y: 0.0, width: 10.0, height: 10.0 };
+    let canvas = render_document(&document, viewport).unwrap();
+    let pixel = canvas.pixel(5, 5).unwrap();
+    // rgba(255,0,0,50%) over white → blended ~(255,128,128)
+    assert!(pixel.r > 200, "red channel should be high, got {}", pixel.r);
+    assert!(pixel.g > 100 && pixel.g < 180, "green channel should be ~128, got {}", pixel.g);
+    assert!(pixel.a == 255, "final pixel should be fully opaque after blending");
+}
+
+#[test]
+fn rgb_percentage_channels_are_clamped() {
+    let html = r#"<html><head><style>
+body { margin: 0; }
+div { width: 10px; height: 10px; background: rgb(200%, 0%, 50%); }
+</style></head><body><div></div></body></html>"#;
+    let document = TreeBuilder::parse(html).document();
+    let viewport = Rect { x: 0.0, y: 0.0, width: 10.0, height: 10.0 };
+    let canvas = render_document(&document, viewport).unwrap();
+    assert_eq!(canvas.pixel(5, 5), Some(Color::rgb(255, 0, 128)),
+        "rgb(200%,0%,50%) should clamp to rgb(255,0,128)");
+}
+
