@@ -126,15 +126,39 @@ fn parse_function_call(value: &str) -> Option<(&str, &str)> {
 /// modern space-separated `rgb(r g b / a)` syntax.
 fn parse_rgb_args(args: &str) -> Option<Color> {
     let parts = split_color_args(args);
-    let nums: Vec<f32> = parts.iter().filter_map(|s| s.parse().ok()).collect();
+    let nums: Vec<f32> = parts
+        .iter()
+        .filter_map(|s| {
+            let trimmed = s.trim();
+            if let Some(pct) = trimmed.strip_suffix('%') {
+                pct.parse::<f32>().ok().map(|p| p * 255.0 / 100.0)
+            } else {
+                trimmed.parse().ok()
+            }
+        })
+        .collect();
     match nums.as_slice() {
-        [r, g, b] => Some(Color::rgb(*r as u8, *g as u8, *b as u8)),
+        [r, g, b] => Some(Color::rgb(
+            clamp_channel(*r),
+            clamp_channel(*g),
+            clamp_channel(*b),
+        )),
         [r, g, b, a] => {
             let alpha = (a.clamp(0.0, 1.0) * 255.0).round() as u8;
-            Some(Color::rgba(*r as u8, *g as u8, *b as u8, alpha))
+            Some(Color::rgba(
+                clamp_channel(*r),
+                clamp_channel(*g),
+                clamp_channel(*b),
+                alpha,
+            ))
         }
         _ => None,
     }
+}
+
+/// Clamps a color channel value to [0, 255] and rounds to u8.
+fn clamp_channel(v: f32) -> u8 {
+    v.round().clamp(0.0, 255.0) as u8
 }
 
 /// Parses `hsl()` / `hsla()` argument string.
