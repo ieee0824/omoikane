@@ -1607,19 +1607,33 @@ fn apply_inheritance(
         return;
     };
 
+    // Inherited CSS properties supported by this engine.
+    // Based on CSS 2.1 §6.2 and CSS Text Decoration Module Level 3.
+    // https://developer.mozilla.org/en-US/docs/Web/CSS/Inheritance
     for inherited_name in [
+        "border-collapse",
+        "border-spacing",
         "color",
+        "direction",
         "font-family",
         "font-size",
+        "font-style",
+        "font-weight",
         "letter-spacing",
         "line-height",
         "list-style-image",
-        "list-style-type",
         "list-style-position",
+        "list-style-type",
+        "overflow-wrap",
+        "text-align",
+        "text-decoration-color",
+        "text-decoration-line",
+        "text-decoration-style",
+        "text-indent",
         "text-transform",
+        "visibility",
         "white-space",
         "word-break",
-        "overflow-wrap",
         "word-spacing",
     ] {
         if !properties.contains_key(inherited_name) {
