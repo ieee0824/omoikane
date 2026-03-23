@@ -685,12 +685,17 @@ pub(super) fn normalize_text(text: &str, mode: WhiteSpaceMode) -> String {
 }
 
 fn collapse_white_space_preserve_newlines(text: &str) -> String {
+    // First pass: collapse whitespace within lines, preserving newlines.
     let mut out = String::new();
     let mut previous_was_space = false;
     for ch in text.chars() {
         if ch == '\n' {
+            // Drop trailing space before newline
+            if out.ends_with(' ') {
+                out.pop();
+            }
             out.push('\n');
-            previous_was_space = false;
+            previous_was_space = true; // suppress leading space after newline
         } else if ch.is_ascii_whitespace() {
             if !previous_was_space {
                 out.push(' ');
