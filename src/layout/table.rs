@@ -613,12 +613,31 @@ pub(super) fn compute_table_column_widths(
             column_hints = column_min_widths.clone();
         } else {
             // Distribute available_width between min and max proportionally.
-            let extra = available_width - min_total;
-            let max_extra = max_total - min_total;
+            // Only auto (non-explicit) columns participate in proportional distribution.
+            let fixed_min: f32 = (0..column_count)
+                .filter(|c| explicit_flags[*c])
+                .map(|c| column_min_widths[c])
+                .sum();
+            let auto_available = (available_width - fixed_min).max(0.0);
+            let auto_min: f32 = (0..column_count)
+                .filter(|c| !explicit_flags[*c])
+                .map(|c| column_min_widths[c])
+                .sum();
+            let auto_max: f32 = (0..column_count)
+                .filter(|c| !explicit_flags[*c])
+                .map(|c| column_max_widths[c])
+                .sum();
+            let auto_extra = (auto_available - auto_min).max(0.0);
+            let auto_max_extra = (auto_max - auto_min).max(0.0);
+
             for col in 0..column_count {
+                if explicit_flags[col] {
+                    // Explicit columns keep their hint (set above).
+                    continue;
+                }
                 let col_extra = column_max_widths[col] - column_min_widths[col];
-                let share = if max_extra > 0.0 {
-                    extra * (col_extra / max_extra)
+                let share = if auto_max_extra > 0.0 {
+                    auto_extra * (col_extra / auto_max_extra)
                 } else {
                     0.0
                 };

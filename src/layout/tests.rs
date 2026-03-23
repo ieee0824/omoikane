@@ -4388,8 +4388,6 @@ fn shrink_to_fit_table_uses_min_max_column_distribution() {
 
     let table_box = find_layout_box_by_tag(&layout, "table").unwrap();
     // Table should shrink-to-fit: image column ~100px + text column.
-    // With min/max distribution, text column uses proportional share, not full preferred width.
-    // Table should be narrower than containing block (800px).
     assert!(
         table_box.dimensions.content.width < 800.0,
         "shrink-to-fit table should be narrower than containing block (800px), got {}",
@@ -4399,6 +4397,25 @@ fn shrink_to_fit_table_uses_min_max_column_distribution() {
         table_box.dimensions.content.width >= 100.0,
         "table should be at least as wide as the image column, got {}",
         table_box.dimensions.content.width,
+    );
+    // Verify cell widths: image cell should be ~100px (explicit via img width attribute)
+    let row = &table_box.children[0];
+    let img_cell = &row.children[0];
+    let text_cell = &row.children[1];
+    assert!(
+        (img_cell.dimensions.content.width - 100.0).abs() < 2.0,
+        "image cell should be ~100px, got {}",
+        img_cell.dimensions.content.width,
+    );
+    assert!(
+        text_cell.dimensions.content.width > 50.0,
+        "text cell should have reasonable width, got {}",
+        text_cell.dimensions.content.width,
+    );
+    assert!(
+        text_cell.dimensions.content.width < 700.0,
+        "text cell should not use full preferred width, got {}",
+        text_cell.dimensions.content.width,
     );
 }
 
