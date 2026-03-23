@@ -4207,3 +4207,55 @@ fn rowspan_second_pass_preserves_vertical_align_bottom_with_initial_offset() {
         "text should remain near cell bottom after second-pass: cell_bottom={cell_bottom}, line_bottom={line_bottom}"
     );
 }
+
+#[test]
+fn unsupported_html_tag_sqlite_logging() {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let db_path = std::env::temp_dir().join(format!("omoikane-html-tags-{unique}.db"));
+    let db_path_str = db_path.to_string_lossy().to_string();
+
+    super::persist_unsupported_html_to_sqlite(&db_path_str, "canvas", Some("div"));
+    super::persist_unsupported_html_to_sqlite(&db_path_str, "canvas", Some("div"));
+    super::persist_unsupported_html_to_sqlite(&db_path_str, "video", Some("body"));
+
+    let conn = rusqlite::Connection::open(&db_path_str).unwrap();
+    let mut stmt = conn
+        .prepare("SELECT tag, parent_tag, occurrences FROM unsupported_html_log ORDER BY tag")
+        .unwrap();
+    let rows = stmt
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)?,
+            ))
+        })
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0], ("canvas".to_string(), "div".to_string(), 2));
+    assert_eq!(rows[1], ("video".to_string(), "body".to_string(), 1));
+
+    drop(stmt);
+    drop(conn);
+    super::close_html_sqlite_connection_for_path(&db_path_str);
+    let _ = std::fs::remove_file(db_path);
+}
+
+#[test]
+fn supported_html_tags_are_not_logged() {
+    assert!(super::is_supported_html_tag("div"));
+    assert!(super::is_supported_html_tag("table"));
+    assert!(super::is_supported_html_tag("img"));
+    assert!(!super::is_supported_html_tag("canvas"));
+    assert!(!super::is_supported_html_tag("video"));
+    assert!(!super::is_supported_html_tag("iframe"));
+    assert!(!super::is_supported_html_tag("form"));
+    assert!(!super::is_supported_html_tag("input"));
+}
