@@ -857,10 +857,11 @@ fn layout_inline_segments(
                     // word-break: break-word — if the fragment still doesn't fit
                     // even at the start of a fresh line, break it character by
                     // character.
-                    let needs_char_break = (matches!(
-                        overflow_wrap,
-                        OverflowWrap::BreakWord | OverflowWrap::Anywhere
-                    ) || segment.word_break == WordBreak::BreakWord)
+                    let needs_char_break = allows_wrapping
+                        && (matches!(
+                            overflow_wrap,
+                            OverflowWrap::BreakWord | OverflowWrap::Anywhere
+                        ) || segment.word_break == WordBreak::BreakWord)
                         && cursor_x == start_x
                         && width > available_width
                         && available_width > 0.0;
