@@ -565,8 +565,13 @@ fn collect_rule_candidates(
                             color_scheme_dark,
                             media_cache,
                         )
+                    } else if at_rule.name.eq_ignore_ascii_case("keyframes")
+                        || at_rule.name.eq_ignore_ascii_case("-webkit-keyframes")
+                    {
+                        // @keyframes rules are handled separately; skip them in cascade.
+                        false
                     } else {
-                        // Non-media at-rules (e.g. @keyframes, @supports) are passed through.
+                        // Other at-rules (e.g. @supports) are passed through.
                         true
                     };
                     if should_apply {
@@ -680,39 +685,89 @@ fn collect_keyframes(rules: &[Rule], keyframes_final: &mut HashMap<String, Vec<D
                 if anim_name.is_empty() {
                     continue;
                 }
-                if let Some(block) = &at_rule.block {
-                    for inner_rule in block {
-                        if let Rule::Style(style_rule) = inner_rule {
-                            let selector_text = style_rule
-                                .selectors
-                                .first()
-                                .map(|s| {
-                                    s.parts
-                                        .iter()
-                                        .map(|p| {
-                                            p.simples
-                                                .iter()
-                                                .map(|s| format!("{s:?}"))
-                                                .collect::<Vec<_>>()
-                                                .join("")
-                                        })
-                                        .collect::<String>()
-                                })
-                                .unwrap_or_default();
-                            // Check if this is the final keyframe (to / 100%)
-                            let is_final = selector_text.contains("to")
-                                || selector_text.contains("100");
-                            if is_final {
-                                keyframes_final
-                                    .insert(anim_name.clone(), style_rule.declarations.clone());
-                            }
-                        }
+                // The @keyframes block is stored as raw text in a special declaration.
+                let raw_block = at_rule
+                    .declarations
+                    .iter()
+                    .find(|d| d.name == "__keyframes_block")
+                    .and_then(|d| match &d.value {
+                        Value::Keyword(text) => Some(text.clone()),
+                        _ => None,
+                    });
+                if let Some(block_text) = raw_block {
+                    if let Some(decls) = parse_keyframe_final_declarations(&block_text) {
+                        keyframes_final.insert(anim_name, decls);
                     }
                 }
             }
             _ => {}
         }
     }
+}
+
+/// Parses a raw @keyframes block text and extracts the declarations from
+/// the final keyframe (`to` or `100%`).
+fn parse_keyframe_final_declarations(block_text: &str) -> Option<Vec<Declaration>> {
+    // Split into individual keyframe steps by finding `selector { declarations }`
+    let mut final_decls = None;
+    let mut pos = 0;
+    let chars: Vec<char> = block_text.chars().collect();
+
+    while pos < chars.len() {
+        // Skip whitespace
+        while pos < chars.len() && chars[pos].is_ascii_whitespace() {
+            pos += 1;
+        }
+        if pos >= chars.len() {
+            break;
+        }
+
+        // Read selector (everything before `{`)
+        let selector_start = pos;
+        while pos < chars.len() && chars[pos] != '{' {
+            pos += 1;
+        }
+        if pos >= chars.len() {
+            break;
+        }
+        let selector: String = chars[selector_start..pos].iter().collect();
+        let selector = selector.trim().to_ascii_lowercase();
+        pos += 1; // skip '{'
+
+        // Read declarations (everything before matching `}`)
+        let decl_start = pos;
+        let mut depth = 1;
+        while pos < chars.len() && depth > 0 {
+            if chars[pos] == '{' {
+                depth += 1;
+            } else if chars[pos] == '}' {
+                depth -= 1;
+            }
+            if depth > 0 {
+                pos += 1;
+            }
+        }
+        let decl_text: String = chars[decl_start..pos].iter().collect();
+        if pos < chars.len() {
+            pos += 1; // skip '}'
+        }
+
+        // Check if this is the final keyframe
+        let is_final = selector == "to" || selector == "100%" || selector.contains("100%");
+        if is_final {
+            // Parse declarations using the CSS parser
+            let fake_rule = format!("x {{ {} }}", decl_text);
+            if let Ok(stylesheet) = super::parse_stylesheet(&fake_rule) {
+                for rule in &stylesheet.rules {
+                    if let Rule::Style(style_rule) = rule {
+                        final_decls = Some(style_rule.declarations.clone());
+                    }
+                }
+            }
+        }
+    }
+
+    final_decls
 }
 
 fn cascade_rank(candidate: &Candidate) -> (u8, u8) {
