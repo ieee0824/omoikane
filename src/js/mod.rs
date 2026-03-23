@@ -81,7 +81,10 @@ const DOM_BOOTSTRAP: &str = r#"
       const capture = typeof options === "boolean" ? options : !!options.capture;
       const key = String(type);
       const list = this.__listeners.get(key) ?? [];
-      list.push({ listener, capture });
+      // Deduplicate: same listener+capture is only registered once (DOM spec).
+      if (!list.some(entry => entry.listener === listener && !!entry.capture === capture)) {
+        list.push({ listener, capture });
+      }
       this.__listeners.set(key, list);
     }
 
@@ -536,7 +539,9 @@ impl JsRuntime {
             .replace('\\', "\\\\")
             .replace('\'', "\\'")
             .replace('\n', "\\n")
-            .replace('\r', "\\r");
+            .replace('\r', "\\r")
+            .replace('\u{2028}', "\\u2028")
+            .replace('\u{2029}', "\\u2029");
         self.eval(&format!("document.dispatchEvent(new Event('{}'))", escaped))?;
         self.run_jobs()
     }
@@ -1411,5 +1416,44 @@ mod tests {
         let result = runtime.eval("eventFired").unwrap()
             .as_string().unwrap().to_std_string_escaped();
         assert_eq!(result, "myevent");
+    }
+
+    #[test]
+    fn fire_document_event_escapes_special_chars() {
+        let doc = NodeHandle::document();
+        let mut runtime = JsRuntime::with_document(doc).unwrap();
+
+        runtime.eval(r#"
+            let special = "";
+            document.addEventListener("te'st", (e) => { special = e.type; });
+        "#).unwrap();
+
+        runtime.fire_document_event("te'st").unwrap();
+
+        let result = runtime.eval("special").unwrap()
+            .as_string().unwrap().to_std_string_escaped();
+        assert_eq!(result, "te'st");
+    }
+
+    #[test]
+    fn add_event_listener_deduplicates() {
+        let doc = NodeHandle::document();
+        let div = NodeHandle::element("div");
+        doc.append_child(div.clone());
+
+        let mut runtime = JsRuntime::with_document(doc).unwrap();
+        runtime.eval(r#"
+            let count = 0;
+            const el = document.querySelector("div");
+            function handler() { count++; }
+            el.addEventListener("click", handler);
+            el.addEventListener("click", handler);
+            el.addEventListener("click", handler);
+            el.dispatchEvent(new Event("click"));
+        "#).unwrap();
+
+        let count = runtime.eval("count").unwrap()
+            .to_number(&mut runtime.context).unwrap();
+        assert_eq!(count, 1.0, "duplicate addEventListener should only fire once");
     }
 }
