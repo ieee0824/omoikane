@@ -1270,11 +1270,41 @@ fn background_attachment_fixed(style: &ComputedStyle) -> bool {
     )
 }
 
-fn background_position(style: &ComputedStyle) -> (f32, f32) {
-    (
-        length_property(style, "background-position-x").unwrap_or(0.0),
-        length_property(style, "background-position-y").unwrap_or(0.0),
-    )
+/// Returns background-position as `(x, y)` pixel offsets.
+///
+/// Supports px values and percentage values.
+/// For percentages: `position = (container_size - image_size) * percentage / 100`
+fn background_position(
+    style: &ComputedStyle,
+    container_w: f32,
+    container_h: f32,
+    image_w: f32,
+    image_h: f32,
+) -> (f32, f32) {
+    let x = resolve_bg_position(style, "background-position-x", container_w, image_w);
+    let y = resolve_bg_position(style, "background-position-y", container_h, image_h);
+    (x, y)
+}
+
+fn resolve_bg_position(
+    style: &ComputedStyle,
+    property: &str,
+    container_size: f32,
+    image_size: f32,
+) -> f32 {
+    match style.get(property) {
+        Some(ComputedValue::Px(v)) => *v,
+        Some(ComputedValue::Number(v)) => *v,
+        Some(ComputedValue::Percentage(p)) => (container_size - image_size) * p / 100.0,
+        Some(ComputedValue::Keyword(k)) => {
+            match k.to_ascii_lowercase().as_str() {
+                "center" => (container_size - image_size) * 0.5,
+                "right" | "bottom" => container_size - image_size,
+                _ => 0.0,
+            }
+        }
+        _ => 0.0,
+    }
 }
 
 fn background_size(style: &ComputedStyle, area: Rect, image_w: f32, image_h: f32) -> (f32, f32) {
@@ -1669,7 +1699,7 @@ fn paint_background_image(
                 let tile_w = tile_w.max(1.0);
                 let tile_h = tile_h.max(1.0);
                 let repeat = background_repeat(style);
-                let (position_x, position_y) = background_position(style);
+                let (position_x, position_y) = background_position(style, area.width, area.height, tile_w, tile_h);
                 let fixed = background_attachment_fixed(style);
                 let anchor_x = if fixed { viewport.x + position_x } else { area.x + position_x };
                 let anchor_y = if fixed { viewport.y + position_y } else { area.y + position_y };
@@ -1742,7 +1772,7 @@ fn paint_background_image(
     let x_end = area.x + area.width;
     let y_end = area.y + area.height;
     let repeat = background_repeat(style);
-    let (position_x, position_y) = background_position(style);
+    let (position_x, position_y) = background_position(style, area.width, area.height, tile_width, tile_height);
     let fixed = background_attachment_fixed(style);
     let anchor_x = if fixed {
         viewport.x + position_x
