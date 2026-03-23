@@ -1079,6 +1079,7 @@ fn cdp_node_type(node: &NodeHandle) -> u8 {
         NodeType::Comment => 8,
         NodeType::Document => 9,
         NodeType::DocumentType => 10,
+        NodeType::DocumentFragment => 11,
     }
 }
 
@@ -1110,6 +1111,12 @@ fn serialize_outer_html(node: &NodeHandle) -> String {
         NodeType::Text => escape_html(&node.data().unwrap_or_default()),
         NodeType::Comment => format!("<!--{}-->", node.data().unwrap_or_default()),
         NodeType::DocumentType => format!("<!DOCTYPE {}>", node.data().unwrap_or_default()),
+        NodeType::DocumentFragment => node
+            .child_nodes()
+            .iter()
+            .map(serialize_outer_html)
+            .collect::<Vec<_>>()
+            .join(""),
     }
 }
 

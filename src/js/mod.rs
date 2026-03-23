@@ -14,322 +14,8 @@ thread_local! {
     static ACTIVE_HOST_STATE: RefCell<Option<Rc<RefCell<HostState>>>> = const { RefCell::new(None) };
 }
 
-const DOM_BOOTSTRAP: &str = r#"
-(() => {
-  const cache = new Map();
+const DOM_BOOTSTRAP: &str = include_str!("dom_bootstrap.js");
 
-  function wrapNode(id) {
-    if (id === null || id === undefined) {
-      return null;
-    }
-    if (cache.has(id)) {
-      return cache.get(id);
-    }
-    const node = id === __omoikane_document_id ? new Document(id) : new Node(id);
-    cache.set(id, node);
-    return node;
-  }
-
-  function invokeListeners(node, event, capture, phase) {
-    const listeners = node.__listeners.get(event.type) || [];
-    for (const entry of listeners) {
-      if (!!entry.capture === capture) {
-        event.currentTarget = node;
-        event.eventPhase = phase;
-        entry.listener.call(node, event);
-        if (event.__stopped) {
-          return true;
-        }
-      }
-    }
-    return false;
-  }
-
-  class Event {
-    constructor(type, init = {}) {
-      this.type = String(type);
-      this.bubbles = init.bubbles ?? true;
-      this.cancelable = init.cancelable ?? false;
-      this.target = null;
-      this.currentTarget = null;
-      this.eventPhase = 0;
-      this.__stopped = false;
-    }
-
-    stopPropagation() {
-      this.__stopped = true;
-    }
-  }
-
-  class Node {
-    constructor(id) {
-      this.__id = id;
-      this.__listeners = new Map();
-    }
-
-    appendChild(child) {
-      __omoikane_append_child(this.__id, child.__id);
-      return child;
-    }
-
-    querySelector(selector) {
-      const id = __omoikane_query_selector(this.__id, String(selector));
-      return wrapNode(id);
-    }
-
-    addEventListener(type, listener, options = false) {
-      const capture = typeof options === "boolean" ? options : !!options.capture;
-      const key = String(type);
-      const list = this.__listeners.get(key) ?? [];
-      // Deduplicate: same listener+capture is only registered once (DOM spec).
-      if (!list.some(entry => entry.listener === listener && !!entry.capture === capture)) {
-        list.push({ listener, capture });
-      }
-      this.__listeners.set(key, list);
-    }
-
-    removeEventListener(type, listener, options = false) {
-      const capture = typeof options === "boolean" ? options : !!options.capture;
-      const key = String(type);
-      const list = this.__listeners.get(key);
-      if (!list) return;
-      const index = list.findIndex(entry => entry.listener === listener && !!entry.capture === capture);
-      if (index !== -1) list.splice(index, 1);
-    }
-
-    dispatchEvent(event) {
-      const dispatchEvent = event instanceof Event ? event : new Event(event);
-      dispatchEvent.target = this;
-
-      const path = [];
-      let current = this;
-      while (current) {
-        path.push(current);
-        current = current.parentNode;
-      }
-
-      for (let i = path.length - 1; i >= 1; i -= 1) {
-        if (invokeListeners(path[i], dispatchEvent, true, 1)) {
-          return false;
-        }
-      }
-
-      if (invokeListeners(this, dispatchEvent, true, 2)) {
-        return false;
-      }
-      if (invokeListeners(this, dispatchEvent, false, 2)) {
-        return false;
-      }
-
-      if (dispatchEvent.bubbles) {
-        for (let i = 1; i < path.length; i += 1) {
-          if (invokeListeners(path[i], dispatchEvent, false, 3)) {
-            return false;
-          }
-        }
-      }
-
-      return true;
-    }
-
-    get parentNode() {
-      return wrapNode(__omoikane_parent_node(this.__id));
-    }
-
-    get nodeName() {
-      return __omoikane_node_name(this.__id);
-    }
-
-    get id() {
-      return __omoikane_get_attribute(this.__id, "id");
-    }
-
-    set id(value) {
-      __omoikane_set_attribute(this.__id, "id", String(value));
-    }
-
-    getAttribute(name) {
-      return __omoikane_get_attribute(this.__id, String(name));
-    }
-
-    setAttribute(name, value) {
-      __omoikane_set_attribute(this.__id, String(name), String(value));
-    }
-
-    get className() {
-      return __omoikane_get_attribute(this.__id, "class") || "";
-    }
-
-    set className(value) {
-      __omoikane_set_attribute(this.__id, "class", String(value));
-    }
-
-    get classList() {
-      const node = this;
-      return {
-        add(...classes) {
-          const current = new Set((node.className || "").split(/\s+/).filter(Boolean));
-          for (const cls of classes) current.add(cls);
-          node.className = [...current].join(" ");
-        },
-        remove(...classes) {
-          const current = new Set((node.className || "").split(/\s+/).filter(Boolean));
-          for (const cls of classes) current.delete(cls);
-          node.className = [...current].join(" ");
-        },
-        toggle(cls, force) {
-          const current = new Set((node.className || "").split(/\s+/).filter(Boolean));
-          const has = current.has(cls);
-          if (force === undefined) {
-            has ? current.delete(cls) : current.add(cls);
-          } else if (force) {
-            current.add(cls);
-          } else {
-            current.delete(cls);
-          }
-          node.className = [...current].join(" ");
-          return current.has(cls);
-        },
-        contains(cls) {
-          return (node.className || "").split(/\s+/).filter(Boolean).includes(cls);
-        },
-        get length() {
-          return (node.className || "").split(/\s+/).filter(Boolean).length;
-        },
-        item(index) {
-          return (node.className || "").split(/\s+/).filter(Boolean)[index] || null;
-        },
-      };
-    }
-
-    get style() {
-      const node = this;
-      return new Proxy({}, {
-        get(target, prop) {
-          if (typeof prop !== "string") return undefined;
-          const kebab = prop.replace(/[A-Z]/g, m => "-" + m.toLowerCase());
-          const styleAttr = __omoikane_get_attribute(node.__id, "style") || "";
-          const escaped = kebab.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-          const match = styleAttr.match(new RegExp("(?:^|;\\s*)" + escaped + "\\s*:\\s*([^;]+)"));
-          return match ? match[1].trim() : "";
-        },
-        set(target, prop, value) {
-          if (typeof prop !== "string") return true;
-          const kebab = prop.replace(/[A-Z]/g, m => "-" + m.toLowerCase());
-          const shouldRemove = value === null || value === undefined || value === "";
-          const strValue = shouldRemove ? "" : String(value);
-          let styleAttr = __omoikane_get_attribute(node.__id, "style") || "";
-          const escaped = kebab.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-          const regex = new RegExp("(^|;\\s*)" + escaped + "\\s*:[^;]+(;|$)");
-          if (regex.test(styleAttr)) {
-            if (shouldRemove) {
-              styleAttr = styleAttr.replace(regex, "$1");
-            } else {
-              styleAttr = styleAttr.replace(regex, (m, pre) => pre + kebab + ": " + strValue + ";");
-            }
-          } else if (!shouldRemove) {
-            styleAttr = (styleAttr ? styleAttr.replace(/;?\s*$/, "; ") : "") + kebab + ": " + strValue + ";";
-          }
-          styleAttr = styleAttr.replace(/^[;\s]+/, "").replace(/[;\s]+$/, "").replace(/;\s*;+/g, ";");
-          __omoikane_set_attribute(node.__id, "style", styleAttr.trim());
-          return true;
-        },
-      });
-    }
-  }
-
-  class Document extends Node {
-    getElementById(id) {
-      return wrapNode(__omoikane_get_element_by_id(String(id)));
-    }
-
-    createElement(tag) {
-      return wrapNode(__omoikane_create_element(String(tag)));
-    }
-  }
-
-  globalThis.Node = Node;
-  globalThis.Document = Document;
-  globalThis.Event = Event;
-  globalThis.document = wrapNode(__omoikane_document_id);
-  globalThis.window = globalThis;
-  globalThis.location = { href: __omoikane_location_href };
-  globalThis.navigator = { userAgent: __omoikane_navigator_user_agent };
-  globalThis.console = {
-    log: (...args) => __omoikane_console_log(...args),
-  };
-  globalThis.fetch = function(url) {
-    return Promise.resolve(__omoikane_fetch(String(url))).then(raw => {
-      const data = JSON.parse(String(raw));
-      return {
-        status: data.status,
-        ok: data.ok,
-        url: data.url,
-        text() {
-          return Promise.resolve(data.bodyText);
-        },
-      };
-    });
-  };
-
-  // IntersectionObserver polyfill for headless rendering.
-  // All elements are assumed to be within the viewport, so observe()
-  // immediately invokes the callback with isIntersecting: true.
-  const emptyRect = Object.freeze({ x: 0, y: 0, width: 0, height: 0, top: 0, left: 0, bottom: 0, right: 0 });
-
-  class IntersectionObserverEntry {
-    constructor(target) {
-      this.target = target;
-      this.isIntersecting = true;
-      this.intersectionRatio = 1.0;
-      this.boundingClientRect = emptyRect;
-      this.intersectionRect = emptyRect;
-      this.rootBounds = null;
-      this.time = Date.now();
-    }
-  }
-
-  if (!globalThis.IntersectionObserverEntry) {
-    globalThis.IntersectionObserverEntry = IntersectionObserverEntry;
-  }
-
-  if (!globalThis.IntersectionObserver) {
-    globalThis.IntersectionObserver = class IntersectionObserver {
-    constructor(callback, options = {}) {
-      if (typeof callback !== "function") {
-        throw new TypeError("IntersectionObserver constructor: callback must be a function");
-      }
-      this._callback = callback;
-      this._options = options;
-      this._targets = new Set();
-    }
-
-    observe(target) {
-      if (this._targets.has(target)) return;
-      this._targets.add(target);
-      // Schedule callback asynchronously (microtask) to match real browser behavior.
-      // Re-check that target is still observed when microtask runs.
-      Promise.resolve().then(() => {
-        if (!this._targets.has(target)) return;
-        this._callback([new IntersectionObserverEntry(target)], this);
-      });
-    }
-
-    unobserve(target) {
-      this._targets.delete(target);
-    }
-
-    disconnect() {
-      this._targets.clear();
-    }
-
-    takeRecords() {
-      return [];
-    }
-  };
-  } // end if (!globalThis.IntersectionObserver)
-})();
-"#;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct TimerTask {
@@ -848,6 +534,81 @@ fn register_host_bindings(
             1,
             NativeFunction::from_copy_closure(fetch_native),
         ),
+        (
+            js_string!("__omoikane_get_text_content"),
+            1,
+            NativeFunction::from_copy_closure(get_text_content_native),
+        ),
+        (
+            js_string!("__omoikane_set_text_content"),
+            2,
+            NativeFunction::from_copy_closure(set_text_content_native),
+        ),
+        (
+            js_string!("__omoikane_get_inner_html"),
+            1,
+            NativeFunction::from_copy_closure(get_inner_html_native),
+        ),
+        (
+            js_string!("__omoikane_set_inner_html"),
+            2,
+            NativeFunction::from_copy_closure(set_inner_html_native),
+        ),
+        (
+            js_string!("__omoikane_child_node_ids"),
+            1,
+            NativeFunction::from_copy_closure(child_node_ids_native),
+        ),
+        (
+            js_string!("__omoikane_next_sibling"),
+            1,
+            NativeFunction::from_copy_closure(next_sibling_native),
+        ),
+        (
+            js_string!("__omoikane_previous_sibling"),
+            1,
+            NativeFunction::from_copy_closure(previous_sibling_native),
+        ),
+        (
+            js_string!("__omoikane_remove_child"),
+            2,
+            NativeFunction::from_copy_closure(remove_child_native),
+        ),
+        (
+            js_string!("__omoikane_insert_before"),
+            3,
+            NativeFunction::from_copy_closure(insert_before_native),
+        ),
+        (
+            js_string!("__omoikane_query_selector_all"),
+            2,
+            NativeFunction::from_copy_closure(query_selector_all_native),
+        ),
+        (
+            js_string!("__omoikane_node_type"),
+            1,
+            NativeFunction::from_copy_closure(node_type_native),
+        ),
+        (
+            js_string!("__omoikane_clone_node"),
+            2,
+            NativeFunction::from_copy_closure(clone_node_native),
+        ),
+        (
+            js_string!("__omoikane_remove_attribute"),
+            2,
+            NativeFunction::from_copy_closure(remove_attribute_native),
+        ),
+        (
+            js_string!("__omoikane_create_text_node"),
+            1,
+            NativeFunction::from_copy_closure(create_text_node_native),
+        ),
+        (
+            js_string!("__omoikane_create_document_fragment"),
+            0,
+            NativeFunction::from_copy_closure(create_document_fragment_native),
+        ),
     ] {
         context.register_global_builtin_callable(name, length, function)?;
     }
@@ -1120,6 +881,411 @@ fn escape_json_string(value: &str) -> String {
         .replace('\n', "\\n")
         .replace('\r', "\\r")
         .replace('\t', "\\t")
+}
+
+// ── Additional DOM native bindings ──────────────────────────────────────────
+
+fn get_text_content_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let id = args.first().cloned().unwrap_or_default().to_number(context)? as usize;
+    with_host_state(|state| {
+        let state = state.borrow();
+        let node = state.get_node(id).ok_or_else(|| JsError::from(JsNativeError::error().with_message("node not found")))?;
+        match node.node_type() {
+            // DocumentType returns null per DOM spec
+            crate::dom::NodeType::DocumentType => Ok(JsValue::null()),
+            // Text and Comment return their data
+            crate::dom::NodeType::Text | crate::dom::NodeType::Comment => {
+                let data = node.data().unwrap_or_default();
+                Ok(js_string!(data.as_str()).into())
+            }
+            // Element, Document, DocumentFragment: concatenate descendant text
+            _ => {
+                let text = collect_text_recursive(&node);
+                Ok(js_string!(text.as_str()).into())
+            }
+        }
+    })
+}
+
+fn collect_text_recursive(node: &NodeHandle) -> String {
+    let mut text = String::new();
+    for child in node.child_nodes() {
+        match child.node_type() {
+            crate::dom::NodeType::Text => {
+                if let Some(data) = child.data() {
+                    text.push_str(&data);
+                }
+            }
+            crate::dom::NodeType::Comment | crate::dom::NodeType::DocumentType => {}
+            _ => {
+                text.push_str(&collect_text_recursive(&child));
+            }
+        }
+    }
+    text
+}
+
+fn set_text_content_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let id = args.first().cloned().unwrap_or_default().to_number(context)? as usize;
+    let text = args.get(1).cloned().unwrap_or_default().to_string(context)?.to_std_string_escaped();
+    with_host_state(|state| {
+        let state = state.borrow();
+        let node = state.get_node(id).ok_or_else(|| JsError::from(JsNativeError::error().with_message("node not found")))?;
+        // For text/comment leaf nodes, update data directly
+        if matches!(node.node_type(), crate::dom::NodeType::Text | crate::dom::NodeType::Comment) {
+            node.set_data(&text);
+        } else {
+            // Remove all children
+            for child in node.child_nodes() {
+                let _ = node.remove_child(&child);
+            }
+            // Add single text node
+            if !text.is_empty() {
+                let text_node = NodeHandle::text(&text);
+                node.append_child(text_node);
+            }
+        }
+        Ok(JsValue::undefined())
+    })
+}
+
+fn get_inner_html_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let id = args.first().cloned().unwrap_or_default().to_number(context)? as usize;
+    with_host_state(|state| {
+        let state = state.borrow();
+        let node = state.get_node(id).ok_or_else(|| JsError::from(JsNativeError::error().with_message("node not found")))?;
+        let html = serialize_inner_html(&node);
+        Ok(js_string!(html.as_str()).into())
+    })
+}
+
+fn escape_html_text(s: &str) -> String {
+    s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
+}
+
+fn escape_html_attr(s: &str) -> String {
+    s.replace('&', "&amp;").replace('"', "&quot;").replace('<', "&lt;").replace('>', "&gt;")
+}
+
+fn serialize_inner_html(node: &NodeHandle) -> String {
+    let mut html = String::new();
+    for child in node.child_nodes() {
+        serialize_node(&child, &mut html);
+    }
+    html
+}
+
+fn serialize_node(node: &NodeHandle, html: &mut String) {
+    match node.node_type() {
+        crate::dom::NodeType::Text => {
+            if let Some(data) = node.data() {
+                html.push_str(&escape_html_text(&data));
+            }
+        }
+        crate::dom::NodeType::Comment => {
+            if let Some(data) = node.data() {
+                html.push_str("<!--");
+                html.push_str(&data);
+                html.push_str("-->");
+            }
+        }
+        crate::dom::NodeType::DocumentType => {
+            if let Some(name) = node.data() {
+                html.push_str("<!DOCTYPE ");
+                html.push_str(&name);
+                html.push('>');
+            }
+        }
+        crate::dom::NodeType::Element => {
+            if let Some(tag) = node.tag_name() {
+                html.push('<');
+                html.push_str(&tag);
+                if let Some(attrs) = node.attributes() {
+                    for (name, value) in &attrs {
+                        html.push(' ');
+                        html.push_str(name);
+                        html.push_str("=\"");
+                        html.push_str(&escape_html_attr(value));
+                        html.push('"');
+                    }
+                }
+                html.push('>');
+                html.push_str(&serialize_inner_html(node));
+                html.push_str("</");
+                html.push_str(&tag);
+                html.push('>');
+            }
+        }
+        _ => {
+            // Document/DocumentFragment: serialize children
+            html.push_str(&serialize_inner_html(node));
+        }
+    }
+}
+
+fn set_inner_html_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let id = args.first().cloned().unwrap_or_default().to_number(context)? as usize;
+    let html = args.get(1).cloned().unwrap_or_default().to_string(context)?.to_std_string_escaped();
+    with_host_state(|state| {
+        let state = state.borrow();
+        let node = state.get_node(id).ok_or_else(|| JsError::from(JsNativeError::error().with_message("node not found")))?;
+        for child in node.child_nodes() {
+            let _ = node.remove_child(&child);
+        }
+        if !html.is_empty() {
+            // Parse as fragment: wrap in body context and extract children
+            let parsed = crate::html::TreeBuilder::parse(&format!("<body>{html}</body>")).document();
+            let body = parsed.query_selector("body");
+            let source = body.as_ref().map(|b| b.child_nodes()).unwrap_or_default();
+            for child in source {
+                node.append_child(child);
+            }
+        }
+        Ok(JsValue::undefined())
+    })
+}
+
+fn child_node_ids_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let id = args.first().cloned().unwrap_or_default().to_number(context)? as usize;
+    with_host_state(|state| {
+        let children = {
+            let s = state.borrow();
+            let node = s.get_node(id).ok_or_else(|| JsError::from(JsNativeError::error().with_message("node not found")))?;
+            node.child_nodes()
+        };
+        {
+            let mut s = state.borrow_mut();
+            for child in &children {
+                s.register_tree(child);
+            }
+        }
+        let ids: Vec<JsValue> = children.iter().map(|c| JsValue::from(c.identity() as f64)).collect();
+        Ok(boa_engine::JsValue::from(boa_engine::object::builtins::JsArray::from_iter(ids, context)))
+    })
+}
+
+fn next_sibling_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let id = args.first().cloned().unwrap_or_default().to_number(context)? as usize;
+    with_host_state(|state| {
+        let state = state.borrow();
+        let node = state.get_node(id).ok_or_else(|| JsError::from(JsNativeError::error().with_message("node not found")))?;
+        let parent = match node.parent_node() {
+            Some(p) => p,
+            None => return Ok(JsValue::null()),
+        };
+        let siblings = parent.child_nodes();
+        let mut found = false;
+        for sibling in &siblings {
+            if found {
+                return Ok(JsValue::from(sibling.identity() as f64));
+            }
+            if sibling.identity() == id {
+                found = true;
+            }
+        }
+        Ok(JsValue::null())
+    })
+}
+
+fn previous_sibling_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let id = args.first().cloned().unwrap_or_default().to_number(context)? as usize;
+    with_host_state(|state| {
+        let state = state.borrow();
+        let node = state.get_node(id).ok_or_else(|| JsError::from(JsNativeError::error().with_message("node not found")))?;
+        let parent = match node.parent_node() {
+            Some(p) => p,
+            None => return Ok(JsValue::null()),
+        };
+        let siblings = parent.child_nodes();
+        let mut prev: Option<&NodeHandle> = None;
+        for sibling in &siblings {
+            if sibling.identity() == id {
+                return Ok(prev.map(|p| JsValue::from(p.identity() as f64)).unwrap_or(JsValue::null()));
+            }
+            prev = Some(sibling);
+        }
+        Ok(JsValue::null())
+    })
+}
+
+fn remove_child_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let parent_id = args.first().cloned().unwrap_or_default().to_number(context)? as usize;
+    let child_id = args.get(1).cloned().unwrap_or_default().to_number(context)? as usize;
+    with_host_state(|state| {
+        let state = state.borrow();
+        let parent = state.get_node(parent_id).ok_or_else(|| JsError::from(JsNativeError::error().with_message("parent not found")))?;
+        let child = state.get_node(child_id).ok_or_else(|| JsError::from(JsNativeError::error().with_message("child not found")))?;
+        parent.remove_child(&child).map_err(|e| JsError::from(JsNativeError::error().with_message(e.to_string())))?;
+        Ok(JsValue::undefined())
+    })
+}
+
+fn insert_before_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let parent_id = args.first().cloned().unwrap_or_default().to_number(context)? as usize;
+    let new_id = args.get(1).cloned().unwrap_or_default().to_number(context)? as usize;
+    let ref_value = args.get(2).cloned().unwrap_or_default();
+    with_host_state(|state| {
+        let state = state.borrow();
+        let parent = state.get_node(parent_id).ok_or_else(|| JsError::from(JsNativeError::error().with_message("parent not found")))?;
+        let new_node = state.get_node(new_id).ok_or_else(|| JsError::from(JsNativeError::error().with_message("new node not found")))?;
+        if ref_value.is_null() || ref_value.is_undefined() {
+            parent.append_child(new_node);
+        } else {
+            let ref_id = ref_value.to_number(context)? as usize;
+            let ref_node = state.get_node(ref_id);
+            if let Some(ref_node) = ref_node {
+                let _ = parent.insert_before(new_node.clone(), &ref_node);
+            } else {
+                parent.append_child(new_node);
+            }
+        }
+        Ok(JsValue::undefined())
+    })
+}
+
+fn query_selector_all_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let parent_id = args.first().cloned().unwrap_or_default().to_number(context)? as usize;
+    let selector = args.get(1).cloned().unwrap_or_default().to_string(context)?.to_std_string_escaped();
+    with_host_state(|state| {
+        let results = {
+            let s = state.borrow();
+            let parent = s.get_node(parent_id).ok_or_else(|| JsError::from(JsNativeError::error().with_message("node not found")))?;
+            query_selector_all_recursive(&parent, &selector)
+        };
+        {
+            let mut s = state.borrow_mut();
+            for node in &results {
+                s.register_tree(node);
+            }
+        }
+        let ids: Vec<JsValue> = results.iter().map(|n| JsValue::from(n.identity() as f64)).collect();
+        Ok(boa_engine::JsValue::from(boa_engine::object::builtins::JsArray::from_iter(ids, context)))
+    })
+}
+
+/// Simple querySelectorAll: supports tag name, .class, #id selectors.
+fn query_selector_all_recursive(node: &NodeHandle, selector: &str) -> Vec<NodeHandle> {
+    let mut results = Vec::new();
+    let selector = selector.trim();
+    for child in node.child_nodes() {
+        if matches_simple_selector(&child, selector) {
+            results.push(child.clone());
+        }
+        results.extend(query_selector_all_recursive(&child, selector));
+    }
+    results
+}
+
+fn matches_simple_selector(node: &NodeHandle, selector: &str) -> bool {
+    if node.node_type() != crate::dom::NodeType::Element {
+        return false;
+    }
+    if let Some(cls) = selector.strip_prefix('.') {
+        let class_attr = node.attributes().and_then(|a| a.get("class").cloned()).unwrap_or_default();
+        return class_attr.split_whitespace().any(|c| c == cls);
+    }
+    if let Some(id) = selector.strip_prefix('#') {
+        let id_attr = node.attributes().and_then(|a| a.get("id").cloned()).unwrap_or_default();
+        return id_attr == id;
+    }
+    match node.tag_name() {
+        Some(tag) => tag.eq_ignore_ascii_case(selector),
+        None => false,
+    }
+}
+
+fn node_type_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let id = args.first().cloned().unwrap_or_default().to_number(context)? as usize;
+    with_host_state(|state| {
+        let state = state.borrow();
+        let node = state.get_node(id).ok_or_else(|| JsError::from(JsNativeError::error().with_message("node not found")))?;
+        let node_type = match node.node_type() {
+            crate::dom::NodeType::Element => 1,
+            crate::dom::NodeType::Text => 3,
+            crate::dom::NodeType::Comment => 8,
+            crate::dom::NodeType::Document => 9,
+            crate::dom::NodeType::DocumentType => 10,
+            crate::dom::NodeType::DocumentFragment => 11,
+        };
+        Ok(JsValue::from(node_type))
+    })
+}
+
+fn clone_node_impl(node: &NodeHandle, deep: bool) -> NodeHandle {
+    let clone = match node.node_type() {
+        crate::dom::NodeType::Element => {
+            let tag = node.tag_name().unwrap_or_default();
+            let el = NodeHandle::element(&tag);
+            if let Some(attrs) = node.attributes() {
+                for (name, value) in &attrs {
+                    el.set_attribute(name, value);
+                }
+            }
+            el
+        }
+        crate::dom::NodeType::Text => {
+            NodeHandle::text(&node.data().unwrap_or_default())
+        }
+        crate::dom::NodeType::Comment => {
+            NodeHandle::comment(&node.data().unwrap_or_default())
+        }
+        crate::dom::NodeType::Document => NodeHandle::document(),
+        crate::dom::NodeType::DocumentFragment => NodeHandle::document_fragment(),
+        crate::dom::NodeType::DocumentType => {
+            NodeHandle::document_type(&node.data().unwrap_or_default())
+        }
+    };
+    if deep {
+        for child in node.child_nodes() {
+            clone.append_child(clone_node_impl(&child, true));
+        }
+    }
+    clone
+}
+
+fn clone_node_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let id = args.first().cloned().unwrap_or_default().to_number(context)? as usize;
+    let deep = args.get(1).cloned().unwrap_or_default().to_boolean();
+    with_host_state(|state| {
+        let clone = {
+            let s = state.borrow();
+            let node = s.get_node(id).ok_or_else(|| JsError::from(JsNativeError::error().with_message("node not found")))?;
+            clone_node_impl(&node, deep)
+        };
+        let clone_id = clone.identity() as f64;
+        state.borrow_mut().register_tree(&clone);
+        Ok(JsValue::from(clone_id))
+    })
+}
+
+fn remove_attribute_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let id = args.first().cloned().unwrap_or_default().to_number(context)? as usize;
+    let name = args.get(1).cloned().unwrap_or_default().to_string(context)?.to_std_string_escaped();
+    with_host_state(|state| {
+        let state = state.borrow();
+        let node = state.get_node(id).ok_or_else(|| JsError::from(JsNativeError::error().with_message("node not found")))?;
+        node.remove_attribute(&name);
+        Ok(JsValue::undefined())
+    })
+}
+
+fn create_text_node_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let text = args.first().cloned().unwrap_or_default().to_string(context)?.to_std_string_escaped();
+    let node = NodeHandle::text(&text);
+    let id = node.identity() as f64;
+    with_host_state(|state| {
+        state.borrow_mut().nodes.insert(node.identity(), node);
+        Ok(JsValue::from(id))
+    })
+}
+
+fn create_document_fragment_native(_: &JsValue, _args: &[JsValue], _context: &mut Context) -> JsResult<JsValue> {
+    let node = NodeHandle::document_fragment();
+    let id = node.identity() as f64;
+    with_host_state(|state| {
+        state.borrow_mut().nodes.insert(node.identity(), node);
+        Ok(JsValue::from(id))
+    })
 }
 
 #[cfg(test)]
@@ -1844,5 +2010,329 @@ mod tests {
         // Verify the DOM attribute
         let class_attr = div.attributes().unwrap().get("class").cloned().unwrap_or_default();
         assert!(class_attr.contains("on"), "DOM class attr should contain 'on': {class_attr}");
+    }
+
+    #[test]
+    fn text_content_getter_and_setter() {
+        let doc = NodeHandle::document();
+        let div = NodeHandle::element("div");
+        let text = NodeHandle::text("Hello world");
+        div.append_child(text);
+        doc.append_child(div.clone());
+
+        let mut runtime = JsRuntime::with_document(doc).unwrap();
+        let result = runtime.eval("document.querySelector('div').textContent")
+            .unwrap().as_string().unwrap().to_std_string_escaped();
+        assert_eq!(result, "Hello world");
+
+        runtime.eval("document.querySelector('div').textContent = 'Changed'").unwrap();
+        let result = runtime.eval("document.querySelector('div').textContent")
+            .unwrap().as_string().unwrap().to_std_string_escaped();
+        assert_eq!(result, "Changed");
+    }
+
+    #[test]
+    fn child_nodes_returns_array() {
+        let doc = NodeHandle::document();
+        let div = NodeHandle::element("div");
+        let span1 = NodeHandle::element("span");
+        let span2 = NodeHandle::element("span");
+        div.append_child(span1);
+        div.append_child(span2);
+        doc.append_child(div.clone());
+
+        let mut runtime = JsRuntime::with_document(doc).unwrap();
+        let len = runtime.eval("document.querySelector('div').childNodes.length")
+            .unwrap().to_number(&mut runtime.context).unwrap();
+        assert_eq!(len, 2.0);
+    }
+
+    #[test]
+    fn document_body_and_create_text_node() {
+        use crate::html::TreeBuilder;
+        let html = "<html><body></body></html>";
+        let doc = TreeBuilder::parse(html).document();
+
+        let mut runtime = JsRuntime::with_document(doc).unwrap();
+        let has_body = runtime.eval("document.body !== null")
+            .unwrap().as_boolean().unwrap();
+        assert!(has_body, "document.body should not be null");
+
+        runtime.eval(r#"
+            const t = document.createTextNode("Hello");
+            document.body.appendChild(t);
+        "#).unwrap();
+
+        let result = runtime.eval("document.body.textContent")
+            .unwrap().as_string().unwrap().to_std_string_escaped();
+        assert_eq!(result, "Hello");
+    }
+
+    #[test]
+    fn query_selector_all_returns_multiple() {
+        let doc = NodeHandle::document();
+        let div = NodeHandle::element("div");
+        let s1 = NodeHandle::element("span");
+        let s2 = NodeHandle::element("span");
+        let p = NodeHandle::element("p");
+        div.append_child(s1);
+        div.append_child(p);
+        div.append_child(s2);
+        doc.append_child(div.clone());
+
+        let mut runtime = JsRuntime::with_document(doc).unwrap();
+        let len = runtime.eval("document.querySelectorAll('span').length")
+            .unwrap().to_number(&mut runtime.context).unwrap();
+        assert_eq!(len, 2.0);
+    }
+
+    #[test]
+    fn node_type_returns_correct_values() {
+        use crate::html::TreeBuilder;
+        let html = "<html><body><div>text</div></body></html>";
+        let doc = TreeBuilder::parse(html).document();
+
+        let mut runtime = JsRuntime::with_document(doc).unwrap();
+        let div_type = runtime.eval("document.querySelector('div').nodeType")
+            .unwrap().to_number(&mut runtime.context).unwrap();
+        assert_eq!(div_type, 1.0, "element nodeType should be 1");
+
+        let doc_type = runtime.eval("document.nodeType")
+            .unwrap().to_number(&mut runtime.context).unwrap();
+        assert_eq!(doc_type, 9.0, "document nodeType should be 9");
+    }
+
+    #[test]
+    fn clone_node_shallow_and_deep() {
+        let doc = NodeHandle::document();
+        let div = NodeHandle::element("div");
+        div.set_attribute("class", "original");
+        let span = NodeHandle::element("span");
+        div.append_child(span);
+        doc.append_child(div.clone());
+
+        let mut runtime = JsRuntime::with_document(doc).unwrap();
+
+        // Shallow clone should copy attributes but not children
+        let shallow_children = runtime.eval(r#"
+            const el = document.querySelector('div');
+            const shallow = el.cloneNode(false);
+            shallow.childNodes.length;
+        "#).unwrap().to_number(&mut runtime.context).unwrap();
+        assert_eq!(shallow_children, 0.0, "shallow clone should have no children");
+
+        let shallow_class = runtime.eval("shallow.className")
+            .unwrap().as_string().unwrap().to_std_string_escaped();
+        assert_eq!(shallow_class, "original", "shallow clone should preserve attributes");
+
+        // Deep clone should copy children too
+        let deep_children = runtime.eval(r#"
+            const deep = el.cloneNode(true);
+            deep.childNodes.length;
+        "#).unwrap().to_number(&mut runtime.context).unwrap();
+        assert_eq!(deep_children, 1.0, "deep clone should have children");
+    }
+
+    #[test]
+    fn remove_attribute_removes_from_dom() {
+        let doc = NodeHandle::document();
+        let div = NodeHandle::element("div");
+        div.set_attribute("data-value", "42");
+        doc.append_child(div.clone());
+
+        let mut runtime = JsRuntime::with_document(doc).unwrap();
+
+        let has = runtime.eval("document.querySelector('div').hasAttribute('data-value')")
+            .unwrap().as_boolean().unwrap();
+        assert!(has, "attribute should exist before removal");
+
+        runtime.eval("document.querySelector('div').removeAttribute('data-value')").unwrap();
+
+        let has = runtime.eval("document.querySelector('div').hasAttribute('data-value')")
+            .unwrap().as_boolean().unwrap();
+        assert!(!has, "attribute should be removed");
+    }
+
+    #[test]
+    fn create_document_fragment_has_correct_node_type() {
+        let doc = NodeHandle::document();
+        let mut runtime = JsRuntime::with_document(doc).unwrap();
+
+        let node_type = runtime.eval("document.createDocumentFragment().nodeType")
+            .unwrap().to_number(&mut runtime.context).unwrap();
+        assert_eq!(node_type, 11.0, "DocumentFragment nodeType should be 11");
+    }
+
+    #[test]
+    fn document_fragment_can_hold_children() {
+        use crate::html::TreeBuilder;
+        let html = "<html><body><div id='target'></div></body></html>";
+        let doc = TreeBuilder::parse(html).document();
+
+        let mut runtime = JsRuntime::with_document(doc).unwrap();
+        runtime.eval(r#"
+            const frag = document.createDocumentFragment();
+            frag.appendChild(document.createElement('p'));
+            frag.appendChild(document.createElement('span'));
+            document.getElementById('target').appendChild(frag);
+        "#).unwrap();
+
+        let children = runtime.eval("document.getElementById('target').childNodes.length")
+            .unwrap().to_number(&mut runtime.context).unwrap();
+        // Fragment itself is appended (not its children individually) since we don't have
+        // special fragment append semantics yet, but the fragment node holds the children.
+        assert!(children > 0.0, "target should have children after appending fragment");
+    }
+
+    #[test]
+    fn inner_html_round_trip() {
+        use crate::html::TreeBuilder;
+        let html = "<html><body><div id='box'><span class=\"a\">Hello</span></div></body></html>";
+        let doc = TreeBuilder::parse(html).document();
+
+        let mut runtime = JsRuntime::with_document(doc).unwrap();
+        let inner = runtime.eval("document.getElementById('box').innerHTML")
+            .unwrap().as_string().unwrap().to_std_string_escaped();
+        assert!(inner.contains("<span"), "innerHTML should contain span tag");
+        assert!(inner.contains("Hello"), "innerHTML should contain text");
+
+        // Set and re-read
+        runtime.eval(r#"document.getElementById('box').innerHTML = '<b>Bold</b>'"#).unwrap();
+        let inner = runtime.eval("document.getElementById('box').innerHTML")
+            .unwrap().as_string().unwrap().to_std_string_escaped();
+        assert!(inner.contains("<b>"), "innerHTML should contain b tag after set");
+        assert!(inner.contains("Bold"), "innerHTML should contain text after set");
+    }
+
+    #[test]
+    fn inner_html_escapes_text() {
+        let doc = NodeHandle::document();
+        let div = NodeHandle::element("div");
+        let text = NodeHandle::text("<script>alert(1)</script>");
+        div.append_child(text);
+        doc.append_child(div.clone());
+
+        let mut runtime = JsRuntime::with_document(doc).unwrap();
+        let inner = runtime.eval("document.querySelector('div').innerHTML")
+            .unwrap().as_string().unwrap().to_std_string_escaped();
+        assert!(inner.contains("&lt;script&gt;"), "innerHTML should escape angle brackets in text: {inner}");
+        assert!(!inner.contains("<script>"), "innerHTML should not contain raw script tag");
+    }
+
+    #[test]
+    fn text_content_null_sets_empty() {
+        let doc = NodeHandle::document();
+        let div = NodeHandle::element("div");
+        let text = NodeHandle::text("Hello");
+        div.append_child(text);
+        doc.append_child(div.clone());
+
+        let mut runtime = JsRuntime::with_document(doc).unwrap();
+        runtime.eval("document.querySelector('div').textContent = null").unwrap();
+        let result = runtime.eval("document.querySelector('div').textContent")
+            .unwrap().as_string().unwrap().to_std_string_escaped();
+        assert_eq!(result, "", "textContent = null should produce empty string");
+    }
+
+    #[test]
+    fn inner_html_null_sets_empty() {
+        let doc = NodeHandle::document();
+        let div = NodeHandle::element("div");
+        let span = NodeHandle::element("span");
+        div.append_child(span);
+        doc.append_child(div.clone());
+
+        let mut runtime = JsRuntime::with_document(doc).unwrap();
+        runtime.eval("document.querySelector('div').innerHTML = null").unwrap();
+        let result = runtime.eval("document.querySelector('div').innerHTML")
+            .unwrap().as_string().unwrap().to_std_string_escaped();
+        assert_eq!(result, "", "innerHTML = null should produce empty string");
+    }
+
+    #[test]
+    fn text_content_excludes_comments() {
+        use crate::html::TreeBuilder;
+        let html = "<html><body><div>Hello<!-- comment -->World</div></body></html>";
+        let doc = TreeBuilder::parse(html).document();
+
+        let mut runtime = JsRuntime::with_document(doc).unwrap();
+        let result = runtime.eval("document.querySelector('div').textContent")
+            .unwrap().as_string().unwrap().to_std_string_escaped();
+        assert_eq!(result, "HelloWorld", "textContent should not include comment data");
+    }
+
+    #[test]
+    fn document_fragment_appends_children_not_self() {
+        use crate::html::TreeBuilder;
+        let html = "<html><body><div id='target'></div></body></html>";
+        let doc = TreeBuilder::parse(html).document();
+
+        let mut runtime = JsRuntime::with_document(doc.clone()).unwrap();
+        runtime.eval(r#"
+            const frag = document.createDocumentFragment();
+            const p = document.createElement('p');
+            const span = document.createElement('span');
+            frag.appendChild(p);
+            frag.appendChild(span);
+            document.getElementById('target').appendChild(frag);
+        "#).unwrap();
+
+        // Fragment's children should be directly under target
+        let target = doc.query_selector("#target").unwrap();
+        let children = target.child_nodes();
+        let tags: Vec<_> = children.iter().filter_map(|c| c.tag_name()).collect();
+        assert_eq!(tags, vec!["p", "span"], "fragment children should be appended directly");
+    }
+
+    #[test]
+    fn owner_document_is_null_for_document() {
+        let doc = NodeHandle::document();
+        let mut runtime = JsRuntime::with_document(doc).unwrap();
+
+        let is_null = runtime.eval("document.ownerDocument === null")
+            .unwrap().as_boolean().unwrap();
+        assert!(is_null, "document.ownerDocument should be null");
+
+        runtime.eval("const el = document.createElement('div')").unwrap();
+        let is_doc = runtime.eval("el.ownerDocument === document")
+            .unwrap().as_boolean().unwrap();
+        assert!(is_doc, "element.ownerDocument should be document");
+    }
+
+    #[test]
+    fn tag_name_undefined_for_non_elements() {
+        let doc = NodeHandle::document();
+        let mut runtime = JsRuntime::with_document(doc).unwrap();
+
+        let is_undef = runtime.eval("document.createTextNode('x').tagName === undefined")
+            .unwrap().as_boolean().unwrap();
+        assert!(is_undef, "text node tagName should be undefined");
+
+        let tag = runtime.eval("document.createElement('div').tagName")
+            .unwrap().as_string().unwrap().to_std_string_escaped();
+        assert_eq!(tag, "DIV", "element tagName should be uppercase tag");
+    }
+
+    #[test]
+    fn comment_text_content_returns_data() {
+        use crate::html::TreeBuilder;
+        let html = "<html><body><!-- hello --></body></html>";
+        let doc = TreeBuilder::parse(html).document();
+
+        let mut runtime = JsRuntime::with_document(doc).unwrap();
+        // Comment nodes are in the body's childNodes
+        let result = runtime.eval(r#"
+            const body = document.body;
+            let commentText = null;
+            const nodes = body.childNodes;
+            for (let i = 0; i < nodes.length; i++) {
+                if (nodes[i].nodeType === 8) {
+                    commentText = nodes[i].textContent;
+                    break;
+                }
+            }
+            commentText;
+        "#).unwrap().as_string().unwrap().to_std_string_escaped();
+        assert_eq!(result.trim(), "hello", "comment textContent should return its data");
     }
 }
