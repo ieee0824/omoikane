@@ -47,6 +47,10 @@ pub(super) fn layout_flex_container(
 
     let mut items = Vec::new();
     let mut positioned_children = Vec::new();
+    let main_basis = match direction {
+        FlexDirection::Row => width,
+        FlexDirection::Column => 0.0, // Height percentage basis is unknown at this point
+    };
     for child in node.child_nodes() {
         if child.node_type() != NodeType::Element {
             continue;
@@ -59,10 +63,6 @@ pub(super) fn layout_flex_container(
             positioned_children.push((child, child_style));
             continue;
         }
-        let main_basis = match direction {
-            FlexDirection::Row => width,
-            FlexDirection::Column => 0.0, // Height percentage basis is unknown at this point
-        };
         let base_main_size = flex_basis(&child_style, direction)
             .or_else(|| resolved_main_size(&child_style, direction, main_basis))
             .unwrap_or_else(|| auto_flex_base_main_size(&child, resolver, direction));
@@ -331,7 +331,7 @@ fn explicit_main_size(style: &ComputedStyle, direction: FlexDirection) -> Option
     }
 }
 
-/// Like `explicit_main_size` but also resolves percentages and `calc(% + px)` using the
+/// Like `explicit_main_size` but also resolves percentages and `calc(% +/- px)` using the
 /// container's main axis size as basis.
 fn resolved_main_size(style: &ComputedStyle, direction: FlexDirection, basis: f32) -> Option<f32> {
     match direction {
