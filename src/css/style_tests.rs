@@ -2531,3 +2531,102 @@ fn author_css_overrides_heading_ua_margin() {
     );
     assert!(is_zero, "author CSS margin:0 should override UA margin for h1, got {:?}", margin_top);
 }
+
+#[test]
+fn ua_defaults_blockquote_has_margin() {
+    let document = NodeHandle::document();
+    let html = NodeHandle::element("html");
+    let body = NodeHandle::element("body");
+    let bq = NodeHandle::element("blockquote");
+    document.append_child(html.clone());
+    html.append_child(body.clone());
+    body.append_child(bq.clone());
+
+    let mut resolver = StyleResolver::new();
+    let style = resolver.computed_style(&bq);
+    assert_eq!(style.get("margin-left"), Some(&ComputedValue::Px(40.0)));
+}
+
+#[test]
+fn ua_defaults_pre_has_monospace_and_whitespace_pre() {
+    let document = NodeHandle::document();
+    let html = NodeHandle::element("html");
+    let body = NodeHandle::element("body");
+    let pre = NodeHandle::element("pre");
+    document.append_child(html.clone());
+    html.append_child(body.clone());
+    body.append_child(pre.clone());
+
+    let mut resolver = StyleResolver::new();
+    let style = resolver.computed_style(&pre);
+    assert_eq!(style.get("font-family"), Some(&ComputedValue::Keyword("monospace".to_string())));
+    assert_eq!(style.get("white-space"), Some(&ComputedValue::Keyword("pre".to_string())));
+}
+
+#[test]
+fn ua_defaults_th_is_bold_centered() {
+    let document = NodeHandle::document();
+    let html = NodeHandle::element("html");
+    let body = NodeHandle::element("body");
+    let table = NodeHandle::element("table");
+    let tr = NodeHandle::element("tr");
+    let th = NodeHandle::element("th");
+    document.append_child(html.clone());
+    html.append_child(body.clone());
+    body.append_child(table.clone());
+    table.append_child(tr.clone());
+    tr.append_child(th.clone());
+
+    let mut resolver = StyleResolver::new();
+    let style = resolver.computed_style(&th);
+    assert_eq!(style.get("font-weight"), Some(&ComputedValue::Keyword("bold".to_string())));
+    assert_eq!(style.get("text-align"), Some(&ComputedValue::Keyword("center".to_string())));
+}
+
+#[test]
+fn ua_defaults_a_has_underline_and_blue() {
+    let document = NodeHandle::document();
+    let html = NodeHandle::element("html");
+    let body = NodeHandle::element("body");
+    let a = NodeHandle::element("a");
+    document.append_child(html.clone());
+    html.append_child(body.clone());
+    body.append_child(a.clone());
+
+    let mut resolver = StyleResolver::new();
+    let style = resolver.computed_style(&a);
+    assert_eq!(style.get("text-decoration-line"), Some(&ComputedValue::Keyword("underline".to_string())));
+    assert_eq!(style.get("color"), Some(&ComputedValue::Color("#0000ee".to_string())));
+}
+
+#[test]
+fn ua_defaults_dd_has_margin_left() {
+    let document = NodeHandle::document();
+    let html = NodeHandle::element("html");
+    let body = NodeHandle::element("body");
+    let dl = NodeHandle::element("dl");
+    let dd = NodeHandle::element("dd");
+    document.append_child(html.clone());
+    html.append_child(body.clone());
+    body.append_child(dl.clone());
+    dl.append_child(dd.clone());
+
+    let mut resolver = StyleResolver::new();
+    let style = resolver.computed_style(&dd);
+    assert_eq!(style.get("margin-left"), Some(&ComputedValue::Px(40.0)));
+}
+
+#[test]
+fn ua_defaults_table_has_display_table() {
+    let document = NodeHandle::document();
+    let html = NodeHandle::element("html");
+    let body = NodeHandle::element("body");
+    let table = NodeHandle::element("table");
+    document.append_child(html.clone());
+    html.append_child(body.clone());
+    body.append_child(table.clone());
+
+    let mut resolver = StyleResolver::new();
+    let style = resolver.computed_style(&table);
+    assert_eq!(style.get("display"), Some(&ComputedValue::Keyword("table".to_string())));
+}

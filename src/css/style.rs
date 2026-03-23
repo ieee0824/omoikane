@@ -1548,6 +1548,61 @@ fn apply_ua_defaults(
                 .entry("display".to_string())
                 .or_insert(ComputedValue::Keyword("list-item".to_string()));
         }
+        "blockquote" => {
+            let em = parent_font_size;
+            properties.entry("margin-top".to_string()).or_insert(ComputedValue::Px(em));
+            properties.entry("margin-bottom".to_string()).or_insert(ComputedValue::Px(em));
+            properties.entry("margin-left".to_string()).or_insert(ComputedValue::Px(40.0));
+            properties.entry("margin-right".to_string()).or_insert(ComputedValue::Px(40.0));
+        }
+        "pre" => {
+            properties.entry("font-family".to_string()).or_insert(ComputedValue::Keyword("monospace".to_string()));
+            properties.entry("white-space".to_string()).or_insert(ComputedValue::Keyword("pre".to_string()));
+            let em = parent_font_size;
+            properties.entry("margin-top".to_string()).or_insert(ComputedValue::Px(em));
+            properties.entry("margin-bottom".to_string()).or_insert(ComputedValue::Px(em));
+        }
+        "code" | "kbd" | "samp" | "tt" => {
+            properties.entry("font-family".to_string()).or_insert(ComputedValue::Keyword("monospace".to_string()));
+        }
+        "dd" => {
+            properties.entry("margin-left".to_string()).or_insert(ComputedValue::Px(40.0));
+        }
+        "th" => {
+            properties.entry("font-weight".to_string()).or_insert(ComputedValue::Keyword("bold".to_string()));
+            properties.entry("text-align".to_string()).or_insert(ComputedValue::Keyword("center".to_string()));
+            properties.entry("display".to_string()).or_insert(ComputedValue::Keyword("table-cell".to_string()));
+        }
+        "td" => {
+            properties.entry("display".to_string()).or_insert(ComputedValue::Keyword("table-cell".to_string()));
+        }
+        "a" => {
+            properties.entry("text-decoration-line".to_string()).or_insert(ComputedValue::Keyword("underline".to_string()));
+            properties.entry("color".to_string()).or_insert(ComputedValue::Color("#0000ee".to_string()));
+        }
+        "sub" => {
+            properties.entry("vertical-align".to_string()).or_insert(ComputedValue::Keyword("sub".to_string()));
+            properties.entry("font-size".to_string()).or_insert(ComputedValue::Keyword("smaller".to_string()));
+        }
+        "sup" => {
+            properties.entry("vertical-align".to_string()).or_insert(ComputedValue::Keyword("super".to_string()));
+            properties.entry("font-size".to_string()).or_insert(ComputedValue::Keyword("smaller".to_string()));
+        }
+        "small" => {
+            properties.entry("font-size".to_string()).or_insert(ComputedValue::Keyword("smaller".to_string()));
+        }
+        "center" => {
+            properties.entry("text-align".to_string()).or_insert(ComputedValue::Keyword("center".to_string()));
+        }
+        "table" => {
+            properties.entry("display".to_string()).or_insert(ComputedValue::Keyword("table".to_string()));
+        }
+        "tr" => {
+            properties.entry("display".to_string()).or_insert(ComputedValue::Keyword("table-row".to_string()));
+        }
+        "thead" | "tbody" | "tfoot" => {
+            properties.entry("display".to_string()).or_insert(ComputedValue::Keyword("table-row-group".to_string()));
+        }
         _ => {}
     }
 }
