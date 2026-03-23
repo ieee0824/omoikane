@@ -1560,6 +1560,72 @@ fn auto_width_from_layout(
 
 /// Returns the outer width (content + padding + border) that `node` needs.
 /// Used by parent elements to determine how wide their content area must be.
+/// Returns true if the node or any descendant is an image element.
+#[allow(dead_code)]
+fn cell_contains_image_recursive(node: &NodeHandle) -> bool {
+    if element_inline_image(node).is_some() {
+        return true;
+    }
+    for child in node.child_nodes() {
+        if cell_contains_image_recursive(&child) {
+            return true;
+        }
+    }
+    false
+}
+
+#[allow(dead_code)]
+/// Returns the minimum content width for a node.
+/// For text, this is the width of the longest unbreakable word.
+/// For elements with explicit width, returns that width + padding/border.
+/// This is used for table column sizing where columns should shrink as much as possible.
+fn minimum_content_width(node: &NodeHandle, resolver: &mut StyleResolver) -> f32 {
+    match node.node_type() {
+        NodeType::Text => node
+            .data()
+            .map(|text| {
+                let parent_style = node
+                    .parent_node()
+                    .map(|parent| resolver.computed_style(&parent))
+                    .unwrap_or_default();
+                let metrics = font_metrics(&parent_style);
+                // Find the width of the longest unbreakable unit (word or CJK character).
+                use crate::layout::inline::split_words_preserving_spaces_cjk;
+                let normalized = normalize_text(&text, white_space(&parent_style));
+                split_words_preserving_spaces_cjk(&normalized)
+                    .into_iter()
+                    .map(|word| measure_text_width(&word, metrics))
+                    .fold(0.0f32, f32::max)
+            })
+            .unwrap_or(0.0),
+        NodeType::Element => {
+            let style = resolver.computed_style(node);
+            let padding = edge_sizes(&style, "padding");
+            let border = edge_sizes(&style, "border");
+            // Elements with explicit width use that as minimum.
+            if let Some(width) = explicit_length(&style, "width") {
+                let margin = edge_sizes(&style, "margin");
+                return width + padding.horizontal() + border.horizontal() + margin.horizontal();
+            }
+            // For images, use rendered size.
+            if let Some((image_node, image)) = element_inline_image(node) {
+                let image_style = resolver.computed_style(&image_node);
+                let (rendered_width, _) = resolve_image_rendered_size(&image_node, &image, &image_style);
+                let img_padding = edge_sizes(&image_style, "padding");
+                let img_border = edge_sizes(&image_style, "border");
+                return rendered_width + img_padding.horizontal() + img_border.horizontal();
+            }
+            // Recurse: minimum of children's minimum widths
+            let mut min_width = 0.0f32;
+            for child in node.child_nodes() {
+                min_width = min_width.max(minimum_content_width(&child, resolver));
+            }
+            min_width + padding.horizontal() + border.horizontal()
+        }
+        _ => 0.0,
+    }
+}
+
 fn intrinsic_width(node: &NodeHandle, resolver: &mut StyleResolver) -> f32 {
     match node.node_type() {
         NodeType::Text => node

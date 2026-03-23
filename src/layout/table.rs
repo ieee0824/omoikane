@@ -624,7 +624,16 @@ pub(super) fn compute_table_column_widths(
                     widths[i] = hint + equal_extra;
                 }
             }
-            // shrink-to-fit tables: auto columns keep their intrinsic hints only.
+            // shrink-to-fit tables: distribute leftover proportionally to hints.
+            if shrink_to_fit && auto_hint_total > 0.0 {
+                let leftover = remaining - auto_hint_total;
+                if leftover > 0.0 {
+                    for &(i, hint) in &auto_hints {
+                        let share = leftover * (hint / auto_hint_total);
+                        widths[i] = hint + share;
+                    }
+                }
+            }
         } else if auto_hint_total > 0.0 {
             for &(i, hint) in &auto_hints {
                 widths[i] = remaining * (hint / auto_hint_total);
