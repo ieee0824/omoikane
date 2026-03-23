@@ -2460,3 +2460,74 @@ fn inherits_text_decoration_line_from_parent() {
         "text-decoration-line should inherit from parent"
     );
 }
+
+#[test]
+fn author_css_overrides_heading_ua_font_weight() {
+    let document = NodeHandle::document();
+    let html = NodeHandle::element("html");
+    let body = NodeHandle::element("body");
+    let h1 = NodeHandle::element("h1");
+    document.append_child(html.clone());
+    html.append_child(body.clone());
+    body.append_child(h1.clone());
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet("h1 { font-weight: normal; }").unwrap(),
+    );
+    let style = resolver.computed_style(&h1);
+    assert_eq!(
+        style.get("font-weight"),
+        Some(&ComputedValue::Keyword("normal".to_string())),
+        "author CSS font-weight:normal should override UA bold for h1"
+    );
+}
+
+#[test]
+fn author_css_overrides_heading_ua_font_size() {
+    let document = NodeHandle::document();
+    let html = NodeHandle::element("html");
+    let body = NodeHandle::element("body");
+    let h1 = NodeHandle::element("h1");
+    document.append_child(html.clone());
+    html.append_child(body.clone());
+    body.append_child(h1.clone());
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet("h1 { font-size: 12px; }").unwrap(),
+    );
+    let style = resolver.computed_style(&h1);
+    assert_eq!(
+        style.get("font-size"),
+        Some(&ComputedValue::Px(12.0)),
+        "author CSS font-size:12px should override UA 2em for h1"
+    );
+}
+
+#[test]
+fn author_css_overrides_heading_ua_margin() {
+    let document = NodeHandle::document();
+    let html = NodeHandle::element("html");
+    let body = NodeHandle::element("body");
+    let h1 = NodeHandle::element("h1");
+    document.append_child(html.clone());
+    html.append_child(body.clone());
+    body.append_child(h1.clone());
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet("h1 { margin: 0; }").unwrap(),
+    );
+    let style = resolver.computed_style(&h1);
+    let margin_top = style.get("margin-top");
+    // margin: 0 may compute as Px(0.0) or Number(0.0) depending on unitless zero handling.
+    let is_zero = matches!(
+        margin_top,
+        Some(ComputedValue::Px(v)) | Some(ComputedValue::Number(v)) if *v == 0.0
+    );
+    assert!(is_zero, "author CSS margin:0 should override UA margin for h1, got {:?}", margin_top);
+}

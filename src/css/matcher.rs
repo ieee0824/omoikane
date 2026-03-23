@@ -116,15 +116,19 @@ fn add_simple_specificity(value: &mut Specificity, simple: &SimpleSelector) {
         SimpleSelector::Type(_) | SimpleSelector::PseudoElement(_) => value.elements += 1,
         SimpleSelector::Universal => {}
         SimpleSelector::Not(inner) => {
-            // :not() is modeled as a single compound selector, so its
-            // specificity is the sum of the specificities of its inner simple selectors.
-            let max_inner = inner.iter().fold(Specificity::zero(), |mut acc, s| {
+            // CSS Selectors Level 4 §17: :not() itself contributes zero specificity.
+            // The specificity of :not() is that of its argument.
+            // Currently we only support a single compound selector as the argument,
+            // so we sum the specificities of the inner simple selectors.
+            // TODO: When selector list support is added (e.g. :not(.a, #b)),
+            // use the *maximum* specificity among the list items instead of the sum.
+            let inner_specificity = inner.iter().fold(Specificity::zero(), |mut acc, s| {
                 add_simple_specificity(&mut acc, s);
                 acc
             });
-            value.ids += max_inner.ids;
-            value.classes += max_inner.classes;
-            value.elements += max_inner.elements;
+            value.ids += inner_specificity.ids;
+            value.classes += inner_specificity.classes;
+            value.elements += inner_specificity.elements;
         }
     }
 }
