@@ -22,6 +22,7 @@ pub(super) fn expand_shorthand(name: &str, value: Value, important: bool) -> Vec
         "list-style" => expand_list_style_shorthand(value, important),
         "flex-flow" => expand_flex_flow_shorthand(value, important),
         "animation" => expand_animation_shorthand(value, important),
+        "outline" => expand_outline_shorthand(value, important),
         // `word-wrap` is a legacy alias for `overflow-wrap`
         "word-wrap" => vec![Declaration {
             name: "overflow-wrap".to_string(),
@@ -1173,5 +1174,78 @@ fn expand_animation_shorthand(value: Value, important: bool) -> Vec<Declaration>
         important,
     });
 
+    decls
+}
+
+/// Expand `outline` shorthand into `outline-style`, `outline-width`, `outline-color`.
+fn expand_outline_shorthand(value: Value, important: bool) -> Vec<Declaration> {
+    let values = match &value {
+        Value::List(vs) => vs.clone(),
+        other => vec![other.clone()],
+    };
+
+    let mut style = None;
+    let mut width = None;
+    let mut color = None;
+
+    for item in &values {
+        if let Value::Keyword(kw) = item {
+            let lower = kw.to_ascii_lowercase();
+            match lower.as_str() {
+                "none" | "solid" | "dashed" | "dotted" | "double" | "groove" | "ridge"
+                | "inset" | "outset" | "auto" => {
+                    if style.is_none() {
+                        style = Some(Value::Keyword(lower));
+                    }
+                }
+                "thin" | "medium" | "thick" => {
+                    if width.is_none() {
+                        width = Some(item.clone());
+                    }
+                }
+                _ => {
+                    if color.is_none() {
+                        color = Some(item.clone());
+                    }
+                }
+            }
+        } else if matches!(item, Value::Length(_, _) | Value::Number(_)) {
+            if width.is_none() {
+                width = Some(item.clone());
+            }
+        } else if color.is_none() {
+            color = Some(item.clone());
+        }
+    }
+
+    let mut decls = Vec::new();
+    if let Some(s) = style {
+        decls.push(Declaration {
+            name: "outline-style".to_string(),
+            value: s,
+            important,
+        });
+    }
+    if let Some(w) = width {
+        decls.push(Declaration {
+            name: "outline-width".to_string(),
+            value: w,
+            important,
+        });
+    }
+    if let Some(c) = color {
+        decls.push(Declaration {
+            name: "outline-color".to_string(),
+            value: c,
+            important,
+        });
+    }
+    if decls.is_empty() {
+        decls.push(Declaration {
+            name: "outline".to_string(),
+            value,
+            important,
+        });
+    }
     decls
 }
