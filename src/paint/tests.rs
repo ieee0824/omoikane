@@ -5812,3 +5812,21 @@ div { color: currentColor; width: 10px; height: 10px; border: 2px solid currentC
     assert_eq!(canvas.pixel(0, 0), Some(Color::rgb(0, 0, 255)),
         "color: currentColor should resolve to parent color (blue)");
 }
+
+#[test]
+fn render_document_executes_inline_script() {
+    let html = r#"<html><head><style>
+        body { margin: 0; }
+        div { width: 10px; height: 10px; background: white; }
+        div.red { background: red; }
+    </style></head><body>
+        <div id="target"></div>
+        <script>document.getElementById("target").classList.add("red");</script>
+    </body></html>"#;
+    let document = TreeBuilder::parse(html).document();
+    let viewport = Rect { x: 0.0, y: 0.0, width: 10.0, height: 10.0 };
+    let canvas = render_document(&document, viewport).unwrap();
+    // JS should add class "red" → background: red
+    assert_eq!(canvas.pixel(5, 5), Some(Color::rgb(255, 0, 0)),
+        "inline script should add 'red' class, making div background red");
+}
