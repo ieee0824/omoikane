@@ -2391,3 +2391,72 @@ fn child_override_prevents_inheritance() {
         "explicit child font-weight should override inherited value"
     );
 }
+
+#[test]
+fn inherits_direction_from_parent() {
+    let document = NodeHandle::document();
+    let html = NodeHandle::element("html");
+    let body = NodeHandle::element("body");
+    let child = NodeHandle::element("div");
+    document.append_child(html.clone());
+    html.append_child(body.clone());
+    body.append_child(child.clone());
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet("body { direction: rtl; }").unwrap(),
+    );
+    let style = resolver.computed_style(&child);
+    assert_eq!(
+        style.get("direction"),
+        Some(&ComputedValue::Keyword("rtl".to_string())),
+        "direction should inherit from parent"
+    );
+}
+
+#[test]
+fn inherits_text_indent_from_parent() {
+    let document = NodeHandle::document();
+    let html = NodeHandle::element("html");
+    let body = NodeHandle::element("body");
+    let child = NodeHandle::element("p");
+    document.append_child(html.clone());
+    html.append_child(body.clone());
+    body.append_child(child.clone());
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet("body { text-indent: 24px; }").unwrap(),
+    );
+    let style = resolver.computed_style(&child);
+    assert_eq!(
+        style.get("text-indent"),
+        Some(&ComputedValue::Px(24.0)),
+        "text-indent should inherit from parent"
+    );
+}
+
+#[test]
+fn inherits_text_decoration_line_from_parent() {
+    let document = NodeHandle::document();
+    let html = NodeHandle::element("html");
+    let body = NodeHandle::element("body");
+    let child = NodeHandle::element("span");
+    document.append_child(html.clone());
+    html.append_child(body.clone());
+    body.append_child(child.clone());
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet("body { text-decoration-line: underline; }").unwrap(),
+    );
+    let style = resolver.computed_style(&child);
+    assert_eq!(
+        style.get("text-decoration-line"),
+        Some(&ComputedValue::Keyword("underline".to_string())),
+        "text-decoration-line should inherit from parent"
+    );
+}

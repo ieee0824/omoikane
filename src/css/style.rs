@@ -1607,7 +1607,8 @@ fn apply_inheritance(
         return;
     };
 
-    // CSS 2.1 §6.2: inherited properties.
+    // Inherited CSS properties supported by this engine.
+    // Based on CSS 2.1 §6.2 and CSS Text Decoration Module Level 3.
     // https://developer.mozilla.org/en-US/docs/Web/CSS/Inheritance
     for inherited_name in [
         "border-collapse",
