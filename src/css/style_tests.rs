@@ -2600,6 +2600,62 @@ fn ua_defaults_a_has_underline_and_blue() {
 }
 
 #[test]
+fn animation_forwards_applies_keyframe_final_state() {
+    let document = NodeHandle::document();
+    let html = NodeHandle::element("html");
+    let body = NodeHandle::element("body");
+    let div = NodeHandle::element("div");
+    div.set_attribute("class", "fade");
+    document.append_child(html.clone());
+    html.append_child(body.clone());
+    body.append_child(div.clone());
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "@keyframes fadein { from { opacity: 0; } to { opacity: 1; } } \
+             .fade { opacity: 0; animation-name: fadein; animation-fill-mode: forwards; }",
+        )
+        .unwrap(),
+    );
+    let style = resolver.computed_style(&div);
+    let opacity = style.get("opacity");
+    assert!(
+        matches!(opacity, Some(ComputedValue::Number(v)) if (*v - 1.0).abs() < 0.01),
+        "animation forwards should apply final opacity: 1.0, got {opacity:?}"
+    );
+}
+
+#[test]
+fn animation_fill_mode_none_does_not_apply_keyframe() {
+    let document = NodeHandle::document();
+    let html = NodeHandle::element("html");
+    let body = NodeHandle::element("body");
+    let div = NodeHandle::element("div");
+    div.set_attribute("class", "fade");
+    document.append_child(html.clone());
+    html.append_child(body.clone());
+    body.append_child(div.clone());
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "@keyframes fadein { from { opacity: 0; } to { opacity: 1; } } \
+             .fade { opacity: 0; animation-name: fadein; animation-fill-mode: none; }",
+        )
+        .unwrap(),
+    );
+    let style = resolver.computed_style(&div);
+    let opacity = style.get("opacity");
+    assert!(
+        matches!(opacity, Some(ComputedValue::Number(v)) if (*v - 0.0).abs() < 0.01),
+        "animation fill-mode: none should keep opacity: 0, got {opacity:?}"
+    );
+}
+
+#[test]
 fn ua_defaults_dd_has_margin_left() {
     let document = NodeHandle::document();
     let html = NodeHandle::element("html");
