@@ -113,6 +113,8 @@ pub(super) struct InlineSegment {
     pub(super) word_break: WordBreak,
     /// CSS `overflow-wrap` value resolved from the owning element's computed style.
     pub(super) overflow_wrap: OverflowWrap,
+    /// CSS `white-space` mode for this segment.
+    pub(super) white_space_mode: WhiteSpaceMode,
 }
 
 #[derive(Debug, Clone)]
@@ -148,6 +150,7 @@ fn collect_inline_segments(
                         style: FragmentStyle::from_computed(&parent_style),
                         word_break: word_break(&parent_style),
                         overflow_wrap: overflow_wrap(&parent_style),
+                        white_space_mode: white_space(&parent_style),
                     });
                 }
             }
@@ -183,6 +186,7 @@ fn collect_inline_segments(
                     metrics: font_metrics(&image_style),
                     word_break: word_break(&image_style),
                     overflow_wrap: overflow_wrap(&image_style),
+                    white_space_mode: white_space(&image_style),
                     line_height: line_height(&image_style).max(
                         rendered_height + padding.top + padding.bottom + border.top + border.bottom,
                     ),
@@ -208,6 +212,7 @@ fn collect_inline_segments(
                         style: FragmentStyle::from_computed(&style),
                         word_break: word_break(&style),
                         overflow_wrap: overflow_wrap(&style),
+                        white_space_mode: white_space(&style),
                     });
                     out.extend(generated_inline_segments(
                         node,
@@ -233,6 +238,7 @@ fn collect_inline_segments(
                                     style: FragmentStyle::from_computed(&style),
                                     word_break: word_break(&style),
                                     overflow_wrap: overflow_wrap(&style),
+                                    white_space_mode: white_space(&style),
                                 });
                             }
                         }
@@ -292,6 +298,7 @@ pub(super) fn generated_inline_segments(
             style: FragmentStyle::from_computed(&style),
             word_break: wb,
             overflow_wrap: ow,
+            white_space_mode: white_space(&style),
         }],
         Some(GeneratedContent::Image(image)) => vec![InlineSegment {
             node: node.clone(),
@@ -307,6 +314,7 @@ pub(super) fn generated_inline_segments(
             style: FragmentStyle::from_computed(&style),
             word_break: wb,
             overflow_wrap: ow,
+            white_space_mode: white_space(&style),
         }],
         None => Vec::new(),
     }
@@ -618,24 +626,87 @@ pub(super) fn apply_text_transform_layout(text: &str, style: &ComputedStyle) -> 
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum WhiteSpaceMode {
+    /// Collapse whitespace, no preserved newlines, allow wrapping.
     Normal,
+    /// Preserve all whitespace and newlines, no wrapping.
     Pre,
+    /// Collapse whitespace, no preserved newlines, no wrapping.
+    Nowrap,
+    /// Preserve whitespace and newlines, allow wrapping.
+    PreWrap,
+    /// Collapse whitespace sequences, preserve newlines, allow wrapping.
+    PreLine,
+}
+
+impl WhiteSpaceMode {
+    /// Whether the mode collapses whitespace sequences into a single space.
+    pub(super) fn collapses_whitespace(self) -> bool {
+        matches!(self, Self::Normal | Self::Nowrap | Self::PreLine)
+    }
+
+    /// Whether the mode preserves newline characters as line breaks.
+    pub(super) fn preserves_newlines(self) -> bool {
+        matches!(self, Self::Pre | Self::PreWrap | Self::PreLine)
+    }
+
+    /// Whether the mode allows automatic line wrapping.
+    pub(super) fn allows_wrapping(self) -> bool {
+        matches!(self, Self::Normal | Self::PreWrap | Self::PreLine)
+    }
 }
 
 pub(super) fn white_space(style: &ComputedStyle) -> WhiteSpaceMode {
     match style.get("white-space") {
-        Some(ComputedValue::Keyword(keyword)) if keyword.eq_ignore_ascii_case("pre") => {
-            WhiteSpaceMode::Pre
+        Some(ComputedValue::Keyword(keyword)) => {
+            match keyword.to_ascii_lowercase().as_str() {
+                "pre" => WhiteSpaceMode::Pre,
+                "nowrap" => WhiteSpaceMode::Nowrap,
+                "pre-wrap" => WhiteSpaceMode::PreWrap,
+                "pre-line" => WhiteSpaceMode::PreLine,
+                _ => WhiteSpaceMode::Normal,
+            }
         }
         _ => WhiteSpaceMode::Normal,
     }
 }
 
 pub(super) fn normalize_text(text: &str, mode: WhiteSpaceMode) -> String {
-    match mode {
-        WhiteSpaceMode::Normal => collapse_white_space(text),
-        WhiteSpaceMode::Pre => text.to_string(),
+    if mode.collapses_whitespace() {
+        if mode.preserves_newlines() {
+            // pre-line: collapse whitespace but keep newlines
+            collapse_white_space_preserve_newlines(text)
+        } else {
+            collapse_white_space(text)
+        }
+    } else {
+        // pre, pre-wrap: preserve all whitespace
+        text.to_string()
     }
+}
+
+fn collapse_white_space_preserve_newlines(text: &str) -> String {
+    // First pass: collapse whitespace within lines, preserving newlines.
+    let mut out = String::new();
+    let mut previous_was_space = false;
+    for ch in text.chars() {
+        if ch == '\n' {
+            // Drop trailing space before newline
+            if out.ends_with(' ') {
+                out.pop();
+            }
+            out.push('\n');
+            previous_was_space = true; // suppress leading space after newline
+        } else if ch.is_ascii_whitespace() {
+            if !previous_was_space {
+                out.push(' ');
+            }
+            previous_was_space = true;
+        } else {
+            out.push(ch);
+            previous_was_space = false;
+        }
+    }
+    out
 }
 
 fn collapse_white_space(text: &str) -> String {
@@ -868,6 +939,7 @@ fn split_segment(segment: &InlineSegment) -> Vec<InlinePiece> {
                 segment.metrics,
                 segment.line_height,
                 segment.word_break,
+                segment.white_space_mode,
             )
         }
         InlineSegmentContent::Image(image, style, rendered_width, rendered_height) => {
@@ -911,6 +983,7 @@ fn split_text_segment(
     metrics: FontMetrics,
     line_height: f32,
     wb: WordBreak,
+    ws_mode: WhiteSpaceMode,
 ) -> Vec<InlinePiece> {
     // `word-break: break-word` is a non-standard value treated identically to
     // `word-break: normal` for segment-level splitting; the actual emergency
@@ -922,7 +995,54 @@ fn split_text_segment(
         WordBreak::Normal | WordBreak::BreakWord => split_words_preserving_spaces_cjk,
     };
 
-    if text.contains('\n') {
+    // For nowrap: treat the entire text as one fragment (no splitting into words).
+    if !ws_mode.allows_wrapping() {
+        if ws_mode.preserves_newlines() && text.contains('\n') {
+            let mut pieces = Vec::new();
+            let line_count = text.split('\n').count();
+            for (index, part) in text.split('\n').enumerate() {
+                if !part.is_empty() {
+                    pieces.push(InlinePiece::Fragment {
+                        width: measure_text_width(part, metrics),
+                        height: line_height,
+                        content: InlineFragmentContent::Text(part.to_string()),
+                    });
+                }
+                if index + 1 < line_count {
+                    pieces.push(InlinePiece::Newline);
+                }
+            }
+            return pieces;
+        }
+        return vec![InlinePiece::Fragment {
+            width: measure_text_width(text, metrics),
+            height: line_height,
+            content: InlineFragmentContent::Text(text.to_string()),
+        }];
+    }
+
+    if ws_mode.preserves_newlines() && text.contains('\n') {
+        let mut pieces = Vec::new();
+        let line_count = text.split('\n').count();
+        for (index, part) in text.split('\n').enumerate() {
+            if !part.is_empty() {
+                pieces.extend(
+                    split_fn(part)
+                        .into_iter()
+                        .map(|piece| InlinePiece::Fragment {
+                            width: measure_text_width(&piece, metrics),
+                            height: line_height,
+                            content: InlineFragmentContent::Text(piece),
+                        }),
+                );
+            }
+            if index + 1 < line_count {
+                pieces.push(InlinePiece::Newline);
+            }
+        }
+        pieces
+    } else if text.contains('\n') && !ws_mode.collapses_whitespace() {
+        // pre/pre-wrap with newlines
         let mut pieces = Vec::new();
         let line_count = text.split('\n').count();
         for (index, part) in text.split('\n').enumerate() {
