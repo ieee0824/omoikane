@@ -4493,3 +4493,43 @@ fn nowrap_with_inline_elements_stays_on_one_line() {
         div_box.lines.len(),
     );
 }
+
+#[test]
+fn calc_percent_minus_px_resolves_width_at_layout() {
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let container = NodeHandle::element("div");
+    let child = NodeHandle::element("section");
+    container.set_attribute("class", "container");
+    child.set_attribute("class", "child");
+    child.append_child(NodeHandle::text("x"));
+    document.append_child(body.clone());
+    body.append_child(container.clone());
+    container.append_child(child.clone());
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "body { margin: 0; } \
+             .container { width: 500px; } \
+             .child { width: calc(100% - 100px); font-size: 10px; line-height: 10px; }",
+        )
+        .unwrap(),
+    );
+
+    let layout = layout_tree(
+        &body,
+        &mut resolver,
+        Rect { x: 0.0, y: 0.0, width: 800.0, height: 0.0 },
+    )
+    .unwrap();
+
+    let child_box = find_layout_box_by_tag(&layout, "section").unwrap();
+    // calc(100% - 100px) with containing block 500px → 400px
+    assert!(
+        (child_box.dimensions.content.width - 400.0).abs() < 1.0,
+        "calc(100% - 100px) in 500px container should be ~400px, got {}",
+        child_box.dimensions.content.width,
+    );
+}

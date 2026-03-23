@@ -1307,25 +1307,35 @@ fn try_extract_calc_px_percent(arguments: &[Value], ctx: ResolutionContext) -> O
     let mut px_total = 0.0f32;
     let mut pct_total = 0.0f32;
     let mut sign = 1.0f32;
+    let mut saw_px = false;
+    let mut saw_pct = false;
 
     for token in &tokens {
         match token {
             CalcToken::Value(q) => {
                 match q.unit {
-                    CalcUnit::Px => px_total += sign * q.value,
-                    CalcUnit::Percentage => pct_total += sign * q.value,
-                    CalcUnit::Unitless => px_total += sign * q.value,
+                    CalcUnit::Px => {
+                        px_total += sign * q.value;
+                        saw_px = true;
+                    }
+                    CalcUnit::Percentage => {
+                        pct_total += sign * q.value;
+                        saw_pct = true;
+                    }
+                    // Only accept unitless zero; reject other unitless values.
+                    CalcUnit::Unitless if q.value == 0.0 => {}
+                    CalcUnit::Unitless => return None,
                 }
                 sign = 1.0;
             }
             CalcToken::Operator('+') => sign = 1.0,
             CalcToken::Operator('-') => sign = -1.0,
-            CalcToken::Operator(_) => return None, // Unsupported operator in mixed calc
+            CalcToken::Operator(_) => return None,
         }
     }
 
-    // Only return if there's actually a mix of px and percentage.
-    if pct_total != 0.0 || px_total != 0.0 {
+    // Only return if we actually saw both px and percentage tokens.
+    if saw_px && saw_pct {
         Some((px_total, pct_total))
     } else {
         None
