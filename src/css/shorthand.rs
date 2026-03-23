@@ -1106,11 +1106,15 @@ fn expand_animation_shorthand(value: Value, important: bool) -> Vec<Declaration>
         if let Value::Keyword(kw) = item {
             let lower = kw.to_ascii_lowercase();
             match lower.as_str() {
-                "none" | "forwards" | "backwards" | "both" => {
+                "none" => {
+                    // "none" is primarily animation-name: none (clears animation).
+                    if name.is_none() {
+                        name = Some("none".to_string());
+                    }
+                }
+                "forwards" | "backwards" | "both" => {
                     if fill_mode.is_none() {
                         fill_mode = Some(lower);
-                    } else if name.is_none() {
-                        name = Some(kw.clone());
                     }
                 }
                 "normal" | "reverse" | "alternate" | "alternate-reverse" => {
@@ -1132,12 +1136,8 @@ fn expand_animation_shorthand(value: Value, important: bool) -> Vec<Declaration>
                     }
                 }
             }
-        } else if let Value::Length(_, _) = item {
-            if duration.is_none() {
-                duration = Some(item.clone());
-            }
-        } else if let Value::Number(_) = item {
-            if duration.is_none() {
+        } else if let Value::Length(_, unit) = item {
+            if (unit == "s" || unit == "ms") && duration.is_none() {
                 duration = Some(item.clone());
             }
         }

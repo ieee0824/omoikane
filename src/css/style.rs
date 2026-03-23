@@ -442,7 +442,7 @@ impl StyleResolver {
 
         for decl in final_decls {
             let computed = compute_value(&decl.value, &decl.name, ctx);
-            properties.insert(decl.name.clone(), computed);
+            insert_computed_property(properties, &decl.name, computed);
         }
     }
 }
