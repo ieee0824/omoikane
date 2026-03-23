@@ -801,9 +801,11 @@ fn layout_inline_segments(
     let mut cursor_y = start_y;
     let mut current_line_height: f32 = strut_line_height;
 
+    let mut prev_segment_allows_wrapping = true;
     for segment in segments {
         let overflow_wrap = segment.overflow_wrap;
         let allows_wrapping = segment.white_space_mode.allows_wrapping();
+        let mut is_first_piece_in_segment = true;
         for piece in split_segment(segment) {
             match piece {
                 InlinePiece::Newline => {
@@ -826,7 +828,16 @@ fn layout_inline_segments(
                     width,
                     height,
                 } => {
-                    if allows_wrapping && cursor_x > start_x && cursor_x + width > start_x + available_width {
+                    // Allow wrapping at segment boundary only if the previous
+                    // segment allowed wrapping (i.e., not inside a nowrap run).
+                    // Inside a segment, use the segment's own allows_wrapping.
+                    let can_wrap = if is_first_piece_in_segment {
+                        prev_segment_allows_wrapping
+                    } else {
+                        allows_wrapping
+                    };
+                    is_first_piece_in_segment = false;
+                    if can_wrap && cursor_x > start_x && cursor_x + width > start_x + available_width {
                         push_line(
                             &mut lines,
                             &mut current_fragments,
@@ -914,6 +925,7 @@ fn layout_inline_segments(
                 }
             }
         }
+        prev_segment_allows_wrapping = allows_wrapping;
     }
 
     if !current_fragments.is_empty() {
