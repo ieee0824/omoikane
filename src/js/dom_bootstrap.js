@@ -22,12 +22,15 @@
   }
 
   function invokeListeners(node, event, capture, phase) {
-    const listeners = node.__listeners.get(event.type) || [];
+    const listeners = (node.__listeners.get(event.type) || []).slice();
     for (const entry of listeners) {
       if (!!entry.capture === capture) {
         event.currentTarget = node;
         event.eventPhase = phase;
         entry.listener.call(node, event);
+        if (event.__stoppedImmediate) {
+          return true;
+        }
         if (event.__stopped) {
           return true;
         }
@@ -44,11 +47,74 @@
       this.target = null;
       this.currentTarget = null;
       this.eventPhase = 0;
+      this.defaultPrevented = false;
+      this.isTrusted = false;
+      this.timeStamp = Date.now();
       this.__stopped = false;
+      this.__stoppedImmediate = false;
     }
 
     stopPropagation() {
       this.__stopped = true;
+    }
+
+    stopImmediatePropagation() {
+      this.__stopped = true;
+      this.__stoppedImmediate = true;
+    }
+
+    preventDefault() {
+      if (this.cancelable) {
+        this.defaultPrevented = true;
+      }
+    }
+  }
+
+  class CustomEvent extends Event {
+    constructor(type, init = {}) {
+      super(type, init);
+      this.detail = init.detail ?? null;
+    }
+  }
+
+  class MouseEvent extends Event {
+    constructor(type, init = {}) {
+      super(type, init);
+      this.clientX = init.clientX ?? 0;
+      this.clientY = init.clientY ?? 0;
+      this.pageX = init.pageX ?? 0;
+      this.pageY = init.pageY ?? 0;
+      this.screenX = init.screenX ?? 0;
+      this.screenY = init.screenY ?? 0;
+      this.button = init.button ?? 0;
+      this.buttons = init.buttons ?? 0;
+      this.altKey = init.altKey ?? false;
+      this.ctrlKey = init.ctrlKey ?? false;
+      this.shiftKey = init.shiftKey ?? false;
+      this.metaKey = init.metaKey ?? false;
+      this.relatedTarget = init.relatedTarget ?? null;
+    }
+  }
+
+  class KeyboardEvent extends Event {
+    constructor(type, init = {}) {
+      super(type, init);
+      this.key = init.key ?? "";
+      this.code = init.code ?? "";
+      this.keyCode = init.keyCode ?? 0;
+      this.charCode = init.charCode ?? 0;
+      this.repeat = init.repeat ?? false;
+      this.altKey = init.altKey ?? false;
+      this.ctrlKey = init.ctrlKey ?? false;
+      this.shiftKey = init.shiftKey ?? false;
+      this.metaKey = init.metaKey ?? false;
+    }
+  }
+
+  class FocusEvent extends Event {
+    constructor(type, init = {}) {
+      super(type, init);
+      this.relatedTarget = init.relatedTarget ?? null;
     }
   }
 
@@ -341,6 +407,219 @@
       }
       return false;
     }
+
+    get innerText() {
+      return this.textContent;
+    }
+
+    set innerText(value) {
+      this.textContent = value;
+    }
+
+    get isConnected() {
+      let current = this;
+      while (current) {
+        if (current.nodeType === 9) return true;
+        current = current.parentNode;
+      }
+      return false;
+    }
+
+    get attributes() {
+      const node = this;
+      // NamedNodeMap-like object backed by getAttribute/setAttribute
+      return new Proxy([], {
+        get(target, prop) {
+          if (prop === "length") {
+            // Count by getting all via style hack — not ideal but functional
+            return 0;
+          }
+          if (prop === "getNamedItem") {
+            return function(name) {
+              const val = node.getAttribute(name);
+              return val !== null ? { name, value: val, specified: true } : null;
+            };
+          }
+          if (prop === "setNamedItem") {
+            return function(attr) { node.setAttribute(attr.name, attr.value); };
+          }
+          if (prop === "removeNamedItem") {
+            return function(name) { node.removeAttribute(name); };
+          }
+          if (typeof prop === "string" && !isNaN(prop)) {
+            return undefined;
+          }
+          // Named access: attributes["data-foo"]
+          if (typeof prop === "string") {
+            const val = node.getAttribute(prop);
+            return val !== null ? { name: prop, value: val, specified: true, expando: false } : undefined;
+          }
+          return undefined;
+        }
+      });
+    }
+
+    get dataset() {
+      const node = this;
+      return new Proxy({}, {
+        get(target, prop) {
+          if (typeof prop !== "string") return undefined;
+          const attrName = "data-" + prop.replace(/[A-Z]/g, m => "-" + m.toLowerCase());
+          return node.getAttribute(attrName);
+        },
+        set(target, prop, value) {
+          if (typeof prop !== "string") return true;
+          const attrName = "data-" + prop.replace(/[A-Z]/g, m => "-" + m.toLowerCase());
+          node.setAttribute(attrName, String(value));
+          return true;
+        },
+        deleteProperty(target, prop) {
+          if (typeof prop !== "string") return true;
+          const attrName = "data-" + prop.replace(/[A-Z]/g, m => "-" + m.toLowerCase());
+          node.removeAttribute(attrName);
+          return true;
+        }
+      });
+    }
+
+    get nodeValue() {
+      const t = this.nodeType;
+      if (t === 3 || t === 8) return this.textContent;
+      return null;
+    }
+
+    set nodeValue(value) {
+      const t = this.nodeType;
+      if (t === 3 || t === 8) this.textContent = value;
+    }
+
+    replaceChild(newChild, oldChild) {
+      this.insertBefore(newChild, oldChild);
+      this.removeChild(oldChild);
+      return oldChild;
+    }
+
+    get firstElementChild() {
+      return this.children[0] || null;
+    }
+
+    get lastElementChild() {
+      const c = this.children;
+      return c.length > 0 ? c[c.length - 1] : null;
+    }
+
+    get childElementCount() {
+      return this.children.length;
+    }
+
+    get nextElementSibling() {
+      let s = this.nextSibling;
+      while (s) {
+        if (s.nodeType === 1) return s;
+        s = s.nextSibling;
+      }
+      return null;
+    }
+
+    get previousElementSibling() {
+      let s = this.previousSibling;
+      while (s) {
+        if (s.nodeType === 1) return s;
+        s = s.previousSibling;
+      }
+      return null;
+    }
+
+    closest(selector) {
+      let current = this;
+      while (current) {
+        if (current.nodeType === 1 && current.matches(selector)) return current;
+        current = current.parentNode;
+      }
+      return null;
+    }
+
+    matches(selector) {
+      if (!selector || this.nodeType !== 1) return false;
+      const parent = this.parentNode || this.ownerDocument;
+      if (!parent) return false;
+      const all = parent.querySelectorAll(selector);
+      for (let i = 0; i < all.length; i++) {
+        if (all[i].__id === this.__id) return true;
+      }
+      return false;
+    }
+
+    getBoundingClientRect() {
+      return { x: 0, y: 0, width: 0, height: 0, top: 0, left: 0, bottom: 0, right: 0 };
+    }
+
+    getClientRects() {
+      return [];
+    }
+
+    get offsetWidth() { return 0; }
+    get offsetHeight() { return 0; }
+    get offsetTop() { return 0; }
+    get offsetLeft() { return 0; }
+    get clientWidth() { return 0; }
+    get clientHeight() { return 0; }
+    get clientTop() { return 0; }
+    get clientLeft() { return 0; }
+    get scrollWidth() { return 0; }
+    get scrollHeight() { return 0; }
+    get scrollTop() { return 0; }
+    set scrollTop(v) {}
+    get scrollLeft() { return 0; }
+    set scrollLeft(v) {}
+    get offsetParent() { return null; }
+
+    focus() {}
+    blur() {}
+    click() { this.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true })); }
+
+    get hidden() {
+      return this.hasAttribute("hidden");
+    }
+
+    set hidden(value) {
+      if (value) this.setAttribute("hidden", "");
+      else this.removeAttribute("hidden");
+    }
+
+    get value() {
+      return __omoikane_get_attribute(this.__id, "value") ?? "";
+    }
+
+    set value(v) {
+      __omoikane_set_attribute(this.__id, "value", String(v));
+    }
+
+    get checked() {
+      return this.hasAttribute("checked");
+    }
+
+    set checked(v) {
+      if (v) this.setAttribute("checked", "");
+      else this.removeAttribute("checked");
+    }
+
+    get disabled() {
+      return this.hasAttribute("disabled");
+    }
+
+    set disabled(v) {
+      if (v) this.setAttribute("disabled", "");
+      else this.removeAttribute("disabled");
+    }
+
+    get type() {
+      return this.getAttribute("type") || "";
+    }
+
+    set type(v) {
+      this.setAttribute("type", String(v));
+    }
   }
 
   class Document extends Node {
@@ -360,6 +639,20 @@
       return wrapNode(__omoikane_create_text_node(String(text)));
     }
 
+    createComment(data) {
+      return wrapNode(__omoikane_create_comment(String(data ?? "")));
+    }
+
+    createEvent(type) {
+      const evt = new Event("");
+      evt.initEvent = function(t, bubbles, cancelable) {
+        this.type = String(t);
+        this.bubbles = !!bubbles;
+        this.cancelable = !!cancelable;
+      };
+      return evt;
+    }
+
     get body() {
       return this.querySelector("body");
     }
@@ -370,6 +663,34 @@
 
     get documentElement() {
       return this.querySelector("html");
+    }
+
+    get readyState() {
+      return "complete";
+    }
+
+    get characterSet() {
+      return "UTF-8";
+    }
+
+    get contentType() {
+      return "text/html";
+    }
+
+    get URL() {
+      return globalThis.location.href;
+    }
+
+    get documentURI() {
+      return globalThis.location.href;
+    }
+
+    get compatMode() {
+      return "CSS1Compat";
+    }
+
+    hasFocus() {
+      return true;
     }
 
     getElementsByTagName(tag) {
@@ -389,20 +710,157 @@
   globalThis.Document = Document;
   globalThis.DocumentFragment = DocumentFragment;
   globalThis.Event = Event;
+  globalThis.CustomEvent = CustomEvent;
+  globalThis.MouseEvent = MouseEvent;
+  globalThis.KeyboardEvent = KeyboardEvent;
+  globalThis.FocusEvent = FocusEvent;
+  globalThis.UIEvent = Event;
+  globalThis.InputEvent = Event;
+  globalThis.WheelEvent = MouseEvent;
+  globalThis.PointerEvent = MouseEvent;
+  globalThis.TouchEvent = Event;
+  globalThis.AnimationEvent = Event;
+  globalThis.TransitionEvent = Event;
   globalThis.document = wrapNode(__omoikane_document_id);
   globalThis.window = globalThis;
+  globalThis.self = globalThis;
   globalThis.addEventListener = function(type, listener, options) {
     return document.addEventListener(type, listener, options);
   };
   globalThis.removeEventListener = function(type, listener, options) {
     return document.removeEventListener(type, listener, options);
   };
-  globalThis.location = { href: __omoikane_location_href };
+  globalThis.dispatchEvent = function(event) {
+    return document.dispatchEvent(event);
+  };
+  globalThis.location = { href: __omoikane_location_href, protocol: "https:", hostname: "", pathname: "/", search: "", hash: "", origin: "", host: "" };
   globalThis.getComputedStyle = function() { return new Proxy({}, { get() { return ""; } }); };
-  globalThis.navigator = { userAgent: __omoikane_navigator_user_agent };
+  globalThis.navigator = { userAgent: __omoikane_navigator_user_agent, language: "en", languages: ["en"], platform: "", cookieEnabled: false, onLine: true };
   globalThis.console = {
     log: (...args) => __omoikane_console_log(...args),
+    warn: (...args) => __omoikane_console_log("[warn]", ...args),
+    error: (...args) => __omoikane_console_log("[error]", ...args),
+    info: (...args) => __omoikane_console_log("[info]", ...args),
+    debug: () => {},
+    trace: () => {},
+    dir: () => {},
+    table: () => {},
+    group: () => {},
+    groupEnd: () => {},
+    time: () => {},
+    timeEnd: () => {},
+    assert: () => {},
+    count: () => {},
+    clear: () => {},
   };
+  globalThis.alert = function() {};
+  globalThis.confirm = function() { return false; };
+  globalThis.prompt = function() { return null; };
+  globalThis.innerWidth = 1280;
+  globalThis.innerHeight = 720;
+  globalThis.outerWidth = 1280;
+  globalThis.outerHeight = 720;
+  globalThis.screenX = 0;
+  globalThis.screenY = 0;
+  globalThis.devicePixelRatio = 1;
+  globalThis.scrollX = 0;
+  globalThis.scrollY = 0;
+  globalThis.pageXOffset = 0;
+  globalThis.pageYOffset = 0;
+  globalThis.scrollTo = function() {};
+  globalThis.scrollBy = function() {};
+  globalThis.scroll = function() {};
+  globalThis.screen = { width: 1280, height: 720, availWidth: 1280, availHeight: 720, colorDepth: 24, pixelDepth: 24 };
+
+  // requestAnimationFrame: execute callback synchronously with a fake timestamp
+  let __rafId = 0;
+  globalThis.requestAnimationFrame = function(cb) {
+    const id = ++__rafId;
+    Promise.resolve().then(() => cb(Date.now()));
+    return id;
+  };
+  globalThis.cancelAnimationFrame = function() {};
+
+  // matchMedia stub: always returns matches=false
+  globalThis.matchMedia = function(query) {
+    return {
+      matches: false,
+      media: String(query),
+      onchange: null,
+      addListener: function() {},
+      removeListener: function() {},
+      addEventListener: function() {},
+      removeEventListener: function() {},
+      dispatchEvent: function() { return true; },
+    };
+  };
+
+  // In-memory storage stubs
+  function createStorage() {
+    const store = new Map();
+    return {
+      getItem(key) { return store.has(key) ? store.get(key) : null; },
+      setItem(key, value) { store.set(key, String(value)); },
+      removeItem(key) { store.delete(key); },
+      clear() { store.clear(); },
+      key(index) { return [...store.keys()][index] ?? null; },
+      get length() { return store.size; },
+    };
+  }
+  globalThis.localStorage = createStorage();
+  globalThis.sessionStorage = createStorage();
+
+  // MutationObserver stub
+  globalThis.MutationObserver = class MutationObserver {
+    constructor(callback) { this._callback = callback; }
+    observe() {}
+    disconnect() {}
+    takeRecords() { return []; }
+  };
+
+  // ResizeObserver stub
+  globalThis.ResizeObserver = class ResizeObserver {
+    constructor(callback) { this._callback = callback; }
+    observe() {}
+    unobserve() {}
+    disconnect() {}
+  };
+
+  // Performance stub
+  globalThis.performance = {
+    now: () => Date.now(),
+    timing: {},
+    getEntriesByType: () => [],
+    getEntriesByName: () => [],
+    mark: () => {},
+    measure: () => {},
+  };
+
+  // DOMParser stub
+  globalThis.DOMParser = class DOMParser {
+    parseFromString() { return globalThis.document; }
+  };
+
+  // URL and URLSearchParams (basic)
+  if (!globalThis.URLSearchParams) {
+    globalThis.URLSearchParams = class URLSearchParams {
+      constructor(init) {
+        this._params = new Map();
+        if (typeof init === "string") {
+          init.replace(/^\?/, "").split("&").forEach(pair => {
+            const [k, v] = pair.split("=");
+            if (k) this._params.set(decodeURIComponent(k), decodeURIComponent(v || ""));
+          });
+        }
+      }
+      get(name) { return this._params.get(name) ?? null; }
+      set(name, value) { this._params.set(name, String(value)); }
+      has(name) { return this._params.has(name); }
+      delete(name) { this._params.delete(name); }
+      toString() { return [...this._params].map(([k, v]) => encodeURIComponent(k) + "=" + encodeURIComponent(v)).join("&"); }
+      forEach(cb) { this._params.forEach((v, k) => cb(v, k, this)); }
+    };
+  }
   globalThis.fetch = function(url) {
     return Promise.resolve(__omoikane_fetch(String(url))).then(raw => {
       const data = JSON.parse(String(raw));

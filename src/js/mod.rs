@@ -609,6 +609,11 @@ fn register_host_bindings(
             0,
             NativeFunction::from_copy_closure(create_document_fragment_native),
         ),
+        (
+            js_string!("__omoikane_create_comment"),
+            1,
+            NativeFunction::from_copy_closure(create_comment_native),
+        ),
     ] {
         context.register_global_builtin_callable(name, length, function)?;
     }
@@ -1281,6 +1286,16 @@ fn create_text_node_native(_: &JsValue, args: &[JsValue], context: &mut Context)
 
 fn create_document_fragment_native(_: &JsValue, _args: &[JsValue], _context: &mut Context) -> JsResult<JsValue> {
     let node = NodeHandle::document_fragment();
+    let id = node.identity() as f64;
+    with_host_state(|state| {
+        state.borrow_mut().nodes.insert(node.identity(), node);
+        Ok(JsValue::from(id))
+    })
+}
+
+fn create_comment_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let data = args.first().cloned().unwrap_or_default().to_string(context)?.to_std_string_escaped();
+    let node = NodeHandle::comment(&data);
     let id = node.identity() as f64;
     with_host_state(|state| {
         state.borrow_mut().nodes.insert(node.identity(), node);
@@ -2334,5 +2349,181 @@ mod tests {
             commentText;
         "#).unwrap().as_string().unwrap().to_std_string_escaped();
         assert_eq!(result.trim(), "hello", "comment textContent should return its data");
+    }
+
+    #[test]
+    fn prevent_default_and_stop_immediate_propagation() {
+        let doc = NodeHandle::document();
+        let div = NodeHandle::element("div");
+        doc.append_child(div.clone());
+
+        let mut runtime = JsRuntime::with_document(doc).unwrap();
+        runtime.eval(r#"
+            let count = 0;
+            const el = document.querySelector("div");
+            el.addEventListener("click", (e) => { count++; e.stopImmediatePropagation(); });
+            el.addEventListener("click", () => { count++; });
+            const evt = new MouseEvent("click", { cancelable: true });
+            el.dispatchEvent(evt);
+        "#).unwrap();
+
+        let count = runtime.eval("count").unwrap()
+            .to_number(&mut runtime.context).unwrap();
+        assert_eq!(count, 1.0, "stopImmediatePropagation should prevent later listeners");
+    }
+
+    #[test]
+    fn custom_event_has_detail() {
+        let doc = NodeHandle::document();
+        let mut runtime = JsRuntime::with_document(doc).unwrap();
+        runtime.eval(r#"
+            let detail = null;
+            document.addEventListener("custom", (e) => { detail = e.detail; });
+            document.dispatchEvent(new CustomEvent("custom", { detail: 42 }));
+        "#).unwrap();
+
+        let detail = runtime.eval("detail").unwrap()
+            .to_number(&mut runtime.context).unwrap();
+        assert_eq!(detail, 42.0, "CustomEvent detail should be accessible");
+    }
+
+    #[test]
+    fn dataset_proxy_read_write() {
+        let doc = NodeHandle::document();
+        let div = NodeHandle::element("div");
+        div.set_attribute("data-foo", "bar");
+        doc.append_child(div.clone());
+
+        let mut runtime = JsRuntime::with_document(doc).unwrap();
+        let result = runtime.eval("document.querySelector('div').dataset.foo")
+            .unwrap().as_string().unwrap().to_std_string_escaped();
+        assert_eq!(result, "bar");
+
+        runtime.eval("document.querySelector('div').dataset.baz = 'qux'").unwrap();
+        let attr = div.attributes().unwrap().get("data-baz").cloned();
+        assert_eq!(attr.as_deref(), Some("qux"), "dataset setter should set data- attribute");
+    }
+
+    #[test]
+    fn is_connected_property() {
+        let doc = NodeHandle::document();
+        let div = NodeHandle::element("div");
+        doc.append_child(div.clone());
+
+        let mut runtime = JsRuntime::with_document(doc).unwrap();
+        let connected = runtime.eval("document.querySelector('div').isConnected")
+            .unwrap().as_boolean().unwrap();
+        assert!(connected, "element in document should be connected");
+
+        let disconnected = runtime.eval("document.createElement('span').isConnected")
+            .unwrap().as_boolean().unwrap();
+        assert!(!disconnected, "orphan element should not be connected");
+    }
+
+    #[test]
+    fn document_create_comment() {
+        let doc = NodeHandle::document();
+        let mut runtime = JsRuntime::with_document(doc).unwrap();
+
+        let node_type = runtime.eval("document.createComment('test').nodeType")
+            .unwrap().to_number(&mut runtime.context).unwrap();
+        assert_eq!(node_type, 8.0, "comment nodeType should be 8");
+    }
+
+    #[test]
+    fn document_ready_state() {
+        let doc = NodeHandle::document();
+        let mut runtime = JsRuntime::with_document(doc).unwrap();
+
+        let state = runtime.eval("document.readyState")
+            .unwrap().as_string().unwrap().to_std_string_escaped();
+        assert_eq!(state, "complete");
+    }
+
+    #[test]
+    fn matches_and_closest() {
+        let doc = NodeHandle::document();
+        let html = NodeHandle::element("html");
+        let body = NodeHandle::element("body");
+        let div = NodeHandle::element("div");
+        div.set_attribute("class", "wrapper");
+        let span = NodeHandle::element("span");
+        doc.append_child(html.clone());
+        html.append_child(body.clone());
+        body.append_child(div.clone());
+        div.append_child(span.clone());
+
+        let mut runtime = JsRuntime::with_document(doc).unwrap();
+        let matches = runtime.eval("document.querySelector('span').matches('span')")
+            .unwrap().as_boolean().unwrap();
+        assert!(matches, "span should match 'span'");
+
+        let closest = runtime.eval("document.querySelector('span').closest('.wrapper').tagName")
+            .unwrap().as_string().unwrap().to_std_string_escaped();
+        assert_eq!(closest, "DIV");
+    }
+
+    #[test]
+    fn local_storage_stub() {
+        let doc = NodeHandle::document();
+        let mut runtime = JsRuntime::with_document(doc).unwrap();
+        runtime.eval(r#"
+            localStorage.setItem("key", "value");
+        "#).unwrap();
+
+        let result = runtime.eval("localStorage.getItem('key')")
+            .unwrap().as_string().unwrap().to_std_string_escaped();
+        assert_eq!(result, "value");
+
+        runtime.eval("localStorage.removeItem('key')").unwrap();
+        let removed = runtime.eval("localStorage.getItem('key')").unwrap();
+        assert!(removed.is_null(), "removed item should return null");
+    }
+
+    #[test]
+    fn match_media_returns_object() {
+        let doc = NodeHandle::document();
+        let mut runtime = JsRuntime::with_document(doc).unwrap();
+        let matches = runtime.eval("matchMedia('(min-width: 768px)').matches")
+            .unwrap().as_boolean().unwrap();
+        assert!(!matches, "matchMedia stub should return matches=false");
+    }
+
+    #[test]
+    fn request_animation_frame_calls_callback() {
+        let doc = NodeHandle::document();
+        let mut runtime = JsRuntime::with_document(doc).unwrap();
+        runtime.eval("globalThis.rafCalled = false; requestAnimationFrame(() => { globalThis.rafCalled = true; });").unwrap();
+        runtime.run_jobs().unwrap();
+
+        let called = runtime.eval("rafCalled").unwrap().as_boolean().unwrap();
+        assert!(called, "requestAnimationFrame callback should be called");
+    }
+
+    #[test]
+    fn replace_child_works() {
+        let doc = NodeHandle::document();
+        let div = NodeHandle::element("div");
+        let old_span = NodeHandle::element("span");
+        old_span.set_attribute("id", "old");
+        div.append_child(old_span);
+        doc.append_child(div.clone());
+
+        let mut runtime = JsRuntime::with_document(doc).unwrap();
+        runtime.eval(r#"
+            const parent = document.querySelector('div');
+            const oldChild = document.querySelector('#old');
+            const newChild = document.createElement('b');
+            newChild.id = 'new';
+            parent.replaceChild(newChild, oldChild);
+        "#).unwrap();
+
+        let found_new = runtime.eval("document.querySelector('#new') !== null")
+            .unwrap().as_boolean().unwrap();
+        assert!(found_new, "new child should be in DOM");
+
+        let found_old = runtime.eval("document.querySelector('#old')")
+            .unwrap();
+        assert!(found_old.is_null(), "old child should be removed");
     }
 }
