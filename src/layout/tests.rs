@@ -4343,6 +4343,83 @@ fn line_height_percentage_scales_by_font_size() {
 }
 
 #[test]
+fn shrink_to_fit_table_uses_min_max_column_distribution() {
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let table = NodeHandle::element("table");
+    let tr = NodeHandle::element("tr");
+    let td_img = NodeHandle::element("td");
+    let td_text = NodeHandle::element("td");
+    let img = NodeHandle::element("img");
+    img.set_attribute("width", "100");
+    img.set_attribute("height", "100");
+    img.set_attribute(
+        "src",
+        "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAIAAAD91JpzAAAAEUlEQVR42mP4/58BCv7/ZwAAHfAD/abwPj4AAAAASUVORK5CYII=",
+    );
+    td_img.append_child(img);
+    td_text.append_child(NodeHandle::text(
+        "This is a long text that should wrap within the available width of the table cell",
+    ));
+    tr.append_child(td_img);
+    tr.append_child(td_text);
+    table.append_child(tr);
+    document.append_child(body.clone());
+    body.append_child(table.clone());
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "body { margin: 0; } \
+             table { display: table; } \
+             tr { display: table-row; } \
+             td { display: table-cell; font-size: 12px; line-height: 12px; }",
+        )
+        .unwrap(),
+    );
+
+    let layout = layout_tree(
+        &body,
+        &mut resolver,
+        Rect { x: 0.0, y: 0.0, width: 800.0, height: 0.0 },
+    )
+    .unwrap();
+
+    let table_box = find_layout_box_by_tag(&layout, "table").unwrap();
+    // Table should shrink-to-fit: image column ~100px + text column.
+    assert!(
+        table_box.dimensions.content.width < 800.0,
+        "shrink-to-fit table should be narrower than containing block (800px), got {}",
+        table_box.dimensions.content.width,
+    );
+    assert!(
+        table_box.dimensions.content.width >= 100.0,
+        "table should be at least as wide as the image column, got {}",
+        table_box.dimensions.content.width,
+    );
+    // Verify cell widths: image cell should be ~100px (explicit via img width attribute)
+    let row = &table_box.children[0];
+    let img_cell = &row.children[0];
+    let text_cell = &row.children[1];
+    assert!(
+        (img_cell.dimensions.content.width - 100.0).abs() < 2.0,
+        "image cell should be ~100px, got {}",
+        img_cell.dimensions.content.width,
+    );
+    assert!(
+        text_cell.dimensions.content.width > 50.0,
+        "text cell should have reasonable width, got {}",
+        text_cell.dimensions.content.width,
+    );
+    assert!(
+        text_cell.dimensions.content.width < 700.0,
+        "text cell should not use full preferred width, got {}",
+        text_cell.dimensions.content.width,
+    );
+}
+
+#[test]
 fn nowrap_prevents_line_wrapping() {
     let document = NodeHandle::document();
     let body = NodeHandle::element("body");
