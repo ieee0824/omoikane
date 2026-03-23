@@ -382,7 +382,7 @@ pub(crate) fn element_inline_image(node: &NodeHandle) -> Option<(NodeHandle, Ima
     }
 }
 
-/// Decode an image from a data: URI (PNG or JPEG).
+/// Decode an image from a data: URI (PNG, JPEG, or SVG).
 fn decode_data_uri_image(uri: &str) -> Option<Image> {
     let data_uri = parse_data_uri(uri).ok()?;
     match data_uri {
@@ -393,12 +393,47 @@ fn decode_data_uri_image(uri: &str) -> Option<Image> {
                 || mime_type.eq_ignore_ascii_case("image/jpg")
             {
                 Image::decode_jpeg(&data).ok()
+            } else if mime_type.eq_ignore_ascii_case("image/svg+xml") {
+                decode_svg_bytes(&data)
             } else {
                 None
             }
         }
-        _ => None,
+        DataUri::Text { mime_type, data } => {
+            if mime_type.eq_ignore_ascii_case("image/svg+xml") {
+                decode_svg_text(&data)
+            } else {
+                None
+            }
+        }
     }
+}
+
+/// Decode SVG from raw bytes (UTF-8 text).
+fn decode_svg_bytes(bytes: &[u8]) -> Option<Image> {
+    let text = std::str::from_utf8(bytes).ok()?;
+    decode_svg_text(text)
+}
+
+/// Decode SVG from text, parse and rasterize.
+fn decode_svg_text(text: &str) -> Option<Image> {
+    use crate::dom::Node;
+    use crate::html::TreeBuilder;
+    let doc = TreeBuilder::parse(text).document();
+    // Find the <svg> element in the parsed document
+    fn find_svg(node: &NodeHandle) -> Option<NodeHandle> {
+        if node.tag_name().as_deref() == Some("svg") {
+            return Some(node.clone());
+        }
+        for child in node.child_nodes() {
+            if let Some(found) = find_svg(&child) {
+                return Some(found);
+            }
+        }
+        None
+    }
+    let svg_node = find_svg(&doc)?;
+    crate::svg::render_svg_to_image(&svg_node)
 }
 
 /// Maximum image size to fetch (10 MiB).
@@ -445,15 +480,19 @@ fn fetch_image_uncached(url: &str) -> Option<Image> {
         .unwrap_or_default();
 
     // Determine image type from Content-Type header or try both decoders
+    if content_type.contains("image/svg+xml") || url.ends_with(".svg") {
+        return decode_svg_bytes(body);
+    }
     if content_type.contains("image/png") {
         Image::decode_png(body).ok()
     } else if content_type.contains("image/jpeg") || content_type.contains("image/jpg") {
         Image::decode_jpeg(body).ok()
     } else {
-        // Try PNG first, then JPEG
+        // Try PNG first, then JPEG, then SVG
         Image::decode_png(body)
             .ok()
             .or_else(|| Image::decode_jpeg(body).ok())
+            .or_else(|| decode_svg_bytes(body))
     }
 }
 
