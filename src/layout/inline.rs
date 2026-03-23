@@ -771,6 +771,14 @@ pub(super) fn vertical_align(style: &ComputedStyle) -> VerticalAlign {
         Some(ComputedValue::Keyword(keyword)) if keyword.eq_ignore_ascii_case("bottom") => {
             VerticalAlign::Bottom
         }
+        Some(ComputedValue::Keyword(keyword)) if keyword.eq_ignore_ascii_case("sub") => {
+            // sub: lower by ~0.4em
+            VerticalAlign::Length(-font_size(style) * 0.4)
+        }
+        Some(ComputedValue::Keyword(keyword)) if keyword.eq_ignore_ascii_case("super") => {
+            // super: raise by ~0.6em
+            VerticalAlign::Length(font_size(style) * 0.6)
+        }
         Some(ComputedValue::Px(value)) => VerticalAlign::Length(*value),
         Some(ComputedValue::Number(value)) => VerticalAlign::Length(*value),
         _ => VerticalAlign::Baseline,

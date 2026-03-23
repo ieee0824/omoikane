@@ -2630,3 +2630,53 @@ fn ua_defaults_table_has_display_table() {
     let style = resolver.computed_style(&table);
     assert_eq!(style.get("display"), Some(&ComputedValue::Keyword("table".to_string())));
 }
+
+#[test]
+fn font_size_smaller_resolves_to_px() {
+    let document = NodeHandle::document();
+    let html = NodeHandle::element("html");
+    let body = NodeHandle::element("body");
+    let child = NodeHandle::element("span");
+    document.append_child(html.clone());
+    html.append_child(body.clone());
+    body.append_child(child.clone());
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet("body { font-size: 20px; } span { font-size: smaller; }").unwrap(),
+    );
+    let style = resolver.computed_style(&child);
+    // smaller = parent * 0.833 = 20 * 0.833 = 16.66
+    match style.get("font-size") {
+        Some(ComputedValue::Px(px)) => {
+            assert!((*px - 16.66).abs() < 0.1, "font-size: smaller should be ~16.66px, got {px}");
+        }
+        other => panic!("expected Px, got {other:?}"),
+    }
+}
+
+#[test]
+fn font_size_larger_resolves_to_px() {
+    let document = NodeHandle::document();
+    let html = NodeHandle::element("html");
+    let body = NodeHandle::element("body");
+    let child = NodeHandle::element("span");
+    document.append_child(html.clone());
+    html.append_child(body.clone());
+    body.append_child(child.clone());
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet("body { font-size: 20px; } span { font-size: larger; }").unwrap(),
+    );
+    let style = resolver.computed_style(&child);
+    // larger = parent * 1.2 = 20 * 1.2 = 24.0
+    match style.get("font-size") {
+        Some(ComputedValue::Px(px)) => {
+            assert!((*px - 24.0).abs() < 0.1, "font-size: larger should be ~24px, got {px}");
+        }
+        other => panic!("expected Px, got {other:?}"),
+    }
+}
