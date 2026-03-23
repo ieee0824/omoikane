@@ -355,10 +355,18 @@
   }
 
   globalThis.Node = Node;
+  globalThis.Element = Node;
+  globalThis.HTMLElement = Node;
   globalThis.Document = Document;
   globalThis.Event = Event;
   globalThis.document = wrapNode(__omoikane_document_id);
   globalThis.window = globalThis;
+  globalThis.addEventListener = function(type, listener, options) {
+    return document.addEventListener(type, listener, options);
+  };
+  globalThis.removeEventListener = function(type, listener, options) {
+    return document.removeEventListener(type, listener, options);
+  };
   globalThis.location = { href: __omoikane_location_href };
   globalThis.getComputedStyle = function() { return new Proxy({}, { get() { return ""; } }); };
   globalThis.navigator = { userAgent: __omoikane_navigator_user_agent };

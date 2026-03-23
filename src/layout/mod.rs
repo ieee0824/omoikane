@@ -2045,7 +2045,7 @@ fn is_inline_child(node: &NodeHandle, resolver: &mut StyleResolver) -> bool {
 fn is_non_rendered_html_element(node: &NodeHandle) -> bool {
     matches!(
         node.tag_name().as_deref(),
-        Some("head" | "title" | "meta" | "style" | "script" | "link")
+        Some("head" | "title" | "meta" | "style" | "script" | "link" | "noscript")
     )
 }
 
