@@ -10,8 +10,8 @@ use crate::dom::{Node, NodeHandle, NodeType};
 use rusqlite::{Connection, params};
 
 use super::{
-    MediaQuery, PseudoElement, Rule, Specificity, Stylesheet, Value, evaluate_media_query,
-    matches_selector_with_pseudo, parse_media_query_list, specificity,
+    Declaration, MediaQuery, PseudoElement, Rule, Specificity, Stylesheet, Value,
+    evaluate_media_query, matches_selector_with_pseudo, parse_media_query_list, specificity,
 };
 
 /// CSS origin.
@@ -108,6 +108,9 @@ pub struct StyleResolver {
     /// it depends only on the prelude text, not on viewport dimensions or
     /// color-scheme settings.
     media_query_cache: HashMap<String, Vec<MediaQuery>>,
+    /// Parsed `@keyframes` rules keyed by animation name.
+    /// Each entry contains the declarations from the final keyframe (`to` / `100%`).
+    keyframes_final: HashMap<String, Vec<Declaration>>,
 }
 
 static UNSUPPORTED_CSS_LOGGED: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
@@ -181,6 +184,8 @@ impl StyleResolver {
 
     /// Adds a stylesheet with its origin.
     pub fn add_stylesheet(&mut self, origin: Origin, stylesheet: Stylesheet) {
+        // Extract @keyframes rules before storing the stylesheet.
+        collect_keyframes(&stylesheet.rules, &mut self.keyframes_final);
         self.stylesheets
             .push(StylesheetInput { origin, stylesheet });
         self.cache.clear();
@@ -389,8 +394,56 @@ impl StyleResolver {
         apply_inheritance(&mut properties, parent_style);
         apply_initial_values(&mut properties);
         zero_border_width_for_none_style(&mut properties);
+        self.apply_animation_final_state(&mut properties, parent_style);
 
         ComputedStyle { properties }
+    }
+
+    /// If the element has `animation-fill-mode: forwards` (or `both`),
+    /// apply the final keyframe's declarations on top of the computed style.
+    fn apply_animation_final_state(
+        &self,
+        properties: &mut BTreeMap<String, ComputedValue>,
+        parent_style: Option<&ComputedStyle>,
+    ) {
+        let fill_mode = match properties.get("animation-fill-mode") {
+            Some(ComputedValue::Keyword(kw)) => kw.to_ascii_lowercase(),
+            _ => return,
+        };
+        if fill_mode != "forwards" && fill_mode != "both" {
+            return;
+        }
+
+        let anim_name = match properties.get("animation-name") {
+            Some(ComputedValue::Keyword(name)) => name.clone(),
+            _ => return,
+        };
+        if anim_name.eq_ignore_ascii_case("none") || anim_name.is_empty() {
+            return;
+        }
+
+        let Some(final_decls) = self.keyframes_final.get(&anim_name) else {
+            return;
+        };
+
+        let parent_font_size = parent_style
+            .and_then(|ps| ps.get("font-size"))
+            .and_then(|v| match v {
+                ComputedValue::Px(px) => Some(*px),
+                _ => None,
+            })
+            .unwrap_or(16.0);
+        let ctx = ResolutionContext {
+            parent_font_size,
+            root_font_size: self.root_font_size,
+            viewport_width: self.viewport_width,
+            viewport_height: self.viewport_height,
+        };
+
+        for decl in final_decls {
+            let computed = compute_value(&decl.value, &decl.name, ctx);
+            insert_computed_property(properties, &decl.name, computed);
+        }
     }
 }
 
@@ -512,8 +565,13 @@ fn collect_rule_candidates(
                             color_scheme_dark,
                             media_cache,
                         )
+                    } else if at_rule.name.eq_ignore_ascii_case("keyframes")
+                        || at_rule.name.eq_ignore_ascii_case("-webkit-keyframes")
+                    {
+                        // @keyframes rules are handled separately; skip them in cascade.
+                        false
                     } else {
-                        // Non-media at-rules (e.g. @keyframes, @supports) are passed through.
+                        // Other at-rules (e.g. @supports) are passed through.
                         true
                     };
                     if should_apply {
@@ -612,6 +670,104 @@ fn is_length_property(name: &str) -> bool {
             | "border-spacing"
             | "flex-basis"
     )
+}
+
+/// Extracts `@keyframes` rules from a stylesheet and stores the final
+/// keyframe's declarations (from `to` / `100%`) in the provided map.
+fn collect_keyframes(rules: &[Rule], keyframes_final: &mut HashMap<String, Vec<Declaration>>) {
+    for rule in rules {
+        match rule {
+            Rule::At(at_rule)
+                if at_rule.name.eq_ignore_ascii_case("keyframes")
+                    || at_rule.name.eq_ignore_ascii_case("-webkit-keyframes") =>
+            {
+                let anim_name = at_rule.prelude.trim().to_string();
+                if anim_name.is_empty() {
+                    continue;
+                }
+                // The @keyframes block is stored as raw text in a special declaration.
+                let raw_block = at_rule
+                    .declarations
+                    .iter()
+                    .find(|d| d.name == "__keyframes_block")
+                    .and_then(|d| match &d.value {
+                        Value::Keyword(text) => Some(text.clone()),
+                        _ => None,
+                    });
+                if let Some(block_text) = raw_block {
+                    if let Some(decls) = parse_keyframe_final_declarations(&block_text) {
+                        keyframes_final.insert(anim_name, decls);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Parses a raw @keyframes block text and extracts the declarations from
+/// the final keyframe (`to` or `100%`).
+fn parse_keyframe_final_declarations(block_text: &str) -> Option<Vec<Declaration>> {
+    // Split into individual keyframe steps by finding `selector { declarations }`
+    let mut final_decls = None;
+    let mut pos = 0;
+    let chars: Vec<char> = block_text.chars().collect();
+
+    while pos < chars.len() {
+        // Skip whitespace
+        while pos < chars.len() && chars[pos].is_ascii_whitespace() {
+            pos += 1;
+        }
+        if pos >= chars.len() {
+            break;
+        }
+
+        // Read selector (everything before `{`)
+        let selector_start = pos;
+        while pos < chars.len() && chars[pos] != '{' {
+            pos += 1;
+        }
+        if pos >= chars.len() {
+            break;
+        }
+        let selector: String = chars[selector_start..pos].iter().collect();
+        let selector = selector.trim().to_ascii_lowercase();
+        pos += 1; // skip '{'
+
+        // Read declarations (everything before matching `}`)
+        let decl_start = pos;
+        let mut depth = 1;
+        while pos < chars.len() && depth > 0 {
+            if chars[pos] == '{' {
+                depth += 1;
+            } else if chars[pos] == '}' {
+                depth -= 1;
+            }
+            if depth > 0 {
+                pos += 1;
+            }
+        }
+        let decl_text: String = chars[decl_start..pos].iter().collect();
+        if pos < chars.len() {
+            pos += 1; // skip '}'
+        }
+
+        // Check if this is the final keyframe
+        let is_final = selector == "to" || selector == "100%" || selector.contains("100%");
+        if is_final {
+            // Parse declarations using the CSS parser
+            let fake_rule = format!("x {{ {} }}", decl_text);
+            if let Ok(stylesheet) = super::parse_stylesheet(&fake_rule) {
+                for rule in &stylesheet.rules {
+                    if let Rule::Style(style_rule) = rule {
+                        final_decls = Some(style_rule.declarations.clone());
+                    }
+                }
+            }
+        }
+    }
+
+    final_decls
 }
 
 fn cascade_rank(candidate: &Candidate) -> (u8, u8) {
@@ -900,6 +1056,8 @@ fn is_supported_property(name: &str) -> bool {
     matches!(
         name,
         "align-items"
+            | "animation-fill-mode"
+            | "animation-name"
             | "align-self"
             | "background-attachment"
             | "background-color"

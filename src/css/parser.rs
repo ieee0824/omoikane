@@ -98,6 +98,26 @@ impl Parser {
                         }));
                     }
 
+                    // @keyframes: skip the block entirely and store as raw text
+                    // because keyframe selectors (0%, 100%, from, to) are not
+                    // valid CSS selectors and would fail parse_rule_block().
+                    if name.eq_ignore_ascii_case("keyframes")
+                        || name.eq_ignore_ascii_case("-webkit-keyframes")
+                    {
+                        let raw_block = self.consume_raw_block()?;
+                        return Ok(Rule::At(AtRule {
+                            name,
+                            prelude: render_tokens(&prelude_tokens).trim().to_string(),
+                            block: None,
+                            // Store raw block text in a single declaration for later parsing.
+                            declarations: vec![Declaration {
+                                name: "__keyframes_block".to_string(),
+                                value: Value::Keyword(raw_block),
+                                important: false,
+                            }],
+                        }));
+                    }
+
                     let declarations = self.parse_declaration_list()?;
 
                     // Produce a structured FontFace rule when possible.
@@ -124,6 +144,32 @@ impl Parser {
             block: None,
             declarations: Vec::new(),
         }))
+    }
+
+    /// Consumes tokens until the matching closing brace, returning the raw text.
+    /// The opening brace has already been consumed.
+    fn consume_raw_block(&mut self) -> Result<String, CssParseError> {
+        let mut depth = 1;
+        let mut text = String::new();
+        while let Some(token) = self.next() {
+            match &token {
+                CssToken::CurlyOpen => {
+                    depth += 1;
+                    text.push('{');
+                }
+                CssToken::CurlyClose => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return Ok(text);
+                    }
+                    text.push('}');
+                }
+                _ => {
+                    text.push_str(&render_tokens(&[token]));
+                }
+            }
+        }
+        Err(CssParseError::UnexpectedEndOfInput)
     }
 
     fn parse_rule_block(&mut self) -> Result<Vec<Rule>, CssParseError> {
