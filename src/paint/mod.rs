@@ -1699,8 +1699,9 @@ fn paint_background_image(
                 let tile_w = tile_w.max(1.0);
                 let tile_h = tile_h.max(1.0);
                 let repeat = background_repeat(style);
-                let (position_x, position_y) = background_position(style, area.width, area.height, tile_w, tile_h);
                 let fixed = background_attachment_fixed(style);
+                let (pos_cw, pos_ch) = if fixed { (viewport.width, viewport.height) } else { (area.width, area.height) };
+                let (position_x, position_y) = background_position(style, pos_cw, pos_ch, tile_w, tile_h);
                 let anchor_x = if fixed { viewport.x + position_x } else { area.x + position_x };
                 let anchor_y = if fixed { viewport.y + position_y } else { area.y + position_y };
                 let x_end = area.x + area.width;
@@ -1772,8 +1773,13 @@ fn paint_background_image(
     let x_end = area.x + area.width;
     let y_end = area.y + area.height;
     let repeat = background_repeat(style);
-    let (position_x, position_y) = background_position(style, area.width, area.height, tile_width, tile_height);
     let fixed = background_attachment_fixed(style);
+    let (pos_container_w, pos_container_h) = if fixed {
+        (viewport.width, viewport.height)
+    } else {
+        (area.width, area.height)
+    };
+    let (position_x, position_y) = background_position(style, pos_container_w, pos_container_h, tile_width, tile_height);
     let anchor_x = if fixed {
         viewport.x + position_x
     } else {
