@@ -88,7 +88,7 @@ fn is_supported_html_tag(tag: &str) -> bool {
             | "br" | "strong" | "em" | "b" | "i" | "u" | "s" | "a" | "pre" | "code"
             | "ul" | "ol" | "li"
             | "table" | "thead" | "tbody" | "tfoot" | "tr" | "td" | "th"
-            | "img" | "object"
+            | "img" | "object" | "svg" | "path" | "circle" | "rect" | "g"
             | "style" | "link" | "meta" | "title" | "script" | "noscript"
             | "font" | "blockquote" | "hr" | "address"
             | "dl" | "dt" | "dd" | "figure" | "figcaption"
