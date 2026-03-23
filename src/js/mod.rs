@@ -271,6 +271,63 @@ const DOM_BOOTSTRAP: &str = r#"
       };
     });
   };
+
+  // IntersectionObserver polyfill for headless rendering.
+  // All elements are assumed to be within the viewport, so observe()
+  // immediately invokes the callback with isIntersecting: true.
+  const emptyRect = Object.freeze({ x: 0, y: 0, width: 0, height: 0, top: 0, left: 0, bottom: 0, right: 0 });
+
+  class IntersectionObserverEntry {
+    constructor(target) {
+      this.target = target;
+      this.isIntersecting = true;
+      this.intersectionRatio = 1.0;
+      this.boundingClientRect = emptyRect;
+      this.intersectionRect = emptyRect;
+      this.rootBounds = null;
+      this.time = Date.now();
+    }
+  }
+
+  if (!globalThis.IntersectionObserverEntry) {
+    globalThis.IntersectionObserverEntry = IntersectionObserverEntry;
+  }
+
+  if (!globalThis.IntersectionObserver) {
+    globalThis.IntersectionObserver = class IntersectionObserver {
+    constructor(callback, options = {}) {
+      if (typeof callback !== "function") {
+        throw new TypeError("IntersectionObserver constructor: callback must be a function");
+      }
+      this._callback = callback;
+      this._options = options;
+      this._targets = new Set();
+    }
+
+    observe(target) {
+      if (this._targets.has(target)) return;
+      this._targets.add(target);
+      // Schedule callback asynchronously (microtask) to match real browser behavior.
+      // Re-check that target is still observed when microtask runs.
+      Promise.resolve().then(() => {
+        if (!this._targets.has(target)) return;
+        this._callback([new IntersectionObserverEntry(target)], this);
+      });
+    }
+
+    unobserve(target) {
+      this._targets.delete(target);
+    }
+
+    disconnect() {
+      this._targets.clear();
+    }
+
+    takeRecords() {
+      return [];
+    }
+  };
+  } // end if (!globalThis.IntersectionObserver)
 })();
 "#;
 
@@ -1685,5 +1742,107 @@ mod tests {
         let result = runtime.eval("order").unwrap()
             .as_string().unwrap().to_std_string_escaped();
         assert_eq!(result, "first,second,", "defer on inline should be ignored; both run in order");
+    }
+
+    #[test]
+    fn intersection_observer_fires_callback_on_observe() {
+        let doc = NodeHandle::document();
+        let div = NodeHandle::element("div");
+        doc.append_child(div.clone());
+
+        let mut runtime = JsRuntime::with_document(doc).unwrap();
+        runtime.eval(r#"
+            var observed = false;
+            var intersecting = false;
+            const el = document.querySelector("div");
+            const observer = new IntersectionObserver((entries) => {
+                observed = true;
+                intersecting = entries[0].isIntersecting;
+            });
+            observer.observe(el);
+        "#).unwrap();
+        runtime.run_jobs().unwrap();
+
+        let observed = runtime.eval("observed").unwrap().as_boolean().unwrap();
+        assert!(observed, "IntersectionObserver callback should fire after observe()");
+
+        let intersecting = runtime.eval("intersecting").unwrap().as_boolean().unwrap();
+        assert!(intersecting, "entry.isIntersecting should be true in headless mode");
+    }
+
+    #[test]
+    fn intersection_observer_reobserve_fires_callback_again() {
+        let doc = NodeHandle::document();
+        let div = NodeHandle::element("div");
+        doc.append_child(div.clone());
+
+        let mut runtime = JsRuntime::with_document(doc).unwrap();
+        runtime.eval(r#"
+            var count = 0;
+            const el = document.querySelector("div");
+            const observer = new IntersectionObserver((entries) => { count++; });
+            observer.observe(el);
+            observer.unobserve(el);
+            observer.observe(el);
+        "#).unwrap();
+        runtime.run_jobs().unwrap();
+
+        let count = runtime.eval("count").unwrap()
+            .to_number(&mut runtime.context).unwrap();
+        // observe → unobserve → observe: callback fires for each observe (2 times)
+        assert_eq!(count, 2.0, "callback should fire for each observe() call");
+    }
+
+    #[test]
+    fn intersection_observer_disconnect_clears_targets() {
+        let doc = NodeHandle::document();
+        let div = NodeHandle::element("div");
+        doc.append_child(div.clone());
+
+        let mut runtime = JsRuntime::with_document(doc).unwrap();
+        runtime.eval(r#"
+            var count = 0;
+            const el = document.querySelector("div");
+            const observer = new IntersectionObserver((entries) => { count++; });
+            observer.observe(el);
+            observer.disconnect();
+            observer.observe(el);
+        "#).unwrap();
+        runtime.run_jobs().unwrap();
+
+        let count = runtime.eval("count").unwrap()
+            .to_number(&mut runtime.context).unwrap();
+        assert_eq!(count, 2.0, "disconnect then re-observe should fire callback again");
+    }
+
+    #[test]
+    fn intersection_observer_classlist_add_pattern() {
+        // Simulate the common pattern: IO + classList.add('on') for fade-in
+        let doc = NodeHandle::document();
+        let div = NodeHandle::element("div");
+        div.set_attribute("class", "fade");
+        doc.append_child(div.clone());
+
+        let mut runtime = JsRuntime::with_document(doc).unwrap();
+        runtime.eval(r#"
+            const el = document.querySelector("div");
+            const observer = new IntersectionObserver((entries) => {
+                entries.forEach(entry => {
+                    if (entry.isIntersecting) {
+                        entry.target.classList.add("on");
+                    }
+                });
+            });
+            observer.observe(el);
+        "#).unwrap();
+        runtime.run_jobs().unwrap();
+
+        let has_on = runtime.eval("document.querySelector('div').classList.contains('on')")
+            .unwrap().as_boolean().unwrap();
+        assert!(has_on, "IO should add 'on' class via classList.add");
+
+        // Verify the DOM attribute
+        let class_attr = div.attributes().unwrap().get("class").cloned().unwrap_or_default();
+        assert!(class_attr.contains("on"), "DOM class attr should contain 'on': {class_attr}");
     }
 }
