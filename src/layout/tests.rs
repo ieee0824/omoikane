@@ -4307,3 +4307,37 @@ fn border_spacing_two_values_apply_to_table() {
         "horizontal spacing should be ~10px, got {h_gap}"
     );
 }
+
+#[test]
+fn line_height_percentage_scales_by_font_size() {
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let p = NodeHandle::element("p");
+    p.append_child(NodeHandle::text("Hello"));
+    document.append_child(body.clone());
+    body.append_child(p.clone());
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "body { margin: 0; } p { font-size: 20px; line-height: 150%; width: 200px; }",
+        )
+        .unwrap(),
+    );
+
+    let layout = layout_tree(
+        &body,
+        &mut resolver,
+        Rect { x: 0.0, y: 0.0, width: 200.0, height: 0.0 },
+    )
+    .unwrap();
+
+    let p_box = find_layout_box_by_tag(&layout, "p").unwrap();
+    // line-height: 150% of 20px = 30px
+    assert!(
+        (p_box.dimensions.content.height - 30.0).abs() < 1.0,
+        "line-height: 150% of 20px should be ~30px, got {}",
+        p_box.dimensions.content.height,
+    );
+}
