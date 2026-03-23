@@ -135,6 +135,95 @@ const DOM_BOOTSTRAP: &str = r#"
     set id(value) {
       __omoikane_set_attribute(this.__id, "id", String(value));
     }
+
+    getAttribute(name) {
+      return __omoikane_get_attribute(this.__id, String(name));
+    }
+
+    setAttribute(name, value) {
+      __omoikane_set_attribute(this.__id, String(name), String(value));
+    }
+
+    get className() {
+      return __omoikane_get_attribute(this.__id, "class") || "";
+    }
+
+    set className(value) {
+      __omoikane_set_attribute(this.__id, "class", String(value));
+    }
+
+    get classList() {
+      const node = this;
+      return {
+        add(...classes) {
+          const current = new Set((node.className || "").split(/\s+/).filter(Boolean));
+          for (const cls of classes) current.add(cls);
+          node.className = [...current].join(" ");
+        },
+        remove(...classes) {
+          const current = new Set((node.className || "").split(/\s+/).filter(Boolean));
+          for (const cls of classes) current.delete(cls);
+          node.className = [...current].join(" ");
+        },
+        toggle(cls, force) {
+          const current = new Set((node.className || "").split(/\s+/).filter(Boolean));
+          const has = current.has(cls);
+          if (force === undefined) {
+            has ? current.delete(cls) : current.add(cls);
+          } else if (force) {
+            current.add(cls);
+          } else {
+            current.delete(cls);
+          }
+          node.className = [...current].join(" ");
+          return current.has(cls);
+        },
+        contains(cls) {
+          return (node.className || "").split(/\s+/).filter(Boolean).includes(cls);
+        },
+        get length() {
+          return (node.className || "").split(/\s+/).filter(Boolean).length;
+        },
+        item(index) {
+          return (node.className || "").split(/\s+/).filter(Boolean)[index] || null;
+        },
+      };
+    }
+
+    get style() {
+      const node = this;
+      return new Proxy({}, {
+        get(target, prop) {
+          if (typeof prop !== "string") return undefined;
+          const kebab = prop.replace(/[A-Z]/g, m => "-" + m.toLowerCase());
+          const styleAttr = __omoikane_get_attribute(node.__id, "style") || "";
+          const escaped = kebab.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+          const match = styleAttr.match(new RegExp("(?:^|;\\s*)" + escaped + "\\s*:\\s*([^;]+)"));
+          return match ? match[1].trim() : "";
+        },
+        set(target, prop, value) {
+          if (typeof prop !== "string") return true;
+          const kebab = prop.replace(/[A-Z]/g, m => "-" + m.toLowerCase());
+          const shouldRemove = value === null || value === undefined || value === "";
+          const strValue = shouldRemove ? "" : String(value);
+          let styleAttr = __omoikane_get_attribute(node.__id, "style") || "";
+          const escaped = kebab.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+          const regex = new RegExp("(^|;\\s*)" + escaped + "\\s*:[^;]+(;|$)");
+          if (regex.test(styleAttr)) {
+            if (shouldRemove) {
+              styleAttr = styleAttr.replace(regex, "$1");
+            } else {
+              styleAttr = styleAttr.replace(regex, (m, pre) => pre + kebab + ": " + strValue + ";");
+            }
+          } else if (!shouldRemove) {
+            styleAttr = (styleAttr ? styleAttr.replace(/;?\s*$/, "; ") : "") + kebab + ": " + strValue + ";";
+          }
+          styleAttr = styleAttr.replace(/^[;\s]+/, "").replace(/[;\s]+$/, "").replace(/;\s*;+/g, ";");
+          __omoikane_set_attribute(node.__id, "style", styleAttr.trim());
+          return true;
+        },
+      });
+    }
   }
 
   class Document extends Node {
@@ -1051,5 +1140,186 @@ mod tests {
         assert!(result.is_err(), "accessing 'process' should throw ReferenceError");
         let result = runtime.eval_safe("require");
         assert!(result.is_err(), "accessing 'require' should throw ReferenceError");
+    }
+
+    #[test]
+    fn classname_getter_and_setter() {
+        let doc = NodeHandle::document();
+        let div = NodeHandle::element("div");
+        doc.append_child(div.clone());
+
+        let mut runtime = JsRuntime::with_document(doc).unwrap();
+        runtime.eval(r#"
+            const el = document.querySelector("div");
+            el.className = "foo bar";
+        "#).unwrap();
+
+        let result = runtime.eval("document.querySelector('div').className")
+            .unwrap().as_string().unwrap().to_std_string_escaped();
+        assert_eq!(result, "foo bar");
+    }
+
+    #[test]
+    fn classlist_add_remove_contains() {
+        let doc = NodeHandle::document();
+        let div = NodeHandle::element("div");
+        doc.append_child(div.clone());
+
+        let mut runtime = JsRuntime::with_document(doc).unwrap();
+        runtime.eval(r#"
+            const el = document.querySelector("div");
+            el.classList.add("alpha", "beta");
+        "#).unwrap();
+
+        let has_alpha = runtime.eval("document.querySelector('div').classList.contains('alpha')")
+            .unwrap().as_boolean().unwrap();
+        assert!(has_alpha, "classList should contain 'alpha'");
+
+        runtime.eval("document.querySelector('div').classList.remove('alpha')").unwrap();
+        let has_alpha = runtime.eval("document.querySelector('div').classList.contains('alpha')")
+            .unwrap().as_boolean().unwrap();
+        assert!(!has_alpha, "classList should not contain 'alpha' after remove");
+
+        let has_beta = runtime.eval("document.querySelector('div').classList.contains('beta')")
+            .unwrap().as_boolean().unwrap();
+        assert!(has_beta, "classList should still contain 'beta'");
+    }
+
+    #[test]
+    fn classlist_toggle() {
+        let doc = NodeHandle::document();
+        let div = NodeHandle::element("div");
+        doc.append_child(div.clone());
+
+        let mut runtime = JsRuntime::with_document(doc).unwrap();
+        let result = runtime.eval(r#"
+            const el = document.querySelector("div");
+            el.classList.toggle("active");
+        "#).unwrap().as_boolean().unwrap();
+        assert!(result, "toggle should return true when adding");
+
+        let result = runtime.eval("document.querySelector('div').classList.toggle('active')")
+            .unwrap().as_boolean().unwrap();
+        assert!(!result, "toggle should return false when removing");
+    }
+
+    #[test]
+    fn style_getter_and_setter() {
+        let doc = NodeHandle::document();
+        let div = NodeHandle::element("div");
+        doc.append_child(div.clone());
+
+        let mut runtime = JsRuntime::with_document(doc).unwrap();
+        runtime.eval(r#"
+            const el = document.querySelector("div");
+            el.style.backgroundColor = "red";
+            el.style.fontSize = "16px";
+        "#).unwrap();
+
+        let bg = runtime.eval("document.querySelector('div').style.backgroundColor")
+            .unwrap().as_string().unwrap().to_std_string_escaped();
+        assert_eq!(bg, "red");
+
+        let fs = runtime.eval("document.querySelector('div').style.fontSize")
+            .unwrap().as_string().unwrap().to_std_string_escaped();
+        assert_eq!(fs, "16px");
+
+        // Verify the style attribute on the DOM node
+        let style_attr = div.attributes().unwrap().get("style").cloned().unwrap_or_default();
+        assert!(style_attr.contains("background-color: red"), "style attr: {style_attr}");
+        assert!(style_attr.contains("font-size: 16px"), "style attr: {style_attr}");
+    }
+
+    #[test]
+    fn get_set_attribute_round_trip() {
+        let doc = NodeHandle::document();
+        let div = NodeHandle::element("div");
+        doc.append_child(div.clone());
+
+        let mut runtime = JsRuntime::with_document(doc).unwrap();
+        runtime.eval(r#"
+            const el = document.querySelector("div");
+            el.setAttribute("data-value", "42");
+        "#).unwrap();
+
+        let result = runtime.eval("document.querySelector('div').getAttribute('data-value')")
+            .unwrap().as_string().unwrap().to_std_string_escaped();
+        assert_eq!(result, "42");
+
+        let missing = runtime.eval("document.querySelector('div').getAttribute('nonexistent')")
+            .unwrap();
+        assert!(missing.is_null(), "getAttribute for missing attr should return null");
+    }
+
+    #[test]
+    fn classlist_length_and_item() {
+        let doc = NodeHandle::document();
+        let div = NodeHandle::element("div");
+        doc.append_child(div.clone());
+
+        let mut runtime = JsRuntime::with_document(doc).unwrap();
+        runtime.eval(r#"
+            const el = document.querySelector("div");
+            el.classList.add("a", "b", "c");
+        "#).unwrap();
+
+        let len = runtime.eval("document.querySelector('div').classList.length")
+            .unwrap().to_number(&mut runtime.context).unwrap();
+        assert_eq!(len, 3.0);
+
+        let item0 = runtime.eval("document.querySelector('div').classList.item(0)")
+            .unwrap().as_string().unwrap().to_std_string_escaped();
+        assert_eq!(item0, "a");
+
+        let item_oob = runtime.eval("document.querySelector('div').classList.item(99)")
+            .unwrap();
+        assert!(item_oob.is_null(), "out-of-range item should return null");
+    }
+
+    #[test]
+    fn classlist_toggle_with_force() {
+        let doc = NodeHandle::document();
+        let div = NodeHandle::element("div");
+        doc.append_child(div.clone());
+
+        let mut runtime = JsRuntime::with_document(doc).unwrap();
+
+        // force=true always adds
+        let result = runtime.eval(r#"
+            const el = document.querySelector("div");
+            el.classList.toggle("x", true);
+        "#).unwrap().as_boolean().unwrap();
+        assert!(result, "toggle(cls, true) should return true");
+
+        // force=true when already present keeps it
+        let result = runtime.eval("document.querySelector('div').classList.toggle('x', true)")
+            .unwrap().as_boolean().unwrap();
+        assert!(result, "toggle(cls, true) when present should return true");
+
+        // force=false always removes
+        let result = runtime.eval("document.querySelector('div').classList.toggle('x', false)")
+            .unwrap().as_boolean().unwrap();
+        assert!(!result, "toggle(cls, false) should return false");
+
+        let has = runtime.eval("document.querySelector('div').classList.contains('x')")
+            .unwrap().as_boolean().unwrap();
+        assert!(!has, "x should be removed after toggle(x, false)");
+    }
+
+    #[test]
+    fn style_value_zero_is_preserved() {
+        let doc = NodeHandle::document();
+        let div = NodeHandle::element("div");
+        doc.append_child(div.clone());
+
+        let mut runtime = JsRuntime::with_document(doc).unwrap();
+        runtime.eval(r#"
+            const el = document.querySelector("div");
+            el.style.marginTop = 0;
+        "#).unwrap();
+
+        let result = runtime.eval("document.querySelector('div').style.marginTop")
+            .unwrap().as_string().unwrap().to_std_string_escaped();
+        assert_eq!(result, "0", "style value 0 should be preserved, not removed");
     }
 }
