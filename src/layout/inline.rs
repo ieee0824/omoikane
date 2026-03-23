@@ -752,6 +752,7 @@ pub(super) fn line_height(style: &ComputedStyle) -> f32 {
     match style.get("line-height") {
         Some(ComputedValue::Px(value)) => *value,
         Some(ComputedValue::Number(value)) => *value * font_size(style),
+        Some(ComputedValue::Percentage(value)) => font_size(style) * value / 100.0,
         Some(ComputedValue::Keyword(keyword)) if keyword.eq_ignore_ascii_case("normal") => {
             font_size(style) * 1.2
         }
