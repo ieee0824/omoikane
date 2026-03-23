@@ -25,11 +25,13 @@ boa_engine (0.21.0) による JS エンジンは既に統合済み。残りの D
 
 ## 子 issue
 
+- [041-0](041-0-js-execution-sandbox.md): JS 実行サンドボックス（**最初に実装**）
 - [041-1](041-1-classlist-style-bindings.md): className/classList/style バインディング
 - [041-2](041-2-event-listeners.md): addEventListener と DOMContentLoaded
 - [041-3](041-3-script-tag-execution.md): `<script>` タグの自動実行
 - [041-4](041-4-intersection-observer.md): IntersectionObserver（モダンサイト必須）
 
-## 優先度
+## 優先度・実装順序
 
-高 — 041-1 → 041-2 → 041-3 の順で、041-3 完了後にモダンサイトの JS が動く
+高 — 041-0 → 041-1 → 041-2 → 041-3 → 041-4 の順
+041-0（サンドボックス）は全ての前提として最初に実装

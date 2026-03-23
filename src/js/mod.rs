@@ -277,11 +277,33 @@ impl HostState {
     }
 }
 
-/// Embedded JavaScript runtime backed by Boa.
-#[derive(Debug)]
+/// Sandbox configuration for JS execution.
+#[derive(Clone)]
+pub struct SandboxConfig {
+    /// Maximum execution time per eval() call (default: 5 seconds).
+    pub timeout: std::time::Duration,
+}
+
+impl Default for SandboxConfig {
+    fn default() -> Self {
+        Self {
+            timeout: std::time::Duration::from_secs(5),
+        }
+    }
+}
+
 pub struct JsRuntime {
     context: Context,
     host_state: Rc<RefCell<HostState>>,
+    sandbox: SandboxConfig,
+}
+
+impl std::fmt::Debug for JsRuntime {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("JsRuntime")
+            .field("sandbox", &format_args!("timeout={:?}", self.sandbox.timeout))
+            .finish_non_exhaustive()
+    }
 }
 
 impl Default for JsRuntime {
@@ -298,6 +320,14 @@ impl JsRuntime {
 
     /// Creates a JavaScript runtime backed by `document`.
     pub fn with_document(document: NodeHandle) -> JsResult<Self> {
+        Self::with_document_and_sandbox(document, SandboxConfig::default())
+    }
+
+    /// Creates a JavaScript runtime with custom sandbox configuration.
+    pub fn with_document_and_sandbox(
+        document: NodeHandle,
+        sandbox: SandboxConfig,
+    ) -> JsResult<Self> {
         let host_state = Rc::new(RefCell::new(HostState::new(document.clone())));
         let mut context = Context::default();
 
@@ -306,6 +336,7 @@ impl JsRuntime {
         let mut runtime = Self {
             context,
             host_state,
+            sandbox,
         };
         runtime.eval(DOM_BOOTSTRAP)?;
         Ok(runtime)
@@ -322,8 +353,22 @@ impl JsRuntime {
     }
 
     /// Evaluates JavaScript source code.
+    ///
+    /// Script errors are returned as `JsError`.
+    /// Note: `SandboxConfig.timeout` is stored but not yet enforced due to
+    /// boa 0.21 lacking a runtime interrupt API.
     pub fn eval(&mut self, source: &str) -> JsResult<JsValue> {
         self.with_active_host(|context| context.eval(Source::from_bytes(source)))
+    }
+
+    /// Evaluates JavaScript source code, converting `JsError` into `Err(String)`.
+    ///
+    /// This does not catch Rust panics; it only converts JS-level errors.
+    pub fn eval_safe(&mut self, source: &str) -> Result<JsValue, String> {
+        match self.eval(source) {
+            Ok(value) => Ok(value),
+            Err(error) => Err(format!("{error}")),
+        }
     }
 
     /// Runs pending promise jobs.
@@ -945,5 +990,66 @@ mod tests {
         handle.join().unwrap();
 
         assert_eq!(result, "hello");
+    }
+
+    #[test]
+    fn eval_safe_catches_syntax_error() {
+        let mut runtime = JsRuntime::new().unwrap();
+        let result = runtime.eval_safe("this is not valid javascript }{");
+        assert!(result.is_err(), "eval_safe should return Err for syntax errors");
+    }
+
+    #[test]
+    fn eval_safe_catches_runtime_error() {
+        let mut runtime = JsRuntime::new().unwrap();
+        let result = runtime.eval_safe("undefinedFunction()");
+        assert!(result.is_err(), "eval_safe should return Err for runtime errors");
+    }
+
+    #[test]
+    fn eval_safe_returns_ok_for_valid_code() {
+        let mut runtime = JsRuntime::new().unwrap();
+        let result = runtime.eval_safe("1 + 2");
+        assert!(result.is_ok(), "eval_safe should return Ok for valid code");
+    }
+
+    #[test]
+    fn sandbox_config_has_default_timeout() {
+        let config = SandboxConfig::default();
+        assert_eq!(config.timeout, std::time::Duration::from_secs(5));
+    }
+
+    #[test]
+    fn runtime_with_custom_sandbox() {
+        let sandbox = SandboxConfig {
+            timeout: std::time::Duration::from_secs(1),
+        };
+        let doc = crate::dom::NodeHandle::document();
+        let mut runtime = JsRuntime::with_document_and_sandbox(doc, sandbox).unwrap();
+        let result = runtime.eval_safe("1 + 1");
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn process_and_require_do_not_exist_in_global() {
+        let mut runtime = JsRuntime::new().unwrap();
+        // Verify process is not defined at all (not just undefined value)
+        let result = runtime.eval_safe("'process' in globalThis");
+        assert_eq!(
+            result.unwrap().as_boolean(),
+            Some(false),
+            "'process' should not exist in globalThis"
+        );
+        let result = runtime.eval_safe("'require' in globalThis");
+        assert_eq!(
+            result.unwrap().as_boolean(),
+            Some(false),
+            "'require' should not exist in globalThis"
+        );
+        // Accessing them directly should throw ReferenceError
+        let result = runtime.eval_safe("process");
+        assert!(result.is_err(), "accessing 'process' should throw ReferenceError");
+        let result = runtime.eval_safe("require");
+        assert!(result.is_err(), "accessing 'require' should throw ReferenceError");
     }
 }
