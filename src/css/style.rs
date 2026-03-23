@@ -404,7 +404,7 @@ impl StyleResolver {
     fn apply_animation_final_state(
         &self,
         properties: &mut BTreeMap<String, ComputedValue>,
-        parent_style: Option<&ComputedStyle>,
+        _parent_style: Option<&ComputedStyle>,
     ) {
         let fill_mode = match properties.get("animation-fill-mode") {
             Some(ComputedValue::Keyword(kw)) => kw.to_ascii_lowercase(),
@@ -426,22 +426,33 @@ impl StyleResolver {
             return;
         };
 
-        let parent_font_size = parent_style
-            .and_then(|ps| ps.get("font-size"))
+        // Use the element's own computed font-size for em resolution,
+        // and the effective root font-size for rem resolution.
+        let element_font_size = properties
+            .get("font-size")
             .and_then(|v| match v {
                 ComputedValue::Px(px) => Some(*px),
                 _ => None,
             })
             .unwrap_or(16.0);
         let ctx = ResolutionContext {
-            parent_font_size,
+            parent_font_size: element_font_size,
             root_font_size: self.root_font_size,
             viewport_width: self.viewport_width,
             viewport_height: self.viewport_height,
         };
 
+        // Collect custom properties for var() resolution in keyframes.
+        let custom_properties: BTreeMap<String, Value> = properties
+            .iter()
+            .filter(|(name, _)| name.starts_with("--"))
+            .map(|(name, value)| (name.clone(), computed_value_to_value(value)))
+            .collect();
+
         for decl in final_decls {
-            let computed = compute_value(&decl.value, &decl.name, ctx);
+            let resolved = resolve_value_with_custom_properties(&decl.value, &custom_properties)
+                .unwrap_or_else(|| decl.value.clone());
+            let computed = compute_value(&resolved, &decl.name, ctx);
             insert_computed_property(properties, &decl.name, computed);
         }
     }
@@ -699,6 +710,10 @@ fn collect_keyframes(rules: &[Rule], keyframes_final: &mut HashMap<String, Vec<D
                         keyframes_final.insert(anim_name, decls);
                     }
                 }
+            }
+            // Recurse into @media and other at-rule blocks to find nested @keyframes.
+            Rule::At(at_rule) if at_rule.block.is_some() => {
+                collect_keyframes(at_rule.block.as_ref().unwrap(), keyframes_final);
             }
             _ => {}
         }
@@ -2315,6 +2330,18 @@ fn computed_to_value(value: &ComputedValue) -> Value {
         ComputedValue::Color(value) => Value::Color(value.clone()),
         ComputedValue::String(value) => Value::String(value.clone()),
         ComputedValue::Number(value) => Value::Number(*value),
+    }
+}
+
+/// Converts a `ComputedValue` back into a `Value` for re-processing (e.g., var() resolution).
+fn computed_value_to_value(cv: &ComputedValue) -> Value {
+    match cv {
+        ComputedValue::Px(v) => Value::Length(*v, "px".to_string()),
+        ComputedValue::Number(v) => Value::Number(*v),
+        ComputedValue::Percentage(v) => Value::Percentage(*v),
+        ComputedValue::Color(c) => Value::Keyword(c.clone()),
+        ComputedValue::Keyword(k) => Value::Keyword(k.clone()),
+        ComputedValue::String(s) => Value::Keyword(s.clone()),
     }
 }
 
