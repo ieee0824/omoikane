@@ -4007,7 +4007,6 @@ fn rowspan_cell_distributes_height_evenly_across_spanned_rows() {
     let row1 = NodeHandle::element("tr");
     let tall_cell = NodeHandle::element("td");
     tall_cell.set_attribute("rowspan", "2");
-    tall_cell.set_attribute("rowspan", "2");
     tall_cell.set_attribute("class", "tall");
     tall_cell.append_child(NodeHandle::text("tall"));
     let short_cell1 = NodeHandle::element("td");

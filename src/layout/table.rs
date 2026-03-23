@@ -44,6 +44,7 @@ pub(super) fn layout_table_container(
     let mut row_groups: Vec<Option<NodeHandle>> = Vec::new();
     let mut occupied_columns = vec![0usize; column_count];
 
+    let mut pass1_cursor_y = y + spacing;
     for (row_index, entry) in entries.drain(..).enumerate() {
         for occupied in &mut occupied_columns {
             if *occupied > 0 {
@@ -51,7 +52,7 @@ pub(super) fn layout_table_container(
             }
         }
 
-        let row_y = y + spacing + row_heights.iter().enumerate().map(|(_, &h)| h + spacing).sum::<f32>();
+        let row_y = pass1_cursor_y;
         let (row_box, row_height, rowspan_cells) = layout_table_row_entry(
             &entry,
             resolver,
@@ -66,6 +67,7 @@ pub(super) fn layout_table_container(
         row_boxes.push(row_box);
         row_heights.push(row_height);
         row_groups.push(entry.row_group);
+        pass1_cursor_y += row_height + spacing;
 
         for cell_info in rowspan_cells {
             all_rowspan_cells.push((row_index, cell_info));
@@ -117,7 +119,7 @@ pub(super) fn layout_table_container(
         }
         cursor_y += final_height + spacing;
 
-        if let Some(group_node) = row_groups[row_index].clone() as Option<NodeHandle> {
+        if let Some(group_node) = row_groups[row_index].clone() {
             match &mut pending_group {
                 Some((current_group, rows, _, _group_start_y)) if *current_group == group_node => {
                     rows.push(row_box);
@@ -399,7 +401,7 @@ fn layout_table_row_entry(
         if rs > 1 {
             rowspan_cells.push(RowspanCellInfo {
                 rowspan: rs,
-                cell_height: child.dimensions.content.height,
+                cell_height: child.total_height(),
             });
         }
     }
