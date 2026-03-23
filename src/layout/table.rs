@@ -543,9 +543,11 @@ pub(super) fn compute_table_column_widths(
     available_width: f32,
     shrink_to_fit: bool,
 ) -> Vec<f32> {
+    let mut column_min_widths = vec![0.0f32; column_count];
+    let mut column_max_widths = vec![0.0f32; column_count];
     let mut column_hints = vec![0.0f32; column_count];
 
-    // Single pass: scan all rows with rowspan tracking to collect hints and explicit flags
+    // Single pass: scan all rows with rowspan tracking to collect min/max widths and explicit flags
     let mut explicit_flags = vec![false; column_count];
     let mut occupied_columns = vec![0usize; column_count];
     for entry in entries {
@@ -572,11 +574,16 @@ pub(super) fn compute_table_column_widths(
             if span == 1 {
                 let cell_style = resolver.computed_style(cell);
                 if let Some(w) = explicit_length(&cell_style, "width") {
+                    column_min_widths[col] = column_min_widths[col].max(w);
+                    column_max_widths[col] = column_max_widths[col].max(w);
                     column_hints[col] = column_hints[col].max(w);
                     explicit_flags[col] = true;
                 } else {
-                    let w = intrinsic_width(cell, resolver);
-                    column_hints[col] = column_hints[col].max(w);
+                    let max_w = intrinsic_width(cell, resolver);
+                    let min_w = super::minimum_content_width(cell, resolver);
+                    column_min_widths[col] = column_min_widths[col].max(min_w);
+                    column_max_widths[col] = column_max_widths[col].max(max_w);
+                    column_hints[col] = column_hints[col].max(max_w);
                     // Treat cells containing images as having a fixed minimum
                     // width so they are not compressed by text-heavy siblings.
                     if cell_contains_image(cell) {
@@ -590,6 +597,33 @@ pub(super) fn compute_table_column_widths(
                 }
             }
             col = end;
+        }
+    }
+
+    // CSS 2.1 §17.5.2.2: Table width = max(MIN, min(MAX, available_width))
+    // For shrink-to-fit tables, use the min/max algorithm to determine column hints.
+    if shrink_to_fit {
+        let min_total: f32 = column_min_widths.iter().sum();
+        let max_total: f32 = column_max_widths.iter().sum();
+        if max_total <= available_width {
+            // All columns can use their preferred (max) width.
+            column_hints = column_max_widths.clone();
+        } else if min_total >= available_width {
+            // All columns must use their minimum width.
+            column_hints = column_min_widths.clone();
+        } else {
+            // Distribute available_width between min and max proportionally.
+            let extra = available_width - min_total;
+            let max_extra = max_total - min_total;
+            for col in 0..column_count {
+                let col_extra = column_max_widths[col] - column_min_widths[col];
+                let share = if max_extra > 0.0 {
+                    extra * (col_extra / max_extra)
+                } else {
+                    0.0
+                };
+                column_hints[col] = column_min_widths[col] + share;
+            }
         }
     }
 

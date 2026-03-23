@@ -1574,12 +1574,11 @@ fn cell_contains_image_recursive(node: &NodeHandle) -> bool {
     false
 }
 
-#[allow(dead_code)]
 /// Returns the minimum content width for a node.
 /// For text, this is the width of the longest unbreakable word.
 /// For elements with explicit width, returns that width + padding/border.
 /// This is used for table column sizing where columns should shrink as much as possible.
-fn minimum_content_width(node: &NodeHandle, resolver: &mut StyleResolver) -> f32 {
+pub(super) fn minimum_content_width(node: &NodeHandle, resolver: &mut StyleResolver) -> f32 {
     match node.node_type() {
         NodeType::Text => node
             .data()
