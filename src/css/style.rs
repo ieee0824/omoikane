@@ -680,6 +680,8 @@ fn is_length_property(name: &str) -> bool {
             | "left"
             | "border-spacing"
             | "flex-basis"
+            | "outline-width"
+            | "outline-offset"
     )
 }
 
@@ -1172,7 +1174,11 @@ fn is_supported_property(name: &str) -> bool {
 fn compute_value(value: &Value, property_name: &str, ctx: ResolutionContext) -> ComputedValue {
     match value {
         Value::Keyword(keyword) => {
-            if is_color_keyword(keyword)
+            // CSS-wide keywords must remain as Keyword for inherit/initial resolution.
+            let lower = keyword.to_ascii_lowercase();
+            if matches!(lower.as_str(), "inherit" | "initial" | "unset" | "revert") {
+                ComputedValue::Keyword(keyword.clone())
+            } else if is_color_keyword(keyword)
                 || property_name.ends_with("color")
                 || property_name == "color"
             {

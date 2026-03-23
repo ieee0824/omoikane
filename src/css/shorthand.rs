@@ -1184,6 +1184,20 @@ fn expand_outline_shorthand(value: Value, important: bool) -> Vec<Declaration> {
         other => vec![other.clone()],
     };
 
+    // CSS-wide keywords apply to all longhands at once.
+    if values.len() == 1 {
+        if let Value::Keyword(kw) = &values[0] {
+            let lower = kw.to_ascii_lowercase();
+            if matches!(lower.as_str(), "inherit" | "initial" | "unset" | "revert") {
+                return vec![
+                    Declaration { name: "outline-style".to_string(), value: Value::Keyword(lower.clone()), important },
+                    Declaration { name: "outline-width".to_string(), value: Value::Keyword(lower.clone()), important },
+                    Declaration { name: "outline-color".to_string(), value: Value::Keyword(lower), important },
+                ];
+            }
+        }
+    }
+
     let mut style = None;
     let mut width = None;
     let mut color = None;
@@ -1203,49 +1217,48 @@ fn expand_outline_shorthand(value: Value, important: bool) -> Vec<Declaration> {
                         width = Some(item.clone());
                     }
                 }
-                _ => {
+                _ if is_background_color_keyword(&lower) => {
                     if color.is_none() {
                         color = Some(item.clone());
                     }
                 }
+                _ => {
+                    // Unknown keyword — skip rather than mis-classify as color
+                }
             }
-        } else if matches!(item, Value::Length(_, _) | Value::Number(_)) {
+        } else if let Value::Length(_, _) = item {
             if width.is_none() {
                 width = Some(item.clone());
             }
-        } else if color.is_none() {
-            color = Some(item.clone());
+        } else if let Value::Number(v) = item {
+            if *v == 0.0 && width.is_none() {
+                width = Some(item.clone());
+            }
+        } else if let Value::Function { .. } = item {
+            // Color functions like rgb(), hsl()
+            if color.is_none() {
+                color = Some(item.clone());
+            }
         }
     }
 
-    let mut decls = Vec::new();
-    if let Some(s) = style {
-        decls.push(Declaration {
+    // Always emit all three longhands, using initial values for omitted ones.
+    // This ensures `outline: none` resets width and color to their defaults.
+    vec![
+        Declaration {
             name: "outline-style".to_string(),
-            value: s,
+            value: style.unwrap_or_else(|| Value::Keyword("none".to_string())),
             important,
-        });
-    }
-    if let Some(w) = width {
-        decls.push(Declaration {
+        },
+        Declaration {
             name: "outline-width".to_string(),
-            value: w,
+            value: width.unwrap_or_else(|| Value::Keyword("medium".to_string())),
             important,
-        });
-    }
-    if let Some(c) = color {
-        decls.push(Declaration {
+        },
+        Declaration {
             name: "outline-color".to_string(),
-            value: c,
+            value: color.unwrap_or_else(|| Value::Keyword("currentcolor".to_string())),
             important,
-        });
-    }
-    if decls.is_empty() {
-        decls.push(Declaration {
-            name: "outline".to_string(),
-            value,
-            important,
-        });
-    }
-    decls
+        },
+    ]
 }
