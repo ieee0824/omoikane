@@ -6,7 +6,7 @@ use crate::layout::{LayoutBox, Rect};
 use super::color::{parse_color, Color};
 use super::{
     border_box_rect, border_color, border_radius_corners, Canvas,
-    color_property, fill_triangle_clipped, fill_triangle_clipped_inclusive,
+    fill_triangle_clipped, fill_triangle_clipped_inclusive,
     has_border_radius, length_property, normalize_rect, padding_box_rect,
     resolve_color_value,
     BorderRegion,

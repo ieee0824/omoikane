@@ -188,6 +188,9 @@ enum PathCommand {
     LineTo(f32, f32),
     HorizontalLineTo(f32),
     VerticalLineTo(f32),
+    // Control points (cp1x, cp1y, cp2x, cp2y) + endpoint (x, y).
+    // Control points are parsed but currently only the endpoint is used for rendering.
+    #[allow(dead_code)]
     CurveTo(f32, f32, f32, f32, f32, f32),
     Close,
 }
