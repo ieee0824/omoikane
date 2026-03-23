@@ -2764,3 +2764,35 @@ fn font_size_larger_resolves_to_px() {
         other => panic!("expected Px, got {other:?}"),
     }
 }
+
+#[test]
+fn outline_shorthand_expands_to_longhands() {
+    use crate::css::{Rule, parse_stylesheet};
+
+    let stylesheet = parse_stylesheet("div { outline: 2px solid red; }").unwrap();
+    let Rule::Style(rule) = &stylesheet.rules[0] else {
+        panic!("expected style rule");
+    };
+
+    assert!(rule.declarations.iter().any(|d| d.name == "outline-style"),
+        "outline shorthand should expand outline-style");
+    assert!(rule.declarations.iter().any(|d| d.name == "outline-width"),
+        "outline shorthand should expand outline-width");
+    assert!(rule.declarations.iter().any(|d| d.name == "outline-color"),
+        "outline shorthand should expand outline-color");
+}
+
+#[test]
+fn outline_none_expands_to_outline_style_none() {
+    use crate::css::{Rule, Value, parse_stylesheet};
+
+    let stylesheet = parse_stylesheet("div { outline: none; }").unwrap();
+    let Rule::Style(rule) = &stylesheet.rules[0] else {
+        panic!("expected style rule");
+    };
+
+    let style_decl = rule.declarations.iter()
+        .find(|d| d.name == "outline-style")
+        .expect("outline: none should produce outline-style");
+    assert_eq!(style_decl.value, Value::Keyword("none".to_string()));
+}
