@@ -106,15 +106,24 @@ pub(super) fn layout_table_container(
                 translate_layout_box_to_outer(child, cx, cursor_y);
             }
         }
-        // Stretch row and non-rowspan cells to final height
+        // Stretch row and cells to final height
         let height_increase = final_height - row_box.dimensions.content.height;
         if height_increase > 0.01 {
             row_box.dimensions.content.height = final_height;
-            for child in &mut row_box.children {
-                let rs = html_table_span_attribute(&child.node, "rowspan").unwrap_or(1);
-                if rs <= 1 {
+        }
+        for child in &mut row_box.children {
+            let rs = html_table_span_attribute(&child.node, "rowspan").unwrap_or(1);
+            if rs <= 1 {
+                // Non-rowspan cells stretch to match the row height
+                if height_increase > 0.01 {
                     child.dimensions.content.height += height_increase;
                 }
+            } else {
+                // Rowspan cells stretch to span all their rows
+                let end = (row_index + rs).min(row_heights.len());
+                let spanned: f32 = row_heights[row_index..end].iter().sum();
+                let spanned_spacing = (end - row_index).saturating_sub(1) as f32 * spacing;
+                child.dimensions.content.height = spanned + spanned_spacing;
             }
         }
         cursor_y += final_height + spacing;
