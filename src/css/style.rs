@@ -1063,6 +1063,7 @@ fn compute_value(value: &Value, property_name: &str, ctx: ResolutionContext) -> 
                 || property_name.eq_ignore_ascii_case("overflow")
                 || property_name.eq_ignore_ascii_case("box-shadow")
                 || property_name.eq_ignore_ascii_case("background-size")
+                || property_name.eq_ignore_ascii_case("border-spacing")
             {
                 return ComputedValue::Keyword(render_value(value));
             }
