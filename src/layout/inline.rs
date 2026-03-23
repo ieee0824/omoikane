@@ -359,6 +359,10 @@ pub(crate) fn element_inline_image(node: &NodeHandle) -> Option<(NodeHandle, Ima
             let src = attributes.get("src")?;
             decode_or_fetch_image(src).map(|image| (node.clone(), image))
         }
+        "svg" => {
+            let image = crate::svg::render_svg_to_image(node)?;
+            return Some((node.clone(), image));
+        }
         "object" => {
             if let Some(data) = attributes.get("data") {
                 if let Some(image) = decode_or_fetch_image(data) {

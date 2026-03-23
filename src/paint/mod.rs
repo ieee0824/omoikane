@@ -202,6 +202,23 @@ impl Canvas {
         &self.pixels
     }
 
+    /// Consumes the canvas and returns the raw RGBA pixel buffer.
+    pub fn into_pixels(self) -> Vec<u8> {
+        self.pixels
+    }
+
+    /// Sets a single pixel at `(x, y)` to the given color.
+    pub fn set_pixel(&mut self, x: u32, y: u32, color: Color) {
+        if x >= self.width || y >= self.height {
+            return;
+        }
+        let offset = (y as usize * self.width as usize + x as usize) * 4;
+        self.pixels[offset] = color.r;
+        self.pixels[offset + 1] = color.g;
+        self.pixels[offset + 2] = color.b;
+        self.pixels[offset + 3] = color.a;
+    }
+
     /// Returns the pixel color at `(x, y)`, if in bounds.
     pub fn pixel(&self, x: u32, y: u32) -> Option<Color> {
         if x >= self.width || y >= self.height {
