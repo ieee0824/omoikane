@@ -561,8 +561,8 @@ fn layout_element(
             if float_side(&style) == FloatSide::None {
                 let outer = width + padding.horizontal() + border.horizontal();
                 let remaining = (containing_block.width - outer).max(0.0);
-                let left_auto = is_auto(style.get("margin-left"));
-                let right_auto = is_auto(style.get("margin-right"));
+                let left_auto = margin_start_is_auto(&style);
+                let right_auto = margin_end_is_auto(&style);
                 match (left_auto, right_auto) {
                     (true, true) => {
                         margin.left = remaining / 2.0;

@@ -3840,7 +3840,7 @@ fn table_three_column_rowspan_distributes_widths_correctly() {
     let table_box = find_layout_box_by_tag(&layout, "table").unwrap();
     // Row 1 should have 3 cells visible
     let row1_box = &table_box.children[0];
-    assert!(row1_box.children.len() >= 2, "row1 should have cells, got {}", row1_box.children.len());
+    assert_eq!(row1_box.children.len(), 3, "row1 should have 3 cells");
 
     // Col 0 (rowspan cell) should be at least 350px
     let col0 = &row1_box.children[0];
@@ -3850,22 +3850,19 @@ fn table_three_column_rowspan_distributes_widths_correctly() {
         col0.dimensions.content.width
     );
 
-    // Col 2 (text) should have positive width
-    if row1_box.children.len() >= 3 {
-        let col2 = &row1_box.children[2];
-        assert!(
-            col2.dimensions.content.width > 0.0,
-            "col2 (text) should have positive width, got {}",
-            col2.dimensions.content.width
-        );
-        // Col 2 should start after col 0
-        assert!(
-            col2.dimensions.content.x > col0.dimensions.content.x + col0.dimensions.content.width - 1.0,
-            "col2 x ({}) should be after col0 right edge ({})",
-            col2.dimensions.content.x,
-            col0.dimensions.content.x + col0.dimensions.content.width
-        );
-    }
+    // Col 2 (text) should have positive width and start after col 0
+    let col2 = &row1_box.children[2];
+    assert!(
+        col2.dimensions.content.width > 0.0,
+        "col2 (text) should have positive width, got {}",
+        col2.dimensions.content.width
+    );
+    assert!(
+        col2.dimensions.content.x > col0.dimensions.content.x + col0.dimensions.content.width - 1.0,
+        "col2 x ({}) should be after col0 right edge ({})",
+        col2.dimensions.content.x,
+        col0.dimensions.content.x + col0.dimensions.content.width
+    );
 }
 
 #[test]
@@ -3957,4 +3954,45 @@ fn debug_abe_real_table() {
     for (tag, x, y, w, h) in &tables {
         eprintln!("{tag}: x={x:.0} y={y:.0} w={w:.0} h={h:.0}");
     }
+}
+
+#[test]
+fn table_align_center_centers_with_auto_margins() {
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let table = NodeHandle::element("table");
+    table.set_attribute("align", "center");
+    let row = NodeHandle::element("tr");
+    let td = NodeHandle::element("td");
+    td.set_attribute("width", "200");
+    td.append_child(NodeHandle::text("content"));
+    row.append_child(td);
+    table.append_child(row);
+    document.append_child(body.clone());
+    body.append_child(table);
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet("body { margin: 0; } table { display: table; } tr { display: table-row; } td { display: table-cell; }").unwrap(),
+    );
+
+    let layout = layout_tree(
+        &body,
+        &mut resolver,
+        Rect { x: 0.0, y: 0.0, width: 800.0, height: 0.0 },
+    ).unwrap();
+
+    let table_box = find_layout_box_by_tag(&layout, "table").unwrap();
+    let table_left = table_box.dimensions.content.x
+        - table_box.dimensions.padding.left
+        - table_box.dimensions.border.left;
+    let table_outer_width = table_box.dimensions.content.width
+        + table_box.dimensions.padding.horizontal()
+        + table_box.dimensions.border.horizontal();
+    let expected_margin = (800.0 - table_outer_width) / 2.0;
+    assert!(
+        (table_left - expected_margin).abs() < 2.0,
+        "table should be centered: left={table_left}, expected_margin={expected_margin}, table_width={table_outer_width}"
+    );
 }
