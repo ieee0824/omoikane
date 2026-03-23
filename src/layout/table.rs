@@ -118,6 +118,8 @@ pub(super) fn layout_table_container(
             if rs <= 1 {
                 // Non-rowspan cells stretch to match the row height
                 if height_increase > 0.01 {
+                    // Reset contents to top first so used_content_height is accurate
+                    reset_content_to_top(child);
                     let content_used_height = used_content_height(child);
                     child.dimensions.content.height += height_increase;
                     // Re-apply vertical-align offset for middle/bottom
@@ -128,8 +130,6 @@ pub(super) fn layout_table_container(
                         _ => 0.0,
                     };
                     if offset > 0.01 {
-                        // Reset contents to top, then apply new offset
-                        reset_content_to_top(child);
                         translate_layout_contents(child, 0.0, offset);
                     }
                 }
@@ -142,6 +142,7 @@ pub(super) fn layout_table_container(
                 child.dimensions.content.height = spanned + spanned_spacing;
                 let new_height = child.dimensions.content.height;
                 if (new_height - old_height).abs() > 0.01 {
+                    reset_content_to_top(child);
                     let content_used_height = used_content_height(child);
                     let extra = (new_height - content_used_height).max(0.0);
                     let offset = match valign {
@@ -150,7 +151,6 @@ pub(super) fn layout_table_container(
                         _ => 0.0,
                     };
                     if offset > 0.01 {
-                        reset_content_to_top(child);
                         translate_layout_contents(child, 0.0, offset);
                     }
                 }
