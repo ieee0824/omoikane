@@ -556,7 +556,25 @@ fn layout_element(
     if is_table_container_element(node, &style) {
         if resolved_length(&style, "width", containing_block.width).is_none() {
             width = shrink_to_fit_width(node, resolver, containing_block.width);
+            // Re-distribute auto margins now that shrink-to-fit width is known.
+            // Floated tables keep auto margins as zero (CSS 2.1 §10.3.5).
+            if float_side(&style) == FloatSide::None {
+                let outer = width + padding.horizontal() + border.horizontal();
+                let remaining = (containing_block.width - outer).max(0.0);
+                let left_auto = margin_start_is_auto(&style);
+                let right_auto = margin_end_is_auto(&style);
+                match (left_auto, right_auto) {
+                    (true, true) => {
+                        margin.left = remaining / 2.0;
+                        margin.right = remaining / 2.0;
+                    }
+                    (true, false) => margin.left = (remaining - margin.right).max(0.0),
+                    (false, true) => margin.right = (remaining - margin.left).max(0.0),
+                    _ => {}
+                }
+            }
         }
+        let x = containing_block.x + margin.left + border.left + padding.left;
         return layout_table_container(
             node, resolver, style, margin, padding, border, x, y, width, viewport,
         );

@@ -3740,3 +3740,259 @@ fn word_wrap_alias_behaves_like_overflow_wrap() {
         p_box.lines.len()
     );
 }
+
+#[test]
+fn table_img_width_attribute_sets_column_intrinsic_width() {
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let table = NodeHandle::element("table");
+    let row = NodeHandle::element("tr");
+    let td1 = NodeHandle::element("td");
+    let img = NodeHandle::element("img");
+    img.set_attribute("width", "350");
+    img.set_attribute("height", "414");
+    td1.append_child(img);
+    let td2 = NodeHandle::element("td");
+    td2.append_child(NodeHandle::text("Hello"));
+
+    document.append_child(body.clone());
+    body.append_child(table.clone());
+    table.append_child(row.clone());
+    row.append_child(td1);
+    row.append_child(td2);
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet("table { display: table; } tr { display: table-row; } td { display: table-cell; }").unwrap(),
+    );
+
+    let layout = layout_tree(
+        &body,
+        &mut resolver,
+        Rect { x: 0.0, y: 0.0, width: 800.0, height: 0.0 },
+    ).unwrap();
+
+    let table_box = find_layout_box_by_tag(&layout, "table").unwrap();
+    let row_box = &table_box.children[0];
+    assert_eq!(row_box.children.len(), 2, "should have 2 cells");
+    let col0_width = row_box.children[0].dimensions.content.width;
+    let col1_width = row_box.children[1].dimensions.content.width;
+    assert!(col0_width >= 350.0, "col0 should be >= 350px (img width), got {col0_width}");
+    assert!(col1_width > 0.0, "col1 should have some width");
+}
+
+#[test]
+fn table_three_column_rowspan_distributes_widths_correctly() {
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let table = NodeHandle::element("table");
+
+    // Row 1: [td rowspan=2 width=350] [td nbsp] [td text]
+    let row1 = NodeHandle::element("tr");
+    let td1 = NodeHandle::element("td");
+    td1.set_attribute("rowspan", "2");
+    let img = NodeHandle::element("img");
+    img.set_attribute("width", "350");
+    img.set_attribute("height", "414");
+    td1.append_child(img);
+    td1.append_child(NodeHandle::text("Profile info"));
+    let td2 = NodeHandle::element("td");
+    td2.append_child(NodeHandle::text("\u{00a0}"));
+    let td3 = NodeHandle::element("td");
+    td3.append_child(NodeHandle::text("Latest news and drama information here"));
+    row1.append_child(td1);
+    row1.append_child(td2);
+    row1.append_child(td3);
+
+    // Row 2: [td empty] [td text]
+    let row2 = NodeHandle::element("tr");
+    let td4 = NodeHandle::element("td");
+    let td5 = NodeHandle::element("td");
+    td5.append_child(NodeHandle::text("More content"));
+    row2.append_child(td4);
+    row2.append_child(td5);
+
+    document.append_child(body.clone());
+    body.append_child(table.clone());
+    table.append_child(row1);
+    table.append_child(row2);
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "body { margin: 0; } \
+             table { display: table; } \
+             tr { display: table-row; } \
+             td { display: table-cell; }",
+        )
+        .unwrap(),
+    );
+
+    let layout = layout_tree(
+        &body,
+        &mut resolver,
+        Rect { x: 0.0, y: 0.0, width: 800.0, height: 0.0 },
+    )
+    .unwrap();
+
+    let table_box = find_layout_box_by_tag(&layout, "table").unwrap();
+    // Row 1 should have 3 cells visible
+    let row1_box = &table_box.children[0];
+    assert_eq!(row1_box.children.len(), 3, "row1 should have 3 cells");
+
+    // Col 0 (rowspan cell) should be at least 350px
+    let col0 = &row1_box.children[0];
+    assert!(
+        col0.dimensions.content.width >= 350.0,
+        "col0 (img) should be >= 350px, got {}",
+        col0.dimensions.content.width
+    );
+
+    // Col 2 (text) should have positive width and start after col 0
+    let col2 = &row1_box.children[2];
+    assert!(
+        col2.dimensions.content.width > 0.0,
+        "col2 (text) should have positive width, got {}",
+        col2.dimensions.content.width
+    );
+    assert!(
+        col2.dimensions.content.x > col0.dimensions.content.x + col0.dimensions.content.width - 1.0,
+        "col2 x ({}) should be after col0 right edge ({})",
+        col2.dimensions.content.x,
+        col0.dimensions.content.x + col0.dimensions.content.width
+    );
+}
+
+#[test]
+#[ignore = "debug abe table"]
+fn debug_abe_table_column_widths() {
+    let html = r#"<html><body>
+    <table align="center">
+      <tr>
+        <td rowspan="2"><img src="abe-top.jpg" width="350" height="414"><br>
+          <table width="256">
+            <tr><td>阿部 寛（あべ ひろし）</td></tr>
+          </table>
+          所属: 株式会社オフィスA
+        </td>
+        <td>&nbsp;</td>
+        <td><div align="center">★★★ 最新情報 ★★★</div></td>
+      </tr>
+      <tr>
+        <td></td>
+        <td>
+          ・ドラマ 日曜劇場「VIVANT」続編 2026年放送<br>
+          ・Netflixシリーズ「イクサガミ」2025年11月13日配信
+        </td>
+      </tr>
+    </table>
+    </body></html>"#;
+
+    let document = crate::html::TreeBuilder::parse(html).document();
+    let mut resolver = StyleResolver::new();
+
+    let layout = layout_tree(
+        &document,
+        &mut resolver,
+        Rect { x: 0.0, y: 0.0, width: 800.0, height: 600.0 },
+    ).unwrap();
+
+    fn dump_table(layout: &LayoutBox, depth: usize) {
+        let indent = "  ".repeat(depth);
+        let tag = layout.node.tag_name().unwrap_or_default();
+        let r = &layout.dimensions.content;
+        println!("{indent}{tag}: x={:.0} y={:.0} w={:.0} h={:.0}", r.x, r.y, r.width, r.height);
+        for child in &layout.children {
+            dump_table(child, depth + 1);
+        }
+    }
+    dump_table(&layout, 0);
+}
+
+#[test]
+#[ignore = "debug abe real table"]
+fn debug_abe_real_table() {
+    let path = "/tmp/abe-top.html";
+    if !std::path::Path::new(path).exists() {
+        eprintln!("skipping: {path} not found");
+        return;
+    }
+    let html = std::fs::read_to_string(path).unwrap();
+    let document = crate::html::TreeBuilder::parse(&html).document();
+    let mut resolver = StyleResolver::new();
+
+    let layout = layout_tree(
+        &document,
+        &mut resolver,
+        Rect { x: 0.0, y: 0.0, width: 1280.0, height: 900.0 },
+    ).unwrap();
+
+    fn find_tables(lb: &LayoutBox, results: &mut Vec<(String, f32, f32, f32, f32)>) {
+        let tag = lb.node.tag_name().unwrap_or_default();
+        if tag == "table" {
+            let r = &lb.dimensions.content;
+            results.push((tag.clone(), r.x, r.y, r.width, r.height));
+            for (i, child) in lb.children.iter().enumerate() {
+                let child_tag = child.node.tag_name().unwrap_or_default();
+                let cr = &child.dimensions.content;
+                eprintln!("  {child_tag}[{i}]: x={:.0} y={:.0} w={:.0} h={:.0} children={}", cr.x, cr.y, cr.width, cr.height, child.children.len());
+                for (j, cell) in child.children.iter().enumerate() {
+                    let cell_tag = cell.node.tag_name().unwrap_or_default();
+                    let ccr = &cell.dimensions.content;
+                    eprintln!("    {cell_tag}[{j}]: x={:.0} y={:.0} w={:.0} h={:.0}", ccr.x, ccr.y, ccr.width, ccr.height);
+                }
+            }
+        }
+        for child in &lb.children {
+            find_tables(child, results);
+        }
+    }
+    let mut tables = Vec::new();
+    find_tables(&layout, &mut tables);
+    for (tag, x, y, w, h) in &tables {
+        eprintln!("{tag}: x={x:.0} y={y:.0} w={w:.0} h={h:.0}");
+    }
+}
+
+#[test]
+fn table_align_center_centers_with_auto_margins() {
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let table = NodeHandle::element("table");
+    table.set_attribute("align", "center");
+    let row = NodeHandle::element("tr");
+    let td = NodeHandle::element("td");
+    td.set_attribute("width", "200");
+    td.append_child(NodeHandle::text("content"));
+    row.append_child(td);
+    table.append_child(row);
+    document.append_child(body.clone());
+    body.append_child(table);
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet("body { margin: 0; } table { display: table; } tr { display: table-row; } td { display: table-cell; }").unwrap(),
+    );
+
+    let layout = layout_tree(
+        &body,
+        &mut resolver,
+        Rect { x: 0.0, y: 0.0, width: 800.0, height: 0.0 },
+    ).unwrap();
+
+    let table_box = find_layout_box_by_tag(&layout, "table").unwrap();
+    let table_left = table_box.dimensions.content.x
+        - table_box.dimensions.padding.left
+        - table_box.dimensions.border.left;
+    let table_outer_width = table_box.dimensions.content.width
+        + table_box.dimensions.padding.horizontal()
+        + table_box.dimensions.border.horizontal();
+    let expected_margin = (800.0 - table_outer_width) / 2.0;
+    assert!(
+        (table_left - expected_margin).abs() < 2.0,
+        "table should be centered: left={table_left}, expected_margin={expected_margin}, table_width={table_outer_width}"
+    );
+}
