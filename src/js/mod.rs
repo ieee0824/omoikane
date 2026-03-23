@@ -546,6 +546,95 @@ impl JsRuntime {
         self.run_jobs()
     }
 
+    /// Collects and executes all `<script>` elements in the document.
+    ///
+    /// - Inline scripts: text content is executed directly.
+    /// - External scripts (`src` attribute): fetched via HTTP and executed.
+    /// - `type` attribute must be absent, empty, or `text/javascript` / `module` (module is skipped).
+    /// - `defer` scripts are collected and executed after all inline/sync scripts.
+    /// - After all scripts, `DOMContentLoaded` is fired.
+    ///
+    /// Errors in individual scripts are logged but do not stop execution of remaining scripts.
+    pub fn execute_document_scripts(&mut self, base_url: Option<&crate::http::Url>) -> Vec<String> {
+        let document = self.document();
+        let scripts = collect_script_elements(&document);
+        let mut errors = Vec::new();
+        let mut deferred = Vec::new();
+
+        for script in &scripts {
+            let attrs = script.attributes().unwrap_or_default();
+            let script_type = attrs.get("type").map(|s| s.to_ascii_lowercase());
+
+            // Skip non-JavaScript types
+            if let Some(ref t) = script_type {
+                // Strip MIME parameters (e.g., "text/javascript; charset=utf-8" → "text/javascript")
+                let mime = t.split(';').next().unwrap_or("").trim();
+                if !mime.is_empty()
+                    && mime != "text/javascript"
+                    && mime != "application/javascript"
+                    && mime != "module"
+                {
+                    continue;
+                }
+                if mime == "module" {
+                    continue;
+                }
+            }
+
+            let src = attrs.get("src").cloned();
+            // HTML spec: defer only applies to external (src) scripts.
+            let is_defer = attrs.get("defer").is_some() && src.is_some();
+
+            let source_code = if let Some(src_url) = src {
+                // External script: fetch
+                match fetch_script_source(&src_url, base_url) {
+                    Some(code) => code,
+                    None => {
+                        errors.push(format!("failed to fetch script: {src_url}"));
+                        continue;
+                    }
+                }
+            } else {
+                // Inline script: collect text content
+                collect_text_content(script)
+            };
+
+            if source_code.trim().is_empty() {
+                continue;
+            }
+
+            if is_defer {
+                deferred.push(source_code);
+                continue;
+            }
+
+            // Execute immediately
+            if let Err(err) = self.eval_safe(&source_code) {
+                errors.push(err);
+            }
+            if let Err(err) = self.run_jobs() {
+                errors.push(format!("{err}"));
+            }
+        }
+
+        // Execute deferred scripts
+        for source_code in deferred {
+            if let Err(err) = self.eval_safe(&source_code) {
+                errors.push(err);
+            }
+            if let Err(err) = self.run_jobs() {
+                errors.push(format!("{err}"));
+            }
+        }
+
+        // Fire DOMContentLoaded
+        if let Err(err) = self.fire_dom_content_loaded() {
+            errors.push(format!("{err}"));
+        }
+
+        errors
+    }
+
     fn with_active_host<T>(&mut self, f: impl FnOnce(&mut Context) -> JsResult<T>) -> JsResult<T> {
         let host_state = Rc::clone(&self.host_state);
         ACTIVE_HOST_STATE.with(|slot| {
@@ -555,6 +644,58 @@ impl JsRuntime {
             result
         })
     }
+}
+
+/// Collects all `<script>` elements from the document tree in document order.
+fn collect_script_elements(node: &NodeHandle) -> Vec<NodeHandle> {
+    let mut scripts = Vec::new();
+    collect_script_elements_recursive(node, &mut scripts);
+    scripts
+}
+
+fn collect_script_elements_recursive(node: &NodeHandle, out: &mut Vec<NodeHandle>) {
+    if node.tag_name().as_deref() == Some("script") {
+        out.push(node.clone());
+        return; // Don't recurse into <script> children
+    }
+    for child in node.child_nodes() {
+        collect_script_elements_recursive(&child, out);
+    }
+}
+
+/// Collects text content from a node's text-node children (for inline script content).
+/// Only includes Text nodes, not comments or other node types.
+fn collect_text_content(node: &NodeHandle) -> String {
+    use crate::dom::NodeType;
+    let mut text = String::new();
+    for child in node.child_nodes() {
+        if child.node_type() == NodeType::Text {
+            if let Some(data) = child.data() {
+                text.push_str(&data);
+            }
+        } else {
+            text.push_str(&collect_text_content(&child));
+        }
+    }
+    text
+}
+
+/// Fetches an external script source via HTTP.
+fn fetch_script_source(src: &str, base_url: Option<&crate::http::Url>) -> Option<String> {
+    let url = if src.starts_with("http://") || src.starts_with("https://") {
+        src.to_string()
+    } else if let Some(base) = base_url {
+        crate::http::url::resolve_url(base, src).ok()?.to_string()
+    } else {
+        return None;
+    };
+
+    let mut client = Client::new();
+    let response = client.get(&url).ok()?;
+    if response.status_code() != 200 {
+        return None;
+    }
+    std::str::from_utf8(response.body()).ok().map(|s| s.to_string())
 }
 
 fn register_host_bindings(
@@ -1455,5 +1596,94 @@ mod tests {
         let count = runtime.eval("count").unwrap()
             .to_number(&mut runtime.context).unwrap();
         assert_eq!(count, 1.0, "duplicate addEventListener should only fire once");
+    }
+
+    #[test]
+    fn execute_document_scripts_runs_inline_script() {
+        use crate::html::TreeBuilder;
+        let html = r#"<html><body>
+            <div id="target"></div>
+            <script>
+                document.getElementById("target").setAttribute("data-ran", "yes");
+            </script>
+        </body></html>"#;
+        let doc = TreeBuilder::parse(html).document();
+        let mut runtime = JsRuntime::with_document(doc.clone()).unwrap();
+        let errors = runtime.execute_document_scripts(None);
+        assert!(errors.is_empty(), "should have no errors: {errors:?}");
+
+        let target = doc.query_selector("#target").expect("should find #target");
+        let attrs = target.attributes().unwrap_or_default();
+        assert_eq!(attrs.get("data-ran").map(|s| s.as_str()), Some("yes"));
+    }
+
+    #[test]
+    fn execute_document_scripts_fires_dom_content_loaded() {
+        use crate::html::TreeBuilder;
+        let html = r#"<html><body>
+            <script>
+                var loaded = false;
+                document.addEventListener("DOMContentLoaded", function() { loaded = true; });
+            </script>
+        </body></html>"#;
+        let doc = TreeBuilder::parse(html).document();
+        let mut runtime = JsRuntime::with_document(doc).unwrap();
+        runtime.execute_document_scripts(None);
+
+        let result = runtime.eval("loaded").unwrap().as_boolean().unwrap();
+        assert!(result, "DOMContentLoaded should fire after execute_document_scripts");
+    }
+
+    #[test]
+    fn execute_document_scripts_skips_non_js_type() {
+        use crate::html::TreeBuilder;
+        let html = r#"<html><body>
+            <script type="application/json">{"key": "value"}</script>
+            <script>var jsRan = true;</script>
+        </body></html>"#;
+        let doc = TreeBuilder::parse(html).document();
+        let mut runtime = JsRuntime::with_document(doc).unwrap();
+        let errors = runtime.execute_document_scripts(None);
+        assert!(errors.is_empty(), "errors: {errors:?}");
+
+        let result = runtime.eval("jsRan").unwrap().as_boolean().unwrap();
+        assert!(result, "JS script should run");
+    }
+
+    #[test]
+    fn execute_document_scripts_error_does_not_stop_others() {
+        use crate::html::TreeBuilder;
+        let html = r#"<html><body>
+            <script>var first = true;</script>
+            <script>undefinedFunction();</script>
+            <script>var third = true;</script>
+        </body></html>"#;
+        let doc = TreeBuilder::parse(html).document();
+        let mut runtime = JsRuntime::with_document(doc).unwrap();
+        let errors = runtime.execute_document_scripts(None);
+        assert_eq!(errors.len(), 1, "should have 1 error");
+
+        let first = runtime.eval("first").unwrap().as_boolean().unwrap();
+        assert!(first, "first script should run");
+        let third = runtime.eval("third").unwrap().as_boolean().unwrap();
+        assert!(third, "third script should run despite second failing");
+    }
+
+    #[test]
+    fn execute_document_scripts_defer_only_applies_to_external() {
+        use crate::html::TreeBuilder;
+        // defer on inline script should be ignored (HTML spec);
+        // both scripts execute in document order.
+        let html = r#"<html><body>
+            <script defer>var order = (typeof order === 'undefined' ? '' : order) + 'first,';</script>
+            <script>var order = (typeof order === 'undefined' ? '' : order) + 'second,';</script>
+        </body></html>"#;
+        let doc = TreeBuilder::parse(html).document();
+        let mut runtime = JsRuntime::with_document(doc).unwrap();
+        runtime.execute_document_scripts(None);
+
+        let result = runtime.eval("order").unwrap()
+            .as_string().unwrap().to_std_string_escaped();
+        assert_eq!(result, "first,second,", "defer on inline should be ignored; both run in order");
     }
 }
