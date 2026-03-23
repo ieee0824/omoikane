@@ -3917,7 +3917,12 @@ fn debug_abe_table_column_widths() {
 #[test]
 #[ignore = "debug abe real table"]
 fn debug_abe_real_table() {
-    let html = std::fs::read_to_string("/tmp/abe-top.html").unwrap();
+    let path = "/tmp/abe-top.html";
+    if !std::path::Path::new(path).exists() {
+        eprintln!("skipping: {path} not found");
+        return;
+    }
+    let html = std::fs::read_to_string(path).unwrap();
     let document = crate::html::TreeBuilder::parse(&html).document();
     let mut resolver = StyleResolver::new();
 
