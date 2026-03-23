@@ -352,16 +352,18 @@ impl JsRuntime {
         self.host_state.borrow().console_logs.clone()
     }
 
-    /// Evaluates JavaScript source code within the sandbox constraints.
+    /// Evaluates JavaScript source code.
     ///
-    /// Returns an error if the script exceeds the operation limit or timeout.
-    /// Script errors are caught and returned as `JsError` without crashing the host.
+    /// Script errors are returned as `JsError`.
+    /// Note: `SandboxConfig.timeout` is stored but not yet enforced due to
+    /// boa 0.21 lacking a runtime interrupt API.
     pub fn eval(&mut self, source: &str) -> JsResult<JsValue> {
         self.with_active_host(|context| context.eval(Source::from_bytes(source)))
     }
 
-    /// Evaluates JavaScript source code, catching errors and returning them as `Err`.
-    /// Unlike `eval`, this never panics and always returns a Result.
+    /// Evaluates JavaScript source code, converting `JsError` into `Err(String)`.
+    ///
+    /// This does not catch Rust panics; it only converts JS-level errors.
     pub fn eval_safe(&mut self, source: &str) -> Result<JsValue, String> {
         match self.eval(source) {
             Ok(value) => Ok(value),
@@ -1029,17 +1031,25 @@ mod tests {
     }
 
     #[test]
-    fn process_and_require_are_undefined() {
+    fn process_and_require_do_not_exist_in_global() {
         let mut runtime = JsRuntime::new().unwrap();
-        let result = runtime.eval_safe("typeof process");
+        // Verify process is not defined at all (not just undefined value)
+        let result = runtime.eval_safe("'process' in globalThis");
         assert_eq!(
-            result.unwrap().as_string().unwrap().to_std_string_escaped(),
-            "undefined"
+            result.unwrap().as_boolean(),
+            Some(false),
+            "'process' should not exist in globalThis"
         );
-        let result = runtime.eval_safe("typeof require");
+        let result = runtime.eval_safe("'require' in globalThis");
         assert_eq!(
-            result.unwrap().as_string().unwrap().to_std_string_escaped(),
-            "undefined"
+            result.unwrap().as_boolean(),
+            Some(false),
+            "'require' should not exist in globalThis"
         );
+        // Accessing them directly should throw ReferenceError
+        let result = runtime.eval_safe("process");
+        assert!(result.is_err(), "accessing 'process' should throw ReferenceError");
+        let result = runtime.eval_safe("require");
+        assert!(result.is_err(), "accessing 'require' should throw ReferenceError");
     }
 }
