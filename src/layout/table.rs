@@ -751,16 +751,40 @@ pub(super) fn table_display_for_node(node: &NodeHandle, style: &ComputedStyle) -
     None
 }
 
-pub(super) fn table_border_spacing(style: &ComputedStyle) -> f32 {
+/// Returns `(horizontal, vertical)` border-spacing values.
+/// CSS `border-spacing` accepts 1 value (both axes) or 2 values (horizontal vertical).
+pub(super) fn table_border_spacing_hv(style: &ComputedStyle) -> (f32, f32) {
     use crate::css::ComputedValue;
     if matches!(
         style.get("border-collapse"),
         Some(ComputedValue::Keyword(keyword)) if keyword.eq_ignore_ascii_case("collapse")
     ) {
-        return 0.0;
+        return (0.0, 0.0);
     }
 
-    explicit_length(style, "border-spacing").unwrap_or(0.0)
+    // Try to parse 2-value form from keyword (e.g. "10px 20px")
+    if let Some(ComputedValue::Keyword(kw)) = style.get("border-spacing") {
+        let parts: Vec<&str> = kw.split_whitespace().collect();
+        if parts.len() == 2 {
+            let h = parts[0]
+                .strip_suffix("px")
+                .and_then(|v| v.parse::<f32>().ok())
+                .unwrap_or(0.0);
+            let v = parts[1]
+                .strip_suffix("px")
+                .and_then(|v| v.parse::<f32>().ok())
+                .unwrap_or(0.0);
+            return (h, v);
+        }
+    }
+
+    let single = explicit_length(style, "border-spacing").unwrap_or(0.0);
+    (single, single)
+}
+
+/// Returns the horizontal border-spacing value (backward-compatible single-value API).
+pub(super) fn table_border_spacing(style: &ComputedStyle) -> f32 {
+    table_border_spacing_hv(style).0
 }
 
 /// Returns `true` if the node (or any direct child) contains an `<img>` element.

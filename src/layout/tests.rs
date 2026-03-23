@@ -4259,3 +4259,51 @@ fn supported_html_tags_are_not_logged() {
     assert!(!super::is_supported_html_tag("form"));
     assert!(!super::is_supported_html_tag("input"));
 }
+
+#[test]
+fn border_spacing_two_values_apply_to_table() {
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let table = NodeHandle::element("table");
+    let tr = NodeHandle::element("tr");
+    let td1 = NodeHandle::element("td");
+    let td2 = NodeHandle::element("td");
+    td1.append_child(NodeHandle::text("A"));
+    td2.append_child(NodeHandle::text("B"));
+    document.append_child(body.clone());
+    body.append_child(table.clone());
+    table.append_child(tr.clone());
+    tr.append_child(td1);
+    tr.append_child(td2);
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "body { margin: 0; } \
+             table { display: table; border-spacing: 10px 20px; } \
+             tr { display: table-row; } \
+             td { display: table-cell; width: 50px; height: 30px; font-size: 10px; line-height: 10px; }",
+        )
+        .unwrap(),
+    );
+
+    let layout = layout_tree(
+        &body,
+        &mut resolver,
+        Rect { x: 0.0, y: 0.0, width: 200.0, height: 0.0 },
+    )
+    .unwrap();
+
+    let table_box = find_layout_box_by_tag(&layout, "table").unwrap();
+    let row = &table_box.children[0];
+    let cell1 = &row.children[0];
+    let cell2 = &row.children[1];
+
+    // Horizontal spacing = 10px: cell1 at x=10, cell2 at x=10+50+10=70
+    let h_gap = cell2.dimensions.content.x - (cell1.dimensions.content.x + cell1.dimensions.content.width);
+    assert!(
+        (h_gap - 10.0).abs() < 1.0,
+        "horizontal spacing should be ~10px, got {h_gap}"
+    );
+}
