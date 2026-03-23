@@ -5715,3 +5715,4 @@ fn box_shadow_no_blur_rounded_corners_do_not_paint_outside_shadow_shape() {
         "blur=0 rounded box-shadow should paint center of bottom band at (12,23), got {:?}", shadow_mid
     );
 }
+
