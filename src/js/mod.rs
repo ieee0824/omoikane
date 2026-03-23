@@ -890,24 +890,34 @@ fn get_text_content_native(_: &JsValue, args: &[JsValue], context: &mut Context)
     with_host_state(|state| {
         let state = state.borrow();
         let node = state.get_node(id).ok_or_else(|| JsError::from(JsNativeError::error().with_message("node not found")))?;
-        let text = collect_text_recursive(&node);
-        Ok(js_string!(text.as_str()).into())
+        match node.node_type() {
+            // DocumentType returns null per DOM spec
+            crate::dom::NodeType::DocumentType => Ok(JsValue::null()),
+            // Text and Comment return their data
+            crate::dom::NodeType::Text | crate::dom::NodeType::Comment => {
+                let data = node.data().unwrap_or_default();
+                Ok(js_string!(data.as_str()).into())
+            }
+            // Element, Document, DocumentFragment: concatenate descendant text
+            _ => {
+                let text = collect_text_recursive(&node);
+                Ok(js_string!(text.as_str()).into())
+            }
+        }
     })
 }
 
 fn collect_text_recursive(node: &NodeHandle) -> String {
     let mut text = String::new();
-    match node.node_type() {
-        crate::dom::NodeType::Text => {
-            if let Some(data) = node.data() {
-                text.push_str(&data);
+    for child in node.child_nodes() {
+        match child.node_type() {
+            crate::dom::NodeType::Text => {
+                if let Some(data) = child.data() {
+                    text.push_str(&data);
+                }
             }
-        }
-        crate::dom::NodeType::Comment | crate::dom::NodeType::DocumentType => {
-            // Skip comment and doctype nodes per DOM spec
-        }
-        _ => {
-            for child in node.child_nodes() {
+            crate::dom::NodeType::Comment | crate::dom::NodeType::DocumentType => {}
+            _ => {
                 text.push_str(&collect_text_recursive(&child));
             }
         }
@@ -921,8 +931,8 @@ fn set_text_content_native(_: &JsValue, args: &[JsValue], context: &mut Context)
     with_host_state(|state| {
         let state = state.borrow();
         let node = state.get_node(id).ok_or_else(|| JsError::from(JsNativeError::error().with_message("node not found")))?;
-        // For text-like leaf nodes, update data directly
-        if node.node_type() == crate::dom::NodeType::Text {
+        // For text/comment leaf nodes, update data directly
+        if matches!(node.node_type(), crate::dom::NodeType::Text | crate::dom::NodeType::Comment) {
             node.set_data(&text);
         } else {
             // Remove all children
@@ -2249,5 +2259,80 @@ mod tests {
         let result = runtime.eval("document.querySelector('div').textContent")
             .unwrap().as_string().unwrap().to_std_string_escaped();
         assert_eq!(result, "HelloWorld", "textContent should not include comment data");
+    }
+
+    #[test]
+    fn document_fragment_appends_children_not_self() {
+        use crate::html::TreeBuilder;
+        let html = "<html><body><div id='target'></div></body></html>";
+        let doc = TreeBuilder::parse(html).document();
+
+        let mut runtime = JsRuntime::with_document(doc.clone()).unwrap();
+        runtime.eval(r#"
+            const frag = document.createDocumentFragment();
+            const p = document.createElement('p');
+            const span = document.createElement('span');
+            frag.appendChild(p);
+            frag.appendChild(span);
+            document.getElementById('target').appendChild(frag);
+        "#).unwrap();
+
+        // Fragment's children should be directly under target
+        let target = doc.query_selector("#target").unwrap();
+        let children = target.child_nodes();
+        let tags: Vec<_> = children.iter().filter_map(|c| c.tag_name()).collect();
+        assert_eq!(tags, vec!["p", "span"], "fragment children should be appended directly");
+    }
+
+    #[test]
+    fn owner_document_is_null_for_document() {
+        let doc = NodeHandle::document();
+        let mut runtime = JsRuntime::with_document(doc).unwrap();
+
+        let is_null = runtime.eval("document.ownerDocument === null")
+            .unwrap().as_boolean().unwrap();
+        assert!(is_null, "document.ownerDocument should be null");
+
+        runtime.eval("const el = document.createElement('div')").unwrap();
+        let is_doc = runtime.eval("el.ownerDocument === document")
+            .unwrap().as_boolean().unwrap();
+        assert!(is_doc, "element.ownerDocument should be document");
+    }
+
+    #[test]
+    fn tag_name_undefined_for_non_elements() {
+        let doc = NodeHandle::document();
+        let mut runtime = JsRuntime::with_document(doc).unwrap();
+
+        let is_undef = runtime.eval("document.createTextNode('x').tagName === undefined")
+            .unwrap().as_boolean().unwrap();
+        assert!(is_undef, "text node tagName should be undefined");
+
+        let tag = runtime.eval("document.createElement('div').tagName")
+            .unwrap().as_string().unwrap().to_std_string_escaped();
+        assert_eq!(tag, "DIV", "element tagName should be uppercase tag");
+    }
+
+    #[test]
+    fn comment_text_content_returns_data() {
+        use crate::html::TreeBuilder;
+        let html = "<html><body><!-- hello --></body></html>";
+        let doc = TreeBuilder::parse(html).document();
+
+        let mut runtime = JsRuntime::with_document(doc).unwrap();
+        // Comment nodes are in the body's childNodes
+        let result = runtime.eval(r#"
+            const body = document.body;
+            let commentText = null;
+            const nodes = body.childNodes;
+            for (let i = 0; i < nodes.length; i++) {
+                if (nodes[i].nodeType === 8) {
+                    commentText = nodes[i].textContent;
+                    break;
+                }
+            }
+            commentText;
+        "#).unwrap().as_string().unwrap().to_std_string_escaped();
+        assert_eq!(result.trim(), "hello", "comment textContent should return its data");
     }
 }

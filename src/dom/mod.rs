@@ -300,7 +300,7 @@ impl NodeHandle {
         }
     }
 
-    /// Sets the data for a text, comment, or document type node.
+    /// Sets the data for a text or comment node. No-op for other node kinds.
     pub fn set_data(&self, data: &str) {
         match &mut self.0.borrow_mut().data {
             NodeData::Text(text) => text.data = data.to_string(),

@@ -8,7 +8,15 @@
     if (cache.has(id)) {
       return cache.get(id);
     }
-    const node = id === __omoikane_document_id ? new Document(id) : new Node(id);
+    const nodeType = __omoikane_node_type(id);
+    let node;
+    if (id === __omoikane_document_id) {
+      node = new Document(id);
+    } else if (nodeType === 11) {
+      node = new DocumentFragment(id);
+    } else {
+      node = new Node(id);
+    }
     cache.set(id, node);
     return node;
   }
@@ -51,6 +59,14 @@
     }
 
     appendChild(child) {
+      // DOM semantics: appending a DocumentFragment appends its children
+      if (child && child.nodeType === 11) {
+        const children = child.childNodes.slice();
+        for (const c of children) {
+          __omoikane_append_child(this.__id, c.__id);
+        }
+        return child;
+      }
       __omoikane_append_child(this.__id, child.__id);
       return child;
     }
@@ -289,7 +305,7 @@
     }
 
     get ownerDocument() {
-      return globalThis.document;
+      return this.nodeType === 9 ? null : globalThis.document;
     }
 
     get nodeType() {
@@ -309,6 +325,9 @@
     }
 
     get tagName() {
+      if (this.nodeType !== 1) {
+        return undefined;
+      }
       const name = __omoikane_node_name(this.__id);
       return name ? name.toUpperCase() : undefined;
     }
@@ -362,10 +381,13 @@
     }
   }
 
+  class DocumentFragment extends Node {}
+
   globalThis.Node = Node;
   globalThis.Element = Node;
   globalThis.HTMLElement = Node;
   globalThis.Document = Document;
+  globalThis.DocumentFragment = DocumentFragment;
   globalThis.Event = Event;
   globalThis.document = wrapNode(__omoikane_document_id);
   globalThis.window = globalThis;
