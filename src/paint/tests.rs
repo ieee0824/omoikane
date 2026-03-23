@@ -5785,3 +5785,30 @@ div { width: 10px; height: 10px; background: rgb(200%, 0%, 50%); }
         "rgb(200%,0%,50%) should clamp to rgb(255,0,128)");
 }
 
+#[test]
+fn current_color_resolves_border_color_from_element_color() {
+    let html = r#"<html><head><style>
+body { margin: 0; }
+div { width: 10px; height: 10px; color: red; border: 2px solid currentColor; }
+</style></head><body><div></div></body></html>"#;
+    let document = TreeBuilder::parse(html).document();
+    let viewport = Rect { x: 0.0, y: 0.0, width: 14.0, height: 14.0 };
+    let canvas = render_document(&document, viewport).unwrap();
+    // Border should be red (from currentColor → color: red)
+    assert_eq!(canvas.pixel(0, 0), Some(Color::rgb(255, 0, 0)),
+        "border with currentColor should use element's color (red)");
+}
+
+#[test]
+fn color_current_color_inherits_from_parent() {
+    let html = r#"<html><head><style>
+body { margin: 0; color: blue; }
+div { color: currentColor; width: 10px; height: 10px; border: 2px solid currentColor; }
+</style></head><body><div></div></body></html>"#;
+    let document = TreeBuilder::parse(html).document();
+    let viewport = Rect { x: 0.0, y: 0.0, width: 14.0, height: 14.0 };
+    let canvas = render_document(&document, viewport).unwrap();
+    // color: currentColor on the element should inherit from parent (blue)
+    assert_eq!(canvas.pixel(0, 0), Some(Color::rgb(0, 0, 255)),
+        "color: currentColor should resolve to parent color (blue)");
+}

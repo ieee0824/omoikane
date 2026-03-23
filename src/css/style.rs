@@ -374,6 +374,7 @@ impl StyleResolver {
 
         apply_ua_defaults(node, &mut properties, pseudo, parent_style);
         apply_presentational_hints(node, &mut properties, pseudo);
+        resolve_current_color_on_color_property(&mut properties, parent_style);
         resolve_explicit_inherit(&mut properties, parent_style);
         apply_inheritance(&mut properties, parent_style);
         apply_initial_values(&mut properties);
@@ -1574,6 +1575,40 @@ fn zero_border_width_for_none_style(properties: &mut BTreeMap<String, ComputedVa
     }
 }
 
+/// `color: currentColor` is equivalent to `color: inherit` per CSS Color Level 4.
+/// Resolve it before general inherit resolution so other properties that reference
+/// currentColor can see the resolved color value.
+fn resolve_current_color_on_color_property(
+    properties: &mut BTreeMap<String, ComputedValue>,
+    parent_style: Option<&ComputedStyle>,
+) {
+    let is_current_color = matches!(
+        properties.get("color"),
+        Some(ComputedValue::Color(c)) if c.eq_ignore_ascii_case("currentcolor")
+    ) || matches!(
+        properties.get("color"),
+        Some(ComputedValue::Keyword(k)) if k.eq_ignore_ascii_case("currentcolor")
+    );
+    if is_current_color {
+        if let Some(parent) = parent_style {
+            if let Some(parent_color) = parent.get("color") {
+                properties.insert("color".to_string(), parent_color.clone());
+            } else {
+                // Root element with color: currentColor → initial value (black)
+                properties.insert(
+                    "color".to_string(),
+                    ComputedValue::Color("black".to_string()),
+                );
+            }
+        } else {
+            properties.insert(
+                "color".to_string(),
+                ComputedValue::Color("black".to_string()),
+            );
+        }
+    }
+}
+
 fn resolve_explicit_inherit(
     properties: &mut BTreeMap<String, ComputedValue>,
     parent_style: Option<&ComputedStyle>,
@@ -1667,6 +1702,9 @@ fn inherited_font_size(
 }
 
 pub(crate) fn is_color_keyword(keyword: &str) -> bool {
+    if keyword.eq_ignore_ascii_case("currentcolor") {
+        return true;
+    }
     matches!(
         keyword,
         "black"

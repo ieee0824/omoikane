@@ -8,6 +8,7 @@ use super::{
     border_box_rect, border_color, border_radius_corners, Canvas,
     color_property, fill_triangle_clipped, fill_triangle_clipped_inclusive,
     has_border_radius, length_property, normalize_rect, padding_box_rect,
+    resolve_color_value,
     BorderRegion,
 };
 
@@ -159,7 +160,8 @@ pub(crate) fn has_solid_border_side(style: &ComputedStyle, side: &str) -> bool {
 }
 
 pub(crate) fn border_color_side(style: &ComputedStyle, side: &str) -> Option<Color> {
-    color_property(style.get(&format!("border-{side}-color"))).or_else(|| border_color(style))
+    resolve_color_value(style.get(&format!("border-{side}-color")), style)
+        .or_else(|| border_color(style))
 }
 
 #[derive(Clone, Copy)]

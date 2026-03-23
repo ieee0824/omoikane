@@ -248,11 +248,8 @@ pub(crate) fn text_decoration_line(style: &ComputedStyle) -> TextDecorationLines
 
 /// Returns the text-decoration-color, falling back to the text color.
 pub(crate) fn text_decoration_color(style: &ComputedStyle, fallback: Color) -> Color {
-    match style.get("text-decoration-color") {
-        Some(ComputedValue::Color(c)) => parse_color(c).unwrap_or(fallback),
-        Some(ComputedValue::Keyword(c)) => parse_color(c).unwrap_or(fallback),
-        _ => fallback,
-    }
+    use super::resolve_color_value;
+    resolve_color_value(style.get("text-decoration-color"), style).unwrap_or(fallback)
 }
 
 /// Draw text decoration lines (underline, overline, line-through) for a fragment.
