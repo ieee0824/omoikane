@@ -39,20 +39,24 @@ Firefox 参考: 写真(col0) | スペーサー(col1) | ★★★最新情報+ド
 
 ### 原因分析
 
-1. **カラム幅分配**: col0 の intrinsic width (350px) が explicit として扱われるが、
-   col2 の intrinsic width (1143px) が比例縮小で col0 を圧縮している
-2. **行高計算**: rowspan=2 のセルの高さが row0 の全高になり、
-   row0 の他セル（col1, col2）も同じ高さに引き伸ばされる
-3. **セルの垂直配置**: rowspan セルの内容（写真 + ネストテーブル + テキスト）が
-   1行分の高さに制限されている可能性
+1. ~~**カラム幅分配**: col0 の intrinsic width (350px) が explicit として扱われるが、
+   col2 の intrinsic width (1143px) が比例縮小で col0 を圧縮している~~ → 021-1 で修正済み
+2. **行高計算**: rowspan=2 のセルの高さが2行に分配されない（1パスレイアウトの限界）
+3. **セルの垂直配置**: 行高変更後の vertical-align 調整が未実装
+
+### 調査結果
+
+- CSS 2.1 §17.5.3: rowspan セルの高さ分配は **実装依存**
+- 仕様上 **2パスレイアウトが必須**（rowspan 制約はデータ依存）
+- Chromium: 均等分配、Gecko: 最後の行に集約、WebKit: 比例分配
+- **Chromium 方式（均等分配）** を採用
 
 ## 子 issue
 
-### 021-1: カラム幅の改善
-- テキストの intrinsic width を「折り返し可能な最小幅」と「折り返し不可の最大幅」に分離
-- 画像含有セルの幅は min-content width（折り返し不可）で固定
-- テキストセルは available width に応じて折り返し
-- CSS 2.1 §17.5.2 の自動テーブルレイアウトアルゴリズムに近づける
+### 021-1: カラム幅の改善 ✅ 完了 (PR #56)
+- テーブル shrink-to-fit 後の auto margin 再計算
+- img width 属性によるカラム幅設定
+- align="center" のセンタリング対応
 
 ### 021-2: rowspan の行高分配
 - rowspan=N のセルの高さを N 行に分配
