@@ -41,10 +41,12 @@ status: open
 
 ## 実装方針
 
-1. `JsSandbox` 構造体を作成（`Context` のラッパー）
-2. タイムアウト機構: `std::time::Instant` で定期チェック
-3. メモリ制限: boa_engine の `Interner` サイズ監視
-4. エラーハンドリング: `eval()` の結果を `Result` で返し、エラーは記録して続行
+1. `SandboxConfig` 構造体でタイムアウト等の設定を保持
+2. `eval_safe()` でエラーを catch して続行可能に
+3. `process`/`require` 等のホスト API が undefined であることを保証
+4. タイムアウト強制停止: boa 0.21 にはランタイム割り込み API がないため、
+   将来バージョンで `can_execute` 等が追加された場合に対応予定
+5. 現時点の無限ループ対策: `run_until_idle` に呼び出し回数上限を設定
 
 ## 受け入れ条件
 
