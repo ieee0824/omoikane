@@ -4,13 +4,15 @@
 //! produces a tree of rectangular block boxes.
 
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::sync::{Mutex, OnceLock};
 
 use crate::css::{ComputedStyle, ComputedValue, PseudoElement, StyleResolver};
 use crate::dom::{Node, NodeHandle, NodeType};
 use crate::font::Font;
 use crate::http::{Client, Url};
 use crate::paint::Image;
+use rusqlite::{Connection, params};
 
 mod flex;
 mod inline;
@@ -47,6 +49,124 @@ thread_local! {
     static HTTP_CLIENT: RefCell<Client> = RefCell::new(Client::new());
     static LAYOUT_FONTS: RefCell<Option<Vec<Font>>> = RefCell::new(None);
     static IMAGE_BASE_URL: RefCell<Option<Url>> = const { RefCell::new(None) };
+    static HTML_TAG_SQLITE_CONNECTIONS: RefCell<HashMap<String, Connection>> = RefCell::new(HashMap::new());
+}
+
+static UNSUPPORTED_HTML_CONFIG: OnceLock<UnsupportedHtmlConfig> = OnceLock::new();
+static UNSUPPORTED_HTML_LOGGED: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+static HTML_SQLITE_LOG_ERRORS: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+const MAX_HTML_LOG_KEYS: usize = 4096;
+const MAX_HTML_SQLITE_ERRORS: usize = 1024;
+
+#[derive(Debug, Clone)]
+struct UnsupportedHtmlConfig {
+    logging_enabled: bool,
+    sqlite_path: Option<String>,
+}
+
+fn unsupported_html_config() -> &'static UnsupportedHtmlConfig {
+    UNSUPPORTED_HTML_CONFIG.get_or_init(|| UnsupportedHtmlConfig {
+        logging_enabled: std::env::var("OMOIKANE_LOG_UNSUPPORTED_HTML")
+            .map(|v| {
+                let v = v.trim();
+                v == "1" || v.eq_ignore_ascii_case("true") || v.eq_ignore_ascii_case("yes")
+            })
+            .unwrap_or(false),
+        sqlite_path: std::env::var("OMOIKANE_UNSUPPORTED_HTML_SQLITE")
+            .ok()
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty()),
+    })
+}
+
+fn is_supported_html_tag(tag: &str) -> bool {
+    matches!(
+        tag,
+        "html" | "head" | "body" | "div" | "span" | "section" | "article"
+            | "aside" | "main" | "nav" | "header" | "footer"
+            | "p" | "h1" | "h2" | "h3" | "h4" | "h5" | "h6"
+            | "br" | "strong" | "em" | "b" | "i" | "u" | "s" | "a" | "pre" | "code"
+            | "ul" | "ol" | "li"
+            | "table" | "thead" | "tbody" | "tfoot" | "tr" | "td" | "th"
+            | "img" | "object"
+            | "style" | "link" | "meta" | "title" | "script" | "noscript"
+            | "font" | "blockquote" | "hr" | "address"
+            | "dl" | "dt" | "dd" | "figure" | "figcaption"
+            | "sup" | "sub" | "small" | "mark" | "abbr" | "cite" | "q"
+            | "center" | "nobr" | "wbr"
+    )
+}
+
+fn log_unsupported_html_tag(tag: &str, parent_tag: Option<&str>) {
+    let config = unsupported_html_config();
+    if !config.logging_enabled && config.sqlite_path.is_none() {
+        return;
+    }
+    if is_supported_html_tag(tag) {
+        return;
+    }
+
+    if let Some(path) = config.sqlite_path.as_deref() {
+        persist_unsupported_html_to_sqlite(path, tag, parent_tag);
+    }
+
+    if config.logging_enabled {
+        let key = format!("{tag}:{}", parent_tag.unwrap_or(""));
+        let logged = UNSUPPORTED_HTML_LOGGED.get_or_init(|| Mutex::new(HashSet::new()));
+        let mut logged = logged.lock().expect("html log lock poisoned");
+        if logged.len() >= MAX_HTML_LOG_KEYS {
+            logged.clear();
+        }
+        if logged.insert(key) {
+            eprintln!(
+                "[omoikane][unsupported-html] <{tag}> (parent: {})",
+                parent_tag.unwrap_or("none")
+            );
+        }
+    }
+}
+
+fn persist_unsupported_html_to_sqlite(path: &str, tag: &str, parent_tag: Option<&str>) {
+    let result: Result<(), rusqlite::Error> = HTML_TAG_SQLITE_CONNECTIONS.with(|connections| {
+        let mut connections = connections.borrow_mut();
+        if !connections.contains_key(path) {
+            let conn = Connection::open(path)?;
+            conn.busy_timeout(std::time::Duration::from_millis(5000))?;
+            conn.execute_batch(
+                "PRAGMA journal_mode=WAL;
+                 PRAGMA synchronous=NORMAL;
+                 CREATE TABLE IF NOT EXISTS unsupported_html_log (
+                     tag TEXT NOT NULL,
+                     parent_tag TEXT,
+                     first_seen_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                     last_seen_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                     occurrences INTEGER NOT NULL DEFAULT 0,
+                     PRIMARY KEY (tag, parent_tag)
+                 );
+                 CREATE INDEX IF NOT EXISTS idx_unsupported_html_log_occurrences
+                 ON unsupported_html_log (occurrences DESC);",
+            )?;
+            connections.insert(path.to_string(), conn);
+        }
+        let conn = connections.get(path).expect("connection must exist");
+        conn.execute(
+            "INSERT INTO unsupported_html_log (tag, parent_tag, occurrences)
+             VALUES (?1, ?2, 1)
+             ON CONFLICT(tag, parent_tag) DO UPDATE SET
+               occurrences = unsupported_html_log.occurrences + 1,
+               last_seen_at = CURRENT_TIMESTAMP",
+            params![tag, parent_tag.unwrap_or("")],
+        )?;
+        Ok(())
+    });
+    if let Err(error) = result {
+        let key = format!("{error}");
+        let errors = HTML_SQLITE_LOG_ERRORS.get_or_init(|| Mutex::new(HashSet::new()));
+        let mut errors = errors.lock().expect("html sqlite error lock poisoned");
+        if errors.len() < MAX_HTML_SQLITE_ERRORS && errors.insert(key.clone()) {
+            eprintln!("[omoikane][unsupported-html][sqlite-error] {key}");
+        }
+    }
 }
 
 /// Runs layout/image resolution with a temporary base URL used for relative image sources.
@@ -533,6 +653,13 @@ fn layout_element(
 ) -> Option<LayoutBox> {
     if is_non_rendered_html_element(node) {
         return None;
+    }
+
+    if let Some(tag) = node.tag_name() {
+        let parent_tag = node
+            .parent_node()
+            .and_then(|p| p.tag_name());
+        log_unsupported_html_tag(&tag.to_ascii_lowercase(), parent_tag.as_deref());
     }
 
     let style = resolver.computed_style(node);
