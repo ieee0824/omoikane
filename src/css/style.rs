@@ -323,7 +323,17 @@ impl StyleResolver {
                     viewport_height: self.viewport_height,
                 };
                 let computed = compute_value(&resolved_value, "font-size", ctx);
-                properties.insert("font-size".to_string(), computed);
+                // Resolve font-size keywords "smaller" / "larger" relative to parent.
+                let resolved = match &computed {
+                    ComputedValue::Keyword(kw) if kw.eq_ignore_ascii_case("smaller") => {
+                        ComputedValue::Px(parent_fs * 0.833)
+                    }
+                    ComputedValue::Keyword(kw) if kw.eq_ignore_ascii_case("larger") => {
+                        ComputedValue::Px(parent_fs * 1.2)
+                    }
+                    other => other.clone(),
+                };
+                properties.insert("font-size".to_string(), resolved);
             }
         }
 
