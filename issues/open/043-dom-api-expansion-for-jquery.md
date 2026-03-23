@@ -1,20 +1,20 @@
 ---
 number: 043
-slug: dom-api-expansion-for-jquery
+slug: dom-api-basic-operations
 status: open
 ---
 
-# DOM API 拡張（jQuery 互換）
+# DOM API 基本操作の拡充
 
 ## 概要
 
-jQuery 1.x が最低限動作するために必要な DOM API バインディングを追加する。
+バニラ JS および jQuery 等のライブラリが使用する基本的な DOM 操作 API を追加する。
 
 ## 背景
 
 - 042 で JS 実行をレンダリングパイプラインに統合済み
-- kasaneteto.jp で jQuery が読み込まれるが `TypeError: cannot convert 'null' or 'undefined' to object` で失敗
-- jQuery が使う基本 DOM API が不足
+- `textContent`, `childNodes`, `removeChild` 等の基本 DOM API が未実装のため、多くの JS コードが動かない
+- バニラ JS でも jQuery でも共通して使われる API が不足している
 
 ## 追加すべき API
 
