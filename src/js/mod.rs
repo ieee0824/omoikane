@@ -85,6 +85,15 @@ const DOM_BOOTSTRAP: &str = r#"
       this.__listeners.set(key, list);
     }
 
+    removeEventListener(type, listener, options = false) {
+      const capture = typeof options === "boolean" ? options : !!options.capture;
+      const key = String(type);
+      const list = this.__listeners.get(key);
+      if (!list) return;
+      const index = list.findIndex(entry => entry.listener === listener && !!entry.capture === capture);
+      if (index !== -1) list.splice(index, 1);
+    }
+
     dispatchEvent(event) {
       const dispatchEvent = event instanceof Event ? event : new Event(event);
       dispatchEvent.target = this;
@@ -506,6 +515,29 @@ impl JsRuntime {
             }
         }
 
+        self.run_jobs()
+    }
+
+    /// Dispatches a `DOMContentLoaded` event on the document.
+    ///
+    /// Call this after the DOM tree is fully constructed (e.g., after parsing HTML
+    /// and executing inline scripts). Listeners registered via
+    /// `document.addEventListener('DOMContentLoaded', fn)` will be invoked.
+    pub fn fire_dom_content_loaded(&mut self) -> JsResult<()> {
+        self.eval("document.dispatchEvent(new Event('DOMContentLoaded'))")?;
+        self.run_jobs()
+    }
+
+    /// Dispatches a named event on the document.
+    ///
+    /// The event type is escaped to prevent JS injection from untrusted input.
+    pub fn fire_document_event(&mut self, event_type: &str) -> JsResult<()> {
+        let escaped = event_type
+            .replace('\\', "\\\\")
+            .replace('\'', "\\'")
+            .replace('\n', "\\n")
+            .replace('\r', "\\r");
+        self.eval(&format!("document.dispatchEvent(new Event('{}'))", escaped))?;
         self.run_jobs()
     }
 
@@ -1321,5 +1353,63 @@ mod tests {
         let result = runtime.eval("document.querySelector('div').style.marginTop")
             .unwrap().as_string().unwrap().to_std_string_escaped();
         assert_eq!(result, "0", "style value 0 should be preserved, not removed");
+    }
+
+    #[test]
+    fn remove_event_listener_stops_callback() {
+        let doc = NodeHandle::document();
+        let div = NodeHandle::element("div");
+        doc.append_child(div.clone());
+
+        let mut runtime = JsRuntime::with_document(doc).unwrap();
+        runtime.eval(r#"
+            let count = 0;
+            const el = document.querySelector("div");
+            function handler() { count++; }
+            el.addEventListener("click", handler);
+            el.dispatchEvent(new Event("click"));
+            el.removeEventListener("click", handler);
+            el.dispatchEvent(new Event("click"));
+        "#).unwrap();
+
+        let count = runtime.eval("count").unwrap()
+            .to_number(&mut runtime.context).unwrap();
+        assert_eq!(count, 1.0, "handler should fire once before removal, not after");
+    }
+
+    #[test]
+    fn fire_dom_content_loaded_invokes_listeners() {
+        let doc = NodeHandle::document();
+        let mut runtime = JsRuntime::with_document(doc).unwrap();
+
+        runtime.eval(r#"
+            let loaded = false;
+            document.addEventListener("DOMContentLoaded", () => { loaded = true; });
+        "#).unwrap();
+
+        let before = runtime.eval("loaded").unwrap().as_boolean().unwrap();
+        assert!(!before, "loaded should be false before DOMContentLoaded");
+
+        runtime.fire_dom_content_loaded().unwrap();
+
+        let after = runtime.eval("loaded").unwrap().as_boolean().unwrap();
+        assert!(after, "loaded should be true after DOMContentLoaded");
+    }
+
+    #[test]
+    fn fire_document_event_dispatches_custom_event() {
+        let doc = NodeHandle::document();
+        let mut runtime = JsRuntime::with_document(doc).unwrap();
+
+        runtime.eval(r#"
+            let eventFired = "";
+            document.addEventListener("myevent", (e) => { eventFired = e.type; });
+        "#).unwrap();
+
+        runtime.fire_document_event("myevent").unwrap();
+
+        let result = runtime.eval("eventFired").unwrap()
+            .as_string().unwrap().to_std_string_escaped();
+        assert_eq!(result, "myevent");
     }
 }
