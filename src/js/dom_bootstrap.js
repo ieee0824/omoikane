@@ -31,12 +31,11 @@
         if (event.__stoppedImmediate) {
           return true;
         }
-        if (event.__stopped) {
-          return true;
-        }
       }
     }
-    return false;
+    // stopPropagation prevents further propagation to other nodes
+    // but does NOT prevent other listeners on the same node
+    return event.__stopped;
   }
 
   class Event {
@@ -194,7 +193,7 @@
         }
       }
 
-      return true;
+      return !dispatchEvent.defaultPrevented;
     }
 
     get parentNode() {
@@ -465,7 +464,8 @@
         get(target, prop) {
           if (typeof prop !== "string") return undefined;
           const attrName = "data-" + prop.replace(/[A-Z]/g, m => "-" + m.toLowerCase());
-          return node.getAttribute(attrName);
+          const val = node.getAttribute(attrName);
+          return val === null ? undefined : val;
         },
         set(target, prop, value) {
           if (typeof prop !== "string") return true;
@@ -494,6 +494,9 @@
     }
 
     replaceChild(newChild, oldChild) {
+      if (!oldChild || !oldChild.__id) {
+        throw new Error("Failed to execute 'replaceChild': parameter is not a Node");
+      }
       this.insertBefore(newChild, oldChild);
       this.removeChild(oldChild);
       return oldChild;
@@ -541,9 +544,30 @@
 
     matches(selector) {
       if (!selector || this.nodeType !== 1) return false;
+      const sel = selector.trim();
+      // Tag selector
+      if (/^[a-zA-Z][a-zA-Z0-9]*$/.test(sel)) {
+        return this.tagName && this.tagName.toLowerCase() === sel.toLowerCase();
+      }
+      // ID selector
+      if (sel.startsWith("#")) {
+        return this.id === sel.slice(1);
+      }
+      // Class selector
+      if (sel.startsWith(".")) {
+        return this.classList && this.classList.contains(sel.slice(1));
+      }
+      // Attribute selector [attr] or [attr="value"]
+      const attrMatch = /^\[([^\s=\]]+)(?:="([^"]*)")?\]$/.exec(sel);
+      if (attrMatch) {
+        if (!this.hasAttribute(attrMatch[1])) return false;
+        if (attrMatch[2] !== undefined) return this.getAttribute(attrMatch[1]) === attrMatch[2];
+        return true;
+      }
+      // Fallback: use querySelectorAll on parent
       const parent = this.parentNode || this.ownerDocument;
       if (!parent) return false;
-      const all = parent.querySelectorAll(selector);
+      const all = parent.querySelectorAll(sel);
       for (let i = 0; i < all.length; i++) {
         if (all[i].__id === this.__id) return true;
       }
@@ -733,7 +757,20 @@
   globalThis.dispatchEvent = function(event) {
     return document.dispatchEvent(event);
   };
-  globalThis.location = { href: __omoikane_location_href, protocol: "https:", hostname: "", pathname: "/", search: "", hash: "", origin: "", host: "" };
+  const __loc = { href: __omoikane_location_href, protocol: "", hostname: "", pathname: "/", search: "", hash: "", origin: "", host: "" };
+  try {
+    const __m = String(__omoikane_location_href).match(/^(.*?):\/\/([^/?#]+)([^?#]*)(\?[^#]*)?(#.*)?$/);
+    if (__m) {
+      __loc.protocol = (__m[1] || "") + ":";
+      __loc.host = __m[2] || "";
+      __loc.hostname = (__m[2] || "").replace(/:\d+$/, "");
+      __loc.pathname = __m[3] || "/";
+      __loc.search = __m[4] || "";
+      __loc.hash = __m[5] || "";
+      __loc.origin = __loc.protocol + "//" + __loc.host;
+    }
+  } catch(e) {}
+  globalThis.location = __loc;
   globalThis.getComputedStyle = function() { return new Proxy({}, { get() { return ""; } }); };
   globalThis.navigator = { userAgent: __omoikane_navigator_user_agent, language: "en", languages: ["en"], platform: "", cookieEnabled: false, onLine: true };
   globalThis.console = {
@@ -772,14 +809,24 @@
   globalThis.scroll = function() {};
   globalThis.screen = { width: 1280, height: 720, availWidth: 1280, availHeight: 720, colorDepth: 24, pixelDepth: 24 };
 
-  // requestAnimationFrame: execute callback synchronously with a fake timestamp
+  // requestAnimationFrame: execute callback asynchronously (microtask) with a timestamp
   let __rafId = 0;
+  const __rafCallbacks = new Map();
   globalThis.requestAnimationFrame = function(cb) {
     const id = ++__rafId;
-    Promise.resolve().then(() => cb(Date.now()));
+    __rafCallbacks.set(id, cb);
+    Promise.resolve().then(() => {
+      const callback = __rafCallbacks.get(id);
+      if (typeof callback === "function") {
+        callback(Date.now());
+      }
+      __rafCallbacks.delete(id);
+    });
     return id;
   };
-  globalThis.cancelAnimationFrame = function() {};
+  globalThis.cancelAnimationFrame = function(id) {
+    __rafCallbacks.delete(id);
+  };
 
   // matchMedia stub: always returns matches=false
   globalThis.matchMedia = function(query) {

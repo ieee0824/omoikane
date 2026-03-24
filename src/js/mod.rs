@@ -2360,16 +2360,57 @@ mod tests {
         let mut runtime = JsRuntime::with_document(doc).unwrap();
         runtime.eval(r#"
             let count = 0;
+            let prevented = false;
+            let dispatchReturn = null;
             const el = document.querySelector("div");
-            el.addEventListener("click", (e) => { count++; e.stopImmediatePropagation(); });
+            el.addEventListener("click", (e) => { count++; e.preventDefault(); e.stopImmediatePropagation(); });
             el.addEventListener("click", () => { count++; });
             const evt = new MouseEvent("click", { cancelable: true });
-            el.dispatchEvent(evt);
+            dispatchReturn = el.dispatchEvent(evt);
+            prevented = evt.defaultPrevented;
         "#).unwrap();
 
         let count = runtime.eval("count").unwrap()
             .to_number(&mut runtime.context).unwrap();
         assert_eq!(count, 1.0, "stopImmediatePropagation should prevent later listeners");
+
+        let prevented = runtime.eval("prevented").unwrap()
+            .as_boolean().unwrap();
+        assert!(prevented, "preventDefault should set defaultPrevented");
+
+        let dispatch_return = runtime.eval("dispatchReturn").unwrap()
+            .as_boolean().unwrap();
+        assert!(!dispatch_return, "dispatchEvent should return false when default prevented");
+    }
+
+    #[test]
+    fn stop_propagation_allows_same_node_listeners() {
+        let doc = NodeHandle::document();
+        let html = NodeHandle::element("html");
+        let body = NodeHandle::element("body");
+        let div = NodeHandle::element("div");
+        doc.append_child(html.clone());
+        html.append_child(body.clone());
+        body.append_child(div.clone());
+
+        let mut runtime = JsRuntime::with_document(doc).unwrap();
+        runtime.eval(r#"
+            let count = 0;
+            let parentFired = false;
+            const el = document.querySelector("div");
+            el.addEventListener("click", (e) => { count++; e.stopPropagation(); });
+            el.addEventListener("click", () => { count++; });
+            document.querySelector("body").addEventListener("click", () => { parentFired = true; });
+            el.dispatchEvent(new Event("click", { bubbles: true }));
+        "#).unwrap();
+
+        let count = runtime.eval("count").unwrap()
+            .to_number(&mut runtime.context).unwrap();
+        assert_eq!(count, 2.0, "stopPropagation should NOT prevent other listeners on same node");
+
+        let parent_fired = runtime.eval("parentFired").unwrap()
+            .as_boolean().unwrap();
+        assert!(!parent_fired, "stopPropagation should prevent bubbling to parent");
     }
 
     #[test]
