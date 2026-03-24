@@ -172,27 +172,37 @@
         current = current.parentNode;
       }
 
+      // Capture phase
+      let stopped = false;
       for (let i = path.length - 1; i >= 1; i -= 1) {
         if (invokeListeners(path[i], dispatchEvent, true, 1)) {
-          return false;
+          stopped = true;
+          break;
         }
       }
 
-      if (invokeListeners(this, dispatchEvent, true, 2)) {
-        return false;
+      // Target phase
+      if (!stopped) {
+        if (invokeListeners(this, dispatchEvent, true, 2)) {
+          stopped = true;
+        }
       }
-      if (invokeListeners(this, dispatchEvent, false, 2)) {
-        return false;
+      if (!stopped) {
+        if (invokeListeners(this, dispatchEvent, false, 2)) {
+          stopped = true;
+        }
       }
 
-      if (dispatchEvent.bubbles) {
+      // Bubble phase
+      if (!stopped && dispatchEvent.bubbles) {
         for (let i = 1; i < path.length; i += 1) {
           if (invokeListeners(path[i], dispatchEvent, false, 3)) {
-            return false;
+            break;
           }
         }
       }
 
+      // Return value depends only on preventDefault, not stopPropagation
       return !dispatchEvent.defaultPrevented;
     }
 
@@ -816,11 +826,14 @@
     const id = ++__rafId;
     __rafCallbacks.set(id, cb);
     Promise.resolve().then(() => {
-      const callback = __rafCallbacks.get(id);
-      if (typeof callback === "function") {
-        callback(Date.now());
+      try {
+        const callback = __rafCallbacks.get(id);
+        if (typeof callback === "function") {
+          callback(Date.now());
+        }
+      } finally {
+        __rafCallbacks.delete(id);
       }
-      __rafCallbacks.delete(id);
     });
     return id;
   };
