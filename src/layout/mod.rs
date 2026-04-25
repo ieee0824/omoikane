@@ -651,6 +651,220 @@ fn layout_document(
     })
 }
 
+/// Returns `true` when all nodes are whitespace-only text.
+fn all_whitespace_only(nodes: &[NodeHandle]) -> bool {
+    nodes.iter().all(|n| {
+        n.node_type() == NodeType::Text
+            && n.data()
+                .map(|t| {
+                    t.bytes()
+                        .all(|b| matches!(b, b' ' | b'\t' | b'\n' | b'\r' | b'\x0C'))
+                })
+                .unwrap_or(true)
+    })
+}
+
+/// Flushes pending inline nodes into line boxes, advancing cursor_y.
+/// Clears `pending` after processing.
+fn flush_pending_inline_nodes(
+    pending: &mut Vec<NodeHandle>,
+    resolver: &mut StyleResolver,
+    style: &ComputedStyle,
+    float_regions: &[FloatRegion],
+    cursor_y: &mut f32,
+    x: f32,
+    width: f32,
+    lines: &mut Vec<LineBox>,
+) {
+    if pending.is_empty() || all_whitespace_only(pending) {
+        pending.clear();
+        return;
+    }
+    let offsets = active_float_offsets(float_regions, *cursor_y, x, width);
+    let inline_lines = layout_inline_nodes(
+        pending,
+        resolver,
+        x + offsets.left,
+        *cursor_y,
+        (width - offsets.left - offsets.right).max(0.0),
+        text_align(style),
+        line_height(style),
+    );
+    if let Some(last_line) = inline_lines.last() {
+        *cursor_y = last_line.rect.y + last_line.rect.height;
+    }
+    lines.extend(inline_lines);
+    pending.clear();
+}
+
+/// Applies CSS `clear` to cursor_y, pushing past any interfering floats.
+fn apply_clear(
+    cursor_y: &mut f32,
+    child_style: &ComputedStyle,
+    child_margin_top: f32,
+    collapse_delta: f32,
+    float_regions: &[FloatRegion],
+) {
+    match clear_side(child_style) {
+        ClearSide::Left => {
+            *cursor_y = clear_cursor_y_for_side(
+                *cursor_y, child_margin_top, collapse_delta, float_regions, FloatSide::Left,
+            );
+        }
+        ClearSide::Right => {
+            *cursor_y = clear_cursor_y_for_side(
+                *cursor_y, child_margin_top, collapse_delta, float_regions, FloatSide::Right,
+            );
+        }
+        ClearSide::Both => {
+            *cursor_y = clear_cursor_y_for_side(
+                *cursor_y, child_margin_top, collapse_delta, float_regions, FloatSide::Left,
+            );
+            *cursor_y = clear_cursor_y_for_side(
+                *cursor_y, child_margin_top, collapse_delta, float_regions, FloatSide::Right,
+            );
+        }
+        ClearSide::None => {}
+    }
+}
+
+/// Lays out a floated child, finding a suitable vertical position and
+/// registering the float region. Returns `true` when the child was
+/// consumed (always; provided for control flow clarity).
+fn layout_float_child(
+    child: &NodeHandle,
+    child_style: &ComputedStyle,
+    resolver: &mut StyleResolver,
+    side: FloatSide,
+    child_y: f32,
+    x: f32,
+    width: f32,
+    viewport: Rect,
+    positioned_ancestor: Option<BoxDimensions>,
+    float_regions: &mut Vec<FloatRegion>,
+    children: &mut Vec<LayoutBox>,
+) {
+    let available = (width
+        - active_float_offsets(float_regions, child_y, x, width).left
+        - active_float_offsets(float_regions, child_y, x, width).right)
+        .max(0.0);
+    let float_width = resolved_length(child_style, "width", available)
+        .unwrap_or_else(|| shrink_to_fit_width(child, resolver, width));
+    let mut float_y = child_y;
+    loop {
+        let offsets = active_float_offsets(float_regions, float_y, x, width);
+        let float_available_width = (width - offsets.left - offsets.right).max(0.0);
+        if float_width <= float_available_width + 0.5 {
+            let float_containing = Rect {
+                x: x + offsets.left,
+                y: float_y,
+                width: float_available_width.max(float_width),
+                height: 0.0,
+            };
+            if let Some(mut layout_child) = layout_node(
+                child, resolver, float_containing, viewport, positioned_ancestor,
+            ) {
+                if resolved_length(child_style, "width", float_available_width).is_none() {
+                    layout_child.dimensions.content.width = float_width;
+                }
+                let outer_y = float_containing.y;
+                let outer_x = match side {
+                    FloatSide::Left => x + offsets.left,
+                    FloatSide::Right => x + width - offsets.right - layout_child.total_width(),
+                    FloatSide::None => x + offsets.left,
+                };
+                translate_layout_box_to_outer(&mut layout_child, outer_x, outer_y);
+                float_regions.push(FloatRegion {
+                    outer: Rect {
+                        x: outer_x,
+                        y: outer_y,
+                        width: layout_child.total_width(),
+                        height: layout_child.total_height(),
+                    },
+                    side,
+                });
+                children.push(layout_child);
+            }
+            break;
+        }
+        let Some(next_y) = next_float_boundary_after(float_regions, float_y) else {
+            break;
+        };
+        if next_y <= float_y {
+            break;
+        }
+        float_y = next_y;
+    }
+}
+
+/// Advances cursor_y after laying out a block child, handling margin collapse.
+fn update_cursor_after_child(
+    layout_child: &LayoutBox,
+    cursor_y: &mut f32,
+    previous_margin_bottom: &mut Option<f32>,
+    effective_collapse_delta: f32,
+    collapse_delta: f32,
+) {
+    if is_empty_for_margin_collapse(layout_child) {
+        let prev = previous_margin_bottom.unwrap_or(0.0);
+        let empty_collapsed = collapse_through_empty(layout_child);
+        let combined = collapse_margins(prev, empty_collapsed);
+        *cursor_y += combined - prev - (effective_collapse_delta - collapse_delta);
+        *previous_margin_bottom = Some(combined);
+    } else {
+        *cursor_y += layout_child.total_height() - effective_collapse_delta;
+        *previous_margin_bottom = Some(layout_child.dimensions.margin.bottom);
+    }
+}
+
+/// Computes the containing block for a child element, accounting for float offsets.
+fn child_containing_rect(
+    child_style: &ComputedStyle,
+    child_y: f32,
+    offsets: &FloatOffsets,
+    x: f32,
+    width: f32,
+) -> Rect {
+    let has_explicit_width = explicit_length(child_style, "width").is_some();
+    Rect {
+        x: if has_explicit_width { x } else { x + offsets.left },
+        y: child_y,
+        width: if has_explicit_width {
+            width
+        } else {
+            (width - offsets.left - offsets.right).max(0.0)
+        },
+        height: 0.0,
+    }
+}
+
+/// Re-distributes auto margins for shrink-to-fit table containers.
+fn redistribute_auto_margins_for_table(
+    style: &ComputedStyle,
+    width: f32,
+    padding: &EdgeSizes,
+    border: &EdgeSizes,
+    margin: &mut EdgeSizes,
+    containing_width: f32,
+) {
+    if float_side(style) != FloatSide::None {
+        return;
+    }
+    let outer = width + padding.horizontal() + border.horizontal();
+    let remaining = (containing_width - outer).max(0.0);
+    let left_auto = margin_start_is_auto(style);
+    let right_auto = margin_end_is_auto(style);
+    match (left_auto, right_auto) {
+        (true, true) => {
+            margin.left = remaining / 2.0;
+            margin.right = remaining / 2.0;
+        }
+        (true, false) => margin.left = (remaining - margin.right).max(0.0),
+        (false, true) => margin.right = (remaining - margin.left).max(0.0),
+        _ => {}
+    }
+}
+
 fn layout_element(
     node: &NodeHandle,
     resolver: &mut StyleResolver,
@@ -667,7 +881,6 @@ fn layout_element(
         return None;
     }
 
-    // Log unsupported tags only for rendered elements and only when logging is enabled
     let config = unsupported_html_config();
     if config.logging_enabled || config.sqlite_path.is_some() {
         if let Some(tag) = node.tag_name() {
@@ -693,23 +906,9 @@ fn layout_element(
         let is_shrink_to_fit = resolved_length(&style, "width", containing_block.width).is_none();
         if is_shrink_to_fit {
             width = shrink_to_fit_width(node, resolver, containing_block.width);
-            // Re-distribute auto margins now that shrink-to-fit width is known.
-            // Floated tables keep auto margins as zero (CSS 2.1 §10.3.5).
-            if float_side(&style) == FloatSide::None {
-                let outer = width + padding.horizontal() + border.horizontal();
-                let remaining = (containing_block.width - outer).max(0.0);
-                let left_auto = margin_start_is_auto(&style);
-                let right_auto = margin_end_is_auto(&style);
-                match (left_auto, right_auto) {
-                    (true, true) => {
-                        margin.left = remaining / 2.0;
-                        margin.right = remaining / 2.0;
-                    }
-                    (true, false) => margin.left = (remaining - margin.right).max(0.0),
-                    (false, true) => margin.right = (remaining - margin.left).max(0.0),
-                    _ => {}
-                }
-            }
+            redistribute_auto_margins_for_table(
+                &style, width, &padding, &border, &mut margin, containing_block.width,
+            );
         }
         let x = containing_block.x + margin.left + border.left + padding.left;
         return layout_table_container(
@@ -724,6 +923,79 @@ fn layout_element(
         );
     }
 
+    let BlockChildrenResult {
+        mut children, lines, cursor_y, float_bottom, positioned_children,
+    } = layout_block_children(
+        node, resolver, &style, padding, border, margin,
+        x, y, width, viewport, positioned_ancestor,
+    );
+
+    let effective_cursor_y = cursor_y.max(float_bottom);
+    let content_height = resolve_content_height(
+        &style, containing_block.height, padding, border, y, effective_cursor_y,
+    );
+
+    let dimensions = BoxDimensions {
+        content: Rect { x, y, width, height: content_height },
+        padding, border, margin,
+    };
+
+    // Resolve positioned children using the final dimensions (content_height is
+    // now known, which is required for absolute positioning relative to this box).
+    let next_pos_ancestor = if establishes_positioned_containing_block(&style) {
+        Some(dimensions)
+    } else {
+        positioned_ancestor
+    };
+    for (child, cs, static_position) in positioned_children {
+        if let Some(positioned) = layout_positioned_child(
+            &child, resolver, &cs,
+            next_pos_ancestor.unwrap_or(dimensions),
+            static_position, viewport,
+        ) {
+            children.push(positioned);
+        }
+    }
+    sort_children_by_z_index(&mut children);
+
+    let marker = build_list_marker(node, &style, x, y);
+    let mut layout = LayoutBox {
+        node: node.clone(),
+        dimensions,
+        visibility: visibility(&style),
+        overflow: overflow(&style),
+        z_index: z_index(&style),
+        lines,
+        children,
+        marker,
+    };
+    apply_relative_offset(&mut layout, &style);
+    Some(layout)
+}
+
+struct BlockChildrenResult {
+    children: Vec<LayoutBox>,
+    lines: Vec<LineBox>,
+    cursor_y: f32,
+    float_bottom: f32,
+    positioned_children: Vec<(NodeHandle, ComputedStyle, Rect)>,
+}
+
+/// Lays out block-level children, returning in-flow children, lines,
+/// cursor position, float bottom, and deferred positioned children.
+fn layout_block_children(
+    node: &NodeHandle,
+    resolver: &mut StyleResolver,
+    style: &ComputedStyle,
+    padding: EdgeSizes,
+    border: EdgeSizes,
+    margin: EdgeSizes,
+    x: f32,
+    y: f32,
+    width: f32,
+    viewport: Rect,
+    positioned_ancestor: Option<BoxDimensions>,
+) -> BlockChildrenResult {
     let mut children = Vec::new();
     let mut positioned_children = Vec::new();
     let mut lines = Vec::new();
@@ -738,34 +1010,10 @@ fn layout_element(
             continue;
         }
 
-        if !pending_inline_nodes.is_empty() {
-            let all_whitespace = pending_inline_nodes.iter().all(|n| {
-                n.node_type() == NodeType::Text
-                    && n.data()
-                        .map(|t| {
-                            t.bytes()
-                                .all(|b| matches!(b, b' ' | b'\t' | b'\n' | b'\r' | b'\x0C'))
-                        })
-                        .unwrap_or(true)
-            });
-            if !all_whitespace {
-                let offsets = active_float_offsets(&float_regions, cursor_y, x, width);
-                let inline_lines = layout_inline_nodes(
-                    &pending_inline_nodes,
-                    resolver,
-                    x + offsets.left,
-                    cursor_y,
-                    (width - offsets.left - offsets.right).max(0.0),
-                    text_align(&style),
-                    line_height(&style),
-                );
-                if let Some(last_line) = inline_lines.last() {
-                    cursor_y = last_line.rect.y + last_line.rect.height;
-                }
-                lines.extend(inline_lines);
-            }
-            pending_inline_nodes.clear();
-        }
+        flush_pending_inline_nodes(
+            &mut pending_inline_nodes, resolver, style,
+            &float_regions, &mut cursor_y, x, width, &mut lines,
+        );
 
         let child_style = match child.node_type() {
             NodeType::Element => Some(resolver.computed_style(&child)),
@@ -773,54 +1021,18 @@ fn layout_element(
         };
         let child_margin_top = child_style
             .as_ref()
-            .map(|style| edge_sizes(style, "margin").top)
+            .map(|s| edge_sizes(s, "margin").top)
             .unwrap_or(0.0);
         let collapse_delta = previous_margin_bottom
-            .map(|margin_bottom| {
-                margin_bottom + child_margin_top - collapse_margins(margin_bottom, child_margin_top)
-            })
+            .map(|mb| mb + child_margin_top - collapse_margins(mb, child_margin_top))
             .unwrap_or(0.0);
-        if let Some(style) = &child_style {
-            match clear_side(style) {
-                ClearSide::Left => {
-                    cursor_y = clear_cursor_y_for_side(
-                        cursor_y,
-                        child_margin_top,
-                        collapse_delta,
-                        &float_regions,
-                        FloatSide::Left,
-                    );
-                }
-                ClearSide::Right => {
-                    cursor_y = clear_cursor_y_for_side(
-                        cursor_y,
-                        child_margin_top,
-                        collapse_delta,
-                        &float_regions,
-                        FloatSide::Right,
-                    );
-                }
-                ClearSide::Both => {
-                    cursor_y = clear_cursor_y_for_side(
-                        cursor_y,
-                        child_margin_top,
-                        collapse_delta,
-                        &float_regions,
-                        FloatSide::Left,
-                    );
-                    cursor_y = clear_cursor_y_for_side(
-                        cursor_y,
-                        child_margin_top,
-                        collapse_delta,
-                        &float_regions,
-                        FloatSide::Right,
-                    );
-                }
-                ClearSide::None => {}
-            }
+
+        if let Some(cs) = &child_style {
+            apply_clear(&mut cursor_y, cs, child_margin_top, collapse_delta, &float_regions);
         }
+
         if let Some(child_style) = &child_style {
-            let parent_top_margin_collapse = previous_margin_bottom.is_none()
+            let parent_top_collapse = previous_margin_bottom.is_none()
                 && lines.is_empty()
                 && pending_inline_nodes.is_empty()
                 && border.top == 0.0
@@ -828,267 +1040,114 @@ fn layout_element(
                 && clear_side(child_style) == ClearSide::None
                 && !is_out_of_flow_positioned(child_style)
                 && float_side(child_style) == FloatSide::None;
-            let effective_collapse_delta = if parent_top_margin_collapse {
+            let effective_collapse_delta = if parent_top_collapse {
                 collapse_delta + child_margin_top
             } else {
                 collapse_delta
             };
             let child_y = cursor_y - effective_collapse_delta;
             let offsets = active_float_offsets(&float_regions, child_y, x, width);
-            let available_width = (width - offsets.left - offsets.right).max(0.0);
-            let child_containing = Rect {
-                x: if explicit_length(child_style, "width").is_some() {
-                    x
-                } else {
-                    x + offsets.left
-                },
-                y: child_y,
-                width: if explicit_length(child_style, "width").is_some() {
-                    width
-                } else {
-                    available_width
-                },
-                height: 0.0,
-            };
+            let child_containing = child_containing_rect(child_style, child_y, &offsets, x, width);
+
             if is_out_of_flow_positioned(child_style) {
                 positioned_children.push((child, child_style.clone(), child_containing));
                 continue;
             }
-            let float_side = float_side(child_style);
-            if float_side != FloatSide::None {
-                let float_width = resolved_length(child_style, "width", available_width)
-                    .unwrap_or_else(|| shrink_to_fit_width(&child, resolver, width));
-                let mut float_y = child_y;
-                loop {
-                    let offsets = active_float_offsets(&float_regions, float_y, x, width);
-                    let float_available_width = (width - offsets.left - offsets.right).max(0.0);
-                    if float_width <= float_available_width + 0.5 {
-                        let float_containing = Rect {
-                            x: x + offsets.left,
-                            y: float_y,
-                            width: float_available_width.max(float_width),
-                            height: 0.0,
-                        };
-                        if let Some(mut layout_child) = layout_node(
-                            &child,
-                            resolver,
-                            float_containing,
-                            viewport,
-                            positioned_ancestor,
-                        ) {
-                            if resolved_length(child_style, "width", float_available_width)
-                                .is_none()
-                            {
-                                layout_child.dimensions.content.width = float_width;
-                            }
-                            let outer_y = float_containing.y;
-                            let outer_x = match float_side {
-                                FloatSide::Left => x + offsets.left,
-                                FloatSide::Right => {
-                                    x + width - offsets.right - layout_child.total_width()
-                                }
-                                FloatSide::None => x + offsets.left,
-                            };
-                            translate_layout_box_to_outer(&mut layout_child, outer_x, outer_y);
-                            float_regions.push(FloatRegion {
-                                outer: Rect {
-                                    x: outer_x,
-                                    y: outer_y,
-                                    width: layout_child.total_width(),
-                                    height: layout_child.total_height(),
-                                },
-                                side: float_side,
-                            });
-                            children.push(layout_child);
-                        }
-                        break;
-                    }
-                    let Some(next_y) = next_float_boundary_after(&float_regions, float_y) else {
-                        break;
-                    };
-                    if next_y <= float_y {
-                        break;
-                    }
-                    float_y = next_y;
-                }
-                // Floats don't participate in margin collapsing;
-                // preserve previous_margin_bottom so adjacent in-flow
-                // siblings can still collapse through.
+
+            let side = float_side(child_style);
+            if side != FloatSide::None {
+                layout_float_child(
+                    &child, child_style, resolver, side, child_y, x, width,
+                    viewport, positioned_ancestor, &mut float_regions, &mut children,
+                );
                 continue;
             }
-            let next_positioned_ancestor = if establishes_positioned_containing_block(&style) {
+
+            let next_pos_ancestor = if establishes_positioned_containing_block(style) {
                 Some(BoxDimensions {
-                    content: Rect {
-                        x,
-                        y,
-                        width,
-                        height: 0.0,
-                    },
-                    padding,
-                    border,
-                    margin,
+                    content: Rect { x, y, width, height: 0.0 },
+                    padding, border, margin,
                 })
             } else {
                 positioned_ancestor
             };
             if let Some(layout_child) = layout_node(
-                &child,
-                resolver,
-                child_containing,
-                viewport,
-                next_positioned_ancestor,
+                &child, resolver, child_containing, viewport, next_pos_ancestor,
             ) {
-                if is_empty_for_margin_collapse(&layout_child) {
-                    let prev = previous_margin_bottom.unwrap_or(0.0);
-                    let empty_collapsed = collapse_through_empty(&layout_child);
-                    let combined = collapse_margins(prev, empty_collapsed);
-                    // Advance cursor_y by the difference between the combined
-                    // collapsed margin and the previous margin already tracked.
-                    cursor_y += combined - prev - (effective_collapse_delta - collapse_delta);
-                    previous_margin_bottom = Some(combined);
-                    children.push(layout_child);
-                } else {
-                    cursor_y += layout_child.total_height() - effective_collapse_delta;
-                    previous_margin_bottom = Some(layout_child.dimensions.margin.bottom);
-                    children.push(layout_child);
-                }
+                update_cursor_after_child(
+                    &layout_child, &mut cursor_y, &mut previous_margin_bottom,
+                    effective_collapse_delta, collapse_delta,
+                );
+                children.push(layout_child);
             }
             continue;
         }
 
+        // Non-element child (comment, etc.) — fallback path
         let child_containing = Rect {
-            x,
-            y: cursor_y - collapse_delta,
-            width,
-            height: 0.0,
+            x, y: cursor_y - collapse_delta, width, height: 0.0,
         };
         if let Some(layout_child) = layout_node(
-            &child,
-            resolver,
-            child_containing,
-            viewport,
-            positioned_ancestor,
+            &child, resolver, child_containing, viewport, positioned_ancestor,
         ) {
-            if is_empty_for_margin_collapse(&layout_child) {
-                let prev = previous_margin_bottom.unwrap_or(0.0);
-                let empty_collapsed = collapse_through_empty(&layout_child);
-                let combined = collapse_margins(prev, empty_collapsed);
-                cursor_y += combined - prev;
-                previous_margin_bottom = Some(combined);
-                children.push(layout_child);
-            } else {
-                cursor_y += layout_child.total_height() - collapse_delta;
-                previous_margin_bottom = Some(layout_child.dimensions.margin.bottom);
-                children.push(layout_child);
-            }
+            update_cursor_after_child(
+                &layout_child, &mut cursor_y, &mut previous_margin_bottom,
+                collapse_delta, collapse_delta,
+            );
+            children.push(layout_child);
         }
     }
 
-    if !pending_inline_nodes.is_empty() {
-        let all_whitespace = pending_inline_nodes.iter().all(|n| {
-            n.node_type() == NodeType::Text
-                && n.data()
-                    .map(|t| {
-                        t.bytes()
-                            .all(|b| matches!(b, b' ' | b'\t' | b'\n' | b'\r' | b'\x0C'))
-                    })
-                    .unwrap_or(true)
-        });
-        if !all_whitespace {
-            let offsets = active_float_offsets(&float_regions, cursor_y, x, width);
-            let inline_lines = layout_inline_nodes(
-                &pending_inline_nodes,
-                resolver,
-                x + offsets.left,
-                cursor_y,
-                (width - offsets.left - offsets.right).max(0.0),
-                text_align(&style),
-                line_height(&style),
-            );
-            if let Some(last_line) = inline_lines.last() {
-                cursor_y = last_line.rect.y + last_line.rect.height;
-            }
-            lines.extend(inline_lines);
-        }
-    }
+    flush_pending_inline_nodes(
+        &mut pending_inline_nodes, resolver, style,
+        &float_regions, &mut cursor_y, x, width, &mut lines,
+    );
 
     let float_bottom = float_regions
         .iter()
         .map(|region| region.outer.y + region.outer.height)
         .fold(y, f32::max);
-    let auto_height = (cursor_y.max(float_bottom)) - y;
-    let border_box = is_border_box(&style);
-    let pb_vertical = padding.vertical() + border.vertical();
-    let mut content_height = resolved_length(&style, "height", containing_block.height)
-        .map(|h| {
-            if border_box {
-                (h - pb_vertical).max(0.0)
-            } else {
-                h
-            }
-        })
-        .unwrap_or(auto_height);
-    let (min_height, max_height) =
-        normalized_min_max_lengths(&style, "min-height", "max-height", containing_block.height);
-    if let Some(min_height) = min_height {
-        let content_min = if border_box {
-            (min_height - pb_vertical).max(0.0)
-        } else {
-            min_height
-        };
-        content_height = content_height.max(content_min);
-    }
-    if let Some(max_height) = max_height {
-        let content_max = if border_box {
-            (max_height - pb_vertical).max(0.0)
-        } else {
-            max_height
-        };
-        content_height = content_height.min(content_max);
-    }
-    let dimensions = BoxDimensions {
-        content: Rect {
-            x,
-            y,
-            width,
-            height: content_height,
-        },
-        padding,
-        border,
-        margin,
-    };
-    let next_positioned_ancestor = if establishes_positioned_containing_block(&style) {
-        Some(dimensions)
-    } else {
-        positioned_ancestor
-    };
-    for (child, style, static_position) in positioned_children {
-        if let Some(positioned) = layout_positioned_child(
-            &child,
-            resolver,
-            &style,
-            next_positioned_ancestor.unwrap_or(dimensions),
-            static_position,
-            viewport,
-        ) {
-            children.push(positioned);
-        }
-    }
-    sort_children_by_z_index(&mut children);
-    let marker = build_list_marker(node, &style, x, y);
-    let mut layout = LayoutBox {
-        node: node.clone(),
-        dimensions,
-        visibility: visibility(&style),
-        overflow: overflow(&style),
-        z_index: z_index(&style),
-        lines,
-        children,
-        marker,
-    };
-    apply_relative_offset(&mut layout, &style);
 
-    Some(layout)
+    sort_children_by_z_index(&mut children);
+
+    BlockChildrenResult {
+        children,
+        lines,
+        cursor_y,
+        float_bottom,
+        positioned_children,
+    }
+}
+
+/// Resolves the content height for a block element, considering explicit height,
+/// min/max constraints, border-box mode, and auto height from content.
+///
+/// `cursor_y` is the bottom edge of all content (including floats).
+fn resolve_content_height(
+    style: &ComputedStyle,
+    containing_height: f32,
+    padding: EdgeSizes,
+    border: EdgeSizes,
+    y: f32,
+    cursor_y: f32,
+) -> f32 {
+    let border_box = is_border_box(style);
+    let pb_vertical = padding.vertical() + border.vertical();
+    let auto_height = (cursor_y - y).max(0.0);
+    let mut height = resolved_length(style, "height", containing_height)
+        .map(|h| if border_box { (h - pb_vertical).max(0.0) } else { h })
+        .unwrap_or(auto_height);
+    let (min_h, max_h) =
+        normalized_min_max_lengths(style, "min-height", "max-height", containing_height);
+    if let Some(min_h) = min_h {
+        let content_min = if border_box { (min_h - pb_vertical).max(0.0) } else { min_h };
+        height = height.max(content_min);
+    }
+    if let Some(max_h) = max_h {
+        let content_max = if border_box { (max_h - pb_vertical).max(0.0) } else { max_h };
+        height = height.min(content_max);
+    }
+    height
 }
 
 // ── Width computation ───────────────────────────────────────────────────────

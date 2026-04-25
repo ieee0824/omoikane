@@ -978,4 +978,307 @@ mod tests {
         // Without src, it should fall back to a generic AtRule
         assert!(matches!(&stylesheet.rules[0], Rule::At(_)));
     }
+
+    // ── Attribute selector parsing ──────────────────────────────────────
+
+    #[test]
+    fn parses_attribute_presence_selector() {
+        let stylesheet = parse_stylesheet("[disabled] { opacity: 0.5; }").unwrap();
+        let Rule::Style(rule) = &stylesheet.rules[0] else {
+            panic!("expected style rule");
+        };
+        assert_eq!(
+            rule.selectors[0].parts[0].simples,
+            vec![SimpleSelector::Attribute {
+                name: "disabled".to_string(),
+                operator: None,
+                value: None,
+            }]
+        );
+    }
+
+    #[test]
+    fn parses_attribute_equals_selector() {
+        let stylesheet = parse_stylesheet(r#"[type="text"] { color: black; }"#).unwrap();
+        let Rule::Style(rule) = &stylesheet.rules[0] else {
+            panic!("expected style rule");
+        };
+        assert_eq!(
+            rule.selectors[0].parts[0].simples[0],
+            SimpleSelector::Attribute {
+                name: "type".to_string(),
+                operator: Some(AttributeOperator::Equals),
+                value: Some("text".to_string()),
+            }
+        );
+    }
+
+    #[test]
+    fn parses_attribute_includes_selector() {
+        let stylesheet = parse_stylesheet(r#"[class~="active"] { color: red; }"#).unwrap();
+        let Rule::Style(rule) = &stylesheet.rules[0] else {
+            panic!("expected style rule");
+        };
+        assert_eq!(
+            rule.selectors[0].parts[0].simples[0],
+            SimpleSelector::Attribute {
+                name: "class".to_string(),
+                operator: Some(AttributeOperator::Includes),
+                value: Some("active".to_string()),
+            }
+        );
+    }
+
+    #[test]
+    fn parses_attribute_starts_with_selector() {
+        let stylesheet = parse_stylesheet(r#"[href^="https"] { color: green; }"#).unwrap();
+        let Rule::Style(rule) = &stylesheet.rules[0] else {
+            panic!("expected style rule");
+        };
+        assert_eq!(
+            rule.selectors[0].parts[0].simples[0],
+            SimpleSelector::Attribute {
+                name: "href".to_string(),
+                operator: Some(AttributeOperator::StartsWith),
+                value: Some("https".to_string()),
+            }
+        );
+    }
+
+    #[test]
+    fn parses_attribute_ends_with_selector() {
+        let stylesheet = parse_stylesheet(r#"[src$=".png"] { border: none; }"#).unwrap();
+        let Rule::Style(rule) = &stylesheet.rules[0] else {
+            panic!("expected style rule");
+        };
+        assert_eq!(
+            rule.selectors[0].parts[0].simples[0],
+            SimpleSelector::Attribute {
+                name: "src".to_string(),
+                operator: Some(AttributeOperator::EndsWith),
+                value: Some(".png".to_string()),
+            }
+        );
+    }
+
+    #[test]
+    fn parses_attribute_contains_selector() {
+        let stylesheet = parse_stylesheet(r#"[data-value*="mid"] { display: block; }"#).unwrap();
+        let Rule::Style(rule) = &stylesheet.rules[0] else {
+            panic!("expected style rule");
+        };
+        assert_eq!(
+            rule.selectors[0].parts[0].simples[0],
+            SimpleSelector::Attribute {
+                name: "data-value".to_string(),
+                operator: Some(AttributeOperator::Contains),
+                value: Some("mid".to_string()),
+            }
+        );
+    }
+
+    #[test]
+    fn parses_attribute_dash_match_selector() {
+        let stylesheet = parse_stylesheet(r#"[lang|="en"] { font-size: 14px; }"#).unwrap();
+        let Rule::Style(rule) = &stylesheet.rules[0] else {
+            panic!("expected style rule");
+        };
+        assert_eq!(
+            rule.selectors[0].parts[0].simples[0],
+            SimpleSelector::Attribute {
+                name: "lang".to_string(),
+                operator: Some(AttributeOperator::DashMatch),
+                value: Some("en".to_string()),
+            }
+        );
+    }
+
+    #[test]
+    fn parses_multiple_attribute_selectors_on_same_element() {
+        let stylesheet =
+            parse_stylesheet(r#"input[type="text"][required] { border: 1px solid red; }"#)
+                .unwrap();
+        let Rule::Style(rule) = &stylesheet.rules[0] else {
+            panic!("expected style rule");
+        };
+        assert_eq!(rule.selectors[0].parts[0].simples.len(), 3);
+        assert_eq!(
+            rule.selectors[0].parts[0].simples[0],
+            SimpleSelector::Type("input".to_string())
+        );
+        assert_eq!(
+            rule.selectors[0].parts[0].simples[1],
+            SimpleSelector::Attribute {
+                name: "type".to_string(),
+                operator: Some(AttributeOperator::Equals),
+                value: Some("text".to_string()),
+            }
+        );
+        assert_eq!(
+            rule.selectors[0].parts[0].simples[2],
+            SimpleSelector::Attribute {
+                name: "required".to_string(),
+                operator: None,
+                value: None,
+            }
+        );
+    }
+
+    // ── Pseudo selector parsing ─────────────────────────────────────────
+
+    #[test]
+    fn parses_pseudo_class_without_arguments() {
+        let stylesheet = parse_stylesheet("a:hover { color: blue; }").unwrap();
+        let Rule::Style(rule) = &stylesheet.rules[0] else {
+            panic!("expected style rule");
+        };
+        assert_eq!(
+            rule.selectors[0].parts[0].simples[1],
+            SimpleSelector::PseudoClass("hover".to_string())
+        );
+    }
+
+    #[test]
+    fn parses_pseudo_class_with_arguments() {
+        let stylesheet = parse_stylesheet("li:nth-child(2n+1) { color: red; }").unwrap();
+        let Rule::Style(rule) = &stylesheet.rules[0] else {
+            panic!("expected style rule");
+        };
+        // The tokenizer produces Delim('+') between 2n and 1, and render_tokens
+        // concatenates them without inserting whitespace around delimiters.
+        let pseudo = &rule.selectors[0].parts[0].simples[1];
+        match pseudo {
+            SimpleSelector::PseudoClass(value) => {
+                assert!(
+                    value.starts_with("nth-child("),
+                    "expected nth-child(...), got: {value}"
+                );
+                assert!(
+                    value.contains("2n"),
+                    "should contain 2n, got: {value}"
+                );
+            }
+            _ => panic!("expected PseudoClass, got: {:?}", pseudo),
+        }
+    }
+
+    #[test]
+    fn parses_pseudo_class_with_nested_parentheses() {
+        let stylesheet =
+            parse_stylesheet("div:has(> span:nth-child(odd)) { color: red; }").unwrap();
+        let Rule::Style(rule) = &stylesheet.rules[0] else {
+            panic!("expected style rule");
+        };
+        // The argument should preserve the inner parenthesized content
+        let pseudo = &rule.selectors[0].parts[0].simples[1];
+        match pseudo {
+            SimpleSelector::PseudoClass(value) => {
+                assert!(
+                    value.starts_with("has("),
+                    "expected has(...), got: {value}"
+                );
+                assert!(
+                    value.contains("nth-child(odd)"),
+                    "nested parens should be preserved, got: {value}"
+                );
+            }
+            _ => panic!("expected PseudoClass, got: {:?}", pseudo),
+        }
+    }
+
+    #[test]
+    fn parses_pseudo_element_with_double_colon() {
+        let stylesheet = parse_stylesheet("p::first-line { font-weight: bold; }").unwrap();
+        let Rule::Style(rule) = &stylesheet.rules[0] else {
+            panic!("expected style rule");
+        };
+        assert_eq!(
+            rule.selectors[0].parts[0].simples[1],
+            SimpleSelector::PseudoElement("first-line".to_string())
+        );
+    }
+
+    #[test]
+    fn parses_not_pseudo_class() {
+        let stylesheet = parse_stylesheet(":not(.hidden) { display: block; }").unwrap();
+        let Rule::Style(rule) = &stylesheet.rules[0] else {
+            panic!("expected style rule");
+        };
+        assert_eq!(
+            rule.selectors[0].parts[0].simples[0],
+            SimpleSelector::Not(vec![SimpleSelector::Class("hidden".to_string())])
+        );
+    }
+
+    #[test]
+    fn parses_not_with_type_selector() {
+        let stylesheet = parse_stylesheet("div:not(span) { margin: 0; }").unwrap();
+        let Rule::Style(rule) = &stylesheet.rules[0] else {
+            panic!("expected style rule");
+        };
+        assert_eq!(
+            rule.selectors[0].parts[0].simples[1],
+            SimpleSelector::Not(vec![SimpleSelector::Type("span".to_string())])
+        );
+    }
+
+    #[test]
+    fn parses_not_with_attribute_selector() {
+        let stylesheet =
+            parse_stylesheet(r#":not([disabled]) { opacity: 1; }"#).unwrap();
+        let Rule::Style(rule) = &stylesheet.rules[0] else {
+            panic!("expected style rule");
+        };
+        assert_eq!(
+            rule.selectors[0].parts[0].simples[0],
+            SimpleSelector::Not(vec![SimpleSelector::Attribute {
+                name: "disabled".to_string(),
+                operator: None,
+                value: None,
+            }])
+        );
+    }
+
+    #[test]
+    fn parses_chained_pseudo_classes() {
+        let stylesheet =
+            parse_stylesheet("a:hover:focus { outline: none; }").unwrap();
+        let Rule::Style(rule) = &stylesheet.rules[0] else {
+            panic!("expected style rule");
+        };
+        assert_eq!(
+            rule.selectors[0].parts[0].simples,
+            vec![
+                SimpleSelector::Type("a".to_string()),
+                SimpleSelector::PseudoClass("hover".to_string()),
+                SimpleSelector::PseudoClass("focus".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn parses_complex_compound_selector() {
+        // Type + class + attribute + pseudo-class + pseudo-element
+        let stylesheet = parse_stylesheet(
+            r#"input.form-control[type="email"]:focus::placeholder { color: gray; }"#,
+        )
+        .unwrap();
+        let Rule::Style(rule) = &stylesheet.rules[0] else {
+            panic!("expected style rule");
+        };
+        assert_eq!(
+            rule.selectors[0].parts[0].simples,
+            vec![
+                SimpleSelector::Type("input".to_string()),
+                SimpleSelector::Class("form-control".to_string()),
+                SimpleSelector::Attribute {
+                    name: "type".to_string(),
+                    operator: Some(AttributeOperator::Equals),
+                    value: Some("email".to_string()),
+                },
+                SimpleSelector::PseudoClass("focus".to_string()),
+                SimpleSelector::PseudoElement("placeholder".to_string()),
+            ]
+        );
+    }
 }
