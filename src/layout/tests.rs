@@ -4604,3 +4604,199 @@ fn flex_wrap_child_calc_width_resolves_correctly() {
         right_box.dimensions.content.x,
     );
 }
+
+// ── Tests for extracted pure functions ──────────────────────────────────
+
+#[test]
+fn all_whitespace_only_returns_true_for_empty() {
+    assert!(all_whitespace_only(&[]));
+}
+
+#[test]
+fn all_whitespace_only_returns_true_for_whitespace_text_nodes() {
+    let doc = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    doc.append_child(body.clone());
+    let text1 = NodeHandle::text("  \n\t  ");
+    let text2 = NodeHandle::text("   ");
+    body.append_child(text1.clone());
+    body.append_child(text2.clone());
+    assert!(all_whitespace_only(&[text1, text2]));
+}
+
+#[test]
+fn all_whitespace_only_returns_false_for_non_whitespace() {
+    let doc = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    doc.append_child(body.clone());
+    let text1 = NodeHandle::text("  ");
+    let text2 = NodeHandle::text("hello");
+    body.append_child(text1.clone());
+    body.append_child(text2.clone());
+    assert!(!all_whitespace_only(&[text1, text2]));
+}
+
+#[test]
+fn collapse_margins_both_positive_takes_larger() {
+    assert_eq!(collapse_margins(10.0, 20.0), 20.0);
+    assert_eq!(collapse_margins(20.0, 10.0), 20.0);
+    assert_eq!(collapse_margins(15.0, 15.0), 15.0);
+}
+
+#[test]
+fn collapse_margins_both_negative_takes_more_negative() {
+    assert_eq!(collapse_margins(-10.0, -20.0), -20.0);
+    assert_eq!(collapse_margins(-20.0, -10.0), -20.0);
+}
+
+#[test]
+fn collapse_margins_mixed_signs_adds_them() {
+    assert_eq!(collapse_margins(10.0, -5.0), 5.0);
+    assert_eq!(collapse_margins(-5.0, 10.0), 5.0);
+}
+
+#[test]
+fn collapse_margins_zero_cases() {
+    assert_eq!(collapse_margins(0.0, 0.0), 0.0);
+    assert_eq!(collapse_margins(10.0, 0.0), 10.0);
+    assert_eq!(collapse_margins(0.0, 10.0), 10.0);
+}
+
+/// Helper: resolves computed style from a stylesheet for an element.
+fn resolve_style_for_test(css: &str, tag: &str) -> ComputedStyle {
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let elem = NodeHandle::element(tag);
+    document.append_child(body.clone());
+    body.append_child(elem.clone());
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(Origin::Author, parse_stylesheet(css).unwrap());
+    resolver.computed_style(&elem)
+}
+
+#[test]
+fn resolve_content_height_uses_auto_when_no_explicit_height() {
+    let style = ComputedStyle::default();
+    let height = resolve_content_height(&style, 0.0, EdgeSizes::default(), EdgeSizes::default(), 10.0, 50.0);
+    assert_eq!(height, 40.0);
+}
+
+#[test]
+fn resolve_content_height_uses_explicit_height() {
+    let style = resolve_style_for_test("div { height: 100px; }", "div");
+    let height = resolve_content_height(&style, 500.0, EdgeSizes::default(), EdgeSizes::default(), 0.0, 50.0);
+    assert_eq!(height, 100.0);
+}
+
+#[test]
+fn resolve_content_height_clamps_to_min_height() {
+    let style = resolve_style_for_test("div { min-height: 80px; }", "div");
+    let height = resolve_content_height(&style, 500.0, EdgeSizes::default(), EdgeSizes::default(), 0.0, 30.0);
+    assert_eq!(height, 80.0);
+}
+
+#[test]
+fn resolve_content_height_clamps_to_max_height() {
+    let style = resolve_style_for_test("div { max-height: 20px; }", "div");
+    let height = resolve_content_height(&style, 500.0, EdgeSizes::default(), EdgeSizes::default(), 0.0, 50.0);
+    assert_eq!(height, 20.0);
+}
+
+#[test]
+fn resolve_content_height_border_box_subtracts_padding_and_border() {
+    let style = resolve_style_for_test("div { height: 100px; box-sizing: border-box; }", "div");
+    let padding = EdgeSizes { top: 10.0, bottom: 10.0, left: 0.0, right: 0.0 };
+    let border = EdgeSizes { top: 5.0, bottom: 5.0, left: 0.0, right: 0.0 };
+    let height = resolve_content_height(&style, 500.0, padding, border, 0.0, 0.0);
+    assert_eq!(height, 70.0);
+}
+
+#[test]
+fn flush_pending_inline_nodes_clears_whitespace_only() {
+    let doc = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    doc.append_child(body.clone());
+    let text = NodeHandle::text("   ");
+    body.append_child(text.clone());
+
+    let mut pending = vec![text];
+    let mut resolver = StyleResolver::new();
+    let style = ComputedStyle::default();
+    let mut cursor_y = 0.0;
+    let mut lines = Vec::new();
+    flush_pending_inline_nodes(
+        &mut pending, &mut resolver, &style, &[], &mut cursor_y, 0.0, 200.0, &mut lines,
+    );
+    assert!(pending.is_empty());
+    assert!(lines.is_empty());
+    assert_eq!(cursor_y, 0.0);
+}
+
+#[test]
+fn block_children_inline_nodes_produce_line_boxes() {
+    let doc = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let div = NodeHandle::element("div");
+    doc.append_child(body.clone());
+    body.append_child(div.clone());
+    let text = NodeHandle::text("Hello World");
+    div.append_child(text);
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet("div { width: 200px; }").unwrap(),
+    );
+
+    let layout = layout_tree(
+        &body,
+        &mut resolver,
+        Rect { x: 0.0, y: 0.0, width: 200.0, height: 0.0 },
+    ).unwrap();
+
+    let div_box = &layout.children[0];
+    assert!(!div_box.lines.is_empty(), "inline text should produce line boxes");
+    let first_line = &div_box.lines[0];
+    assert!(!first_line.fragments.is_empty(), "line should have fragments");
+}
+
+#[test]
+fn redistribute_auto_margins_centers_table() {
+    let style = resolve_style_for_test("div { margin-left: auto; margin-right: auto; }", "div");
+    let padding = EdgeSizes::default();
+    let border = EdgeSizes::default();
+    let mut margin = EdgeSizes::default();
+    redistribute_auto_margins_for_table(&style, 100.0, &padding, &border, &mut margin, 300.0);
+    assert_eq!(margin.left, 100.0);
+    assert_eq!(margin.right, 100.0);
+}
+
+#[test]
+fn redistribute_auto_margins_left_auto_only() {
+    let style = resolve_style_for_test("div { margin-left: auto; margin-right: 20px; }", "div");
+    let padding = EdgeSizes::default();
+    let border = EdgeSizes::default();
+    let mut margin = EdgeSizes { top: 0.0, right: 20.0, bottom: 0.0, left: 0.0 };
+    redistribute_auto_margins_for_table(&style, 100.0, &padding, &border, &mut margin, 300.0);
+    assert_eq!(margin.left, 180.0);
+    assert_eq!(margin.right, 20.0);
+}
+
+#[test]
+fn child_containing_rect_uses_float_offsets_for_auto_width() {
+    let style = ComputedStyle::default();
+    let offsets = FloatOffsets { left: 50.0, right: 30.0 };
+    let rect = child_containing_rect(&style, 10.0, &offsets, 0.0, 200.0);
+    assert_eq!(rect.x, 50.0);
+    assert_eq!(rect.y, 10.0);
+    assert_eq!(rect.width, 120.0);
+}
+
+#[test]
+fn child_containing_rect_ignores_offsets_for_explicit_width() {
+    let style = resolve_style_for_test("div { width: 150px; }", "div");
+    let offsets = FloatOffsets { left: 50.0, right: 30.0 };
+    let rect = child_containing_rect(&style, 10.0, &offsets, 0.0, 200.0);
+    assert_eq!(rect.x, 0.0);
+    assert_eq!(rect.width, 200.0);
+}

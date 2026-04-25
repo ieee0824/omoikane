@@ -126,6 +126,31 @@ pub(super) enum InlineSegmentContent {
 
 // ── Inline segment collection ───────────────────────────────────────────────
 
+/// Creates a text `InlineSegment` from a node, text content, and resolved style.
+/// Returns `None` when the normalized + transformed text is empty.
+fn make_text_segment(
+    node: NodeHandle,
+    text: &str,
+    style: &ComputedStyle,
+) -> Option<InlineSegment> {
+    let text = normalize_text(text, white_space(style));
+    let text = apply_text_transform_layout(&text, style);
+    if text.is_empty() {
+        return None;
+    }
+    Some(InlineSegment {
+        node,
+        content: InlineSegmentContent::Text(text),
+        metrics: font_metrics(style),
+        line_height: line_height(style),
+        vertical_align: vertical_align(style),
+        style: FragmentStyle::from_computed(style),
+        word_break: word_break(style),
+        overflow_wrap: overflow_wrap(style),
+        white_space_mode: white_space(style),
+    })
+}
+
 fn collect_inline_segments(
     node: &NodeHandle,
     resolver: &mut StyleResolver,
@@ -138,125 +163,100 @@ fn collect_inline_segments(
                     .parent_node()
                     .map(|parent| resolver.computed_style(&parent))
                     .unwrap_or_default();
-                let text = normalize_text(&text, white_space(&parent_style));
-                let text = apply_text_transform_layout(&text, &parent_style);
-                if !text.is_empty() {
-                    out.push(InlineSegment {
-                        node: node.clone(),
-                        content: InlineSegmentContent::Text(text),
-                        metrics: font_metrics(&parent_style),
-                        line_height: line_height(&parent_style),
-                        vertical_align: vertical_align(&parent_style),
-                        style: FragmentStyle::from_computed(&parent_style),
-                        word_break: word_break(&parent_style),
-                        overflow_wrap: overflow_wrap(&parent_style),
-                        white_space_mode: white_space(&parent_style),
-                    });
-                }
+                out.extend(make_text_segment(node.clone(), &text, &parent_style));
             }
         }
         NodeType::Element => {
-            if is_non_rendered_html_element(node) {
-                return;
-            }
-            let style = resolver.computed_style(node);
-            if is_display_none(&style) {
-                return;
-            }
-
-            out.extend(generated_inline_segments(
-                node,
-                resolver,
-                PseudoElement::Before,
-            ));
-            if let Some((image_node, image)) = element_inline_image(node) {
-                let image_style = resolver.computed_style(&image_node);
-                let padding = edge_sizes(&image_style, "padding");
-                let border = edge_sizes(&image_style, "border");
-                let (rendered_width, rendered_height) =
-                    resolve_image_rendered_size(&image_node, &image, &image_style);
-                out.push(InlineSegment {
-                    node: image_node,
-                    content: InlineSegmentContent::Image(
-                        image.clone(),
-                        image_style.clone(),
-                        rendered_width,
-                        rendered_height,
-                    ),
-                    metrics: font_metrics(&image_style),
-                    word_break: word_break(&image_style),
-                    overflow_wrap: overflow_wrap(&image_style),
-                    white_space_mode: white_space(&image_style),
-                    line_height: line_height(&image_style).max(
-                        rendered_height + padding.top + padding.bottom + border.top + border.bottom,
-                    ),
-                    vertical_align: vertical_align(&image_style),
-                    style: FragmentStyle::from_computed(&image_style),
-                });
-                out.extend(generated_inline_segments(
-                    node,
-                    resolver,
-                    PseudoElement::After,
-                ));
-                return;
-            }
-
-            if node.tag_name().as_deref() == Some("img") {
-                if let Some(alt_text) = image_alt_fallback_text(node, &style) {
-                    out.push(InlineSegment {
-                        node: node.clone(),
-                        content: InlineSegmentContent::Text(alt_text),
-                        metrics: font_metrics(&style),
-                        line_height: line_height(&style),
-                        vertical_align: vertical_align(&style),
-                        style: FragmentStyle::from_computed(&style),
-                        word_break: word_break(&style),
-                        overflow_wrap: overflow_wrap(&style),
-                        white_space_mode: white_space(&style),
-                    });
-                    out.extend(generated_inline_segments(
-                        node,
-                        resolver,
-                        PseudoElement::After,
-                    ));
-                    return;
-                }
-            }
-            for child in node.child_nodes() {
-                match child.node_type() {
-                    NodeType::Text => {
-                        if let Some(text) = child.data() {
-                            let text = normalize_text(&text, white_space(&style));
-                            let text = apply_text_transform_layout(&text, &style);
-                            if !text.is_empty() {
-                                out.push(InlineSegment {
-                                    node: child,
-                                    content: InlineSegmentContent::Text(text),
-                                    metrics: font_metrics(&style),
-                                    line_height: line_height(&style),
-                                    vertical_align: vertical_align(&style),
-                                    style: FragmentStyle::from_computed(&style),
-                                    word_break: word_break(&style),
-                                    overflow_wrap: overflow_wrap(&style),
-                                    white_space_mode: white_space(&style),
-                                });
-                            }
-                        }
-                    }
-                    NodeType::Element if is_inline_child(&child, resolver) => {
-                        collect_inline_segments(&child, resolver, out);
-                    }
-                    _ => {}
-                }
-            }
-            out.extend(generated_inline_segments(
-                node,
-                resolver,
-                PseudoElement::After,
-            ));
+            collect_element_inline_segments(node, resolver, out);
         }
         _ => {}
     }
+}
+
+fn collect_element_inline_segments(
+    node: &NodeHandle,
+    resolver: &mut StyleResolver,
+    out: &mut Vec<InlineSegment>,
+) {
+    if is_non_rendered_html_element(node) {
+        return;
+    }
+    let style = resolver.computed_style(node);
+    if is_display_none(&style) {
+        return;
+    }
+
+    out.extend(generated_inline_segments(node, resolver, PseudoElement::Before));
+
+    if let Some((image_node, image)) = element_inline_image(node) {
+        collect_image_segment(&image_node, &image, resolver, out);
+        out.extend(generated_inline_segments(node, resolver, PseudoElement::After));
+        return;
+    }
+
+    if node.tag_name().as_deref() == Some("img") {
+        if let Some(alt_text) = image_alt_fallback_text(node, &style) {
+            out.push(InlineSegment {
+                node: node.clone(),
+                content: InlineSegmentContent::Text(alt_text),
+                metrics: font_metrics(&style),
+                line_height: line_height(&style),
+                vertical_align: vertical_align(&style),
+                style: FragmentStyle::from_computed(&style),
+                word_break: word_break(&style),
+                overflow_wrap: overflow_wrap(&style),
+                white_space_mode: white_space(&style),
+            });
+            out.extend(generated_inline_segments(node, resolver, PseudoElement::After));
+            return;
+        }
+    }
+
+    for child in node.child_nodes() {
+        match child.node_type() {
+            NodeType::Text => {
+                if let Some(text) = child.data() {
+                    out.extend(make_text_segment(child, &text, &style));
+                }
+            }
+            NodeType::Element if is_inline_child(&child, resolver) => {
+                collect_inline_segments(&child, resolver, out);
+            }
+            _ => {}
+        }
+    }
+    out.extend(generated_inline_segments(node, resolver, PseudoElement::After));
+}
+
+fn collect_image_segment(
+    image_node: &NodeHandle,
+    image: &Image,
+    resolver: &mut StyleResolver,
+    out: &mut Vec<InlineSegment>,
+) {
+    let image_style = resolver.computed_style(image_node);
+    let padding = edge_sizes(&image_style, "padding");
+    let border = edge_sizes(&image_style, "border");
+    let (rendered_width, rendered_height) =
+        resolve_image_rendered_size(image_node, image, &image_style);
+    out.push(InlineSegment {
+        node: image_node.clone(),
+        content: InlineSegmentContent::Image(
+            image.clone(),
+            image_style.clone(),
+            rendered_width,
+            rendered_height,
+        ),
+        metrics: font_metrics(&image_style),
+        word_break: word_break(&image_style),
+        overflow_wrap: overflow_wrap(&image_style),
+        white_space_mode: white_space(&image_style),
+        line_height: line_height(&image_style).max(
+            rendered_height + padding.top + padding.bottom + border.top + border.bottom,
+        ),
+        vertical_align: vertical_align(&image_style),
+        style: FragmentStyle::from_computed(&image_style),
+    });
 }
 
 pub(super) fn generated_inline_segments(
@@ -787,6 +787,107 @@ pub(super) fn vertical_align(style: &ComputedStyle) -> VerticalAlign {
 
 // ── Inline layout engine ────────────────────────────────────────────────────
 
+/// Mutable cursor state threaded through inline layout.
+struct InlineCursor {
+    x: f32,
+    y: f32,
+    line_height: f32,
+    start_x: f32,
+    strut_line_height: f32,
+}
+
+impl InlineCursor {
+    fn new(start_x: f32, start_y: f32, strut_line_height: f32) -> Self {
+        Self {
+            x: start_x,
+            y: start_y,
+            line_height: strut_line_height,
+            start_x,
+            strut_line_height,
+        }
+    }
+
+    fn wrap_line(
+        &mut self,
+        lines: &mut Vec<LineBox>,
+        fragments: &mut Vec<InlineFragment>,
+        segment_line_height: f32,
+        available_width: f32,
+        align: TextAlign,
+    ) {
+        let effective_height = self.line_height.max(segment_line_height);
+        push_line(
+            lines,
+            fragments,
+            self.start_x,
+            self.y,
+            self.x - self.start_x,
+            effective_height,
+            available_width,
+            align,
+        );
+        self.y += effective_height;
+        self.x = self.start_x;
+        self.line_height = self.strut_line_height;
+    }
+}
+
+/// Determines whether a text fragment needs emergency character-by-character
+/// breaking (overflow-wrap: break-word / anywhere).
+fn needs_character_break(
+    overflow_wrap: OverflowWrap,
+    word_break: WordBreak,
+    allows_wrapping: bool,
+    cursor_x: f32,
+    start_x: f32,
+    fragment_width: f32,
+    available_width: f32,
+) -> bool {
+    allows_wrapping
+        && (matches!(overflow_wrap, OverflowWrap::BreakWord | OverflowWrap::Anywhere)
+            || word_break == WordBreak::BreakWord)
+        && cursor_x == start_x
+        && fragment_width > available_width
+        && available_width > 0.0
+}
+
+/// Breaks a text fragment character by character, emitting fragments and
+/// wrapping lines as needed. Returns the fragments produced.
+fn break_text_by_characters(
+    text: &str,
+    segment: &InlineSegment,
+    height: f32,
+    cursor: &mut InlineCursor,
+    lines: &mut Vec<LineBox>,
+    fragments: &mut Vec<InlineFragment>,
+    available_width: f32,
+    align: TextAlign,
+) {
+    for ch_str in split_chars(text) {
+        let ch_width = measure_text_width(&ch_str, segment.metrics);
+        if cursor.x > cursor.start_x
+            && cursor.x + ch_width > cursor.start_x + available_width
+        {
+            cursor.wrap_line(lines, fragments, segment.line_height, available_width, align);
+        }
+        fragments.push(InlineFragment {
+            node: segment.node.clone(),
+            content: InlineFragmentContent::Text(ch_str),
+            rect: Rect {
+                x: cursor.x,
+                y: cursor.y,
+                width: ch_width,
+                height,
+            },
+            metrics: segment.metrics,
+            vertical_align: segment.vertical_align,
+            style: segment.style.clone(),
+        });
+        cursor.x += ch_width;
+        cursor.line_height = cursor.line_height.max(segment.line_height.max(height));
+    }
+}
+
 fn layout_inline_segments(
     segments: &[InlineSegment],
     start_x: f32,
@@ -797,9 +898,7 @@ fn layout_inline_segments(
 ) -> Vec<LineBox> {
     let mut lines = Vec::new();
     let mut current_fragments = Vec::new();
-    let mut cursor_x = start_x;
-    let mut cursor_y = start_y;
-    let mut current_line_height: f32 = strut_line_height;
+    let mut cursor = InlineCursor::new(start_x, start_y, strut_line_height);
 
     let mut prev_segment_allows_wrapping = true;
     for segment in segments {
@@ -809,101 +908,55 @@ fn layout_inline_segments(
         for piece in split_segment(segment) {
             match piece {
                 InlinePiece::Newline => {
-                    push_line(
+                    cursor.wrap_line(
                         &mut lines,
                         &mut current_fragments,
-                        start_x,
-                        cursor_y,
-                        cursor_x - start_x,
-                        current_line_height.max(segment.line_height),
+                        segment.line_height,
                         available_width,
                         align,
                     );
-                    cursor_y += current_line_height.max(segment.line_height);
-                    cursor_x = start_x;
-                    current_line_height = strut_line_height;
                 }
-                InlinePiece::Fragment {
-                    content,
-                    width,
-                    height,
-                } => {
-                    // Allow wrapping at segment boundary only if the previous
-                    // segment allowed wrapping (i.e., not inside a nowrap run).
-                    // Inside a segment, use the segment's own allows_wrapping.
+                InlinePiece::Fragment { content, width, height } => {
                     let can_wrap = if is_first_piece_in_segment {
                         prev_segment_allows_wrapping
                     } else {
                         allows_wrapping
                     };
                     is_first_piece_in_segment = false;
-                    if can_wrap && cursor_x > start_x && cursor_x + width > start_x + available_width {
-                        push_line(
+
+                    if can_wrap
+                        && cursor.x > start_x
+                        && cursor.x + width > start_x + available_width
+                    {
+                        cursor.wrap_line(
                             &mut lines,
                             &mut current_fragments,
-                            start_x,
-                            cursor_y,
-                            cursor_x - start_x,
-                            current_line_height.max(segment.line_height),
+                            segment.line_height,
                             available_width,
                             align,
                         );
-                        cursor_y += current_line_height.max(segment.line_height);
-                        cursor_x = start_x;
-                        current_line_height = strut_line_height;
                     }
 
-                    // overflow-wrap: break-word / anywhere, and the non-standard
-                    // word-break: break-word — if the fragment still doesn't fit
-                    // even at the start of a fresh line, break it character by
-                    // character.
-                    let needs_char_break = allows_wrapping
-                        && (matches!(
-                            overflow_wrap,
-                            OverflowWrap::BreakWord | OverflowWrap::Anywhere
-                        ) || segment.word_break == WordBreak::BreakWord)
-                        && cursor_x == start_x
-                        && width > available_width
-                        && available_width > 0.0;
-
-                    if needs_char_break {
+                    if needs_character_break(
+                        overflow_wrap,
+                        segment.word_break,
+                        allows_wrapping,
+                        cursor.x,
+                        start_x,
+                        width,
+                        available_width,
+                    ) {
                         if let InlineFragmentContent::Text(text) = content {
-                            for ch_str in split_chars(&text) {
-                                let ch_width = measure_text_width(&ch_str, segment.metrics);
-                                if cursor_x > start_x
-                                    && cursor_x + ch_width > start_x + available_width
-                                {
-                                    push_line(
-                                        &mut lines,
-                                        &mut current_fragments,
-                                        start_x,
-                                        cursor_y,
-                                        cursor_x - start_x,
-                                        current_line_height.max(segment.line_height),
-                                        available_width,
-                                        align,
-                                    );
-                                    cursor_y += current_line_height.max(segment.line_height);
-                                    cursor_x = start_x;
-                                    current_line_height = strut_line_height;
-                                }
-                                current_fragments.push(InlineFragment {
-                                    node: segment.node.clone(),
-                                    content: InlineFragmentContent::Text(ch_str),
-                                    rect: Rect {
-                                        x: cursor_x,
-                                        y: cursor_y,
-                                        width: ch_width,
-                                        height,
-                                    },
-                                    metrics: segment.metrics,
-                                    vertical_align: segment.vertical_align,
-                                    style: segment.style.clone(),
-                                });
-                                cursor_x += ch_width;
-                                current_line_height =
-                                    current_line_height.max(segment.line_height.max(height));
-                            }
+                            break_text_by_characters(
+                                &text,
+                                segment,
+                                height,
+                                &mut cursor,
+                                &mut lines,
+                                &mut current_fragments,
+                                available_width,
+                                align,
+                            );
                             continue;
                         }
                     }
@@ -912,8 +965,8 @@ fn layout_inline_segments(
                         node: segment.node.clone(),
                         content,
                         rect: Rect {
-                            x: cursor_x,
-                            y: cursor_y,
+                            x: cursor.x,
+                            y: cursor.y,
                             width,
                             height,
                         },
@@ -921,8 +974,9 @@ fn layout_inline_segments(
                         vertical_align: segment.vertical_align,
                         style: segment.style.clone(),
                     });
-                    cursor_x += width;
-                    current_line_height = current_line_height.max(segment.line_height.max(height));
+                    cursor.x += width;
+                    cursor.line_height =
+                        cursor.line_height.max(segment.line_height.max(height));
                 }
             }
         }
@@ -934,9 +988,9 @@ fn layout_inline_segments(
             &mut lines,
             &mut current_fragments,
             start_x,
-            cursor_y,
-            cursor_x - start_x,
-            current_line_height.max(0.0),
+            cursor.y,
+            cursor.x - start_x,
+            cursor.line_height.max(0.0),
             available_width,
             align,
         );

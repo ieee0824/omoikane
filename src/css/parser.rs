@@ -298,109 +298,10 @@ impl Parser {
                     simples.push(SimpleSelector::Id(id));
                 }
                 Some(CssToken::BracketOpen) => {
-                    self.next();
-                    self.skip_whitespace();
-                    let name = self.expect_ident()?;
-                    self.skip_whitespace();
-                    let operator = match self.peek() {
-                        Some(CssToken::Delim('=')) => {
-                            self.next();
-                            Some(AttributeOperator::Equals)
-                        }
-                        Some(CssToken::Delim('~')) => {
-                            self.next();
-                            self.expect_delim('=')?;
-                            Some(AttributeOperator::Includes)
-                        }
-                        Some(CssToken::Delim('^')) => {
-                            self.next();
-                            self.expect_delim('=')?;
-                            Some(AttributeOperator::StartsWith)
-                        }
-                        Some(CssToken::Delim('$')) => {
-                            self.next();
-                            self.expect_delim('=')?;
-                            Some(AttributeOperator::EndsWith)
-                        }
-                        Some(CssToken::Delim('*')) => {
-                            self.next();
-                            self.expect_delim('=')?;
-                            Some(AttributeOperator::Contains)
-                        }
-                        Some(CssToken::Delim('|')) => {
-                            self.next();
-                            self.expect_delim('=')?;
-                            Some(AttributeOperator::DashMatch)
-                        }
-                        _ => None,
-                    };
-                    self.skip_whitespace();
-                    let value = if operator.is_some() {
-                        Some(self.expect_ident_or_string()?)
-                    } else {
-                        None
-                    };
-                    self.skip_whitespace();
-                    self.expect_bracket_close()?;
-                    simples.push(SimpleSelector::Attribute {
-                        name,
-                        operator,
-                        value,
-                    });
+                    simples.push(self.parse_attribute_selector()?);
                 }
                 Some(CssToken::Colon) => {
-                    self.next();
-                    let pseudo = if matches!(self.peek(), Some(CssToken::Colon)) {
-                        self.next();
-                        SimpleSelector::PseudoElement(self.expect_ident()?)
-                    } else {
-                        let name = self.expect_ident()?;
-                        if matches!(self.peek(), Some(CssToken::ParenOpen)) {
-                            self.next();
-                            let mut argument_tokens = Vec::new();
-                            let mut depth = 0usize;
-                            loop {
-                                match self.peek() {
-                                    Some(CssToken::ParenOpen) => {
-                                        depth += 1;
-                                        argument_tokens.push(
-                                            self.next().expect("peeked token should exist"),
-                                        );
-                                    }
-                                    Some(CssToken::ParenClose) if depth > 0 => {
-                                        depth -= 1;
-                                        argument_tokens.push(
-                                            self.next().expect("peeked token should exist"),
-                                        );
-                                    }
-                                    Some(CssToken::ParenClose) | None => break,
-                                    _ => {
-                                        argument_tokens.push(
-                                            self.next().expect("peeked token should exist"),
-                                        );
-                                    }
-                                }
-                            }
-                            match self.next() {
-                                Some(CssToken::ParenClose) => {}
-                                _ => return Err(CssParseError::ExpectedToken(")")),
-                            }
-                            if name == "not" {
-                                // Parse the argument as a list of simple selectors
-                                let argument_str =
-                                    render_tokens(&argument_tokens).trim().to_string();
-                                let inner = parse_not_argument(&argument_str)?;
-                                SimpleSelector::Not(inner)
-                            } else {
-                                let argument =
-                                    render_tokens(&argument_tokens).trim().to_string();
-                                SimpleSelector::PseudoClass(format!("{name}({argument})"))
-                            }
-                        } else {
-                            SimpleSelector::PseudoClass(name)
-                        }
-                    };
-                    simples.push(pseudo);
+                    simples.push(self.parse_pseudo_selector()?);
                 }
                 _ => break,
             }
@@ -411,6 +312,118 @@ impl Parser {
         }
 
         Ok(simples)
+    }
+
+    /// Parses `[attr op "value"]` attribute selectors.
+    /// The opening `[` is consumed here.
+    fn parse_attribute_selector(&mut self) -> Result<SimpleSelector, CssParseError> {
+        self.next(); // consume BracketOpen
+        self.skip_whitespace();
+        let name = self.expect_ident()?;
+        self.skip_whitespace();
+        let operator = self.parse_attribute_operator()?;
+        self.skip_whitespace();
+        let value = if operator.is_some() {
+            Some(self.expect_ident_or_string()?)
+        } else {
+            None
+        };
+        self.skip_whitespace();
+        self.expect_bracket_close()?;
+        Ok(SimpleSelector::Attribute {
+            name,
+            operator,
+            value,
+        })
+    }
+
+    /// Parses the operator inside an attribute selector (e.g. `=`, `~=`, `^=`).
+    /// Returns `None` when no operator is present (presence-only selector).
+    fn parse_attribute_operator(&mut self) -> Result<Option<AttributeOperator>, CssParseError> {
+        match self.peek() {
+            Some(CssToken::Delim('=')) => {
+                self.next();
+                Ok(Some(AttributeOperator::Equals))
+            }
+            Some(CssToken::Delim('~')) => {
+                self.next();
+                self.expect_delim('=')?;
+                Ok(Some(AttributeOperator::Includes))
+            }
+            Some(CssToken::Delim('^')) => {
+                self.next();
+                self.expect_delim('=')?;
+                Ok(Some(AttributeOperator::StartsWith))
+            }
+            Some(CssToken::Delim('$')) => {
+                self.next();
+                self.expect_delim('=')?;
+                Ok(Some(AttributeOperator::EndsWith))
+            }
+            Some(CssToken::Delim('*')) => {
+                self.next();
+                self.expect_delim('=')?;
+                Ok(Some(AttributeOperator::Contains))
+            }
+            Some(CssToken::Delim('|')) => {
+                self.next();
+                self.expect_delim('=')?;
+                Ok(Some(AttributeOperator::DashMatch))
+            }
+            _ => Ok(None),
+        }
+    }
+
+    /// Parses `:pseudo-class` or `::pseudo-element` selectors.
+    /// The leading `:` is consumed here.
+    fn parse_pseudo_selector(&mut self) -> Result<SimpleSelector, CssParseError> {
+        self.next(); // consume first Colon
+        if matches!(self.peek(), Some(CssToken::Colon)) {
+            self.next();
+            return Ok(SimpleSelector::PseudoElement(self.expect_ident()?));
+        }
+        let name = self.expect_ident()?;
+        if !matches!(self.peek(), Some(CssToken::ParenOpen)) {
+            return Ok(SimpleSelector::PseudoClass(name));
+        }
+        self.next(); // consume ParenOpen
+        let argument_tokens = self.collect_parenthesized_tokens()?;
+        if name == "not" {
+            let argument_str = render_tokens(&argument_tokens).trim().to_string();
+            let inner = parse_not_argument(&argument_str)?;
+            Ok(SimpleSelector::Not(inner))
+        } else {
+            let argument = render_tokens(&argument_tokens).trim().to_string();
+            Ok(SimpleSelector::PseudoClass(format!("{name}({argument})")))
+        }
+    }
+
+    /// Collects tokens inside a parenthesized group, tracking nesting depth.
+    /// The opening `(` must already be consumed. Consumes the closing `)`.
+    fn collect_parenthesized_tokens(&mut self) -> Result<Vec<CssToken>, CssParseError> {
+        let mut tokens = Vec::new();
+        let mut depth = 0usize;
+        loop {
+            match self.peek() {
+                Some(CssToken::ParenOpen) => {
+                    depth += 1;
+                    tokens.push(self.next().expect("peeked token should exist"));
+                }
+                Some(CssToken::ParenClose) if depth > 0 => {
+                    depth -= 1;
+                    tokens.push(self.next().expect("peeked token should exist"));
+                }
+                Some(CssToken::ParenClose) | None => break,
+                _ => {
+                    tokens.push(self.next().expect("peeked token should exist"));
+                }
+            }
+        }
+        match self.next() {
+            Some(CssToken::ParenClose) => {}
+            _ => return Err(CssParseError::ExpectedToken(")")),
+        }
+        Ok(tokens)
     }
 
     fn parse_declaration_list(&mut self) -> Result<Vec<Declaration>, CssParseError> {
