@@ -1,0 +1,27 @@
+# ビルド出力（コンテナ内では別ボリューム / CARGO_TARGET_DIR を使う）
+/target/
+target/
+
+# Git メタデータ（ビルドコンテキストに不要。リポジトリはバインドマウントで共有する）
+.git/
+
+# 生成物・テスト出力
+/dist/
+/build/
+/tests/output/
+
+# Rust バックアップ
+**/*.rs.bk
+
+# OS / IDE
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# 環境変数
+.env
+.env.*

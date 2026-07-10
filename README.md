@@ -171,6 +171,28 @@ HTTP クライアントの現状仕様:
 
 サンプルは [`examples/ffi`](/examples/ffi) にあります。
 
+### Docker サンドボックス
+
+ホスト環境を汚さずに omoikane のビルド・テスト・Claude Code 実行ができる開発用コンテナを用意しています。CI と同一のフォント構成（＋ CJK フォント）を含み、ビルドに必要な `cmake` などに加え、開発用に `ripgrep`（`rg`）と GitHub CLI（`gh`）もインストール済みです。
+
+```bash
+# イメージをビルド
+docker compose build
+
+# コンテナを起動してシェルに入る
+docker compose up -d
+docker compose exec dev bash
+
+# コンテナ内でビルド・テスト
+cargo build
+CI=1 cargo test -- --include-ignored
+```
+
+- ビルド成果物は `CARGO_TARGET_DIR=/target` に出力され、ホストの `target/` とは分離されます。
+- crates.io インデックスと crate ソースは named volume（`cargo-registry` / `cargo-git`）に永続化されるため、コンテナを作り直しても（`down` / `up`）クレートを再ダウンロードしません。
+- Claude Code のログイン情報は named volume に永続化されるため、コンテナを作り直してもログインし直す必要はありません。
+- リポジトリはバインドマウントで共有されるため、ホスト側での編集がそのままコンテナに反映されます。
+
 ## Acid2 テスト
 
 [Acid2 テスト](https://www.webstandards.org/files/acid2/test.html)の公式リファレンスレンダリングとの比較で**差分 0px** を達成しています。

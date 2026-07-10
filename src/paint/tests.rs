@@ -2512,8 +2512,22 @@ fn acid2_fixture_matches_official_reference_rendering() {
 }
 
 #[test]
-#[ignore = "used only to refresh the checked-in local Acid2 baseline image"]
+#[ignore = "maintenance utility: set OMOIKANE_REFRESH_BASELINE=1 to rewrite the checked-in local Acid2 baseline image"]
 fn refresh_acid2_baseline_png() {
+    // This is a fixture-refresh utility, not a regression assertion — it overwrites
+    // the committed baseline PNG. It must never mutate the working tree merely because
+    // the suite was run with `--include-ignored` (e.g. the documented CI-parity command
+    // `cargo test -- --include-ignored`, which in the bind-mounted Docker sandbox would
+    // otherwise dirty the host tree byte-for-byte). Require an explicit opt-in so the
+    // suite stays idempotent; a maintainer refreshing the baseline sets the env var.
+    if std::env::var("OMOIKANE_REFRESH_BASELINE").as_deref() != Ok("1") {
+        eprintln!(
+            "skipping refresh_acid2_baseline_png: set OMOIKANE_REFRESH_BASELINE=1 to rewrite {}",
+            acid2_baseline_path().display()
+        );
+        return;
+    }
+
     let html = fs::read_to_string(acid2_fixture_path()).unwrap();
     let document = TreeBuilder::parse(&html).document();
     let png = render_document_png(
