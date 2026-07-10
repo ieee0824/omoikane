@@ -66,9 +66,25 @@ cargo test --test acid3_harness
 `examples/acid3.rs` と `tests/acid3_harness.rs` は共有ハーネス
 `tests/acid3_common/harness.rs` を `#[path]` で取り込んで利用する。
 
-## 現状のベースライン（2026-07-10 時点、エンジン無改変）
+## 現状のスコア（更新: 016-5 時点）
 
-`cargo run --example acid3` の実測では **スコアは取得できない（0 相当）**。
+`cargo run --example acid3` の実測で **Faithful / DirectDrive 両モードとも 28/100**。
+016-2〜016-5 の実装で以下が解消済み:
+
+- **016-2**: トークナイザに script-data / RAWTEXT / RCDATA 状態を実装し、下記の
+  パーサ問題を解消（`<script>` が 10 個に正しく分割され、`update`/`tests` が定義される）。
+- **016-3**: `setTimeout` の関数コールバック保持 + イベントループ統合。
+- **016-4**: `<body onload="update()">` を実 `load` イベントで起動（ハーネスの手動
+  `update()` エミュレーションは撤去）。`.data` / `defaultView` / `Node` 定数 / `localName` を追加。
+- **016-5**: `data:` スキームのスクリプト取得に対応（d1〜d5 の 5 ベクタが実行され test 97 が PASS）。
+
+残る主要ブロッカーは iframe / `contentDocument` / `document.write`（P7/P8）、
+`getComputedStyle` 実値（P5）、DOMException（P9）など。詳細な次アクションは
+`issues/` の 016 系子 issue で追跡する。
+
+### 参考: 016-2 実装前の 0 点だった根本原因（履歴）
+
+`cargo run --example acid3` の実測では **スコアは取得できない（0 相当）**だった。
 根本原因は JS ではなく HTML パーサ:
 
 - エンジンのトークナイザに script-data / raw-text 状態が無く、`<script>` 内の

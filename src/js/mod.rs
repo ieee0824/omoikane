@@ -555,8 +555,26 @@ fn collect_text_content(node: &NodeHandle) -> String {
     text
 }
 
-/// Fetches an external script source via HTTP.
+/// Fetches an external script's source.
+///
+/// Supports `http:`/`https:` (fetched over the network) and `data:` URIs
+/// (decoded inline via [`crate::http::parse_data_uri`], RFC 2397). Relative
+/// references are resolved against `base_url` when provided.
+///
+/// For `data:` URIs, only JavaScript media types (see
+/// [`is_javascript_mime_type`]) are executed as classic scripts; a `data:` URI
+/// with a non-JavaScript media type returns `None` (treated as a fetch
+/// failure), matching how browsers refuse to run non-script `data:` sources.
 fn fetch_script_source(src: &str, base_url: Option<&crate::http::Url>) -> Option<String> {
+    // data: URI scripts are decoded inline without a network fetch.
+    if src.get(..5).is_some_and(|prefix| prefix.eq_ignore_ascii_case("data:")) {
+        let parsed = crate::http::parse_data_uri(src)?;
+        if !is_javascript_mime_type(&parsed.mime_type) {
+            return None;
+        }
+        return String::from_utf8(parsed.data).ok();
+    }
+
     let url = if src.starts_with("http://") || src.starts_with("https://") {
         src.to_string()
     } else if let Some(base) = base_url {
@@ -571,6 +589,31 @@ fn fetch_script_source(src: &str, base_url: Option<&crate::http::Url>) -> Option
         return None;
     }
     std::str::from_utf8(response.body()).ok().map(|s| s.to_string())
+}
+
+/// Returns whether `mime` is a JavaScript media type per the HTML spec's
+/// "JavaScript MIME type essence match" (case-insensitive, parameters already
+/// stripped). Only these types are executed as classic scripts.
+fn is_javascript_mime_type(mime: &str) -> bool {
+    matches!(
+        mime.trim().to_ascii_lowercase().as_str(),
+        "application/ecmascript"
+            | "application/javascript"
+            | "application/x-ecmascript"
+            | "application/x-javascript"
+            | "text/ecmascript"
+            | "text/javascript"
+            | "text/javascript1.0"
+            | "text/javascript1.1"
+            | "text/javascript1.2"
+            | "text/javascript1.3"
+            | "text/javascript1.4"
+            | "text/javascript1.5"
+            | "text/jscript"
+            | "text/livescript"
+            | "text/x-ecmascript"
+            | "text/x-javascript"
+    )
 }
 
 fn register_host_bindings(
@@ -2265,6 +2308,67 @@ mod tests {
         assert!(runtime.eval("document.createTextNode('x').localName === null").unwrap().as_boolean().unwrap());
         assert!(runtime.eval("document.createComment('x').localName === null").unwrap().as_boolean().unwrap());
         assert!(runtime.eval("document.localName === null").unwrap().as_boolean().unwrap());
+    }
+
+    // --- 016-5: data: URI scripts ---
+
+    #[test]
+    fn fetch_script_source_decodes_acid3_data_uri_vectors() {
+        // The five Acid3 (test 97) vectors and the JS source each must yield.
+        let cases = [
+            ("data:text/javascript,d1%20%3D%20'one'%3B", "d1 = 'one';"),
+            ("data:text/javascript;base64,ZDIgPSAndHdvJzs%3D", "d2 = 'two';"),
+            (
+                "data:text/javascript;base64,%5a%44%4d%67%50%53%41%6e%64%47%68%79%5a%57%55%6e%4f%77%3D%3D",
+                "d3 = 'three';",
+            ),
+            (
+                "data:text/javascript;base64,%20ZD%20Qg%0D%0APS%20An%20Zm91cic%0D%0A%207%20",
+                "d4 = 'four';",
+            ),
+            (
+                "data:text/javascript,d5%20%3D%20'five%5Cu0027s'%3B",
+                "d5 = 'five\\u0027s';",
+            ),
+        ];
+        for (uri, expected) in cases {
+            let source = fetch_script_source(uri, None)
+                .unwrap_or_else(|| panic!("data: URI should decode: {uri}"));
+            assert_eq!(source, expected, "wrong decoded source for {uri}");
+        }
+    }
+
+    #[test]
+    fn fetch_script_source_rejects_non_javascript_data_uri() {
+        // A data: URI whose media type is not JavaScript is not executed.
+        assert!(
+            fetch_script_source("data:text/plain,alert(1)", None).is_none(),
+            "non-JavaScript data: media type must not be treated as a script"
+        );
+    }
+
+    #[test]
+    fn data_uri_scripts_define_globals_end_to_end() {
+        // Executing the five decoded sources must define d1..d5 as Acid3 expects.
+        let mut runtime = JsRuntime::with_document(default_document()).unwrap();
+        let vectors = [
+            "data:text/javascript,d1%20%3D%20'one'%3B",
+            "data:text/javascript;base64,ZDIgPSAndHdvJzs%3D",
+            "data:text/javascript;base64,%5a%44%4d%67%50%53%41%6e%64%47%68%79%5a%57%55%6e%4f%77%3D%3D",
+            "data:text/javascript;base64,%20ZD%20Qg%0D%0APS%20An%20Zm91cic%0D%0A%207%20",
+            "data:text/javascript,d5%20%3D%20'five%5Cu0027s'%3B",
+        ];
+        for uri in vectors {
+            let source = fetch_script_source(uri, None).unwrap();
+            runtime.eval(&source).unwrap();
+        }
+        let combined = runtime
+            .eval("[d1, d2, d3, d4, d5].join('|')")
+            .unwrap()
+            .as_string()
+            .unwrap()
+            .to_std_string_escaped();
+        assert_eq!(combined, "one|two|three|four|five's");
     }
 
     #[test]
