@@ -34,3 +34,15 @@ status: open
 
 - 81〜96 の各 pass/fail が実測ログで確認できる
 - 要注意 4 件（88/89/90/93）と test 85 の原因が切り分けられている
+
+## 進捗
+
+### test 85 の原因特定と対処（完了）
+
+- **原因**: `"scathing".substr(-7, 3)` の `String.prototype.substr` が未定義で「not a callable function」。Boa 0.21 では `substr`（ならびに Annex B 由来の各種レガシー API）は `annex-b` フィーチャの背後にあり、既定フィーチャ（`float16`,`xsum`）には含まれない。
+- **対処**: `Cargo.toml` の `boa_engine` を `features = ["annex-b"]` 付きに変更。test 85 が PASS。bucket6 の他テスト（86〜96）に回帰が無いことを `cargo run --example acid3` で確認済み。
+
+### bucket6 実測（43/100 到達時点、direct-drive）
+
+- PASS: 81-84, 86-97（86〜96 の要注意 4 件 88/89/90/93 含め Boa 素通しで通過）
+- FAIL: test 98（"not a callable function"）。これは ECMAScript ではなく XHTML/XML DOM 依存（`document.implementation.createDocument` 等）で、016-12/016-14 スコープ。bucket6 の ECMAScript 本体は 85 の解消で全通過。
