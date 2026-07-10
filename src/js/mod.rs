@@ -188,6 +188,14 @@ impl HostState {
             }
         }
 
+        // The `src` changed (or this is the first load). Drop any previously
+        // loaded sub-document tree from the node registry before loading the
+        // new one, so stale nodes are released and their ids stop resolving
+        // instead of leaking across reloads.
+        if let Some(previous) = self.iframe_documents.remove(&iframe_id) {
+            self.unregister_tree(&previous.document);
+        }
+
         let document = self.load_iframe_document(&src);
         self.register_tree(&document);
         self.iframe_documents.insert(
@@ -211,25 +219,25 @@ impl HostState {
             return blank_html_document();
         }
 
-        // Resolve the resource: data: URIs decode inline; everything else is
-        // fetched over HTTP after resolving relative references against the
-        // document base URL.
+        // Resolve the reference (shared with script loading) to either inline
+        // `data:` bytes or an absolute URL, then obtain the (mime, body) pair.
+        //
+        // NOTE: unlike script loading (see `fetch_script_source`), an iframe
+        // load intentionally does NOT inspect the HTTP status code. A real
+        // browser renders even an error response's body into the frame, so we
+        // adopt the response body as the sub-document regardless of status.
+        // This asymmetry with `fetch_script_source` (which requires 200) is
+        // deliberate.
         let fetched: Option<(String, Vec<u8>)> =
-            if src.get(..5).is_some_and(|prefix| prefix.eq_ignore_ascii_case("data:")) {
-                crate::http::parse_data_uri(src).map(|d| (d.mime_type, d.data))
-            } else {
-                let resolved = if src.starts_with("http://") || src.starts_with("https://") {
-                    Some(src.to_string())
-                } else {
-                    self.base_url
-                        .as_ref()
-                        .and_then(|base| crate::http::url::resolve_url(base, src).ok())
-                        .map(|url| url.to_string())
-                };
-                resolved.and_then(|url| self.http_client.get(&url).ok()).map(|resp| {
-                    let mime = resp.header("Content-Type").unwrap_or("").to_string();
-                    (mime, resp.body().to_vec())
-                })
+            match resolve_resource_ref(src, self.base_url.as_ref()) {
+                Some(ResolvedResource::Data { mime_type, data }) => Some((mime_type, data)),
+                Some(ResolvedResource::Url(url)) => {
+                    self.http_client.get(&url).ok().map(|resp| {
+                        let mime = resp.header("Content-Type").unwrap_or("").to_string();
+                        (mime, resp.body().to_vec())
+                    })
+                }
+                None => None,
             };
 
         match fetched {
@@ -249,6 +257,18 @@ impl HostState {
         self.nodes.insert(node.identity(), node.clone());
         for child in node.child_nodes() {
             self.register_tree(&child);
+        }
+    }
+
+    /// Removes `node` and all its descendants from the id→node registry.
+    ///
+    /// Called when an iframe reloads (its `src` changed) so the previous
+    /// sub-document tree is released and its ids can no longer be resolved,
+    /// preventing stale nodes from accumulating in the registry across reloads.
+    fn unregister_tree(&mut self, node: &NodeHandle) {
+        self.nodes.remove(&node.identity());
+        for child in node.child_nodes() {
+            self.unregister_tree(&child);
         }
     }
 
@@ -708,6 +728,60 @@ fn collect_text_content(node: &NodeHandle) -> String {
     text
 }
 
+/// A resource reference (`src`) resolved to something fetchable.
+enum ResolvedResource {
+    /// A `data:` URI decoded inline (RFC 2397): the parsed media type and bytes.
+    Data { mime_type: String, data: Vec<u8> },
+    /// An absolute `http:`/`https:` URL to fetch over the network.
+    Url(String),
+}
+
+/// Resolves a resource reference (`src`) to either inline `data:` bytes or an
+/// absolute HTTP(S) URL. Shared by iframe document loading
+/// ([`HostState::load_iframe_document`]) and external script loading
+/// ([`fetch_script_source`]) so the classification stays in one place.
+///
+/// `src` is classified case-insensitively:
+/// - a `data:` URI is decoded inline;
+/// - an absolute `http://`/`https://` URL is used verbatim;
+/// - anything else is treated as a relative reference and resolved against
+///   `base_url`.
+///
+/// Returns `None` when a `data:` URI fails to parse, or when a relative
+/// reference cannot be resolved (no base URL, or a resolution error).
+fn resolve_resource_ref(
+    src: &str,
+    base_url: Option<&crate::http::Url>,
+) -> Option<ResolvedResource> {
+    if src
+        .get(..5)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("data:"))
+    {
+        let parsed = crate::http::parse_data_uri(src)?;
+        return Some(ResolvedResource::Data {
+            mime_type: parsed.mime_type,
+            data: parsed.data,
+        });
+    }
+
+    // Scheme match is case-insensitive: `HTTP://…` must not fall through to
+    // relative resolution.
+    let is_absolute_http = src
+        .get(..7)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("http://"))
+        || src
+            .get(..8)
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case("https://"));
+
+    if is_absolute_http {
+        Some(ResolvedResource::Url(src.to_string()))
+    } else {
+        let base = base_url?;
+        let url = crate::http::url::resolve_url(base, src).ok()?;
+        Some(ResolvedResource::Url(url.to_string()))
+    }
+}
+
 /// Fetches an external script's source.
 ///
 /// Supports `http:`/`https:` (fetched over the network) and `data:` URIs
@@ -719,29 +793,31 @@ fn collect_text_content(node: &NodeHandle) -> String {
 /// with a non-JavaScript media type returns `None` (treated as a fetch
 /// failure), matching how browsers refuse to run non-script `data:` sources.
 fn fetch_script_source(src: &str, base_url: Option<&crate::http::Url>) -> Option<String> {
-    // data: URI scripts are decoded inline without a network fetch.
-    if src.get(..5).is_some_and(|prefix| prefix.eq_ignore_ascii_case("data:")) {
-        let parsed = crate::http::parse_data_uri(src)?;
-        if !is_javascript_mime_type(&parsed.mime_type) {
-            return None;
+    match resolve_resource_ref(src, base_url)? {
+        // data: URI scripts are decoded inline without a network fetch. Only
+        // JavaScript media types are executed as classic scripts; any other
+        // media type is treated as a fetch failure (returns None), matching how
+        // browsers refuse to run non-script `data:` sources.
+        ResolvedResource::Data { mime_type, data } => {
+            if !is_javascript_mime_type(&mime_type) {
+                return None;
+            }
+            String::from_utf8(data).ok()
         }
-        return String::from_utf8(parsed.data).ok();
+        ResolvedResource::Url(url) => {
+            let mut client = Client::new();
+            let response = client.get(&url).ok()?;
+            // Scripts require a successful (200) response; error pages are not
+            // executed. This differs deliberately from iframe loading, which
+            // adopts even an error response's body as the sub-document.
+            if response.status_code() != 200 {
+                return None;
+            }
+            std::str::from_utf8(response.body())
+                .ok()
+                .map(|s| s.to_string())
+        }
     }
-
-    let url = if src.starts_with("http://") || src.starts_with("https://") {
-        src.to_string()
-    } else if let Some(base) = base_url {
-        crate::http::url::resolve_url(base, src).ok()?.to_string()
-    } else {
-        return None;
-    };
-
-    let mut client = Client::new();
-    let response = client.get(&url).ok()?;
-    if response.status_code() != 200 {
-        return None;
-    }
-    std::str::from_utf8(response.body()).ok().map(|s| s.to_string())
 }
 
 /// Returns whether `mime` is a JavaScript media type per the HTML spec's
@@ -958,6 +1034,11 @@ fn register_host_bindings(
             NativeFunction::from_copy_closure(iframe_content_document_native),
         ),
         (
+            js_string!("__omoikane_owner_document"),
+            1,
+            NativeFunction::from_copy_closure(owner_document_native),
+        ),
+        (
             js_string!("__omoikane_document_reset"),
             1,
             NativeFunction::from_copy_closure(document_reset_native),
@@ -1167,6 +1248,37 @@ fn parent_node_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> J
     with_host_state(|state| {
         let node = state.borrow().get_node(node_id);
         Ok(node_to_js_value(node.and_then(|node| node.parent_node())))
+    })
+}
+
+/// `__omoikane_owner_document(nodeId)` — returns the node id of the Document
+/// that owns `node`, found by walking to the root of its tree.
+///
+/// Returns `null` for a document node itself (a document has no owner
+/// document), and also for a detached node whose tree root is not a document
+/// (a freshly created, not-yet-inserted element): the JS layer then falls back
+/// to the node's creation-time owner. An attached node correctly reports the
+/// top-level document or the iframe sub-document it currently lives in.
+fn owner_document_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let node_id = parse_node_id(args.first(), context)?;
+    with_host_state(|state| {
+        let s = state.borrow();
+        let Some(node) = s.get_node(node_id) else {
+            return Ok(JsValue::null());
+        };
+        if node.node_type() == crate::dom::NodeType::Document {
+            return Ok(JsValue::null());
+        }
+        // Walk to the tree root and report it only if it is a document.
+        let mut current = node;
+        while let Some(parent) = current.parent_node() {
+            current = parent;
+        }
+        if current.node_type() == crate::dom::NodeType::Document {
+            Ok(JsValue::from(current.identity() as f64))
+        } else {
+            Ok(JsValue::null())
+        }
     })
 }
 
@@ -1815,8 +1927,12 @@ fn document_reset_native(
 ///   script (and so on) recurses through the JS wrapper unbounded and can
 ///   overflow the stack. No supported page does this today.
 fn document_write_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    // `document.write` passes the target document's node id first, so a write to
+    // an iframe sub-document (`iframe.contentDocument.write(...)`) is routed to
+    // that sub-document rather than the top-level document.
+    let target_id = parse_node_id(args.first(), context)?;
     let text = args
-        .first()
+        .get(1)
         .cloned()
         .unwrap_or_default()
         .to_string(context)?
@@ -1838,35 +1954,51 @@ fn document_write_native(_: &JsValue, args: &[JsValue], context: &mut Context) -
 
     with_host_state(|state| {
         // Resolve the parent element and the sibling to insert before.
-        let (parent, reference_child) = {
+        let (parent, reference_child, is_main) = {
             let s = state.borrow();
+            // The document being written to. `document.write` passes its id; an
+            // unresolved id falls back to the top-level document.
+            let target_doc = s
+                .get_node(target_id)
+                .unwrap_or_else(|| s.document.clone());
+            let is_main = target_doc == s.document;
             // Fallback target when there is no active insertion point: the
-            // <body>, or — after document.open() emptied the document so no
-            // <body> exists — the document node itself, so the written nodes
+            // target document's <body>, or — after document.open() emptied it so
+            // no <body> exists — the document node itself, so the written nodes
             // become the (fresh) document's children.
             let fallback_parent = || {
-                s.document
+                target_doc
                     .query_selector("body")
-                    .unwrap_or_else(|| s.document.clone())
+                    .unwrap_or_else(|| target_doc.clone())
             };
-            match s.write_insertion_ref.clone() {
-                // Active insertion point: insert right after the reference node
-                // (i.e. before the reference node's next sibling).
-                Some(anchor) => match anchor.parent_node() {
-                    Some(parent) => {
-                        let siblings = parent.child_nodes();
-                        let next = siblings
-                            .iter()
-                            .position(|n| n == &anchor)
-                            .and_then(|i| siblings.get(i + 1).cloned());
-                        (Some(parent), next)
-                    }
-                    // The anchor was detached from the tree; fall back.
+            let (parent, reference_child) = if is_main {
+                match s.write_insertion_ref.clone() {
+                    // Active insertion point: insert right after the reference
+                    // node (i.e. before the reference node's next sibling).
+                    Some(anchor) => match anchor.parent_node() {
+                        Some(parent) => {
+                            let siblings = parent.child_nodes();
+                            let next = siblings
+                                .iter()
+                                .position(|n| n == &anchor)
+                                .and_then(|i| siblings.get(i + 1).cloned());
+                            (Some(parent), next)
+                        }
+                        // The anchor was detached from the tree; fall back.
+                        None => (Some(fallback_parent()), None),
+                    },
+                    // No script running: append to the fallback parent.
                     None => (Some(fallback_parent()), None),
-                },
-                // No script running: append to the fallback parent.
-                None => (Some(fallback_parent()), None),
-            }
+                }
+            } else {
+                // Sub-browsing-context documents have no per-frame parser
+                // insertion point here; append the written fragment to the
+                // sub-document's <body> (or the document node itself right after
+                // document.open() emptied it). The main document's insertion
+                // point is left untouched.
+                (Some(fallback_parent()), None)
+            };
+            (parent, reference_child, is_main)
         };
 
         let Some(parent) = parent else {
@@ -1893,9 +2025,14 @@ fn document_write_native(_: &JsValue, args: &[JsValue], context: &mut Context) -
             for child in &parsed_children {
                 s.register_tree(child);
             }
-            if let Some(last) = last_inserted {
-                if s.write_insertion_ref.is_some() {
-                    s.write_insertion_ref = Some(last);
+            // Only the top-level document's parser insertion point advances; a
+            // sub-document write must never repoint the main document's anchor
+            // at one of the sub-document's nodes.
+            if is_main {
+                if let Some(last) = last_inserted {
+                    if s.write_insertion_ref.is_some() {
+                        s.write_insertion_ref = Some(last);
+                    }
                 }
             }
         }
@@ -4591,6 +4728,281 @@ mod tests {
             .as_deref(),
             Some("loaded"),
             "changing src must reload the sub-document"
+        );
+    }
+
+    /// `ownerDocument` reports the document each node belongs to, keeping the
+    /// top-level and iframe sub-document contexts separated; a document node
+    /// itself has no owner document.
+    #[test]
+    fn sub_document_nodes_report_their_own_owner_document() {
+        use crate::html::TreeBuilder;
+        let doc = TreeBuilder::parse(
+            r#"<html><body><span id="host"></span><iframe id="f"></iframe></body></html>"#,
+        )
+        .document();
+        let mut runtime = JsRuntime::with_document(doc).unwrap();
+
+        // A document node has no owner document.
+        assert!(
+            runtime.eval("document.ownerDocument").unwrap().is_null(),
+            "document.ownerDocument must be null"
+        );
+
+        // A top-level element is owned by the top-level document.
+        assert_eq!(
+            runtime
+                .eval("document.getElementById('host').ownerDocument === document")
+                .unwrap()
+                .as_boolean(),
+            Some(true),
+            "a main-document node must be owned by the main document"
+        );
+
+        runtime
+            .eval("var sub = document.getElementById('f').contentDocument;")
+            .unwrap();
+
+        // A node created by the sub-document is owned by it (even while
+        // detached), not by the top-level document.
+        assert_eq!(
+            runtime
+                .eval("sub.createElement('p').ownerDocument === sub")
+                .unwrap()
+                .as_boolean(),
+            Some(true),
+            "a node created by the sub-document must be owned by it"
+        );
+        assert_eq!(
+            runtime
+                .eval("sub.createElement('p').ownerDocument === document")
+                .unwrap()
+                .as_boolean(),
+            Some(false),
+            "a sub-document-created node must not be owned by the top-level document"
+        );
+
+        // An existing node inside the sub-document tree is owned by the
+        // sub-document, which itself has no owner document.
+        assert_eq!(
+            runtime
+                .eval("sub.body.ownerDocument === sub")
+                .unwrap()
+                .as_boolean(),
+            Some(true),
+            "an existing sub-document node must be owned by the sub-document"
+        );
+        assert!(
+            runtime.eval("sub.ownerDocument").unwrap().is_null(),
+            "the sub-document node must have no owner document"
+        );
+    }
+
+    /// Reloading an iframe (its `src` changed) must drop the previous
+    /// sub-document tree from the host node registry instead of leaking it, so
+    /// the registry does not grow without bound across reloads.
+    #[test]
+    fn iframe_reload_unregisters_previous_sub_document_tree() {
+        use crate::html::TreeBuilder;
+        let port =
+            spawn_static_http_server("text/html", r#"<html><body><p id="x">A</p></body></html>"#);
+        let doc =
+            TreeBuilder::parse(r#"<html><body><iframe id="f"></iframe></body></html>"#).document();
+        let mut runtime = JsRuntime::with_document(doc).unwrap();
+
+        let base = runtime.host_state.borrow().nodes.len();
+
+        // First load registers the sub-document tree.
+        runtime
+            .eval(&format!(
+                "document.getElementById('f').src = 'http://127.0.0.1:{port}/a.html'; \
+                 document.getElementById('f').contentDocument;"
+            ))
+            .unwrap();
+        let after_first = runtime.host_state.borrow().nodes.len();
+        let sub_tree_size = after_first - base;
+        assert!(
+            sub_tree_size > 0,
+            "loading the sub-document must register its nodes"
+        );
+
+        // Changing src to a different URL with identical markup reloads the
+        // sub-document. The old tree must be unregistered, so the registry size
+        // is unchanged (base + one sub-tree), not doubled.
+        runtime
+            .eval(&format!(
+                "document.getElementById('f').src = 'http://127.0.0.1:{port}/b.html'; \
+                 document.getElementById('f').contentDocument;"
+            ))
+            .unwrap();
+        let after_reload = runtime.host_state.borrow().nodes.len();
+        assert_eq!(
+            after_reload,
+            base + sub_tree_size,
+            "reloading must unregister the old sub-document tree \
+             (expected {} nodes, found {} — the stale tree leaked)",
+            base + sub_tree_size,
+            after_reload
+        );
+    }
+
+    /// `iframe.contentWindow` returns one stable object: identity holds,
+    /// assigned properties persist, and its `document` getter reflects reloads.
+    #[test]
+    fn iframe_content_window_is_stable_and_reflects_reload() {
+        use crate::html::TreeBuilder;
+        let port = spawn_static_http_server(
+            "text/html",
+            r#"<html><body><p id="loaded">hi</p></body></html>"#,
+        );
+        let doc =
+            TreeBuilder::parse(r#"<html><body><iframe id="f"></iframe></body></html>"#).document();
+        let mut runtime = JsRuntime::with_document(doc).unwrap();
+
+        assert_eq!(
+            runtime
+                .eval("var f = document.getElementById('f'); f.contentWindow === f.contentWindow")
+                .unwrap()
+                .as_boolean(),
+            Some(true),
+            "contentWindow must return a stable object"
+        );
+
+        runtime.eval("f.contentWindow.marker = 42;").unwrap();
+        assert_eq!(
+            runtime.eval("f.contentWindow.marker").unwrap().as_number(),
+            Some(42.0),
+            "properties set on contentWindow must persist"
+        );
+
+        // Before load the sub-document is an empty skeleton (no <p>).
+        assert_eq!(
+            runtime
+                .eval("f.contentWindow.document.getElementsByTagName('p').length")
+                .unwrap()
+                .as_number(),
+            Some(0.0),
+            "before load the sub-document has no <p>"
+        );
+
+        // After a src change the stable window's document getter reflects the
+        // freshly loaded sub-document.
+        runtime
+            .eval(&format!("f.src = 'http://127.0.0.1:{port}/page.html';"))
+            .unwrap();
+        assert_eq!(
+            eval_string_value(
+                &mut runtime,
+                "f.contentWindow.document.getElementById('loaded').textContent"
+            )
+            .as_deref(),
+            Some("hi"),
+            "the stable contentWindow.document getter must reflect the reload"
+        );
+        // The window object (and its state) survives the src change.
+        assert_eq!(
+            runtime.eval("f.contentWindow.marker").unwrap().as_number(),
+            Some(42.0),
+            "contentWindow identity and state must survive a src change"
+        );
+    }
+
+    /// An unbound `getElementById` (`var g = document.getElementById; g('x')`)
+    /// must fall back to the top-level document instead of returning null.
+    #[test]
+    fn get_element_by_id_unbound_falls_back_to_main_document() {
+        use crate::html::TreeBuilder;
+        let doc =
+            TreeBuilder::parse(r#"<html><body><b id="target">hi</b></body></html>"#).document();
+        let mut runtime = JsRuntime::with_document(doc).unwrap();
+
+        assert_eq!(
+            eval_string_value(
+                &mut runtime,
+                "var g = document.getElementById; g('target').tagName"
+            )
+            .as_deref(),
+            Some("B"),
+            "an unbound getElementById must fall back to the main document"
+        );
+        // A normal bound call still resolves.
+        assert_eq!(
+            eval_string_value(&mut runtime, "document.getElementById('target').tagName").as_deref(),
+            Some("B")
+        );
+    }
+
+    /// A sub-document supports `open()`/`write()`/`close()`: the write targets
+    /// the sub-document (not the parent), and `open()` clears the previous
+    /// content so a following write replaces rather than accumulates.
+    #[test]
+    fn iframe_sub_document_open_write_close_replaces_content() {
+        use crate::html::TreeBuilder;
+        let doc =
+            TreeBuilder::parse(r#"<html><body><iframe id="f"></iframe></body></html>"#).document();
+        let mut runtime = JsRuntime::with_document(doc).unwrap();
+
+        runtime
+            .eval(
+                r#"var d = document.getElementById('f').contentDocument;
+                   d.open();
+                   d.write('<p id="first">one</p>');
+                   d.close();"#,
+            )
+            .unwrap();
+
+        // The written node lands in the sub-document...
+        assert_eq!(
+            eval_string_value(
+                &mut runtime,
+                "document.getElementById('f').contentDocument.getElementById('first').textContent"
+            )
+            .as_deref(),
+            Some("one"),
+            "a sub-document write must target the sub-document"
+        );
+        // ...and not the parent document.
+        assert!(
+            runtime
+                .eval("document.getElementById('first')")
+                .unwrap()
+                .is_null(),
+            "a sub-document write must not leak into the parent document"
+        );
+
+        // A second open/write/close replaces, not accumulates.
+        runtime
+            .eval(
+                r#"var d2 = document.getElementById('f').contentDocument;
+                   d2.open();
+                   d2.write('<p id="second">two</p>');
+                   d2.close();"#,
+            )
+            .unwrap();
+        assert!(
+            runtime
+                .eval("document.getElementById('f').contentDocument.getElementById('first')")
+                .unwrap()
+                .is_null(),
+            "open() must clear the previous sub-document content"
+        );
+        assert_eq!(
+            eval_string_value(
+                &mut runtime,
+                "document.getElementById('f').contentDocument.getElementById('second').textContent"
+            )
+            .as_deref(),
+            Some("two")
+        );
+        assert_eq!(
+            runtime
+                .eval(
+                    "document.getElementById('f').contentDocument.getElementsByTagName('p').length"
+                )
+                .unwrap()
+                .as_number(),
+            Some(1.0),
+            "only the freshly written <p> must remain"
         );
     }
 

@@ -76,8 +76,36 @@ iframe 要素にサブブラウジングコンテキスト（独立 document）�
   アクセス間の同一性 / HTML src パース / image/png・text/plain 非パース /
   相対 src の base 解決 / src 変更による再ロード
 
+### レビュー指摘対応 (PR #104)
+
+`issue/016-7-document-write` の最新（レビュー修正コミット）をマージした上で、以下を修正:
+
+- **ownerDocument の親子分離**: 全ノードの `ownerDocument` がトップレベル文書を返して
+  いた不具合を修正。ネイティブ `__omoikane_owner_document`（ツリー根まで遡り、根が
+  Document ならその id を返す）を追加。デタッチ済みの生成ノードは
+  `Document.create*` が付与する生成元文書 (`__ownerDoc`) にフォールバック。document
+  自身は null。
+- **URL スキーム判定の大小無視**: `HTTP://` / `HTTPS://` を取りこぼしていた判定を
+  `eq_ignore_ascii_case` に変更。
+- **再ロード時の旧ツリー解放**: `HostState::unregister_tree` を追加し、`src` 変更に
+  よる再ロード前に旧サブ文書ツリーを `nodes` レジストリから除去（リーク防止）。
+- **contentWindow の同一性**: iframe ごとに安定した Window facade を返すよう変更
+  （`document` は動的 getter で再ロードを反映）。プロパティ保持・同一性が成立。
+- **URL 解決ロジックの共通化**: `resolve_resource_ref` を抽出し
+  `load_iframe_document` と `fetch_script_source` で共有。
+- **アンバインド getElementById の堅牢化**: `this` が Document でない場合はメイン文書
+  起点にフォールバック。
+- **サブ文書の open()/write()/close()**: `document.write` がサブ文書ではなくメイン
+  文書へ書き込んでいた配線を修正（`__omoikane_document_write` に対象 document id を
+  渡す）。サブ文書書き込みはメイン文書の挿入点を変更しない。
+
 ### 残課題（本 issue 外・後続へ）
 
+- **iframe ロードは HTTP ステータスを見ない**: iframe のドキュメントロードはレスポンス
+  のステータスコードを検査せず、本文をそのままサブ文書として採用する（実ブラウザは
+  エラーページの本文を iframe に描画するため本文採用が妥当）。これはスクリプトロード
+  （`fetch_script_source`、200 必須）との意図的な非対称であり、`load_iframe_document`
+  にコメントで明記済み。
 - **iframe onload イベント**（016-4 連携）: `iframe.onload` は未発火。test 65 で
   `kungFuDeathGrip.title` が蓄積されず test 69 は依然 fail。
 - **SVG / XML ドキュメント DOM**（016-14）: svg.xml / empty.xml は空スケルトンを返す

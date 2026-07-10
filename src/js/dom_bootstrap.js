@@ -613,7 +613,21 @@
     }
 
     get ownerDocument() {
-      return this.nodeType === 9 ? null : globalThis.document;
+      // A document node has no owner document.
+      if (this.nodeType === 9) {
+        return null;
+      }
+      // Prefer the document at the root of this node's tree: an attached node
+      // belongs to whichever document it currently lives in — the top-level
+      // document or an iframe sub-document — so parent and child contexts stay
+      // separated. A detached node has no document root; fall back to the
+      // document that created it (stamped by the Document.create* methods via
+      // __own), or the top-level document when nothing else is known.
+      const rootId = __omoikane_owner_document(this.__id);
+      if (rootId !== null && rootId !== undefined) {
+        return wrapNode(rootId);
+      }
+      return this.__ownerDoc || globalThis.document;
     }
 
     get nodeType() {
@@ -924,12 +938,29 @@
   class Comment extends CharacterData {}
 
   class Document extends Node {
+    // Stamps a freshly created node with this document as its owner so
+    // `node.ownerDocument` resolves to this document even while the node is
+    // detached (before it is inserted into any tree). Once the node is inserted,
+    // its tree root wins (see the ownerDocument getter), matching DOM adoption.
+    __own(node) {
+      if (node) {
+        node.__ownerDoc = this;
+      }
+      return node;
+    }
+
     getElementById(id) {
       // Scope the lookup to this document's own tree. For the top-level
       // document this is identical to the whole-document search; for a
       // sub-browsing-context document (an iframe's contentDocument) it keeps
       // parent and child ids from being confused.
-      return wrapNode(__omoikane_query_selector(this.__id, "#" + String(id)));
+      //
+      // Tolerate an unbound call (`var g = document.getElementById; g('x')`)
+      // where `this` is not a Document and `this.__id` would be undefined (a
+      // NaN id that resolves to null): fall back to the top-level document so
+      // the lookup still resolves against the main tree.
+      const scope = this instanceof Document ? this : globalThis.document;
+      return wrapNode(__omoikane_query_selector(scope.__id, "#" + String(id)));
     }
 
     createElement(tag) {
@@ -940,7 +971,7 @@
           "InvalidCharacterError"
         );
       }
-      return wrapNode(__omoikane_create_element(name));
+      return this.__own(wrapNode(__omoikane_create_element(name)));
     }
 
     createElementNS(namespace, qualifiedName) {
@@ -949,7 +980,7 @@
         : String(namespace);
       const qname = String(qualifiedName);
       const info = validateAndExtractNS(ns, qname);
-      const node = wrapNode(__omoikane_create_element(qname));
+      const node = this.__own(wrapNode(__omoikane_create_element(qname)));
       // Namespaced elements preserve their exact qualified name (no ASCII
       // upper-casing) and expose namespace metadata; shadow the prototype
       // getters with per-instance data properties.
@@ -986,15 +1017,15 @@
     }
 
     createDocumentFragment() {
-      return wrapNode(__omoikane_create_document_fragment());
+      return this.__own(wrapNode(__omoikane_create_document_fragment()));
     }
 
     createTextNode(text) {
-      return wrapNode(__omoikane_create_text_node(String(text)));
+      return this.__own(wrapNode(__omoikane_create_text_node(String(text))));
     }
 
     createComment(data) {
-      return wrapNode(__omoikane_create_comment(String(data ?? "")));
+      return this.__own(wrapNode(__omoikane_create_comment(String(data ?? ""))));
     }
 
     createEvent(type) {
@@ -1091,7 +1122,7 @@
       for (let i = 0; i < args.length; i += 1) {
         text += String(args[i]);
       }
-      const scriptIds = __omoikane_document_write(text);
+      const scriptIds = __omoikane_document_write(this.__id, text);
       if (scriptIds && scriptIds.length) {
         for (let i = 0; i < scriptIds.length; i += 1) {
           const el = wrapNode(scriptIds[i]);
@@ -1143,18 +1174,22 @@
     }
 
     get contentWindow() {
-      const doc = this.contentDocument;
-      if (!doc) {
-        return null;
+      // Return one stable Window facade per iframe so that
+      // `iframe.contentWindow === iframe.contentWindow` holds and properties
+      // assigned to it persist across accesses. `document` is a live getter, so
+      // a later `src` change (which reloads the sub-document) is reflected on
+      // the next read. A full Window per frame is out of scope here.
+      if (!this.__contentWindowFacade) {
+        const iframe = this;
+        this.__contentWindowFacade = {
+          get document() {
+            return iframe.contentDocument;
+          },
+          frameElement: iframe,
+          getComputedStyle: globalThis.getComputedStyle,
+        };
       }
-      // Minimal Window facade for the nested browsing context. It exposes the
-      // document and a getComputedStyle entry point; a full Window per frame is
-      // out of scope here.
-      return {
-        document: doc,
-        frameElement: this,
-        getComputedStyle: globalThis.getComputedStyle,
-      };
+      return this.__contentWindowFacade;
     }
 
     get src() {
