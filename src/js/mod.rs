@@ -3233,6 +3233,349 @@ mod tests {
         );
     }
 
+    // ── DOM2 Core / DOMException / namespaces (issue 016-12) ─────────────────
+
+    /// Evaluates `source` (expected to be an IIFE returning 0 on success) and
+    /// asserts the numeric result is 0, reporting the failing step otherwise.
+    fn assert_js_ok(runtime: &mut JsRuntime, source: &str) {
+        let result = runtime
+            .eval(source)
+            .unwrap_or_else(|e| panic!("eval failed: {e}"))
+            .as_number()
+            .expect("expected a numeric result");
+        assert_eq!(result, 0.0, "JS check failed at step {result}");
+    }
+
+    #[test]
+    fn create_element_rejects_invalid_names_with_code_5() {
+        let mut runtime = JsRuntime::new().unwrap();
+        assert_js_ok(
+            &mut runtime,
+            r#"
+            (function () {
+                function codeFor(name) {
+                    try { document.createElement(name); return -1; }
+                    catch (e) { return e.code; }
+                }
+                var invalid = ['<div>', '0div', 'di v', 'di<v', '-div', '.div'];
+                for (var i = 0; i < invalid.length; i += 1) {
+                    if (codeFor(invalid[i]) !== 5) return i + 1;
+                }
+                if (codeFor('div') !== -1) return 100;      // valid name must not throw
+                if (codeFor('form div') !== 5) return 101; // NUL byte is invalid
+                return 0;
+            })()
+        "#,
+        );
+    }
+
+    #[test]
+    fn dom_exception_exposes_code_and_all_constants() {
+        let mut runtime = JsRuntime::new().unwrap();
+        assert_js_ok(
+            &mut runtime,
+            r#"
+            (function () {
+                var e = new DOMException("boom", "InvalidCharacterError");
+                if (e.code !== 5) return 1;
+                if (e.message !== "boom") return 2;
+                if (e.name !== "InvalidCharacterError") return 3;
+                if (e.INDEX_SIZE_ERR !== 1) return 4;
+                if (e.HIERARCHY_REQUEST_ERR !== 3) return 5;
+                if (e.NAMESPACE_ERR !== 14) return 6;
+                if (e.INVALID_ACCESS_ERR !== 15) return 7;
+                if (DOMException.INVALID_CHARACTER_ERR !== 5) return 8;
+                if (DOMException.TYPE_MISMATCH_ERR !== 17) return 9;
+                return 0;
+            })()
+        "#,
+        );
+    }
+
+    #[test]
+    fn create_element_ns_exposes_namespace_properties() {
+        let mut runtime = JsRuntime::new().unwrap();
+        assert_js_ok(
+            &mut runtime,
+            r#"
+            (function () {
+                var el = document.createElementNS('http://ns.example.com/', 'prefix:localname');
+                if (el.tagName !== 'prefix:localname') return 1;
+                if (el.nodeName !== 'prefix:localname') return 2;
+                if (el.prefix !== 'prefix') return 3;
+                if (el.localName !== 'localname') return 4;
+                if (el.namespaceURI !== 'http://ns.example.com/') return 5;
+                return 0;
+            })()
+        "#,
+        );
+    }
+
+    #[test]
+    fn create_element_ns_validates_qualified_names() {
+        let mut runtime = JsRuntime::new().unwrap();
+        assert_js_ok(
+            &mut runtime,
+            r#"
+            (function () {
+                function codeFor(ns, name) {
+                    try { document.createElementNS(ns, name); return -1; }
+                    catch (e) { return e.code; }
+                }
+                if (codeFor(null, '<div>') !== 5) return 1;           // invalid char
+                if (codeFor(null, '0div') !== 5) return 2;
+                if (codeFor('http://example.com/', 'di<v') !== 5) return 3;
+                if (codeFor(null, ':div') !== 14) return 4;           // malformed qname
+                if (codeFor(null, 'd:iv') !== 14) return 5;           // prefix, null ns
+                if (codeFor('http://example.com/', 'xml:test') !== 14) return 6;
+                if (codeFor('http://example.com/', 'xmlns:test') !== 14) return 7;
+                if (codeFor('http://www.w3.org/2000/xmlns/', 'x:test') !== 14) return 8;
+                if (codeFor('http://www.w3.org/2000/xmlns/', 'xmlns:test') !== -1) return 9; // valid
+                return 0;
+            })()
+        "#,
+        );
+    }
+
+    #[test]
+    fn implementation_create_document_type_rejects_malformed_qname() {
+        let mut runtime = JsRuntime::new().unwrap();
+        assert_js_ok(
+            &mut runtime,
+            r#"
+            (function () {
+                try {
+                    document.implementation.createDocumentType('a:', '', '');
+                    return 1;
+                } catch (e) {
+                    if (e.code !== e.NAMESPACE_ERR) return 2;
+                    if (e.INVALID_ACCESS_ERR !== 15) return 3;
+                }
+                return 0;
+            })()
+        "#,
+        );
+    }
+
+    #[test]
+    fn append_child_cycle_throws_hierarchy_request_error() {
+        let mut runtime = JsRuntime::new().unwrap();
+        assert_js_ok(
+            &mut runtime,
+            r#"
+            (function () {
+                var e = null;
+                try {
+                    document.body.appendChild(document.documentElement);
+                } catch (err) {
+                    e = err;
+                }
+                if (!e) return 1;
+                if (e.HIERARCHY_REQUEST_ERR !== 3) return 2;
+                if (e.code !== 3) return 3;
+                return 0;
+            })()
+        "#,
+        );
+    }
+
+    // ── Events: createEvent / initUIEvent (issue 016-12) ─────────────────────
+
+    #[test]
+    fn create_event_ui_event_supports_init_ui_event_and_dispatch() {
+        let mut runtime = JsRuntime::new().unwrap();
+        assert_js_ok(
+            &mut runtime,
+            r#"
+            (function () {
+                var container = document.createElement('div');
+                var child = document.createElement('span');
+                container.appendChild(child);
+                document.body.appendChild(container);
+                var count = 0;
+                var seenDetail = null;
+                container.addEventListener('test', function (event) {
+                    count += 1;
+                    seenDetail = event.detail;
+                }, false);
+                var event = document.createEvent('UIEvents');
+                event.initUIEvent('test', true, false, null, 6);
+                var returned = child.dispatchEvent(event);
+                if (returned !== true) return 1;
+                if (count !== 1) return 2;
+                if (seenDetail !== 6) return 3;
+                if (event.type !== 'test') return 4;
+                if (event.bubbles !== true) return 5;
+                return 0;
+            })()
+        "#,
+        );
+    }
+
+    // ── Table / form / input / button / label / meta / select (issue 016-13) ─
+
+    #[test]
+    fn table_caption_head_foot_accessors() {
+        let mut runtime = JsRuntime::new().unwrap();
+        assert_js_ok(
+            &mut runtime,
+            r#"
+            (function () {
+                var t = document.createElement('table');
+                if (t.caption) return 1;
+                if (!t.tBodies || t.tBodies.length !== 0) return 2;
+                if (!t.rows || t.rows.length !== 0) return 3;
+                if (t.tFoot || t.tHead) return 4;
+                var caption = t.createCaption();
+                var thead = t.createTHead();
+                var tfoot = t.createTFoot();
+                if (t.caption !== caption) return 5;
+                if (t.tHead !== thead) return 6;
+                if (t.tFoot !== tfoot) return 7;
+                if (t.childNodes.length !== 3) return 8;
+                t.deleteCaption();
+                t.deleteTHead();
+                t.deleteTFoot();
+                if (t.caption || t.tHead || t.tFoot) return 9;
+                if (t.hasChildNodes()) return 10;
+                if (t.childNodes.length !== 0) return 11;
+                return 0;
+            })()
+        "#,
+        );
+    }
+
+    #[test]
+    fn input_value_is_dirty_and_preserves_lone_surrogate() {
+        let mut runtime = JsRuntime::new().unwrap();
+        assert_js_ok(
+            &mut runtime,
+            r#"
+            (function () {
+                var i = document.createElement('input');
+                i.name = 'first';
+                i.type = 'text';
+                i.value = 'test';
+                if (i.getAttribute('name') !== 'first') return 1;
+                if (i.name !== 'first') return 2;
+                if (i.hasAttribute('value')) return 3;   // value is not reflected
+                if (i.value !== 'test') return 4;
+                // A lone surrogate must survive round-tripping through the value IDL attribute.
+                var before = String.fromCharCode(0xd863) + 'text';
+                i.value = before;
+                var after = i.value;
+                if (!(after === before && before.length === 5)) return 5;
+                return 0;
+            })()
+        "#,
+        );
+    }
+
+    #[test]
+    fn form_elements_named_and_indexed_access() {
+        let mut runtime = JsRuntime::new().unwrap();
+        assert_js_ok(
+            &mut runtime,
+            r#"
+            (function () {
+                var f = document.createElement('form');
+                var i = document.createElement('input');
+                i.name = 'first';
+                f.appendChild(i);
+                if (f.elements === f) return 1;
+                if (f.elements.length !== 1) return 2;
+                if (f.elements[0] !== i) return 3;
+                if (f.elements.first !== i) return 4;
+                if (f.elements.second !== null) return 5;
+                i.name = 'second';
+                if (f.elements.second !== i) return 6;
+                if (f.elements.first !== null) return 7;
+                return 0;
+            })()
+        "#,
+        );
+    }
+
+    #[test]
+    fn button_type_defaults_to_submit() {
+        let mut runtime = JsRuntime::new().unwrap();
+        assert_js_ok(
+            &mut runtime,
+            r#"
+            (function () {
+                var button = document.createElement('button');
+                if (button.type !== 'submit') return 1;
+                button.setAttribute('type', 'button');
+                if (button.type !== 'button') return 2;
+                button.removeAttribute('type');
+                if (button.type !== 'submit') return 3;
+                button.setAttribute('value', 'apple');
+                button.appendChild(document.createTextNode('banana'));
+                if (button.value !== 'apple') return 4;
+                return 0;
+            })()
+        "#,
+        );
+    }
+
+    #[test]
+    fn label_html_for_and_meta_http_equiv_reflect_content_attributes() {
+        let mut runtime = JsRuntime::new().unwrap();
+        assert_js_ok(
+            &mut runtime,
+            r#"
+            (function () {
+                var label = document.createElement('label');
+                label.htmlFor = 'jars';
+                if (label.htmlFor !== 'jars') return 1;
+                if (label.getAttribute('for') !== 'jars') return 2;
+                if (label.hasAttribute('htmlFor')) return 3;
+                if ('for' in label) return 4;
+                var meta = document.createElement('meta');
+                meta.setAttribute('http-equiv', 'boxes');
+                if (meta.httpEquiv !== 'boxes') return 5;
+                meta.httpEquiv = 'cans';
+                if (meta.getAttribute('http-equiv') !== 'cans') return 6;
+                if (meta.hasAttribute('httpEquiv')) return 7;
+                return 0;
+            })()
+        "#,
+        );
+    }
+
+    #[test]
+    fn select_add_and_options_collection() {
+        let mut runtime = JsRuntime::new().unwrap();
+        assert_js_ok(
+            &mut runtime,
+            r#"
+            (function () {
+                var s = document.createElement('select');
+                var o = document.createElement('option');
+                s.add(o, null);
+                if (s.firstChild !== o) return 1;
+                if (s.childNodes.length !== 1) return 2;
+                if (s.options.length !== 1) return 3;
+                if (s.options[0] !== o) return 4;
+                return 0;
+            })()
+        "#,
+        );
+    }
+
+    // ── ECMAScript Annex B (issue 016-6) ─────────────────────────────────────
+
+    #[test]
+    fn string_substr_supports_negative_start() {
+        let mut runtime = JsRuntime::new().unwrap();
+        let matches = runtime
+            .eval(r#""scathing".substr(-7, 3) === "cat""#)
+            .unwrap()
+            .as_boolean()
+            .unwrap();
+        assert!(matches, "String.prototype.substr must handle negative start");
+    }
+
     #[test]
     fn run_timers_caps_infinite_interval_by_task_count() {
         let mut runtime = JsRuntime::new().unwrap();

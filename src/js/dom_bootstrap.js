@@ -18,6 +18,9 @@
       node = new Text(id);
     } else if (nodeType === 8) {
       node = new Comment(id);
+    } else if (nodeType === 1) {
+      const ctor = ELEMENT_CTORS[(__omoikane_node_name(id) || "").toLowerCase()];
+      node = ctor ? new ctor(id) : new Node(id);
     } else {
       node = new Node(id);
     }
@@ -40,6 +43,175 @@
     // stopPropagation prevents further propagation to other nodes
     // but does NOT prevent other listeners on the same node
     return event.__stopped;
+  }
+
+  // ── DOMException ────────────────────────────────────────────────────────────
+  // Legacy DOM error-code constants (DOM Level 1..3). They are exposed both as
+  // static properties on the DOMException constructor and on its prototype so
+  // they are reachable from any thrown instance (`e.HIERARCHY_REQUEST_ERR`,
+  // `DOMException.NAMESPACE_ERR`, ...), matching the DOM specification.
+  const DOMEXCEPTION_CODES = {
+    INDEX_SIZE_ERR: 1,
+    DOMSTRING_SIZE_ERR: 2,
+    HIERARCHY_REQUEST_ERR: 3,
+    WRONG_DOCUMENT_ERR: 4,
+    INVALID_CHARACTER_ERR: 5,
+    NO_DATA_ALLOWED_ERR: 6,
+    NO_MODIFICATION_ALLOWED_ERR: 7,
+    NOT_FOUND_ERR: 8,
+    NOT_SUPPORTED_ERR: 9,
+    INUSE_ATTRIBUTE_ERR: 10,
+    INVALID_STATE_ERR: 11,
+    SYNTAX_ERR: 12,
+    INVALID_MODIFICATION_ERR: 13,
+    NAMESPACE_ERR: 14,
+    INVALID_ACCESS_ERR: 15,
+    VALIDATION_ERR: 16,
+    TYPE_MISMATCH_ERR: 17,
+    SECURITY_ERR: 18,
+    NETWORK_ERR: 19,
+    ABORT_ERR: 20,
+    URL_MISMATCH_ERR: 21,
+    QUOTA_EXCEEDED_ERR: 22,
+    TIMEOUT_ERR: 23,
+    INVALID_NODE_TYPE_ERR: 24,
+    DATA_CLONE_ERR: 25,
+  };
+
+  // Maps a modern DOMException `name` to its legacy numeric `code`. Names absent
+  // from this table carry code 0, per the DOM specification.
+  const DOMEXCEPTION_NAME_TO_CODE = {
+    IndexSizeError: 1,
+    HierarchyRequestError: 3,
+    WrongDocumentError: 4,
+    InvalidCharacterError: 5,
+    NoModificationAllowedError: 7,
+    NotFoundError: 8,
+    NotSupportedError: 9,
+    InUseAttributeError: 10,
+    InvalidStateError: 11,
+    SyntaxError: 12,
+    InvalidModificationError: 13,
+    NamespaceError: 14,
+    InvalidAccessError: 15,
+    TypeMismatchError: 17,
+    SecurityError: 18,
+    NetworkError: 19,
+    AbortError: 20,
+    URLMismatchError: 21,
+    QuotaExceededError: 22,
+    TimeoutError: 23,
+    InvalidNodeTypeError: 24,
+    DataCloneError: 25,
+  };
+
+  class DOMException {
+    constructor(message = "", name = "Error") {
+      this.message = message == null ? "" : String(message);
+      this.name = name;
+      this.code = DOMEXCEPTION_NAME_TO_CODE[name] ?? 0;
+    }
+
+    toString() {
+      return this.name + ": " + this.message;
+    }
+  }
+  for (const constName of Object.keys(DOMEXCEPTION_CODES)) {
+    const value = DOMEXCEPTION_CODES[constName];
+    DOMException[constName] = value;
+    DOMException.prototype[constName] = value;
+  }
+
+  // ── XML name / qualified-name validation ────────────────────────────────────
+  // Implements the XML 1.0 `NameStartChar` / `NameChar` productions used by
+  // `Document.createElement` and `createElementNS` to reject invalid names with
+  // an `InvalidCharacterError`, and the DOM Level 3 "validate and extract"
+  // namespace rules that raise `NamespaceError` for malformed or inconsistent
+  // qualified names.
+  const XML_NAMESPACE = "http://www.w3.org/XML/1998/namespace";
+  const XMLNS_NAMESPACE = "http://www.w3.org/2000/xmlns/";
+
+  function isXmlNameStartChar(cp) {
+    return cp === 0x3a || (cp >= 0x41 && cp <= 0x5a) || cp === 0x5f ||
+      (cp >= 0x61 && cp <= 0x7a) || (cp >= 0xc0 && cp <= 0xd6) ||
+      (cp >= 0xd8 && cp <= 0xf6) || (cp >= 0xf8 && cp <= 0x2ff) ||
+      (cp >= 0x370 && cp <= 0x37d) || (cp >= 0x37f && cp <= 0x1fff) ||
+      (cp >= 0x200c && cp <= 0x200d) || (cp >= 0x2070 && cp <= 0x218f) ||
+      (cp >= 0x2c00 && cp <= 0x2fef) || (cp >= 0x3001 && cp <= 0xd7ff) ||
+      (cp >= 0xf900 && cp <= 0xfdcf) || (cp >= 0xfdf0 && cp <= 0xfffd) ||
+      (cp >= 0x10000 && cp <= 0xeffff);
+  }
+
+  function isXmlNameChar(cp) {
+    return isXmlNameStartChar(cp) || cp === 0x2d || cp === 0x2e ||
+      (cp >= 0x30 && cp <= 0x39) || cp === 0xb7 ||
+      (cp >= 0x300 && cp <= 0x36f) || (cp >= 0x203f && cp <= 0x2040);
+  }
+
+  function isValidXmlName(value) {
+    if (!value) return false;
+    const chars = Array.from(value);
+    if (!isXmlNameStartChar(chars[0].codePointAt(0))) return false;
+    for (let i = 1; i < chars.length; i += 1) {
+      if (!isXmlNameChar(chars[i].codePointAt(0))) return false;
+    }
+    return true;
+  }
+
+  // Validates a qualified name and splits it into prefix / localName. Throws an
+  // InvalidCharacterError if it is not an XML Name, or a NamespaceError if it is
+  // a malformed QName (empty/extra colon-delimited parts).
+  function validateQualifiedName(qname) {
+    if (!isValidXmlName(qname)) {
+      throw new DOMException(
+        "The qualified name provided ('" + qname + "') is not a valid name.",
+        "InvalidCharacterError"
+      );
+    }
+    const parts = qname.split(":");
+    if (parts.length === 1) {
+      return { prefix: null, localName: parts[0] };
+    }
+    if (parts.length === 2 &&
+        parts[0] !== "" && parts[1] !== "" &&
+        isValidXmlName(parts[0]) && isValidXmlName(parts[1])) {
+      return { prefix: parts[0], localName: parts[1] };
+    }
+    throw new DOMException(
+      "The qualified name provided ('" + qname + "') is not a valid qualified name.",
+      "NamespaceError"
+    );
+  }
+
+  // The DOM Level 3 "validate and extract" algorithm for createElementNS: after
+  // validating the QName, enforces the prefix/namespace consistency rules.
+  function validateAndExtractNS(namespace, qname) {
+    const { prefix, localName } = validateQualifiedName(qname);
+    if (prefix !== null && namespace === null) {
+      throw new DOMException(
+        "A prefixed qualified name requires a non-null namespace.",
+        "NamespaceError"
+      );
+    }
+    if (prefix === "xml" && namespace !== XML_NAMESPACE) {
+      throw new DOMException(
+        "The 'xml' prefix must use the XML namespace.",
+        "NamespaceError"
+      );
+    }
+    if ((qname === "xmlns" || prefix === "xmlns") && namespace !== XMLNS_NAMESPACE) {
+      throw new DOMException(
+        "The 'xmlns' name/prefix must use the XMLNS namespace.",
+        "NamespaceError"
+      );
+    }
+    if (namespace === XMLNS_NAMESPACE && qname !== "xmlns" && prefix !== "xmlns") {
+      throw new DOMException(
+        "The XMLNS namespace requires the 'xmlns' name or prefix.",
+        "NamespaceError"
+      );
+    }
+    return { namespace, prefix, localName };
   }
 
   class Event {
@@ -70,6 +242,30 @@
       if (this.cancelable) {
         this.defaultPrevented = true;
       }
+    }
+
+    // Legacy initialiser used by events created via `document.createEvent()`.
+    initEvent(type, bubbles, cancelable) {
+      this.type = String(type);
+      this.bubbles = !!bubbles;
+      this.cancelable = !!cancelable;
+    }
+  }
+
+  class UIEvent extends Event {
+    constructor(type, init = {}) {
+      super(type, init);
+      this.view = init.view ?? null;
+      this.detail = init.detail ?? 0;
+    }
+
+    // Legacy initialiser used by `document.createEvent('UIEvents')`.
+    initUIEvent(type, bubbles, cancelable, view, detail) {
+      this.type = String(type);
+      this.bubbles = !!bubbles;
+      this.cancelable = !!cancelable;
+      this.view = view ?? null;
+      this.detail = detail ?? 0;
     }
   }
 
@@ -127,6 +323,22 @@
       this.__listeners = new Map();
     }
 
+    // Throws a HierarchyRequestError if inserting `node` would make the tree
+    // cyclic, i.e. `node` is this node or one of its ancestors. Mirrors the DOM
+    // "ensure pre-insertion validity" hierarchy check.
+    __ensureNotAncestor(node) {
+      let ancestor = this;
+      while (ancestor) {
+        if (node && ancestor.__id === node.__id) {
+          throw new DOMException(
+            "The new child element contains the parent.",
+            "HierarchyRequestError"
+          );
+        }
+        ancestor = ancestor.parentNode;
+      }
+    }
+
     appendChild(child) {
       // DOM semantics: appending a DocumentFragment appends its children
       if (child && child.nodeType === 11) {
@@ -136,6 +348,7 @@
         }
         return child;
       }
+      this.__ensureNotAncestor(child);
       __omoikane_append_child(this.__id, child.__id);
       return child;
     }
@@ -376,6 +589,9 @@
     }
 
     insertBefore(newNode, refNode) {
+      if (newNode && newNode.nodeType !== 11) {
+        this.__ensureNotAncestor(newNode);
+      }
       __omoikane_insert_before(this.__id, newNode.__id, refNode ? refNode.__id : null);
       return newNode;
     }
@@ -668,6 +884,18 @@
     set type(v) {
       this.setAttribute("type", String(v));
     }
+
+    get name() {
+      return __omoikane_get_attribute(this.__id, "name") ?? "";
+    }
+
+    set name(v) {
+      __omoikane_set_attribute(this.__id, "name", String(v));
+    }
+
+    hasChildNodes() {
+      return this.childNodes.length > 0;
+    }
   }
 
   // CharacterData is the shared base of Text and Comment nodes. Its `data`
@@ -698,7 +926,56 @@
     }
 
     createElement(tag) {
-      return wrapNode(__omoikane_create_element(String(tag)));
+      const name = String(tag);
+      if (!isValidXmlName(name)) {
+        throw new DOMException(
+          "The tag name provided ('" + name + "') is not a valid name.",
+          "InvalidCharacterError"
+        );
+      }
+      return wrapNode(__omoikane_create_element(name));
+    }
+
+    createElementNS(namespace, qualifiedName) {
+      const ns = (namespace === undefined || namespace === null || namespace === "")
+        ? null
+        : String(namespace);
+      const qname = String(qualifiedName);
+      const info = validateAndExtractNS(ns, qname);
+      const node = wrapNode(__omoikane_create_element(qname));
+      // Namespaced elements preserve their exact qualified name (no ASCII
+      // upper-casing) and expose namespace metadata; shadow the prototype
+      // getters with per-instance data properties.
+      const define = (key, value) =>
+        Object.defineProperty(node, key, { value, configurable: true, enumerable: false });
+      define("namespaceURI", info.namespace);
+      define("prefix", info.prefix);
+      define("localName", info.localName);
+      define("tagName", qname);
+      define("nodeName", qname);
+      return node;
+    }
+
+    get implementation() {
+      return {
+        hasFeature() {
+          return true;
+        },
+        createDocumentType(qualifiedName, publicId, systemId) {
+          validateQualifiedName(String(qualifiedName));
+          return {
+            nodeType: 10,
+            name: String(qualifiedName),
+            nodeName: String(qualifiedName),
+            publicId: publicId == null ? "" : String(publicId),
+            systemId: systemId == null ? "" : String(systemId),
+            internalSubset: null,
+          };
+        },
+        createHTMLDocument() {
+          return globalThis.document;
+        },
+      };
     }
 
     createDocumentFragment() {
@@ -714,12 +991,23 @@
     }
 
     createEvent(type) {
-      const evt = new Event("");
-      evt.initEvent = function(t, bubbles, cancelable) {
-        this.type = String(t);
-        this.bubbles = !!bubbles;
-        this.cancelable = !!cancelable;
-      };
+      const t = String(type);
+      let evt;
+      if (t === "UIEvent" || t === "UIEvents") {
+        evt = new UIEvent("");
+      } else if (t === "MouseEvent" || t === "MouseEvents") {
+        evt = new MouseEvent("");
+      } else if (t === "KeyboardEvent" || t === "KeyEvents") {
+        evt = new KeyboardEvent("");
+      } else if (t === "CustomEvent") {
+        evt = new CustomEvent("");
+      } else {
+        evt = new Event("");
+      }
+      // A freshly created event has its propagation flags cleared until an
+      // init* method is called.
+      evt.bubbles = false;
+      evt.cancelable = false;
       return evt;
     }
 
@@ -780,6 +1068,260 @@
 
   class DocumentFragment extends Node {}
 
+  // ── HTML element specializations ────────────────────────────────────────────
+  // wrapNode() dispatches element nodes to these subclasses by tag name so that
+  // element-specific IDL attributes and methods (e.g. HTMLTableElement.rows,
+  // HTMLButtonElement.type defaulting to "submit") are available. Elements
+  // without a dedicated subclass fall back to the generic Node/Element class.
+
+  function childElementsByTag(node, upperTag) {
+    return node.childNodes.filter(c => c.nodeType === 1 && c.tagName === upperTag);
+  }
+
+  class HTMLTableElement extends Node {
+    get caption() {
+      return childElementsByTag(this, "CAPTION")[0] || null;
+    }
+    // The DOM setters here would replace the corresponding section; Acid3 only
+    // performs no-op self-assignment, so they are intentionally inert.
+    set caption(_value) {}
+    get tHead() {
+      return childElementsByTag(this, "THEAD")[0] || null;
+    }
+    set tHead(_value) {}
+    get tFoot() {
+      return childElementsByTag(this, "TFOOT")[0] || null;
+    }
+    set tFoot(_value) {}
+    get tBodies() {
+      return childElementsByTag(this, "TBODY");
+    }
+    get rows() {
+      const rows = [];
+      for (const head of childElementsByTag(this, "THEAD")) {
+        rows.push(...childElementsByTag(head, "TR"));
+      }
+      for (const body of childElementsByTag(this, "TBODY")) {
+        rows.push(...childElementsByTag(body, "TR"));
+      }
+      rows.push(...childElementsByTag(this, "TR"));
+      for (const foot of childElementsByTag(this, "TFOOT")) {
+        rows.push(...childElementsByTag(foot, "TR"));
+      }
+      return rows;
+    }
+    createCaption() {
+      const existing = this.caption;
+      if (existing) return existing;
+      const caption = document.createElement("caption");
+      this.insertBefore(caption, this.firstChild);
+      return caption;
+    }
+    createTHead() {
+      const existing = this.tHead;
+      if (existing) return existing;
+      const head = document.createElement("thead");
+      const ref = childElementsByTag(this, "TBODY")[0]
+        || childElementsByTag(this, "TFOOT")[0]
+        || null;
+      this.insertBefore(head, ref);
+      return head;
+    }
+    createTFoot() {
+      const existing = this.tFoot;
+      if (existing) return existing;
+      const foot = document.createElement("tfoot");
+      this.appendChild(foot);
+      return foot;
+    }
+    deleteCaption() {
+      const caption = this.caption;
+      if (caption) this.removeChild(caption);
+    }
+    deleteTHead() {
+      const head = this.tHead;
+      if (head) this.removeChild(head);
+    }
+    deleteTFoot() {
+      const foot = this.tFoot;
+      if (foot) this.removeChild(foot);
+    }
+  }
+
+  const FORM_CONTROL_TAGS = new Set([
+    "INPUT", "SELECT", "TEXTAREA", "BUTTON", "FIELDSET", "OBJECT", "OUTPUT", "KEYGEN",
+  ]);
+
+  class HTMLFormElement extends Node {
+    __controls() {
+      const controls = [];
+      const walk = (node) => {
+        for (const child of node.childNodes) {
+          if (child.nodeType !== 1) continue;
+          if (FORM_CONTROL_TAGS.has(child.tagName)) controls.push(child);
+          walk(child);
+        }
+      };
+      walk(this);
+      return controls;
+    }
+    // Live HTMLFormControlsCollection: index access, `.length`, and named access
+    // by control `name`/`id`. Missing named entries resolve to null.
+    get elements() {
+      const controls = this.__controls();
+      return new Proxy(controls, {
+        get(target, prop) {
+          if (prop === "length") return target.length;
+          if (typeof prop !== "string") return target[prop];
+          if (/^\d+$/.test(prop)) return target[Number(prop)] ?? null;
+          const named = target.find(
+            c => (c.name && c.name === prop) || (c.id && c.id === prop)
+          );
+          if (named) return named;
+          if (prop in target) return target[prop];
+          return null;
+        },
+      });
+    }
+    get length() {
+      return this.__controls().length;
+    }
+  }
+
+  class HTMLInputElement extends Node {
+    get type() {
+      const t = (this.getAttribute("type") || "").toLowerCase();
+      return t || "text";
+    }
+    set type(v) {
+      this.setAttribute("type", String(v));
+    }
+    // The `value` IDL attribute is the control's "dirty value": it is held in
+    // JS and is NOT reflected to the `value` content attribute. Storing it in
+    // JS also preserves lone UTF-16 surrogates that would otherwise be mangled
+    // crossing the native boundary.
+    get value() {
+      if (this.__value !== undefined) return this.__value;
+      return this.getAttribute("value") || "";
+    }
+    set value(v) {
+      this.__value = v == null ? "" : String(v);
+    }
+    get defaultValue() {
+      return this.getAttribute("value") || "";
+    }
+    set defaultValue(v) {
+      this.setAttribute("value", String(v));
+    }
+  }
+
+  class HTMLButtonElement extends Node {
+    get type() {
+      const t = (this.getAttribute("type") || "").toLowerCase();
+      if (t === "submit" || t === "reset" || t === "button" || t === "menu") {
+        return t;
+      }
+      return "submit";
+    }
+    set type(v) {
+      this.setAttribute("type", String(v));
+    }
+  }
+
+  class HTMLLabelElement extends Node {
+    get htmlFor() {
+      return this.getAttribute("for") || "";
+    }
+    set htmlFor(v) {
+      this.setAttribute("for", String(v));
+    }
+  }
+
+  class HTMLMetaElement extends Node {
+    get httpEquiv() {
+      return this.getAttribute("http-equiv") || "";
+    }
+    set httpEquiv(v) {
+      this.setAttribute("http-equiv", String(v));
+    }
+  }
+
+  class HTMLSelectElement extends Node {
+    get options() {
+      return childElementsByTag(this, "OPTION");
+    }
+    get length() {
+      return this.options.length;
+    }
+    get selectedIndex() {
+      const options = this.options;
+      for (let i = options.length - 1; i >= 0; i -= 1) {
+        if (options[i].selected) return i;
+      }
+      return -1;
+    }
+    set selectedIndex(index) {
+      this.options.forEach((option, i) => {
+        option.selected = i === index;
+      });
+    }
+    add(element, before) {
+      if (before === null || before === undefined) {
+        this.appendChild(element);
+      } else if (typeof before === "number") {
+        this.insertBefore(element, this.options[before] || null);
+      } else {
+        this.insertBefore(element, before);
+      }
+    }
+    remove(index) {
+      const option = this.options[index];
+      if (option) this.removeChild(option);
+    }
+  }
+
+  class HTMLOptionElement extends Node {
+    get defaultSelected() {
+      return this.hasAttribute("selected");
+    }
+    set defaultSelected(v) {
+      if (v) this.setAttribute("selected", "");
+      else this.removeAttribute("selected");
+    }
+    get selected() {
+      if (this.__selected !== undefined) return this.__selected;
+      return this.hasAttribute("selected");
+    }
+    set selected(v) {
+      this.__selected = !!v;
+    }
+    get value() {
+      if (this.hasAttribute("value")) return this.getAttribute("value");
+      return this.textContent;
+    }
+    set value(v) {
+      this.setAttribute("value", String(v));
+    }
+    get text() {
+      return this.textContent;
+    }
+    set text(v) {
+      this.textContent = v;
+    }
+  }
+
+  // Tag-name → constructor table consulted by wrapNode() for element nodes.
+  const ELEMENT_CTORS = {
+    table: HTMLTableElement,
+    form: HTMLFormElement,
+    input: HTMLInputElement,
+    button: HTMLButtonElement,
+    label: HTMLLabelElement,
+    meta: HTMLMetaElement,
+    select: HTMLSelectElement,
+    option: HTMLOptionElement,
+  };
+
   // Standard Node.nodeType constant values, exposed both as static properties
   // on the Node constructor (`Node.ELEMENT_NODE`) and on the prototype so they
   // are reachable from any node instance (`document.DOCUMENT_FRAGMENT_NODE`,
@@ -812,12 +1354,21 @@
   globalThis.Comment = Comment;
   globalThis.Document = Document;
   globalThis.DocumentFragment = DocumentFragment;
+  globalThis.DOMException = DOMException;
+  globalThis.HTMLTableElement = HTMLTableElement;
+  globalThis.HTMLFormElement = HTMLFormElement;
+  globalThis.HTMLInputElement = HTMLInputElement;
+  globalThis.HTMLButtonElement = HTMLButtonElement;
+  globalThis.HTMLLabelElement = HTMLLabelElement;
+  globalThis.HTMLMetaElement = HTMLMetaElement;
+  globalThis.HTMLSelectElement = HTMLSelectElement;
+  globalThis.HTMLOptionElement = HTMLOptionElement;
   globalThis.Event = Event;
   globalThis.CustomEvent = CustomEvent;
   globalThis.MouseEvent = MouseEvent;
   globalThis.KeyboardEvent = KeyboardEvent;
   globalThis.FocusEvent = FocusEvent;
-  globalThis.UIEvent = Event;
+  globalThis.UIEvent = UIEvent;
   globalThis.InputEvent = Event;
   globalThis.WheelEvent = MouseEvent;
   globalThis.PointerEvent = MouseEvent;
