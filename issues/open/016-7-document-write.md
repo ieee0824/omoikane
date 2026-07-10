@@ -85,9 +85,28 @@ status: open
   機能しており、getElementById('selectors') は iframe を返せている
   （エラーが「iframe が無い」から「contentDocument が null」へ変化）。
 
+### レビュー指摘の修正（2026-07-10, PR #103）
+
+- **insert_before 失敗の黙殺を解消**: `insert_or_append` ヘルパを追加し、
+  `insert_before` 失敗時は `append_child` へフォールバック。挿入されたノードのみ
+  登録・挿入ポイント前進を行い、ツリー外ノードを登録しない。
+- **defer スクリプトの write アンカー**: 遅延スクリプトをコードと script ノードの
+  タプルで保存し、実行時に `write_insertion_ref` を設定/クリア（インラインと同一挙動）。
+- **document.write が返す script id をインライン classic のみに限定**:
+  `is_inline_classic_script` で `src` 付き / `type="module"` / 非 JS 型を除外。
+  それらは DOM には挿入されるが同期実行されない。
+- **document.open() のリセット実装**: native `__omoikane_document_reset` が
+  文書児を全除去。JS `open()` から配線。任意の Document ノード id で動作するため
+  016-9 のサブ文書にも流用可能。open() 後の write は空文書への追記として動く。
+- doc コメントを実挙動（インライン classic のみ同期実行）に合わせて修正。
+
 ### 残課題（016-7 の範囲外）
 
 - **016-9**: `iframe.contentDocument` / サブブラウジングコンテキスト。これが入ると
   `getTestDocument` が完成し、bucket3/5 の約30テストが一気に解放される見込み。
 - 断片が単一 write 呼び出し内で完結する前提（Acid3 は1回で全断片を書くため問題なし）。
   タグをまたいで分割 write する厳密な入力ストリーム連結は未対応。
+- **フォローアップ（オーケストレーター側で issue 化予定、コードにコメント記載済み）**:
+  - 1つの write 断片に `<script>` と後続ノードが混在した場合、仕様のストリーミング
+    挿入ポイントと実行・挿入順が乖離する（全ノードを挿入後にスクリプトを実行するため）。
+  - write が write する `<script>` の再帰深度ガードが無い（スタックオーバーフロー可能）。
