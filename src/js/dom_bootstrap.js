@@ -10,7 +10,10 @@
     }
     const nodeType = __omoikane_node_type(id);
     let node;
-    if (id === __omoikane_document_id) {
+    if (id === __omoikane_document_id || nodeType === 9) {
+      // The top-level document and every sub-browsing-context document (an
+      // iframe's contentDocument) are wrapped as Document so their DOM methods
+      // are scoped to their own tree.
       node = new Document(id);
     } else if (nodeType === 11) {
       node = new DocumentFragment(id);
@@ -26,6 +29,23 @@
     }
     cache.set(id, node);
     return node;
+  }
+
+  // Stamps `node` and (for a deep subtree) every descendant with `doc` as its
+  // owning document, mirroring how `Document.create*` stamps `__ownerDoc`. Used
+  // by `cloneNode`, whose native clone carries no wrapper metadata: without this
+  // a detached clone of a sub-document node would fall through the
+  // `ownerDocument` getter to the top-level document. Wrappers are cached by id
+  // (see `wrapNode`), so the stamp persists across later `childNodes` reads.
+  function stampOwnerDoc(node, doc) {
+    if (!node) {
+      return;
+    }
+    node.__ownerDoc = doc;
+    const children = node.childNodes;
+    for (let i = 0; i < children.length; i++) {
+      stampOwnerDoc(children[i], doc);
+    }
   }
 
   function invokeListeners(node, event, capture, phase) {
@@ -616,7 +636,21 @@
     }
 
     get ownerDocument() {
-      return this.nodeType === 9 ? null : globalThis.document;
+      // A document node has no owner document.
+      if (this.nodeType === 9) {
+        return null;
+      }
+      // Prefer the document at the root of this node's tree: an attached node
+      // belongs to whichever document it currently lives in — the top-level
+      // document or an iframe sub-document — so parent and child contexts stay
+      // separated. A detached node has no document root; fall back to the
+      // document that created it (stamped by the Document.create* methods via
+      // __own), or the top-level document when nothing else is known.
+      const rootId = __omoikane_owner_document(this.__id);
+      if (rootId !== null && rootId !== undefined) {
+        return wrapNode(rootId);
+      }
+      return this.__ownerDoc || globalThis.document;
     }
 
     get nodeType() {
@@ -624,7 +658,17 @@
     }
 
     cloneNode(deep = false) {
-      return wrapNode(__omoikane_clone_node(this.__id, !!deep));
+      const clone = wrapNode(__omoikane_clone_node(this.__id, !!deep));
+      // The clone is detached, so its ownerDocument comes from its creation
+      // context, not its (absent) tree root. Propagate this node's owning
+      // document to the clone and, for a deep clone, its descendants — so a
+      // clone of a sub-document node keeps reporting that sub-document as its
+      // ownerDocument rather than defaulting to the top-level document.
+      const ownerDoc = this.ownerDocument;
+      if (clone && ownerDoc) {
+        stampOwnerDoc(clone, ownerDoc);
+      }
+      return clone;
     }
 
     hasAttribute(name) {
@@ -956,8 +1000,29 @@
   class Comment extends CharacterData {}
 
   class Document extends Node {
+    // Stamps a freshly created node with this document as its owner so
+    // `node.ownerDocument` resolves to this document even while the node is
+    // detached (before it is inserted into any tree). Once the node is inserted,
+    // its tree root wins (see the ownerDocument getter), matching DOM adoption.
+    __own(node) {
+      if (node) {
+        node.__ownerDoc = this;
+      }
+      return node;
+    }
+
     getElementById(id) {
-      return wrapNode(__omoikane_get_element_by_id(String(id)));
+      // Scope the lookup to this document's own tree. For the top-level
+      // document this is identical to the whole-document search; for a
+      // sub-browsing-context document (an iframe's contentDocument) it keeps
+      // parent and child ids from being confused.
+      //
+      // Tolerate an unbound call (`var g = document.getElementById; g('x')`)
+      // where `this` is not a Document and `this.__id` would be undefined (a
+      // NaN id that resolves to null): fall back to the top-level document so
+      // the lookup still resolves against the main tree.
+      const scope = this instanceof Document ? this : globalThis.document;
+      return wrapNode(__omoikane_query_selector(scope.__id, "#" + String(id)));
     }
 
     createElement(tag) {
@@ -968,7 +1033,7 @@
           "InvalidCharacterError"
         );
       }
-      return wrapNode(__omoikane_create_element(name));
+      return this.__own(wrapNode(__omoikane_create_element(name)));
     }
 
     createElementNS(namespace, qualifiedName) {
@@ -977,7 +1042,7 @@
         : String(namespace);
       const qname = String(qualifiedName);
       const info = validateAndExtractNS(ns, qname);
-      const node = wrapNode(__omoikane_create_element(qname));
+      const node = this.__own(wrapNode(__omoikane_create_element(qname)));
       // Namespaced elements preserve their exact qualified name (no ASCII
       // upper-casing) and expose namespace metadata; shadow the prototype
       // getters with per-instance data properties.
@@ -1014,15 +1079,15 @@
     }
 
     createDocumentFragment() {
-      return wrapNode(__omoikane_create_document_fragment());
+      return this.__own(wrapNode(__omoikane_create_document_fragment()));
     }
 
     createTextNode(text) {
-      return wrapNode(__omoikane_create_text_node(String(text)));
+      return this.__own(wrapNode(__omoikane_create_text_node(String(text))));
     }
 
     createComment(data) {
-      return wrapNode(__omoikane_create_comment(String(data ?? "")));
+      return this.__own(wrapNode(__omoikane_create_comment(String(data ?? ""))));
     }
 
     createEvent(type) {
@@ -1099,9 +1164,104 @@
     getElementsByClassName(cls) {
       return this.querySelectorAll("." + String(cls));
     }
+
+    // Adds markup to the document at the parser's insertion point. During
+    // script execution the arguments are concatenated, tokenized as an HTML
+    // fragment, and spliced into the tree as the running script's following
+    // siblings (matching how a streaming parser resumes at the insertion
+    // point). Only inline classic <script> elements in the written markup run
+    // synchronously in global scope, in document order (external `src` and
+    // `type="module"` scripts are inserted but not executed here), as classic
+    // document.write() requires.
+    //
+    // Known limitations (follow-ups, out of scope for 016-7): when a fragment
+    // mixes a <script> with later nodes the spec would run the script before
+    // parsing those later nodes, but here all nodes are spliced in first and
+    // the scripts run afterward; and there is no recursion-depth guard, so a
+    // written script that writes another script recurses unbounded.
+    write(...args) {
+      let text = "";
+      for (let i = 0; i < args.length; i += 1) {
+        text += String(args[i]);
+      }
+      const scriptIds = __omoikane_document_write(this.__id, text);
+      if (scriptIds && scriptIds.length) {
+        for (let i = 0; i < scriptIds.length; i += 1) {
+          const el = wrapNode(scriptIds[i]);
+          const code = el ? el.textContent : "";
+          if (code) {
+            // Indirect eval runs the written script in global scope.
+            (0, eval)(code);
+          }
+        }
+      }
+    }
+
+    // Like write(), but appends a newline after the concatenated arguments.
+    writeln(...args) {
+      let text = "";
+      for (let i = 0; i < args.length; i += 1) {
+        text += String(args[i]);
+      }
+      return this.write(text + "\n");
+    }
+
+    // document.open() replaces the document with an empty one: it removes every
+    // existing child so a following write() builds fresh content (HTML's
+    // "document open steps"). This works for any Document instance — the main
+    // document today, and sub-documents once iframe contentDocument lands in
+    // 016-9 — because the reset targets this document node by id. Returns the
+    // document, as the spec requires.
+    open() {
+      __omoikane_document_reset(this.__id);
+      return this;
+    }
+
+    // document.close() has nothing to flush: write() splices its markup
+    // synchronously, so there is no pending parser input to finish.
+    close() {}
   }
 
   class DocumentFragment extends Node {}
+
+  // An <iframe> owns a nested browsing context whose document is reachable via
+  // contentDocument (and, as a facade, contentWindow.document). The document is
+  // created lazily by the host on first access: an empty/absent src yields an
+  // about:blank skeleton, while a src is fetched and parsed (only HTML content
+  // types become a real DOM tree). Reading contentDocument again after changing
+  // src reloads it.
+  class HTMLIFrameElement extends Node {
+    get contentDocument() {
+      return wrapNode(__omoikane_iframe_content_document(this.__id));
+    }
+
+    get contentWindow() {
+      // Return one stable Window facade per iframe so that
+      // `iframe.contentWindow === iframe.contentWindow` holds and properties
+      // assigned to it persist across accesses. `document` is a live getter, so
+      // a later `src` change (which reloads the sub-document) is reflected on
+      // the next read. A full Window per frame is out of scope here.
+      if (!this.__contentWindowFacade) {
+        const iframe = this;
+        this.__contentWindowFacade = {
+          get document() {
+            return iframe.contentDocument;
+          },
+          frameElement: iframe,
+          getComputedStyle: globalThis.getComputedStyle,
+        };
+      }
+      return this.__contentWindowFacade;
+    }
+
+    get src() {
+      return __omoikane_get_attribute(this.__id, "src") || "";
+    }
+
+    set src(value) {
+      __omoikane_set_attribute(this.__id, "src", String(value));
+    }
+  }
 
   // ── HTML element specializations ────────────────────────────────────────────
   // wrapNode() dispatches element nodes to these subclasses by tag name so that
@@ -1355,6 +1515,7 @@
     meta: HTMLMetaElement,
     select: HTMLSelectElement,
     option: HTMLOptionElement,
+    iframe: HTMLIFrameElement,
   };
 
   // Standard Node.nodeType constant values, exposed both as static properties
@@ -1398,6 +1559,7 @@
   globalThis.HTMLMetaElement = HTMLMetaElement;
   globalThis.HTMLSelectElement = HTMLSelectElement;
   globalThis.HTMLOptionElement = HTMLOptionElement;
+  globalThis.HTMLIFrameElement = HTMLIFrameElement;
   globalThis.Event = Event;
   globalThis.CustomEvent = CustomEvent;
   globalThis.MouseEvent = MouseEvent;
