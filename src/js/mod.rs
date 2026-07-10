@@ -449,22 +449,13 @@ impl JsRuntime {
 
         for script in &scripts {
             let attrs = script.attributes().unwrap_or_default();
-            let script_type = attrs.get("type").map(|s| s.to_ascii_lowercase());
 
-            // Skip non-JavaScript types
-            if let Some(ref t) = script_type {
-                // Strip MIME parameters (e.g., "text/javascript; charset=utf-8" → "text/javascript")
-                let mime = t.split(';').next().unwrap_or("").trim();
-                if !mime.is_empty()
-                    && mime != "text/javascript"
-                    && mime != "application/javascript"
-                    && mime != "module"
-                {
-                    continue;
-                }
-                if mime == "module" {
-                    continue;
-                }
+            // Skip <script> types Omoikane does not run as classic scripts
+            // (`type="module"` and non-JavaScript types). Shares the type gate
+            // with `is_inline_classic_script` so a script executes identically
+            // whether it was parsed normally or inserted via `document.write`.
+            if !is_executable_classic_script_type(attrs.get("type").map(|s| s.as_str())) {
+                continue;
             }
 
             let src = attrs.get("src").cloned();
@@ -1552,11 +1543,17 @@ fn create_comment_native(_: &JsValue, args: &[JsValue], context: &mut Context) -
 
 /// Inserts `child` into `parent` before `reference` when given, otherwise
 /// appends it. If `insert_before` fails — for example the reference node is no
-/// longer a child of `parent` — this falls back to appending, guaranteeing the
-/// child always lands somewhere in `parent`'s subtree rather than being
-/// silently dropped. Callers rely on this: `document.write` registers each
-/// inserted node and advances its insertion point, both of which are only valid
-/// for nodes that are actually in the tree.
+/// longer a child of `parent` — this falls back to appending.
+///
+/// This is not infallible: both `insert_before` and `append_child` reject a
+/// cyclic insertion (a `child` that is an inclusive ancestor of `parent`) with
+/// a `HierarchyRequest` error, so such a `child` is dropped either way. The
+/// guarantee is narrower: **as long as the insertion would not create a cycle,
+/// a failed `insert_before` falls back to `append`**, so the child still lands
+/// in `parent`'s subtree rather than being silently dropped. Callers rely on
+/// this: `document.write` registers each inserted node and advances its
+/// insertion point, both of which are only valid for nodes that are actually in
+/// the tree.
 fn insert_or_append(parent: &NodeHandle, child: &NodeHandle, reference: Option<&NodeHandle>) {
     match reference {
         Some(reference) => {
@@ -1568,13 +1565,39 @@ fn insert_or_append(parent: &NodeHandle, child: &NodeHandle, reference: Option<&
     }
 }
 
+/// Returns whether a `<script>`'s `type` attribute selects a classic script
+/// that Omoikane executes.
+///
+/// This is intentionally narrower than the full "JavaScript MIME type essence
+/// match" ([`is_javascript_mime_type`]): only an **absent, empty,
+/// `text/javascript`, or `application/javascript`** type runs. `type="module"`
+/// and every other value — including other JavaScript MIME essences such as
+/// `text/ecmascript` — are treated as non-executable.
+///
+/// Both [`is_inline_classic_script`] (the `document.write` path) and
+/// `Runtime::execute_document_scripts` (the normal parse path) gate on this
+/// helper, so a `<script>` element runs identically no matter which path
+/// reached it.
+fn is_executable_classic_script_type(type_attr: Option<&str>) -> bool {
+    match type_attr {
+        None => true,
+        Some(t) => {
+            // Strip any MIME parameters (e.g. "text/javascript; charset=utf-8").
+            let mime = t.split(';').next().unwrap_or("").trim().to_ascii_lowercase();
+            mime.is_empty() || mime == "text/javascript" || mime == "application/javascript"
+        }
+    }
+}
+
 /// Returns whether `node` is an inline classic `<script>` — one that
 /// `document.write` should execute synchronously.
 ///
 /// A script qualifies only when it has no `src` attribute (external scripts
-/// carry no inline code to run) and its `type` is absent, empty, or a
-/// JavaScript MIME type (so `type="module"` and non-JS types are excluded).
-/// This mirrors the classic-script conditions in `execute_document_scripts`.
+/// carry no inline code to run) and its `type` selects a classic script that
+/// Omoikane executes (see [`is_executable_classic_script_type`], which excludes
+/// `type="module"` and non-executed types). This shares its type gate with
+/// `execute_document_scripts`, so written and normally parsed scripts agree on
+/// what runs.
 fn is_inline_classic_script(node: &NodeHandle) -> bool {
     if node.tag_name().as_deref() != Some("script") {
         return false;
@@ -1583,14 +1606,7 @@ fn is_inline_classic_script(node: &NodeHandle) -> bool {
     if attrs.get("src").is_some() {
         return false;
     }
-    match attrs.get("type") {
-        None => true,
-        Some(t) => {
-            // Strip any MIME parameters (e.g. "text/javascript; charset=utf-8").
-            let mime = t.split(';').next().unwrap_or("").trim();
-            mime.is_empty() || is_javascript_mime_type(mime)
-        }
-    }
+    is_executable_classic_script_type(attrs.get("type").map(|s| s.as_str()))
 }
 
 /// Backs `document.open()`'s reset semantics: removes every child of the given
@@ -4090,6 +4106,16 @@ mod tests {
         external.set_attribute("src", "x.js");
         assert!(!is_inline_classic_script(&external));
 
+        // application/javascript is also a classic type.
+        let app_js = NodeHandle::element("script");
+        app_js.set_attribute("type", "application/javascript");
+        assert!(is_inline_classic_script(&app_js));
+
+        // A MIME type with parameters still matches on its essence.
+        let with_params = NodeHandle::element("script");
+        with_params.set_attribute("type", "text/javascript; charset=utf-8");
+        assert!(is_inline_classic_script(&with_params));
+
         // Module: type="module".
         let module = NodeHandle::element("script");
         module.set_attribute("type", "module");
@@ -4099,6 +4125,13 @@ mod tests {
         let non_js = NodeHandle::element("script");
         non_js.set_attribute("type", "text/plain");
         assert!(!is_inline_classic_script(&non_js));
+
+        // Other JavaScript MIME essences (e.g. text/ecmascript) are *not*
+        // executed — the classic-script gate is narrower than the full
+        // JavaScript MIME type match and mirrors `execute_document_scripts`.
+        let ecmascript = NodeHandle::element("script");
+        ecmascript.set_attribute("type", "text/ecmascript");
+        assert!(!is_inline_classic_script(&ecmascript));
 
         // Not a <script> at all.
         assert!(!is_inline_classic_script(&NodeHandle::element("div")));
@@ -4197,6 +4230,63 @@ mod tests {
             ran.as_deref(),
             Some("undefined"),
             "a module script must not run synchronously as a classic script"
+        );
+    }
+
+    /// A `type="text/ecmascript"` script must be treated identically whether it
+    /// is parsed normally or inserted via `document.write`: with the shared type
+    /// gate, neither path executes it (the classic-script gate is narrower than
+    /// the full JavaScript MIME type match). This pins the two paths together so
+    /// they cannot drift apart.
+    #[test]
+    fn ecmascript_type_script_is_not_executed_by_either_path() {
+        use crate::html::TreeBuilder;
+
+        // Path 1: normal parse.
+        let normal_html = r#"<html><body>
+            <script type="text/ecmascript" id="ecma">globalThis.__ecma_normal = true;</script>
+        </body></html>"#;
+        let normal_doc = TreeBuilder::parse(normal_html).document();
+        let mut normal_runtime = JsRuntime::with_document(normal_doc.clone()).unwrap();
+        let errors = normal_runtime.execute_document_scripts(None);
+        assert!(errors.is_empty(), "no script errors expected: {errors:?}");
+        assert!(
+            normal_doc.query_selector("#ecma").is_some(),
+            "the ecmascript <script> must remain in the DOM"
+        );
+        let normal_ran = normal_runtime
+            .eval("typeof globalThis.__ecma_normal")
+            .unwrap()
+            .as_string()
+            .map(|s| s.to_std_string_escaped());
+        assert_eq!(
+            normal_ran.as_deref(),
+            Some("undefined"),
+            "a text/ecmascript script must not run when parsed normally"
+        );
+
+        // Path 2: inserted via document.write.
+        let written_html = r#"<html><body>
+            <script>document.write('<script type="text/ecmascript" id="ecma">globalThis.__ecma_written = true;<\/script>');</script>
+        </body></html>"#;
+        let written_doc = TreeBuilder::parse(written_html).document();
+        let mut written_runtime = JsRuntime::with_document(written_doc.clone()).unwrap();
+        let errors = written_runtime.execute_document_scripts(None);
+        assert!(errors.is_empty(), "no script errors expected: {errors:?}");
+        assert!(
+            written_doc.query_selector("#ecma").is_some(),
+            "the written ecmascript <script> must be inserted into the DOM"
+        );
+        let written_ran = written_runtime
+            .eval("typeof globalThis.__ecma_written")
+            .unwrap()
+            .as_string()
+            .map(|s| s.to_std_string_escaped());
+        assert_eq!(
+            written_ran.as_deref(),
+            Some("undefined"),
+            "a text/ecmascript script must not run when inserted via document.write, \
+             matching the normal-parse path"
         );
     }
 

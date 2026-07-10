@@ -59,7 +59,12 @@ status: open
 - **native/バインディング**: `__omoikane_document_write` を追加、`dom_bootstrap.js` の
   `Document` クラスに `write` / `writeln` / `open` / `close` を追加。
 
-### テスト（`src/js/mod.rs` の `tests` に7件追加、いずれも具体アサーション）
+### テスト（`src/js/mod.rs` の `tests` に計14件追加、いずれも具体アサーション）
+
+内訳: 初期実装で7件、その後のレビュー対応で7件（1巡目6件 + 2巡目1件、詳細は
+後述の「レビュー指摘の修正」節を参照）。
+
+初期実装で追加した7件:
 
 - `document_write_creates_iframe_findable_by_id`: 書いた iframe#selectors が
   `getElementById` で引け、`tagName === "IFRAME"`。
@@ -96,9 +101,31 @@ status: open
   `is_inline_classic_script` で `src` 付き / `type="module"` / 非 JS 型を除外。
   それらは DOM には挿入されるが同期実行されない。
 - **document.open() のリセット実装**: native `__omoikane_document_reset` が
-  文書児を全除去。JS `open()` から配線。任意の Document ノード id で動作するため
+  文書の子ノードを全除去。JS `open()` から配線。任意の Document ノード id で動作するため
   016-9 のサブ文書にも流用可能。open() 後の write は空文書への追記として動く。
 - doc コメントを実挙動（インライン classic のみ同期実行）に合わせて修正。
+- テスト6件追加: `is_inline_classic_script_classifies_scripts`,
+  `document_write_from_defer_script_inserts_at_script_position`,
+  `document_write_external_script_present_but_not_executed`,
+  `document_write_module_script_not_executed_as_classic`,
+  `document_open_empties_the_document`,
+  `document_open_write_close_leaves_only_written_content`。
+
+### レビュー指摘の修正（2巡目, 2026-07-10, PR #103）
+
+- **`insert_or_append` の doc コメントの過剰主張を訂正**: `append_child` /
+  `insert_before` は循環挿入を `HierarchyRequest` で拒否するため「必ずサブツリーに
+  入る」わけではない。実際の保証（循環を作らない限り `insert_before` 失敗時に
+  `append` へフォールバックする）に文言を修正。
+- **classic script の type 判定を本体と共有**: `is_inline_classic_script` が
+  `is_javascript_mime_type`（essence 一致なら何でも可）を使っており、`type=text/ecmascript`
+  等が `execute_document_scripts`（空/未指定/`text/javascript`/`application/javascript`
+  のみ実行）と食い違っていた。共有ヘルパ `is_executable_classic_script_type` を追加し
+  両者が同じ判定を使うように統一（現行本体挙動＝これらは非実行）。
+- テスト1件追加: `ecmascript_type_script_is_not_executed_by_either_path`
+  （`type="text/ecmascript"` が document.write 経由でも通常パースでも非実行で一致する
+  ことを検証）。既存の `is_inline_classic_script_classifies_scripts` にも
+  `text/ecmascript` / `application/javascript` / MIME パラメータ付きのケースを追加。
 
 ### 残課題（016-7 の範囲外）
 
