@@ -31,6 +31,23 @@
     return node;
   }
 
+  // Stamps `node` and (for a deep subtree) every descendant with `doc` as its
+  // owning document, mirroring how `Document.create*` stamps `__ownerDoc`. Used
+  // by `cloneNode`, whose native clone carries no wrapper metadata: without this
+  // a detached clone of a sub-document node would fall through the
+  // `ownerDocument` getter to the top-level document. Wrappers are cached by id
+  // (see `wrapNode`), so the stamp persists across later `childNodes` reads.
+  function stampOwnerDoc(node, doc) {
+    if (!node) {
+      return;
+    }
+    node.__ownerDoc = doc;
+    const children = node.childNodes;
+    for (let i = 0; i < children.length; i++) {
+      stampOwnerDoc(children[i], doc);
+    }
+  }
+
   function invokeListeners(node, event, capture, phase) {
     const listeners = (node.__listeners.get(event.type) || []).slice();
     for (const entry of listeners) {
@@ -635,7 +652,17 @@
     }
 
     cloneNode(deep = false) {
-      return wrapNode(__omoikane_clone_node(this.__id, !!deep));
+      const clone = wrapNode(__omoikane_clone_node(this.__id, !!deep));
+      // The clone is detached, so its ownerDocument comes from its creation
+      // context, not its (absent) tree root. Propagate this node's owning
+      // document to the clone and, for a deep clone, its descendants — so a
+      // clone of a sub-document node keeps reporting that sub-document as its
+      // ownerDocument rather than defaulting to the top-level document.
+      const ownerDoc = this.ownerDocument;
+      if (clone && ownerDoc) {
+        stampOwnerDoc(clone, ownerDoc);
+      }
+      return clone;
     }
 
     hasAttribute(name) {

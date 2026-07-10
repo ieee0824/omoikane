@@ -1015,8 +1015,10 @@ fn register_host_bindings(
             NativeFunction::from_copy_closure(create_comment_native),
         ),
         (
+            // (documentId, text) — the target document id plus the markup to
+            // write, so a write to an iframe sub-document routes correctly.
             js_string!("__omoikane_document_write"),
-            1,
+            2,
             NativeFunction::from_copy_closure(document_write_native),
         ),
         (
@@ -1888,9 +1890,17 @@ fn is_inline_classic_script(node: &NodeHandle) -> bool {
 /// Backs `document.open()`'s reset semantics: removes every child of the given
 /// document node so a following `document.write` builds fresh content into an
 /// empty document (HTML's "document open steps" replace the document with an
-/// empty one). Works for any Document node id, so it will apply equally to
-/// sub-documents once iframe `contentDocument` lands (016-9); today it is
-/// exercised on the main document.
+/// empty one). Works for any Document node id, so it applies equally to the
+/// top-level document and to iframe sub-documents (an iframe's
+/// `contentDocument`).
+///
+/// Only the main document owns the parser insertion point tracked by
+/// [`HostState::write_insertion_ref`], so that field is cleared **only** when
+/// the main document is the one being reset. Resetting a sub-document leaves it
+/// untouched: an outer `<script>` may be mid-write into the main document, and
+/// clearing the point here (as an earlier version did unconditionally) would
+/// silently redirect the rest of that script's `document.write` output to the
+/// `<body>` tail instead of the script's position.
 fn document_reset_native(
     _: &JsValue,
     args: &[JsValue],
@@ -1898,18 +1908,22 @@ fn document_reset_native(
 ) -> JsResult<JsValue> {
     let id = parse_node_id(args.first(), context)?;
     with_host_state(|state| {
-        let node = {
+        let (node, is_main_document) = {
             let s = state.borrow();
-            s.get_node(id).ok_or_else(|| {
+            let node = s.get_node(id).ok_or_else(|| {
                 JsError::from(JsNativeError::error().with_message("document node not found"))
-            })?
+            })?;
+            let is_main_document = node == s.document;
+            (node, is_main_document)
         };
         for child in node.child_nodes() {
             let _ = node.remove_child(&child);
         }
-        // The emptied document has no insertion point; a following write()
-        // appends into the now-childless document node.
-        state.borrow_mut().write_insertion_ref = None;
+        if is_main_document {
+            // The emptied main document has no insertion point; a following
+            // write() appends into the now-childless document node.
+            state.borrow_mut().write_insertion_ref = None;
+        }
         Ok(JsValue::undefined())
     })
 }
@@ -4821,6 +4835,72 @@ mod tests {
         );
     }
 
+    /// `cloneNode` must carry the original's owning document onto the (detached)
+    /// clone, including deep-clone descendants. Without the wrapper stamp a
+    /// clone of a sub-document node would report the top-level document as its
+    /// ownerDocument until inserted somewhere.
+    #[test]
+    fn cloned_sub_document_node_reports_sub_document_owner() {
+        use crate::html::TreeBuilder;
+        let doc =
+            TreeBuilder::parse(r#"<html><body><iframe id="f"></iframe></body></html>"#).document();
+        let mut runtime = JsRuntime::with_document(doc).unwrap();
+
+        runtime
+            .eval(
+                r#"var sub = document.getElementById('f').contentDocument;
+                   var orig = sub.createElement('p');
+                   orig.appendChild(sub.createElement('span'));"#,
+            )
+            .unwrap();
+
+        // Shallow clone: the clone itself is owned by the sub-document.
+        assert_eq!(
+            runtime
+                .eval("orig.cloneNode(false).ownerDocument === sub")
+                .unwrap()
+                .as_boolean(),
+            Some(true),
+            "a shallow clone of a sub-document node must be owned by the sub-document"
+        );
+
+        // Deep clone: the clone root is owned by the sub-document...
+        runtime.eval("var deep = orig.cloneNode(true);").unwrap();
+        assert_eq!(
+            runtime
+                .eval("deep.ownerDocument === sub")
+                .unwrap()
+                .as_boolean(),
+            Some(true),
+            "a deep clone's root must be owned by the sub-document"
+        );
+        assert_eq!(
+            runtime
+                .eval("deep.ownerDocument === document")
+                .unwrap()
+                .as_boolean(),
+            Some(false),
+            "a deep clone's root must not be owned by the top-level document"
+        );
+        // ...and so is every descendant of the deep clone.
+        assert_eq!(
+            runtime
+                .eval("deep.firstChild.ownerDocument === sub")
+                .unwrap()
+                .as_boolean(),
+            Some(true),
+            "a deep clone's descendant must be owned by the sub-document"
+        );
+        assert_eq!(
+            runtime
+                .eval("deep.firstChild.ownerDocument === document")
+                .unwrap()
+                .as_boolean(),
+            Some(false),
+            "a deep clone's descendant must not be owned by the top-level document"
+        );
+    }
+
     /// Reloading an iframe (its `src` changed) must drop the previous
     /// sub-document tree from the host node registry instead of leaking it, so
     /// the registry does not grow without bound across reloads.
@@ -5026,6 +5106,39 @@ mod tests {
                 .as_number(),
             Some(1.0),
             "only the freshly written <p> must remain"
+        );
+    }
+
+    /// A sub-document `open()` called from a running main-document script must
+    /// not disturb the main document's parser insertion point: a following
+    /// main-document `document.write` must still land at the script's position,
+    /// not be appended to `<body>`. This guards the earlier bug where
+    /// `document_reset_native` cleared `write_insertion_ref` unconditionally.
+    #[test]
+    fn sub_document_open_during_script_preserves_main_write_insertion_point() {
+        use crate::html::TreeBuilder;
+        let html = r#"<html><body><iframe id="f"></iframe><script>document.getElementById('f').contentDocument.open();document.write('<div id="written"></div>');</script><p id="after"></p></body></html>"#;
+        let doc = TreeBuilder::parse(html).document();
+        let mut runtime = JsRuntime::with_document(doc.clone()).unwrap();
+        let errors = runtime.execute_document_scripts(None);
+        assert!(errors.is_empty(), "no script errors expected: {errors:?}");
+
+        let body = doc.query_selector("body").expect("body");
+        let tags: Vec<String> = body
+            .child_nodes()
+            .iter()
+            .filter_map(|n| n.tag_name())
+            .collect();
+        assert_eq!(
+            tags,
+            vec![
+                "iframe".to_string(),
+                "script".to_string(),
+                "div".to_string(),
+                "p".to_string()
+            ],
+            "the main-document write must land between the <script> and the \
+             following <p> even after a sub-document open() ran mid-script"
         );
     }
 
