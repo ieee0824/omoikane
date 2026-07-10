@@ -10,7 +10,10 @@
     }
     const nodeType = __omoikane_node_type(id);
     let node;
-    if (id === __omoikane_document_id) {
+    if (id === __omoikane_document_id || nodeType === 9) {
+      // The top-level document and every sub-browsing-context document (an
+      // iframe's contentDocument) are wrapped as Document so their DOM methods
+      // are scoped to their own tree.
       node = new Document(id);
     } else if (nodeType === 11) {
       node = new DocumentFragment(id);
@@ -922,7 +925,11 @@
 
   class Document extends Node {
     getElementById(id) {
-      return wrapNode(__omoikane_get_element_by_id(String(id)));
+      // Scope the lookup to this document's own tree. For the top-level
+      // document this is identical to the whole-document search; for a
+      // sub-browsing-context document (an iframe's contentDocument) it keeps
+      // parent and child ids from being confused.
+      return wrapNode(__omoikane_query_selector(this.__id, "#" + String(id)));
     }
 
     createElement(tag) {
@@ -1110,6 +1117,41 @@
   }
 
   class DocumentFragment extends Node {}
+
+  // An <iframe> owns a nested browsing context whose document is reachable via
+  // contentDocument (and, as a facade, contentWindow.document). The document is
+  // created lazily by the host on first access: an empty/absent src yields an
+  // about:blank skeleton, while a src is fetched and parsed (only HTML content
+  // types become a real DOM tree). Reading contentDocument again after changing
+  // src reloads it.
+  class HTMLIFrameElement extends Node {
+    get contentDocument() {
+      return wrapNode(__omoikane_iframe_content_document(this.__id));
+    }
+
+    get contentWindow() {
+      const doc = this.contentDocument;
+      if (!doc) {
+        return null;
+      }
+      // Minimal Window facade for the nested browsing context. It exposes the
+      // document and a getComputedStyle entry point; a full Window per frame is
+      // out of scope here.
+      return {
+        document: doc,
+        frameElement: this,
+        getComputedStyle: globalThis.getComputedStyle,
+      };
+    }
+
+    get src() {
+      return __omoikane_get_attribute(this.__id, "src") || "";
+    }
+
+    set src(value) {
+      __omoikane_set_attribute(this.__id, "src", String(value));
+    }
+  }
 
   // ── HTML element specializations ────────────────────────────────────────────
   // wrapNode() dispatches element nodes to these subclasses by tag name so that
@@ -1363,6 +1405,7 @@
     meta: HTMLMetaElement,
     select: HTMLSelectElement,
     option: HTMLOptionElement,
+    iframe: HTMLIFrameElement,
   };
 
   // Standard Node.nodeType constant values, exposed both as static properties
@@ -1406,6 +1449,7 @@
   globalThis.HTMLMetaElement = HTMLMetaElement;
   globalThis.HTMLSelectElement = HTMLSelectElement;
   globalThis.HTMLOptionElement = HTMLOptionElement;
+  globalThis.HTMLIFrameElement = HTMLIFrameElement;
   globalThis.Event = Event;
   globalThis.CustomEvent = CustomEvent;
   globalThis.MouseEvent = MouseEvent;

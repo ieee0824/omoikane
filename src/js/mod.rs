@@ -121,6 +121,28 @@ struct HostState {
     /// inserted, so consecutive writes stay in order. `None` means no script is
     /// currently executing; a write then falls back to appending to `<body>`.
     write_insertion_ref: Option<NodeHandle>,
+    /// Base URL of the top-level document, used to resolve relative resource
+    /// references such as `<iframe src="empty.html">`. Populated when the
+    /// document's scripts run (see [`JsRuntime::execute_document_scripts`]) or
+    /// explicitly via [`JsRuntime::set_base_url`]. `None` means relative
+    /// references cannot be resolved.
+    base_url: Option<crate::http::Url>,
+    /// Sub-browsing-context documents — one per `<iframe>` element whose
+    /// `contentDocument` has been accessed. Keyed by the iframe element's node
+    /// identity. Each entry records the loaded sub-document root and the `src`
+    /// value it was loaded from, so a subsequent `src` change triggers a
+    /// reload while an unchanged `src` returns the same document instance.
+    iframe_documents: HashMap<usize, IframeDocument>,
+}
+
+/// A loaded sub-browsing-context document owned by an `<iframe>` element.
+#[derive(Debug)]
+struct IframeDocument {
+    /// Root document node of the sub-browsing context.
+    document: NodeHandle,
+    /// The `src` attribute value this document was loaded from (`""` for an
+    /// `about:blank` sub-document with no `src`).
+    loaded_src: String,
 }
 
 impl HostState {
@@ -134,9 +156,93 @@ impl HostState {
             navigator_user_agent: "Omoikane/0.1".to_string(),
             http_client: Client::new(),
             write_insertion_ref: None,
+            base_url: None,
+            iframe_documents: HashMap::new(),
         };
         state.register_tree(&document);
         state
+    }
+
+    /// Returns the sub-browsing-context document for `iframe`, loading it on the
+    /// first access and reloading it whenever the element's `src` changes.
+    ///
+    /// The returned document's whole node tree is registered so it can be
+    /// traversed and mutated through the DOM primitives exactly like the
+    /// top-level document. An empty or `about:blank` `src` yields an empty HTML
+    /// skeleton (`<html><head></head><body></body></html>`); any other `src` is
+    /// fetched and, only if it is served with an HTML content type, parsed as
+    /// HTML (otherwise the sub-document stays an empty skeleton so non-HTML
+    /// resources are never mined for markup).
+    fn iframe_content_document(&mut self, iframe: &NodeHandle) -> NodeHandle {
+        let src = iframe
+            .attributes()
+            .and_then(|attrs| attrs.get("src").cloned())
+            .unwrap_or_default()
+            .trim()
+            .to_string();
+        let iframe_id = iframe.identity();
+
+        if let Some(entry) = self.iframe_documents.get(&iframe_id) {
+            if entry.loaded_src == src {
+                return entry.document.clone();
+            }
+        }
+
+        let document = self.load_iframe_document(&src);
+        self.register_tree(&document);
+        self.iframe_documents.insert(
+            iframe_id,
+            IframeDocument {
+                document: document.clone(),
+                loaded_src: src,
+            },
+        );
+        document
+    }
+
+    /// Fetches and constructs the sub-document for an iframe `src`.
+    ///
+    /// Returns an `about:blank` skeleton for an empty/`about:blank` `src`, for a
+    /// fetch failure, and for any resource whose content type is not an HTML
+    /// type. Only HTML resources (`text/html`, `application/xhtml+xml`) are
+    /// parsed into a real DOM tree.
+    fn load_iframe_document(&mut self, src: &str) -> NodeHandle {
+        if src.is_empty() || src.eq_ignore_ascii_case("about:blank") {
+            return blank_html_document();
+        }
+
+        // Resolve the resource: data: URIs decode inline; everything else is
+        // fetched over HTTP after resolving relative references against the
+        // document base URL.
+        let fetched: Option<(String, Vec<u8>)> =
+            if src.get(..5).is_some_and(|prefix| prefix.eq_ignore_ascii_case("data:")) {
+                crate::http::parse_data_uri(src).map(|d| (d.mime_type, d.data))
+            } else {
+                let resolved = if src.starts_with("http://") || src.starts_with("https://") {
+                    Some(src.to_string())
+                } else {
+                    self.base_url
+                        .as_ref()
+                        .and_then(|base| crate::http::url::resolve_url(base, src).ok())
+                        .map(|url| url.to_string())
+                };
+                resolved.and_then(|url| self.http_client.get(&url).ok()).map(|resp| {
+                    let mime = resp.header("Content-Type").unwrap_or("").to_string();
+                    (mime, resp.body().to_vec())
+                })
+            };
+
+        match fetched {
+            Some((mime, body)) if is_html_mime_type(&mime) => {
+                let html = String::from_utf8_lossy(&body);
+                crate::html::TreeBuilder::parse(&html).document()
+            }
+            // Non-HTML content types (image/png, text/plain, XML, SVG, ...) are
+            // never parsed as HTML: the sub-document stays an empty skeleton so
+            // a page cannot mine markup out of a non-HTML resource. Acid3 tests
+            // 14 and 15 depend on this (a PNG/text file must not yield a <p>).
+            _ => blank_html_document(),
+        }
     }
 
     fn register_tree(&mut self, node: &NodeHandle) {
@@ -219,6 +325,16 @@ impl JsRuntime {
     /// Returns the current DOM document.
     pub fn document(&self) -> NodeHandle {
         self.host_state.borrow().document.clone()
+    }
+
+    /// Sets the base URL used to resolve relative resource references such as
+    /// `<iframe src="empty.html">`.
+    ///
+    /// [`execute_document_scripts`](Self::execute_document_scripts) sets this
+    /// automatically from its `base_url` argument; call this directly when
+    /// driving the runtime without running document scripts.
+    pub fn set_base_url(&mut self, url: crate::http::Url) {
+        self.host_state.borrow_mut().base_url = Some(url);
     }
 
     /// Returns the console log buffer captured from `console.log`.
@@ -442,6 +558,13 @@ impl JsRuntime {
     ///
     /// Errors in individual scripts are logged but do not stop execution of remaining scripts.
     pub fn execute_document_scripts(&mut self, base_url: Option<&crate::http::Url>) -> Vec<String> {
+        // Record the base URL so relative resource references discovered later
+        // (e.g. an `<iframe src="empty.html">` whose contentDocument is accessed
+        // during the timer loop) can be resolved.
+        if let Some(base) = base_url {
+            self.host_state.borrow_mut().base_url = Some(base.clone());
+        }
+
         let document = self.document();
         let scripts = collect_script_elements(&document);
         let mut errors = Vec::new();
@@ -819,6 +942,11 @@ fn register_host_bindings(
             1,
             NativeFunction::from_copy_closure(document_write_native),
         ),
+        (
+            js_string!("__omoikane_iframe_content_document"),
+            1,
+            NativeFunction::from_copy_closure(iframe_content_document_native),
+        ),
     ] {
         context.register_global_builtin_callable(name, length, function)?;
     }
@@ -833,6 +961,37 @@ fn default_document() -> NodeHandle {
     document.append_child(html.clone());
     html.append_child(body);
     document
+}
+
+/// Builds an empty `about:blank`-equivalent HTML document
+/// (`<html><head></head><body></body></html>`).
+///
+/// Used for iframes with no `src` and for iframe resources that must not be
+/// parsed as HTML. The document always has an `<html>` document element with
+/// `<head>` and `<body>` children so callers relying on `documentElement`,
+/// `head`, and `body` never observe a missing node.
+fn blank_html_document() -> NodeHandle {
+    let document = NodeHandle::document();
+    let html = NodeHandle::element("html");
+    let head = NodeHandle::element("head");
+    let body = NodeHandle::element("body");
+    html.append_child(head);
+    html.append_child(body);
+    document.append_child(html);
+    document
+}
+
+/// Returns whether `content_type` denotes an HTML document that a browsing
+/// context should parse into a DOM tree. Parameters (e.g. `; charset=utf-8`)
+/// are stripped and the essence is matched case-insensitively.
+fn is_html_mime_type(content_type: &str) -> bool {
+    let essence = content_type
+        .split(';')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase();
+    matches!(essence.as_str(), "text/html" | "application/xhtml+xml")
 }
 
 fn parse_node_id(value: Option<&JsValue>, context: &mut Context) -> JsResult<usize> {
@@ -1643,6 +1802,27 @@ fn document_write_native(_: &JsValue, args: &[JsValue], context: &mut Context) -
         Ok(JsValue::from(
             boa_engine::object::builtins::JsArray::from_iter(script_ids, context),
         ))
+    })
+}
+
+/// `__omoikane_iframe_content_document(iframeId)` — returns the node id of the
+/// sub-browsing-context document owned by an `<iframe>` element, loading it on
+/// first access. Returns `null` if the node id does not resolve.
+fn iframe_content_document_native(
+    _: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let node_id = parse_node_id(args.first(), context)?;
+    with_host_state(|state| {
+        let iframe = state.borrow().get_node(node_id);
+        match iframe {
+            Some(iframe) => {
+                let document = state.borrow_mut().iframe_content_document(&iframe);
+                Ok(JsValue::from(document.identity() as f64))
+            }
+            None => Ok(JsValue::null()),
+        }
     })
 }
 
@@ -3925,6 +4105,379 @@ mod tests {
             selectors.attributes().unwrap_or_default().get("style").map(|s| s.as_str()),
             Some("height: 100px"),
             "the written iframe must be mutable through the DOM API"
+        );
+    }
+
+    // ── iframe / contentDocument (sub-browsing contexts) ────────────────────
+
+    /// A tiny static HTTP/1.1 server that answers every request with the same
+    /// status, `Content-Type`, and body. It stays alive for the whole process
+    /// (detached, like the other HTTP client tests), so a lazily-loaded iframe
+    /// can both fetch and later reload its document.
+    fn spawn_static_http_server(content_type: &'static str, body: &'static str) -> u16 {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { break };
+                let mut buffer = [0u8; 1024];
+                let _ = stream.read(&mut buffer);
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    content_type,
+                    body.len(),
+                    body
+                );
+                let _ = stream.write_all(response.as_bytes());
+            }
+        });
+        port
+    }
+
+    fn eval_string_value(runtime: &mut JsRuntime, source: &str) -> Option<String> {
+        runtime
+            .eval(source)
+            .unwrap()
+            .as_string()
+            .map(|s| s.to_std_string_escaped())
+    }
+
+    #[test]
+    fn is_html_mime_type_matches_html_essences_only() {
+        assert!(is_html_mime_type("text/html"));
+        assert!(is_html_mime_type("text/html; charset=utf-8"));
+        assert!(is_html_mime_type("APPLICATION/XHTML+XML"));
+        assert!(!is_html_mime_type("image/png"));
+        assert!(!is_html_mime_type("text/plain; charset=utf-8"));
+        assert!(!is_html_mime_type("application/xml"));
+        assert!(!is_html_mime_type("image/svg+xml"));
+        assert!(!is_html_mime_type(""));
+    }
+
+    #[test]
+    fn blank_html_document_has_html_head_and_body_but_no_content() {
+        let doc = blank_html_document();
+        assert_eq!(doc.node_type(), crate::dom::NodeType::Document);
+        assert_eq!(
+            doc.query_selector("html").and_then(|h| h.tag_name()).as_deref(),
+            Some("html")
+        );
+        assert!(doc.query_selector("head").is_some(), "must have a head");
+        assert!(doc.query_selector("body").is_some(), "must have a body");
+        // An about:blank skeleton carries no minable markup.
+        assert!(doc.query_selector("p").is_none(), "must have no <p>");
+    }
+
+    /// An iframe with no `src` exposes an independent about:blank document with
+    /// its own `<html>`/`<head>`/`<body>`, distinct from the top-level document.
+    #[test]
+    fn iframe_empty_content_document_is_independent_document() {
+        use crate::html::TreeBuilder;
+        let doc =
+            TreeBuilder::parse(r#"<html><body><iframe id="f"></iframe></body></html>"#).document();
+        let mut runtime = JsRuntime::with_document(doc).unwrap();
+
+        assert_eq!(
+            runtime
+                .eval("document.getElementById('f').contentDocument.nodeType")
+                .unwrap()
+                .as_number(),
+            Some(9.0),
+            "contentDocument must be a Document node (nodeType 9)"
+        );
+        assert_eq!(
+            eval_string_value(
+                &mut runtime,
+                "document.getElementById('f').contentDocument.documentElement.tagName"
+            )
+            .as_deref(),
+            Some("HTML")
+        );
+        assert_eq!(
+            runtime
+                .eval("document.getElementById('f').contentDocument === document")
+                .unwrap()
+                .as_boolean(),
+            Some(false),
+            "the sub-document must not be the top-level document"
+        );
+        assert_eq!(
+            runtime
+                .eval("!!document.getElementById('f').contentDocument.body && !!document.getElementById('f').contentDocument.head")
+                .unwrap()
+                .as_boolean(),
+            Some(true),
+            "the about:blank sub-document must expose head and body"
+        );
+    }
+
+    /// DOM mutations in a sub-document do not leak into the parent, and vice
+    /// versa: `getElementById`/`getElementsByTagName` stay scoped per document.
+    #[test]
+    fn iframe_empty_content_document_dom_ops_are_isolated_from_parent() {
+        use crate::html::TreeBuilder;
+        let doc = TreeBuilder::parse(
+            r#"<html><body><span id="parentonly"></span><iframe id="f"></iframe></body></html>"#,
+        )
+        .document();
+        let mut runtime = JsRuntime::with_document(doc).unwrap();
+
+        runtime
+            .eval(
+                r#"var d = document.getElementById('f').contentDocument;
+                   var p = d.createElement('p');
+                   p.id = 'inner';
+                   d.body.appendChild(p);"#,
+            )
+            .unwrap();
+
+        // The sub-document sees the node it created.
+        assert_eq!(
+            eval_string_value(
+                &mut runtime,
+                "document.getElementById('f').contentDocument.getElementById('inner').tagName"
+            )
+            .as_deref(),
+            Some("P")
+        );
+        // The parent does not.
+        assert!(
+            runtime
+                .eval("document.getElementById('inner')")
+                .unwrap()
+                .is_null(),
+            "the parent document must not find a child-document node by id"
+        );
+        // getElementsByTagName is scoped: 0 <p> in the parent, 1 in the child.
+        assert_eq!(
+            runtime
+                .eval("document.getElementsByTagName('p').length")
+                .unwrap()
+                .as_number(),
+            Some(0.0)
+        );
+        assert_eq!(
+            runtime
+                .eval("document.getElementById('f').contentDocument.getElementsByTagName('p').length")
+                .unwrap()
+                .as_number(),
+            Some(1.0)
+        );
+        // The sub-document must not see the parent-only element.
+        assert!(
+            runtime
+                .eval("document.getElementById('f').contentDocument.getElementById('parentonly')")
+                .unwrap()
+                .is_null(),
+            "the child document must not find a parent-only node by id"
+        );
+    }
+
+    /// `getElementById` returns the element belonging to the document it was
+    /// called on, even when parent and child share an id.
+    #[test]
+    fn iframe_content_document_get_element_by_id_is_scoped_per_document() {
+        use crate::html::TreeBuilder;
+        let doc = TreeBuilder::parse(
+            r#"<html><body><b id="dup" data-where="parent"></b><iframe id="f"></iframe></body></html>"#,
+        )
+        .document();
+        let mut runtime = JsRuntime::with_document(doc).unwrap();
+
+        runtime
+            .eval(
+                r#"var d = document.getElementById('f').contentDocument;
+                   var c = d.createElement('b');
+                   c.id = 'dup';
+                   c.setAttribute('data-where', 'child');
+                   d.body.appendChild(c);"#,
+            )
+            .unwrap();
+
+        assert_eq!(
+            eval_string_value(
+                &mut runtime,
+                "document.getElementById('dup').getAttribute('data-where')"
+            )
+            .as_deref(),
+            Some("parent")
+        );
+        assert_eq!(
+            eval_string_value(
+                &mut runtime,
+                "document.getElementById('f').contentDocument.getElementById('dup').getAttribute('data-where')"
+            )
+            .as_deref(),
+            Some("child")
+        );
+    }
+
+    /// Repeated `contentDocument` reads return the same document instance while
+    /// `src` is unchanged, so nodes created in it persist between accesses.
+    #[test]
+    fn iframe_content_document_is_stable_across_accesses() {
+        use crate::html::TreeBuilder;
+        let doc =
+            TreeBuilder::parse(r#"<html><body><iframe id="f"></iframe></body></html>"#).document();
+        let mut runtime = JsRuntime::with_document(doc).unwrap();
+
+        assert_eq!(
+            runtime
+                .eval("document.getElementById('f').contentDocument === document.getElementById('f').contentDocument")
+                .unwrap()
+                .as_boolean(),
+            Some(true),
+            "contentDocument must be a stable instance across reads"
+        );
+
+        runtime
+            .eval(
+                r#"var d = document.getElementById('f').contentDocument;
+                   d.body.appendChild(d.createElement('i'));"#,
+            )
+            .unwrap();
+        assert_eq!(
+            runtime
+                .eval("document.getElementById('f').contentDocument.getElementsByTagName('i').length")
+                .unwrap()
+                .as_number(),
+            Some(1.0),
+            "a node appended to the sub-document must survive a later access"
+        );
+    }
+
+    /// An HTML `src` is fetched and parsed into the sub-document's DOM tree.
+    #[test]
+    fn iframe_html_src_is_parsed_into_content_document() {
+        use crate::html::TreeBuilder;
+        let port = spawn_static_http_server(
+            "text/html; charset=utf-8",
+            r#"<!DOCTYPE html><html><head></head><body><p id="loaded">hi</p></body></html>"#,
+        );
+        let doc = TreeBuilder::parse(&format!(
+            r#"<html><body><iframe id="f" src="http://127.0.0.1:{port}/page.html"></iframe></body></html>"#
+        ))
+        .document();
+        let mut runtime = JsRuntime::with_document(doc).unwrap();
+
+        assert_eq!(
+            runtime
+                .eval("document.getElementById('f').contentDocument.getElementsByTagName('p').length")
+                .unwrap()
+                .as_number(),
+            Some(1.0)
+        );
+        assert_eq!(
+            eval_string_value(
+                &mut runtime,
+                "document.getElementById('f').contentDocument.getElementById('loaded').textContent"
+            )
+            .as_deref(),
+            Some("hi")
+        );
+    }
+
+    /// A resource served as `image/png` must never be parsed as HTML, even when
+    /// its bytes look like markup (Acid3 test 14).
+    #[test]
+    fn iframe_png_src_is_not_parsed_as_html() {
+        use crate::html::TreeBuilder;
+        let port = spawn_static_http_server("image/png", r#"<html><body><p>FAIL</p></body></html>"#);
+        let doc = TreeBuilder::parse(&format!(
+            r#"<html><body><iframe id="f" src="http://127.0.0.1:{port}/empty.png"></iframe></body></html>"#
+        ))
+        .document();
+        let mut runtime = JsRuntime::with_document(doc).unwrap();
+        assert_eq!(
+            runtime
+                .eval("document.getElementById('f').contentDocument.getElementsByTagName('p').length")
+                .unwrap()
+                .as_number(),
+            Some(0.0),
+            "image/png content must not be parsed as HTML"
+        );
+    }
+
+    /// A resource served as `text/plain` must never be parsed as HTML even when
+    /// it contains markup (Acid3 test 15).
+    #[test]
+    fn iframe_text_plain_src_is_not_parsed_as_html() {
+        use crate::html::TreeBuilder;
+        let port = spawn_static_http_server(
+            "text/plain; charset=utf-8",
+            r#"<html><body><p>FAIL</p></body></html>"#,
+        );
+        let doc = TreeBuilder::parse(&format!(
+            r#"<html><body><iframe id="f" src="http://127.0.0.1:{port}/empty.txt"></iframe></body></html>"#
+        ))
+        .document();
+        let mut runtime = JsRuntime::with_document(doc).unwrap();
+        assert_eq!(
+            runtime
+                .eval("document.getElementById('f').contentDocument.getElementsByTagName('p').length")
+                .unwrap()
+                .as_number(),
+            Some(0.0),
+            "text/plain content must not be parsed as HTML"
+        );
+    }
+
+    /// A relative `src` is resolved against the document base URL before fetch.
+    #[test]
+    fn iframe_relative_src_resolves_against_base_url() {
+        use crate::html::TreeBuilder;
+        let port = spawn_static_http_server("text/html", r#"<html><body><p id="rel">yes</p></body></html>"#);
+        let doc =
+            TreeBuilder::parse(r#"<html><body><iframe id="f" src="sub.html"></iframe></body></html>"#)
+                .document();
+        let mut runtime = JsRuntime::with_document(doc).unwrap();
+        let base: crate::http::Url = format!("http://127.0.0.1:{port}/index.html").parse().unwrap();
+        runtime.set_base_url(base);
+
+        assert_eq!(
+            eval_string_value(
+                &mut runtime,
+                "document.getElementById('f').contentDocument.getElementById('rel').textContent"
+            )
+            .as_deref(),
+            Some("yes"),
+            "a relative iframe src must resolve against the base URL"
+        );
+    }
+
+    /// Changing an iframe's `src` reloads its document on the next access.
+    #[test]
+    fn iframe_changing_src_reloads_content_document() {
+        use crate::html::TreeBuilder;
+        let port =
+            spawn_static_http_server("text/html", r#"<html><body><p id="x">loaded</p></body></html>"#);
+        let doc =
+            TreeBuilder::parse(r#"<html><body><iframe id="f"></iframe></body></html>"#).document();
+        let mut runtime = JsRuntime::with_document(doc).unwrap();
+
+        // No src yet: an empty about:blank skeleton with no <p>.
+        assert_eq!(
+            runtime
+                .eval("document.getElementById('f').contentDocument.getElementsByTagName('p').length")
+                .unwrap()
+                .as_number(),
+            Some(0.0)
+        );
+
+        // Point src at the HTML resource; the next read reloads and parses it.
+        runtime
+            .eval(&format!(
+                "document.getElementById('f').src = 'http://127.0.0.1:{port}/x.html';"
+            ))
+            .unwrap();
+        assert_eq!(
+            eval_string_value(
+                &mut runtime,
+                "document.getElementById('f').contentDocument.getElementById('x').textContent"
+            )
+            .as_deref(),
+            Some("loaded"),
+            "changing src must reload the sub-document"
         );
     }
 }
