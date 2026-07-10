@@ -8,6 +8,7 @@
 mod client;
 mod connection;
 mod cookie;
+mod data_uri;
 mod http2;
 mod request;
 mod response;
@@ -20,6 +21,7 @@ mod response_tests;
 
 pub use client::Client;
 pub use connection::{send, send_with_options};
+pub use data_uri::{DataUri, parse_data_uri};
 pub use cookie::{Cookie, CookieJar, SameSite};
 pub use request::{HttpRequest, Method, default_user_agent};
 pub use response::HttpResponse;

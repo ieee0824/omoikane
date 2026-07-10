@@ -940,4 +940,87 @@ mod tests {
 
         None
     }
+
+    /// Counts every element in the tree whose tag name equals `tag`.
+    fn count_elements(node: &NodeHandle, tag: &str) -> usize {
+        let mut count = if node.tag_name().as_deref() == Some(tag) {
+            1
+        } else {
+            0
+        };
+        for child in node.child_nodes() {
+            count += count_elements(&child, tag);
+        }
+        count
+    }
+
+    #[test]
+    fn script_with_angle_brackets_is_a_single_element_with_full_text() {
+        let result =
+            TreeBuilder::parse("<body><script>if (a < b) { doc('</p>'); }</script></body>");
+        let document = result.document();
+
+        assert_eq!(count_elements(&document, "script"), 1);
+        // The `<` and the string literal `</p>` must not spawn extra elements.
+        assert_eq!(count_elements(&document, "p"), 0);
+
+        let script = document.query_selector("script").unwrap();
+        let children = script.child_nodes();
+        assert_eq!(children.len(), 1);
+        assert_eq!(
+            children[0].data(),
+            Some("if (a < b) { doc('</p>'); }".to_string())
+        );
+    }
+
+    #[test]
+    fn textarea_content_stays_text_and_does_not_build_elements() {
+        let result = TreeBuilder::parse("<body><textarea><div>x</div></textarea></body>");
+        let document = result.document();
+
+        assert_eq!(count_elements(&document, "textarea"), 1);
+        assert_eq!(count_elements(&document, "div"), 0);
+
+        let textarea = document.query_selector("textarea").unwrap();
+        assert_eq!(
+            textarea.child_nodes()[0].data(),
+            Some("<div>x</div>".to_string())
+        );
+    }
+
+    #[test]
+    fn style_content_with_angle_brackets_is_verbatim_text() {
+        let result =
+            TreeBuilder::parse("<head><style>a > b { content: '</style>fake'; }</style></head>");
+        let document = result.document();
+
+        assert_eq!(count_elements(&document, "style"), 1);
+        let style = document.query_selector("style").unwrap();
+        // `a > b { content: '` precedes the first `</style>` which closes the
+        // element (RAWTEXT has no string awareness), so the text stops there.
+        assert_eq!(
+            style.child_nodes()[0].data(),
+            Some("a > b { content: '".to_string())
+        );
+    }
+
+    #[test]
+    fn acid3_fixture_parses_to_ten_script_elements() {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/acid3/acid3.html"
+        );
+        let html = std::fs::read_to_string(path).expect("read acid3.html fixture");
+        let document = TreeBuilder::parse(&html).document();
+
+        // The real Acid3 page has exactly 10 <script> elements (4 inline in the
+        // head, 5 external data: scripts, 1 inline in the body). Before the
+        // RAWTEXT/script-data states existed, the `<` characters inside inline
+        // JS split the body script into extra spurious elements.
+        assert_eq!(
+            count_elements(&document, "script"),
+            10,
+            "acid3.html must tokenize into exactly 10 script elements"
+        );
+    }
 }

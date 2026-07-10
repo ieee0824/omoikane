@@ -1,0 +1,21 @@
+{
+  "_comment": "HTTP status code and Content-Type that acid3.acidtests.org returns for each resource, captured 2026-07-10. The Acid3 test relies on these EXACT values (e.g. empty.css is deliberately served as text/html so it is NOT applied as a stylesheet; empty.txt is served as text/plain although it contains HTML). The local test server (examples/acid3.rs) replays these values verbatim so behaviour matches the canonical source.",
+  "files": [
+    { "path": "acid3.html", "status": 200, "content_type": "text/html; charset=utf-8" },
+    { "path": "empty.css", "status": 200, "content_type": "text/html; charset=utf-8" },
+    { "path": "empty.html", "status": 200, "content_type": "text/html; charset=utf-8" },
+    { "path": "empty.png", "status": 200, "content_type": "image/png" },
+    { "path": "empty.txt", "status": 200, "content_type": "text/plain; charset=utf-8" },
+    { "path": "empty.xml", "status": 200, "content_type": "application/xml;charset=utf-8" },
+    { "path": "reference.html", "status": 200, "content_type": "text/html; charset=utf-8" },
+    { "path": "font.ttf", "status": 200, "content_type": "application/x-truetype-font" },
+    { "path": "svg.xml", "status": 200, "content_type": "image/svg+xml" },
+    { "path": "xhtml.1", "status": 200, "content_type": "text/xml" },
+    { "path": "xhtml.2", "status": 200, "content_type": "text/xml" },
+    { "path": "xhtml.3", "status": 200, "content_type": "text/xml" },
+    { "path": "support-a.png", "status": 404, "content_type": "image/png" },
+    { "path": "support-b.png", "status": 200, "content_type": "text/html; charset=utf-8" },
+    { "path": "support-c.png", "status": 200, "content_type": "image/png" },
+    { "path": "test.html", "status": 404, "content_type": "image/png" }
+  ]
+}

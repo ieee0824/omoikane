@@ -17,10 +17,25 @@ thread_local! {
 const DOM_BOOTSTRAP: &str = include_str!("dom_bootstrap.js");
 
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// What a scheduled timer executes when it fires.
+///
+/// `setTimeout`/`setInterval` accept either a code string (legal per the HTML
+/// spec, evaluated in the global scope) or a function callback. Function
+/// callbacks are retained as live `JsValue` handles so their captured closure
+/// scope survives until the timer fires, together with any extra arguments
+/// passed after the delay (`setTimeout(fn, ms, arg1, arg2, ...)`).
+#[derive(Debug, Clone)]
+enum TimerPayload {
+    /// A code string, evaluated in the global scope when the timer fires.
+    Source(String),
+    /// A retained function callback plus the extra arguments to invoke it with.
+    Callback { callback: JsValue, args: Vec<JsValue> },
+}
+
+#[derive(Debug, Clone)]
 struct TimerTask {
     id: u64,
-    source: String,
+    payload: TimerPayload,
     next_run_at: u64,
     interval_ms: u64,
     repeat: bool,
@@ -30,17 +45,17 @@ struct TimerTask {
 struct EventLoopState {
     next_timer_id: u64,
     now_ms: u64,
-    macrotasks: VecDeque<String>,
+    macrotasks: VecDeque<TimerPayload>,
     timers: Vec<TimerTask>,
 }
 
 impl EventLoopState {
-    fn schedule_timer(&mut self, source: String, delay_ms: u64, repeat: bool) -> u64 {
+    fn schedule_timer(&mut self, payload: TimerPayload, delay_ms: u64, repeat: bool) -> u64 {
         let id = self.next_timer_id;
         self.next_timer_id += 1;
         self.timers.push(TimerTask {
             id,
-            source,
+            payload,
             next_run_at: self.now_ms.saturating_add(delay_ms),
             interval_ms: delay_ms,
             repeat,
@@ -55,31 +70,35 @@ impl EventLoopState {
     fn advance(&mut self, elapsed_ms: u64) {
         self.now_ms = self.now_ms.saturating_add(elapsed_ms);
 
-        let mut ready = Vec::new();
+        // Collect every timer that is now due, remembering its original fire
+        // time and id so we can enqueue them in fire-time order (ties broken by
+        // registration order, since ids increase monotonically).
+        let mut ready: Vec<(u64, u64, TimerPayload)> = Vec::new();
         for timer in &mut self.timers {
             if timer.next_run_at <= self.now_ms {
-                ready.push((
-                    timer.id,
-                    timer.source.clone(),
-                    timer.repeat,
-                    timer.interval_ms,
-                ));
+                ready.push((timer.next_run_at, timer.id, timer.payload.clone()));
                 if timer.repeat {
                     timer.next_run_at = self.now_ms.saturating_add(timer.interval_ms);
                 }
             }
         }
 
+        ready.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
+
         self.timers
             .retain(|timer| timer.repeat || timer.next_run_at > self.now_ms);
 
-        for (_, source, _, _) in ready {
-            self.macrotasks.push_back(source);
+        for (_, _, payload) in ready {
+            self.macrotasks.push_back(payload);
         }
     }
 
-    fn drain_macrotasks(&mut self) -> Vec<String> {
+    fn drain_macrotasks(&mut self) -> Vec<TimerPayload> {
         self.macrotasks.drain(..).collect()
+    }
+
+    fn has_pending_timers(&self) -> bool {
+        !self.timers.is_empty()
     }
 }
 
@@ -220,20 +239,20 @@ impl JsRuntime {
         self.with_active_host(|context| context.run_jobs())
     }
 
-    /// Schedules a timeout task from Rust.
+    /// Schedules a timeout task from Rust that evaluates `source` as code.
     pub fn set_timeout(&mut self, source: impl Into<String>, delay_ms: u64) -> u64 {
         self.host_state
             .borrow_mut()
             .event_loop
-            .schedule_timer(source.into(), delay_ms, false)
+            .schedule_timer(TimerPayload::Source(source.into()), delay_ms, false)
     }
 
-    /// Schedules an interval task from Rust.
+    /// Schedules an interval task from Rust that evaluates `source` as code.
     pub fn set_interval(&mut self, source: impl Into<String>, interval_ms: u64) -> u64 {
         self.host_state
             .borrow_mut()
             .event_loop
-            .schedule_timer(source.into(), interval_ms, true)
+            .schedule_timer(TimerPayload::Source(source.into()), interval_ms, true)
     }
 
     /// Clears a previously scheduled timer.
@@ -242,12 +261,19 @@ impl JsRuntime {
     }
 
     /// Advances the event loop clock and runs due macrotasks and pending jobs.
+    ///
+    /// Due timers fire in fire-time order (ties broken by registration order).
+    /// Both string-source timers and function-callback timers are supported;
+    /// callbacks re-scheduled from within a firing callback (e.g. an
+    /// `setTimeout(update, delay)` chain) become due on subsequent ticks.
     pub fn tick(&mut self, elapsed_ms: u64) -> JsResult<()> {
         self.host_state.borrow_mut().event_loop.advance(elapsed_ms);
         self.run_until_idle()
     }
 
     /// Runs queued macrotasks and pending promise jobs until idle.
+    ///
+    /// Propagates the first error thrown by a timer callback or source string.
     pub fn run_until_idle(&mut self) -> JsResult<()> {
         loop {
             let tasks = self.host_state.borrow_mut().event_loop.drain_macrotasks();
@@ -256,12 +282,87 @@ impl JsRuntime {
             }
 
             for task in tasks {
-                self.eval(&task)?;
+                self.run_timer_payload(task)?;
                 self.run_jobs()?;
             }
         }
 
         self.run_jobs()
+    }
+
+    /// Returns true if any timers are still scheduled (pending or repeating).
+    pub fn has_pending_timers(&self) -> bool {
+        self.host_state.borrow().event_loop.has_pending_timers()
+    }
+
+    /// Drives the event loop forward in virtual time, firing due timer tasks
+    /// until the timer queue empties or a safety budget is exhausted.
+    ///
+    /// This is the pipeline-facing pump: it advances a virtual clock in
+    /// `step_ms` increments (minimum 1ms), firing `setTimeout`/`setInterval`
+    /// callbacks as they come due, and stops as soon as no timers remain. Two
+    /// caps guard against runaway pages: `max_virtual_ms` bounds total virtual
+    /// time (so a plain `setInterval` cannot spin forever), and `max_tasks`
+    /// bounds the total number of timer tasks executed (so a callback that
+    /// re-schedules many zero-delay timers cannot explode).
+    ///
+    /// Unlike [`tick`](Self::tick), individual callback errors are swallowed so
+    /// that one throwing timer does not halt the remaining pipeline work.
+    ///
+    /// Returns the number of timer tasks that were actually executed.
+    pub fn run_timers(&mut self, max_virtual_ms: u64, step_ms: u64, max_tasks: usize) -> usize {
+        let step = step_ms.max(1);
+        let mut advanced: u64 = 0;
+        let mut tasks_run: usize = 0;
+
+        while advanced < max_virtual_ms && tasks_run < max_tasks {
+            if !self.has_pending_timers() {
+                break;
+            }
+            self.host_state.borrow_mut().event_loop.advance(step);
+            advanced = advanced.saturating_add(step);
+
+            loop {
+                let tasks = self.host_state.borrow_mut().event_loop.drain_macrotasks();
+                if tasks.is_empty() {
+                    break;
+                }
+                let mut hit_cap = false;
+                for task in tasks {
+                    if tasks_run >= max_tasks {
+                        hit_cap = true;
+                        break;
+                    }
+                    // Swallow per-task JS errors: a single failing timer must
+                    // not abort the whole pump during rendering.
+                    let _ = self.run_timer_payload(task);
+                    let _ = self.run_jobs();
+                    tasks_run += 1;
+                }
+                if hit_cap {
+                    break;
+                }
+            }
+        }
+
+        tasks_run
+    }
+
+    /// Executes a single timer payload: evaluates a source string, or invokes a
+    /// retained function callback with its bound extra arguments.
+    fn run_timer_payload(&mut self, payload: TimerPayload) -> JsResult<()> {
+        match payload {
+            TimerPayload::Source(source) => {
+                self.eval(&source)?;
+                Ok(())
+            }
+            TimerPayload::Callback { callback, args } => self.with_active_host(|context| {
+                if let Some(callable) = callback.as_callable() {
+                    callable.call(&JsValue::undefined(), &args, context)?;
+                }
+                Ok(())
+            }),
+        }
     }
 
     /// Dispatches a `DOMContentLoaded` event on the document.
@@ -286,6 +387,37 @@ impl JsRuntime {
             .replace('\u{2028}', "\\u2028")
             .replace('\u{2029}', "\\u2029");
         self.eval(&format!("document.dispatchEvent(new Event('{}'))", escaped))?;
+        self.run_jobs()
+    }
+
+    /// Wires `on*` inline event-handler content attributes to event listeners.
+    ///
+    /// Walks the document tree and, for every element attribute whose name
+    /// starts with `on` (e.g. `onload`, `onclick`), compiles the attribute
+    /// value as the body of `function (event) { ... }` and registers it as an
+    /// event listener for the corresponding event type. The window-reflected
+    /// events on `<body>`/`<frameset>` (`load`, `unload`, `resize`, ...) are
+    /// registered on the Window, so `<body onload="...">` fires when the `load`
+    /// event is dispatched; every other handler is registered on its element.
+    ///
+    /// Call this after the DOM is built (typically after running scripts and
+    /// before firing `load`). It is a no-op for attributes whose value fails to
+    /// compile.
+    pub fn wire_inline_event_handlers(&mut self) -> JsResult<()> {
+        self.eval("__omoikane_wire_inline_handlers()")?;
+        self.run_jobs()
+    }
+
+    /// Dispatches the `load` event on the Window (and thus the document).
+    ///
+    /// In the load pipeline this fires after scripts have executed and
+    /// `DOMContentLoaded` has been dispatched, matching the HTML spec ordering
+    /// (scripts → `DOMContentLoaded` → resource loads → `load`). Combined with
+    /// [`wire_inline_event_handlers`](Self::wire_inline_event_handlers), a
+    /// page's `<body onload="...">` handler runs at this point.
+    pub fn fire_load(&mut self) -> JsResult<()> {
+        // The load event does not bubble.
+        self.eval("window.dispatchEvent(new Event('load', { bubbles: false }))")?;
         self.run_jobs()
     }
 
@@ -423,8 +555,26 @@ fn collect_text_content(node: &NodeHandle) -> String {
     text
 }
 
-/// Fetches an external script source via HTTP.
+/// Fetches an external script's source.
+///
+/// Supports `http:`/`https:` (fetched over the network) and `data:` URIs
+/// (decoded inline via [`crate::http::parse_data_uri`], RFC 2397). Relative
+/// references are resolved against `base_url` when provided.
+///
+/// For `data:` URIs, only JavaScript media types (see
+/// [`is_javascript_mime_type`]) are executed as classic scripts; a `data:` URI
+/// with a non-JavaScript media type returns `None` (treated as a fetch
+/// failure), matching how browsers refuse to run non-script `data:` sources.
 fn fetch_script_source(src: &str, base_url: Option<&crate::http::Url>) -> Option<String> {
+    // data: URI scripts are decoded inline without a network fetch.
+    if src.get(..5).is_some_and(|prefix| prefix.eq_ignore_ascii_case("data:")) {
+        let parsed = crate::http::parse_data_uri(src)?;
+        if !is_javascript_mime_type(&parsed.mime_type) {
+            return None;
+        }
+        return String::from_utf8(parsed.data).ok();
+    }
+
     let url = if src.starts_with("http://") || src.starts_with("https://") {
         src.to_string()
     } else if let Some(base) = base_url {
@@ -439,6 +589,31 @@ fn fetch_script_source(src: &str, base_url: Option<&crate::http::Url>) -> Option
         return None;
     }
     std::str::from_utf8(response.body()).ok().map(|s| s.to_string())
+}
+
+/// Returns whether `mime` is a JavaScript media type per the HTML spec's
+/// "JavaScript MIME type essence match" (case-insensitive, parameters already
+/// stripped). Only these types are executed as classic scripts.
+fn is_javascript_mime_type(mime: &str) -> bool {
+    matches!(
+        mime.trim().to_ascii_lowercase().as_str(),
+        "application/ecmascript"
+            | "application/javascript"
+            | "application/x-ecmascript"
+            | "application/x-javascript"
+            | "text/ecmascript"
+            | "text/javascript"
+            | "text/javascript1.0"
+            | "text/javascript1.1"
+            | "text/javascript1.2"
+            | "text/javascript1.3"
+            | "text/javascript1.4"
+            | "text/javascript1.5"
+            | "text/jscript"
+            | "text/livescript"
+            | "text/x-ecmascript"
+            | "text/x-javascript"
+    )
 }
 
 fn register_host_bindings(
@@ -498,6 +673,11 @@ fn register_host_bindings(
             js_string!("__omoikane_get_attribute"),
             2,
             NativeFunction::from_copy_closure(get_attribute_native),
+        ),
+        (
+            js_string!("__omoikane_attribute_names"),
+            1,
+            NativeFunction::from_copy_closure(attribute_names_native),
         ),
         (
             js_string!("__omoikane_set_attribute"),
@@ -677,12 +857,7 @@ fn schedule_timer_from_js(
     context: &mut Context,
     repeat: bool,
 ) -> JsResult<JsValue> {
-    let source = args
-        .first()
-        .cloned()
-        .unwrap_or_default()
-        .to_string(context)?
-        .to_std_string_escaped();
+    let handler = args.first().cloned().unwrap_or_default();
     let delay_ms = args
         .get(1)
         .cloned()
@@ -690,11 +865,24 @@ fn schedule_timer_from_js(
         .to_u32(context)
         .unwrap_or(0) as u64;
 
+    // A function handler is retained as a live callback (preserving its closure
+    // scope), together with any extra arguments passed after the delay. A
+    // non-callable handler falls back to the HTML string-source behaviour.
+    let payload = if handler.is_callable() {
+        let extra_args: Vec<JsValue> = args.iter().skip(2).cloned().collect();
+        TimerPayload::Callback {
+            callback: handler,
+            args: extra_args,
+        }
+    } else {
+        TimerPayload::Source(handler.to_string(context)?.to_std_string_escaped())
+    };
+
     with_host_state(|state| {
         let id = state
             .borrow_mut()
             .event_loop
-            .schedule_timer(source, delay_ms, repeat);
+            .schedule_timer(payload, delay_ms, repeat);
         Ok(JsValue::from(id as f64))
     })
 }
@@ -791,6 +979,25 @@ fn node_name_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsR
             .get_node(node_id)
             .ok_or_else(|| JsError::from(JsNativeError::error().with_message("node not found")))?;
         Ok(js_string!(node.node_name().as_str()).into())
+    })
+}
+
+fn attribute_names_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let node_id = parse_node_id(args.first(), context)?;
+    with_host_state(|state| {
+        let node = state.borrow().get_node(node_id);
+        let names: Vec<JsValue> = node
+            .and_then(|node| node.attributes())
+            .map(|attributes| {
+                attributes
+                    .keys()
+                    .map(|key| js_string!(key.as_str()).into())
+                    .collect()
+            })
+            .unwrap_or_default();
+        Ok(boa_engine::JsValue::from(
+            boa_engine::object::builtins::JsArray::from_iter(names, context),
+        ))
     })
 }
 
@@ -1925,6 +2132,245 @@ mod tests {
         assert_eq!(result, "first,second,", "defer on inline should be ignored; both run in order");
     }
 
+    // --- 016-4: load event + on* inline handlers + drivers primitives ---
+
+    #[test]
+    fn body_onload_attribute_fires_on_load_and_can_touch_dom() {
+        use crate::html::TreeBuilder;
+        let html = r#"<html><body onload="document.body.setAttribute('data-loaded', 'yes'); globalThis.loadCount = (globalThis.loadCount || 0) + 1;">
+            <p id="p">hi</p>
+        </body></html>"#;
+        let doc = TreeBuilder::parse(html).document();
+        let mut runtime = JsRuntime::with_document(doc).unwrap();
+        runtime.execute_document_scripts(None);
+
+        // Before load fires, the handler must not have run.
+        let before = runtime
+            .eval("globalThis.loadCount || 0")
+            .unwrap()
+            .as_number()
+            .unwrap();
+        assert_eq!(before, 0.0, "onload handler must not fire before load");
+
+        runtime.wire_inline_event_handlers().unwrap();
+        runtime.fire_load().unwrap();
+
+        let count = runtime.eval("globalThis.loadCount").unwrap().as_number().unwrap();
+        assert_eq!(count, 1.0, "body onload should fire exactly once on load");
+        let attr = runtime
+            .eval("document.body.getAttribute('data-loaded')")
+            .unwrap()
+            .as_string()
+            .unwrap()
+            .to_std_string_escaped();
+        assert_eq!(attr, "yes", "onload handler should have mutated the DOM");
+    }
+
+    #[test]
+    fn inline_onclick_handler_receives_event_argument() {
+        use crate::html::TreeBuilder;
+        let html = r#"<html><body><button id="b" onclick="globalThis.clickedType = event.type;">go</button></body></html>"#;
+        let doc = TreeBuilder::parse(html).document();
+        let mut runtime = JsRuntime::with_document(doc).unwrap();
+        runtime.execute_document_scripts(None);
+        runtime.wire_inline_event_handlers().unwrap();
+
+        runtime
+            .eval("document.getElementById('b').dispatchEvent(new Event('click'))")
+            .unwrap();
+        let ty = runtime
+            .eval("globalThis.clickedType")
+            .unwrap()
+            .as_string()
+            .unwrap()
+            .to_std_string_escaped();
+        assert_eq!(ty, "click", "onclick handler should receive the event argument");
+    }
+
+    #[test]
+    fn load_fires_after_dom_content_loaded() {
+        use crate::html::TreeBuilder;
+        // Record the order in which DOMContentLoaded and load fire.
+        let html = r#"<html><body onload="globalThis.order.push('load');">
+            <script>
+                globalThis.order = [];
+                document.addEventListener('DOMContentLoaded', function () { globalThis.order.push('dcl'); });
+            </script>
+        </body></html>"#;
+        let doc = TreeBuilder::parse(html).document();
+        let mut runtime = JsRuntime::with_document(doc).unwrap();
+        // execute_document_scripts fires DOMContentLoaded at the end.
+        runtime.execute_document_scripts(None);
+        runtime.wire_inline_event_handlers().unwrap();
+        runtime.fire_load().unwrap();
+
+        let order = runtime
+            .eval("globalThis.order.join(',')")
+            .unwrap()
+            .as_string()
+            .unwrap()
+            .to_std_string_escaped();
+        assert_eq!(order, "dcl,load", "DOMContentLoaded must fire before load");
+    }
+
+    #[test]
+    fn text_node_data_get_and_set() {
+        let mut runtime = JsRuntime::with_document(default_document()).unwrap();
+        let value = runtime
+            .eval(
+                "const t = document.createTextNode('hello'); \
+                 const before = t.data; \
+                 t.data = 'world'; \
+                 before + '|' + t.data + '|' + t.textContent + '|' + (t instanceof Text) + '|' + t.length",
+            )
+            .unwrap()
+            .as_string()
+            .unwrap()
+            .to_std_string_escaped();
+        assert_eq!(value, "hello|world|world|true|5", "Text.data get/set must map to character data");
+    }
+
+    #[test]
+    fn comment_node_data_get_and_set() {
+        let mut runtime = JsRuntime::with_document(default_document()).unwrap();
+        let value = runtime
+            .eval(
+                "const c = document.createComment('note'); \
+                 const before = c.data; \
+                 c.data = 'changed'; \
+                 before + '|' + c.data + '|' + (c instanceof Comment)",
+            )
+            .unwrap()
+            .as_string()
+            .unwrap()
+            .to_std_string_escaped();
+        assert_eq!(value, "note|changed|true", "Comment.data get/set must map to character data");
+    }
+
+    #[test]
+    fn element_has_no_character_data_property() {
+        let mut runtime = JsRuntime::with_document(default_document()).unwrap();
+        // .data must not be defined on Element nodes (it is a CharacterData API).
+        let is_undefined = runtime
+            .eval("document.createElement('div').data === undefined")
+            .unwrap()
+            .as_boolean()
+            .unwrap();
+        assert!(is_undefined, "Element nodes must not expose CharacterData.data");
+    }
+
+    #[test]
+    fn document_default_view_is_global() {
+        let mut runtime = JsRuntime::with_document(default_document()).unwrap();
+        let same = runtime
+            .eval("document.defaultView === globalThis && document.defaultView === window")
+            .unwrap()
+            .as_boolean()
+            .unwrap();
+        assert!(same, "document.defaultView must be the global window object");
+    }
+
+    #[test]
+    fn node_type_constants_are_exposed() {
+        let mut runtime = JsRuntime::with_document(default_document()).unwrap();
+        // On the Node constructor.
+        assert_eq!(runtime.eval("Node.ELEMENT_NODE").unwrap().as_number().unwrap(), 1.0);
+        assert_eq!(runtime.eval("Node.TEXT_NODE").unwrap().as_number().unwrap(), 3.0);
+        assert_eq!(runtime.eval("Node.COMMENT_NODE").unwrap().as_number().unwrap(), 8.0);
+        assert_eq!(runtime.eval("Node.DOCUMENT_NODE").unwrap().as_number().unwrap(), 9.0);
+        assert_eq!(runtime.eval("Node.DOCUMENT_TYPE_NODE").unwrap().as_number().unwrap(), 10.0);
+        assert_eq!(runtime.eval("Node.DOCUMENT_FRAGMENT_NODE").unwrap().as_number().unwrap(), 11.0);
+        assert_eq!(runtime.eval("Node.NOTATION_NODE").unwrap().as_number().unwrap(), 12.0);
+        // On instances via the prototype (as Acid3 test 19 checks).
+        assert_eq!(
+            runtime.eval("document.DOCUMENT_FRAGMENT_NODE").unwrap().as_number().unwrap(),
+            11.0,
+            "document must inherit DOCUMENT_FRAGMENT_NODE"
+        );
+        assert_eq!(
+            runtime.eval("document.createTextNode('').ELEMENT_NODE").unwrap().as_number().unwrap(),
+            1.0,
+            "text node must inherit ELEMENT_NODE"
+        );
+    }
+
+    #[test]
+    fn local_name_lowercases_elements_and_is_null_for_others() {
+        let mut runtime = JsRuntime::with_document(default_document()).unwrap();
+        let el = runtime
+            .eval("document.createElement('DIV').localName")
+            .unwrap()
+            .as_string()
+            .unwrap()
+            .to_std_string_escaped();
+        assert_eq!(el, "div", "element localName must be the lower-cased tag name");
+        // Non-element nodes (text, comment, document) have null localName.
+        assert!(runtime.eval("document.createTextNode('x').localName === null").unwrap().as_boolean().unwrap());
+        assert!(runtime.eval("document.createComment('x').localName === null").unwrap().as_boolean().unwrap());
+        assert!(runtime.eval("document.localName === null").unwrap().as_boolean().unwrap());
+    }
+
+    // --- 016-5: data: URI scripts ---
+
+    #[test]
+    fn fetch_script_source_decodes_acid3_data_uri_vectors() {
+        // The five Acid3 (test 97) vectors and the JS source each must yield.
+        let cases = [
+            ("data:text/javascript,d1%20%3D%20'one'%3B", "d1 = 'one';"),
+            ("data:text/javascript;base64,ZDIgPSAndHdvJzs%3D", "d2 = 'two';"),
+            (
+                "data:text/javascript;base64,%5a%44%4d%67%50%53%41%6e%64%47%68%79%5a%57%55%6e%4f%77%3D%3D",
+                "d3 = 'three';",
+            ),
+            (
+                "data:text/javascript;base64,%20ZD%20Qg%0D%0APS%20An%20Zm91cic%0D%0A%207%20",
+                "d4 = 'four';",
+            ),
+            (
+                "data:text/javascript,d5%20%3D%20'five%5Cu0027s'%3B",
+                "d5 = 'five\\u0027s';",
+            ),
+        ];
+        for (uri, expected) in cases {
+            let source = fetch_script_source(uri, None)
+                .unwrap_or_else(|| panic!("data: URI should decode: {uri}"));
+            assert_eq!(source, expected, "wrong decoded source for {uri}");
+        }
+    }
+
+    #[test]
+    fn fetch_script_source_rejects_non_javascript_data_uri() {
+        // A data: URI whose media type is not JavaScript is not executed.
+        assert!(
+            fetch_script_source("data:text/plain,alert(1)", None).is_none(),
+            "non-JavaScript data: media type must not be treated as a script"
+        );
+    }
+
+    #[test]
+    fn data_uri_scripts_define_globals_end_to_end() {
+        // Executing the five decoded sources must define d1..d5 as Acid3 expects.
+        let mut runtime = JsRuntime::with_document(default_document()).unwrap();
+        let vectors = [
+            "data:text/javascript,d1%20%3D%20'one'%3B",
+            "data:text/javascript;base64,ZDIgPSAndHdvJzs%3D",
+            "data:text/javascript;base64,%5a%44%4d%67%50%53%41%6e%64%47%68%79%5a%57%55%6e%4f%77%3D%3D",
+            "data:text/javascript;base64,%20ZD%20Qg%0D%0APS%20An%20Zm91cic%0D%0A%207%20",
+            "data:text/javascript,d5%20%3D%20'five%5Cu0027s'%3B",
+        ];
+        for uri in vectors {
+            let source = fetch_script_source(uri, None).unwrap();
+            runtime.eval(&source).unwrap();
+        }
+        let combined = runtime
+            .eval("[d1, d2, d3, d4, d5].join('|')")
+            .unwrap()
+            .as_string()
+            .unwrap()
+            .to_std_string_escaped();
+        assert_eq!(combined, "one|two|three|four|five's");
+    }
+
     #[test]
     fn intersection_observer_fires_callback_on_observe() {
         let doc = NodeHandle::document();
@@ -2566,5 +3012,584 @@ mod tests {
         let found_old = runtime.eval("document.querySelector('#old')")
             .unwrap();
         assert!(found_old.is_null(), "old child should be removed");
+    }
+
+    // ── Timer callback / event-loop tests (issue 016-3) ──────────────────────
+
+    #[test]
+    fn set_timeout_function_callback_preserves_closure() {
+        let mut runtime = JsRuntime::new().unwrap();
+        // The captured `base` lives only in the IIFE scope; if the callback
+        // were stringified via toString() this closure would be lost.
+        runtime
+            .eval(
+                r#"
+                globalThis.result = 0;
+                (function () {
+                    let base = 40;
+                    setTimeout(function () { globalThis.result = base + 2; }, 0);
+                })();
+                "#,
+            )
+            .unwrap();
+
+        // Not fired before the loop runs.
+        assert_eq!(
+            runtime.eval("globalThis.result").unwrap().as_number(),
+            Some(0.0)
+        );
+
+        runtime.tick(0).unwrap();
+
+        assert_eq!(
+            runtime.eval("globalThis.result").unwrap().as_number(),
+            Some(42.0),
+            "callback should fire preserving captured closure variable"
+        );
+    }
+
+    #[test]
+    fn set_timeout_function_fires_only_at_delay_boundary() {
+        let mut runtime = JsRuntime::new().unwrap();
+        runtime
+            .eval("globalThis.fired = false; setTimeout(function () { globalThis.fired = true; }, 10);")
+            .unwrap();
+
+        runtime.tick(9).unwrap();
+        assert_eq!(
+            runtime.eval("globalThis.fired").unwrap().as_boolean(),
+            Some(false),
+            "timer must not fire before its delay elapses"
+        );
+
+        runtime.tick(1).unwrap();
+        assert_eq!(
+            runtime.eval("globalThis.fired").unwrap().as_boolean(),
+            Some(true),
+            "timer must fire once the delay is reached"
+        );
+    }
+
+    #[test]
+    fn set_timeout_callback_reschedule_chain_advances() {
+        // Mirrors the Acid3 update() loop: each callback re-schedules the next.
+        let mut runtime = JsRuntime::new().unwrap();
+        runtime
+            .eval(
+                r#"
+                globalThis.n = 0;
+                function step() {
+                    globalThis.n += 1;
+                    if (globalThis.n < 5) {
+                        setTimeout(step, 10);
+                    }
+                }
+                setTimeout(step, 10);
+                "#,
+            )
+            .unwrap();
+
+        // Each tick(10) fires the currently-due `step`, which schedules the next.
+        for _ in 0..6 {
+            runtime.tick(10).unwrap();
+        }
+
+        assert_eq!(
+            runtime.eval("globalThis.n").unwrap().as_number(),
+            Some(5.0),
+            "re-scheduled setTimeout chain should advance exactly 5 times"
+        );
+    }
+
+    #[test]
+    fn set_interval_repeats_and_clear_interval_stops() {
+        let mut runtime = JsRuntime::new().unwrap();
+        runtime
+            .eval("globalThis.count = 0; globalThis.tid = setInterval(function () { globalThis.count += 1; }, 5);")
+            .unwrap();
+
+        runtime.tick(5).unwrap();
+        assert_eq!(runtime.eval("globalThis.count").unwrap().as_number(), Some(1.0));
+        runtime.tick(5).unwrap();
+        assert_eq!(runtime.eval("globalThis.count").unwrap().as_number(), Some(2.0));
+
+        runtime.eval("clearInterval(globalThis.tid);").unwrap();
+        runtime.tick(5).unwrap();
+        runtime.tick(5).unwrap();
+        assert_eq!(
+            runtime.eval("globalThis.count").unwrap().as_number(),
+            Some(2.0),
+            "cleared interval must not fire again"
+        );
+    }
+
+    #[test]
+    fn clear_timeout_removes_pending_function_timer() {
+        let mut runtime = JsRuntime::new().unwrap();
+        runtime
+            .eval(
+                r#"
+                globalThis.ran = false;
+                globalThis.tid = setTimeout(function () { globalThis.ran = true; }, 10);
+                clearTimeout(globalThis.tid);
+                "#,
+            )
+            .unwrap();
+
+        runtime.tick(20).unwrap();
+        assert_eq!(
+            runtime.eval("globalThis.ran").unwrap().as_boolean(),
+            Some(false),
+            "clearTimeout must cancel a pending function-callback timer"
+        );
+    }
+
+    #[test]
+    fn set_timeout_string_source_still_evaluates() {
+        // The HTML string form must keep working alongside function callbacks.
+        let mut runtime = JsRuntime::new().unwrap();
+        runtime.eval("globalThis.marker = 0;").unwrap();
+        runtime
+            .eval(r#"setTimeout("globalThis.marker = 99;", 5);"#)
+            .unwrap();
+
+        runtime.tick(4).unwrap();
+        assert_eq!(runtime.eval("globalThis.marker").unwrap().as_number(), Some(0.0));
+        runtime.tick(1).unwrap();
+        assert_eq!(
+            runtime.eval("globalThis.marker").unwrap().as_number(),
+            Some(99.0),
+            "string-source setTimeout must still evaluate as code"
+        );
+    }
+
+    #[test]
+    fn set_timeout_passes_extra_arguments_to_callback() {
+        let mut runtime = JsRuntime::new().unwrap();
+        runtime
+            .eval(
+                "globalThis.sum = 0; setTimeout(function (a, b) { globalThis.sum = a + b; }, 0, 3, 4);",
+            )
+            .unwrap();
+
+        runtime.tick(0).unwrap();
+        assert_eq!(
+            runtime.eval("globalThis.sum").unwrap().as_number(),
+            Some(7.0),
+            "extra setTimeout arguments must be forwarded to the callback"
+        );
+    }
+
+    #[test]
+    fn execute_document_scripts_then_pump_settles_settimeout_dom_change() {
+        use crate::html::TreeBuilder;
+        let html = r#"<html><body>
+            <div id="target"></div>
+            <script>
+                setTimeout(function () {
+                    document.getElementById("target").setAttribute("data-done", "yes");
+                }, 20);
+            </script>
+        </body></html>"#;
+        let doc = TreeBuilder::parse(html).document();
+        let mut runtime = JsRuntime::with_document(doc.clone()).unwrap();
+
+        let errors = runtime.execute_document_scripts(None);
+        assert!(errors.is_empty(), "no script errors expected: {errors:?}");
+
+        // Before pumping the timers, the DOM mutation has not happened yet.
+        let target = doc.query_selector("#target").expect("find #target");
+        assert_eq!(
+            target.attributes().unwrap_or_default().get("data-done").map(|s| s.as_str()),
+            None,
+            "attribute must not be set before the timer fires"
+        );
+
+        let tasks = runtime.run_timers(1_000, 10, 10_000);
+        assert_eq!(tasks, 1, "exactly one timer callback should have run");
+
+        let attrs = target.attributes().unwrap_or_default();
+        assert_eq!(
+            attrs.get("data-done").map(|s| s.as_str()),
+            Some("yes"),
+            "setTimeout callback should have mutated the DOM after run_timers"
+        );
+    }
+
+    #[test]
+    fn run_timers_caps_infinite_interval_by_virtual_time() {
+        let mut runtime = JsRuntime::new().unwrap();
+        runtime
+            .eval("globalThis.ticks = 0; setInterval(function () { globalThis.ticks += 1; }, 10);")
+            .unwrap();
+
+        // 100ms of virtual time at a 10ms step fires the interval exactly 10 times.
+        let tasks = runtime.run_timers(100, 10, 10_000);
+        assert_eq!(tasks, 10, "virtual-time budget should bound interval firings");
+        assert_eq!(
+            runtime.eval("globalThis.ticks").unwrap().as_number(),
+            Some(10.0),
+            "infinite interval must stop at the virtual-time cap"
+        );
+    }
+
+    // ── DOM2 Core / DOMException / namespaces (issue 016-12) ─────────────────
+
+    /// Evaluates `source` (expected to be an IIFE returning 0 on success) and
+    /// asserts the numeric result is 0, reporting the failing step otherwise.
+    fn assert_js_ok(runtime: &mut JsRuntime, source: &str) {
+        let result = runtime
+            .eval(source)
+            .unwrap_or_else(|e| panic!("eval failed: {e}"))
+            .as_number()
+            .expect("expected a numeric result");
+        assert_eq!(result, 0.0, "JS check failed at step {result}");
+    }
+
+    #[test]
+    fn create_element_rejects_invalid_names_with_code_5() {
+        let mut runtime = JsRuntime::new().unwrap();
+        assert_js_ok(
+            &mut runtime,
+            r#"
+            (function () {
+                function codeFor(name) {
+                    try { document.createElement(name); return -1; }
+                    catch (e) { return e.code; }
+                }
+                var invalid = ['<div>', '0div', 'di v', 'di<v', '-div', '.div'];
+                for (var i = 0; i < invalid.length; i += 1) {
+                    if (codeFor(invalid[i]) !== 5) return i + 1;
+                }
+                if (codeFor('div') !== -1) return 100;      // valid name must not throw
+                if (codeFor('form div') !== 5) return 101; // NUL byte is invalid
+                return 0;
+            })()
+        "#,
+        );
+    }
+
+    #[test]
+    fn dom_exception_exposes_code_and_all_constants() {
+        let mut runtime = JsRuntime::new().unwrap();
+        assert_js_ok(
+            &mut runtime,
+            r#"
+            (function () {
+                var e = new DOMException("boom", "InvalidCharacterError");
+                if (e.code !== 5) return 1;
+                if (e.message !== "boom") return 2;
+                if (e.name !== "InvalidCharacterError") return 3;
+                if (e.INDEX_SIZE_ERR !== 1) return 4;
+                if (e.HIERARCHY_REQUEST_ERR !== 3) return 5;
+                if (e.NAMESPACE_ERR !== 14) return 6;
+                if (e.INVALID_ACCESS_ERR !== 15) return 7;
+                if (DOMException.INVALID_CHARACTER_ERR !== 5) return 8;
+                if (DOMException.TYPE_MISMATCH_ERR !== 17) return 9;
+                return 0;
+            })()
+        "#,
+        );
+    }
+
+    #[test]
+    fn create_element_ns_exposes_namespace_properties() {
+        let mut runtime = JsRuntime::new().unwrap();
+        assert_js_ok(
+            &mut runtime,
+            r#"
+            (function () {
+                var el = document.createElementNS('http://ns.example.com/', 'prefix:localname');
+                if (el.tagName !== 'prefix:localname') return 1;
+                if (el.nodeName !== 'prefix:localname') return 2;
+                if (el.prefix !== 'prefix') return 3;
+                if (el.localName !== 'localname') return 4;
+                if (el.namespaceURI !== 'http://ns.example.com/') return 5;
+                return 0;
+            })()
+        "#,
+        );
+    }
+
+    #[test]
+    fn create_element_ns_validates_qualified_names() {
+        let mut runtime = JsRuntime::new().unwrap();
+        assert_js_ok(
+            &mut runtime,
+            r#"
+            (function () {
+                function codeFor(ns, name) {
+                    try { document.createElementNS(ns, name); return -1; }
+                    catch (e) { return e.code; }
+                }
+                if (codeFor(null, '<div>') !== 5) return 1;           // invalid char
+                if (codeFor(null, '0div') !== 5) return 2;
+                if (codeFor('http://example.com/', 'di<v') !== 5) return 3;
+                if (codeFor(null, ':div') !== 14) return 4;           // malformed qname
+                if (codeFor(null, 'd:iv') !== 14) return 5;           // prefix, null ns
+                if (codeFor('http://example.com/', 'xml:test') !== 14) return 6;
+                if (codeFor('http://example.com/', 'xmlns:test') !== 14) return 7;
+                if (codeFor('http://www.w3.org/2000/xmlns/', 'x:test') !== 14) return 8;
+                if (codeFor('http://www.w3.org/2000/xmlns/', 'xmlns:test') !== -1) return 9; // valid
+                return 0;
+            })()
+        "#,
+        );
+    }
+
+    #[test]
+    fn implementation_create_document_type_rejects_malformed_qname() {
+        let mut runtime = JsRuntime::new().unwrap();
+        assert_js_ok(
+            &mut runtime,
+            r#"
+            (function () {
+                try {
+                    document.implementation.createDocumentType('a:', '', '');
+                    return 1;
+                } catch (e) {
+                    if (e.code !== e.NAMESPACE_ERR) return 2;
+                    if (e.INVALID_ACCESS_ERR !== 15) return 3;
+                }
+                return 0;
+            })()
+        "#,
+        );
+    }
+
+    #[test]
+    fn append_child_cycle_throws_hierarchy_request_error() {
+        let mut runtime = JsRuntime::new().unwrap();
+        assert_js_ok(
+            &mut runtime,
+            r#"
+            (function () {
+                var e = null;
+                try {
+                    document.body.appendChild(document.documentElement);
+                } catch (err) {
+                    e = err;
+                }
+                if (!e) return 1;
+                if (e.HIERARCHY_REQUEST_ERR !== 3) return 2;
+                if (e.code !== 3) return 3;
+                return 0;
+            })()
+        "#,
+        );
+    }
+
+    // ── Events: createEvent / initUIEvent (issue 016-12) ─────────────────────
+
+    #[test]
+    fn create_event_ui_event_supports_init_ui_event_and_dispatch() {
+        let mut runtime = JsRuntime::new().unwrap();
+        assert_js_ok(
+            &mut runtime,
+            r#"
+            (function () {
+                var container = document.createElement('div');
+                var child = document.createElement('span');
+                container.appendChild(child);
+                document.body.appendChild(container);
+                var count = 0;
+                var seenDetail = null;
+                container.addEventListener('test', function (event) {
+                    count += 1;
+                    seenDetail = event.detail;
+                }, false);
+                var event = document.createEvent('UIEvents');
+                event.initUIEvent('test', true, false, null, 6);
+                var returned = child.dispatchEvent(event);
+                if (returned !== true) return 1;
+                if (count !== 1) return 2;
+                if (seenDetail !== 6) return 3;
+                if (event.type !== 'test') return 4;
+                if (event.bubbles !== true) return 5;
+                return 0;
+            })()
+        "#,
+        );
+    }
+
+    // ── Table / form / input / button / label / meta / select (issue 016-13) ─
+
+    #[test]
+    fn table_caption_head_foot_accessors() {
+        let mut runtime = JsRuntime::new().unwrap();
+        assert_js_ok(
+            &mut runtime,
+            r#"
+            (function () {
+                var t = document.createElement('table');
+                if (t.caption) return 1;
+                if (!t.tBodies || t.tBodies.length !== 0) return 2;
+                if (!t.rows || t.rows.length !== 0) return 3;
+                if (t.tFoot || t.tHead) return 4;
+                var caption = t.createCaption();
+                var thead = t.createTHead();
+                var tfoot = t.createTFoot();
+                if (t.caption !== caption) return 5;
+                if (t.tHead !== thead) return 6;
+                if (t.tFoot !== tfoot) return 7;
+                if (t.childNodes.length !== 3) return 8;
+                t.deleteCaption();
+                t.deleteTHead();
+                t.deleteTFoot();
+                if (t.caption || t.tHead || t.tFoot) return 9;
+                if (t.hasChildNodes()) return 10;
+                if (t.childNodes.length !== 0) return 11;
+                return 0;
+            })()
+        "#,
+        );
+    }
+
+    #[test]
+    fn input_value_is_dirty_and_preserves_lone_surrogate() {
+        let mut runtime = JsRuntime::new().unwrap();
+        assert_js_ok(
+            &mut runtime,
+            r#"
+            (function () {
+                var i = document.createElement('input');
+                i.name = 'first';
+                i.type = 'text';
+                i.value = 'test';
+                if (i.getAttribute('name') !== 'first') return 1;
+                if (i.name !== 'first') return 2;
+                if (i.hasAttribute('value')) return 3;   // value is not reflected
+                if (i.value !== 'test') return 4;
+                // A lone surrogate must survive round-tripping through the value IDL attribute.
+                var before = String.fromCharCode(0xd863) + 'text';
+                i.value = before;
+                var after = i.value;
+                if (!(after === before && before.length === 5)) return 5;
+                return 0;
+            })()
+        "#,
+        );
+    }
+
+    #[test]
+    fn form_elements_named_and_indexed_access() {
+        let mut runtime = JsRuntime::new().unwrap();
+        assert_js_ok(
+            &mut runtime,
+            r#"
+            (function () {
+                var f = document.createElement('form');
+                var i = document.createElement('input');
+                i.name = 'first';
+                f.appendChild(i);
+                if (f.elements === f) return 1;
+                if (f.elements.length !== 1) return 2;
+                if (f.elements[0] !== i) return 3;
+                if (f.elements.first !== i) return 4;
+                if (f.elements.second !== null) return 5;
+                i.name = 'second';
+                if (f.elements.second !== i) return 6;
+                if (f.elements.first !== null) return 7;
+                return 0;
+            })()
+        "#,
+        );
+    }
+
+    #[test]
+    fn button_type_defaults_to_submit() {
+        let mut runtime = JsRuntime::new().unwrap();
+        assert_js_ok(
+            &mut runtime,
+            r#"
+            (function () {
+                var button = document.createElement('button');
+                if (button.type !== 'submit') return 1;
+                button.setAttribute('type', 'button');
+                if (button.type !== 'button') return 2;
+                button.removeAttribute('type');
+                if (button.type !== 'submit') return 3;
+                button.setAttribute('value', 'apple');
+                button.appendChild(document.createTextNode('banana'));
+                if (button.value !== 'apple') return 4;
+                return 0;
+            })()
+        "#,
+        );
+    }
+
+    #[test]
+    fn label_html_for_and_meta_http_equiv_reflect_content_attributes() {
+        let mut runtime = JsRuntime::new().unwrap();
+        assert_js_ok(
+            &mut runtime,
+            r#"
+            (function () {
+                var label = document.createElement('label');
+                label.htmlFor = 'jars';
+                if (label.htmlFor !== 'jars') return 1;
+                if (label.getAttribute('for') !== 'jars') return 2;
+                if (label.hasAttribute('htmlFor')) return 3;
+                if ('for' in label) return 4;
+                var meta = document.createElement('meta');
+                meta.setAttribute('http-equiv', 'boxes');
+                if (meta.httpEquiv !== 'boxes') return 5;
+                meta.httpEquiv = 'cans';
+                if (meta.getAttribute('http-equiv') !== 'cans') return 6;
+                if (meta.hasAttribute('httpEquiv')) return 7;
+                return 0;
+            })()
+        "#,
+        );
+    }
+
+    #[test]
+    fn select_add_and_options_collection() {
+        let mut runtime = JsRuntime::new().unwrap();
+        assert_js_ok(
+            &mut runtime,
+            r#"
+            (function () {
+                var s = document.createElement('select');
+                var o = document.createElement('option');
+                s.add(o, null);
+                if (s.firstChild !== o) return 1;
+                if (s.childNodes.length !== 1) return 2;
+                if (s.options.length !== 1) return 3;
+                if (s.options[0] !== o) return 4;
+                return 0;
+            })()
+        "#,
+        );
+    }
+
+    // ── ECMAScript Annex B (issue 016-6) ─────────────────────────────────────
+
+    #[test]
+    fn string_substr_supports_negative_start() {
+        let mut runtime = JsRuntime::new().unwrap();
+        let matches = runtime
+            .eval(r#""scathing".substr(-7, 3) === "cat""#)
+            .unwrap()
+            .as_boolean()
+            .unwrap();
+        assert!(matches, "String.prototype.substr must handle negative start");
+    }
+
+    #[test]
+    fn run_timers_caps_infinite_interval_by_task_count() {
+        let mut runtime = JsRuntime::new().unwrap();
+        runtime
+            .eval("globalThis.ticks = 0; setInterval(function () { globalThis.ticks += 1; }, 1);")
+            .unwrap();
+
+        // Effectively unlimited virtual time, but the task cap stops it.
+        let tasks = runtime.run_timers(u64::MAX, 1, 50);
+        assert_eq!(tasks, 50, "task-count cap should bound total timer executions");
+        assert_eq!(
+            runtime.eval("globalThis.ticks").unwrap().as_number(),
+            Some(50.0),
+            "infinite interval must stop at the task-count cap"
+        );
     }
 }

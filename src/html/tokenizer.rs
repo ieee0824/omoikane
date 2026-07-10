@@ -114,6 +114,40 @@ enum State {
     Doctype,
     BeforeDoctypeName,
     DoctypeName,
+    // RAWTEXT states (§13.2.5.3–13.2.5.6): `<style>`, `<xmp>`, `<noembed>`,
+    // `<noframes>`. Content is emitted verbatim; only the matching end tag
+    // (e.g. `</style>`) leaves the state.
+    RawText,
+    RawTextLessThanSign,
+    RawTextEndTagOpen,
+    RawTextEndTagName,
+    // RCDATA states (§13.2.5.2, 13.2.5.7–13.2.5.9): `<title>`, `<textarea>`.
+    // Like RAWTEXT but character references are still decoded.
+    RcData,
+    RcDataLessThanSign,
+    RcDataEndTagOpen,
+    RcDataEndTagName,
+    // Script data states (§13.2.5.4, 13.2.5.14–13.2.5.34): `<script>`. Includes
+    // the escaped / double-escaped sub-states so that `<!-- ... -->` and nested
+    // `<script>` sequences inside script content are handled per spec.
+    ScriptData,
+    ScriptDataLessThanSign,
+    ScriptDataEndTagOpen,
+    ScriptDataEndTagName,
+    ScriptDataEscapeStart,
+    ScriptDataEscapeStartDash,
+    ScriptDataEscaped,
+    ScriptDataEscapedDash,
+    ScriptDataEscapedDashDash,
+    ScriptDataEscapedLessThanSign,
+    ScriptDataEscapedEndTagOpen,
+    ScriptDataEscapedEndTagName,
+    ScriptDataDoubleEscapeStart,
+    ScriptDataDoubleEscaped,
+    ScriptDataDoubleEscapedDash,
+    ScriptDataDoubleEscapedDashDash,
+    ScriptDataDoubleEscapedLessThanSign,
+    ScriptDataDoubleEscapeEnd,
 }
 
 /// A small HTML tokenizer.
@@ -164,6 +198,11 @@ impl<'a> Tokenizer<'a> {
         let mut current_comment = String::new();
         let mut current_doctype_name = String::new();
         let mut current_doctype_force_quirks = false;
+        // Scratch buffer for the tentative end-tag name in RAWTEXT/RCDATA/script
+        // states, and the name of the last start tag emitted (used to recognise
+        // the *appropriate* end tag that leaves those states).
+        let mut temp_buffer = String::new();
+        let mut last_start_tag_name = String::new();
 
         while let Some(ch) = cursor.consume() {
             match state {
@@ -233,11 +272,18 @@ impl<'a> Tokenizer<'a> {
                             &current_attributes,
                             current_self_closing,
                         );
+                        if current_end_tag_name.is_empty() {
+                            state = raw_next_state(&current_tag_name, current_self_closing);
+                            if state != State::Data {
+                                last_start_tag_name = current_tag_name.clone();
+                            }
+                        } else {
+                            state = State::Data;
+                        }
                         current_tag_name.clear();
                         current_end_tag_name.clear();
                         current_attributes.clear();
                         current_self_closing = false;
-                        state = State::Data;
                     }
                     c => {
                         if current_end_tag_name.is_empty() {
@@ -258,11 +304,18 @@ impl<'a> Tokenizer<'a> {
                             &current_attributes,
                             current_self_closing,
                         );
+                        if current_end_tag_name.is_empty() {
+                            state = raw_next_state(&current_tag_name, current_self_closing);
+                            if state != State::Data {
+                                last_start_tag_name = current_tag_name.clone();
+                            }
+                        } else {
+                            state = State::Data;
+                        }
                         current_tag_name.clear();
                         current_end_tag_name.clear();
                         current_attributes.clear();
                         current_self_closing = false;
-                        state = State::Data;
                     }
                     _ => {
                         current_attr_name.clear();
@@ -297,11 +350,18 @@ impl<'a> Tokenizer<'a> {
                             &current_attributes,
                             current_self_closing,
                         );
+                        if current_end_tag_name.is_empty() {
+                            state = raw_next_state(&current_tag_name, current_self_closing);
+                            if state != State::Data {
+                                last_start_tag_name = current_tag_name.clone();
+                            }
+                        } else {
+                            state = State::Data;
+                        }
                         current_tag_name.clear();
                         current_end_tag_name.clear();
                         current_attributes.clear();
                         current_self_closing = false;
-                        state = State::Data;
                     }
                     c => current_attr_name.push(c.to_ascii_lowercase()),
                 },
@@ -329,11 +389,18 @@ impl<'a> Tokenizer<'a> {
                             &current_attributes,
                             current_self_closing,
                         );
+                        if current_end_tag_name.is_empty() {
+                            state = raw_next_state(&current_tag_name, current_self_closing);
+                            if state != State::Data {
+                                last_start_tag_name = current_tag_name.clone();
+                            }
+                        } else {
+                            state = State::Data;
+                        }
                         current_tag_name.clear();
                         current_end_tag_name.clear();
                         current_attributes.clear();
                         current_self_closing = false;
-                        state = State::Data;
                     }
                     _ => {
                         push_attribute(
@@ -362,11 +429,18 @@ impl<'a> Tokenizer<'a> {
                             &current_attributes,
                             current_self_closing,
                         );
+                        if current_end_tag_name.is_empty() {
+                            state = raw_next_state(&current_tag_name, current_self_closing);
+                            if state != State::Data {
+                                last_start_tag_name = current_tag_name.clone();
+                            }
+                        } else {
+                            state = State::Data;
+                        }
                         current_tag_name.clear();
                         current_end_tag_name.clear();
                         current_attributes.clear();
                         current_self_closing = false;
-                        state = State::Data;
                     }
                     _ => {
                         current_attr_value.push(ch);
@@ -438,11 +512,18 @@ impl<'a> Tokenizer<'a> {
                             &current_attributes,
                             current_self_closing,
                         );
+                        if current_end_tag_name.is_empty() {
+                            state = raw_next_state(&current_tag_name, current_self_closing);
+                            if state != State::Data {
+                                last_start_tag_name = current_tag_name.clone();
+                            }
+                        } else {
+                            state = State::Data;
+                        }
                         current_tag_name.clear();
                         current_end_tag_name.clear();
                         current_attributes.clear();
                         current_self_closing = false;
-                        state = State::Data;
                     }
                     _ => current_attr_value.push(ch),
                 },
@@ -457,11 +538,18 @@ impl<'a> Tokenizer<'a> {
                             &current_attributes,
                             current_self_closing,
                         );
+                        if current_end_tag_name.is_empty() {
+                            state = raw_next_state(&current_tag_name, current_self_closing);
+                            if state != State::Data {
+                                last_start_tag_name = current_tag_name.clone();
+                            }
+                        } else {
+                            state = State::Data;
+                        }
                         current_tag_name.clear();
                         current_end_tag_name.clear();
                         current_attributes.clear();
                         current_self_closing = false;
-                        state = State::Data;
                     }
                     _ => {
                         errors.push(HtmlParseError::UnexpectedEof);
@@ -481,11 +569,18 @@ impl<'a> Tokenizer<'a> {
                             &current_attributes,
                             current_self_closing,
                         );
+                        if current_end_tag_name.is_empty() {
+                            state = raw_next_state(&current_tag_name, current_self_closing);
+                            if state != State::Data {
+                                last_start_tag_name = current_tag_name.clone();
+                            }
+                        } else {
+                            state = State::Data;
+                        }
                         current_tag_name.clear();
                         current_end_tag_name.clear();
                         current_attributes.clear();
                         current_self_closing = false;
-                        state = State::Data;
                     }
                     _ => {
                         state = State::BeforeAttributeName;
@@ -620,6 +715,352 @@ impl<'a> Tokenizer<'a> {
                     }
                     _ => current_doctype_name.push(ch.to_ascii_lowercase()),
                 },
+
+                // --- RAWTEXT (§13.2.5.3–13.2.5.6) ---
+                State::RawText => match ch {
+                    '<' => state = State::RawTextLessThanSign,
+                    _ => text_buffer.push(ch),
+                },
+                State::RawTextLessThanSign => match ch {
+                    '/' => {
+                        temp_buffer.clear();
+                        state = State::RawTextEndTagOpen;
+                    }
+                    _ => {
+                        text_buffer.push('<');
+                        state = State::RawText;
+                        cursor.reconsume();
+                    }
+                },
+                State::RawTextEndTagOpen => match ch {
+                    c if c.is_ascii_alphabetic() => {
+                        temp_buffer.clear();
+                        state = State::RawTextEndTagName;
+                        cursor.reconsume();
+                    }
+                    _ => {
+                        text_buffer.push('<');
+                        text_buffer.push('/');
+                        state = State::RawText;
+                        cursor.reconsume();
+                    }
+                },
+                State::RawTextEndTagName => {
+                    if let Some(next) = raw_end_tag_name_step(
+                        ch,
+                        &mut temp_buffer,
+                        &last_start_tag_name,
+                        &mut text_buffer,
+                        &mut tokens,
+                        &mut current_end_tag_name,
+                        &mut current_tag_name,
+                        &mut current_attributes,
+                        &mut current_self_closing,
+                        State::RawTextEndTagName,
+                    ) {
+                        state = next;
+                    } else {
+                        cursor.reconsume();
+                        state = State::RawText;
+                    }
+                }
+
+                // --- RCDATA (§13.2.5.2, 13.2.5.7–13.2.5.9) ---
+                State::RcData => match ch {
+                    '&' => match consume_character_reference(&mut cursor) {
+                        Ok(decoded) => text_buffer.push_str(&decoded),
+                        Err(error) => {
+                            errors.push(error);
+                            text_buffer.push('&');
+                        }
+                    },
+                    '<' => state = State::RcDataLessThanSign,
+                    _ => text_buffer.push(ch),
+                },
+                State::RcDataLessThanSign => match ch {
+                    '/' => {
+                        temp_buffer.clear();
+                        state = State::RcDataEndTagOpen;
+                    }
+                    _ => {
+                        text_buffer.push('<');
+                        state = State::RcData;
+                        cursor.reconsume();
+                    }
+                },
+                State::RcDataEndTagOpen => match ch {
+                    c if c.is_ascii_alphabetic() => {
+                        temp_buffer.clear();
+                        state = State::RcDataEndTagName;
+                        cursor.reconsume();
+                    }
+                    _ => {
+                        text_buffer.push('<');
+                        text_buffer.push('/');
+                        state = State::RcData;
+                        cursor.reconsume();
+                    }
+                },
+                State::RcDataEndTagName => {
+                    if let Some(next) = raw_end_tag_name_step(
+                        ch,
+                        &mut temp_buffer,
+                        &last_start_tag_name,
+                        &mut text_buffer,
+                        &mut tokens,
+                        &mut current_end_tag_name,
+                        &mut current_tag_name,
+                        &mut current_attributes,
+                        &mut current_self_closing,
+                        State::RcDataEndTagName,
+                    ) {
+                        state = next;
+                    } else {
+                        cursor.reconsume();
+                        state = State::RcData;
+                    }
+                }
+
+                // --- Script data (§13.2.5.4, 13.2.5.14–13.2.5.34) ---
+                State::ScriptData => match ch {
+                    '<' => state = State::ScriptDataLessThanSign,
+                    _ => text_buffer.push(ch),
+                },
+                State::ScriptDataLessThanSign => match ch {
+                    '/' => {
+                        temp_buffer.clear();
+                        state = State::ScriptDataEndTagOpen;
+                    }
+                    '!' => {
+                        text_buffer.push('<');
+                        text_buffer.push('!');
+                        state = State::ScriptDataEscapeStart;
+                    }
+                    _ => {
+                        text_buffer.push('<');
+                        state = State::ScriptData;
+                        cursor.reconsume();
+                    }
+                },
+                State::ScriptDataEndTagOpen => match ch {
+                    c if c.is_ascii_alphabetic() => {
+                        temp_buffer.clear();
+                        state = State::ScriptDataEndTagName;
+                        cursor.reconsume();
+                    }
+                    _ => {
+                        text_buffer.push('<');
+                        text_buffer.push('/');
+                        state = State::ScriptData;
+                        cursor.reconsume();
+                    }
+                },
+                State::ScriptDataEndTagName => {
+                    if let Some(next) = raw_end_tag_name_step(
+                        ch,
+                        &mut temp_buffer,
+                        &last_start_tag_name,
+                        &mut text_buffer,
+                        &mut tokens,
+                        &mut current_end_tag_name,
+                        &mut current_tag_name,
+                        &mut current_attributes,
+                        &mut current_self_closing,
+                        State::ScriptDataEndTagName,
+                    ) {
+                        state = next;
+                    } else {
+                        cursor.reconsume();
+                        state = State::ScriptData;
+                    }
+                }
+                State::ScriptDataEscapeStart => match ch {
+                    '-' => {
+                        text_buffer.push('-');
+                        state = State::ScriptDataEscapeStartDash;
+                    }
+                    _ => {
+                        state = State::ScriptData;
+                        cursor.reconsume();
+                    }
+                },
+                State::ScriptDataEscapeStartDash => match ch {
+                    '-' => {
+                        text_buffer.push('-');
+                        state = State::ScriptDataEscapedDashDash;
+                    }
+                    _ => {
+                        state = State::ScriptData;
+                        cursor.reconsume();
+                    }
+                },
+                State::ScriptDataEscaped => match ch {
+                    '-' => {
+                        text_buffer.push('-');
+                        state = State::ScriptDataEscapedDash;
+                    }
+                    '<' => state = State::ScriptDataEscapedLessThanSign,
+                    _ => text_buffer.push(ch),
+                },
+                State::ScriptDataEscapedDash => match ch {
+                    '-' => {
+                        text_buffer.push('-');
+                        state = State::ScriptDataEscapedDashDash;
+                    }
+                    '<' => state = State::ScriptDataEscapedLessThanSign,
+                    _ => {
+                        text_buffer.push(ch);
+                        state = State::ScriptDataEscaped;
+                    }
+                },
+                State::ScriptDataEscapedDashDash => match ch {
+                    '-' => text_buffer.push('-'),
+                    '<' => state = State::ScriptDataEscapedLessThanSign,
+                    '>' => {
+                        text_buffer.push('>');
+                        state = State::ScriptData;
+                    }
+                    _ => {
+                        text_buffer.push(ch);
+                        state = State::ScriptDataEscaped;
+                    }
+                },
+                State::ScriptDataEscapedLessThanSign => match ch {
+                    '/' => {
+                        temp_buffer.clear();
+                        state = State::ScriptDataEscapedEndTagOpen;
+                    }
+                    c if c.is_ascii_alphabetic() => {
+                        temp_buffer.clear();
+                        text_buffer.push('<');
+                        state = State::ScriptDataDoubleEscapeStart;
+                        cursor.reconsume();
+                    }
+                    _ => {
+                        text_buffer.push('<');
+                        state = State::ScriptDataEscaped;
+                        cursor.reconsume();
+                    }
+                },
+                State::ScriptDataEscapedEndTagOpen => match ch {
+                    c if c.is_ascii_alphabetic() => {
+                        temp_buffer.clear();
+                        state = State::ScriptDataEscapedEndTagName;
+                        cursor.reconsume();
+                    }
+                    _ => {
+                        text_buffer.push('<');
+                        text_buffer.push('/');
+                        state = State::ScriptDataEscaped;
+                        cursor.reconsume();
+                    }
+                },
+                State::ScriptDataEscapedEndTagName => {
+                    if let Some(next) = raw_end_tag_name_step(
+                        ch,
+                        &mut temp_buffer,
+                        &last_start_tag_name,
+                        &mut text_buffer,
+                        &mut tokens,
+                        &mut current_end_tag_name,
+                        &mut current_tag_name,
+                        &mut current_attributes,
+                        &mut current_self_closing,
+                        State::ScriptDataEscapedEndTagName,
+                    ) {
+                        state = next;
+                    } else {
+                        cursor.reconsume();
+                        state = State::ScriptDataEscaped;
+                    }
+                }
+                State::ScriptDataDoubleEscapeStart => match ch {
+                    c if is_html_whitespace(c) || c == '/' || c == '>' => {
+                        text_buffer.push(c);
+                        state = if temp_buffer.eq_ignore_ascii_case("script") {
+                            State::ScriptDataDoubleEscaped
+                        } else {
+                            State::ScriptDataEscaped
+                        };
+                    }
+                    c if c.is_ascii_alphabetic() => {
+                        temp_buffer.push(c.to_ascii_lowercase());
+                        text_buffer.push(c);
+                    }
+                    _ => {
+                        state = State::ScriptDataEscaped;
+                        cursor.reconsume();
+                    }
+                },
+                State::ScriptDataDoubleEscaped => match ch {
+                    '-' => {
+                        text_buffer.push('-');
+                        state = State::ScriptDataDoubleEscapedDash;
+                    }
+                    '<' => {
+                        text_buffer.push('<');
+                        state = State::ScriptDataDoubleEscapedLessThanSign;
+                    }
+                    _ => text_buffer.push(ch),
+                },
+                State::ScriptDataDoubleEscapedDash => match ch {
+                    '-' => {
+                        text_buffer.push('-');
+                        state = State::ScriptDataDoubleEscapedDashDash;
+                    }
+                    '<' => {
+                        text_buffer.push('<');
+                        state = State::ScriptDataDoubleEscapedLessThanSign;
+                    }
+                    _ => {
+                        text_buffer.push(ch);
+                        state = State::ScriptDataDoubleEscaped;
+                    }
+                },
+                State::ScriptDataDoubleEscapedDashDash => match ch {
+                    '-' => text_buffer.push('-'),
+                    '<' => {
+                        text_buffer.push('<');
+                        state = State::ScriptDataDoubleEscapedLessThanSign;
+                    }
+                    '>' => {
+                        text_buffer.push('>');
+                        state = State::ScriptData;
+                    }
+                    _ => {
+                        text_buffer.push(ch);
+                        state = State::ScriptDataDoubleEscaped;
+                    }
+                },
+                State::ScriptDataDoubleEscapedLessThanSign => match ch {
+                    '/' => {
+                        temp_buffer.clear();
+                        text_buffer.push('/');
+                        state = State::ScriptDataDoubleEscapeEnd;
+                    }
+                    _ => {
+                        state = State::ScriptDataDoubleEscaped;
+                        cursor.reconsume();
+                    }
+                },
+                State::ScriptDataDoubleEscapeEnd => match ch {
+                    c if is_html_whitespace(c) || c == '/' || c == '>' => {
+                        text_buffer.push(c);
+                        state = if temp_buffer.eq_ignore_ascii_case("script") {
+                            State::ScriptDataEscaped
+                        } else {
+                            State::ScriptDataDoubleEscaped
+                        };
+                    }
+                    c if c.is_ascii_alphabetic() => {
+                        temp_buffer.push(c.to_ascii_lowercase());
+                        text_buffer.push(c);
+                    }
+                    _ => {
+                        state = State::ScriptDataDoubleEscaped;
+                        cursor.reconsume();
+                    }
+                },
             }
         }
 
@@ -649,7 +1090,36 @@ impl<'a> Tokenizer<'a> {
             | State::Doctype
             | State::BeforeDoctypeName
             | State::DoctypeName => errors.push(HtmlParseError::UnexpectedEof),
-            State::Data => {}
+            // In the RAWTEXT/RCDATA/script-data content models an unexpected EOF
+            // simply ends the (already-flushed) text run and emits EOF, matching
+            // the spec's "Emit an end-of-file token" behaviour.
+            State::Data
+            | State::RawText
+            | State::RawTextLessThanSign
+            | State::RawTextEndTagOpen
+            | State::RawTextEndTagName
+            | State::RcData
+            | State::RcDataLessThanSign
+            | State::RcDataEndTagOpen
+            | State::RcDataEndTagName
+            | State::ScriptData
+            | State::ScriptDataLessThanSign
+            | State::ScriptDataEndTagOpen
+            | State::ScriptDataEndTagName
+            | State::ScriptDataEscapeStart
+            | State::ScriptDataEscapeStartDash
+            | State::ScriptDataEscaped
+            | State::ScriptDataEscapedDash
+            | State::ScriptDataEscapedDashDash
+            | State::ScriptDataEscapedLessThanSign
+            | State::ScriptDataEscapedEndTagOpen
+            | State::ScriptDataEscapedEndTagName
+            | State::ScriptDataDoubleEscapeStart
+            | State::ScriptDataDoubleEscaped
+            | State::ScriptDataDoubleEscapedDash
+            | State::ScriptDataDoubleEscapedDashDash
+            | State::ScriptDataDoubleEscapedLessThanSign
+            | State::ScriptDataDoubleEscapeEnd => {}
         }
 
         tokens.push(Token::Eof);
@@ -732,6 +1202,95 @@ fn emit_tag(
             attributes: current_attributes.to_vec(),
             self_closing: current_self_closing,
         });
+    }
+}
+
+/// Returns the tokenizer state to switch into after emitting a start tag whose
+/// content model is RAWTEXT, RCDATA, or script data. In the HTML5 spec this
+/// switch is performed by the tree builder; because this tokenizer runs to
+/// completion before tree construction, the (deterministic, tag-name-driven)
+/// rule lives here instead. Non-raw elements and any self-closing start tag
+/// stay in the [`State::Data`] content model.
+fn raw_next_state(tag_name: &str, self_closing: bool) -> State {
+    if self_closing {
+        return State::Data;
+    }
+    match tag_name {
+        "script" => State::ScriptData,
+        "style" | "xmp" | "noembed" | "noframes" => State::RawText,
+        "title" | "textarea" => State::RcData,
+        _ => State::Data,
+    }
+}
+
+/// Shared logic for the RAWTEXT / RCDATA / script-data *end tag name* states.
+///
+/// Accumulates the tentative end-tag name in `temp_buffer`. When that name is
+/// the *appropriate end tag* (case-insensitively equal to the last start tag
+/// emitted) and the character is a name terminator, it flushes the buffered
+/// raw text and commits to an end tag:
+///
+/// * whitespace -> [`State::BeforeAttributeName`] (attributes are parsed, then dropped)
+/// * `/`        -> [`State::SelfClosingStartTag`]
+/// * `>`        -> emits the [`Token::EndTag`] and returns [`State::Data`]
+///
+/// Returns `Some(next_state)` when the character was consumed — either by
+/// committing (above) or by appending an ASCII letter (returning `self_state`
+/// so the caller stays in the same end-tag-name state). Returns `None` for the
+/// "anything else" case: the `</name` seen so far is flushed back as ordinary
+/// text and the caller must reconsume the character in the raw-content state.
+#[allow(clippy::too_many_arguments)]
+fn raw_end_tag_name_step(
+    ch: char,
+    temp_buffer: &mut String,
+    last_start_tag_name: &str,
+    text_buffer: &mut String,
+    tokens: &mut Vec<Token>,
+    current_end_tag_name: &mut String,
+    current_tag_name: &mut String,
+    current_attributes: &mut Vec<Attribute>,
+    current_self_closing: &mut bool,
+    self_state: State,
+) -> Option<State> {
+    let is_appropriate = temp_buffer.eq_ignore_ascii_case(last_start_tag_name);
+    match ch {
+        c if is_html_whitespace(c) && is_appropriate => {
+            flush_text(text_buffer, tokens);
+            *current_end_tag_name = temp_buffer.to_ascii_lowercase();
+            current_tag_name.clear();
+            current_attributes.clear();
+            *current_self_closing = false;
+            temp_buffer.clear();
+            Some(State::BeforeAttributeName)
+        }
+        '/' if is_appropriate => {
+            flush_text(text_buffer, tokens);
+            *current_end_tag_name = temp_buffer.to_ascii_lowercase();
+            current_tag_name.clear();
+            current_attributes.clear();
+            *current_self_closing = false;
+            temp_buffer.clear();
+            Some(State::SelfClosingStartTag)
+        }
+        '>' if is_appropriate => {
+            flush_text(text_buffer, tokens);
+            tokens.push(Token::EndTag {
+                name: temp_buffer.to_ascii_lowercase(),
+            });
+            temp_buffer.clear();
+            Some(State::Data)
+        }
+        c if c.is_ascii_alphabetic() => {
+            temp_buffer.push(c);
+            Some(self_state)
+        }
+        _ => {
+            text_buffer.push('<');
+            text_buffer.push('/');
+            text_buffer.push_str(temp_buffer);
+            temp_buffer.clear();
+            None
+        }
     }
 }
 
@@ -901,5 +1460,164 @@ mod tests {
     fn reports_unexpected_eof() {
         let (_, errors) = Tokenizer::new("<div").tokenize_with_errors();
         assert_eq!(errors, vec![HtmlParseError::UnexpectedEof]);
+    }
+
+    // ---- RAWTEXT / RCDATA / script-data content models ----
+
+    /// Concatenates every [`Token::Character`] payload emitted for `html`.
+    fn character_data(html: &str) -> String {
+        Tokenizer::new(html)
+            .tokenize()
+            .into_iter()
+            .filter_map(|token| match token {
+                Token::Character(text) => Some(text),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Counts the number of start tags emitted for `name`.
+    fn count_start_tags(html: &str, name: &str) -> usize {
+        Tokenizer::new(html)
+            .tokenize()
+            .into_iter()
+            .filter(|token| matches!(token, Token::StartTag { name: n, .. } if n == name))
+            .count()
+    }
+
+    #[test]
+    fn script_data_keeps_angle_brackets_as_text() {
+        let tokens = Tokenizer::new("<script>if (a < b) { x('</div>'); }</script>").tokenize();
+        assert_eq!(
+            tokens,
+            vec![
+                Token::StartTag {
+                    name: "script".to_string(),
+                    attributes: vec![],
+                    self_closing: false,
+                },
+                Token::Character("if (a < b) { x('</div>'); }".to_string()),
+                Token::EndTag {
+                    name: "script".to_string(),
+                },
+                Token::Eof,
+            ]
+        );
+        // Exactly one script element, no spurious <div>.
+        assert_eq!(count_start_tags("<script>if (a < b) { x('</div>'); }</script>", "div"), 0);
+    }
+
+    #[test]
+    fn script_data_only_closes_on_matching_end_tag() {
+        let html = "<script>var s = '</scr' + 'ipt>';</script>";
+        assert_eq!(character_data(html), "var s = '</scr' + 'ipt>';");
+        assert_eq!(count_start_tags(html, "script"), 1);
+    }
+
+    #[test]
+    fn script_data_ignores_non_matching_end_tag_name() {
+        // </scriptx> is not the appropriate end tag; the real </script> closes it.
+        let html = "<script>x</scriptx></script>";
+        assert_eq!(character_data(html), "x</scriptx>");
+    }
+
+    #[test]
+    fn script_data_end_tag_terminates_with_attributes_or_extra_space() {
+        let with_attr = "<script>a</script foo>";
+        assert_eq!(character_data(with_attr), "a");
+        assert_eq!(
+            Tokenizer::new(with_attr).tokenize().last(),
+            Some(&Token::Eof)
+        );
+        assert!(
+            Tokenizer::new(with_attr)
+                .tokenize()
+                .contains(&Token::EndTag {
+                    name: "script".to_string()
+                })
+        );
+
+        let with_space = "<script>a</script  >";
+        assert_eq!(character_data(with_space), "a");
+        assert!(
+            Tokenizer::new(with_space)
+                .tokenize()
+                .contains(&Token::EndTag {
+                    name: "script".to_string()
+                })
+        );
+    }
+
+    #[test]
+    fn script_data_uppercase_end_tag_is_recognised() {
+        let html = "<script>x</SCRIPT>";
+        assert_eq!(character_data(html), "x");
+        assert!(
+            Tokenizer::new(html).tokenize().contains(&Token::EndTag {
+                name: "script".to_string()
+            }),
+            "uppercase </SCRIPT> must emit a lowercased script end tag"
+        );
+    }
+
+    #[test]
+    fn script_data_escaped_comment_is_preserved() {
+        let html = "<script><!-- if (a<b) --></script>";
+        assert_eq!(character_data(html), "<!-- if (a<b) -->");
+        assert_eq!(count_start_tags(html, "script"), 1);
+    }
+
+    #[test]
+    fn script_data_double_escaped_closes_on_outer_end_tag() {
+        // The inner </script> is part of a double-escaped block; only the outer
+        // </script> after the comment ends the script.
+        let html = "<script><!--<script>nested</script>--></script>";
+        assert_eq!(character_data(html), "<!--<script>nested</script>-->");
+        assert_eq!(count_start_tags(html, "script"), 1);
+    }
+
+    #[test]
+    fn rawtext_style_keeps_content_verbatim() {
+        let html = "<style>a>b{} /* </sty */</style>";
+        assert_eq!(character_data(html), "a>b{} /* </sty */");
+        assert_eq!(count_start_tags(html, "style"), 1);
+    }
+
+    #[test]
+    fn rawtext_applies_to_xmp_and_noframes() {
+        assert_eq!(character_data("<xmp><b>x</b></xmp>"), "<b>x</b>");
+        assert_eq!(count_start_tags("<xmp><b>x</b></xmp>", "b"), 0);
+
+        assert_eq!(
+            character_data("<noframes><p>no frames</p></noframes>"),
+            "<p>no frames</p>"
+        );
+        assert_eq!(
+            count_start_tags("<noframes><p>no frames</p></noframes>", "p"),
+            0
+        );
+    }
+
+    #[test]
+    fn rcdata_title_decodes_entities_but_not_tags() {
+        let html = "<title>a < b &amp; c</title>";
+        assert_eq!(character_data(html), "a < b & c");
+        assert_eq!(count_start_tags(html, "b"), 0);
+    }
+
+    #[test]
+    fn rcdata_textarea_does_not_open_child_elements() {
+        let html = "<textarea><div></textarea>";
+        assert_eq!(character_data(html), "<div>");
+        assert_eq!(count_start_tags(html, "div"), 0);
+        assert_eq!(count_start_tags(html, "textarea"), 1);
+    }
+
+    #[test]
+    fn self_closing_script_does_not_enter_script_data() {
+        // A self-closing start tag stays in the Data content model, so the
+        // following markup is parsed normally.
+        let html = "<script src=x />text<b>bold</b>";
+        assert_eq!(count_start_tags(html, "b"), 1);
     }
 }

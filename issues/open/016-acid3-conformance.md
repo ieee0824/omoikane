@@ -47,3 +47,46 @@ Acid3 は DOM / CSS / HTML parser / scripting / networking まで含む複合テ
 
 - Acid3 は広範囲の互換性を要求するため、短期完了前提ではなく段階実装とする
 - 必要に応じて parser / DOM / CSS / JS / networking / harness の各観点で子issueへ分割する
+
+## スコア推移（`cargo run --example acid3`）
+
+| 時点 | スコア | 主な変化 |
+| --- | --- | --- |
+| 初期 harness 導入時 | 0/100 | ドライバ未接続 |
+| 016-2〜016-3 | 26/100 | トークナイザ + タイマーコールバック |
+| 016-4〜016-5 | 28/100 | load イベント + data: URI スクリプト |
+| 016-12/016-13 部分 + 016-6 | **43/100** | DOMException 基盤・名前検証・createElementNS・createEvent 補完・table/form/input/button/label/meta/select 反射・Boa annex-b |
+
+### 今回（43/100 到達）で新規 PASS したテスト
+
+- 016-12 分: test 19（appendChild HIERARCHY_REQUEST_ERR の JS 例外化）, 20（NUL バイト → INVALID_CHARACTER_ERR）, 21（createElementNS 名前空間プロパティ）, 22（createElement 名前検証）, 23（createElementNS 名前検証と例外コード）, 25（DOMException 定数群 + createDocumentType）, 30（createEvent('UIEvents')/initUIEvent/detail）
+- 016-13 分: test 49（table.caption/tHead/tFoot/tBodies/rows/create*/delete*）, 53（input.name 反射 + value dirty value + form.elements 名前/index アクセス）, 57（select.add/options）, 58（option.defaultSelected/select.selectedIndex）, 59（button 既定 type=submit）, 62（label.htmlFor / meta.httpEquiv 反射）
+- 016-6 分: test 68（input value の孤立サロゲート保持。JS メモリ内 dirty value 化で FFI 越えを回避）, 85（Boa `annex-b` フィーチャ有効化で `String.prototype.substr` 提供）
+
+### 残りの主要ブロッカー（未着手の XL 三点）
+
+- **016-7 document.write**（未実装）: acid3.html は静的 HTML 末尾で `document.write('<map>...<form>...<table>...<iframe>...')` を使ってテスト用 DOM を注入している。このため form/table/map/area/iframe 群が生成されず、test 04-13・16-17・33-48・52・54-56・63-65・73・79-80 など多数が「cannot convert null」で失敗する。**最大の得点源**。
+- **016-8 getComputedStyle 実値化**: test 00（pre-wrap）, 45（float）ほか CSS 実測系。
+- **016-9 iframe / contentDocument**: test 14-15・69-78 など。SVG/XML サブドキュメント読み込みに依存。
+
+これら 3 点は相互依存が強く（document.write が生成する iframe を getComputedStyle/contentDocument で検査する）、XL 規模。
+
+## 子issue
+
+Acid3 ギャップ分析（`tests/fixtures/acid3/GAP_ANALYSIS.md`）に基づく分解。
+実装順序の推奨は GAP_ANALYSIS.md セクション4 を参照。
+
+- [x] [016-1 Acid3 ローカル実行ハーネス](../closed/016-1-acid3-harness.md)
+- [ ] [016-2 script-data / RAWTEXT / RCDATA トークナイザ](016-2-script-data-tokenizer.md)
+- [ ] [016-3 setTimeout 関数コールバック保持 + イベントループ統合](016-3-timer-callbacks-event-loop.md)
+- [ ] [016-4 load イベント発火 + on* インラインハンドラ配線](016-4-load-event-inline-handlers.md)
+- [ ] [016-5 data: URI スクリプト対応](016-5-data-uri-scripts.md)
+- [ ] [016-6 bucket6 (ECMAScript) 実測と微修正](016-6-bucket6-ecmascript.md)
+- [ ] [016-7 document.write 実装](016-7-document-write.md)
+- [ ] [016-8 getComputedStyle 実値化（044-2 と同根）](016-8-computed-style-exposure.md)
+- [ ] [016-9 iframe / contentDocument サブブラウジングコンテキスト](016-9-iframe-content-document.md)
+- [ ] [016-10 querySelector matcher 接続 + セレクタ拡充](016-10-css-selector-extensions.md)
+- [ ] [016-11 NodeIterator / TreeWalker / Range](016-11-traversal-and-range.md)
+- [ ] [016-12 DOM2 Core / 名前空間 / DOMException](016-12-dom2-core-namespaces.md)
+- [ ] [016-13 HTMLTableElement / Form / Input / Select / Button API](016-13-table-form-apis.md)
+- [ ] [016-14 XML/XHTML・CSSOM・SVG DOM](016-14-xml-cssom-svgdom.md)
