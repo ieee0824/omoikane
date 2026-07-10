@@ -111,6 +111,16 @@ struct HostState {
     location_href: String,
     navigator_user_agent: String,
     http_client: Client,
+    /// Insertion reference for `document.write`.
+    ///
+    /// Models the HTML tokenizer's "insertion point". While a `<script>` runs,
+    /// this holds the node **after which** the next `document.write` fragment is
+    /// inserted (initially the script element itself, so written content lands
+    /// as the script's following siblings, exactly as a streaming parser would
+    /// place it). Each write advances the reference to the last node it
+    /// inserted, so consecutive writes stay in order. `None` means no script is
+    /// currently executing; a write then falls back to appending to `<body>`.
+    write_insertion_ref: Option<NodeHandle>,
 }
 
 impl HostState {
@@ -123,6 +133,7 @@ impl HostState {
             location_href: "http://localhost/".to_string(),
             navigator_user_agent: "Omoikane/0.1".to_string(),
             http_client: Client::new(),
+            write_insertion_ref: None,
         };
         state.register_tree(&document);
         state
@@ -483,6 +494,12 @@ impl JsRuntime {
                 continue;
             }
 
+            // Point `document.write`'s insertion reference at this script so any
+            // content it writes lands as the script's following siblings (the
+            // HTML tokenizer inserts written text at the "insertion point",
+            // i.e. right where the running <script> sits in the tree).
+            self.host_state.borrow_mut().write_insertion_ref = Some(script.clone());
+
             // Execute immediately
             if let Err(err) = self.eval_safe(&source_code) {
                 errors.push(err);
@@ -490,6 +507,9 @@ impl JsRuntime {
             if let Err(err) = self.run_jobs() {
                 errors.push(format!("{err}"));
             }
+
+            // The insertion point is only defined while a script is running.
+            self.host_state.borrow_mut().write_insertion_ref = None;
         }
 
         // Execute deferred scripts
@@ -793,6 +813,11 @@ fn register_host_bindings(
             js_string!("__omoikane_create_comment"),
             1,
             NativeFunction::from_copy_closure(create_comment_native),
+        ),
+        (
+            js_string!("__omoikane_document_write"),
+            1,
+            NativeFunction::from_copy_closure(document_write_native),
         ),
     ] {
         context.register_global_builtin_callable(name, length, function)?;
@@ -1507,6 +1532,117 @@ fn create_comment_native(_: &JsValue, args: &[JsValue], context: &mut Context) -
     with_host_state(|state| {
         state.borrow_mut().nodes.insert(node.identity(), node);
         Ok(JsValue::from(id))
+    })
+}
+
+/// Backs `document.write` / `document.writeln`.
+///
+/// Tokenizes the argument as an HTML fragment (in `<body>` context) and splices
+/// the resulting nodes into the live tree at the current insertion point:
+///
+/// - While a `<script>` is executing (see
+///   [`HostState::write_insertion_ref`]), the fragment is inserted as the
+///   script's following siblings, and the reference advances so subsequent
+///   writes stay in document order — mirroring a streaming parser resuming at
+///   the tokenizer insertion point.
+/// - Outside of script execution (e.g. from a timer), the fragment is appended
+///   to `<body>` rather than triggering the destructive `document.open()`
+///   reset, which no supported page relies on.
+///
+/// Newly inserted nodes are registered so they are reachable by id from JS.
+/// Returns an array of the ids of any `<script>` elements contained in the
+/// written fragment, in document order, so the JS wrapper can execute them
+/// synchronously (classic `document.write('<script>...')` behaviour).
+fn document_write_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let text = args
+        .first()
+        .cloned()
+        .unwrap_or_default()
+        .to_string(context)?
+        .to_std_string_escaped();
+
+    // Parse the fragment into a throwaway document and lift out the body's
+    // children. Parsing per-call matches the existing innerHTML path; it means
+    // a single write() call must contain balanced-enough markup (Acid3 writes
+    // its whole fragment in one call), which is the common case.
+    let parsed_children: Vec<NodeHandle> = if text.is_empty() {
+        Vec::new()
+    } else {
+        let parsed = crate::html::TreeBuilder::parse(&format!("<body>{text}</body>")).document();
+        parsed
+            .query_selector("body")
+            .map(|body| body.child_nodes())
+            .unwrap_or_default()
+    };
+
+    with_host_state(|state| {
+        // Resolve the parent element and the sibling to insert before.
+        let (parent, reference_child) = {
+            let s = state.borrow();
+            match s.write_insertion_ref.clone() {
+                // Active insertion point: insert right after the reference node
+                // (i.e. before the reference node's next sibling).
+                Some(anchor) => match anchor.parent_node() {
+                    Some(parent) => {
+                        let siblings = parent.child_nodes();
+                        let next = siblings
+                            .iter()
+                            .position(|n| n == &anchor)
+                            .and_then(|i| siblings.get(i + 1).cloned());
+                        (Some(parent), next)
+                    }
+                    // The anchor was detached from the tree; fall back to body.
+                    None => (s.document.query_selector("body"), None),
+                },
+                // No script running: append to <body>.
+                None => (s.document.query_selector("body"), None),
+            }
+        };
+
+        let Some(parent) = parent else {
+            // No insertion target at all; nothing sensible to do.
+            return Ok(JsValue::from(
+                boa_engine::object::builtins::JsArray::from_iter(Vec::<JsValue>::new(), context),
+            ));
+        };
+
+        // Splice the parsed nodes in, preserving order.
+        let mut last_inserted: Option<NodeHandle> = None;
+        for child in &parsed_children {
+            match &reference_child {
+                Some(reference) => {
+                    let _ = parent.insert_before(child.clone(), reference);
+                }
+                None => parent.append_child(child.clone()),
+            }
+            last_inserted = Some(child.clone());
+        }
+
+        // Register the freshly inserted subtree and advance the insertion point.
+        {
+            let mut s = state.borrow_mut();
+            for child in &parsed_children {
+                s.register_tree(child);
+            }
+            if let Some(last) = last_inserted {
+                if s.write_insertion_ref.is_some() {
+                    s.write_insertion_ref = Some(last);
+                }
+            }
+        }
+
+        // Collect <script> descendants in document order for the JS wrapper.
+        let mut script_nodes = Vec::new();
+        for child in &parsed_children {
+            collect_script_elements_recursive(child, &mut script_nodes);
+        }
+        let script_ids: Vec<JsValue> = script_nodes
+            .iter()
+            .map(|n| JsValue::from(n.identity() as f64))
+            .collect();
+        Ok(JsValue::from(
+            boa_engine::object::builtins::JsArray::from_iter(script_ids, context),
+        ))
     })
 }
 
@@ -3590,6 +3726,205 @@ mod tests {
             runtime.eval("globalThis.ticks").unwrap().as_number(),
             Some(50.0),
             "infinite interval must stop at the task-count cap"
+        );
+    }
+
+    // ── document.write (issue 016-7) ────────────────────────────────────────
+
+    /// An inline script that writes an `<iframe id="selectors">` must create a
+    /// real iframe element that `getElementById` can find — the exact pattern
+    /// Acid3 relies on to build its `getTestDocument()` scaffold.
+    #[test]
+    fn document_write_creates_iframe_findable_by_id() {
+        use crate::html::TreeBuilder;
+        let html = r#"<html><body>
+            <script>document.write('<iframe id="selectors"></iframe>');</script>
+        </body></html>"#;
+        let doc = TreeBuilder::parse(html).document();
+        let mut runtime = JsRuntime::with_document(doc.clone()).unwrap();
+        let errors = runtime.execute_document_scripts(None);
+        assert!(errors.is_empty(), "no script errors expected: {errors:?}");
+
+        let iframe = doc
+            .query_selector("#selectors")
+            .expect("document.write should have created #selectors");
+        assert_eq!(
+            iframe.tag_name().as_deref(),
+            Some("iframe"),
+            "#selectors must be an iframe element"
+        );
+
+        // The element must also be reachable through the JS DOM API.
+        let tag = runtime
+            .eval("document.getElementById('selectors').tagName")
+            .unwrap()
+            .as_string()
+            .map(|s| s.to_std_string_escaped());
+        assert_eq!(tag.as_deref(), Some("IFRAME"));
+    }
+
+    /// Written content is spliced in at the running script's position, so nodes
+    /// that followed the script in the source stay after the written fragment.
+    #[test]
+    fn document_write_inserts_at_script_position() {
+        use crate::html::TreeBuilder;
+        let html = r#"<html><body><script>document.write('<div id="written"></div>');</script><p id="after"></p></body></html>"#;
+        let doc = TreeBuilder::parse(html).document();
+        let mut runtime = JsRuntime::with_document(doc.clone()).unwrap();
+        let errors = runtime.execute_document_scripts(None);
+        assert!(errors.is_empty(), "no script errors expected: {errors:?}");
+
+        let body = doc.query_selector("body").expect("body");
+        let tags: Vec<String> = body
+            .child_nodes()
+            .iter()
+            .filter_map(|n| n.tag_name())
+            .collect();
+        assert_eq!(
+            tags,
+            vec![
+                "script".to_string(),
+                "div".to_string(),
+                "p".to_string()
+            ],
+            "written <div> must land between the <script> and the following <p>"
+        );
+    }
+
+    /// Multiple writes from the same script accumulate in call order.
+    #[test]
+    fn document_write_multiple_calls_stay_in_order() {
+        use crate::html::TreeBuilder;
+        let html = r#"<html><body><script>document.write('<i id="one"></i>');document.write('<b id="two"></b>');</script><span id="tail"></span></body></html>"#;
+        let doc = TreeBuilder::parse(html).document();
+        let mut runtime = JsRuntime::with_document(doc.clone()).unwrap();
+        let errors = runtime.execute_document_scripts(None);
+        assert!(errors.is_empty(), "no script errors expected: {errors:?}");
+
+        let body = doc.query_selector("body").expect("body");
+        let tags: Vec<String> = body
+            .child_nodes()
+            .iter()
+            .filter_map(|n| n.tag_name())
+            .collect();
+        assert_eq!(
+            tags,
+            vec![
+                "script".to_string(),
+                "i".to_string(),
+                "b".to_string(),
+                "span".to_string()
+            ],
+            "both writes must be ordered after the script and before the tail"
+        );
+    }
+
+    /// A `<script>` inside written markup executes synchronously in global scope.
+    #[test]
+    fn document_write_executes_written_script() {
+        use crate::html::TreeBuilder;
+        let html = r#"<html><body>
+            <script>document.write('<script>globalThis.__written_ran = 41 + 1;<\/script>');</script>
+        </body></html>"#;
+        let doc = TreeBuilder::parse(html).document();
+        let mut runtime = JsRuntime::with_document(doc).unwrap();
+        let errors = runtime.execute_document_scripts(None);
+        assert!(errors.is_empty(), "no script errors expected: {errors:?}");
+
+        assert_eq!(
+            runtime.eval("globalThis.__written_ran").unwrap().as_number(),
+            Some(42.0),
+            "a <script> written via document.write must run in global scope"
+        );
+    }
+
+    /// document.writeln behaves like write but appends a newline.
+    #[test]
+    fn document_writeln_appends_newline() {
+        use crate::html::TreeBuilder;
+        let html = r#"<html><body><script>document.writeln('<pre id="p">x</pre>');</script></body></html>"#;
+        let doc = TreeBuilder::parse(html).document();
+        let mut runtime = JsRuntime::with_document(doc.clone()).unwrap();
+        let errors = runtime.execute_document_scripts(None);
+        assert!(errors.is_empty(), "no script errors expected: {errors:?}");
+
+        let pre = doc.query_selector("#p").expect("writeln should create #p");
+        assert_eq!(pre.tag_name().as_deref(), Some("pre"));
+        // The trailing newline lands as a text node after the written element.
+        let body = doc.query_selector("body").expect("body");
+        let has_newline_text = body.child_nodes().iter().any(|n| {
+            n.node_type() == crate::dom::NodeType::Text
+                && n.data().as_deref().map(|d| d.contains('\n')).unwrap_or(false)
+        });
+        assert!(has_newline_text, "writeln must append a newline text node");
+    }
+
+    /// A write from outside any running script (e.g. from `eval` after parsing)
+    /// appends to `<body>` instead of wiping the document.
+    #[test]
+    fn document_write_without_active_script_appends_to_body() {
+        use crate::html::TreeBuilder;
+        let html = r#"<html><body><p id="existing"></p></body></html>"#;
+        let doc = TreeBuilder::parse(html).document();
+        let mut runtime = JsRuntime::with_document(doc.clone()).unwrap();
+        // No execute_document_scripts: the insertion point is undefined.
+        runtime
+            .eval("document.write('<span id=\"late\"></span>')")
+            .unwrap();
+
+        // The pre-existing content survives (no document.open() reset).
+        assert!(
+            doc.query_selector("#existing").is_some(),
+            "existing content must not be erased"
+        );
+        let body = doc.query_selector("body").expect("body");
+        let tags: Vec<String> = body
+            .child_nodes()
+            .iter()
+            .filter_map(|n| n.tag_name())
+            .collect();
+        assert_eq!(
+            tags,
+            vec!["p".to_string(), "span".to_string()],
+            "late write must append after existing body children"
+        );
+    }
+
+    /// The verbatim Acid3 fragment must produce the map/iframe/form/table
+    /// scaffold, with `#selectors` iframe reachable and later mutable.
+    #[test]
+    fn document_write_acid3_fragment_builds_selectors_scaffold() {
+        use crate::html::TreeBuilder;
+        // Exactly the fragment acid3.html writes at the end of <body>.
+        let html = r#"<html><body>
+            <script>document.write('<map name=""><area href="" shape="rect" coords="2,2,4,4" alt="<\'>"><iframe src="empty.png">FAIL<\/iframe><iframe src="empty.txt">FAIL<\/iframe><iframe src="empty.html" id="selectors"><\/iframe><form action="" name="form"><input type=HIDDEN><\/form><table><tr><td><p><\/tbody> <\/table><\/map>');</script>
+        </body></html>"#;
+        let doc = TreeBuilder::parse(html).document();
+        let mut runtime = JsRuntime::with_document(doc.clone()).unwrap();
+        let errors = runtime.execute_document_scripts(None);
+        assert!(errors.is_empty(), "no script errors expected: {errors:?}");
+
+        // The selectors iframe exists and is an iframe.
+        let selectors = doc
+            .query_selector("#selectors")
+            .expect("Acid3 fragment must yield #selectors");
+        assert_eq!(selectors.tag_name().as_deref(), Some("iframe"));
+
+        // The other scaffold elements are present too.
+        assert!(doc.query_selector("map").is_some(), "map must exist");
+        assert!(doc.query_selector("form").is_some(), "form must exist");
+        assert!(doc.query_selector("table").is_some(), "table must exist");
+        assert!(doc.query_selector("area").is_some(), "area must exist");
+
+        // The iframe is registered, so a later attribute mutation succeeds
+        // (Acid3 test 32 does exactly this on #selectors).
+        runtime
+            .eval("document.getElementById('selectors').setAttribute('style', 'height: 100px')")
+            .unwrap();
+        assert_eq!(
+            selectors.attributes().unwrap_or_default().get("style").map(|s| s.as_str()),
+            Some("height: 100px"),
+            "the written iframe must be mutable through the DOM API"
         );
     }
 }

@@ -1064,6 +1064,49 @@
     getElementsByClassName(cls) {
       return this.querySelectorAll("." + String(cls));
     }
+
+    // Adds markup to the document at the parser's insertion point. During
+    // script execution the arguments are concatenated, tokenized as an HTML
+    // fragment, and spliced into the tree as the running script's following
+    // siblings (matching how a streaming parser resumes at the insertion
+    // point). Any <script> elements in the written markup run synchronously in
+    // global scope, in document order, as classic document.write() requires.
+    write(...args) {
+      let text = "";
+      for (let i = 0; i < args.length; i += 1) {
+        text += String(args[i]);
+      }
+      const scriptIds = __omoikane_document_write(text);
+      if (scriptIds && scriptIds.length) {
+        for (let i = 0; i < scriptIds.length; i += 1) {
+          const el = wrapNode(scriptIds[i]);
+          const code = el ? el.textContent : "";
+          if (code) {
+            // Indirect eval runs the written script in global scope.
+            (0, eval)(code);
+          }
+        }
+      }
+    }
+
+    // Like write(), but appends a newline after the concatenated arguments.
+    writeln(...args) {
+      let text = "";
+      for (let i = 0; i < args.length; i += 1) {
+        text += String(args[i]);
+      }
+      return this.write(text + "\n");
+    }
+
+    // document.open() returns the document; the full "erase the document"
+    // behaviour is unnecessary for the pages this engine drives, so it is a
+    // no-op here. document.close() likewise has nothing to flush because
+    // write() splices its markup synchronously.
+    open() {
+      return this;
+    }
+
+    close() {}
   }
 
   class DocumentFragment extends Node {}
