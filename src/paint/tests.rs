@@ -2520,7 +2520,7 @@ fn refresh_acid2_baseline_png() {
     // `cargo test -- --include-ignored`, which in the bind-mounted Docker sandbox would
     // otherwise dirty the host tree byte-for-byte). Require an explicit opt-in so the
     // suite stays idempotent; a maintainer refreshing the baseline sets the env var.
-    if std::env::var_os("OMOIKANE_REFRESH_BASELINE").is_none() {
+    if std::env::var("OMOIKANE_REFRESH_BASELINE").as_deref() != Ok("1") {
         eprintln!(
             "skipping refresh_acid2_baseline_png: set OMOIKANE_REFRESH_BASELINE=1 to rewrite {}",
             acid2_baseline_path().display()

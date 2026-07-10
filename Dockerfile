@@ -80,7 +80,12 @@ RUN mkdir -p ${CLAUDE_CONFIG_DIR}
 
 # Claude Code のネイティブインストーラ。~/.local/bin にインストールされる。
 # 公式が推奨するインストール方法であり、チェックサム検証なしで取得する設計判断。
-RUN curl -fsSL https://claude.ai/install.sh | bash
+# パイプ（curl | bash）だと途中で curl が失敗しても層が成功しうるため、
+# ダウンロードと実行を分離し、同一 RUN 内で claude --version による検証まで行う。
+RUN curl -fsSL https://claude.ai/install.sh -o /tmp/claude-install.sh \
+    && bash /tmp/claude-install.sh \
+    && rm /tmp/claude-install.sh \
+    && "$HOME/.local/bin/claude" --version
 ENV PATH=/home/${USERNAME}/.local/bin:${PATH}
 
 # colima のバインドマウントはコンテナ内で root 所有に見えるため、
