@@ -2,7 +2,7 @@
 number: 016-2
 slug: script-data-tokenizer
 parent: 016
-status: open
+status: closed
 ---
 
 # HTMLトークナイザに script-data / RAWTEXT / RCDATA 状態を実装
@@ -35,3 +35,9 @@ HTML5 仕様のトークナイザ状態（script data / RAWTEXT / RCDATA）を�
 - RCDATA で文字参照は解決、タグは解決しない（`<textarea><div>` の div が要素にならない）
 - acid3.html をパースして script 要素数が 10 になる（従来は 14）
 - 既存テストを壊さない
+
+## 完了メモ
+
+- 実装コミット: `d7fc211`（"016-2: トークナイザにscript-data/RAWTEXT/RCDATA状態を実装"）
+- script data（+escaped / double-escaped）/ RAWTEXT / RCDATA 状態を実装し、
+  tree_builder と連携。受け入れ条件を満たしたためクローズ。

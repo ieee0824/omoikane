@@ -17,10 +17,25 @@ thread_local! {
 const DOM_BOOTSTRAP: &str = include_str!("dom_bootstrap.js");
 
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// What a scheduled timer executes when it fires.
+///
+/// `setTimeout`/`setInterval` accept either a code string (legal per the HTML
+/// spec, evaluated in the global scope) or a function callback. Function
+/// callbacks are retained as live `JsValue` handles so their captured closure
+/// scope survives until the timer fires, together with any extra arguments
+/// passed after the delay (`setTimeout(fn, ms, arg1, arg2, ...)`).
+#[derive(Debug, Clone)]
+enum TimerPayload {
+    /// A code string, evaluated in the global scope when the timer fires.
+    Source(String),
+    /// A retained function callback plus the extra arguments to invoke it with.
+    Callback { callback: JsValue, args: Vec<JsValue> },
+}
+
+#[derive(Debug, Clone)]
 struct TimerTask {
     id: u64,
-    source: String,
+    payload: TimerPayload,
     next_run_at: u64,
     interval_ms: u64,
     repeat: bool,
@@ -30,17 +45,17 @@ struct TimerTask {
 struct EventLoopState {
     next_timer_id: u64,
     now_ms: u64,
-    macrotasks: VecDeque<String>,
+    macrotasks: VecDeque<TimerPayload>,
     timers: Vec<TimerTask>,
 }
 
 impl EventLoopState {
-    fn schedule_timer(&mut self, source: String, delay_ms: u64, repeat: bool) -> u64 {
+    fn schedule_timer(&mut self, payload: TimerPayload, delay_ms: u64, repeat: bool) -> u64 {
         let id = self.next_timer_id;
         self.next_timer_id += 1;
         self.timers.push(TimerTask {
             id,
-            source,
+            payload,
             next_run_at: self.now_ms.saturating_add(delay_ms),
             interval_ms: delay_ms,
             repeat,
@@ -55,31 +70,35 @@ impl EventLoopState {
     fn advance(&mut self, elapsed_ms: u64) {
         self.now_ms = self.now_ms.saturating_add(elapsed_ms);
 
-        let mut ready = Vec::new();
+        // Collect every timer that is now due, remembering its original fire
+        // time and id so we can enqueue them in fire-time order (ties broken by
+        // registration order, since ids increase monotonically).
+        let mut ready: Vec<(u64, u64, TimerPayload)> = Vec::new();
         for timer in &mut self.timers {
             if timer.next_run_at <= self.now_ms {
-                ready.push((
-                    timer.id,
-                    timer.source.clone(),
-                    timer.repeat,
-                    timer.interval_ms,
-                ));
+                ready.push((timer.next_run_at, timer.id, timer.payload.clone()));
                 if timer.repeat {
                     timer.next_run_at = self.now_ms.saturating_add(timer.interval_ms);
                 }
             }
         }
 
+        ready.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
+
         self.timers
             .retain(|timer| timer.repeat || timer.next_run_at > self.now_ms);
 
-        for (_, source, _, _) in ready {
-            self.macrotasks.push_back(source);
+        for (_, _, payload) in ready {
+            self.macrotasks.push_back(payload);
         }
     }
 
-    fn drain_macrotasks(&mut self) -> Vec<String> {
+    fn drain_macrotasks(&mut self) -> Vec<TimerPayload> {
         self.macrotasks.drain(..).collect()
+    }
+
+    fn has_pending_timers(&self) -> bool {
+        !self.timers.is_empty()
     }
 }
 
@@ -220,20 +239,20 @@ impl JsRuntime {
         self.with_active_host(|context| context.run_jobs())
     }
 
-    /// Schedules a timeout task from Rust.
+    /// Schedules a timeout task from Rust that evaluates `source` as code.
     pub fn set_timeout(&mut self, source: impl Into<String>, delay_ms: u64) -> u64 {
         self.host_state
             .borrow_mut()
             .event_loop
-            .schedule_timer(source.into(), delay_ms, false)
+            .schedule_timer(TimerPayload::Source(source.into()), delay_ms, false)
     }
 
-    /// Schedules an interval task from Rust.
+    /// Schedules an interval task from Rust that evaluates `source` as code.
     pub fn set_interval(&mut self, source: impl Into<String>, interval_ms: u64) -> u64 {
         self.host_state
             .borrow_mut()
             .event_loop
-            .schedule_timer(source.into(), interval_ms, true)
+            .schedule_timer(TimerPayload::Source(source.into()), interval_ms, true)
     }
 
     /// Clears a previously scheduled timer.
@@ -242,12 +261,19 @@ impl JsRuntime {
     }
 
     /// Advances the event loop clock and runs due macrotasks and pending jobs.
+    ///
+    /// Due timers fire in fire-time order (ties broken by registration order).
+    /// Both string-source timers and function-callback timers are supported;
+    /// callbacks re-scheduled from within a firing callback (e.g. an
+    /// `setTimeout(update, delay)` chain) become due on subsequent ticks.
     pub fn tick(&mut self, elapsed_ms: u64) -> JsResult<()> {
         self.host_state.borrow_mut().event_loop.advance(elapsed_ms);
         self.run_until_idle()
     }
 
     /// Runs queued macrotasks and pending promise jobs until idle.
+    ///
+    /// Propagates the first error thrown by a timer callback or source string.
     pub fn run_until_idle(&mut self) -> JsResult<()> {
         loop {
             let tasks = self.host_state.borrow_mut().event_loop.drain_macrotasks();
@@ -256,12 +282,87 @@ impl JsRuntime {
             }
 
             for task in tasks {
-                self.eval(&task)?;
+                self.run_timer_payload(task)?;
                 self.run_jobs()?;
             }
         }
 
         self.run_jobs()
+    }
+
+    /// Returns true if any timers are still scheduled (pending or repeating).
+    pub fn has_pending_timers(&self) -> bool {
+        self.host_state.borrow().event_loop.has_pending_timers()
+    }
+
+    /// Drives the event loop forward in virtual time, firing due timer tasks
+    /// until the timer queue empties or a safety budget is exhausted.
+    ///
+    /// This is the pipeline-facing pump: it advances a virtual clock in
+    /// `step_ms` increments (minimum 1ms), firing `setTimeout`/`setInterval`
+    /// callbacks as they come due, and stops as soon as no timers remain. Two
+    /// caps guard against runaway pages: `max_virtual_ms` bounds total virtual
+    /// time (so a plain `setInterval` cannot spin forever), and `max_tasks`
+    /// bounds the total number of timer tasks executed (so a callback that
+    /// re-schedules many zero-delay timers cannot explode).
+    ///
+    /// Unlike [`tick`](Self::tick), individual callback errors are swallowed so
+    /// that one throwing timer does not halt the remaining pipeline work.
+    ///
+    /// Returns the number of timer tasks that were actually executed.
+    pub fn run_timers(&mut self, max_virtual_ms: u64, step_ms: u64, max_tasks: usize) -> usize {
+        let step = step_ms.max(1);
+        let mut advanced: u64 = 0;
+        let mut tasks_run: usize = 0;
+
+        while advanced < max_virtual_ms && tasks_run < max_tasks {
+            if !self.has_pending_timers() {
+                break;
+            }
+            self.host_state.borrow_mut().event_loop.advance(step);
+            advanced = advanced.saturating_add(step);
+
+            loop {
+                let tasks = self.host_state.borrow_mut().event_loop.drain_macrotasks();
+                if tasks.is_empty() {
+                    break;
+                }
+                let mut hit_cap = false;
+                for task in tasks {
+                    if tasks_run >= max_tasks {
+                        hit_cap = true;
+                        break;
+                    }
+                    // Swallow per-task JS errors: a single failing timer must
+                    // not abort the whole pump during rendering.
+                    let _ = self.run_timer_payload(task);
+                    let _ = self.run_jobs();
+                    tasks_run += 1;
+                }
+                if hit_cap {
+                    break;
+                }
+            }
+        }
+
+        tasks_run
+    }
+
+    /// Executes a single timer payload: evaluates a source string, or invokes a
+    /// retained function callback with its bound extra arguments.
+    fn run_timer_payload(&mut self, payload: TimerPayload) -> JsResult<()> {
+        match payload {
+            TimerPayload::Source(source) => {
+                self.eval(&source)?;
+                Ok(())
+            }
+            TimerPayload::Callback { callback, args } => self.with_active_host(|context| {
+                if let Some(callable) = callback.as_callable() {
+                    callable.call(&JsValue::undefined(), &args, context)?;
+                }
+                Ok(())
+            }),
+        }
     }
 
     /// Dispatches a `DOMContentLoaded` event on the document.
@@ -677,12 +778,7 @@ fn schedule_timer_from_js(
     context: &mut Context,
     repeat: bool,
 ) -> JsResult<JsValue> {
-    let source = args
-        .first()
-        .cloned()
-        .unwrap_or_default()
-        .to_string(context)?
-        .to_std_string_escaped();
+    let handler = args.first().cloned().unwrap_or_default();
     let delay_ms = args
         .get(1)
         .cloned()
@@ -690,11 +786,24 @@ fn schedule_timer_from_js(
         .to_u32(context)
         .unwrap_or(0) as u64;
 
+    // A function handler is retained as a live callback (preserving its closure
+    // scope), together with any extra arguments passed after the delay. A
+    // non-callable handler falls back to the HTML string-source behaviour.
+    let payload = if handler.is_callable() {
+        let extra_args: Vec<JsValue> = args.iter().skip(2).cloned().collect();
+        TimerPayload::Callback {
+            callback: handler,
+            args: extra_args,
+        }
+    } else {
+        TimerPayload::Source(handler.to_string(context)?.to_std_string_escaped())
+    };
+
     with_host_state(|state| {
         let id = state
             .borrow_mut()
             .event_loop
-            .schedule_timer(source, delay_ms, repeat);
+            .schedule_timer(payload, delay_ms, repeat);
         Ok(JsValue::from(id as f64))
     })
 }
@@ -2566,5 +2675,241 @@ mod tests {
         let found_old = runtime.eval("document.querySelector('#old')")
             .unwrap();
         assert!(found_old.is_null(), "old child should be removed");
+    }
+
+    // ── Timer callback / event-loop tests (issue 016-3) ──────────────────────
+
+    #[test]
+    fn set_timeout_function_callback_preserves_closure() {
+        let mut runtime = JsRuntime::new().unwrap();
+        // The captured `base` lives only in the IIFE scope; if the callback
+        // were stringified via toString() this closure would be lost.
+        runtime
+            .eval(
+                r#"
+                globalThis.result = 0;
+                (function () {
+                    let base = 40;
+                    setTimeout(function () { globalThis.result = base + 2; }, 0);
+                })();
+                "#,
+            )
+            .unwrap();
+
+        // Not fired before the loop runs.
+        assert_eq!(
+            runtime.eval("globalThis.result").unwrap().as_number(),
+            Some(0.0)
+        );
+
+        runtime.tick(0).unwrap();
+
+        assert_eq!(
+            runtime.eval("globalThis.result").unwrap().as_number(),
+            Some(42.0),
+            "callback should fire preserving captured closure variable"
+        );
+    }
+
+    #[test]
+    fn set_timeout_function_fires_only_at_delay_boundary() {
+        let mut runtime = JsRuntime::new().unwrap();
+        runtime
+            .eval("globalThis.fired = false; setTimeout(function () { globalThis.fired = true; }, 10);")
+            .unwrap();
+
+        runtime.tick(9).unwrap();
+        assert_eq!(
+            runtime.eval("globalThis.fired").unwrap().as_boolean(),
+            Some(false),
+            "timer must not fire before its delay elapses"
+        );
+
+        runtime.tick(1).unwrap();
+        assert_eq!(
+            runtime.eval("globalThis.fired").unwrap().as_boolean(),
+            Some(true),
+            "timer must fire once the delay is reached"
+        );
+    }
+
+    #[test]
+    fn set_timeout_callback_reschedule_chain_advances() {
+        // Mirrors the Acid3 update() loop: each callback re-schedules the next.
+        let mut runtime = JsRuntime::new().unwrap();
+        runtime
+            .eval(
+                r#"
+                globalThis.n = 0;
+                function step() {
+                    globalThis.n += 1;
+                    if (globalThis.n < 5) {
+                        setTimeout(step, 10);
+                    }
+                }
+                setTimeout(step, 10);
+                "#,
+            )
+            .unwrap();
+
+        // Each tick(10) fires the currently-due `step`, which schedules the next.
+        for _ in 0..6 {
+            runtime.tick(10).unwrap();
+        }
+
+        assert_eq!(
+            runtime.eval("globalThis.n").unwrap().as_number(),
+            Some(5.0),
+            "re-scheduled setTimeout chain should advance exactly 5 times"
+        );
+    }
+
+    #[test]
+    fn set_interval_repeats_and_clear_interval_stops() {
+        let mut runtime = JsRuntime::new().unwrap();
+        runtime
+            .eval("globalThis.count = 0; globalThis.tid = setInterval(function () { globalThis.count += 1; }, 5);")
+            .unwrap();
+
+        runtime.tick(5).unwrap();
+        assert_eq!(runtime.eval("globalThis.count").unwrap().as_number(), Some(1.0));
+        runtime.tick(5).unwrap();
+        assert_eq!(runtime.eval("globalThis.count").unwrap().as_number(), Some(2.0));
+
+        runtime.eval("clearInterval(globalThis.tid);").unwrap();
+        runtime.tick(5).unwrap();
+        runtime.tick(5).unwrap();
+        assert_eq!(
+            runtime.eval("globalThis.count").unwrap().as_number(),
+            Some(2.0),
+            "cleared interval must not fire again"
+        );
+    }
+
+    #[test]
+    fn clear_timeout_removes_pending_function_timer() {
+        let mut runtime = JsRuntime::new().unwrap();
+        runtime
+            .eval(
+                r#"
+                globalThis.ran = false;
+                globalThis.tid = setTimeout(function () { globalThis.ran = true; }, 10);
+                clearTimeout(globalThis.tid);
+                "#,
+            )
+            .unwrap();
+
+        runtime.tick(20).unwrap();
+        assert_eq!(
+            runtime.eval("globalThis.ran").unwrap().as_boolean(),
+            Some(false),
+            "clearTimeout must cancel a pending function-callback timer"
+        );
+    }
+
+    #[test]
+    fn set_timeout_string_source_still_evaluates() {
+        // The HTML string form must keep working alongside function callbacks.
+        let mut runtime = JsRuntime::new().unwrap();
+        runtime.eval("globalThis.marker = 0;").unwrap();
+        runtime
+            .eval(r#"setTimeout("globalThis.marker = 99;", 5);"#)
+            .unwrap();
+
+        runtime.tick(4).unwrap();
+        assert_eq!(runtime.eval("globalThis.marker").unwrap().as_number(), Some(0.0));
+        runtime.tick(1).unwrap();
+        assert_eq!(
+            runtime.eval("globalThis.marker").unwrap().as_number(),
+            Some(99.0),
+            "string-source setTimeout must still evaluate as code"
+        );
+    }
+
+    #[test]
+    fn set_timeout_passes_extra_arguments_to_callback() {
+        let mut runtime = JsRuntime::new().unwrap();
+        runtime
+            .eval(
+                "globalThis.sum = 0; setTimeout(function (a, b) { globalThis.sum = a + b; }, 0, 3, 4);",
+            )
+            .unwrap();
+
+        runtime.tick(0).unwrap();
+        assert_eq!(
+            runtime.eval("globalThis.sum").unwrap().as_number(),
+            Some(7.0),
+            "extra setTimeout arguments must be forwarded to the callback"
+        );
+    }
+
+    #[test]
+    fn execute_document_scripts_then_pump_settles_settimeout_dom_change() {
+        use crate::html::TreeBuilder;
+        let html = r#"<html><body>
+            <div id="target"></div>
+            <script>
+                setTimeout(function () {
+                    document.getElementById("target").setAttribute("data-done", "yes");
+                }, 20);
+            </script>
+        </body></html>"#;
+        let doc = TreeBuilder::parse(html).document();
+        let mut runtime = JsRuntime::with_document(doc.clone()).unwrap();
+
+        let errors = runtime.execute_document_scripts(None);
+        assert!(errors.is_empty(), "no script errors expected: {errors:?}");
+
+        // Before pumping the timers, the DOM mutation has not happened yet.
+        let target = doc.query_selector("#target").expect("find #target");
+        assert_eq!(
+            target.attributes().unwrap_or_default().get("data-done").map(|s| s.as_str()),
+            None,
+            "attribute must not be set before the timer fires"
+        );
+
+        let tasks = runtime.run_timers(1_000, 10, 10_000);
+        assert_eq!(tasks, 1, "exactly one timer callback should have run");
+
+        let attrs = target.attributes().unwrap_or_default();
+        assert_eq!(
+            attrs.get("data-done").map(|s| s.as_str()),
+            Some("yes"),
+            "setTimeout callback should have mutated the DOM after run_timers"
+        );
+    }
+
+    #[test]
+    fn run_timers_caps_infinite_interval_by_virtual_time() {
+        let mut runtime = JsRuntime::new().unwrap();
+        runtime
+            .eval("globalThis.ticks = 0; setInterval(function () { globalThis.ticks += 1; }, 10);")
+            .unwrap();
+
+        // 100ms of virtual time at a 10ms step fires the interval exactly 10 times.
+        let tasks = runtime.run_timers(100, 10, 10_000);
+        assert_eq!(tasks, 10, "virtual-time budget should bound interval firings");
+        assert_eq!(
+            runtime.eval("globalThis.ticks").unwrap().as_number(),
+            Some(10.0),
+            "infinite interval must stop at the virtual-time cap"
+        );
+    }
+
+    #[test]
+    fn run_timers_caps_infinite_interval_by_task_count() {
+        let mut runtime = JsRuntime::new().unwrap();
+        runtime
+            .eval("globalThis.ticks = 0; setInterval(function () { globalThis.ticks += 1; }, 1);")
+            .unwrap();
+
+        // Effectively unlimited virtual time, but the task cap stops it.
+        let tasks = runtime.run_timers(u64::MAX, 1, 50);
+        assert_eq!(tasks, 50, "task-count cap should bound total timer executions");
+        assert_eq!(
+            runtime.eval("globalThis.ticks").unwrap().as_number(),
+            Some(50.0),
+            "infinite interval must stop at the task-count cap"
+        );
     }
 }

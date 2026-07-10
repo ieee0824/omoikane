@@ -2,7 +2,7 @@
 number: 016-3
 slug: timer-callbacks-event-loop
 parent: 016
-status: open
+status: closed
 ---
 
 # setTimeout/setInterval の関数コールバック保持とイベントループ統合
@@ -31,3 +31,18 @@ status: open
 
 - 関数コールバックを渡した `setTimeout` が指定遅延後に実行される
 - Acid3 Faithful モードで `update()` チェーンが自走し、DirectDrive と同等まで index が進む
+
+## 完了メモ
+
+- `TimerTask` のペイロードを `TimerPayload { Source(String) | Callback { callback: JsValue, args: Vec<JsValue> } }`
+  の両対応に変更。関数は `JsValue` ハンドルとしてそのまま保持し（クロージャ scope を保存）、
+  発火時に `callable.call(&this, &args, context)` で呼ぶ。`setTimeout(fn, ms, arg1, ...)` の
+  追加引数も透過。文字列ソース（`setTimeout("code", ms)`）の従来経路は維持。
+- `advance()` は発火時刻順（同時刻は登録順）で `macrotasks` に積む。再スケジュールと
+  clearTimeout/clearInterval が正しく動作。
+- レンダリングパイプライン（`paint::render_document_with_url`）で `execute_document_scripts`
+  実行後にランタイムを保持したまま `run_timers()` でタイマーキューを仮想時間消化。
+  上限: 仮想時間 10,000ms / step 10ms / タスク数 100,000。
+- 検証: `cargo test` 全パス（lib 810 + harness 4 + 9）。`cargo run --example acid3` で
+  Faithful モードが index 1 → 100 まで自走し、DirectDrive と同点の 26/100 を達成
+  （従来 Faithful は 0/100・index 1 で停止）。

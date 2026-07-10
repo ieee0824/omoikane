@@ -9,6 +9,15 @@ pub(crate) mod text;
 use std::cell::Cell;
 use std::path::Path;
 
+/// Total virtual milliseconds the render pipeline advances the JS event loop to
+/// drain script-scheduled timers before layout.
+const TIMER_PUMP_MAX_VIRTUAL_MS: u64 = 10_000;
+/// Virtual-time increment per event-loop step while pumping timers.
+const TIMER_PUMP_STEP_MS: u64 = 10;
+/// Hard cap on the number of timer tasks executed while pumping, guarding
+/// against callbacks that endlessly re-schedule zero-delay timers.
+const TIMER_PUMP_MAX_TASKS: usize = 100_000;
+
 thread_local! {
     static FORCE_OPACITY: Cell<bool> = const { Cell::new(false) };
 }
@@ -700,6 +709,15 @@ pub fn render_document_with_url(
         for err in &errors {
             eprintln!("[omoikane][js-error] {err}");
         }
+        // Drive script-scheduled timers (setTimeout/setInterval) in virtual
+        // time so that DOM mutations from deferred callbacks settle before
+        // layout. Bounded by a virtual-time budget and a task-count cap so an
+        // infinite setInterval cannot hang the render.
+        runtime.run_timers(
+            TIMER_PUMP_MAX_VIRTUAL_MS,
+            TIMER_PUMP_STEP_MS,
+            TIMER_PUMP_MAX_TASKS,
+        );
         // Re-extract stylesheets and rebuild resolver after JS may have
         // modified the DOM (inserted/removed <style>/<link> elements).
         resolver = StyleResolver::new();
