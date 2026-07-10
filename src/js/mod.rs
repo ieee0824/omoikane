@@ -10,7 +10,7 @@ use boa_engine::{Context, JsError, JsNativeError, JsResult, JsValue, Source, js_
 use crate::css::{ComputedStyle, ComputedValue, Origin, StyleResolver};
 use crate::dom::{Node, NodeHandle, NodeType};
 use crate::http::Client;
-use crate::layout::{LayoutBox, Rect};
+use crate::layout::{LayoutBox, Overflow, Rect};
 
 thread_local! {
     static ACTIVE_HOST_STATE: RefCell<Option<Rc<RefCell<HostState>>>> = const { RefCell::new(None) };
@@ -1055,6 +1055,11 @@ struct LayoutMetrics {
     client_left: f32,
     scroll_width: f32,
     scroll_height: f32,
+    /// Whether the element produced a layout box at all. `false` for elements
+    /// that generate no box (e.g. `display: none`, or a missing node), which
+    /// lets `getClientRects()` distinguish "no rendered box" (empty list) from a
+    /// rendered but zero-sized box (one rect), per CSSOM.
+    has_box: bool,
 }
 
 impl LayoutMetrics {
@@ -1074,6 +1079,7 @@ impl LayoutMetrics {
             client_left: 0.0,
             scroll_width: 0.0,
             scroll_height: 0.0,
+            has_box: false,
         }
     }
 
@@ -1086,7 +1092,8 @@ impl LayoutMetrics {
 \"top\":{y},\"left\":{x},\"right\":{right},\"bottom\":{bottom},\
 \"offsetWidth\":{ow},\"offsetHeight\":{oh},\"offsetTop\":{ot},\"offsetLeft\":{ol},\
 \"clientWidth\":{cw},\"clientHeight\":{ch},\"clientTop\":{ct},\"clientLeft\":{cl},\
-\"scrollWidth\":{sw},\"scrollHeight\":{sh},\"scrollTop\":0,\"scrollLeft\":0}}",
+\"scrollWidth\":{sw},\"scrollHeight\":{sh},\"scrollTop\":0,\"scrollLeft\":0,\
+\"hasBox\":{has_box}}}",
             x = json_number(self.x),
             y = json_number(self.y),
             w = json_number(self.width),
@@ -1103,6 +1110,7 @@ impl LayoutMetrics {
             cl = json_number(self.client_left),
             sw = json_number(self.scroll_width),
             sh = json_number(self.scroll_height),
+            has_box = self.has_box,
         )
     }
 }
@@ -1131,8 +1139,12 @@ fn json_number(value: f32) -> String {
 ///   CSSOM definition when the offset parent is the root box at the origin.
 /// - `clientWidth` / `clientHeight` use the padding box (content + padding),
 ///   and `clientTop` / `clientLeft` are the top/left border widths.
-/// - `scrollWidth` / `scrollHeight` are the padding box extended to enclose any
-///   overflowing descendant border boxes.
+/// - `scrollWidth` / `scrollHeight` are the padding box extended to enclose the
+///   border boxes of every overflowing descendant (not just the direct
+///   children). Traversal stops at any descendant that clips its overflow
+///   (`overflow` other than `visible`): such a box still contributes its own
+///   border box, but its clipped content cannot overflow past it into this
+///   element's scrollable area. See [`expand_scroll_bounds`].
 fn compute_layout_metrics(layout: &LayoutBox) -> LayoutMetrics {
     let content = layout.dimensions.content;
     let padding = layout.dimensions.padding;
@@ -1147,23 +1159,16 @@ fn compute_layout_metrics(layout: &LayoutBox) -> LayoutMetrics {
     let client_height = content.height + padding.top + padding.bottom;
 
     // scrollWidth/scrollHeight: the padding box grown to contain descendants.
+    // Layout coordinates are absolute (see `layout_document`/`layout_element`),
+    // so descendant border-box edges are comparable directly with this box's
+    // padding-box edges without accumulating per-level offsets.
     let padding_right_edge = content.x + content.width + padding.right;
     let padding_bottom_edge = content.y + content.height + padding.bottom;
     let padding_left_edge = content.x - padding.left;
     let padding_top_edge = content.y - padding.top;
     let mut max_right = padding_right_edge;
     let mut max_bottom = padding_bottom_edge;
-    for child in &layout.children {
-        let child_content = child.dimensions.content;
-        let child_padding = child.dimensions.padding;
-        let child_border = child.dimensions.border;
-        let child_right =
-            child_content.x + child_content.width + child_padding.right + child_border.right;
-        let child_bottom =
-            child_content.y + child_content.height + child_padding.bottom + child_border.bottom;
-        max_right = max_right.max(child_right);
-        max_bottom = max_bottom.max(child_bottom);
-    }
+    expand_scroll_bounds(&layout.children, &mut max_right, &mut max_bottom);
     let scroll_width = (max_right - padding_left_edge).max(client_width);
     let scroll_height = (max_bottom - padding_top_edge).max(client_height);
 
@@ -1182,6 +1187,35 @@ fn compute_layout_metrics(layout: &LayoutBox) -> LayoutMetrics {
         client_left: border.left,
         scroll_width,
         scroll_height,
+        has_box: true,
+    }
+}
+
+/// Expands `max_right`/`max_bottom` to enclose the border boxes of every box in
+/// `boxes` and (recursively) their descendants, for `scrollWidth`/`scrollHeight`.
+///
+/// Layout coordinates are absolute, so each descendant's border-box right/bottom
+/// edge is compared directly against the running maxima — no per-level offset
+/// accumulation is required. Traversal does not descend into a box that clips its
+/// overflow ([`Overflow::Hidden`]): the clipping box still contributes its own
+/// border box, but its clipped content is not part of an ancestor's scrollable
+/// area, matching how a scroll container establishes its own scroll region.
+fn expand_scroll_bounds(boxes: &[LayoutBox], max_right: &mut f32, max_bottom: &mut f32) {
+    for child in boxes {
+        let child_content = child.dimensions.content;
+        let child_padding = child.dimensions.padding;
+        let child_border = child.dimensions.border;
+        let child_right =
+            child_content.x + child_content.width + child_padding.right + child_border.right;
+        let child_bottom =
+            child_content.y + child_content.height + child_padding.bottom + child_border.bottom;
+        *max_right = max_right.max(child_right);
+        *max_bottom = max_bottom.max(child_bottom);
+        // A descendant that clips its overflow bounds its own subtree; deeper
+        // content cannot spill into this element's scrollable area.
+        if child.overflow == Overflow::Visible {
+            expand_scroll_bounds(&child.children, max_right, max_bottom);
+        }
     }
 }
 
@@ -4299,6 +4333,115 @@ mod tests {
             eval_num(&mut runtime, "document.getElementById('box').scrollHeight"),
             200.0,
             "scrollHeight must enclose the overflowing child"
+        );
+    }
+
+    #[test]
+    fn scroll_size_encloses_overflowing_grandchild() {
+        // Regression: scrollWidth/scrollHeight must recurse into descendants, not
+        // just the direct children. The grandchild `#wide` (300x200) overflows the
+        // 100x100 `#mid`, which in turn overflows the 100x100 `#box`. The old
+        // direct-child-only scan would report 100x100 (the size of `#mid`).
+        let html = r#"<html><head><style>
+            * { margin: 0; padding: 0; }
+            #box { width: 100px; height: 100px; }
+            #mid { width: 100px; height: 100px; }
+            #wide { width: 300px; height: 200px; }
+        </style></head><body>
+            <div id="box"><div id="mid"><div id="wide"></div></div></div>
+        </body></html>"#;
+        let mut runtime = runtime_from_html(html);
+
+        // clientWidth/clientHeight stay at the padding box of `#box`.
+        assert_eq!(eval_num(&mut runtime, "document.getElementById('box').clientWidth"), 100.0);
+        assert_eq!(eval_num(&mut runtime, "document.getElementById('box').clientHeight"), 100.0);
+        // scrollWidth/scrollHeight enclose the overflowing grandchild's border box.
+        assert_eq!(
+            eval_num(&mut runtime, "document.getElementById('box').scrollWidth"),
+            300.0,
+            "scrollWidth must enclose the overflowing grandchild, not just direct children"
+        );
+        assert_eq!(
+            eval_num(&mut runtime, "document.getElementById('box').scrollHeight"),
+            200.0,
+            "scrollHeight must enclose the overflowing grandchild, not just direct children"
+        );
+    }
+
+    #[test]
+    fn scroll_size_stops_at_clipping_descendant() {
+        // A descendant that clips its overflow (`overflow: hidden`) establishes its
+        // own scroll region: its clipped content must not spill into an ancestor's
+        // scrollable area. `#box` should see only `#clip`'s 100x100 border box,
+        // while `#clip` itself reports the overflowing `#wide` (300x200).
+        let html = r#"<html><head><style>
+            * { margin: 0; padding: 0; }
+            #box { width: 100px; height: 100px; }
+            #clip { width: 100px; height: 100px; overflow: hidden; }
+            #wide { width: 300px; height: 200px; }
+        </style></head><body>
+            <div id="box"><div id="clip"><div id="wide"></div></div></div>
+        </body></html>"#;
+        let mut runtime = runtime_from_html(html);
+
+        // The outer box does not count the grandchild clipped by `#clip`.
+        assert_eq!(
+            eval_num(&mut runtime, "document.getElementById('box').scrollWidth"),
+            100.0,
+            "content clipped by a descendant must not extend the ancestor's scrollWidth"
+        );
+        assert_eq!(
+            eval_num(&mut runtime, "document.getElementById('box').scrollHeight"),
+            100.0,
+            "content clipped by a descendant must not extend the ancestor's scrollHeight"
+        );
+        // The clipping element itself still reports its overflowing direct child.
+        assert_eq!(
+            eval_num(&mut runtime, "document.getElementById('clip').scrollWidth"),
+            300.0,
+            "the clipping container reports its own overflowing content"
+        );
+        assert_eq!(
+            eval_num(&mut runtime, "document.getElementById('clip').scrollHeight"),
+            200.0,
+            "the clipping container reports its own overflowing content"
+        );
+    }
+
+    #[test]
+    fn get_client_rects_distinguishes_zero_size_from_no_box() {
+        // CSSOM: a rendered box (even zero-sized) yields one client rect, while an
+        // element that generates no box yields none. Uses a stylesheet rule for
+        // `display: none` so the distinction does not depend on inline-style
+        // layout application.
+        let html = r#"<html><head><style>
+            * { margin: 0; padding: 0; }
+            #zero { width: 0; height: 0; }
+            #gone { display: none; }
+        </style></head><body>
+            <div id="zero"></div>
+            <div id="gone"></div>
+        </body></html>"#;
+        let mut runtime = runtime_from_html(html);
+
+        assert_eq!(
+            eval_num(&mut runtime, "document.getElementById('zero').getClientRects().length"),
+            1.0,
+            "a zero-sized rendered box must still return one client rect"
+        );
+        assert_eq!(
+            eval_num(&mut runtime, "document.getElementById('gone').getClientRects().length"),
+            0.0,
+            "an element that generates no box must return an empty client-rect list"
+        );
+        // The zero-sized box's single rect reports zero width/height.
+        assert_eq!(
+            eval_num(&mut runtime, "document.getElementById('zero').getClientRects()[0].width"),
+            0.0
+        );
+        assert_eq!(
+            eval_num(&mut runtime, "document.getElementById('zero').getClientRects()[0].height"),
+            0.0
         );
     }
 }

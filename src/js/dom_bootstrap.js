@@ -831,6 +831,7 @@
           offsetWidth: 0, offsetHeight: 0, offsetTop: 0, offsetLeft: 0,
           clientWidth: 0, clientHeight: 0, clientTop: 0, clientLeft: 0,
           scrollWidth: 0, scrollHeight: 0, scrollTop: 0, scrollLeft: 0,
+          hasBox: false,
         };
       }
     }
@@ -844,8 +845,16 @@
     }
 
     getClientRects() {
-      const r = this.getBoundingClientRect();
-      return (r.width === 0 && r.height === 0) ? [] : [r];
+      // CSSOM: an element with a rendered box returns at least one rectangle,
+      // even when the box is zero-sized; an element that generates no box (e.g.
+      // `display: none`) returns an empty list. `hasBox` distinguishes the two,
+      // which a zero-sized rect alone cannot.
+      const m = this.__layoutMetrics();
+      if (!m.hasBox) return [];
+      return [{
+        x: m.x, y: m.y, width: m.width, height: m.height,
+        top: m.top, left: m.left, bottom: m.bottom, right: m.right,
+      }];
     }
 
     get offsetWidth() { return this.__layoutMetrics().offsetWidth; }
