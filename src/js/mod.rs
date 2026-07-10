@@ -860,11 +860,6 @@ fn register_host_bindings(
 
     for (name, length, function) in [
         (
-            js_string!("__omoikane_get_element_by_id"),
-            1,
-            NativeFunction::from_copy_closure(get_element_by_id_native),
-        ),
-        (
             js_string!("__omoikane_query_selector"),
             2,
             NativeFunction::from_copy_closure(query_selector_native),
@@ -1157,23 +1152,6 @@ fn schedule_timer_from_js(
             .event_loop
             .schedule_timer(payload, delay_ms, repeat);
         Ok(JsValue::from(id as f64))
-    })
-}
-
-fn get_element_by_id_native(
-    _: &JsValue,
-    args: &[JsValue],
-    context: &mut Context,
-) -> JsResult<JsValue> {
-    let id = args
-        .first()
-        .cloned()
-        .unwrap_or_default()
-        .to_string(context)?
-        .to_std_string_escaped();
-    with_host_state(|state| {
-        let document = state.borrow().document.clone();
-        Ok(node_to_js_value(document.query_selector(&format!("#{id}"))))
     })
 }
 
