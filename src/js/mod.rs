@@ -1816,15 +1816,20 @@ fn create_comment_native(_: &JsValue, args: &[JsValue], context: &mut Context) -
 /// appends it. If `insert_before` fails — for example the reference node is no
 /// longer a child of `parent` — this falls back to appending.
 ///
-/// This is not infallible: both `insert_before` and `append_child` reject a
-/// cyclic insertion (a `child` that is an inclusive ancestor of `parent`) with
-/// a `HierarchyRequest` error, so such a `child` is dropped either way. The
-/// guarantee is narrower: **as long as the insertion would not create a cycle,
-/// a failed `insert_before` falls back to `append`**, so the child still lands
-/// in `parent`'s subtree rather than being silently dropped. Callers rely on
-/// this: `document.write` registers each inserted node and advances its
-/// insertion point, both of which are only valid for nodes that are actually in
-/// the tree.
+/// This is not infallible, and the two operations fail differently.
+/// `insert_before` returns `Err` — `HierarchyRequest` if the insertion would
+/// create a cycle (`child` is an inclusive ancestor of `parent`), or
+/// `ReferenceChildNotFound` if `reference` is no longer a child of `parent`.
+/// `append_child`, by contrast, never returns an error: it silently no-ops on a
+/// cyclic insertion and otherwise appends. So a stale reference falls back to a
+/// successful append, but a genuinely cyclic `child` is dropped either way — the
+/// `insert_before` error falls through to `append_child`, which also refuses the
+/// cycle and does nothing. The guarantee is therefore narrow: **as long as the
+/// insertion would not create a cycle, the child lands in `parent`'s subtree**
+/// (via `insert_before` or the `append` fallback) rather than being silently
+/// dropped. Callers rely on this: `document.write` registers each inserted node
+/// and advances its insertion point, both of which are only valid for nodes that
+/// are actually in the tree.
 fn insert_or_append(parent: &NodeHandle, child: &NodeHandle, reference: Option<&NodeHandle>) {
     match reference {
         Some(reference) => {
@@ -2025,10 +2030,12 @@ fn document_write_native(_: &JsValue, args: &[JsValue], context: &mut Context) -
         };
 
         // Splice the parsed nodes in, preserving order. `insert_or_append`
-        // guarantees every child actually lands in the tree even if
-        // `insert_before` fails (e.g. a stale reference), so registering the
-        // node and advancing the insertion point below stay consistent — we
-        // never register or advance to a node that isn't in the tree.
+        // lands each child in the tree even if `insert_before` fails on a stale
+        // reference — but only as long as the insertion would not create a cycle
+        // (see its docs). For `document.write` that proviso always holds:
+        // `parsed_children` is a freshly parsed fragment, so its nodes cannot be
+        // ancestors of `parent` and no cycle can form. Every child therefore
+        // lands in the tree, keeping the register/advance steps below consistent.
         let mut last_inserted: Option<NodeHandle> = None;
         for child in &parsed_children {
             insert_or_append(&parent, child, reference_child.as_ref());
