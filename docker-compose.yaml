@@ -1,0 +1,28 @@
+services:
+  dev:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: omoikane-dev
+    working_dir: /workspace
+    # 対話的に exec して使うため tty/stdin を有効化する。
+    tty: true
+    stdin_open: true
+    volumes:
+      # リポジトリをバインドマウントし、ソース編集をホストと共有する。
+      - .:/workspace
+      # ビルド成果物はホストの target/ と分離した専用ボリュームに置く（CARGO_TARGET_DIR=/target）。
+      - cargo-target:/target
+      # crates.io インデックス / crate ソース / git 依存を永続化し、毎回の再ダウンロードを避ける。
+      - cargo-registry:/usr/local/cargo/registry
+      - cargo-git:/usr/local/cargo/git
+      # Claude Code のログイン情報・設定を永続化する（CLAUDE_CONFIG_DIR）。
+      - claude-config:/home/dev/.claude
+    # コンテナを起動したままにして docker compose exec で入れるようにする。
+    command: sleep infinity
+
+volumes:
+  cargo-target:
+  cargo-registry:
+  cargo-git:
+  claude-config:
