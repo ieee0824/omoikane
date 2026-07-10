@@ -169,6 +169,9 @@ impl DocumentType {
 pub enum DomError {
     ReferenceChildNotFound,
     ChildNotFound,
+    /// The operation would make a node an ancestor of itself (a cyclic tree).
+    /// Corresponds to the DOM `HierarchyRequestError`.
+    HierarchyRequest,
 }
 
 impl fmt::Display for DomError {
@@ -176,6 +179,7 @@ impl fmt::Display for DomError {
         match self {
             Self::ReferenceChildNotFound => write!(f, "reference child not found"),
             Self::ChildNotFound => write!(f, "child not found"),
+            Self::HierarchyRequest => write!(f, "hierarchy request error"),
         }
     }
 }
@@ -227,18 +231,33 @@ impl NodeHandle {
     }
 
     /// Appends `child` to the node's children.
+    ///
+    /// Appending an inclusive ancestor of this node (or this node itself) would
+    /// make the tree cyclic and hang every recursive traversal, so the request
+    /// is silently rejected. The DOM spec raises a `HierarchyRequestError` in
+    /// this case; here the operation is simply a no-op to keep the tree acyclic.
     pub fn append_child(&self, child: NodeHandle) {
+        if child.is_inclusive_ancestor_of(self) {
+            return;
+        }
         detach_from_parent(&child);
         child.0.borrow_mut().parent = Some(Rc::downgrade(&self.0));
         self.0.borrow_mut().children.push(child);
     }
 
     /// Inserts `new_child` before `reference_child`.
+    ///
+    /// Returns [`DomError::HierarchyRequest`] if `new_child` is an inclusive
+    /// ancestor of this node, which would otherwise create a cyclic tree.
     pub fn insert_before(
         &self,
         new_child: NodeHandle,
         reference_child: &NodeHandle,
     ) -> Result<(), DomError> {
+        if new_child.is_inclusive_ancestor_of(self) {
+            return Err(DomError::HierarchyRequest);
+        }
+
         let index = self
             .0
             .borrow()
@@ -251,6 +270,19 @@ impl NodeHandle {
         new_child.0.borrow_mut().parent = Some(Rc::downgrade(&self.0));
         self.0.borrow_mut().children.insert(index, new_child);
         Ok(())
+    }
+
+    /// Returns `true` if this node is `other` or one of its ancestors. Used to
+    /// reject insertions that would make the tree cyclic.
+    fn is_inclusive_ancestor_of(&self, other: &NodeHandle) -> bool {
+        let mut current = Some(other.clone());
+        while let Some(node) = current {
+            if &node == self {
+                return true;
+            }
+            current = node.parent_node();
+        }
+        false
     }
 
     /// Removes `child` from the node's children and returns it.
@@ -534,6 +566,46 @@ mod tests {
         assert_eq!(removed, child);
         assert!(parent.child_nodes().is_empty());
         assert_eq!(child.parent_node(), None);
+    }
+
+    #[test]
+    fn append_child_rejects_ancestor_cycles() {
+        let grandparent = NodeHandle::element("section");
+        let parent = NodeHandle::element("div");
+        let child = NodeHandle::element("span");
+        grandparent.append_child(parent.clone());
+        parent.append_child(child.clone());
+
+        // Appending an ancestor (grandparent) into a descendant (child) must be
+        // refused so the tree stays acyclic; otherwise traversal would hang.
+        child.append_child(grandparent.clone());
+
+        assert!(child.child_nodes().is_empty());
+        assert_eq!(grandparent.parent_node(), None);
+        assert_eq!(grandparent.child_nodes(), vec![parent]);
+
+        // Appending a node to itself is likewise refused.
+        let solo = NodeHandle::element("p");
+        solo.append_child(solo.clone());
+        assert!(solo.child_nodes().is_empty());
+    }
+
+    #[test]
+    fn insert_before_rejects_ancestor_cycles() {
+        let parent = NodeHandle::element("div");
+        let middle = NodeHandle::element("section");
+        let leaf = NodeHandle::element("p");
+        parent.append_child(middle.clone());
+        middle.append_child(leaf.clone());
+
+        // Inserting `parent` (an ancestor of `middle`) into `middle` would form
+        // a cycle and must raise a hierarchy-request error.
+        let result = middle.insert_before(parent.clone(), &leaf);
+        assert_eq!(result, Err(DomError::HierarchyRequest));
+
+        // Tree is unchanged.
+        assert_eq!(middle.child_nodes(), vec![leaf]);
+        assert_eq!(parent.parent_node(), None);
     }
 
     #[test]
