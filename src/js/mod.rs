@@ -301,16 +301,38 @@ impl JsRuntime {
     /// layout-metric bindings (`getBoundingClientRect`, `offsetWidth`, ...).
     ///
     /// Invalidates any cached style resolver and layout tree so the next query
-    /// recomputes against the new viewport.
+    /// recomputes against the new viewport. It also updates the script-visible
+    /// window metrics (`window.innerWidth`/`innerHeight`, the matching
+    /// `outerWidth`/`outerHeight`, and `screen.*`) so page scripts observe the
+    /// same viewport that `vw`/`vh` units resolve against. Without this the DOM
+    /// bootstrap's fixed 1280x720 defaults would leak through even after the
+    /// embedder configured a different render viewport.
     pub fn set_viewport(&mut self, width: f32, height: f32) {
-        let mut state = self.host_state.borrow_mut();
-        state.viewport = Rect {
-            x: 0.0,
-            y: 0.0,
-            width,
-            height,
-        };
-        state.mark_style_dirty();
+        {
+            let mut state = self.host_state.borrow_mut();
+            state.viewport = Rect {
+                x: 0.0,
+                y: 0.0,
+                width,
+                height,
+            };
+            state.mark_style_dirty();
+        }
+        // `window.innerWidth`/`screen.width` are CSSOM integers, so round to the
+        // nearest pixel. For integer viewports this exactly matches the `vw`/`vh`
+        // resolution (which divides the same dimension by 100).
+        let w = width.round().max(0.0) as i64;
+        let h = height.round().max(0.0) as i64;
+        let sync = format!(
+            "globalThis.innerWidth = {w}; globalThis.innerHeight = {h}; \
+             globalThis.outerWidth = {w}; globalThis.outerHeight = {h}; \
+             if (globalThis.screen) {{ \
+             globalThis.screen.width = {w}; globalThis.screen.height = {h}; \
+             globalThis.screen.availWidth = {w}; globalThis.screen.availHeight = {h}; }}"
+        );
+        // The bootstrap always defines these globals before any embedder call,
+        // so this eval cannot fail in practice; ignore the result defensively.
+        let _ = self.eval(&sync);
     }
 
     /// Returns the console log buffer captured from `console.log`.
@@ -4248,6 +4270,62 @@ mod tests {
             ),
             "pre-wrap",
             "`:last-child` must re-match after the final child is removed"
+        );
+    }
+
+    #[test]
+    fn window_metrics_default_to_bootstrap_viewport() {
+        // Without an explicit set_viewport the DOM bootstrap's 1280x720 defaults
+        // apply and are visible to scripts unchanged.
+        let mut runtime = runtime_from_html("<html><body></body></html>");
+        assert_eq!(eval_num(&mut runtime, "window.innerWidth"), 1280.0);
+        assert_eq!(eval_num(&mut runtime, "window.innerHeight"), 720.0);
+        assert_eq!(eval_num(&mut runtime, "window.outerWidth"), 1280.0);
+        assert_eq!(eval_num(&mut runtime, "window.outerHeight"), 720.0);
+        assert_eq!(eval_num(&mut runtime, "screen.width"), 1280.0);
+        assert_eq!(eval_num(&mut runtime, "screen.height"), 720.0);
+        assert_eq!(eval_num(&mut runtime, "screen.availWidth"), 1280.0);
+        assert_eq!(eval_num(&mut runtime, "screen.availHeight"), 720.0);
+    }
+
+    #[test]
+    fn set_viewport_syncs_window_and_screen_metrics() {
+        // set_viewport must wire the render viewport into the script-visible
+        // window metrics so `window.innerWidth`/`innerHeight` (and `screen.*`)
+        // agree with the render viewport, and match the `vw`/`vh` units resolved
+        // by getComputedStyle against the same viewport. Regression: the fixed
+        // 1280x720 bootstrap defaults previously leaked through.
+        let html = r#"<html><head><style>
+            #target { width: 100vw; height: 100vh; }
+        </style></head><body><div id="target"></div></body></html>"#;
+        let mut runtime = runtime_from_html(html);
+        runtime.set_viewport(800.0, 600.0);
+
+        assert_eq!(eval_num(&mut runtime, "window.innerWidth"), 800.0);
+        assert_eq!(eval_num(&mut runtime, "window.innerHeight"), 600.0);
+        assert_eq!(eval_num(&mut runtime, "window.outerWidth"), 800.0);
+        assert_eq!(eval_num(&mut runtime, "window.outerHeight"), 600.0);
+        assert_eq!(eval_num(&mut runtime, "screen.width"), 800.0);
+        assert_eq!(eval_num(&mut runtime, "screen.height"), 600.0);
+        assert_eq!(eval_num(&mut runtime, "screen.availWidth"), 800.0);
+        assert_eq!(eval_num(&mut runtime, "screen.availHeight"), 600.0);
+
+        // getComputedStyle's `vw`/`vh` resolution must agree with window.inner*.
+        assert_eq!(
+            eval_str(
+                &mut runtime,
+                "getComputedStyle(document.getElementById('target'), '').width"
+            ),
+            "800px",
+            "100vw must resolve against the same viewport window.innerWidth reports"
+        );
+        assert_eq!(
+            eval_str(
+                &mut runtime,
+                "getComputedStyle(document.getElementById('target'), '').height"
+            ),
+            "600px",
+            "100vh must resolve against the same viewport window.innerHeight reports"
         );
     }
 

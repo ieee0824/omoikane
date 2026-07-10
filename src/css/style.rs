@@ -526,7 +526,12 @@ fn should_skip_computed_property(name: &str, computed: &ComputedValue) -> bool {
         if let Some(valid) = enumerated_keyword_set(name) {
             let lower = keyword.to_ascii_lowercase();
             // CSS-wide keywords are resolved in a later pass; never drop them.
-            let is_css_wide = matches!(lower.as_str(), "inherit" | "initial" | "unset" | "revert");
+            // `revert-layer` (CSS Cascade 5) is a CSS-wide keyword too and must
+            // not be discarded by the enumerated-value validation.
+            let is_css_wide = matches!(
+                lower.as_str(),
+                "inherit" | "initial" | "unset" | "revert" | "revert-layer"
+            );
             if !is_css_wide && !valid.iter().any(|candidate| *candidate == lower) {
                 return true;
             }

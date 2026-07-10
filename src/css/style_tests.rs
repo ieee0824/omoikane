@@ -2905,3 +2905,34 @@ fn valid_white_space_keyword_survives_cascade() {
         "a valid later value must override the earlier one"
     );
 }
+
+#[test]
+fn revert_layer_keyword_survives_enumerated_validation() {
+    // `revert-layer` (CSS Cascade 5) is a CSS-wide keyword and must be handled
+    // exactly like `inherit`/`initial`/`unset`/`revert`: the enumerated-keyword
+    // validation must NOT discard it as an invalid `white-space` value. Since it
+    // is not dropped, the later `revert-layer` declaration overrides the earlier
+    // `pre-wrap` and is preserved as-is (CSS-wide keywords other than `inherit`
+    // are not further resolved here).
+    let document = NodeHandle::document();
+    let html = NodeHandle::element("html");
+    let body = NodeHandle::element("body");
+    let p = NodeHandle::element("p");
+    p.set_attribute("id", "target");
+    document.append_child(html.clone());
+    html.append_child(body.clone());
+    body.append_child(p.clone());
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet("#target { white-space: pre-wrap; white-space: revert-layer; }").unwrap(),
+    );
+
+    let style = resolver.computed_style(&p);
+    assert_eq!(
+        style.get("white-space"),
+        Some(&ComputedValue::Keyword("revert-layer".to_string())),
+        "`revert-layer` is CSS-wide and must not be dropped; it overrides `pre-wrap`"
+    );
+}
