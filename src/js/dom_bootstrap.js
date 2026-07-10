@@ -505,10 +505,16 @@
 
     get style() {
       const node = this;
+      // `cssFloat` / `styleFloat` alias the CSS `float` property (per CSSOM),
+      // so they map to `float` rather than the naive `css-float` kebab form.
+      const toKebab = (prop) =>
+        (prop === "cssFloat" || prop === "styleFloat")
+          ? "float"
+          : prop.replace(/[A-Z]/g, m => "-" + m.toLowerCase());
       return new Proxy({}, {
         get(target, prop) {
           if (typeof prop !== "string") return undefined;
-          const kebab = prop.replace(/[A-Z]/g, m => "-" + m.toLowerCase());
+          const kebab = toKebab(prop);
           const styleAttr = __omoikane_get_attribute(node.__id, "style") || "";
           const escaped = kebab.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
           const match = styleAttr.match(new RegExp("(?:^|;\\s*)" + escaped + "\\s*:\\s*([^;]+)"));
@@ -516,7 +522,7 @@
         },
         set(target, prop, value) {
           if (typeof prop !== "string") return true;
-          const kebab = prop.replace(/[A-Z]/g, m => "-" + m.toLowerCase());
+          const kebab = toKebab(prop);
           const shouldRemove = value === null || value === undefined || value === "";
           const strValue = shouldRemove ? "" : String(value);
           let styleAttr = __omoikane_get_attribute(node.__id, "style") || "";
@@ -814,24 +820,44 @@
       return false;
     }
 
+    // Queries the native layout engine for this element's geometry, forcing a
+    // synchronous reflow if the DOM changed since the last query.
+    __layoutMetrics() {
+      try {
+        return JSON.parse(__omoikane_layout_metrics(this.__id));
+      } catch (e) {
+        return {
+          x: 0, y: 0, width: 0, height: 0, top: 0, left: 0, right: 0, bottom: 0,
+          offsetWidth: 0, offsetHeight: 0, offsetTop: 0, offsetLeft: 0,
+          clientWidth: 0, clientHeight: 0, clientTop: 0, clientLeft: 0,
+          scrollWidth: 0, scrollHeight: 0, scrollTop: 0, scrollLeft: 0,
+        };
+      }
+    }
+
     getBoundingClientRect() {
-      return { x: 0, y: 0, width: 0, height: 0, top: 0, left: 0, bottom: 0, right: 0 };
+      const m = this.__layoutMetrics();
+      return {
+        x: m.x, y: m.y, width: m.width, height: m.height,
+        top: m.top, left: m.left, bottom: m.bottom, right: m.right,
+      };
     }
 
     getClientRects() {
-      return [];
+      const r = this.getBoundingClientRect();
+      return (r.width === 0 && r.height === 0) ? [] : [r];
     }
 
-    get offsetWidth() { return 0; }
-    get offsetHeight() { return 0; }
-    get offsetTop() { return 0; }
-    get offsetLeft() { return 0; }
-    get clientWidth() { return 0; }
-    get clientHeight() { return 0; }
-    get clientTop() { return 0; }
-    get clientLeft() { return 0; }
-    get scrollWidth() { return 0; }
-    get scrollHeight() { return 0; }
+    get offsetWidth() { return this.__layoutMetrics().offsetWidth; }
+    get offsetHeight() { return this.__layoutMetrics().offsetHeight; }
+    get offsetTop() { return this.__layoutMetrics().offsetTop; }
+    get offsetLeft() { return this.__layoutMetrics().offsetLeft; }
+    get clientWidth() { return this.__layoutMetrics().clientWidth; }
+    get clientHeight() { return this.__layoutMetrics().clientHeight; }
+    get clientTop() { return this.__layoutMetrics().clientTop; }
+    get clientLeft() { return this.__layoutMetrics().clientLeft; }
+    get scrollWidth() { return this.__layoutMetrics().scrollWidth; }
+    get scrollHeight() { return this.__layoutMetrics().scrollHeight; }
     get scrollTop() { return 0; }
     set scrollTop(v) {}
     get scrollLeft() { return 0; }
@@ -1448,7 +1474,71 @@
     }
   } catch(e) {}
   globalThis.location = __loc;
-  globalThis.getComputedStyle = function() { return new Proxy({}, { get() { return ""; } }); };
+  // Maps a JS-style property name to its CSS (kebab-case) form. `cssFloat` /
+  // `styleFloat` alias the `float` property, matching the CSSOM.
+  function __styleNameToCss(prop) {
+    if (prop === "cssFloat" || prop === "styleFloat") return "float";
+    return String(prop).replace(/[A-Z]/g, m => "-" + m.toLowerCase());
+  }
+  // Parses an inline `style="a: b; c: d"` attribute into a kebab-case map so
+  // inline declarations override the cascade result in getComputedStyle.
+  function __parseInlineStyle(cssText, map) {
+    if (!cssText) return;
+    for (const decl of String(cssText).split(";")) {
+      const idx = decl.indexOf(":");
+      if (idx < 0) continue;
+      const name = decl.slice(0, idx).trim().toLowerCase();
+      const value = decl.slice(idx + 1).trim();
+      if (name) map[name] = value;
+    }
+  }
+  // Builds a read-only CSSStyleDeclaration-like object over `map` (kebab-case
+  // property names -> CSS string values). Supports camelCase access
+  // (`style.whiteSpace`), `cssFloat`, `getPropertyValue('white-space')`,
+  // `length`, and `item(i)`.
+  function __makeComputedStyle(map) {
+    const decl = {
+      getPropertyValue(name) {
+        const key = __styleNameToCss(name).toLowerCase();
+        return Object.prototype.hasOwnProperty.call(map, key) ? map[key] : "";
+      },
+      getPropertyPriority() { return ""; },
+      get length() { return Object.keys(map).length; },
+      item(index) { return Object.keys(map)[index] || ""; },
+      get cssText() {
+        return Object.keys(map).map(k => k + ": " + map[k] + ";").join(" ");
+      },
+    };
+    return new Proxy(decl, {
+      get(target, prop) {
+        if (typeof prop === "symbol" || prop in target) return target[prop];
+        const key = __styleNameToCss(prop);
+        return Object.prototype.hasOwnProperty.call(map, key) ? map[key] : "";
+      },
+      has(target, prop) {
+        if (prop in target) return true;
+        return Object.prototype.hasOwnProperty.call(map, __styleNameToCss(prop));
+      },
+    });
+  }
+  globalThis.getComputedStyle = function(element, pseudoElt) {
+    void pseudoElt;
+    const map = {};
+    if (element && element.__id != null) {
+      let cascade;
+      try {
+        cascade = JSON.parse(__omoikane_computed_style(element.__id));
+      } catch (e) {
+        cascade = {};
+      }
+      for (const key in cascade) {
+        if (Object.prototype.hasOwnProperty.call(cascade, key)) map[key] = cascade[key];
+      }
+      // Inline styles take precedence over cascaded values.
+      __parseInlineStyle(__omoikane_get_attribute(element.__id, "style"), map);
+    }
+    return __makeComputedStyle(map);
+  };
   globalThis.navigator = { userAgent: __omoikane_navigator_user_agent, language: "en", languages: ["en"], platform: "", cookieEnabled: false, onLine: true };
   globalThis.console = {
     log: (...args) => __omoikane_console_log(...args),

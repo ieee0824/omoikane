@@ -705,6 +705,9 @@ pub fn render_document_with_url(
     // JS may modify the DOM (e.g., classList.add for fade-in animations,
     // injecting <style> elements), so this must happen before layout.
     if let Ok(mut runtime) = crate::js::JsRuntime::with_document(document.clone()) {
+        // Keep getComputedStyle / layout-metric queries issued by page scripts
+        // consistent with the render viewport.
+        runtime.set_viewport(viewport.width, viewport.height);
         let errors = runtime.execute_document_scripts(effective_base.as_ref());
         for err in &errors {
             eprintln!("[omoikane][js-error] {err}");

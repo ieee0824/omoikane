@@ -7,8 +7,10 @@ use std::rc::Rc;
 use boa_engine::native_function::NativeFunction;
 use boa_engine::{Context, JsError, JsNativeError, JsResult, JsValue, Source, js_string};
 
-use crate::dom::{Node, NodeHandle};
+use crate::css::{ComputedStyle, ComputedValue, Origin, StyleResolver};
+use crate::dom::{Node, NodeHandle, NodeType};
 use crate::http::Client;
+use crate::layout::{LayoutBox, Rect};
 
 thread_local! {
     static ACTIVE_HOST_STATE: RefCell<Option<Rc<RefCell<HostState>>>> = const { RefCell::new(None) };
@@ -102,7 +104,6 @@ impl EventLoopState {
     }
 }
 
-#[derive(Debug)]
 struct HostState {
     event_loop: EventLoopState,
     document: NodeHandle,
@@ -111,7 +112,38 @@ struct HostState {
     location_href: String,
     navigator_user_agent: String,
     http_client: Client,
+    /// Viewport used when resolving computed styles and running layout for the
+    /// `getComputedStyle` / layout-metrics bindings (issues 016-8 and 044-2).
+    viewport: Rect,
+    /// `true` when the DOM has been mutated since the cached style resolver and
+    /// layout tree were built, so the next style/metric query must recompute
+    /// them (a forced synchronous reflow).
+    style_dirty: bool,
+    /// Cached style resolver seeded with the document's inline `<style>` rules.
+    /// Rebuilt on demand when [`HostState::style_dirty`] is set.
+    style_resolver: Option<StyleResolver>,
+    /// Cached layout tree matching `style_resolver`. Rebuilt lazily and only
+    /// when a layout metric (not just a computed style) is requested.
+    layout_root: Option<LayoutBox>,
 }
+
+impl std::fmt::Debug for HostState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HostState")
+            .field("nodes", &self.nodes.len())
+            .field("console_logs", &self.console_logs.len())
+            .field("location_href", &self.location_href)
+            .field("style_dirty", &self.style_dirty)
+            .finish()
+    }
+}
+
+/// Default viewport dimensions (px) used for computed-style and layout-metric
+/// resolution when the embedder has not configured one. Matches the
+/// `window.innerWidth` / `window.innerHeight` defaults exposed by the DOM
+/// bootstrap so `vw`/`vh` units and metrics agree with `window.inner*`.
+const DEFAULT_VIEWPORT_WIDTH: f32 = 1280.0;
+const DEFAULT_VIEWPORT_HEIGHT: f32 = 720.0;
 
 impl HostState {
     fn new(document: NodeHandle) -> Self {
@@ -123,6 +155,15 @@ impl HostState {
             location_href: "http://localhost/".to_string(),
             navigator_user_agent: "Omoikane/0.1".to_string(),
             http_client: Client::new(),
+            viewport: Rect {
+                x: 0.0,
+                y: 0.0,
+                width: DEFAULT_VIEWPORT_WIDTH,
+                height: DEFAULT_VIEWPORT_HEIGHT,
+            },
+            style_dirty: true,
+            style_resolver: None,
+            layout_root: None,
         };
         state.register_tree(&document);
         state
@@ -137,6 +178,52 @@ impl HostState {
 
     fn get_node(&self, id: usize) -> Option<NodeHandle> {
         self.nodes.get(&id).cloned()
+    }
+
+    /// Marks the cached style resolver and layout tree as stale.
+    ///
+    /// Every DOM mutation performed through a native binding calls this so the
+    /// next `getComputedStyle` or layout-metric query performs a forced reflow
+    /// and observes the mutation.
+    fn mark_style_dirty(&mut self) {
+        self.style_dirty = true;
+    }
+
+    /// Rebuilds the cached [`StyleResolver`] from the document's inline
+    /// stylesheets when the DOM is dirty (or nothing has been computed yet).
+    ///
+    /// Only inline `<style>` element content is collected; external
+    /// stylesheets are intentionally not fetched here so that computed-style
+    /// resolution stays synchronous and free of network side effects.
+    fn ensure_style_resolver(&mut self) {
+        if !self.style_dirty && self.style_resolver.is_some() {
+            return;
+        }
+        let document = self.document.clone();
+        let mut resolver = StyleResolver::new();
+        resolver.set_viewport(self.viewport.width, self.viewport.height);
+        for css in collect_inline_stylesheets(&document) {
+            let sheet = crate::paint::stylesheet::parse_stylesheet_forgiving(&css);
+            resolver.add_stylesheet(Origin::Author, sheet);
+        }
+        self.style_resolver = Some(resolver);
+        // The layout tree must be recomputed against the fresh resolver.
+        self.layout_root = None;
+        self.style_dirty = false;
+    }
+
+    /// Rebuilds the cached layout tree when needed, first ensuring the style
+    /// resolver is current. Runs a full synchronous layout (forced reflow).
+    fn ensure_layout(&mut self) {
+        self.ensure_style_resolver();
+        if self.layout_root.is_some() {
+            return;
+        }
+        let document = self.document.clone();
+        let viewport = self.viewport;
+        if let Some(resolver) = self.style_resolver.as_mut() {
+            self.layout_root = crate::layout::layout_tree(&document, resolver, viewport);
+        }
     }
 }
 
@@ -208,6 +295,22 @@ impl JsRuntime {
     /// Returns the current DOM document.
     pub fn document(&self) -> NodeHandle {
         self.host_state.borrow().document.clone()
+    }
+
+    /// Sets the viewport dimensions (px) used by `getComputedStyle` and the
+    /// layout-metric bindings (`getBoundingClientRect`, `offsetWidth`, ...).
+    ///
+    /// Invalidates any cached style resolver and layout tree so the next query
+    /// recomputes against the new viewport.
+    pub fn set_viewport(&mut self, width: f32, height: f32) {
+        let mut state = self.host_state.borrow_mut();
+        state.viewport = Rect {
+            x: 0.0,
+            y: 0.0,
+            width,
+            height,
+        };
+        state.mark_style_dirty();
     }
 
     /// Returns the console log buffer captured from `console.log`.
@@ -794,6 +897,16 @@ fn register_host_bindings(
             1,
             NativeFunction::from_copy_closure(create_comment_native),
         ),
+        (
+            js_string!("__omoikane_computed_style"),
+            1,
+            NativeFunction::from_copy_closure(computed_style_native),
+        ),
+        (
+            js_string!("__omoikane_layout_metrics"),
+            1,
+            NativeFunction::from_copy_closure(layout_metrics_native),
+        ),
     ] {
         context.register_global_builtin_callable(name, length, function)?;
     }
@@ -827,6 +940,294 @@ fn with_host_state<T>(f: impl FnOnce(&Rc<RefCell<HostState>>) -> JsResult<T>) ->
             JsError::from(JsNativeError::error().with_message("host state is not active"))
         })?;
         f(&state)
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Computed style + layout metrics (issues 016-8, 044-2)
+// ---------------------------------------------------------------------------
+
+/// Recursively collects the text content of every inline `<style>` element in
+/// the document tree, returning one CSS string per `<style>` element.
+///
+/// Only inline styles are gathered; linked stylesheets are not fetched here to
+/// keep computed-style resolution synchronous and side-effect free.
+fn collect_inline_stylesheets(document: &NodeHandle) -> Vec<String> {
+    fn walk(node: &NodeHandle, out: &mut Vec<String>) {
+        if node.node_type() == NodeType::Element
+            && node
+                .tag_name()
+                .as_deref()
+                .is_some_and(|tag| tag.eq_ignore_ascii_case("style"))
+        {
+            let css = collect_text_recursive(node);
+            if !css.trim().is_empty() {
+                out.push(css);
+            }
+        }
+        for child in node.child_nodes() {
+            walk(&child, out);
+        }
+    }
+    let mut out = Vec::new();
+    walk(document, &mut out);
+    out
+}
+
+/// Formats an `f32` as a CSS number, dropping a redundant trailing `.0` so that
+/// integer-valued lengths serialize as `16px` rather than `16.0px` and
+/// `z-index` values serialize as `0` / `3` (matching what Acid3's `selectorTest`
+/// compares against).
+fn format_css_number(value: f32) -> String {
+    if value.is_finite() && value.fract() == 0.0 {
+        format!("{}", value as i64)
+    } else {
+        // Round to a few decimals to avoid noisy floating-point tails.
+        let rounded = (value * 1000.0).round() / 1000.0;
+        format!("{rounded}")
+    }
+}
+
+/// Serializes a single [`ComputedValue`] to its CSS string form.
+fn computed_value_to_css_string(value: &ComputedValue) -> String {
+    match value {
+        ComputedValue::Keyword(keyword) => keyword.clone(),
+        ComputedValue::Color(color) => color.clone(),
+        ComputedValue::String(string) => string.clone(),
+        ComputedValue::Px(px) => format!("{}px", format_css_number(*px)),
+        ComputedValue::Percentage(pct) => format!("{}%", format_css_number(*pct)),
+        ComputedValue::Number(number) => format_css_number(*number),
+        ComputedValue::CalcPxPercent(px, pct) => {
+            format!("calc({}px + {}%)", format_css_number(*px), format_css_number(*pct))
+        }
+    }
+}
+
+/// Serializes a resolved [`ComputedStyle`] to a JSON object mapping each CSS
+/// property name (kebab-case) to its computed string value.
+fn serialize_computed_style(style: &ComputedStyle) -> String {
+    let mut json = String::from("{");
+    let mut first = true;
+    for (name, value) in style.properties() {
+        if !first {
+            json.push(',');
+        }
+        first = false;
+        json.push('"');
+        json.push_str(&escape_json_string(name));
+        json.push_str("\":\"");
+        json.push_str(&escape_json_string(&computed_value_to_css_string(value)));
+        json.push('"');
+    }
+    json.push('}');
+    json
+}
+
+/// Finds the [`LayoutBox`] produced for `node`, searching the layout tree by
+/// node identity. Returns `None` for nodes that produced no box (e.g.
+/// `display: none`, `<head>` content, or detached nodes).
+fn find_layout_box<'a>(root: &'a LayoutBox, node: &NodeHandle) -> Option<&'a LayoutBox> {
+    if &root.node == node {
+        return Some(root);
+    }
+    for child in &root.children {
+        if let Some(found) = find_layout_box(child, node) {
+            return Some(found);
+        }
+    }
+    None
+}
+
+/// The eight geometry values `getBoundingClientRect()` exposes plus the derived
+/// `offset*` / `client*` / `scroll*` metrics, all in CSS pixels.
+struct LayoutMetrics {
+    x: f32,
+    y: f32,
+    width: f32,
+    height: f32,
+    offset_width: f32,
+    offset_height: f32,
+    offset_top: f32,
+    offset_left: f32,
+    client_width: f32,
+    client_height: f32,
+    client_top: f32,
+    client_left: f32,
+    scroll_width: f32,
+    scroll_height: f32,
+}
+
+impl LayoutMetrics {
+    fn zero() -> Self {
+        Self {
+            x: 0.0,
+            y: 0.0,
+            width: 0.0,
+            height: 0.0,
+            offset_width: 0.0,
+            offset_height: 0.0,
+            offset_top: 0.0,
+            offset_left: 0.0,
+            client_width: 0.0,
+            client_height: 0.0,
+            client_top: 0.0,
+            client_left: 0.0,
+            scroll_width: 0.0,
+            scroll_height: 0.0,
+        }
+    }
+
+    /// Serializes the metrics to a JSON object. `top`/`left`/`right`/`bottom`
+    /// mirror the CSSOM `DOMRect` shape; `scrollTop`/`scrollLeft` are always 0
+    /// because the engine does not model scroll offsets.
+    fn to_json(&self) -> String {
+        format!(
+            "{{\"x\":{x},\"y\":{y},\"width\":{w},\"height\":{h},\
+\"top\":{y},\"left\":{x},\"right\":{right},\"bottom\":{bottom},\
+\"offsetWidth\":{ow},\"offsetHeight\":{oh},\"offsetTop\":{ot},\"offsetLeft\":{ol},\
+\"clientWidth\":{cw},\"clientHeight\":{ch},\"clientTop\":{ct},\"clientLeft\":{cl},\
+\"scrollWidth\":{sw},\"scrollHeight\":{sh},\"scrollTop\":0,\"scrollLeft\":0}}",
+            x = json_number(self.x),
+            y = json_number(self.y),
+            w = json_number(self.width),
+            h = json_number(self.height),
+            right = json_number(self.x + self.width),
+            bottom = json_number(self.y + self.height),
+            ow = json_number(self.offset_width),
+            oh = json_number(self.offset_height),
+            ot = json_number(self.offset_top),
+            ol = json_number(self.offset_left),
+            cw = json_number(self.client_width),
+            ch = json_number(self.client_height),
+            ct = json_number(self.client_top),
+            cl = json_number(self.client_left),
+            sw = json_number(self.scroll_width),
+            sh = json_number(self.scroll_height),
+        )
+    }
+}
+
+/// Rounds a metric to a whole pixel when it is integer-valued (the common case
+/// for block layout) and otherwise emits up to three decimals, producing clean
+/// JSON numbers like `100` rather than `100.0`.
+fn json_number(value: f32) -> String {
+    if !value.is_finite() {
+        return "0".to_string();
+    }
+    if value.fract() == 0.0 {
+        format!("{}", value as i64)
+    } else {
+        let rounded = (value * 1000.0).round() / 1000.0;
+        format!("{rounded}")
+    }
+}
+
+/// Computes the layout metrics for a single [`LayoutBox`].
+///
+/// - `getBoundingClientRect` / `offsetWidth` / `offsetHeight` use the border
+///   box (content + padding + border).
+/// - `offsetTop` / `offsetLeft` are the border-box position relative to the
+///   initial containing block (the viewport origin); this coincides with the
+///   CSSOM definition when the offset parent is the root box at the origin.
+/// - `clientWidth` / `clientHeight` use the padding box (content + padding),
+///   and `clientTop` / `clientLeft` are the top/left border widths.
+/// - `scrollWidth` / `scrollHeight` are the padding box extended to enclose any
+///   overflowing descendant border boxes.
+fn compute_layout_metrics(layout: &LayoutBox) -> LayoutMetrics {
+    let content = layout.dimensions.content;
+    let padding = layout.dimensions.padding;
+    let border = layout.dimensions.border;
+
+    let border_x = content.x - padding.left - border.left;
+    let border_y = content.y - padding.top - border.top;
+    let border_width = content.width + padding.left + padding.right + border.left + border.right;
+    let border_height = content.height + padding.top + padding.bottom + border.top + border.bottom;
+
+    let client_width = content.width + padding.left + padding.right;
+    let client_height = content.height + padding.top + padding.bottom;
+
+    // scrollWidth/scrollHeight: the padding box grown to contain descendants.
+    let padding_right_edge = content.x + content.width + padding.right;
+    let padding_bottom_edge = content.y + content.height + padding.bottom;
+    let padding_left_edge = content.x - padding.left;
+    let padding_top_edge = content.y - padding.top;
+    let mut max_right = padding_right_edge;
+    let mut max_bottom = padding_bottom_edge;
+    for child in &layout.children {
+        let child_content = child.dimensions.content;
+        let child_padding = child.dimensions.padding;
+        let child_border = child.dimensions.border;
+        let child_right =
+            child_content.x + child_content.width + child_padding.right + child_border.right;
+        let child_bottom =
+            child_content.y + child_content.height + child_padding.bottom + child_border.bottom;
+        max_right = max_right.max(child_right);
+        max_bottom = max_bottom.max(child_bottom);
+    }
+    let scroll_width = (max_right - padding_left_edge).max(client_width);
+    let scroll_height = (max_bottom - padding_top_edge).max(client_height);
+
+    LayoutMetrics {
+        x: border_x,
+        y: border_y,
+        width: border_width,
+        height: border_height,
+        offset_width: border_width,
+        offset_height: border_height,
+        offset_top: border_y,
+        offset_left: border_x,
+        client_width,
+        client_height,
+        client_top: border.top,
+        client_left: border.left,
+        scroll_width,
+        scroll_height,
+    }
+}
+
+/// `__omoikane_computed_style(nodeId)` -> JSON string of computed CSS
+/// properties (kebab-case name to CSS string value). Forces a synchronous
+/// style recompute if the DOM changed since the last query.
+fn computed_style_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let node_id = parse_node_id(args.first(), context)?;
+    with_host_state(|state| {
+        let node = state.borrow().get_node(node_id);
+        let Some(node) = node else {
+            return Ok(js_string!("{}").into());
+        };
+        if node.node_type() != NodeType::Element {
+            return Ok(js_string!("{}").into());
+        }
+        let mut state = state.borrow_mut();
+        state.ensure_style_resolver();
+        let json = match state.style_resolver.as_mut() {
+            Some(resolver) => serialize_computed_style(&resolver.computed_style(&node)),
+            None => "{}".to_string(),
+        };
+        Ok(js_string!(json.as_str()).into())
+    })
+}
+
+/// `__omoikane_layout_metrics(nodeId)` -> JSON string of geometry metrics for
+/// the element (see [`compute_layout_metrics`]). Forces a synchronous reflow if
+/// the DOM changed since the last query. Elements that produce no box (e.g.
+/// `display: none`) report all-zero metrics.
+fn layout_metrics_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let node_id = parse_node_id(args.first(), context)?;
+    with_host_state(|state| {
+        let node = state.borrow().get_node(node_id);
+        let Some(node) = node else {
+            return Ok(js_string!(LayoutMetrics::zero().to_json().as_str()).into());
+        };
+        let mut state = state.borrow_mut();
+        state.ensure_layout();
+        let metrics = state
+            .layout_root
+            .as_ref()
+            .and_then(|root| find_layout_box(root, &node))
+            .map(compute_layout_metrics)
+            .unwrap_or_else(LayoutMetrics::zero);
+        Ok(js_string!(metrics.to_json().as_str()).into())
     })
 }
 
@@ -958,7 +1359,11 @@ fn append_child_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> 
             JsError::from(JsNativeError::error().with_message("child node not found"))
         })?;
         parent.append_child(child.clone());
-        state.borrow_mut().register_tree(&child);
+        {
+            let mut state = state.borrow_mut();
+            state.register_tree(&child);
+            state.mark_style_dirty();
+        }
         Ok(JsValue::from(child.identity() as f64))
     })
 }
@@ -1042,6 +1447,7 @@ fn set_attribute_native(_: &JsValue, args: &[JsValue], context: &mut Context) ->
             .get_node(node_id)
             .ok_or_else(|| JsError::from(JsNativeError::error().with_message("node not found")))?;
         node.set_attribute(name, value);
+        state.borrow_mut().mark_style_dirty();
         Ok(JsValue::undefined())
     })
 }
@@ -1141,8 +1547,10 @@ fn set_text_content_native(_: &JsValue, args: &[JsValue], context: &mut Context)
     let id = args.first().cloned().unwrap_or_default().to_number(context)? as usize;
     let text = args.get(1).cloned().unwrap_or_default().to_string(context)?.to_std_string_escaped();
     with_host_state(|state| {
-        let state = state.borrow();
-        let node = state.get_node(id).ok_or_else(|| JsError::from(JsNativeError::error().with_message("node not found")))?;
+        let node = state
+            .borrow()
+            .get_node(id)
+            .ok_or_else(|| JsError::from(JsNativeError::error().with_message("node not found")))?;
         // For text/comment leaf nodes, update data directly
         if matches!(node.node_type(), crate::dom::NodeType::Text | crate::dom::NodeType::Comment) {
             node.set_data(&text);
@@ -1157,6 +1565,7 @@ fn set_text_content_native(_: &JsValue, args: &[JsValue], context: &mut Context)
                 node.append_child(text_node);
             }
         }
+        state.borrow_mut().mark_style_dirty();
         Ok(JsValue::undefined())
     })
 }
@@ -1239,8 +1648,10 @@ fn set_inner_html_native(_: &JsValue, args: &[JsValue], context: &mut Context) -
     let id = args.first().cloned().unwrap_or_default().to_number(context)? as usize;
     let html = args.get(1).cloned().unwrap_or_default().to_string(context)?.to_std_string_escaped();
     with_host_state(|state| {
-        let state = state.borrow();
-        let node = state.get_node(id).ok_or_else(|| JsError::from(JsNativeError::error().with_message("node not found")))?;
+        let node = state
+            .borrow()
+            .get_node(id)
+            .ok_or_else(|| JsError::from(JsNativeError::error().with_message("node not found")))?;
         for child in node.child_nodes() {
             let _ = node.remove_child(&child);
         }
@@ -1253,6 +1664,7 @@ fn set_inner_html_native(_: &JsValue, args: &[JsValue], context: &mut Context) -
                 node.append_child(child);
             }
         }
+        state.borrow_mut().mark_style_dirty();
         Ok(JsValue::undefined())
     })
 }
@@ -1324,10 +1736,14 @@ fn remove_child_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> 
     let parent_id = args.first().cloned().unwrap_or_default().to_number(context)? as usize;
     let child_id = args.get(1).cloned().unwrap_or_default().to_number(context)? as usize;
     with_host_state(|state| {
-        let state = state.borrow();
-        let parent = state.get_node(parent_id).ok_or_else(|| JsError::from(JsNativeError::error().with_message("parent not found")))?;
-        let child = state.get_node(child_id).ok_or_else(|| JsError::from(JsNativeError::error().with_message("child not found")))?;
+        let (parent, child) = {
+            let state = state.borrow();
+            let parent = state.get_node(parent_id).ok_or_else(|| JsError::from(JsNativeError::error().with_message("parent not found")))?;
+            let child = state.get_node(child_id).ok_or_else(|| JsError::from(JsNativeError::error().with_message("child not found")))?;
+            (parent, child)
+        };
         parent.remove_child(&child).map_err(|e| JsError::from(JsNativeError::error().with_message(e.to_string())))?;
+        state.borrow_mut().mark_style_dirty();
         Ok(JsValue::undefined())
     })
 }
@@ -1337,20 +1753,25 @@ fn insert_before_native(_: &JsValue, args: &[JsValue], context: &mut Context) ->
     let new_id = args.get(1).cloned().unwrap_or_default().to_number(context)? as usize;
     let ref_value = args.get(2).cloned().unwrap_or_default();
     with_host_state(|state| {
-        let state = state.borrow();
-        let parent = state.get_node(parent_id).ok_or_else(|| JsError::from(JsNativeError::error().with_message("parent not found")))?;
-        let new_node = state.get_node(new_id).ok_or_else(|| JsError::from(JsNativeError::error().with_message("new node not found")))?;
-        if ref_value.is_null() || ref_value.is_undefined() {
-            parent.append_child(new_node);
+        let ref_node = if ref_value.is_null() || ref_value.is_undefined() {
+            None
         } else {
             let ref_id = ref_value.to_number(context)? as usize;
-            let ref_node = state.get_node(ref_id);
-            if let Some(ref_node) = ref_node {
+            state.borrow().get_node(ref_id)
+        };
+        let (parent, new_node) = {
+            let state = state.borrow();
+            let parent = state.get_node(parent_id).ok_or_else(|| JsError::from(JsNativeError::error().with_message("parent not found")))?;
+            let new_node = state.get_node(new_id).ok_or_else(|| JsError::from(JsNativeError::error().with_message("new node not found")))?;
+            (parent, new_node)
+        };
+        match ref_node {
+            Some(ref_node) => {
                 let _ = parent.insert_before(new_node.clone(), &ref_node);
-            } else {
-                parent.append_child(new_node);
             }
+            None => parent.append_child(new_node),
         }
+        state.borrow_mut().mark_style_dirty();
         Ok(JsValue::undefined())
     })
 }
@@ -1474,9 +1895,12 @@ fn remove_attribute_native(_: &JsValue, args: &[JsValue], context: &mut Context)
     let id = args.first().cloned().unwrap_or_default().to_number(context)? as usize;
     let name = args.get(1).cloned().unwrap_or_default().to_string(context)?.to_std_string_escaped();
     with_host_state(|state| {
-        let state = state.borrow();
-        let node = state.get_node(id).ok_or_else(|| JsError::from(JsNativeError::error().with_message("node not found")))?;
+        let node = state
+            .borrow()
+            .get_node(id)
+            .ok_or_else(|| JsError::from(JsNativeError::error().with_message("node not found")))?;
         node.remove_attribute(&name);
+        state.borrow_mut().mark_style_dirty();
         Ok(JsValue::undefined())
     })
 }
@@ -3590,6 +4014,291 @@ mod tests {
             runtime.eval("globalThis.ticks").unwrap().as_number(),
             Some(50.0),
             "infinite interval must stop at the task-count cap"
+        );
+    }
+
+    // -- getComputedStyle (issue 016-8) + layout metrics (issue 044-2) --------
+
+    /// Evaluates `expr`, coercing the result to a JS string, and returns it as a
+    /// Rust `String`.
+    fn eval_str(runtime: &mut JsRuntime, expr: &str) -> String {
+        let wrapped = format!("String({expr})");
+        runtime
+            .eval(&wrapped)
+            .unwrap_or_else(|e| panic!("eval `{expr}` failed: {e}"))
+            .as_string()
+            .map(|s| s.to_std_string_escaped())
+            .unwrap_or_else(|| panic!("`{expr}` did not evaluate to a string"))
+    }
+
+    /// Evaluates `expr` and returns the result as an `f64`.
+    fn eval_num(runtime: &mut JsRuntime, expr: &str) -> f64 {
+        runtime
+            .eval(expr)
+            .unwrap_or_else(|e| panic!("eval `{expr}` failed: {e}"))
+            .as_number()
+            .unwrap_or_else(|| panic!("`{expr}` did not evaluate to a number"))
+    }
+
+    fn runtime_from_html(html: &str) -> JsRuntime {
+        use crate::html::TreeBuilder;
+        let doc = TreeBuilder::parse(html).document();
+        JsRuntime::with_document(doc).unwrap()
+    }
+
+    #[test]
+    fn get_computed_style_returns_cascade_white_space() {
+        let html = r#"<html><head><style>
+            #target { white-space: pre-wrap; }
+        </style></head><body><p id="target">hi</p></body></html>"#;
+        let mut runtime = runtime_from_html(html);
+
+        // camelCase property access.
+        assert_eq!(
+            eval_str(
+                &mut runtime,
+                "getComputedStyle(document.getElementById('target'), '').whiteSpace"
+            ),
+            "pre-wrap"
+        );
+        // getPropertyValue with the CSS (kebab-case) name.
+        assert_eq!(
+            eval_str(
+                &mut runtime,
+                "getComputedStyle(document.getElementById('target'), '').getPropertyValue('white-space')"
+            ),
+            "pre-wrap"
+        );
+    }
+
+    #[test]
+    fn get_computed_style_drops_invalid_white_space_keyword() {
+        // Mirrors Acid3 test 0: an invalid later declaration must not override a
+        // valid earlier one.
+        let html = r#"<html><head><style>
+            #target { white-space: pre-wrap; white-space: x-bogus; }
+        </style></head><body><p id="target">hi</p></body></html>"#;
+        let mut runtime = runtime_from_html(html);
+
+        assert_eq!(
+            eval_str(
+                &mut runtime,
+                "getComputedStyle(document.getElementById('target'), '').whiteSpace"
+            ),
+            "pre-wrap",
+            "invalid `x-bogus` declaration must be discarded, keeping `pre-wrap`"
+        );
+    }
+
+    #[test]
+    fn get_computed_style_exposes_float_as_css_float() {
+        let html = r#"<html><head><style>
+            #target { float: right; }
+        </style></head><body><div id="target"></div></body></html>"#;
+        let mut runtime = runtime_from_html(html);
+
+        assert_eq!(
+            eval_str(
+                &mut runtime,
+                "getComputedStyle(document.getElementById('target'), '').cssFloat"
+            ),
+            "right"
+        );
+        assert_eq!(
+            eval_str(
+                &mut runtime,
+                "getComputedStyle(document.getElementById('target'), '').float"
+            ),
+            "right"
+        );
+    }
+
+    #[test]
+    fn get_computed_style_exposes_z_index_like_selector_test() {
+        // Reproduces the shape of Acid3's selectorTest: a universal rule sets a
+        // baseline z-index and a specific rule raises it. getComputedStyle must
+        // report the numeric value (never "auto").
+        let html = r#"<html><head><style>
+            * { z-index: 0; position: absolute; }
+            #target { z-index: 3; }
+        </style></head><body><div id="target"></div><div id="other"></div></body></html>"#;
+        let mut runtime = runtime_from_html(html);
+
+        assert_eq!(
+            eval_str(
+                &mut runtime,
+                "document.defaultView.getComputedStyle(document.getElementById('target'), '').zIndex"
+            ),
+            "3"
+        );
+        assert_eq!(
+            eval_str(
+                &mut runtime,
+                "document.defaultView.getComputedStyle(document.getElementById('other'), '').zIndex"
+            ),
+            "0"
+        );
+    }
+
+    #[test]
+    fn get_computed_style_inline_style_overrides_cascade() {
+        let html = r#"<html><head><style>
+            #target { color: red; }
+        </style></head><body><div id="target" style="color: blue"></div></body></html>"#;
+        let mut runtime = runtime_from_html(html);
+
+        assert_eq!(
+            eval_str(
+                &mut runtime,
+                "getComputedStyle(document.getElementById('target'), '').color"
+            ),
+            "blue",
+            "inline style must win over the cascaded stylesheet rule"
+        );
+    }
+
+    #[test]
+    fn get_computed_style_is_shared_across_default_view_window_and_global() {
+        let html = r#"<html><head><style>
+            #target { white-space: pre-wrap; }
+        </style></head><body><p id="target">hi</p></body></html>"#;
+        let mut runtime = runtime_from_html(html);
+
+        assert_eq!(
+            eval_str(
+                &mut runtime,
+                "getComputedStyle === window.getComputedStyle && \
+                 window.getComputedStyle === document.defaultView.getComputedStyle"
+            ),
+            "true",
+            "global / window / defaultView getComputedStyle must be the same function"
+        );
+        // And all three produce the same value.
+        assert_eq!(
+            eval_str(
+                &mut runtime,
+                "[getComputedStyle, window.getComputedStyle, document.defaultView.getComputedStyle]\
+                 .map(f => f(document.getElementById('target'), '').whiteSpace).join(',')"
+            ),
+            "pre-wrap,pre-wrap,pre-wrap"
+        );
+    }
+
+    #[test]
+    fn get_computed_style_recomputes_last_child_after_removal() {
+        // Acid3 test 0 core: removing the final child makes the previous element
+        // the new `:last-child`, which must recompute to `pre-wrap`.
+        let html = r#"<html><head><style>
+            #keep:last-child { white-space: pre-wrap; }
+        </style></head><body><div id="parent"><p id="keep">a</p><p id="last">b</p></div></body></html>"#;
+        let mut runtime = runtime_from_html(html);
+
+        // Before removal `#keep` is not the last child, so no pre-wrap.
+        assert_ne!(
+            eval_str(
+                &mut runtime,
+                "getComputedStyle(document.getElementById('keep'), '').whiteSpace"
+            ),
+            "pre-wrap"
+        );
+
+        // Remove the last element; forced reflow must observe the new structure.
+        runtime
+            .eval("(function(){ var l = document.getElementById('last'); l.parentNode.removeChild(l); })()")
+            .unwrap();
+
+        assert_eq!(
+            eval_str(
+                &mut runtime,
+                "getComputedStyle(document.getElementById('keep'), '').whiteSpace"
+            ),
+            "pre-wrap",
+            "`:last-child` must re-match after the final child is removed"
+        );
+    }
+
+    #[test]
+    fn get_bounding_client_rect_returns_block_geometry() {
+        let html = r#"<html><head><style>
+            * { margin: 0; padding: 0; }
+            #box { width: 100px; height: 50px; }
+        </style></head><body><div id="box"></div></body></html>"#;
+        let mut runtime = runtime_from_html(html);
+
+        assert_eq!(eval_num(&mut runtime, "document.getElementById('box').getBoundingClientRect().width"), 100.0);
+        assert_eq!(eval_num(&mut runtime, "document.getElementById('box').getBoundingClientRect().height"), 50.0);
+        assert_eq!(eval_num(&mut runtime, "document.getElementById('box').getBoundingClientRect().left"), 0.0);
+        assert_eq!(eval_num(&mut runtime, "document.getElementById('box').getBoundingClientRect().top"), 0.0);
+        assert_eq!(eval_num(&mut runtime, "document.getElementById('box').getBoundingClientRect().right"), 100.0);
+        assert_eq!(eval_num(&mut runtime, "document.getElementById('box').getBoundingClientRect().bottom"), 50.0);
+        assert_eq!(eval_num(&mut runtime, "document.getElementById('box').offsetWidth"), 100.0);
+        assert_eq!(eval_num(&mut runtime, "document.getElementById('box').offsetHeight"), 50.0);
+        assert_eq!(eval_num(&mut runtime, "document.getElementById('box').offsetLeft"), 0.0);
+        assert_eq!(eval_num(&mut runtime, "document.getElementById('box').offsetTop"), 0.0);
+    }
+
+    #[test]
+    fn client_metrics_account_for_padding_and_border() {
+        let html = r#"<html><head><style>
+            * { margin: 0; padding: 0; }
+            #box { width: 100px; height: 50px; padding: 10px; border: 5px solid black; }
+        </style></head><body><div id="box"></div></body></html>"#;
+        let mut runtime = runtime_from_html(html);
+
+        // clientWidth/Height = content + padding (no border).
+        assert_eq!(eval_num(&mut runtime, "document.getElementById('box').clientWidth"), 120.0);
+        assert_eq!(eval_num(&mut runtime, "document.getElementById('box').clientHeight"), 70.0);
+        // offsetWidth/Height = content + padding + border.
+        assert_eq!(eval_num(&mut runtime, "document.getElementById('box').offsetWidth"), 130.0);
+        assert_eq!(eval_num(&mut runtime, "document.getElementById('box').offsetHeight"), 80.0);
+        // clientTop/Left = border widths.
+        assert_eq!(eval_num(&mut runtime, "document.getElementById('box').clientTop"), 5.0);
+        assert_eq!(eval_num(&mut runtime, "document.getElementById('box').clientLeft"), 5.0);
+        // Border box starts at the origin.
+        assert_eq!(eval_num(&mut runtime, "document.getElementById('box').getBoundingClientRect().left"), 0.0);
+        assert_eq!(eval_num(&mut runtime, "document.getElementById('box').getBoundingClientRect().top"), 0.0);
+    }
+
+    #[test]
+    fn layout_metrics_force_reflow_after_class_change() {
+        let html = r#"<html><head><style>
+            * { margin: 0; padding: 0; }
+            #box { width: 100px; height: 50px; }
+            #box.wide { width: 250px; }
+        </style></head><body><div id="box"></div></body></html>"#;
+        let mut runtime = runtime_from_html(html);
+
+        assert_eq!(eval_num(&mut runtime, "document.getElementById('box').offsetWidth"), 100.0);
+
+        // Adding the `wide` class matches a wider rule; the next metric query
+        // must reflect the change via a forced reflow.
+        runtime
+            .eval("document.getElementById('box').className = 'wide';")
+            .unwrap();
+
+        assert_eq!(
+            eval_num(&mut runtime, "document.getElementById('box').offsetWidth"),
+            250.0,
+            "forced reflow must observe the class-driven width change"
+        );
+    }
+
+    #[test]
+    fn scroll_size_encloses_overflowing_child() {
+        let html = r#"<html><head><style>
+            * { margin: 0; padding: 0; }
+            #box { width: 100px; height: 50px; overflow: hidden; }
+            #tall { width: 100px; height: 200px; }
+        </style></head><body><div id="box"><div id="tall"></div></div></body></html>"#;
+        let mut runtime = runtime_from_html(html);
+
+        // clientHeight is the (clipped) padding box; scrollHeight encloses the
+        // taller child.
+        assert_eq!(eval_num(&mut runtime, "document.getElementById('box').clientHeight"), 50.0);
+        assert_eq!(
+            eval_num(&mut runtime, "document.getElementById('box').scrollHeight"),
+            200.0,
+            "scrollHeight must enclose the overflowing child"
         );
     }
 }

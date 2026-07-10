@@ -2851,3 +2851,57 @@ fn outline_inherit_applies_to_all_longhands() {
             "{longhand} should be inherit");
     }
 }
+
+#[test]
+fn invalid_white_space_keyword_is_dropped_from_cascade() {
+    // CSS discards invalid declarations, so a later `white-space: x-bogus`
+    // must not override an earlier valid `pre-wrap` (Acid3 test 0 relies on
+    // this). The invalid keyword is not a valid `white-space` value.
+    let document = NodeHandle::document();
+    let html = NodeHandle::element("html");
+    let body = NodeHandle::element("body");
+    let p = NodeHandle::element("p");
+    p.set_attribute("id", "target");
+    document.append_child(html.clone());
+    html.append_child(body.clone());
+    body.append_child(p.clone());
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet("#target { white-space: pre-wrap; white-space: x-bogus; }").unwrap(),
+    );
+
+    let style = resolver.computed_style(&p);
+    assert_eq!(
+        style.get("white-space"),
+        Some(&ComputedValue::Keyword("pre-wrap".to_string())),
+        "invalid `x-bogus` must be discarded, keeping `pre-wrap`"
+    );
+}
+
+#[test]
+fn valid_white_space_keyword_survives_cascade() {
+    // A valid enumerated value must still win when it is the last declaration.
+    let document = NodeHandle::document();
+    let html = NodeHandle::element("html");
+    let body = NodeHandle::element("body");
+    let p = NodeHandle::element("p");
+    p.set_attribute("id", "target");
+    document.append_child(html.clone());
+    html.append_child(body.clone());
+    body.append_child(p.clone());
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet("#target { white-space: pre-wrap; white-space: nowrap; }").unwrap(),
+    );
+
+    let style = resolver.computed_style(&p);
+    assert_eq!(
+        style.get("white-space"),
+        Some(&ComputedValue::Keyword("nowrap".to_string())),
+        "a valid later value must override the earlier one"
+    );
+}

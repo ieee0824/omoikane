@@ -513,7 +513,40 @@ fn insert_computed_property(
 fn should_skip_computed_property(name: &str, computed: &ComputedValue) -> bool {
     // CSS 2.1: non-zero unitless numbers are invalid for length properties;
     // skip them so they don't override valid length values in the cascade.
-    matches!(computed, ComputedValue::Number(n) if *n != 0.0) && is_length_property(name)
+    if matches!(computed, ComputedValue::Number(n) if *n != 0.0) && is_length_property(name) {
+        return true;
+    }
+
+    // Enumerated properties: a keyword outside the property's valid set is an
+    // invalid declaration and must be discarded by the cascade so it cannot
+    // override an earlier valid declaration of the same property. Acid3 test 0
+    // relies on `white-space: pre-wrap; white-space: x-bogus;` keeping the
+    // `pre-wrap` value (the invalid `x-bogus` declaration is dropped).
+    if let ComputedValue::Keyword(keyword) = computed {
+        if let Some(valid) = enumerated_keyword_set(name) {
+            let lower = keyword.to_ascii_lowercase();
+            // CSS-wide keywords are resolved in a later pass; never drop them.
+            let is_css_wide = matches!(lower.as_str(), "inherit" | "initial" | "unset" | "revert");
+            if !is_css_wide && !valid.iter().any(|candidate| *candidate == lower) {
+                return true;
+            }
+        }
+    }
+
+    false
+}
+
+/// Returns the set of valid keyword values for an enumerated CSS property, or
+/// `None` for properties that are not validated here.
+///
+/// Only properties whose invalid values Omoikane must actively discard during
+/// the cascade are listed. Keeping the set small avoids accidentally dropping a
+/// valid value that a property accepts but that is not enumerated here.
+fn enumerated_keyword_set(name: &str) -> Option<&'static [&'static str]> {
+    match name {
+        "white-space" => Some(&["normal", "pre", "nowrap", "pre-wrap", "pre-line", "break-spaces"]),
+        _ => None,
+    }
 }
 
 #[derive(Debug, Clone)]
