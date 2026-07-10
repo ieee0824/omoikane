@@ -7,7 +7,7 @@
 //!
 //! Usage:
 //!     cargo run --example acid3
-//!     cargo run --example acid3 -- --faithful     # only faithful load emulation
+//!     cargo run --example acid3 -- --faithful     # only faithful load (real load event)
 //!     cargo run --example acid3 -- --direct        # only direct-drive baseline
 //!
 //! This runner does NOT modify the engine; it only exercises existing public
@@ -32,7 +32,7 @@ fn main() {
     if run_faithful {
         let run = run_acid3(&server.base_url(), DriveMode::Faithful);
         report(
-            "FAITHFUL LOAD EMULATION (onload + setTimeout/advance)",
+            "FAITHFUL LOAD (real load event fires <body onload> + setTimeout/advance)",
             &run,
         );
     }

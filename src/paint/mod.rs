@@ -709,6 +709,16 @@ pub fn render_document_with_url(
         for err in &errors {
             eprintln!("[omoikane][js-error] {err}");
         }
+        // Wire `on*` inline handlers (e.g. <body onload>) and fire the `load`
+        // event. Per the HTML load order this happens after scripts run and
+        // DOMContentLoaded has fired (inside execute_document_scripts), so page
+        // load handlers run before the timer pump advances virtual time.
+        if let Err(err) = runtime.wire_inline_event_handlers() {
+            eprintln!("[omoikane][js-error] {err}");
+        }
+        if let Err(err) = runtime.fire_load() {
+            eprintln!("[omoikane][js-error] {err}");
+        }
         // Drive script-scheduled timers (setTimeout/setInterval) in virtual
         // time so that DOM mutations from deferred callbacks settle before
         // layout. Bounded by a virtual-time budget and a task-count cap so an

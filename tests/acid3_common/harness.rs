@@ -227,10 +227,12 @@ fn handle_connection(
 /// How the runner advances the Acid3 test loop.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DriveMode {
-    /// Faithful browser emulation: call the `onload` handler once, then advance
-    /// the event loop's virtual clock so scheduled `setTimeout(update, delay)`
-    /// tasks fire, exactly as a real page load would. Exposes whatever breaks in
-    /// the engine's timer/callback plumbing.
+    /// Faithful browser emulation: wire the page's `on*` inline handlers and
+    /// dispatch the real `load` event (so `<body onload="update()">` runs
+    /// through the engine's own event machinery), then advance the event loop's
+    /// virtual clock so scheduled `setTimeout(update, delay)` tasks fire,
+    /// exactly as a real page load would. Exposes whatever breaks in the
+    /// engine's handler-wiring and timer/callback plumbing.
     Faithful,
     /// Force the loop forward by invoking `update()` directly N times, bypassing
     /// `setTimeout`. Gives an upper-bound baseline of how many individual tests
@@ -293,9 +295,14 @@ pub fn run_acid3(base_url: &str, mode: DriveMode) -> Acid3Run {
 
     match mode {
         DriveMode::Faithful => {
-            // Simulate the <body onload="update()"> handler firing.
-            if let Err(e) = runtime.eval_safe("if (typeof update === 'function') update();") {
-                drive_errors.push(format!("onload update(): {e}"));
+            // Wire the page's on* inline attributes and dispatch the real load
+            // event so <body onload="update()"> starts the Acid3 driver through
+            // the engine's own event pipeline -- no manual update() call.
+            if let Err(e) = runtime.wire_inline_event_handlers() {
+                drive_errors.push(format!("wire inline handlers: {e}"));
+            }
+            if let Err(e) = runtime.fire_load() {
+                drive_errors.push(format!("fire load: {e}"));
             }
             // Advance virtual time so setTimeout(update, delay) tasks fire.
             // Cap: 60 virtual seconds at the page's 10ms delay = 6000 ticks.

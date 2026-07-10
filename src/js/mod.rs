@@ -390,6 +390,37 @@ impl JsRuntime {
         self.run_jobs()
     }
 
+    /// Wires `on*` inline event-handler content attributes to event listeners.
+    ///
+    /// Walks the document tree and, for every element attribute whose name
+    /// starts with `on` (e.g. `onload`, `onclick`), compiles the attribute
+    /// value as the body of `function (event) { ... }` and registers it as an
+    /// event listener for the corresponding event type. The window-reflected
+    /// events on `<body>`/`<frameset>` (`load`, `unload`, `resize`, ...) are
+    /// registered on the Window, so `<body onload="...">` fires when the `load`
+    /// event is dispatched; every other handler is registered on its element.
+    ///
+    /// Call this after the DOM is built (typically after running scripts and
+    /// before firing `load`). It is a no-op for attributes whose value fails to
+    /// compile.
+    pub fn wire_inline_event_handlers(&mut self) -> JsResult<()> {
+        self.eval("__omoikane_wire_inline_handlers()")?;
+        self.run_jobs()
+    }
+
+    /// Dispatches the `load` event on the Window (and thus the document).
+    ///
+    /// In the load pipeline this fires after scripts have executed and
+    /// `DOMContentLoaded` has been dispatched, matching the HTML spec ordering
+    /// (scripts → `DOMContentLoaded` → resource loads → `load`). Combined with
+    /// [`wire_inline_event_handlers`](Self::wire_inline_event_handlers), a
+    /// page's `<body onload="...">` handler runs at this point.
+    pub fn fire_load(&mut self) -> JsResult<()> {
+        // The load event does not bubble.
+        self.eval("window.dispatchEvent(new Event('load', { bubbles: false }))")?;
+        self.run_jobs()
+    }
+
     /// Collects and executes all `<script>` elements in the document.
     ///
     /// - Inline scripts: text content is executed directly.
@@ -599,6 +630,11 @@ fn register_host_bindings(
             js_string!("__omoikane_get_attribute"),
             2,
             NativeFunction::from_copy_closure(get_attribute_native),
+        ),
+        (
+            js_string!("__omoikane_attribute_names"),
+            1,
+            NativeFunction::from_copy_closure(attribute_names_native),
         ),
         (
             js_string!("__omoikane_set_attribute"),
@@ -900,6 +936,25 @@ fn node_name_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsR
             .get_node(node_id)
             .ok_or_else(|| JsError::from(JsNativeError::error().with_message("node not found")))?;
         Ok(js_string!(node.node_name().as_str()).into())
+    })
+}
+
+fn attribute_names_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let node_id = parse_node_id(args.first(), context)?;
+    with_host_state(|state| {
+        let node = state.borrow().get_node(node_id);
+        let names: Vec<JsValue> = node
+            .and_then(|node| node.attributes())
+            .map(|attributes| {
+                attributes
+                    .keys()
+                    .map(|key| js_string!(key.as_str()).into())
+                    .collect()
+            })
+            .unwrap_or_default();
+        Ok(boa_engine::JsValue::from(
+            boa_engine::object::builtins::JsArray::from_iter(names, context),
+        ))
     })
 }
 
@@ -2032,6 +2087,184 @@ mod tests {
         let result = runtime.eval("order").unwrap()
             .as_string().unwrap().to_std_string_escaped();
         assert_eq!(result, "first,second,", "defer on inline should be ignored; both run in order");
+    }
+
+    // --- 016-4: load event + on* inline handlers + drivers primitives ---
+
+    #[test]
+    fn body_onload_attribute_fires_on_load_and_can_touch_dom() {
+        use crate::html::TreeBuilder;
+        let html = r#"<html><body onload="document.body.setAttribute('data-loaded', 'yes'); globalThis.loadCount = (globalThis.loadCount || 0) + 1;">
+            <p id="p">hi</p>
+        </body></html>"#;
+        let doc = TreeBuilder::parse(html).document();
+        let mut runtime = JsRuntime::with_document(doc).unwrap();
+        runtime.execute_document_scripts(None);
+
+        // Before load fires, the handler must not have run.
+        let before = runtime
+            .eval("globalThis.loadCount || 0")
+            .unwrap()
+            .as_number()
+            .unwrap();
+        assert_eq!(before, 0.0, "onload handler must not fire before load");
+
+        runtime.wire_inline_event_handlers().unwrap();
+        runtime.fire_load().unwrap();
+
+        let count = runtime.eval("globalThis.loadCount").unwrap().as_number().unwrap();
+        assert_eq!(count, 1.0, "body onload should fire exactly once on load");
+        let attr = runtime
+            .eval("document.body.getAttribute('data-loaded')")
+            .unwrap()
+            .as_string()
+            .unwrap()
+            .to_std_string_escaped();
+        assert_eq!(attr, "yes", "onload handler should have mutated the DOM");
+    }
+
+    #[test]
+    fn inline_onclick_handler_receives_event_argument() {
+        use crate::html::TreeBuilder;
+        let html = r#"<html><body><button id="b" onclick="globalThis.clickedType = event.type;">go</button></body></html>"#;
+        let doc = TreeBuilder::parse(html).document();
+        let mut runtime = JsRuntime::with_document(doc).unwrap();
+        runtime.execute_document_scripts(None);
+        runtime.wire_inline_event_handlers().unwrap();
+
+        runtime
+            .eval("document.getElementById('b').dispatchEvent(new Event('click'))")
+            .unwrap();
+        let ty = runtime
+            .eval("globalThis.clickedType")
+            .unwrap()
+            .as_string()
+            .unwrap()
+            .to_std_string_escaped();
+        assert_eq!(ty, "click", "onclick handler should receive the event argument");
+    }
+
+    #[test]
+    fn load_fires_after_dom_content_loaded() {
+        use crate::html::TreeBuilder;
+        // Record the order in which DOMContentLoaded and load fire.
+        let html = r#"<html><body onload="globalThis.order.push('load');">
+            <script>
+                globalThis.order = [];
+                document.addEventListener('DOMContentLoaded', function () { globalThis.order.push('dcl'); });
+            </script>
+        </body></html>"#;
+        let doc = TreeBuilder::parse(html).document();
+        let mut runtime = JsRuntime::with_document(doc).unwrap();
+        // execute_document_scripts fires DOMContentLoaded at the end.
+        runtime.execute_document_scripts(None);
+        runtime.wire_inline_event_handlers().unwrap();
+        runtime.fire_load().unwrap();
+
+        let order = runtime
+            .eval("globalThis.order.join(',')")
+            .unwrap()
+            .as_string()
+            .unwrap()
+            .to_std_string_escaped();
+        assert_eq!(order, "dcl,load", "DOMContentLoaded must fire before load");
+    }
+
+    #[test]
+    fn text_node_data_get_and_set() {
+        let mut runtime = JsRuntime::with_document(default_document()).unwrap();
+        let value = runtime
+            .eval(
+                "const t = document.createTextNode('hello'); \
+                 const before = t.data; \
+                 t.data = 'world'; \
+                 before + '|' + t.data + '|' + t.textContent + '|' + (t instanceof Text) + '|' + t.length",
+            )
+            .unwrap()
+            .as_string()
+            .unwrap()
+            .to_std_string_escaped();
+        assert_eq!(value, "hello|world|world|true|5", "Text.data get/set must map to character data");
+    }
+
+    #[test]
+    fn comment_node_data_get_and_set() {
+        let mut runtime = JsRuntime::with_document(default_document()).unwrap();
+        let value = runtime
+            .eval(
+                "const c = document.createComment('note'); \
+                 const before = c.data; \
+                 c.data = 'changed'; \
+                 before + '|' + c.data + '|' + (c instanceof Comment)",
+            )
+            .unwrap()
+            .as_string()
+            .unwrap()
+            .to_std_string_escaped();
+        assert_eq!(value, "note|changed|true", "Comment.data get/set must map to character data");
+    }
+
+    #[test]
+    fn element_has_no_character_data_property() {
+        let mut runtime = JsRuntime::with_document(default_document()).unwrap();
+        // .data must not be defined on Element nodes (it is a CharacterData API).
+        let is_undefined = runtime
+            .eval("document.createElement('div').data === undefined")
+            .unwrap()
+            .as_boolean()
+            .unwrap();
+        assert!(is_undefined, "Element nodes must not expose CharacterData.data");
+    }
+
+    #[test]
+    fn document_default_view_is_global() {
+        let mut runtime = JsRuntime::with_document(default_document()).unwrap();
+        let same = runtime
+            .eval("document.defaultView === globalThis && document.defaultView === window")
+            .unwrap()
+            .as_boolean()
+            .unwrap();
+        assert!(same, "document.defaultView must be the global window object");
+    }
+
+    #[test]
+    fn node_type_constants_are_exposed() {
+        let mut runtime = JsRuntime::with_document(default_document()).unwrap();
+        // On the Node constructor.
+        assert_eq!(runtime.eval("Node.ELEMENT_NODE").unwrap().as_number().unwrap(), 1.0);
+        assert_eq!(runtime.eval("Node.TEXT_NODE").unwrap().as_number().unwrap(), 3.0);
+        assert_eq!(runtime.eval("Node.COMMENT_NODE").unwrap().as_number().unwrap(), 8.0);
+        assert_eq!(runtime.eval("Node.DOCUMENT_NODE").unwrap().as_number().unwrap(), 9.0);
+        assert_eq!(runtime.eval("Node.DOCUMENT_TYPE_NODE").unwrap().as_number().unwrap(), 10.0);
+        assert_eq!(runtime.eval("Node.DOCUMENT_FRAGMENT_NODE").unwrap().as_number().unwrap(), 11.0);
+        assert_eq!(runtime.eval("Node.NOTATION_NODE").unwrap().as_number().unwrap(), 12.0);
+        // On instances via the prototype (as Acid3 test 19 checks).
+        assert_eq!(
+            runtime.eval("document.DOCUMENT_FRAGMENT_NODE").unwrap().as_number().unwrap(),
+            11.0,
+            "document must inherit DOCUMENT_FRAGMENT_NODE"
+        );
+        assert_eq!(
+            runtime.eval("document.createTextNode('').ELEMENT_NODE").unwrap().as_number().unwrap(),
+            1.0,
+            "text node must inherit ELEMENT_NODE"
+        );
+    }
+
+    #[test]
+    fn local_name_lowercases_elements_and_is_null_for_others() {
+        let mut runtime = JsRuntime::with_document(default_document()).unwrap();
+        let el = runtime
+            .eval("document.createElement('DIV').localName")
+            .unwrap()
+            .as_string()
+            .unwrap()
+            .to_std_string_escaped();
+        assert_eq!(el, "div", "element localName must be the lower-cased tag name");
+        // Non-element nodes (text, comment, document) have null localName.
+        assert!(runtime.eval("document.createTextNode('x').localName === null").unwrap().as_boolean().unwrap());
+        assert!(runtime.eval("document.createComment('x').localName === null").unwrap().as_boolean().unwrap());
+        assert!(runtime.eval("document.localName === null").unwrap().as_boolean().unwrap());
     }
 
     #[test]

@@ -14,6 +14,10 @@
       node = new Document(id);
     } else if (nodeType === 11) {
       node = new DocumentFragment(id);
+    } else if (nodeType === 3) {
+      node = new Text(id);
+    } else if (nodeType === 8) {
+      node = new Comment(id);
     } else {
       node = new Node(id);
     }
@@ -212,6 +216,16 @@
 
     get nodeName() {
       return __omoikane_node_name(this.__id);
+    }
+
+    get localName() {
+      // HTML documents lower-case element names; non-element nodes have no
+      // local name (DOM: text/comment/document `.localName` is null).
+      if (this.nodeType !== 1) {
+        return null;
+      }
+      const name = __omoikane_node_name(this.__id);
+      return name ? name.toLowerCase() : null;
     }
 
     get id() {
@@ -656,6 +670,28 @@
     }
   }
 
+  // CharacterData is the shared base of Text and Comment nodes. Its `data`
+  // property is the node's character content (the same string exposed via
+  // `textContent`/`nodeValue` for these node types). Defining it here — rather
+  // than on the base Node — keeps `.data` off Element nodes, where e.g.
+  // `HTMLObjectElement.data` reflects the `data` content attribute instead.
+  class CharacterData extends Node {
+    get data() {
+      return this.textContent;
+    }
+
+    set data(value) {
+      this.textContent = value == null ? "" : String(value);
+    }
+
+    get length() {
+      return this.data.length;
+    }
+  }
+
+  class Text extends CharacterData {}
+  class Comment extends CharacterData {}
+
   class Document extends Node {
     getElementById(id) {
       return wrapNode(__omoikane_get_element_by_id(String(id)));
@@ -723,6 +759,12 @@
       return "CSS1Compat";
     }
 
+    get defaultView() {
+      // The Window associated with this document. For the top-level document
+      // that is the global object itself.
+      return globalThis;
+    }
+
     hasFocus() {
       return true;
     }
@@ -738,9 +780,36 @@
 
   class DocumentFragment extends Node {}
 
+  // Standard Node.nodeType constant values, exposed both as static properties
+  // on the Node constructor (`Node.ELEMENT_NODE`) and on the prototype so they
+  // are reachable from any node instance (`document.DOCUMENT_FRAGMENT_NODE`,
+  // `element.COMMENT_NODE`, ...), matching the DOM specification.
+  const NODE_TYPE_CONSTANTS = {
+    ELEMENT_NODE: 1,
+    ATTRIBUTE_NODE: 2,
+    TEXT_NODE: 3,
+    CDATA_SECTION_NODE: 4,
+    ENTITY_REFERENCE_NODE: 5,
+    ENTITY_NODE: 6,
+    PROCESSING_INSTRUCTION_NODE: 7,
+    COMMENT_NODE: 8,
+    DOCUMENT_NODE: 9,
+    DOCUMENT_TYPE_NODE: 10,
+    DOCUMENT_FRAGMENT_NODE: 11,
+    NOTATION_NODE: 12,
+  };
+  for (const constName of Object.keys(NODE_TYPE_CONSTANTS)) {
+    const value = NODE_TYPE_CONSTANTS[constName];
+    Node[constName] = value;
+    Node.prototype[constName] = value;
+  }
+
   globalThis.Node = Node;
   globalThis.Element = Node;
   globalThis.HTMLElement = Node;
+  globalThis.CharacterData = CharacterData;
+  globalThis.Text = Text;
+  globalThis.Comment = Comment;
   globalThis.Document = Document;
   globalThis.DocumentFragment = DocumentFragment;
   globalThis.Event = Event;
@@ -766,6 +835,53 @@
   };
   globalThis.dispatchEvent = function(event) {
     return document.dispatchEvent(event);
+  };
+
+  // Wire `on*` inline event-handler content attributes (e.g.
+  // `<body onload="update()">`, `<h1 onclick="report(event)">`) to real event
+  // listeners, matching the HTML spec's event-handler-content-attribute
+  // processing. Each attribute value is compiled as the body of
+  // `function (event) { ... }`, so a handler can reference the `event` argument
+  // and page globals. Handlers for the window-reflected events on
+  // `<body>`/`<frameset>` (load, unload, resize, scroll, ...) are registered on
+  // the Window so that `<body onload>` fires when the load event is dispatched;
+  // all other handlers are registered on the element itself.
+  const WINDOW_REFLECTED_HANDLERS = new Set([
+    "load", "unload", "beforeunload", "resize", "scroll", "blur", "focus",
+    "error", "hashchange", "popstate", "pageshow", "pagehide", "online",
+    "offline", "languagechange", "message", "storage",
+  ]);
+  function compileInlineHandler(source) {
+    try {
+      return new Function("event", source);
+    } catch (e) {
+      return null;
+    }
+  }
+  function wireInlineHandlers(node) {
+    if (node && node.nodeType === 1) {
+      const names = __omoikane_attribute_names(node.__id) || [];
+      const tag = (__omoikane_node_name(node.__id) || "").toLowerCase();
+      for (const name of names) {
+        const lower = String(name).toLowerCase();
+        if (lower.length <= 2 || lower.slice(0, 2) !== "on") continue;
+        const type = lower.slice(2);
+        const source = __omoikane_get_attribute(node.__id, name);
+        if (source == null) continue;
+        const handler = compileInlineHandler(source);
+        if (!handler) continue;
+        const reflectToWindow =
+          (tag === "body" || tag === "frameset") && WINDOW_REFLECTED_HANDLERS.has(type);
+        (reflectToWindow ? globalThis : node).addEventListener(type, handler);
+      }
+    }
+    const kids = node ? node.childNodes : [];
+    for (const child of kids) {
+      wireInlineHandlers(child);
+    }
+  }
+  globalThis.__omoikane_wire_inline_handlers = function() {
+    wireInlineHandlers(globalThis.document);
   };
   const __loc = { href: __omoikane_location_href, protocol: "", hostname: "", pathname: "/", search: "", hash: "", origin: "", host: "" };
   try {
