@@ -1548,13 +1548,38 @@ fn fetch_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResul
     })
 }
 
+/// Escapes `value` so it can be embedded inside a JSON string literal.
+///
+/// This handles the two mandatory JSON escapes (`\` and `"`), uses the short
+/// forms for the common whitespace control characters (`\n`, `\r`, `\t`), and
+/// escapes every remaining C0 control character (U+0000–U+001F) as a `\u00XX`
+/// sequence. The C0 handling matters because computed values (e.g. a `content`
+/// property or a URL) can contain arbitrary control characters — for example a
+/// CSS hex escape such as `content: "\1 "` yields a literal U+0001. Emitting
+/// such a byte raw would produce invalid JSON, causing the `JSON.parse()` in
+/// `dom_bootstrap.js` to throw and `getComputedStyle` to silently degrade to an
+/// empty `{}` object.
+///
+/// Used for both JSON object keys (CSS property names) and values, so the
+/// output is always a valid JSON string body regardless of input.
 fn escape_json_string(value: &str) -> String {
-    value
-        .replace('\\', "\\\\")
-        .replace('"', "\\\"")
-        .replace('\n', "\\n")
-        .replace('\r', "\\r")
-        .replace('\t', "\\t")
+    let mut escaped = String::with_capacity(value.len());
+    for ch in value.chars() {
+        match ch {
+            '\\' => escaped.push_str("\\\\"),
+            '"' => escaped.push_str("\\\""),
+            '\n' => escaped.push_str("\\n"),
+            '\r' => escaped.push_str("\\r"),
+            '\t' => escaped.push_str("\\t"),
+            // All other C0 control characters (U+0000–U+001F) must be escaped
+            // to keep the output valid JSON.
+            c if (c as u32) < 0x20 => {
+                escaped.push_str(&format!("\\u{:04x}", c as u32));
+            }
+            c => escaped.push(c),
+        }
+    }
+    escaped
 }
 
 // ── Additional DOM native bindings ──────────────────────────────────────────
@@ -4520,6 +4545,65 @@ mod tests {
         assert_eq!(
             eval_num(&mut runtime, "document.getElementById('zero').getClientRects()[0].height"),
             0.0
+        );
+    }
+
+    #[test]
+    fn escape_json_string_escapes_all_c0_control_characters() {
+        // Short forms are preserved for the common whitespace controls.
+        assert_eq!(escape_json_string("a\nb\rc\td"), "a\\nb\\rc\\td");
+        // The two mandatory JSON escapes: backslash and double-quote.
+        assert_eq!(escape_json_string("a\\\"b"), "a\\\\\\\"b");
+        // Every other C0 control character becomes a `\u00XX` sequence.
+        assert_eq!(escape_json_string("\u{0}"), "\\u0000");
+        assert_eq!(escape_json_string("\u{1}"), "\\u0001");
+        assert_eq!(escape_json_string("\u{8}"), "\\u0008");
+        assert_eq!(escape_json_string("\u{b}"), "\\u000b");
+        assert_eq!(escape_json_string("\u{c}"), "\\u000c");
+        assert_eq!(escape_json_string("\u{1f}"), "\\u001f");
+        // A realistic mixed value: a `content` string with an embedded U+0001.
+        assert_eq!(escape_json_string("\u{1}x"), "\\u0001x");
+        // Non-control characters (including multi-byte) pass through untouched.
+        assert_eq!(escape_json_string("héllo\u{1f600}"), "héllo\u{1f600}");
+    }
+
+    #[test]
+    fn get_computed_style_survives_control_char_in_content_value() {
+        // A CSS hex escape injects a literal U+0001 control character into the
+        // `content` string value. Before escape_json_string handled C0 controls,
+        // serialize_computed_style emitted a raw control byte inside a JSON
+        // string, so JSON.parse in dom_bootstrap.js threw and getComputedStyle
+        // silently degraded to an empty `{}`. The value must now round-trip.
+        let html = "<html><head><style>\
+            #target { content: \"\\1 x\"; }\
+            </style></head><body><div id=\"target\"></div></body></html>";
+        let mut runtime = runtime_from_html(html);
+
+        // The declaration itself carries a literal U+0001 (sanity check that the
+        // CSS hex escape produced a control character, not the text "\\1").
+        assert!(
+            html.contains("\\1 x"),
+            "test fixture must use a CSS hex escape, not a literal control char"
+        );
+
+        // The object must not have degraded to `{}`: a valid computed style
+        // exposes many properties, so `length` is well above zero.
+        assert!(
+            eval_num(
+                &mut runtime,
+                "getComputedStyle(document.getElementById('target'), '').length"
+            ) > 0.0,
+            "getComputedStyle must not degrade to an empty object when a computed \
+             value contains a control character"
+        );
+        // The control character survives the JSON round-trip: U+0001 then 'x'.
+        assert_eq!(
+            eval_str(
+                &mut runtime,
+                "getComputedStyle(document.getElementById('target'), '').content"
+            ),
+            "\u{1}x",
+            "the U+0001 control character in `content` must round-trip through JSON"
         );
     }
 }
