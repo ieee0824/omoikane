@@ -1069,8 +1069,16 @@
     // script execution the arguments are concatenated, tokenized as an HTML
     // fragment, and spliced into the tree as the running script's following
     // siblings (matching how a streaming parser resumes at the insertion
-    // point). Any <script> elements in the written markup run synchronously in
-    // global scope, in document order, as classic document.write() requires.
+    // point). Only inline classic <script> elements in the written markup run
+    // synchronously in global scope, in document order (external `src` and
+    // `type="module"` scripts are inserted but not executed here), as classic
+    // document.write() requires.
+    //
+    // Known limitations (follow-ups, out of scope for 016-7): when a fragment
+    // mixes a <script> with later nodes the spec would run the script before
+    // parsing those later nodes, but here all nodes are spliced in first and
+    // the scripts run afterward; and there is no recursion-depth guard, so a
+    // written script that writes another script recurses unbounded.
     write(...args) {
       let text = "";
       for (let i = 0; i < args.length; i += 1) {
@@ -1098,14 +1106,19 @@
       return this.write(text + "\n");
     }
 
-    // document.open() returns the document; the full "erase the document"
-    // behaviour is unnecessary for the pages this engine drives, so it is a
-    // no-op here. document.close() likewise has nothing to flush because
-    // write() splices its markup synchronously.
+    // document.open() replaces the document with an empty one: it removes every
+    // existing child so a following write() builds fresh content (HTML's
+    // "document open steps"). This works for any Document instance — the main
+    // document today, and sub-documents once iframe contentDocument lands in
+    // 016-9 — because the reset targets this document node by id. Returns the
+    // document, as the spec requires.
     open() {
+      __omoikane_document_reset(this.__id);
       return this;
     }
 
+    // document.close() has nothing to flush: write() splices its markup
+    // synchronously, so there is no pending parser input to finish.
     close() {}
   }
 
