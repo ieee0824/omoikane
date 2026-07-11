@@ -6122,6 +6122,37 @@ mod tests {
           return [f.nodeType,f.childNodes.length,f.firstChild.tagName,f.firstChild.firstChild.tagName,f.firstChild.firstChild.textContent,f.firstChild.lastChild.textContent,f.lastChild.tagName,p.childNodes.length].join('|')})()"#), "11|2|H1|EM|ful| Kitty|P|1");
     }
 
+    #[test]
+    fn range_insert_splits_text_and_keeps_inserted_node_in_selection() {
+        use crate::html::TreeBuilder;
+        let doc = TreeBuilder::parse("<html><body><p id='p'>12345</p></body></html>").document();
+        let mut runtime = JsRuntime::with_document(doc).unwrap();
+        assert_eq!(eval_str(&mut runtime, r#"(()=>{var p=document.getElementById('p'),t1=p.firstChild,t2=document.createTextNode('ABCDE');p.appendChild(t2);
+          var r=document.createRange();r.setStart(t1,2);r.setEnd(t1,3);r.insertNode(t2);
+          return [p.childNodes.length,p.childNodes[0].data,p.childNodes[1].data,p.childNodes[2].data,r.toString()].join('|')})()"#), "3|12|ABCDE|345|ABCDE3");
+    }
+
+    #[test]
+    fn range_live_boundaries_follow_removed_subtree() {
+        use crate::html::TreeBuilder;
+        let doc = TreeBuilder::parse("<html><body><p id='p'>12345</p></body></html>").document();
+        let mut runtime = JsRuntime::with_document(doc).unwrap();
+        assert_eq!(eval_str(&mut runtime, r#"(()=>{var p=document.getElementById('p'),b=document.body,r=document.createRange();
+          r.setEnd(b,1);r.setStart(p.firstChild,2);b.removeChild(p);
+          return [r.collapsed,r.startContainer===b,r.startOffset,r.endContainer===b,r.endOffset].join('|')})()"#), "true|true|0|true|0");
+    }
+
+    #[test]
+    fn range_surround_reports_hierarchy_and_partial_character_data_errors() {
+        use crate::html::TreeBuilder;
+        let doc = TreeBuilder::parse("<html><body></body></html>").document();
+        let mut runtime = JsRuntime::with_document(doc).unwrap();
+        assert_eq!(eval_str(&mut runtime, r#"(()=>{var c=document.createComment('11111');document.appendChild(c);var r=document.createRange();r.selectNode(c);
+          try{r.surroundContents(document.createElement('a'));return 'none'}catch(e){document.removeChild(c);return e.name+'|'+e.code}})()"#), "HierarchyRequestError|3");
+        assert_eq!(eval_str(&mut runtime, r#"(()=>{var b=document.body,c1=document.createComment('111'),c2=document.createComment('222');b.appendChild(c1);b.appendChild(c2);
+          var r=document.createRange();r.setStart(c1,1);r.setEnd(c2,1);try{r.surroundContents(document.createElement('a'));return 'none'}catch(e){return e.name+'|'+e.code}})()"#), "InvalidStateError|11");
+    }
+
     // ── iframe / contentDocument (sub-browsing contexts) ────────────────────
 
     /// A tiny static HTTP/1.1 server that answers every request with the same
