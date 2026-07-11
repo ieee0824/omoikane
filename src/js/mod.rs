@@ -8030,4 +8030,67 @@ mod tests {
             "insertBefore into a primed sub-document must re-match :first-child against the new first child"
         );
     }
+
+
+    /// Deterministic iframe + computed-style regressions for the selectors
+    /// added by issue 016-10 (Acid3 tests 34/37/38/39/40/43).
+    #[test]
+    fn acid3_extended_selector_cases_resolve_in_iframe_document() {
+        let mut runtime = runtime_from_html(
+            r#"<html><body><iframe id="selectors"></iframe></body></html>"#,
+        );
+        let result = eval_str(
+            &mut runtime,
+            r#"
+            (() => {
+              const doc = document.getElementById('selectors').contentDocument;
+              function setup(rules) {
+                const de = doc.documentElement;
+                while (de.firstChild) de.removeChild(de.firstChild);
+                const head = doc.createElement('head'); de.appendChild(head);
+                const body = doc.createElement('body'); de.appendChild(body);
+                const style = doc.createElement('style');
+                style.textContent = '* { z-index: 0; position: absolute; }\n' + rules;
+                head.appendChild(style);
+                return body;
+              }
+              const zi = node => doc.defaultView.getComputedStyle(node, '').zIndex;
+              const out = [];
+
+              let body = setup(':lang(en) { z-index: 1 }\n[class|=widget] { z-index: 2 }');
+              const lang = doc.createElement('div'); lang.setAttribute('lang', 'en-GB'); body.appendChild(lang);
+              const inherited = doc.createElement('p'); lang.appendChild(inherited);
+              const dash = doc.createElement('p'); dash.className = 'widget-blue'; body.appendChild(dash);
+              out.push([zi(lang), zi(inherited), zi(dash)].join(','));
+
+              body = setup(':only-child { z-index: 1 }');
+              const only = doc.createElement('p'); body.appendChild(doc.createTextNode('x')); body.appendChild(only);
+              const before = zi(only); const extra = doc.createElement('p'); body.appendChild(extra);
+              const after = zi(only); body.removeChild(extra); out.push([before, after, zi(only)].join(','));
+
+              body = setup(':empty { z-index: 1 }');
+              const empty = doc.createElement('p'); body.appendChild(empty); empty.appendChild(doc.createComment('x')); empty.appendChild(doc.createTextNode(''));
+              const emptyBefore = zi(empty); empty.appendChild(doc.createTextNode(' ')); out.push([emptyBefore, zi(empty)].join(','));
+
+              body = setup(':nth-child(-n+3) { z-index: 1 }\n:nth-last-child(2) { z-index: 2 }');
+              const children = []; for (let i = 0; i < 5; i++) { const p = doc.createElement('p'); body.appendChild(p); children.push(p); }
+              out.push(children.map(zi).join(','));
+
+              body = setup(':first-of-type { z-index: 1 }\n:nth-of-type(3n-1) { z-index: 2 }\n:nth-last-of-type(-5n+3) { z-index: 3 }');
+              const ps = []; for (let i = 0; i < 6; i++) { body.appendChild(doc.createElement('span')); const p = doc.createElement('p'); body.appendChild(p); ps.push(p); }
+              out.push(ps.map(zi).join(','));
+
+              body = setup(':enabled { z-index: 1 }\n:disabled { z-index: 2 }\n:checked { z-index: 3 }\n:checked:enabled { z-index: 4 }');
+              const input = doc.createElement('input'); input.type = 'checkbox'; body.appendChild(input);
+              const enabled = zi(input); input.click(); const checked = zi(input); input.disabled = true; const disabled = zi(input); input.checked = false;
+              out.push([enabled, checked, disabled, zi(input), zi(body)].join(','));
+              return out.join(';');
+            })()
+            "#,
+        );
+        assert_eq!(
+            result,
+            "1,1,2;1,0,1;1,0;1,1,1,2,0;1,2,0,3,2,0;1,4,3,2,0"
+        );
+    }
 }
