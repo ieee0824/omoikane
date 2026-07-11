@@ -1687,8 +1687,20 @@
         return Object.prototype.hasOwnProperty.call(map, key) ? map[key] : "";
       },
       has(target, prop) {
+        // Symbols (e.g. `Symbol.iterator in getComputedStyle(el)`) must never be
+        // run through the CSS-name mapping; report membership from the target
+        // only, matching the `get` trap's symbol guard.
+        if (typeof prop === "symbol") return prop in target;
         if (prop in target) return true;
         return Object.prototype.hasOwnProperty.call(map, __styleNameToCss(prop));
+      },
+      set() {
+        // getComputedStyle returns a read-only CSSStyleDeclaration: its
+        // properties are getter-only accessors, so assignments are ignored
+        // (silently in sloppy mode, TypeError in strict mode). Returning false
+        // reproduces that and keeps the underlying `decl`/`map` unmutated, so a
+        // later read still reports the computed value rather than a stale write.
+        return false;
       },
     });
   }

@@ -177,6 +177,22 @@ impl std::fmt::Debug for HostState {
 const DEFAULT_VIEWPORT_WIDTH: f32 = 1280.0;
 const DEFAULT_VIEWPORT_HEIGHT: f32 = 720.0;
 
+/// Clamps a caller-supplied viewport dimension to a finite, non-negative pixel
+/// value.
+///
+/// A viewport width/height flows unchecked into `StyleResolver::set_viewport`
+/// and `layout_tree`, so a `NaN`, `±∞`, or negative value would produce invalid
+/// geometry (e.g. `vw`/`vh` resolving to `NaN`) or overflow a later `as i64`
+/// cast. Any non-finite or negative input therefore maps to `0.0`, a safe and
+/// well-defined dimension; finite non-negative inputs pass through unchanged.
+fn sanitize_viewport_dimension(dim: f32) -> f32 {
+    if dim.is_finite() && dim >= 0.0 {
+        dim
+    } else {
+        0.0
+    }
+}
+
 impl HostState {
     fn new(document: NodeHandle) -> Self {
         let mut state = Self {
@@ -445,6 +461,16 @@ impl JsRuntime {
     /// bootstrap's fixed 1280x720 defaults would leak through even after the
     /// embedder configured a different render viewport.
     pub fn set_viewport(&mut self, width: f32, height: f32) {
+        // Sanitize the caller-supplied dimensions before they reach the style
+        // resolver and layout engine. A non-finite (`NaN`, `±∞`) or negative
+        // width/height would otherwise flow into `StyleResolver::set_viewport`
+        // and `layout_tree`, yielding invalid geometry (`vw`/`vh` resolving to
+        // `NaN`) or an overflowing `as i64` cast when syncing the JS-visible
+        // metrics. Clamp to a finite, non-negative value so the stored native
+        // viewport and the script-visible `window.*`/`screen.*` values stay
+        // consistent and well-defined.
+        let width = sanitize_viewport_dimension(width);
+        let height = sanitize_viewport_dimension(height);
         {
             let mut state = self.host_state.borrow_mut();
             state.viewport = Rect {
@@ -457,9 +483,10 @@ impl JsRuntime {
         }
         // `window.innerWidth`/`screen.width` are CSSOM integers, so round to the
         // nearest pixel. For integer viewports this exactly matches the `vw`/`vh`
-        // resolution (which divides the same dimension by 100).
-        let w = width.round().max(0.0) as i64;
-        let h = height.round().max(0.0) as i64;
+        // resolution (which divides the same dimension by 100). `width`/`height`
+        // are already finite and non-negative, so the round/cast cannot overflow.
+        let w = width.round() as i64;
+        let h = height.round() as i64;
         let sync = format!(
             "globalThis.innerWidth = {w}; globalThis.innerHeight = {h}; \
              globalThis.outerWidth = {w}; globalThis.outerHeight = {h}; \
@@ -2399,8 +2426,18 @@ fn document_reset_native(
             let is_main_document = node == s.document;
             (node, is_main_document)
         };
+        let removed_any = !node.child_nodes().is_empty();
         for child in node.child_nodes() {
             let _ = node.remove_child(&child);
+        }
+        // Emptying the document (document.open) mutates the tree, so the cached
+        // style resolver and layout tree are stale regardless of whether this is
+        // the main document or an iframe sub-document. Mark them dirty so the
+        // next style/metric query recomputes instead of returning pre-reset
+        // results. (The main document's `getComputedStyle` cache is keyed on
+        // `self.document`; a sub-document reset still counts as a mutation.)
+        if removed_any {
+            state.borrow_mut().mark_style_dirty();
         }
         if is_main_document {
             // The emptied main document has no insertion point; a following
@@ -2544,6 +2581,14 @@ fn document_write_native(_: &JsValue, args: &[JsValue], context: &mut Context) -
             let mut s = state.borrow_mut();
             for child in &parsed_children {
                 s.register_tree(child);
+            }
+            // `document.write` splices new nodes into the live tree, so the
+            // cached style resolver and layout tree are now stale. Mark them
+            // dirty so a following `getComputedStyle`/layout-metric query forces
+            // a reflow instead of returning results computed before the write
+            // (e.g. a `<style>` or element written after an earlier query).
+            if !parsed_children.is_empty() {
+                s.mark_style_dirty();
             }
             // Only the top-level document's parser insertion point advances; a
             // sub-document write must never repoint the main document's anchor
@@ -4880,6 +4925,132 @@ mod tests {
     }
 
     #[test]
+    fn document_write_marks_style_dirty_so_getcomputedstyle_recomputes() {
+        // Regression (integration review): a getComputedStyle query caches the
+        // style resolver and clears the dirty flag. A subsequent
+        // `document.write` that adds a <style> must re-dirty that cache so the
+        // next query observes the newly written rule instead of returning the
+        // stale pre-write result.
+        let html = r#"<html><head></head><body><p id="target">hi</p></body></html>"#;
+        let mut runtime = runtime_from_html(html);
+
+        // Prime the cache: no rule applies yet, so this is not pre-wrap. The
+        // query computes and caches the resolver (dirty = false).
+        assert_ne!(
+            eval_str(
+                &mut runtime,
+                "getComputedStyle(document.getElementById('target'), '').whiteSpace"
+            ),
+            "pre-wrap",
+            "no white-space rule applies before the write"
+        );
+
+        // Write a <style> targeting #target. Outside script execution the
+        // fragment appends to <body>; collect_inline_stylesheets still picks it
+        // up. This must mark the cached resolver dirty.
+        runtime
+            .eval("document.write('<style>#target { white-space: pre-wrap; }</style>')")
+            .unwrap();
+
+        assert_eq!(
+            eval_str(
+                &mut runtime,
+                "getComputedStyle(document.getElementById('target'), '').whiteSpace"
+            ),
+            "pre-wrap",
+            "getComputedStyle after document.write must observe the newly written rule"
+        );
+    }
+
+    #[test]
+    fn document_open_marks_style_dirty_so_getcomputedstyle_recomputes() {
+        // Regression (integration review): document.open() empties the document,
+        // removing the <style> that fed the cached resolver. Without marking the
+        // style cache dirty, a getComputedStyle query that already primed the
+        // cache would keep reporting the pre-open rule.
+        let html = r#"<html><head><style>
+            #target { white-space: pre-wrap; }
+        </style></head><body><p id="target">hi</p></body></html>"#;
+        let mut runtime = runtime_from_html(html);
+
+        // Retain the element so it stays queryable after the tree is emptied,
+        // then prime the cache (dirty = false).
+        runtime
+            .eval("globalThis.__t = document.getElementById('target');")
+            .unwrap();
+        assert_eq!(
+            eval_str(&mut runtime, "getComputedStyle(globalThis.__t, '').whiteSpace"),
+            "pre-wrap",
+            "the <style> rule applies before document.open()"
+        );
+
+        // Empty the document via document.open(); the <style> is now gone.
+        runtime.eval("document.open();").unwrap();
+
+        assert_ne!(
+            eval_str(&mut runtime, "getComputedStyle(globalThis.__t, '').whiteSpace"),
+            "pre-wrap",
+            "after document.open() the removed <style> must no longer apply"
+        );
+    }
+
+    #[test]
+    fn get_computed_style_has_trap_tolerates_symbols() {
+        // Regression (integration review): the `has` trap must guard symbols the
+        // same way `get` does, so `Symbol.x in getComputedStyle(el)` neither
+        // throws nor is run through the CSS-name mapping. The underlying
+        // declaration has no such symbol key, so membership is false.
+        let html = r#"<html><body><div id="target"></div></body></html>"#;
+        let mut runtime = runtime_from_html(html);
+
+        assert_eq!(
+            eval_str(
+                &mut runtime,
+                "Symbol.iterator in getComputedStyle(document.getElementById('target'), '')"
+            ),
+            "false",
+            "Symbol.iterator must not be a member and must not throw"
+        );
+        assert_eq!(
+            eval_str(
+                &mut runtime,
+                "Symbol.toStringTag in getComputedStyle(document.getElementById('target'), '')"
+            ),
+            "false",
+            "Symbol.toStringTag must not be a member and must not throw"
+        );
+    }
+
+    #[test]
+    fn get_computed_style_is_read_only() {
+        // Regression (integration review): getComputedStyle returns a read-only
+        // CSSStyleDeclaration. Assigning to a property must be ignored and must
+        // never pollute the underlying declaration, so a later read still
+        // reports the computed value.
+        let html = r#"<html><head><style>
+            #target { white-space: pre-wrap; }
+        </style></head><body><p id="target">hi</p></body></html>"#;
+        let mut runtime = runtime_from_html(html);
+
+        let result = eval_str(
+            &mut runtime,
+            r#"(function() {
+                var cs = getComputedStyle(document.getElementById('target'), '');
+                // Overwriting a known computed property must be ignored.
+                try { cs.whiteSpace = 'nowrap'; } catch (e) { /* strict-mode TypeError ok */ }
+                // Writing an unknown property must not land on the underlying decl.
+                try { cs.notARealProp = 'polluted'; } catch (e) {}
+                return cs.whiteSpace + '|' + cs.notARealProp;
+            })()"#,
+        );
+
+        assert_eq!(
+            result, "pre-wrap|",
+            "writes to a computed style must be ignored and leave the declaration unpolluted"
+        );
+    }
+
+    #[test]
     fn window_metrics_default_to_bootstrap_viewport() {
         // Without an explicit set_viewport the DOM bootstrap's 1280x720 defaults
         // apply and are visible to scripts unchanged.
@@ -4932,6 +5103,60 @@ mod tests {
             ),
             "600px",
             "100vh must resolve against the same viewport window.innerHeight reports"
+        );
+    }
+
+    #[test]
+    fn set_viewport_clamps_non_finite_and_negative_dimensions() {
+        // Regression (integration review): raw f64/f32 viewport dimensions were
+        // stored unchecked and flowed into StyleResolver::set_viewport and
+        // layout_tree. A NaN/+inf/negative value must clamp to 0 (a safe finite
+        // dimension) without panicking, and the script-visible metrics must stay
+        // consistent with the vw/vh resolution.
+        let html = r#"<html><head><style>
+            #target { width: 100vw; height: 100vh; }
+        </style></head><body><div id="target"></div></body></html>"#;
+        let mut runtime = runtime_from_html(html);
+
+        // NaN width and +inf height both clamp to 0.
+        runtime.set_viewport(f32::NAN, f32::INFINITY);
+        assert_eq!(eval_num(&mut runtime, "window.innerWidth"), 0.0);
+        assert_eq!(eval_num(&mut runtime, "window.innerHeight"), 0.0);
+        assert_eq!(eval_num(&mut runtime, "screen.width"), 0.0);
+        assert_eq!(eval_num(&mut runtime, "screen.height"), 0.0);
+        assert_eq!(
+            eval_str(
+                &mut runtime,
+                "getComputedStyle(document.getElementById('target'), '').width"
+            ),
+            "0px",
+            "100vw against a clamped-to-zero viewport resolves to 0px, not NaN"
+        );
+        assert_eq!(
+            eval_str(
+                &mut runtime,
+                "getComputedStyle(document.getElementById('target'), '').height"
+            ),
+            "0px",
+            "100vh against a clamped-to-zero viewport resolves to 0px, not NaN"
+        );
+
+        // Negative dimensions clamp to 0 as well.
+        runtime.set_viewport(-100.0, -50.0);
+        assert_eq!(eval_num(&mut runtime, "window.innerWidth"), 0.0);
+        assert_eq!(eval_num(&mut runtime, "window.innerHeight"), 0.0);
+
+        // A subsequent valid viewport is unaffected by the clamp.
+        runtime.set_viewport(640.0, 480.0);
+        assert_eq!(eval_num(&mut runtime, "window.innerWidth"), 640.0);
+        assert_eq!(eval_num(&mut runtime, "window.innerHeight"), 480.0);
+        assert_eq!(
+            eval_str(
+                &mut runtime,
+                "getComputedStyle(document.getElementById('target'), '').width"
+            ),
+            "640px",
+            "a valid viewport still resolves 100vw normally after a clamped one"
         );
     }
 
