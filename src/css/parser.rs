@@ -47,7 +47,46 @@ pub fn parse_selector_list(input: &str) -> Result<Vec<Selector>, CssParseError> 
     if parser.peek().is_some() {
         return Err(CssParseError::InvalidSelector);
     }
+    if !selectors.iter().all(selector_is_supported_for_dom_query) {
+        return Err(CssParseError::InvalidSelector);
+    }
     Ok(selectors)
+}
+
+fn selector_is_supported_for_dom_query(selector: &Selector) -> bool {
+    selector.parts.iter().all(|part| {
+        part.simples.iter().all(|simple| match simple {
+            SimpleSelector::PseudoClass(name) => {
+                let base = name.split_once('(').map_or(name.as_str(), |(base, _)| base);
+                let known = matches!(
+                    base,
+                    "root" | "first-child" | "last-child" | "only-child"
+                        | "nth-child" | "nth-last-child" | "first-of-type"
+                        | "last-of-type" | "only-of-type" | "nth-of-type"
+                        | "nth-last-of-type" | "empty" | "lang" | "enabled"
+                        | "disabled" | "checked" | "before" | "after"
+                );
+                known
+                    && (!base.starts_with("nth-")
+                        || name
+                            .strip_prefix(base)
+                            .and_then(|rest| rest.strip_prefix('('))
+                            .and_then(|rest| rest.strip_suffix(')'))
+                            .and_then(super::matcher::parse_an_plus_b)
+                            .is_some())
+            }
+            SimpleSelector::PseudoElement(name) => matches!(name.as_str(), "before" | "after"),
+            SimpleSelector::Not(inner) => inner.iter().all(|simple| {
+                selector_is_supported_for_dom_query(&Selector {
+                    parts: vec![SelectorPart {
+                        combinator: None,
+                        simples: vec![simple.clone()],
+                    }],
+                })
+            }),
+            _ => true,
+        })
+    })
 }
 
 struct Parser {

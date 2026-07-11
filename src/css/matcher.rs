@@ -347,7 +347,7 @@ fn matches_nth_child(node: &NodeHandle, expression: &str) -> bool {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct AnPlusB {
+pub(super) struct AnPlusB {
     a: i64,
     b: i64,
 }
@@ -368,7 +368,7 @@ impl AnPlusB {
     }
 }
 
-fn parse_an_plus_b(expression: &str) -> Option<AnPlusB> {
+pub(super) fn parse_an_plus_b(expression: &str) -> Option<AnPlusB> {
     let compact: String = expression
         .chars()
         .filter(|character| !character.is_ascii_whitespace())

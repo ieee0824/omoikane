@@ -374,8 +374,15 @@
     }
 
     querySelector(selector) {
-      const id = __omoikane_query_selector(this.__id, String(selector));
-      return wrapNode(id);
+      try {
+        const id = __omoikane_query_selector(this.__id, String(selector));
+        return wrapNode(id);
+      } catch (error) {
+        if (error && error.name === "SyntaxError") {
+          throw new DOMException(error.message, "SyntaxError");
+        }
+        throw error;
+      }
     }
 
     addEventListener(type, listener, options = false) {
@@ -637,8 +644,15 @@
     }
 
     querySelectorAll(selector) {
-      const ids = __omoikane_query_selector_all(this.__id, String(selector));
-      return ids ? ids.map(id => wrapNode(id)) : [];
+      try {
+        const ids = __omoikane_query_selector_all(this.__id, String(selector));
+        return ids ? ids.map(id => wrapNode(id)) : [];
+      } catch (error) {
+        if (error && error.name === "SyntaxError") {
+          throw new DOMException(error.message, "SyntaxError");
+        }
+        throw error;
+      }
     }
 
     getElementsByTagName(tag) {

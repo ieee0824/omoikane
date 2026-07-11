@@ -7,7 +7,10 @@ use std::rc::Rc;
 use boa_engine::native_function::NativeFunction;
 use boa_engine::{Context, JsError, JsNativeError, JsResult, JsValue, Source, js_string};
 
-use crate::css::{ComputedStyle, ComputedValue, Origin, StyleResolver};
+use crate::css::{
+    ComputedStyle, ComputedValue, Origin, Selector, StyleResolver, matches_selector,
+    parse_selector_list,
+};
 use crate::dom::{Node, NodeHandle, NodeType};
 use crate::http::Client;
 use crate::layout::{LayoutBox, Overflow, Rect};
@@ -1805,11 +1808,12 @@ fn query_selector_native(
         .unwrap_or_default()
         .to_string(context)?
         .to_std_string_escaped();
+    let selectors = parse_dom_selector_list(&selector)?;
     with_host_state(|state| {
         let node = state.borrow().get_node(node_id);
-        Ok(node_to_js_value(
-            node.and_then(|node| node.query_selector(&selector)),
-        ))
+        Ok(node_to_js_value(node.and_then(|node| {
+            query_first_matching_descendant(&node, &selectors)
+        })))
     })
 }
 
@@ -2389,11 +2393,12 @@ fn insert_before_native(_: &JsValue, args: &[JsValue], context: &mut Context) ->
 fn query_selector_all_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
     let parent_id = args.first().cloned().unwrap_or_default().to_number(context)? as usize;
     let selector = args.get(1).cloned().unwrap_or_default().to_string(context)?.to_std_string_escaped();
+    let selectors = parse_dom_selector_list(&selector)?;
     with_host_state(|state| {
         let results = {
             let s = state.borrow();
             let parent = s.get_node(parent_id).ok_or_else(|| JsError::from(JsNativeError::error().with_message("node not found")))?;
-            query_selector_all_recursive(&parent, &selector)
+            query_all_matching_descendants(&parent, &selectors)
         };
         {
             let mut s = state.borrow_mut();
@@ -2406,35 +2411,37 @@ fn query_selector_all_native(_: &JsValue, args: &[JsValue], context: &mut Contex
     })
 }
 
-/// Simple querySelectorAll: supports tag name, .class, #id selectors.
-fn query_selector_all_recursive(node: &NodeHandle, selector: &str) -> Vec<NodeHandle> {
-    let mut results = Vec::new();
-    let selector = selector.trim();
-    for child in node.child_nodes() {
-        if matches_simple_selector(&child, selector) {
-            results.push(child.clone());
-        }
-        results.extend(query_selector_all_recursive(&child, selector));
-    }
-    results
+fn parse_dom_selector_list(selector: &str) -> JsResult<Vec<Selector>> {
+    parse_selector_list(selector).map_err(|error| {
+        JsError::from(JsNativeError::syntax().with_message(error.to_string()))
+    })
 }
 
-fn matches_simple_selector(node: &NodeHandle, selector: &str) -> bool {
-    if node.node_type() != crate::dom::NodeType::Element {
-        return false;
+fn query_first_matching_descendant(node: &NodeHandle, selectors: &[Selector]) -> Option<NodeHandle> {
+    for child in node.child_nodes() {
+        if child.node_type() == NodeType::Element
+            && selectors.iter().any(|selector| matches_selector(&child, selector))
+        {
+            return Some(child);
+        }
+        if let Some(found) = query_first_matching_descendant(&child, selectors) {
+            return Some(found);
+        }
     }
-    if let Some(cls) = selector.strip_prefix('.') {
-        let class_attr = node.attributes().and_then(|a| a.get("class").cloned()).unwrap_or_default();
-        return class_attr.split_whitespace().any(|c| c == cls);
+    None
+}
+
+fn query_all_matching_descendants(node: &NodeHandle, selectors: &[Selector]) -> Vec<NodeHandle> {
+    let mut results = Vec::new();
+    for child in node.child_nodes() {
+        if child.node_type() == NodeType::Element
+            && selectors.iter().any(|selector| matches_selector(&child, selector))
+        {
+            results.push(child.clone());
+        }
+        results.extend(query_all_matching_descendants(&child, selectors));
     }
-    if let Some(id) = selector.strip_prefix('#') {
-        let id_attr = node.attributes().and_then(|a| a.get("id").cloned()).unwrap_or_default();
-        return id_attr == id;
-    }
-    match node.tag_name() {
-        Some(tag) => tag.eq_ignore_ascii_case(selector),
-        None => false,
-    }
+    results
 }
 
 fn node_type_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
@@ -3898,6 +3905,42 @@ mod tests {
         let len = runtime.eval("document.querySelectorAll('span').length")
             .unwrap().to_number(&mut runtime.context).unwrap();
         assert_eq!(len, 2.0);
+    }
+
+    #[test]
+    fn query_selector_apis_use_full_css_matcher_and_strict_parser() {
+        use crate::html::TreeBuilder;
+        let doc = TreeBuilder::parse(
+            r#"<html><body><main id="scope"><p id="first" class="a" data-kind="x"></p><section><p id="second" class="a"></p></section></main></body></html>"#,
+        )
+        .document();
+        let mut runtime = JsRuntime::with_document(doc).unwrap();
+        let result = runtime
+            .eval(
+                r##"
+                (() => {
+                  const scope = document.querySelector("#scope");
+                  const first = scope.querySelector("section > p.a, p[data-kind=x]");
+                  const all = scope.querySelectorAll("p.a, #first");
+                  const snapshot = all.length;
+                  scope.appendChild(document.createElement("p"));
+                  let syntax = false;
+                  let atomic = false;
+                  try { scope.querySelector("p,"); } catch (e) {
+                    syntax = e instanceof DOMException && e.name === "SyntaxError";
+                  }
+                  try { scope.querySelectorAll("p, :unknown"); } catch (e) {
+                    atomic = e instanceof DOMException && e.name === "SyntaxError";
+                  }
+                  return [first.id, all.length, snapshot, scope.querySelector("#scope") === null, syntax, atomic, scope.querySelector("::before") === null].join("|");
+                })()
+                "##,
+            )
+            .unwrap()
+            .to_string(&mut runtime.context)
+            .unwrap()
+            .to_std_string_escaped();
+        assert_eq!(result, "first|2|2|true|true|true|true");
     }
 
     #[test]
