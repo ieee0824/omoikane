@@ -115,15 +115,19 @@ struct HostState {
     /// Viewport used when resolving computed styles and running layout for the
     /// `getComputedStyle` / layout-metrics bindings (issues 016-8 and 044-2).
     viewport: Rect,
-    /// `true` when the DOM has been mutated since the cached style resolver and
-    /// layout tree were built, so the next style/metric query must recompute
-    /// them (a forced synchronous reflow).
-    style_dirty: bool,
-    /// Cached style resolver seeded with the document's inline `<style>` rules.
-    /// Rebuilt on demand when [`HostState::style_dirty`] is set.
-    style_resolver: Option<StyleResolver>,
-    /// Cached layout tree matching `style_resolver`. Rebuilt lazily and only
-    /// when a layout metric (not just a computed style) is requested.
+    /// Per-document cached style resolvers, keyed by the identity of each
+    /// document's root [`Document`] node (the top-level document and every
+    /// `<iframe>` sub-browsing-context document). Each entry is rebuilt on
+    /// demand from that document's own inline `<style>` rules when it is marked
+    /// dirty, so `getComputedStyle` on a node resolves against the cascade of
+    /// the document that node actually lives in — the main document's rules
+    /// never leak into a sub-document and vice versa (issue 016-15).
+    document_styles: HashMap<usize, DocumentStyleEntry>,
+    /// Cached layout tree for the **main** document, matching its entry in
+    /// [`HostState::document_styles`]. Rebuilt lazily and only when a layout
+    /// metric (not just a computed style) is requested. Sub-documents do not
+    /// participate in layout (layout metrics for sub-document nodes report
+    /// zero); only computed styles are document-scoped here.
     layout_root: Option<LayoutBox>,
     /// Insertion reference for `document.write`.
     ///
@@ -159,13 +163,32 @@ struct IframeDocument {
     loaded_src: String,
 }
 
+/// A cached [`StyleResolver`] for one document (the top-level document or an
+/// iframe sub-document), plus a dirty flag driving lazy rebuilds.
+///
+/// The resolver is seeded from that document's own inline `<style>` rules only;
+/// it is rebuilt on the next computed-style query whenever [`dirty`] is set (or
+/// the resolver has never been built), so a DOM mutation in one document does
+/// not force every other document's resolver to rebuild.
+///
+/// [`dirty`]: DocumentStyleEntry::dirty
+#[derive(Debug, Default)]
+struct DocumentStyleEntry {
+    /// Cached resolver seeded with this document's inline `<style>` rules, or
+    /// `None` until first built.
+    resolver: Option<StyleResolver>,
+    /// `true` when this document was mutated since `resolver` was built, so the
+    /// next query must rebuild it (a forced synchronous style recompute).
+    dirty: bool,
+}
+
 impl std::fmt::Debug for HostState {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("HostState")
             .field("nodes", &self.nodes.len())
             .field("console_logs", &self.console_logs.len())
             .field("location_href", &self.location_href)
-            .field("style_dirty", &self.style_dirty)
+            .field("document_styles", &self.document_styles.len())
             .finish()
     }
 }
@@ -195,6 +218,17 @@ fn sanitize_viewport_dimension(dim: f32) -> f32 {
 
 impl HostState {
     fn new(document: NodeHandle) -> Self {
+        // Seed the main document's style entry immediately so its identity is a
+        // known key from the start; iframe sub-document entries are created when
+        // their content document is first loaded (see `iframe_content_document`).
+        let mut document_styles = HashMap::new();
+        document_styles.insert(
+            document.identity(),
+            DocumentStyleEntry {
+                resolver: None,
+                dirty: true,
+            },
+        );
         let mut state = Self {
             event_loop: EventLoopState::default(),
             document: document.clone(),
@@ -209,8 +243,7 @@ impl HostState {
                 width: DEFAULT_VIEWPORT_WIDTH,
                 height: DEFAULT_VIEWPORT_HEIGHT,
             },
-            style_dirty: true,
-            style_resolver: None,
+            document_styles,
             layout_root: None,
             write_insertion_ref: None,
             base_url: None,
@@ -333,50 +366,138 @@ impl HostState {
         self.nodes.get(&id).cloned()
     }
 
-    /// Marks the cached style resolver and layout tree as stale.
+    /// Marks the given document's cached style resolver as stale, creating its
+    /// entry if it does not yet exist.
     ///
-    /// Every DOM mutation performed through a native binding calls this so the
-    /// next `getComputedStyle` or layout-metric query performs a forced reflow
-    /// and observes the mutation.
-    fn mark_style_dirty(&mut self) {
-        self.style_dirty = true;
+    /// `document` must be the root [`Document`] node of a browsing context (the
+    /// top-level document or an iframe sub-document); it is keyed by its node
+    /// identity. When it is the main document, the cached layout tree is also
+    /// dropped, because layout is only maintained for the main document.
+    fn mark_document_style_dirty(&mut self, document: &NodeHandle) {
+        let document_id = document.identity();
+        self.document_styles.entry(document_id).or_default().dirty = true;
+        if document_id == self.document.identity() {
+            self.layout_root = None;
+        }
     }
 
-    /// Rebuilds the cached [`StyleResolver`] from the document's inline
-    /// stylesheets when the DOM is dirty (or nothing has been computed yet).
+    /// Marks the document that `node` currently lives in as stale.
     ///
-    /// Only inline `<style>` element content is collected; external
-    /// stylesheets are intentionally not fetched here so that computed-style
-    /// resolution stays synchronous and free of network side effects.
-    fn ensure_style_resolver(&mut self) {
-        if !self.style_dirty && self.style_resolver.is_some() {
+    /// If `node` has no live document root (a detached, freshly created node),
+    /// every cached document is conservatively marked dirty: the node may later
+    /// be inserted into any document, and over-invalidating only costs a rebuild
+    /// while under-invalidating would serve stale styles.
+    fn mark_style_dirty_for_node(&mut self, node: &NodeHandle) {
+        match document_root_for_node(node) {
+            Some(document) => self.mark_document_style_dirty(&document),
+            None => self.mark_all_document_styles_dirty(),
+        }
+    }
+
+    /// Marks every cached document's style resolver as stale and drops the main
+    /// document's layout tree.
+    ///
+    /// Used when a change affects all documents at once — a viewport change
+    /// (every resolver shares the same viewport for `vw`/`vh` resolution) — and
+    /// as the conservative fallback when a mutated node's owning document cannot
+    /// be determined.
+    fn mark_all_document_styles_dirty(&mut self) {
+        for entry in self.document_styles.values_mut() {
+            entry.dirty = true;
+        }
+        self.layout_root = None;
+    }
+
+    /// Rebuilds `document`'s cached [`StyleResolver`] from its own inline
+    /// stylesheets when that document is dirty (or nothing has been built yet).
+    ///
+    /// Only inline `<style>` element content belonging to `document` is
+    /// collected; external stylesheets are intentionally not fetched here so
+    /// that computed-style resolution stays synchronous and free of network
+    /// side effects. `document` must be a root [`Document`] node.
+    fn ensure_style_resolver(&mut self, document: &NodeHandle) {
+        let document_id = document.identity();
+        let needs_rebuild = match self.document_styles.get(&document_id) {
+            Some(entry) => entry.dirty || entry.resolver.is_none(),
+            None => true,
+        };
+        if !needs_rebuild {
             return;
         }
-        let document = self.document.clone();
+        // Build the resolver as a local first so no `document_styles` borrow is
+        // held while `self.viewport` / the document tree are read, then store it.
         let mut resolver = StyleResolver::new();
         resolver.set_viewport(self.viewport.width, self.viewport.height);
-        for css in collect_inline_stylesheets(&document) {
+        for css in collect_inline_stylesheets(document) {
             let sheet = crate::paint::stylesheet::parse_stylesheet_forgiving(&css);
             resolver.add_stylesheet(Origin::Author, sheet);
         }
-        self.style_resolver = Some(resolver);
-        // The layout tree must be recomputed against the fresh resolver.
-        self.layout_root = None;
-        self.style_dirty = false;
+        self.document_styles.insert(
+            document_id,
+            DocumentStyleEntry {
+                resolver: Some(resolver),
+                dirty: false,
+            },
+        );
     }
 
-    /// Rebuilds the cached layout tree when needed, first ensuring the style
-    /// resolver is current. Runs a full synchronous layout (forced reflow).
+    /// Rebuilds the main document's cached layout tree when needed, first
+    /// ensuring its style resolver is current. Runs a full synchronous layout
+    /// (forced reflow). Layout is only maintained for the main document.
     fn ensure_layout(&mut self) {
-        self.ensure_style_resolver();
+        let document = self.document.clone();
+        self.ensure_style_resolver(&document);
         if self.layout_root.is_some() {
             return;
         }
-        let document = self.document.clone();
         let viewport = self.viewport;
-        if let Some(resolver) = self.style_resolver.as_mut() {
-            self.layout_root = crate::layout::layout_tree(&document, resolver, viewport);
-        }
+        let document_id = document.identity();
+        // Compute into a local so the `document_styles` borrow is released
+        // before assigning `self.layout_root` (a different field).
+        let layout = self
+            .document_styles
+            .get_mut(&document_id)
+            .and_then(|entry| entry.resolver.as_mut())
+            .and_then(|resolver| crate::layout::layout_tree(&document, resolver, viewport));
+        self.layout_root = layout;
+    }
+}
+
+/// Returns the root [`Document`] node of `node`'s tree, or `node` itself when it
+/// is already a `Document`.
+///
+/// This is the key used to select a node's per-document style cache entry: an
+/// attached node resolves to whichever document it currently lives in (the
+/// top-level document or an iframe sub-document). A detached node whose tree
+/// root is not a document (a freshly created, not-yet-inserted element) yields
+/// `None`.
+///
+/// Unlike the DOM `Node.ownerDocument` accessor (see [`owner_document_for_node`]),
+/// a `Document` node maps to itself here, because a document's own style cache is
+/// keyed by that document node.
+fn document_root_for_node(node: &NodeHandle) -> Option<NodeHandle> {
+    if node.node_type() == NodeType::Document {
+        return Some(node.clone());
+    }
+    let mut current = node.clone();
+    while let Some(parent) = current.parent_node() {
+        current = parent;
+    }
+    if current.node_type() == NodeType::Document {
+        Some(current)
+    } else {
+        None
+    }
+}
+
+/// Returns the [`Document`] that owns `node` per the DOM `Node.ownerDocument`
+/// accessor: like [`document_root_for_node`] but a `Document` node has **no**
+/// owner document and maps to `None`.
+fn owner_document_for_node(node: &NodeHandle) -> Option<NodeHandle> {
+    if node.node_type() == NodeType::Document {
+        None
+    } else {
+        document_root_for_node(node)
     }
 }
 
@@ -479,7 +600,9 @@ impl JsRuntime {
                 width,
                 height,
             };
-            state.mark_style_dirty();
+            // Every document shares this viewport for `vw`/`vh` resolution, so
+            // invalidate all cached resolvers (and the main layout tree).
+            state.mark_all_document_styles_dirty();
         }
         // `window.innerWidth`/`screen.width` are CSSOM integers, so round to the
         // nearest pixel. For integer viewports this exactly matches the `vw`/`vh`
@@ -1549,9 +1672,21 @@ fn computed_style_native(_: &JsValue, args: &[JsValue], context: &mut Context) -
         if node.node_type() != NodeType::Element {
             return Ok(js_string!("{}").into());
         }
+        // Resolve against the cascade of the document this node actually lives
+        // in, so a sub-document (iframe) node uses the iframe's `<style>` rules
+        // and never the main document's, and vice versa. A detached node has no
+        // document root and keeps the empty-object result.
+        let Some(document) = document_root_for_node(&node) else {
+            return Ok(js_string!("{}").into());
+        };
+        let document_id = document.identity();
         let mut state = state.borrow_mut();
-        state.ensure_style_resolver();
-        let json = match state.style_resolver.as_mut() {
+        state.ensure_style_resolver(&document);
+        let json = match state
+            .document_styles
+            .get_mut(&document_id)
+            .and_then(|entry| entry.resolver.as_mut())
+        {
             Some(resolver) => serialize_computed_style(&resolver.computed_style(&node)),
             None => "{}".to_string(),
         };
@@ -1692,11 +1827,23 @@ fn append_child_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> 
         let child = child.ok_or_else(|| {
             JsError::from(JsNativeError::error().with_message("child node not found"))
         })?;
+        // `append_child` may move `child` out of another document into
+        // `parent`'s document. Note both documents *before* the move so both
+        // resolvers are invalidated: the source loses a node, the target gains
+        // one. (A detached side has no document root and needs no invalidation;
+        // it acquires one only when later inserted into a live document.)
+        let source_document = document_root_for_node(&child);
+        let target_document = document_root_for_node(&parent);
         parent.append_child(child.clone());
         {
             let mut state = state.borrow_mut();
             state.register_tree(&child);
-            state.mark_style_dirty();
+            if let Some(document) = &source_document {
+                state.mark_document_style_dirty(document);
+            }
+            if let Some(document) = &target_document {
+                state.mark_document_style_dirty(document);
+            }
         }
         Ok(JsValue::from(child.identity() as f64))
     })
@@ -1725,19 +1872,9 @@ fn owner_document_native(_: &JsValue, args: &[JsValue], context: &mut Context) -
         let Some(node) = s.get_node(node_id) else {
             return Ok(JsValue::null());
         };
-        if node.node_type() == crate::dom::NodeType::Document {
-            return Ok(JsValue::null());
-        }
-        // Walk to the tree root and report it only if it is a document.
-        let mut current = node;
-        while let Some(parent) = current.parent_node() {
-            current = parent;
-        }
-        if current.node_type() == crate::dom::NodeType::Document {
-            Ok(JsValue::from(current.identity() as f64))
-        } else {
-            Ok(JsValue::null())
-        }
+        // DOM `ownerDocument` semantics: a document node has no owner document,
+        // and a detached node whose root is not a document reports none.
+        Ok(node_to_js_value(owner_document_for_node(&node)))
     })
 }
 
@@ -1812,7 +1949,10 @@ fn set_attribute_native(_: &JsValue, args: &[JsValue], context: &mut Context) ->
             .get_node(node_id)
             .ok_or_else(|| JsError::from(JsNativeError::error().with_message("node not found")))?;
         node.set_attribute(name, value);
-        state.borrow_mut().mark_style_dirty();
+        // Any attribute may participate in a selector (id/class/attribute
+        // selectors), so invalidate the element's document unconditionally. A
+        // detached element falls back to invalidating every document.
+        state.borrow_mut().mark_style_dirty_for_node(&node);
         Ok(JsValue::undefined())
     })
 }
@@ -1955,7 +2095,11 @@ fn set_text_content_native(_: &JsValue, args: &[JsValue], context: &mut Context)
                 node.append_child(text_node);
             }
         }
-        state.borrow_mut().mark_style_dirty();
+        // The node stays attached to its document (only its text changes), so
+        // its document root is unchanged; invalidate that document's resolver.
+        // This covers the common `<style>.textContent = "..."` case, where the
+        // stylesheet text of the owning document must be re-collected.
+        state.borrow_mut().mark_style_dirty_for_node(&node);
         Ok(JsValue::undefined())
     })
 }
@@ -2054,7 +2198,9 @@ fn set_inner_html_native(_: &JsValue, args: &[JsValue], context: &mut Context) -
                 node.append_child(child);
             }
         }
-        state.borrow_mut().mark_style_dirty();
+        // The node stays attached to its document; invalidate that document's
+        // resolver so a `<style>` inside the new markup is picked up.
+        state.borrow_mut().mark_style_dirty_for_node(&node);
         Ok(JsValue::undefined())
     })
 }
@@ -2132,8 +2278,14 @@ fn remove_child_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> 
             let child = state.get_node(child_id).ok_or_else(|| JsError::from(JsNativeError::error().with_message("child not found")))?;
             (parent, child)
         };
+        // Save the parent's document *before* removing `child`: afterwards the
+        // detached child has no document root, so the affected document could no
+        // longer be found from it. The parent keeps its place in the tree.
+        let parent_document = document_root_for_node(&parent);
         parent.remove_child(&child).map_err(|e| JsError::from(JsNativeError::error().with_message(e.to_string())))?;
-        state.borrow_mut().mark_style_dirty();
+        if let Some(document) = &parent_document {
+            state.borrow_mut().mark_document_style_dirty(document);
+        }
         Ok(JsValue::undefined())
     })
 }
@@ -2155,13 +2307,27 @@ fn insert_before_native(_: &JsValue, args: &[JsValue], context: &mut Context) ->
             let new_node = state.get_node(new_id).ok_or_else(|| JsError::from(JsNativeError::error().with_message("new node not found")))?;
             (parent, new_node)
         };
+        // Like `append_child`, the inserted node may move out of another
+        // document into `parent`'s. Note both documents before the move so both
+        // resolvers are invalidated. The reference node's document is irrelevant
+        // — it is `parent` (the new home) that matters.
+        let source_document = document_root_for_node(&new_node);
+        let target_document = document_root_for_node(&parent);
         match ref_node {
             Some(ref_node) => {
                 let _ = parent.insert_before(new_node.clone(), &ref_node);
             }
             None => parent.append_child(new_node),
         }
-        state.borrow_mut().mark_style_dirty();
+        {
+            let mut state = state.borrow_mut();
+            if let Some(document) = &source_document {
+                state.mark_document_style_dirty(document);
+            }
+            if let Some(document) = &target_document {
+                state.mark_document_style_dirty(document);
+            }
+        }
         Ok(JsValue::undefined())
     })
 }
@@ -2290,7 +2456,9 @@ fn remove_attribute_native(_: &JsValue, args: &[JsValue], context: &mut Context)
             .get_node(id)
             .ok_or_else(|| JsError::from(JsNativeError::error().with_message("node not found")))?;
         node.remove_attribute(&name);
-        state.borrow_mut().mark_style_dirty();
+        // Any attribute may participate in a selector, so invalidate the
+        // element's document (or every document if it is detached).
+        state.borrow_mut().mark_style_dirty_for_node(&node);
         Ok(JsValue::undefined())
     })
 }
@@ -2430,14 +2598,13 @@ fn document_reset_native(
         for child in node.child_nodes() {
             let _ = node.remove_child(&child);
         }
-        // Emptying the document (document.open) mutates the tree, so the cached
-        // style resolver and layout tree are stale regardless of whether this is
-        // the main document or an iframe sub-document. Mark them dirty so the
-        // next style/metric query recomputes instead of returning pre-reset
-        // results. (The main document's `getComputedStyle` cache is keyed on
-        // `self.document`; a sub-document reset still counts as a mutation.)
+        // Emptying the document (document.open) mutates its tree, so its cached
+        // style resolver (and, for the main document, its layout tree) is stale.
+        // Invalidate only the document being reset — a sub-document reset must
+        // not touch the main document's resolver, and vice versa. `node` is the
+        // document node itself, whose own document root is itself.
         if removed_any {
-            state.borrow_mut().mark_style_dirty();
+            state.borrow_mut().mark_style_dirty_for_node(&node);
         }
         if is_main_document {
             // The emptied main document has no insertion point; a following
@@ -2509,7 +2676,7 @@ fn document_write_native(_: &JsValue, args: &[JsValue], context: &mut Context) -
 
     with_host_state(|state| {
         // Resolve the parent element and the sibling to insert before.
-        let (parent, reference_child, is_main) = {
+        let (parent, reference_child, is_main, target_doc) = {
             let s = state.borrow();
             // The document being written to. `document.write` passes its id; an
             // unresolved id falls back to the top-level document.
@@ -2553,7 +2720,7 @@ fn document_write_native(_: &JsValue, args: &[JsValue], context: &mut Context) -
                 // point is left untouched.
                 (Some(fallback_parent()), None)
             };
-            (parent, reference_child, is_main)
+            (parent, reference_child, is_main, target_doc)
         };
 
         let Some(parent) = parent else {
@@ -2583,12 +2750,13 @@ fn document_write_native(_: &JsValue, args: &[JsValue], context: &mut Context) -
                 s.register_tree(child);
             }
             // `document.write` splices new nodes into the live tree, so the
-            // cached style resolver and layout tree are now stale. Mark them
-            // dirty so a following `getComputedStyle`/layout-metric query forces
-            // a reflow instead of returning results computed before the write
-            // (e.g. a `<style>` or element written after an earlier query).
+            // written document's cached resolver is now stale. Invalidate only
+            // that document (`target_doc`) so a write into an iframe sub-document
+            // does not pollute the main document's resolver and vice versa. A
+            // following `getComputedStyle` then re-collects the written `<style>`
+            // / element instead of returning pre-write results.
             if !parsed_children.is_empty() {
-                s.mark_style_dirty();
+                s.mark_document_style_dirty(&target_doc);
             }
             // Only the top-level document's parser insertion point advances; a
             // sub-document write must never repoint the main document's anchor
@@ -6646,6 +6814,437 @@ mod tests {
             tags,
             vec!["div".to_string()],
             "the document must contain only the freshly written <div>"
+        );
+    }
+
+    // -- document-scoped computed style (issue 016-15) ------------------------
+    //
+    // `getComputedStyle` must resolve against the cascade of the document the
+    // queried node actually lives in: an iframe sub-document uses its own
+    // `<style>` rules, never the main document's, and vice versa. These tests
+    // exercise the per-document resolver cache and its invalidation.
+
+    /// A `<style>` added to an iframe sub-document is reflected by
+    /// `getComputedStyle` on a node in that sub-document — the core regression
+    /// behind Acid3's selectorTest (which styles the iframe contentDocument).
+    #[test]
+    fn get_computed_style_uses_iframe_subdocument_stylesheet() {
+        let mut runtime = runtime_from_html(
+            r#"<html><body><iframe id="f"></iframe></body></html>"#,
+        );
+        runtime
+            .eval(
+                r#"var d = document.getElementById('f').contentDocument;
+                   var style = d.createElement('style');
+                   style.textContent = '#target { z-index: 7; position: absolute; }';
+                   d.body.appendChild(style);
+                   var target = d.createElement('div');
+                   target.id = 'target';
+                   d.body.appendChild(target);"#,
+            )
+            .unwrap();
+
+        assert_eq!(
+            eval_str(&mut runtime, "getComputedStyle(target, '').zIndex"),
+            "7",
+            "getComputedStyle must reflect the iframe sub-document's own <style> rule"
+        );
+    }
+
+    /// Neither document's rules leak into the other: a rule that exists only in
+    /// the main document does not apply in the sub-document, and vice versa.
+    /// Elements with no matching rule report the default z-index (empty string).
+    #[test]
+    fn get_computed_style_does_not_leak_between_main_and_iframe() {
+        let mut runtime = runtime_from_html(
+            r#"<html><head><style>#mainonly { z-index: 3; position: absolute; }</style></head>
+               <body><div id="mainonly"></div><div id="subonly"></div>
+               <iframe id="f"></iframe></body></html>"#,
+        );
+        runtime
+            .eval(
+                r#"var d = document.getElementById('f').contentDocument;
+                   var s = d.createElement('style');
+                   s.textContent = '#subonly { z-index: 9; position: absolute; }';
+                   d.body.appendChild(s);
+                   var subMain = d.createElement('div'); subMain.id = 'mainonly'; d.body.appendChild(subMain);
+                   var subOnly = d.createElement('div'); subOnly.id = 'subonly'; d.body.appendChild(subOnly);"#,
+            )
+            .unwrap();
+
+        // Main document: its own rule applies; the sub-document's rule does not.
+        assert_eq!(
+            eval_str(
+                &mut runtime,
+                "getComputedStyle(document.getElementById('mainonly'), '').zIndex"
+            ),
+            "3",
+            "the main document's own rule must apply in the main document"
+        );
+        assert_eq!(
+            eval_str(
+                &mut runtime,
+                "getComputedStyle(document.getElementById('subonly'), '').zIndex"
+            ),
+            "",
+            "the sub-document's rule must NOT leak into the main document"
+        );
+        // Sub-document: its own rule applies; the main document's rule does not.
+        assert_eq!(
+            eval_str(&mut runtime, "getComputedStyle(subOnly, '').zIndex"),
+            "9",
+            "the sub-document's own rule must apply in the sub-document"
+        );
+        assert_eq!(
+            eval_str(&mut runtime, "getComputedStyle(subMain, '').zIndex"),
+            "",
+            "the main document's rule must NOT leak into the sub-document"
+        );
+    }
+
+    /// Two iframe sub-documents keep independent resolvers: the same selector
+    /// with a different z-index resolves per document, proving the cache is
+    /// keyed on each document's identity rather than shared.
+    #[test]
+    fn get_computed_style_keeps_two_iframe_styles_isolated() {
+        let mut runtime = runtime_from_html(
+            r#"<html><body><iframe id="a"></iframe><iframe id="b"></iframe></body></html>"#,
+        );
+        runtime
+            .eval(
+                r#"var da = document.getElementById('a').contentDocument;
+                   var sa = da.createElement('style');
+                   sa.textContent = '#t { z-index: 4; position: absolute; }';
+                   da.body.appendChild(sa);
+                   var ta = da.createElement('div'); ta.id = 't'; da.body.appendChild(ta);
+
+                   var db = document.getElementById('b').contentDocument;
+                   var sb = db.createElement('style');
+                   sb.textContent = '#t { z-index: 8; position: absolute; }';
+                   db.body.appendChild(sb);
+                   var tb = db.createElement('div'); tb.id = 't'; db.body.appendChild(tb);"#,
+            )
+            .unwrap();
+
+        assert_eq!(
+            eval_str(&mut runtime, "getComputedStyle(ta, '').zIndex"),
+            "4",
+            "iframe A must resolve against its own stylesheet"
+        );
+        assert_eq!(
+            eval_str(&mut runtime, "getComputedStyle(tb, '').zIndex"),
+            "8",
+            "iframe B must resolve against its own stylesheet"
+        );
+    }
+
+    /// Mutating a sub-document `<style>`'s `textContent` after it has been
+    /// queried recomputes that sub-document's resolver, and only its resolver —
+    /// the main document's cached value is untouched.
+    #[test]
+    fn iframe_style_text_content_mutation_recomputes_only_subdocument() {
+        let mut runtime = runtime_from_html(
+            r#"<html><head><style>#m { z-index: 5; position: absolute; }</style></head>
+               <body><div id="m"></div><iframe id="f"></iframe></body></html>"#,
+        );
+        runtime
+            .eval(
+                r#"var d = document.getElementById('f').contentDocument;
+                   var subStyle = d.createElement('style');
+                   subStyle.textContent = '#t { z-index: 1; position: absolute; }';
+                   d.body.appendChild(subStyle);
+                   var t = d.createElement('div'); t.id = 't'; d.body.appendChild(t);"#,
+            )
+            .unwrap();
+
+        // Prime both resolvers.
+        assert_eq!(eval_str(&mut runtime, "getComputedStyle(t, '').zIndex"), "1");
+        assert_eq!(
+            eval_str(
+                &mut runtime,
+                "getComputedStyle(document.getElementById('m'), '').zIndex"
+            ),
+            "5"
+        );
+
+        // Mutate only the sub-document's stylesheet.
+        runtime
+            .eval("subStyle.textContent = '#t { z-index: 2; position: absolute; }';")
+            .unwrap();
+
+        assert_eq!(
+            eval_str(&mut runtime, "getComputedStyle(t, '').zIndex"),
+            "2",
+            "the sub-document must recompute after its <style> text changed"
+        );
+        assert_eq!(
+            eval_str(
+                &mut runtime,
+                "getComputedStyle(document.getElementById('m'), '').zIndex"
+            ),
+            "5",
+            "the main document's resolver must be untouched by a sub-document mutation"
+        );
+    }
+
+    /// Appending a `<style>` element to a sub-document *after* an initial query
+    /// (when the resolver is already cached) recomputes it — the exact shape of
+    /// Acid3's selectorTest, which reads a node, then adds a rule, then re-reads.
+    #[test]
+    fn iframe_style_element_append_after_first_query_recomputes() {
+        let mut runtime = runtime_from_html(
+            r#"<html><body><iframe id="f"></iframe></body></html>"#,
+        );
+        runtime
+            .eval(
+                r#"var d = document.getElementById('f').contentDocument;
+                   var t = d.createElement('div'); t.id = 't'; d.body.appendChild(t);"#,
+            )
+            .unwrap();
+
+        // First query, before any rule exists: default z-index.
+        assert_eq!(
+            eval_str(&mut runtime, "getComputedStyle(t, '').zIndex"),
+            "",
+            "with no rule the target must report the default z-index"
+        );
+
+        // Add a rule after the resolver was already built and cached.
+        runtime
+            .eval(
+                r#"var s = d.createElement('style');
+                   s.textContent = '#t { z-index: 5; position: absolute; }';
+                   d.body.appendChild(s);"#,
+            )
+            .unwrap();
+
+        assert_eq!(
+            eval_str(&mut runtime, "getComputedStyle(t, '').zIndex"),
+            "5",
+            "appending a <style> after the first query must recompute the resolver"
+        );
+    }
+
+    /// Removing a sub-document `<style>` element recomputes the sub-document's
+    /// resolver so the previously applied rule no longer matches.
+    #[test]
+    fn iframe_remove_style_recomputes_subdocument() {
+        let mut runtime = runtime_from_html(
+            r#"<html><body><iframe id="f"></iframe></body></html>"#,
+        );
+        runtime
+            .eval(
+                r#"var d = document.getElementById('f').contentDocument;
+                   var s = d.createElement('style');
+                   s.textContent = '#t { z-index: 6; position: absolute; }';
+                   d.body.appendChild(s);
+                   var t = d.createElement('div'); t.id = 't'; d.body.appendChild(t);"#,
+            )
+            .unwrap();
+
+        assert_eq!(eval_str(&mut runtime, "getComputedStyle(t, '').zIndex"), "6");
+
+        runtime.eval("s.parentNode.removeChild(s);").unwrap();
+
+        assert_eq!(
+            eval_str(&mut runtime, "getComputedStyle(t, '').zIndex"),
+            "",
+            "removing the <style> must drop its rule from the sub-document resolver"
+        );
+    }
+
+    /// `document.open()` on a sub-document clears its cached styles: after a
+    /// following `write()` only the newly written rules apply; a previously
+    /// present rule for the same id no longer matches.
+    #[test]
+    fn iframe_document_open_clears_cached_styles() {
+        let mut runtime = runtime_from_html(
+            r#"<html><body><iframe id="f"></iframe></body></html>"#,
+        );
+        runtime
+            .eval(
+                r#"var d = document.getElementById('f').contentDocument;
+                   var s = d.createElement('style');
+                   s.textContent = '#old { z-index: 1; position: absolute; }';
+                   d.body.appendChild(s);
+                   var o = d.createElement('div'); o.id = 'old'; d.body.appendChild(o);"#,
+            )
+            .unwrap();
+        assert_eq!(eval_str(&mut runtime, "getComputedStyle(o, '').zIndex"), "1");
+
+        runtime
+            .eval(
+                r#"d.open();
+                   d.write('<style>#new { z-index: 4; position: absolute; }</style><div id="new"></div><div id="old"></div>');
+                   d.close();"#,
+            )
+            .unwrap();
+
+        assert_eq!(
+            eval_str(
+                &mut runtime,
+                "getComputedStyle(d.getElementById('new'), '').zIndex"
+            ),
+            "4",
+            "the freshly written rule must apply after open()/write()"
+        );
+        assert_eq!(
+            eval_str(
+                &mut runtime,
+                "getComputedStyle(d.getElementById('old'), '').zIndex"
+            ),
+            "",
+            "the pre-open() rule must not survive document.open()"
+        );
+    }
+
+    /// A sub-document `document.write` of a `<style>` marks only that
+    /// sub-document dirty: the new rule applies there and the main document's
+    /// cached resolver is not polluted.
+    #[test]
+    fn iframe_document_write_marks_own_document_dirty() {
+        let mut runtime = runtime_from_html(
+            r#"<html><head><style>#m { z-index: 7; position: absolute; }</style></head>
+               <body><div id="m"></div><iframe id="f"></iframe></body></html>"#,
+        );
+        // Prime both resolvers.
+        assert_eq!(
+            eval_str(
+                &mut runtime,
+                "getComputedStyle(document.getElementById('m'), '').zIndex"
+            ),
+            "7"
+        );
+        runtime
+            .eval("var d = document.getElementById('f').contentDocument; d.body;")
+            .unwrap();
+
+        runtime
+            .eval(
+                r#"d.write('<style>#w { z-index: 2; position: absolute; }</style><div id="w"></div>');"#,
+            )
+            .unwrap();
+
+        assert_eq!(
+            eval_str(
+                &mut runtime,
+                "getComputedStyle(d.getElementById('w'), '').zIndex"
+            ),
+            "2",
+            "a written sub-document rule must apply in the sub-document"
+        );
+        assert_eq!(
+            eval_str(
+                &mut runtime,
+                "getComputedStyle(document.getElementById('m'), '').zIndex"
+            ),
+            "7",
+            "a sub-document write must not pollute the main document's resolver"
+        );
+    }
+
+    /// Moving a `<style>` element from the main document into a sub-document
+    /// invalidates *both* resolvers: the rule disappears from the main document
+    /// and appears in the sub-document. Guards the cross-document-move case
+    /// where marking only the destination would leave the source stale.
+    #[test]
+    fn moving_style_between_documents_invalidates_both_resolvers() {
+        let mut runtime = runtime_from_html(
+            r#"<html><head><style id="s">#t { z-index: 3; position: absolute; }</style></head>
+               <body><div id="t"></div><iframe id="f"></iframe></body></html>"#,
+        );
+        runtime
+            .eval(
+                r#"var d = document.getElementById('f').contentDocument;
+                   var subT = d.createElement('div'); subT.id = 't'; d.body.appendChild(subT);"#,
+            )
+            .unwrap();
+
+        // Prime: rule applies in the main document, not in the sub-document.
+        assert_eq!(
+            eval_str(
+                &mut runtime,
+                "getComputedStyle(document.getElementById('t'), '').zIndex"
+            ),
+            "3"
+        );
+        assert_eq!(eval_str(&mut runtime, "getComputedStyle(subT, '').zIndex"), "");
+
+        // Move the <style> element from the main document into the sub-document.
+        runtime
+            .eval("d.body.appendChild(document.getElementById('s'));")
+            .unwrap();
+
+        assert_eq!(
+            eval_str(
+                &mut runtime,
+                "getComputedStyle(document.getElementById('t'), '').zIndex"
+            ),
+            "",
+            "the rule must disappear from the source (main) document"
+        );
+        assert_eq!(
+            eval_str(&mut runtime, "getComputedStyle(subT, '').zIndex"),
+            "3",
+            "the rule must appear in the destination (sub) document"
+        );
+    }
+
+    /// A sub-document resolver uses the runtime's configured viewport for
+    /// `vw`/`vh` resolution, exactly like the main document.
+    #[test]
+    fn iframe_computed_style_uses_configured_viewport() {
+        let mut runtime = runtime_from_html(
+            r#"<html><body><iframe id="f"></iframe></body></html>"#,
+        );
+        runtime.set_viewport(800.0, 600.0);
+        runtime
+            .eval(
+                r#"var d = document.getElementById('f').contentDocument;
+                   var s = d.createElement('style');
+                   s.textContent = '#t { width: 50vw; height: 25vh; }';
+                   d.body.appendChild(s);
+                   var t = d.createElement('div'); t.id = 't'; d.body.appendChild(t);"#,
+            )
+            .unwrap();
+
+        assert_eq!(
+            eval_str(&mut runtime, "getComputedStyle(t, '').width"),
+            "400px",
+            "50vw of an 800px viewport must resolve to 400px in the sub-document"
+        );
+        assert_eq!(
+            eval_str(&mut runtime, "getComputedStyle(t, '').height"),
+            "150px",
+            "25vh of a 600px viewport must resolve to 150px in the sub-document"
+        );
+    }
+
+    /// Changing the viewport after a sub-document resolver was already built
+    /// invalidates it, so a re-query resolves `vw`/`vh` against the new size.
+    #[test]
+    fn set_viewport_invalidates_existing_iframe_resolver() {
+        let mut runtime = runtime_from_html(
+            r#"<html><body><iframe id="f"></iframe></body></html>"#,
+        );
+        runtime.set_viewport(800.0, 600.0);
+        runtime
+            .eval(
+                r#"var d = document.getElementById('f').contentDocument;
+                   var s = d.createElement('style');
+                   s.textContent = '#t { width: 50vw; }';
+                   d.body.appendChild(s);
+                   var t = d.createElement('div'); t.id = 't'; d.body.appendChild(t);"#,
+            )
+            .unwrap();
+        assert_eq!(eval_str(&mut runtime, "getComputedStyle(t, '').width"), "400px");
+
+        // Widen the viewport: the cached sub-document resolver must rebuild.
+        runtime.set_viewport(1000.0, 600.0);
+        assert_eq!(
+            eval_str(&mut runtime, "getComputedStyle(t, '').width"),
+            "500px",
+            "a viewport change must invalidate the cached sub-document resolver"
         );
     }
 }
