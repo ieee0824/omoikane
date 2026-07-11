@@ -34,6 +34,22 @@ pub fn parse_stylesheet(input: &str) -> Result<Stylesheet, CssParseError> {
     Parser::new(tokens).parse_stylesheet()
 }
 
+/// Parses a standalone selector list, requiring the complete input to be valid.
+pub fn parse_selector_list(input: &str) -> Result<Vec<Selector>, CssParseError> {
+    let tokens = tokenize(input)?;
+    let mut parser = Parser::new(tokens);
+    parser.skip_whitespace();
+    if parser.peek().is_none() {
+        return Err(CssParseError::InvalidSelector);
+    }
+    let selectors = parser.parse_selector_list_until(false)?;
+    parser.skip_whitespace();
+    if parser.peek().is_some() {
+        return Err(CssParseError::InvalidSelector);
+    }
+    Ok(selectors)
+}
+
 struct Parser {
     tokens: Vec<CssToken>,
     index: usize,
@@ -189,7 +205,7 @@ impl Parser {
     }
 
     fn parse_style_rule(&mut self) -> Result<Rule, CssParseError> {
-        let selectors = self.parse_selector_list()?;
+        let selectors = self.parse_selector_list_until(true)?;
         self.expect_curly_open()?;
         let declarations = self.parse_declaration_list()?;
         Ok(Rule::Style(StyleRule {
@@ -198,7 +214,10 @@ impl Parser {
         }))
     }
 
-    fn parse_selector_list(&mut self) -> Result<Vec<Selector>, CssParseError> {
+    fn parse_selector_list_until(
+        &mut self,
+        allow_curly_open: bool,
+    ) -> Result<Vec<Selector>, CssParseError> {
         let mut selectors = Vec::new();
         loop {
             selectors.push(self.parse_selector()?);
@@ -207,8 +226,14 @@ impl Parser {
                 Some(CssToken::Comma) => {
                     self.next();
                     self.skip_whitespace();
+                    if self.peek().is_none()
+                        || (allow_curly_open && matches!(self.peek(), Some(CssToken::CurlyOpen)))
+                        || matches!(self.peek(), Some(CssToken::Comma))
+                    {
+                        return Err(CssParseError::InvalidSelector);
+                    }
                 }
-                Some(CssToken::CurlyOpen) => break,
+                Some(CssToken::CurlyOpen) if allow_curly_open => break,
                 _ => break,
             }
         }
@@ -241,16 +266,25 @@ impl Parser {
             match self.peek() {
                 Some(CssToken::CurlyOpen) | Some(CssToken::Comma) | None => break,
                 Some(CssToken::Delim('>')) => {
+                    if parts.is_empty() || combinator.is_some() {
+                        return Err(CssParseError::InvalidSelector);
+                    }
                     self.next();
                     combinator = Some(Combinator::Child);
                     continue;
                 }
                 Some(CssToken::Delim('+')) => {
+                    if parts.is_empty() || combinator.is_some() {
+                        return Err(CssParseError::InvalidSelector);
+                    }
                     self.next();
                     combinator = Some(Combinator::AdjacentSibling);
                     continue;
                 }
                 Some(CssToken::Delim('~')) => {
+                    if parts.is_empty() || combinator.is_some() {
+                        return Err(CssParseError::InvalidSelector);
+                    }
                     self.next();
                     combinator = Some(Combinator::GeneralSibling);
                     continue;
@@ -266,7 +300,7 @@ impl Parser {
             combinator = None;
         }
 
-        if parts.is_empty() {
+        if parts.is_empty() || combinator.is_some() {
             return Err(CssParseError::InvalidSelector);
         }
 
@@ -308,6 +342,14 @@ impl Parser {
         }
 
         if simples.is_empty() {
+            return Err(CssParseError::InvalidSelector);
+        }
+
+        let type_selector_count = simples
+            .iter()
+            .filter(|simple| matches!(simple, SimpleSelector::Type(_) | SimpleSelector::Universal))
+            .count();
+        if type_selector_count > 1 {
             return Err(CssParseError::InvalidSelector);
         }
 
@@ -394,6 +436,9 @@ impl Parser {
             Ok(SimpleSelector::Not(inner))
         } else {
             let argument = render_tokens(&argument_tokens).trim().to_string();
+            if argument.is_empty() {
+                return Err(CssParseError::InvalidSelector);
+            }
             Ok(SimpleSelector::PseudoClass(format!("{name}({argument})")))
         }
     }
@@ -914,5 +959,47 @@ fn extract_url_from_keyword(keyword: &str) -> String {
         inner[1..inner.len() - 1].to_string()
     } else {
         inner.to_string()
+    }
+}
+
+#[cfg(test)]
+mod selector_list_tests {
+    use super::*;
+
+    #[test]
+    fn standalone_selector_list_accepts_lists_and_function_arguments() {
+        let selectors = parse_selector_list(
+            "div.foo, #bar > input:nth-child( -n + 3 ):nth-of-type(3n-1)",
+        )
+        .unwrap();
+        assert_eq!(selectors.len(), 2);
+        assert!(format!("{:?}", selectors).contains("nth-child(-n + 3)"));
+        assert!(format!("{:?}", selectors).contains("nth-of-type(3n-1)"));
+
+        for selector in [":lang(en)", ":nth-last-of-type(-5n+3)"] {
+            assert_eq!(parse_selector_list(selector).unwrap().len(), 1);
+        }
+    }
+
+    #[test]
+    fn standalone_selector_list_rejects_empty_or_partial_lists() {
+        for invalid in ["", "   ", ",div", "div,", "div,,span"] {
+            assert!(parse_selector_list(invalid).is_err(), "accepted {invalid:?}");
+        }
+    }
+
+    #[test]
+    fn standalone_selector_list_rejects_invalid_structure() {
+        for invalid in [
+            "> div",
+            "div >",
+            "div > + span",
+            "div:lang()",
+            "div:nth-child(2n+1",
+            "html*.test",
+            "div { color: red }",
+        ] {
+            assert!(parse_selector_list(invalid).is_err(), "accepted {invalid:?}");
+        }
     }
 }
