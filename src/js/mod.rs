@@ -6099,6 +6099,29 @@ mod tests {
           }); var out=[],n; while(n=w.nextNode()) out.push(n.tagName); return out.join(',')})()"#), "B");
     }
 
+    #[test]
+    fn range_boundaries_clone_string_and_legacy_exception_are_explicit() {
+        use crate::html::TreeBuilder;
+        let doc = TreeBuilder::parse("<html><body><p id='p'>Hello <em>World</em>!</p></body></html>").document();
+        let mut runtime = JsRuntime::with_document(doc).unwrap();
+        assert_eq!(eval_str(&mut runtime, r#"(()=>{var p=document.getElementById('p'),r=document.createRange();
+          r.selectNodeContents(p); var c=r.cloneContents();
+          return [r.toString(),c.nodeType,c.childNodes.length,r.collapsed,r.commonAncestorContainer===p].join('|')})()"#), "Hello World!|11|3|false|true");
+        assert_eq!(eval_str(&mut runtime, r#"(()=>{var p=document.getElementById('p'),r=document.createRange();
+          r.setStart(p.firstChild,2); r.setEnd(p.firstChild,5); return [r.toString(),r.cloneRange().toString()].join('|')})()"#), "llo|llo");
+        assert_eq!(eval_str(&mut runtime, r#"(()=>{var r=document.createRange();try{r.setEndBefore(document);return 'none'}catch(e){return e.name+'|'+e.code+'|'+e.INVALID_NODE_TYPE_ERR}})()"#), "InvalidNodeTypeError|24|24");
+    }
+
+    #[test]
+    fn range_extract_returns_fragment_with_partial_ancestor_clones() {
+        use crate::html::TreeBuilder;
+        let doc = TreeBuilder::parse("<html><body><h1>Hello <em>Wonderful</em> Kitty</h1><p>How are you?</p></body></html>").document();
+        let mut runtime = JsRuntime::with_document(doc).unwrap();
+        assert_eq!(eval_str(&mut runtime, r#"(()=>{var h=document.querySelector('h1'),em=document.querySelector('em'),p=document.querySelector('p');
+          var r=document.createRange();r.setStart(em.firstChild,6);r.setEnd(p,0);var f=r.extractContents();
+          return [f.nodeType,f.childNodes.length,f.firstChild.tagName,f.firstChild.firstChild.tagName,f.firstChild.firstChild.textContent,f.firstChild.lastChild.textContent,f.lastChild.tagName,p.childNodes.length].join('|')})()"#), "11|2|H1|EM|ful| Kitty|P|1");
+    }
+
     // ── iframe / contentDocument (sub-browsing contexts) ────────────────────
 
     /// A tiny static HTTP/1.1 server that answers every request with the same

@@ -1101,7 +1101,23 @@
     }
   }
 
-  class Text extends CharacterData {}
+  class Text extends CharacterData {
+    splitText(offset) {
+      offset = Number(offset) >>> 0;
+      if (offset > this.length) throw new DOMException("Offset is outside the data.", "IndexSizeError");
+      const oldData = this.data;
+      const newNode = nodeDocument(this).createTextNode(oldData.slice(offset));
+      const parent = this.parentNode;
+      const index = indexOfNode(this);
+      this.data = oldData.slice(0, offset);
+      const state = traversalByDocument.get(nodeDocument(this).__id);
+      if (state) {
+        for (const range of state.ranges) range.__splitText(this, newNode, offset, parent, index);
+      }
+      if (parent) parent.insertBefore(newNode, this.nextSibling);
+      return newNode;
+    }
+  }
   class Comment extends CharacterData {}
 
   const NodeFilter = {
@@ -1294,6 +1310,227 @@
     }
   }
 
+  function nodeLength(node) {
+    return node.nodeType === 3 || node.nodeType === 8 ? node.length : node.childNodes.length;
+  }
+
+  function boundaryCompare(aNode, aOffset, bNode, bOffset) {
+    if (aNode === bNode) return aOffset < bOffset ? -1 : (aOffset > bOffset ? 1 : 0);
+    if (isInclusiveDescendant(bNode, aNode)) {
+      let child = bNode;
+      while (child.parentNode !== aNode) child = child.parentNode;
+      return aOffset <= indexOfNode(child) ? -1 : 1;
+    }
+    if (isInclusiveDescendant(aNode, bNode)) {
+      let child = aNode;
+      while (child.parentNode !== bNode) child = child.parentNode;
+      return indexOfNode(child) < bOffset ? -1 : 1;
+    }
+    const aPath = [], bPath = [];
+    for (let n = aNode; n; n = n.parentNode) aPath.unshift(n);
+    for (let n = bNode; n; n = n.parentNode) bPath.unshift(n);
+    let i = 0;
+    while (i < aPath.length && aPath[i] === bPath[i]) i++;
+    if (i === 0) return 0;
+    return indexOfNode(aPath[i]) < indexOfNode(bPath[i]) ? -1 : 1;
+  }
+
+  function commonAncestor(a, b) {
+    const ancestors = new Set();
+    for (let n = a; n; n = n.parentNode) ancestors.add(n);
+    for (let n = b; n; n = n.parentNode) if (ancestors.has(n)) return n;
+    return null;
+  }
+
+  class Range {
+    constructor(doc) {
+      this.__doc = doc;
+      this.__startContainer = doc; this.__startOffset = 0;
+      this.__endContainer = doc; this.__endOffset = 0;
+      traversalState(doc).ranges.add(this);
+    }
+    get startContainer() { return this.__startContainer; }
+    get startOffset() { return this.__startOffset; }
+    get endContainer() { return this.__endContainer; }
+    get endOffset() { return this.__endOffset; }
+    get collapsed() { return this.__startContainer === this.__endContainer && this.__startOffset === this.__endOffset; }
+    get commonAncestorContainer() { return commonAncestor(this.__startContainer, this.__endContainer); }
+    __validate(node, offset) {
+      if (!node || node.nodeType === 10) throw new DOMException("Invalid boundary node.", "InvalidNodeTypeError");
+      offset = Number(offset) >>> 0;
+      if (offset > nodeLength(node)) throw new DOMException("Offset is outside the node.", "IndexSizeError");
+      return offset;
+    }
+    setStart(node, offset) {
+      offset = this.__validate(node, offset);
+      if (nodeDocument(node) !== this.__doc || boundaryCompare(node, offset, this.__endContainer, this.__endOffset) > 0) {
+        this.__endContainer = node; this.__endOffset = offset;
+      }
+      this.__startContainer = node; this.__startOffset = offset;
+    }
+    setEnd(node, offset) {
+      offset = this.__validate(node, offset);
+      if (nodeDocument(node) !== this.__doc || boundaryCompare(node, offset, this.__startContainer, this.__startOffset) < 0) {
+        this.__startContainer = node; this.__startOffset = offset;
+      }
+      this.__endContainer = node; this.__endOffset = offset;
+    }
+    __beforeAfter(node, delta, start) {
+      if (!node || !node.parentNode) throw new DOMException("Node has no parent.", "InvalidNodeTypeError");
+      const parent = node.parentNode, offset = indexOfNode(node) + delta;
+      start ? this.setStart(parent, offset) : this.setEnd(parent, offset);
+    }
+    setStartBefore(node) { this.__beforeAfter(node, 0, true); }
+    setStartAfter(node) { this.__beforeAfter(node, 1, true); }
+    setEndBefore(node) { this.__beforeAfter(node, 0, false); }
+    setEndAfter(node) { this.__beforeAfter(node, 1, false); }
+    selectNode(node) {
+      if (!node || !node.parentNode) throw new DOMException("Node has no parent.", "InvalidNodeTypeError");
+      const parent = node.parentNode, index = indexOfNode(node);
+      this.__startContainer = parent; this.__startOffset = index;
+      this.__endContainer = parent; this.__endOffset = index + 1;
+    }
+    selectNodeContents(node) {
+      this.__validate(node, 0);
+      this.__startContainer = node; this.__startOffset = 0;
+      this.__endContainer = node; this.__endOffset = nodeLength(node);
+    }
+    collapse(toStart = false) {
+      if (toStart) { this.__endContainer = this.__startContainer; this.__endOffset = this.__startOffset; }
+      else { this.__startContainer = this.__endContainer; this.__startOffset = this.__endOffset; }
+    }
+    cloneRange() {
+      const r = new Range(this.__doc);
+      r.__startContainer=this.__startContainer; r.__startOffset=this.__startOffset;
+      r.__endContainer=this.__endContainer; r.__endOffset=this.__endOffset;
+      return r;
+    }
+    compareBoundaryPoints(how, source) {
+      if (how === Range.START_TO_START) return boundaryCompare(this.__startContainer,this.__startOffset,source.__startContainer,source.__startOffset);
+      if (how === Range.START_TO_END) return boundaryCompare(this.__endContainer,this.__endOffset,source.__startContainer,source.__startOffset);
+      if (how === Range.END_TO_END) return boundaryCompare(this.__endContainer,this.__endOffset,source.__endContainer,source.__endOffset);
+      if (how === Range.END_TO_START) return boundaryCompare(this.__startContainer,this.__startOffset,source.__endContainer,source.__endOffset);
+      throw new DOMException("Invalid comparison mode.", "NotSupportedError");
+    }
+    __nodeRelation(node) {
+      const parent = node.parentNode;
+      if (!parent) return 0;
+      const i = indexOfNode(node);
+      const startsBeforeEnd = boundaryCompare(parent,i,this.__endContainer,this.__endOffset) < 0;
+      const endsAfterStart = boundaryCompare(parent,i+1,this.__startContainer,this.__startOffset) > 0;
+      if (!startsBeforeEnd || !endsAfterStart) return 0;
+      const full = boundaryCompare(this.__startContainer,this.__startOffset,parent,i) <= 0 &&
+        boundaryCompare(parent,i+1,this.__endContainer,this.__endOffset) <= 0;
+      return full ? 2 : 1;
+    }
+    __characterSlice(node) {
+      let from = 0, to = node.length;
+      if (node === this.__startContainer) from = this.__startOffset;
+      if (node === this.__endContainer) to = this.__endOffset;
+      return [from, to];
+    }
+    __copyNode(node, extract) {
+      if (node.nodeType === 3 || node.nodeType === 8) {
+        const [from,to] = this.__characterSlice(node);
+        const copy = node.nodeType === 3 ? this.__doc.createTextNode(node.data.slice(from,to)) : this.__doc.createComment(node.data.slice(from,to));
+        if (extract) node.data = node.data.slice(0,from) + node.data.slice(to);
+        return copy;
+      }
+      const relation = this.__nodeRelation(node);
+      if (relation === 2) {
+        if (extract) return node;
+        return node.cloneNode(true);
+      }
+      const copy = node.cloneNode(false);
+      for (const child of node.childNodes.slice()) {
+        const rel = this.__nodeRelation(child);
+        if (rel) copy.appendChild(rel === 2 && extract ? child : this.__copyNode(child, extract));
+      }
+      return copy;
+    }
+    __contents(extract) {
+      const fragment = this.__doc.createDocumentFragment();
+      if (this.collapsed) return fragment;
+      if (this.__startContainer === this.__endContainer && (this.__startContainer.nodeType === 3 || this.__startContainer.nodeType === 8)) {
+        fragment.appendChild(this.__copyNode(this.__startContainer, extract));
+      } else {
+        const common = this.commonAncestorContainer;
+        if (common.nodeType === 3 || common.nodeType === 8) fragment.appendChild(this.__copyNode(common, extract));
+        else for (const child of common.childNodes.slice()) if (this.__nodeRelation(child)) fragment.appendChild(this.__copyNode(child, extract));
+      }
+      if (extract) this.collapse(true);
+      return fragment;
+    }
+    cloneContents() { return this.__contents(false); }
+    extractContents() { return this.__contents(true); }
+    deleteContents() { this.__contents(true); }
+    insertNode(node) {
+      let parent, reference;
+      if (this.__startContainer.nodeType === 3) {
+        reference = this.__startContainer.splitText(this.__startOffset);
+        parent = reference.parentNode;
+      } else {
+        parent = this.__startContainer;
+        reference = parent.childNodes[this.__startOffset] || null;
+      }
+      if (!parent) throw new DOMException("Cannot insert at this boundary.", "HierarchyRequestError");
+      if (parent.nodeType === 9 && node.nodeType === 1 && parent.documentElement) throw new DOMException("Document already has an element.", "HierarchyRequestError");
+      const count = node.nodeType === 11 ? node.childNodes.length : 1;
+      parent.insertBefore(node, reference);
+      if (this.collapsed) { this.__endContainer = parent; this.__endOffset = indexOfNode(reference) < 0 ? parent.childNodes.length : indexOfNode(reference); }
+      else if (this.__endContainer === parent && this.__endOffset === this.__startOffset) this.__endOffset += count;
+    }
+    surroundContents(newParent) {
+      if ([9,10,11].includes(newParent.nodeType)) throw new DOMException("Invalid wrapper.", "InvalidNodeTypeError");
+      if (this.__startContainer !== this.__endContainer &&
+          ((this.__startContainer.nodeType === 3 || this.__startContainer.nodeType === 8) ||
+           (this.__endContainer.nodeType === 3 || this.__endContainer.nodeType === 8))) {
+        throw new DOMException("Range partially contains a non-Text node.", "InvalidStateError");
+      }
+      const fragment = this.extractContents();
+      this.insertNode(newParent);
+      newParent.textContent = "";
+      newParent.appendChild(fragment);
+      this.selectNode(newParent);
+    }
+    toString() {
+      if (this.collapsed) return "";
+      let result = "";
+      const root = this.commonAncestorContainer;
+      const visit = node => {
+        if (node.nodeType === 3) {
+          let from=0,to=node.length;
+          if (node===this.__startContainer) from=this.__startOffset;
+          if (node===this.__endContainer) to=this.__endOffset;
+          if ((node===this.__startContainer || node===this.__endContainer || this.__nodeRelation(node))) result += node.data.slice(from,to);
+        } else for (const child of node.childNodes) visit(child);
+      };
+      visit(root); return result;
+    }
+    detach() { traversalState(this.__doc).ranges.delete(this); }
+    __preRemove(parent, removed) {
+      const index = indexOfNode(removed);
+      const adjust = (container, offset) => {
+        if (isInclusiveDescendant(container, removed)) return [parent,index];
+        if (container === parent && offset > index) return [container,offset-1];
+        return [container,offset];
+      };
+      [this.__startContainer,this.__startOffset]=adjust(this.__startContainer,this.__startOffset);
+      [this.__endContainer,this.__endOffset]=adjust(this.__endContainer,this.__endOffset);
+    }
+    __splitText(oldNode,newNode,offset,parent,index) {
+      const adjust=(container,value) => container===oldNode && value>offset ? [newNode,value-offset] : [container,value];
+      [this.__startContainer,this.__startOffset]=adjust(this.__startContainer,this.__startOffset);
+      [this.__endContainer,this.__endOffset]=adjust(this.__endContainer,this.__endOffset);
+      if (parent) {
+        if (this.__startContainer===parent && this.__startOffset>index) this.__startOffset++;
+        if (this.__endContainer===parent && this.__endOffset>index) this.__endOffset++;
+      }
+    }
+  }
+  Range.START_TO_START=0; Range.START_TO_END=1; Range.END_TO_END=2; Range.END_TO_START=3;
+  Range.prototype.START_TO_START=0; Range.prototype.START_TO_END=1; Range.prototype.END_TO_END=2; Range.prototype.END_TO_START=3;
+
   class Document extends Node {
     // Stamps a freshly created node with this document as its owner so
     // `node.ownerDocument` resolves to this document even while the node is
@@ -1404,6 +1641,8 @@
     createTreeWalker(root, whatToShow = NodeFilter.SHOW_ALL, filter = null) {
       return new TreeWalker(root, whatToShow, filter);
     }
+
+    createRange() { return new Range(this); }
 
     createEvent(type) {
       const t = String(type);
@@ -1884,6 +2123,7 @@
   globalThis.NodeFilter = NodeFilter;
   globalThis.NodeIterator = NodeIterator;
   globalThis.TreeWalker = TreeWalker;
+  globalThis.Range = Range;
   globalThis.HTMLTableElement = HTMLTableElement;
   globalThis.HTMLFormElement = HTMLFormElement;
   globalThis.HTMLInputElement = HTMLInputElement;
