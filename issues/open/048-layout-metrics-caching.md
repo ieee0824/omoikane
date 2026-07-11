@@ -14,8 +14,8 @@ DOM 世代ベースのキャッシュで削減する。
 
 ## 背景（PR #105 Copilot レビュー + 批判的レビューより）
 
-- `offsetWidth` / `clientWidth` / `scrollWidth` 等の各 getter が毎回 `__layoutMetrics()` ネイティブ呼び出し +
-  `JSON.parse` を行うため、複数メトリクスの連続取得だけで同じ reflow 結果を何度も往復する
+- `offsetWidth` / `clientWidth` / `scrollWidth` 等の各 getter が毎回 `__omoikane_layout_metrics(nodeId)` の
+  ネイティブ呼び出し + `JSON.parse` を行うため、複数メトリクスの連続取得だけで同じ reflow 結果を何度も往復する
 - `ensure_style_resolver` は dirty 時に全 `<style>` を毎回フルで再パースし、`ensure_layout` は全文書を再レイアウトする。
   部分無効化がないため、「ループ内で DOM を変更しつつ getComputedStyle を読む」パターン
   （Acid3 selectorTest が該当）で O(n²) 気味に退化する
