@@ -6058,6 +6058,47 @@ mod tests {
         );
     }
 
+    // ── DOM Traversal / Range ───────────────────────────────────────────────
+
+    #[test]
+    fn node_iterator_honors_mask_filter_exceptions_and_live_removal() {
+        use crate::html::TreeBuilder;
+        let doc = TreeBuilder::parse("<html><body><div id='r'>a<i>b</i><b>c</b></div></body></html>").document();
+        let mut runtime = JsRuntime::with_document(doc).unwrap();
+        assert_eq!(eval_str(&mut runtime, r#"(()=>{
+          var r=document.getElementById('r'), seen=[];
+          var it=document.createNodeIterator(r, NodeFilter.SHOW_ELEMENT, function(n) {
+            if (n.tagName === 'I') return NodeFilter.FILTER_REJECT;
+            return NodeFilter.FILTER_ACCEPT;
+          });
+          var n; while(n=it.nextNode()) seen.push(n.tagName);
+          return seen.join(',')})()"#), "DIV,B");
+        assert_eq!(eval_str(&mut runtime, r#"(()=>{
+          var r=document.getElementById('r');
+          try { document.createNodeIterator(r, NodeFilter.SHOW_ALL, function(){throw 'filter-error'}).nextNode(); return 'miss' }
+          catch(e) { return String(e) }})()"#), "filter-error");
+        assert_eq!(eval_str(&mut runtime, r#"(()=>{
+          var x=document.createElement('div'); var a=document.createElement('a'); var b=document.createElement('b');
+          x.appendChild(a); x.appendChild(b); var live=document.createNodeIterator(x); live.nextNode(); live.nextNode();
+          x.removeChild(a); return live.nextNode().tagName})()"#), "B");
+    }
+
+    #[test]
+    fn tree_walker_distinguishes_reject_from_skip_and_stays_in_root() {
+        use crate::html::TreeBuilder;
+        let doc = TreeBuilder::parse("<html><body><div id='r'><section><i></i></section><b></b></div></body></html>").document();
+        let mut runtime = JsRuntime::with_document(doc).unwrap();
+        assert_eq!(eval_str(&mut runtime, r#"(()=>{
+          var r=document.getElementById('r');
+          var w=document.createTreeWalker(r, NodeFilter.SHOW_ELEMENT, function(n) {
+            return n.tagName==='SECTION' ? NodeFilter.FILTER_SKIP : NodeFilter.FILTER_ACCEPT;
+          }); var out=[],n; while(n=w.nextNode()) out.push(n.tagName); return out.join(',')})()"#), "I,B");
+        assert_eq!(eval_str(&mut runtime, r#"(()=>{
+          var r=document.getElementById('r'); var w=document.createTreeWalker(r, NodeFilter.SHOW_ELEMENT, function(n) {
+            return n.tagName==='SECTION' ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_ACCEPT;
+          }); var out=[],n; while(n=w.nextNode()) out.push(n.tagName); return out.join(',')})()"#), "B");
+    }
+
     // ── iframe / contentDocument (sub-browsing contexts) ────────────────────
 
     /// A tiny static HTTP/1.1 server that answers every request with the same

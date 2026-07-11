@@ -337,6 +337,43 @@
     }
   }
 
+  const traversalByDocument = new Map();
+  function traversalState(doc) {
+    let state = traversalByDocument.get(doc.__id);
+    if (!state) {
+      state = { iterators: new Set(), ranges: new Set() };
+      traversalByDocument.set(doc.__id, state);
+    }
+    return state;
+  }
+
+  function nodeDocument(node) {
+    if (!node) return globalThis.document;
+    return node.nodeType === 9 ? node : (node.ownerDocument || globalThis.document);
+  }
+
+  function isInclusiveDescendant(node, ancestor) {
+    for (let n = node; n; n = n.parentNode) if (n === ancestor) return true;
+    return false;
+  }
+
+  function indexOfNode(node) {
+    const parent = node && node.parentNode;
+    return parent ? parent.childNodes.indexOf(node) : -1;
+  }
+
+  function preRemove(parent, removed) {
+    const doc = nodeDocument(parent);
+    const state = traversalByDocument.get(doc.__id);
+    if (!state) return;
+    for (const iterator of state.iterators) iterator.__preRemove(removed);
+    for (const range of state.ranges) range.__preRemove(parent, removed);
+  }
+
+  function notifyImplicitRemoval(node) {
+    if (node && node.parentNode) preRemove(node.parentNode, node);
+  }
+
   class Node {
     constructor(id) {
       this.__id = id;
@@ -364,11 +401,13 @@
       if (child && child.nodeType === 11) {
         const children = child.childNodes.slice();
         for (const c of children) {
+          notifyImplicitRemoval(c);
           __omoikane_append_child(this.__id, c.__id);
         }
         return child;
       }
       this.__ensureNotAncestor(child);
+      notifyImplicitRemoval(child);
       __omoikane_append_child(this.__id, child.__id);
       return child;
     }
@@ -631,6 +670,7 @@
     }
 
     removeChild(child) {
+      preRemove(this, child);
       __omoikane_remove_child(this.__id, child.__id);
       return child;
     }
@@ -639,6 +679,12 @@
       if (newNode && newNode.nodeType !== 11) {
         this.__ensureNotAncestor(newNode);
       }
+      if (newNode && newNode.nodeType === 11) {
+        const children = newNode.childNodes.slice();
+        for (const child of children) this.insertBefore(child, refNode);
+        return newNode;
+      }
+      notifyImplicitRemoval(newNode);
       __omoikane_insert_before(this.__id, newNode.__id, refNode ? refNode.__id : null);
       return newNode;
     }
@@ -1058,6 +1104,196 @@
   class Text extends CharacterData {}
   class Comment extends CharacterData {}
 
+  const NodeFilter = {
+    FILTER_ACCEPT: 1, FILTER_REJECT: 2, FILTER_SKIP: 3,
+    SHOW_ALL: 0xffffffff, SHOW_ELEMENT: 0x1, SHOW_ATTRIBUTE: 0x2,
+    SHOW_TEXT: 0x4, SHOW_CDATA_SECTION: 0x8,
+    SHOW_ENTITY_REFERENCE: 0x10, SHOW_ENTITY: 0x20,
+    SHOW_PROCESSING_INSTRUCTION: 0x40, SHOW_COMMENT: 0x80,
+    SHOW_DOCUMENT: 0x100, SHOW_DOCUMENT_TYPE: 0x200,
+    SHOW_DOCUMENT_FRAGMENT: 0x400, SHOW_NOTATION: 0x800,
+  };
+
+  function filterNode(node, whatToShow, filter) {
+    const bit = 1 << (node.nodeType - 1);
+    if ((whatToShow & bit) === 0) return NodeFilter.FILTER_SKIP;
+    if (filter == null) return NodeFilter.FILTER_ACCEPT;
+    const result = typeof filter === "function"
+      ? filter(node)
+      : filter.acceptNode(node);
+    return Number(result);
+  }
+
+  function nextInTree(node, root) {
+    if (node.firstChild) return node.firstChild;
+    while (node && node !== root) {
+      if (node.nextSibling) return node.nextSibling;
+      node = node.parentNode;
+    }
+    return null;
+  }
+
+  function previousInTree(node, root) {
+    if (!node || node === root) return null;
+    if (node.previousSibling) {
+      node = node.previousSibling;
+      while (node.lastChild) node = node.lastChild;
+      return node;
+    }
+    return node.parentNode;
+  }
+
+  class NodeIterator {
+    constructor(root, whatToShow, filter) {
+      this.root = root;
+      this.whatToShow = whatToShow >>> 0;
+      this.filter = filter || null;
+      this.referenceNode = root;
+      this.pointerBeforeReferenceNode = true;
+      traversalState(nodeDocument(root)).iterators.add(this);
+    }
+
+    nextNode() {
+      let candidate = this.pointerBeforeReferenceNode
+        ? this.referenceNode : nextInTree(this.referenceNode, this.root);
+      while (candidate) {
+        this.referenceNode = candidate;
+        this.pointerBeforeReferenceNode = false;
+        if (filterNode(candidate, this.whatToShow, this.filter) === NodeFilter.FILTER_ACCEPT) return candidate;
+        candidate = nextInTree(candidate, this.root);
+      }
+      return null;
+    }
+
+    previousNode() {
+      let candidate = this.pointerBeforeReferenceNode
+        ? previousInTree(this.referenceNode, this.root) : this.referenceNode;
+      while (candidate) {
+        this.referenceNode = candidate;
+        this.pointerBeforeReferenceNode = true;
+        if (filterNode(candidate, this.whatToShow, this.filter) === NodeFilter.FILTER_ACCEPT) return candidate;
+        candidate = previousInTree(candidate, this.root);
+      }
+      return null;
+    }
+
+    detach() {}
+
+    __preRemove(removed) {
+      if (!isInclusiveDescendant(this.referenceNode, removed) || isInclusiveDescendant(this.root, removed)) return;
+      if (this.pointerBeforeReferenceNode) {
+        let next = removed.nextSibling;
+        let parent = removed.parentNode;
+        while (!next && parent && parent !== this.root) {
+          next = parent.nextSibling;
+          parent = parent.parentNode;
+        }
+        if (next) {
+          this.referenceNode = next;
+          return;
+        }
+        this.pointerBeforeReferenceNode = false;
+      }
+      let previous = removed.previousSibling;
+      if (!previous) previous = removed.parentNode;
+      else while (previous.lastChild) previous = previous.lastChild;
+      if (previous) this.referenceNode = previous;
+    }
+  }
+
+  class TreeWalker {
+    constructor(root, whatToShow, filter) {
+      this.root = root;
+      this.whatToShow = whatToShow >>> 0;
+      this.filter = filter || null;
+      this.currentNode = root;
+    }
+    __accept(node) { return filterNode(node, this.whatToShow, this.filter); }
+    parentNode() {
+      let n = this.currentNode;
+      while (n && n !== this.root) {
+        n = n.parentNode;
+        if (this.__accept(n) === NodeFilter.FILTER_ACCEPT) return (this.currentNode = n);
+      }
+      return null;
+    }
+    firstChild() { return this.__child(false); }
+    lastChild() { return this.__child(true); }
+    __child(reverse) {
+      let n = reverse ? this.currentNode.lastChild : this.currentNode.firstChild;
+      while (n) {
+        const result = this.__accept(n);
+        if (result === NodeFilter.FILTER_ACCEPT) return (this.currentNode = n);
+        if (result === NodeFilter.FILTER_SKIP) {
+          const child = reverse ? n.lastChild : n.firstChild;
+          if (child) { n = child; continue; }
+        }
+        while (n && n !== this.currentNode) {
+          const sibling = reverse ? n.previousSibling : n.nextSibling;
+          if (sibling) { n = sibling; break; }
+          n = n.parentNode;
+        }
+        if (n === this.currentNode) return null;
+      }
+      return null;
+    }
+    nextSibling() { return this.__sibling(false); }
+    previousSibling() { return this.__sibling(true); }
+    __sibling(reverse) {
+      let n = this.currentNode;
+      if (n === this.root) return null;
+      while (n && n !== this.root) {
+        let sibling = reverse ? n.previousSibling : n.nextSibling;
+        while (sibling) {
+          n = sibling;
+          const result = this.__accept(n);
+          if (result === NodeFilter.FILTER_ACCEPT) return (this.currentNode = n);
+          if (result === NodeFilter.FILTER_SKIP) {
+            const child = reverse ? n.lastChild : n.firstChild;
+            if (child) { sibling = child; continue; }
+          }
+          sibling = reverse ? n.previousSibling : n.nextSibling;
+        }
+        n = n.parentNode;
+        if (n && this.__accept(n) === NodeFilter.FILTER_ACCEPT) return null;
+      }
+      return null;
+    }
+    nextNode() {
+      let n = this.currentNode;
+      let descend = true;
+      while (n) {
+        if (descend) {
+          const result = n === this.currentNode ? NodeFilter.FILTER_SKIP : this.__accept(n);
+          if (n !== this.currentNode && result === NodeFilter.FILTER_ACCEPT) return (this.currentNode = n);
+          if (result !== NodeFilter.FILTER_REJECT && n.firstChild) { n = n.firstChild; descend = true; continue; }
+        }
+        if (n === this.root) return null;
+        if (n.nextSibling) { n = n.nextSibling; descend = true; continue; }
+        n = n.parentNode; descend = false;
+      }
+      return null;
+    }
+    previousNode() {
+      let n = this.currentNode;
+      while (n && n !== this.root) {
+        if (n.previousSibling) {
+          n = n.previousSibling;
+          while (true) {
+            const result = this.__accept(n);
+            if (result !== NodeFilter.FILTER_REJECT && n.lastChild) { n = n.lastChild; continue; }
+            if (result === NodeFilter.FILTER_ACCEPT) return (this.currentNode = n);
+            break;
+          }
+        } else {
+          n = n.parentNode;
+          if (n && this.__accept(n) === NodeFilter.FILTER_ACCEPT) return (this.currentNode = n);
+        }
+      }
+      return null;
+    }
+  }
+
   class Document extends Node {
     // Stamps a freshly created node with this document as its owner so
     // `node.ownerDocument` resolves to this document even while the node is
@@ -1159,6 +1395,14 @@
 
     createComment(data) {
       return this.__own(wrapNode(__omoikane_create_comment(String(data ?? ""))));
+    }
+
+    createNodeIterator(root, whatToShow = NodeFilter.SHOW_ALL, filter = null) {
+      return new NodeIterator(root, whatToShow, filter);
+    }
+
+    createTreeWalker(root, whatToShow = NodeFilter.SHOW_ALL, filter = null) {
+      return new TreeWalker(root, whatToShow, filter);
     }
 
     createEvent(type) {
@@ -1637,6 +1881,9 @@
   globalThis.Document = Document;
   globalThis.DocumentFragment = DocumentFragment;
   globalThis.DOMException = DOMException;
+  globalThis.NodeFilter = NodeFilter;
+  globalThis.NodeIterator = NodeIterator;
+  globalThis.TreeWalker = TreeWalker;
   globalThis.HTMLTableElement = HTMLTableElement;
   globalThis.HTMLFormElement = HTMLFormElement;
   globalThis.HTMLInputElement = HTMLInputElement;
