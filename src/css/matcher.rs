@@ -273,6 +273,7 @@ fn matches_pseudo_class(node: &NodeHandle, name: &str, pseudo: Option<PseudoElem
             "nth-last-of-type" => type_position(node).is_some_and(|(index, total)| {
                 parse_an_plus_b(argument).is_some_and(|formula| formula.matches(total - index + 1))
             }),
+            "lang" => matches_language(node, argument),
             _ => false,
         };
     }
@@ -301,6 +302,25 @@ fn matches_pseudo_class(node: &NodeHandle, name: &str, pseudo: Option<PseudoElem
         }),
         _ => false,
     }
+}
+
+fn matches_language(node: &NodeHandle, range: &str) -> bool {
+    let range = range.trim().trim_matches(['\'', '"']);
+    if range.is_empty() {
+        return false;
+    }
+    let mut current = Some(node.clone());
+    while let Some(element) = current {
+        if let Some(language) = get_attribute(&element, "lang") {
+            return language.eq_ignore_ascii_case(range)
+                || language
+                    .get(..range.len())
+                    .is_some_and(|prefix| prefix.eq_ignore_ascii_case(range))
+                    && language.as_bytes().get(range.len()) == Some(&b'-');
+        }
+        current = element.parent_node();
+    }
+    false
 }
 
 fn functional_pseudo(name: &str) -> Option<(&str, &str)> {
@@ -647,6 +667,25 @@ mod tests {
         let unique = NodeHandle::element("em");
         parent.append_child(unique.clone());
         assert!(matches_selector(&unique, &selector(":only-of-type {}")));
+    }
+
+    #[test]
+    fn lang_matches_inherited_exact_and_dash_prefixed_languages() {
+        let outer = NodeHandle::element("section");
+        let inherited = NodeHandle::element("p");
+        let overridden = NodeHandle::element("span");
+        let nested = NodeHandle::element("em");
+        outer.set_attribute("lang", "EN-gb");
+        overridden.set_attribute("lang", "english");
+        outer.append_child(inherited.clone());
+        outer.append_child(overridden.clone());
+        overridden.append_child(nested.clone());
+
+        assert!(matches_selector(&outer, &selector(":lang(en) {}")));
+        assert!(matches_selector(&inherited, &selector(":lang(EN) {}")));
+        assert!(matches_selector(&inherited, &selector(":lang(en-gb) {}")));
+        assert!(!matches_selector(&overridden, &selector(":lang(en) {}")));
+        assert!(!matches_selector(&nested, &selector(":lang(en) {}")));
     }
 
     #[test]
