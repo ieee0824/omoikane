@@ -281,9 +281,11 @@ impl HostState {
         // The `src` changed (or this is the first load). Drop any previously
         // loaded sub-document tree from the node registry before loading the
         // new one, so stale nodes are released and their ids stop resolving
-        // instead of leaking across reloads. Its per-document style cache entry
-        // is dropped too, so the reloaded document does not inherit the old
-        // document's resolver (and the cache does not leak entries per reload).
+        // instead of leaking across reloads. The top-level sub-document's style
+        // cache entry is dropped too, so the reloaded document does not inherit
+        // the old document's resolver. Cleanup is not recursive: iframes nested
+        // inside the discarded sub-document keep their `iframe_documents` /
+        // `document_styles` entries (tracked in issue 049).
         if let Some(previous) = self.iframe_documents.remove(&iframe_id) {
             self.document_styles.remove(&previous.document.identity());
             self.unregister_tree(&previous.document);
