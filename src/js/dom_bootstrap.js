@@ -337,6 +337,113 @@
     }
   }
 
+  // Boa 0.21 exposes WeakMap/WeakRef (but not FinalizationRegistry), so the
+  // traversal registry must not itself keep Documents, NodeIterators or Ranges
+  // alive. Dead weak references are swept on registration, mutation and
+  // detach. The bounded strong-reference fallback is only for JS engines that
+  // lack WeakRef; bounding it trades updates to very old traversal objects for
+  // avoiding the permanent, unbounded leak that the old Map<id, Set> caused.
+  const hasWeakTraversalRegistry = typeof WeakMap === "function" && typeof WeakRef === "function";
+  const traversalByDocument = hasWeakTraversalRegistry ? new WeakMap() : new Map();
+  const MAX_STRONG_TRAVERSAL_ENTRIES = 1024;
+  const TRAVERSAL_SWEEP_INTERVAL = 64;
+  function traversalDocumentKey(doc) {
+    return hasWeakTraversalRegistry ? doc : doc.__id;
+  }
+  function traversalState(doc) {
+    const key = traversalDocumentKey(doc);
+    let state = traversalByDocument.get(key);
+    if (!state) {
+      state = { iterators: [], ranges: [] };
+      traversalByDocument.set(key, state);
+    }
+    return state;
+  }
+
+  function traversalEntries(entries) {
+    if (!hasWeakTraversalRegistry) return entries.slice();
+    const live = [];
+    for (let i = entries.length - 1; i >= 0; i--) {
+      const ref = entries[i];
+      const value = ref.deref();
+      if (value) live.push(value);
+      else entries.splice(i, 1);
+    }
+    return live;
+  }
+
+  function registerTraversal(doc, kind, value) {
+    const entries = traversalState(doc)[kind];
+    // WeakRef targets stay alive through the current ECMAScript job. Sweeping
+    // every insertion would therefore be quadratic in createRange-heavy code;
+    // periodic registration sweeps plus every mutation/detach keep it bounded
+    // without penalising a burst of live traversal objects.
+    if (entries.length % TRAVERSAL_SWEEP_INTERVAL === 0) traversalEntries(entries);
+    if (hasWeakTraversalRegistry) entries.push(new WeakRef(value));
+    else {
+      if (entries.length >= MAX_STRONG_TRAVERSAL_ENTRIES) entries.shift();
+      entries.push(value);
+    }
+  }
+
+  function unregisterTraversal(doc, kind, value) {
+    const entries = traversalState(doc)[kind];
+    if (!hasWeakTraversalRegistry) {
+      const index = entries.indexOf(value);
+      if (index !== -1) entries.splice(index, 1);
+    }
+    else {
+      for (let i = entries.length - 1; i >= 0; i--) {
+        const ref = entries[i];
+        const target = ref.deref();
+        if (!target || target === value) entries.splice(i, 1);
+      }
+    }
+  }
+
+  // Internal diagnostic used by regression tests; reading it also performs the
+  // same dead-reference sweep as normal registry operations.
+  globalThis.__omoikane_traversal_registry_counts = doc => {
+    const state = traversalByDocument.get(traversalDocumentKey(doc));
+    return state ? {
+      iterators: traversalEntries(state.iterators).length,
+      ranges: traversalEntries(state.ranges).length,
+    } : { iterators: 0, ranges: 0 };
+  };
+
+  function nodeDocument(node) {
+    if (!node) return globalThis.document;
+    return node.nodeType === 9 ? node : (node.ownerDocument || globalThis.document);
+  }
+
+  function nodeRoot(node) {
+    let root = node;
+    while (root && root.parentNode) root = root.parentNode;
+    return root;
+  }
+
+  function isInclusiveDescendant(node, ancestor) {
+    for (let n = node; n; n = n.parentNode) if (n === ancestor) return true;
+    return false;
+  }
+
+  function indexOfNode(node) {
+    const parent = node && node.parentNode;
+    return parent ? parent.childNodes.indexOf(node) : -1;
+  }
+
+  function preRemove(parent, removed) {
+    const doc = nodeDocument(parent);
+    const state = traversalByDocument.get(traversalDocumentKey(doc));
+    if (!state) return;
+    for (const iterator of traversalEntries(state.iterators)) iterator.__preRemove(removed);
+    for (const range of traversalEntries(state.ranges)) range.__preRemove(parent, removed);
+  }
+
+  function notifyImplicitRemoval(node) {
+    if (node && node.parentNode) preRemove(node.parentNode, node);
+  }
+
   class Node {
     constructor(id) {
       this.__id = id;
@@ -364,11 +471,13 @@
       if (child && child.nodeType === 11) {
         const children = child.childNodes.slice();
         for (const c of children) {
+          notifyImplicitRemoval(c);
           __omoikane_append_child(this.__id, c.__id);
         }
         return child;
       }
       this.__ensureNotAncestor(child);
+      notifyImplicitRemoval(child);
       __omoikane_append_child(this.__id, child.__id);
       return child;
     }
@@ -591,6 +700,10 @@
 
     set textContent(value) {
       const text = value == null ? "" : String(value);
+      // Native replaces all children at once. Notify from the end so boundary
+      // offsets for later siblings are subsequently decremented by removals of
+      // their preceding siblings, matching sequential pre-remove semantics.
+      for (const child of this.childNodes.slice().reverse()) preRemove(this, child);
       __omoikane_set_text_content(this.__id, text);
     }
 
@@ -600,6 +713,7 @@
 
     set innerHTML(value) {
       const html = value == null ? "" : String(value);
+      for (const child of this.childNodes.slice().reverse()) preRemove(this, child);
       __omoikane_set_inner_html(this.__id, html);
     }
 
@@ -631,6 +745,7 @@
     }
 
     removeChild(child) {
+      preRemove(this, child);
       __omoikane_remove_child(this.__id, child.__id);
       return child;
     }
@@ -639,6 +754,12 @@
       if (newNode && newNode.nodeType !== 11) {
         this.__ensureNotAncestor(newNode);
       }
+      if (newNode && newNode.nodeType === 11) {
+        const children = newNode.childNodes.slice();
+        for (const child of children) this.insertBefore(child, refNode);
+        return newNode;
+      }
+      notifyImplicitRemoval(newNode);
       __omoikane_insert_before(this.__id, newNode.__id, refNode ? refNode.__id : null);
       return newNode;
     }
@@ -1043,7 +1164,8 @@
   // `HTMLObjectElement.data` reflects the `data` content attribute instead.
   class CharacterData extends Node {
     get data() {
-      return this.textContent;
+      const value = this.textContent;
+      return value == null ? "" : String(value);
     }
 
     set data(value) {
@@ -1055,8 +1177,472 @@
     }
   }
 
-  class Text extends CharacterData {}
+  class Text extends CharacterData {
+    splitText(offset) {
+      offset = Number(offset) >>> 0;
+      if (offset > this.length) throw new DOMException("Offset is outside the data.", "IndexSizeError");
+      const oldData = this.data;
+      const newNode = nodeDocument(this).createTextNode(oldData.slice(offset));
+      const parent = this.parentNode;
+      const index = indexOfNode(this);
+      this.data = oldData.slice(0, offset);
+      const state = traversalByDocument.get(traversalDocumentKey(nodeDocument(this)));
+      if (state) {
+        for (const range of traversalEntries(state.ranges)) range.__splitText(this, newNode, offset, parent, index);
+      }
+      if (parent) parent.insertBefore(newNode, this.nextSibling);
+      return newNode;
+    }
+  }
   class Comment extends CharacterData {}
+
+  const NodeFilter = {
+    FILTER_ACCEPT: 1, FILTER_REJECT: 2, FILTER_SKIP: 3,
+    SHOW_ALL: 0xffffffff, SHOW_ELEMENT: 0x1, SHOW_ATTRIBUTE: 0x2,
+    SHOW_TEXT: 0x4, SHOW_CDATA_SECTION: 0x8,
+    SHOW_ENTITY_REFERENCE: 0x10, SHOW_ENTITY: 0x20,
+    SHOW_PROCESSING_INSTRUCTION: 0x40, SHOW_COMMENT: 0x80,
+    SHOW_DOCUMENT: 0x100, SHOW_DOCUMENT_TYPE: 0x200,
+    SHOW_DOCUMENT_FRAGMENT: 0x400, SHOW_NOTATION: 0x800,
+  };
+
+  function filterNode(node, whatToShow, filter) {
+    const bit = 1 << (node.nodeType - 1);
+    if ((whatToShow & bit) === 0) return NodeFilter.FILTER_SKIP;
+    if (filter == null) return NodeFilter.FILTER_ACCEPT;
+    const result = typeof filter === "function"
+      ? filter(node)
+      : filter.acceptNode(node);
+    return Number(result);
+  }
+
+  function nextInTree(node, root) {
+    if (node.firstChild) return node.firstChild;
+    while (node && node !== root) {
+      if (node.nextSibling) return node.nextSibling;
+      node = node.parentNode;
+    }
+    return null;
+  }
+
+  function previousInTree(node, root) {
+    if (!node || node === root) return null;
+    if (node.previousSibling) {
+      node = node.previousSibling;
+      while (node.lastChild) node = node.lastChild;
+      return node;
+    }
+    return node.parentNode;
+  }
+
+  class NodeIterator {
+    constructor(root, whatToShow, filter) {
+      this.root = root;
+      this.whatToShow = whatToShow >>> 0;
+      this.filter = filter || null;
+      this.referenceNode = root;
+      this.pointerBeforeReferenceNode = true;
+      registerTraversal(nodeDocument(root), "iterators", this);
+    }
+
+    nextNode() {
+      let candidate = this.pointerBeforeReferenceNode
+        ? this.referenceNode : nextInTree(this.referenceNode, this.root);
+      while (candidate) {
+        const fallbackNext = nextInTree(candidate, this.root);
+        const oldReference = this.referenceNode, oldPointer = this.pointerBeforeReferenceNode;
+        const result = filterNode(candidate, this.whatToShow, this.filter);
+        const adjusted = this.referenceNode !== oldReference || this.pointerBeforeReferenceNode !== oldPointer;
+        if (!adjusted) {
+          if (candidate !== this.root && !isInclusiveDescendant(candidate, this.root) && fallbackNext) {
+            this.referenceNode = fallbackNext; this.pointerBeforeReferenceNode = true;
+          } else { this.referenceNode = candidate; this.pointerBeforeReferenceNode = false; }
+        }
+        if (result === NodeFilter.FILTER_ACCEPT) return candidate;
+        candidate = adjusted
+          ? (this.pointerBeforeReferenceNode ? this.referenceNode : nextInTree(this.referenceNode, this.root))
+          : nextInTree(candidate, this.root);
+      }
+      return null;
+    }
+
+    previousNode() {
+      let candidate = this.pointerBeforeReferenceNode
+        ? previousInTree(this.referenceNode, this.root) : this.referenceNode;
+      while (candidate) {
+        const fallbackPrevious = previousInTree(candidate, this.root);
+        const oldReference = this.referenceNode, oldPointer = this.pointerBeforeReferenceNode;
+        const result = filterNode(candidate, this.whatToShow, this.filter);
+        const adjusted = this.referenceNode !== oldReference || this.pointerBeforeReferenceNode !== oldPointer;
+        if (!adjusted) {
+          if (candidate !== this.root && !isInclusiveDescendant(candidate, this.root) && fallbackPrevious) {
+            this.referenceNode = fallbackPrevious; this.pointerBeforeReferenceNode = false;
+          } else { this.referenceNode = candidate; this.pointerBeforeReferenceNode = true; }
+        }
+        if (result === NodeFilter.FILTER_ACCEPT) return candidate;
+        candidate = adjusted
+          ? (this.pointerBeforeReferenceNode ? previousInTree(this.referenceNode, this.root) : this.referenceNode)
+          : previousInTree(candidate, this.root);
+      }
+      return null;
+    }
+
+    detach() { unregisterTraversal(nodeDocument(this.root), "iterators", this); }
+
+    __preRemove(removed) {
+      if (!isInclusiveDescendant(this.referenceNode, removed) || isInclusiveDescendant(this.root, removed)) return;
+      if (this.pointerBeforeReferenceNode) {
+        let next = removed.nextSibling;
+        let parent = removed.parentNode;
+        while (!next && parent && parent !== this.root) {
+          next = parent.nextSibling;
+          parent = parent.parentNode;
+        }
+        if (next) {
+          this.referenceNode = next;
+          return;
+        }
+        this.pointerBeforeReferenceNode = false;
+      }
+      let previous = removed.previousSibling;
+      if (!previous) previous = removed.parentNode;
+      else while (previous.lastChild) previous = previous.lastChild;
+      if (previous) this.referenceNode = previous;
+    }
+  }
+
+  class TreeWalker {
+    constructor(root, whatToShow, filter) {
+      this.root = root;
+      this.whatToShow = whatToShow >>> 0;
+      this.filter = filter || null;
+      this.currentNode = root;
+    }
+    __accept(node) { return filterNode(node, this.whatToShow, this.filter); }
+    parentNode() {
+      let n = this.currentNode;
+      while (n && n !== this.root) {
+        n = n.parentNode;
+        if (this.__accept(n) === NodeFilter.FILTER_ACCEPT) return (this.currentNode = n);
+      }
+      return null;
+    }
+    firstChild() { return this.__child(false); }
+    lastChild() { return this.__child(true); }
+    __child(reverse) {
+      let n = reverse ? this.currentNode.lastChild : this.currentNode.firstChild;
+      while (n) {
+        const result = this.__accept(n);
+        if (result === NodeFilter.FILTER_ACCEPT) return (this.currentNode = n);
+        if (result === NodeFilter.FILTER_SKIP) {
+          const child = reverse ? n.lastChild : n.firstChild;
+          if (child) { n = child; continue; }
+        }
+        while (n && n !== this.currentNode) {
+          const sibling = reverse ? n.previousSibling : n.nextSibling;
+          if (sibling) { n = sibling; break; }
+          n = n.parentNode;
+        }
+        if (n === this.currentNode) return null;
+      }
+      return null;
+    }
+    nextSibling() { return this.__sibling(false); }
+    previousSibling() { return this.__sibling(true); }
+    __sibling(reverse) {
+      let n = this.currentNode;
+      if (n === this.root) return null;
+      while (n && n !== this.root) {
+        let sibling = reverse ? n.previousSibling : n.nextSibling;
+        while (sibling) {
+          n = sibling;
+          const result = this.__accept(n);
+          if (result === NodeFilter.FILTER_ACCEPT) return (this.currentNode = n);
+          if (result === NodeFilter.FILTER_SKIP) {
+            const child = reverse ? n.lastChild : n.firstChild;
+            if (child) { sibling = child; continue; }
+          }
+          sibling = reverse ? n.previousSibling : n.nextSibling;
+        }
+        n = n.parentNode;
+        if (reverse) return null;
+        if (n && this.__accept(n) === NodeFilter.FILTER_ACCEPT) return null;
+      }
+      return null;
+    }
+    nextNode() {
+      let n = this.currentNode;
+      let descend = true;
+      while (n) {
+        if (descend) {
+          const result = n === this.currentNode ? NodeFilter.FILTER_SKIP : this.__accept(n);
+          if (n !== this.currentNode && result === NodeFilter.FILTER_ACCEPT) return (this.currentNode = n);
+          if (result !== NodeFilter.FILTER_REJECT && n.firstChild) { n = n.firstChild; descend = true; continue; }
+        }
+        if (n === this.root) return null;
+        if (n.nextSibling) { n = n.nextSibling; descend = true; continue; }
+        n = n.parentNode; descend = false;
+      }
+      return null;
+    }
+    previousNode() {
+      let n = this.currentNode;
+      while (n && n !== this.root) {
+        if (n.previousSibling) {
+          n = n.previousSibling;
+          while (true) {
+            const result = this.__accept(n);
+            if (result !== NodeFilter.FILTER_REJECT && n.lastChild) { n = n.lastChild; continue; }
+            if (result === NodeFilter.FILTER_ACCEPT) return (this.currentNode = n);
+            break;
+          }
+        } else {
+          n = n.parentNode;
+          if (n && this.__accept(n) === NodeFilter.FILTER_ACCEPT) return (this.currentNode = n);
+        }
+      }
+      return null;
+    }
+  }
+
+  function nodeLength(node) {
+    return node.nodeType === 3 || node.nodeType === 8 ? node.length : node.childNodes.length;
+  }
+
+  function boundaryCompare(aNode, aOffset, bNode, bOffset) {
+    if (aNode === bNode) return aOffset < bOffset ? -1 : (aOffset > bOffset ? 1 : 0);
+    if (isInclusiveDescendant(bNode, aNode)) {
+      let child = bNode;
+      while (child.parentNode !== aNode) child = child.parentNode;
+      return aOffset <= indexOfNode(child) ? -1 : 1;
+    }
+    if (isInclusiveDescendant(aNode, bNode)) {
+      let child = aNode;
+      while (child.parentNode !== bNode) child = child.parentNode;
+      return indexOfNode(child) < bOffset ? -1 : 1;
+    }
+    const aPath = [], bPath = [];
+    for (let n = aNode; n; n = n.parentNode) aPath.unshift(n);
+    for (let n = bNode; n; n = n.parentNode) bPath.unshift(n);
+    let i = 0;
+    while (i < aPath.length && aPath[i] === bPath[i]) i++;
+    if (i === 0) return 0;
+    return indexOfNode(aPath[i]) < indexOfNode(bPath[i]) ? -1 : 1;
+  }
+
+  function commonAncestor(a, b) {
+    const ancestors = new Set();
+    for (let n = a; n; n = n.parentNode) ancestors.add(n);
+    for (let n = b; n; n = n.parentNode) if (ancestors.has(n)) return n;
+    return null;
+  }
+
+  class Range {
+    constructor(doc) {
+      this.__doc = doc;
+      this.__startContainer = doc; this.__startOffset = 0;
+      this.__endContainer = doc; this.__endOffset = 0;
+      registerTraversal(doc, "ranges", this);
+    }
+    get startContainer() { return this.__startContainer; }
+    get startOffset() { return this.__startOffset; }
+    get endContainer() { return this.__endContainer; }
+    get endOffset() { return this.__endOffset; }
+    get collapsed() { return this.__startContainer === this.__endContainer && this.__startOffset === this.__endOffset; }
+    get commonAncestorContainer() { return commonAncestor(this.__startContainer, this.__endContainer); }
+    __validate(node, offset) {
+      if (!node || node.nodeType === 10) throw new DOMException("Invalid boundary node.", "InvalidNodeTypeError");
+      offset = Number(offset) >>> 0;
+      if (offset > nodeLength(node)) throw new DOMException("Offset is outside the node.", "IndexSizeError");
+      return offset;
+    }
+    setStart(node, offset) {
+      offset = this.__validate(node, offset);
+      const doc = nodeDocument(node);
+      if (doc !== this.__doc) {
+        unregisterTraversal(this.__doc, "ranges", this);
+        this.__doc = doc;
+        registerTraversal(doc, "ranges", this);
+      }
+      // Living DOM reroots (collapses) a range when the new point and the
+      // opposite point have different roots; it does not throw the DOM2
+      // WrongDocumentError. Updating __doc above keeps mutation tracking on the
+      // same Document as both newly collapsed boundary points.
+      if (nodeRoot(node) !== nodeRoot(this.__endContainer) ||
+          boundaryCompare(node, offset, this.__endContainer, this.__endOffset) > 0) {
+        this.__endContainer = node; this.__endOffset = offset;
+      }
+      this.__startContainer = node; this.__startOffset = offset;
+    }
+    setEnd(node, offset) {
+      offset = this.__validate(node, offset);
+      const doc = nodeDocument(node);
+      if (doc !== this.__doc) {
+        unregisterTraversal(this.__doc, "ranges", this);
+        this.__doc = doc;
+        registerTraversal(doc, "ranges", this);
+      }
+      if (nodeRoot(node) !== nodeRoot(this.__startContainer) ||
+          boundaryCompare(node, offset, this.__startContainer, this.__startOffset) < 0) {
+        this.__startContainer = node; this.__startOffset = offset;
+      }
+      this.__endContainer = node; this.__endOffset = offset;
+    }
+    __beforeAfter(node, delta, start) {
+      if (!node || !node.parentNode) throw new DOMException("Node has no parent.", "InvalidNodeTypeError");
+      const parent = node.parentNode, offset = indexOfNode(node) + delta;
+      start ? this.setStart(parent, offset) : this.setEnd(parent, offset);
+    }
+    setStartBefore(node) { this.__beforeAfter(node, 0, true); }
+    setStartAfter(node) { this.__beforeAfter(node, 1, true); }
+    setEndBefore(node) { this.__beforeAfter(node, 0, false); }
+    setEndAfter(node) { this.__beforeAfter(node, 1, false); }
+    selectNode(node) {
+      if (!node || !node.parentNode) throw new DOMException("Node has no parent.", "InvalidNodeTypeError");
+      const parent = node.parentNode, index = indexOfNode(node);
+      this.__startContainer = parent; this.__startOffset = index;
+      this.__endContainer = parent; this.__endOffset = index + 1;
+    }
+    selectNodeContents(node) {
+      this.__validate(node, 0);
+      this.__startContainer = node; this.__startOffset = 0;
+      this.__endContainer = node; this.__endOffset = nodeLength(node);
+    }
+    collapse(toStart = false) {
+      if (toStart) { this.__endContainer = this.__startContainer; this.__endOffset = this.__startOffset; }
+      else { this.__startContainer = this.__endContainer; this.__startOffset = this.__endOffset; }
+    }
+    cloneRange() {
+      const r = new Range(this.__doc);
+      r.__startContainer=this.__startContainer; r.__startOffset=this.__startOffset;
+      r.__endContainer=this.__endContainer; r.__endOffset=this.__endOffset;
+      return r;
+    }
+    compareBoundaryPoints(how, source) {
+      if (how === Range.START_TO_START) return boundaryCompare(this.__startContainer,this.__startOffset,source.__startContainer,source.__startOffset);
+      if (how === Range.START_TO_END) return boundaryCompare(this.__endContainer,this.__endOffset,source.__startContainer,source.__startOffset);
+      if (how === Range.END_TO_END) return boundaryCompare(this.__endContainer,this.__endOffset,source.__endContainer,source.__endOffset);
+      if (how === Range.END_TO_START) return boundaryCompare(this.__startContainer,this.__startOffset,source.__endContainer,source.__endOffset);
+      throw new DOMException("Invalid comparison mode.", "NotSupportedError");
+    }
+    __nodeRelation(node) {
+      const parent = node.parentNode;
+      if (!parent) return 0;
+      const i = indexOfNode(node);
+      const startsBeforeEnd = boundaryCompare(parent,i,this.__endContainer,this.__endOffset) < 0;
+      const endsAfterStart = boundaryCompare(parent,i+1,this.__startContainer,this.__startOffset) > 0;
+      if (!startsBeforeEnd || !endsAfterStart) return 0;
+      const full = boundaryCompare(this.__startContainer,this.__startOffset,parent,i) <= 0 &&
+        boundaryCompare(parent,i+1,this.__endContainer,this.__endOffset) <= 0;
+      return full ? 2 : 1;
+    }
+    __characterSlice(node) {
+      let from = 0, to = node.length;
+      if (node === this.__startContainer) from = this.__startOffset;
+      if (node === this.__endContainer) to = this.__endOffset;
+      return [from, to];
+    }
+    __copyNode(node, extract) {
+      if (node.nodeType === 3 || node.nodeType === 8) {
+        const [from,to] = this.__characterSlice(node);
+        const copy = node.nodeType === 3 ? this.__doc.createTextNode(node.data.slice(from,to)) : this.__doc.createComment(node.data.slice(from,to));
+        if (extract) node.data = node.data.slice(0,from) + node.data.slice(to);
+        return copy;
+      }
+      const relation = this.__nodeRelation(node);
+      if (relation === 2) {
+        if (extract) return node;
+        return node.cloneNode(true);
+      }
+      const copy = node.cloneNode(false);
+      for (const child of node.childNodes.slice()) {
+        const rel = this.__nodeRelation(child);
+        if (rel) copy.appendChild(rel === 2 && extract ? child : this.__copyNode(child, extract));
+      }
+      return copy;
+    }
+    __contents(extract) {
+      const fragment = this.__doc.createDocumentFragment();
+      if (this.collapsed) return fragment;
+      if (this.__startContainer === this.__endContainer && (this.__startContainer.nodeType === 3 || this.__startContainer.nodeType === 8)) {
+        fragment.appendChild(this.__copyNode(this.__startContainer, extract));
+      } else {
+        const common = this.commonAncestorContainer;
+        if (common.nodeType === 3 || common.nodeType === 8) fragment.appendChild(this.__copyNode(common, extract));
+        else for (const child of common.childNodes.slice()) if (this.__nodeRelation(child)) fragment.appendChild(this.__copyNode(child, extract));
+      }
+      if (extract) this.collapse(true);
+      return fragment;
+    }
+    cloneContents() { return this.__contents(false); }
+    extractContents() { return this.__contents(true); }
+    deleteContents() { this.__contents(true); }
+    insertNode(node) {
+      let parent, reference;
+      if (this.__startContainer.nodeType === 3) {
+        reference = this.__startContainer.splitText(this.__startOffset);
+        parent = reference.parentNode;
+      } else {
+        parent = this.__startContainer;
+        reference = parent.childNodes[this.__startOffset] || null;
+      }
+      if (!parent) throw new DOMException("Cannot insert at this boundary.", "HierarchyRequestError");
+      if (parent.nodeType === 9 && node.nodeType === 1 && parent.documentElement) throw new DOMException("Document already has an element.", "HierarchyRequestError");
+      const count = node.nodeType === 11 ? node.childNodes.length : 1;
+      parent.insertBefore(node, reference);
+      if (this.collapsed) { this.__endContainer = parent; this.__endOffset = indexOfNode(reference) < 0 ? parent.childNodes.length : indexOfNode(reference); }
+      else if (this.__endContainer === parent && this.__endOffset === this.__startOffset) this.__endOffset += count;
+    }
+    surroundContents(newParent) {
+      if ([9,10,11].includes(newParent.nodeType)) throw new DOMException("Invalid wrapper.", "InvalidNodeTypeError");
+      if (this.__startContainer !== this.__endContainer &&
+          ((this.__startContainer.nodeType === 3 || this.__startContainer.nodeType === 8) ||
+           (this.__endContainer.nodeType === 3 || this.__endContainer.nodeType === 8))) {
+        throw new DOMException("Range partially contains a non-Text node.", "InvalidStateError");
+      }
+      const fragment = this.extractContents();
+      this.insertNode(newParent);
+      newParent.textContent = "";
+      newParent.appendChild(fragment);
+      this.selectNode(newParent);
+    }
+    toString() {
+      if (this.collapsed) return "";
+      let result = "";
+      const root = this.commonAncestorContainer;
+      const visit = node => {
+        if (node.nodeType === 3) {
+          let from=0,to=node.length;
+          if (node===this.__startContainer) from=this.__startOffset;
+          if (node===this.__endContainer) to=this.__endOffset;
+          if ((node===this.__startContainer || node===this.__endContainer || this.__nodeRelation(node))) result += node.data.slice(from,to);
+        } else for (const child of node.childNodes) visit(child);
+      };
+      visit(root); return result;
+    }
+    detach() { unregisterTraversal(this.__doc, "ranges", this); }
+    __preRemove(parent, removed) {
+      const index = indexOfNode(removed);
+      const adjust = (container, offset) => {
+        if (isInclusiveDescendant(container, removed)) return [parent,index];
+        if (container === parent && offset > index) return [container,offset-1];
+        return [container,offset];
+      };
+      [this.__startContainer,this.__startOffset]=adjust(this.__startContainer,this.__startOffset);
+      [this.__endContainer,this.__endOffset]=adjust(this.__endContainer,this.__endOffset);
+    }
+    __splitText(oldNode,newNode,offset,parent,index) {
+      const adjust=(container,value) => container===oldNode && value>offset ? [newNode,value-offset] : [container,value];
+      [this.__startContainer,this.__startOffset]=adjust(this.__startContainer,this.__startOffset);
+      [this.__endContainer,this.__endOffset]=adjust(this.__endContainer,this.__endOffset);
+      if (parent) {
+        if (this.__startContainer===parent && this.__startOffset>index) this.__startOffset++;
+        if (this.__endContainer===parent && this.__endOffset>index) this.__endOffset++;
+      }
+    }
+  }
+  Range.START_TO_START=0; Range.START_TO_END=1; Range.END_TO_END=2; Range.END_TO_START=3;
+  Range.prototype.START_TO_START=0; Range.prototype.START_TO_END=1; Range.prototype.END_TO_END=2; Range.prototype.END_TO_START=3;
 
   class Document extends Node {
     // Stamps a freshly created node with this document as its owner so
@@ -1160,6 +1746,16 @@
     createComment(data) {
       return this.__own(wrapNode(__omoikane_create_comment(String(data ?? ""))));
     }
+
+    createNodeIterator(root, whatToShow = NodeFilter.SHOW_ALL, filter = null) {
+      return new NodeIterator(root, whatToShow, filter);
+    }
+
+    createTreeWalker(root, whatToShow = NodeFilter.SHOW_ALL, filter = null) {
+      return new TreeWalker(root, whatToShow, filter);
+    }
+
+    createRange() { return new Range(this); }
 
     createEvent(type) {
       const t = String(type);
@@ -1637,6 +2233,10 @@
   globalThis.Document = Document;
   globalThis.DocumentFragment = DocumentFragment;
   globalThis.DOMException = DOMException;
+  globalThis.NodeFilter = NodeFilter;
+  globalThis.NodeIterator = NodeIterator;
+  globalThis.TreeWalker = TreeWalker;
+  globalThis.Range = Range;
   globalThis.HTMLTableElement = HTMLTableElement;
   globalThis.HTMLFormElement = HTMLFormElement;
   globalThis.HTMLInputElement = HTMLInputElement;

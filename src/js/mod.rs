@@ -3029,6 +3029,117 @@ mod tests {
     }
 
     #[test]
+    fn traversal_registry_sweeps_unreachable_objects_after_repeated_create() {
+        let mut runtime = JsRuntime::with_document(sample_document()).unwrap();
+        runtime
+            .eval(
+                "for (let i = 0; i < 5000; i++) { \
+                    document.createRange(); \
+                    document.createNodeIterator(document); \
+                }",
+            )
+            .unwrap();
+
+        // WeakRef targets are deliberately kept alive until the end of their
+        // current ECMAScript job. Force a collection between evaluations, then
+        // read the diagnostic (which performs the same sweep as registration
+        // and DOM mutation).
+        runtime.context.clear_kept_objects();
+        boa_gc::force_collect();
+        let result = runtime
+            .eval(
+                r#"
+                const counts = __omoikane_traversal_registry_counts(document);
+                `${counts.ranges},${counts.iterators}`;
+                "#,
+            )
+            .unwrap()
+            .as_string()
+            .unwrap()
+            .to_std_string_escaped();
+
+        assert_eq!(result, "0,0", "unreachable traversal objects must be swept from the registry");
+    }
+
+    #[test]
+    fn bulk_content_replacement_adjusts_live_iterators_and_ranges() {
+        let mut runtime = JsRuntime::with_document(sample_document()).unwrap();
+        let result = runtime
+            .eval(
+                r#"
+                const host = document.getElementById('app');
+                host.innerHTML = '<p>old</p><span>tail</span>';
+                const oldText = host.lastChild.firstChild;
+                const range = document.createRange();
+                range.setStart(oldText, 1);
+                range.setEnd(oldText, 2);
+                const iterator = document.createNodeIterator(host);
+                for (let i = 0; i < 5; i++) iterator.nextNode();
+                host.textContent = 'new';
+                const textResult = [range.startContainer === host, range.startOffset,
+                    range.endContainer === host, range.endOffset,
+                    iterator.referenceNode === host, iterator.nextNode().data].join(',');
+
+                host.innerHTML = '<b>again</b><i>tail</i>';
+                const innerText = host.lastChild.firstChild;
+                range.setStart(innerText, 1);
+                range.setEnd(innerText, 3);
+                const iterator2 = document.createNodeIterator(host);
+                for (let i = 0; i < 5; i++) iterator2.nextNode();
+                host.innerHTML = '<u>replacement</u>';
+                const htmlResult = [range.startContainer === host, range.startOffset,
+                    range.endContainer === host, range.endOffset,
+                    iterator2.referenceNode === host,
+                    iterator2.nextNode() === host.firstChild].join(',');
+                textResult + '|' + htmlResult;
+                "#,
+            )
+            .unwrap()
+            .as_string()
+            .unwrap()
+            .to_std_string_escaped();
+
+        assert_eq!(result, "true,0,true,0,true,new|true,0,true,0,true,true");
+    }
+
+    #[test]
+    fn range_set_start_and_end_reroot_across_documents() {
+        let mut runtime = JsRuntime::with_document(sample_document()).unwrap();
+        let result = runtime
+            .eval(
+                r#"
+                const frame = document.createElement('iframe');
+                document.body.appendChild(frame);
+                const foreign = frame.contentDocument;
+                const root = foreign.createElement('root');
+                foreign.appendChild(root);
+                const text = foreign.createTextNode('foreign');
+                root.appendChild(text);
+                const range = document.createRange();
+                range.selectNodeContents(document.getElementById('app'));
+                range.setStart(text, 2);
+                const afterStart = [range.collapsed, range.startContainer === text,
+                    range.endContainer === text, range.commonAncestorContainer === text,
+                    range.toString()].join(',');
+
+                const homeText = document.createTextNode('home');
+                document.getElementById('app').appendChild(homeText);
+                range.setEnd(homeText, 3);
+                const afterEnd = [range.collapsed, range.startContainer === homeText,
+                    range.endContainer === homeText, range.commonAncestorContainer === homeText,
+                    range.toString()].join(',');
+                afterStart + '|' + afterEnd;
+                "#,
+            )
+            .unwrap()
+            .as_string()
+            .unwrap()
+            .to_std_string_escaped();
+
+        assert_eq!(result, "true,true,true,true,|true,true,true,true,");
+    }
+
+    #[test]
     fn supports_event_listeners_bubbling_and_capture() {
         let mut runtime = JsRuntime::with_document(sample_document()).unwrap();
         runtime
@@ -6056,6 +6167,114 @@ mod tests {
             Some("height: 100px"),
             "the written iframe must be mutable through the DOM API"
         );
+    }
+
+    // ── DOM Traversal / Range ───────────────────────────────────────────────
+
+    #[test]
+    fn node_iterator_honors_mask_filter_exceptions_and_live_removal() {
+        use crate::html::TreeBuilder;
+        let doc = TreeBuilder::parse("<html><body><div id='r'>a<i>b</i><b>c</b></div></body></html>").document();
+        let mut runtime = JsRuntime::with_document(doc).unwrap();
+        assert_eq!(eval_str(&mut runtime, r#"(()=>{
+          var r=document.getElementById('r'), seen=[];
+          var it=document.createNodeIterator(r, NodeFilter.SHOW_ELEMENT, function(n) {
+            if (n.tagName === 'I') return NodeFilter.FILTER_REJECT;
+            return NodeFilter.FILTER_ACCEPT;
+          });
+          var n; while(n=it.nextNode()) seen.push(n.tagName);
+          return seen.join(',')})()"#), "DIV,B");
+        assert_eq!(eval_str(&mut runtime, r#"(()=>{
+          var r=document.getElementById('r');
+          try { document.createNodeIterator(r, NodeFilter.SHOW_ALL, function(){throw 'filter-error'}).nextNode(); return 'miss' }
+          catch(e) { return String(e) }})()"#), "filter-error");
+        assert_eq!(eval_str(&mut runtime, r#"(()=>{
+          var x=document.createElement('div'); var a=document.createElement('a'); var b=document.createElement('b');
+          x.appendChild(a); x.appendChild(b); var live=document.createNodeIterator(x); live.nextNode(); live.nextNode();
+          x.removeChild(a); return live.nextNode().tagName})()"#), "B");
+    }
+
+    #[test]
+    fn tree_walker_distinguishes_reject_from_skip_and_stays_in_root() {
+        use crate::html::TreeBuilder;
+        let doc = TreeBuilder::parse("<html><body><div id='r'><section><i></i></section><b></b></div></body></html>").document();
+        let mut runtime = JsRuntime::with_document(doc).unwrap();
+        assert_eq!(eval_str(&mut runtime, r#"(()=>{
+          var r=document.getElementById('r');
+          var w=document.createTreeWalker(r, NodeFilter.SHOW_ELEMENT, function(n) {
+            return n.tagName==='SECTION' ? NodeFilter.FILTER_SKIP : NodeFilter.FILTER_ACCEPT;
+          }); var out=[],n; while(n=w.nextNode()) out.push(n.tagName); return out.join(',')})()"#), "I,B");
+        assert_eq!(eval_str(&mut runtime, r#"(()=>{
+          var r=document.getElementById('r'); var w=document.createTreeWalker(r, NodeFilter.SHOW_ELEMENT, function(n) {
+            return n.tagName==='SECTION' ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_ACCEPT;
+          }); var out=[],n; while(n=w.nextNode()) out.push(n.tagName); return out.join(',')})()"#), "B");
+    }
+
+    #[test]
+    fn range_boundaries_clone_string_and_legacy_exception_are_explicit() {
+        use crate::html::TreeBuilder;
+        let doc = TreeBuilder::parse("<html><body><p id='p'>Hello <em>World</em>!</p></body></html>").document();
+        let mut runtime = JsRuntime::with_document(doc).unwrap();
+        assert_eq!(eval_str(&mut runtime, r#"(()=>{var p=document.getElementById('p'),r=document.createRange();
+          r.selectNodeContents(p); var c=r.cloneContents();
+          return [r.toString(),c.nodeType,c.childNodes.length,r.collapsed,r.commonAncestorContainer===p].join('|')})()"#), "Hello World!|11|3|false|true");
+        assert_eq!(eval_str(&mut runtime, r#"(()=>{var p=document.getElementById('p'),r=document.createRange();
+          r.setStart(p.firstChild,2); r.setEnd(p.firstChild,5); return [r.toString(),r.cloneRange().toString()].join('|')})()"#), "llo|llo");
+        assert_eq!(eval_str(&mut runtime, r#"(()=>{var r=document.createRange();try{r.setEndBefore(document);return 'none'}catch(e){return e.name+'|'+e.code+'|'+e.INVALID_NODE_TYPE_ERR}})()"#), "InvalidNodeTypeError|24|24");
+    }
+
+    #[test]
+    fn range_extract_returns_fragment_with_partial_ancestor_clones() {
+        use crate::html::TreeBuilder;
+        let doc = TreeBuilder::parse("<html><body><h1>Hello <em>Wonderful</em> Kitty</h1><p>How are you?</p></body></html>").document();
+        let mut runtime = JsRuntime::with_document(doc).unwrap();
+        assert_eq!(eval_str(&mut runtime, r#"(()=>{var h=document.querySelector('h1'),em=document.querySelector('em'),p=document.querySelector('p');
+          var r=document.createRange();r.setStart(em.firstChild,6);r.setEnd(p,0);var f=r.extractContents();
+          return [f.nodeType,f.childNodes.length,f.firstChild.tagName,f.firstChild.firstChild.tagName,f.firstChild.firstChild.textContent,f.firstChild.lastChild.textContent,f.lastChild.tagName,p.childNodes.length].join('|')})()"#), "11|2|H1|EM|ful| Kitty|P|1");
+    }
+
+    #[test]
+    fn range_insert_splits_text_and_keeps_inserted_node_in_selection() {
+        use crate::html::TreeBuilder;
+        let doc = TreeBuilder::parse("<html><body><p id='p'>12345</p></body></html>").document();
+        let mut runtime = JsRuntime::with_document(doc).unwrap();
+        assert_eq!(eval_str(&mut runtime, r#"(()=>{var p=document.getElementById('p'),t1=p.firstChild,t2=document.createTextNode('ABCDE');p.appendChild(t2);
+          var r=document.createRange();r.setStart(t1,2);r.setEnd(t1,3);r.insertNode(t2);
+          return [p.childNodes.length,p.childNodes[0].data,p.childNodes[1].data,p.childNodes[2].data,r.toString()].join('|')})()"#), "3|12|ABCDE|345|ABCDE3");
+    }
+
+    #[test]
+    fn range_live_boundaries_follow_removed_subtree() {
+        use crate::html::TreeBuilder;
+        let doc = TreeBuilder::parse("<html><body><p id='p'>12345</p></body></html>").document();
+        let mut runtime = JsRuntime::with_document(doc).unwrap();
+        assert_eq!(eval_str(&mut runtime, r#"(()=>{var p=document.getElementById('p'),b=document.body,r=document.createRange();
+          r.setEnd(b,1);r.setStart(p.firstChild,2);b.removeChild(p);
+          return [r.collapsed,r.startContainer===b,r.startOffset,r.endContainer===b,r.endOffset].join('|')})()"#), "true|true|0|true|0");
+    }
+
+    #[test]
+    fn range_surround_reports_hierarchy_and_partial_character_data_errors() {
+        use crate::html::TreeBuilder;
+        let doc = TreeBuilder::parse("<html><body></body></html>").document();
+        let mut runtime = JsRuntime::with_document(doc).unwrap();
+        assert_eq!(eval_str(&mut runtime, r#"(()=>{var c=document.createComment('11111');document.appendChild(c);var r=document.createRange();r.selectNode(c);
+          try{r.surroundContents(document.createElement('a'));return 'none'}catch(e){document.removeChild(c);return e.name+'|'+e.code}})()"#), "HierarchyRequestError|3");
+        assert_eq!(eval_str(&mut runtime, r#"(()=>{var b=document.body,c1=document.createComment('111'),c2=document.createComment('222');b.appendChild(c1);b.appendChild(c2);
+          var r=document.createRange();r.setStart(c1,1);r.setEnd(c2,1);try{r.surroundContents(document.createElement('a'));return 'none'}catch(e){return e.name+'|'+e.code}})()"#), "InvalidStateError|11");
+    }
+
+    #[test]
+    fn acid3_traversal_filter_mutation_and_tree_regrafting_regressions() {
+        use crate::html::TreeBuilder;
+        let doc = TreeBuilder::parse("<html><head><title></title></head><body></body></html>").document();
+        let mut runtime = JsRuntime::with_document(doc).unwrap();
+        assert_eq!(eval_str(&mut runtime, r#"(()=>{var b=document.body;for(var k=0;k<5;k++){var s=document.createElement('section');s.title=k;b.appendChild(s)}
+          var count=0,it=document.createNodeIterator(b,0xffffffff,function(){if(count>3&&count<12)b.appendChild(b.firstChild);count++;return count%2===0?1:2});
+          var out=[],n;while(n=it.nextNode())out.push(n.title);return out.join(',')})()"#), "0,2,4,1,3,0,2");
+        assert_eq!(eval_str(&mut runtime, r#"(()=>{var b=document.body;b.textContent='';var p=document.createElement('p');b.appendChild(p);var w=document.createTreeWalker(b);
+          w.lastChild();w.previousNode();document.documentElement.removeChild(b);var a=w.lastChild()===p,z=w.nextNode()===null;
+          document.documentElement.appendChild(p);var title=w.previousNode();p.appendChild(b);return [a,z,title.tagName,w.nextNode()===p,w.nextNode()===b,w.previousNode()===null].join('|')})()"#), "true|true|TITLE|true|true|true");
     }
 
     // ── iframe / contentDocument (sub-browsing contexts) ────────────────────

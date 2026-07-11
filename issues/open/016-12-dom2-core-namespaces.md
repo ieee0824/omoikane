@@ -7,6 +7,10 @@ status: open
 
 # DOM2 Core / 名前空間 / DOMException
 
+## 016-11 からの引き継ぎ
+
+- Acid3 test 8 の Range 境界操作自体は 016-11 で実装・回帰確認済みだが、テスト文書を作る `document.implementation.createDocument(null, null, null)` が未実装のため実測では failure のまま。016-12 で `createDocument` を実装した際に test 8 を再検証する。
+
 ## 目的
 
 createElementNS、document.implementation、DOMException（`.code` + 定数）、名前検証を実装する。9 点。
