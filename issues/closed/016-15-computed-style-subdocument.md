@@ -2,7 +2,7 @@
 number: 016-15
 slug: computed-style-subdocument
 parent: 016
-status: open
+status: closed
 ---
 
 # getComputedStyle のサブ文書（iframe contentDocument）対応

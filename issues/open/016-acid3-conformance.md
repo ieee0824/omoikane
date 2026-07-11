@@ -105,5 +105,5 @@ Acid3 ギャップ分析（`tests/fixtures/acid3/GAP_ANALYSIS.md`）に基づく
 - [ ] [016-12 DOM2 Core / 名前空間 / DOMException](016-12-dom2-core-namespaces.md)
 - [ ] [016-13 HTMLTableElement / Form / Input / Select / Button API](016-13-table-form-apis.md)
 - [ ] [016-14 XML/XHTML・CSSOM・SVG DOM](016-14-xml-cssom-svgdom.md)
-- [ ] [016-15 getComputedStyle のサブ文書対応（selectorTest 解放の前提）](016-15-computed-style-subdocument.md)
+- [x] [016-15 getComputedStyle のサブ文書対応（selectorTest 解放の前提）](../closed/016-15-computed-style-subdocument.md)（PR #109, 58→63）
 - [ ] [016-16 iframe の load イベント発火](016-16-iframe-onload-event.md)
