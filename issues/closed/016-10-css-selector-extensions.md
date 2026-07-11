@@ -2,7 +2,7 @@
 number: 016-10
 slug: css-selector-extensions
 parent: 016
-status: open
+status: closed
 ---
 
 # querySelector の matcher.rs 接続とセレクタ拡充

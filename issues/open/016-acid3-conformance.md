@@ -115,7 +115,7 @@ Acid3 ギャップ分析（`tests/fixtures/acid3/GAP_ANALYSIS.md`）に基づく
 - [x] [016-7 document.write 実装](../closed/016-7-document-write.md)
 - [x] [016-8 getComputedStyle 実値化（044-2 と同根）](../closed/016-8-computed-style-exposure.md)
 - [x] [016-9 iframe / contentDocument サブブラウジングコンテキスト](../closed/016-9-iframe-content-document.md)
-- [ ] [016-10 querySelector matcher 接続 + セレクタ拡充](016-10-css-selector-extensions.md)
+- [x] [016-10 querySelector matcher 接続 + セレクタ拡充](../closed/016-10-css-selector-extensions.md)（PR #110, 63→70）
 - [ ] [016-11 NodeIterator / TreeWalker / Range](016-11-traversal-and-range.md)
 - [ ] [016-12 DOM2 Core / 名前空間 / DOMException](016-12-dom2-core-namespaces.md)
 - [ ] [016-13 HTMLTableElement / Form / Input / Select / Button API](016-13-table-form-apis.md)
