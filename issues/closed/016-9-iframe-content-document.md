@@ -2,7 +2,7 @@
 number: 016-9
 slug: iframe-content-document
 parent: 016
-status: open
+status: closed
 ---
 
 # iframe / contentDocument サブブラウジングコンテキスト

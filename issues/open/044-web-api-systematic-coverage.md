@@ -28,21 +28,23 @@ jQuery 等のエラーを個別に追うのではなく、よく使われる API
 - コンテンツ: `textContent`, `innerHTML`
 - メタ: `nodeType`, `nodeName`
 - ネットワーク: `fetch`（基本）
+- スタイル/レイアウト: `__omoikane_computed_style`（カスケード実値）, `__omoikane_layout_metrics`（offset*/client*/scroll*/getBoundingClientRect、forced reflow 付き）— 044-2/PR #105
 
 ### JS ポリフィル
 - Event system（capture/bubble/target phases）
 - `className`, `classList`, `style`（Proxy）, `tagName`
 - `getElementsByTagName`, `getElementsByClassName`
 - `IntersectionObserver`
-- `getComputedStyle`（空 Proxy stub）
+- `getComputedStyle`（カスケード実値を返す実装。044-2/PR #105 で空 Proxy stub を置換）
 - `window.addEventListener/removeEventListener`
 - `Element`, `HTMLElement`（Node class のエイリアス）
 
 ## 不足 API カテゴリ
 
-### Phase 1: レイアウトメトリクス（最優先）
+### Phase 1: レイアウトメトリクス（最優先）— ✅ 完了（2026-07-11、[044-2](../closed/044-2-layout-metrics-bindings.md) / PR #105）
 
 実サイトの JS がレイアウト情報を取得するために必須。
+下表すべて実装済み（forced reflow 付き）。残課題は 047（インライン style カスケード）と 048（メトリクスキャッシュ）で追跡。
 
 | API | 用途 |
 |-----|------|

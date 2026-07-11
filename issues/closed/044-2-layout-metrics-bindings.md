@@ -1,7 +1,7 @@
 ---
 number: 044-2
 slug: layout-metrics-bindings
-status: open
+status: closed
 parent: 044
 ---
 

@@ -2,7 +2,7 @@
 number: 016-8
 slug: computed-style-exposure
 parent: 016
-status: open
+status: closed
 ---
 
 # getComputedStyle の実値化（カスケード結果のJS露出）
