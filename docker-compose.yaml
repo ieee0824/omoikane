@@ -18,6 +18,9 @@ services:
       - cargo-git:/usr/local/cargo/git
       # Claude Code のログイン情報・設定を永続化する（CLAUDE_CONFIG_DIR）。
       - claude-config:/home/dev/.claude
+      # Codex CLI のログイン情報と本体パッケージ（~/.codex = CODEX_HOME）を永続化する。
+      # 更新はコンテナ内で codex update を実行する（README 参照）。
+      - codex-config:/home/dev/.codex
     # コンテナを起動したままにして docker compose exec で入れるようにする。
     command: sleep infinity
 
@@ -26,3 +29,4 @@ volumes:
   cargo-registry:
   cargo-git:
   claude-config:
+  codex-config:
