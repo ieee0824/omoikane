@@ -297,18 +297,67 @@ fn matches_nth_child(node: &NodeHandle, expression: &str) -> bool {
         return false;
     };
 
-    if expression.eq_ignore_ascii_case("odd") {
-        return index % 2 == 1;
+    parse_an_plus_b(expression).is_some_and(|formula| formula.matches(index))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct AnPlusB {
+    a: i64,
+    b: i64,
+}
+
+impl AnPlusB {
+    fn matches(self, position: usize) -> bool {
+        let Ok(position) = i64::try_from(position) else {
+            return false;
+        };
+        if position <= 0 {
+            return false;
+        }
+        if self.a == 0 {
+            return position == self.b;
+        }
+        let difference = position.checked_sub(self.b);
+        difference.is_some_and(|difference| difference % self.a == 0 && difference / self.a >= 0)
     }
-    if expression.eq_ignore_ascii_case("even") {
-        return index % 2 == 0;
+}
+
+fn parse_an_plus_b(expression: &str) -> Option<AnPlusB> {
+    let compact: String = expression
+        .chars()
+        .filter(|character| !character.is_ascii_whitespace())
+        .flat_map(char::to_lowercase)
+        .collect();
+    match compact.as_str() {
+        "odd" => return Some(AnPlusB { a: 2, b: 1 }),
+        "even" => return Some(AnPlusB { a: 2, b: 0 }),
+        _ => {}
     }
 
-    if let Ok(number) = expression.parse::<usize>() {
-        return index == number;
+    if let Ok(b) = compact.parse::<i64>() {
+        return Some(AnPlusB { a: 0, b });
     }
 
-    false
+    let n = compact.find('n')?;
+    if compact[n + 1..].contains('n') {
+        return None;
+    }
+    let coefficient = &compact[..n];
+    let a = match coefficient {
+        "" | "+" => 1,
+        "-" => -1,
+        value => value.parse::<i64>().ok()?,
+    };
+    let remainder = &compact[n + 1..];
+    let b = if remainder.is_empty() {
+        0
+    } else {
+        if !remainder.starts_with(['+', '-']) {
+            return None;
+        }
+        remainder.parse::<i64>().ok()?
+    };
+    Some(AnPlusB { a, b })
 }
 
 fn get_attribute(node: &NodeHandle, name: &str) -> Option<String> {
@@ -447,6 +496,36 @@ mod tests {
         assert!(matches_selector(&title, &selector(":nth-child(odd) {}")));
         assert!(matches_selector(&lead, &selector(":nth-child(even) {}")));
         assert!(!matches_selector(&lead, &selector(":first-child {}")));
+    }
+
+    #[test]
+    fn parses_and_evaluates_general_an_plus_b_expressions() {
+        let cases = [
+            ("odd", AnPlusB { a: 2, b: 1 }),
+            (" EVEN ", AnPlusB { a: 2, b: 0 }),
+            ("5", AnPlusB { a: 0, b: 5 }),
+            ("n", AnPlusB { a: 1, b: 0 }),
+            ("-n", AnPlusB { a: -1, b: 0 }),
+            ("n + 3", AnPlusB { a: 1, b: 3 }),
+            ("-n+3", AnPlusB { a: -1, b: 3 }),
+            ("3n-1", AnPlusB { a: 3, b: -1 }),
+            ("-5n+3", AnPlusB { a: -5, b: 3 }),
+            ("0n+3", AnPlusB { a: 0, b: 3 }),
+        ];
+        for (input, expected) in cases {
+            assert_eq!(parse_an_plus_b(input), Some(expected), "{input}");
+        }
+        for invalid in ["", "n+", "2n 3", "2nn+1", "--n", "infinite"] {
+            assert_eq!(parse_an_plus_b(invalid), None, "{invalid}");
+        }
+
+        assert!(parse_an_plus_b("-n+3").unwrap().matches(1));
+        assert!(parse_an_plus_b("-n+3").unwrap().matches(3));
+        assert!(!parse_an_plus_b("-n+3").unwrap().matches(4));
+        assert!(parse_an_plus_b("3n-1").unwrap().matches(2));
+        assert!(parse_an_plus_b("3n-1").unwrap().matches(5));
+        assert!(!parse_an_plus_b("3n-1").unwrap().matches(3));
+        assert!(parse_an_plus_b("0n+3").unwrap().matches(3));
     }
 
     #[test]
