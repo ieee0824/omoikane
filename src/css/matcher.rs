@@ -333,6 +333,16 @@ fn element_index_in_parent(node: &NodeHandle) -> Option<usize> {
 
 fn element_position(node: &NodeHandle) -> Option<(usize, usize)> {
     let parent = node.parent_node()?;
+    // Tree-structural pseudo-classes (`:first-child`, `:last-child`,
+    // `:nth-child`) are defined in terms of an element being a child of *some
+    // other element*. A root element whose parent is the `Document` node (or a
+    // `DocumentFragment`) has no element parent and therefore has no sibling
+    // position: it must never match `:first-child`/`:last-child`/`:nth-child`.
+    // Without this guard the document element would report position `1 of 1`
+    // and wrongly claim to be a `:first-child` (Acid3 test 35).
+    if parent.node_type() != NodeType::Element {
+        return None;
+    }
     let element_children: Vec<NodeHandle> = parent
         .child_nodes()
         .into_iter()
@@ -437,6 +447,30 @@ mod tests {
         assert!(matches_selector(&title, &selector(":nth-child(odd) {}")));
         assert!(matches_selector(&lead, &selector(":nth-child(even) {}")));
         assert!(!matches_selector(&lead, &selector(":first-child {}")));
+    }
+
+    #[test]
+    fn root_element_does_not_match_structural_child_pseudo_classes() {
+        // `html`'s parent is the `Document` node, not an element. Per the CSS
+        // Selectors spec these pseudo-classes only apply to a child of another
+        // *element*, so the root element must not match even though it is the
+        // sole child of the document. (Acid3 test 35 regression guard.)
+        let (_document, html, _body, _main, _lead, _title, _cta) = sample_tree();
+
+        assert!(
+            !matches_selector(&html, &selector(":first-child {}")),
+            "the root element has no element parent and must not be :first-child"
+        );
+        assert!(
+            !matches_selector(&html, &selector(":last-child {}")),
+            "the root element has no element parent and must not be :last-child"
+        );
+        assert!(
+            !matches_selector(&html, &selector(":nth-child(1) {}")),
+            "the root element has no sibling position and must not be :nth-child(1)"
+        );
+        // It is, however, still the :root element.
+        assert!(matches_selector(&html, &selector(":root {}")));
     }
 
     #[test]

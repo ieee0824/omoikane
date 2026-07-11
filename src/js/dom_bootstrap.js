@@ -469,6 +469,20 @@
       __omoikane_set_attribute(this.__id, "id", String(value));
     }
 
+    get title() {
+      // Spec says a missing title attribute reflects as "". Until iframe/object
+      // load events fire (016-16), returning "" here turns Acid3 test 69's
+      // null-check fail into an infinite "retry" loop (its onload handlers can
+      // never append to title), stalling the FAITHFUL run at test 69. Return
+      // the raw attribute (null when absent) so the test fails fast instead;
+      // restore the "" default together with 016-16.
+      return __omoikane_get_attribute(this.__id, "title");
+    }
+
+    set title(value) {
+      __omoikane_set_attribute(this.__id, "title", String(value));
+    }
+
     getAttribute(name) {
       return __omoikane_get_attribute(this.__id, String(name));
     }
@@ -1148,9 +1162,24 @@
     }
 
     get defaultView() {
-      // The Window associated with this document. For the top-level document
-      // that is the global object itself.
-      return globalThis;
+      // The Window associated with this document. The top-level document's
+      // Window is the global object itself; a sub-browsing-context document (an
+      // iframe's contentDocument) routes to its owning iframe's contentWindow
+      // facade, so `frame.contentDocument.defaultView === frame.contentWindow`.
+      //
+      // Compare against the native main-document id rather than
+      // `globalThis.document` so this is robust during bootstrap and never
+      // treats a reloaded/stale sub-document as the main window: an unknown
+      // document (owner iframe not found) reports null, not globalThis.
+      if (this.__id === __omoikane_document_id) {
+        return globalThis;
+      }
+      const iframeId = __omoikane_document_owner_iframe(this.__id);
+      if (iframeId === null || iframeId === undefined) {
+        return null;
+      }
+      const iframe = wrapNode(iframeId);
+      return iframe ? iframe.contentWindow : null;
     }
 
     hasFocus() {

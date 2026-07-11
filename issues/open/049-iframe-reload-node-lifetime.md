@@ -34,6 +34,17 @@ JS ラッパの挙動を、実ブラウザの「detached だがアクセス可�
   detached ノード相当のフォールバック値（nodeType 等はラッパ側キャッシュ）にする
 - または旧文書ツリーを世代管理し、上限付きで保持（LRU 的に解放）
 
+## 関連メモ（016-15 由来）
+
+- 016-15 で iframe reload 時に旧サブ文書の `iframe_documents` / `document_styles` エントリを掃除する
+  処理を入れたが、この cleanup は**非再帰**である。ネストした iframe を含む外側 iframe を reload すると、
+  内側 iframe のサブ文書に対応する `iframe_documents` / `document_styles` エントリが解放されずに残留する。
+- `document_styles` は文書ルートの identity でキーされるが、iframe 経路以外で生じた文書
+  （`cloneNode` 等で作られたスタンドアロン文書ツリー）の `document_styles` エントリを解放する経路が無く、
+  それらは解放されないまま残る。
+- いずれもメモリの単調増加要因だが、1 ページ処理で終了するヘッドレス用途では有界であり正しさには影響しない。
+  再帰的 cleanup / 世代管理を入れる際にまとめて解消する。
+
 ## 優先度
 
 低 — 実サイトで iframe src を動的に切り替えつつ旧文書参照を使い続けるケースは限定的。
