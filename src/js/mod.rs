@@ -7565,4 +7565,149 @@ mod tests {
             "a viewport change must invalidate the cached sub-document resolver"
         );
     }
+
+    /// Deterministic port of Acid3 bucket-3 `selectorTest` cases (tests
+    /// 33/35/36/41/42) that use selectors the matcher already supports. This
+    /// exercises the exact path Acid3 uses — append `* { z-index: 0; position:
+    /// absolute; }` plus `selector { z-index: N }` to a fresh iframe
+    /// sub-document, then read `doc.defaultView.getComputedStyle(node,'').zIndex`
+    /// — so it pins 016-15's contribution (document-scoped resolver +
+    /// sub-document `defaultView`). Selector *coverage* itself is issue 016-10,
+    /// so only already-supported selectors appear here.
+    #[test]
+    fn acid3_supported_selector_cases_resolve_in_iframe_document() {
+        let mut runtime = runtime_from_html(
+            r#"<html><body><iframe id="selectors"></iframe></body></html>"#,
+        );
+        // Harness mirroring Acid3's getTestDocument()/selectorTest(): a fresh
+        // sub-document with a `<style>` seeded with the universal baseline rule,
+        // an `addRule` that appends `sel { z-index: N }`, and a `zi` reader that
+        // goes through `defaultView.getComputedStyle`.
+        runtime
+            .eval(
+                r#"
+                function setupTestDoc() {
+                  var doc = document.getElementById('selectors').contentDocument;
+                  var de = doc.documentElement;
+                  while (de.firstChild) de.removeChild(de.firstChild);
+                  var head = doc.createElement('head'); de.appendChild(head);
+                  var body = doc.createElement('body'); de.appendChild(body);
+                  var style = doc.createElement('style');
+                  style.appendChild(doc.createTextNode('* { z-index: 0; position: absolute; }\n'));
+                  head.appendChild(style);
+                  globalThis.__doc = doc;
+                  globalThis.__style = style;
+                  globalThis.__n = 0;
+                  return doc;
+                }
+                function addRule(sel) {
+                  globalThis.__n += 1;
+                  __style.appendChild(__doc.createTextNode(sel + ' { z-index: ' + __n + '; }\n'));
+                  return __n;
+                }
+                function zi(node) { return __doc.defaultView.getComputedStyle(node, '').zIndex; }
+                "#,
+            )
+            .unwrap();
+
+        // test 33: class selector — matched element raises z-index, others keep
+        // the universal baseline of 0.
+        assert_eq!(
+            eval_str(
+                &mut runtime,
+                r#"(function(){
+                    var doc = setupTestDoc();
+                    var p = doc.createElement('p'); doc.body.appendChild(p);
+                    p.className = 'selectorPingTest';
+                    addRule('.selectorPingTest');
+                    return [zi(p), zi(doc.body)].join(',');
+                })()"#
+            ),
+            "1,0",
+            "class selector must match the target and no other element"
+        );
+
+        // test 33: attribute selector `[title=...]`.
+        assert_eq!(
+            eval_str(
+                &mut runtime,
+                r#"(function(){
+                    var doc = setupTestDoc();
+                    var p = doc.createElement('p'); doc.body.appendChild(p);
+                    p.setAttribute('title', 'selectorPingTest');
+                    addRule('[title=selectorPingTest]');
+                    return [zi(p), zi(doc.body)].join(',');
+                })()"#
+            ),
+            "1,0",
+            "[title=...] attribute selector must match the target only"
+        );
+
+        // test 35: :first-child.
+        assert_eq!(
+            eval_str(
+                &mut runtime,
+                r#"(function(){
+                    var doc = setupTestDoc();
+                    var first = addRule(':first-child');
+                    var p1 = doc.createElement('p'); doc.body.appendChild(p1);
+                    var p2 = doc.createElement('p'); doc.body.appendChild(p2);
+                    return [zi(p1), zi(p2)].join(',');
+                })()"#
+            ),
+            "1,0",
+            ":first-child must match only the first child"
+        );
+
+        // test 36: :last-child.
+        assert_eq!(
+            eval_str(
+                &mut runtime,
+                r#"(function(){
+                    var doc = setupTestDoc();
+                    var p1 = doc.createElement('p'); doc.body.appendChild(p1);
+                    var p2 = doc.createElement('p'); doc.body.appendChild(p2);
+                    addRule(':last-child');
+                    return [zi(p1), zi(p2)].join(',');
+                })()"#
+            ),
+            "0,1",
+            ":last-child must match only the last child"
+        );
+
+        // test 41: :not(:root) — the root element is excluded, all others match.
+        assert_eq!(
+            eval_str(
+                &mut runtime,
+                r#"(function(){
+                    var doc = setupTestDoc();
+                    var p = doc.createElement('p'); doc.body.appendChild(p);
+                    addRule(':not(:root)');
+                    return [zi(doc.documentElement), zi(doc.body), zi(p)].join(',');
+                })()"#
+            ),
+            "0,1,1",
+            ":not(:root) must exclude only the root element"
+        );
+
+        // test 42: descendant + child combinators in `#div1 > div div > div`.
+        assert_eq!(
+            eval_str(
+                &mut runtime,
+                r#"(function(){
+                    var doc = setupTestDoc();
+                    var d1 = doc.createElement('div'); d1.id = 'div1'; doc.body.appendChild(d1);
+                    var d2 = doc.createElement('div'); d1.appendChild(d2);
+                    var d3 = doc.createElement('div'); d2.appendChild(d3);
+                    var d4 = doc.createElement('div'); d3.appendChild(d4);
+                    var d5 = doc.createElement('div'); d4.appendChild(d5);
+                    var d6 = doc.createElement('div'); d5.appendChild(d6);
+                    addRule('#div1 > div div > div');
+                    return [zi(d1), zi(d2), zi(d3), zi(d4), zi(d5), zi(d6)].join(',');
+                })()"#
+            ),
+            "0,0,0,1,1,1",
+            "the combinator chain must match only the deepest three divs"
+        );
+    }
 }

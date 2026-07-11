@@ -57,6 +57,12 @@ Acid3 は DOM / CSS / HTML parser / scripting / networking まで含む複合テ
 | 016-4〜016-5 | 28/100 | load イベント + data: URI スクリプト |
 | 016-12/016-13 部分 + 016-6 | 43/100 | DOMException 基盤・名前検証・createElementNS・createEvent 補完・table/form/input/button/label/meta/select 反射・Boa annex-b |
 | 016-7 + 016-9 + 016-8/044-2（PR #103/#104/#105） | **58/100** | document.write/open/close・iframe/contentDocument サブブラウジングコンテキスト・getComputedStyle 実値化・レイアウトメトリクス（offset*/client*/scroll*/getBoundingClientRect）・forced reflow |
+| 016-15 実装 | **61/100** | getComputedStyle をノードの owner document 基準に解決（文書単位 StyleResolver キャッシュ）+ サブ文書 defaultView を contentWindow に接続。selectorTest bucket3 の test 36/41/42 が新規 PASS（FAITHFUL/DIRECT 両モード 61/100） |
+
+### 61/100 到達時（016-15 実装）に新規 PASS したテスト
+
+- test 36（:last-child）, 41（:root / :not(:root)）, 42（`+` `~` `>` ` ` の動的組み合わせ）: selectorTest が iframe contentDocument の `<style>` を `doc.defaultView.getComputedStyle` で解決できるようになり解放
+- test 33（クラス/属性セレクタ）と 35（:first-child）は**サブ文書解決自体は動作**するが、それぞれ `.title` IDL 反射の未対応（failure 7）と `:first-child` のルート要素判定（ルートが :first-child を主張する）で失敗が残る。いずれも 016-15 のスコープ外（016-10 セレクタ拡充 / IDL 反射側）
 
 ### 43/100 到達時（016-12/016-13 部分 + 016-6）に新規 PASS したテスト
 
@@ -70,9 +76,9 @@ Acid3 は DOM / CSS / HTML parser / scripting / networking まで含む複合テ
 - ~~**016-9 iframe / contentDocument**~~ → PR #104 で実装（52→56）。
 - ~~**016-8 getComputedStyle 実値化 + 044-2**~~ → PR #105 で実装・統合（統合実測 58）。
 
-### 残りの主要ブロッカー（58/100 時点の失敗傾向）
+### 残りの主要ブロッカー（61/100 時点の失敗傾向）
 
-- **016-15 getComputedStyle のサブ文書対応**: selectorTest（bucket3: test 33-43, 46, 47）は resolver がメイン文書固定のため未解放。**次の最大得点源**（016-10 のセレクタ拡充とセット）。
+- ~~**016-15 getComputedStyle のサブ文書対応**~~ → 実装済み（58→61）。resolver を文書単位化しサブ文書 defaultView を接続。selectorTest bucket3 の残り（test 33-40, 43, 46, 47）は **016-10 のセレクタ拡充 + IDL 反射**が主因（例: test 33 は `.title` 反射、35 は :first-child ルート判定）。
 - **016-11 NodeIterator / TreeWalker / Range**: test 01-09, 11-13 等の「not a callable function」群。
 - **016-14 XML/XHTML・CSSOM・SVG DOM**: test 69-72, 74-80 の SVG/XML サブドキュメント系。
 - **016-16 iframe load イベント**: test 65/69 の kungFuDeathGrip。
