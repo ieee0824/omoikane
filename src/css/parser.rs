@@ -34,6 +34,65 @@ pub fn parse_stylesheet(input: &str) -> Result<Stylesheet, CssParseError> {
     Parser::new(tokens).parse_stylesheet()
 }
 
+/// Parses a standalone selector list, requiring the complete input to be valid.
+pub fn parse_selector_list(input: &str) -> Result<Vec<Selector>, CssParseError> {
+    let tokens = tokenize(input)?;
+    let mut parser = Parser::new(tokens);
+    parser.skip_whitespace();
+    if parser.peek().is_none() {
+        return Err(CssParseError::InvalidSelector);
+    }
+    let selectors = parser.parse_selector_list_until(false)?;
+    parser.skip_whitespace();
+    if parser.peek().is_some() {
+        return Err(CssParseError::InvalidSelector);
+    }
+    if !selectors.iter().all(selector_is_supported_for_dom_query) {
+        return Err(CssParseError::InvalidSelector);
+    }
+    Ok(selectors)
+}
+
+fn selector_is_supported_for_dom_query(selector: &Selector) -> bool {
+    selector.parts.iter().all(|part| {
+        part.simples.iter().all(|simple| match simple {
+            SimpleSelector::PseudoClass(name) => {
+                // Pseudo-class names are ASCII case-insensitive
+                // (`:NTH-CHILD(odd)` is valid), so normalize before gating.
+                let base = name.split_once('(').map_or(name.as_str(), |(base, _)| base);
+                let base = base.to_ascii_lowercase();
+                let known = matches!(
+                    base.as_str(),
+                    "root" | "first-child" | "last-child" | "only-child"
+                        | "nth-child" | "nth-last-child" | "first-of-type"
+                        | "last-of-type" | "only-of-type" | "nth-of-type"
+                        | "nth-last-of-type" | "empty" | "lang" | "enabled"
+                        | "disabled" | "checked" | "before" | "after"
+                );
+                known
+                    && (!base.starts_with("nth-")
+                        || name
+                            .split_once('(')
+                            .and_then(|(_, rest)| rest.strip_suffix(')'))
+                            .and_then(super::matcher::parse_an_plus_b)
+                            .is_some())
+            }
+            SimpleSelector::PseudoElement(name) => {
+                name.eq_ignore_ascii_case("before") || name.eq_ignore_ascii_case("after")
+            }
+            SimpleSelector::Not(inner) => inner.iter().all(|simple| {
+                selector_is_supported_for_dom_query(&Selector {
+                    parts: vec![SelectorPart {
+                        combinator: None,
+                        simples: vec![simple.clone()],
+                    }],
+                })
+            }),
+            _ => true,
+        })
+    })
+}
+
 struct Parser {
     tokens: Vec<CssToken>,
     index: usize,
@@ -189,7 +248,7 @@ impl Parser {
     }
 
     fn parse_style_rule(&mut self) -> Result<Rule, CssParseError> {
-        let selectors = self.parse_selector_list()?;
+        let selectors = self.parse_selector_list_until(true)?;
         self.expect_curly_open()?;
         let declarations = self.parse_declaration_list()?;
         Ok(Rule::Style(StyleRule {
@@ -198,7 +257,10 @@ impl Parser {
         }))
     }
 
-    fn parse_selector_list(&mut self) -> Result<Vec<Selector>, CssParseError> {
+    fn parse_selector_list_until(
+        &mut self,
+        allow_curly_open: bool,
+    ) -> Result<Vec<Selector>, CssParseError> {
         let mut selectors = Vec::new();
         loop {
             selectors.push(self.parse_selector()?);
@@ -207,8 +269,14 @@ impl Parser {
                 Some(CssToken::Comma) => {
                     self.next();
                     self.skip_whitespace();
+                    if self.peek().is_none()
+                        || (allow_curly_open && matches!(self.peek(), Some(CssToken::CurlyOpen)))
+                        || matches!(self.peek(), Some(CssToken::Comma))
+                    {
+                        return Err(CssParseError::InvalidSelector);
+                    }
                 }
-                Some(CssToken::CurlyOpen) => break,
+                Some(CssToken::CurlyOpen) if allow_curly_open => break,
                 _ => break,
             }
         }
@@ -241,16 +309,25 @@ impl Parser {
             match self.peek() {
                 Some(CssToken::CurlyOpen) | Some(CssToken::Comma) | None => break,
                 Some(CssToken::Delim('>')) => {
+                    if parts.is_empty() || combinator.is_some() {
+                        return Err(CssParseError::InvalidSelector);
+                    }
                     self.next();
                     combinator = Some(Combinator::Child);
                     continue;
                 }
                 Some(CssToken::Delim('+')) => {
+                    if parts.is_empty() || combinator.is_some() {
+                        return Err(CssParseError::InvalidSelector);
+                    }
                     self.next();
                     combinator = Some(Combinator::AdjacentSibling);
                     continue;
                 }
                 Some(CssToken::Delim('~')) => {
+                    if parts.is_empty() || combinator.is_some() {
+                        return Err(CssParseError::InvalidSelector);
+                    }
                     self.next();
                     combinator = Some(Combinator::GeneralSibling);
                     continue;
@@ -266,7 +343,7 @@ impl Parser {
             combinator = None;
         }
 
-        if parts.is_empty() {
+        if parts.is_empty() || combinator.is_some() {
             return Err(CssParseError::InvalidSelector);
         }
 
@@ -308,6 +385,14 @@ impl Parser {
         }
 
         if simples.is_empty() {
+            return Err(CssParseError::InvalidSelector);
+        }
+
+        let type_selector_count = simples
+            .iter()
+            .filter(|simple| matches!(simple, SimpleSelector::Type(_) | SimpleSelector::Universal))
+            .count();
+        if type_selector_count > 1 {
             return Err(CssParseError::InvalidSelector);
         }
 
@@ -393,7 +478,14 @@ impl Parser {
             let inner = parse_not_argument(&argument_str)?;
             Ok(SimpleSelector::Not(inner))
         } else {
-            let argument = render_tokens(&argument_tokens).trim().to_string();
+            let argument = if name.to_ascii_lowercase().starts_with("nth-") {
+                render_nth_argument(&argument_tokens)
+            } else {
+                render_tokens(&argument_tokens).trim().to_string()
+            };
+            if argument.is_empty() {
+                return Err(CssParseError::InvalidSelector);
+            }
             Ok(SimpleSelector::PseudoClass(format!("{name}({argument})")))
         }
     }
@@ -533,6 +625,32 @@ impl Parser {
         self.index += 1;
         Some(token)
     }
+}
+
+fn render_nth_argument(tokens: &[CssToken]) -> String {
+    let mut rendered = String::new();
+    for (index, token) in tokens.iter().enumerate() {
+        let piece = render_tokens(std::slice::from_ref(token));
+        // The tokenizer folds a '+' that directly precedes digits into the
+        // number itself (`2n+3` tokenizes as `2n`, `3`), so the sign has to be
+        // re-inserted when rendering. Only do so when the number *immediately*
+        // follows the `n` token: with intervening whitespace (`2n 3`) the
+        // source had no operator at all and must stay invalid. Known
+        // limitation: `2n +3` (space before a folded `+`) is tokenized
+        // identically to `2n 3` and is therefore also rejected — write
+        // `2n + 3` or `2n+3` instead. A negative b keeps its sign in the
+        // token value, so `2n -3` stays valid.
+        let follows_n_directly = index > 0
+            && !matches!(tokens[index - 1], CssToken::Whitespace)
+            && rendered.ends_with(['n', 'N']);
+        if matches!(token, CssToken::Number(value) | CssToken::Dimension(value, _) if *value >= 0.0)
+            && follows_n_directly
+        {
+            rendered.push('+');
+        }
+        rendered.push_str(&piece);
+    }
+    rendered.trim().to_string()
 }
 
 fn parse_value_tokens(tokens: &[CssToken]) -> Result<Value, CssParseError> {
@@ -914,5 +1032,77 @@ fn extract_url_from_keyword(keyword: &str) -> String {
         inner[1..inner.len() - 1].to_string()
     } else {
         inner.to_string()
+    }
+}
+
+#[cfg(test)]
+mod selector_list_tests {
+    use super::*;
+
+    #[test]
+    fn standalone_selector_list_accepts_lists_and_function_arguments() {
+        let selectors = parse_selector_list(
+            "div.foo, #bar > input:nth-child( -n + 3 ):nth-of-type(3n-1)",
+        )
+        .unwrap();
+        assert_eq!(selectors.len(), 2);
+        assert!(format!("{:?}", selectors).contains("nth-child(-n + 3)"));
+        assert!(format!("{:?}", selectors).contains("nth-of-type(3n-1)"));
+
+        for selector in [":lang(en)", ":nth-last-of-type(-5n+3)"] {
+            assert_eq!(parse_selector_list(selector).unwrap().len(), 1);
+        }
+    }
+
+    #[test]
+    fn standalone_selector_list_rejects_empty_or_partial_lists() {
+        for invalid in ["", "   ", ",div", "div,", "div,,span"] {
+            assert!(parse_selector_list(invalid).is_err(), "accepted {invalid:?}");
+        }
+    }
+
+    #[test]
+    fn standalone_selector_list_rejects_an_plus_b_missing_operator() {
+        // A whitespace-separated b with no operator is not valid an+b
+        // grammar and must not be silently normalized into `an+b`.
+        for invalid in [
+            ":nth-child(2n 3)",
+            ":nth-child(n 3)",
+            ":nth-last-of-type(2n 1)",
+        ] {
+            assert!(parse_selector_list(invalid).is_err(), "accepted {invalid:?}");
+        }
+        // Whitespace around an explicit operator stays valid, and a negative
+        // b keeps its sign inside the number token.
+        for valid in [
+            ":nth-child(2n + 3)",
+            ":nth-child(2n+3)",
+            ":nth-child(2n - 1)",
+            ":nth-child(2n -1)",
+        ] {
+            assert!(parse_selector_list(valid).is_ok(), "rejected {valid:?}");
+        }
+    }
+
+    #[test]
+    fn standalone_selector_list_accepts_uppercase_pseudo_names() {
+        for valid in [":NTH-CHILD(odd)", ":First-Child", "::BEFORE", ":LANG(en)"] {
+            assert!(parse_selector_list(valid).is_ok(), "rejected {valid:?}");
+        }
+    }
+
+    #[test]
+    fn standalone_selector_list_rejects_invalid_structure() {
+        for invalid in [
+            "> div",
+            "div >",
+            "div > + span",
+            "div:lang()",
+            "div:nth-child(2n+1",
+            "html*.test",
+            "div { color: red }",
+        ] {
+            assert!(parse_selector_list(invalid).is_err(), "accepted {invalid:?}");
+        }
     }
 }

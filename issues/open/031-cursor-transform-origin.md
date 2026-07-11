@@ -31,3 +31,8 @@ is_supported_property に追加し、未対応ログのノイズを削減する�
 
 - 上記プロパティが未対応ログに出なくなる
 - 既存テスト全通過
+
+## 関連 issue
+
+- [051 CSS プロパティ値検証と computed style serialization](051-css-property-value-validation.md)
+  - 本 issue は supported property 登録まで、051 は `cursor` keyword の妥当性検証・無効宣言破棄・初期値 `auto` の serialization を担当する

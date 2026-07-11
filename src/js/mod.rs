@@ -7,7 +7,10 @@ use std::rc::Rc;
 use boa_engine::native_function::NativeFunction;
 use boa_engine::{Context, JsError, JsNativeError, JsResult, JsValue, Source, js_string};
 
-use crate::css::{ComputedStyle, ComputedValue, Origin, StyleResolver};
+use crate::css::{
+    ComputedStyle, ComputedValue, Origin, Selector, StyleResolver, matches_selector,
+    parse_selector_list,
+};
 use crate::dom::{Node, NodeHandle, NodeType};
 use crate::http::Client;
 use crate::layout::{LayoutBox, Overflow, Rect};
@@ -1189,6 +1192,16 @@ fn register_host_bindings(
             NativeFunction::from_copy_closure(set_attribute_native),
         ),
         (
+            js_string!("__omoikane_get_checked"),
+            1,
+            NativeFunction::from_copy_closure(get_checked_native),
+        ),
+        (
+            js_string!("__omoikane_set_checked"),
+            2,
+            NativeFunction::from_copy_closure(set_checked_native),
+        ),
+        (
             js_string!("__omoikane_console_log"),
             1,
             NativeFunction::from_copy_closure(console_log_native),
@@ -1805,11 +1818,12 @@ fn query_selector_native(
         .unwrap_or_default()
         .to_string(context)?
         .to_std_string_escaped();
+    let selectors = parse_dom_selector_list(&selector)?;
     with_host_state(|state| {
         let node = state.borrow().get_node(node_id);
-        Ok(node_to_js_value(
-            node.and_then(|node| node.query_selector(&selector)),
-        ))
+        Ok(node_to_js_value(node.and_then(|node| {
+            query_first_matching_descendant(&node, &selectors)
+        })))
     })
 }
 
@@ -2006,6 +2020,31 @@ fn set_attribute_native(_: &JsValue, args: &[JsValue], context: &mut Context) ->
         // Any attribute may participate in a selector (id/class/attribute
         // selectors), so invalidate the element's document unconditionally. A
         // detached element falls back to invalidating every document.
+        state.borrow_mut().mark_style_dirty_for_node(&node);
+        Ok(JsValue::undefined())
+    })
+}
+
+fn get_checked_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let node_id = parse_node_id(args.first(), context)?;
+    with_host_state(|state| {
+        let checked = state
+            .borrow()
+            .get_node(node_id)
+            .is_some_and(|node| node.checked());
+        Ok(JsValue::from(checked))
+    })
+}
+
+fn set_checked_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let node_id = parse_node_id(args.first(), context)?;
+    let checked = args.get(1).is_some_and(JsValue::to_boolean);
+    with_host_state(|state| {
+        let node = state
+            .borrow()
+            .get_node(node_id)
+            .ok_or_else(|| JsError::from(JsNativeError::error().with_message("node not found")))?;
+        node.set_checked(checked);
         state.borrow_mut().mark_style_dirty_for_node(&node);
         Ok(JsValue::undefined())
     })
@@ -2389,11 +2428,12 @@ fn insert_before_native(_: &JsValue, args: &[JsValue], context: &mut Context) ->
 fn query_selector_all_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
     let parent_id = args.first().cloned().unwrap_or_default().to_number(context)? as usize;
     let selector = args.get(1).cloned().unwrap_or_default().to_string(context)?.to_std_string_escaped();
+    let selectors = parse_dom_selector_list(&selector)?;
     with_host_state(|state| {
         let results = {
             let s = state.borrow();
             let parent = s.get_node(parent_id).ok_or_else(|| JsError::from(JsNativeError::error().with_message("node not found")))?;
-            query_selector_all_recursive(&parent, &selector)
+            query_all_matching_descendants(&parent, &selectors)
         };
         {
             let mut s = state.borrow_mut();
@@ -2406,35 +2446,37 @@ fn query_selector_all_native(_: &JsValue, args: &[JsValue], context: &mut Contex
     })
 }
 
-/// Simple querySelectorAll: supports tag name, .class, #id selectors.
-fn query_selector_all_recursive(node: &NodeHandle, selector: &str) -> Vec<NodeHandle> {
-    let mut results = Vec::new();
-    let selector = selector.trim();
-    for child in node.child_nodes() {
-        if matches_simple_selector(&child, selector) {
-            results.push(child.clone());
-        }
-        results.extend(query_selector_all_recursive(&child, selector));
-    }
-    results
+fn parse_dom_selector_list(selector: &str) -> JsResult<Vec<Selector>> {
+    parse_selector_list(selector).map_err(|error| {
+        JsError::from(JsNativeError::syntax().with_message(error.to_string()))
+    })
 }
 
-fn matches_simple_selector(node: &NodeHandle, selector: &str) -> bool {
-    if node.node_type() != crate::dom::NodeType::Element {
-        return false;
+fn query_first_matching_descendant(node: &NodeHandle, selectors: &[Selector]) -> Option<NodeHandle> {
+    for child in node.child_nodes() {
+        if child.node_type() == NodeType::Element
+            && selectors.iter().any(|selector| matches_selector(&child, selector))
+        {
+            return Some(child);
+        }
+        if let Some(found) = query_first_matching_descendant(&child, selectors) {
+            return Some(found);
+        }
     }
-    if let Some(cls) = selector.strip_prefix('.') {
-        let class_attr = node.attributes().and_then(|a| a.get("class").cloned()).unwrap_or_default();
-        return class_attr.split_whitespace().any(|c| c == cls);
+    None
+}
+
+fn query_all_matching_descendants(node: &NodeHandle, selectors: &[Selector]) -> Vec<NodeHandle> {
+    let mut results = Vec::new();
+    for child in node.child_nodes() {
+        if child.node_type() == NodeType::Element
+            && selectors.iter().any(|selector| matches_selector(&child, selector))
+        {
+            results.push(child.clone());
+        }
+        results.extend(query_all_matching_descendants(&child, selectors));
     }
-    if let Some(id) = selector.strip_prefix('#') {
-        let id_attr = node.attributes().and_then(|a| a.get("id").cloned()).unwrap_or_default();
-        return id_attr == id;
-    }
-    match node.tag_name() {
-        Some(tag) => tag.eq_ignore_ascii_case(selector),
-        None => false,
-    }
+    results
 }
 
 fn node_type_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
@@ -3898,6 +3940,188 @@ mod tests {
         let len = runtime.eval("document.querySelectorAll('span').length")
             .unwrap().to_number(&mut runtime.context).unwrap();
         assert_eq!(len, 2.0);
+    }
+
+    #[test]
+    fn query_selector_apis_use_full_css_matcher_and_strict_parser() {
+        use crate::html::TreeBuilder;
+        let doc = TreeBuilder::parse(
+            r#"<html><body><main id="scope"><p id="first" class="a" data-kind="x"></p><section><p id="second" class="a"></p></section></main></body></html>"#,
+        )
+        .document();
+        let mut runtime = JsRuntime::with_document(doc).unwrap();
+        let result = runtime
+            .eval(
+                r##"
+                (() => {
+                  const scope = document.querySelector("#scope");
+                  const first = scope.querySelector("section > p.a, p[data-kind=x]");
+                  const all = scope.querySelectorAll("p.a, #first");
+                  const snapshot = all.length;
+                  scope.appendChild(document.createElement("p"));
+                  let syntax = false;
+                  let atomic = false;
+                  try { scope.querySelector("p,"); } catch (e) {
+                    syntax = e instanceof DOMException && e.name === "SyntaxError";
+                  }
+                  try { scope.querySelectorAll("p, :unknown"); } catch (e) {
+                    atomic = e instanceof DOMException && e.name === "SyntaxError";
+                  }
+                  return [first.id, all.length, snapshot, scope.querySelector("#scope") === null, syntax, atomic, scope.querySelector("::before") === null].join("|");
+                })()
+                "##,
+            )
+            .unwrap()
+            .to_string(&mut runtime.context)
+            .unwrap()
+            .to_std_string_escaped();
+        assert_eq!(result, "first|2|2|true|true|true|true");
+    }
+
+    #[test]
+    fn get_element_by_id_does_not_parse_id_as_a_selector() {
+        use crate::html::TreeBuilder;
+        let doc = TreeBuilder::parse(r#"<html><body><div id="plain"></div></body></html>"#).document();
+        let mut runtime = JsRuntime::with_document(doc).unwrap();
+        assert!(runtime
+            .eval("document.getElementById('plain\\0suffix') === null")
+            .unwrap()
+            .as_boolean()
+            .unwrap());
+        assert!(runtime
+            .eval("document.getElementById('plain').id === 'plain'")
+            .unwrap()
+            .as_boolean()
+            .unwrap());
+    }
+
+    #[test]
+    fn checkedness_is_limited_to_checkable_inputs() {
+        use crate::html::TreeBuilder;
+        // A `checked` attribute on a text input or a non-input element must
+        // not surface through the `.checked` IDL property (nor `:checked`);
+        // checkedness only applies to checkbox/radio inputs.
+        let doc = TreeBuilder::parse(
+            r#"<html><body><input id="text" type="text" checked><div id="div" checked></div><input id="box" type="checkbox" checked></body></html>"#,
+        )
+        .document();
+        let mut runtime = JsRuntime::with_document(doc).unwrap();
+        let result = runtime
+            .eval(
+                r#"
+                (() => {
+                  const text = document.getElementById("text");
+                  const div = document.getElementById("div");
+                  const box = document.getElementById("box");
+                  return [text.checked, div.checked, box.checked,
+                          document.querySelector(":checked") === box].join("|");
+                })()
+                "#,
+            )
+            .unwrap()
+            .to_string(&mut runtime.context)
+            .unwrap()
+            .to_std_string_escaped();
+        assert_eq!(result, "false|false|true|true");
+    }
+
+    #[test]
+    fn click_dispatches_on_non_disableable_elements_with_disabled_attribute() {
+        use crate::html::TreeBuilder;
+        // `disabled` only suppresses activation on form controls: a
+        // `<div disabled>` still dispatches click, a `<button disabled>`
+        // does not.
+        let doc = TreeBuilder::parse(
+            r#"<html><body><div id="div" disabled></div><button id="btn" disabled></button></body></html>"#,
+        )
+        .document();
+        let mut runtime = JsRuntime::with_document(doc).unwrap();
+        let result = runtime
+            .eval(
+                r#"
+                (() => {
+                  const div = document.getElementById("div");
+                  const btn = document.getElementById("btn");
+                  let divClicked = false;
+                  let btnClicked = false;
+                  div.addEventListener("click", () => { divClicked = true; });
+                  btn.addEventListener("click", () => { btnClicked = true; });
+                  div.click();
+                  btn.click();
+                  return [divClicked, btnClicked].join("|");
+                })()
+                "#,
+            )
+            .unwrap()
+            .to_string(&mut runtime.context)
+            .unwrap()
+            .to_std_string_escaped();
+        assert_eq!(result, "true|false");
+    }
+
+    #[test]
+    fn form_checkedness_is_live_dirty_and_radio_exclusive() {
+        use crate::html::TreeBuilder;
+        let doc = TreeBuilder::parse(
+            r#"<html><body><input id="box" type="checkbox" checked><input id="r1" type="radio" name="g"><input id="r2" type="radio" name="g" checked><input id="off" type="checkbox" disabled></body></html>"#,
+        )
+        .document();
+        let mut runtime = JsRuntime::with_document(doc).unwrap();
+        let result = runtime
+            .eval(
+                r#"
+                (() => {
+                  const box = document.getElementById("box");
+                  const r1 = document.getElementById("r1");
+                  const r2 = document.getElementById("r2");
+                  const off = document.getElementById("off");
+                  box.click();
+                  box.setAttribute("checked", "");
+                  const dirtyStayedOff = !box.checked && box.defaultChecked;
+                  r1.click();
+                  const clickExclusive = r1.checked && !r2.checked;
+                  r2.checked = true;
+                  const propertyExclusive = !r1.checked && r2.checked;
+                  off.click();
+                  return [dirtyStayedOff, clickExclusive, propertyExclusive, !off.checked, off.disabled].join("|");
+                })()
+                "#,
+            )
+            .unwrap()
+            .to_string(&mut runtime.context)
+            .unwrap()
+            .to_std_string_escaped();
+        assert_eq!(result, "true|true|true|true|true");
+    }
+
+    #[test]
+    fn query_selector_observes_live_form_state_pseudos() {
+        use crate::html::TreeBuilder;
+        let doc = TreeBuilder::parse(
+            r#"<html><body><input id="box" type="checkbox"><input id="button" type="button" disabled></body></html>"#,
+        )
+        .document();
+        let mut runtime = JsRuntime::with_document(doc).unwrap();
+        let result = runtime
+            .eval(
+                r#"
+                (() => {
+                  const box = document.getElementById("box");
+                  box.click();
+                  const checked = document.querySelector(":checked") === box;
+                  box.disabled = true;
+                  const disabled = document.querySelectorAll(":disabled").length;
+                  const enabled = document.querySelectorAll(":enabled").length;
+                  box.type = "text";
+                  return [checked, disabled, enabled, document.querySelector(":checked") === null].join("|");
+                })()
+                "#,
+            )
+            .unwrap()
+            .to_string(&mut runtime.context)
+            .unwrap()
+            .to_std_string_escaped();
+        assert_eq!(result, "true|2|0|true");
     }
 
     #[test]
@@ -7885,6 +8109,69 @@ mod tests {
             ),
             "1,1,0",
             "insertBefore into a primed sub-document must re-match :first-child against the new first child"
+        );
+    }
+
+
+    /// Deterministic iframe + computed-style regressions for the selectors
+    /// added by issue 016-10 (Acid3 tests 34/37/38/39/40/43).
+    #[test]
+    fn acid3_extended_selector_cases_resolve_in_iframe_document() {
+        let mut runtime = runtime_from_html(
+            r#"<html><body><iframe id="selectors"></iframe></body></html>"#,
+        );
+        let result = eval_str(
+            &mut runtime,
+            r#"
+            (() => {
+              const doc = document.getElementById('selectors').contentDocument;
+              function setup(rules) {
+                const de = doc.documentElement;
+                while (de.firstChild) de.removeChild(de.firstChild);
+                const head = doc.createElement('head'); de.appendChild(head);
+                const body = doc.createElement('body'); de.appendChild(body);
+                const style = doc.createElement('style');
+                style.textContent = '* { z-index: 0; position: absolute; }\n' + rules;
+                head.appendChild(style);
+                return body;
+              }
+              const zi = node => doc.defaultView.getComputedStyle(node, '').zIndex;
+              const out = [];
+
+              let body = setup(':lang(en) { z-index: 1 }\n[class|=widget] { z-index: 2 }');
+              const lang = doc.createElement('div'); lang.setAttribute('lang', 'en-GB'); body.appendChild(lang);
+              const inherited = doc.createElement('p'); lang.appendChild(inherited);
+              const dash = doc.createElement('p'); dash.className = 'widget-blue'; body.appendChild(dash);
+              out.push([zi(lang), zi(inherited), zi(dash)].join(','));
+
+              body = setup(':only-child { z-index: 1 }');
+              const only = doc.createElement('p'); body.appendChild(doc.createTextNode('x')); body.appendChild(only);
+              const before = zi(only); const extra = doc.createElement('p'); body.appendChild(extra);
+              const after = zi(only); body.removeChild(extra); out.push([before, after, zi(only)].join(','));
+
+              body = setup(':empty { z-index: 1 }');
+              const empty = doc.createElement('p'); body.appendChild(empty); empty.appendChild(doc.createComment('x')); empty.appendChild(doc.createTextNode(''));
+              const emptyBefore = zi(empty); empty.appendChild(doc.createTextNode(' ')); out.push([emptyBefore, zi(empty)].join(','));
+
+              body = setup(':nth-child(-n+3) { z-index: 1 }\n:nth-last-child(2) { z-index: 2 }');
+              const children = []; for (let i = 0; i < 5; i++) { const p = doc.createElement('p'); body.appendChild(p); children.push(p); }
+              out.push(children.map(zi).join(','));
+
+              body = setup(':first-of-type { z-index: 1 }\n:nth-of-type(3n-1) { z-index: 2 }\n:nth-last-of-type(-5n+3) { z-index: 3 }');
+              const ps = []; for (let i = 0; i < 6; i++) { body.appendChild(doc.createElement('span')); const p = doc.createElement('p'); body.appendChild(p); ps.push(p); }
+              out.push(ps.map(zi).join(','));
+
+              body = setup(':enabled { z-index: 1 }\n:disabled { z-index: 2 }\n:checked { z-index: 3 }\n:checked:enabled { z-index: 4 }');
+              const input = doc.createElement('input'); input.type = 'checkbox'; body.appendChild(input);
+              const enabled = zi(input); input.click(); const checked = zi(input); input.disabled = true; const disabled = zi(input); input.checked = false;
+              out.push([enabled, checked, disabled, zi(input), zi(body)].join(','));
+              return out.join(';');
+            })()
+            "#,
+        );
+        assert_eq!(
+            result,
+            "1,1,2;1,0,1;1,0;1,1,1,2,0;1,2,0,3,2,0;1,4,3,2,0"
         );
     }
 }

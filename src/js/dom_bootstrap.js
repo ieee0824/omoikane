@@ -374,8 +374,15 @@
     }
 
     querySelector(selector) {
-      const id = __omoikane_query_selector(this.__id, String(selector));
-      return wrapNode(id);
+      try {
+        const id = __omoikane_query_selector(this.__id, String(selector));
+        return wrapNode(id);
+      } catch (error) {
+        if (error && error.name === "SyntaxError") {
+          throw new DOMException(error.message, "SyntaxError");
+        }
+        throw error;
+      }
     }
 
     addEventListener(type, listener, options = false) {
@@ -637,8 +644,15 @@
     }
 
     querySelectorAll(selector) {
-      const ids = __omoikane_query_selector_all(this.__id, String(selector));
-      return ids ? ids.map(id => wrapNode(id)) : [];
+      try {
+        const ids = __omoikane_query_selector_all(this.__id, String(selector));
+        return ids ? ids.map(id => wrapNode(id)) : [];
+      } catch (error) {
+        if (error && error.name === "SyntaxError") {
+          throw new DOMException(error.message, "SyntaxError");
+        }
+        throw error;
+      }
     }
 
     getElementsByTagName(tag) {
@@ -933,7 +947,18 @@
 
     focus() {}
     blur() {}
-    click() { this.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true })); }
+    click() {
+      // A `disabled` attribute only suppresses activation on elements where
+      // it has meaning; a stray `<div disabled>` must still dispatch click.
+      const DISABLEABLE_TAGS = ["input", "button", "select", "textarea", "option", "optgroup", "fieldset"];
+      if (this.disabled && DISABLEABLE_TAGS.includes(this.nodeName.toLowerCase())) return;
+      if (this.nodeName === "INPUT") {
+        const type = this.type.toLowerCase();
+        if (type === "checkbox") this.checked = !this.checked;
+        else if (type === "radio") this.checked = true;
+      }
+      this.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+    }
 
     get hidden() {
       return this.hasAttribute("hidden");
@@ -953,10 +978,30 @@
     }
 
     get checked() {
-      return this.hasAttribute("checked");
+      return __omoikane_get_checked(this.__id);
     }
 
     set checked(v) {
+      const checked = !!v;
+      if (checked && this.nodeName === "INPUT" && this.type.toLowerCase() === "radio") {
+        const document = this.ownerDocument;
+        const name = this.name;
+        if (document) {
+          for (const radio of document.querySelectorAll("input[type=radio]")) {
+            if (radio.__id !== this.__id && radio.name === name) {
+              __omoikane_set_checked(radio.__id, false);
+            }
+          }
+        }
+      }
+      __omoikane_set_checked(this.__id, checked);
+    }
+
+    get defaultChecked() {
+      return this.hasAttribute("checked");
+    }
+
+    set defaultChecked(v) {
       if (v) this.setAttribute("checked", "");
       else this.removeAttribute("checked");
     }
@@ -1036,7 +1081,19 @@
       // NaN id that resolves to null): fall back to the top-level document so
       // the lookup still resolves against the main tree.
       const scope = this instanceof Document ? this : globalThis.document;
-      return wrapNode(__omoikane_query_selector(scope.__id, "#" + String(id)));
+      const expected = String(id);
+      // Plain tree walk with an id equality check: getElementById needs no
+      // selector parsing/matching and no full-document snapshot.
+      const findById = (node) => {
+        for (const child of node.childNodes) {
+          if (child.nodeType !== 1) continue;
+          if (child.getAttribute("id") === expected) return child;
+          const found = findById(child);
+          if (found) return found;
+        }
+        return null;
+      };
+      return findById(scope);
     }
 
     createElement(tag) {

@@ -72,6 +72,8 @@ pub struct Document;
 pub struct Element {
     tag_name: String,
     attributes: BTreeMap<String, String>,
+    checked: bool,
+    dirty_checkedness: bool,
 }
 
 impl Element {
@@ -80,6 +82,8 @@ impl Element {
         Self {
             tag_name: tag_name.into().to_ascii_lowercase(),
             attributes: BTreeMap::new(),
+            checked: false,
+            dirty_checkedness: false,
         }
     }
 
@@ -319,16 +323,65 @@ impl NodeHandle {
     /// Sets an attribute on an element node. No-op for other node kinds.
     pub fn set_attribute(&self, name: impl Into<String>, value: impl Into<String>) {
         if let NodeData::Element(element) = &mut self.0.borrow_mut().data {
+            let name = name.into().to_ascii_lowercase();
+            if name == "checked" && !element.dirty_checkedness {
+                element.checked = true;
+            }
             element
                 .attributes
-                .insert(name.into().to_ascii_lowercase(), value.into());
+                .insert(name, value.into());
         }
     }
 
     /// Removes an attribute from an element node. No-op for other node kinds.
     pub fn remove_attribute(&self, name: &str) {
         if let NodeData::Element(element) = &mut self.0.borrow_mut().data {
-            element.attributes.remove(&name.to_ascii_lowercase());
+            let name = name.to_ascii_lowercase();
+            element.attributes.remove(&name);
+            if name == "checked" && !element.dirty_checkedness {
+                element.checked = false;
+            }
+        }
+    }
+
+    /// Returns the live checkedness of an element.
+    ///
+    /// Checkedness is only meaningful for checkable inputs (`<input
+    /// type="checkbox">` / `<input type="radio">`), matching `:checked` and
+    /// HTML semantics: any other element reports `false` even if a stray
+    /// `checked` attribute recorded internal state. The internal state is
+    /// still kept in sync with the content attribute, so an input whose
+    /// `type` later becomes checkable reports the attribute-derived
+    /// checkedness, as the non-dirty default would.
+    pub fn checked(&self) -> bool {
+        if !self.is_checkable_input() {
+            return false;
+        }
+        match &self.0.borrow().data {
+            NodeData::Element(element) => element.checked,
+            _ => false,
+        }
+    }
+
+    /// Returns `true` for `<input>` elements whose `type` attribute makes
+    /// them checkable (`checkbox` or `radio`, ASCII case-insensitive).
+    pub fn is_checkable_input(&self) -> bool {
+        match &self.0.borrow().data {
+            NodeData::Element(element) => {
+                element.tag_name == "input"
+                    && element.attributes.get("type").is_some_and(|kind| {
+                        matches!(kind.to_ascii_lowercase().as_str(), "checkbox" | "radio")
+                    })
+            }
+            _ => false,
+        }
+    }
+
+    /// Updates live checkedness and marks it dirty with respect to the content attribute.
+    pub fn set_checked(&self, checked: bool) {
+        if let NodeData::Element(element) = &mut self.0.borrow_mut().data {
+            element.checked = checked;
+            element.dirty_checkedness = true;
         }
     }
 

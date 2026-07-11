@@ -260,14 +260,30 @@ fn matches_attribute_selector(
 }
 
 fn matches_pseudo_class(node: &NodeHandle, name: &str, pseudo: Option<PseudoElement>) -> bool {
-    if let Some(argument) = name
-        .strip_prefix("nth-child(")
-        .and_then(|rest| rest.strip_suffix(')'))
-    {
-        return matches_nth_child(node, argument.trim());
+    if let Some((function, argument)) = functional_pseudo(name) {
+        // Pseudo-class names are ASCII case-insensitive; the argument keeps
+        // its original case (`:lang()` compares case-insensitively itself and
+        // an+b parsing lowercases internally).
+        let function = function.to_ascii_lowercase();
+        return match function.as_str() {
+            "nth-child" => matches_nth_child(node, argument),
+            "nth-last-child" => element_position(node)
+                .is_some_and(|(index, total)| {
+                    parse_an_plus_b(argument).is_some_and(|formula| formula.matches(total - index + 1))
+                }),
+            "nth-of-type" => type_position(node).is_some_and(|(index, _)| {
+                parse_an_plus_b(argument).is_some_and(|formula| formula.matches(index))
+            }),
+            "nth-last-of-type" => type_position(node).is_some_and(|(index, total)| {
+                parse_an_plus_b(argument).is_some_and(|formula| formula.matches(total - index + 1))
+            }),
+            "lang" => matches_language(node, argument),
+            _ => false,
+        };
     }
 
-    match name {
+    let name = name.to_ascii_lowercase();
+    match name.as_str() {
         "before" => pseudo == Some(PseudoElement::Before),
         "after" => pseudo == Some(PseudoElement::After),
         "root" => node
@@ -280,12 +296,60 @@ fn matches_pseudo_class(node: &NodeHandle, name: &str, pseudo: Option<PseudoElem
             };
             index == total
         }
+        "only-child" => element_position(node).is_some_and(|(_, total)| total == 1),
+        "first-of-type" => type_position(node).is_some_and(|(index, _)| index == 1),
+        "last-of-type" => type_position(node).is_some_and(|(index, total)| index == total),
+        "only-of-type" => type_position(node).is_some_and(|(_, total)| total == 1),
+        "enabled" => is_form_control(node) && get_attribute(node, "disabled").is_none(),
+        "disabled" => is_form_control(node) && get_attribute(node, "disabled").is_some(),
+        "checked" => node.checked(),
+        "empty" => node.child_nodes().into_iter().all(|child| match child.node_type() {
+            NodeType::Element => false,
+            NodeType::Text => child.data().is_some_and(|data| data.is_empty()),
+            _ => true,
+        }),
         _ => false,
     }
 }
 
+fn is_form_control(node: &NodeHandle) -> bool {
+    node.tag_name().is_some_and(|tag| {
+        matches!(
+            tag.as_str(),
+            "button" | "input" | "select" | "textarea" | "option" | "optgroup" | "fieldset"
+        )
+    })
+}
+
+fn matches_language(node: &NodeHandle, range: &str) -> bool {
+    let range = range.trim().trim_matches(['\'', '"']);
+    if range.is_empty() {
+        return false;
+    }
+    let mut current = Some(node.clone());
+    while let Some(element) = current {
+        if let Some(language) = get_attribute(&element, "lang") {
+            return language.eq_ignore_ascii_case(range)
+                || language
+                    .get(..range.len())
+                    .is_some_and(|prefix| prefix.eq_ignore_ascii_case(range))
+                    && language.as_bytes().get(range.len()) == Some(&b'-');
+        }
+        current = element.parent_node();
+    }
+    false
+}
+
+fn functional_pseudo(name: &str) -> Option<(&str, &str)> {
+    let open = name.find('(')?;
+    let function = &name[..open];
+    let argument = name[open + 1..].strip_suffix(')')?.trim();
+    Some((function, argument))
+}
+
 fn matches_pseudo_element(name: &str, pseudo: Option<PseudoElement>) -> bool {
-    match name {
+    // Pseudo-element names are ASCII case-insensitive (`::BEFORE`).
+    match name.to_ascii_lowercase().as_str() {
         "before" => pseudo == Some(PseudoElement::Before),
         "after" => pseudo == Some(PseudoElement::After),
         _ => false,
@@ -297,18 +361,67 @@ fn matches_nth_child(node: &NodeHandle, expression: &str) -> bool {
         return false;
     };
 
-    if expression.eq_ignore_ascii_case("odd") {
-        return index % 2 == 1;
+    parse_an_plus_b(expression).is_some_and(|formula| formula.matches(index))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct AnPlusB {
+    a: i64,
+    b: i64,
+}
+
+impl AnPlusB {
+    fn matches(self, position: usize) -> bool {
+        let Ok(position) = i64::try_from(position) else {
+            return false;
+        };
+        if position <= 0 {
+            return false;
+        }
+        if self.a == 0 {
+            return position == self.b;
+        }
+        let difference = position.checked_sub(self.b);
+        difference.is_some_and(|difference| difference % self.a == 0 && difference / self.a >= 0)
     }
-    if expression.eq_ignore_ascii_case("even") {
-        return index % 2 == 0;
+}
+
+pub(super) fn parse_an_plus_b(expression: &str) -> Option<AnPlusB> {
+    let compact: String = expression
+        .chars()
+        .filter(|character| !character.is_ascii_whitespace())
+        .flat_map(char::to_lowercase)
+        .collect();
+    match compact.as_str() {
+        "odd" => return Some(AnPlusB { a: 2, b: 1 }),
+        "even" => return Some(AnPlusB { a: 2, b: 0 }),
+        _ => {}
     }
 
-    if let Ok(number) = expression.parse::<usize>() {
-        return index == number;
+    if let Ok(b) = compact.parse::<i64>() {
+        return Some(AnPlusB { a: 0, b });
     }
 
-    false
+    let n = compact.find('n')?;
+    if compact[n + 1..].contains('n') {
+        return None;
+    }
+    let coefficient = &compact[..n];
+    let a = match coefficient {
+        "" | "+" => 1,
+        "-" => -1,
+        value => value.parse::<i64>().ok()?,
+    };
+    let remainder = &compact[n + 1..];
+    let b = if remainder.is_empty() {
+        0
+    } else {
+        if !remainder.starts_with(['+', '-']) {
+            return None;
+        }
+        remainder.parse::<i64>().ok()?
+    };
+    Some(AnPlusB { a, b })
 }
 
 fn get_attribute(node: &NodeHandle, name: &str) -> Option<String> {
@@ -353,6 +466,26 @@ fn element_position(node: &NodeHandle) -> Option<(usize, usize)> {
         .iter()
         .position(|candidate| candidate == node)
         .map(|position| position + 1)?;
+    Some((index, total))
+}
+
+fn type_position(node: &NodeHandle) -> Option<(usize, usize)> {
+    let parent = node.parent_node()?;
+    if parent.node_type() != NodeType::Element {
+        return None;
+    }
+    let tag_name = node.tag_name()?;
+    let same_type: Vec<NodeHandle> = parent
+        .child_nodes()
+        .into_iter()
+        .filter(|child| {
+            child
+                .tag_name()
+                .is_some_and(|tag| tag.eq_ignore_ascii_case(&tag_name))
+        })
+        .collect();
+    let total = same_type.len();
+    let index = same_type.iter().position(|candidate| candidate == node)? + 1;
     Some((index, total))
 }
 
@@ -405,6 +538,30 @@ mod tests {
     }
 
     #[test]
+    fn pseudo_class_names_are_ascii_case_insensitive() {
+        // Named bindings keep the whole tree alive: a bare `_` would drop the
+        // ancestor handles and sever the children's weak parent links.
+        let (_document, _html, _body, _main, lead, title, _cta) = sample_tree();
+
+        assert!(
+            matches_selector(&title, &selector(":FIRST-CHILD {}")),
+            ":FIRST-CHILD must match like :first-child"
+        );
+        assert!(
+            matches_selector(&title, &selector(":NTH-CHILD(ODD) {}")),
+            ":NTH-CHILD(ODD) must match like :nth-child(odd)"
+        );
+        assert!(
+            matches_selector(&lead, &selector(":Nth-Child(EVEN) {}")),
+            ":Nth-Child(EVEN) must match like :nth-child(even)"
+        );
+        assert!(
+            !matches_selector(&lead, &selector(":FIRST-CHILD {}")),
+            "case-insensitive names must not loosen matching itself"
+        );
+    }
+
+    #[test]
     fn matches_simple_selectors() {
         let (_, _, _, main, lead, _, _) = sample_tree();
 
@@ -447,6 +604,151 @@ mod tests {
         assert!(matches_selector(&title, &selector(":nth-child(odd) {}")));
         assert!(matches_selector(&lead, &selector(":nth-child(even) {}")));
         assert!(!matches_selector(&lead, &selector(":first-child {}")));
+    }
+
+    #[test]
+    fn parses_and_evaluates_general_an_plus_b_expressions() {
+        let cases = [
+            ("odd", AnPlusB { a: 2, b: 1 }),
+            (" EVEN ", AnPlusB { a: 2, b: 0 }),
+            ("5", AnPlusB { a: 0, b: 5 }),
+            ("n", AnPlusB { a: 1, b: 0 }),
+            ("-n", AnPlusB { a: -1, b: 0 }),
+            ("n + 3", AnPlusB { a: 1, b: 3 }),
+            ("-n+3", AnPlusB { a: -1, b: 3 }),
+            ("3n-1", AnPlusB { a: 3, b: -1 }),
+            ("-5n+3", AnPlusB { a: -5, b: 3 }),
+            ("0n+3", AnPlusB { a: 0, b: 3 }),
+        ];
+        for (input, expected) in cases {
+            assert_eq!(parse_an_plus_b(input), Some(expected), "{input}");
+        }
+        for invalid in ["", "n+", "2n 3", "2nn+1", "--n", "infinite"] {
+            assert_eq!(parse_an_plus_b(invalid), None, "{invalid}");
+        }
+
+        assert!(parse_an_plus_b("-n+3").unwrap().matches(1));
+        assert!(parse_an_plus_b("-n+3").unwrap().matches(3));
+        assert!(!parse_an_plus_b("-n+3").unwrap().matches(4));
+        assert!(parse_an_plus_b("3n-1").unwrap().matches(2));
+        assert!(parse_an_plus_b("3n-1").unwrap().matches(5));
+        assert!(!parse_an_plus_b("3n-1").unwrap().matches(3));
+        assert!(parse_an_plus_b("0n+3").unwrap().matches(3));
+    }
+
+    #[test]
+    fn child_structural_pseudos_follow_current_element_siblings() {
+        let parent = NodeHandle::element("div");
+        let first = NodeHandle::element("p");
+        let second = NodeHandle::element("p");
+        let third = NodeHandle::element("p");
+        parent.append_child(NodeHandle::text("ignored"));
+        parent.append_child(first.clone());
+        parent.append_child(NodeHandle::comment("ignored"));
+        assert!(matches_selector(&first, &selector(":only-child {}")));
+        parent.append_child(second.clone());
+        parent.append_child(third.clone());
+
+        assert!(!matches_selector(&first, &selector(":only-child {}")));
+        assert!(matches_selector(&first, &selector(":nth-child(-n+3) {}")));
+        assert!(matches_selector(&third, &selector(":nth-last-child(1) {}")));
+        assert!(matches_selector(&second, &selector(":nth-last-child(even) {}")));
+        parent.remove_child(&first).unwrap();
+        assert!(matches_selector(&second, &selector(":first-child {}")));
+    }
+
+    #[test]
+    fn empty_ignores_comments_and_empty_text_but_not_content() {
+        let element = NodeHandle::element("div");
+        element.append_child(NodeHandle::comment("comment"));
+        element.append_child(NodeHandle::text(""));
+        assert!(matches_selector(&element, &selector(":empty {}")));
+
+        let whitespace = NodeHandle::text(" ");
+        element.append_child(whitespace.clone());
+        assert!(!matches_selector(&element, &selector(":empty {}")));
+        element.remove_child(&whitespace).unwrap();
+        element.append_child(NodeHandle::element("span"));
+        assert!(!matches_selector(&element, &selector(":empty {}")));
+    }
+
+    #[test]
+    fn of_type_pseudos_count_only_matching_element_names() {
+        let parent = NodeHandle::element("div");
+        let mut paragraphs = Vec::new();
+        for index in 0..8 {
+            if index % 2 == 0 {
+                parent.append_child(NodeHandle::element("span"));
+            }
+            let paragraph = NodeHandle::element("p");
+            parent.append_child(paragraph.clone());
+            paragraphs.push(paragraph);
+        }
+
+        assert!(matches_selector(&paragraphs[0], &selector(":first-of-type {}")));
+        assert!(matches_selector(&paragraphs[7], &selector(":last-of-type {}")));
+        assert_eq!(
+            paragraphs
+                .iter()
+                .enumerate()
+                .filter_map(|(i, node)| matches_selector(node, &selector(":nth-of-type(3n-1) {}"))
+                    .then_some(i + 1))
+                .collect::<Vec<_>>(),
+            vec![2, 5, 8]
+        );
+        assert_eq!(
+            paragraphs
+                .iter()
+                .enumerate()
+                .filter_map(|(i, node)| matches_selector(node, &selector(":nth-last-of-type(-5n+3) {}"))
+                    .then_some(i + 1))
+                .collect::<Vec<_>>(),
+            vec![6]
+        );
+
+        let unique = NodeHandle::element("em");
+        parent.append_child(unique.clone());
+        assert!(matches_selector(&unique, &selector(":only-of-type {}")));
+    }
+
+    #[test]
+    fn lang_matches_inherited_exact_and_dash_prefixed_languages() {
+        let outer = NodeHandle::element("section");
+        let inherited = NodeHandle::element("p");
+        let overridden = NodeHandle::element("span");
+        let nested = NodeHandle::element("em");
+        outer.set_attribute("lang", "EN-gb");
+        overridden.set_attribute("lang", "english");
+        outer.append_child(inherited.clone());
+        outer.append_child(overridden.clone());
+        overridden.append_child(nested.clone());
+
+        assert!(matches_selector(&outer, &selector(":lang(en) {}")));
+        assert!(matches_selector(&inherited, &selector(":lang(EN) {}")));
+        assert!(matches_selector(&inherited, &selector(":lang(en-gb) {}")));
+        assert!(!matches_selector(&overridden, &selector(":lang(en) {}")));
+        assert!(!matches_selector(&nested, &selector(":lang(en) {}")));
+    }
+
+    #[test]
+    fn form_state_pseudos_apply_to_eligible_controls() {
+        let input = NodeHandle::element("input");
+        input.set_attribute("type", "checkbox");
+        let text = NodeHandle::element("input");
+        text.set_attribute("type", "text");
+        text.set_attribute("checked", "");
+        let body = NodeHandle::element("body");
+
+        assert!(matches_selector(&input, &selector(":enabled {}")));
+        assert!(!matches_selector(&body, &selector(":enabled {}")));
+        input.set_attribute("disabled", "");
+        assert!(matches_selector(&input, &selector(":disabled {}")));
+        assert!(!matches_selector(&input, &selector(":enabled {}")));
+        input.set_checked(true);
+        assert!(matches_selector(&input, &selector(":checked {}")));
+        assert!(!matches_selector(&text, &selector(":checked {}")));
+        input.set_attribute("type", "text");
+        assert!(!matches_selector(&input, &selector(":checked {}")));
     }
 
     #[test]

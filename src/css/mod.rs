@@ -17,8 +17,7 @@ pub use matcher::{
     selector_pseudo_element, specificity,
 };
 pub use media::{evaluate_media_query, parse_media_query_list};
-pub use parser::parse_stylesheet;
-pub use parser::extract_font_face_rules;
+pub use parser::{extract_font_face_rules, parse_selector_list, parse_stylesheet};
 pub use style::{ComputedStyle, ComputedValue, Origin, StyleResolver, StylesheetInput};
 pub use tokenizer::tokenize;
 

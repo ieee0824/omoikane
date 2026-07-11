@@ -59,6 +59,19 @@ Acid3 は DOM / CSS / HTML parser / scripting / networking まで含む複合テ
 | 016-7 + 016-9 + 016-8/044-2（PR #103/#104/#105） | **58/100** | document.write/open/close・iframe/contentDocument サブブラウジングコンテキスト・getComputedStyle 実値化・レイアウトメトリクス（offset*/client*/scroll*/getBoundingClientRect）・forced reflow |
 | 016-15 実装（resolver 文書単位化） | 61/100 | getComputedStyle をノードの owner document 基準に解決（文書単位 StyleResolver キャッシュ）+ サブ文書 defaultView を contentWindow に接続。selectorTest bucket3 の test 36/41/42 が新規 PASS |
 | 016-15 実装（title 反射 + :first-child 修正） | **63/100** | HTMLElement.title の IDL 反射を追加し、:first-child/:last-child/:nth-child がルート要素（親が Document）にマッチしていたマッチャのバグを修正。test 33/35 が新規 PASS（FAITHFUL/DIRECT 両モード 63/100、実測） |
+| 016-10 セレクタ拡充 + querySelector matcher 統合 | **70/100** | strict selector-list parser、querySelector 系の CSS matcher 統合、`:lang` / child・of-type・`:empty` / UI 状態擬似クラス、フォーム checkedness を実装。test 34/37/38/39/40/43 が新規 PASS。getElementById の selector 依存も解消して test 28 が PASS（FAITHFUL/DIRECT 両モード 70/100、実測） |
+
+### 70/100 到達時（016-10 実装）に新規 PASS したテスト
+
+- test 34: `:lang()` の継承・言語 prefix と `[class|=...]`
+- test 37: `:only-child` と DOM 変異後の再計算
+- test 38: `:empty`（Comment と空 Text を無視し、内容のある Text/Element を判定）
+- test 39: 一般 `an+b` と負係数を含む `:nth-child()` / reverse position
+- test 40: first/last/only/nth/nth-last の of-type 系
+- test 43: `:enabled` / `:disabled` / `:checked`、checkbox/radio の live checkedness・dirty checkedness・radio group 排他
+- test 28: `getElementById` を querySelector 経由から ID 文字列完全一致走査へ変更したことで、selector として特殊な ID も正しく検索
+
+実測では test 37/39/40（および実行によって 33/42）が 30fps 閾値超過の警告を出す場合があるが、assertion 自体は PASS。FAITHFUL が DIRECT より低くなる差やハングはない。
 
 ### 63/100 到達時（016-15 実装）に新規 PASS したテスト
 
@@ -78,13 +91,15 @@ Acid3 は DOM / CSS / HTML parser / scripting / networking まで含む複合テ
 - ~~**016-9 iframe / contentDocument**~~ → PR #104 で実装（52→56）。
 - ~~**016-8 getComputedStyle 実値化 + 044-2**~~ → PR #105 で実装・統合（統合実測 58）。
 
-### 残りの主要ブロッカー（63/100 時点の失敗傾向）
+### 残りの主要ブロッカー（70/100 時点の失敗傾向）
 
-- ~~**016-15 getComputedStyle のサブ文書対応**~~ → 実装済み（58→63）。resolver を文書単位化しサブ文書 defaultView を接続、加えて title IDL 反射と :first-child ルート判定を修正し test 33/35/36/41/42 を解放。selectorTest bucket3 の残り（test 34, 37-40, 43, 46, 47）は **016-10 のセレクタ拡充**（:lang / :only-child / :empty / :nth-child(An+B) / :enabled 等）が主因。
+- ~~**016-10 querySelector matcher 接続 + セレクタ拡充**~~ → 実装済み（63→70）。test 34/37/38/39/40/43 と、getElementById 経路修正により test 28 を解放。
+- **050 CSS media query 評価**: test 46（`@media`、iframe viewport、`text-transform` computed style）。
+- **051 CSS プロパティ値検証**: test 47（無効な `cursor` 宣言の破棄、初期値 `auto`、serialization）。issue 031 と相互参照。
 - **016-11 NodeIterator / TreeWalker / Range**: test 01-09, 11-13 等の「not a callable function」群。
 - **016-14 XML/XHTML・CSSOM・SVG DOM**: test 69-72, 74-80 の SVG/XML サブドキュメント系。
 - **016-16 iframe load イベント**: test 65/69 の kungFuDeathGrip。
-- 残: test 26-29, 50-51, 54-56, 64, 98 等（016-12/016-13 の残り + イベント dispatch）。
+- 残: test 26-27, 29, 50-51, 54-56, 64, 98 等（016-12/016-13 の残り + イベント dispatch）。
 
 ## 子issue
 
@@ -107,3 +122,5 @@ Acid3 ギャップ分析（`tests/fixtures/acid3/GAP_ANALYSIS.md`）に基づく
 - [ ] [016-14 XML/XHTML・CSSOM・SVG DOM](016-14-xml-cssom-svgdom.md)
 - [x] [016-15 getComputedStyle のサブ文書対応（selectorTest 解放の前提）](../closed/016-15-computed-style-subdocument.md)（PR #109, 58→63）
 - [ ] [016-16 iframe の load イベント発火](016-16-iframe-onload-event.md)
+- [ ] [050 CSS media query の構文解析・評価と computed style 反映](050-css-media-query-evaluation.md)（test 46）
+- [ ] [051 CSS プロパティ値検証と computed style serialization](051-css-property-value-validation.md)（test 47、031 と相互参照）
