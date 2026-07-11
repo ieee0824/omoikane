@@ -260,11 +260,15 @@ fn matches_attribute_selector(
 }
 
 fn matches_pseudo_class(node: &NodeHandle, name: &str, pseudo: Option<PseudoElement>) -> bool {
-    if let Some(argument) = name
-        .strip_prefix("nth-child(")
-        .and_then(|rest| rest.strip_suffix(')'))
-    {
-        return matches_nth_child(node, argument.trim());
+    if let Some((function, argument)) = functional_pseudo(name) {
+        return match function {
+            "nth-child" => matches_nth_child(node, argument),
+            "nth-last-child" => element_position(node)
+                .is_some_and(|(index, total)| {
+                    parse_an_plus_b(argument).is_some_and(|formula| formula.matches(total - index + 1))
+                }),
+            _ => false,
+        };
     }
 
     match name {
@@ -280,8 +284,21 @@ fn matches_pseudo_class(node: &NodeHandle, name: &str, pseudo: Option<PseudoElem
             };
             index == total
         }
+        "only-child" => element_position(node).is_some_and(|(_, total)| total == 1),
+        "empty" => node.child_nodes().into_iter().all(|child| match child.node_type() {
+            NodeType::Element => false,
+            NodeType::Text => child.data().is_some_and(|data| data.is_empty()),
+            _ => true,
+        }),
         _ => false,
     }
+}
+
+fn functional_pseudo(name: &str) -> Option<(&str, &str)> {
+    let open = name.find('(')?;
+    let function = &name[..open];
+    let argument = name[open + 1..].strip_suffix(')')?.trim();
+    Some((function, argument))
 }
 
 fn matches_pseudo_element(name: &str, pseudo: Option<PseudoElement>) -> bool {
@@ -526,6 +543,42 @@ mod tests {
         assert!(parse_an_plus_b("3n-1").unwrap().matches(5));
         assert!(!parse_an_plus_b("3n-1").unwrap().matches(3));
         assert!(parse_an_plus_b("0n+3").unwrap().matches(3));
+    }
+
+    #[test]
+    fn child_structural_pseudos_follow_current_element_siblings() {
+        let parent = NodeHandle::element("div");
+        let first = NodeHandle::element("p");
+        let second = NodeHandle::element("p");
+        let third = NodeHandle::element("p");
+        parent.append_child(NodeHandle::text("ignored"));
+        parent.append_child(first.clone());
+        parent.append_child(NodeHandle::comment("ignored"));
+        assert!(matches_selector(&first, &selector(":only-child {}")));
+        parent.append_child(second.clone());
+        parent.append_child(third.clone());
+
+        assert!(!matches_selector(&first, &selector(":only-child {}")));
+        assert!(matches_selector(&first, &selector(":nth-child(-n+3) {}")));
+        assert!(matches_selector(&third, &selector(":nth-last-child(1) {}")));
+        assert!(matches_selector(&second, &selector(":nth-last-child(even) {}")));
+        parent.remove_child(&first).unwrap();
+        assert!(matches_selector(&second, &selector(":first-child {}")));
+    }
+
+    #[test]
+    fn empty_ignores_comments_and_empty_text_but_not_content() {
+        let element = NodeHandle::element("div");
+        element.append_child(NodeHandle::comment("comment"));
+        element.append_child(NodeHandle::text(""));
+        assert!(matches_selector(&element, &selector(":empty {}")));
+
+        let whitespace = NodeHandle::text(" ");
+        element.append_child(whitespace.clone());
+        assert!(!matches_selector(&element, &selector(":empty {}")));
+        element.remove_child(&whitespace).unwrap();
+        element.append_child(NodeHandle::element("span"));
+        assert!(!matches_selector(&element, &selector(":empty {}")));
     }
 
     #[test]

@@ -435,7 +435,11 @@ impl Parser {
             let inner = parse_not_argument(&argument_str)?;
             Ok(SimpleSelector::Not(inner))
         } else {
-            let argument = render_tokens(&argument_tokens).trim().to_string();
+            let argument = if name.to_ascii_lowercase().starts_with("nth-") {
+                render_nth_argument(&argument_tokens)
+            } else {
+                render_tokens(&argument_tokens).trim().to_string()
+            };
             if argument.is_empty() {
                 return Err(CssParseError::InvalidSelector);
             }
@@ -578,6 +582,20 @@ impl Parser {
         self.index += 1;
         Some(token)
     }
+}
+
+fn render_nth_argument(tokens: &[CssToken]) -> String {
+    let mut rendered = String::new();
+    for token in tokens {
+        let piece = render_tokens(std::slice::from_ref(token));
+        if matches!(token, CssToken::Number(value) | CssToken::Dimension(value, _) if *value >= 0.0)
+            && rendered.trim_end().ends_with(['n', 'N'])
+        {
+            rendered.push('+');
+        }
+        rendered.push_str(&piece);
+    }
+    rendered.trim().to_string()
 }
 
 fn parse_value_tokens(tokens: &[CssToken]) -> Result<Value, CssParseError> {
