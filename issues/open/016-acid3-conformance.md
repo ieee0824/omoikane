@@ -58,7 +58,7 @@ Acid3 は DOM / CSS / HTML parser / scripting / networking まで含む複合テ
 | 016-12/016-13 部分 + 016-6 | 43/100 | DOMException 基盤・名前検証・createElementNS・createEvent 補完・table/form/input/button/label/meta/select 反射・Boa annex-b |
 | 016-7 + 016-9 + 016-8/044-2（PR #103/#104/#105） | **58/100** | document.write/open/close・iframe/contentDocument サブブラウジングコンテキスト・getComputedStyle 実値化・レイアウトメトリクス（offset*/client*/scroll*/getBoundingClientRect）・forced reflow |
 
-### 今回（43/100 到達）で新規 PASS したテスト
+### 43/100 到達時（016-12/016-13 部分 + 016-6）に新規 PASS したテスト
 
 - 016-12 分: test 19（appendChild HIERARCHY_REQUEST_ERR の JS 例外化）, 20（NUL バイト → INVALID_CHARACTER_ERR）, 21（createElementNS 名前空間プロパティ）, 22（createElement 名前検証）, 23（createElementNS 名前検証と例外コード）, 25（DOMException 定数群 + createDocumentType）, 30（createEvent('UIEvents')/initUIEvent/detail）
 - 016-13 分: test 49（table.caption/tHead/tFoot/tBodies/rows/create*/delete*）, 53（input.name 反射 + value dirty value + form.elements 名前/index アクセス）, 57（select.add/options）, 58（option.defaultSelected/select.selectedIndex）, 59（button 既定 type=submit）, 62（label.htmlFor / meta.httpEquiv 反射）
