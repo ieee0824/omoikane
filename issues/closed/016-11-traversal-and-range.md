@@ -2,7 +2,7 @@
 number: 016-11
 slug: traversal-and-range
 parent: 016
-status: open
+status: closed
 ---
 
 # NodeIterator / TreeWalker / Range 実装
