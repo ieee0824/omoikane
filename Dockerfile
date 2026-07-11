@@ -88,6 +88,16 @@ RUN curl -fsSL https://claude.ai/install.sh -o /tmp/claude-install.sh \
     && "$HOME/.local/bin/claude" --version
 ENV PATH=/home/${USERNAME}/.local/bin:${PATH}
 
+# Codex CLI（OpenAI）。code-reviewer / codex-specialist エージェント等の codex exec で使う。
+# 参考: https://learn.chatgpt.com/docs/codex/cli#getting-started
+# 本体は ~/.codex/packages に、ランチャーは ~/.local/bin/codex に入る。
+# ~/.codex はログイン情報も含むため named volume（codex-config）で永続化する。
+# Claude Code と同様、ダウンロードと実行を分離し、同一 RUN 内で検証まで行う。
+RUN curl -fsSL https://chatgpt.com/codex/install.sh -o /tmp/codex-install.sh \
+    && sh /tmp/codex-install.sh \
+    && rm /tmp/codex-install.sh \
+    && "$HOME/.local/bin/codex" --version
+
 # colima のバインドマウントはコンテナ内で root 所有に見えるため、
 # git が "dubious ownership" でリポジトリを拒否しないよう safe.directory を設定する。
 RUN git config --global --add safe.directory /workspace
