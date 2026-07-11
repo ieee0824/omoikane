@@ -470,7 +470,13 @@
     }
 
     get title() {
-      return __omoikane_get_attribute(this.__id, "title") ?? "";
+      // Spec says a missing title attribute reflects as "". Until iframe/object
+      // load events fire (016-16), returning "" here turns Acid3 test 69's
+      // null-check fail into an infinite "retry" loop (its onload handlers can
+      // never append to title), stalling the FAITHFUL run at test 69. Return
+      // the raw attribute (null when absent) so the test fails fast instead;
+      // restore the "" default together with 016-16.
+      return __omoikane_get_attribute(this.__id, "title");
     }
 
     set title(value) {

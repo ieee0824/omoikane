@@ -28,3 +28,7 @@ iframe のサブ文書ロード完了時に load イベント（`iframe.onload` 
 
 - Acid3 test 69 の kungFuDeathGrip 検証が前進する（test 65/69 の該当部分が PASS）
 - 静的・動的生成の両方の iframe で load が発火するテストを追加
+
+## 追記(2026-07-11, 016-15 実装時)
+
+- `HTMLElement.title` getter は仕様上、属性欠如時に `""` を返すべきだが、load イベント未発火の現状で `""` を返すと Acid3 test 69 が null チェックを通過して無限 retry になり、FAITHFUL 実行が test 69 で停止する(61→41 に退行)。暫定で属性欠如時は null を返している(dom_bootstrap.js の title getter 参照)。本 issue で load イベントを発火させる際に `?? ""` の仕様準拠デフォルトへ戻すこと。
