@@ -77,10 +77,10 @@ Acid3 ギャップ分析（`tests/fixtures/acid3/GAP_ANALYSIS.md`）に基づく
 実装順序の推奨は GAP_ANALYSIS.md セクション4 を参照。
 
 - [x] [016-1 Acid3 ローカル実行ハーネス](../closed/016-1-acid3-harness.md)
-- [ ] [016-2 script-data / RAWTEXT / RCDATA トークナイザ](016-2-script-data-tokenizer.md)
-- [ ] [016-3 setTimeout 関数コールバック保持 + イベントループ統合](016-3-timer-callbacks-event-loop.md)
-- [ ] [016-4 load イベント発火 + on* インラインハンドラ配線](016-4-load-event-inline-handlers.md)
-- [ ] [016-5 data: URI スクリプト対応](016-5-data-uri-scripts.md)
+- [x] [016-2 script-data / RAWTEXT / RCDATA トークナイザ](../closed/016-2-script-data-tokenizer.md)
+- [x] [016-3 setTimeout 関数コールバック保持 + イベントループ統合](../closed/016-3-timer-callbacks-event-loop.md)
+- [x] [016-4 load イベント発火 + on* インラインハンドラ配線](../closed/016-4-load-event-inline-handlers.md)
+- [x] [016-5 data: URI スクリプト対応](../closed/016-5-data-uri-scripts.md)
 - [ ] [016-6 bucket6 (ECMAScript) 実測と微修正](016-6-bucket6-ecmascript.md)
 - [ ] [016-7 document.write 実装](016-7-document-write.md)
 - [ ] [016-8 getComputedStyle 実値化（044-2 と同根）](016-8-computed-style-exposure.md)
@@ -90,3 +90,5 @@ Acid3 ギャップ分析（`tests/fixtures/acid3/GAP_ANALYSIS.md`）に基づく
 - [ ] [016-12 DOM2 Core / 名前空間 / DOMException](016-12-dom2-core-namespaces.md)
 - [ ] [016-13 HTMLTableElement / Form / Input / Select / Button API](016-13-table-form-apis.md)
 - [ ] [016-14 XML/XHTML・CSSOM・SVG DOM](016-14-xml-cssom-svgdom.md)
+- [ ] [016-15 getComputedStyle のサブ文書対応（selectorTest 解放の前提）](016-15-computed-style-subdocument.md)
+- [ ] [016-16 iframe の load イベント発火](016-16-iframe-onload-event.md)
