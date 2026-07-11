@@ -2,7 +2,7 @@
 number: 016-7
 slug: document-write
 parent: 016
-status: open
+status: closed
 ---
 
 # document.write 実装
