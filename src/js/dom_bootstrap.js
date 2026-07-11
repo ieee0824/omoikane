@@ -469,6 +469,14 @@
       __omoikane_set_attribute(this.__id, "id", String(value));
     }
 
+    get title() {
+      return __omoikane_get_attribute(this.__id, "title") ?? "";
+    }
+
+    set title(value) {
+      __omoikane_set_attribute(this.__id, "title", String(value));
+    }
+
     getAttribute(name) {
       return __omoikane_get_attribute(this.__id, String(name));
     }

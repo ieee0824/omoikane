@@ -7261,9 +7261,12 @@ mod tests {
     /// the main document's cached value is untouched.
     #[test]
     fn iframe_style_text_content_mutation_recomputes_only_subdocument() {
+        // The main document carries its own `<div id="t">` — the same id the
+        // sub-document's rule targets — so a leak of the sub-document rule into
+        // the main resolver would be directly observable on it.
         let mut runtime = runtime_from_html(
             r#"<html><head><style>#m { z-index: 5; position: absolute; }</style></head>
-               <body><div id="m"></div><iframe id="f"></iframe></body></html>"#,
+               <body><div id="m"></div><div id="t"></div><iframe id="f"></iframe></body></html>"#,
         );
         runtime
             .eval(
@@ -7284,6 +7287,15 @@ mod tests {
             ),
             "5"
         );
+        // The main document's own `#t` has no rule, so its baseline is default.
+        assert_eq!(
+            eval_str(
+                &mut runtime,
+                "getComputedStyle(document.getElementById('t'), '').zIndex"
+            ),
+            "",
+            "the main document has no #t rule, so its #t element starts at the default z-index"
+        );
 
         // Mutate only the sub-document's stylesheet.
         runtime
@@ -7302,6 +7314,16 @@ mod tests {
             ),
             "5",
             "the main document's resolver must be untouched by a sub-document mutation"
+        );
+        // The sub-document's `#t` rule must not leak onto the main document's
+        // `#t` element, which shares the id the rule targets.
+        assert_eq!(
+            eval_str(
+                &mut runtime,
+                "getComputedStyle(document.getElementById('t'), '').zIndex"
+            ),
+            "",
+            "the sub-document #t rule must not apply to the main document's #t element"
         );
     }
 
@@ -7421,9 +7443,12 @@ mod tests {
     /// cached resolver is not polluted.
     #[test]
     fn iframe_document_write_marks_own_document_dirty() {
+        // The main document carries a `<div id="w">` — the id the written
+        // sub-document rule targets — so any leak of that rule into the main
+        // resolver would be directly observable on it.
         let mut runtime = runtime_from_html(
             r#"<html><head><style>#m { z-index: 7; position: absolute; }</style></head>
-               <body><div id="m"></div><iframe id="f"></iframe></body></html>"#,
+               <body><div id="m"></div><div id="w"></div><iframe id="f"></iframe></body></html>"#,
         );
         // Prime both resolvers.
         assert_eq!(
@@ -7432,6 +7457,15 @@ mod tests {
                 "getComputedStyle(document.getElementById('m'), '').zIndex"
             ),
             "7"
+        );
+        // The main document has no #w rule, so its #w element starts at default.
+        assert_eq!(
+            eval_str(
+                &mut runtime,
+                "getComputedStyle(document.getElementById('w'), '').zIndex"
+            ),
+            "",
+            "the main document has no #w rule, so its #w element starts at the default z-index"
         );
         runtime
             .eval("var d = document.getElementById('f').contentDocument; d.body;")
@@ -7458,6 +7492,16 @@ mod tests {
             ),
             "7",
             "a sub-document write must not pollute the main document's resolver"
+        );
+        // The written sub-document `#w` rule must not leak onto the main
+        // document's `#w` element, which shares the id the rule targets.
+        assert_eq!(
+            eval_str(
+                &mut runtime,
+                "getComputedStyle(document.getElementById('w'), '').zIndex"
+            ),
+            "",
+            "the written sub-document #w rule must not apply to the main document's #w element"
         );
     }
 
@@ -7566,6 +7610,77 @@ mod tests {
         );
     }
 
+    /// Injecting a `<style>` into a sub-document element via `innerHTML` (after
+    /// the resolver was primed with a first query) must invalidate that
+    /// sub-document so the new rule is picked up on the next `getComputedStyle`.
+    #[test]
+    fn iframe_inner_html_style_injection_recomputes_subdocument() {
+        let mut runtime = runtime_from_html(
+            r#"<html><body><iframe id="f"></iframe></body></html>"#,
+        );
+        runtime
+            .eval(
+                r#"var d = document.getElementById('f').contentDocument;
+                   var host = d.createElement('div'); d.body.appendChild(host);
+                   var t = d.createElement('div'); t.id = 't'; d.body.appendChild(t);"#,
+            )
+            .unwrap();
+
+        // Prime the sub-document resolver before any rule exists.
+        assert_eq!(
+            eval_str(&mut runtime, "getComputedStyle(t, '').zIndex"),
+            "",
+            "with no rule the target must report the default z-index"
+        );
+
+        // Inject a `<style>` nested inside `host` through innerHTML.
+        runtime
+            .eval(
+                r#"host.innerHTML = '<style>#t { z-index: 8; position: absolute; }</style>';"#,
+            )
+            .unwrap();
+
+        assert_eq!(
+            eval_str(&mut runtime, "getComputedStyle(t, '').zIndex"),
+            "8",
+            "an innerHTML-injected <style> must recompute the primed sub-document resolver"
+        );
+    }
+
+    /// Changing a sub-document element's `class` via `setAttribute` after the
+    /// resolver was primed must invalidate that sub-document so a class selector
+    /// re-matches on the next query.
+    #[test]
+    fn iframe_set_attribute_class_rematches_after_prime() {
+        let mut runtime = runtime_from_html(
+            r#"<html><body><iframe id="f"></iframe></body></html>"#,
+        );
+        runtime
+            .eval(
+                r#"var d = document.getElementById('f').contentDocument;
+                   var s = d.createElement('style');
+                   s.textContent = '.hot { z-index: 9; position: absolute; }';
+                   d.body.appendChild(s);
+                   var t = d.createElement('div'); t.id = 't'; d.body.appendChild(t);"#,
+            )
+            .unwrap();
+
+        // Prime: the target has no `class`, so `.hot` does not match yet.
+        assert_eq!(
+            eval_str(&mut runtime, "getComputedStyle(t, '').zIndex"),
+            "",
+            "before the class is set the .hot rule must not match"
+        );
+
+        runtime.eval("t.setAttribute('class', 'hot');").unwrap();
+
+        assert_eq!(
+            eval_str(&mut runtime, "getComputedStyle(t, '').zIndex"),
+            "9",
+            "a setAttribute('class', ...) must invalidate the primed sub-document and re-match .hot"
+        );
+    }
+
     /// Deterministic port of Acid3 bucket-3 `selectorTest` cases (tests
     /// 33/35/36/41/42) that use selectors the matcher already supports. This
     /// exercises the exact path Acid3 uses — append `* { z-index: 0; position:
@@ -7627,23 +7742,27 @@ mod tests {
             "class selector must match the target and no other element"
         );
 
-        // test 33: attribute selector `[title=...]`.
+        // test 33: attribute selector `[title=...]` reached through the
+        // `HTMLElement.title` IDL setter (Acid3 sets `p.title = ...`, not
+        // `setAttribute`). The setter must reflect into the `title` attribute so
+        // the selector matches.
         assert_eq!(
             eval_str(
                 &mut runtime,
                 r#"(function(){
                     var doc = setupTestDoc();
                     var p = doc.createElement('p'); doc.body.appendChild(p);
-                    p.setAttribute('title', 'selectorPingTest');
+                    p.title = 'selectorPingTest';
                     addRule('[title=selectorPingTest]');
                     return [zi(p), zi(doc.body)].join(',');
                 })()"#
             ),
             "1,0",
-            "[title=...] attribute selector must match the target only"
+            "the title IDL setter must reflect into [title=...] and match the target only"
         );
 
-        // test 35: :first-child.
+        // test 35: :first-child. The parentless root element must never match it
+        // (its parent is the Document, not an element).
         assert_eq!(
             eval_str(
                 &mut runtime,
@@ -7652,11 +7771,11 @@ mod tests {
                     var first = addRule(':first-child');
                     var p1 = doc.createElement('p'); doc.body.appendChild(p1);
                     var p2 = doc.createElement('p'); doc.body.appendChild(p2);
-                    return [zi(p1), zi(p2)].join(',');
+                    return [zi(doc.documentElement), zi(p1), zi(p2)].join(',');
                 })()"#
             ),
-            "1,0",
-            ":first-child must match only the first child"
+            "0,1,0",
+            ":first-child must match only the first child and never the parentless root element"
         );
 
         // test 36: :last-child.
@@ -7708,6 +7827,62 @@ mod tests {
             ),
             "0,0,0,1,1,1",
             "the combinator chain must match only the deepest three divs"
+        );
+
+        // test 42 (cont.): adjacent-sibling combinator `h1 + p` — only the `p`
+        // immediately preceded by the `h1` matches.
+        assert_eq!(
+            eval_str(
+                &mut runtime,
+                r#"(function(){
+                    var doc = setupTestDoc();
+                    var h = doc.createElement('h1'); doc.body.appendChild(h);
+                    var p = doc.createElement('p'); doc.body.appendChild(p);
+                    addRule('h1 + p');
+                    return [zi(h), zi(p)].join(',');
+                })()"#
+            ),
+            "0,1",
+            "the adjacent-sibling combinator must match only the immediately following element"
+        );
+
+        // test 42 (cont.): general-sibling combinator `h1 ~ p` — every `p`
+        // following the `h1` in the same parent matches.
+        assert_eq!(
+            eval_str(
+                &mut runtime,
+                r#"(function(){
+                    var doc = setupTestDoc();
+                    var h = doc.createElement('h1'); doc.body.appendChild(h);
+                    var p1 = doc.createElement('p'); doc.body.appendChild(p1);
+                    var p2 = doc.createElement('p'); doc.body.appendChild(p2);
+                    addRule('h1 ~ p');
+                    return [zi(h), zi(p1), zi(p2)].join(',');
+                })()"#
+            ),
+            "0,1,1",
+            "the general-sibling combinator must match all following siblings"
+        );
+
+        // test 42 (cont.): `insertBefore` into a *primed* sub-document must
+        // recompute the sub-document's resolver (insert_before_native marks the
+        // target document dirty). A `:first-child` rule is primed against `p2`
+        // (then the only child → matches); inserting `p1` before it must move
+        // the match to `p1` and drop it from `p2`.
+        assert_eq!(
+            eval_str(
+                &mut runtime,
+                r#"(function(){
+                    var doc = setupTestDoc();
+                    addRule(':first-child');
+                    var p2 = doc.createElement('p'); doc.body.appendChild(p2);
+                    var primed = zi(p2);
+                    var p1 = doc.createElement('p'); doc.body.insertBefore(p1, p2);
+                    return [primed, zi(p1), zi(p2)].join(',');
+                })()"#
+            ),
+            "1,1,0",
+            "insertBefore into a primed sub-document must re-match :first-child against the new first child"
         );
     }
 }
