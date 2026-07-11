@@ -28,13 +28,14 @@ jQuery 等のエラーを個別に追うのではなく、よく使われる API
 - コンテンツ: `textContent`, `innerHTML`
 - メタ: `nodeType`, `nodeName`
 - ネットワーク: `fetch`（基本）
+- スタイル/レイアウト: `__omoikane_computed_style`（カスケード実値）, `__omoikane_layout_metrics`（offset*/client*/scroll*/getBoundingClientRect、forced reflow 付き）— 044-2/PR #105
 
 ### JS ポリフィル
 - Event system（capture/bubble/target phases）
 - `className`, `classList`, `style`（Proxy）, `tagName`
 - `getElementsByTagName`, `getElementsByClassName`
 - `IntersectionObserver`
-- `getComputedStyle`（空 Proxy stub）
+- `getComputedStyle`（カスケード実値を返す実装。044-2/PR #105 で空 Proxy stub を置換）
 - `window.addEventListener/removeEventListener`
 - `Element`, `HTMLElement`（Node class のエイリアス）
 
