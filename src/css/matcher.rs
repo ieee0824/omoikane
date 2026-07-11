@@ -267,6 +267,12 @@ fn matches_pseudo_class(node: &NodeHandle, name: &str, pseudo: Option<PseudoElem
                 .is_some_and(|(index, total)| {
                     parse_an_plus_b(argument).is_some_and(|formula| formula.matches(total - index + 1))
                 }),
+            "nth-of-type" => type_position(node).is_some_and(|(index, _)| {
+                parse_an_plus_b(argument).is_some_and(|formula| formula.matches(index))
+            }),
+            "nth-last-of-type" => type_position(node).is_some_and(|(index, total)| {
+                parse_an_plus_b(argument).is_some_and(|formula| formula.matches(total - index + 1))
+            }),
             _ => false,
         };
     }
@@ -285,6 +291,9 @@ fn matches_pseudo_class(node: &NodeHandle, name: &str, pseudo: Option<PseudoElem
             index == total
         }
         "only-child" => element_position(node).is_some_and(|(_, total)| total == 1),
+        "first-of-type" => type_position(node).is_some_and(|(index, _)| index == 1),
+        "last-of-type" => type_position(node).is_some_and(|(index, total)| index == total),
+        "only-of-type" => type_position(node).is_some_and(|(_, total)| total == 1),
         "empty" => node.child_nodes().into_iter().all(|child| match child.node_type() {
             NodeType::Element => false,
             NodeType::Text => child.data().is_some_and(|data| data.is_empty()),
@@ -419,6 +428,26 @@ fn element_position(node: &NodeHandle) -> Option<(usize, usize)> {
         .iter()
         .position(|candidate| candidate == node)
         .map(|position| position + 1)?;
+    Some((index, total))
+}
+
+fn type_position(node: &NodeHandle) -> Option<(usize, usize)> {
+    let parent = node.parent_node()?;
+    if parent.node_type() != NodeType::Element {
+        return None;
+    }
+    let tag_name = node.tag_name()?;
+    let same_type: Vec<NodeHandle> = parent
+        .child_nodes()
+        .into_iter()
+        .filter(|child| {
+            child
+                .tag_name()
+                .is_some_and(|tag| tag.eq_ignore_ascii_case(&tag_name))
+        })
+        .collect();
+    let total = same_type.len();
+    let index = same_type.iter().position(|candidate| candidate == node)? + 1;
     Some((index, total))
 }
 
@@ -579,6 +608,45 @@ mod tests {
         element.remove_child(&whitespace).unwrap();
         element.append_child(NodeHandle::element("span"));
         assert!(!matches_selector(&element, &selector(":empty {}")));
+    }
+
+    #[test]
+    fn of_type_pseudos_count_only_matching_element_names() {
+        let parent = NodeHandle::element("div");
+        let mut paragraphs = Vec::new();
+        for index in 0..8 {
+            if index % 2 == 0 {
+                parent.append_child(NodeHandle::element("span"));
+            }
+            let paragraph = NodeHandle::element("p");
+            parent.append_child(paragraph.clone());
+            paragraphs.push(paragraph);
+        }
+
+        assert!(matches_selector(&paragraphs[0], &selector(":first-of-type {}")));
+        assert!(matches_selector(&paragraphs[7], &selector(":last-of-type {}")));
+        assert_eq!(
+            paragraphs
+                .iter()
+                .enumerate()
+                .filter_map(|(i, node)| matches_selector(node, &selector(":nth-of-type(3n-1) {}"))
+                    .then_some(i + 1))
+                .collect::<Vec<_>>(),
+            vec![2, 5, 8]
+        );
+        assert_eq!(
+            paragraphs
+                .iter()
+                .enumerate()
+                .filter_map(|(i, node)| matches_selector(node, &selector(":nth-last-of-type(-5n+3) {}"))
+                    .then_some(i + 1))
+                .collect::<Vec<_>>(),
+            vec![6]
+        );
+
+        let unique = NodeHandle::element("em");
+        parent.append_child(unique.clone());
+        assert!(matches_selector(&unique, &selector(":only-of-type {}")));
     }
 
     #[test]
