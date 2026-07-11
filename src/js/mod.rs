@@ -281,13 +281,25 @@ impl HostState {
         // The `src` changed (or this is the first load). Drop any previously
         // loaded sub-document tree from the node registry before loading the
         // new one, so stale nodes are released and their ids stop resolving
-        // instead of leaking across reloads.
+        // instead of leaking across reloads. Its per-document style cache entry
+        // is dropped too, so the reloaded document does not inherit the old
+        // document's resolver (and the cache does not leak entries per reload).
         if let Some(previous) = self.iframe_documents.remove(&iframe_id) {
+            self.document_styles.remove(&previous.document.identity());
             self.unregister_tree(&previous.document);
         }
 
         let document = self.load_iframe_document(&src);
         self.register_tree(&document);
+        // Seed a dirty style cache entry for the freshly loaded sub-document so
+        // its resolver is built from its own `<style>` rules on first query.
+        self.document_styles.insert(
+            document.identity(),
+            DocumentStyleEntry {
+                resolver: None,
+                dirty: true,
+            },
+        );
         self.iframe_documents.insert(
             iframe_id,
             IframeDocument {
@@ -6331,6 +6343,112 @@ mod tests {
              (expected {} nodes, found {} — the stale tree leaked)",
             base + sub_tree_size,
             after_reload
+        );
+    }
+
+    /// Reloading an iframe must discard the previous sub-document's per-document
+    /// style cache entry (not just its node tree) and seed a fresh entry for the
+    /// new document, so the reloaded frame never resolves against the old
+    /// document's resolver and the cache does not leak an entry per reload.
+    #[test]
+    fn iframe_reload_discards_old_document_style_entry() {
+        use crate::html::TreeBuilder;
+        let port = spawn_static_http_server(
+            "text/html",
+            r#"<html><body><style>#t { z-index: 1; position: absolute; }</style><div id="t"></div></body></html>"#,
+        );
+        let doc =
+            TreeBuilder::parse(r#"<html><body><iframe id="f"></iframe></body></html>"#).document();
+        let mut runtime = JsRuntime::with_document(doc).unwrap();
+
+        // First load, then a computed-style query to actually build the
+        // sub-document's resolver (not just seed a dirty placeholder).
+        runtime
+            .eval(&format!(
+                "document.getElementById('f').src = 'http://127.0.0.1:{port}/a.html'; \
+                 var d = document.getElementById('f').contentDocument; \
+                 getComputedStyle(d.getElementById('t'), '').zIndex;"
+            ))
+            .unwrap();
+
+        // Hold a strong reference to the old document so its heap address (and
+        // thus its `identity()`, which is pointer-based) cannot be reused by the
+        // reloaded document. This makes the old/new identity comparison below
+        // deterministic — otherwise the freed old document node's address could
+        // be recycled for the new one.
+        let old_document: NodeHandle = {
+            let s = runtime.host_state.borrow();
+            s.iframe_documents
+                .values()
+                .next()
+                .expect("one iframe document after first load")
+                .document
+                .clone()
+        };
+        let old_doc_id = old_document.identity();
+        {
+            let s = runtime.host_state.borrow();
+            assert!(
+                s.document_styles.contains_key(&old_doc_id),
+                "first load must create the sub-document's style entry"
+            );
+            assert!(
+                s.document_styles
+                    .get(&old_doc_id)
+                    .unwrap()
+                    .resolver
+                    .is_some(),
+                "the computed-style query must have built the resolver"
+            );
+            assert!(
+                s.nodes.contains_key(&old_doc_id),
+                "first load must register the sub-document node"
+            );
+        }
+
+        // Reload the iframe with a different URL (identical markup).
+        runtime
+            .eval(&format!(
+                "document.getElementById('f').src = 'http://127.0.0.1:{port}/b.html'; \
+                 var d2 = document.getElementById('f').contentDocument; \
+                 getComputedStyle(d2.getElementById('t'), '').zIndex;"
+            ))
+            .unwrap();
+
+        let new_doc_id = {
+            let s = runtime.host_state.borrow();
+            let (_id, entry) = s
+                .iframe_documents
+                .iter()
+                .next()
+                .expect("one iframe document after reload");
+            entry.document.identity()
+        };
+        assert_ne!(
+            new_doc_id, old_doc_id,
+            "reloading must produce a new document node with a new identity"
+        );
+
+        let s = runtime.host_state.borrow();
+        assert!(
+            !s.document_styles.contains_key(&old_doc_id),
+            "the old document's style entry must be discarded on reload"
+        );
+        assert!(
+            !s.nodes.contains_key(&old_doc_id),
+            "the old document node must be unregistered on reload"
+        );
+        assert!(
+            s.document_styles.contains_key(&new_doc_id),
+            "the reloaded document must have its own style entry"
+        );
+        assert!(
+            s.document_styles
+                .get(&new_doc_id)
+                .unwrap()
+                .resolver
+                .is_some(),
+            "the reloaded document's resolver must be built after the re-query"
         );
     }
 
