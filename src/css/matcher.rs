@@ -261,7 +261,11 @@ fn matches_attribute_selector(
 
 fn matches_pseudo_class(node: &NodeHandle, name: &str, pseudo: Option<PseudoElement>) -> bool {
     if let Some((function, argument)) = functional_pseudo(name) {
-        return match function {
+        // Pseudo-class names are ASCII case-insensitive; the argument keeps
+        // its original case (`:lang()` compares case-insensitively itself and
+        // an+b parsing lowercases internally).
+        let function = function.to_ascii_lowercase();
+        return match function.as_str() {
             "nth-child" => matches_nth_child(node, argument),
             "nth-last-child" => element_position(node)
                 .is_some_and(|(index, total)| {
@@ -278,7 +282,8 @@ fn matches_pseudo_class(node: &NodeHandle, name: &str, pseudo: Option<PseudoElem
         };
     }
 
-    match name {
+    let name = name.to_ascii_lowercase();
+    match name.as_str() {
         "before" => pseudo == Some(PseudoElement::Before),
         "after" => pseudo == Some(PseudoElement::After),
         "root" => node
@@ -297,7 +302,7 @@ fn matches_pseudo_class(node: &NodeHandle, name: &str, pseudo: Option<PseudoElem
         "only-of-type" => type_position(node).is_some_and(|(_, total)| total == 1),
         "enabled" => is_form_control(node) && get_attribute(node, "disabled").is_none(),
         "disabled" => is_form_control(node) && get_attribute(node, "disabled").is_some(),
-        "checked" => is_checkable_input(node) && node.checked(),
+        "checked" => node.checked(),
         "empty" => node.child_nodes().into_iter().all(|child| match child.node_type() {
             NodeType::Element => false,
             NodeType::Text => child.data().is_some_and(|data| data.is_empty()),
@@ -314,12 +319,6 @@ fn is_form_control(node: &NodeHandle) -> bool {
             "button" | "input" | "select" | "textarea" | "option" | "optgroup" | "fieldset"
         )
     })
-}
-
-fn is_checkable_input(node: &NodeHandle) -> bool {
-    node.tag_name().is_some_and(|tag| tag == "input")
-        && get_attribute(node, "type")
-            .is_some_and(|kind| matches!(kind.to_ascii_lowercase().as_str(), "checkbox" | "radio"))
 }
 
 fn matches_language(node: &NodeHandle, range: &str) -> bool {
@@ -349,7 +348,8 @@ fn functional_pseudo(name: &str) -> Option<(&str, &str)> {
 }
 
 fn matches_pseudo_element(name: &str, pseudo: Option<PseudoElement>) -> bool {
-    match name {
+    // Pseudo-element names are ASCII case-insensitive (`::BEFORE`).
+    match name.to_ascii_lowercase().as_str() {
         "before" => pseudo == Some(PseudoElement::Before),
         "after" => pseudo == Some(PseudoElement::After),
         _ => false,
@@ -535,6 +535,30 @@ mod tests {
         main.append_child(cta.clone());
 
         (document, html, body, main, lead, title, cta)
+    }
+
+    #[test]
+    fn pseudo_class_names_are_ascii_case_insensitive() {
+        // Named bindings keep the whole tree alive: a bare `_` would drop the
+        // ancestor handles and sever the children's weak parent links.
+        let (_document, _html, _body, _main, lead, title, _cta) = sample_tree();
+
+        assert!(
+            matches_selector(&title, &selector(":FIRST-CHILD {}")),
+            ":FIRST-CHILD must match like :first-child"
+        );
+        assert!(
+            matches_selector(&title, &selector(":NTH-CHILD(ODD) {}")),
+            ":NTH-CHILD(ODD) must match like :nth-child(odd)"
+        );
+        assert!(
+            matches_selector(&lead, &selector(":Nth-Child(EVEN) {}")),
+            ":Nth-Child(EVEN) must match like :nth-child(even)"
+        );
+        assert!(
+            !matches_selector(&lead, &selector(":FIRST-CHILD {}")),
+            "case-insensitive names must not loosen matching itself"
+        );
     }
 
     #[test]

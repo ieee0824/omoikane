@@ -3996,6 +3996,70 @@ mod tests {
     }
 
     #[test]
+    fn checkedness_is_limited_to_checkable_inputs() {
+        use crate::html::TreeBuilder;
+        // A `checked` attribute on a text input or a non-input element must
+        // not surface through the `.checked` IDL property (nor `:checked`);
+        // checkedness only applies to checkbox/radio inputs.
+        let doc = TreeBuilder::parse(
+            r#"<html><body><input id="text" type="text" checked><div id="div" checked></div><input id="box" type="checkbox" checked></body></html>"#,
+        )
+        .document();
+        let mut runtime = JsRuntime::with_document(doc).unwrap();
+        let result = runtime
+            .eval(
+                r#"
+                (() => {
+                  const text = document.getElementById("text");
+                  const div = document.getElementById("div");
+                  const box = document.getElementById("box");
+                  return [text.checked, div.checked, box.checked,
+                          document.querySelector(":checked") === box].join("|");
+                })()
+                "#,
+            )
+            .unwrap()
+            .to_string(&mut runtime.context)
+            .unwrap()
+            .to_std_string_escaped();
+        assert_eq!(result, "false|false|true|true");
+    }
+
+    #[test]
+    fn click_dispatches_on_non_disableable_elements_with_disabled_attribute() {
+        use crate::html::TreeBuilder;
+        // `disabled` only suppresses activation on form controls: a
+        // `<div disabled>` still dispatches click, a `<button disabled>`
+        // does not.
+        let doc = TreeBuilder::parse(
+            r#"<html><body><div id="div" disabled></div><button id="btn" disabled></button></body></html>"#,
+        )
+        .document();
+        let mut runtime = JsRuntime::with_document(doc).unwrap();
+        let result = runtime
+            .eval(
+                r#"
+                (() => {
+                  const div = document.getElementById("div");
+                  const btn = document.getElementById("btn");
+                  let divClicked = false;
+                  let btnClicked = false;
+                  div.addEventListener("click", () => { divClicked = true; });
+                  btn.addEventListener("click", () => { btnClicked = true; });
+                  div.click();
+                  btn.click();
+                  return [divClicked, btnClicked].join("|");
+                })()
+                "#,
+            )
+            .unwrap()
+            .to_string(&mut runtime.context)
+            .unwrap()
+            .to_std_string_escaped();
+        assert_eq!(result, "true|false");
+    }
+
+    #[test]
     fn form_checkedness_is_live_dirty_and_radio_exclusive() {
         use crate::html::TreeBuilder;
         let doc = TreeBuilder::parse(

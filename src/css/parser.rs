@@ -57,9 +57,12 @@ fn selector_is_supported_for_dom_query(selector: &Selector) -> bool {
     selector.parts.iter().all(|part| {
         part.simples.iter().all(|simple| match simple {
             SimpleSelector::PseudoClass(name) => {
+                // Pseudo-class names are ASCII case-insensitive
+                // (`:NTH-CHILD(odd)` is valid), so normalize before gating.
                 let base = name.split_once('(').map_or(name.as_str(), |(base, _)| base);
+                let base = base.to_ascii_lowercase();
                 let known = matches!(
-                    base,
+                    base.as_str(),
                     "root" | "first-child" | "last-child" | "only-child"
                         | "nth-child" | "nth-last-child" | "first-of-type"
                         | "last-of-type" | "only-of-type" | "nth-of-type"
@@ -69,13 +72,14 @@ fn selector_is_supported_for_dom_query(selector: &Selector) -> bool {
                 known
                     && (!base.starts_with("nth-")
                         || name
-                            .strip_prefix(base)
-                            .and_then(|rest| rest.strip_prefix('('))
-                            .and_then(|rest| rest.strip_suffix(')'))
+                            .split_once('(')
+                            .and_then(|(_, rest)| rest.strip_suffix(')'))
                             .and_then(super::matcher::parse_an_plus_b)
                             .is_some())
             }
-            SimpleSelector::PseudoElement(name) => matches!(name.as_str(), "before" | "after"),
+            SimpleSelector::PseudoElement(name) => {
+                name.eq_ignore_ascii_case("before") || name.eq_ignore_ascii_case("after")
+            }
             SimpleSelector::Not(inner) => inner.iter().all(|simple| {
                 selector_is_supported_for_dom_query(&Selector {
                     parts: vec![SelectorPart {
@@ -625,10 +629,22 @@ impl Parser {
 
 fn render_nth_argument(tokens: &[CssToken]) -> String {
     let mut rendered = String::new();
-    for token in tokens {
+    for (index, token) in tokens.iter().enumerate() {
         let piece = render_tokens(std::slice::from_ref(token));
+        // The tokenizer folds a '+' that directly precedes digits into the
+        // number itself (`2n+3` tokenizes as `2n`, `3`), so the sign has to be
+        // re-inserted when rendering. Only do so when the number *immediately*
+        // follows the `n` token: with intervening whitespace (`2n 3`) the
+        // source had no operator at all and must stay invalid. Known
+        // limitation: `2n +3` (space before a folded `+`) is tokenized
+        // identically to `2n 3` and is therefore also rejected — write
+        // `2n + 3` or `2n+3` instead. A negative b keeps its sign in the
+        // token value, so `2n -3` stays valid.
+        let follows_n_directly = index > 0
+            && !matches!(tokens[index - 1], CssToken::Whitespace)
+            && rendered.ends_with(['n', 'N']);
         if matches!(token, CssToken::Number(value) | CssToken::Dimension(value, _) if *value >= 0.0)
-            && rendered.trim_end().ends_with(['n', 'N'])
+            && follows_n_directly
         {
             rendered.push('+');
         }
@@ -1042,6 +1058,36 @@ mod selector_list_tests {
     fn standalone_selector_list_rejects_empty_or_partial_lists() {
         for invalid in ["", "   ", ",div", "div,", "div,,span"] {
             assert!(parse_selector_list(invalid).is_err(), "accepted {invalid:?}");
+        }
+    }
+
+    #[test]
+    fn standalone_selector_list_rejects_an_plus_b_missing_operator() {
+        // A whitespace-separated b with no operator is not valid an+b
+        // grammar and must not be silently normalized into `an+b`.
+        for invalid in [
+            ":nth-child(2n 3)",
+            ":nth-child(n 3)",
+            ":nth-last-of-type(2n 1)",
+        ] {
+            assert!(parse_selector_list(invalid).is_err(), "accepted {invalid:?}");
+        }
+        // Whitespace around an explicit operator stays valid, and a negative
+        // b keeps its sign inside the number token.
+        for valid in [
+            ":nth-child(2n + 3)",
+            ":nth-child(2n+3)",
+            ":nth-child(2n - 1)",
+            ":nth-child(2n -1)",
+        ] {
+            assert!(parse_selector_list(valid).is_ok(), "rejected {valid:?}");
+        }
+    }
+
+    #[test]
+    fn standalone_selector_list_accepts_uppercase_pseudo_names() {
+        for valid in [":NTH-CHILD(odd)", ":First-Child", "::BEFORE", ":LANG(en)"] {
+            assert!(parse_selector_list(valid).is_ok(), "rejected {valid:?}");
         }
     }
 

@@ -345,9 +345,34 @@ impl NodeHandle {
     }
 
     /// Returns the live checkedness of an element.
+    ///
+    /// Checkedness is only meaningful for checkable inputs (`<input
+    /// type="checkbox">` / `<input type="radio">`), matching `:checked` and
+    /// HTML semantics: any other element reports `false` even if a stray
+    /// `checked` attribute recorded internal state. The internal state is
+    /// still kept in sync with the content attribute, so an input whose
+    /// `type` later becomes checkable reports the attribute-derived
+    /// checkedness, as the non-dirty default would.
     pub fn checked(&self) -> bool {
+        if !self.is_checkable_input() {
+            return false;
+        }
         match &self.0.borrow().data {
             NodeData::Element(element) => element.checked,
+            _ => false,
+        }
+    }
+
+    /// Returns `true` for `<input>` elements whose `type` attribute makes
+    /// them checkable (`checkbox` or `radio`, ASCII case-insensitive).
+    pub fn is_checkable_input(&self) -> bool {
+        match &self.0.borrow().data {
+            NodeData::Element(element) => {
+                element.tag_name == "input"
+                    && element.attributes.get("type").is_some_and(|kind| {
+                        matches!(kind.to_ascii_lowercase().as_str(), "checkbox" | "radio")
+                    })
+            }
             _ => false,
         }
     }

@@ -948,7 +948,10 @@
     focus() {}
     blur() {}
     click() {
-      if (this.disabled) return;
+      // A `disabled` attribute only suppresses activation on elements where
+      // it has meaning; a stray `<div disabled>` must still dispatch click.
+      const DISABLEABLE_TAGS = ["input", "button", "select", "textarea", "option", "optgroup", "fieldset"];
+      if (this.disabled && DISABLEABLE_TAGS.includes(this.nodeName.toLowerCase())) return;
       if (this.nodeName === "INPUT") {
         const type = this.type.toLowerCase();
         if (type === "checkbox") this.checked = !this.checked;
@@ -1079,10 +1082,18 @@
       // the lookup still resolves against the main tree.
       const scope = this instanceof Document ? this : globalThis.document;
       const expected = String(id);
-      for (const element of scope.querySelectorAll("*")) {
-        if (element.getAttribute("id") === expected) return element;
-      }
-      return null;
+      // Plain tree walk with an id equality check: getElementById needs no
+      // selector parsing/matching and no full-document snapshot.
+      const findById = (node) => {
+        for (const child of node.childNodes) {
+          if (child.nodeType !== 1) continue;
+          if (child.getAttribute("id") === expected) return child;
+          const found = findById(child);
+          if (found) return found;
+        }
+        return null;
+      };
+      return findById(scope);
     }
 
     createElement(tag) {
