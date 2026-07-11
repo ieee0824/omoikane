@@ -3029,6 +3029,117 @@ mod tests {
     }
 
     #[test]
+    fn traversal_registry_sweeps_unreachable_objects_after_repeated_create() {
+        let mut runtime = JsRuntime::with_document(sample_document()).unwrap();
+        runtime
+            .eval(
+                "for (let i = 0; i < 5000; i++) { \
+                    document.createRange(); \
+                    document.createNodeIterator(document); \
+                }",
+            )
+            .unwrap();
+
+        // WeakRef targets are deliberately kept alive until the end of their
+        // current ECMAScript job. Force a collection between evaluations, then
+        // read the diagnostic (which performs the same sweep as registration
+        // and DOM mutation).
+        runtime.context.clear_kept_objects();
+        boa_gc::force_collect();
+        let result = runtime
+            .eval(
+                r#"
+                const counts = __omoikane_traversal_registry_counts(document);
+                `${counts.ranges},${counts.iterators}`;
+                "#,
+            )
+            .unwrap()
+            .as_string()
+            .unwrap()
+            .to_std_string_escaped();
+
+        assert_eq!(result, "0,0", "unreachable traversal objects must be swept from the registry");
+    }
+
+    #[test]
+    fn bulk_content_replacement_adjusts_live_iterators_and_ranges() {
+        let mut runtime = JsRuntime::with_document(sample_document()).unwrap();
+        let result = runtime
+            .eval(
+                r#"
+                const host = document.getElementById('app');
+                host.innerHTML = '<p>old</p><span>tail</span>';
+                const oldText = host.lastChild.firstChild;
+                const range = document.createRange();
+                range.setStart(oldText, 1);
+                range.setEnd(oldText, 2);
+                const iterator = document.createNodeIterator(host);
+                for (let i = 0; i < 5; i++) iterator.nextNode();
+                host.textContent = 'new';
+                const textResult = [range.startContainer === host, range.startOffset,
+                    range.endContainer === host, range.endOffset,
+                    iterator.referenceNode === host, iterator.nextNode().data].join(',');
+
+                host.innerHTML = '<b>again</b><i>tail</i>';
+                const innerText = host.lastChild.firstChild;
+                range.setStart(innerText, 1);
+                range.setEnd(innerText, 3);
+                const iterator2 = document.createNodeIterator(host);
+                for (let i = 0; i < 5; i++) iterator2.nextNode();
+                host.innerHTML = '<u>replacement</u>';
+                const htmlResult = [range.startContainer === host, range.startOffset,
+                    range.endContainer === host, range.endOffset,
+                    iterator2.referenceNode === host,
+                    iterator2.nextNode() === host.firstChild].join(',');
+                textResult + '|' + htmlResult;
+                "#,
+            )
+            .unwrap()
+            .as_string()
+            .unwrap()
+            .to_std_string_escaped();
+
+        assert_eq!(result, "true,0,true,0,true,new|true,0,true,0,true,true");
+    }
+
+    #[test]
+    fn range_set_start_and_end_reroot_across_documents() {
+        let mut runtime = JsRuntime::with_document(sample_document()).unwrap();
+        let result = runtime
+            .eval(
+                r#"
+                const frame = document.createElement('iframe');
+                document.body.appendChild(frame);
+                const foreign = frame.contentDocument;
+                const root = foreign.createElement('root');
+                foreign.appendChild(root);
+                const text = foreign.createTextNode('foreign');
+                root.appendChild(text);
+                const range = document.createRange();
+                range.selectNodeContents(document.getElementById('app'));
+                range.setStart(text, 2);
+                const afterStart = [range.collapsed, range.startContainer === text,
+                    range.endContainer === text, range.commonAncestorContainer === text,
+                    range.toString()].join(',');
+
+                const homeText = document.createTextNode('home');
+                document.getElementById('app').appendChild(homeText);
+                range.setEnd(homeText, 3);
+                const afterEnd = [range.collapsed, range.startContainer === homeText,
+                    range.endContainer === homeText, range.commonAncestorContainer === homeText,
+                    range.toString()].join(',');
+                afterStart + '|' + afterEnd;
+                "#,
+            )
+            .unwrap()
+            .as_string()
+            .unwrap()
+            .to_std_string_escaped();
+
+        assert_eq!(result, "true,true,true,true,|true,true,true,true,");
+    }
+
+    #[test]
     fn supports_event_listeners_bubbling_and_capture() {
         let mut runtime = JsRuntime::with_document(sample_document()).unwrap();
         runtime

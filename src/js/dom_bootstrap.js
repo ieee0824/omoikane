@@ -337,19 +337,89 @@
     }
   }
 
-  const traversalByDocument = new Map();
+  // Boa 0.21 exposes WeakMap/WeakRef (but not FinalizationRegistry), so the
+  // traversal registry must not itself keep Documents, NodeIterators or Ranges
+  // alive. Dead weak references are swept on registration, mutation and
+  // detach. The bounded strong-reference fallback is only for JS engines that
+  // lack WeakRef; bounding it trades updates to very old traversal objects for
+  // avoiding the permanent, unbounded leak that the old Map<id, Set> caused.
+  const hasWeakTraversalRegistry = typeof WeakMap === "function" && typeof WeakRef === "function";
+  const traversalByDocument = hasWeakTraversalRegistry ? new WeakMap() : new Map();
+  const MAX_STRONG_TRAVERSAL_ENTRIES = 1024;
+  const TRAVERSAL_SWEEP_INTERVAL = 64;
+  function traversalDocumentKey(doc) {
+    return hasWeakTraversalRegistry ? doc : doc.__id;
+  }
   function traversalState(doc) {
-    let state = traversalByDocument.get(doc.__id);
+    const key = traversalDocumentKey(doc);
+    let state = traversalByDocument.get(key);
     if (!state) {
-      state = { iterators: new Set(), ranges: new Set() };
-      traversalByDocument.set(doc.__id, state);
+      state = { iterators: [], ranges: [] };
+      traversalByDocument.set(key, state);
     }
     return state;
   }
 
+  function traversalEntries(entries) {
+    if (!hasWeakTraversalRegistry) return entries.slice();
+    const live = [];
+    for (let i = entries.length - 1; i >= 0; i--) {
+      const ref = entries[i];
+      const value = ref.deref();
+      if (value) live.push(value);
+      else entries.splice(i, 1);
+    }
+    return live;
+  }
+
+  function registerTraversal(doc, kind, value) {
+    const entries = traversalState(doc)[kind];
+    // WeakRef targets stay alive through the current ECMAScript job. Sweeping
+    // every insertion would therefore be quadratic in createRange-heavy code;
+    // periodic registration sweeps plus every mutation/detach keep it bounded
+    // without penalising a burst of live traversal objects.
+    if (entries.length % TRAVERSAL_SWEEP_INTERVAL === 0) traversalEntries(entries);
+    if (hasWeakTraversalRegistry) entries.push(new WeakRef(value));
+    else {
+      if (entries.length >= MAX_STRONG_TRAVERSAL_ENTRIES) entries.shift();
+      entries.push(value);
+    }
+  }
+
+  function unregisterTraversal(doc, kind, value) {
+    const entries = traversalState(doc)[kind];
+    if (!hasWeakTraversalRegistry) {
+      const index = entries.indexOf(value);
+      if (index !== -1) entries.splice(index, 1);
+    }
+    else {
+      for (let i = entries.length - 1; i >= 0; i--) {
+        const ref = entries[i];
+        const target = ref.deref();
+        if (!target || target === value) entries.splice(i, 1);
+      }
+    }
+  }
+
+  // Internal diagnostic used by regression tests; reading it also performs the
+  // same dead-reference sweep as normal registry operations.
+  globalThis.__omoikane_traversal_registry_counts = doc => {
+    const state = traversalByDocument.get(traversalDocumentKey(doc));
+    return state ? {
+      iterators: traversalEntries(state.iterators).length,
+      ranges: traversalEntries(state.ranges).length,
+    } : { iterators: 0, ranges: 0 };
+  };
+
   function nodeDocument(node) {
     if (!node) return globalThis.document;
     return node.nodeType === 9 ? node : (node.ownerDocument || globalThis.document);
+  }
+
+  function nodeRoot(node) {
+    let root = node;
+    while (root && root.parentNode) root = root.parentNode;
+    return root;
   }
 
   function isInclusiveDescendant(node, ancestor) {
@@ -364,10 +434,10 @@
 
   function preRemove(parent, removed) {
     const doc = nodeDocument(parent);
-    const state = traversalByDocument.get(doc.__id);
+    const state = traversalByDocument.get(traversalDocumentKey(doc));
     if (!state) return;
-    for (const iterator of state.iterators) iterator.__preRemove(removed);
-    for (const range of state.ranges) range.__preRemove(parent, removed);
+    for (const iterator of traversalEntries(state.iterators)) iterator.__preRemove(removed);
+    for (const range of traversalEntries(state.ranges)) range.__preRemove(parent, removed);
   }
 
   function notifyImplicitRemoval(node) {
@@ -630,6 +700,10 @@
 
     set textContent(value) {
       const text = value == null ? "" : String(value);
+      // Native replaces all children at once. Notify from the end so boundary
+      // offsets for later siblings are subsequently decremented by removals of
+      // their preceding siblings, matching sequential pre-remove semantics.
+      for (const child of this.childNodes.slice().reverse()) preRemove(this, child);
       __omoikane_set_text_content(this.__id, text);
     }
 
@@ -639,6 +713,7 @@
 
     set innerHTML(value) {
       const html = value == null ? "" : String(value);
+      for (const child of this.childNodes.slice().reverse()) preRemove(this, child);
       __omoikane_set_inner_html(this.__id, html);
     }
 
@@ -1111,9 +1186,9 @@
       const parent = this.parentNode;
       const index = indexOfNode(this);
       this.data = oldData.slice(0, offset);
-      const state = traversalByDocument.get(nodeDocument(this).__id);
+      const state = traversalByDocument.get(traversalDocumentKey(nodeDocument(this)));
       if (state) {
-        for (const range of state.ranges) range.__splitText(this, newNode, offset, parent, index);
+        for (const range of traversalEntries(state.ranges)) range.__splitText(this, newNode, offset, parent, index);
       }
       if (parent) parent.insertBefore(newNode, this.nextSibling);
       return newNode;
@@ -1167,7 +1242,7 @@
       this.filter = filter || null;
       this.referenceNode = root;
       this.pointerBeforeReferenceNode = true;
-      traversalState(nodeDocument(root)).iterators.add(this);
+      registerTraversal(nodeDocument(root), "iterators", this);
     }
 
     nextNode() {
@@ -1212,7 +1287,7 @@
       return null;
     }
 
-    detach() {}
+    detach() { unregisterTraversal(nodeDocument(this.root), "iterators", this); }
 
     __preRemove(removed) {
       if (!isInclusiveDescendant(this.referenceNode, removed) || isInclusiveDescendant(this.root, removed)) return;
@@ -1367,7 +1442,7 @@
       this.__doc = doc;
       this.__startContainer = doc; this.__startOffset = 0;
       this.__endContainer = doc; this.__endOffset = 0;
-      traversalState(doc).ranges.add(this);
+      registerTraversal(doc, "ranges", this);
     }
     get startContainer() { return this.__startContainer; }
     get startOffset() { return this.__startOffset; }
@@ -1383,14 +1458,32 @@
     }
     setStart(node, offset) {
       offset = this.__validate(node, offset);
-      if (nodeDocument(node) !== this.__doc || boundaryCompare(node, offset, this.__endContainer, this.__endOffset) > 0) {
+      const doc = nodeDocument(node);
+      if (doc !== this.__doc) {
+        unregisterTraversal(this.__doc, "ranges", this);
+        this.__doc = doc;
+        registerTraversal(doc, "ranges", this);
+      }
+      // Living DOM reroots (collapses) a range when the new point and the
+      // opposite point have different roots; it does not throw the DOM2
+      // WrongDocumentError. Updating __doc above keeps mutation tracking on the
+      // same Document as both newly collapsed boundary points.
+      if (nodeRoot(node) !== nodeRoot(this.__endContainer) ||
+          boundaryCompare(node, offset, this.__endContainer, this.__endOffset) > 0) {
         this.__endContainer = node; this.__endOffset = offset;
       }
       this.__startContainer = node; this.__startOffset = offset;
     }
     setEnd(node, offset) {
       offset = this.__validate(node, offset);
-      if (nodeDocument(node) !== this.__doc || boundaryCompare(node, offset, this.__startContainer, this.__startOffset) < 0) {
+      const doc = nodeDocument(node);
+      if (doc !== this.__doc) {
+        unregisterTraversal(this.__doc, "ranges", this);
+        this.__doc = doc;
+        registerTraversal(doc, "ranges", this);
+      }
+      if (nodeRoot(node) !== nodeRoot(this.__startContainer) ||
+          boundaryCompare(node, offset, this.__startContainer, this.__startOffset) < 0) {
         this.__startContainer = node; this.__startOffset = offset;
       }
       this.__endContainer = node; this.__endOffset = offset;
@@ -1527,7 +1620,7 @@
       };
       visit(root); return result;
     }
-    detach() { traversalState(this.__doc).ranges.delete(this); }
+    detach() { unregisterTraversal(this.__doc, "ranges", this); }
     __preRemove(parent, removed) {
       const index = indexOfNode(removed);
       const adjust = (container, offset) => {
