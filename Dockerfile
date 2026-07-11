@@ -71,6 +71,11 @@ RUN chmod 0755 /usr/local/bin/docker-entrypoint.sh
 # Claude Code のログイン情報・設定の永続化先（compose の named volume でマウントする）。
 ENV CLAUDE_CONFIG_DIR=/home/${USERNAME}/.claude
 
+# Codex CLI のホームディレクトリ（ログイン情報・本体パッケージ）。
+# compose の codex-config volume のマウント先および docker-entrypoint.sh の
+# 所有者自己修復ループと整合させるため、ENV で明示的に固定する。
+ENV CODEX_HOME=/home/${USERNAME}/.codex
+
 USER ${USERNAME}
 WORKDIR /workspace
 
@@ -92,7 +97,9 @@ ENV PATH=/home/${USERNAME}/.local/bin:${PATH}
 # 参考: https://learn.chatgpt.com/docs/codex/cli#getting-started
 # 本体は ~/.codex/packages に、ランチャーは ~/.local/bin/codex に入る。
 # ~/.codex はログイン情報も含むため named volume（codex-config）で永続化する。
-# Claude Code と同様、ダウンロードと実行を分離し、同一 RUN 内で検証まで行う。
+# Claude Code と同様、公式推奨のインストーラをチェックサム検証なしで取得する設計判断。
+# パイプ（curl | sh）は途中の curl 失敗を握りつぶすため、ダウンロードと実行を分離し、
+# 同一 RUN 内で codex --version による検証まで行う。
 RUN curl -fsSL https://chatgpt.com/codex/install.sh -o /tmp/codex-install.sh \
     && sh /tmp/codex-install.sh \
     && rm /tmp/codex-install.sh \

@@ -8,12 +8,12 @@
 
 ## 設計
 
-- 公式スタンドアロンインストーラ（`curl -fsSL https://chatgpt.com/codex/install.sh | sh`、Node.js 不要）を Dockerfile のレイヤーとして焼き込む
-  - Claude Code と同様、ダウンロードと実行を分離し、同一 RUN 内で `codex --version` による検証まで行う
+- 公式スタンドアロンインストーラ（`https://chatgpt.com/codex/install.sh`、Node.js 不要）を Dockerfile のレイヤーとして焼き込む
+  - Claude Code と同様、curl でダウンロード → sh で実行 → 削除、と分離し、同一 RUN 内で `codex --version` による検証まで行う（`curl | sh` のパイプは curl 失敗を握りつぶすため使わない）
   - 本体は `~/.codex/packages/`、ランチャーは `~/.local/bin/codex`（PATH 設定済み）に入ることを実機確認済み
 - `~/.codex` はログイン情報（auth）も含むため、named volume `codex-config` で永続化する
-  - 本体パッケージも volume 側に乗るため、更新はコンテナ内でインストーラを再実行する（イメージ再ビルドでは既存 volume に反映されない）。README に明記
-- docker-entrypoint.sh の所有者自己修復ループに `${CODEX_HOME:-$HOME/.codex}` を追加
+  - 本体パッケージも volume 側に乗るため、更新はコンテナ内で `codex update` を実行する（イメージ再ビルドでは既存 volume に反映されない）。README に明記
+- `CODEX_HOME` を Dockerfile の ENV で定義し、compose のマウント先・docker-entrypoint.sh の所有者自己修復ループと整合させる
 
 ## 作成・変更ファイル
 

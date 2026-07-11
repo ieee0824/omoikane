@@ -191,7 +191,7 @@ CI=1 cargo test -- --include-ignored
 - ビルド成果物は `CARGO_TARGET_DIR=/target` に出力され、ホストの `target/` とは分離されます。
 - crates.io インデックスと crate ソースは named volume（`cargo-registry` / `cargo-git`）に永続化されるため、コンテナを作り直しても（`down` / `up`）クレートを再ダウンロードしません。
 - Claude Code / Codex CLI のログイン情報は named volume に永続化されるため、コンテナを作り直してもログインし直す必要はありません（初回はそれぞれ `claude` / `codex login` でログイン）。
-- Codex CLI は本体パッケージも `~/.codex`（named volume）に置かれるため、更新はコンテナ内で `curl -fsSL https://chatgpt.com/codex/install.sh | sh` を再実行します（イメージ再ビルドでは既存 volume 内の本体は更新されません）。
+- Codex CLI は本体パッケージも `~/.codex`（named volume）に置かれるため、更新はコンテナ内で `codex update` を実行します（イメージ再ビルドでは既存 volume 内の本体は更新されません）。
 - リポジトリはバインドマウントで共有されるため、ホスト側での編集がそのままコンテナに反映されます。
 
 ## Acid2 テスト
