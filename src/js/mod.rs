@@ -3979,6 +3979,23 @@ mod tests {
     }
 
     #[test]
+    fn get_element_by_id_does_not_parse_id_as_a_selector() {
+        use crate::html::TreeBuilder;
+        let doc = TreeBuilder::parse(r#"<html><body><div id="plain"></div></body></html>"#).document();
+        let mut runtime = JsRuntime::with_document(doc).unwrap();
+        assert!(runtime
+            .eval("document.getElementById('plain\\0suffix') === null")
+            .unwrap()
+            .as_boolean()
+            .unwrap());
+        assert!(runtime
+            .eval("document.getElementById('plain').id === 'plain'")
+            .unwrap()
+            .as_boolean()
+            .unwrap());
+    }
+
+    #[test]
     fn form_checkedness_is_live_dirty_and_radio_exclusive() {
         use crate::html::TreeBuilder;
         let doc = TreeBuilder::parse(

@@ -1078,7 +1078,11 @@
       // NaN id that resolves to null): fall back to the top-level document so
       // the lookup still resolves against the main tree.
       const scope = this instanceof Document ? this : globalThis.document;
-      return wrapNode(__omoikane_query_selector(scope.__id, "#" + String(id)));
+      const expected = String(id);
+      for (const element of scope.querySelectorAll("*")) {
+        if (element.getAttribute("id") === expected) return element;
+      }
+      return null;
     }
 
     createElement(tag) {
