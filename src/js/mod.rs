@@ -1192,6 +1192,16 @@ fn register_host_bindings(
             NativeFunction::from_copy_closure(set_attribute_native),
         ),
         (
+            js_string!("__omoikane_get_checked"),
+            1,
+            NativeFunction::from_copy_closure(get_checked_native),
+        ),
+        (
+            js_string!("__omoikane_set_checked"),
+            2,
+            NativeFunction::from_copy_closure(set_checked_native),
+        ),
+        (
             js_string!("__omoikane_console_log"),
             1,
             NativeFunction::from_copy_closure(console_log_native),
@@ -2010,6 +2020,31 @@ fn set_attribute_native(_: &JsValue, args: &[JsValue], context: &mut Context) ->
         // Any attribute may participate in a selector (id/class/attribute
         // selectors), so invalidate the element's document unconditionally. A
         // detached element falls back to invalidating every document.
+        state.borrow_mut().mark_style_dirty_for_node(&node);
+        Ok(JsValue::undefined())
+    })
+}
+
+fn get_checked_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let node_id = parse_node_id(args.first(), context)?;
+    with_host_state(|state| {
+        let checked = state
+            .borrow()
+            .get_node(node_id)
+            .is_some_and(|node| node.checked());
+        Ok(JsValue::from(checked))
+    })
+}
+
+fn set_checked_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let node_id = parse_node_id(args.first(), context)?;
+    let checked = args.get(1).is_some_and(JsValue::to_boolean);
+    with_host_state(|state| {
+        let node = state
+            .borrow()
+            .get_node(node_id)
+            .ok_or_else(|| JsError::from(JsNativeError::error().with_message("node not found")))?;
+        node.set_checked(checked);
         state.borrow_mut().mark_style_dirty_for_node(&node);
         Ok(JsValue::undefined())
     })
@@ -3941,6 +3976,41 @@ mod tests {
             .unwrap()
             .to_std_string_escaped();
         assert_eq!(result, "first|2|2|true|true|true|true");
+    }
+
+    #[test]
+    fn form_checkedness_is_live_dirty_and_radio_exclusive() {
+        use crate::html::TreeBuilder;
+        let doc = TreeBuilder::parse(
+            r#"<html><body><input id="box" type="checkbox" checked><input id="r1" type="radio" name="g"><input id="r2" type="radio" name="g" checked><input id="off" type="checkbox" disabled></body></html>"#,
+        )
+        .document();
+        let mut runtime = JsRuntime::with_document(doc).unwrap();
+        let result = runtime
+            .eval(
+                r#"
+                (() => {
+                  const box = document.getElementById("box");
+                  const r1 = document.getElementById("r1");
+                  const r2 = document.getElementById("r2");
+                  const off = document.getElementById("off");
+                  box.click();
+                  box.setAttribute("checked", "");
+                  const dirtyStayedOff = !box.checked && box.defaultChecked;
+                  r1.click();
+                  const clickExclusive = r1.checked && !r2.checked;
+                  r2.checked = true;
+                  const propertyExclusive = !r1.checked && r2.checked;
+                  off.click();
+                  return [dirtyStayedOff, clickExclusive, propertyExclusive, !off.checked, off.disabled].join("|");
+                })()
+                "#,
+            )
+            .unwrap()
+            .to_string(&mut runtime.context)
+            .unwrap()
+            .to_std_string_escaped();
+        assert_eq!(result, "true|true|true|true|true");
     }
 
     #[test]

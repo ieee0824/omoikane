@@ -947,7 +947,15 @@
 
     focus() {}
     blur() {}
-    click() { this.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true })); }
+    click() {
+      if (this.disabled) return;
+      if (this.nodeName === "INPUT") {
+        const type = this.type.toLowerCase();
+        if (type === "checkbox") this.checked = !this.checked;
+        else if (type === "radio") this.checked = true;
+      }
+      this.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+    }
 
     get hidden() {
       return this.hasAttribute("hidden");
@@ -967,10 +975,30 @@
     }
 
     get checked() {
-      return this.hasAttribute("checked");
+      return __omoikane_get_checked(this.__id);
     }
 
     set checked(v) {
+      const checked = !!v;
+      if (checked && this.nodeName === "INPUT" && this.type.toLowerCase() === "radio") {
+        const document = this.ownerDocument;
+        const name = this.name;
+        if (document) {
+          for (const radio of document.querySelectorAll("input[type=radio]")) {
+            if (radio.__id !== this.__id && radio.name === name) {
+              __omoikane_set_checked(radio.__id, false);
+            }
+          }
+        }
+      }
+      __omoikane_set_checked(this.__id, checked);
+    }
+
+    get defaultChecked() {
+      return this.hasAttribute("checked");
+    }
+
+    set defaultChecked(v) {
       if (v) this.setAttribute("checked", "");
       else this.removeAttribute("checked");
     }
