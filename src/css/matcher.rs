@@ -295,6 +295,9 @@ fn matches_pseudo_class(node: &NodeHandle, name: &str, pseudo: Option<PseudoElem
         "first-of-type" => type_position(node).is_some_and(|(index, _)| index == 1),
         "last-of-type" => type_position(node).is_some_and(|(index, total)| index == total),
         "only-of-type" => type_position(node).is_some_and(|(_, total)| total == 1),
+        "enabled" => is_form_control(node) && get_attribute(node, "disabled").is_none(),
+        "disabled" => is_form_control(node) && get_attribute(node, "disabled").is_some(),
+        "checked" => is_checkable_input(node) && node.checked(),
         "empty" => node.child_nodes().into_iter().all(|child| match child.node_type() {
             NodeType::Element => false,
             NodeType::Text => child.data().is_some_and(|data| data.is_empty()),
@@ -302,6 +305,21 @@ fn matches_pseudo_class(node: &NodeHandle, name: &str, pseudo: Option<PseudoElem
         }),
         _ => false,
     }
+}
+
+fn is_form_control(node: &NodeHandle) -> bool {
+    node.tag_name().is_some_and(|tag| {
+        matches!(
+            tag.as_str(),
+            "button" | "input" | "select" | "textarea" | "option" | "optgroup" | "fieldset"
+        )
+    })
+}
+
+fn is_checkable_input(node: &NodeHandle) -> bool {
+    node.tag_name().is_some_and(|tag| tag == "input")
+        && get_attribute(node, "type")
+            .is_some_and(|kind| matches!(kind.to_ascii_lowercase().as_str(), "checkbox" | "radio"))
 }
 
 fn matches_language(node: &NodeHandle, range: &str) -> bool {
@@ -686,6 +704,27 @@ mod tests {
         assert!(matches_selector(&inherited, &selector(":lang(en-gb) {}")));
         assert!(!matches_selector(&overridden, &selector(":lang(en) {}")));
         assert!(!matches_selector(&nested, &selector(":lang(en) {}")));
+    }
+
+    #[test]
+    fn form_state_pseudos_apply_to_eligible_controls() {
+        let input = NodeHandle::element("input");
+        input.set_attribute("type", "checkbox");
+        let text = NodeHandle::element("input");
+        text.set_attribute("type", "text");
+        text.set_attribute("checked", "");
+        let body = NodeHandle::element("body");
+
+        assert!(matches_selector(&input, &selector(":enabled {}")));
+        assert!(!matches_selector(&body, &selector(":enabled {}")));
+        input.set_attribute("disabled", "");
+        assert!(matches_selector(&input, &selector(":disabled {}")));
+        assert!(!matches_selector(&input, &selector(":enabled {}")));
+        input.set_checked(true);
+        assert!(matches_selector(&input, &selector(":checked {}")));
+        assert!(!matches_selector(&text, &selector(":checked {}")));
+        input.set_attribute("type", "text");
+        assert!(!matches_selector(&input, &selector(":checked {}")));
     }
 
     #[test]

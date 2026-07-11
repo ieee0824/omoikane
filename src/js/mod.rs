@@ -4014,6 +4014,36 @@ mod tests {
     }
 
     #[test]
+    fn query_selector_observes_live_form_state_pseudos() {
+        use crate::html::TreeBuilder;
+        let doc = TreeBuilder::parse(
+            r#"<html><body><input id="box" type="checkbox"><input id="button" type="button" disabled></body></html>"#,
+        )
+        .document();
+        let mut runtime = JsRuntime::with_document(doc).unwrap();
+        let result = runtime
+            .eval(
+                r#"
+                (() => {
+                  const box = document.getElementById("box");
+                  box.click();
+                  const checked = document.querySelector(":checked") === box;
+                  box.disabled = true;
+                  const disabled = document.querySelectorAll(":disabled").length;
+                  const enabled = document.querySelectorAll(":enabled").length;
+                  box.type = "text";
+                  return [checked, disabled, enabled, document.querySelector(":checked") === null].join("|");
+                })()
+                "#,
+            )
+            .unwrap()
+            .to_string(&mut runtime.context)
+            .unwrap()
+            .to_std_string_escaped();
+        assert_eq!(result, "true|2|0|true");
+    }
+
+    #[test]
     fn node_type_returns_correct_values() {
         use crate::html::TreeBuilder;
         let html = "<html><body><div>text</div></body></html>";
