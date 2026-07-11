@@ -1089,7 +1089,8 @@
   // `HTMLObjectElement.data` reflects the `data` content attribute instead.
   class CharacterData extends Node {
     get data() {
-      return this.textContent;
+      const value = this.textContent;
+      return value == null ? "" : String(value);
     }
 
     set data(value) {
@@ -1173,10 +1174,19 @@
       let candidate = this.pointerBeforeReferenceNode
         ? this.referenceNode : nextInTree(this.referenceNode, this.root);
       while (candidate) {
-        this.referenceNode = candidate;
-        this.pointerBeforeReferenceNode = false;
-        if (filterNode(candidate, this.whatToShow, this.filter) === NodeFilter.FILTER_ACCEPT) return candidate;
-        candidate = nextInTree(candidate, this.root);
+        const fallbackNext = nextInTree(candidate, this.root);
+        const oldReference = this.referenceNode, oldPointer = this.pointerBeforeReferenceNode;
+        const result = filterNode(candidate, this.whatToShow, this.filter);
+        const adjusted = this.referenceNode !== oldReference || this.pointerBeforeReferenceNode !== oldPointer;
+        if (!adjusted) {
+          if (candidate !== this.root && !isInclusiveDescendant(candidate, this.root) && fallbackNext) {
+            this.referenceNode = fallbackNext; this.pointerBeforeReferenceNode = true;
+          } else { this.referenceNode = candidate; this.pointerBeforeReferenceNode = false; }
+        }
+        if (result === NodeFilter.FILTER_ACCEPT) return candidate;
+        candidate = adjusted
+          ? (this.pointerBeforeReferenceNode ? this.referenceNode : nextInTree(this.referenceNode, this.root))
+          : nextInTree(candidate, this.root);
       }
       return null;
     }
@@ -1185,10 +1195,19 @@
       let candidate = this.pointerBeforeReferenceNode
         ? previousInTree(this.referenceNode, this.root) : this.referenceNode;
       while (candidate) {
-        this.referenceNode = candidate;
-        this.pointerBeforeReferenceNode = true;
-        if (filterNode(candidate, this.whatToShow, this.filter) === NodeFilter.FILTER_ACCEPT) return candidate;
-        candidate = previousInTree(candidate, this.root);
+        const fallbackPrevious = previousInTree(candidate, this.root);
+        const oldReference = this.referenceNode, oldPointer = this.pointerBeforeReferenceNode;
+        const result = filterNode(candidate, this.whatToShow, this.filter);
+        const adjusted = this.referenceNode !== oldReference || this.pointerBeforeReferenceNode !== oldPointer;
+        if (!adjusted) {
+          if (candidate !== this.root && !isInclusiveDescendant(candidate, this.root) && fallbackPrevious) {
+            this.referenceNode = fallbackPrevious; this.pointerBeforeReferenceNode = false;
+          } else { this.referenceNode = candidate; this.pointerBeforeReferenceNode = true; }
+        }
+        if (result === NodeFilter.FILTER_ACCEPT) return candidate;
+        candidate = adjusted
+          ? (this.pointerBeforeReferenceNode ? previousInTree(this.referenceNode, this.root) : this.referenceNode)
+          : previousInTree(candidate, this.root);
       }
       return null;
     }
@@ -1271,6 +1290,7 @@
           sibling = reverse ? n.previousSibling : n.nextSibling;
         }
         n = n.parentNode;
+        if (reverse) return null;
         if (n && this.__accept(n) === NodeFilter.FILTER_ACCEPT) return null;
       }
       return null;

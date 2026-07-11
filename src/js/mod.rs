@@ -6153,6 +6153,19 @@ mod tests {
           var r=document.createRange();r.setStart(c1,1);r.setEnd(c2,1);try{r.surroundContents(document.createElement('a'));return 'none'}catch(e){return e.name+'|'+e.code}})()"#), "InvalidStateError|11");
     }
 
+    #[test]
+    fn acid3_traversal_filter_mutation_and_tree_regrafting_regressions() {
+        use crate::html::TreeBuilder;
+        let doc = TreeBuilder::parse("<html><head><title></title></head><body></body></html>").document();
+        let mut runtime = JsRuntime::with_document(doc).unwrap();
+        assert_eq!(eval_str(&mut runtime, r#"(()=>{var b=document.body;for(var k=0;k<5;k++){var s=document.createElement('section');s.title=k;b.appendChild(s)}
+          var count=0,it=document.createNodeIterator(b,0xffffffff,function(){if(count>3&&count<12)b.appendChild(b.firstChild);count++;return count%2===0?1:2});
+          var out=[],n;while(n=it.nextNode())out.push(n.title);return out.join(',')})()"#), "0,2,4,1,3,0,2");
+        assert_eq!(eval_str(&mut runtime, r#"(()=>{var b=document.body;b.textContent='';var p=document.createElement('p');b.appendChild(p);var w=document.createTreeWalker(b);
+          w.lastChild();w.previousNode();document.documentElement.removeChild(b);var a=w.lastChild()===p,z=w.nextNode()===null;
+          document.documentElement.appendChild(p);var title=w.previousNode();p.appendChild(b);return [a,z,title.tagName,w.nextNode()===p,w.nextNode()===b,w.previousNode()===null].join('|')})()"#), "true|true|TITLE|true|true|true");
+    }
+
     // ── iframe / contentDocument (sub-browsing contexts) ────────────────────
 
     /// A tiny static HTTP/1.1 server that answers every request with the same

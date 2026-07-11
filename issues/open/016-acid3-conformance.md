@@ -60,6 +60,7 @@ Acid3 は DOM / CSS / HTML parser / scripting / networking まで含む複合テ
 | 016-15 実装（resolver 文書単位化） | 61/100 | getComputedStyle をノードの owner document 基準に解決（文書単位 StyleResolver キャッシュ）+ サブ文書 defaultView を contentWindow に接続。selectorTest bucket3 の test 36/41/42 が新規 PASS |
 | 016-15 実装（title 反射 + :first-child 修正） | **63/100** | HTMLElement.title の IDL 反射を追加し、:first-child/:last-child/:nth-child がルート要素（親が Document）にマッチしていたマッチャのバグを修正。test 33/35 が新規 PASS（FAITHFUL/DIRECT 両モード 63/100、実測） |
 | 016-10 セレクタ拡充 + querySelector matcher 統合 | **70/100** | strict selector-list parser、querySelector 系の CSS matcher 統合、`:lang` / child・of-type・`:empty` / UI 状態擬似クラス、フォーム checkedness を実装。test 34/37/38/39/40/43 が新規 PASS。getElementById の selector 依存も解消して test 28 が PASS（FAITHFUL/DIRECT 両モード 70/100、実測） |
+| 016-11 Traversal / Range | **79/100** | NodeIterator / TreeWalker / Range と live 変異補正を純 JS で実装。test 1-3, 6-7, 9, 11-13 が新規 PASS（FAITHFUL/DIRECT 両モード 79/100、実測）。test 4-5 は HTML tree/API 前提差、test 8 は `implementation.createDocument` 未実装のため残存。 |
 
 ### 70/100 到達時（016-10 実装）に新規 PASS したテスト
 
