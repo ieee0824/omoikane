@@ -1324,6 +1324,11 @@ fn register_host_bindings(
             NativeFunction::from_copy_closure(owner_document_native),
         ),
         (
+            js_string!("__omoikane_document_owner_iframe"),
+            1,
+            NativeFunction::from_copy_closure(document_owner_iframe_native),
+        ),
+        (
             js_string!("__omoikane_document_reset"),
             1,
             NativeFunction::from_copy_closure(document_reset_native),
@@ -1887,6 +1892,41 @@ fn owner_document_native(_: &JsValue, args: &[JsValue], context: &mut Context) -
         // DOM `ownerDocument` semantics: a document node has no owner document,
         // and a detached node whose root is not a document reports none.
         Ok(node_to_js_value(owner_document_for_node(&node)))
+    })
+}
+
+/// `__omoikane_document_owner_iframe(documentId)` — returns the node id of the
+/// `<iframe>` element that owns the sub-browsing-context document `documentId`,
+/// or `null` when it is the top-level (main) document, a reloaded/stale document
+/// no longer tracked, or any unknown id.
+///
+/// Backs `Document.defaultView`: a sub-document routes to its owning iframe's
+/// `contentWindow`, while an unknown/stale document must NOT be treated as the
+/// main window. The main document is reported as `null` here because the JS
+/// layer already routes it to `globalThis` before calling this binding.
+///
+/// The lookup is a linear scan of the (typically small) `iframe_documents`
+/// table; a reverse index is deliberately avoided to keep reload cleanup from
+/// having to maintain two maps in lockstep.
+fn document_owner_iframe_native(
+    _: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let document_id = parse_node_id(args.first(), context)?;
+    with_host_state(|state| {
+        let s = state.borrow();
+        // The main document is not owned by any iframe.
+        if document_id == s.document.identity() {
+            return Ok(JsValue::null());
+        }
+        for (iframe_id, entry) in s.iframe_documents.iter() {
+            if entry.document.identity() == document_id {
+                return Ok(JsValue::from(*iframe_id as f64));
+            }
+        }
+        // Unknown or reloaded (stale) sub-document: no live owning iframe.
+        Ok(JsValue::null())
     })
 }
 
@@ -6510,6 +6550,166 @@ mod tests {
             runtime.eval("f.contentWindow.marker").unwrap().as_number(),
             Some(42.0),
             "contentWindow identity and state must survive a src change"
+        );
+    }
+
+    /// A sub-document's `defaultView` is its iframe's `contentWindow` (stable and
+    /// round-tripping through `.document`), while the main document's
+    /// `defaultView` remains the global window.
+    #[test]
+    fn iframe_document_default_view_routes_to_content_window() {
+        use crate::html::TreeBuilder;
+        let doc =
+            TreeBuilder::parse(r#"<html><body><iframe id="f"></iframe></body></html>"#).document();
+        let mut runtime = JsRuntime::with_document(doc).unwrap();
+
+        // The main document still routes to the global window.
+        assert_eq!(
+            runtime
+                .eval("document.defaultView === globalThis && document.defaultView === window")
+                .unwrap()
+                .as_boolean(),
+            Some(true),
+            "the main document's defaultView must remain the global window"
+        );
+
+        // A sub-document routes to its iframe's contentWindow.
+        assert_eq!(
+            runtime
+                .eval("var f = document.getElementById('f'); f.contentDocument.defaultView === f.contentWindow")
+                .unwrap()
+                .as_boolean(),
+            Some(true),
+            "a sub-document's defaultView must be its iframe's contentWindow"
+        );
+        assert_eq!(
+            runtime
+                .eval("f.contentDocument.defaultView === f.contentDocument.defaultView")
+                .unwrap()
+                .as_boolean(),
+            Some(true),
+            "defaultView must return a stable object across reads"
+        );
+        assert_eq!(
+            runtime
+                .eval("f.contentDocument.defaultView.document === f.contentDocument")
+                .unwrap()
+                .as_boolean(),
+            Some(true),
+            "the sub-document window's document must be the sub-document itself"
+        );
+    }
+
+    /// After a `src` change the reloaded document is a new document that routes
+    /// to the same stable `contentWindow`; the previous (now stale) document's
+    /// `defaultView` reports null rather than the main window.
+    #[test]
+    fn reloaded_iframe_default_view_follows_new_document() {
+        use crate::html::TreeBuilder;
+        // Distinct markup per URL so the reload is verified by *content* rather
+        // than by node identity (which is pointer-based and may be recycled for
+        // the reloaded document, so pre/post-reload identity comparison is not
+        // reliable — the stale-document case is pinned in the native-contract
+        // test `document_owner_iframe_native_maps_document_to_owning_iframe`).
+        let port_a =
+            spawn_static_http_server("text/html", r#"<html><body><p id="a">A</p></body></html>"#);
+        let port_b =
+            spawn_static_http_server("text/html", r#"<html><body><p id="b">B</p></body></html>"#);
+        let doc =
+            TreeBuilder::parse(r#"<html><body><iframe id="f"></iframe></body></html>"#).document();
+        let mut runtime = JsRuntime::with_document(doc).unwrap();
+
+        runtime
+            .eval(&format!(
+                "var f = document.getElementById('f'); \
+                 f.src = 'http://127.0.0.1:{port_a}/a.html'; \
+                 f.contentDocument;"
+            ))
+            .unwrap();
+
+        // Reload with different content.
+        runtime
+            .eval(&format!(
+                "f.src = 'http://127.0.0.1:{port_b}/b.html'; f.contentDocument;"
+            ))
+            .unwrap();
+
+        // The reload actually happened: the new content is present, the old is
+        // gone.
+        assert!(
+            runtime
+                .eval("f.contentDocument.getElementById('b')")
+                .unwrap()
+                .is_object(),
+            "the reloaded document must contain the new content"
+        );
+        assert!(
+            runtime
+                .eval("f.contentDocument.getElementById('a')")
+                .unwrap()
+                .is_null(),
+            "the reloaded document must not contain the old content"
+        );
+        // The reloaded document routes to the same stable contentWindow, and the
+        // window's document getter reflects the reload.
+        assert_eq!(
+            runtime
+                .eval("f.contentDocument.defaultView === f.contentWindow")
+                .unwrap()
+                .as_boolean(),
+            Some(true),
+            "the reloaded document must route to the same stable contentWindow"
+        );
+        assert_eq!(
+            runtime
+                .eval("f.contentWindow.document === f.contentDocument")
+                .unwrap()
+                .as_boolean(),
+            Some(true),
+            "the contentWindow's document getter must reflect the reload"
+        );
+    }
+
+    /// The `__omoikane_document_owner_iframe` binding backing `defaultView`
+    /// maps the main document and unknown/stale ids to null, and a live
+    /// sub-document to its owning iframe's node id.
+    #[test]
+    fn document_owner_iframe_native_maps_document_to_owning_iframe() {
+        use crate::html::TreeBuilder;
+        let doc =
+            TreeBuilder::parse(r#"<html><body><iframe id="f"></iframe></body></html>"#).document();
+        let mut runtime = JsRuntime::with_document(doc).unwrap();
+
+        // The main document is owned by no iframe.
+        assert!(
+            runtime
+                .eval("__omoikane_document_owner_iframe(document.__id)")
+                .unwrap()
+                .is_null(),
+            "the main document must map to null (its window is globalThis)"
+        );
+
+        // A live sub-document maps to its owning iframe's node id.
+        assert_eq!(
+            runtime
+                .eval(
+                    "var f = document.getElementById('f'); \
+                     __omoikane_document_owner_iframe(f.contentDocument.__id) === f.__id"
+                )
+                .unwrap()
+                .as_boolean(),
+            Some(true),
+            "a sub-document must map to its owning iframe's node id"
+        );
+
+        // An id that is neither the main document nor any tracked sub-document
+        // (unknown or reloaded/stale) maps to null.
+        assert!(
+            runtime
+                .eval("__omoikane_document_owner_iframe(999999999)")
+                .unwrap()
+                .is_null(),
+            "an unknown/stale document id must map to null, not an iframe"
         );
     }
 

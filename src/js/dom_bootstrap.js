@@ -1148,9 +1148,24 @@
     }
 
     get defaultView() {
-      // The Window associated with this document. For the top-level document
-      // that is the global object itself.
-      return globalThis;
+      // The Window associated with this document. The top-level document's
+      // Window is the global object itself; a sub-browsing-context document (an
+      // iframe's contentDocument) routes to its owning iframe's contentWindow
+      // facade, so `frame.contentDocument.defaultView === frame.contentWindow`.
+      //
+      // Compare against the native main-document id rather than
+      // `globalThis.document` so this is robust during bootstrap and never
+      // treats a reloaded/stale sub-document as the main window: an unknown
+      // document (owner iframe not found) reports null, not globalThis.
+      if (this.__id === __omoikane_document_id) {
+        return globalThis;
+      }
+      const iframeId = __omoikane_document_owner_iframe(this.__id);
+      if (iframeId === null || iframeId === undefined) {
+        return null;
+      }
+      const iframe = wrapNode(iframeId);
+      return iframe ? iframe.contentWindow : null;
     }
 
     hasFocus() {
