@@ -2,7 +2,7 @@
 number: 051
 slug: css-property-value-validation
 parent: 016
-status: open
+status: closed
 ---
 
 # CSS プロパティ値検証と computed style serialization
