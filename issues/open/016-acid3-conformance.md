@@ -66,6 +66,7 @@ Acid3 は DOM / CSS / HTML parser / scripting / networking まで含む複合テ
 | 016-16 iframe/object load イベント | **83/100** | 接続時のサブ文書ロードとマクロタスクでの `load` dispatch、3種のハンドラ経路、`object[data]`、再接続時の再ロードを実装。test 65 の7ハンドラが完了し、test 69 は retry を抜けて後続の `t was null`（016-14）まで前進。FAITHFUL/DIRECT とも index 100、83/100（実測）。 |
 | 016-13 table row API + フォーム送信/on* ハンドラ | 86/100 | HTMLTableElement.insertRow/deleteRow、HTMLTableSectionElement(rows/insertRow/deleteRow)、HTMLTableRowElement(cells/rowIndex/sectionRowIndex/insertCell/deleteCell)、IndexSizeError 境界検証、rows ゲッタのツリー順修正を実装（test 50/51 が PASS、83→85）。加えて submit/reset ボタン click の活性化挙動（所属 form への cancelable な submit/reset 同期発火）と on* イベントハンドラ IDL 属性を実装（test 54 が PASS、85→86）。FAITHFUL/DIRECT 両モード 86/100（実測）。test 29 は HTML パーサが `<tr>` を tbody 挿入せず table 直下に置くため（tree construction 側、本 issue スコープ外）残存。 |
 | 051 cursor 値検証（無効宣言の破棄） | **87/100** | CSS 宣言のプロパティ別値検証フックを導入し、`cursor` の keyword/url() 文法検証・無効宣言のカスケード前破棄・初期値 `auto` フォールバック・inline style への同一検証適用を実装（PR #117）。test 47 が新規 PASS（PR #116 と合流後の main 実測で FAITHFUL/DIRECT 両モード 87/100）。 |
+| 054 table tree construction（暗黙 tbody 生成） | **88/100** | HTML パーサに "in table" / "in table body" 挿入モードを実装。`<table>` 直下の `<tr>`（および `<td>`/`<th>`）に対し暗黙 `<tbody>`（必要なら `<tr>` も）を生成し、明示 `<thead>`/`<tbody>`/`<tfoot>` は二重ラップしない。section 閉じタグ後の table 内空白テキストの配置も仕様に寄せた。test 29（cloneNode + tBodies）が新規 PASS（FAITHFUL/DIRECT 両モード 88/100、実測）。test 5 は暗黙 tbody 前提（expectation 11）を通過したが、`document.forms` / `document.links` 未実装のため後続で残存。test 4 も同 API（`document.forms[0]`）が原因で残存（tbody 前まで到達せず）。foster parenting は本 issue でも対象外。 |
 
 ### 82/100 到達時（016-12 `createDocument` 実装）に新規 PASS したテスト
 
@@ -113,7 +114,9 @@ Acid3 は DOM / CSS / HTML parser / scripting / networking まで含む複合テ
 - **016-14 XML/XHTML・CSSOM・SVG DOM**: test 69-72, 74-80 の SVG/XML サブドキュメント系。
 - ~~**016-16 iframe load イベント**~~ → 実装済み。test 65 の iframe×6 + object×1 の load が完了し、test 69 の kungFuDeathGrip/title/retry 部分を解消。残る `t was null` は 016-14 の XML/SVG パース範囲。
 - ~~**016-13 table row API + フォーム送信**~~ → 実装済み（83→86）。test 50/51（insertRow/rowIndex/section）と test 54（submit ボタン click → form submit イベント）を解放。test 55/56（checkbox 移動・radio clone）は 016-10 のライブ選択状態モデルで既に PASS 済みと実測確認。
-- 残: test 29（HTML パーサの table tree construction が `<tr>` を tbody へ入れないため tBodies が空、parser スコープ）, 64, 98 等（016-14 の残り + parser）。
+- ~~test 29~~ → 054 で解消（parser の暗黙 tbody 生成、87→88）。
+- **test 4 / test 5**: パーサの table tree construction（暗黙 tbody）は 054 で解消したが、両テストは `document.forms` / `document.links`（Document の HTMLCollection）未実装で残存。test 4 は `document.forms[0]`（expectation 25、tbody 参照より前）で throw、test 5 は暗黙 tbody 前提（expectation 11）を通過後 `document.links[1].firstChild`（expectation 23）で throw。DOM API スコープのため別途 055 で追跡。
+- 残: test 64, 98 等（016-14 の残り + parser）。
 
 ## 子issue
 
@@ -138,3 +141,5 @@ Acid3 ギャップ分析（`tests/fixtures/acid3/GAP_ANALYSIS.md`）に基づく
 - [x] [016-16 iframe の load イベント発火](../closed/016-16-iframe-onload-event.md)（PR #115, 83/100 維持、test 69 retry 解消）
 - [x] [050 CSS media query の構文解析・評価と computed style 反映](../closed/050-css-media-query-evaluation.md)（PR #114, 82→83）
 - [x] [051 CSS プロパティ値検証と computed style serialization](../closed/051-css-property-value-validation.md)（PR #117, test 47 PASS, 合流後 87/100）
+- [x] [054 table tree construction（暗黙 tbody 生成）](054-parser-table-tree-construction.md)（test 29 PASS, 87→88）
+- [ ] [055 document.forms / document.links の HTMLCollection](055-document-forms-links-collections.md)（test 4/5 の残ブロッカー）
