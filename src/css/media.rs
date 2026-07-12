@@ -33,6 +33,15 @@ pub fn evaluate_media_query(
         MediaCondition::OrientationLandscape => viewport_width > viewport_height,
         MediaCondition::PrefersColorSchemeDark => color_scheme_dark,
         MediaCondition::PrefersColorSchemeLight => !color_scheme_dark,
+        // Omoikane models a color display with 8 bits per color component and
+        // no monochrome framebuffer. These are the MQ3 values exposed by the
+        // rendering backend rather than user preferences.
+        MediaCondition::Color { minimum, maximum } => {
+            numeric_feature_matches(8, *minimum, *maximum, true)
+        }
+        MediaCondition::Monochrome { minimum, maximum } => {
+            numeric_feature_matches(0, *minimum, *maximum, false)
+        }
         MediaCondition::Unknown => false,
     });
 
@@ -127,7 +136,9 @@ fn parse_single_media_query(input: &str) -> Option<MediaQuery> {
                 remaining = after_and.trim_start();
                 continue;
             }
-            // Unrecognised token -- stop parsing.
+            // A feature outside parentheses is invalid MQ3 syntax. Preserve a
+            // false condition so a malformed query cannot accidentally match.
+            conditions.push(MediaCondition::Unknown);
             break;
         }
         // Find matching closing paren.
@@ -204,9 +215,71 @@ fn parse_media_feature(inner: &str) -> MediaCondition {
             "light" => return MediaCondition::PrefersColorSchemeLight,
             _ => {}
         },
+        "color" if value_str.is_empty() => {
+            return MediaCondition::Color {
+                minimum: None,
+                maximum: None,
+            };
+        }
+        "min-color" => {
+            if let Some(value) = parse_non_negative_integer(value_str) {
+                return MediaCondition::Color {
+                    minimum: Some(value),
+                    maximum: None,
+                };
+            }
+        }
+        "max-color" => {
+            if let Some(value) = parse_non_negative_integer(value_str) {
+                return MediaCondition::Color {
+                    minimum: None,
+                    maximum: Some(value),
+                };
+            }
+        }
+        "monochrome" if value_str.is_empty() => {
+            return MediaCondition::Monochrome {
+                minimum: None,
+                maximum: None,
+            };
+        }
+        "min-monochrome" => {
+            if let Some(value) = parse_non_negative_integer(value_str) {
+                return MediaCondition::Monochrome {
+                    minimum: Some(value),
+                    maximum: None,
+                };
+            }
+        }
+        "max-monochrome" => {
+            if let Some(value) = parse_non_negative_integer(value_str) {
+                return MediaCondition::Monochrome {
+                    minimum: None,
+                    maximum: Some(value),
+                };
+            }
+        }
         _ => {}
     }
     MediaCondition::Unknown
+}
+
+fn parse_non_negative_integer(value: &str) -> Option<u32> {
+    value.trim().parse().ok()
+}
+
+fn numeric_feature_matches(
+    actual: u32,
+    minimum: Option<u32>,
+    maximum: Option<u32>,
+    boolean_value: bool,
+) -> bool {
+    match (minimum, maximum) {
+        (None, None) => boolean_value,
+        (Some(min), None) => actual >= min,
+        (None, Some(max)) => actual <= max,
+        (Some(min), Some(max)) => actual >= min && actual <= max,
+    }
 }
 
 /// Strips a case-insensitive keyword prefix with word boundary check.
