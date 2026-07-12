@@ -1294,6 +1294,11 @@ fn register_host_bindings(
             NativeFunction::from_copy_closure(create_element_native),
         ),
         (
+            js_string!("__omoikane_is_valid_xml_name"),
+            1,
+            NativeFunction::from_copy_closure(is_valid_xml_name_native),
+        ),
+        (
             js_string!("__omoikane_append_child"),
             2,
             NativeFunction::from_copy_closure(append_child_native),
@@ -1991,6 +1996,57 @@ fn create_element_native(
         state.borrow_mut().nodes.insert(id, node);
         Ok(JsValue::from(id as f64))
     })
+}
+
+fn is_valid_xml_name_start_char(cp: u32) -> bool {
+    cp == 0x3a
+        || (0x41..=0x5a).contains(&cp)
+        || cp == 0x5f
+        || (0x61..=0x7a).contains(&cp)
+        || (0xc0..=0xd6).contains(&cp)
+        || (0xd8..=0xf6).contains(&cp)
+        || (0xf8..=0x2ff).contains(&cp)
+        || (0x370..=0x37d).contains(&cp)
+        || (0x37f..=0x1fff).contains(&cp)
+        || (0x200c..=0x200d).contains(&cp)
+        || (0x2070..=0x218f).contains(&cp)
+        || (0x2c00..=0x2fef).contains(&cp)
+        || (0x3001..=0xd7ff).contains(&cp)
+        || (0xf900..=0xfdcf).contains(&cp)
+        || (0xfdf0..=0xfffd).contains(&cp)
+        || (0x10000..=0xeffff).contains(&cp)
+}
+
+fn is_valid_xml_name_char(cp: u32) -> bool {
+    is_valid_xml_name_start_char(cp)
+        || cp == 0x2d
+        || cp == 0x2e
+        || (0x30..=0x39).contains(&cp)
+        || cp == 0xb7
+        || (0x300..=0x36f).contains(&cp)
+        || (0x203f..=0x2040).contains(&cp)
+}
+
+/// Validates an XML Name outside Boa bytecode. This is intentionally native:
+/// Boa 0.21.1 can return a stale inline-cache slot for the JavaScript
+/// `codePointAt` call site after some core-js polyfills mutate built-in shapes.
+fn is_valid_xml_name_native(
+    _: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let name = args
+        .first()
+        .cloned()
+        .unwrap_or_default()
+        .to_string(context)?
+        .to_std_string_escaped();
+    let mut chars = name.chars();
+    let valid = chars
+        .next()
+        .is_some_and(|first| is_valid_xml_name_start_char(first as u32))
+        && chars.all(|ch| is_valid_xml_name_char(ch as u32));
+    Ok(JsValue::from(valid))
 }
 
 fn append_child_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
@@ -5768,6 +5824,25 @@ mod tests {
                 if (codeFor('div') !== -1) return 100;      // valid name must not throw
                 if (codeFor('form div') !== 5) return 101; // NUL byte is invalid
                 return 0;
+            })()
+        "#,
+        );
+    }
+
+    #[test]
+    fn xml_name_validation_does_not_depend_on_string_method_dispatch() {
+        let mut runtime = JsRuntime::new().unwrap();
+        assert_js_ok(
+            &mut runtime,
+            r#"
+            (function () {
+                // Models Boa 0.21.1 resolving this call site to `concat` after
+                // core-js mutates built-in shapes (issue 057).
+                String.prototype.codePointAt = String.prototype.concat;
+                if (document.createElement('style').tagName !== 'STYLE') return 1;
+                try { document.createElement('0style'); }
+                catch (e) { return e.code === 5 ? 0 : 2; }
+                return 3;
             })()
         "#,
         );
