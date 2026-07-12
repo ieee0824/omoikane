@@ -288,6 +288,41 @@ impl StyleResolver {
             );
         }
 
+        // Inline declarations on an iframe must participate in its layout so
+        // the resulting content box is the authoritative child viewport. This
+        // is especially important when script resizes an iframe after its
+        // sub-document resolver has already been created.
+        if pseudo.is_none()
+            && node
+                .tag_name()
+                .as_deref()
+                .is_some_and(|tag| tag.eq_ignore_ascii_case("iframe"))
+            && let Some(inline_style) = node
+                .attributes()
+                .and_then(|attributes| attributes.get("style").cloned())
+        {
+            let fake_rule = format!("iframe {{ {inline_style} }}");
+            if let Ok(stylesheet) = super::parse_stylesheet(&fake_rule)
+                && let Some(Rule::Style(rule)) = stylesheet.rules.first()
+            {
+                for declaration in &rule.declarations {
+                    candidates.push(Candidate {
+                        name: declaration.name.clone(),
+                        value: declaration.value.clone(),
+                        important: declaration.important,
+                        origin: Origin::Author,
+                        specificity: Specificity {
+                            ids: u32::MAX,
+                            classes: u32::MAX,
+                            elements: u32::MAX,
+                        },
+                        source_order,
+                    });
+                    source_order += 1;
+                }
+            }
+        }
+
         candidates.sort_by(|left, right| {
             cascade_rank(left)
                 .cmp(&cascade_rank(right))
@@ -1909,6 +1944,9 @@ fn apply_initial_values(properties: &mut BTreeMap<String, ComputedValue>) {
     properties
         .entry("font-size".to_string())
         .or_insert_with(|| ComputedValue::Px(16.0));
+    properties
+        .entry("text-transform".to_string())
+        .or_insert_with(|| ComputedValue::Keyword("none".to_string()));
 }
 
 /// CSS 2.1 §8.5.3: If border-style is 'none', the computed border-width is 0.

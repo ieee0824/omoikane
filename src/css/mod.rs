@@ -176,7 +176,11 @@ pub enum MediaCondition {
     PrefersColorSchemeDark,
     /// `(prefers-color-scheme: light)`.
     PrefersColorSchemeLight,
-    /// An unrecognised condition -- treated as matching to be forward-compatible.
+    /// `(color)` or `(min/max-color: <integer>)`, in bits per color component.
+    Color { minimum: Option<u32>, maximum: Option<u32> },
+    /// `(monochrome)` or `(min/max-monochrome: <integer>)`, in bits per pixel.
+    Monochrome { minimum: Option<u32>, maximum: Option<u32> },
+    /// An unrecognised condition -- never matches.
     Unknown,
 }
 
@@ -833,6 +837,24 @@ mod tests {
         assert_eq!(queries[0].conditions, vec![MediaCondition::MaxWidth(768.0)]);
     }
 
+    #[test]
+    fn parse_media_query_color_and_monochrome_features() {
+        let queries = parse_media_query_list(
+            "(color) and (min-color: 1) and (max-monochrome: 0)",
+        ).unwrap();
+        assert_eq!(queries[0].conditions, vec![
+            MediaCondition::Color { minimum: None, maximum: None },
+            MediaCondition::Color { minimum: Some(1), maximum: None },
+            MediaCondition::Monochrome { minimum: None, maximum: Some(0) },
+        ]);
+    }
+
+    #[test]
+    fn parse_media_query_unknown_feature_is_preserved_as_false_condition() {
+        let queries = parse_media_query_list("only all and (future-feature: 1)").unwrap();
+        assert_eq!(queries[0].conditions, vec![MediaCondition::Unknown]);
+    }
+
     // -- @media query evaluation --
 
     #[test]
@@ -899,6 +921,28 @@ mod tests {
             .iter()
             .any(|q| evaluate_media_query(q, 1024.0, 768.0, false));
         assert!(matches);
+    }
+
+    #[test]
+    fn evaluate_color_and_monochrome_features() {
+        let matches = |query: &str| {
+            let queries = parse_media_query_list(query).unwrap();
+            queries.iter().any(|q| evaluate_media_query(q, 0.0, 0.0, false))
+        };
+        assert!(matches("(color)"));
+        assert!(matches("(min-color: 1)"));
+        assert!(!matches("(max-color: 0)"));
+        assert!(!matches("(monochrome)"));
+        assert!(matches("(max-monochrome: 0)"));
+        assert!(!matches("(min-monochrome: 1)"));
+    }
+
+    #[test]
+    fn evaluate_not_negates_the_whole_query() {
+        let queries = parse_media_query_list("not all and (min-color: 1)").unwrap();
+        assert!(!evaluate_media_query(&queries[0], 0.0, 0.0, false));
+        let queries = parse_media_query_list("not all and (min-monochrome: 1)").unwrap();
+        assert!(evaluate_media_query(&queries[0], 0.0, 0.0, false));
     }
 
     // -- @font-face parsing --

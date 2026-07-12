@@ -202,6 +202,8 @@ impl std::fmt::Debug for HostState {
 /// bootstrap so `vw`/`vh` units and metrics agree with `window.inner*`.
 const DEFAULT_VIEWPORT_WIDTH: f32 = 1280.0;
 const DEFAULT_VIEWPORT_HEIGHT: f32 = 720.0;
+const DEFAULT_IFRAME_VIEWPORT_WIDTH: f32 = 300.0;
+const DEFAULT_IFRAME_VIEWPORT_HEIGHT: f32 = 150.0;
 
 /// Clamps a caller-supplied viewport dimension to a finite, non-negative pixel
 /// value.
@@ -409,6 +411,15 @@ impl HostState {
             Some(document) => self.mark_document_style_dirty(&document),
             None => self.mark_all_document_styles_dirty(),
         }
+        // The iframe element belongs to the parent document, but its rendered
+        // content-box establishes the child document's viewport. A width/height
+        // style or attribute mutation must therefore invalidate both caches.
+        if node.tag_name().as_deref() == Some("iframe") {
+            if let Some(child) = self.iframe_documents.get(&node.identity()) {
+                let child_document = child.document.clone();
+                self.mark_document_style_dirty(&child_document);
+            }
+        }
     }
 
     /// Marks every cached document's style resolver as stale and drops the main
@@ -443,8 +454,9 @@ impl HostState {
         }
         // Build the resolver as a local first so no `document_styles` borrow is
         // held while `self.viewport` / the document tree are read, then store it.
+        let viewport = self.viewport_for_document(document);
         let mut resolver = StyleResolver::new();
-        resolver.set_viewport(self.viewport.width, self.viewport.height);
+        resolver.set_viewport(viewport.width, viewport.height);
         for css in collect_inline_stylesheets(document) {
             let sheet = crate::paint::stylesheet::parse_stylesheet_forgiving(&css);
             resolver.add_stylesheet(Origin::Author, sheet);
@@ -456,6 +468,51 @@ impl HostState {
                 dirty: false,
             },
         );
+    }
+
+    /// Returns the viewport belonging to a document. A child browsing context
+    /// uses its owning iframe's laid-out content box. If layout produced no box,
+    /// HTML width/height attributes are used, then the HTML defaults 300x150.
+    fn viewport_for_document(&mut self, document: &NodeHandle) -> Rect {
+        if document.identity() == self.document.identity() {
+            return self.viewport;
+        }
+        let owner = self.iframe_documents.iter().find_map(|(iframe_id, entry)| {
+            (entry.document.identity() == document.identity())
+                .then(|| self.nodes.get(iframe_id).cloned())
+                .flatten()
+        });
+        let Some(iframe) = owner else {
+            return self.viewport;
+        };
+
+        self.ensure_layout();
+        if let Some(layout_box) = self
+            .layout_root
+            .as_ref()
+            .and_then(|root| find_layout_box(root, &iframe))
+        {
+            return Rect {
+                x: 0.0,
+                y: 0.0,
+                width: layout_box.dimensions.content.width.max(0.0),
+                height: layout_box.dimensions.content.height.max(0.0),
+            };
+        }
+
+        let attrs = iframe.attributes().unwrap_or_default();
+        let parse_dimension = |name: &str, default: f32| {
+            attrs.get(name)
+                .and_then(|value| value.trim().parse::<f32>().ok())
+                .filter(|value| value.is_finite() && *value >= 0.0)
+                .unwrap_or(default)
+        };
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: parse_dimension("width", DEFAULT_IFRAME_VIEWPORT_WIDTH),
+            height: parse_dimension("height", DEFAULT_IFRAME_VIEWPORT_HEIGHT),
+        }
     }
 
     /// Rebuilds the main document's cached layout tree when needed, first
@@ -3359,7 +3416,9 @@ mod tests {
         doc.append_child(div.clone());
 
         let mut runtime = JsRuntime::with_document(doc).unwrap();
-        runtime.eval(r#"
+        runtime
+            .eval(
+                r#"
             const el = document.querySelector("div");
             el.className = "foo bar";
         "#).unwrap();
@@ -8189,8 +8248,9 @@ mod tests {
         );
     }
 
-    /// A sub-document resolver uses the runtime's configured viewport for
-    /// `vw`/`vh` resolution, exactly like the main document.
+    /// A sub-document resolver uses its owning iframe's laid-out content box
+    /// for `vw`/`vh` resolution. This fixture's iframe fills the 800px parent
+    /// width and has zero laid-out height.
     #[test]
     fn iframe_computed_style_uses_configured_viewport() {
         let mut runtime = runtime_from_html(
@@ -8214,8 +8274,42 @@ mod tests {
         );
         assert_eq!(
             eval_str(&mut runtime, "getComputedStyle(t, '').height"),
-            "150px",
-            "25vh of a 600px viewport must resolve to 150px in the sub-document"
+            "0px",
+            "25vh of the iframe's zero-height viewport must resolve to 0px"
+        );
+    }
+
+    /// The iframe viewport follows the constrained layout result, rather than
+    /// the unconstrained width/height declarations in its style attribute.
+    #[test]
+    fn iframe_viewport_uses_layout_size_when_max_size_constrains_style() {
+        let mut runtime = runtime_from_html(
+            r#"<html><head><style>
+                 iframe { width: 200px; max-width: 80px; height: 120px; max-height: 40px; }
+               </style></head><body>
+                 <iframe id="f" style="width: 200px; height: 120px"></iframe>
+               </body></html>"#,
+        );
+        runtime.set_viewport(800.0, 600.0);
+        runtime
+            .eval(
+                r#"var d = document.getElementById('f').contentDocument;
+                   var s = d.createElement('style');
+                   s.textContent = '#t { width: 50vw; height: 50vh; }';
+                   d.body.appendChild(s);
+                   var t = d.createElement('div'); t.id = 't'; d.body.appendChild(t);"#,
+            )
+            .unwrap();
+
+        assert_eq!(
+            eval_str(&mut runtime, "getComputedStyle(t, '').width"),
+            "40px",
+            "50vw must use the max-width-constrained 80px layout width, not style width 200px"
+        );
+        assert_eq!(
+            eval_str(&mut runtime, "getComputedStyle(t, '').height"),
+            "20px",
+            "50vh must use the max-height-constrained 40px layout height, not style height 120px"
         );
     }
 
@@ -8244,6 +8338,80 @@ mod tests {
             eval_str(&mut runtime, "getComputedStyle(t, '').width"),
             "500px",
             "a viewport change must invalidate the cached sub-document resolver"
+        );
+    }
+
+    /// Acid3 test 46 regression: media features are evaluated against the
+    /// iframe's own 0x0 viewport and re-evaluated after its CSS size changes.
+    #[test]
+    fn acid3_media_queries_use_and_recompute_iframe_viewport() {
+        let mut runtime = runtime_from_html(
+            r#"<html><head><style>
+                 iframe { width: 0; height: 0; }
+                 iframe.large { width: 100px; height: 100px; }
+               </style></head>
+               <body><iframe id="f"></iframe></body></html>"#,
+        );
+        runtime.eval(r#"
+            var d = document.getElementById('f').contentDocument;
+            var s = d.createElement('style');
+            s.textContent =
+                '@media all and (min-color: 0) { #a { text-transform: uppercase; } }' +
+                '@media (bogus), all { #h { text-transform: uppercase; } }' +
+                '@media (min-color: 1), (min-monochrome: 1) { #v { text-transform: uppercase; } }' +
+                '@media all and (min-color: 0) and (min-monochrome: 0) { #w { text-transform: uppercase; } }' +
+                '@media all and (min-height: 1em) and (min-width: 1em) { #y1 { text-transform: uppercase; } }' +
+                '@media all and (max-height: 1em) and (max-width: 1em) { #y4 { text-transform: uppercase; } }';
+            d.head.appendChild(s);
+            for (const id of ['a', 'plain', 'h', 'v', 'w', 'y1', 'y4']) {
+                var p = d.createElement('p'); p.id = id; d.body.appendChild(p);
+            }
+        "#,
+            )
+            .unwrap();
+
+        for id in ["a", "h", "v", "w", "y4"] {
+            assert_eq!(
+                eval_str(
+                    &mut runtime,
+                    &format!("getComputedStyle(d.getElementById('{id}'), '').textTransform")
+                ),
+                "uppercase"
+            );
+        }
+        assert_eq!(
+            eval_str(
+                &mut runtime,
+                "getComputedStyle(d.getElementById('plain'), '').textTransform"
+            ),
+            "none"
+        );
+        assert_eq!(
+            eval_str(
+                &mut runtime,
+                "getComputedStyle(d.getElementById('y1'), '').textTransform"
+            ),
+            "none"
+        );
+
+        runtime
+            .eval(
+                "document.getElementById('f').setAttribute('class', 'large')",
+            )
+            .unwrap();
+        assert_eq!(
+            eval_str(
+                &mut runtime,
+                "getComputedStyle(d.getElementById('y1'), '').textTransform"
+            ),
+            "uppercase"
+        );
+        assert_eq!(
+            eval_str(
+                &mut runtime,
+                "getComputedStyle(d.getElementById('y4'), '').textTransform"
+            ),
+            "none"
         );
     }
 

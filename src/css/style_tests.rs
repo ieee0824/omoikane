@@ -1189,6 +1189,19 @@ fn expands_text_decoration_shorthand_none() {
 // ===== text-transform compute tests =====
 
 #[test]
+fn text_transform_initial_value_is_none() {
+    let document = NodeHandle::document();
+    let target = NodeHandle::element("p");
+    document.append_child(target.clone());
+    let mut resolver = StyleResolver::new();
+    let style = resolver.computed_style(&target);
+    assert_eq!(
+        style.get("text-transform"),
+        Some(&ComputedValue::Keyword("none".to_string()))
+    );
+}
+
+#[test]
 fn computes_text_transform_uppercase() {
     let (_document, _body, title, _html) = sample_tree();
     let mut resolver = StyleResolver::new();
