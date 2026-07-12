@@ -1719,15 +1719,30 @@
           return true;
         },
         createDocumentType(qualifiedName, publicId, systemId) {
-          validateQualifiedName(String(qualifiedName));
-          return {
-            nodeType: 10,
-            name: String(qualifiedName),
-            nodeName: String(qualifiedName),
-            publicId: publicId == null ? "" : String(publicId),
-            systemId: systemId == null ? "" : String(systemId),
-            internalSubset: null,
-          };
+          const name = String(qualifiedName);
+          validateQualifiedName(name);
+          const node = wrapNode(__omoikane_create_document_type(name));
+          Object.defineProperties(node, {
+            name: { value: name, configurable: true },
+            publicId: { value: publicId == null ? "" : String(publicId), configurable: true },
+            systemId: { value: systemId == null ? "" : String(systemId), configurable: true },
+            internalSubset: { value: null, configurable: true },
+          });
+          return node;
+        },
+        createDocument(namespace, qualifiedName, doctype) {
+          const ns = (namespace === undefined || namespace === null || namespace === "")
+            ? null
+            : String(namespace);
+          const qname = qualifiedName == null ? "" : String(qualifiedName);
+          if (qname !== "") validateAndExtractNS(ns, qname);
+
+          const doc = wrapNode(__omoikane_create_document());
+          let root = null;
+          if (qname !== "") root = doc.createElementNS(ns, qname);
+          if (doctype !== undefined && doctype !== null) doc.appendChild(doctype);
+          if (root) doc.appendChild(root);
+          return doc;
         },
         createHTMLDocument() {
           return globalThis.document;
@@ -1787,7 +1802,10 @@
     }
 
     get documentElement() {
-      return this.querySelector("html");
+      for (const child of this.childNodes) {
+        if (child.nodeType === 1) return child;
+      }
+      return null;
     }
 
     get readyState() {
