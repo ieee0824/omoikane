@@ -567,7 +567,15 @@
       }
 
       // Return value depends only on preventDefault, not stopPropagation
-      return !dispatchEvent.defaultPrevented;
+      const notCanceled = !dispatchEvent.defaultPrevented;
+      // Activation behavior is the default action of a click event: a submit or
+      // reset button whose click was not canceled submits or resets its owning
+      // form. Running it here (rather than only in click()) means a synthetic
+      // click dispatched directly through dispatchEvent behaves like a real one.
+      if (notCanceled && dispatchEvent.type === "click") {
+        this.__runActivationBehavior();
+      }
+      return notCanceled;
     }
 
     get parentNode() {
@@ -1074,17 +1082,64 @@
 
     focus() {}
     blur() {}
-    click() {
-      // A `disabled` attribute only suppresses activation on elements where
-      // it has meaning; a stray `<div disabled>` must still dispatch click.
+
+    // True when this element is a form control on which the `disabled`
+    // attribute has meaning and is set. A stray `<div disabled>` is not a
+    // disabled control; only these tags honour the attribute.
+    __isDisabledControl() {
       const DISABLEABLE_TAGS = ["input", "button", "select", "textarea", "option", "optgroup", "fieldset"];
-      if (this.disabled && DISABLEABLE_TAGS.includes(this.nodeName.toLowerCase())) return;
+      return this.disabled && DISABLEABLE_TAGS.includes(this.nodeName.toLowerCase());
+    }
+
+    click() {
+      // A disabled form control is not activated at all: it does not even
+      // dispatch a click event. A stray `<div disabled>` must still dispatch.
+      if (this.__isDisabledControl()) return;
       if (this.nodeName === "INPUT") {
         const type = this.type.toLowerCase();
         if (type === "checkbox") this.checked = !this.checked;
         else if (type === "radio") this.checked = true;
       }
-      this.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+      // The click event's activation behavior (form submit/reset) is its
+      // default action; dispatchEvent runs it when the event is not canceled.
+      this.dispatchEvent(
+        new MouseEvent("click", { bubbles: true, cancelable: true })
+      );
+    }
+
+    // Nearest ancestor <form>, or null. The `form` content-attribute
+    // association is not modeled; ancestry suffices for our needs.
+    __owningForm() {
+      let node = this.parentNode;
+      while (node) {
+        if (node.nodeType === 1 && node.tagName === "FORM") return node;
+        node = node.parentNode;
+      }
+      return null;
+    }
+
+    __runActivationBehavior() {
+      // A disabled form control has no activation behavior, so it never submits
+      // or resets its form -- not even for a synthetic click dispatched
+      // directly through dispatchEvent.
+      if (this.__isDisabledControl()) return;
+      const tag = this.nodeName;
+      let type = "";
+      try {
+        type = (this.type || "").toLowerCase();
+      } catch (_e) {
+        type = "";
+      }
+      const isSubmit =
+        (tag === "INPUT" && (type === "submit" || type === "image")) ||
+        (tag === "BUTTON" && (type === "submit" || type === ""));
+      const isReset =
+        (tag === "INPUT" || tag === "BUTTON") && type === "reset";
+      if (!isSubmit && !isReset) return;
+      const form = this.__owningForm();
+      if (!form) return;
+      if (isSubmit) form.__submit(this);
+      else form.__reset();
     }
 
     get hidden() {
@@ -2012,19 +2067,22 @@
     get tBodies() {
       return childElementsByTag(this, "TBODY");
     }
+    // Per HTML spec: tr children of thead elements (in tree order) come first,
+    // then those whose parent is the table itself or a tbody (interleaved in
+    // tree order), then those in tfoot elements.
     get rows() {
-      const rows = [];
-      for (const head of childElementsByTag(this, "THEAD")) {
-        rows.push(...childElementsByTag(head, "TR"));
+      const heads = [];
+      const bodies = [];
+      const feet = [];
+      for (const child of this.childNodes) {
+        if (child.nodeType !== 1) continue;
+        const tag = child.tagName;
+        if (tag === "THEAD") heads.push(...childElementsByTag(child, "TR"));
+        else if (tag === "TFOOT") feet.push(...childElementsByTag(child, "TR"));
+        else if (tag === "TBODY") bodies.push(...childElementsByTag(child, "TR"));
+        else if (tag === "TR") bodies.push(child);
       }
-      for (const body of childElementsByTag(this, "TBODY")) {
-        rows.push(...childElementsByTag(body, "TR"));
-      }
-      rows.push(...childElementsByTag(this, "TR"));
-      for (const foot of childElementsByTag(this, "TFOOT")) {
-        rows.push(...childElementsByTag(foot, "TR"));
-      }
-      return rows;
+      return heads.concat(bodies, feet);
     }
     createCaption() {
       const existing = this.caption;
@@ -2061,6 +2119,136 @@
     deleteTFoot() {
       const foot = this.tFoot;
       if (foot) this.removeChild(foot);
+    }
+    // HTMLTableElement.insertRow(index): creates a tr and places it per the HTML
+    // spec's insertion rules — auto-creating a tbody for an empty table, else
+    // appending to the last tbody, else positioning relative to the rows
+    // collection. index defaults to -1 (append).
+    insertRow(index = -1) {
+      const rows = this.rows;
+      if (index < -1 || index > rows.length) {
+        throw new DOMException("The index is out of range.", "IndexSizeError");
+      }
+      const tr = document.createElement("tr");
+      const tbodies = childElementsByTag(this, "TBODY");
+      if (rows.length === 0 && tbodies.length === 0) {
+        const tbody = document.createElement("tbody");
+        tbody.appendChild(tr);
+        this.appendChild(tbody);
+      } else if (rows.length === 0) {
+        tbodies[tbodies.length - 1].appendChild(tr);
+      } else if (index === -1 || index === rows.length) {
+        rows[rows.length - 1].parentNode.appendChild(tr);
+      } else {
+        const ref = rows[index];
+        ref.parentNode.insertBefore(tr, ref);
+      }
+      return tr;
+    }
+    deleteRow(index) {
+      const rows = this.rows;
+      if (index < -1 || index >= rows.length) {
+        throw new DOMException("The index is out of range.", "IndexSizeError");
+      }
+      if (index === -1) {
+        if (rows.length === 0) return;
+        index = rows.length - 1;
+      }
+      const row = rows[index];
+      row.parentNode.removeChild(row);
+    }
+  }
+
+  // thead / tbody / tfoot share the HTMLTableSectionElement interface.
+  class HTMLTableSectionElement extends Node {
+    get rows() {
+      return childElementsByTag(this, "TR");
+    }
+    insertRow(index = -1) {
+      const rows = this.rows;
+      if (index < -1 || index > rows.length) {
+        throw new DOMException("The index is out of range.", "IndexSizeError");
+      }
+      const tr = document.createElement("tr");
+      if (index === -1 || index === rows.length) {
+        this.appendChild(tr);
+      } else {
+        this.insertBefore(tr, rows[index]);
+      }
+      return tr;
+    }
+    deleteRow(index) {
+      const rows = this.rows;
+      if (index < -1 || index >= rows.length) {
+        throw new DOMException("The index is out of range.", "IndexSizeError");
+      }
+      if (index === -1) {
+        if (rows.length === 0) return;
+        index = rows.length - 1;
+      }
+      this.removeChild(rows[index]);
+    }
+  }
+
+  class HTMLTableRowElement extends Node {
+    // td and th children, in tree order.
+    get cells() {
+      return this.childNodes.filter(
+        c => c.nodeType === 1 && (c.tagName === "TD" || c.tagName === "TH")
+      );
+    }
+    // Index of this row in its owning table's rows collection (thead, then
+    // body/tbody, then tfoot ordering), or -1 if not in a table.
+    get rowIndex() {
+      const parent = this.parentNode;
+      if (!parent) return -1;
+      let table = null;
+      const ptag = parent.tagName;
+      if (ptag === "TABLE") {
+        table = parent;
+      } else if (
+        (ptag === "THEAD" || ptag === "TBODY" || ptag === "TFOOT") &&
+        parent.parentNode &&
+        parent.parentNode.tagName === "TABLE"
+      ) {
+        table = parent.parentNode;
+      }
+      if (!table) return -1;
+      return table.rows.findIndex(r => r.__id === this.__id);
+    }
+    // Index of this row among its parent section's rows, or -1 when the row is
+    // not in a table section. Per the HTML spec this is defined only within a
+    // thead/tbody/tfoot; a row that is a direct child of the table (with no
+    // intervening section) returns -1.
+    get sectionRowIndex() {
+      const parent = this.parentNode;
+      if (!parent) return -1;
+      const ptag = parent.tagName;
+      if (ptag !== "THEAD" && ptag !== "TBODY" && ptag !== "TFOOT") {
+        return -1;
+      }
+      return childElementsByTag(parent, "TR").findIndex(r => r.__id === this.__id);
+    }
+    insertCell(index = -1) {
+      const cells = this.cells;
+      if (index < -1 || index > cells.length) {
+        throw new DOMException("The index is out of range.", "IndexSizeError");
+      }
+      const td = document.createElement("td");
+      if (index === -1 || index === cells.length) {
+        this.appendChild(td);
+      } else {
+        this.insertBefore(td, cells[index]);
+      }
+      return td;
+    }
+    deleteCell(index) {
+      const cells = this.cells;
+      if (index === -1) index = cells.length - 1;
+      if (index < 0 || index >= cells.length) {
+        throw new DOMException("The index is out of range.", "IndexSizeError");
+      }
+      this.removeChild(cells[index]);
     }
   }
 
@@ -2101,6 +2289,17 @@
     }
     get length() {
       return this.__controls().length;
+    }
+    // Fires a cancelable `submit` event (the form-submission entry point used by
+    // a submit button's activation behavior). Actual navigation is out of scope;
+    // a handler calling preventDefault simply suppresses the (absent) default.
+    __submit(submitter) {
+      const event = new Event("submit", { bubbles: true, cancelable: true });
+      event.submitter = submitter || null;
+      this.dispatchEvent(event);
+    }
+    __reset() {
+      this.dispatchEvent(new Event("reset", { bubbles: true, cancelable: true }));
     }
   }
 
@@ -2229,6 +2428,10 @@
   // Tag-name → constructor table consulted by wrapNode() for element nodes.
   const ELEMENT_CTORS = {
     table: HTMLTableElement,
+    thead: HTMLTableSectionElement,
+    tbody: HTMLTableSectionElement,
+    tfoot: HTMLTableSectionElement,
+    tr: HTMLTableRowElement,
     form: HTMLFormElement,
     input: HTMLInputElement,
     button: HTMLButtonElement,
@@ -2264,6 +2467,33 @@
     Node.prototype[constName] = value;
   }
 
+  // Event handler IDL attributes (onclick, onsubmit, ...). Assigning a function
+  // registers a single event listener for the matching type and replaces any
+  // previously assigned handler, so `form.onsubmit = fn` behaves like
+  // `addEventListener("submit", fn)`. `onload` is defined directly on Node
+  // (with Window reflection for <body>) and is intentionally excluded here.
+  const EVENT_HANDLER_TYPES = [
+    "click", "dblclick", "mousedown", "mouseup", "mouseover", "mousemove",
+    "mouseout", "mouseenter", "mouseleave", "submit", "reset", "change",
+    "input", "focus", "blur", "keydown", "keyup", "keypress", "select",
+    "contextmenu", "wheel", "error", "abort",
+  ];
+  for (const type of EVENT_HANDLER_TYPES) {
+    const key = "__on_" + type;
+    Object.defineProperty(Node.prototype, "on" + type, {
+      configurable: true,
+      enumerable: false,
+      get() {
+        return this[key] || null;
+      },
+      set(handler) {
+        if (this[key]) this.removeEventListener(type, this[key]);
+        this[key] = typeof handler === "function" ? handler : null;
+        if (this[key]) this.addEventListener(type, this[key]);
+      },
+    });
+  }
+
   globalThis.Node = Node;
   globalThis.Element = Node;
   globalThis.HTMLElement = Node;
@@ -2278,6 +2508,8 @@
   globalThis.TreeWalker = TreeWalker;
   globalThis.Range = Range;
   globalThis.HTMLTableElement = HTMLTableElement;
+  globalThis.HTMLTableSectionElement = HTMLTableSectionElement;
+  globalThis.HTMLTableRowElement = HTMLTableRowElement;
   globalThis.HTMLFormElement = HTMLFormElement;
   globalThis.HTMLInputElement = HTMLInputElement;
   globalThis.HTMLButtonElement = HTMLButtonElement;

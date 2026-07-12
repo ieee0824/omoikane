@@ -5486,6 +5486,441 @@ mod tests {
     }
 
     #[test]
+    fn table_insert_row_placement_and_bounds() {
+        let mut runtime = JsRuntime::new().unwrap();
+        assert_js_ok(
+            &mut runtime,
+            r#"
+            (function () {
+                // Empty table: insertRow auto-creates a tbody and puts the row in it.
+                var t = document.createElement('table');
+                var r0 = t.insertRow(0);
+                if (t.tBodies.length !== 1) return 1;
+                if (t.tBodies[0].firstChild !== r0) return 2;
+                if (t.rows.length !== 1) return 3;
+                if (r0.tagName !== 'TR') return 4;
+
+                // Row count 1, insert at -1 (append) goes to the last section (tbody).
+                var r1 = t.insertRow(-1);
+                if (t.rows.length !== 2) return 5;
+                if (t.rows[1] !== r1) return 6;
+                if (t.tBodies[0].childNodes.length !== 2) return 7;
+
+                // Insert at index 0 positions before the current first row, same section.
+                var r2 = t.insertRow(0);
+                if (t.rows[0] !== r2) return 8;
+                if (t.tBodies[0].firstChild !== r2) return 9;
+                if (t.rows.length !== 3) return 10;
+
+                // Out-of-range indices throw IndexSizeError (code 1).
+                function codeFor(i) {
+                    try { t.insertRow(i); return -1; } catch (e) { return e.code; }
+                }
+                if (codeFor(-2) !== 1) return 11;
+                if (codeFor(99) !== 1) return 12;
+
+                // A table that already has an (empty) tbody reuses it rather than
+                // creating a second one.
+                var t2 = document.createElement('table');
+                t2.appendChild(document.createElement('tbody'));
+                var x = t2.insertRow(0);
+                if (t2.tBodies.length !== 1) return 13;
+                if (t2.tBodies[0].firstChild !== x) return 14;
+
+                // deleteRow(-1) removes the last row; out of range throws.
+                t2.deleteRow(-1);
+                if (t2.rows.length !== 0) return 15;
+                var t3 = document.createElement('table');
+                var d = t3.insertRow(0);
+                function delCode(i) {
+                    try { t3.deleteRow(i); return -1; } catch (e) { return e.code; }
+                }
+                if (delCode(5) !== 1) return 16;
+                t3.deleteRow(0);
+                if (t3.rows.length !== 0) return 17;
+                return 0;
+            })()
+        "#,
+        );
+    }
+
+    #[test]
+    fn table_row_index_spans_sections_in_collection_order() {
+        let mut runtime = JsRuntime::new().unwrap();
+        assert_js_ok(
+            &mut runtime,
+            r#"
+            (function () {
+                // Build <table><thead><tr/></thead><tbody><tr/></tbody><tfoot><tr/></tfoot>
+                // plus a stray tr child of the table itself.
+                var t = document.createElement('table');
+                var head = t.createTHead();
+                var foot = t.createTFoot();
+                var body = document.createElement('tbody');
+                t.insertBefore(body, foot);
+                var hr = head.insertRow(0);
+                var br = body.insertRow(0);
+                var fr = foot.insertRow(0);
+                var direct = document.createElement('tr');
+                t.insertBefore(direct, foot); // table-direct row, after tbody
+
+                // rows collection order: thead, then body(table-direct + tbody in
+                // tree order), then tfoot.
+                var rows = t.rows;
+                if (rows.length !== 4) return 1;
+                if (rows[0] !== hr) return 2;
+                if (rows[1] !== br) return 3;   // tbody row precedes direct row (tree order)
+                if (rows[2] !== direct) return 4;
+                if (rows[3] !== fr) return 5;
+
+                // rowIndex is the index in that collection.
+                if (hr.rowIndex !== 0) return 6;
+                if (br.rowIndex !== 1) return 7;
+                if (direct.rowIndex !== 2) return 8;
+                if (fr.rowIndex !== 3) return 9;
+
+                // sectionRowIndex is per-section.
+                if (hr.sectionRowIndex !== 0) return 10;
+                if (br.sectionRowIndex !== 0) return 11;
+                if (fr.sectionRowIndex !== 0) return 12;
+
+                // A row that is a direct child of the table (no thead/tbody/tfoot
+                // section between it and the table) has no section row index,
+                // even though it still participates in table.rows (rowIndex 2).
+                if (direct.sectionRowIndex !== -1) return 15;
+
+                // A detached row reports -1 for rowIndex.
+                var orphan = document.createElement('tr');
+                if (orphan.rowIndex !== -1) return 13;
+                if (orphan.sectionRowIndex !== -1) return 14;
+                return 0;
+            })()
+        "#,
+        );
+    }
+
+    #[test]
+    fn table_section_rows_insert_delete_and_row_cells() {
+        let mut runtime = JsRuntime::new().unwrap();
+        assert_js_ok(
+            &mut runtime,
+            r#"
+            (function () {
+                var tbody = document.createElement('tbody');
+                if (tbody.rows.length !== 0) return 1;
+                var r0 = tbody.insertRow(0);
+                var r1 = tbody.insertRow(-1);
+                var rMid = tbody.insertRow(1);
+                if (tbody.rows.length !== 3) return 2;
+                if (tbody.rows[0] !== r0) return 3;
+                if (tbody.rows[1] !== rMid) return 4;
+                if (tbody.rows[2] !== r1) return 5;
+
+                // Section insertRow bounds.
+                function codeFor(i) {
+                    try { tbody.insertRow(i); return -1; } catch (e) { return e.code; }
+                }
+                if (codeFor(99) !== 1) return 6;
+
+                tbody.deleteRow(1);
+                if (tbody.rows.length !== 2) return 7;
+                if (tbody.rows[0] !== r0) return 8;
+                if (tbody.rows[1] !== r1) return 9;
+
+                // tr.cells returns td and th in tree order.
+                var tr = tbody.rows[0];
+                tr.appendChild(document.createElement('th'));
+                tr.appendChild(document.createElement('td'));
+                tr.appendChild(document.createTextNode('ignored'));
+                tr.appendChild(document.createElement('td'));
+                if (tr.cells.length !== 3) return 10;
+                if (tr.cells[0].tagName !== 'TH') return 11;
+                if (tr.cells[1].tagName !== 'TD') return 12;
+                if (tr.cells[2].tagName !== 'TD') return 13;
+                return 0;
+            })()
+        "#,
+        );
+    }
+
+    #[test]
+    fn acid3_test50_row_construction_and_ordering() {
+        // Deterministic regression mirroring Acid3 test 50: section insertRow,
+        // rowIndex/sectionRowIndex, and rows ordering after appending into thead.
+        let mut runtime = JsRuntime::new().unwrap();
+        assert_js_ok(
+            &mut runtime,
+            r#"
+            (function () {
+                var table = document.createElement('table');
+                table.appendChild(document.createElement('tbody'));
+                var tr1 = document.createElement('tr');
+                table.appendChild(tr1);
+                table.appendChild(document.createElement('caption'));
+                table.appendChild(document.createElement('thead'));
+                table.insertBefore(table.firstChild.nextSibling, null);
+                table.replaceChild(table.firstChild, table.lastChild);
+                var tr2 = table.tBodies[0].insertRow(0);
+                if (table.tBodies[0].rows[0].rowIndex !== 0) return 1;
+                if (table.tBodies[0].rows[0].sectionRowIndex !== 0) return 2;
+                if (table.childNodes.length !== 3) return 3;
+                if (!table.caption) return 4;
+                if (!table.tHead) return 5;
+                if (table.tFoot) return 6;
+                if (table.tBodies.length !== 1) return 7;
+                if (table.rows.length !== 1) return 8;
+                if (tr1.parentNode) return 9;
+                if (table.caption !== table.createCaption()) return 10;
+                if (table.tFoot !== null) return 11;
+                if (table.tHead !== table.createTHead()) return 12;
+                if (table.createTFoot() !== table.tFoot) return 13;
+                table.tHead.appendChild(tr1);
+                if (table.rows[0] !== table.tHead.firstChild) return 14;
+                if (table.rows.length !== 2) return 15;
+                if (table.rows[1] !== table.tBodies[0].firstChild) return 16;
+                return 0;
+            })()
+        "#,
+        );
+    }
+
+    #[test]
+    fn acid3_test51_row_ordering_across_sections() {
+        // Deterministic regression mirroring Acid3 test 51: cross-section row
+        // ordering, table insertRow with existing sections, and tree-order
+        // traversal via getElementsByTagName.
+        let mut runtime = JsRuntime::new().unwrap();
+        assert_js_ok(
+            &mut runtime,
+            r#"
+            (function () {
+                var table = document.createElement('table');
+                var rows = [
+                    document.createElement('tr'),
+                    document.createElement('tr'),
+                    document.createElement('tr'),
+                    document.createElement('tr'),
+                    document.createElement('tr'),
+                    table.insertRow(0),
+                    table.createTFoot().insertRow(0)
+                ];
+                rows[6].parentNode.appendChild(rows[0]);
+                table.appendChild(rows[1]);
+                table.insertBefore(document.createElement('thead'), table.firstChild);
+                table.firstChild.appendChild(rows[2]);
+                rows[2].parentNode.appendChild(rows[3]);
+                rows[4].appendChild(rows[5].parentNode);
+                table.insertRow(0);
+                table.tFoot.appendChild(rows[6]);
+                if (table.rows.length !== 6) return 1;
+                if (table.getElementsByTagName('tr').length !== 6) return 2;
+                if (table.childNodes.length !== 3) return 3;
+                if (table.childNodes[0] !== table.tHead) return 4;
+                var trs = table.getElementsByTagName('tr');
+                if (trs[0] !== table.tHead.childNodes[0]) return 5;
+                if (trs[1] !== table.tHead.childNodes[1]) return 6;
+                if (trs[1] !== rows[2]) return 7;
+                if (trs[2] !== table.tHead.childNodes[2]) return 8;
+                if (trs[2] !== rows[3]) return 9;
+                if (table.childNodes[1] !== table.tFoot) return 10;
+                if (trs[3] !== table.tFoot.childNodes[0]) return 11;
+                if (trs[3] !== rows[0]) return 12;
+                if (trs[4] !== table.tFoot.childNodes[1]) return 13;
+                if (trs[4] !== rows[6]) return 14;
+                if (trs[5] !== table.childNodes[2]) return 15;
+                if (trs[5] !== rows[1]) return 16;
+                if (table.tBodies.length !== 0) return 17;
+                return 0;
+            })()
+        "#,
+        );
+    }
+
+    #[test]
+    fn acid3_test29_cloned_table_section_rows_and_cells() {
+        // Regression for Acid3 test 29: a cloned <table> must expose section
+        // rows and row cells so that tBodies[0].rows[0].cells[0] resolves.
+        let mut runtime = JsRuntime::new().unwrap();
+        assert_js_ok(
+            &mut runtime,
+            r#"
+            (function () {
+                var t1 = document.createElement('table');
+                var tbody = document.createElement('tbody');
+                var tr = document.createElement('tr');
+                var td = document.createElement('td');
+                td.appendChild(document.createElement('p'));
+                tr.appendChild(td);
+                tbody.appendChild(tr);
+                t1.appendChild(tbody);
+                var t2 = t1.cloneNode(true);
+                if (t2.tBodies[0].rows[0].cells[0].firstChild.tagName !== 'P') return 1;
+                if (t2.tBodies[0].rows[0].cells[0].firstChild.childNodes.length !== 0) return 2;
+                return 0;
+            })()
+        "#,
+        );
+    }
+
+    #[test]
+    fn event_handler_idl_attribute_registers_and_replaces_listener() {
+        let mut runtime = JsRuntime::new().unwrap();
+        assert_js_ok(
+            &mut runtime,
+            r#"
+            (function () {
+                var d = document.createElement('div');
+                var n = 0;
+                d.onclick = function () { n += 1; };
+                if (typeof d.onclick !== 'function') return 1;
+                d.click();
+                if (n !== 1) return 2;
+                // Reassigning replaces the previous handler (no double-firing).
+                var m = 0;
+                d.onclick = function () { m += 1; };
+                d.click();
+                if (n !== 1) return 3;
+                if (m !== 1) return 4;
+                // Assigning null removes the handler.
+                d.onclick = null;
+                if (d.onclick !== null) return 5;
+                d.click();
+                if (m !== 1) return 6;
+                return 0;
+            })()
+        "#,
+        );
+    }
+
+    #[test]
+    fn submit_button_click_fires_cancelable_submit_on_owning_form() {
+        // Regression for Acid3 test 54: input.click() on a submit control must
+        // synchronously dispatch a submit event to the owning form.
+        let mut runtime = JsRuntime::new().unwrap();
+        assert_js_ok(
+            &mut runtime,
+            r#"
+            (function () {
+                var f = document.createElement('form');
+                var i = document.createElement('input');
+                f.appendChild(i);
+                i.type = 'submit';
+                var called = 0;
+                var wasCancelable = false;
+                f.onsubmit = function (e) {
+                    wasCancelable = e.cancelable;
+                    e.preventDefault();
+                    called += 1;
+                };
+                i.click();
+                if (called !== 1) return 1;
+                if (!wasCancelable) return 2;
+
+                // A reset button dispatches a reset event instead.
+                var r = document.createElement('input');
+                r.type = 'reset';
+                f.appendChild(r);
+                var resetCalled = 0;
+                f.onreset = function () { resetCalled += 1; };
+                r.click();
+                if (resetCalled !== 1) return 3;
+
+                // A plain text input's click does not submit the form.
+                var t = document.createElement('input');
+                t.type = 'text';
+                f.appendChild(t);
+                called = 0;
+                t.click();
+                if (called !== 0) return 4;
+
+                // A submit control with no owning form does not throw.
+                var lone = document.createElement('button');
+                lone.click();
+
+                // addEventListener('submit', ...) also receives the event, and a
+                // nested submit button still finds its ancestor form.
+                var wrap = document.createElement('div');
+                var i2 = document.createElement('input');
+                i2.type = 'submit';
+                wrap.appendChild(i2);
+                var f2 = document.createElement('form');
+                f2.appendChild(wrap);
+                var listened = 0;
+                f2.addEventListener('submit', function (e) { e.preventDefault(); listened += 1; });
+                i2.click();
+                if (listened !== 1) return 5;
+                return 0;
+            })()
+        "#,
+        );
+    }
+
+    #[test]
+    fn disabled_form_control_click_runs_no_activation_behavior() {
+        // A disabled submit/reset control has no activation behavior: neither the
+        // native click() nor a synthetic click dispatched through dispatchEvent
+        // submits or resets its owning form.
+        let mut runtime = JsRuntime::new().unwrap();
+        assert_js_ok(
+            &mut runtime,
+            r#"
+            (function () {
+                var f = document.createElement('form');
+                var submits = 0;
+                var resets = 0;
+                f.addEventListener('submit', function (e) { e.preventDefault(); submits += 1; });
+                f.addEventListener('reset', function () { resets += 1; });
+
+                // Baseline: an ENABLED submit button submits the form even when
+                // the click arrives as a synthetic event dispatched through
+                // dispatchEvent (not only via the native click() method).
+                var enabled = document.createElement('button');
+                enabled.type = 'submit';
+                f.appendChild(enabled);
+                enabled.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+                if (submits !== 1) return 1;
+
+                // The `disabled` IDL attribute reflects the content attribute on
+                // a <button>, and a disabled submit button does not submit the
+                // form via the native click().
+                var b = document.createElement('button');
+                b.type = 'submit';
+                b.disabled = true;
+                if (b.disabled !== true) return 2;
+                if (!b.hasAttribute('disabled')) return 3;
+                f.appendChild(b);
+                submits = 0;
+                b.click();
+                if (submits !== 0) return 4;
+
+                // ...nor via a synthetic click dispatched directly through
+                // dispatchEvent (which does reach __runActivationBehavior).
+                b.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+                if (submits !== 0) return 5;
+
+                // A disabled reset control likewise runs no activation behavior,
+                // by either path.
+                var r = document.createElement('input');
+                r.type = 'reset';
+                r.disabled = true;
+                f.appendChild(r);
+                r.click();
+                r.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+                if (resets !== 0) return 6;
+
+                // Re-enabling the button restores its activation behavior.
+                b.disabled = false;
+                submits = 0;
+                b.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+                if (submits !== 1) return 7;
+
+                return 0;
+            })()
+        "#,
+        );
+    }
+
+    #[test]
     fn input_value_is_dirty_and_preserves_lone_surrogate() {
         let mut runtime = JsRuntime::new().unwrap();
         assert_js_ok(

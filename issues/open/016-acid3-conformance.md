@@ -64,6 +64,7 @@ Acid3 は DOM / CSS / HTML parser / scripting / networking まで含む複合テ
 | 016-12 `implementation.createDocument` | 82/100 | 独立 Document の native 生成・文書単位 StyleResolver 登録、QName/namespace 検証、doctype のルート前挿入を実装。test 8/26/27 が新規 PASS（FAITHFUL/DIRECT 両モード 82/100、実測）。test 98 は createDocument を通過し、016-14 範囲の XML/XHTML document title 差で残存。 |
 | 050 `@media` 評価と iframe 固有 viewport | **83/100** | media query の構文解析・評価（all/not/only、リスト OR、color/monochrome、min/max-width/height の px・em）と owning iframe のレイアウト content box に基づく文書固有 viewport、text-transform 初期値の露出を実装（PR #114）。test 46 が新規 PASS（FAITHFUL/DIRECT 両モード 83/100、実測）。 |
 | 016-16 iframe/object load イベント | **83/100** | 接続時のサブ文書ロードとマクロタスクでの `load` dispatch、3種のハンドラ経路、`object[data]`、再接続時の再ロードを実装。test 65 の7ハンドラが完了し、test 69 は retry を抜けて後続の `t was null`（016-14）まで前進。FAITHFUL/DIRECT とも index 100、83/100（実測）。 |
+| 016-13 table row API + フォーム送信/on* ハンドラ | **86/100** | HTMLTableElement.insertRow/deleteRow、HTMLTableSectionElement(rows/insertRow/deleteRow)、HTMLTableRowElement(cells/rowIndex/sectionRowIndex/insertCell/deleteCell)、IndexSizeError 境界検証、rows ゲッタのツリー順修正を実装（test 50/51 が PASS、83→85）。加えて submit/reset ボタン click の活性化挙動（所属 form への cancelable な submit/reset 同期発火）と on* イベントハンドラ IDL 属性を実装（test 54 が PASS、85→86）。FAITHFUL/DIRECT 両モード 86/100（実測）。test 29 は HTML パーサが `<tr>` を tbody 挿入せず table 直下に置くため（tree construction 側、本 issue スコープ外）残存。 |
 
 ### 82/100 到達時（016-12 `createDocument` 実装）に新規 PASS したテスト
 
@@ -111,7 +112,8 @@ Acid3 は DOM / CSS / HTML parser / scripting / networking まで含む複合テ
 - ~~**016-11 NodeIterator / TreeWalker / Range**~~ → 実装済み（70→79）。test 8 も 016-12 の `createDocument` 実装で解放。
 - **016-14 XML/XHTML・CSSOM・SVG DOM**: test 69-72, 74-80 の SVG/XML サブドキュメント系。
 - ~~**016-16 iframe load イベント**~~ → 実装済み。test 65 の iframe×6 + object×1 の load が完了し、test 69 の kungFuDeathGrip/title/retry 部分を解消。残る `t was null` は 016-14 の XML/SVG パース範囲。
-- 残: test 29, 50-51, 54-56, 64, 98 等（016-13/016-14 の残り + イベント dispatch）。
+- ~~**016-13 table row API + フォーム送信**~~ → 実装済み（83→86）。test 50/51（insertRow/rowIndex/section）と test 54（submit ボタン click → form submit イベント）を解放。test 55/56（checkbox 移動・radio clone）は 016-10 のライブ選択状態モデルで既に PASS 済みと実測確認。
+- 残: test 29（HTML パーサの table tree construction が `<tr>` を tbody へ入れないため tBodies が空、parser スコープ）, 64, 98 等（016-14 の残り + parser）。
 
 ## 子issue
 

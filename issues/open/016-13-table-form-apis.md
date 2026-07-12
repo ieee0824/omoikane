@@ -48,9 +48,17 @@ table 系および form 系の DOM API を実装する。bucket4、最大 12 点
 - Node 共通に `name` 反射と `hasChildNodes()` を追加。
 - 結果: Acid3 test **49,53,57,58,59,62 が PASS**（test 62 は label.htmlFor / meta.httpEquiv 補完で通過）。
 
+### 完了済み（追加分・PR 未マージ、`issue/016-13-table-row-apis`、83→86）
+
+- **HTMLTableElement.insertRow / deleteRow**: HTML 仕様の挿入先決定（空 table は tbody 自動生成、tbody ありは最後の tbody へ、index/-1/末尾は rows コレクション基準の位置決め）。IndexSizeError(code 1) の境界検証も実装。
+- **rows ゲッタのツリー順修正**: thead 行 → body 行（table 直下 tr と tbody 内 tr をツリー順で混在）→ tfoot 行 の順序に修正。
+- **HTMLTableSectionElement**（thead/tbody/tfoot）: `rows` / `insertRow` / `deleteRow`。
+- **HTMLTableRowElement**（tr）: `cells`（td/th をツリー順）/ `rowIndex`（所属 table の rows コレクション内 index、非所属は -1）/ `sectionRowIndex`（親 section 内 index）/ `insertCell` / `deleteCell`。
+- **submit ボタン click のフォーム送信**（test 54）: `click()` に活性化挙動を追加し、submit/reset ボタンの click が伝播中止されなければ祖先 `<form>` へ cancelable な `submit`/`reset` イベントを同期発火。
+- **on* イベントハンドラ IDL 属性**: `onclick`/`onsubmit`/`onreset` 等を汎用実装（代入で単一リスナー登録・再代入で置換・null で解除）。`onload` は Window 反射のため従来どおり Node 側に個別定義。
+- 結果: Acid3 test **50 / 51 / 54 が新規 PASS**（FAITHFUL/DIRECT 両モード 86/100、実測）。test 55/56（checkbox 移動・radio clone の状態保持）は 016-10 のライブ選択状態モデルで既に PASS 済みと実測確認（本 issue では未変更）。
+
 ### 残項目
 
-- **insertRow / deleteRow / rowIndex / sectionRowIndex**: test 50/51 が要求。`table.insertRow(0)` や `tSection.insertRow(0)` が未実装で「not a callable function」。test 51 は thead/tfoot/tbody をまたいだ行のツリー順序を厳密にアサートするため、単なる insertRow 追加だけでなく section 振り分け・rowIndex/sectionRowIndex・rows の正確なツリー順序が必要（M〜L 規模）。今回は未着手。
-- **HTMLTableSectionElement**（thead/tbody/tfoot の `rows`/`insertRow`/`deleteRow`）: 上記に付随。
-- radio group 排他・checkbox の dirty checkedness（test 55/56）: iframe 依存（016-9）でもあり未着手。
-- test 52/54: `document.write` で生成される parsed form/input に依存（016-7）。
+- **test 29**: `document.getElementsByTagName('table')[0].cloneNode(true).tBodies[0]...` が空。原因は DOM API 側ではなく **HTML パーサの table tree construction**（`src/html/tree_builder.rs`）が `<tr>` を tbody へ入れず table 直下に配置しており（"in table body" 挿入モード未実装）、`tBodies` が空になるため。DOM 側の section/cell API は cloneNode 経由でも正しく動くことをテストで確認済み。パーサ側で tbody 自動生成を実装すれば解放される（parser スコープ、別 issue 相当）。
+- test 52: `document.write` で生成される parsed form/input に依存（016-7 は実装済みだが、実測では PASS。念のため経過観察）。
