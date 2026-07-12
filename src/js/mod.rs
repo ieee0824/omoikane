@@ -385,6 +385,8 @@ impl HostState {
                 let html = String::from_utf8_lossy(&body);
                 crate::html::TreeBuilder::parse(&html).document()
             }
+            Some((mime, body)) if is_xml_mime_type(&mime) => crate::xml::parse(&body)
+                .unwrap_or_else(|_| blank_html_document()),
             // Non-HTML content types (image/png, text/plain, XML, SVG, ...) are
             // never parsed as HTML: the sub-document stays an empty skeleton so
             // a page cannot mine markup out of a non-HTML resource. Acid3 tests
@@ -897,15 +899,16 @@ impl JsRuntime {
                 Ok(())
             }),
             TimerPayload::ResourceLoad { node_id } => {
-                let should_dispatch = {
+                let (should_dispatch, xhtml_scripts) = {
                     let mut state = self.host_state.borrow_mut();
                     state.pending_resource_loads.remove(&node_id);
                     let Some(node) = state.get_node(node_id) else {
                         return Ok(());
                     };
                     if document_root_for_node(&node).is_none() {
-                        false
+                        (false, Vec::new())
                     } else {
+                        let mut xhtml_scripts = Vec::new();
                         if node
                             .tag_name()
                             .is_some_and(|tag| tag.eq_ignore_ascii_case("iframe"))
@@ -918,15 +921,37 @@ impl JsRuntime {
                                 state.document_styles.remove(&previous.document.identity());
                                 state.unregister_tree(&previous.document);
                             }
-                            state.iframe_content_document(&node);
+                            let document = state.iframe_content_document(&node);
+                            let is_xhtml = document
+                                .child_nodes()
+                                .into_iter()
+                                .find(|child| child.node_type() == NodeType::Element)
+                                .and_then(|root| root.namespace_uri())
+                                .as_deref()
+                                == Some("http://www.w3.org/1999/xhtml");
+                            if is_xhtml {
+                                xhtml_scripts = collect_script_elements(&document)
+                                    .into_iter()
+                                    .filter(|script| script.namespace_uri().as_deref() == Some("http://www.w3.org/1999/xhtml"))
+                                    .filter(is_inline_classic_script)
+                                    .map(|script| collect_text_content(&script))
+                                    .collect();
+                            }
                             // JS wrappers are cached by native identity, so keep
                             // the old Rc alive until its replacement has been
                             // allocated and cannot reuse the same address.
                             drop(previous);
                         }
-                        true
+                        (true, xhtml_scripts)
                     }
                 };
+                for source in xhtml_scripts {
+                    // Like top-level document scripts, one failing XHTML
+                    // script must not prevent later scripts or the iframe load
+                    // event from running.
+                    let _ = self.eval(&source);
+                    let _ = self.run_jobs();
+                }
                 if should_dispatch {
                     self.eval(&format!("__omoikane_dispatch_resource_load({node_id})"))?;
                     self.run_jobs()?;
@@ -1314,6 +1339,31 @@ fn register_host_bindings(
             NativeFunction::from_copy_closure(node_name_native),
         ),
         (
+            js_string!("__omoikane_node_local_name"),
+            1,
+            NativeFunction::from_copy_closure(node_local_name_native),
+        ),
+        (
+            js_string!("__omoikane_node_namespace_uri"),
+            1,
+            NativeFunction::from_copy_closure(node_namespace_uri_native),
+        ),
+        (
+            js_string!("__omoikane_node_prefix"),
+            1,
+            NativeFunction::from_copy_closure(node_prefix_native),
+        ),
+        (
+            js_string!("__omoikane_doctype_public_id"),
+            1,
+            NativeFunction::from_copy_closure(doctype_public_id_native),
+        ),
+        (
+            js_string!("__omoikane_doctype_system_id"),
+            1,
+            NativeFunction::from_copy_closure(doctype_system_id_native),
+        ),
+        (
             js_string!("__omoikane_get_attribute"),
             2,
             NativeFunction::from_copy_closure(get_attribute_native),
@@ -1549,7 +1599,13 @@ fn is_html_mime_type(content_type: &str) -> bool {
         .unwrap_or("")
         .trim()
         .to_ascii_lowercase();
-    matches!(essence.as_str(), "text/html" | "application/xhtml+xml")
+    essence == "text/html"
+}
+
+fn is_xml_mime_type(content_type: &str) -> bool {
+    let essence = content_type.split(';').next().unwrap_or("").trim();
+    matches!(essence.to_ascii_lowercase().as_str(),
+        "text/xml" | "application/xml" | "image/svg+xml" | "application/xhtml+xml")
 }
 
 fn parse_node_id(value: Option<&JsValue>, context: &mut Context) -> JsResult<usize> {
@@ -2180,6 +2236,36 @@ fn node_name_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsR
     })
 }
 
+fn node_local_name_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let id = parse_node_id(args.first(), context)?;
+    with_host_state(|state| Ok(state.borrow().get_node(id).and_then(|n| n.local_name())
+        .map(|s| js_string!(s.as_str()).into()).unwrap_or_else(JsValue::null)))
+}
+
+fn node_namespace_uri_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let id = parse_node_id(args.first(), context)?;
+    with_host_state(|state| Ok(state.borrow().get_node(id).and_then(|n| n.namespace_uri())
+        .map(|s| js_string!(s.as_str()).into()).unwrap_or_else(JsValue::null)))
+}
+
+fn node_prefix_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let id = parse_node_id(args.first(), context)?;
+    with_host_state(|state| Ok(state.borrow().get_node(id).and_then(|n| n.prefix())
+        .map(|s| js_string!(s.as_str()).into()).unwrap_or_else(JsValue::null)))
+}
+
+fn doctype_public_id_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let id = parse_node_id(args.first(), context)?;
+    with_host_state(|state| Ok(state.borrow().get_node(id).and_then(|n| n.public_id())
+        .map(|s| js_string!(s.as_str()).into()).unwrap_or_else(|| js_string!("").into())))
+}
+
+fn doctype_system_id_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let id = parse_node_id(args.first(), context)?;
+    with_host_state(|state| Ok(state.borrow().get_node(id).and_then(|n| n.system_id())
+        .map(|s| js_string!(s.as_str()).into()).unwrap_or_else(|| js_string!("").into())))
+}
+
 fn attribute_names_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
     let node_id = parse_node_id(args.first(), context)?;
     with_host_state(|state| {
@@ -2206,13 +2292,21 @@ fn get_attribute_native(_: &JsValue, args: &[JsValue], context: &mut Context) ->
         .cloned()
         .unwrap_or_default()
         .to_string(context)?
-        .to_std_string_escaped()
-        .to_ascii_lowercase();
+        .to_std_string_escaped();
     with_host_state(|state| {
         let node = state.borrow().get_node(node_id);
         let value = node
-            .and_then(|node| node.attributes())
-            .and_then(|attributes| attributes.get(&name).cloned());
+            .and_then(|node| {
+                let is_html = node.is_html_element();
+                node.attributes().map(|attributes| (attributes, is_html))
+            })
+            .and_then(|(attributes, is_html)| {
+                attributes.get(&name).cloned().or_else(|| {
+                    is_html
+                        .then(|| attributes.get(&name.to_ascii_lowercase()).cloned())
+                        .flatten()
+                })
+            });
         Ok(match value {
             Some(value) => js_string!(value.as_str()).into(),
             None => JsValue::null(),
@@ -4481,6 +4575,32 @@ mod tests {
         assert!(first, "first script should run");
         let third = runtime.eval("third").unwrap().as_boolean().unwrap();
         assert!(third, "third script should run despite second failing");
+    }
+
+    #[test]
+    fn get_attribute_is_case_sensitive_for_xml_and_case_insensitive_for_html() {
+        use crate::html::TreeBuilder;
+
+        let xml = crate::xml::parse(b"<Root a='lower'/>").unwrap();
+        let mut xml_runtime = JsRuntime::with_document(xml).unwrap();
+        assert_eq!(
+            eval_string_value(
+                &mut xml_runtime,
+                "[document.documentElement.getAttribute('A') === null, document.documentElement.getAttribute('a')].join('|')",
+            )
+            .as_deref(),
+            Some("true|lower"),
+            "XML getAttribute('A') must not return the lowercase a attribute",
+        );
+
+        let html = TreeBuilder::parse("<html><body><div a='html'></div></body></html>").document();
+        let mut html_runtime = JsRuntime::with_document(html).unwrap();
+        assert_eq!(
+            eval_string_value(&mut html_runtime, "document.querySelector('div').getAttribute('A')")
+                .as_deref(),
+            Some("html"),
+            "HTML getAttribute must retain ASCII case-insensitive lookup",
+        );
     }
 
     #[test]
@@ -8312,12 +8432,21 @@ mod tests {
     fn is_html_mime_type_matches_html_essences_only() {
         assert!(is_html_mime_type("text/html"));
         assert!(is_html_mime_type("text/html; charset=utf-8"));
-        assert!(is_html_mime_type("APPLICATION/XHTML+XML"));
+        assert!(!is_html_mime_type("APPLICATION/XHTML+XML"));
         assert!(!is_html_mime_type("image/png"));
         assert!(!is_html_mime_type("text/plain; charset=utf-8"));
         assert!(!is_html_mime_type("application/xml"));
         assert!(!is_html_mime_type("image/svg+xml"));
         assert!(!is_html_mime_type(""));
+    }
+
+
+    #[test]
+    fn is_xml_mime_type_matches_required_essences() {
+        for mime in ["text/xml", "application/xml;charset=utf-8", "image/svg+xml", "APPLICATION/XHTML+XML"] {
+            assert!(is_xml_mime_type(mime), "{mime}");
+        }
+        assert!(!is_xml_mime_type("text/html"));
     }
 
     #[test]
@@ -8541,6 +8670,74 @@ mod tests {
             .as_deref(),
             Some("hi")
         );
+    }
+
+    #[test]
+    fn iframe_xml_src_preserves_case_namespace_entities_and_doctype() {
+        use crate::html::TreeBuilder;
+        let port = spawn_static_http_server(
+            "application/xml; charset=utf-8",
+            r#"<?xml version='1.0'?><!DOCTYPE Root SYSTEM 'urn:test'><Root xmlns='urn:root' xmlns:p='urn:child' A='&lt;&#65;'><p:Child/></Root>"#,
+        );
+        let doc = TreeBuilder::parse(&format!(
+            r#"<html><body><iframe id="f" src="http://127.0.0.1:{port}/doc.xml"></iframe></body></html>"#
+        )).document();
+        let mut runtime = JsRuntime::with_document(doc).unwrap();
+        assert_eq!(eval_string_value(&mut runtime,
+            "var d=document.getElementById('f').contentDocument,c=d.documentElement.childNodes[0]; [d.doctype.nodeType,d.doctype.nodeName,d.doctype.name,d.doctype.systemId,d.documentElement.tagName,d.documentElement.namespaceURI,d.documentElement.getAttribute('A'),c.localName].join('|')"
+        ).as_deref(), Some("10|Root|Root|urn:test|Root|urn:root|<A|Child"));
+    }
+
+    #[test]
+    fn malformed_xml_discards_the_whole_partial_tree() {
+        use crate::html::TreeBuilder;
+        let port = spawn_static_http_server("text/xml", "<root><test/></wrong>");
+        let doc = TreeBuilder::parse(&format!(
+            r#"<html><body><iframe id="f" src="http://127.0.0.1:{port}/bad.xml"></iframe></body></html>"#
+        )).document();
+        let mut runtime = JsRuntime::with_document(doc).unwrap();
+        assert_eq!(runtime.eval("document.getElementById('f').contentDocument.getElementsByTagName('test').length").unwrap().as_number(), Some(0.0));
+    }
+
+    #[test]
+    fn xhtml_scripts_run_only_for_well_formed_correct_namespace_documents() {
+        use crate::html::TreeBuilder;
+        let port = spawn_static_http_server("text/xml", r#"<html xmlns='http://www.w3.org/1999/xhtml'><body><script>parent.xmlNotice=(parent.xmlNotice||0)+1</script></body></html>"#);
+        let doc = TreeBuilder::parse(&format!(
+            r#"<html><body><iframe id="f" src="http://127.0.0.1:{port}/x.xhtml"></iframe></body></html>"#
+        )).document();
+        let mut runtime = JsRuntime::with_document(doc).unwrap();
+        pump_zero_delay_tasks(&mut runtime);
+        assert_eq!(runtime.eval("xmlNotice").unwrap().as_number(), Some(1.0));
+
+        let wrong_port = spawn_static_http_server("text/xml", r#"<html xmlns='http://www.w3.org/1999/xhtml#'><body><script>parent.wrongNotice=1</script></body></html>"#);
+        runtime.eval(&format!("var f=document.getElementById('f');f.src='http://127.0.0.1:{wrong_port}/wrong.xhtml';document.body.removeChild(f);document.body.appendChild(f)")).unwrap();
+        pump_zero_delay_tasks(&mut runtime);
+        assert_eq!(runtime.eval("typeof wrongNotice").unwrap().as_string().unwrap().to_std_string_escaped(), "undefined");
+    }
+
+    #[test]
+    fn failing_xhtml_script_does_not_stop_later_scripts_or_iframe_load() {
+        use crate::html::TreeBuilder;
+        let port = spawn_static_http_server(
+            "application/xhtml+xml",
+            r#"<html xmlns='http://www.w3.org/1999/xhtml'><body><script>throw new Error('expected')</script><script>parent.xhtmlAfterError='ran'</script></body></html>"#,
+        );
+        let doc = TreeBuilder::parse(&format!(
+            r#"<html><body><iframe id="f" src="http://127.0.0.1:{port}/x.xhtml"></iframe></body></html>"#
+        ))
+        .document();
+        let mut runtime = JsRuntime::with_document(doc).unwrap();
+        runtime
+            .eval("document.getElementById('f').addEventListener('load', () => globalThis.xhtmlLoadCount = (globalThis.xhtmlLoadCount || 0) + 1)")
+            .unwrap();
+
+        pump_zero_delay_tasks(&mut runtime);
+
+        assert_eq!(eval_string_value(&mut runtime, "globalThis.xhtmlAfterError").as_deref(), Some("ran"),
+            "a later XHTML script must run after an earlier script throws");
+        assert_eq!(runtime.eval("globalThis.xhtmlLoadCount").unwrap().as_number(), Some(1.0),
+            "the iframe load event must still dispatch exactly once");
     }
 
     /// A resource served as `image/png` must never be parsed as HTML, even when

@@ -12,3 +12,4 @@ pub mod layout;
 pub mod paint;
 mod screenshot;
 pub mod svg;
+pub mod xml;
