@@ -71,6 +71,10 @@ pub struct Document;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Element {
     tag_name: String,
+    namespace_uri: Option<String>,
+    prefix: Option<String>,
+    local_name: String,
+    html: bool,
     attributes: BTreeMap<String, String>,
     checked: bool,
     dirty_checkedness: bool,
@@ -81,6 +85,31 @@ impl Element {
     pub fn new(tag_name: impl Into<String>) -> Self {
         Self {
             tag_name: tag_name.into().to_ascii_lowercase(),
+            namespace_uri: None,
+            prefix: None,
+            local_name: String::new(),
+            html: true,
+            attributes: BTreeMap::new(),
+            checked: false,
+            dirty_checkedness: false,
+        }
+    }
+
+    pub fn new_xml(
+        qualified_name: impl Into<String>,
+        namespace_uri: Option<String>,
+    ) -> Self {
+        let tag_name = qualified_name.into();
+        let (prefix, local_name) = tag_name
+            .split_once(':')
+            .map(|(prefix, local)| (Some(prefix.to_string()), local.to_string()))
+            .unwrap_or_else(|| (None, tag_name.clone()));
+        Self {
+            tag_name,
+            namespace_uri,
+            prefix,
+            local_name,
+            html: false,
             attributes: BTreeMap::new(),
             checked: false,
             dirty_checkedness: false,
@@ -91,6 +120,13 @@ impl Element {
     pub fn tag_name(&self) -> &str {
         &self.tag_name
     }
+
+    pub fn namespace_uri(&self) -> Option<&str> { self.namespace_uri.as_deref() }
+    pub fn prefix(&self) -> Option<&str> { self.prefix.as_deref() }
+    pub fn local_name(&self) -> &str {
+        if self.html { &self.tag_name } else { &self.local_name }
+    }
+    pub fn is_html(&self) -> bool { self.html }
 
     /// Returns the element attributes.
     pub fn attributes(&self) -> &BTreeMap<String, String> {
@@ -210,6 +246,12 @@ impl NodeHandle {
     /// Creates an element node.
     pub fn element(tag_name: impl Into<String>) -> Self {
         Self::new(NodeData::Element(Element::new(tag_name)))
+    }
+
+
+    /// Creates an XML element, preserving its qualified name and namespace.
+    pub fn xml_element(tag_name: impl Into<String>, namespace_uri: Option<String>) -> Self {
+        Self::new(NodeData::Element(Element::new_xml(tag_name, namespace_uri)))
     }
 
     /// Creates a text node.
@@ -345,6 +387,35 @@ impl NodeHandle {
         }
     }
 
+
+    /// Sets an XML attribute without HTML ASCII case folding.
+    pub fn set_xml_attribute(&self, name: impl Into<String>, value: impl Into<String>) {
+        if let NodeData::Element(element) = &mut self.0.borrow_mut().data {
+            element.attributes.insert(name.into(), value.into());
+        }
+    }
+
+    pub fn namespace_uri(&self) -> Option<String> {
+        match &self.0.borrow().data {
+            NodeData::Element(element) => element.namespace_uri().map(str::to_string),
+            _ => None,
+        }
+    }
+
+    pub fn prefix(&self) -> Option<String> {
+        match &self.0.borrow().data {
+            NodeData::Element(element) => element.prefix().map(str::to_string),
+            _ => None,
+        }
+    }
+
+    pub fn local_name(&self) -> Option<String> {
+        match &self.0.borrow().data {
+            NodeData::Element(element) => Some(element.local_name().to_string()),
+            _ => None,
+        }
+    }
+
     /// Removes an attribute from an element node. No-op for other node kinds.
     pub fn remove_attribute(&self, name: &str) {
         if let NodeData::Element(element) = &mut self.0.borrow_mut().data {
@@ -468,7 +539,8 @@ impl Node for NodeHandle {
         match &self.0.borrow().data {
             NodeData::Document(_) => "#document".to_string(),
             NodeData::DocumentFragment => "#document-fragment".to_string(),
-            NodeData::Element(element) => element.tag_name.to_ascii_uppercase(),
+            NodeData::Element(element) if element.is_html() => element.tag_name.to_ascii_uppercase(),
+            NodeData::Element(element) => element.tag_name.clone(),
             NodeData::Text(_) => "#text".to_string(),
             NodeData::Comment(_) => "#comment".to_string(),
             NodeData::DocumentType(doctype) => doctype.name.clone(),
