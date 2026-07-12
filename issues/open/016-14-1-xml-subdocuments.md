@@ -37,3 +37,24 @@ image/svg+xml, application/xhtml+xml)を実際に XML としてパースし DOM 
 
 - 上記対象テストのうち XML パース起因のものが前進する(実測で個別記録)
 - 既存テスト・Acid3 スコア(90/100)の維持以上
+
+## 実装結果（2026-07-12）
+
+- `src/xml` に strict な最小 XML parser を追加。タグ対応、属性引用、定義済み実体／数値文字参照、CDATA、comment、PI、doctype、UTF-8 と encoding 宣言を検証し、違反時は部分 DOM を破棄する。
+- `text/xml` / `application/xml` / `image/svg+xml` / `application/xhtml+xml` を XML としてロード。qualified name の大小文字、default/prefixed namespace、XML 属性名、doctype IDL を DOM/JS に公開した。
+- 正しい XHTML namespace の整形式文書だけ parser-inserted classic script を実行。誤 namespace の `xhtml.3` と不整形式な `xhtml.2` は実行しない。
+- XHTML の動的 `Document.title` と namespaced form の `Document.forms` を補完した。
+- XML parser 単体 5 tests と iframe 統合 3 tests を追加。`cargo build -j1`、`cargo test --lib -j1`（1036 passed / 26 ignored）、`cargo test --tests -j1`（同 unit 群 + Acid3 harness 4 passed）を完走。
+
+### Acid3 実測
+
+| test | main | 実装後 | 結果 |
+| --- | --- | --- | --- |
+| 64 | FAIL（object.data が `test.html`） | FAIL（同一） | URL IDL 反射で別領域 |
+| 69 | FAIL（`t was null`） | PASS | SVG XML DOM 化で解消 |
+| 70 | PASS | PASS | 不正 UTF-8 を XML parser の fatal error として固定 |
+| 71 | FAIL（Document childNodes 3、期待 2） | FAIL（同一） | `document.write` 後の HTML tree construction で別領域 |
+| 80 | FAIL（linktest onload timeout） | FAIL（同一） | test 48 の接続済み iframe `src` 再 navigation / 動的 onload が未配線。XHTML script 自体は統合 test で検証済み |
+| 98 | FAIL（title 更新後も空） | PASS | XHTML title / forms を解消 |
+
+FAITHFUL / DIRECT とも **90/100 → 92/100**、index 100、script/drive error 0。FAITHFUL は非ハング。
