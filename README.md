@@ -173,7 +173,7 @@ HTTP クライアントの現状仕様:
 
 ### Docker サンドボックス
 
-ホスト環境を汚さずに omoikane のビルド・テスト・Claude Code / Codex CLI 実行ができる開発用コンテナを用意しています。CI と同一のフォント構成（＋ CJK フォント）を含み、ビルドに必要な `cmake` などに加え、開発用に `ripgrep`（`rg`）・GitHub CLI（`gh`）・[Codex CLI](https://learn.chatgpt.com/docs/codex/cli)（`codex`）もインストール済みです。
+ホスト環境を汚さずに omoikane のビルド・テスト・Claude Code / Codex CLI 実行ができる開発用コンテナを用意しています。CI と同一のフォント構成に加えて日本語フォント（Noto CJK / IPA ゴシック・明朝）を含み、ビルドに必要な `cmake` などに加え、開発用に `vim`・`ripgrep`（`rg`）・GitHub CLI（`gh`）・[Codex CLI](https://learn.chatgpt.com/docs/codex/cli)（`codex`）もインストール済みです。
 
 ```bash
 # イメージをビルド
@@ -193,6 +193,8 @@ CI=1 cargo test -- --include-ignored
 - Claude Code / Codex CLI のログイン情報は named volume に永続化されるため、コンテナを作り直してもログインし直す必要はありません（初回はそれぞれ `claude` / `codex login` でログイン）。
 - Codex CLI は本体パッケージも `~/.codex`（named volume）に置かれるため、更新はコンテナ内で `codex update` を実行します（イメージ再ビルドでは既存 volume 内の本体は更新されません）。
 - リポジトリはバインドマウントで共有されるため、ホスト側での編集がそのままコンテナに反映されます。
+- `dev` ユーザーはパスワードなしで `sudo` を使えます（コンテナ内での ad-hoc なパッケージ追加など）。
+- SSH 鍵は named volume（`ssh-config`）で `~/.ssh` に永続化されます。サンドボックスの隔離を保つためホストの `~/.ssh` はマウントしない方針です。コンテナ内で `ssh-keygen -t ed25519` で生成し、公開鍵を GitHub 等に登録してください。
 
 ## Acid2 テスト
 
