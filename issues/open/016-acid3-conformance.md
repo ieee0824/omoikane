@@ -67,6 +67,7 @@ Acid3 は DOM / CSS / HTML parser / scripting / networking まで含む複合テ
 | 016-13 table row API + フォーム送信/on* ハンドラ | 86/100 | HTMLTableElement.insertRow/deleteRow、HTMLTableSectionElement(rows/insertRow/deleteRow)、HTMLTableRowElement(cells/rowIndex/sectionRowIndex/insertCell/deleteCell)、IndexSizeError 境界検証、rows ゲッタのツリー順修正を実装（test 50/51 が PASS、83→85）。加えて submit/reset ボタン click の活性化挙動（所属 form への cancelable な submit/reset 同期発火）と on* イベントハンドラ IDL 属性を実装（test 54 が PASS、85→86）。FAITHFUL/DIRECT 両モード 86/100（実測）。test 29 は HTML パーサが `<tr>` を tbody 挿入せず table 直下に置くため（tree construction 側、本 issue スコープ外）残存。 |
 | 051 cursor 値検証（無効宣言の破棄） | **87/100** | CSS 宣言のプロパティ別値検証フックを導入し、`cursor` の keyword/url() 文法検証・無効宣言のカスケード前破棄・初期値 `auto` フォールバック・inline style への同一検証適用を実装（PR #117）。test 47 が新規 PASS（PR #116 と合流後の main 実測で FAITHFUL/DIRECT 両モード 87/100）。 |
 | 054 table tree construction（暗黙 tbody 生成） | **88/100** | HTML パーサに "in table" / "in table body" 挿入モードを実装。`<table>` 直下の `<tr>`（および `<td>`/`<th>`）に対し暗黙 `<tbody>`（必要なら `<tr>` も）を生成し、明示 `<thead>`/`<tbody>`/`<tfoot>` は二重ラップしない。section 閉じタグ後の table 内空白テキストの配置も仕様に寄せた。test 29（cloneNode + tBodies）が新規 PASS（FAITHFUL/DIRECT 両モード 88/100、実測）。test 5 は暗黙 tbody 前提（expectation 11）を通過したが、`document.forms` / `document.links` 未実装のため後続で残存。test 4 も同 API（`document.forms[0]`）が原因で残存（tbody 前まで到達せず）。foster parenting は本 issue でも対象外。 |
+| 055 document.forms / document.links の HTMLCollection | **90/100** | Document の live HTMLCollection（`forms` / `links` / `images` / `anchors`）を実装。tree 順・index/`length`・`item`/`namedItem`・`name`/`id` 名前アクセスに対応し、保持した参照でも DOM 変更を反映する live 性を持つ（`collect()` を毎アクセス再実行）。`links` は `href` 属性を持つ `<a>`/`<area>` のみ、`anchors` は `name` を持つ `<a>` のみを対象とし、各コレクションはその Document 自身の tree にスコープされる（iframe contentDocument の form/link がメイン文書に混ざらない）。test 4 / test 5 が新規 PASS（FAITHFUL/DIRECT 両モード 90/100、実測）。加えて FAITHFUL harness の stall 判定を「保留タイマーが残る間は打ち切らない」よう修正（`has_pending_timers()` を条件に追加）。`document.links` が解決したことで新規に発火する test 80 の retry ループ（linktest の iframe onload 待ち）で FAITHFUL が index 80 で停止していた退行を解消し、両モードとも index 100 まで到達。 |
 
 ### 82/100 到達時（016-12 `createDocument` 実装）に新規 PASS したテスト
 
@@ -115,8 +116,8 @@ Acid3 は DOM / CSS / HTML parser / scripting / networking まで含む複合テ
 - ~~**016-16 iframe load イベント**~~ → 実装済み。test 65 の iframe×6 + object×1 の load が完了し、test 69 の kungFuDeathGrip/title/retry 部分を解消。残る `t was null` は 016-14 の XML/SVG パース範囲。
 - ~~**016-13 table row API + フォーム送信**~~ → 実装済み（83→86）。test 50/51（insertRow/rowIndex/section）と test 54（submit ボタン click → form submit イベント）を解放。test 55/56（checkbox 移動・radio clone）は 016-10 のライブ選択状態モデルで既に PASS 済みと実測確認。
 - ~~test 29~~ → 054 で解消（parser の暗黙 tbody 生成、87→88）。
-- **test 4 / test 5**: パーサの table tree construction（暗黙 tbody）は 054 で解消したが、両テストは `document.forms` / `document.links`（Document の HTMLCollection）未実装で残存。test 4 は `document.forms[0]`（expectation 25、tbody 参照より前）で throw、test 5 は暗黙 tbody 前提（expectation 11）を通過後 `document.links[1].firstChild`（expectation 23）で throw。DOM API スコープのため別途 055 で追跡。
-- 残: test 64, 98 等（016-14 の残り + parser）。
+- ~~**test 4 / test 5**~~ → 055 で解消（Document の live HTMLCollection `forms`/`links`/`images`/`anchors` を実装、88→90）。test 4 は `document.forms[0]`／`document.forms.form.elements[0]`、test 5 は `document.links[1].firstChild` が解決するようになり両モードで PASS。
+- 残: test 64（object URI 解決）, 69/71/72/74/75/77/79/80/98（016-14 の SVG/XML/CSSOM + object/iframe URI + linktest networking）。test 80 は `document.links` 解決後 retry を経て `timeout -- could be a networking issue`（linktest の onload 未発火）へ前進したが、依然として残存。
 
 ## 子issue
 
@@ -142,4 +143,4 @@ Acid3 ギャップ分析（`tests/fixtures/acid3/GAP_ANALYSIS.md`）に基づく
 - [x] [050 CSS media query の構文解析・評価と computed style 反映](../closed/050-css-media-query-evaluation.md)（PR #114, 82→83）
 - [x] [051 CSS プロパティ値検証と computed style serialization](../closed/051-css-property-value-validation.md)（PR #117, test 47 PASS, 合流後 87/100）
 - [x] [054 table tree construction（暗黙 tbody 生成）](../closed/054-parser-table-tree-construction.md)（PR #119, test 29 PASS, 87→88）
-- [ ] [055 document.forms / document.links の HTMLCollection](055-document-forms-links-collections.md)（test 4/5 の残ブロッカー）
+- [x] [055 document.forms / document.links の HTMLCollection](055-document-forms-links-collections.md)（test 4/5 PASS, 88→90）
