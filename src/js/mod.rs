@@ -5584,6 +5584,11 @@ mod tests {
                 if (br.sectionRowIndex !== 0) return 11;
                 if (fr.sectionRowIndex !== 0) return 12;
 
+                // A row that is a direct child of the table (no thead/tbody/tfoot
+                // section between it and the table) has no section row index,
+                // even though it still participates in table.rows (rowIndex 2).
+                if (direct.sectionRowIndex !== -1) return 15;
+
                 // A detached row reports -1 for rowIndex.
                 var orphan = document.createElement('tr');
                 if (orphan.rowIndex !== -1) return 13;
@@ -5844,6 +5849,71 @@ mod tests {
                 f2.addEventListener('submit', function (e) { e.preventDefault(); listened += 1; });
                 i2.click();
                 if (listened !== 1) return 5;
+                return 0;
+            })()
+        "#,
+        );
+    }
+
+    #[test]
+    fn disabled_form_control_click_runs_no_activation_behavior() {
+        // A disabled submit/reset control has no activation behavior: neither the
+        // native click() nor a synthetic click dispatched through dispatchEvent
+        // submits or resets its owning form.
+        let mut runtime = JsRuntime::new().unwrap();
+        assert_js_ok(
+            &mut runtime,
+            r#"
+            (function () {
+                var f = document.createElement('form');
+                var submits = 0;
+                var resets = 0;
+                f.addEventListener('submit', function (e) { e.preventDefault(); submits += 1; });
+                f.addEventListener('reset', function () { resets += 1; });
+
+                // Baseline: an ENABLED submit button submits the form even when
+                // the click arrives as a synthetic event dispatched through
+                // dispatchEvent (not only via the native click() method).
+                var enabled = document.createElement('button');
+                enabled.type = 'submit';
+                f.appendChild(enabled);
+                enabled.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+                if (submits !== 1) return 1;
+
+                // The `disabled` IDL attribute reflects the content attribute on
+                // a <button>, and a disabled submit button does not submit the
+                // form via the native click().
+                var b = document.createElement('button');
+                b.type = 'submit';
+                b.disabled = true;
+                if (b.disabled !== true) return 2;
+                if (!b.hasAttribute('disabled')) return 3;
+                f.appendChild(b);
+                submits = 0;
+                b.click();
+                if (submits !== 0) return 4;
+
+                // ...nor via a synthetic click dispatched directly through
+                // dispatchEvent (which does reach __runActivationBehavior).
+                b.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+                if (submits !== 0) return 5;
+
+                // A disabled reset control likewise runs no activation behavior,
+                // by either path.
+                var r = document.createElement('input');
+                r.type = 'reset';
+                r.disabled = true;
+                f.appendChild(r);
+                r.click();
+                r.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+                if (resets !== 0) return 6;
+
+                // Re-enabling the button restores its activation behavior.
+                b.disabled = false;
+                submits = 0;
+                b.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+                if (submits !== 1) return 7;
+
                 return 0;
             })()
         "#,

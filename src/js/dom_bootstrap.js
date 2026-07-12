@@ -567,7 +567,15 @@
       }
 
       // Return value depends only on preventDefault, not stopPropagation
-      return !dispatchEvent.defaultPrevented;
+      const notCanceled = !dispatchEvent.defaultPrevented;
+      // Activation behavior is the default action of a click event: a submit or
+      // reset button whose click was not canceled submits or resets its owning
+      // form. Running it here (rather than only in click()) means a synthetic
+      // click dispatched directly through dispatchEvent behaves like a real one.
+      if (notCanceled && dispatchEvent.type === "click") {
+        this.__runActivationBehavior();
+      }
+      return notCanceled;
     }
 
     get parentNode() {
@@ -1074,22 +1082,29 @@
 
     focus() {}
     blur() {}
-    click() {
-      // A `disabled` attribute only suppresses activation on elements where
-      // it has meaning; a stray `<div disabled>` must still dispatch click.
+
+    // True when this element is a form control on which the `disabled`
+    // attribute has meaning and is set. A stray `<div disabled>` is not a
+    // disabled control; only these tags honour the attribute.
+    __isDisabledControl() {
       const DISABLEABLE_TAGS = ["input", "button", "select", "textarea", "option", "optgroup", "fieldset"];
-      if (this.disabled && DISABLEABLE_TAGS.includes(this.nodeName.toLowerCase())) return;
+      return this.disabled && DISABLEABLE_TAGS.includes(this.nodeName.toLowerCase());
+    }
+
+    click() {
+      // A disabled form control is not activated at all: it does not even
+      // dispatch a click event. A stray `<div disabled>` must still dispatch.
+      if (this.__isDisabledControl()) return;
       if (this.nodeName === "INPUT") {
         const type = this.type.toLowerCase();
         if (type === "checkbox") this.checked = !this.checked;
         else if (type === "radio") this.checked = true;
       }
-      const notCanceled = this.dispatchEvent(
+      // The click event's activation behavior (form submit/reset) is its
+      // default action; dispatchEvent runs it when the event is not canceled.
+      this.dispatchEvent(
         new MouseEvent("click", { bubbles: true, cancelable: true })
       );
-      // Post-click activation behavior: a submit/reset button whose click was
-      // not canceled submits or resets its owning form.
-      if (notCanceled) this.__runActivationBehavior();
     }
 
     // Nearest ancestor <form>, or null. The `form` content-attribute
@@ -1104,6 +1119,10 @@
     }
 
     __runActivationBehavior() {
+      // A disabled form control has no activation behavior, so it never submits
+      // or resets its form -- not even for a synthetic click dispatched
+      // directly through dispatchEvent.
+      if (this.__isDisabledControl()) return;
       const tag = this.nodeName;
       let type = "";
       try {
@@ -2197,12 +2216,15 @@
       if (!table) return -1;
       return table.rows.findIndex(r => r.__id === this.__id);
     }
-    // Index of this row among its parent section's tr children, or -1.
+    // Index of this row among its parent section's rows, or -1 when the row is
+    // not in a table section. Per the HTML spec this is defined only within a
+    // thead/tbody/tfoot; a row that is a direct child of the table (with no
+    // intervening section) returns -1.
     get sectionRowIndex() {
       const parent = this.parentNode;
       if (!parent) return -1;
       const ptag = parent.tagName;
-      if (ptag !== "THEAD" && ptag !== "TBODY" && ptag !== "TFOOT" && ptag !== "TABLE") {
+      if (ptag !== "THEAD" && ptag !== "TBODY" && ptag !== "TFOOT") {
         return -1;
       }
       return childElementsByTag(parent, "TR").findIndex(r => r.__id === this.__id);
