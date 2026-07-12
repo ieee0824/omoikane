@@ -1,7 +1,7 @@
 //! JavaScript engine embedding and DOM/Web API bindings.
 
 use std::cell::RefCell;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::rc::Rc;
 
 use boa_engine::native_function::NativeFunction;
@@ -35,6 +35,8 @@ enum TimerPayload {
     Source(String),
     /// A retained function callback plus the extra arguments to invoke it with.
     Callback { callback: JsValue, args: Vec<JsValue> },
+    /// A connected iframe/object resource load, followed by `load` dispatch.
+    ResourceLoad { node_id: usize },
 }
 
 #[derive(Debug, Clone)]
@@ -103,7 +105,7 @@ impl EventLoopState {
     }
 
     fn has_pending_timers(&self) -> bool {
-        !self.timers.is_empty()
+        !self.timers.is_empty() || !self.macrotasks.is_empty()
     }
 }
 
@@ -154,6 +156,9 @@ struct HostState {
     /// value it was loaded from, so a subsequent `src` change triggers a
     /// reload while an unchanged `src` returns the same document instance.
     iframe_documents: HashMap<usize, IframeDocument>,
+    /// Resource elements that already have a queued load task. This prevents a
+    /// move within one connected document from producing duplicate events.
+    pending_resource_loads: HashSet<usize>,
 }
 
 /// A loaded sub-browsing-context document owned by an `<iframe>` element.
@@ -253,9 +258,35 @@ impl HostState {
             write_insertion_ref: None,
             base_url: None,
             iframe_documents: HashMap::new(),
+            pending_resource_loads: HashSet::new(),
         };
         state.register_tree(&document);
         state
+    }
+
+    /// Queue loads for iframe and data-bearing object descendants when a
+    /// detached subtree first becomes connected to a document.
+    fn schedule_connected_resource_loads(&mut self, root: &NodeHandle) {
+        fn visit(state: &mut HostState, node: &NodeHandle) {
+            let tag = node.tag_name().unwrap_or_default();
+            let is_resource = tag.eq_ignore_ascii_case("iframe")
+                || (tag.eq_ignore_ascii_case("object")
+                    && node
+                        .attributes()
+                        .is_some_and(|attrs| attrs.contains_key("data")));
+            if is_resource && state.pending_resource_loads.insert(node.identity()) {
+                state
+                    .event_loop
+                    .macrotasks
+                    .push_back(TimerPayload::ResourceLoad {
+                        node_id: node.identity(),
+                    });
+            }
+            for child in node.child_nodes() {
+                visit(state, &child);
+            }
+        }
+        visit(self, root);
     }
 
     /// Returns the sub-browsing-context document for `iframe`, loading it on the
@@ -637,6 +668,13 @@ impl JsRuntime {
             sandbox,
         };
         runtime.eval(DOM_BOOTSTRAP)?;
+        // Parsed resource elements are already connected before the JS wrapper
+        // exists. Queue their loads only after bootstrap so dispatch can wrap
+        // the target element when the macrotask runs.
+        runtime
+            .host_state
+            .borrow_mut()
+            .schedule_connected_resource_loads(&document);
         Ok(runtime)
     }
 
@@ -858,6 +896,38 @@ impl JsRuntime {
                 }
                 Ok(())
             }),
+            TimerPayload::ResourceLoad { node_id } => {
+                let should_dispatch = {
+                    let mut state = self.host_state.borrow_mut();
+                    state.pending_resource_loads.remove(&node_id);
+                    let Some(node) = state.get_node(node_id) else {
+                        return Ok(());
+                    };
+                    if document_root_for_node(&node).is_none() {
+                        false
+                    } else {
+                        if node
+                            .tag_name()
+                            .is_some_and(|tag| tag.eq_ignore_ascii_case("iframe"))
+                        {
+                            // A newly connected iframe starts a fresh navigation.
+                            // This also makes detach/reconnect reload rather than
+                            // merely replaying the old document's event.
+                            if let Some(previous) = state.iframe_documents.remove(&node_id) {
+                                state.document_styles.remove(&previous.document.identity());
+                                state.unregister_tree(&previous.document);
+                            }
+                            state.iframe_content_document(&node);
+                        }
+                        true
+                    }
+                };
+                if should_dispatch {
+                    self.eval(&format!("__omoikane_dispatch_resource_load({node_id})"))?;
+                    self.run_jobs()?;
+                }
+                Ok(())
+            }
         }
     }
 
@@ -1944,6 +2014,9 @@ fn append_child_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> 
             if let Some(document) = &target_document {
                 state.mark_document_style_dirty(document);
             }
+            if source_document.is_none() && target_document.is_some() {
+                state.schedule_connected_resource_loads(&child);
+            }
         }
         Ok(JsValue::from(child.identity() as f64))
     })
@@ -2488,7 +2561,7 @@ fn insert_before_native(_: &JsValue, args: &[JsValue], context: &mut Context) ->
             Some(ref_node) => {
                 let _ = parent.insert_before(new_node.clone(), &ref_node);
             }
-            None => parent.append_child(new_node),
+            None => parent.append_child(new_node.clone()),
         }
         {
             let mut state = state.borrow_mut();
@@ -2497,6 +2570,9 @@ fn insert_before_native(_: &JsValue, args: &[JsValue], context: &mut Context) ->
             }
             if let Some(document) = &target_document {
                 state.mark_document_style_dirty(document);
+            }
+            if source_document.is_none() && target_document.is_some() {
+                state.schedule_connected_resource_loads(&new_node);
             }
         }
         Ok(JsValue::undefined())
@@ -2982,6 +3058,7 @@ fn document_write_native(_: &JsValue, args: &[JsValue], context: &mut Context) -
             let mut s = state.borrow_mut();
             for child in &parsed_children {
                 s.register_tree(child);
+                s.schedule_connected_resource_loads(child);
             }
             // `document.write` splices new nodes into the live tree, so the
             // written document's cached resolver is now stale. Invalidate only
@@ -6560,6 +6637,92 @@ mod tests {
             .unwrap()
             .as_string()
             .map(|s| s.to_std_string_escaped())
+    }
+
+    fn pump_zero_delay_tasks(runtime: &mut JsRuntime) {
+        runtime.tick(0).expect("zero-delay resource tasks should run");
+    }
+
+    #[test]
+    fn connected_iframe_load_supports_property_attribute_and_listener_handlers() {
+        use crate::html::TreeBuilder;
+        let doc = TreeBuilder::parse(
+            r#"<html><body><iframe id="property"></iframe><iframe id="attribute" onload="globalThis.attributeLoads++"></iframe><iframe id="listener"></iframe></body></html>"#,
+        )
+        .document();
+        let mut runtime = JsRuntime::with_document(doc).unwrap();
+        runtime
+            .eval(
+                r#"globalThis.propertyLoads = 0;
+                   globalThis.attributeLoads = 0;
+                   globalThis.listenerLoads = 0;
+                   document.getElementById('property').onload = () => propertyLoads++;
+                   document.getElementById('listener').addEventListener('load', () => listenerLoads++);"#,
+            )
+            .unwrap();
+        runtime.wire_inline_event_handlers().unwrap();
+
+        assert_eq!(runtime.eval("propertyLoads + attributeLoads + listenerLoads").unwrap().as_number(), Some(0.0));
+        pump_zero_delay_tasks(&mut runtime);
+        assert_eq!(runtime.eval("propertyLoads").unwrap().as_number(), Some(1.0));
+        assert_eq!(runtime.eval("attributeLoads").unwrap().as_number(), Some(1.0));
+        assert_eq!(runtime.eval("listenerLoads").unwrap().as_number(), Some(1.0));
+    }
+
+    #[test]
+    fn detached_iframe_load_waits_until_connected() {
+        let mut runtime = JsRuntime::new().unwrap();
+        runtime
+            .eval(
+                r#"globalThis.loads = 0;
+                   globalThis.frame = document.createElement('iframe');
+                   frame.src = 'about:blank';
+                   frame.onload = () => loads++;"#,
+            )
+            .unwrap();
+        pump_zero_delay_tasks(&mut runtime);
+        assert_eq!(runtime.eval("loads").unwrap().as_number(), Some(0.0));
+
+        runtime.eval("document.body.appendChild(frame)").unwrap();
+        assert_eq!(runtime.eval("loads").unwrap().as_number(), Some(0.0));
+        pump_zero_delay_tasks(&mut runtime);
+        assert_eq!(runtime.eval("loads").unwrap().as_number(), Some(1.0));
+    }
+
+    #[test]
+    fn document_write_iframe_dispatches_load() {
+        let mut runtime = JsRuntime::new().unwrap();
+        runtime
+            .eval(
+                r#"globalThis.loads = 0;
+                   document.write('<iframe id="written" onload="globalThis.loads++"></iframe>');"#,
+            )
+            .unwrap();
+        runtime.wire_inline_event_handlers().unwrap();
+        pump_zero_delay_tasks(&mut runtime);
+        assert_eq!(runtime.eval("loads").unwrap().as_number(), Some(1.0));
+    }
+
+    #[test]
+    fn connected_object_with_data_dispatches_load() {
+        let mut runtime = JsRuntime::new().unwrap();
+        runtime
+            .eval(
+                r#"globalThis.loads = 0;
+                   const object = document.createElement('object');
+                   object.data = 'fixture.svg';
+                   object.onload = () => loads++;
+                   document.body.appendChild(object);"#,
+            )
+            .unwrap();
+        pump_zero_delay_tasks(&mut runtime);
+        assert_eq!(runtime.eval("loads").unwrap().as_number(), Some(1.0));
+    }
+
+    #[test]
+    fn missing_title_reflects_as_empty_string() {
+        let mut runtime = JsRuntime::new().unwrap();
+        assert_eq!(eval_string_value(&mut runtime, "document.createElement('p').title").as_deref(), Some(""));
     }
 
     #[test]
