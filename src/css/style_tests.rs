@@ -3190,6 +3190,107 @@ fn cursor_url_without_fallback_keyword_is_dropped() {
 }
 
 #[test]
+fn cursor_coordinates_without_url_are_dropped() {
+    // `cursor: 1 2 pointer` has coordinates with no preceding `url()`, which
+    // violates the grammar, so the whole declaration is dropped back to `auto`.
+    let (_document, target) = cursor_target_tree();
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet("#target { cursor: 1 2 pointer; }").unwrap(),
+    );
+
+    let style = resolver.computed_style(&target);
+    assert_eq!(
+        style.get("cursor"),
+        Some(&ComputedValue::Keyword("auto".to_string())),
+        "coordinates with no preceding url() must be dropped to `auto`"
+    );
+}
+
+#[test]
+fn cursor_url_with_single_coordinate_is_dropped() {
+    // `cursor: url(cur.png) 1 pointer` has a lone hotspot coordinate; the
+    // grammar requires an `<x> <y>` pair, so the declaration is dropped.
+    let (_document, target) = cursor_target_tree();
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet("#target { cursor: url(cur.png) 1 pointer; }").unwrap(),
+    );
+
+    let style = resolver.computed_style(&target);
+    assert_eq!(
+        style.get("cursor"),
+        Some(&ComputedValue::Keyword("auto".to_string())),
+        "a url() with a single (unpaired) coordinate must be dropped to `auto`"
+    );
+}
+
+#[test]
+fn cursor_url_with_coordinate_pair_is_accepted() {
+    // `cursor: url(cur.png) 1 2, pointer` is valid: the url() carries a hotspot
+    // coordinate pair. Serialization keeps the coordinates space-separated and
+    // inserts the comma before the trailing keyword.
+    let (_document, target) = cursor_target_tree();
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet("#target { cursor: url(cur.png) 1 2, pointer; }").unwrap(),
+    );
+
+    let style = resolver.computed_style(&target);
+    assert_eq!(
+        style.get("cursor"),
+        Some(&ComputedValue::Keyword("url(cur.png) 1 2, pointer".to_string())),
+        "a url() with an `<x> <y>` coordinate pair must be accepted and serialized"
+    );
+}
+
+#[test]
+fn cursor_multiple_url_groups_serialize_with_commas() {
+    // `cursor: url(a), url(b), pointer` has two comma-separated url() groups.
+    // Each group is serialized separately and joined with commas.
+    let (_document, target) = cursor_target_tree();
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet("#target { cursor: url(a), url(b), pointer; }").unwrap(),
+    );
+
+    let style = resolver.computed_style(&target);
+    assert_eq!(
+        style.get("cursor"),
+        Some(&ComputedValue::Keyword("url(a), url(b), pointer".to_string())),
+        "multiple url() groups must be serialized with a comma between each group"
+    );
+}
+
+#[test]
+fn cursor_multiple_url_groups_with_coordinates_serialize_with_commas() {
+    // Multiple url() groups, one carrying a coordinate pair, must serialize with
+    // group-separating commas while keeping coordinates space-separated.
+    let (_document, target) = cursor_target_tree();
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet("#target { cursor: url(a), url(b) 1 2, pointer; }").unwrap(),
+    );
+
+    let style = resolver.computed_style(&target);
+    assert_eq!(
+        style.get("cursor"),
+        Some(&ComputedValue::Keyword("url(a), url(b) 1 2, pointer".to_string())),
+        "coordinate-bearing url() groups must serialize as `url(a), url(b) 1 2, pointer`"
+    );
+}
+
+#[test]
 fn cursor_is_inherited_from_parent() {
     // `cursor` is an inherited property: a child with no cursor declaration
     // takes its parent's computed value.

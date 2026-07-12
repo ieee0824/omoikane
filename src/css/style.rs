@@ -689,11 +689,21 @@ fn is_valid_cursor_keyword(keyword: &str) -> bool {
 /// Validates a `cursor` declaration value and returns its normalized computed
 /// value, or `None` if the value is invalid.
 ///
-/// Per the CSS UI `cursor` grammar `[ <url> [<x> <y>]? , ]* <keyword>`, any
-/// leading `url()` references (with optional `<x> <y>` coordinates) are accepted
-/// as syntax; only the mandatory trailing keyword is validated against the
-/// supported set. Keywords are normalized to lowercase. CSS-wide keywords pass
-/// through for resolution by later cascade passes.
+/// Per the CSS UI `cursor` grammar `[ <url> [ <x> <y> ]? , ]* <keyword>`, the
+/// value is a comma-separated list of `url()` groups followed by a mandatory
+/// trailing keyword. Each group is a `url()` reference optionally followed by a
+/// hotspot coordinate **pair** `<x> <y>` (never a lone coordinate). Coordinates
+/// may only appear directly after a `url()`. Any grammar violation — a
+/// coordinate with no preceding `url()`, an odd number of coordinates, or an
+/// unexpected token — makes the whole declaration invalid (returns `None`, so
+/// the cascade falls back to the initial value `auto`). The trailing keyword is
+/// validated against the supported set and normalized to lowercase; CSS-wide
+/// keywords pass through for resolution by later cascade passes.
+///
+/// The CSS parser discards commas from the token stream, so the group structure
+/// is reconstructed positionally: each `url()` starts a new group and consumes
+/// the run of coordinate tokens that immediately follows it. Serialization
+/// re-inserts the group-separating commas (`url(a), url(b) 1 2, pointer`).
 fn compute_cursor_value(value: &Value) -> Option<ComputedValue> {
     match value {
         Value::Keyword(keyword) => {
@@ -717,24 +727,49 @@ fn compute_cursor_value(value: &Value) -> Option<ComputedValue> {
             if leading.is_empty() {
                 return Some(ComputedValue::Keyword(lower));
             }
-            // Every leading component must be a `url()` reference (the parser
-            // renders these as `Keyword("url(...)")`) or an `<x> <y>` coordinate.
-            for item in leading {
-                let accepted = match item {
+            // Parse the leading `url()` groups positionally. Each group must
+            // start with a `url()` reference (the parser renders these as
+            // `Keyword("url(...)")` or, defensively, a `url` function) and may
+            // be followed by exactly zero or two coordinate tokens.
+            let mut groups: Vec<String> = Vec::new();
+            let mut index = 0;
+            while index < leading.len() {
+                let is_url = match &leading[index] {
                     Value::Keyword(k) => k.to_ascii_lowercase().starts_with("url("),
                     Value::Function { name, .. } => name.eq_ignore_ascii_case("url"),
-                    Value::Number(_) | Value::Length(_, _) => true,
                     _ => false,
                 };
-                if !accepted {
+                if !is_url {
+                    // A coordinate (or anything else) with no preceding `url()`.
                     return None;
                 }
+                let url = render_value(&leading[index]);
+                index += 1;
+
+                // Consume the coordinate run that follows this `url()`.
+                let mut coords: Vec<String> = Vec::new();
+                while index < leading.len() {
+                    match &leading[index] {
+                        Value::Number(_) | Value::Length(_, _) => {
+                            coords.push(render_value(&leading[index]));
+                            index += 1;
+                        }
+                        _ => break,
+                    }
+                }
+                // Coordinates are only valid as an `<x> <y>` pair.
+                if coords.len() != 2 && !coords.is_empty() {
+                    return None;
+                }
+
+                if coords.is_empty() {
+                    groups.push(url);
+                } else {
+                    groups.push(format!("{url} {}", coords.join(" ")));
+                }
             }
-            let prefix = leading
-                .iter()
-                .map(render_value)
-                .collect::<Vec<_>>()
-                .join(" ");
+
+            let prefix = groups.join(", ");
             Some(ComputedValue::Keyword(format!("{prefix}, {lower}")))
         }
         _ => None,
