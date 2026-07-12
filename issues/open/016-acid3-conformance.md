@@ -143,4 +143,4 @@ Acid3 ギャップ分析（`tests/fixtures/acid3/GAP_ANALYSIS.md`）に基づく
 - [x] [050 CSS media query の構文解析・評価と computed style 反映](../closed/050-css-media-query-evaluation.md)（PR #114, 82→83）
 - [x] [051 CSS プロパティ値検証と computed style serialization](../closed/051-css-property-value-validation.md)（PR #117, test 47 PASS, 合流後 87/100）
 - [x] [054 table tree construction（暗黙 tbody 生成）](../closed/054-parser-table-tree-construction.md)（PR #119, test 29 PASS, 87→88）
-- [x] [055 document.forms / document.links の HTMLCollection](055-document-forms-links-collections.md)（test 4/5 PASS, 88→90）
+- [x] [055 document.forms / document.links の HTMLCollection](../closed/055-document-forms-links-collections.md)（PR #120, test 4/5 PASS, 88→90）

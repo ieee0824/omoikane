@@ -2,7 +2,7 @@
 number: 055
 slug: document-forms-links-collections
 parent: 016
-status: open
+status: closed
 ---
 
 # document.forms / document.links の HTMLCollection
