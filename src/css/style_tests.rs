@@ -2949,3 +2949,304 @@ fn revert_layer_keyword_survives_enumerated_validation() {
         "`revert-layer` is CSS-wide and must not be dropped; it overrides `pre-wrap`"
     );
 }
+
+/// Builds a `<html><body><p id="target"></p></body></html>` tree and returns
+/// the `#target` element for cursor cascade tests.
+fn cursor_target_tree() -> (NodeHandle, NodeHandle) {
+    let document = NodeHandle::document();
+    let html = NodeHandle::element("html");
+    let body = NodeHandle::element("body");
+    let p = NodeHandle::element("p");
+    p.set_attribute("id", "target");
+    document.append_child(html.clone());
+    html.append_child(body.clone());
+    body.append_child(p.clone());
+    (document, p)
+}
+
+/// All `cursor` keywords exercised by Acid3 test 47.
+const ACID3_CURSOR_KEYWORDS: &[&str] = &[
+    "auto",
+    "default",
+    "none",
+    "context-menu",
+    "help",
+    "pointer",
+    "progress",
+    "wait",
+    "cell",
+    "crosshair",
+    "text",
+    "vertical-text",
+    "alias",
+    "copy",
+    "move",
+    "no-drop",
+    "not-allowed",
+    "e-resize",
+    "n-resize",
+    "ne-resize",
+    "nw-resize",
+    "s-resize",
+    "se-resize",
+    "sw-resize",
+    "w-resize",
+    "ew-resize",
+    "ns-resize",
+    "nesw-resize",
+    "nwse-resize",
+    "col-resize",
+    "row-resize",
+    "all-scroll",
+];
+
+#[test]
+fn invalid_cursor_keyword_falls_back_to_initial_auto() {
+    // Acid3 test 47 control case: `cursor: bogus` is not a valid keyword, so the
+    // declaration is discarded and computed `cursor` is the initial value `auto`.
+    let (_document, target) = cursor_target_tree();
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet("#target { cursor: bogus; }").unwrap(),
+    );
+
+    let style = resolver.computed_style(&target);
+    assert_eq!(
+        style.get("cursor"),
+        Some(&ComputedValue::Keyword("auto".to_string())),
+        "invalid `cursor: bogus` must be dropped, leaving the initial value `auto`"
+    );
+}
+
+#[test]
+fn absent_cursor_defaults_to_initial_auto() {
+    // With no `cursor` declaration at all, computed `cursor` is still `auto`.
+    let (_document, target) = cursor_target_tree();
+
+    let mut resolver = StyleResolver::new();
+    let style = resolver.computed_style(&target);
+    assert_eq!(
+        style.get("cursor"),
+        Some(&ComputedValue::Keyword("auto".to_string())),
+        "cursor initial value must be `auto` when undeclared"
+    );
+}
+
+#[test]
+fn all_acid3_cursor_keywords_are_accepted() {
+    // Every keyword Acid3 test 47 iterates over must be accepted verbatim.
+    for keyword in ACID3_CURSOR_KEYWORDS {
+        let (_document, target) = cursor_target_tree();
+        let mut resolver = StyleResolver::new();
+        resolver.add_stylesheet(
+            Origin::Author,
+            parse_stylesheet(&format!("#target {{ cursor: {keyword}; }}")).unwrap(),
+        );
+        let style = resolver.computed_style(&target);
+        assert_eq!(
+            style.get("cursor"),
+            Some(&ComputedValue::Keyword(keyword.to_string())),
+            "cursor keyword `{keyword}` must be accepted"
+        );
+    }
+}
+
+#[test]
+fn valid_cursor_keyword_is_normalized_to_lowercase() {
+    // Keywords are ASCII case-insensitive; the computed value is canonicalized
+    // to lowercase.
+    let (_document, target) = cursor_target_tree();
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet("#target { cursor: POINTER; }").unwrap(),
+    );
+
+    let style = resolver.computed_style(&target);
+    assert_eq!(
+        style.get("cursor"),
+        Some(&ComputedValue::Keyword("pointer".to_string())),
+        "cursor keyword must be normalized to lowercase"
+    );
+}
+
+#[test]
+fn invalid_cursor_does_not_override_earlier_valid() {
+    // A later invalid declaration must not clobber an earlier valid one.
+    let (_document, target) = cursor_target_tree();
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet("#target { cursor: pointer; cursor: bogus; }").unwrap(),
+    );
+
+    let style = resolver.computed_style(&target);
+    assert_eq!(
+        style.get("cursor"),
+        Some(&ComputedValue::Keyword("pointer".to_string())),
+        "invalid later `cursor: bogus` must be dropped, keeping `pointer`"
+    );
+}
+
+#[test]
+fn invalid_cursor_before_valid_does_not_block() {
+    // An earlier invalid declaration must not block a later valid one.
+    let (_document, target) = cursor_target_tree();
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet("#target { cursor: bogus; cursor: help; }").unwrap(),
+    );
+
+    let style = resolver.computed_style(&target);
+    assert_eq!(
+        style.get("cursor"),
+        Some(&ComputedValue::Keyword("help".to_string())),
+        "a valid later `cursor: help` must win over an earlier invalid declaration"
+    );
+}
+
+#[test]
+fn valid_cursor_later_declaration_wins() {
+    // Two valid declarations: the later one wins per source order.
+    let (_document, target) = cursor_target_tree();
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet("#target { cursor: pointer; cursor: move; }").unwrap(),
+    );
+
+    let style = resolver.computed_style(&target);
+    assert_eq!(
+        style.get("cursor"),
+        Some(&ComputedValue::Keyword("move".to_string())),
+        "the later valid `cursor: move` must win"
+    );
+}
+
+#[test]
+fn cursor_url_with_fallback_keyword_is_accepted() {
+    // `cursor: url(...), <keyword>` is valid syntax; the trailing keyword is
+    // validated and the whole value is retained.
+    let (_document, target) = cursor_target_tree();
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet("#target { cursor: url(cur.png), pointer; }").unwrap(),
+    );
+
+    let style = resolver.computed_style(&target);
+    assert_eq!(
+        style.get("cursor"),
+        Some(&ComputedValue::Keyword("url(cur.png), pointer".to_string())),
+        "a url() cursor with a valid fallback keyword must be accepted"
+    );
+}
+
+#[test]
+fn cursor_url_with_invalid_fallback_keyword_is_dropped() {
+    // The mandatory trailing keyword is still validated: an invalid fallback
+    // makes the whole declaration invalid, so it is dropped back to `auto`.
+    let (_document, target) = cursor_target_tree();
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet("#target { cursor: url(cur.png), bogus; }").unwrap(),
+    );
+
+    let style = resolver.computed_style(&target);
+    assert_eq!(
+        style.get("cursor"),
+        Some(&ComputedValue::Keyword("auto".to_string())),
+        "a url() cursor with an invalid fallback keyword must be dropped to `auto`"
+    );
+}
+
+#[test]
+fn cursor_url_without_fallback_keyword_is_dropped() {
+    // A url() with no mandatory fallback keyword is invalid per the grammar.
+    let (_document, target) = cursor_target_tree();
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet("#target { cursor: url(cur.png); }").unwrap(),
+    );
+
+    let style = resolver.computed_style(&target);
+    assert_eq!(
+        style.get("cursor"),
+        Some(&ComputedValue::Keyword("auto".to_string())),
+        "a url() cursor without a fallback keyword must be dropped to `auto`"
+    );
+}
+
+#[test]
+fn cursor_is_inherited_from_parent() {
+    // `cursor` is an inherited property: a child with no cursor declaration
+    // takes its parent's computed value.
+    let document = NodeHandle::document();
+    let html = NodeHandle::element("html");
+    let body = NodeHandle::element("body");
+    let child = NodeHandle::element("span");
+    body.set_attribute("id", "parent");
+    document.append_child(html.clone());
+    html.append_child(body.clone());
+    body.append_child(child.clone());
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet("#parent { cursor: pointer; }").unwrap(),
+    );
+
+    let style = resolver.computed_style(&child);
+    assert_eq!(
+        style.get("cursor"),
+        Some(&ComputedValue::Keyword("pointer".to_string())),
+        "cursor must inherit from the parent when the child does not set it"
+    );
+}
+
+#[test]
+fn is_supported_property_includes_cursor() {
+    assert!(is_supported_property("cursor"));
+}
+
+#[test]
+fn inline_cursor_validation_matches_cascade() {
+    // The inline-style validator (used by getComputedStyle's inline override)
+    // must apply the same value validation as the cascade.
+    assert!(matches!(
+        validate_inline_declaration("cursor", "pointer"),
+        InlineDeclarationValidation::Valid(ref v) if v == "pointer"
+    ));
+    // Normalization to lowercase.
+    assert!(matches!(
+        validate_inline_declaration("cursor", "POINTER"),
+        InlineDeclarationValidation::Valid(ref v) if v == "pointer"
+    ));
+    // Invalid keyword is dropped.
+    assert!(matches!(
+        validate_inline_declaration("cursor", "bogus"),
+        InlineDeclarationValidation::Invalid
+    ));
+    // url() with valid fallback keyword is accepted.
+    assert!(matches!(
+        validate_inline_declaration("cursor", "url(cur.png), move"),
+        InlineDeclarationValidation::Valid(ref v) if v == "url(cur.png), move"
+    ));
+    // Non-validated properties are left untouched.
+    assert!(matches!(
+        validate_inline_declaration("color", "blue"),
+        InlineDeclarationValidation::Unvalidated
+    ));
+}

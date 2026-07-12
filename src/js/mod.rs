@@ -1464,6 +1464,11 @@ fn register_host_bindings(
             NativeFunction::from_copy_closure(layout_metrics_native),
         ),
         (
+            js_string!("__omoikane_validate_inline_css"),
+            2,
+            NativeFunction::from_copy_closure(validate_inline_css_native),
+        ),
+        (
             // (documentId, text) — the target document id plus the markup to
             // write, so a write to an iframe sub-document routes correctly.
             js_string!("__omoikane_document_write"),
@@ -2152,6 +2157,42 @@ fn get_attribute_native(_: &JsValue, args: &[JsValue], context: &mut Context) ->
             None => JsValue::null(),
         })
     })
+}
+
+/// `__omoikane_validate_inline_css(name, value)` -> the value string to apply
+/// for an inline-style declaration, or `null` when the declaration is invalid
+/// and must be dropped (so the cascaded value is retained). This keeps the
+/// `getComputedStyle` inline override in step with the cascade's per-property
+/// value validation (issue 051): validated properties (e.g. `cursor`) are
+/// checked and normalized; every other property echoes its raw value unchanged.
+fn validate_inline_css_native(
+    _: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let name = args
+        .first()
+        .cloned()
+        .unwrap_or_default()
+        .to_string(context)?
+        .to_std_string_escaped();
+    let value = args
+        .get(1)
+        .cloned()
+        .unwrap_or_default()
+        .to_string(context)?
+        .to_std_string_escaped();
+    Ok(
+        match crate::css::style::validate_inline_declaration(&name, &value) {
+            crate::css::style::InlineDeclarationValidation::Unvalidated => {
+                js_string!(value.as_str()).into()
+            }
+            crate::css::style::InlineDeclarationValidation::Valid(normalized) => {
+                js_string!(normalized.as_str()).into()
+            }
+            crate::css::style::InlineDeclarationValidation::Invalid => JsValue::null(),
+        },
+    )
 }
 
 fn set_attribute_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
@@ -5703,6 +5744,78 @@ mod tests {
             ),
             "pre-wrap",
             "invalid `x-bogus` declaration must be discarded, keeping `pre-wrap`"
+        );
+    }
+
+    #[test]
+    fn get_computed_style_drops_invalid_cursor_keyword() {
+        // Acid3 test 47 control case: `cursor: bogus` is invalid, so computed
+        // `cursor` falls back to the initial value `auto`.
+        let html = r#"<html><head><style>
+            #target { cursor: bogus; }
+        </style></head><body><div id="target"></div></body></html>"#;
+        let mut runtime = runtime_from_html(html);
+
+        assert_eq!(
+            eval_str(
+                &mut runtime,
+                "getComputedStyle(document.getElementById('target'), '').cursor"
+            ),
+            "auto",
+            "invalid `cursor: bogus` must be discarded, leaving the initial `auto`"
+        );
+    }
+
+    #[test]
+    fn get_computed_style_returns_valid_cursor_keyword() {
+        // A valid keyword is returned verbatim (Acid3 test 47 positive cases).
+        let html = r#"<html><head><style>
+            #target { cursor: pointer; }
+        </style></head><body><div id="target"></div></body></html>"#;
+        let mut runtime = runtime_from_html(html);
+
+        assert_eq!(
+            eval_str(
+                &mut runtime,
+                "getComputedStyle(document.getElementById('target'), '').cursor"
+            ),
+            "pointer"
+        );
+    }
+
+    #[test]
+    fn get_computed_style_inline_cursor_bogus_is_dropped() {
+        // The inline getComputedStyle override must apply the same validation as
+        // the cascade: an invalid inline `cursor` is dropped, not applied raw.
+        let html = r#"<html><head></head>
+            <body><div id="target" style="cursor: bogus"></div></body></html>"#;
+        let mut runtime = runtime_from_html(html);
+
+        assert_eq!(
+            eval_str(
+                &mut runtime,
+                "getComputedStyle(document.getElementById('target'), '').cursor"
+            ),
+            "auto",
+            "invalid inline `cursor: bogus` must be dropped, leaving the initial `auto`"
+        );
+    }
+
+    #[test]
+    fn get_computed_style_inline_cursor_valid_is_applied() {
+        // A valid inline `cursor` still overrides the cascade and is normalized.
+        let html = r#"<html><head><style>
+            #target { cursor: pointer; }
+        </style></head><body><div id="target" style="cursor: MOVE"></div></body></html>"#;
+        let mut runtime = runtime_from_html(html);
+
+        assert_eq!(
+            eval_str(
+                &mut runtime,
+                "getComputedStyle(document.getElementById('target'), '').cursor"
+            ),
+            "move",
+            "valid inline `cursor` must override the cascade and be lowercased"
         );
     }
 

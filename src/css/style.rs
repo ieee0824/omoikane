@@ -405,6 +405,17 @@ impl StyleResolver {
             else {
                 continue;
             };
+            // Per-property value validation runs before the value enters the
+            // cascade so an invalid declaration is dropped entirely (CSS error
+            // handling), never overriding an earlier valid declaration.
+            match validate_declaration(&candidate.name, &resolved_value) {
+                DeclarationValidation::Valid(computed) => {
+                    properties.insert(candidate.name.to_ascii_lowercase(), computed);
+                    continue;
+                }
+                DeclarationValidation::Invalid => continue,
+                DeclarationValidation::Unvalidated => {}
+            }
             let font_size = inherited_font_size(parent_style, &properties);
             let ctx = ResolutionContext {
                 parent_font_size: font_size,
@@ -586,6 +597,208 @@ fn enumerated_keyword_set(name: &str) -> Option<&'static [&'static str]> {
     match name {
         "white-space" => Some(&["normal", "pre", "nowrap", "pre-wrap", "pre-line", "break-spaces"]),
         _ => None,
+    }
+}
+
+/// Outcome of validating a single declaration's value against a property's
+/// grammar. Properties without a dedicated grammar report [`Self::Unvalidated`]
+/// and fall through to the generic compute path unchanged, so introducing a new
+/// validated property cannot alter the handling of existing ones.
+enum DeclarationValidation {
+    /// The declaration is valid; use this normalized computed value.
+    Valid(ComputedValue),
+    /// The declaration is invalid and must be dropped by the cascade (CSS error
+    /// handling: an invalid declaration is ignored, so it neither applies nor
+    /// blocks an earlier/later valid declaration of the same property).
+    Invalid,
+    /// The property has no dedicated grammar validation here.
+    Unvalidated,
+}
+
+/// Validates a resolved declaration value against the property's grammar.
+///
+/// This is the single extension point for per-property value validation. Only
+/// `cursor` is validated today; other properties fall through unchanged. To add
+/// a property, match its name here and return [`DeclarationValidation::Valid`] /
+/// [`DeclarationValidation::Invalid`].
+fn validate_declaration(name: &str, value: &Value) -> DeclarationValidation {
+    if name.eq_ignore_ascii_case("cursor") {
+        return match compute_cursor_value(value) {
+            Some(computed) => DeclarationValidation::Valid(computed),
+            None => DeclarationValidation::Invalid,
+        };
+    }
+    DeclarationValidation::Unvalidated
+}
+
+/// A CSS-wide keyword (CSS Cascade). These are valid for every property and are
+/// resolved (or left as-is) by later passes, so property grammars must never
+/// reject them.
+fn is_css_wide_keyword(lowercased: &str) -> bool {
+    matches!(
+        lowercased,
+        "inherit" | "initial" | "unset" | "revert" | "revert-layer"
+    )
+}
+
+/// Valid `cursor` keyword set: the CSS 2.1 values plus the CSS UI Level 3 / 4
+/// additions. Includes every keyword exercised by Acid3 test 47 and the common
+/// CSS3 extras (`grab`/`grabbing`, `zoom-in`/`zoom-out`).
+fn is_valid_cursor_keyword(keyword: &str) -> bool {
+    matches!(
+        keyword,
+        "auto"
+            | "default"
+            | "none"
+            | "context-menu"
+            | "help"
+            | "pointer"
+            | "progress"
+            | "wait"
+            | "cell"
+            | "crosshair"
+            | "text"
+            | "vertical-text"
+            | "alias"
+            | "copy"
+            | "move"
+            | "no-drop"
+            | "not-allowed"
+            | "grab"
+            | "grabbing"
+            | "e-resize"
+            | "n-resize"
+            | "ne-resize"
+            | "nw-resize"
+            | "s-resize"
+            | "se-resize"
+            | "sw-resize"
+            | "w-resize"
+            | "ew-resize"
+            | "ns-resize"
+            | "nesw-resize"
+            | "nwse-resize"
+            | "col-resize"
+            | "row-resize"
+            | "all-scroll"
+            | "zoom-in"
+            | "zoom-out"
+    )
+}
+
+/// Validates a `cursor` declaration value and returns its normalized computed
+/// value, or `None` if the value is invalid.
+///
+/// Per the CSS UI `cursor` grammar `[ <url> [<x> <y>]? , ]* <keyword>`, any
+/// leading `url()` references (with optional `<x> <y>` coordinates) are accepted
+/// as syntax; only the mandatory trailing keyword is validated against the
+/// supported set. Keywords are normalized to lowercase. CSS-wide keywords pass
+/// through for resolution by later cascade passes.
+fn compute_cursor_value(value: &Value) -> Option<ComputedValue> {
+    match value {
+        Value::Keyword(keyword) => {
+            let lower = keyword.to_ascii_lowercase();
+            if is_css_wide_keyword(&lower) || is_valid_cursor_keyword(&lower) {
+                Some(ComputedValue::Keyword(lower))
+            } else {
+                None
+            }
+        }
+        Value::List(items) => {
+            // The final component must be a valid, non-CSS-wide cursor keyword.
+            let (last, leading) = items.split_last()?;
+            let Value::Keyword(keyword) = last else {
+                return None;
+            };
+            let lower = keyword.to_ascii_lowercase();
+            if !is_valid_cursor_keyword(&lower) {
+                return None;
+            }
+            if leading.is_empty() {
+                return Some(ComputedValue::Keyword(lower));
+            }
+            // Every leading component must be a `url()` reference (the parser
+            // renders these as `Keyword("url(...)")`) or an `<x> <y>` coordinate.
+            for item in leading {
+                let accepted = match item {
+                    Value::Keyword(k) => k.to_ascii_lowercase().starts_with("url("),
+                    Value::Function { name, .. } => name.eq_ignore_ascii_case("url"),
+                    Value::Number(_) | Value::Length(_, _) => true,
+                    _ => false,
+                };
+                if !accepted {
+                    return None;
+                }
+            }
+            let prefix = leading
+                .iter()
+                .map(render_value)
+                .collect::<Vec<_>>()
+                .join(" ");
+            Some(ComputedValue::Keyword(format!("{prefix}, {lower}")))
+        }
+        _ => None,
+    }
+}
+
+/// Outcome of validating a single inline-style declaration (`style="..."`),
+/// used to keep the inline getComputedStyle override in step with the cascade's
+/// value validation. See [`validate_inline_declaration`].
+pub enum InlineDeclarationValidation {
+    /// The property is not grammar-validated here; keep the author's raw value.
+    Unvalidated,
+    /// Valid: override the cascaded value with this normalized string.
+    Valid(String),
+    /// Invalid: drop the inline declaration so the cascaded value is retained.
+    Invalid,
+}
+
+/// Validates a single inline-style declaration so the `getComputedStyle` inline
+/// override applies the *same* per-property value validation as the stylesheet
+/// cascade. Only validated properties (currently `cursor`) are parsed; every
+/// other property reports [`InlineDeclarationValidation::Unvalidated`] and keeps
+/// its raw author value, so existing inline behavior is unchanged.
+pub fn validate_inline_declaration(name: &str, raw_value: &str) -> InlineDeclarationValidation {
+    if !name.eq_ignore_ascii_case("cursor") {
+        return InlineDeclarationValidation::Unvalidated;
+    }
+    let Some(value) = parse_declaration_value(name, raw_value) else {
+        return InlineDeclarationValidation::Invalid;
+    };
+    match validate_declaration(name, &value) {
+        DeclarationValidation::Valid(ComputedValue::Keyword(keyword)) => {
+            InlineDeclarationValidation::Valid(keyword)
+        }
+        DeclarationValidation::Valid(other) => {
+            InlineDeclarationValidation::Valid(render_computed_value(&other))
+        }
+        DeclarationValidation::Invalid => InlineDeclarationValidation::Invalid,
+        DeclarationValidation::Unvalidated => InlineDeclarationValidation::Unvalidated,
+    }
+}
+
+/// Parses `name: raw_value` into a [`Value`] by round-tripping through the CSS
+/// parser. Returns `None` when the fragment is not a well-formed declaration.
+fn parse_declaration_value(name: &str, raw_value: &str) -> Option<Value> {
+    let css = format!("omoikane-inline{{{name}:{raw_value}}}");
+    let stylesheet = super::parse_stylesheet(&css).ok()?;
+    match stylesheet.rules.first()? {
+        Rule::Style(rule) => rule.declarations.first().map(|decl| decl.value.clone()),
+        _ => None,
+    }
+}
+
+/// Serializes a [`ComputedValue`] to its CSS string form. Mirrors the JS-side
+/// serializer so inline-validated values match cascade-serialized values.
+fn render_computed_value(value: &ComputedValue) -> String {
+    match value {
+        ComputedValue::Keyword(keyword) => keyword.clone(),
+        ComputedValue::Color(color) => color.clone(),
+        ComputedValue::String(string) => string.clone(),
+        ComputedValue::Px(px) => format!("{px}px"),
+        ComputedValue::Percentage(pct) => format!("{pct}%"),
+        ComputedValue::Number(number) => number.to_string(),
+        ComputedValue::CalcPxPercent(px, pct) => format!("calc({px}px + {pct}%)"),
     }
 }
 
@@ -1183,6 +1396,7 @@ fn is_supported_property(name: &str) -> bool {
             | "clear"
             | "color"
             | "content"
+            | "cursor"
             | "display"
             | "flex-basis"
             | "flex-direction"
@@ -1947,6 +2161,12 @@ fn apply_initial_values(properties: &mut BTreeMap<String, ComputedValue>) {
     properties
         .entry("text-transform".to_string())
         .or_insert_with(|| ComputedValue::Keyword("none".to_string()));
+    // `cursor` initial value is `auto` (CSS UI). Ensuring it is always present
+    // lets a dropped/absent `cursor` declaration serialize as `auto` in
+    // getComputedStyle (Acid3 test 47).
+    properties
+        .entry("cursor".to_string())
+        .or_insert_with(|| ComputedValue::Keyword("auto".to_string()));
 }
 
 /// CSS 2.1 §8.5.3: If border-style is 'none', the computed border-width is 0.
@@ -2038,6 +2258,7 @@ fn apply_inheritance(
         "border-collapse",
         "border-spacing",
         "color",
+        "cursor",
         "direction",
         "font-family",
         "font-size",
