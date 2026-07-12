@@ -2622,7 +2622,13 @@
       if (idx < 0) continue;
       const name = decl.slice(0, idx).trim().toLowerCase();
       const value = decl.slice(idx + 1).trim();
-      if (name) map[name] = value;
+      if (!name) continue;
+      // Apply the same per-property value validation as the stylesheet cascade.
+      // A `null` result means the inline declaration is invalid and must be
+      // dropped so the cascaded value (not the raw inline value) is retained.
+      const validated = __omoikane_validate_inline_css(name, value);
+      if (validated === null) continue;
+      map[name] = validated;
     }
   }
   // Builds a read-only CSSStyleDeclaration-like object over `map` (kebab-case
