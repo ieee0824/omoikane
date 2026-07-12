@@ -1,4 +1,6 @@
 (() => {
+  // The top-level browsing context is its own parent.
+  globalThis.parent = globalThis;
   const cache = new Map();
 
   // Window objects are not ordinary DOM wrappers in Omoikane: the top-level
@@ -587,8 +589,27 @@
       if (this.nodeType !== 1) {
         return null;
       }
-      const name = __omoikane_node_name(this.__id);
-      return name ? name.toLowerCase() : null;
+      return __omoikane_node_local_name(this.__id);
+    }
+
+    get namespaceURI() {
+      return __omoikane_node_namespace_uri(this.__id);
+    }
+
+    get prefix() {
+      return __omoikane_node_prefix(this.__id);
+    }
+
+    get publicId() {
+      return this.nodeType === 10 ? __omoikane_doctype_public_id(this.__id) : undefined;
+    }
+
+    get systemId() {
+      return this.nodeType === 10 ? __omoikane_doctype_system_id(this.__id) : undefined;
+    }
+
+    get internalSubset() {
+      return this.nodeType === 10 ? null : undefined;
     }
 
     get id() {
@@ -974,8 +995,7 @@
       if (this.nodeType !== 1) {
         return undefined;
       }
-      const name = __omoikane_node_name(this.__id);
-      return name ? name.toUpperCase() : undefined;
+      return __omoikane_node_name(this.__id) ?? undefined;
     }
 
     contains(other) {
@@ -1334,10 +1354,12 @@
     }
 
     get name() {
+      if (this.nodeType === 10) return this.nodeName;
       return __omoikane_get_attribute(this.__id, "name") ?? "";
     }
 
     set name(v) {
+      if (this.nodeType === 10) return;
       __omoikane_set_attribute(this.__id, "name", String(v));
     }
 
@@ -2079,6 +2101,23 @@
       return null;
     }
 
+    get doctype() {
+      for (const child of this.childNodes) {
+        if (child.nodeType === 10) return child;
+      }
+      return null;
+    }
+
+    get title() {
+      const title = this.getElementsByTagName("title")[0];
+      return title ? title.textContent : "";
+    }
+
+    set title(value) {
+      const title = this.getElementsByTagName("title")[0];
+      if (title) title.textContent = String(value);
+    }
+
     // Live HTMLCollection of every <form> in this document, in tree order, with
     // index / `length` / `item` / `namedItem` and named access by `name` or `id`
     // (e.g. `document.forms.myForm`). Scoped to this document's own tree, so an
@@ -2086,7 +2125,9 @@
     get forms() {
       const root = this;
       return makeHTMLCollection(() =>
-        collectElements(root, (el) => el.tagName === "FORM"));
+        collectElements(root, (el) =>
+          el.tagName === "FORM" ||
+          (el.localName === "form" && el.namespaceURI === "http://www.w3.org/1999/xhtml")));
     }
 
     // Live HTMLCollection of the <a> and <area> elements that carry an `href`
