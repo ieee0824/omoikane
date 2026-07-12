@@ -12,8 +12,9 @@ self_uid="$(id -u)"
 # CLAUDE_CONFIG_DIR（既定 /home/dev/.claude）は Claude Code 設定の named volume（claude-config）。
 # Dockerfile の ENV と整合させるためパスを直書きせず参照する。他と同様に所有者を自己修復する。
 # CODEX_HOME（Dockerfile の ENV で定義、既定 /home/dev/.codex）は Codex CLI の named volume（codex-config）。
+# $HOME/.ssh は SSH 鍵の named volume（ssh-config）。
 for d in /target /usr/local/cargo/registry /usr/local/cargo/git \
-         "${CLAUDE_CONFIG_DIR:-/home/dev/.claude}" "${CODEX_HOME:-$HOME/.codex}"; do
+         "${CLAUDE_CONFIG_DIR:-/home/dev/.claude}" "${CODEX_HOME:-$HOME/.codex}" "$HOME/.ssh"; do
     if [ -d "$d" ] && [ "$(stat -c %u "$d")" != "$self_uid" ]; then
         sudo chown -R "$(id -u):$(id -g)" "$d" || true
     fi

@@ -6,11 +6,13 @@ FROM rust:1-bookworm
 
 # aws-lc-sys（rustls 0.23 の依存）のビルドに cmake が必須。
 # build-essential / pkg-config は rusqlite（bundled SQLite）などのネイティブビルドに使う。
-# build-essential / pkg-config / git / curl / ca-certificates / gpg は rust:1-bookworm
-# （buildpack-deps ベース）に既に含まれるが、ベースイメージの変化に備えて明示的に指定する。
+# build-essential / pkg-config / git / curl / ca-certificates / gpg / openssh-client は
+# rust:1-bookworm（buildpack-deps ベース）に既に含まれるが、ベースイメージの変化に備えて明示的に指定する。
+# openssh-client は SSH 鍵の生成・利用（ssh-keygen / ssh。README の SSH 鍵運用参照）に使う。
 # フォントは CI と同一のもの（fonts-dejavu / fonts-liberation / fonts-noto-core）に加え、
-# CJK レンダリング用に fonts-noto-cjk を追加する。
-# ripgrep（rg）はシェルでのコード検索に、gpg は gh の apt リポジトリ鍵の検証に使う。
+# 日本語（CJK）レンダリング用に fonts-noto-cjk と IPA フォント（ゴシック・明朝）を追加する。
+# IPA フォントはフォント探索の CJK フォールバック候補（IPAGothic 等。src/font/mod.rs 参照）に対応する。
+# ripgrep（rg）はシェルでのコード検索に、vim は編集に、gpg は gh の apt リポジトリ鍵の検証に使う。
 RUN apt-get update && apt-get install -y --no-install-recommends \
         cmake \
         pkg-config \
@@ -19,12 +21,16 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         curl \
         ca-certificates \
         gpg \
+        openssh-client \
         sudo \
         ripgrep \
+        vim \
         fonts-dejavu \
         fonts-liberation \
         fonts-noto-core \
         fonts-noto-cjk \
+        fonts-ipafont-gothic \
+        fonts-ipafont-mincho \
     && rm -rf /var/lib/apt/lists/*
 
 # GitHub CLI（gh）。PR 作成などの Claude Code / PR ワークフローで使う。
@@ -82,6 +88,11 @@ WORKDIR /workspace
 # CLAUDE_CONFIG_DIR を dev 所有で用意しておく。
 # 空の named volume はマウント先ディレクトリの所有者を引き継ぐため、ここで作成しておくと権限問題を避けられる。
 RUN mkdir -p ${CLAUDE_CONFIG_DIR}
+
+# SSH 鍵の置き場所（compose の ssh-config volume でマウントして永続化する）。
+# ホストの ~/.ssh はマウントせず、コンテナ内で生成した鍵をここに置く運用。
+# 空の named volume は所有者・パーミッションを引き継ぐため、dev 所有・700 で用意しておく。
+RUN mkdir -p /home/${USERNAME}/.ssh && chmod 700 /home/${USERNAME}/.ssh
 
 # Claude Code のネイティブインストーラ。~/.local/bin にインストールされる。
 # 公式が推奨するインストール方法であり、チェックサム検証なしで取得する設計判断。

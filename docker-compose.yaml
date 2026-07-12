@@ -21,6 +21,9 @@ services:
       # Codex CLI のログイン情報と本体パッケージ（~/.codex = CODEX_HOME）を永続化する。
       # 更新はコンテナ内で codex update を実行する（README 参照）。
       - codex-config:/home/dev/.codex
+      # コンテナ専用の SSH 鍵（~/.ssh）を永続化する。サンドボックスの隔離を保つため
+      # ホストの ~/.ssh はマウントしない（鍵はコンテナ内で生成して個別に登録する）。
+      - ssh-config:/home/dev/.ssh
     # コンテナを起動したままにして docker compose exec で入れるようにする。
     command: sleep infinity
 
@@ -30,3 +33,4 @@ volumes:
   cargo-git:
   claude-config:
   codex-config:
+  ssh-config:
