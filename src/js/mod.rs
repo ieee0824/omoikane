@@ -1474,6 +1474,11 @@ fn register_host_bindings(
             NativeFunction::from_copy_closure(validate_inline_css_native),
         ),
         (
+            js_string!("__omoikane_css_rule_count"),
+            1,
+            NativeFunction::from_copy_closure(css_rule_count_native),
+        ),
+        (
             // (documentId, text) — the target document id plus the markup to
             // write, so a write to an iframe sub-document routes correctly.
             js_string!("__omoikane_document_write"),
@@ -2249,6 +2254,26 @@ fn validate_inline_css_native(
             crate::css::style::InlineDeclarationValidation::Invalid => JsValue::null(),
         },
     )
+}
+
+/// Parses CSS with the engine parser and returns its top-level rule count.
+/// CSSOM uses this both to enumerate a style block and to require that an
+/// `insertRule` argument is exactly one syntactically valid rule.
+fn css_rule_count_native(
+    _: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let css = args
+        .first()
+        .cloned()
+        .unwrap_or_default()
+        .to_string(context)?
+        .to_std_string_escaped();
+    let sheet = crate::css::parse_stylesheet(&css).map_err(|error| {
+        JsError::from(JsNativeError::syntax().with_message(error.to_string()))
+    })?;
+    Ok(JsValue::from(sheet.rules.len() as f64))
 }
 
 fn set_attribute_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
@@ -4868,6 +4893,39 @@ mod tests {
         let result = runtime.eval("document.querySelector('div').textContent")
             .unwrap().as_string().unwrap().to_std_string_escaped();
         assert_eq!(result, "Changed");
+    }
+
+    #[test]
+    fn cssom_lists_style_sheets_and_rules_in_tree_order() {
+        let doc = crate::html::TreeBuilder::parse("<html><head><style>p { color: red; } span { display: block; }</style><style>#x { width: 7px; }</style></head><body><p id='x'></p></body></html>").document();
+        let mut runtime = JsRuntime::with_document(doc).unwrap();
+        assert_eq!(eval_num(&mut runtime, "document.styleSheets.length"), 2.0);
+        assert_eq!(eval_num(&mut runtime, "document.styleSheets[0].cssRules.length"), 2.0);
+        assert_eq!(eval_str(&mut runtime, "document.styleSheets[0].cssRules[0].selectorText"), "p");
+        assert_eq!(eval_str(&mut runtime, "document.styleSheets[0].cssRules[1].selectorText"), "span");
+        assert!(runtime.eval("document.styleSheets[0].ownerNode === document.querySelector('style')").unwrap().as_boolean().unwrap());
+        assert_eq!(eval_str(&mut runtime, "document.styleSheets[0].cssRules[0].style.color"), "red");
+    }
+
+    #[test]
+    fn cssom_insert_and_delete_are_live_and_restyle_synchronously() {
+        let doc = crate::html::TreeBuilder::parse("<html><head><style>img { height: 10px; } img { height: 20px; }</style></head><body><img></body></html>").document();
+        let mut runtime = JsRuntime::with_document(doc).unwrap();
+        runtime.eval("globalThis.rules = document.styleSheets[0].cssRules; document.styleSheets[0].insertRule('img { height: 40px; }', 2)").unwrap();
+        assert_eq!(eval_num(&mut runtime, "rules.length"), 3.0, "retained CSSRuleList must be live");
+        assert_eq!(eval_num(&mut runtime, "document.images[0].height"), 40.0);
+        runtime.eval("document.styleSheets[0].deleteRule(2)").unwrap();
+        assert_eq!(eval_num(&mut runtime, "rules.length"), 2.0);
+        assert_eq!(eval_num(&mut runtime, "document.images[0].height"), 20.0);
+    }
+
+    #[test]
+    fn cssom_insert_and_delete_report_dom_exceptions() {
+        let doc = crate::html::TreeBuilder::parse("<html><head><style>p { color: red; }</style></head><body></body></html>").document();
+        let mut runtime = JsRuntime::with_document(doc).unwrap();
+        assert_eq!(eval_str(&mut runtime, "(() => { try { document.styleSheets[0].insertRule('not css', 0); return ''; } catch (e) { return e.name + ':' + e.code; } })()"), "SyntaxError:12");
+        assert_eq!(eval_str(&mut runtime, "(() => { try { document.styleSheets[0].insertRule('p { color: blue; }', 2); return ''; } catch (e) { return e.name + ':' + e.code; } })()"), "IndexSizeError:1");
+        assert_eq!(eval_str(&mut runtime, "(() => { try { document.styleSheets[0].deleteRule(1); return ''; } catch (e) { return e.name + ':' + e.code; } })()"), "IndexSizeError:1");
     }
 
     #[test]

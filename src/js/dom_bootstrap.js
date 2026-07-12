@@ -2025,6 +2025,10 @@
       return this.__own(wrapNode(__omoikane_create_document_fragment()));
     }
 
+    get styleSheets() {
+      return makeStyleSheetList(this);
+    }
+
     createTextNode(text) {
       return this.__own(wrapNode(__omoikane_create_text_node(String(text))));
     }
@@ -2235,6 +2239,160 @@
   }
 
   class DocumentFragment extends Node {}
+
+  // ── Minimal CSSOM ─────────────────────────────────────────────────────────
+  // CSS syntax is accepted/rejected by the native engine parser. This scanner
+  // only preserves each accepted top-level rule's source text for CSSOM
+  // serialization; it understands strings, comments and nested blocks.
+  function splitCssRules(source) {
+    const css = String(source || "");
+    const expected = __omoikane_css_rule_count(css);
+    const rules = [];
+    let start = 0, depth = 0, quote = "", comment = false;
+    for (let i = 0; i < css.length; i++) {
+      const ch = css[i], next = css[i + 1];
+      if (comment) {
+        if (ch === "*" && next === "/") { comment = false; i++; }
+        continue;
+      }
+      if (quote) {
+        if (ch === "\\") i++;
+        else if (ch === quote) quote = "";
+        continue;
+      }
+      if (ch === "/" && next === "*") { comment = true; i++; continue; }
+      if (ch === "'" || ch === '"') { quote = ch; continue; }
+      if (ch === "{") depth++;
+      else if (ch === "}") {
+        depth--;
+        if (depth === 0) {
+          const text = css.slice(start, i + 1).trim();
+          if (text) rules.push(text);
+          start = i + 1;
+        }
+      } else if (ch === ";" && depth === 0) {
+        const text = css.slice(start, i + 1).trim();
+        if (text) rules.push(text);
+        start = i + 1;
+      }
+    }
+    const tail = css.slice(start).trim();
+    if (tail) rules.push(tail);
+    if (rules.length !== expected) {
+      throw new DOMException("Unable to enumerate stylesheet rules.", "SyntaxError");
+    }
+    return rules;
+  }
+
+  function declarationView(block) {
+    const parse = () => {
+      const out = [];
+      for (const part of block.split(";")) {
+        const colon = part.indexOf(":");
+        if (colon < 0) continue;
+        const name = part.slice(0, colon).trim().toLowerCase();
+        let value = part.slice(colon + 1).trim();
+        if (name && value) out.push({ name, value });
+      }
+      return out;
+    };
+    const target = {
+      getPropertyValue(name) {
+        const key = String(name).toLowerCase();
+        const found = parse().filter(d => d.name === key);
+        return found.length ? found[found.length - 1].value : "";
+      },
+      item(index) { return parse()[Number(index) | 0]?.name || ""; },
+      get length() { return parse().length; },
+      get cssText() { return parse().map(d => d.name + ": " + d.value + ";").join(" "); },
+    };
+    return new Proxy(target, {
+      get(object, prop) {
+        if (typeof prop === "symbol" || prop in object) return object[prop];
+        const name = String(prop).replace(/[A-Z]/g, m => "-" + m.toLowerCase());
+        return object.getPropertyValue(name);
+      },
+    });
+  }
+
+  class CSSStyleRule {
+    constructor(text) { this.__text = text; }
+    get selectorText() { return this.__text.slice(0, this.__text.indexOf("{")).trim(); }
+    get cssText() { return this.selectorText + " { " + this.style.cssText + " }"; }
+    get style() {
+      const open = this.__text.indexOf("{");
+      const close = this.__text.lastIndexOf("}");
+      return declarationView(this.__text.slice(open + 1, close));
+    }
+  }
+
+  class CSSRuleList {
+    constructor(sheet) { this.__sheet = sheet; }
+    __rules() { return this.__sheet.__ruleTexts().map(text => new CSSStyleRule(text)); }
+    item(index) { return this.__rules()[Number(index) | 0] || null; }
+    get length() { return this.__rules().length; }
+  }
+
+  function ruleListProxy(sheet) {
+    const list = new CSSRuleList(sheet);
+    return new Proxy(list, {
+      get(target, prop) {
+        if (typeof prop === "string" && /^(?:0|[1-9]\d*)$/.test(prop)) return target.item(Number(prop));
+        if (prop === Symbol.iterator) return target.__rules()[Symbol.iterator].bind(target.__rules());
+        return target[prop];
+      },
+    });
+  }
+
+  class CSSStyleSheet {
+    constructor(ownerNode) {
+      this.ownerNode = ownerNode;
+      this.href = null;
+      this.__cssRules = ruleListProxy(this);
+    }
+    __ruleTexts() { return splitCssRules(this.ownerNode.textContent); }
+    get cssRules() { return this.__cssRules; }
+    insertRule(rule, index) {
+      const text = String(rule);
+      let count;
+      try { count = __omoikane_css_rule_count(text); }
+      catch (error) { throw new DOMException(error.message || "Invalid CSS rule.", "SyntaxError"); }
+      if (count !== 1) throw new DOMException("Exactly one rule is required.", "SyntaxError");
+      const rules = this.__ruleTexts();
+      const position = index === undefined ? 0 : Number(index);
+      if (!Number.isInteger(position) || position < 0 || position > rules.length)
+        throw new DOMException("The index is out of range.", "IndexSizeError");
+      rules.splice(position, 0, text.trim());
+      this.ownerNode.textContent = rules.join("\n");
+      return position;
+    }
+    deleteRule(index) {
+      const rules = this.__ruleTexts();
+      const position = Number(index);
+      if (!Number.isInteger(position) || position < 0 || position >= rules.length)
+        throw new DOMException("The index is out of range.", "IndexSizeError");
+      rules.splice(position, 1);
+      this.ownerNode.textContent = rules.join("\n");
+    }
+  }
+
+  const styleSheetCache = new WeakMap();
+  function sheetFor(style) {
+    if (!styleSheetCache.has(style)) styleSheetCache.set(style, new CSSStyleSheet(style));
+    return styleSheetCache.get(style);
+  }
+  function makeStyleSheetList(doc) {
+    const collect = () => Array.from(doc.querySelectorAll("style"), sheetFor);
+    return new Proxy([], {
+      get(_target, prop) {
+        const list = collect();
+        if (prop === "length") return list.length;
+        if (prop === "item") return index => list[Number(index) | 0] || null;
+        const value = list[prop];
+        return typeof value === "function" ? value.bind(list) : value;
+      },
+    });
+  }
 
   // An <iframe> owns a nested browsing context whose document is reachable via
   // contentDocument (and, as a facade, contentWindow.document). The document is
@@ -2672,6 +2830,23 @@
     }
   }
 
+  class HTMLImageElement extends Node {
+    get height() {
+      const attr = this.getAttribute("height");
+      if (attr !== null && attr !== "") return Math.max(0, Number.parseInt(attr, 10) || 0);
+      const value = globalThis.getComputedStyle(this).height;
+      return Math.max(0, Number.parseFloat(value) || 0);
+    }
+    set height(value) { this.setAttribute("height", String(Math.max(0, Number(value) || 0))); }
+    get width() {
+      const attr = this.getAttribute("width");
+      if (attr !== null && attr !== "") return Math.max(0, Number.parseInt(attr, 10) || 0);
+      const value = globalThis.getComputedStyle(this).width;
+      return Math.max(0, Number.parseFloat(value) || 0);
+    }
+    set width(value) { this.setAttribute("width", String(Math.max(0, Number(value) || 0))); }
+  }
+
   // Tag-name → constructor table consulted by wrapNode() for element nodes.
   const ELEMENT_CTORS = {
     table: HTMLTableElement,
@@ -2688,6 +2863,7 @@
     option: HTMLOptionElement,
     iframe: HTMLIFrameElement,
     object: HTMLObjectElement,
+    img: HTMLImageElement,
   };
 
   // Standard Node.nodeType constant values, exposed both as static properties
@@ -2751,6 +2927,9 @@
   globalThis.Document = Document;
   globalThis.DocumentFragment = DocumentFragment;
   globalThis.DOMException = DOMException;
+  globalThis.CSSStyleSheet = CSSStyleSheet;
+  globalThis.CSSRuleList = CSSRuleList;
+  globalThis.CSSStyleRule = CSSStyleRule;
   globalThis.NodeFilter = NodeFilter;
   globalThis.NodeIterator = NodeIterator;
   globalThis.TreeWalker = TreeWalker;
@@ -2765,6 +2944,7 @@
   globalThis.HTMLMetaElement = HTMLMetaElement;
   globalThis.HTMLSelectElement = HTMLSelectElement;
   globalThis.HTMLOptionElement = HTMLOptionElement;
+  globalThis.HTMLImageElement = HTMLImageElement;
   globalThis.HTMLIFrameElement = HTMLIFrameElement;
   globalThis.Event = Event;
   globalThis.CustomEvent = CustomEvent;
