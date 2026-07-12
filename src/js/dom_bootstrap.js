@@ -1084,7 +1084,43 @@
         if (type === "checkbox") this.checked = !this.checked;
         else if (type === "radio") this.checked = true;
       }
-      this.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+      const notCanceled = this.dispatchEvent(
+        new MouseEvent("click", { bubbles: true, cancelable: true })
+      );
+      // Post-click activation behavior: a submit/reset button whose click was
+      // not canceled submits or resets its owning form.
+      if (notCanceled) this.__runActivationBehavior();
+    }
+
+    // Nearest ancestor <form>, or null. The `form` content-attribute
+    // association is not modeled; ancestry suffices for our needs.
+    __owningForm() {
+      let node = this.parentNode;
+      while (node) {
+        if (node.nodeType === 1 && node.tagName === "FORM") return node;
+        node = node.parentNode;
+      }
+      return null;
+    }
+
+    __runActivationBehavior() {
+      const tag = this.nodeName;
+      let type = "";
+      try {
+        type = (this.type || "").toLowerCase();
+      } catch (_e) {
+        type = "";
+      }
+      const isSubmit =
+        (tag === "INPUT" && (type === "submit" || type === "image")) ||
+        (tag === "BUTTON" && (type === "submit" || type === ""));
+      const isReset =
+        (tag === "INPUT" || tag === "BUTTON") && type === "reset";
+      if (!isSubmit && !isReset) return;
+      const form = this.__owningForm();
+      if (!form) return;
+      if (isSubmit) form.__submit(this);
+      else form.__reset();
     }
 
     get hidden() {
@@ -2232,6 +2268,17 @@
     get length() {
       return this.__controls().length;
     }
+    // Fires a cancelable `submit` event (the form-submission entry point used by
+    // a submit button's activation behavior). Actual navigation is out of scope;
+    // a handler calling preventDefault simply suppresses the (absent) default.
+    __submit(submitter) {
+      const event = new Event("submit", { bubbles: true, cancelable: true });
+      event.submitter = submitter || null;
+      this.dispatchEvent(event);
+    }
+    __reset() {
+      this.dispatchEvent(new Event("reset", { bubbles: true, cancelable: true }));
+    }
   }
 
   class HTMLInputElement extends Node {
@@ -2396,6 +2443,33 @@
     const value = NODE_TYPE_CONSTANTS[constName];
     Node[constName] = value;
     Node.prototype[constName] = value;
+  }
+
+  // Event handler IDL attributes (onclick, onsubmit, ...). Assigning a function
+  // registers a single event listener for the matching type and replaces any
+  // previously assigned handler, so `form.onsubmit = fn` behaves like
+  // `addEventListener("submit", fn)`. `onload` is defined directly on Node
+  // (with Window reflection for <body>) and is intentionally excluded here.
+  const EVENT_HANDLER_TYPES = [
+    "click", "dblclick", "mousedown", "mouseup", "mouseover", "mousemove",
+    "mouseout", "mouseenter", "mouseleave", "submit", "reset", "change",
+    "input", "focus", "blur", "keydown", "keyup", "keypress", "select",
+    "contextmenu", "wheel", "error", "abort",
+  ];
+  for (const type of EVENT_HANDLER_TYPES) {
+    const key = "__on_" + type;
+    Object.defineProperty(Node.prototype, "on" + type, {
+      configurable: true,
+      enumerable: false,
+      get() {
+        return this[key] || null;
+      },
+      set(handler) {
+        if (this[key]) this.removeEventListener(type, this[key]);
+        this[key] = typeof handler === "function" ? handler : null;
+        if (this[key]) this.addEventListener(type, this[key]);
+      },
+    });
   }
 
   globalThis.Node = Node;

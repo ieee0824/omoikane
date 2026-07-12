@@ -5758,6 +5758,99 @@ mod tests {
     }
 
     #[test]
+    fn event_handler_idl_attribute_registers_and_replaces_listener() {
+        let mut runtime = JsRuntime::new().unwrap();
+        assert_js_ok(
+            &mut runtime,
+            r#"
+            (function () {
+                var d = document.createElement('div');
+                var n = 0;
+                d.onclick = function () { n += 1; };
+                if (typeof d.onclick !== 'function') return 1;
+                d.click();
+                if (n !== 1) return 2;
+                // Reassigning replaces the previous handler (no double-firing).
+                var m = 0;
+                d.onclick = function () { m += 1; };
+                d.click();
+                if (n !== 1) return 3;
+                if (m !== 1) return 4;
+                // Assigning null removes the handler.
+                d.onclick = null;
+                if (d.onclick !== null) return 5;
+                d.click();
+                if (m !== 1) return 6;
+                return 0;
+            })()
+        "#,
+        );
+    }
+
+    #[test]
+    fn submit_button_click_fires_cancelable_submit_on_owning_form() {
+        // Regression for Acid3 test 54: input.click() on a submit control must
+        // synchronously dispatch a submit event to the owning form.
+        let mut runtime = JsRuntime::new().unwrap();
+        assert_js_ok(
+            &mut runtime,
+            r#"
+            (function () {
+                var f = document.createElement('form');
+                var i = document.createElement('input');
+                f.appendChild(i);
+                i.type = 'submit';
+                var called = 0;
+                var wasCancelable = false;
+                f.onsubmit = function (e) {
+                    wasCancelable = e.cancelable;
+                    e.preventDefault();
+                    called += 1;
+                };
+                i.click();
+                if (called !== 1) return 1;
+                if (!wasCancelable) return 2;
+
+                // A reset button dispatches a reset event instead.
+                var r = document.createElement('input');
+                r.type = 'reset';
+                f.appendChild(r);
+                var resetCalled = 0;
+                f.onreset = function () { resetCalled += 1; };
+                r.click();
+                if (resetCalled !== 1) return 3;
+
+                // A plain text input's click does not submit the form.
+                var t = document.createElement('input');
+                t.type = 'text';
+                f.appendChild(t);
+                called = 0;
+                t.click();
+                if (called !== 0) return 4;
+
+                // A submit control with no owning form does not throw.
+                var lone = document.createElement('button');
+                lone.click();
+
+                // addEventListener('submit', ...) also receives the event, and a
+                // nested submit button still finds its ancestor form.
+                var wrap = document.createElement('div');
+                var i2 = document.createElement('input');
+                i2.type = 'submit';
+                wrap.appendChild(i2);
+                var f2 = document.createElement('form');
+                f2.appendChild(wrap);
+                var listened = 0;
+                f2.addEventListener('submit', function (e) { e.preventDefault(); listened += 1; });
+                i2.click();
+                if (listened !== 1) return 5;
+                return 0;
+            })()
+        "#,
+        );
+    }
+
+    #[test]
     fn input_value_is_dirty_and_preserves_lone_surrogate() {
         let mut runtime = JsRuntime::new().unwrap();
         assert_js_ok(
