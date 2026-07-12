@@ -1714,6 +1714,7 @@
     }
 
     get implementation() {
+      const ownerDocument = this;
       return {
         hasFeature() {
           return true;
@@ -1721,11 +1722,15 @@
         createDocumentType(qualifiedName, publicId, systemId) {
           const name = String(qualifiedName);
           validateQualifiedName(name);
-          const node = wrapNode(__omoikane_create_document_type(name));
+          const publicIdentifier = publicId == null ? "" : String(publicId);
+          const systemIdentifier = systemId == null ? "" : String(systemId);
+          const node = ownerDocument.__own(wrapNode(
+            __omoikane_create_document_type(name, publicIdentifier, systemIdentifier)
+          ));
           Object.defineProperties(node, {
             name: { value: name, configurable: true },
-            publicId: { value: publicId == null ? "" : String(publicId), configurable: true },
-            systemId: { value: systemId == null ? "" : String(systemId), configurable: true },
+            publicId: { value: publicIdentifier, configurable: true },
+            systemId: { value: systemIdentifier, configurable: true },
             internalSubset: { value: null, configurable: true },
           });
           return node;

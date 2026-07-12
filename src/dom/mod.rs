@@ -144,11 +144,17 @@ pub struct DocumentType {
 
 impl DocumentType {
     /// Creates a new document type payload.
-    pub fn new(name: impl Into<String>) -> Self {
+    pub fn new(
+        name: impl Into<String>,
+        public_id: impl Into<String>,
+        system_id: impl Into<String>,
+    ) -> Self {
+        let public_id = public_id.into();
+        let system_id = system_id.into();
         Self {
             name: name.into(),
-            public_id: None,
-            system_id: None,
+            public_id: (!public_id.is_empty()).then_some(public_id),
+            system_id: (!system_id.is_empty()).then_some(system_id),
         }
     }
 
@@ -217,8 +223,14 @@ impl NodeHandle {
     }
 
     /// Creates a document type node.
-    pub fn document_type(name: impl Into<String>) -> Self {
-        Self::new(NodeData::DocumentType(DocumentType::new(name)))
+    pub fn document_type(
+        name: impl Into<String>,
+        public_id: impl Into<String>,
+        system_id: impl Into<String>,
+    ) -> Self {
+        Self::new(NodeData::DocumentType(DocumentType::new(
+            name, public_id, system_id,
+        )))
     }
 
     fn new(data: NodeData) -> Self {
@@ -404,6 +416,22 @@ impl NodeHandle {
         }
     }
 
+    /// Returns the public identifier for a document type node.
+    pub fn public_id(&self) -> Option<String> {
+        match &self.0.borrow().data {
+            NodeData::DocumentType(doctype) => doctype.public_id().map(str::to_string),
+            _ => None,
+        }
+    }
+
+    /// Returns the system identifier for a document type node.
+    pub fn system_id(&self) -> Option<String> {
+        match &self.0.borrow().data {
+            NodeData::DocumentType(doctype) => doctype.system_id().map(str::to_string),
+            _ => None,
+        }
+    }
+
     /// Returns the first matching descendant element for a simple selector.
     ///
     /// Supported selectors are tag names, `#id`, `.class`, and simple
@@ -574,7 +602,7 @@ mod tests {
         let element = NodeHandle::element("div");
         let text = NodeHandle::text("hello");
         let comment = NodeHandle::comment("note");
-        let doctype = NodeHandle::document_type("html");
+        let doctype = NodeHandle::document_type("html", "", "");
 
         assert_eq!(document.node_type(), NodeType::Document);
         assert_eq!(document.node_name(), "#document");

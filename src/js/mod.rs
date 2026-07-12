@@ -2251,6 +2251,17 @@ fn serialize_node(node: &NodeHandle, html: &mut String) {
             if let Some(name) = node.data() {
                 html.push_str("<!DOCTYPE ");
                 html.push_str(&name);
+                if let Some(public_id) = node.public_id() {
+                    html.push_str(" PUBLIC \"");
+                    html.push_str(&public_id);
+                    html.push_str("\" \"");
+                    html.push_str(node.system_id().as_deref().unwrap_or(""));
+                    html.push('"');
+                } else if let Some(system_id) = node.system_id() {
+                    html.push_str(" SYSTEM \"");
+                    html.push_str(&system_id);
+                    html.push('"');
+                }
                 html.push('>');
             }
         }
@@ -2527,7 +2538,11 @@ fn clone_node_impl(node: &NodeHandle, deep: bool) -> NodeHandle {
         crate::dom::NodeType::Document => NodeHandle::document(),
         crate::dom::NodeType::DocumentFragment => NodeHandle::document_fragment(),
         crate::dom::NodeType::DocumentType => {
-            NodeHandle::document_type(&node.data().unwrap_or_default())
+            NodeHandle::document_type(
+                node.data().unwrap_or_default(),
+                node.public_id().unwrap_or_default(),
+                node.system_id().unwrap_or_default(),
+            )
         }
     };
     if deep {
@@ -2624,7 +2639,19 @@ fn create_document_type_native(
         .unwrap_or_default()
         .to_string(context)?
         .to_std_string_escaped();
-    let node = NodeHandle::document_type(&name);
+    let public_id = args
+        .get(1)
+        .cloned()
+        .unwrap_or_default()
+        .to_string(context)?
+        .to_std_string_escaped();
+    let system_id = args
+        .get(2)
+        .cloned()
+        .unwrap_or_default()
+        .to_string(context)?
+        .to_std_string_escaped();
+    let node = NodeHandle::document_type(&name, &public_id, &system_id);
     let id = node.identity();
     with_host_state(|state| {
         state.borrow_mut().nodes.insert(id, node);
@@ -5096,6 +5123,53 @@ mod tests {
                 return 0;
             })()
         "#,
+        );
+    }
+
+    #[test]
+    fn iframe_implementation_created_doctype_keeps_its_owner_document() {
+        let mut runtime = JsRuntime::new().unwrap();
+        assert_js_ok(
+            &mut runtime,
+            r#"
+            (function () {
+                var frame = document.createElement('iframe');
+                document.body.appendChild(frame);
+                var foreign = frame.contentDocument;
+                var doctype = foreign.implementation.createDocumentType('html', '', '');
+                if (doctype.ownerDocument !== foreign) return 1;
+                if (doctype.ownerDocument === document) return 2;
+                return 0;
+            })()
+        "#,
+        );
+    }
+
+    #[test]
+    fn document_type_identifiers_are_exposed_and_serialized() {
+        let mut runtime = JsRuntime::new().unwrap();
+        let result = runtime
+            .eval(
+                r#"
+                var publicType = document.implementation.createDocumentType(
+                    'html', '-//W3C//DTD XHTML 1.0 Strict//EN',
+                    'http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd');
+                var publicDoc = document.implementation.createDocument(null, 'html', publicType);
+                var systemType = document.implementation.createDocumentType(
+                    'example', '', 'example.dtd');
+                var systemDoc = document.implementation.createDocument(null, 'example', systemType);
+                [publicType.publicId, publicType.systemId, publicDoc.innerHTML,
+                 systemType.publicId, systemType.systemId, systemDoc.innerHTML].join('|');
+                "#,
+            )
+            .unwrap()
+            .as_string()
+            .unwrap()
+            .to_std_string_escaped();
+
+        assert_eq!(
+            result,
+            "-//W3C//DTD XHTML 1.0 Strict//EN|http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd|<!DOCTYPE html PUBLIC \"-//W3C//DTD XHTML 1.0 Strict//EN\" \"http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd\"><html></html>||example.dtd|<!DOCTYPE example SYSTEM \"example.dtd\"><example></example>"
         );
     }
 
