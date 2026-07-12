@@ -674,35 +674,139 @@
       const toKebab = (prop) =>
         (prop === "cssFloat" || prop === "styleFloat")
           ? "float"
-          : prop.replace(/[A-Z]/g, m => "-" + m.toLowerCase());
-      return new Proxy({}, {
+          : String(prop).replace(/[A-Z]/g, m => "-" + m.toLowerCase());
+      // Normalizes a CSSOM method argument (`setProperty`/`removeProperty`/…) to
+      // its canonical CSS (kebab, lowercase) form, matching getComputedStyle's
+      // `__styleNameToCss(name).toLowerCase()` so camelCase and kebab-case access
+      // resolve to the same declaration.
+      const toCssName = (name) => toKebab(name).toLowerCase();
+
+      // Reads the current `style` attribute into an ordered list of
+      // `{ name, value, priority }` declarations. `name` is the kebab-case CSS
+      // property, `priority` is "important" or "". Both the camelCase accessors
+      // and the CSSStyleDeclaration methods below operate over this list so the
+      // two views stay consistent and every mutation re-serializes through the
+      // one `__omoikane_set_attribute` path (driving cascade/layout dirtying).
+      const parseDecls = () => {
+        const attr = __omoikane_get_attribute(node.__id, "style") || "";
+        const decls = [];
+        for (const part of attr.split(";")) {
+          const idx = part.indexOf(":");
+          if (idx < 0) continue;
+          const name = part.slice(0, idx).trim().toLowerCase();
+          let value = part.slice(idx + 1).trim();
+          if (!name || value === "") continue;
+          let priority = "";
+          const stripped = value.replace(/\s*!\s*important\s*$/i, "");
+          if (stripped !== value) { priority = "important"; value = stripped.trim(); }
+          if (value === "") continue;
+          decls.push({ name, value, priority });
+        }
+        return decls;
+      };
+      const serializeDecls = (decls) =>
+        decls
+          .map(d => d.name + ": " + d.value + (d.priority ? " !" + d.priority : "") + ";")
+          .join(" ");
+      const writeDecls = (decls) =>
+        __omoikane_set_attribute(node.__id, "style", serializeDecls(decls));
+
+      // Returns the declared value for a kebab-case property ("" if absent).
+      // Later declarations win, matching the inline cascade.
+      const getValue = (kebab) => {
+        const decls = parseDecls();
+        for (let i = decls.length - 1; i >= 0; i--) {
+          if (decls[i].name === kebab) return decls[i].value;
+        }
+        return "";
+      };
+      const getPriority = (kebab) => {
+        const decls = parseDecls();
+        for (let i = decls.length - 1; i >= 0; i--) {
+          if (decls[i].name === kebab) return decls[i].priority;
+        }
+        return "";
+      };
+      const setValue = (kebab, value, priority) => {
+        const decls = parseDecls();
+        const existing = decls.find(d => d.name === kebab);
+        if (existing) {
+          existing.value = value;
+          existing.priority = priority || "";
+        } else {
+          decls.push({ name: kebab, value, priority: priority || "" });
+        }
+        writeDecls(decls);
+      };
+      // Removes a kebab-case property and returns its previous value ("" if it
+      // was not set), per CSSOM `removeProperty`.
+      const removeValue = (kebab) => {
+        const decls = parseDecls();
+        const idx = decls.findIndex(d => d.name === kebab);
+        if (idx < 0) return "";
+        const old = decls[idx].value;
+        decls.splice(idx, 1);
+        writeDecls(decls);
+        return old;
+      };
+
+      // CSSStyleDeclaration surface. `length`/`cssText` are accessors so they
+      // reflect the live attribute; `cssText` writes go through the proxy `set`
+      // trap below (which routes to `setCssText`).
+      const setCssText = (value) => {
+        __omoikane_set_attribute(
+          node.__id,
+          "style",
+          value == null ? "" : String(value),
+        );
+      };
+      const decl = {
+        getPropertyValue(name) { return getValue(toCssName(name)); },
+        getPropertyPriority(name) { return getPriority(toCssName(name)); },
+        setProperty(name, value, priority) {
+          const kebab = toCssName(name);
+          if (value == null || value === "") { removeValue(kebab); return; }
+          setValue(kebab, String(value), priority ? String(priority).toLowerCase() : "");
+        },
+        removeProperty(name) { return removeValue(toCssName(name)); },
+        item(index) {
+          const decls = parseDecls();
+          const i = Number(index) | 0;
+          return (i >= 0 && i < decls.length) ? decls[i].name : "";
+        },
+        get length() { return parseDecls().length; },
+        get cssText() { return serializeDecls(parseDecls()); },
+        set cssText(value) { setCssText(value); },
+      };
+
+      return new Proxy(decl, {
         get(target, prop) {
-          if (typeof prop !== "string") return undefined;
-          const kebab = toKebab(prop);
-          const styleAttr = __omoikane_get_attribute(node.__id, "style") || "";
-          const escaped = kebab.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-          const match = styleAttr.match(new RegExp("(?:^|;\\s*)" + escaped + "\\s*:\\s*([^;]+)"));
-          return match ? match[1].trim() : "";
+          // Symbols and the CSSStyleDeclaration members (methods, `length`,
+          // `cssText`, and inherited Object members) resolve from the target;
+          // everything else is treated as a camelCase CSS property name.
+          if (typeof prop === "symbol" || prop in target) return target[prop];
+          return getValue(toKebab(prop));
+        },
+        has(target, prop) {
+          if (typeof prop === "symbol") return prop in target;
+          if (prop in target) return true;
+          return getValue(toKebab(prop)) !== "";
         },
         set(target, prop, value) {
           if (typeof prop !== "string") return true;
+          // `cssText` replaces the whole declaration block.
+          if (prop === "cssText") { setCssText(value); return true; }
+          // Other CSSStyleDeclaration members are read-only; ignore writes so a
+          // stray `style.length = …` does not create a bogus declaration.
+          if (prop in target) return true;
           const kebab = toKebab(prop);
-          const shouldRemove = value === null || value === undefined || value === "";
-          const strValue = shouldRemove ? "" : String(value);
-          let styleAttr = __omoikane_get_attribute(node.__id, "style") || "";
-          const escaped = kebab.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-          const regex = new RegExp("(^|;\\s*)" + escaped + "\\s*:[^;]+(;|$)");
-          if (regex.test(styleAttr)) {
-            if (shouldRemove) {
-              styleAttr = styleAttr.replace(regex, "$1");
-            } else {
-              styleAttr = styleAttr.replace(regex, (m, pre) => pre + kebab + ": " + strValue + ";");
-            }
-          } else if (!shouldRemove) {
-            styleAttr = (styleAttr ? styleAttr.replace(/;?\s*$/, "; ") : "") + kebab + ": " + strValue + ";";
+          if (value === null || value === undefined || value === "") {
+            removeValue(kebab);
+          } else {
+            // A plain camelCase assignment carries no priority (CSSOM), so any
+            // prior `!important` on this property is dropped.
+            setValue(kebab, String(value), "");
           }
-          styleAttr = styleAttr.replace(/^[;\s]+/, "").replace(/[;\s]+$/, "").replace(/;\s*;+/g, ";");
-          __omoikane_set_attribute(node.__id, "style", styleAttr.trim());
           return true;
         },
       });
