@@ -151,31 +151,8 @@
   const XML_NAMESPACE = "http://www.w3.org/XML/1998/namespace";
   const XMLNS_NAMESPACE = "http://www.w3.org/2000/xmlns/";
 
-  function isXmlNameStartChar(cp) {
-    return cp === 0x3a || (cp >= 0x41 && cp <= 0x5a) || cp === 0x5f ||
-      (cp >= 0x61 && cp <= 0x7a) || (cp >= 0xc0 && cp <= 0xd6) ||
-      (cp >= 0xd8 && cp <= 0xf6) || (cp >= 0xf8 && cp <= 0x2ff) ||
-      (cp >= 0x370 && cp <= 0x37d) || (cp >= 0x37f && cp <= 0x1fff) ||
-      (cp >= 0x200c && cp <= 0x200d) || (cp >= 0x2070 && cp <= 0x218f) ||
-      (cp >= 0x2c00 && cp <= 0x2fef) || (cp >= 0x3001 && cp <= 0xd7ff) ||
-      (cp >= 0xf900 && cp <= 0xfdcf) || (cp >= 0xfdf0 && cp <= 0xfffd) ||
-      (cp >= 0x10000 && cp <= 0xeffff);
-  }
-
-  function isXmlNameChar(cp) {
-    return isXmlNameStartChar(cp) || cp === 0x2d || cp === 0x2e ||
-      (cp >= 0x30 && cp <= 0x39) || cp === 0xb7 ||
-      (cp >= 0x300 && cp <= 0x36f) || (cp >= 0x203f && cp <= 0x2040);
-  }
-
   function isValidXmlName(value) {
-    if (!value) return false;
-    const chars = Array.from(value);
-    if (!isXmlNameStartChar(chars[0].codePointAt(0))) return false;
-    for (let i = 1; i < chars.length; i += 1) {
-      if (!isXmlNameChar(chars[i].codePointAt(0))) return false;
-    }
-    return true;
+    return __omoikane_is_valid_xml_name(value);
   }
 
   // Validates a qualified name and splits it into prefix / localName. Throws an
