@@ -477,8 +477,18 @@ impl Builder {
                 if matches!(name.as_str(), "tbody" | "tfoot" | "thead") =>
             {
                 self.clear_stack_to_table_body_context();
-                self.pop_current_section();
-                self.mode = InsertionMode::InTable;
+                // Per the HTML "in table body" insertion mode, act on the end
+                // tag only when an element with the same tag name is in table
+                // scope. After clearing to a table body context the current
+                // node is the innermost open section, so a name match is the
+                // scope check expressed in terms of this stack. A mismatched
+                // section end tag (e.g. `</tbody>` while a `<thead>` is open)
+                // is a parse error: ignore it, leaving the section open and the
+                // insertion mode unchanged.
+                if self.current_node().tag_name().as_deref() == Some(name.as_str()) {
+                    self.open_elements.pop();
+                    self.mode = InsertionMode::InTable;
+                }
             }
             Token::EndTag { name } if name == "table" => {
                 self.clear_stack_to_table_body_context();
@@ -1070,6 +1080,67 @@ mod tests {
         // Exactly one <tbody> (the explicit one) and one <tr> per section.
         assert_eq!(count_elements(&table, "tbody"), 1);
         assert_eq!(count_elements(&table, "tr"), 3);
+    }
+
+    #[test]
+    fn mismatched_section_end_tag_is_ignored_in_table_body() {
+        // `</tbody>` while a `<thead>` is the open section does not match any
+        // element in table scope, so per the HTML "in table body" insertion
+        // mode it is a parse error and must be ignored. The `<thead>` therefore
+        // stays open and the following row lands inside it (matching Chrome /
+        // Firefox), rather than the section being wrongly closed and the row
+        // dropped into a spurious implicit `<tbody>`.
+        let result = TreeBuilder::parse("<table><thead></tbody><tr><td>x</table>");
+        let table = result.document().query_selector("table").unwrap();
+
+        // The section is not double-created: exactly one <thead>, no <tbody>.
+        assert_eq!(count_elements(&table, "thead"), 1);
+        assert_eq!(count_elements(&table, "tbody"), 0);
+
+        let children = table.child_nodes();
+        assert_eq!(
+            children.len(),
+            1,
+            "the ignored </tbody> must not create a sibling section"
+        );
+        let thead = children[0].clone();
+        assert_eq!(thead.tag_name().as_deref(), Some("thead"));
+
+        let tr = thead.child_nodes()[0].clone();
+        assert_eq!(tr.tag_name().as_deref(), Some("tr"));
+        let td = tr.child_nodes()[0].clone();
+        assert_eq!(td.tag_name().as_deref(), Some("td"));
+        assert_eq!(td.child_nodes()[0].data(), Some("x".to_string()));
+    }
+
+    #[test]
+    fn matching_section_end_tag_closes_section_in_table_body() {
+        // Regression guard for the mismatch fix above: a *matching* section end
+        // tag must still close the section. `</thead>` closes the open (empty)
+        // `<thead>`, so the subsequent row is placed in a fresh implicit
+        // `<tbody>` sibling.
+        let result = TreeBuilder::parse("<table><thead></thead><tr><td>x</table>");
+        let table = result.document().query_selector("table").unwrap();
+
+        let sections: Vec<String> = table
+            .child_nodes()
+            .into_iter()
+            .filter_map(|node| node.tag_name())
+            .collect();
+        assert_eq!(sections, vec!["thead".to_string(), "tbody".to_string()]);
+
+        let thead = table.child_nodes()[0].clone();
+        assert_eq!(
+            thead.child_nodes().len(),
+            0,
+            "the closed <thead> must stay empty"
+        );
+
+        let tbody = table.child_nodes()[1].clone();
+        let tr = tbody.child_nodes()[0].clone();
+        assert_eq!(tr.tag_name().as_deref(), Some("tr"));
+        let td = tr.child_nodes()[0].clone();
+        assert_eq!(td.child_nodes()[0].data(), Some("x".to_string()));
     }
 
     #[test]
