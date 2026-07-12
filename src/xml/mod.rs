@@ -21,6 +21,9 @@ impl std::error::Error for XmlParseError {}
 pub fn parse(bytes: &[u8]) -> Result<NodeHandle, XmlParseError> {
     let input = std::str::from_utf8(bytes)
         .map_err(|_| XmlParseError::new("XML input is not valid UTF-8"))?;
+    if input.chars().any(|ch| !is_xml_char(ch)) {
+        return Err(XmlParseError::new("invalid XML character"));
+    }
     Parser::new(input).parse_document()
 }
 
@@ -91,6 +94,10 @@ impl<'a> Parser<'a> {
             if attr_name == "xmlns" { namespaces.insert(String::new(), value.clone()); }
             else if let Some(prefix) = attr_name.strip_prefix("xmlns:") {
                 if prefix.is_empty() { return self.err("empty namespace prefix"); }
+                if prefix == "xmlns" { return self.err("the xmlns prefix is reserved"); }
+                if prefix == "xml" && value != XML_NS {
+                    return self.err("the xml prefix must bind to the XML namespace");
+                }
                 namespaces.insert(prefix.to_string(), value.clone());
             }
             attributes.push((attr_name, value));
@@ -129,10 +136,20 @@ impl<'a> Parser<'a> {
     fn parse_comment(&mut self) -> Result<(), XmlParseError> {
         self.pos += 4;
         let body = self.take_until("-->")?;
-        if body.contains("--") { return self.err("'--' is forbidden in XML comments"); }
+        if body.contains("--") || body.ends_with('-') {
+            return self.err("'--' and a trailing '-' are forbidden in XML comments");
+        }
         self.parent().append_child(NodeHandle::comment(body)); Ok(())
     }
-    fn parse_pi(&mut self) -> Result<(), XmlParseError> { self.pos += 2; self.name()?; self.take_until("?>")?; Ok(()) }
+    fn parse_pi(&mut self) -> Result<(), XmlParseError> {
+        self.pos += 2;
+        let target = self.name()?;
+        if target.eq_ignore_ascii_case("xml") {
+            return self.err("the processing-instruction target 'xml' is reserved");
+        }
+        self.take_until("?>")?;
+        Ok(())
+    }
     fn parse_cdata(&mut self) -> Result<(), XmlParseError> {
         if self.stack.is_empty() { return self.err("CDATA outside document element"); }
         self.pos += 9; let text = self.take_until("]]>")?.to_string();
@@ -185,6 +202,9 @@ fn declaration_encoding(decl: &str) -> Option<&str> {
 fn is_name_char(ch: char, first: bool) -> bool {
     ch == ':' || ch == '_' || ch.is_alphabetic() || (!first && (ch.is_ascii_digit() || matches!(ch, '-' | '.') || ch == '\u{b7}'))
 }
+fn is_xml_char(ch: char) -> bool {
+    matches!(ch as u32, 0x9 | 0xa | 0xd | 0x20..=0xd7ff | 0xe000..=0xfffd | 0x10000..=0x10ffff)
+}
 fn decode_references(input: &str) -> Result<String, XmlParseError> {
     let mut out = String::new(); let mut rest = input;
     while let Some(pos) = rest.find('&') {
@@ -197,7 +217,7 @@ fn decode_references(input: &str) -> Result<String, XmlParseError> {
             value if value.starts_with('#') => char::from_u32(value[1..].parse().map_err(|_| XmlParseError::new("invalid numeric character reference"))?).ok_or_else(|| XmlParseError::new("invalid XML character"))?,
             _ => return Err(XmlParseError::new("undefined entity reference")),
         };
-        if value == '\0' || (value as u32) >= 0xd800 && (value as u32) <= 0xdfff { return Err(XmlParseError::new("invalid XML character")); }
+        if !is_xml_char(value) { return Err(XmlParseError::new("invalid XML character")); }
         out.push(value);
     }
     out.push_str(rest); Ok(out)
@@ -216,4 +236,43 @@ mod tests {
     #[test] fn rejects_mismatched_tags_unquoted_attributes_and_unknown_entities() { for xml in ["<a></b>", "<a x=y/>", "<a>&bogus;</a>"] { assert!(parse(xml.as_bytes()).is_err(), "expected error for {xml}"); } }
     #[test] fn rejects_invalid_utf8_and_non_utf8_declaration() { assert!(parse(b"<r>\xff</r>").is_err()); assert!(parse(br#"<?xml version='1.0' encoding='ISO-8859-1'?><r/>"#).is_err()); }
     #[test] fn rejects_xhtml_crossed_tags_as_whole_document_error() { assert!(parse(br#"<html><p><strong/>x</strong></p></html>"#).is_err()); }
+    #[test] fn rejects_invalid_reserved_namespace_prefix_bindings() {
+        for xml in [
+            "<r xmlns:xml='urn:not-xml'/>",
+            "<r xmlns:xmlns='http://www.w3.org/2000/xmlns/'/>",
+        ] {
+            assert!(parse(xml.as_bytes()).is_err(), "expected fatal error for {xml}");
+        }
+        assert!(parse(format!("<r xmlns:xml='{XML_NS}'/>").as_bytes()).is_ok(),
+            "the predefined xml prefix may bind to the XML namespace");
+    }
+    #[test] fn rejects_reserved_xml_processing_instruction_target_case_insensitively() {
+        for xml in ["<r><?xml bad?></r>", "<r><?XmL bad?></r>"] {
+            assert!(parse(xml.as_bytes()).is_err(), "expected fatal error for {xml}");
+        }
+        assert!(parse(b"<r><?xml-stylesheet ok?></r>").is_ok(),
+            "a target merely starting with xml remains valid");
+    }
+    #[test] fn rejects_double_hyphen_and_trailing_hyphen_in_comments() {
+        for xml in ["<r><!--a--b--></r>", "<r><!--a---></r>"] {
+            assert!(parse(xml.as_bytes()).is_err(), "expected fatal error for {xml}");
+        }
+        assert!(parse(b"<r><!--a-b--></r>").is_ok(), "a single interior hyphen is valid");
+    }
+    #[test] fn rejects_xml_1_0_forbidden_characters_directly_and_by_reference() {
+        for xml in [
+            "<r>\u{1}</r>",
+            "<r>\u{b}</r>",
+            "<r>\u{fffe}</r>",
+            "<r>\u{ffff}</r>",
+            "<r>&#1;</r>",
+            "<r>&#xB;</r>",
+            "<r>&#xFFFE;</r>",
+            "<r>&#65535;</r>",
+        ] {
+            assert!(parse(xml.as_bytes()).is_err(), "expected invalid XML character error for {xml:?}");
+        }
+        assert!(parse("<r>\t\n\r\u{20}\u{d7ff}\u{e000}\u{fffd}\u{10000}</r>".as_bytes()).is_ok(),
+            "XML 1.0 boundary characters must remain accepted");
+    }
 }

@@ -402,6 +402,11 @@ impl NodeHandle {
         }
     }
 
+    /// Returns whether this node is an element created with HTML semantics.
+    pub fn is_html_element(&self) -> bool {
+        matches!(&self.0.borrow().data, NodeData::Element(element) if element.is_html())
+    }
+
     pub fn prefix(&self) -> Option<String> {
         match &self.0.borrow().data {
             NodeData::Element(element) => element.prefix().map(str::to_string),
