@@ -2012,19 +2012,22 @@
     get tBodies() {
       return childElementsByTag(this, "TBODY");
     }
+    // Per HTML spec: tr children of thead elements (in tree order) come first,
+    // then those whose parent is the table itself or a tbody (interleaved in
+    // tree order), then those in tfoot elements.
     get rows() {
-      const rows = [];
-      for (const head of childElementsByTag(this, "THEAD")) {
-        rows.push(...childElementsByTag(head, "TR"));
+      const heads = [];
+      const bodies = [];
+      const feet = [];
+      for (const child of this.childNodes) {
+        if (child.nodeType !== 1) continue;
+        const tag = child.tagName;
+        if (tag === "THEAD") heads.push(...childElementsByTag(child, "TR"));
+        else if (tag === "TFOOT") feet.push(...childElementsByTag(child, "TR"));
+        else if (tag === "TBODY") bodies.push(...childElementsByTag(child, "TR"));
+        else if (tag === "TR") bodies.push(child);
       }
-      for (const body of childElementsByTag(this, "TBODY")) {
-        rows.push(...childElementsByTag(body, "TR"));
-      }
-      rows.push(...childElementsByTag(this, "TR"));
-      for (const foot of childElementsByTag(this, "TFOOT")) {
-        rows.push(...childElementsByTag(foot, "TR"));
-      }
-      return rows;
+      return heads.concat(bodies, feet);
     }
     createCaption() {
       const existing = this.caption;
@@ -2061,6 +2064,133 @@
     deleteTFoot() {
       const foot = this.tFoot;
       if (foot) this.removeChild(foot);
+    }
+    // HTMLTableElement.insertRow(index): creates a tr and places it per the HTML
+    // spec's insertion rules — auto-creating a tbody for an empty table, else
+    // appending to the last tbody, else positioning relative to the rows
+    // collection. index defaults to -1 (append).
+    insertRow(index = -1) {
+      const rows = this.rows;
+      if (index < -1 || index > rows.length) {
+        throw new DOMException("The index is out of range.", "IndexSizeError");
+      }
+      const tr = document.createElement("tr");
+      const tbodies = childElementsByTag(this, "TBODY");
+      if (rows.length === 0 && tbodies.length === 0) {
+        const tbody = document.createElement("tbody");
+        tbody.appendChild(tr);
+        this.appendChild(tbody);
+      } else if (rows.length === 0) {
+        tbodies[tbodies.length - 1].appendChild(tr);
+      } else if (index === -1 || index === rows.length) {
+        rows[rows.length - 1].parentNode.appendChild(tr);
+      } else {
+        const ref = rows[index];
+        ref.parentNode.insertBefore(tr, ref);
+      }
+      return tr;
+    }
+    deleteRow(index) {
+      const rows = this.rows;
+      if (index < -1 || index >= rows.length) {
+        throw new DOMException("The index is out of range.", "IndexSizeError");
+      }
+      if (index === -1) {
+        if (rows.length === 0) return;
+        index = rows.length - 1;
+      }
+      const row = rows[index];
+      row.parentNode.removeChild(row);
+    }
+  }
+
+  // thead / tbody / tfoot share the HTMLTableSectionElement interface.
+  class HTMLTableSectionElement extends Node {
+    get rows() {
+      return childElementsByTag(this, "TR");
+    }
+    insertRow(index = -1) {
+      const rows = this.rows;
+      if (index < -1 || index > rows.length) {
+        throw new DOMException("The index is out of range.", "IndexSizeError");
+      }
+      const tr = document.createElement("tr");
+      if (index === -1 || index === rows.length) {
+        this.appendChild(tr);
+      } else {
+        this.insertBefore(tr, rows[index]);
+      }
+      return tr;
+    }
+    deleteRow(index) {
+      const rows = this.rows;
+      if (index < -1 || index >= rows.length) {
+        throw new DOMException("The index is out of range.", "IndexSizeError");
+      }
+      if (index === -1) {
+        if (rows.length === 0) return;
+        index = rows.length - 1;
+      }
+      this.removeChild(rows[index]);
+    }
+  }
+
+  class HTMLTableRowElement extends Node {
+    // td and th children, in tree order.
+    get cells() {
+      return this.childNodes.filter(
+        c => c.nodeType === 1 && (c.tagName === "TD" || c.tagName === "TH")
+      );
+    }
+    // Index of this row in its owning table's rows collection (thead, then
+    // body/tbody, then tfoot ordering), or -1 if not in a table.
+    get rowIndex() {
+      const parent = this.parentNode;
+      if (!parent) return -1;
+      let table = null;
+      const ptag = parent.tagName;
+      if (ptag === "TABLE") {
+        table = parent;
+      } else if (
+        (ptag === "THEAD" || ptag === "TBODY" || ptag === "TFOOT") &&
+        parent.parentNode &&
+        parent.parentNode.tagName === "TABLE"
+      ) {
+        table = parent.parentNode;
+      }
+      if (!table) return -1;
+      return table.rows.findIndex(r => r.__id === this.__id);
+    }
+    // Index of this row among its parent section's tr children, or -1.
+    get sectionRowIndex() {
+      const parent = this.parentNode;
+      if (!parent) return -1;
+      const ptag = parent.tagName;
+      if (ptag !== "THEAD" && ptag !== "TBODY" && ptag !== "TFOOT" && ptag !== "TABLE") {
+        return -1;
+      }
+      return childElementsByTag(parent, "TR").findIndex(r => r.__id === this.__id);
+    }
+    insertCell(index = -1) {
+      const cells = this.cells;
+      if (index < -1 || index > cells.length) {
+        throw new DOMException("The index is out of range.", "IndexSizeError");
+      }
+      const td = document.createElement("td");
+      if (index === -1 || index === cells.length) {
+        this.appendChild(td);
+      } else {
+        this.insertBefore(td, cells[index]);
+      }
+      return td;
+    }
+    deleteCell(index) {
+      const cells = this.cells;
+      if (index === -1) index = cells.length - 1;
+      if (index < 0 || index >= cells.length) {
+        throw new DOMException("The index is out of range.", "IndexSizeError");
+      }
+      this.removeChild(cells[index]);
     }
   }
 
@@ -2229,6 +2359,10 @@
   // Tag-name → constructor table consulted by wrapNode() for element nodes.
   const ELEMENT_CTORS = {
     table: HTMLTableElement,
+    thead: HTMLTableSectionElement,
+    tbody: HTMLTableSectionElement,
+    tfoot: HTMLTableSectionElement,
+    tr: HTMLTableRowElement,
     form: HTMLFormElement,
     input: HTMLInputElement,
     button: HTMLButtonElement,
@@ -2278,6 +2412,8 @@
   globalThis.TreeWalker = TreeWalker;
   globalThis.Range = Range;
   globalThis.HTMLTableElement = HTMLTableElement;
+  globalThis.HTMLTableSectionElement = HTMLTableSectionElement;
+  globalThis.HTMLTableRowElement = HTMLTableRowElement;
   globalThis.HTMLFormElement = HTMLFormElement;
   globalThis.HTMLInputElement = HTMLInputElement;
   globalThis.HTMLButtonElement = HTMLButtonElement;
