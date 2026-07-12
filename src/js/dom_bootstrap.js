@@ -2026,7 +2026,8 @@
     }
 
     get styleSheets() {
-      return makeStyleSheetList(this);
+      if (!this.__styleSheets) this.__styleSheets = makeStyleSheetList(this);
+      return this.__styleSheets;
     }
 
     createTextNode(text) {
@@ -2246,7 +2247,12 @@
   // serialization; it understands strings, comments and nested blocks.
   function splitCssRules(source) {
     const css = String(source || "");
-    const expected = __omoikane_css_rule_count(css);
+    let expected;
+    try {
+      expected = __omoikane_css_rule_count(css);
+    } catch (error) {
+      throw new DOMException(error.message || "Invalid CSS rule.", "SyntaxError");
+    }
     const rules = [];
     let start = 0, depth = 0, quote = "", comment = false;
     for (let i = 0; i < css.length; i++) {
@@ -2285,26 +2291,23 @@
   }
 
   function declarationView(block) {
-    const parse = () => {
-      const out = [];
-      for (const part of block.split(";")) {
-        const colon = part.indexOf(":");
-        if (colon < 0) continue;
-        const name = part.slice(0, colon).trim().toLowerCase();
-        let value = part.slice(colon + 1).trim();
-        if (name && value) out.push({ name, value });
-      }
-      return out;
-    };
+    const declarations = [];
+    for (const part of block.split(";")) {
+      const colon = part.indexOf(":");
+      if (colon < 0) continue;
+      const name = part.slice(0, colon).trim().toLowerCase();
+      const value = part.slice(colon + 1).trim();
+      if (name && value) declarations.push({ name, value });
+    }
     const target = {
       getPropertyValue(name) {
         const key = String(name).toLowerCase();
-        const found = parse().filter(d => d.name === key);
+        const found = declarations.filter(d => d.name === key);
         return found.length ? found[found.length - 1].value : "";
       },
-      item(index) { return parse()[Number(index) | 0]?.name || ""; },
-      get length() { return parse().length; },
-      get cssText() { return parse().map(d => d.name + ": " + d.value + ";").join(" "); },
+      item(index) { return declarations[Number(index) | 0]?.name || ""; },
+      get length() { return declarations.length; },
+      get cssText() { return declarations.map(d => d.name + ": " + d.value + ";").join(" "); },
     };
     return new Proxy(target, {
       get(object, prop) {
@@ -2316,14 +2319,21 @@
   }
 
   class CSSStyleRule {
-    constructor(text) { this.__text = text; }
-    get selectorText() { return this.__text.slice(0, this.__text.indexOf("{")).trim(); }
-    get cssText() { return this.selectorText + " { " + this.style.cssText + " }"; }
-    get style() {
+    constructor(text) {
+      this.__text = text;
       const open = this.__text.indexOf("{");
       const close = this.__text.lastIndexOf("}");
-      return declarationView(this.__text.slice(open + 1, close));
+      this.__hasBlock = open >= 0 && close > open;
+      this.__selectorText = this.__hasBlock ? this.__text.slice(0, open).trim() : "";
+      this.__style = declarationView(this.__hasBlock ? this.__text.slice(open + 1, close) : "");
     }
+    get selectorText() { return this.__selectorText; }
+    get cssText() {
+      return this.__hasBlock
+        ? this.selectorText + " { " + this.style.cssText + " }"
+        : this.__text.trim();
+    }
+    get style() { return this.__style; }
   }
 
   class CSSRuleList {

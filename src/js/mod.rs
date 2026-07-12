@@ -4899,6 +4899,7 @@ mod tests {
     fn cssom_lists_style_sheets_and_rules_in_tree_order() {
         let doc = crate::html::TreeBuilder::parse("<html><head><style>p { color: red; } span { display: block; }</style><style>#x { width: 7px; }</style></head><body><p id='x'></p></body></html>").document();
         let mut runtime = JsRuntime::with_document(doc).unwrap();
+        assert!(runtime.eval("document.styleSheets === document.styleSheets").unwrap().as_boolean().unwrap(), "StyleSheetList identity must be stable");
         assert_eq!(eval_num(&mut runtime, "document.styleSheets.length"), 2.0);
         assert_eq!(eval_num(&mut runtime, "document.styleSheets[0].cssRules.length"), 2.0);
         assert_eq!(eval_str(&mut runtime, "document.styleSheets[0].cssRules[0].selectorText"), "p");
@@ -4923,9 +4924,22 @@ mod tests {
     fn cssom_insert_and_delete_report_dom_exceptions() {
         let doc = crate::html::TreeBuilder::parse("<html><head><style>p { color: red; }</style></head><body></body></html>").document();
         let mut runtime = JsRuntime::with_document(doc).unwrap();
-        assert_eq!(eval_str(&mut runtime, "(() => { try { document.styleSheets[0].insertRule('not css', 0); return ''; } catch (e) { return e.name + ':' + e.code; } })()"), "SyntaxError:12");
+        assert!(runtime.eval("(() => { try { document.styleSheets[0].insertRule('not css', 0); return false; } catch (e) { return e.name === 'SyntaxError' && e instanceof DOMException; } })()").unwrap().as_boolean().unwrap(), "invalid insertRule input must throw a SyntaxError DOMException");
         assert_eq!(eval_str(&mut runtime, "(() => { try { document.styleSheets[0].insertRule('p { color: blue; }', 2); return ''; } catch (e) { return e.name + ':' + e.code; } })()"), "IndexSizeError:1");
         assert_eq!(eval_str(&mut runtime, "(() => { try { document.styleSheets[0].deleteRule(1); return ''; } catch (e) { return e.name + ':' + e.code; } })()"), "IndexSizeError:1");
+        assert!(runtime.eval("(() => { document.styleSheets[0].ownerNode.textContent = 'not css'; try { document.styleSheets[0].insertRule('p { color: blue; }', 0); return false; } catch (e) { return e.name === 'SyntaxError' && e instanceof DOMException; } })()").unwrap().as_boolean().unwrap(), "stylesheet enumeration errors must be wrapped as SyntaxError DOMExceptions");
+    }
+
+    #[test]
+    fn cssom_braceless_at_rule_has_healthy_rule_views() {
+        let doc = crate::html::TreeBuilder::parse("<html><head><style>@charset \"UTF-8\"; p { color: red; }</style></head><body></body></html>").document();
+        let mut runtime = JsRuntime::with_document(doc).unwrap();
+        assert_eq!(eval_num(&mut runtime, "document.styleSheets[0].cssRules.length"), 2.0);
+        assert_eq!(eval_str(&mut runtime, "document.styleSheets[0].cssRules[0].selectorText"), "");
+        assert_eq!(eval_str(&mut runtime, "document.styleSheets[0].cssRules[0].cssText"), "@charset \"UTF-8\";");
+        assert_eq!(eval_str(&mut runtime, "document.styleSheets[0].cssRules[0].style.cssText"), "");
+        assert_eq!(eval_str(&mut runtime, "document.styleSheets[0].cssRules[1].selectorText"), "p");
+        assert_eq!(eval_str(&mut runtime, "document.styleSheets[0].cssRules[1].cssText"), "p { color: red; }");
     }
 
     #[test]
