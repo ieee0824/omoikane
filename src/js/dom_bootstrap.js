@@ -1,6 +1,24 @@
 (() => {
   const cache = new Map();
 
+  // Window objects are not ordinary DOM wrappers in Omoikane: the top-level
+  // Window is Boa's global object, while nested browsing contexts currently
+  // expose a small facade. Keep their identity explicit instead of changing
+  // the global object's prototype, which could disturb Boa's global property
+  // lookup and built-in prototype chain.
+  const windowObjects = new WeakSet([globalThis]);
+  class Window {
+    constructor() {
+      throw new TypeError("Illegal constructor");
+    }
+  }
+  Object.defineProperty(Window, Symbol.hasInstance, {
+    value(candidate) {
+      return (typeof candidate === "object" || typeof candidate === "function") &&
+        candidate !== null && windowObjects.has(candidate);
+    },
+  });
+
   function wrapNode(id) {
     if (id === null || id === undefined) {
       return null;
@@ -2267,6 +2285,7 @@
           frameElement: iframe,
           getComputedStyle: globalThis.getComputedStyle,
         };
+        windowObjects.add(this.__contentWindowFacade);
       }
       return this.__contentWindowFacade;
     }
@@ -2746,6 +2765,7 @@
   }
 
   globalThis.Node = Node;
+  globalThis.Window = Window;
   globalThis.Element = Node;
   globalThis.HTMLElement = Node;
   globalThis.CharacterData = CharacterData;
@@ -2782,7 +2802,9 @@
   globalThis.AnimationEvent = Event;
   globalThis.TransitionEvent = Event;
   globalThis.document = wrapNode(__omoikane_document_id);
-  globalThis.window = globalThis;
+  if (globalThis.window === undefined) {
+    globalThis.window = globalThis;
+  }
   globalThis.self = globalThis;
   globalThis.addEventListener = function(type, listener, options) {
     return document.addEventListener(type, listener, options);

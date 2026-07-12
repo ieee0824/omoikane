@@ -4559,6 +4559,40 @@ mod tests {
     }
 
     #[test]
+    fn window_global_class_recognizes_only_window_objects() {
+        use crate::html::TreeBuilder;
+        let doc = TreeBuilder::parse(
+            r#"<html><body><div id="d"></div><iframe id="f"></iframe></body></html>"#,
+        )
+        .document();
+        let mut runtime = JsRuntime::with_document(doc).unwrap();
+        let actual = runtime
+            .eval(
+                "[
+                    typeof Window === 'function',
+                    globalThis.window === globalThis,
+                    globalThis instanceof Window,
+                    window instanceof Window,
+                    document.defaultView instanceof Window,
+                    document.getElementById('f').contentWindow instanceof Window,
+                    document.getElementById('f').contentDocument.defaultView instanceof Window,
+                    document instanceof Window,
+                    document.getElementById('d') instanceof Window,
+                    ({w: window}).w instanceof Window ? 'win' : 'other'
+                ].join('|')",
+            )
+            .unwrap()
+            .as_string()
+            .unwrap()
+            .to_std_string_escaped();
+        assert_eq!(
+            actual,
+            "true|true|true|true|true|true|true|false|false|win",
+            "Window must recognize the main global and iframe facades, but no DOM nodes",
+        );
+    }
+
+    #[test]
     fn node_type_constants_are_exposed() {
         let mut runtime = JsRuntime::with_document(default_document()).unwrap();
         // On the Node constructor.
