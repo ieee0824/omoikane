@@ -4046,6 +4046,195 @@ mod tests {
     }
 
     #[test]
+    fn style_custom_property_preserves_case_across_roundtrip() {
+        // Custom properties are case-sensitive: `--Foo` must not be folded to
+        // lowercase or camelCase→kebab mangled into `---foo`. The value set via
+        // setProperty must be readable via getPropertyValue and removable via
+        // removeProperty using the same mixed-case name.
+        let doc = NodeHandle::document();
+        let div = NodeHandle::element("div");
+        doc.append_child(div.clone());
+
+        let mut runtime = JsRuntime::with_document(doc).unwrap();
+        runtime
+            .eval(r#"document.querySelector("div").style.setProperty("--Foo", "10px");"#)
+            .unwrap();
+
+        // The declaration is serialized with its case preserved.
+        let style_attr = div.attributes().unwrap().get("style").cloned().unwrap_or_default();
+        assert_eq!(
+            style_attr, "--Foo: 10px;",
+            "custom property name must keep its original case in the style attribute"
+        );
+
+        // Round-trip read with the exact mixed-case name.
+        assert_eq!(
+            eval_str(
+                &mut runtime,
+                r#"document.querySelector('div').style.getPropertyValue('--Foo')"#
+            ),
+            "10px",
+            "getPropertyValue must resolve the case-preserved custom property"
+        );
+        // A differently-cased name must NOT match (case-sensitive).
+        assert_eq!(
+            eval_str(
+                &mut runtime,
+                r#"document.querySelector('div').style.getPropertyValue('--foo')"#
+            ),
+            "",
+            "custom property lookup is case-sensitive"
+        );
+
+        // removeProperty returns the prior value and clears the declaration.
+        assert_eq!(
+            eval_str(
+                &mut runtime,
+                r#"document.querySelector('div').style.removeProperty('--Foo')"#
+            ),
+            "10px",
+            "removeProperty must return the prior value of the custom property"
+        );
+        let style_attr = div.attributes().unwrap().get("style").cloned().unwrap_or_default();
+        assert_eq!(
+            style_attr, "",
+            "the custom property must be gone after removeProperty"
+        );
+    }
+
+    #[test]
+    fn style_set_property_normalizes_duplicate_declarations() {
+        // A duplicate declaration (here injected via cssText, e.g. as authored)
+        // is resolved last-wins on read; a subsequent setProperty must update the
+        // winning value AND collapse the block to a single declaration.
+        let doc = NodeHandle::document();
+        let div = NodeHandle::element("div");
+        doc.append_child(div.clone());
+
+        let mut runtime = JsRuntime::with_document(doc).unwrap();
+        runtime
+            .eval(
+                r#"
+            const el = document.querySelector("div");
+            el.style.cssText = "color: red; color: blue";
+            el.style.setProperty("color", "green");
+        "#,
+            )
+            .unwrap();
+
+        assert_eq!(
+            eval_str(
+                &mut runtime,
+                "document.querySelector('div').style.getPropertyValue('color')"
+            ),
+            "green",
+            "setProperty must update the winning declaration even with duplicates"
+        );
+        assert_eq!(
+            eval_num(&mut runtime, "document.querySelector('div').style.length"),
+            1.0,
+            "duplicate declarations must collapse to a single one"
+        );
+        let style_attr = div.attributes().unwrap().get("style").cloned().unwrap_or_default();
+        assert_eq!(
+            style_attr, "color: green;",
+            "the style attribute must contain exactly one normalized declaration"
+        );
+    }
+
+    #[test]
+    fn style_remove_property_returns_last_wins_and_removes_all_duplicates() {
+        // With duplicate declarations, removeProperty must return the last-wins
+        // value (not the first) and remove every occurrence.
+        let doc = NodeHandle::document();
+        let div = NodeHandle::element("div");
+        doc.append_child(div.clone());
+
+        let mut runtime = JsRuntime::with_document(doc).unwrap();
+        runtime
+            .eval(
+                r#"
+            const el = document.querySelector("div");
+            el.style.cssText = "color: red; color: blue; display: block";
+            globalThis.__removed = el.style.removeProperty("color");
+        "#,
+            )
+            .unwrap();
+
+        assert_eq!(
+            eval_str(&mut runtime, "globalThis.__removed"),
+            "blue",
+            "removeProperty must return the last-wins value, not the first"
+        );
+        assert_eq!(
+            eval_str(
+                &mut runtime,
+                "document.querySelector('div').style.getPropertyValue('color')"
+            ),
+            "",
+            "every duplicate occurrence of the property must be removed"
+        );
+        let style_attr = div.attributes().unwrap().get("style").cloned().unwrap_or_default();
+        assert_eq!(
+            style_attr, "display: block;",
+            "only the unrelated declaration must remain"
+        );
+    }
+
+    #[test]
+    fn style_set_property_priority_only_accepts_important() {
+        // Per CSSOM, only "important" (ASCII case-insensitive) is a valid
+        // priority. Any other non-empty token is treated as no priority; a
+        // case-varied "IMPORTANT" is accepted.
+        let doc = NodeHandle::document();
+        let div = NodeHandle::element("div");
+        doc.append_child(div.clone());
+
+        let mut runtime = JsRuntime::with_document(doc).unwrap();
+        runtime
+            .eval(
+                r#"
+            const el = document.querySelector("div");
+            el.style.setProperty("color", "red", "foo");
+            el.style.setProperty("display", "block", "IMPORTANT");
+        "#,
+            )
+            .unwrap();
+
+        // "foo" is not a valid priority -> treated as none, no bogus `!foo`.
+        assert_eq!(
+            eval_str(
+                &mut runtime,
+                "document.querySelector('div').style.getPropertyPriority('color')"
+            ),
+            "",
+            "an invalid priority token must be treated as no priority"
+        );
+        assert_eq!(
+            eval_str(
+                &mut runtime,
+                "document.querySelector('div').style.getPropertyValue('color')"
+            ),
+            "red",
+            "the value must still be set when the priority is invalid"
+        );
+        // "IMPORTANT" matches ASCII case-insensitively.
+        assert_eq!(
+            eval_str(
+                &mut runtime,
+                "document.querySelector('div').style.getPropertyPriority('display')"
+            ),
+            "important",
+            "priority matching is ASCII case-insensitive"
+        );
+        let style_attr = div.attributes().unwrap().get("style").cloned().unwrap_or_default();
+        assert_eq!(
+            style_attr, "color: red; display: block !important;",
+            "invalid priority must not serialize a bogus flag; valid one must"
+        );
+    }
+
+    #[test]
     fn remove_event_listener_stops_callback() {
         let doc = NodeHandle::document();
         let div = NodeHandle::element("div");

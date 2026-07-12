@@ -679,7 +679,15 @@
       // its canonical CSS (kebab, lowercase) form, matching getComputedStyle's
       // `__styleNameToCss(name).toLowerCase()` so camelCase and kebab-case access
       // resolve to the same declaration.
-      const toCssName = (name) => toKebab(name).toLowerCase();
+      const toCssName = (name) => {
+        const s = String(name);
+        // Custom properties (`--foo`) are case-sensitive and already in CSS
+        // form, so they pass through untouched — never camelCase→kebab folded,
+        // which would otherwise corrupt `--Foo` into `---foo` and break the
+        // set/get/removeProperty round-trip.
+        if (s.startsWith("--")) return s;
+        return toKebab(s).toLowerCase();
+      };
 
       // Reads the current `style` attribute into an ordered list of
       // `{ name, value, priority }` declarations. `name` is the kebab-case CSS
@@ -693,7 +701,10 @@
         for (const part of attr.split(";")) {
           const idx = part.indexOf(":");
           if (idx < 0) continue;
-          const name = part.slice(0, idx).trim().toLowerCase();
+          const rawName = part.slice(0, idx).trim();
+          // Custom properties are case-sensitive; only standard property names
+          // fold to lowercase so `--Foo` survives a serialize/parse round-trip.
+          const name = rawName.startsWith("--") ? rawName : rawName.toLowerCase();
           let value = part.slice(idx + 1).trim();
           if (!name || value === "") continue;
           let priority = "";
@@ -727,26 +738,37 @@
         }
         return "";
       };
+      // Sets a kebab-case property. When the property is already declared, the
+      // last (winning) occurrence is updated in place and any earlier duplicates
+      // are dropped, so a block with redundant declarations (e.g. from cssText)
+      // normalizes to a single declaration that matches the last-wins reads of
+      // getValue/getPriority.
       const setValue = (kebab, value, priority) => {
         const decls = parseDecls();
-        const existing = decls.find(d => d.name === kebab);
-        if (existing) {
-          existing.value = value;
-          existing.priority = priority || "";
+        const matches = decls.filter(d => d.name === kebab);
+        if (matches.length > 0) {
+          const winner = matches[matches.length - 1];
+          winner.value = value;
+          winner.priority = priority || "";
+          writeDecls(decls.filter(d => d.name !== kebab || d === winner));
         } else {
           decls.push({ name: kebab, value, priority: priority || "" });
+          writeDecls(decls);
         }
-        writeDecls(decls);
       };
       // Removes a kebab-case property and returns its previous value ("" if it
-      // was not set), per CSSOM `removeProperty`.
+      // was not set), per CSSOM `removeProperty`. The returned value is the
+      // last-wins (winning) declaration's value, and every occurrence — not
+      // just the first — is removed.
       const removeValue = (kebab) => {
         const decls = parseDecls();
-        const idx = decls.findIndex(d => d.name === kebab);
-        if (idx < 0) return "";
-        const old = decls[idx].value;
-        decls.splice(idx, 1);
-        writeDecls(decls);
+        const remaining = decls.filter(d => d.name !== kebab);
+        if (remaining.length === decls.length) return "";
+        let old = "";
+        for (let i = decls.length - 1; i >= 0; i--) {
+          if (decls[i].name === kebab) { old = decls[i].value; break; }
+        }
+        writeDecls(remaining);
         return old;
       };
 
@@ -766,7 +788,14 @@
         setProperty(name, value, priority) {
           const kebab = toCssName(name);
           if (value == null || value === "") { removeValue(kebab); return; }
-          setValue(kebab, String(value), priority ? String(priority).toLowerCase() : "");
+          // Per CSSOM only "important" (ASCII case-insensitive) is a valid
+          // priority; any other non-empty token is treated as no priority
+          // rather than being serialized as a bogus `!foo`.
+          const prio =
+            priority != null && String(priority).toLowerCase() === "important"
+              ? "important"
+              : "";
+          setValue(kebab, String(value), prio);
         },
         removeProperty(name) { return removeValue(toCssName(name)); },
         item(index) {
