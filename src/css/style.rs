@@ -1909,6 +1909,9 @@ fn apply_initial_values(properties: &mut BTreeMap<String, ComputedValue>) {
     properties
         .entry("font-size".to_string())
         .or_insert_with(|| ComputedValue::Px(16.0));
+    properties
+        .entry("text-transform".to_string())
+        .or_insert_with(|| ComputedValue::Keyword("none".to_string()));
 }
 
 /// CSS 2.1 §8.5.3: If border-style is 'none', the computed border-width is 0.
