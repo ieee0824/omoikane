@@ -1,7 +1,7 @@
 ---
 number: 057
 slug: boa-inline-cache-poisoning
-status: open
+status: closed
 ---
 
 # Boa のインラインキャッシュ汚染で String メソッド解決が化ける（tokyo6.tokyo）
