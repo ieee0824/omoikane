@@ -16,6 +16,7 @@ pub enum InsertionMode {
     InHead,
     InBody,
     InTable,
+    InTableBody,
     InRow,
     InCell,
     AfterBody,
@@ -92,6 +93,7 @@ impl Builder {
             InsertionMode::InHead => self.handle_in_head(token, errors),
             InsertionMode::InBody => self.handle_in_body(token, errors),
             InsertionMode::InTable => self.handle_in_table(token, errors),
+            InsertionMode::InTableBody => self.handle_in_table_body(token, errors),
             InsertionMode::InRow => self.handle_in_row(token, errors),
             InsertionMode::InCell => self.handle_in_cell(token, errors),
             InsertionMode::AfterBody => self.handle_after_body(token, errors),
@@ -260,18 +262,21 @@ impl Builder {
                             self.mode = InsertionMode::InTable;
                         }
                     }
-                    "tr" => {
-                        let table = self.ensure_table_element();
-                        let tr = self.insert_into(&table, "tr", &attributes);
-                        self.open_elements.push(tr);
-                        self.mode = InsertionMode::InRow;
-                    }
-                    "td" | "th" => {
-                        let table = self.ensure_table_element();
-                        let tr = self.ensure_table_row(&table);
-                        let cell = self.insert_into(&tr, &name, &attributes);
-                        self.open_elements.push(cell);
-                        self.mode = InsertionMode::InCell;
+                    "tr" | "td" | "th" => {
+                        // A table-scoped start tag encountered directly in body
+                        // context: open an implicit `<table>` and reprocess so the
+                        // "in table" / "in table body" machinery inserts the
+                        // implicit `<tbody>` (and `<tr>` for a stray cell).
+                        self.ensure_table_element();
+                        self.mode = InsertionMode::InTable;
+                        self.process_token(
+                            Token::StartTag {
+                                name: name.clone(),
+                                attributes: attributes.clone(),
+                                self_closing,
+                            },
+                            errors,
+                        );
                     }
                     "template" => {
                         let template = self.insert_element_with_attributes("template", &attributes);
@@ -342,22 +347,36 @@ impl Builder {
                 attributes,
                 self_closing,
             } => match name.as_str() {
-                "tr" => {
+                "tbody" | "thead" | "tfoot" => {
+                    // Explicit section: insert it under the table and switch to
+                    // the "in table body" insertion mode.
+                    self.clear_stack_to_table_context();
                     let table = self
                         .current_table()
                         .unwrap_or_else(|| self.ensure_table_element());
-                    let tr = self.insert_into(&table, "tr", &attributes);
-                    self.open_elements.push(tr);
-                    self.mode = InsertionMode::InRow;
+                    let section = self.insert_into(&table, &name, &attributes);
+                    self.open_elements.push(section);
+                    self.mode = InsertionMode::InTableBody;
                 }
-                "td" | "th" => {
+                "tr" | "td" | "th" => {
+                    // No open section: generate an implicit `<tbody>`, then
+                    // reprocess the token in the "in table body" mode so a `<tr>`
+                    // (or an implicit `<tr>` for a stray cell) is placed inside it.
+                    self.clear_stack_to_table_context();
                     let table = self
                         .current_table()
                         .unwrap_or_else(|| self.ensure_table_element());
-                    let tr = self.ensure_table_row(&table);
-                    let cell = self.insert_into(&tr, &name, &attributes);
-                    self.open_elements.push(cell);
-                    self.mode = InsertionMode::InCell;
+                    let tbody = self.insert_into(&table, "tbody", &[]);
+                    self.open_elements.push(tbody);
+                    self.mode = InsertionMode::InTableBody;
+                    self.process_token(
+                        Token::StartTag {
+                            name: name.clone(),
+                            attributes: attributes.clone(),
+                            self_closing,
+                        },
+                        errors,
+                    );
                 }
                 "table" => {
                     let table = self.insert_element_with_attributes("table", &attributes);
@@ -395,6 +414,85 @@ impl Builder {
                     InsertionMode::InBody
                 };
             }
+        }
+    }
+
+    /// The HTML "in table body" insertion mode: the current node is a
+    /// `<tbody>` / `<thead>` / `<tfoot>` section and we are placing rows.
+    fn handle_in_table_body(&mut self, token: Token, errors: &mut Vec<HtmlParseError>) {
+        match token {
+            Token::StartTag {
+                name,
+                attributes,
+                self_closing,
+            } => match name.as_str() {
+                "tr" => {
+                    self.clear_stack_to_table_body_context();
+                    let section = self.current_node();
+                    let tr = self.insert_into(&section, "tr", &attributes);
+                    self.open_elements.push(tr);
+                    self.mode = InsertionMode::InRow;
+                }
+                "td" | "th" => {
+                    // A cell without an open row: generate an implicit `<tr>`,
+                    // then reprocess so the cell is placed inside it.
+                    self.clear_stack_to_table_body_context();
+                    let section = self.current_node();
+                    let tr = self.insert_into(&section, "tr", &[]);
+                    self.open_elements.push(tr);
+                    self.mode = InsertionMode::InRow;
+                    self.process_token(
+                        Token::StartTag {
+                            name: name.clone(),
+                            attributes: attributes.clone(),
+                            self_closing,
+                        },
+                        errors,
+                    );
+                }
+                "caption" | "col" | "colgroup" | "tbody" | "tfoot" | "thead" => {
+                    // Close the current section and reprocess in "in table".
+                    self.clear_stack_to_table_body_context();
+                    self.pop_current_section();
+                    self.mode = InsertionMode::InTable;
+                    self.process_token(
+                        Token::StartTag {
+                            name: name.clone(),
+                            attributes: attributes.clone(),
+                            self_closing,
+                        },
+                        errors,
+                    );
+                }
+                _ => self.handle_in_table(
+                    Token::StartTag {
+                        name,
+                        attributes,
+                        self_closing,
+                    },
+                    errors,
+                ),
+            },
+            Token::EndTag { name }
+                if matches!(name.as_str(), "tbody" | "tfoot" | "thead") =>
+            {
+                self.clear_stack_to_table_body_context();
+                self.pop_current_section();
+                self.mode = InsertionMode::InTable;
+            }
+            Token::EndTag { name } if name == "table" => {
+                self.clear_stack_to_table_body_context();
+                self.pop_current_section();
+                self.mode = InsertionMode::InTable;
+                self.process_token(Token::EndTag { name }, errors);
+            }
+            // Stray end tags that have no effect in this mode.
+            Token::EndTag { name }
+                if matches!(
+                    name.as_str(),
+                    "body" | "caption" | "col" | "colgroup" | "html" | "td" | "th" | "tr"
+                ) => {}
+            other => self.handle_in_table(other, errors),
         }
     }
 
@@ -519,14 +617,43 @@ impl Builder {
         table
     }
 
-    fn ensure_table_row(&mut self, table: &NodeHandle) -> NodeHandle {
-        if let Some(row) = self.find_open_element("tr") {
-            return row;
+    /// Pops open elements until the current node is a `<table>`, `<template>`
+    /// or `<html>` (HTML "clear the stack back to a table context").
+    fn clear_stack_to_table_context(&mut self) {
+        while let Some(node) = self.open_elements.last() {
+            if matches!(
+                node.tag_name().as_deref(),
+                Some("table" | "template" | "html")
+            ) {
+                break;
+            }
+            self.open_elements.pop();
         }
+    }
 
-        let row = self.insert_into(table, "tr", &[]);
-        self.open_elements.push(row.clone());
-        row
+    /// Pops open elements until the current node is a table section
+    /// (`<tbody>`/`<tfoot>`/`<thead>`), `<template>` or `<html>` (HTML "clear
+    /// the stack back to a table body context").
+    fn clear_stack_to_table_body_context(&mut self) {
+        while let Some(node) = self.open_elements.last() {
+            if matches!(
+                node.tag_name().as_deref(),
+                Some("tbody" | "tfoot" | "thead" | "template" | "html")
+            ) {
+                break;
+            }
+            self.open_elements.pop();
+        }
+    }
+
+    /// Pops the current node if it is an open table section element.
+    fn pop_current_section(&mut self) {
+        if matches!(
+            self.current_node().tag_name().as_deref(),
+            Some("tbody" | "tfoot" | "thead")
+        ) {
+            self.open_elements.pop();
+        }
     }
 
     fn insert_html_element(&mut self, name: &str) -> NodeHandle {
@@ -682,6 +809,7 @@ impl Builder {
             .find_map(|node| match node.tag_name().as_deref() {
                 Some("td" | "th") => Some(InsertionMode::InCell),
                 Some("tr") => Some(InsertionMode::InRow),
+                Some("tbody" | "thead" | "tfoot") => Some(InsertionMode::InTableBody),
                 Some("table") => Some(InsertionMode::InTable),
                 Some("body") => Some(InsertionMode::InBody),
                 Some("head") => Some(InsertionMode::InHead),
@@ -699,6 +827,7 @@ impl Builder {
             match node.tag_name().as_deref() {
                 Some("td" | "th") => return InsertionMode::InCell,
                 Some("tr") => return InsertionMode::InRow,
+                Some("tbody" | "thead" | "tfoot") => return InsertionMode::InTableBody,
                 Some("table") => return InsertionMode::InTable,
                 _ => continue,
             }
@@ -851,7 +980,11 @@ mod tests {
     fn table_modes_create_rows_and_cells() {
         let result = TreeBuilder::parse("<table><tr><td>A</td><td>B</td></tr></table>");
         let table = result.document().query_selector("table").unwrap();
-        let row = table.child_nodes()[0].clone();
+        // A `<tr>` directly under `<table>` is placed inside an implicitly
+        // generated `<tbody>` per the HTML "in table" insertion mode.
+        let tbody = table.child_nodes()[0].clone();
+        assert_eq!(tbody.tag_name().as_deref(), Some("tbody"));
+        let row = tbody.child_nodes()[0].clone();
         let first_cell = row.child_nodes()[0].clone();
         let second_cell = row.child_nodes()[1].clone();
 
@@ -859,6 +992,112 @@ mod tests {
         assert_eq!(first_cell.tag_name().as_deref(), Some("td"));
         assert_eq!(first_cell.child_nodes()[0].data(), Some("A".to_string()));
         assert_eq!(second_cell.child_nodes()[0].data(), Some("B".to_string()));
+    }
+
+    #[test]
+    fn implicit_tbody_wraps_direct_row() {
+        let result = TreeBuilder::parse("<table><tr><td>x</td></tr></table>");
+        let table = result.document().query_selector("table").unwrap();
+        let children = table.child_nodes();
+        assert_eq!(children.len(), 1, "table should contain exactly one tbody");
+
+        let tbody = children[0].clone();
+        assert_eq!(tbody.tag_name().as_deref(), Some("tbody"));
+        assert_eq!(tbody.parent_node(), Some(table));
+
+        let tr = tbody.child_nodes()[0].clone();
+        assert_eq!(tr.tag_name().as_deref(), Some("tr"));
+        assert_eq!(tr.parent_node(), Some(tbody));
+
+        let td = tr.child_nodes()[0].clone();
+        assert_eq!(td.tag_name().as_deref(), Some("td"));
+        assert_eq!(td.child_nodes()[0].data(), Some("x".to_string()));
+    }
+
+    #[test]
+    fn implicit_tbody_and_row_for_direct_cell() {
+        // `<table><td>` with no intervening `<tr>` generates BOTH a `<tbody>`
+        // and a `<tr>` (HTML "in table" then "in table body" insertion modes).
+        let result = TreeBuilder::parse("<table><td>x</td></table>");
+        let table = result.document().query_selector("table").unwrap();
+        let tbody = table.child_nodes()[0].clone();
+        assert_eq!(tbody.tag_name().as_deref(), Some("tbody"));
+
+        let tr = tbody.child_nodes()[0].clone();
+        assert_eq!(tr.tag_name().as_deref(), Some("tr"));
+
+        let td = tr.child_nodes()[0].clone();
+        assert_eq!(td.tag_name().as_deref(), Some("td"));
+        assert_eq!(td.child_nodes()[0].data(), Some("x".to_string()));
+    }
+
+    #[test]
+    fn explicit_table_sections_are_not_double_wrapped() {
+        let html = "<table>\
+            <thead><tr><td>h</td></tr></thead>\
+            <tbody><tr><td>b</td></tr></tbody>\
+            <tfoot><tr><td>f</td></tr></tfoot>\
+            </table>";
+        let result = TreeBuilder::parse(html);
+        let table = result.document().query_selector("table").unwrap();
+
+        let sections: Vec<String> = table
+            .child_nodes()
+            .into_iter()
+            .filter_map(|node| node.tag_name())
+            .collect();
+        assert_eq!(
+            sections,
+            vec![
+                "thead".to_string(),
+                "tbody".to_string(),
+                "tfoot".to_string()
+            ],
+            "explicit sections must be preserved in order without extra wrappers"
+        );
+
+        // Each explicit section directly holds its `<tr>` (no implicit tbody).
+        for section in table.child_nodes() {
+            let tr = section.child_nodes()[0].clone();
+            assert_eq!(
+                tr.tag_name().as_deref(),
+                Some("tr"),
+                "section {:?} must hold its row directly",
+                section.tag_name()
+            );
+        }
+
+        // Exactly one <tbody> (the explicit one) and one <tr> per section.
+        assert_eq!(count_elements(&table, "tbody"), 1);
+        assert_eq!(count_elements(&table, "tr"), 3);
+    }
+
+    #[test]
+    fn whitespace_after_implicit_section_close_stays_in_table() {
+        // Mirrors the exact Acid3 fragment `<table><tr><td><p></tbody> </table>`:
+        // after `</tbody>` closes the cell/row, the trailing whitespace text
+        // must land in the `<table>` (not inside the cell), and the `<p>` stays
+        // empty. This is the parser precondition for Acid3 test 29.
+        let result = TreeBuilder::parse("<table><tr><td><p></tbody> </table>");
+        let table = result.document().query_selector("table").unwrap();
+        let children = table.child_nodes();
+        assert_eq!(
+            children.len(),
+            2,
+            "table must have a <tbody> plus a trailing whitespace text node"
+        );
+        assert_eq!(children[0].tag_name().as_deref(), Some("tbody"));
+        assert_eq!(children[1].node_name(), "#text");
+        assert_eq!(children[1].data(), Some(" ".to_string()));
+
+        let p = table.query_selector("p").unwrap();
+        assert_eq!(p.child_nodes().len(), 0, "the <p> must remain empty");
+        let td = p.parent_node().unwrap();
+        assert_eq!(td.tag_name().as_deref(), Some("td"));
+        let tr = td.parent_node().unwrap();
+        assert_eq!(tr.tag_name().as_deref(), Some("tr"));
+        let tbody = tr.parent_node().unwrap();
+        assert_eq!(tbody.tag_name().as_deref(), Some("tbody"));
     }
 
     #[test]
@@ -877,7 +1116,13 @@ mod tests {
         let html = "<table><tr><td rowspan='2'><table><tr><td>a</td><td>b</tr></table></td></tr><tr><td>c</td><td>d</td></tr></table>";
         let result = TreeBuilder::parse(html);
         let table = result.document().query_selector("table").unwrap();
-        let rows: Vec<_> = table
+        // The outer table's rows now live under an implicit `<tbody>`.
+        let tbody = table
+            .child_nodes()
+            .into_iter()
+            .find(|node| node.tag_name().as_deref() == Some("tbody"))
+            .expect("outer table has an implicit tbody");
+        let rows: Vec<_> = tbody
             .child_nodes()
             .into_iter()
             .filter(|node| node.tag_name().as_deref() == Some("tr"))

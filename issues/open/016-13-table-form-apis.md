@@ -60,5 +60,5 @@ table 系および form 系の DOM API を実装する。bucket4、最大 12 点
 
 ### 残項目
 
-- **test 29**: `document.getElementsByTagName('table')[0].cloneNode(true).tBodies[0]...` が空。原因は DOM API 側ではなく **HTML パーサの table tree construction**（`src/html/tree_builder.rs`）が `<tr>` を tbody へ入れず table 直下に配置しており（"in table body" 挿入モード未実装）、`tBodies` が空になるため。DOM 側の section/cell API は cloneNode 経由でも正しく動くことをテストで確認済み。パーサ側で tbody 自動生成を実装すれば解放される（parser スコープ、別 issue 相当）。
+- ~~**test 29**~~: 解消済み（054, 87→88）。原因は DOM API 側ではなく **HTML パーサの table tree construction**（`src/html/tree_builder.rs`）が `<tr>` を tbody へ入れず table 直下に配置しており（"in table body" 挿入モード未実装）、`tBodies` が空になっていた。054 で "in table" / "in table body" 挿入モードと暗黙 `<tbody>` 生成を実装し、`<table><tr><td><p></tbody> </table>` が `table > tbody > tr > td > p`（+ 末尾空白テキスト）になったことで解放。DOM 側の section/cell API は cloneNode 経由でも正しく動くことは本 issue で確認済み。
 - test 52: `document.write` で生成される parsed form/input に依存（016-7 は実装済みだが、実測では PASS。念のため経過観察）。
