@@ -1307,6 +1307,16 @@ fn register_host_bindings(
             NativeFunction::from_copy_closure(create_document_fragment_native),
         ),
         (
+            js_string!("__omoikane_create_document"),
+            0,
+            NativeFunction::from_copy_closure(create_document_native),
+        ),
+        (
+            js_string!("__omoikane_create_document_type"),
+            1,
+            NativeFunction::from_copy_closure(create_document_type_native),
+        ),
+        (
             js_string!("__omoikane_create_comment"),
             1,
             NativeFunction::from_copy_closure(create_comment_native),
@@ -2241,6 +2251,17 @@ fn serialize_node(node: &NodeHandle, html: &mut String) {
             if let Some(name) = node.data() {
                 html.push_str("<!DOCTYPE ");
                 html.push_str(&name);
+                if let Some(public_id) = node.public_id() {
+                    html.push_str(" PUBLIC \"");
+                    html.push_str(&public_id);
+                    html.push_str("\" \"");
+                    html.push_str(node.system_id().as_deref().unwrap_or(""));
+                    html.push('"');
+                } else if let Some(system_id) = node.system_id() {
+                    html.push_str(" SYSTEM \"");
+                    html.push_str(&system_id);
+                    html.push('"');
+                }
                 html.push('>');
             }
         }
@@ -2517,7 +2538,11 @@ fn clone_node_impl(node: &NodeHandle, deep: bool) -> NodeHandle {
         crate::dom::NodeType::Document => NodeHandle::document(),
         crate::dom::NodeType::DocumentFragment => NodeHandle::document_fragment(),
         crate::dom::NodeType::DocumentType => {
-            NodeHandle::document_type(&node.data().unwrap_or_default())
+            NodeHandle::document_type(
+                node.data().unwrap_or_default(),
+                node.public_id().unwrap_or_default(),
+                node.system_id().unwrap_or_default(),
+            )
         }
     };
     if deep {
@@ -2575,6 +2600,62 @@ fn create_document_fragment_native(_: &JsValue, _args: &[JsValue], _context: &mu
     with_host_state(|state| {
         state.borrow_mut().nodes.insert(node.identity(), node);
         Ok(JsValue::from(id))
+    })
+}
+
+/// Creates an independent, initially empty Document and enrolls it in the same
+/// node/style registries as the main and iframe documents.
+fn create_document_native(
+    _: &JsValue,
+    _args: &[JsValue],
+    _context: &mut Context,
+) -> JsResult<JsValue> {
+    let document = NodeHandle::document();
+    let id = document.identity();
+    with_host_state(|state| {
+        let mut state = state.borrow_mut();
+        state.nodes.insert(id, document);
+        state.document_styles.insert(
+            id,
+            DocumentStyleEntry {
+                resolver: None,
+                dirty: true,
+            },
+        );
+        Ok(JsValue::from(id as f64))
+    })
+}
+
+/// Materialises the already validated DOMImplementation doctype descriptor so
+/// createDocument can insert it into the native document tree.
+fn create_document_type_native(
+    _: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let name = args
+        .first()
+        .cloned()
+        .unwrap_or_default()
+        .to_string(context)?
+        .to_std_string_escaped();
+    let public_id = args
+        .get(1)
+        .cloned()
+        .unwrap_or_default()
+        .to_string(context)?
+        .to_std_string_escaped();
+    let system_id = args
+        .get(2)
+        .cloned()
+        .unwrap_or_default()
+        .to_string(context)?
+        .to_std_string_escaped();
+    let node = NodeHandle::document_type(&name, &public_id, &system_id);
+    let id = node.identity();
+    with_host_state(|state| {
+        state.borrow_mut().nodes.insert(id, node);
+        Ok(JsValue::from(id as f64))
     })
 }
 
@@ -5039,6 +5120,117 @@ mod tests {
                     if (e.code !== e.NAMESPACE_ERR) return 2;
                     if (e.INVALID_ACCESS_ERR !== 15) return 3;
                 }
+                return 0;
+            })()
+        "#,
+        );
+    }
+
+    #[test]
+    fn iframe_implementation_created_doctype_keeps_its_owner_document() {
+        let mut runtime = JsRuntime::new().unwrap();
+        assert_js_ok(
+            &mut runtime,
+            r#"
+            (function () {
+                var frame = document.createElement('iframe');
+                document.body.appendChild(frame);
+                var foreign = frame.contentDocument;
+                var doctype = foreign.implementation.createDocumentType('html', '', '');
+                if (doctype.ownerDocument !== foreign) return 1;
+                if (doctype.ownerDocument === document) return 2;
+                return 0;
+            })()
+        "#,
+        );
+    }
+
+    #[test]
+    fn document_type_identifiers_are_exposed_and_serialized() {
+        let mut runtime = JsRuntime::new().unwrap();
+        let result = runtime
+            .eval(
+                r#"
+                var publicType = document.implementation.createDocumentType(
+                    'html', '-//W3C//DTD XHTML 1.0 Strict//EN',
+                    'http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd');
+                var publicDoc = document.implementation.createDocument(null, 'html', publicType);
+                var systemType = document.implementation.createDocumentType(
+                    'example', '', 'example.dtd');
+                var systemDoc = document.implementation.createDocument(null, 'example', systemType);
+                [publicType.publicId, publicType.systemId, publicDoc.innerHTML,
+                 systemType.publicId, systemType.systemId, systemDoc.innerHTML].join('|');
+                "#,
+            )
+            .unwrap()
+            .as_string()
+            .unwrap()
+            .to_std_string_escaped();
+
+        assert_eq!(
+            result,
+            "-//W3C//DTD XHTML 1.0 Strict//EN|http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd|<!DOCTYPE html PUBLIC \"-//W3C//DTD XHTML 1.0 Strict//EN\" \"http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd\"><html></html>||example.dtd|<!DOCTYPE example SYSTEM \"example.dtd\"><example></example>"
+        );
+    }
+
+    #[test]
+    fn implementation_create_document_builds_independent_document() {
+        let mut runtime = JsRuntime::new().unwrap();
+        assert_js_ok(
+            &mut runtime,
+            r#"
+            (function () {
+                var empty = document.implementation.createDocument(null, null, null);
+                if (empty.nodeType !== 9 || empty.documentElement !== null) return 1;
+                if (empty.defaultView !== null) return 2;
+
+                var doc = document.implementation.createDocument('urn:test', 'p:root', null);
+                var root = doc.documentElement;
+                if (!root || root.namespaceURI !== 'urn:test') return 3;
+                if (root.prefix !== 'p' || root.localName !== 'root') return 4;
+                if (root.ownerDocument !== doc) return 5;
+
+                var child = doc.createElement('child');
+                var text = doc.createTextNode('hello');
+                child.id = 'created-only';
+                child.appendChild(text);
+                root.appendChild(child);
+                if (doc.getElementById('created-only') !== child) return 6;
+                if (document.getElementById('created-only') !== null) return 7;
+
+                var range = doc.createRange();
+                range.setStartBefore(child);
+                range.setEndAfter(child);
+                if (range.startContainer !== root || range.startOffset !== 0) return 8;
+                if (range.endContainer !== root || range.endOffset !== 1) return 9;
+
+                var style = getComputedStyle(root);
+                if (style === null || typeof style !== 'object') return 10;
+
+                var dt = document.implementation.createDocumentType('p:root', 'pub', 'sys');
+                var withType = document.implementation.createDocument('urn:test', 'p:root', dt);
+                if (withType.firstChild !== dt || withType.documentElement.previousSibling !== dt) return 11;
+                if (dt.ownerDocument !== withType) return 12;
+                return 0;
+            })()
+        "#,
+        );
+    }
+
+    #[test]
+    fn implementation_create_document_validates_qualified_name() {
+        let mut runtime = JsRuntime::new().unwrap();
+        assert_js_ok(
+            &mut runtime,
+            r#"
+            (function () {
+                function codeFor(ns, name) {
+                    try { document.implementation.createDocument(ns, name, null); return -1; }
+                    catch (e) { return e.code; }
+                }
+                if (codeFor(null, '<root>') !== 5) return 1;
+                if (codeFor(null, ':root') !== 14) return 2;
+                if (codeFor(null, 'p:root') !== 14) return 3;
                 return 0;
             })()
         "#,

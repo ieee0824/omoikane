@@ -39,7 +39,7 @@ createElementNS、document.implementation、DOMException（`.code` + 定数）�
 - createElementNS / implementation.createDocument が動く
 - Acid3 test 8,19-23,25,26,98 の前提を満たす
 
-## 進捗（部分実装 — closed にはしない）
+## 進捗（実装完了 — closed には移動しない）
 
 ### 完了済み（`src/js/dom_bootstrap.js`、テストは `src/js/mod.rs`）
 
@@ -53,5 +53,7 @@ createElementNS、document.implementation、DOMException（`.code` + 定数）�
 
 ### 残項目
 
-- `implementation.createDocument`（独立した Document ツリー生成）: test 8/26/27/98 が要求。native に Document 生成バインディングが無く、Range API（016-11）とも絡むため未実装。test 8/26 は現在「createDocument is not a callable function」で失敗。
-- test 98（XHTML/XML DOM）: 016-14 と重複。
+- **本 issue の残項目は全消化**。`implementation.createDocument` を実装し、空の独立 Document を native node registry と文書単位 `document_styles` dirty entry に登録。QName/namespace 検証、documentElement 生成、doctype の documentElement 前への挿入、生成文書スコープの `createElement` / `createTextNode` / Range / getComputedStyle、`defaultView === null` を回帰テストで確認した。
+- Acid3 実測は FAITHFUL/DIRECT とも **82/100**（79→82）。test **8/26/27 が PASS**。test 26 は約28〜29秒の速度警告のみ。
+- test 98 は `createDocument` と doctype 挿入を通過後、生成 XHTML 文書の `title` が `null`（期待値 `""`）で失敗する。これは 016-14（XML/XHTML DOM）の残項目として継続する。
+- `cannot convert 'null' or 'undefined' to object` 系は test 27 が解消。test 29/64/72/79/80 は残存し、createDocument 起因ではない。

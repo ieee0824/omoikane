@@ -61,6 +61,16 @@ Acid3 は DOM / CSS / HTML parser / scripting / networking まで含む複合テ
 | 016-15 実装（title 反射 + :first-child 修正） | **63/100** | HTMLElement.title の IDL 反射を追加し、:first-child/:last-child/:nth-child がルート要素（親が Document）にマッチしていたマッチャのバグを修正。test 33/35 が新規 PASS（FAITHFUL/DIRECT 両モード 63/100、実測） |
 | 016-10 セレクタ拡充 + querySelector matcher 統合 | **70/100** | strict selector-list parser、querySelector 系の CSS matcher 統合、`:lang` / child・of-type・`:empty` / UI 状態擬似クラス、フォーム checkedness を実装。test 34/37/38/39/40/43 が新規 PASS。getElementById の selector 依存も解消して test 28 が PASS（FAITHFUL/DIRECT 両モード 70/100、実測） |
 | 016-11 Traversal / Range | **79/100** | NodeIterator / TreeWalker / Range と live 変異補正を純 JS で実装。test 1-3, 6-7, 9, 11-13 が新規 PASS（FAITHFUL/DIRECT 両モード 79/100、実測）。test 4-5 は HTML tree/API 前提差、test 8 は `implementation.createDocument` 未実装のため残存。 |
+| 016-12 `implementation.createDocument` | **82/100** | 独立 Document の native 生成・文書単位 StyleResolver 登録、QName/namespace 検証、doctype のルート前挿入を実装。test 8/26/27 が新規 PASS（FAITHFUL/DIRECT 両モード 82/100、実測）。test 98 は createDocument を通過し、016-14 範囲の XML/XHTML document title 差で残存。 |
+
+### 82/100 到達時（016-12 `createDocument` 実装）に新規 PASS したテスト
+
+- test 8: 独立生成文書上の Range 境界操作（`setStart` / `setEndBefore` 等）
+- test 26: 参照保持・GC ストレス下の独立生成文書 DOM 操作（FAITHFUL 約29.0秒、DIRECT 約27.7秒の速度警告あり）
+- test 27: `createDocument` 不在に起因していた後続の null/undefined failure を解消
+- test 98: `createDocument` と doctype 挿入は通過するが、生成 XHTML 文書の `title` 初期値が `null`（期待値 `""`）のため残存（016-14）
+
+`cannot convert 'null' or 'undefined' to object` 系では test 27 のみ解消。test 29/64/72/79/80 は残存し、test 71 は別 failure（Document の子ノード数差）。
 
 ### 70/100 到達時（016-10 実装）に新規 PASS したテスト
 
@@ -97,10 +107,10 @@ Acid3 は DOM / CSS / HTML parser / scripting / networking まで含む複合テ
 - ~~**016-10 querySelector matcher 接続 + セレクタ拡充**~~ → 実装済み（63→70）。test 34/37/38/39/40/43 と、getElementById 経路修正により test 28 を解放。
 - **050 CSS media query 評価**: test 46（`@media`、iframe viewport、`text-transform` computed style）。
 - **051 CSS プロパティ値検証**: test 47（無効な `cursor` 宣言の破棄、初期値 `auto`、serialization）。issue 031 と相互参照。
-- **016-11 NodeIterator / TreeWalker / Range**: test 01-09, 11-13 等の「not a callable function」群。
+- ~~**016-11 NodeIterator / TreeWalker / Range**~~ → 実装済み（70→79）。test 8 も 016-12 の `createDocument` 実装で解放。
 - **016-14 XML/XHTML・CSSOM・SVG DOM**: test 69-72, 74-80 の SVG/XML サブドキュメント系。
 - **016-16 iframe load イベント**: test 65/69 の kungFuDeathGrip。
-- 残: test 26-27, 29, 50-51, 54-56, 64, 98 等（016-12/016-13 の残り + イベント dispatch）。
+- 残: test 29, 50-51, 54-56, 64, 98 等（016-13/016-14 の残り + イベント dispatch）。
 
 ## 子issue
 

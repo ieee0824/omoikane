@@ -104,7 +104,8 @@ impl Builder {
             Token::Comment(data) => self.document.append_child(NodeHandle::comment(data)),
             Token::Doctype(doctype) => {
                 if let Some(name) = doctype.name() {
-                    self.document.append_child(NodeHandle::document_type(name));
+                    self.document
+                        .append_child(NodeHandle::document_type(name, "", ""));
                 }
             }
             Token::Character(data) if data.trim().is_empty() => {}
