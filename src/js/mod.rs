@@ -913,11 +913,16 @@ impl JsRuntime {
                             // A newly connected iframe starts a fresh navigation.
                             // This also makes detach/reconnect reload rather than
                             // merely replaying the old document's event.
-                            if let Some(previous) = state.iframe_documents.remove(&node_id) {
+                            let previous = state.iframe_documents.remove(&node_id);
+                            if let Some(previous) = previous.as_ref() {
                                 state.document_styles.remove(&previous.document.identity());
                                 state.unregister_tree(&previous.document);
                             }
                             state.iframe_content_document(&node);
+                            // JS wrappers are cached by native identity, so keep
+                            // the old Rc alive until its replacement has been
+                            // allocated and cannot reuse the same address.
+                            drop(previous);
                         }
                         true
                     }
@@ -6687,6 +6692,37 @@ mod tests {
         assert_eq!(runtime.eval("loads").unwrap().as_number(), Some(0.0));
         pump_zero_delay_tasks(&mut runtime);
         assert_eq!(runtime.eval("loads").unwrap().as_number(), Some(1.0));
+    }
+
+    #[test]
+    fn reconnected_iframe_reloads_and_dispatches_load_again() {
+        let mut runtime = JsRuntime::new().unwrap();
+        runtime
+            .eval(
+                r#"globalThis.loads = 0;
+                   globalThis.frame = document.createElement('iframe');
+                   frame.onload = () => loads++;
+                   document.body.insertBefore(frame, null);"#,
+            )
+            .unwrap();
+        pump_zero_delay_tasks(&mut runtime);
+        runtime
+            .eval(
+                r#"globalThis.firstDocument = frame.contentDocument;
+                   document.body.removeChild(frame);
+                   document.body.appendChild(frame);"#,
+            )
+            .unwrap();
+        pump_zero_delay_tasks(&mut runtime);
+        assert_eq!(runtime.eval("loads").unwrap().as_number(), Some(2.0));
+        assert_eq!(
+            runtime
+                .eval("frame.contentDocument !== firstDocument")
+                .unwrap()
+                .as_boolean(),
+            Some(true),
+            "reconnection should start a fresh iframe navigation"
+        );
     }
 
     #[test]
