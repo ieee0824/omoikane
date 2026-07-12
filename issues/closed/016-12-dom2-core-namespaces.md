@@ -2,7 +2,7 @@
 number: 016-12
 slug: dom2-core-namespaces
 parent: 016
-status: open
+status: closed
 ---
 
 # DOM2 Core / 名前空間 / DOMException
