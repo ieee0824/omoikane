@@ -2,7 +2,7 @@
 number: 050
 slug: css-media-query-evaluation
 parent: 016
-status: open
+status: closed
 ---
 
 # CSS media query の構文解析・評価と computed style 反映

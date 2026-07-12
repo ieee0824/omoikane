@@ -61,7 +61,8 @@ Acid3 は DOM / CSS / HTML parser / scripting / networking まで含む複合テ
 | 016-15 実装（title 反射 + :first-child 修正） | **63/100** | HTMLElement.title の IDL 反射を追加し、:first-child/:last-child/:nth-child がルート要素（親が Document）にマッチしていたマッチャのバグを修正。test 33/35 が新規 PASS（FAITHFUL/DIRECT 両モード 63/100、実測） |
 | 016-10 セレクタ拡充 + querySelector matcher 統合 | **70/100** | strict selector-list parser、querySelector 系の CSS matcher 統合、`:lang` / child・of-type・`:empty` / UI 状態擬似クラス、フォーム checkedness を実装。test 34/37/38/39/40/43 が新規 PASS。getElementById の selector 依存も解消して test 28 が PASS（FAITHFUL/DIRECT 両モード 70/100、実測） |
 | 016-11 Traversal / Range | **79/100** | NodeIterator / TreeWalker / Range と live 変異補正を純 JS で実装。test 1-3, 6-7, 9, 11-13 が新規 PASS（FAITHFUL/DIRECT 両モード 79/100、実測）。test 4-5 は HTML tree/API 前提差、test 8 は `implementation.createDocument` 未実装のため残存。 |
-| 016-12 `implementation.createDocument` | **82/100** | 独立 Document の native 生成・文書単位 StyleResolver 登録、QName/namespace 検証、doctype のルート前挿入を実装。test 8/26/27 が新規 PASS（FAITHFUL/DIRECT 両モード 82/100、実測）。test 98 は createDocument を通過し、016-14 範囲の XML/XHTML document title 差で残存。 |
+| 016-12 `implementation.createDocument` | 82/100 | 独立 Document の native 生成・文書単位 StyleResolver 登録、QName/namespace 検証、doctype のルート前挿入を実装。test 8/26/27 が新規 PASS（FAITHFUL/DIRECT 両モード 82/100、実測）。test 98 は createDocument を通過し、016-14 範囲の XML/XHTML document title 差で残存。 |
+| 050 `@media` 評価と iframe 固有 viewport | **83/100** | media query の構文解析・評価（all/not/only、リスト OR、color/monochrome、min/max-width/height の px・em）と owning iframe のレイアウト content box に基づく文書固有 viewport、text-transform 初期値の露出を実装（PR #114）。test 46 が新規 PASS（FAITHFUL/DIRECT 両モード 83/100、実測）。 |
 
 ### 82/100 到達時（016-12 `createDocument` 実装）に新規 PASS したテスト
 
@@ -105,7 +106,6 @@ Acid3 は DOM / CSS / HTML parser / scripting / networking まで含む複合テ
 ### 残りの主要ブロッカー（70/100 時点の失敗傾向）
 
 - ~~**016-10 querySelector matcher 接続 + セレクタ拡充**~~ → 実装済み（63→70）。test 34/37/38/39/40/43 と、getElementById 経路修正により test 28 を解放。
-- **050 CSS media query 評価**: test 46（`@media`、iframe viewport、`text-transform` computed style）。
 - **051 CSS プロパティ値検証**: test 47（無効な `cursor` 宣言の破棄、初期値 `auto`、serialization）。issue 031 と相互参照。
 - ~~**016-11 NodeIterator / TreeWalker / Range**~~ → 実装済み（70→79）。test 8 も 016-12 の `createDocument` 実装で解放。
 - **016-14 XML/XHTML・CSSOM・SVG DOM**: test 69-72, 74-80 の SVG/XML サブドキュメント系。
@@ -133,5 +133,5 @@ Acid3 ギャップ分析（`tests/fixtures/acid3/GAP_ANALYSIS.md`）に基づく
 - [ ] [016-14 XML/XHTML・CSSOM・SVG DOM](016-14-xml-cssom-svgdom.md)
 - [x] [016-15 getComputedStyle のサブ文書対応（selectorTest 解放の前提）](../closed/016-15-computed-style-subdocument.md)（PR #109, 58→63）
 - [ ] [016-16 iframe の load イベント発火](016-16-iframe-onload-event.md)
-- [ ] [050 CSS media query の構文解析・評価と computed style 反映](050-css-media-query-evaluation.md)（test 46）
+- [x] [050 CSS media query の構文解析・評価と computed style 反映](../closed/050-css-media-query-evaluation.md)（PR #114, 82→83）
 - [ ] [051 CSS プロパティ値検証と computed style serialization](051-css-property-value-validation.md)（test 47、031 と相互参照）
