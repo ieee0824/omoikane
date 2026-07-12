@@ -325,9 +325,13 @@ pub fn run_acid3(base_url: &str, mode: DriveMode) -> Acid3Run {
                 }
                 if idx == last_index {
                     stalled += 1;
-                    // The event loop produced no forward progress; the timer
-                    // queue has drained. Stop instead of spinning.
-                    if stalled >= 3 {
+                    // No forward progress this tick. Only give up once the timer
+                    // queue has genuinely drained: a subtest that returns "retry"
+                    // (e.g. Acid3 test 80's linktest loop) holds `index` fixed
+                    // while re-scheduling setTimeout(update, delay), so a pending
+                    // timer means real progress is still possible. The max_ticks
+                    // cap keeps this bounded if a retry never resolves.
+                    if stalled >= 3 && !runtime.has_pending_timers() {
                         break;
                     }
                 } else {
