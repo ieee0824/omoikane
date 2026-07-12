@@ -2006,7 +2006,9 @@ fn append_child_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> 
         // `parent`'s document. Note both documents *before* the move so both
         // resolvers are invalidated: the source loses a node, the target gains
         // one. (A detached side has no document root and needs no invalidation;
-        // it acquires one only when later inserted into a live document.)
+        // it acquires one only when later inserted into a live document.) The
+        // pair is also compared below to decide whether the move is a fresh
+        // navigation for iframe/object resource elements.
         let source_document = document_root_for_node(&child);
         let target_document = document_root_for_node(&parent);
         parent.append_child(child.clone());
@@ -2019,7 +2021,17 @@ fn append_child_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> 
             if let Some(document) = &target_document {
                 state.mark_document_style_dirty(document);
             }
-            if source_document.is_none() && target_document.is_some() {
+            // Schedule iframe/object resource loads whenever the move lands the
+            // subtree in a live document that differs from where it came from:
+            // a detached origin (`source_document == None`) becoming connected,
+            // or a *direct* move between two different documents (e.g. main
+            // document ↔ iframe sub-document). Both are fresh navigations for
+            // the moved resource elements. A pure in-document reorder
+            // (`source_document == target_document`) is intentionally left alone
+            // so it does not re-navigate — matching the existing model, where
+            // only a detach/reconnect reloads (real browsers reload here too,
+            // but that broader change is out of scope for this fix).
+            if target_document.is_some() && source_document != target_document {
                 state.schedule_connected_resource_loads(&child);
             }
         }
@@ -2558,8 +2570,10 @@ fn insert_before_native(_: &JsValue, args: &[JsValue], context: &mut Context) ->
         };
         // Like `append_child`, the inserted node may move out of another
         // document into `parent`'s. Note both documents before the move so both
-        // resolvers are invalidated. The reference node's document is irrelevant
-        // — it is `parent` (the new home) that matters.
+        // resolvers are invalidated and so the pair can be compared below to
+        // decide whether the move re-navigates resource elements. The reference
+        // node's document is irrelevant — it is `parent` (the new home) that
+        // matters.
         let source_document = document_root_for_node(&new_node);
         let target_document = document_root_for_node(&parent);
         match ref_node {
@@ -2576,7 +2590,12 @@ fn insert_before_native(_: &JsValue, args: &[JsValue], context: &mut Context) ->
             if let Some(document) = &target_document {
                 state.mark_document_style_dirty(document);
             }
-            if source_document.is_none() && target_document.is_some() {
+            // See `append_child_native`: a fresh navigation for iframe/object
+            // resource elements is scheduled when the move lands the subtree in
+            // a live document that differs from its origin (detached origin, or
+            // a direct move across two different documents), but not for an
+            // in-document reorder.
+            if target_document.is_some() && source_document != target_document {
                 state.schedule_connected_resource_loads(&new_node);
             }
         }
@@ -6722,6 +6741,146 @@ mod tests {
                 .as_boolean(),
             Some(true),
             "reconnection should start a fresh iframe navigation"
+        );
+    }
+
+    /// Moving a connected `<iframe>` *directly* from the main document into an
+    /// iframe sub-document (no detach in between) is a cross-document move and
+    /// must re-navigate the frame, dispatching `load` again while it is
+    /// connected to the new (sub-)document.
+    #[test]
+    fn iframe_moved_from_main_to_sub_document_redispatches_load() {
+        let mut runtime = JsRuntime::new().unwrap();
+        runtime
+            .eval(
+                r#"globalThis.loads = 0;
+                   // A host iframe supplies a live sub-document to move into.
+                   globalThis.host = document.createElement('iframe');
+                   document.body.appendChild(host);
+                   globalThis.moved = document.createElement('iframe');
+                   moved.onload = () => loads++;
+                   document.body.appendChild(moved);"#,
+            )
+            .unwrap();
+        pump_zero_delay_tasks(&mut runtime);
+        // Only `moved` carries a load handler; its initial connection fires it.
+        assert_eq!(runtime.eval("loads").unwrap().as_number(), Some(1.0));
+
+        runtime
+            .eval(
+                r#"globalThis.subDoc = host.contentDocument;
+                   globalThis.firstMovedDoc = moved.contentDocument;
+                   // Direct move: `moved` is still connected to the main document
+                   // and is appended into the sub-document without a removeChild.
+                   subDoc.body.appendChild(moved);"#,
+            )
+            .unwrap();
+        pump_zero_delay_tasks(&mut runtime);
+        assert_eq!(
+            runtime.eval("loads").unwrap().as_number(),
+            Some(2.0),
+            "a cross-document move must re-navigate and dispatch load again"
+        );
+        assert_eq!(
+            runtime
+                .eval("moved.ownerDocument === subDoc")
+                .unwrap()
+                .as_boolean(),
+            Some(true),
+            "the moved iframe must now be owned by the sub-document"
+        );
+        assert_eq!(
+            runtime
+                .eval("moved.contentDocument !== firstMovedDoc")
+                .unwrap()
+                .as_boolean(),
+            Some(true),
+            "the cross-document move must start a fresh sub-document navigation"
+        );
+    }
+
+    /// The reverse direction: moving a connected `<iframe>` out of an iframe
+    /// sub-document into the main document is also a cross-document move and
+    /// re-dispatches `load` in the main document.
+    #[test]
+    fn iframe_moved_from_sub_to_main_document_redispatches_load() {
+        let mut runtime = JsRuntime::new().unwrap();
+        runtime
+            .eval(
+                r#"globalThis.loads = 0;
+                   globalThis.host = document.createElement('iframe');
+                   document.body.appendChild(host);"#,
+            )
+            .unwrap();
+        pump_zero_delay_tasks(&mut runtime);
+        runtime
+            .eval(
+                r#"globalThis.subDoc = host.contentDocument;
+                   globalThis.moved = document.createElement('iframe');
+                   moved.onload = () => loads++;
+                   // Connect `moved` inside the sub-document first.
+                   subDoc.body.appendChild(moved);"#,
+            )
+            .unwrap();
+        pump_zero_delay_tasks(&mut runtime);
+        assert_eq!(
+            runtime.eval("loads").unwrap().as_number(),
+            Some(1.0),
+            "the initial connection inside the sub-document fires load once"
+        );
+
+        runtime
+            .eval(
+                r#"globalThis.firstMovedDoc = moved.contentDocument;
+                   // Direct move back out into the main document. Uses
+                   // insertBefore so the `insert_before_native` cross-document
+                   // branch is exercised (the appendChild path is covered by the
+                   // main→sub test above).
+                   document.body.insertBefore(moved, null);"#,
+            )
+            .unwrap();
+        pump_zero_delay_tasks(&mut runtime);
+        assert_eq!(
+            runtime.eval("loads").unwrap().as_number(),
+            Some(2.0),
+            "moving out of the sub-document must re-navigate and dispatch load"
+        );
+        assert_eq!(
+            runtime
+                .eval("moved.ownerDocument === document")
+                .unwrap()
+                .as_boolean(),
+            Some(true),
+            "the moved iframe must now be owned by the main document"
+        );
+    }
+
+    /// A *direct* in-document reorder (re-appending an already-connected iframe
+    /// within the same document, with no detach) is deliberately NOT treated as
+    /// a fresh navigation under the current model, so `load` does not re-fire.
+    /// (Real browsers do reload here; matching that requires the broader
+    /// navigation rework and is out of scope.)
+    #[test]
+    fn same_document_direct_reinsertion_does_not_reload_iframe() {
+        let mut runtime = JsRuntime::new().unwrap();
+        runtime
+            .eval(
+                r#"globalThis.loads = 0;
+                   globalThis.frame = document.createElement('iframe');
+                   frame.onload = () => loads++;
+                   document.body.appendChild(frame);"#,
+            )
+            .unwrap();
+        pump_zero_delay_tasks(&mut runtime);
+        assert_eq!(runtime.eval("loads").unwrap().as_number(), Some(1.0));
+
+        // Re-append within the same document (a move, no removeChild).
+        runtime.eval("document.body.appendChild(frame);").unwrap();
+        pump_zero_delay_tasks(&mut runtime);
+        assert_eq!(
+            runtime.eval("loads").unwrap().as_number(),
+            Some(1.0),
+            "an in-document reorder must not re-navigate under the current model"
         );
     }
 
