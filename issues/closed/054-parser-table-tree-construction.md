@@ -1,7 +1,7 @@
 ---
 number: 054
 slug: parser-table-tree-construction
-status: open
+status: closed
 ---
 
 # HTML パーサの table tree construction（暗黙 tbody 生成）
