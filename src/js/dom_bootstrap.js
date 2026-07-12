@@ -1838,6 +1838,83 @@
   Range.START_TO_START=0; Range.START_TO_END=1; Range.END_TO_END=2; Range.END_TO_START=3;
   Range.prototype.START_TO_START=0; Range.prototype.START_TO_END=1; Range.prototype.END_TO_END=2; Range.prototype.END_TO_START=3;
 
+  // Elements whose `name` content attribute participates in HTMLCollection
+  // named access, in addition to `id` (which applies to every element). Per the
+  // HTML spec these are the "named" elements exposed on collections such as
+  // `document.forms` / `document.images` / `document.anchors`.
+  const COLLECTION_NAME_TAGS = new Set([
+    "A", "AREA", "FORM", "IMG", "OBJECT", "EMBED", "IFRAME", "INPUT", "MAP",
+  ]);
+
+  // Walks `root`'s subtree in tree (document) order and returns every element
+  // for which `predicate` holds. Used to build the live document HTMLCollections
+  // (forms / links / images / anchors), scoped to `root`'s own document tree so
+  // an iframe's contentDocument never leaks nodes into the main document.
+  function collectElements(root, predicate) {
+    const out = [];
+    const walk = (node) => {
+      for (const child of node.childNodes) {
+        if (child.nodeType !== 1) continue;
+        if (predicate(child)) out.push(child);
+        walk(child);
+      }
+    };
+    walk(root);
+    return out;
+  }
+
+  // Builds a live HTMLCollection over the elements returned by `collect()`.
+  // `collect()` is re-invoked on every access so the collection always reflects
+  // the current tree (DOM "live" semantics), even when the collection object is
+  // retained across mutations. Supports `.length`, integer index access,
+  // `item(index)`, `namedItem(name)`, iteration, and named property access by
+  // `id` (any element) or `name` (elements in COLLECTION_NAME_TAGS). Out-of-range
+  // index access resolves to `null`.
+  function makeHTMLCollection(collect) {
+    // Per spec an id match wins over a name match; both scan in tree order.
+    const byName = (list, key) => {
+      let named = null;
+      for (const el of list) {
+        if (!el.getAttribute) continue;
+        if (el.getAttribute("id") === key) return el;
+        if (named === null &&
+            COLLECTION_NAME_TAGS.has(el.tagName) &&
+            el.getAttribute("name") === key) {
+          named = el;
+        }
+      }
+      return named;
+    };
+    const isIndex = (prop) =>
+      typeof prop === "string" && /^(?:0|[1-9]\d*)$/.test(prop);
+    return new Proxy([], {
+      get(_target, prop) {
+        const list = collect();
+        if (prop === "length") return list.length;
+        if (prop === "item") return (index) => list[Number(index) | 0] ?? null;
+        if (prop === "namedItem") return (name) => byName(list, String(name));
+        if (isIndex(prop)) return list[Number(prop)] ?? null;
+        if (typeof prop === "string") {
+          const named = byName(list, prop);
+          if (named) return named;
+        }
+        // Array prototype members (Symbol.iterator, forEach, ...) and anything
+        // else resolve against the live snapshot; bind methods to it.
+        const value = list[prop];
+        return typeof value === "function" ? value.bind(list) : value;
+      },
+      has(_target, prop) {
+        const list = collect();
+        if (prop === "length" || prop === "item" || prop === "namedItem") {
+          return true;
+        }
+        if (isIndex(prop)) return Number(prop) < list.length;
+        if (typeof prop === "string" && byName(list, prop)) return true;
+        return prop in list;
+      },
+    });
+  }
+
   class Document extends Node {
     // Stamps a freshly created node with this document as its owner so
     // `node.ownerDocument` resolves to this document even while the node is
@@ -2005,6 +2082,47 @@
         if (child.nodeType === 1) return child;
       }
       return null;
+    }
+
+    // Live HTMLCollection of every <form> in this document, in tree order, with
+    // index / `length` / `item` / `namedItem` and named access by `name` or `id`
+    // (e.g. `document.forms.myForm`). Scoped to this document's own tree, so an
+    // iframe's contentDocument resolves its own forms.
+    get forms() {
+      const root = this;
+      return makeHTMLCollection(() =>
+        collectElements(root, (el) => el.tagName === "FORM"));
+    }
+
+    // Live HTMLCollection of the <a> and <area> elements that carry an `href`
+    // content attribute, in tree order.
+    get links() {
+      const root = this;
+      return makeHTMLCollection(() =>
+        collectElements(
+          root,
+          (el) =>
+            (el.tagName === "A" || el.tagName === "AREA") &&
+            el.hasAttribute("href"),
+        ));
+    }
+
+    // Live HTMLCollection of every <img> in this document, in tree order.
+    get images() {
+      const root = this;
+      return makeHTMLCollection(() =>
+        collectElements(root, (el) => el.tagName === "IMG"));
+    }
+
+    // Live HTMLCollection of the <a> elements that carry a `name` content
+    // attribute, in tree order.
+    get anchors() {
+      const root = this;
+      return makeHTMLCollection(() =>
+        collectElements(
+          root,
+          (el) => el.tagName === "A" && el.hasAttribute("name"),
+        ));
     }
 
     get readyState() {

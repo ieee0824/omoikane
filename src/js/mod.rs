@@ -6513,6 +6513,165 @@ mod tests {
     }
 
     #[test]
+    fn document_forms_indexed_named_and_live() {
+        use crate::html::TreeBuilder;
+        // Two forms in tree order: one named via `name`, one via `id`.
+        let doc = TreeBuilder::parse(
+            r#"<html><body><form name="alpha"><input name="x"></form><div><form id="beta"></form></div></body></html>"#,
+        )
+        .document();
+        let mut runtime = JsRuntime::with_document(doc).unwrap();
+        assert_js_ok(
+            &mut runtime,
+            r#"
+            (function () {
+                var forms = document.forms;
+                if (forms.length !== 2) return 1;
+                if (forms[0].getAttribute('name') !== 'alpha') return 2;
+                if (forms[1].getAttribute('id') !== 'beta') return 3;
+                if (forms.alpha !== forms[0]) return 4;      // named access by name
+                if (forms.beta !== forms[1]) return 5;       // named access by id
+                if (forms.namedItem('alpha') !== forms[0]) return 6;
+                if (forms.item(1) !== forms[1]) return 7;
+                if (forms.alpha.elements[0].getAttribute('name') !== 'x') return 8;
+                if (forms.missing != null) return 9;         // absent name is nullish
+                // Liveness: a retained collection reflects later mutations.
+                var extra = document.createElement('form');
+                document.body.appendChild(extra);
+                if (forms.length !== 3) return 10;
+                if (forms[2] !== extra) return 11;
+                if (forms[3] != null) return 12;             // out of range is null
+                return 0;
+            })()
+        "#,
+        );
+    }
+
+    #[test]
+    fn document_links_filters_href_and_keeps_tree_order() {
+        use crate::html::TreeBuilder;
+        // Only <a>/<area> with an href attribute are links, in tree order.
+        let doc = TreeBuilder::parse(
+            r#"<html><body><map name="m"><area href="a" alt=""><area alt="no-href"></map><a href="b">link</a><a>no href</a><a name="anchor">named only</a></body></html>"#,
+        )
+        .document();
+        let mut runtime = JsRuntime::with_document(doc).unwrap();
+        assert_js_ok(
+            &mut runtime,
+            r#"
+            (function () {
+                var links = document.links;
+                if (links.length !== 2) return 1;
+                if (links[0].tagName !== 'AREA') return 2;
+                if (links[0].getAttribute('href') !== 'a') return 3;
+                if (links[1].tagName !== 'A') return 4;
+                if (links[1].getAttribute('href') !== 'b') return 5;
+                // The href-less <area> and <a>, and the <a name> without href, are excluded.
+                for (var i = 0; i < links.length; i++) {
+                    if (!links[i].hasAttribute('href')) return 6;
+                }
+                return 0;
+            })()
+        "#,
+        );
+    }
+
+    #[test]
+    fn document_images_and_anchors_collections() {
+        use crate::html::TreeBuilder;
+        let doc = TreeBuilder::parse(
+            r#"<html><body><img id="i1" src="x"><img name="i2" src="y"><a name="top">anchor</a><a href="z">link</a></body></html>"#,
+        )
+        .document();
+        let mut runtime = JsRuntime::with_document(doc).unwrap();
+        assert_js_ok(
+            &mut runtime,
+            r#"
+            (function () {
+                if (document.images.length !== 2) return 1;
+                if (document.images[0].getAttribute('id') !== 'i1') return 2;
+                if (document.images.i1 !== document.images[0]) return 3;  // by id
+                if (document.images.i2 !== document.images[1]) return 4;  // by name
+                // anchors are only <a> elements carrying a name attribute.
+                if (document.anchors.length !== 1) return 5;
+                if (document.anchors[0].getAttribute('name') !== 'top') return 6;
+                if (document.anchors.top !== document.anchors[0]) return 7;
+                return 0;
+            })()
+        "#,
+        );
+    }
+
+    #[test]
+    fn document_collections_scoped_to_each_document() {
+        use crate::html::TreeBuilder;
+        // A form inside an iframe's contentDocument must not appear in the main
+        // document's forms collection, and vice versa.
+        let doc = TreeBuilder::parse(r#"<html><body><iframe id="f"></iframe></body></html>"#)
+            .document();
+        let mut runtime = JsRuntime::with_document(doc).unwrap();
+        runtime
+            .eval("globalThis.frame = document.getElementById('f');")
+            .unwrap();
+        // The iframe's blank document is materialized as a zero-delay task.
+        pump_zero_delay_tasks(&mut runtime);
+        assert_js_ok(
+            &mut runtime,
+            r#"
+            (function () {
+                var mainForm = document.createElement('form');
+                mainForm.setAttribute('name', 'mainForm');
+                document.body.appendChild(mainForm);
+                var sub = frame.contentDocument;
+                var subForm = sub.createElement('form');
+                sub.body.appendChild(subForm);
+                if (document.forms.length !== 1) return 1;
+                if (document.forms[0] !== mainForm) return 2;
+                if (sub.forms.length !== 1) return 3;
+                if (sub.forms[0] !== subForm) return 4;
+                if (document.forms[0] === sub.forms[0]) return 5;
+                if (document.forms.mainForm !== mainForm) return 6;
+                return 0;
+            })()
+        "#,
+        );
+    }
+
+    #[test]
+    fn acid3_test4_and_test5_document_forms_and_links_regression() {
+        use crate::html::TreeBuilder;
+        // Mirrors the Acid3 body fragment exercised by tests 4/5: a named form
+        // with a control, plus an <area href> and an <a href> as document.links.
+        let doc = TreeBuilder::parse(
+            r#"<html><body><map name=""><area href="" shape="rect" coords="2,2,4,4" alt="x"><form action="" name="form"><input type="hidden"></form></map><p id="instructions">To pass the test,<span></span> a browser must, like <a href="reference.html">this reference rendering</a>.</p></body></html>"#,
+        )
+        .document();
+        let mut runtime = JsRuntime::with_document(doc).unwrap();
+        assert_js_ok(
+            &mut runtime,
+            r#"
+            (function () {
+                // Acid3 test 4: document.forms[0] and document.forms.form.elements[0].
+                if (document.forms.length !== 1) return 1;
+                var form = document.forms[0];
+                if (form.tagName !== 'FORM') return 2;
+                if (document.forms.form !== form) return 3;
+                if (form.elements[0].tagName !== 'INPUT') return 4;
+                if (document.forms.form.elements[0] !== form.elements[0]) return 5;
+                // Acid3 test 5: document.links[1] is the <a href> after the <area href>.
+                if (document.links.length !== 2) return 6;
+                if (document.links[0].tagName !== 'AREA') return 7;
+                if (document.links[1].tagName !== 'A') return 8;
+                if (document.links[1].getAttribute('href') !== 'reference.html') return 9;
+                if (document.links[1].firstChild.nodeType !== 3) return 10;
+                if (document.links[1].firstChild.data !== 'this reference rendering') return 11;
+                return 0;
+            })()
+        "#,
+        );
+    }
+
+    #[test]
     fn button_type_defaults_to_submit() {
         let mut runtime = JsRuntime::new().unwrap();
         assert_js_ok(
