@@ -2,7 +2,7 @@
 number: 016-14-1
 slug: xml-subdocuments
 parent: 016-14
-status: open
+status: closed
 ---
 
 # XML/XHTML サブ文書のパースと DOM 化
