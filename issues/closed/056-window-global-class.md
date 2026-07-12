@@ -1,7 +1,7 @@
 ---
 number: 056
 slug: window-global-class
-status: open
+status: closed
 ---
 
 # Window グローバルクラスの定義（instanceof Window 対応）
