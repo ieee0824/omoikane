@@ -6,8 +6,9 @@ FROM rust:1-bookworm
 
 # aws-lc-sys（rustls 0.23 の依存）のビルドに cmake が必須。
 # build-essential / pkg-config は rusqlite（bundled SQLite）などのネイティブビルドに使う。
-# build-essential / pkg-config / git / curl / ca-certificates / gpg は rust:1-bookworm
-# （buildpack-deps ベース）に既に含まれるが、ベースイメージの変化に備えて明示的に指定する。
+# build-essential / pkg-config / git / curl / ca-certificates / gpg / openssh-client は
+# rust:1-bookworm（buildpack-deps ベース）に既に含まれるが、ベースイメージの変化に備えて明示的に指定する。
+# openssh-client は SSH 鍵の生成・利用（ssh-keygen / ssh。README の SSH 鍵運用参照）に使う。
 # フォントは CI と同一のもの（fonts-dejavu / fonts-liberation / fonts-noto-core）に加え、
 # 日本語（CJK）レンダリング用に fonts-noto-cjk と IPA フォント（ゴシック・明朝）を追加する。
 # IPA フォントはフォント探索の CJK フォールバック候補（IPAGothic 等。src/font/mod.rs 参照）に対応する。
@@ -20,6 +21,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         curl \
         ca-certificates \
         gpg \
+        openssh-client \
         sudo \
         ripgrep \
         vim \
