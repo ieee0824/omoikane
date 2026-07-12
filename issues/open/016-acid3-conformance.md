@@ -133,6 +133,6 @@ Acid3 ギャップ分析（`tests/fixtures/acid3/GAP_ANALYSIS.md`）に基づく
 - [ ] [016-13 HTMLTableElement / Form / Input / Select / Button API](016-13-table-form-apis.md)
 - [ ] [016-14 XML/XHTML・CSSOM・SVG DOM](016-14-xml-cssom-svgdom.md)
 - [x] [016-15 getComputedStyle のサブ文書対応（selectorTest 解放の前提）](../closed/016-15-computed-style-subdocument.md)（PR #109, 58→63）
-- [x] [016-16 iframe の load イベント発火](016-16-iframe-onload-event.md)（83/100 維持、test 69 retry 解消）
+- [x] [016-16 iframe の load イベント発火](../closed/016-16-iframe-onload-event.md)（PR #115, 83/100 維持、test 69 retry 解消）
 - [x] [050 CSS media query の構文解析・評価と computed style 反映](../closed/050-css-media-query-evaluation.md)（PR #114, 82→83）
 - [ ] [051 CSS プロパティ値検証と computed style serialization](051-css-property-value-validation.md)（test 47、031 と相互参照）

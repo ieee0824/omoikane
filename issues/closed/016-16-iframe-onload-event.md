@@ -2,7 +2,7 @@
 number: 016-16
 slug: iframe-onload-event
 parent: 016
-status: open
+status: closed
 ---
 
 # iframe の load イベント発火
