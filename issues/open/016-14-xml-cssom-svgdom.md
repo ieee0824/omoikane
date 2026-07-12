@@ -28,3 +28,9 @@ status: open
 
 - 各領域の対象テストが個別に検証できる
 - Acid3 test 18,69,70,71,72,74,80 の前提を満たす
+
+## 子 issue(2026-07-12 分割)
+
+- [ ] [016-14-1 XML/XHTML サブ文書のパースと DOM 化](016-14-1-xml-subdocuments.md)（test 69/70/71/80/98 系の基盤）
+- [ ] [016-14-2 CSSOM](016-14-2-cssom.md)（test 72）
+- [ ] [016-14-3 SVG DOM 最小実装と getSVGDocument](016-14-3-svg-dom.md)（test 69/74/75/77/79、14-1 が前提）
