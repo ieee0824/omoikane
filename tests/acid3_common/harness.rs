@@ -337,6 +337,14 @@ pub fn run_acid3(base_url: &str, mode: DriveMode) -> Acid3Run {
             }
         }
         DriveMode::DirectDrive => {
+            // Direct-drive bypasses the page's timer chain, but connected
+            // iframe/object loads are browser macrotasks rather than part of
+            // that bypass. Flush the already queued zero-delay resource tasks
+            // once so preparation tests such as Acid3 test 65 complete before
+            // their later assertions are invoked directly.
+            if let Err(e) = runtime.tick(0) {
+                drive_errors.push(format!("initial resource tasks: {e}"));
+            }
             // Invoke update() directly, once per subtest, bypassing setTimeout.
             let total = read_int(&mut runtime, "tests.length").unwrap_or(0);
             // Budget: one call per test plus a bounded retry allowance.
@@ -351,6 +359,14 @@ pub fn run_acid3(base_url: &str, mode: DriveMode) -> Acid3Run {
                 iterations += 1;
                 if let Err(e) = runtime.eval_safe("if (typeof update === 'function') update();") {
                     drive_errors.push(format!("update(): {e}"));
+                    break;
+                }
+                // A directly invoked preparation test may connect an iframe or
+                // object (test 65). Run only zero-delay work so its resource
+                // load events complete without advancing the page's 10ms
+                // setTimeout-driven update chain that this mode bypasses.
+                if let Err(e) = runtime.tick(0) {
+                    drive_errors.push(format!("resource tasks after update(): {e}"));
                     break;
                 }
                 let idx = read_int(&mut runtime, "index").unwrap_or(last_index);

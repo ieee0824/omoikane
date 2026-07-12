@@ -448,6 +448,17 @@
     constructor(id) {
       this.__id = id;
       this.__listeners = new Map();
+      this.__onload = null;
+    }
+
+    get onload() {
+      return this.__onload;
+    }
+
+    set onload(handler) {
+      if (this.__onload) this.removeEventListener("load", this.__onload);
+      this.__onload = typeof handler === "function" ? handler : null;
+      if (this.__onload) this.addEventListener("load", this.__onload);
     }
 
     // Throws a HierarchyRequestError if inserting `node` would make the tree
@@ -586,13 +597,8 @@
     }
 
     get title() {
-      // Spec says a missing title attribute reflects as "". Until iframe/object
-      // load events fire (016-16), returning "" here turns Acid3 test 69's
-      // null-check fail into an infinite "retry" loop (its onload handlers can
-      // never append to title), stalling the FAITHFUL run at test 69. Return
-      // the raw attribute (null when absent) so the test fails fast instead;
-      // restore the "" default together with 016-16.
-      return __omoikane_get_attribute(this.__id, "title");
+      // DOMString-reflecting attributes use the empty string when absent.
+      return __omoikane_get_attribute(this.__id, "title") ?? "";
     }
 
     set title(value) {
@@ -1968,6 +1974,16 @@
     }
   }
 
+  class HTMLObjectElement extends Node {
+    get data() {
+      return __omoikane_get_attribute(this.__id, "data") || "";
+    }
+
+    set data(value) {
+      __omoikane_set_attribute(this.__id, "data", String(value));
+    }
+  }
+
   // ── HTML element specializations ────────────────────────────────────────────
   // wrapNode() dispatches element nodes to these subclasses by tag name so that
   // element-specific IDL attributes and methods (e.g. HTMLTableElement.rows,
@@ -2221,6 +2237,7 @@
     select: HTMLSelectElement,
     option: HTMLOptionElement,
     iframe: HTMLIFrameElement,
+    object: HTMLObjectElement,
   };
 
   // Standard Node.nodeType constant values, exposed both as static properties
@@ -2339,6 +2356,10 @@
   }
   globalThis.__omoikane_wire_inline_handlers = function() {
     wireInlineHandlers(globalThis.document);
+  };
+  globalThis.__omoikane_dispatch_resource_load = function(id) {
+    const element = wrapNode(id);
+    if (element) element.dispatchEvent(new Event("load", { bubbles: false }));
   };
   const __loc = { href: __omoikane_location_href, protocol: "", hostname: "", pathname: "/", search: "", hash: "", origin: "", host: "" };
   try {
