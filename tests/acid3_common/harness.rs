@@ -361,6 +361,14 @@ pub fn run_acid3(base_url: &str, mode: DriveMode) -> Acid3Run {
                     drive_errors.push(format!("update(): {e}"));
                     break;
                 }
+                // A directly invoked preparation test may connect an iframe or
+                // object (test 65). Run only zero-delay work so its resource
+                // load events complete without advancing the page's 10ms
+                // setTimeout-driven update chain that this mode bypasses.
+                if let Err(e) = runtime.tick(0) {
+                    drive_errors.push(format!("resource tasks after update(): {e}"));
+                    break;
+                }
                 let idx = read_int(&mut runtime, "index").unwrap_or(last_index);
                 if total > 0 && idx >= total {
                     break;
