@@ -492,41 +492,11 @@ impl HostState {
             .as_ref()
             .and_then(|root| find_layout_box(root, &iframe))
         {
-            let inline_size = iframe
-                .attributes()
-                .and_then(|attrs| {
-                    attrs.get("style").map(|style| {
-                        let dimension = |name: &str| {
-                            style.split(';').find_map(|declaration| {
-                                let (property, value) = declaration.split_once(':')?;
-                                if !property.trim().eq_ignore_ascii_case(name) {
-                                    return None;
-                                }
-                                value
-                                    .trim()
-                                    .to_ascii_lowercase()
-                                    .strip_suffix("px")?
-                                    .trim()
-                                    .parse::<f32>()
-                                    .ok()
-                                    .filter(|value| value.is_finite() && *value >= 0.0)
-                            })
-                        };
-                        (dimension("width"), dimension("height"))
-                    })
-                })
-                .unwrap_or((None, None));
             return Rect {
                 x: 0.0,
                 y: 0.0,
-                width: inline_size
-                    .0
-                    .unwrap_or(layout_box.dimensions.content.width)
-                    .max(0.0),
-                height: inline_size
-                    .1
-                    .unwrap_or(layout_box.dimensions.content.height)
-                    .max(0.0),
+                width: layout_box.dimensions.content.width.max(0.0),
+                height: layout_box.dimensions.content.height.max(0.0),
             };
         }
 
@@ -8117,6 +8087,40 @@ mod tests {
         );
     }
 
+    /// The iframe viewport follows the constrained layout result, rather than
+    /// the unconstrained width/height declarations in its style attribute.
+    #[test]
+    fn iframe_viewport_uses_layout_size_when_max_size_constrains_style() {
+        let mut runtime = runtime_from_html(
+            r#"<html><head><style>
+                 iframe { width: 200px; max-width: 80px; height: 120px; max-height: 40px; }
+               </style></head><body>
+                 <iframe id="f" style="width: 200px; height: 120px"></iframe>
+               </body></html>"#,
+        );
+        runtime.set_viewport(800.0, 600.0);
+        runtime
+            .eval(
+                r#"var d = document.getElementById('f').contentDocument;
+                   var s = d.createElement('style');
+                   s.textContent = '#t { width: 50vw; height: 50vh; }';
+                   d.body.appendChild(s);
+                   var t = d.createElement('div'); t.id = 't'; d.body.appendChild(t);"#,
+            )
+            .unwrap();
+
+        assert_eq!(
+            eval_str(&mut runtime, "getComputedStyle(t, '').width"),
+            "40px",
+            "50vw must use the max-width-constrained 80px layout width, not style width 200px"
+        );
+        assert_eq!(
+            eval_str(&mut runtime, "getComputedStyle(t, '').height"),
+            "20px",
+            "50vh must use the max-height-constrained 40px layout height, not style height 120px"
+        );
+    }
+
     /// Changing the viewport after a sub-document resolver was already built
     /// invalidates it, so a re-query resolves `vw`/`vh` against the new size.
     #[test]
@@ -8150,7 +8154,10 @@ mod tests {
     #[test]
     fn acid3_media_queries_use_and_recompute_iframe_viewport() {
         let mut runtime = runtime_from_html(
-            r#"<html><head><style>iframe { width: 0; height: 0; }</style></head>
+            r#"<html><head><style>
+                 iframe { width: 0; height: 0; }
+                 iframe.large { width: 100px; height: 100px; }
+               </style></head>
                <body><iframe id="f"></iframe></body></html>"#,
         );
         runtime.eval(r#"
@@ -8197,8 +8204,7 @@ mod tests {
 
         runtime
             .eval(
-                "document.getElementById('f').setAttribute('style', \
-                 'width: 100px; height: 100px')",
+                "document.getElementById('f').setAttribute('class', 'large')",
             )
             .unwrap();
         assert_eq!(
