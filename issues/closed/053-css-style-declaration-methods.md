@@ -1,7 +1,7 @@
 ---
 number: 053
 slug: css-style-declaration-methods
-status: open
+status: closed
 ---
 
 # element.style の CSSStyleDeclaration メソッド実装（removeProperty 等）
