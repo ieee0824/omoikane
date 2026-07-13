@@ -42,8 +42,10 @@
     } else if (nodeType === 8) {
       node = new Comment(id);
     } else if (nodeType === 1) {
-      const ctor = ELEMENT_CTORS[(__omoikane_node_name(id) || "").toLowerCase()];
-      node = ctor ? new ctor(id) : new Node(id);
+      const namespace = __omoikane_node_namespace_uri(id);
+      const constructors = namespace === SVG_NAMESPACE ? SVG_ELEMENT_CTORS : ELEMENT_CTORS;
+      const ctor = constructors[(__omoikane_node_local_name(id) || __omoikane_node_name(id) || "").toLowerCase()];
+      node = ctor ? new ctor(id) : namespace === SVG_NAMESPACE ? new SVGElement(id) : new Node(id);
     } else {
       node = new Node(id);
     }
@@ -230,6 +232,8 @@
     }
     return { namespace, prefix, localName };
   }
+
+  const SVG_NAMESPACE = "http://www.w3.org/2000/svg";
 
   class Event {
     constructor(type, init = {}) {
@@ -1998,6 +2002,10 @@
       define("localName", info.localName);
       define("tagName", qname);
       define("nodeName", qname);
+      if (info.namespace === SVG_NAMESPACE) {
+        const ctor = SVG_ELEMENT_CTORS[info.localName.toLowerCase()] || SVGElement;
+        Object.setPrototypeOf(node, ctor.prototype);
+      }
       return node;
     }
 
@@ -2456,6 +2464,14 @@
       return wrapNode(__omoikane_iframe_content_document(this.__id));
     }
 
+    getSVGDocument() {
+      const document = this.contentDocument;
+      const root = document && document.documentElement;
+      return root && root.namespaceURI === SVG_NAMESPACE && root.localName === "svg"
+        ? document
+        : null;
+    }
+
     get contentWindow() {
       // Return one stable Window facade per iframe so that
       // `iframe.contentWindow === iframe.contentWindow` holds and properties
@@ -2486,6 +2502,18 @@
   }
 
   class HTMLObjectElement extends Node {
+    get contentDocument() {
+      return wrapNode(__omoikane_iframe_content_document(this.__id));
+    }
+
+    getSVGDocument() {
+      const document = this.contentDocument;
+      const root = document && document.documentElement;
+      return root && root.namespaceURI === SVG_NAMESPACE && root.localName === "svg"
+        ? document
+        : null;
+    }
+
     get data() {
       return __omoikane_get_attribute(this.__id, "data") || "";
     }
@@ -2898,6 +2926,29 @@
     set width(value) { this.setAttribute("width", String(Math.max(0, Number(value) || 0))); }
   }
 
+  // Minimal SVG DOM layer. Rendering remains owned by src/svg; these wrappers
+  // only provide the interfaces exercised by script and Acid3.
+  class SVGElement extends Node {}
+  class SVGSVGElement extends SVGElement {}
+  class SVGRectElement extends SVGElement {
+    get width() {
+      if (!this.__width) this.__width = {};
+      return this.__width;
+    }
+  }
+  class SVGTextContentElement extends SVGElement {
+    getNumberOfChars() {
+      return String(this.textContent || "").length;
+    }
+  }
+  class SVGTextElement extends SVGTextContentElement {}
+
+  const SVG_ELEMENT_CTORS = {
+    svg: SVGSVGElement,
+    rect: SVGRectElement,
+    text: SVGTextElement,
+  };
+
   // Tag-name → constructor table consulted by wrapNode() for element nodes.
   const ELEMENT_CTORS = {
     table: HTMLTableElement,
@@ -2997,6 +3048,12 @@
   globalThis.HTMLOptionElement = HTMLOptionElement;
   globalThis.HTMLImageElement = HTMLImageElement;
   globalThis.HTMLIFrameElement = HTMLIFrameElement;
+  globalThis.HTMLObjectElement = HTMLObjectElement;
+  globalThis.SVGElement = SVGElement;
+  globalThis.SVGSVGElement = SVGSVGElement;
+  globalThis.SVGRectElement = SVGRectElement;
+  globalThis.SVGTextContentElement = SVGTextContentElement;
+  globalThis.SVGTextElement = SVGTextElement;
   globalThis.Event = Event;
   globalThis.CustomEvent = CustomEvent;
   globalThis.MouseEvent = MouseEvent;

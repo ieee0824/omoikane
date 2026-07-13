@@ -289,20 +289,28 @@ impl HostState {
         visit(self, root);
     }
 
-    /// Returns the sub-browsing-context document for `iframe`, loading it on the
-    /// first access and reloading it whenever the element's `src` changes.
+    /// Returns the embedded document for an iframe or object, loading it on the
+    /// first access and reloading it whenever its resource attribute changes.
     ///
     /// The returned document's whole node tree is registered so it can be
     /// traversed and mutated through the DOM primitives exactly like the
-    /// top-level document. An empty or `about:blank` `src` yields an empty HTML
-    /// skeleton (`<html><head></head><body></body></html>`); any other `src` is
-    /// fetched and, only if it is served with an HTML content type, parsed as
-    /// HTML (otherwise the sub-document stays an empty skeleton so non-HTML
-    /// resources are never mined for markup).
+    /// top-level document. Iframes load their `src`, while objects load their
+    /// `data` attribute. An empty or `about:blank` resource yields an empty HTML
+    /// skeleton (`<html><head></head><body></body></html>`). Other resources are
+    /// parsed as HTML or XML (including SVG) according to their content type;
+    /// unsupported content types and load failures yield the empty skeleton.
     fn iframe_content_document(&mut self, iframe: &NodeHandle) -> NodeHandle {
+        let resource_attribute = if iframe
+            .tag_name()
+            .is_some_and(|tag| tag.eq_ignore_ascii_case("object"))
+        {
+            "data"
+        } else {
+            "src"
+        };
         let src = iframe
             .attributes()
-            .and_then(|attrs| attrs.get("src").cloned())
+            .and_then(|attrs| attrs.get(resource_attribute).cloned())
             .unwrap_or_default()
             .trim()
             .to_string();
@@ -348,12 +356,12 @@ impl HostState {
         document
     }
 
-    /// Fetches and constructs the sub-document for an iframe `src`.
+    /// Fetches and constructs a sub-document from an iframe `src` or object
+    /// `data` resource reference.
     ///
-    /// Returns an `about:blank` skeleton for an empty/`about:blank` `src`, for a
-    /// fetch failure, and for any resource whose content type is not an HTML
-    /// type. Only HTML resources (`text/html`, `application/xhtml+xml`) are
-    /// parsed into a real DOM tree.
+    /// Returns an `about:blank` skeleton for an empty/`about:blank` reference, a
+    /// fetch failure, or an unsupported content type. HTML resources are parsed
+    /// as HTML; XML MIME types, including SVG, are parsed as XML.
     fn load_iframe_document(&mut self, src: &str) -> NodeHandle {
         if src.is_empty() || src.eq_ignore_ascii_case("about:blank") {
             return blank_html_document();
@@ -387,10 +395,10 @@ impl HostState {
             }
             Some((mime, body)) if is_xml_mime_type(&mime) => crate::xml::parse(&body)
                 .unwrap_or_else(|_| blank_html_document()),
-            // Non-HTML content types (image/png, text/plain, XML, SVG, ...) are
-            // never parsed as HTML: the sub-document stays an empty skeleton so
-            // a page cannot mine markup out of a non-HTML resource. Acid3 tests
-            // 14 and 15 depend on this (a PNG/text file must not yield a <p>).
+            // Unsupported content types (image/png, text/plain, ...) leave the
+            // sub-document as an empty skeleton so a page cannot mine markup
+            // from them. Acid3 tests 14 and 15 depend on this (a PNG/text file
+            // must not yield a <p>).
             _ => blank_html_document(),
         }
     }
@@ -8173,6 +8181,82 @@ mod tests {
 
     fn pump_zero_delay_tasks(runtime: &mut JsRuntime) {
         runtime.tick(0).expect("zero-delay resource tasks should run");
+    }
+
+    #[test]
+    fn svg_namespace_elements_use_svg_dom_interfaces() {
+        let mut runtime = JsRuntime::new().unwrap();
+        assert_eq!(
+            runtime
+                .eval(
+                    r#"var d = document.implementation.createDocument('http://www.w3.org/2000/svg', 'svg', null);
+                       var rect = d.createElementNS('http://www.w3.org/2000/svg', 'rect');
+                       var text = d.createElementNS('http://www.w3.org/2000/svg', 'text');
+                       var circle = d.createElementNS('http://www.w3.org/2000/svg', 'circle');
+                       text.appendChild(d.createTextNode('abc'));
+                       [d.documentElement instanceof SVGSVGElement,
+                        rect instanceof SVGRectElement,
+                        rect.constructor.name,
+                        !!rect.width,
+                        text instanceof SVGTextElement,
+                        text instanceof SVGTextContentElement,
+                        text.getNumberOfChars(),
+                        circle instanceof SVGElement].join('|')"#,
+                )
+                .unwrap()
+                .as_string()
+                .map(|s| s.to_std_string_escaped())
+                .as_deref(),
+            Some("true|true|SVGRectElement|true|true|true|3|true")
+        );
+        assert_eq!(
+            runtime
+                .eval("document.createElement('rect') instanceof SVGRectElement")
+                .unwrap()
+                .as_boolean(),
+            Some(false),
+            "an HTML rect element must not receive an SVG interface"
+        );
+    }
+
+    #[test]
+    fn embedded_svg_documents_are_exposed_by_iframe_and_object() {
+        let port = spawn_static_http_server(
+            "image/svg+xml",
+            r#"<svg xmlns="http://www.w3.org/2000/svg"><text>svg</text></svg>"#,
+        );
+        let mut runtime = JsRuntime::new().unwrap();
+        runtime.set_base_url(
+            format!("http://127.0.0.1:{port}/index.html")
+                .parse()
+                .unwrap(),
+        );
+        assert_eq!(
+            runtime
+                .eval(
+                    r#"var frame = document.createElement('iframe'); frame.src = '/asset.svg';
+                       var object = document.createElement('object'); object.data = '/asset.svg';
+                       document.body.appendChild(frame); document.body.appendChild(object);
+                       [frame.getSVGDocument() === frame.contentDocument,
+                        object.getSVGDocument() === object.contentDocument,
+                        frame.getSVGDocument().documentElement instanceof SVGSVGElement,
+                        object.getSVGDocument().getElementsByTagName('text')[0] instanceof SVGTextElement].join('|')"#,
+                )
+                .unwrap()
+                .as_string()
+                .map(|s| s.to_std_string_escaped())
+                .as_deref(),
+            Some("true|true|true|true")
+        );
+
+        assert_eq!(
+            runtime
+                .eval("var htmlFrame = document.createElement('iframe'); htmlFrame.getSVGDocument()")
+                .unwrap()
+                .is_null(),
+            true,
+            "getSVGDocument must return null for a non-SVG document"
+        );
     }
 
     #[test]
