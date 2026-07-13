@@ -10,35 +10,71 @@ use crate::layout::{
 use crate::paint::*;
 
 fn load_cjk_fallback_test_fonts() -> Option<Vec<crate::font::Font>> {
-    let primary = crate::font::Font::load_from_file(std::path::Path::new(
-        "/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf",
-    ))
-    .ok()?;
-    let cjk = crate::font::Font::load_from_file(std::path::Path::new(
-        "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
-    ))
-    .ok()?;
-    Some(vec![primary, cjk])
+    let Some(primary_path) = crate::font::find_system_font("sans-serif") else {
+        eprintln!("Skipping CJK fallback test: no primary sans-serif system font was found");
+        return None;
+    };
+    let primary = match crate::font::Font::load_from_file(&primary_path) {
+        Ok(font) => font,
+        Err(error) => {
+            eprintln!(
+                "Skipping CJK fallback test: failed to load primary font {}: {error}",
+                primary_path.display()
+            );
+            return None;
+        }
+    };
+
+    // The issue 052 CI image installs Noto CJK, so this should not skip there. Keep
+    // several common platform families for local and non-Docker test environments.
+    let cjk_families = [
+        "Noto Sans CJK JP",
+        "Noto Sans JP",
+        "Yu Gothic",
+        "Meiryo",
+        "MS Gothic",
+        "IPA Gothic",
+        "IPAGothic",
+        "Hiragino Sans",
+    ];
+    for family in cjk_families {
+        let Some(path) = crate::font::find_system_font(family) else {
+            continue;
+        };
+        let Ok(font) = crate::font::Font::load_from_file(&path) else {
+            continue;
+        };
+        if font.has_glyph('日') {
+            return Some(vec![primary, font]);
+        }
+    }
+
+    eprintln!(
+        "Skipping CJK fallback test: no loadable CJK system font containing '日' was found (tried {})",
+        cjk_families.join(", ")
+    );
+    None
 }
 
 #[test]
 fn missing_cjk_glyph_uses_cjk_fallback_font() {
     let Some(fonts) = load_cjk_fallback_test_fonts() else {
-        eprintln!("Skipping CJK fallback test: required Noto fonts are unavailable");
         return;
     };
 
-    assert!(!fonts[0].has_glyph('日'));
+    if fonts[0].has_glyph('日') {
+        eprintln!("Skipping CJK fallback scenario: primary font already contains '日'");
+        return;
+    }
     assert!(fonts[1].has_glyph('日'));
     let (index, glyph, _) = rasterize_with_fallback(&fonts, '日', 20.0);
-    assert_ne!(index, 0);
+    assert_eq!(index, 1);
     assert!(glyph.is_some());
 }
 
 #[test]
 fn latin_glyph_stays_on_primary_font() {
     let Some(fonts) = load_cjk_fallback_test_fonts() else {
-        eprintln!("Skipping CJK fallback test: required Noto fonts are unavailable");
         return;
     };
 
@@ -50,7 +86,6 @@ fn latin_glyph_stays_on_primary_font() {
 #[test]
 fn missing_glyph_in_all_fonts_uses_primary_notdef() {
     let Some(fonts) = load_cjk_fallback_test_fonts() else {
-        eprintln!("Skipping CJK fallback test: required Noto fonts are unavailable");
         return;
     };
     let missing = char::MAX;
@@ -64,9 +99,12 @@ fn missing_glyph_in_all_fonts_uses_primary_notdef() {
 #[test]
 fn webfont_primary_refs_fall_back_for_cjk() {
     let Some(fonts) = load_cjk_fallback_test_fonts() else {
-        eprintln!("Skipping CJK fallback test: required Noto fonts are unavailable");
         return;
     };
+    if fonts[0].has_glyph('日') {
+        eprintln!("Skipping CJK fallback scenario: primary font already contains '日'");
+        return;
+    }
     let refs = [&fonts[0], &fonts[1]];
 
     let (index, glyph, _) = rasterize_with_fallback_refs(&refs, '日', 20.0);
