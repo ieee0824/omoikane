@@ -2,7 +2,7 @@
 number: 031
 slug: cursor-transform-origin
 parent:
-status: open
+status: closed
 ---
 
 # cursor / transform-origin の基本対応
@@ -63,3 +63,14 @@ is_supported_property に追加し、未対応ログのノイズを削減する�
 ### 回帰リスク
 
 - allowlist はログ抑制のみでカスケード挙動に影響しないため、リスクはタイポ登録程度。テストの明示列挙で担保する。
+
+## クローズ記録（2026-07-13、PR #139）
+
+- `cursor` は 051（closed 済み）で登録・キーワード検証まで実装済みだったため、本 issue の残スコープとして
+  `transform-origin` と animation 系 8 エントリ（shorthand `animation` + 未登録 classic longhand 6 つ）を
+  `is_supported_property` に追加。allowlist はログ抑制専用でカスケード・レイアウトへの影響なし。
+- テストは `identifies_supported_property_names` を拡張（追加 8 プロパティの明示 assert +
+  `animation` shorthand 展開候補一式の supported 確認）。`cargo test -j1` 全通過（lib 1121 passed）。
+- Copilot レビュー指摘 1 件（`align-*` 系と `animation-*` 系の分断）を並び替えで解消済み。
+- `animation-composition` / `animation-timeline` 等の新 longhand は実サイトログに現れた時点で追加する。
+- 実装は Opus（general-purpose, model: opus）。
