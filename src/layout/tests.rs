@@ -1606,6 +1606,42 @@ fn aligns_grid_items_inside_their_cells_and_allows_self_override() {
 }
 
 #[test]
+fn grid_justify_self_start_resolves_percentage_width_against_cell() {
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let grid = NodeHandle::element("div");
+    let child = NodeHandle::element("article");
+    document.append_child(body.clone());
+    body.append_child(grid.clone());
+    grid.append_child(child);
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(Origin::Author, parse_stylesheet(
+        "body { margin: 0; } div { display: grid; width: 200px; grid-template-columns: 200px; } article { justify-self: start; width: 50%; height: 10px; }"
+    ).unwrap());
+    let layout = layout_tree(&body, &mut resolver, Rect { x: 0.0, y: 0.0, width: 200.0, height: 0.0 }).unwrap();
+    let rect = layout.children[0].children[0].dimensions.content;
+    assert_eq!((rect.x, rect.width), (0.0, 100.0));
+}
+
+#[test]
+fn grid_justify_self_auto_falls_back_to_justify_items() {
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let grid = NodeHandle::element("div");
+    let child = NodeHandle::element("article");
+    document.append_child(body.clone());
+    body.append_child(grid.clone());
+    grid.append_child(child);
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(Origin::Author, parse_stylesheet(
+        "body { margin: 0; } div { display: grid; width: 200px; grid-template-columns: 200px; justify-items: center; } article { justify-self: auto; width: 40px; height: 10px; }"
+    ).unwrap());
+    let layout = layout_tree(&body, &mut resolver, Rect { x: 0.0, y: 0.0, width: 200.0, height: 0.0 }).unwrap();
+    let rect = layout.children[0].children[0].dimensions.content;
+    assert_eq!((rect.x, rect.width), (80.0, 40.0));
+}
+
+#[test]
 fn distributes_grid_track_space_and_expands_place_shorthands() {
     let document = NodeHandle::document();
     let body = NodeHandle::element("body");

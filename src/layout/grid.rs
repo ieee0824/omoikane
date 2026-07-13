@@ -104,17 +104,9 @@ pub(super) fn layout_grid_container(
     let mut content_row_heights = vec![0.0f32; row_count];
     for (index, child) in items.iter().enumerate() {
         let placement = placements[index];
-        let child_style = resolver.computed_style(child);
         let height = track_area(&fixed_row_heights, placement.row, placement.row_span, row_gap);
         let cell_width = track_area(&column_widths, placement.column, placement.column_span, column_gap);
-        let justify = self_alignment(&child_style, "justify-self")
-            .unwrap_or_else(|| alignment(&style, "justify-items", Alignment::Stretch));
-        let containing_width = if justify == Alignment::Stretch {
-            cell_width
-        } else {
-            intrinsic_width(child, resolver).min(cell_width)
-        };
-        let containing = Rect { x: 0.0, y: 0.0, width: containing_width, height };
+        let containing = Rect { x: 0.0, y: 0.0, width: cell_width, height };
         if let Some(layout) = layout_node(child, resolver, containing, viewport, None) {
             let occupied = content_row_heights[placement.row..placement.row + placement.row_span].iter().sum::<f32>()
                 + row_gap * placement.row_span.saturating_sub(1) as f32;
@@ -191,8 +183,11 @@ fn alignment(style: &ComputedStyle, property: &str, default: Alignment) -> Align
 }
 
 fn self_alignment(style: &ComputedStyle, property: &str) -> Option<Alignment> {
-    style.get(property)?;
-    Some(alignment(style, property, Alignment::Stretch))
+    match style.get(property) {
+        Some(ComputedValue::Keyword(value)) if value.eq_ignore_ascii_case("auto") => None,
+        Some(_) => Some(alignment(style, property, Alignment::Stretch)),
+        None => None,
+    }
 }
 
 fn item_offset(alignment: Alignment, available: f32, occupied: f32) -> f32 {
