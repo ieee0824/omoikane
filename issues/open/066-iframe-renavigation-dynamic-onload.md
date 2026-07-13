@@ -72,6 +72,24 @@ test 48 が接続済み iframe#selectors に対して
 - **on* 動的配線の二重登録**: 初期 wireInlineHandlers との重複を per-node/per-type 解除で防ぐ。`event_handler_idl_attribute_registers_and_replaces_listener`（:6616）、`body_onload_attribute_fires_on_load`（:4635）との整合を回帰確認
 - FAITHFUL の stall 判定（`harness.rs:334`）: 修正後は test 48 の tick 内で ResourceLoad が消化され class 除去 → retry ループに入らない。DirectDrive も update() 後の `tick(0)` で消化される
 
+## 実装時の追加知見（2026-07-13）— ノード identity のアドレス再利用バグ
+
+Fix 1/2 の実装により、本 issue の回帰リスク欄で「リスク低」とした 049 系の問題が**実際に発現した**:
+
+- Fix 1 の eager 再ナビゲーションは test 48 時点で旧 #selectors サブ文書を `unregister_tree` する
+  （従来は tests 49-79 の間 reload が起きず解放もされなかった）
+- `NodeHandle::identity()` が `Rc::as_ptr`（アドレス）だったため、解放済みノードのアドレスが後続の
+  `createElement` に再利用されると、identity をキーとする JS ラッパキャッシュが**新規ノードに
+  解放済みノードの stale ラッパ（型違い）を返す**エイリアシングが発生
+- 症状: Fix 1+2 のみでは FAITHFUL/DIRECT とも 98〜99 で flaky に破損
+  （Test 50 rowIndex / Test 62 htmlFor / Test 72 style 等、実行ごとに変わるアドレス再利用の典型）
+
+**同伴修正**: `NodeHandle::identity()` を `Rc::as_ptr` から単調カウンタ（`NEXT_NODE_ID: AtomicUsize`、
+`fn new` の単一経路で採番、再利用なし）に変更（`src/dom/mod.rs`）。identity の意味論
+（ノードごとに一意、clone 間で共有）は不変で、「再利用されない」性質だけが加わる。
+これにより両モード安定 100/100（9/9 クリーン vs 非単調ビルドは破損）。
+049 の残スコープ（stale 参照の "node not found" セマンティクス・レジストリの単調成長）はこの修正では触れておらず、引き続き 049 で追跡する。
+
 ## 受け入れ条件
 
 - Acid3 test 80 が FAITHFUL/DIRECT 両モードで PASS（notifications の3アサート含む）

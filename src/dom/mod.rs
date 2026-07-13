@@ -7,6 +7,15 @@ use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::fmt;
 use std::rc::{Rc, Weak};
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+/// Monotonic source of per-node identities. A fresh value is minted for every
+/// node and never reused, so [`NodeHandle::identity`] cannot alias a released
+/// node's identity. (A pointer-based identity would be recycled when the
+/// allocator reuses a freed node's address, which caused JS wrapper caches keyed
+/// by identity to resolve a newly created node to a stale wrapper — see the
+/// iframe-reload lifetime hazard in issue 049.)
+static NEXT_NODE_ID: AtomicUsize = AtomicUsize::new(1);
 
 /// A handle to a DOM node.
 #[derive(Clone, Debug)]
@@ -22,6 +31,8 @@ impl Eq for NodeHandle {}
 
 #[derive(Debug)]
 struct NodeInner {
+    /// Stable, never-reused identity for this node (see [`NEXT_NODE_ID`]).
+    id: usize,
     parent: Option<Weak<RefCell<NodeInner>>>,
     children: Vec<NodeHandle>,
     data: NodeData,
@@ -277,6 +288,7 @@ impl NodeHandle {
 
     fn new(data: NodeData) -> Self {
         Self(Rc::new(RefCell::new(NodeInner {
+            id: NEXT_NODE_ID.fetch_add(1, Ordering::Relaxed),
             parent: None,
             children: Vec::new(),
             data,
@@ -284,8 +296,14 @@ impl NodeHandle {
     }
 
     /// Returns a stable identity for this node handle.
+    ///
+    /// The identity is minted once per node and never reused, so it stays valid
+    /// as an id-keyed map key even after the node is released: unlike a
+    /// pointer-derived identity, a later node can never reuse it (see
+    /// [`NEXT_NODE_ID`]). Clones of a [`NodeHandle`] share one node and thus one
+    /// identity.
     pub(crate) fn identity(&self) -> usize {
-        Rc::as_ptr(&self.0) as usize
+        self.0.borrow().id
     }
 
     /// Appends `child` to the node's children.

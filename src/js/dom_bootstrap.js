@@ -638,7 +638,11 @@
     }
 
     setAttribute(name, value) {
-      __omoikane_set_attribute(this.__id, String(name), String(value));
+      const attr = String(name);
+      __omoikane_set_attribute(this.__id, attr, String(value));
+      // A dynamically set `on*` content attribute is wired to a listener here
+      // (parse-time attributes go through the initial wireInlineHandlers pass).
+      if (/^on./i.test(attr)) applyInlineHandlerAttribute(this, attr);
     }
 
     get className() {
@@ -992,7 +996,10 @@
     }
 
     removeAttribute(name) {
-      __omoikane_remove_attribute(this.__id, String(name));
+      const attr = String(name);
+      __omoikane_remove_attribute(this.__id, attr);
+      // Removing an `on*` content attribute detaches the listener it wired.
+      if (/^on./i.test(attr)) applyInlineHandlerAttribute(this, attr);
     }
 
     get tagName() {
@@ -3106,21 +3113,59 @@
       return null;
     }
   }
+  // Returns the event type reflected by an `on*` content attribute name (e.g.
+  // "onload" -> "load"), or `null` when `name` is not an event-handler
+  // attribute. Names shorter than three characters (e.g. "on") reflect nothing.
+  function inlineHandlerEventType(name) {
+    const lower = String(name).toLowerCase();
+    if (lower.length <= 2 || lower.slice(0, 2) !== "on") return null;
+    return lower.slice(2);
+  }
+  // (Re)wires a single `on*` content attribute on `node` to a real event
+  // listener, keeping the current attribute value authoritative. This is the
+  // per-attribute step shared by the initial full-tree pass and the dynamic
+  // `setAttribute`/`removeAttribute` paths, so a handler attached after the
+  // page loads (Acid3 test 48's `iframe.setAttribute("onload", ...)`) behaves
+  // like one present at parse time.
+  //
+  // At most one listener per (node, event type) is retained through this path:
+  // the previously installed handler is removed before the new value is
+  // compiled and attached, so re-setting the attribute — or the initial pass
+  // followed by a later `setAttribute` — never leaves two listeners registered.
+  // Removing the attribute (value becomes `null`) just detaches the handler.
+  function applyInlineHandlerAttribute(node, name) {
+    if (!node || node.nodeType !== 1) return;
+    const type = inlineHandlerEventType(name);
+    if (!type) return;
+    const tag = (__omoikane_node_name(node.__id) || "").toLowerCase();
+    const reflectToWindow =
+      (tag === "body" || tag === "frameset") && WINDOW_REFLECTED_HANDLERS.has(type);
+    // Null-prototype dictionary: the key is the event type derived from the
+    // attribute name (e.g. `setAttribute('on__proto__', ...)` -> `"__proto__"`),
+    // which is attacker-influenced, so a plain `{}` would let such a name write
+    // through to `Object.prototype` (prototype pollution) or resolve inherited
+    // members (`constructor`, `toString`) as bogus "previous" handlers.
+    const store =
+      node.__contentAttrHandlers ||
+      (node.__contentAttrHandlers = Object.create(null));
+    const previous = store[type];
+    if (previous) {
+      previous.target.removeEventListener(type, previous.handler);
+      delete store[type];
+    }
+    const source = __omoikane_get_attribute(node.__id, name);
+    if (source == null) return;
+    const handler = compileInlineHandler(source);
+    if (!handler) return;
+    const target = reflectToWindow ? globalThis : node;
+    target.addEventListener(type, handler);
+    store[type] = { handler, target };
+  }
   function wireInlineHandlers(node) {
     if (node && node.nodeType === 1) {
       const names = __omoikane_attribute_names(node.__id) || [];
-      const tag = (__omoikane_node_name(node.__id) || "").toLowerCase();
       for (const name of names) {
-        const lower = String(name).toLowerCase();
-        if (lower.length <= 2 || lower.slice(0, 2) !== "on") continue;
-        const type = lower.slice(2);
-        const source = __omoikane_get_attribute(node.__id, name);
-        if (source == null) continue;
-        const handler = compileInlineHandler(source);
-        if (!handler) continue;
-        const reflectToWindow =
-          (tag === "body" || tag === "frameset") && WINDOW_REFLECTED_HANDLERS.has(type);
-        (reflectToWindow ? globalThis : node).addEventListener(type, handler);
+        applyInlineHandlerAttribute(node, name);
       }
     }
     const kids = node ? node.childNodes : [];

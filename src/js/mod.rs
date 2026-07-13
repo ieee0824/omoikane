@@ -289,6 +289,48 @@ impl HostState {
         visit(self, root);
     }
 
+    /// Queue a fresh navigation for a single resource element whose resource
+    /// attribute (`<iframe src>` / `<object data>`) has just changed, dispatching
+    /// `load` when the new sub-document finishes loading.
+    ///
+    /// This is the single-node analogue of
+    /// [`schedule_connected_resource_loads`](Self::schedule_connected_resource_loads),
+    /// driven by an attribute write rather than a connection. It only queues when:
+    ///
+    /// - the element is **connected** to a document — a detached element defers
+    ///   its load until it is later connected, so `about:blank`/`src` set on a
+    ///   freestanding element never fires prematurely;
+    /// - the resource actually **changed** — setting the attribute to the value
+    ///   already loaded is a no-op navigation.
+    ///
+    /// The `pending_resource_loads` guard collapses a change that races an
+    /// already-queued load (e.g. "set `src`, then append") into a single task.
+    fn schedule_resource_load_on_attribute_change(&mut self, node: &NodeHandle, resource_attr: &str) {
+        if document_root_for_node(node).is_none() {
+            return;
+        }
+        let new_src = node
+            .attributes()
+            .and_then(|attrs| attrs.get(resource_attr).cloned())
+            .unwrap_or_default()
+            .trim()
+            .to_string();
+        if self
+            .iframe_documents
+            .get(&node.identity())
+            .is_some_and(|entry| entry.loaded_src == new_src)
+        {
+            return;
+        }
+        if self.pending_resource_loads.insert(node.identity()) {
+            self.event_loop
+                .macrotasks
+                .push_back(TimerPayload::ResourceLoad {
+                    node_id: node.identity(),
+                });
+        }
+    }
+
     /// Returns the embedded document for an iframe or object, loading it on the
     /// first access and reloading it whenever its resource attribute changes.
     ///
@@ -2402,11 +2444,28 @@ fn set_attribute_native(_: &JsValue, args: &[JsValue], context: &mut Context) ->
             .borrow()
             .get_node(node_id)
             .ok_or_else(|| JsError::from(JsNativeError::error().with_message("node not found")))?;
+        // Setting the resource attribute of a connected `<iframe>`/`<object>`
+        // starts a fresh navigation; detect it before `name` is moved into
+        // `set_attribute`. Any other attribute leaves navigation untouched.
+        let resource_attr = node.tag_name().and_then(|tag| {
+            if tag.eq_ignore_ascii_case("iframe") && name.eq_ignore_ascii_case("src") {
+                Some("src")
+            } else if tag.eq_ignore_ascii_case("object") && name.eq_ignore_ascii_case("data") {
+                Some("data")
+            } else {
+                None
+            }
+        });
         node.set_attribute(name, value);
         // Any attribute may participate in a selector (id/class/attribute
         // selectors), so invalidate the element's document unconditionally. A
         // detached element falls back to invalidating every document.
         state.borrow_mut().mark_style_dirty_for_node(&node);
+        if let Some(resource_attr) = resource_attr {
+            state
+                .borrow_mut()
+                .schedule_resource_load_on_attribute_change(&node, resource_attr);
+        }
         Ok(JsValue::undefined())
     })
 }
@@ -8602,6 +8661,316 @@ mod tests {
             .unwrap();
         pump_zero_delay_tasks(&mut runtime);
         assert_eq!(runtime.eval("loads").unwrap().as_number(), Some(1.0));
+    }
+
+    /// Reassigning the `src` of a *connected* iframe (the `.src` IDL setter
+    /// path) starts a fresh navigation whose `load` event fires once the queued
+    /// task runs, matching the paired
+    /// [`same_document_direct_reinsertion_does_not_reload_iframe`] which must NOT
+    /// reload on a mere in-document reorder.
+    #[test]
+    fn connected_iframe_src_change_renavigates_and_fires_load() {
+        use crate::html::TreeBuilder;
+        let port =
+            spawn_static_http_server("text/html", r#"<html><body><p id="x">frame</p></body></html>"#);
+        let doc =
+            TreeBuilder::parse(r#"<html><body><iframe id="f"></iframe></body></html>"#).document();
+        let mut runtime = JsRuntime::with_document(doc).unwrap();
+        runtime
+            .eval(
+                r#"globalThis.loads = 0;
+                   document.getElementById('f').addEventListener('load', () => loads++);"#,
+            )
+            .unwrap();
+        // The initial connection (from document construction) fires load once.
+        pump_zero_delay_tasks(&mut runtime);
+        assert_eq!(runtime.eval("loads").unwrap().as_number(), Some(1.0));
+
+        runtime
+            .eval(&format!(
+                "document.getElementById('f').src = 'http://127.0.0.1:{port}/next.html';"
+            ))
+            .unwrap();
+        // The re-navigation load is queued, not fired synchronously.
+        assert_eq!(runtime.eval("loads").unwrap().as_number(), Some(1.0));
+        pump_zero_delay_tasks(&mut runtime);
+        assert_eq!(
+            runtime.eval("loads").unwrap().as_number(),
+            Some(2.0),
+            "changing src on a connected iframe must re-navigate and dispatch load again"
+        );
+        assert_eq!(
+            eval_string_value(
+                &mut runtime,
+                "document.getElementById('f').contentDocument.getElementById('x').textContent"
+            )
+            .as_deref(),
+            Some("frame"),
+            "the re-navigation must load the new sub-document"
+        );
+    }
+
+    /// The `setAttribute('src', ...)` path re-navigates a connected iframe just
+    /// like the `.src` IDL setter does, fetching and parsing the new resource
+    /// (not merely re-firing `load`): after the change `contentDocument` exposes
+    /// the server's document, which the initial about:blank sub-document lacked.
+    #[test]
+    fn connected_iframe_set_attribute_src_renavigates_and_fires_load() {
+        use crate::html::TreeBuilder;
+        let port = spawn_static_http_server(
+            "text/html",
+            r#"<html><body><p id="loaded">via-setattr</p></body></html>"#,
+        );
+        let doc =
+            TreeBuilder::parse(r#"<html><body><iframe id="f"></iframe></body></html>"#).document();
+        let mut runtime = JsRuntime::with_document(doc).unwrap();
+        runtime
+            .eval(
+                r#"globalThis.loads = 0;
+                   document.getElementById('f').addEventListener('load', () => loads++);"#,
+            )
+            .unwrap();
+        pump_zero_delay_tasks(&mut runtime);
+        assert_eq!(runtime.eval("loads").unwrap().as_number(), Some(1.0));
+
+        runtime
+            .eval(&format!(
+                "document.getElementById('f').setAttribute('src', 'http://127.0.0.1:{port}/next.html');"
+            ))
+            .unwrap();
+        pump_zero_delay_tasks(&mut runtime);
+        assert_eq!(
+            runtime.eval("loads").unwrap().as_number(),
+            Some(2.0),
+            "setAttribute('src', ...) on a connected iframe must re-navigate and dispatch load"
+        );
+        // The re-navigation must actually load the new sub-document's content,
+        // which the initial about:blank document did not contain.
+        assert_eq!(
+            eval_string_value(
+                &mut runtime,
+                "document.getElementById('f').contentDocument.getElementById('loaded').textContent"
+            )
+            .as_deref(),
+            Some("via-setattr"),
+            "setAttribute('src', ...) must parse the new sub-document's content"
+        );
+    }
+
+    /// Acid3 test 48 minimal repro: an `onload` handler attached *after* load
+    /// via `setAttribute('onload', "code")` runs when a subsequent `src`
+    /// re-navigation completes (removing a class from an unrelated element).
+    #[test]
+    fn dynamic_onload_attribute_runs_on_iframe_src_renavigation() {
+        use crate::html::TreeBuilder;
+        let port =
+            spawn_static_http_server("text/html", r#"<html><body></body></html>"#);
+        let doc = TreeBuilder::parse(
+            r#"<html><body><span id="target" class="hide"></span><iframe id="f"></iframe></body></html>"#,
+        )
+        .document();
+        let mut runtime = JsRuntime::with_document(doc).unwrap();
+        // Drain the initial about:blank load so it cannot run the handler set below.
+        pump_zero_delay_tasks(&mut runtime);
+
+        runtime
+            .eval(&format!(
+                r#"var f = document.getElementById('f');
+                   f.setAttribute('onload', "document.getElementById('target').removeAttribute('class')");
+                   f.src = 'http://127.0.0.1:{port}/next.html';"#
+            ))
+            .unwrap();
+        // The class survives until the queued re-navigation load dispatches.
+        assert_eq!(
+            eval_string_value(&mut runtime, "document.getElementById('target').getAttribute('class')")
+                .as_deref(),
+            Some("hide")
+        );
+        pump_zero_delay_tasks(&mut runtime);
+        assert_eq!(
+            runtime
+                .eval("document.getElementById('target').getAttribute('class')")
+                .unwrap()
+                .is_null(),
+            true,
+            "the dynamically wired onload handler must run on re-navigation and remove the class"
+        );
+    }
+
+    /// A detached iframe must never navigate on a `src` change (whether via the
+    /// IDL setter or setAttribute); its load waits until it is connected. This
+    /// upholds the [`detached_iframe_load_waits_until_connected`] invariant for
+    /// the new attribute-driven navigation path.
+    #[test]
+    fn detached_iframe_src_change_does_not_fire_load() {
+        let mut runtime = JsRuntime::new().unwrap();
+        runtime
+            .eval(
+                r#"globalThis.loads = 0;
+                   globalThis.frame = document.createElement('iframe');
+                   frame.addEventListener('load', () => loads++);
+                   frame.src = 'about:blank';
+                   frame.setAttribute('src', 'about:blank?again');"#,
+            )
+            .unwrap();
+        pump_zero_delay_tasks(&mut runtime);
+        assert_eq!(
+            runtime.eval("loads").unwrap().as_number(),
+            Some(0.0),
+            "a detached iframe must not navigate on src changes"
+        );
+    }
+
+    /// Removing a dynamically wired `on*` content attribute detaches its
+    /// listener, and re-setting one replaces (does not stack) the handler.
+    #[test]
+    fn remove_on_attribute_detaches_dynamically_wired_handler() {
+        let mut runtime = JsRuntime::new().unwrap();
+        runtime
+            .eval(
+                r#"globalThis.clicks = 0;
+                   globalThis.el = document.createElement('div');
+                   el.setAttribute('onclick', 'globalThis.clicks++');"#,
+            )
+            .unwrap();
+        runtime.eval("el.dispatchEvent(new Event('click'))").unwrap();
+        assert_eq!(
+            runtime.eval("clicks").unwrap().as_number(),
+            Some(1.0),
+            "a dynamically set onclick attribute must fire"
+        );
+
+        runtime.eval("el.removeAttribute('onclick');").unwrap();
+        runtime.eval("el.dispatchEvent(new Event('click'))").unwrap();
+        assert_eq!(
+            runtime.eval("clicks").unwrap().as_number(),
+            Some(1.0),
+            "removing the onclick attribute must detach its handler"
+        );
+
+        // Re-setting twice must leave exactly one (the latest) handler wired.
+        runtime
+            .eval(
+                r#"clicks = 0;
+                   el.setAttribute('onclick', 'globalThis.clicks++');
+                   el.setAttribute('onclick', 'globalThis.clicks += 10');"#,
+            )
+            .unwrap();
+        runtime.eval("el.dispatchEvent(new Event('click'))").unwrap();
+        assert_eq!(
+            runtime.eval("clicks").unwrap().as_number(),
+            Some(10.0),
+            "re-setting an on* attribute must replace, not stack, the handler"
+        );
+    }
+
+    /// A crafted `on*` content-attribute name whose derived event type collides
+    /// with an `Object.prototype` member (`on__proto__` -> `"__proto__"`,
+    /// `onconstructor` -> `"constructor"`) must wire without throwing and
+    /// without corrupting the per-node handler store. Regression test for the
+    /// null-prototype (`Object.create(null)`) handler dictionary: a plain `{}`
+    /// store resolves the inherited member as a bogus "previous" handler and
+    /// throws while (re)wiring, besides letting such a key reach the prototype.
+    #[test]
+    fn crafted_on_attribute_name_does_not_break_or_pollute_handler_store() {
+        let mut runtime = JsRuntime::new().unwrap();
+        runtime
+            .eval(
+                r#"globalThis.threw = null;
+                   globalThis.clicks = 0;
+                   globalThis.el = document.createElement('div');
+                   try {
+                     // Handlers add 100 if they ever fire; they are wired to the
+                     // "__proto__"/"constructor" event types, which are never
+                     // dispatched below, so a passing run leaves them dormant.
+                     el.setAttribute('on__proto__', 'globalThis.clicks += 100');
+                     el.setAttribute('onconstructor', 'globalThis.clicks += 100');
+                   } catch (e) { globalThis.threw = String(e); }"#,
+            )
+            .unwrap();
+        assert_eq!(
+            eval_string_value(&mut runtime, "threw === null ? 'no-throw' : threw").as_deref(),
+            Some("no-throw"),
+            "wiring a crafted on* attribute name must not throw (null-prototype store)"
+        );
+
+        // The store stayed intact: a subsequent legitimate handler wires and
+        // fires exactly once, and the crafted-name event types did not fire.
+        runtime
+            .eval(
+                r#"el.setAttribute('onclick', 'globalThis.clicks += 1');
+                   el.dispatchEvent(new Event('click'));"#,
+            )
+            .unwrap();
+        assert_eq!(
+            runtime.eval("clicks").unwrap().as_number(),
+            Some(1.0),
+            "a normal on* handler must still fire once after crafted names were wired"
+        );
+    }
+
+    /// Changing a connected `<object>`'s `data` resource re-navigates it and
+    /// dispatches `load` again, mirroring the iframe `src` path. Beyond the
+    /// re-fired `load`, the new resource must actually be fetched and parsed:
+    /// two servers hand out distinguishable documents, and `contentDocument`
+    /// must expose the second document's content once the change is pumped.
+    #[test]
+    fn connected_object_data_change_renavigates_and_fires_load() {
+        use crate::html::TreeBuilder;
+        let first_port = spawn_static_http_server(
+            "text/html",
+            r#"<html><body><p id="marker">first</p></body></html>"#,
+        );
+        let second_port = spawn_static_http_server(
+            "text/html",
+            r#"<html><body><p id="marker">second</p></body></html>"#,
+        );
+        let doc = TreeBuilder::parse(&format!(
+            r#"<html><body><object id="o" data="http://127.0.0.1:{first_port}/first.html"></object></body></html>"#
+        ))
+        .document();
+        let mut runtime = JsRuntime::with_document(doc).unwrap();
+        runtime
+            .eval(
+                r#"globalThis.loads = 0;
+                   document.getElementById('o').addEventListener('load', () => loads++);"#,
+            )
+            .unwrap();
+        pump_zero_delay_tasks(&mut runtime);
+        assert_eq!(runtime.eval("loads").unwrap().as_number(), Some(1.0));
+        // The initial navigation parses the first document into the sub-context.
+        assert_eq!(
+            eval_string_value(
+                &mut runtime,
+                "document.getElementById('o').contentDocument.getElementById('marker').textContent"
+            )
+            .as_deref(),
+            Some("first"),
+            "the initial object navigation must load the first sub-document"
+        );
+
+        runtime
+            .eval(&format!(
+                "document.getElementById('o').setAttribute('data', 'http://127.0.0.1:{second_port}/second.html');"
+            ))
+            .unwrap();
+        pump_zero_delay_tasks(&mut runtime);
+        assert_eq!(
+            runtime.eval("loads").unwrap().as_number(),
+            Some(2.0),
+            "changing an object's data must re-navigate and dispatch load again"
+        );
+        // The re-navigation must swap the sub-document's content for the second
+        // server's document, not just re-fire `load` over the stale first one.
+        assert_eq!(
+            eval_string_value(
+                &mut runtime,
+                "document.getElementById('o').contentDocument.getElementById('marker').textContent"
+            )
+            .as_deref(),
+            Some("second"),
+            "re-navigating the object must load the second sub-document's content"
+        );
     }
 
     #[test]
