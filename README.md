@@ -17,7 +17,13 @@ Omoikane は、HTTP クライアント、HTML/CSS パーサー、DOM、レイア
 - UA stylesheet デフォルト（h1〜h6 フォントサイズ・太字・margin、p、b/strong、i/em、hr）
 - shorthand 完全展開（margin / padding / border-width / border-color / border-style / overflow / flex / border-radius / list-style / text-decoration）
 - 高度セレクタ（`:not()` / `[attr^=]` / `[attr$=]` / `[attr*=]` / `[attr|=]`）
-- ブロック、インライン、Flexbox、テーブルを含むレイアウトエンジン
+- ブロック、インライン、Flexbox、Grid、テーブルを含むレイアウトエンジン
+- **CSS Grid レイアウト**（`display: grid` / `inline-grid`）
+  - `grid-template-columns` / `grid-template-rows`（px / % / vw 等の単位、`fr`、`auto`、`min-content` / `max-content`、`calc()`、`minmax()`、`repeat(N | auto-fill | auto-fit, ...)`、名前付きラインへの耐性）
+  - 明示配置とスパン（`grid-column` / `grid-row`）、自動配置、暗黙トラック生成
+  - `gap` / `row-gap` / `column-gap`
+  - アラインメント（`justify-content` / `align-content` / `justify-items` / `align-items` / `justify-self` / `align-self` / `place-content` / `place-items` / `place-self`）
+  - 名前付きエリア（`grid-template-areas` / `grid-area` / `grid-template` ショートハンド）
 - テーブルの `colspan` / `rowspan` 対応、カラム幅の intrinsic hint + 均等余剰分配
 - margin collapsing（empty element、parent-child、負margin）
 - float / clear / positioned element のレイアウトとペイント
@@ -37,6 +43,8 @@ Omoikane は、HTTP クライアント、HTML/CSS パーサー、DOM、レイア
 - `opacity`（オフスクリーンバッファ + alpha 乗算）
 - `linear-gradient()`（方向指定 + 複数カラーストップ）
 - `background-size`（cover / contain / length / percentage）
+- `clip-path: inset()` による描画クリッピング（`-webkit-clip-path` 正規化含む。inset 以外の形状（circle/ellipse/polygon/url）はパースのみでクリップ無しフォールバック）
+- CSS マスキング（`mask` / `-webkit-mask` / `mask-image` / `mask-position` / `mask-size` / `mask-repeat`）。`url()` マスク（SVG 含む）を alpha 乗算、第1レイヤのみ対応
 
 ### フォント・テキスト
 - ab_glyph によるフォントファイル読み込みとグリフラスタライズ
@@ -196,15 +204,17 @@ CI=1 cargo test -- --include-ignored
 - `dev` ユーザーはパスワードなしで `sudo` を使えます（コンテナ内での ad-hoc なパッケージ追加など）。
 - SSH 鍵は named volume（`ssh-config`）で `~/.ssh` に永続化されます。サンドボックスの隔離を保つためホストの `~/.ssh` はマウントしない方針です。コンテナ内で `ssh-keygen -t ed25519` で生成し、公開鍵を GitHub 等に登録してください。
 
-## Acid2 テスト
+## Acid2 / Acid3 テスト
 
 [Acid2 テスト](https://www.webstandards.org/files/acid2/test.html)の公式リファレンスレンダリングとの比較で**差分 0px** を達成しています。
 
-CSS パーサー、レイアウトエンジン、ペイントシステムの統合テストとして、608 件以上のテストが常時通過しています（lib テスト 608 件 + doc テスト 9 件）。
+[Acid3 テスト](http://acid3.acidtests.org/)は `cargo run --example acid3` の実測で **97/100** です（詳細は [`tests/fixtures/acid3/README.md`](/tests/fixtures/acid3/README.md)）。
+
+CSS パーサー、レイアウトエンジン、ペイントシステムの統合テストとして、1101 件のテストが常時通過しています（`cargo test --lib`: 1101 passed / 0 failed、doc テスト 10 件）。
 
 ## 進捗
 
-issue ベースの開発状況では、以下の大きな実装フェーズは完了済みです（closed issue 85 件）。
+issue ベースの開発状況では、以下の大きな実装フェーズは完了済みです（closed issue 169 件）。
 
 - HTTP クライアント
 - HTML パーサー・文字エンコーディング検出
@@ -231,14 +241,18 @@ issue ベースの開発状況では、以下の大きな実装フェーズは�
 - `@font-face` Web フォント対応（TTF / OTF / WOFF / WOFF2 フェッチ・デコード）
 - font-weight / font-style バリアント選択
 - TLS 証明書検証スキップオプション
+- CSS Grid レイアウト（061-1〜061-5: トラックサイジング、明示配置・スパン、アラインメント、トラックサイジング拡張、名前付きエリア）
+- `clip-path: inset()` の描画クリッピング（062）
+- CSS マスキング `mask` / `-webkit-mask` / `mask-image`（063）
 
-現在の open issue は [`issues/open`](/issues/open) を参照してください（open issue 6 件）。
+現在の open issue は [`issues/open`](/issues/open) を参照してください（open issue 13 件）。
 
 ## 制約
 
-- CSS 3 の一部機能（Grid、アニメーション、`position: sticky`）は未実装
+- CSS 3 の一部機能（アニメーション、`position: sticky`）は未実装
+- `clip-path` は `inset()` のみクリップを適用（circle / ellipse / polygon / url 形状はパースのみで未クリップ）
+- CSS マスキングは `mask-image` の第1レイヤーのみ適用（複数レイヤー合成・luminance モードは未対応）
 - WOFF2 の glyf/loca transform 逆変換は未対応（transform なしの WOFF2 は対応済み）
-- Web フォント（`@font-face`）は未対応（システムフォントのみ）
 - Web 標準の完全互換は目標であり、現状は CSS 2.1 の主要機能を実装済みです
 - Puppeteer / Playwright 互換は段階的に拡張中です
 - Go 向けラッパーは同梱せず、必要に応じて別リポジトリや外部パッケージとして提供する方針です
