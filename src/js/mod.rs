@@ -3240,8 +3240,22 @@ fn resolve_url_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> J
 
 /// Backs `document.write` / `document.writeln`.
 ///
-/// Tokenizes the argument as an HTML fragment (in `<body>` context) and splices
-/// the resulting nodes into the live tree at the current insertion point:
+/// The written text is parsed one of two ways depending on the target
+/// document's state:
+///
+/// - **Complete document** — when the target document has no `documentElement`
+///   (a root `<html>`), as is the case immediately after `document.open()`
+///   emptied it. The text is parsed as a whole document with
+///   [`crate::html::TreeBuilder::parse`], and the parsed document's children
+///   (a `<!DOCTYPE>` plus the implicit `<html>`/`<head>`/`<body>` structure)
+///   are appended to the target document. This reproduces the doctype and the
+///   head/body split that Acid3 test 71 checks.
+/// - **Fragment** — while a `documentElement` already exists (a normal
+///   mid-parse write). The text is tokenized as an HTML fragment (in `<body>`
+///   context) and its nodes are spliced into the live tree at the current
+///   insertion point, preserving the streaming behaviour below.
+///
+/// For the fragment case:
 ///
 /// - While a `<script>` is executing (see
 ///   [`HostState::write_insertion_ref`]), the fragment is inserted as the
@@ -3283,40 +3297,60 @@ fn document_write_native(_: &JsValue, args: &[JsValue], context: &mut Context) -
         .to_string(context)?
         .to_std_string_escaped();
 
-    // Parse the fragment into a throwaway document and lift out the body's
-    // children. Parsing per-call matches the existing innerHTML path; it means
-    // a single write() call must contain balanced-enough markup (Acid3 writes
-    // its whole fragment in one call), which is the common case.
-    let parsed_children: Vec<NodeHandle> = if text.is_empty() {
-        Vec::new()
-    } else {
-        let parsed = crate::html::TreeBuilder::parse(&format!("<body>{text}</body>")).document();
-        parsed
-            .query_selector("body")
-            .map(|body| body.child_nodes())
-            .unwrap_or_default()
-    };
-
     with_host_state(|state| {
-        // Resolve the parent element and the sibling to insert before.
-        let (parent, reference_child, is_main, target_doc) = {
+        // The document being written to. `document.write` passes its id; an
+        // unresolved id falls back to the top-level document.
+        let (target_doc, is_main) = {
             let s = state.borrow();
-            // The document being written to. `document.write` passes its id; an
-            // unresolved id falls back to the top-level document.
             let target_doc = s
                 .get_node(target_id)
                 .unwrap_or_else(|| s.document.clone());
             let is_main = target_doc == s.document;
+            (target_doc, is_main)
+        };
+        // A `documentElement` (root `<html>`) exists unless `document.open()`
+        // just emptied the document. Its absence selects the complete-document
+        // parse; its presence keeps the fragment/insertion-point behaviour.
+        let has_document_element = target_doc
+            .child_nodes()
+            .iter()
+            .any(|n| n.tag_name().as_deref() == Some("html"));
+
+        // Parse the written text and decide where its nodes are spliced in.
+        // `parent == None` means there is nothing to insert (empty write).
+        let (parsed_children, parent, reference_child): (
+            Vec<NodeHandle>,
+            Option<NodeHandle>,
+            Option<NodeHandle>,
+        ) = if text.is_empty() {
+            (Vec::new(), None, None)
+        } else if !has_document_element {
+            // Complete-document parse into the emptied document: append the
+            // parsed throwaway document's children ([doctype, html]) to the
+            // target document itself, reproducing the implicit
+            // html/head/body structure a streaming parser would build.
+            let parsed = crate::html::TreeBuilder::parse(&text).document();
+            (parsed.child_nodes(), Some(target_doc.clone()), None)
+        } else {
+            // Fragment parse spliced at the insertion point. Parsing per-call
+            // matches the innerHTML path; a single write() call must contain
+            // balanced-enough markup (Acid3 writes its whole fragment in one
+            // call), which is the common case.
+            let parsed =
+                crate::html::TreeBuilder::parse(&format!("<body>{text}</body>")).document();
+            let children = parsed
+                .query_selector("body")
+                .map(|body| body.child_nodes())
+                .unwrap_or_default();
             // Fallback target when there is no active insertion point: the
-            // target document's <body>, or — after document.open() emptied it so
-            // no <body> exists — the document node itself, so the written nodes
-            // become the (fresh) document's children.
+            // target document's <body>, or the document node itself.
             let fallback_parent = || {
                 target_doc
                     .query_selector("body")
                     .unwrap_or_else(|| target_doc.clone())
             };
             let (parent, reference_child) = if is_main {
+                let s = state.borrow();
                 match s.write_insertion_ref.clone() {
                     // Active insertion point: insert right after the reference
                     // node (i.e. before the reference node's next sibling).
@@ -3338,16 +3372,15 @@ fn document_write_native(_: &JsValue, args: &[JsValue], context: &mut Context) -
             } else {
                 // Sub-browsing-context documents have no per-frame parser
                 // insertion point here; append the written fragment to the
-                // sub-document's <body> (or the document node itself right after
-                // document.open() emptied it). The main document's insertion
-                // point is left untouched.
+                // sub-document's <body>. The main document's insertion point is
+                // left untouched.
                 (Some(fallback_parent()), None)
             };
-            (parent, reference_child, is_main, target_doc)
+            (children, parent, reference_child)
         };
 
         let Some(parent) = parent else {
-            // No insertion target at all; nothing sensible to do.
+            // No insertion target (empty write); nothing to do.
             return Ok(JsValue::from(
                 boa_engine::object::builtins::JsArray::from_iter(Vec::<JsValue>::new(), context),
             ));
@@ -9710,6 +9743,87 @@ mod tests {
         );
     }
 
+    /// Acid3 test 71 (first write): `open()` + `write(complete document)` +
+    /// `close()` on an iframe sub-document must build a doctype plus the
+    /// implicit `html`/`head`/`body` structure. The written text is a whole
+    /// document (doctype, a head-level `<title>`, and body-level
+    /// `<span>`/`<script>`), so it must NOT be treated as a `<body>` fragment.
+    #[test]
+    fn iframe_open_write_close_builds_full_document_with_doctype() {
+        let mut runtime =
+            runtime_from_html(r#"<html><body><iframe id="f"></iframe></body></html>"#);
+        runtime
+            .eval(
+                r#"var doc = document.getElementById('f').contentDocument;
+                   doc.open();
+                   doc.write('<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.0 Transitional//EN"><title></title><span></span><script type="text/javascript"></script>');
+                   doc.close();"#,
+            )
+            .unwrap();
+
+        // #document children are exactly [doctype, html].
+        assert_eq!(eval_num(&mut runtime, "doc.childNodes.length"), 2.0);
+        assert_eq!(eval_str(&mut runtime, "doc.firstChild.name.toUpperCase()"), "HTML");
+        assert_eq!(
+            eval_str(&mut runtime, "doc.firstChild.publicId"),
+            "-//W3C//DTD HTML 4.0 Transitional//EN"
+        );
+        // No system id was given: native returns "" (test 71 accepts null | "").
+        assert_eq!(eval_str(&mut runtime, "doc.firstChild.systemId"), "");
+        assert!(
+            runtime
+                .eval("doc.firstChild.internalSubset")
+                .unwrap()
+                .is_null(),
+            "internalSubset must be null"
+        );
+
+        // documentElement = [HEAD, BODY]; head = [TITLE]; body = [SPAN, SCRIPT].
+        assert_eq!(eval_num(&mut runtime, "doc.documentElement.childNodes.length"), 2.0);
+        assert_eq!(eval_str(&mut runtime, "doc.documentElement.firstChild.nodeName"), "HEAD");
+        assert_eq!(eval_num(&mut runtime, "doc.documentElement.firstChild.childNodes.length"), 1.0);
+        assert_eq!(eval_str(&mut runtime, "doc.documentElement.firstChild.firstChild.tagName"), "TITLE");
+        assert_eq!(eval_str(&mut runtime, "doc.documentElement.lastChild.nodeName"), "BODY");
+        assert_eq!(eval_num(&mut runtime, "doc.documentElement.lastChild.childNodes.length"), 2.0);
+        assert_eq!(eval_str(&mut runtime, "doc.documentElement.lastChild.firstChild.tagName"), "SPAN");
+        assert_eq!(eval_str(&mut runtime, "doc.documentElement.lastChild.lastChild.tagName"), "SCRIPT");
+    }
+
+    /// Acid3 test 71 (second write): a PUBLIC + SYSTEM doctype exposes both
+    /// identifiers, and a `<script>` nested inside `<span>` keeps the nesting
+    /// (so `<body>` has a single child).
+    #[test]
+    fn iframe_open_write_close_reads_system_id_and_keeps_nesting() {
+        let mut runtime =
+            runtime_from_html(r#"<html><body><iframe id="f"></iframe></body></html>"#);
+        runtime
+            .eval(
+                r#"var doc = document.getElementById('f').contentDocument;
+                   doc.open();
+                   doc.write('<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN" "http://www.w3.org/TR/html4/loose.dtd"><title></title><span><script type="text/javascript"></script></span>');
+                   doc.close();"#,
+            )
+            .unwrap();
+
+        assert_eq!(eval_num(&mut runtime, "doc.childNodes.length"), 2.0);
+        assert_eq!(
+            eval_str(&mut runtime, "doc.firstChild.publicId"),
+            "-//W3C//DTD HTML 4.01 Transitional//EN"
+        );
+        assert_eq!(
+            eval_str(&mut runtime, "doc.firstChild.systemId"),
+            "http://www.w3.org/TR/html4/loose.dtd"
+        );
+
+        // body = [SPAN]; span = [SCRIPT] (the script is nested in the span).
+        assert_eq!(eval_num(&mut runtime, "doc.documentElement.lastChild.childNodes.length"), 1.0);
+        assert_eq!(eval_str(&mut runtime, "doc.documentElement.lastChild.firstChild.tagName"), "SPAN");
+        assert_eq!(
+            eval_str(&mut runtime, "doc.documentElement.lastChild.firstChild.firstChild.tagName"),
+            "SCRIPT"
+        );
+    }
+
     /// A sub-document `open()` called from a running main-document script must
     /// not disturb the main document's parser insertion point: a following
     /// main-document `document.write` must still land at the script's position,
@@ -9997,7 +10111,11 @@ mod tests {
     }
 
     /// `document.open()` followed by `write()`/`close()` must leave only the
-    /// freshly written content (the prior content is erased by open()).
+    /// freshly written content, wrapped in the implicit `html`/`head`/`body`
+    /// structure a real parser builds. The written `<div>` is a body fragment,
+    /// so after open() emptied the document the document node's sole element
+    /// child is `<html>` (not the bare `<div>`), and the `<div>` lands in
+    /// `<body>` — matching browser behaviour for a complete-document write.
     #[test]
     fn document_open_write_close_leaves_only_written_content() {
         use crate::html::TreeBuilder;
@@ -10016,20 +10134,45 @@ mod tests {
             doc.query_selector("#old").is_none(),
             "document.open() must have erased the old content"
         );
-        // Only the written content remains, reachable by id.
-        let fresh = doc
-            .query_selector("#fresh")
-            .expect("the written content must be present after open/write/close");
-        assert_eq!(fresh.tag_name().as_deref(), Some("div"));
-        let tags: Vec<String> = doc
+        // The document's only element child is the implicit <html> root.
+        let element_children: Vec<String> = doc
             .child_nodes()
             .iter()
             .filter_map(|n| n.tag_name())
             .collect();
         assert_eq!(
-            tags,
+            element_children,
+            vec!["html".to_string()],
+            "the emptied document must be rebuilt with a single <html> root"
+        );
+        // <html> holds the implicit <head> and <body>.
+        let html = doc.query_selector("html").expect("implicit <html>");
+        let html_children: Vec<String> = html
+            .child_nodes()
+            .iter()
+            .filter_map(|n| n.tag_name())
+            .collect();
+        assert_eq!(
+            html_children,
+            vec!["head".to_string(), "body".to_string()],
+            "the implicit <html> must contain <head> then <body>"
+        );
+        // The freshly written <div> is a body-level fragment, so it lands in
+        // <body>, reachable by id.
+        let fresh = doc
+            .query_selector("#fresh")
+            .expect("the written content must be present after open/write/close");
+        assert_eq!(fresh.tag_name().as_deref(), Some("div"));
+        let body = doc.query_selector("body").expect("implicit <body>");
+        let body_children: Vec<String> = body
+            .child_nodes()
+            .iter()
+            .filter_map(|n| n.tag_name())
+            .collect();
+        assert_eq!(
+            body_children,
             vec!["div".to_string()],
-            "the document must contain only the freshly written <div>"
+            "the written <div> must live inside <body>"
         );
     }
 

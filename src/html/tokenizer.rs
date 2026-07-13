@@ -36,6 +36,8 @@ impl Attribute {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DoctypeToken {
     name: Option<String>,
+    public_id: Option<String>,
+    system_id: Option<String>,
     force_quirks: bool,
 }
 
@@ -43,6 +45,18 @@ impl DoctypeToken {
     /// Returns the doctype name, if one was present.
     pub fn name(&self) -> Option<&str> {
         self.name.as_deref()
+    }
+
+    /// Returns the doctype's public identifier, if one was present. The value
+    /// keeps its original case (identifiers are not ASCII-lowercased).
+    pub fn public_id(&self) -> Option<&str> {
+        self.public_id.as_deref()
+    }
+
+    /// Returns the doctype's system identifier, if one was present. The value
+    /// keeps its original case (identifiers are not ASCII-lowercased).
+    pub fn system_id(&self) -> Option<&str> {
+        self.system_id.as_deref()
     }
 
     /// Returns whether the tokenizer marked the doctype as force-quirks.
@@ -114,6 +128,22 @@ enum State {
     Doctype,
     BeforeDoctypeName,
     DoctypeName,
+    // DOCTYPE public/system identifier states (§13.2.5.53–13.2.5.68). These
+    // parse `<!DOCTYPE name PUBLIC "public-id" "system-id">` and its variants.
+    // Identifiers are captured verbatim (not lowercased).
+    AfterDoctypeName,
+    AfterDoctypePublicKeyword,
+    BeforeDoctypePublicIdentifier,
+    DoctypePublicIdentifierDoubleQuoted,
+    DoctypePublicIdentifierSingleQuoted,
+    AfterDoctypePublicIdentifier,
+    BetweenDoctypePublicAndSystemIdentifiers,
+    AfterDoctypeSystemKeyword,
+    BeforeDoctypeSystemIdentifier,
+    DoctypeSystemIdentifierDoubleQuoted,
+    DoctypeSystemIdentifierSingleQuoted,
+    AfterDoctypeSystemIdentifier,
+    BogusDoctype,
     // RAWTEXT states (§13.2.5.3–13.2.5.6): `<style>`, `<xmp>`, `<noembed>`,
     // `<noframes>`. Content is emitted verbatim; only the matching end tag
     // (e.g. `</style>`) leaves the state.
@@ -197,12 +227,31 @@ impl<'a> Tokenizer<'a> {
         let mut current_self_closing = false;
         let mut current_comment = String::new();
         let mut current_doctype_name = String::new();
+        // `None` until a PUBLIC/SYSTEM keyword opens the identifier; `Some("")`
+        // once the opening quote is seen, so an empty identifier is preserved.
+        let mut current_doctype_public_id: Option<String> = None;
+        let mut current_doctype_system_id: Option<String> = None;
         let mut current_doctype_force_quirks = false;
         // Scratch buffer for the tentative end-tag name in RAWTEXT/RCDATA/script
         // states, and the name of the last start tag emitted (used to recognise
         // the *appropriate* end tag that leaves those states).
         let mut temp_buffer = String::new();
         let mut last_start_tag_name = String::new();
+
+        // Emits the current DOCTYPE token, moving the accumulated name and
+        // identifiers into it and resetting the force-quirks flag for the next
+        // DOCTYPE. Used by every state that closes a named DOCTYPE with `>`.
+        macro_rules! emit_doctype {
+            () => {{
+                tokens.push(Token::Doctype(DoctypeToken {
+                    name: Some(std::mem::take(&mut current_doctype_name)),
+                    public_id: current_doctype_public_id.take(),
+                    system_id: current_doctype_system_id.take(),
+                    force_quirks: current_doctype_force_quirks,
+                }));
+                current_doctype_force_quirks = false;
+            }};
+        }
 
         while let Some(ch) = cursor.consume() {
             match state {
@@ -607,6 +656,8 @@ impl<'a> Tokenizer<'a> {
 
                         if doctype_candidate_complete && lookahead.eq_ignore_ascii_case("doctype") {
                             current_doctype_name.clear();
+                            current_doctype_public_id = None;
+                            current_doctype_system_id = None;
                             current_doctype_force_quirks = false;
                             state = State::Doctype;
                         } else {
@@ -675,6 +726,8 @@ impl<'a> Tokenizer<'a> {
                         errors.push(HtmlParseError::InvalidDoctype);
                         tokens.push(Token::Doctype(DoctypeToken {
                             name: None,
+                            public_id: None,
+                            system_id: None,
                             force_quirks: true,
                         }));
                         state = State::Data;
@@ -691,6 +744,8 @@ impl<'a> Tokenizer<'a> {
                         errors.push(HtmlParseError::InvalidDoctype);
                         tokens.push(Token::Doctype(DoctypeToken {
                             name: None,
+                            public_id: None,
+                            system_id: None,
                             force_quirks: true,
                         }));
                         state = State::Data;
@@ -702,19 +757,273 @@ impl<'a> Tokenizer<'a> {
                     }
                 },
                 State::DoctypeName => match ch {
-                    c if is_html_whitespace(c) => {
-                        current_doctype_force_quirks = true;
-                    }
+                    // Whitespace ends the name and moves past it; the previous
+                    // code wrongly forced quirks and stayed in this state, so
+                    // `<!DOCTYPE html PUBLIC ...>` never reached the identifiers.
+                    c if is_html_whitespace(c) => state = State::AfterDoctypeName,
                     '>' => {
-                        tokens.push(Token::Doctype(DoctypeToken {
-                            name: Some(std::mem::take(&mut current_doctype_name)),
-                            force_quirks: current_doctype_force_quirks,
-                        }));
-                        current_doctype_force_quirks = false;
+                        emit_doctype!();
                         state = State::Data;
                     }
                     _ => current_doctype_name.push(ch.to_ascii_lowercase()),
                 },
+                // §13.2.5.53. After the name, only the `PUBLIC` / `SYSTEM`
+                // keywords are meaningful; anything else is a bogus DOCTYPE.
+                State::AfterDoctypeName => match ch {
+                    c if is_html_whitespace(c) => {}
+                    '>' => {
+                        emit_doctype!();
+                        state = State::Data;
+                    }
+                    _ => {
+                        // Gather the (case-insensitive) keyword. Only ASCII
+                        // letters are consumed, so a `>` or whitespace that ends
+                        // a malformed keyword is left for the bogus-doctype scan.
+                        let mut keyword = String::from(ch);
+                        while keyword.len() < 6 {
+                            match cursor.peek() {
+                                Some(next) if next.is_ascii_alphabetic() => {
+                                    keyword.push(cursor.consume().unwrap());
+                                }
+                                _ => break,
+                            }
+                        }
+                        if keyword.eq_ignore_ascii_case("public") {
+                            state = State::AfterDoctypePublicKeyword;
+                        } else if keyword.eq_ignore_ascii_case("system") {
+                            state = State::AfterDoctypeSystemKeyword;
+                        } else {
+                            errors.push(HtmlParseError::InvalidDoctype);
+                            current_doctype_force_quirks = true;
+                            state = State::BogusDoctype;
+                        }
+                    }
+                },
+                // §13.2.5.54.
+                State::AfterDoctypePublicKeyword => match ch {
+                    c if is_html_whitespace(c) => state = State::BeforeDoctypePublicIdentifier,
+                    '"' => {
+                        current_doctype_public_id = Some(String::new());
+                        state = State::DoctypePublicIdentifierDoubleQuoted;
+                    }
+                    '\'' => {
+                        current_doctype_public_id = Some(String::new());
+                        state = State::DoctypePublicIdentifierSingleQuoted;
+                    }
+                    '>' => {
+                        errors.push(HtmlParseError::InvalidDoctype);
+                        current_doctype_force_quirks = true;
+                        emit_doctype!();
+                        state = State::Data;
+                    }
+                    _ => {
+                        errors.push(HtmlParseError::InvalidDoctype);
+                        current_doctype_force_quirks = true;
+                        cursor.reconsume();
+                        state = State::BogusDoctype;
+                    }
+                },
+                // §13.2.5.55.
+                State::BeforeDoctypePublicIdentifier => match ch {
+                    c if is_html_whitespace(c) => {}
+                    '"' => {
+                        current_doctype_public_id = Some(String::new());
+                        state = State::DoctypePublicIdentifierDoubleQuoted;
+                    }
+                    '\'' => {
+                        current_doctype_public_id = Some(String::new());
+                        state = State::DoctypePublicIdentifierSingleQuoted;
+                    }
+                    '>' => {
+                        errors.push(HtmlParseError::InvalidDoctype);
+                        current_doctype_force_quirks = true;
+                        emit_doctype!();
+                        state = State::Data;
+                    }
+                    _ => {
+                        errors.push(HtmlParseError::InvalidDoctype);
+                        current_doctype_force_quirks = true;
+                        cursor.reconsume();
+                        state = State::BogusDoctype;
+                    }
+                },
+                // §13.2.5.56 / §13.2.5.57. Identifiers keep their case.
+                State::DoctypePublicIdentifierDoubleQuoted => match ch {
+                    '"' => state = State::AfterDoctypePublicIdentifier,
+                    '>' => {
+                        errors.push(HtmlParseError::InvalidDoctype);
+                        current_doctype_force_quirks = true;
+                        emit_doctype!();
+                        state = State::Data;
+                    }
+                    _ => {
+                        if let Some(id) = current_doctype_public_id.as_mut() {
+                            id.push(ch);
+                        }
+                    }
+                },
+                State::DoctypePublicIdentifierSingleQuoted => match ch {
+                    '\'' => state = State::AfterDoctypePublicIdentifier,
+                    '>' => {
+                        errors.push(HtmlParseError::InvalidDoctype);
+                        current_doctype_force_quirks = true;
+                        emit_doctype!();
+                        state = State::Data;
+                    }
+                    _ => {
+                        if let Some(id) = current_doctype_public_id.as_mut() {
+                            id.push(ch);
+                        }
+                    }
+                },
+                // §13.2.5.58.
+                State::AfterDoctypePublicIdentifier => match ch {
+                    c if is_html_whitespace(c) => {
+                        state = State::BetweenDoctypePublicAndSystemIdentifiers;
+                    }
+                    '>' => {
+                        emit_doctype!();
+                        state = State::Data;
+                    }
+                    '"' => {
+                        errors.push(HtmlParseError::InvalidDoctype);
+                        current_doctype_system_id = Some(String::new());
+                        state = State::DoctypeSystemIdentifierDoubleQuoted;
+                    }
+                    '\'' => {
+                        errors.push(HtmlParseError::InvalidDoctype);
+                        current_doctype_system_id = Some(String::new());
+                        state = State::DoctypeSystemIdentifierSingleQuoted;
+                    }
+                    _ => {
+                        errors.push(HtmlParseError::InvalidDoctype);
+                        current_doctype_force_quirks = true;
+                        cursor.reconsume();
+                        state = State::BogusDoctype;
+                    }
+                },
+                // §13.2.5.59.
+                State::BetweenDoctypePublicAndSystemIdentifiers => match ch {
+                    c if is_html_whitespace(c) => {}
+                    '>' => {
+                        emit_doctype!();
+                        state = State::Data;
+                    }
+                    '"' => {
+                        current_doctype_system_id = Some(String::new());
+                        state = State::DoctypeSystemIdentifierDoubleQuoted;
+                    }
+                    '\'' => {
+                        current_doctype_system_id = Some(String::new());
+                        state = State::DoctypeSystemIdentifierSingleQuoted;
+                    }
+                    _ => {
+                        errors.push(HtmlParseError::InvalidDoctype);
+                        current_doctype_force_quirks = true;
+                        cursor.reconsume();
+                        state = State::BogusDoctype;
+                    }
+                },
+                // §13.2.5.60.
+                State::AfterDoctypeSystemKeyword => match ch {
+                    c if is_html_whitespace(c) => state = State::BeforeDoctypeSystemIdentifier,
+                    '"' => {
+                        current_doctype_system_id = Some(String::new());
+                        state = State::DoctypeSystemIdentifierDoubleQuoted;
+                    }
+                    '\'' => {
+                        current_doctype_system_id = Some(String::new());
+                        state = State::DoctypeSystemIdentifierSingleQuoted;
+                    }
+                    '>' => {
+                        errors.push(HtmlParseError::InvalidDoctype);
+                        current_doctype_force_quirks = true;
+                        emit_doctype!();
+                        state = State::Data;
+                    }
+                    _ => {
+                        errors.push(HtmlParseError::InvalidDoctype);
+                        current_doctype_force_quirks = true;
+                        cursor.reconsume();
+                        state = State::BogusDoctype;
+                    }
+                },
+                // §13.2.5.61.
+                State::BeforeDoctypeSystemIdentifier => match ch {
+                    c if is_html_whitespace(c) => {}
+                    '"' => {
+                        current_doctype_system_id = Some(String::new());
+                        state = State::DoctypeSystemIdentifierDoubleQuoted;
+                    }
+                    '\'' => {
+                        current_doctype_system_id = Some(String::new());
+                        state = State::DoctypeSystemIdentifierSingleQuoted;
+                    }
+                    '>' => {
+                        errors.push(HtmlParseError::InvalidDoctype);
+                        current_doctype_force_quirks = true;
+                        emit_doctype!();
+                        state = State::Data;
+                    }
+                    _ => {
+                        errors.push(HtmlParseError::InvalidDoctype);
+                        current_doctype_force_quirks = true;
+                        cursor.reconsume();
+                        state = State::BogusDoctype;
+                    }
+                },
+                // §13.2.5.62 / §13.2.5.63. Identifiers keep their case.
+                State::DoctypeSystemIdentifierDoubleQuoted => match ch {
+                    '"' => state = State::AfterDoctypeSystemIdentifier,
+                    '>' => {
+                        errors.push(HtmlParseError::InvalidDoctype);
+                        current_doctype_force_quirks = true;
+                        emit_doctype!();
+                        state = State::Data;
+                    }
+                    _ => {
+                        if let Some(id) = current_doctype_system_id.as_mut() {
+                            id.push(ch);
+                        }
+                    }
+                },
+                State::DoctypeSystemIdentifierSingleQuoted => match ch {
+                    '\'' => state = State::AfterDoctypeSystemIdentifier,
+                    '>' => {
+                        errors.push(HtmlParseError::InvalidDoctype);
+                        current_doctype_force_quirks = true;
+                        emit_doctype!();
+                        state = State::Data;
+                    }
+                    _ => {
+                        if let Some(id) = current_doctype_system_id.as_mut() {
+                            id.push(ch);
+                        }
+                    }
+                },
+                // §13.2.5.64. A stray character here is a parse error but does
+                // not force quirks; the token is finished at the next `>`.
+                State::AfterDoctypeSystemIdentifier => match ch {
+                    c if is_html_whitespace(c) => {}
+                    '>' => {
+                        emit_doctype!();
+                        state = State::Data;
+                    }
+                    _ => {
+                        errors.push(HtmlParseError::InvalidDoctype);
+                        cursor.reconsume();
+                        state = State::BogusDoctype;
+                    }
+                },
+                // §13.2.5.67. Everything up to the closing `>` is ignored; the
+                // already-accumulated token (with its force-quirks flag) is
+                // emitted unchanged.
+                State::BogusDoctype => {
+                    if ch == '>' {
+                        emit_doctype!();
+                        state = State::Data;
+                    }
+                }
 
                 // --- RAWTEXT (§13.2.5.3–13.2.5.6) ---
                 State::RawText => match ch {
@@ -1089,11 +1398,29 @@ impl<'a> Tokenizer<'a> {
             | State::MarkupDeclarationOpen
             | State::Doctype
             | State::BeforeDoctypeName
-            | State::DoctypeName => errors.push(HtmlParseError::UnexpectedEof),
+            | State::DoctypeName
+            // A DOCTYPE that never reached its closing `>` before EOF is
+            // malformed; report it like the other incomplete-DOCTYPE states.
+            | State::AfterDoctypeName
+            | State::AfterDoctypePublicKeyword
+            | State::BeforeDoctypePublicIdentifier
+            | State::DoctypePublicIdentifierDoubleQuoted
+            | State::DoctypePublicIdentifierSingleQuoted
+            | State::AfterDoctypePublicIdentifier
+            | State::BetweenDoctypePublicAndSystemIdentifiers
+            | State::AfterDoctypeSystemKeyword
+            | State::BeforeDoctypeSystemIdentifier
+            | State::DoctypeSystemIdentifierDoubleQuoted
+            | State::DoctypeSystemIdentifierSingleQuoted
+            | State::AfterDoctypeSystemIdentifier => {
+                errors.push(HtmlParseError::UnexpectedEof)
+            }
             // In the RAWTEXT/RCDATA/script-data content models an unexpected EOF
             // simply ends the (already-flushed) text run and emits EOF, matching
-            // the spec's "Emit an end-of-file token" behaviour.
-            State::Data
+            // the spec's "Emit an end-of-file token" behaviour. A bogus DOCTYPE
+            // at EOF likewise ends without a parse error (§13.2.5.67).
+            State::BogusDoctype
+            | State::Data
             | State::RawText
             | State::RawTextLessThanSign
             | State::RawTextEndTagOpen
@@ -1412,6 +1739,68 @@ mod tests {
             vec![
                 Token::Doctype(DoctypeToken {
                     name: Some("html".to_string()),
+                    public_id: None,
+                    system_id: None,
+                    force_quirks: false,
+                }),
+                Token::Eof,
+            ]
+        );
+    }
+
+    #[test]
+    fn tokenizes_doctype_with_public_identifier_only() {
+        let tokens = Tokenizer::new(
+            "<!DOCTYPE HTML PUBLIC \"-//W3C//DTD HTML 4.0 Transitional//EN\">",
+        )
+        .tokenize();
+        assert_eq!(
+            tokens,
+            vec![
+                Token::Doctype(DoctypeToken {
+                    // The name is ASCII-lowercased; identifiers keep their case.
+                    name: Some("html".to_string()),
+                    public_id: Some("-//W3C//DTD HTML 4.0 Transitional//EN".to_string()),
+                    system_id: None,
+                    force_quirks: false,
+                }),
+                Token::Eof,
+            ]
+        );
+    }
+
+    #[test]
+    fn tokenizes_doctype_with_public_and_system_identifiers() {
+        let tokens = Tokenizer::new(
+            "<!DOCTYPE HTML PUBLIC \"-//W3C//DTD HTML 4.01 Transitional//EN\" \"http://www.w3.org/TR/html4/loose.dtd\">",
+        )
+        .tokenize();
+        assert_eq!(
+            tokens,
+            vec![
+                Token::Doctype(DoctypeToken {
+                    name: Some("html".to_string()),
+                    public_id: Some("-//W3C//DTD HTML 4.01 Transitional//EN".to_string()),
+                    system_id: Some("http://www.w3.org/TR/html4/loose.dtd".to_string()),
+                    force_quirks: false,
+                }),
+                Token::Eof,
+            ]
+        );
+    }
+
+    #[test]
+    fn tokenizes_doctype_with_system_identifier_via_system_keyword() {
+        // A `SYSTEM`-keyword DOCTYPE has a system identifier but no public one.
+        let tokens =
+            Tokenizer::new("<!DOCTYPE html SYSTEM \"about:legacy-compat\">").tokenize();
+        assert_eq!(
+            tokens,
+            vec![
+                Token::Doctype(DoctypeToken {
+                    name: Some("html".to_string()),
+                    public_id: None,
+                    system_id: Some("about:legacy-compat".to_string()),
                     force_quirks: false,
                 }),
                 Token::Eof,
