@@ -27,6 +27,14 @@ DOM 世代ベースのキャッシュで削減する。
 - `<style>` 再パースの差分化（追記された stylesheet のみパースして resolver に追加する等）は
   効果測定の上で判断する
 
+## 関連メモ（047 レビュー由来、2026-07-13）
+
+- 047 でインライン style 属性がカスケードに統合された結果、`compute_style_with_pseudo` が
+  要素ごとに style 属性文字列を毎回 `parse_style_attribute` で再パースする
+  （resolver の per-node キャッシュが効く同一 resolver 内では1回だが、resolver 再構築のたびに再パース）。
+  世代ベースキャッシュ導入時に、style 属性文字列（または属性世代）をキーとした
+  解析済み宣言のキャッシュも合わせて検討する。
+
 ## 関連メモ（016-15 由来）
 
 - 016-15 で style 無効化を文書単位に絞ったが、`document_root_for_node` で owner document を
