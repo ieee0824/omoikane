@@ -1,7 +1,7 @@
 ---
 number: 058
 slug: boa-fork-ic-fix
-status: open
+status: closed
 ---
 
 # Boa をフォークして inline cache バグを根治する
