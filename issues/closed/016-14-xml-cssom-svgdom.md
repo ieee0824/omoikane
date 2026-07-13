@@ -2,7 +2,7 @@
 number: 016-14
 slug: xml-cssom-svgdom
 parent: 016
-status: open
+status: closed
 ---
 
 # XML/XHTML・CSSOM・SVG DOM
@@ -33,4 +33,4 @@ status: open
 
 - [x] [016-14-1 XML/XHTML サブ文書のパースと DOM 化](../closed/016-14-1-xml-subdocuments.md)（PR #124, test 69/98 PASS, 90→92）
 - [x] [016-14-2 CSSOM](../closed/016-14-2-cssom.md)（PR #123, test 72 PASS, 単独 90→91）
-- [ ] [016-14-3 SVG DOM 最小実装と getSVGDocument](016-14-3-svg-dom.md)（test 69/74/75/77/79、14-1 が前提）
+- [x] [016-14-3 SVG DOM 最小実装と getSVGDocument](../closed/016-14-3-svg-dom.md)（PR #125, test 74/75/77/79 PASS, 92→97）

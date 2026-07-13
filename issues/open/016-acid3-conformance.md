@@ -69,6 +69,7 @@ Acid3 は DOM / CSS / HTML parser / scripting / networking まで含む複合テ
 | 054 table tree construction（暗黙 tbody 生成） | **88/100** | HTML パーサに "in table" / "in table body" 挿入モードを実装。`<table>` 直下の `<tr>`（および `<td>`/`<th>`）に対し暗黙 `<tbody>`（必要なら `<tr>` も）を生成し、明示 `<thead>`/`<tbody>`/`<tfoot>` は二重ラップしない。section 閉じタグ後の table 内空白テキストの配置も仕様に寄せた。test 29（cloneNode + tBodies）が新規 PASS（FAITHFUL/DIRECT 両モード 88/100、実測）。test 5 は暗黙 tbody 前提（expectation 11）を通過したが、`document.forms` / `document.links` 未実装のため後続で残存。test 4 も同 API（`document.forms[0]`）が原因で残存（tbody 前まで到達せず）。foster parenting は本 issue でも対象外。 |
 | 055 document.forms / document.links の HTMLCollection | **90/100** | Document の live HTMLCollection（`forms` / `links` / `images` / `anchors`）を実装。tree 順・index/`length`・`item`/`namedItem`・`name`/`id` 名前アクセスに対応し、保持した参照でも DOM 変更を反映する live 性を持つ（`collect()` を毎アクセス再実行）。`links` は `href` 属性を持つ `<a>`/`<area>` のみ、`anchors` は `name` を持つ `<a>` のみを対象とし、各コレクションはその Document 自身の tree にスコープされる（iframe contentDocument の form/link がメイン文書に混ざらない）。test 4 / test 5 が新規 PASS（FAITHFUL/DIRECT 両モード 90/100、実測）。加えて FAITHFUL harness の stall 判定を「保留タイマーが残る間は打ち切らない」よう修正（`has_pending_timers()` を条件に追加）。`document.links` が解決したことで新規に発火する test 80 の retry ループ（linktest の iframe onload 待ち）で FAITHFUL が index 80 で停止していた退行を解消し、両モードとも index 100 まで到達。 |
 | 016-14-1 XML/XHTML サブ文書 | **92/100** | strict XML parser、XML MIME 分岐、名前空間／大小文字保持／doctype IDL、XHTML script 実行、XHTML `Document.title` / `forms` を実装。test 69 / 98 が新規 PASS（FAITHFUL/DIRECT 両モード 92/100、index 100）。test 70 は従来も空 skeleton により PASS だったが、不正 UTF-8 と非 UTF-8 encoding 宣言を parser 自身の fatal error にした。test 80 は接続済み iframe の `src` 再 navigation / 動的 onload 未配線で XML script の検査まで到達せず残存。 |
+| 016-14-2 CSSOM / 016-14-3 SVG DOM | **97/100** | CSSOM（styleSheets/cssRules/insertRule/ownerNode、PR #123, test 72）と SVG DOM（SVGElement 基底 + SVGSVGElement/SVGRectElement/SVGTextContentElement、getSVGDocument、PR #125, test 74/75/77/79）を実装。FAITHFUL/DIRECT 両モード 97/100、index 100。残存は test 64（object の URL IDL 反射）/ 71（document.write 後の tree construction）/ 80（iframe 再 navigation・ネットワーク）。 |
 
 ### 82/100 到達時（016-12 `createDocument` 実装）に新規 PASS したテスト
 
@@ -138,7 +139,7 @@ Acid3 ギャップ分析（`tests/fixtures/acid3/GAP_ANALYSIS.md`）に基づく
 - [x] [016-11 NodeIterator / TreeWalker / Range](../closed/016-11-traversal-and-range.md)（PR #111, 70→79）
 - [x] [016-12 DOM2 Core / 名前空間 / DOMException](../closed/016-12-dom2-core-namespaces.md)（PR #113 ほか, test 98 の残差は 016-14 へ）
 - [ ] [016-13 HTMLTableElement / Form / Input / Select / Button API](016-13-table-form-apis.md)
-- [ ] [016-14 XML/XHTML・CSSOM・SVG DOM](016-14-xml-cssom-svgdom.md)
+- [ ] [016-14 XML/XHTML・CSSOM・SVG DOM](../closed/016-14-xml-cssom-svgdom.md)
 - [x] [016-15 getComputedStyle のサブ文書対応（selectorTest 解放の前提）](../closed/016-15-computed-style-subdocument.md)（PR #109, 58→63）
 - [x] [016-16 iframe の load イベント発火](../closed/016-16-iframe-onload-event.md)（PR #115, 83/100 維持、test 69 retry 解消）
 - [x] [050 CSS media query の構文解析・評価と computed style 反映](../closed/050-css-media-query-evaluation.md)（PR #114, 82→83）
