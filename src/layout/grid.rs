@@ -1,7 +1,7 @@
 //! Basic explicit CSS Grid track sizing and row-major auto-placement.
 
 use crate::css::{ComputedStyle, ComputedValue, StyleResolver};
-use crate::dom::{Node, NodeHandle, NodeType};
+use crate::dom::{NodeHandle, NodeType};
 
 use super::{
     BoxDimensions, EdgeSizes, LayoutBox, Rect, intrinsic_width, is_display_none,
@@ -33,12 +33,13 @@ pub(super) fn layout_grid_container(
     x: f32,
     y: f32,
     width: f32,
+    containing_block_height: f32,
     viewport: Rect,
 ) -> Option<LayoutBox> {
     let mut items = Vec::new();
     let mut positioned = Vec::new();
-    for child in node.child_nodes() {
-        if child.node_type() != NodeType::Element { continue; }
+    for child in crate::dom::Node::child_nodes(node) {
+        if crate::dom::Node::node_type(&child) != NodeType::Element { continue; }
         let child_style = resolver.computed_style(&child);
         if is_display_none(&child_style) { continue; }
         if is_out_of_flow_positioned(&child_style) {
@@ -57,13 +58,16 @@ pub(super) fn layout_grid_container(
     let column_intrinsics = auto_column_intrinsics(&columns, &items, resolver);
     let column_widths = resolve_tracks(&columns, width, column_gap, &column_intrinsics);
     let row_count = items.len().div_ceil(columns.len()).max(explicit_rows.len());
+    let specified_height = resolved_length(&style, "height", containing_block_height)
+        .map(|height| super::border_box_adjust_height(&style, height, &padding, &border));
+    let row_basis = specified_height.unwrap_or(0.0);
 
     let mut laid_out = Vec::new();
     let mut content_row_heights = vec![0.0f32; row_count];
     for (index, child) in items.iter().enumerate() {
         let column = index % columns.len();
         let row = index / columns.len();
-        let height = explicit_rows.get(row).and_then(|track| fixed_track(*track, 0.0)).unwrap_or(0.0);
+        let height = explicit_rows.get(row).and_then(|track| fixed_track(*track, row_basis)).unwrap_or(0.0);
         let containing = Rect { x: 0.0, y: 0.0, width: column_widths[column], height };
         if let Some(layout) = layout_node(child, resolver, containing, viewport, None) {
             content_row_heights[row] = content_row_heights[row].max(layout.total_height());
@@ -71,9 +75,6 @@ pub(super) fn layout_grid_container(
         }
     }
 
-    let specified_height = resolved_length(&style, "height", 0.0)
-        .map(|height| super::border_box_adjust_height(&style, height, &padding, &border));
-    let row_basis = specified_height.unwrap_or(0.0);
     let mut row_tracks = explicit_rows;
     row_tracks.resize(row_count, Track::Auto);
     let row_heights = resolve_tracks(&row_tracks, row_basis, row_gap, &content_row_heights);

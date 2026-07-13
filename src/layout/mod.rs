@@ -926,7 +926,8 @@ fn layout_element(
     }
     if is_grid_container(&style) {
         return layout_grid_container(
-            node, resolver, style, margin, padding, border, x, y, width, viewport,
+            node, resolver, style, margin, padding, border, x, y, width,
+            containing_block.height, viewport,
         );
     }
 

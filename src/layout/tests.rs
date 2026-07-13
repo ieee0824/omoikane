@@ -1436,6 +1436,25 @@ fn creates_implicit_grid_rows_using_row_content_height() {
 }
 
 #[test]
+fn resolves_percentage_grid_row_against_explicit_container_height() {
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let grid = NodeHandle::element("div");
+    let child = NodeHandle::element("article");
+    document.append_child(body.clone());
+    body.append_child(grid.clone());
+    grid.append_child(child);
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(Origin::Author, parse_stylesheet(
+        "body { margin: 0; } div { display: grid; height: 200px; grid-template-rows: 50%; } article { height: 100%; }"
+    ).unwrap());
+    let layout = layout_tree(&body, &mut resolver, Rect { x: 0.0, y: 0.0, width: 200.0, height: 0.0 }).unwrap();
+    let child = &layout.children[0].children[0];
+    assert_eq!(child.dimensions.content.height, 100.0);
+}
+
+#[test]
 fn grows_last_flex_item_to_fill_remaining_space() {
     let document = NodeHandle::document();
     let body = NodeHandle::element("body");
