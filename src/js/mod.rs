@@ -3183,10 +3183,20 @@ fn document_reset_native(
 /// attribute reflection (e.g. `HTMLObjectElement.data`), which must expose an
 /// absolute URL rather than the raw attribute value.
 ///
-/// The original reference is returned unchanged when there is no base URL, or
-/// when resolution fails (e.g. a non-HTTP(S) scheme such as `mailto:`), matching
-/// the spec's "return the attribute value" fallback. A missing argument yields
-/// the empty string.
+/// Unlike [`crate::http::url::resolve_url`] (which targets request URLs and so
+/// unconditionally drops any `#fragment`), URL IDL reflection must preserve the
+/// fragment. This wrapper therefore:
+///
+/// - splits the reference at the first `#`, resolves only the part before it,
+///   then re-attaches the `#fragment` to the resolved result;
+/// - treats an empty reference (empty once the fragment is removed) as resolving
+///   to the base URL itself (RFC 3986 §5.2), so `""` reflects the base URL and
+///   `"#frag"` reflects the base URL plus that fragment — rather than being
+///   resolved as a relative path against the base directory;
+/// - falls back to the raw reference (fragment included) when there is no base
+///   URL, or when resolution of the non-fragment part fails (e.g. a non-HTTP(S)
+///   scheme such as `mailto:`), matching the spec's "return the attribute value"
+///   fallback. A missing argument yields the empty string.
 fn resolve_url_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
     let reference = match args.first() {
         Some(value) => value.to_string(context)?.to_std_string_escaped(),
@@ -3195,10 +3205,33 @@ fn resolve_url_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> J
     with_host_state(|state| {
         let base = state.borrow().base_url.clone();
         let resolved = match base {
-            Some(base) => match crate::http::url::resolve_url(&base, &reference) {
-                Ok(url) => url.to_string(),
-                Err(_) => reference,
-            },
+            Some(base) => {
+                // Preserve any fragment: resolve only the part before the first
+                // `#`, then re-attach `#fragment` to the resolved output.
+                let (without_fragment, fragment) = match reference.split_once('#') {
+                    Some((before, after)) => (before, Some(after)),
+                    None => (reference.as_str(), None),
+                };
+                // An empty reference (RFC 3986 §5.2) resolves to the base URL
+                // itself. `None` marks a resolution failure -> raw fallback.
+                let base_part = if without_fragment.is_empty() {
+                    Some(base.to_string())
+                } else {
+                    crate::http::url::resolve_url(&base, without_fragment)
+                        .ok()
+                        .map(|url| url.to_string())
+                };
+                match base_part {
+                    Some(mut s) => {
+                        if let Some(frag) = fragment {
+                            s.push('#');
+                            s.push_str(frag);
+                        }
+                        s
+                    }
+                    None => reference.clone(),
+                }
+            }
             None => reference,
         };
         Ok(js_string!(resolved.as_str()).into())
@@ -8959,6 +8992,60 @@ mod tests {
             .as_deref(),
             Some("\"\""),
             "object.data with no data attribute must be the empty string"
+        );
+    }
+
+    /// `HTMLObjectElement.data` reflection preserves a `#fragment` on the
+    /// reference: the part before `#` is resolved against the base URL and the
+    /// fragment is re-attached to the resolved absolute URL.
+    #[test]
+    fn object_data_preserves_fragment_when_resolving() {
+        let mut runtime = JsRuntime::new().unwrap();
+        runtime.set_base_url("http://example.com/dir/page.html".parse().unwrap());
+        assert_eq!(
+            eval_string_value(
+                &mut runtime,
+                "var o = document.createElement('object'); o.setAttribute('data', 'test.html#frag'); o.data"
+            )
+            .as_deref(),
+            Some("http://example.com/dir/test.html#frag"),
+            "object.data must resolve the path and keep the fragment"
+        );
+    }
+
+    /// A fragment-only reference (`#frag`) is an empty reference once the
+    /// fragment is removed, so it resolves to the base URL itself (RFC 3986
+    /// §5.2) with the fragment re-attached — not to the base directory.
+    #[test]
+    fn object_data_fragment_only_reference_resolves_to_base_with_fragment() {
+        let mut runtime = JsRuntime::new().unwrap();
+        runtime.set_base_url("http://example.com/dir/page.html".parse().unwrap());
+        assert_eq!(
+            eval_string_value(
+                &mut runtime,
+                "var o = document.createElement('object'); o.setAttribute('data', '#frag'); o.data"
+            )
+            .as_deref(),
+            Some("http://example.com/dir/page.html#frag"),
+            "a fragment-only reference must resolve to the base URL plus the fragment"
+        );
+    }
+
+    /// An empty reference (`data=""`) resolves to the base URL string itself
+    /// (RFC 3986 §5.2), rather than being treated as a relative path against the
+    /// base directory.
+    #[test]
+    fn object_data_empty_reference_resolves_to_base_url() {
+        let mut runtime = JsRuntime::new().unwrap();
+        runtime.set_base_url("http://example.com/dir/page.html".parse().unwrap());
+        assert_eq!(
+            eval_string_value(
+                &mut runtime,
+                "var o = document.createElement('object'); o.setAttribute('data', ''); o.data"
+            )
+            .as_deref(),
+            Some("http://example.com/dir/page.html"),
+            "an empty reference must resolve to the base URL itself"
         );
     }
 
