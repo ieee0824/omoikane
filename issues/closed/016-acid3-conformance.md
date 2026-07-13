@@ -2,7 +2,7 @@
 number: 016
 slug: acid3-conformance
 parent:
-status: open
+status: closed
 ---
 
 # Acid3 対応
@@ -72,6 +72,7 @@ Acid3 は DOM / CSS / HTML parser / scripting / networking まで含む複合テ
 | 016-14-2 CSSOM / 016-14-3 SVG DOM | **97/100** | CSSOM（styleSheets/cssRules/insertRule/ownerNode、PR #123, test 72）と SVG DOM（SVGElement 基底 + SVGSVGElement/SVGRectElement/SVGTextContentElement、getSVGDocument、PR #125, test 74/75/77/79）を実装。FAITHFUL/DIRECT 両モード 97/100、index 100。残存は test 64（object の URL IDL 反射）/ 71（document.write 後の tree construction）/ 80（iframe 再 navigation・ネットワーク）。 |
 | 064 object.data の URL 反射 | **98/100** | native binding `__omoikane_resolve_url` を追加し `HTMLObjectElement.data` を URL 反射化（相対→絶対解決、fragment 保持、空参照は base URL、解決失敗は属性値フォールバック）。test 64 が新規 PASS（PR #136、FAITHFUL/DIRECT 両モード 98/100、実測）。残存は test 71（065）/ 80（066）。 |
 | 065 document.write の完全文書パース + DOCTYPE 識別子 | **99/100** | 空文書への write を完全文書パースに分岐（doctype + 暗黙 html/head/body 構築）、トークナイザに DOCTYPE PUBLIC/SYSTEM 状態機械を追加、tree builder が doctype に実 publicId/systemId を付与。test 71 が新規 PASS・test 72 は維持（PR #137、FAITHFUL/DIRECT 両モード 99/100、実測）。残存は test 80（066）のみ。 |
+| 066 iframe src 再ナビゲーション + 動的 on* 配線 | **100/100** | `set_attribute_native` が接続済み iframe `src` / object `data` の実変化時に再ナビゲーションをスケジュールし load を dispatch。動的 `setAttribute('on*', ...)` のハンドラ配線・`removeAttribute` での解除を追加。同伴修正としてノード identity を `Rc::as_ptr` から単調カウンタ化（アドレス再利用による JS ラッパのエイリアシング解消、これが無いと flaky に 98〜99 へ破損）。test 80 が新規 PASS（PR #138、FAITHFUL/DIRECT 両モード 100/100、実測・10 連続バッチで安定）。**Acid3 完走。** |
 
 ### 82/100 到達時（016-12 `createDocument` 実装）に新規 PASS したテスト
 
@@ -126,6 +127,7 @@ Acid3 は DOM / CSS / HTML parser / scripting / networking まで含む複合テ
   - test 64 → [064 object.data URL 反射](064-object-data-url-reflection.md)
   - test 71 → [065 document.write 完全文書パース + doctype IDL](065-document-write-full-document-parsing.md)
   - test 80 → [066 iframe src 再ナビゲーション + 動的 on* 配線](066-iframe-renavigation-dynamic-onload.md)
+- ~~上記3テスト~~ → 064（97→98）・065（98→99）・066（99→100）で解消（2026-07-13）。**残存テストなし。**
 
 ## 子issue
 
@@ -154,4 +156,14 @@ Acid3 ギャップ分析（`tests/fixtures/acid3/GAP_ANALYSIS.md`）に基づく
 - [x] [055 document.forms / document.links の HTMLCollection](../closed/055-document-forms-links-collections.md)（PR #120, test 4/5 PASS, 88→90）
 - [x] [064 HTMLObjectElement.data の URL 反射](../closed/064-object-data-url-reflection.md)（PR #136, test 64 PASS, 97→98）
 - [x] [065 document.write の完全文書パースと doctype IDL](../closed/065-document-write-full-document-parsing.md)（PR #137, test 71 PASS, 98→99）
-- [ ] [066 接続済み iframe の src 再ナビゲーションと動的 on* 属性配線](066-iframe-renavigation-dynamic-onload.md)（test 80）
+- [x] [066 接続済み iframe の src 再ナビゲーションと動的 on* 属性配線](../closed/066-iframe-renavigation-dynamic-onload.md)（PR #138, test 80 PASS, 99→100）
+
+## クローズ記録（2026-07-13）
+
+受け入れ条件をすべて達成してクローズ:
+
+- **Acid3 の実行とスコア取得がローカルで再現できる** — `cargo run --example acid3` で FAITHFUL / DIRECT 両ドライブモードを実行し、スコアと failure log を取得できる（016-1 の harness）
+- **主要 failure が子issueに分解され、追跡可能** — 全 failure を子issue（016-1〜016-16、050/051/054/055/064/065/066）に分解し、本ファイルのスコア推移表で追跡した
+- **Acid3 が通過** — **FAITHFUL / DIRECT 両モード 100/100（実測、reached index 100）**。0/100 から 23 の子issue（チェックリスト計）を経て達成
+
+派生した未解決の周辺課題は独立 issue として追跡継続: 046（document.write 仕様残差）、049（iframe 旧サブ文書の寿命管理）。

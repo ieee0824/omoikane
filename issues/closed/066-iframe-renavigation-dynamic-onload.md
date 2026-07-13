@@ -2,7 +2,7 @@
 number: 066
 slug: iframe-renavigation-dynamic-onload
 parent: 016
-status: open
+status: closed
 ---
 
 # 接続済み iframe の src 再ナビゲーションと動的 on* 属性配線（Acid3 test 80）
@@ -97,4 +97,13 @@ Fix 1/2 の実装により、本 issue の回帰リスク欄で「リスク低�
 
 ## 関連 issue
 
-- [049 iframe 再ロード時の旧サブ文書ノードの寿命管理](049-iframe-reload-node-lifetime.md) — 本 issue で再ナビゲーション経路が増えるため、stale 参照の実害が観測されたら 049 に着手する
+- [049 iframe 再ロード時の旧サブ文書ノードの寿命管理](../open/049-iframe-reload-node-lifetime.md) — 本 issue で再ナビゲーション経路が増えるため、stale 参照の実害が観測されたら 049 に着手する
+
+## クローズ記録（2026-07-13、PR #138）
+
+方針どおり Fix 1（set_attribute_native での再ナビゲーションスケジュール）・Fix 2（動的 on* content 属性配線）を実装し、
+追加知見のノード identity 単調カウンタ化（`NEXT_NODE_ID`）も同 PR に含めて受け入れ条件を達成。
+**Acid3 は FAITHFUL/DIRECT 両モード 100/100（実測、10 連続バッチでも安定）**、`cargo test --lib` 1121 passed。
+Copilot レビュー指摘 2 件（`__contentAttrHandlers` のプロトタイプ汚染 → `Object.create(null)` 化、
+object data 再ナビゲーションテストの内容検証強化）を修正済み。049 の残スコープは 049 で継続追跡。
+実装は Opus（general-purpose, model: opus）。
