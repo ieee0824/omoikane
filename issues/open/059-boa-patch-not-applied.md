@@ -41,6 +41,15 @@ boa_gc = { git = "https://github.com/ieee0824/boa", rev = "6b9778e" }
 - tokyo6.tokyo のレンダリングで `parseDecls` の "not a callable function" が出ない
 - Acid3 97/100 維持、全テスト維持
 
+## 検証結果 (2026-07-13)
+
+- `cargo build -j1`: PASS。`was not used in the crate graph` 警告なし
+- `cargo tree -i boa_engine`: `boa_engine v0.21.1 (https://github.com/ieee0824/boa?rev=6b9778e#6b9778ef)`
+- `cargo test --test boa_inline_cache -j1`: 1 passed
+- `cargo test --lib -j1`: 1048 passed、0 failed、26 ignored
+- `cargo run --example acid3 -j1`: faithful load / direct drive ともに 97/100、test index 100
+- `cargo run --example screenshot -j1 -- "https://tokyo6.tokyo/" /tmp/tokyo6-059.png`: 正常終了。ログに `parseDecls` および `not a callable function` なし
+
 ## 関連
 
 - 058 Boa フォークによる IC バグ根治(patch 方式が不発だった)

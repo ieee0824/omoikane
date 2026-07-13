@@ -12,7 +12,9 @@ crate-type = ["rlib", "cdylib"]
 ab_glyph = "0.2"
 base64 = "0.22"
 brotli = { version = "7", default-features = false, features = ["std"] }
-boa_engine = { version = "0.21.0", features = ["annex-b"] }
+# Pinned to the fork's `omoikane/ic-fix-0.21.1` head so the IC fix is
+# reproducible and cannot silently change under us.
+boa_engine = { git = "https://github.com/ieee0824/boa", rev = "6b9778e", features = ["annex-b"] }
 flate2 = "1.1"
 jpeg-decoder = "0.3"
 png = "0.17"
@@ -25,16 +27,8 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 webpki-roots = "1.0"
 
 [dev-dependencies]
-boa_gc = "0.21.0"
+boa_gc = { git = "https://github.com/ieee0824/boa", rev = "6b9778e" }
 rcgen = "0.13"
 
 [build-dependencies]
 cbindgen = "0.29"
-
-# Pinned to a commit SHA (not the mutable branch) so the IC fix is reproducible
-# and cannot silently change under us. rev 6b9778e is the fork's
-# `omoikane/ic-fix-0.21.1` head: "fix(vm): guard prototype-property inline cache
-# on the prototype's shape".
-[patch.crates-io]
-boa_engine = { git = "https://github.com/ieee0824/boa", rev = "6b9778e" }
-boa_gc = { git = "https://github.com/ieee0824/boa", rev = "6b9778e" }
