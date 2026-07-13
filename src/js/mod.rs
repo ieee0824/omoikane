@@ -294,11 +294,11 @@ impl HostState {
     ///
     /// The returned document's whole node tree is registered so it can be
     /// traversed and mutated through the DOM primitives exactly like the
-    /// top-level document. An empty or `about:blank` `src` yields an empty HTML
-    /// skeleton (`<html><head></head><body></body></html>`); any other `src` is
-    /// fetched and, only if it is served with an HTML content type, parsed as
-    /// HTML (otherwise the sub-document stays an empty skeleton so non-HTML
-    /// resources are never mined for markup).
+    /// top-level document. Iframes load their `src`, while objects load their
+    /// `data` attribute. An empty or `about:blank` resource yields an empty HTML
+    /// skeleton (`<html><head></head><body></body></html>`). Other resources are
+    /// parsed as HTML or XML (including SVG) according to their content type;
+    /// unsupported content types and load failures yield the empty skeleton.
     fn iframe_content_document(&mut self, iframe: &NodeHandle) -> NodeHandle {
         let resource_attribute = if iframe
             .tag_name()
@@ -356,12 +356,12 @@ impl HostState {
         document
     }
 
-    /// Fetches and constructs the sub-document for an iframe `src`.
+    /// Fetches and constructs a sub-document from an iframe `src` or object
+    /// `data` resource reference.
     ///
-    /// Returns an `about:blank` skeleton for an empty/`about:blank` `src`, for a
-    /// fetch failure, and for any resource whose content type is not an HTML
-    /// type. Only HTML resources (`text/html`, `application/xhtml+xml`) are
-    /// parsed into a real DOM tree.
+    /// Returns an `about:blank` skeleton for an empty/`about:blank` reference, a
+    /// fetch failure, or an unsupported content type. HTML resources are parsed
+    /// as HTML; XML MIME types, including SVG, are parsed as XML.
     fn load_iframe_document(&mut self, src: &str) -> NodeHandle {
         if src.is_empty() || src.eq_ignore_ascii_case("about:blank") {
             return blank_html_document();
@@ -395,10 +395,10 @@ impl HostState {
             }
             Some((mime, body)) if is_xml_mime_type(&mime) => crate::xml::parse(&body)
                 .unwrap_or_else(|_| blank_html_document()),
-            // Non-HTML content types (image/png, text/plain, XML, SVG, ...) are
-            // never parsed as HTML: the sub-document stays an empty skeleton so
-            // a page cannot mine markup out of a non-HTML resource. Acid3 tests
-            // 14 and 15 depend on this (a PNG/text file must not yield a <p>).
+            // Unsupported content types (image/png, text/plain, ...) leave the
+            // sub-document as an empty skeleton so a page cannot mine markup
+            // from them. Acid3 tests 14 and 15 depend on this (a PNG/text file
+            // must not yield a <p>).
             _ => blank_html_document(),
         }
     }
@@ -8192,6 +8192,7 @@ mod tests {
                     r#"var d = document.implementation.createDocument('http://www.w3.org/2000/svg', 'svg', null);
                        var rect = d.createElementNS('http://www.w3.org/2000/svg', 'rect');
                        var text = d.createElementNS('http://www.w3.org/2000/svg', 'text');
+                       var circle = d.createElementNS('http://www.w3.org/2000/svg', 'circle');
                        text.appendChild(d.createTextNode('abc'));
                        [d.documentElement instanceof SVGSVGElement,
                         rect instanceof SVGRectElement,
@@ -8199,13 +8200,14 @@ mod tests {
                         !!rect.width,
                         text instanceof SVGTextElement,
                         text instanceof SVGTextContentElement,
-                        text.getNumberOfChars()].join('|')"#,
+                        text.getNumberOfChars(),
+                        circle instanceof SVGElement].join('|')"#,
                 )
                 .unwrap()
                 .as_string()
                 .map(|s| s.to_std_string_escaped())
                 .as_deref(),
-            Some("true|true|SVGRectElement|true|true|true|3")
+            Some("true|true|SVGRectElement|true|true|true|3|true")
         );
         assert_eq!(
             runtime

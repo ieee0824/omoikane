@@ -45,7 +45,7 @@
       const namespace = __omoikane_node_namespace_uri(id);
       const constructors = namespace === SVG_NAMESPACE ? SVG_ELEMENT_CTORS : ELEMENT_CTORS;
       const ctor = constructors[(__omoikane_node_local_name(id) || __omoikane_node_name(id) || "").toLowerCase()];
-      node = ctor ? new ctor(id) : new Node(id);
+      node = ctor ? new ctor(id) : namespace === SVG_NAMESPACE ? new SVGElement(id) : new Node(id);
     } else {
       node = new Node(id);
     }
@@ -2003,8 +2003,8 @@
       define("tagName", qname);
       define("nodeName", qname);
       if (info.namespace === SVG_NAMESPACE) {
-        const ctor = SVG_ELEMENT_CTORS[info.localName.toLowerCase()];
-        if (ctor) Object.setPrototypeOf(node, ctor.prototype);
+        const ctor = SVG_ELEMENT_CTORS[info.localName.toLowerCase()] || SVGElement;
+        Object.setPrototypeOf(node, ctor.prototype);
       }
       return node;
     }
