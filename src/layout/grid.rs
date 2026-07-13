@@ -30,7 +30,6 @@ struct Placement {
 struct AxisRequest {
     start: Option<usize>,
     span: usize,
-    specified: bool,
 }
 
 pub(super) fn is_grid_container(style: &ComputedStyle) -> bool {
@@ -86,20 +85,21 @@ pub(super) fn layout_grid_container(
     let specified_height = resolved_length(&style, "height", containing_block_height)
         .map(|height| super::border_box_adjust_height(&style, height, &padding, &border));
     let row_basis = specified_height.unwrap_or(0.0);
+    let fixed_row_heights: Vec<_> = explicit_rows.iter()
+        .map(|track| fixed_track(*track, row_basis).unwrap_or(0.0))
+        .collect();
 
     let mut laid_out = Vec::new();
     let mut content_row_heights = vec![0.0f32; row_count];
     for (index, child) in items.iter().enumerate() {
         let placement = placements[index];
-        let height = track_area(&explicit_rows.iter().map(|track| fixed_track(*track, row_basis).unwrap_or(0.0)).collect::<Vec<_>>(), placement.row, placement.row_span, row_gap);
+        let height = track_area(&fixed_row_heights, placement.row, placement.row_span, row_gap);
         let containing = Rect { x: 0.0, y: 0.0, width: track_area(&column_widths, placement.column, placement.column_span, column_gap), height };
         if let Some(layout) = layout_node(child, resolver, containing, viewport, None) {
             let occupied = content_row_heights[placement.row..placement.row + placement.row_span].iter().sum::<f32>()
                 + row_gap * placement.row_span.saturating_sub(1) as f32;
-            let deficit = (layout.total_height() - occupied).max(0.0) / placement.row_span as f32;
-            for row in placement.row..placement.row + placement.row_span {
-                content_row_heights[row] += deficit;
-            }
+            let deficit = (layout.total_height() - occupied).max(0.0);
+            content_row_heights[placement.row + placement.row_span - 1] += deficit;
             laid_out.push((index, layout));
         }
     }
@@ -156,7 +156,7 @@ fn place_items(requests: &[(AxisRequest, AxisRequest)], columns: &mut Vec<Track>
     let mut occupied: Vec<Vec<bool>> = Vec::new();
     for explicit_phase in [true, false] {
         for (index, &(column, row)) in requests.iter().enumerate() {
-            if (column.specified || row.specified) != explicit_phase { continue; }
+            if (column.start.is_some() || row.start.is_some()) != explicit_phase { continue; }
             let column_span = column.span.max(1);
             let row_span = row.span.max(1);
             let mut candidate_row = row.start.unwrap_or(0);
@@ -214,18 +214,17 @@ fn area_is_free(occupied: &[Vec<bool>], column: usize, row: usize, column_span: 
 fn axis_request(style: &ComputedStyle, axis: &str, explicit_tracks: usize) -> AxisRequest {
     let start = grid_line(style.get(&format!("{axis}-start")));
     let end = grid_line(style.get(&format!("{axis}-end")));
-    let specified = !matches!(start, GridLine::Auto) || !matches!(end, GridLine::Auto);
     match (start, end) {
         (GridLine::Line(start), GridLine::Line(end)) => {
             let start = resolve_line(start, explicit_tracks);
             let end = resolve_line(end, explicit_tracks);
-            AxisRequest { start: Some(start.min(end)), span: start.abs_diff(end).max(1), specified }
+            AxisRequest { start: Some(start.min(end)), span: start.abs_diff(end).max(1) }
         }
-        (GridLine::Line(start), GridLine::Span(span)) => AxisRequest { start: Some(resolve_line(start, explicit_tracks)), span, specified },
-        (GridLine::Line(start), _) => AxisRequest { start: Some(resolve_line(start, explicit_tracks)), span: 1, specified },
-        (GridLine::Span(span), _) | (_, GridLine::Span(span)) => AxisRequest { start: None, span, specified },
-        (_, GridLine::Line(end)) => AxisRequest { start: Some(resolve_line(end, explicit_tracks).saturating_sub(1)), span: 1, specified },
-        _ => AxisRequest { start: None, span: 1, specified },
+        (GridLine::Line(start), GridLine::Span(span)) => AxisRequest { start: Some(resolve_line(start, explicit_tracks)), span },
+        (GridLine::Line(start), _) => AxisRequest { start: Some(resolve_line(start, explicit_tracks)), span: 1 },
+        (GridLine::Span(span), _) | (_, GridLine::Span(span)) => AxisRequest { start: None, span },
+        (_, GridLine::Line(end)) => AxisRequest { start: Some(resolve_line(end, explicit_tracks).saturating_sub(1)), span: 1 },
+        _ => AxisRequest { start: None, span: 1 },
     }
 }
 

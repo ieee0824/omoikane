@@ -1520,6 +1520,52 @@ fn auto_placement_skips_cells_occupied_by_explicit_items() {
 }
 
 #[test]
+fn overlapping_row_spans_assign_each_height_deficit_to_one_row() {
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let grid = NodeHandle::element("div");
+    document.append_child(body.clone());
+    body.append_child(grid.clone());
+    for class_name in ["first", "second"] {
+        let child = NodeHandle::element("article");
+        child.set_attribute("class", class_name);
+        grid.append_child(child);
+    }
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(Origin::Author, parse_stylesheet(
+        "body { margin: 0; } div { display: grid; grid-template-columns: repeat(2, 100px); } article { height: 100px; } .first { grid-column: 1; grid-row: 1 / 3; } .second { grid-column: 2; grid-row: 2 / 4; }"
+    ).unwrap());
+    let layout = layout_tree(&body, &mut resolver, Rect { x: 0.0, y: 0.0, width: 200.0, height: 0.0 }).unwrap();
+    let grid = &layout.children[0];
+    assert_eq!(grid.dimensions.content.height, 100.0);
+    assert_eq!(grid.children[0].dimensions.content.y, 0.0);
+    assert_eq!(grid.children[1].dimensions.content.y, 0.0);
+}
+
+#[test]
+fn span_only_item_remains_in_auto_placement_order() {
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let grid = NodeHandle::element("div");
+    document.append_child(body.clone());
+    body.append_child(grid.clone());
+    for class_name in ["span-only", "auto", "placed"] {
+        let child = NodeHandle::element("article");
+        child.set_attribute("class", class_name);
+        grid.append_child(child);
+    }
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(Origin::Author, parse_stylesheet(
+        "body { margin: 0; } div { display: grid; width: 300px; grid-template-columns: repeat(3, 100px); } article { height: 20px; } .span-only { grid-column: span 2; } .placed { grid-column-start: 1; grid-row-start: 1; }"
+    ).unwrap());
+    let layout = layout_tree(&body, &mut resolver, Rect { x: 0.0, y: 0.0, width: 300.0, height: 0.0 }).unwrap();
+    let rects: Vec<_> = layout.children[0].children.iter().map(|child| child.dimensions.content).collect();
+    assert_eq!((rects[0].x, rects[0].y, rects[0].width), (100.0, 0.0, 200.0));
+    assert_eq!((rects[1].x, rects[1].y), (0.0, 20.0));
+    assert_eq!((rects[2].x, rects[2].y), (0.0, 0.0));
+}
+
+#[test]
 fn explicit_grid_placement_creates_implicit_columns_and_rows() {
     let document = NodeHandle::document();
     let body = NodeHandle::element("body");
