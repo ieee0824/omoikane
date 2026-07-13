@@ -131,15 +131,15 @@ Acid3 ギャップ分析（`tests/fixtures/acid3/GAP_ANALYSIS.md`）に基づく
 - [x] [016-3 setTimeout 関数コールバック保持 + イベントループ統合](../closed/016-3-timer-callbacks-event-loop.md)
 - [x] [016-4 load イベント発火 + on* インラインハンドラ配線](../closed/016-4-load-event-inline-handlers.md)
 - [x] [016-5 data: URI スクリプト対応](../closed/016-5-data-uri-scripts.md)
-- [ ] [016-6 bucket6 (ECMAScript) 実測と微修正](016-6-bucket6-ecmascript.md)
+- [x] [016-6 bucket6 (ECMAScript) 実測と微修正](../closed/016-6-bucket6-ecmascript.md)
 - [x] [016-7 document.write 実装](../closed/016-7-document-write.md)
 - [x] [016-8 getComputedStyle 実値化（044-2 と同根）](../closed/016-8-computed-style-exposure.md)
 - [x] [016-9 iframe / contentDocument サブブラウジングコンテキスト](../closed/016-9-iframe-content-document.md)
 - [x] [016-10 querySelector matcher 接続 + セレクタ拡充](../closed/016-10-css-selector-extensions.md)（PR #110, 63→70）
 - [x] [016-11 NodeIterator / TreeWalker / Range](../closed/016-11-traversal-and-range.md)（PR #111, 70→79）
 - [x] [016-12 DOM2 Core / 名前空間 / DOMException](../closed/016-12-dom2-core-namespaces.md)（PR #113 ほか, test 98 の残差は 016-14 へ）
-- [ ] [016-13 HTMLTableElement / Form / Input / Select / Button API](016-13-table-form-apis.md)
-- [ ] [016-14 XML/XHTML・CSSOM・SVG DOM](../closed/016-14-xml-cssom-svgdom.md)
+- [x] [016-13 HTMLTableElement / Form / Input / Select / Button API](../closed/016-13-table-form-apis.md)
+- [x] [016-14 XML/XHTML・CSSOM・SVG DOM](../closed/016-14-xml-cssom-svgdom.md)
 - [x] [016-15 getComputedStyle のサブ文書対応（selectorTest 解放の前提）](../closed/016-15-computed-style-subdocument.md)（PR #109, 58→63）
 - [x] [016-16 iframe の load イベント発火](../closed/016-16-iframe-onload-event.md)（PR #115, 83/100 維持、test 69 retry 解消）
 - [x] [050 CSS media query の構文解析・評価と computed style 反映](../closed/050-css-media-query-evaluation.md)（PR #114, 82→83）

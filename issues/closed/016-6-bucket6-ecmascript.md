@@ -2,7 +2,7 @@
 number: 016-6
 slug: bucket6-ecmascript
 parent: 016
-status: open
+status: closed
 ---
 
 # bucket6 (ECMAScript, test 81-96) の実測と微修正
@@ -46,3 +46,11 @@ status: open
 
 - PASS: 81-84, 86-97（86〜96 の要注意 4 件 88/89/90/93 含め Boa 素通しで通過）
 - FAIL: test 98（"not a callable function"）。これは ECMAScript ではなく XHTML/XML DOM 依存（`document.implementation.createDocument` 等）で、016-12/016-14 スコープ。bucket6 の ECMAScript 本体は 85 の解消で全通過。
+
+## クローズ記録（2026-07-13）
+
+受け入れ条件を達成したためクローズ。
+
+- 81〜96 の pass/fail は実測ログで確認済み（全 PASS）
+- 要注意 4 件（88/89/90/93）は Boa 素通しで通過、test 85 は `annex-b` フィーチャ有効化で解消と切り分け済み
+- スコープ外として残っていた test 98 も、その後 016-14-1（XML/XHTML サブ文書）の実装で PASS 済み

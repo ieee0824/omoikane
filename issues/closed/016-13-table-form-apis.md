@@ -2,7 +2,7 @@
 number: 016-13
 slug: table-form-apis
 parent: 016
-status: open
+status: closed
 ---
 
 # HTMLTableElement / Form / Input / Select / Button API
@@ -62,3 +62,9 @@ table 系および form 系の DOM API を実装する。bucket4、最大 12 点
 
 - ~~**test 29**~~: 解消済み（054, 87→88）。原因は DOM API 側ではなく **HTML パーサの table tree construction**（`src/html/tree_builder.rs`）が `<tr>` を tbody へ入れず table 直下に配置しており（"in table body" 挿入モード未実装）、`tBodies` が空になっていた。054 で "in table" / "in table body" 挿入モードと暗黙 `<tbody>` 生成を実装し、`<table><tr><td><p></tbody> </table>` が `table > tbody > tr > td > p`（+ 末尾空白テキスト）になったことで解放。DOM 側の section/cell API は cloneNode 経由でも正しく動くことは本 issue で確認済み。
 - test 52: `document.write` で生成される parsed form/input に依存（016-7 は実装済みだが、実測では PASS。念のため経過観察）。
+
+## クローズ記録（2026-07-13）
+
+スコープの全 API（Table / Form / Input / Select / Button / TableSection / TableRow）を実装済みで、
+対象の Acid3 test 29, 49〜59, 62 はすべて PASS を実測済みのためクローズ。
+経過観察としていた test 52 も PASS が継続しており、今後退行した場合は新規 issue で追跡する。
