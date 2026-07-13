@@ -1411,6 +1411,192 @@ fn sizes_repeat_auto_px_percent_and_fractional_grid_tracks() {
     }
 }
 
+fn grid_track_extension_rects(
+    template: &str,
+    item_count: usize,
+    grid_width: f32,
+    viewport_width: f32,
+) -> Vec<Rect> {
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let grid = NodeHandle::element("div");
+    document.append_child(body.clone());
+    body.append_child(grid.clone());
+    for _ in 0..item_count {
+        grid.append_child(NodeHandle::element("article"));
+    }
+
+    let mut resolver = StyleResolver::new();
+    resolver.set_viewport(viewport_width, 800.0);
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(&format!(
+            "body {{ margin: 0; }} div {{ display: grid; width: {grid_width}px; grid-template-columns: {template}; }} article {{ height: 10px; }}"
+        ))
+        .unwrap(),
+    );
+    let layout = layout_tree(
+        &body,
+        &mut resolver,
+        Rect { x: 0.0, y: 0.0, width: viewport_width, height: 0.0 },
+    )
+    .unwrap();
+    layout.children[0]
+        .children
+        .iter()
+        .map(|child| child.dimensions.content)
+        .collect()
+}
+
+#[test]
+fn resolves_viewport_and_calc_grid_tracks_to_exact_widths() {
+    let viewport = grid_track_extension_rects("10vw calc(30px * 2) calc(50% - 10px) 1fr", 4, 500.0, 1000.0);
+    assert_eq!((viewport[0].x, viewport[0].width), (0.0, 100.0));
+    assert_eq!((viewport[1].x, viewport[1].width), (100.0, 60.0));
+    assert_eq!((viewport[2].x, viewport[2].width), (160.0, 240.0));
+    assert_eq!((viewport[3].x, viewport[3].width), (400.0, 100.0));
+}
+
+#[test]
+fn sizes_minmax_tracks_with_fractional_and_fixed_maxima() {
+    let fractional = grid_track_extension_rects(
+        "minmax(150px, 1fr) minmax(50px, 2fr)",
+        2,
+        400.0,
+        400.0,
+    );
+    assert_eq!((fractional[0].x, fractional[0].width), (0.0, 150.0));
+    assert_eq!((fractional[1].x, fractional[1].width), (150.0, 250.0));
+
+    let fixed = grid_track_extension_rects(
+        "minmax(40px, 90px) minmax(120px, 80px) 1fr",
+        3,
+        300.0,
+        300.0,
+    );
+    assert_eq!((fixed[0].x, fixed[0].width), (0.0, 90.0));
+    assert_eq!((fixed[1].x, fixed[1].width), (90.0, 120.0));
+    assert_eq!((fixed[2].x, fixed[2].width), (210.0, 90.0));
+}
+
+#[test]
+fn expands_multiple_tracks_in_numeric_repeat() {
+    let rects = grid_track_extension_rects("repeat(2, 40px 60px)", 4, 200.0, 200.0);
+    assert_eq!((rects[0].x, rects[0].width), (0.0, 40.0));
+    assert_eq!((rects[1].x, rects[1].width), (40.0, 60.0));
+    assert_eq!((rects[2].x, rects[2].width), (100.0, 40.0));
+    assert_eq!((rects[3].x, rects[3].width), (140.0, 60.0));
+}
+
+#[test]
+fn auto_fill_keeps_empty_repetitions_for_fractional_sizing() {
+    let rects = grid_track_extension_rects(
+        "repeat(auto-fill, minmax(100px, 1fr))",
+        2,
+        400.0,
+        400.0,
+    );
+    assert_eq!((rects[0].x, rects[0].width), (0.0, 100.0));
+    assert_eq!((rects[1].x, rects[1].width), (100.0, 100.0));
+}
+
+#[test]
+fn auto_fit_collapses_empty_repetitions_before_fractional_sizing() {
+    let rects = grid_track_extension_rects(
+        "repeat(auto-fit, minmax(100px, 1fr))",
+        2,
+        400.0,
+        400.0,
+    );
+    assert_eq!((rects[0].x, rects[0].width), (0.0, 200.0));
+    assert_eq!((rects[1].x, rects[1].width), (200.0, 200.0));
+}
+
+#[test]
+fn auto_fit_collapses_gutters_adjacent_to_empty_repetitions() {
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let grid = NodeHandle::element("div");
+    document.append_child(body.clone());
+    body.append_child(grid.clone());
+    for _ in 0..2 {
+        grid.append_child(NodeHandle::element("article"));
+    }
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "body { margin: 0; } div { display: grid; width: 430px; column-gap: 10px; grid-template-columns: repeat(auto-fit, minmax(100px, 1fr)); } article { height: 10px; }",
+        )
+        .unwrap(),
+    );
+    let layout = layout_tree(
+        &body,
+        &mut resolver,
+        Rect { x: 0.0, y: 0.0, width: 430.0, height: 0.0 },
+    )
+    .unwrap();
+    let rects: Vec<_> = layout.children[0]
+        .children
+        .iter()
+        .map(|child| child.dimensions.content)
+        .collect();
+    assert_eq!((rects[0].x, rects[0].width), (0.0, 210.0));
+    assert_eq!((rects[1].x, rects[1].width), (220.0, 210.0));
+}
+
+#[test]
+fn skips_named_grid_lines_while_parsing_tracks() {
+    let rects = grid_track_extension_rects(
+        "[start] 80px [middle alternate] 120px [end]",
+        2,
+        200.0,
+        200.0,
+    );
+    assert_eq!((rects[0].x, rects[0].width), (0.0, 80.0));
+    assert_eq!((rects[1].x, rects[1].width), (80.0, 120.0));
+}
+
+#[test]
+fn falls_back_only_unparseable_grid_tracks_to_auto() {
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let grid = NodeHandle::element("div");
+    let first = NodeHandle::element("article");
+    let fallback = NodeHandle::element("article");
+    let third = NodeHandle::element("article");
+    fallback.set_attribute("class", "fallback");
+    document.append_child(body.clone());
+    body.append_child(grid.clone());
+    grid.append_child(first);
+    grid.append_child(fallback);
+    grid.append_child(third);
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "body { margin: 0; } div { display: grid; width: 220px; grid-template-columns: 50px fit-content(20px) 100px; } article { height: 10px; } .fallback { width: 70px; }",
+        )
+        .unwrap(),
+    );
+    let layout = layout_tree(
+        &body,
+        &mut resolver,
+        Rect { x: 0.0, y: 0.0, width: 220.0, height: 0.0 },
+    )
+    .unwrap();
+    let rects: Vec<_> = layout.children[0]
+        .children
+        .iter()
+        .map(|child| child.dimensions.content)
+        .collect();
+    assert_eq!((rects[0].x, rects[0].width), (0.0, 50.0));
+    assert_eq!((rects[1].x, rects[1].width), (50.0, 70.0));
+    assert_eq!((rects[2].x, rects[2].width), (120.0, 100.0));
+}
+
 #[test]
 fn creates_implicit_grid_rows_using_row_content_height() {
     let document = NodeHandle::document();

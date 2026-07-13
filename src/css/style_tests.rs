@@ -1557,6 +1557,54 @@ fn calc_with_viewport_units() {
     assert_eq!(style.get("height"), Some(&ComputedValue::Px(96.0)));
 }
 
+#[test]
+fn canonicalizes_grid_track_units_calc_functions_and_named_lines() {
+    let document = NodeHandle::document();
+    let html = NodeHandle::element("html");
+    let body = NodeHandle::element("body");
+    document.append_child(html.clone());
+    html.append_child(body.clone());
+
+    let mut resolver = StyleResolver::new();
+    resolver.set_viewport(1000.0, 800.0);
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "body { grid-template-columns: [start] 30vw minmax(2rem, 1fr) repeat(auto-fill, calc(10vw + 20px)) [end]; }",
+        )
+        .unwrap(),
+    );
+
+    let style = resolver.computed_style(&body);
+    assert_eq!(
+        style.get("grid-template-columns"),
+        Some(&ComputedValue::Keyword(
+            "[start] 300px minmax(32px, 1fr) repeat(auto-fill, 120px) [end]".to_string()
+        ))
+    );
+}
+
+#[test]
+fn canonicalizes_grid_calc_multiplication_and_mixed_percentages() {
+    let (_document, body, _title, _html) = sample_tree();
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "body { grid-template-rows: calc(20px * 3) calc(25% + 10px); }",
+        )
+        .unwrap(),
+    );
+
+    let style = resolver.computed_style(&body);
+    assert_eq!(
+        style.get("grid-template-rows"),
+        Some(&ComputedValue::Keyword(
+            "60px calc(10px + 25%)".to_string()
+        ))
+    );
+}
+
 // --- border-radius shorthand 展開テスト ---
 
 #[test]

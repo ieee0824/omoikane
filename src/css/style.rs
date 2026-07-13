@@ -1522,7 +1522,10 @@ fn is_supported_property(name: &str) -> bool {
 fn compute_value(value: &Value, property_name: &str, ctx: ResolutionContext) -> ComputedValue {
     if property_name.eq_ignore_ascii_case("grid-template-columns")
         || property_name.eq_ignore_ascii_case("grid-template-rows")
-        || property_name.eq_ignore_ascii_case("grid-column-start")
+    {
+        return ComputedValue::Keyword(render_grid_track_value(value, ctx));
+    }
+    if property_name.eq_ignore_ascii_case("grid-column-start")
         || property_name.eq_ignore_ascii_case("grid-column-end")
         || property_name.eq_ignore_ascii_case("grid-row-start")
         || property_name.eq_ignore_ascii_case("grid-row-end")
@@ -1545,21 +1548,7 @@ fn compute_value(value: &Value, property_name: &str, ctx: ResolutionContext) -> 
             }
         }
         Value::Length(number, unit) => {
-            let px = match unit.as_str() {
-                "px" => *number,
-                "em" => *number * ctx.parent_font_size,
-                "rem" => *number * ctx.root_font_size,
-                "vw" => *number * ctx.viewport_width / 100.0,
-                "vh" => *number * ctx.viewport_height / 100.0,
-                "vmin" => *number * ctx.viewport_width.min(ctx.viewport_height) / 100.0,
-                "vmax" => *number * ctx.viewport_width.max(ctx.viewport_height) / 100.0,
-                "mm" => *number * (96.0 / 25.4),
-                "cm" => *number * (96.0 / 2.54),
-                "in" => *number * 96.0,
-                "pt" => *number * (96.0 / 72.0),
-                "pc" => *number * (96.0 / 6.0),
-                _ => *number,
-            };
+            let px = resolve_length_to_px(*number, unit, ctx).unwrap_or(*number);
             ComputedValue::Px(px)
         }
         Value::Percentage(percent) => {
@@ -1730,21 +1719,7 @@ fn collect_calc_tokens(
             Some(())
         }
         Value::Length(number, unit) => {
-            let px = match unit.as_str() {
-                "px" => *number,
-                "em" => *number * ctx.parent_font_size,
-                "rem" => *number * ctx.root_font_size,
-                "vw" => *number * ctx.viewport_width / 100.0,
-                "vh" => *number * ctx.viewport_height / 100.0,
-                "vmin" => *number * ctx.viewport_width.min(ctx.viewport_height) / 100.0,
-                "vmax" => *number * ctx.viewport_width.max(ctx.viewport_height) / 100.0,
-                "mm" => *number * (96.0 / 25.4),
-                "cm" => *number * (96.0 / 2.54),
-                "in" => *number * 96.0,
-                "pt" => *number * (96.0 / 72.0),
-                "pc" => *number * (96.0 / 6.0),
-                _ => return None,
-            };
+            let px = resolve_length_to_px(*number, unit, ctx)?;
             out.push(CalcToken::Value(CalcQuantity {
                 value: px,
                 unit: CalcUnit::Px,
@@ -1767,6 +1742,24 @@ fn collect_calc_tokens(
         }
         _ => None,
     }
+}
+
+fn resolve_length_to_px(number: f32, unit: &str, ctx: ResolutionContext) -> Option<f32> {
+    Some(match unit.to_ascii_lowercase().as_str() {
+        "px" => number,
+        "em" => number * ctx.parent_font_size,
+        "rem" => number * ctx.root_font_size,
+        "vw" => number * ctx.viewport_width / 100.0,
+        "vh" => number * ctx.viewport_height / 100.0,
+        "vmin" => number * ctx.viewport_width.min(ctx.viewport_height) / 100.0,
+        "vmax" => number * ctx.viewport_width.max(ctx.viewport_height) / 100.0,
+        "mm" => number * (96.0 / 25.4),
+        "cm" => number * (96.0 / 2.54),
+        "in" => number * 96.0,
+        "pt" => number * (96.0 / 72.0),
+        "pc" => number * (96.0 / 6.0),
+        _ => return None,
+    })
 }
 
 fn parse_calc_add_sub(tokens: &[CalcToken], index: &mut usize) -> Option<CalcQuantity> {
@@ -2722,6 +2715,56 @@ fn render_value(value: &Value) -> String {
         Value::String(value) => value.clone(),
         Value::Number(value) => value.to_string(),
         Value::Percentage(value) => format!("{value}%"),
+    }
+}
+
+fn render_grid_track_value(value: &Value, ctx: ResolutionContext) -> String {
+    match value {
+        Value::Length(number, unit) if unit.eq_ignore_ascii_case("fr") => {
+            format!("{number}fr")
+        }
+        Value::Length(number, unit) => resolve_length_to_px(*number, unit, ctx)
+            .map(|px| format!("{px}px"))
+            .unwrap_or_else(|| format!("{number}{unit}")),
+        Value::Function { name, arguments } if name.eq_ignore_ascii_case("calc") => {
+            if let Some(quantity) = evaluate_calc(arguments, ctx) {
+                return match quantity.unit {
+                    CalcUnit::Px => format!("{}px", quantity.value),
+                    CalcUnit::Percentage => format!("{}%", quantity.value),
+                    CalcUnit::Unitless => quantity.value.to_string(),
+                };
+            }
+            if let Some((px, percentage)) = try_extract_calc_px_percent(arguments, ctx) {
+                let operator = if percentage < 0.0 { '-' } else { '+' };
+                return format!("calc({px}px {operator} {}%)", percentage.abs());
+            }
+            render_value(value)
+        }
+        Value::Function { name, arguments } if name.eq_ignore_ascii_case("minmax") => {
+            let rendered = arguments
+                .iter()
+                .map(|argument| match argument {
+                    Value::Number(number) if *number == 0.0 => "0px".to_string(),
+                    _ => render_grid_track_value(argument, ctx),
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("{name}({rendered})")
+        }
+        Value::Function { name, arguments } => format!(
+            "{name}({})",
+            arguments
+                .iter()
+                .map(|argument| render_grid_track_value(argument, ctx))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        Value::List(values) => values
+            .iter()
+            .map(|value| render_grid_track_value(value, ctx))
+            .collect::<Vec<_>>()
+            .join(" "),
+        _ => render_value(value),
     }
 }
 
