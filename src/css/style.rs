@@ -1455,6 +1455,12 @@ fn is_supported_property(name: &str) -> bool {
             | "grid-column-gap"
             | "grid-template-columns"
             | "grid-template-rows"
+            | "grid-column"
+            | "grid-column-start"
+            | "grid-column-end"
+            | "grid-row"
+            | "grid-row-start"
+            | "grid-row-end"
             | "height"
             | "justify-content"
             | "left"
@@ -1510,6 +1516,10 @@ fn is_supported_property(name: &str) -> bool {
 fn compute_value(value: &Value, property_name: &str, ctx: ResolutionContext) -> ComputedValue {
     if property_name.eq_ignore_ascii_case("grid-template-columns")
         || property_name.eq_ignore_ascii_case("grid-template-rows")
+        || property_name.eq_ignore_ascii_case("grid-column-start")
+        || property_name.eq_ignore_ascii_case("grid-column-end")
+        || property_name.eq_ignore_ascii_case("grid-row-start")
+        || property_name.eq_ignore_ascii_case("grid-row-end")
     {
         return ComputedValue::Keyword(render_value(value));
     }

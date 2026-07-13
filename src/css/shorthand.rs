@@ -23,6 +23,7 @@ pub(super) fn expand_shorthand(name: &str, value: Value, important: bool) -> Vec
         "flex-flow" => expand_flex_flow_shorthand(value, important),
         "animation" => expand_animation_shorthand(value, important),
         "outline" => expand_outline_shorthand(value, important),
+        "grid-column" | "grid-row" => expand_grid_axis_shorthand(name, value, important),
         // `word-wrap` is a legacy alias for `overflow-wrap`
         "word-wrap" => vec![Declaration {
             name: "overflow-wrap".to_string(),
@@ -34,6 +35,33 @@ pub(super) fn expand_shorthand(name: &str, value: Value, important: bool) -> Vec
             value,
             important,
         }],
+    }
+}
+
+fn expand_grid_axis_shorthand(name: &str, value: Value, important: bool) -> Vec<Declaration> {
+    let values = match value {
+        Value::List(values) => values,
+        value => vec![value],
+    };
+    let slash = values.iter().position(|value| matches!(value, Value::Keyword(keyword) if keyword == "/"));
+    let (start, end) = match slash {
+        Some(index) if index > 0 && index + 1 < values.len() => (
+            collapse_grid_line(&values[..index]),
+            collapse_grid_line(&values[index + 1..]),
+        ),
+        Some(_) => return Vec::new(),
+        None => (collapse_grid_line(&values), Value::Keyword("auto".to_string())),
+    };
+    vec![
+        Declaration { name: format!("{name}-start"), value: start, important },
+        Declaration { name: format!("{name}-end"), value: end, important },
+    ]
+}
+
+fn collapse_grid_line(values: &[Value]) -> Value {
+    match values {
+        [value] => value.clone(),
+        values => Value::List(values.to_vec()),
     }
 }
 

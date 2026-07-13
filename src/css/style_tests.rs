@@ -77,6 +77,27 @@ fn identifies_supported_property_names() {
 }
 
 #[test]
+fn expands_grid_placement_shorthands_and_keeps_longhands() {
+    let (_document, _body, title, _html) = sample_tree();
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "h1 { grid-column: 1 / span 3; grid-row: span 2; grid-row-end: 4; }",
+        )
+        .unwrap(),
+    );
+    let style = resolver.computed_style(&title);
+    assert_eq!(style.get("grid-column-start"), Some(&ComputedValue::Keyword("1".to_string())));
+    assert_eq!(style.get("grid-column-end"), Some(&ComputedValue::Keyword("span 3".to_string())));
+    assert_eq!(style.get("grid-row-start"), Some(&ComputedValue::Keyword("span 2".to_string())));
+    assert_eq!(style.get("grid-row-end"), Some(&ComputedValue::Keyword("4".to_string())));
+    for property in ["grid-column", "grid-column-start", "grid-column-end", "grid-row", "grid-row-start", "grid-row-end"] {
+        assert!(is_supported_property(property));
+    }
+}
+
+#[test]
 fn applies_legacy_html_presentational_hints() {
     let document = NodeHandle::document();
     let html = NodeHandle::element("html");
