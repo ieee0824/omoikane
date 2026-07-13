@@ -2782,6 +2782,25 @@ fn red_pixel_data_uri() -> String {
     format!("data:image/png;base64,{encoded}")
 }
 
+fn rgba_mask_data_uri(width: u32, height: u32, alphas: &[u8]) -> String {
+    assert_eq!(alphas.len(), width as usize * height as usize);
+    let pixels = alphas
+        .iter()
+        .flat_map(|alpha| [255, 255, 255, *alpha])
+        .collect();
+    let image = Image::new(width, height, pixels).unwrap();
+    let mut canvas = Canvas::new(width, height);
+    for y in 0..height {
+        for x in 0..width {
+            let index = (y * width + x) as usize;
+            canvas.set_pixel(x, y, Color::rgba(255, 255, 255, alphas[index]));
+        }
+    }
+    assert_eq!(image.pixels(), canvas.pixels());
+    let encoded = base64::engine::general_purpose::STANDARD.encode(canvas.encode_png());
+    format!("data:image/png;base64,{encoded}")
+}
+
 fn find_layout_box_by_id<'a>(layout: &'a LayoutBox, id: &str) -> Option<&'a LayoutBox> {
     if layout
         .node
@@ -6045,4 +6064,95 @@ fn render_document_executes_inline_script() {
     // JS should add class "red" → background: red
     assert_eq!(canvas.pixel(5, 5), Some(Color::rgb(255, 0, 0)),
         "inline script should add 'red' class, making div background red");
+}
+
+#[test]
+fn mask_image_multiplies_element_alpha_per_pixel() {
+    let mask = rgba_mask_data_uri(3, 1, &[255, 128, 0]);
+    let html = format!(
+        r#"<html><head><style>
+body {{ margin: 0; }}
+div {{ width: 3px; height: 1px; background: red;
+       mask-image: url("{mask}"); mask-repeat: no-repeat; }}
+</style></head><body><div></div></body></html>"#
+    );
+    let document = TreeBuilder::parse(&html).document();
+    let canvas = render_document(
+        &document,
+        Rect { x: 0.0, y: 0.0, width: 3.0, height: 1.0 },
+    )
+    .unwrap();
+
+    assert_eq!(canvas.pixel(0, 0), Some(Color::rgba(255, 0, 0, 255)));
+    assert_eq!(canvas.pixel(1, 0), Some(Color::rgba(255, 0, 0, 128)));
+    assert_eq!(canvas.pixel(2, 0), Some(Color::rgba(0, 0, 0, 0)));
+}
+
+#[test]
+fn no_repeat_mask_position_clears_pixels_outside_the_mask_tile() {
+    let mask = rgba_mask_data_uri(1, 1, &[255]);
+    let html = format!(
+        r#"<html><head><style>
+body {{ margin: 0; }}
+div {{ width: 6px; height: 4px; background: red;
+       mask-image: url("{mask}"); mask-size: 2px 2px;
+       mask-position: 2px 1px; mask-repeat: no-repeat; }}
+</style></head><body><div></div></body></html>"#
+    );
+    let document = TreeBuilder::parse(&html).document();
+    let canvas = render_document(
+        &document,
+        Rect { x: 0.0, y: 0.0, width: 6.0, height: 4.0 },
+    )
+    .unwrap();
+
+    assert_eq!(canvas.pixel(1, 1), Some(Color::rgba(0, 0, 0, 0)));
+    assert_eq!(canvas.pixel(2, 1), Some(Color::rgb(255, 0, 0)));
+    assert_eq!(canvas.pixel(3, 2), Some(Color::rgb(255, 0, 0)));
+    assert_eq!(canvas.pixel(4, 2), Some(Color::rgba(0, 0, 0, 0)));
+    assert_eq!(canvas.pixel(2, 3), Some(Color::rgba(0, 0, 0, 0)));
+}
+
+#[test]
+fn mask_size_contain_preserves_aspect_ratio_and_leaves_remainder_transparent() {
+    let mask = rgba_mask_data_uri(2, 1, &[255, 255]);
+    let html = format!(
+        r#"<html><head><style>
+body {{ margin: 0; }}
+div {{ width: 8px; height: 8px; background: blue;
+       mask-image: url("{mask}"); mask-size: contain; mask-repeat: no-repeat; }}
+</style></head><body><div></div></body></html>"#
+    );
+    let document = TreeBuilder::parse(&html).document();
+    let canvas = render_document(
+        &document,
+        Rect { x: 0.0, y: 0.0, width: 8.0, height: 8.0 },
+    )
+    .unwrap();
+
+    assert_eq!(canvas.pixel(0, 0), Some(Color::rgb(0, 0, 255)));
+    assert_eq!(canvas.pixel(7, 3), Some(Color::rgb(0, 0, 255)));
+    assert_eq!(canvas.pixel(0, 4), Some(Color::rgba(0, 0, 0, 0)));
+    assert_eq!(canvas.pixel(7, 7), Some(Color::rgba(0, 0, 0, 0)));
+}
+
+#[test]
+fn mask_applies_to_descendant_painting() {
+    let mask = rgba_mask_data_uri(2, 1, &[255, 0]);
+    let html = format!(
+        r#"<html><head><style>
+body {{ margin: 0; }}
+.parent {{ width: 2px; height: 1px; mask-image: url("{mask}"); mask-repeat: no-repeat; }}
+.child {{ width: 2px; height: 1px; background: green; }}
+</style></head><body><div class="parent"><div class="child"></div></div></body></html>"#
+    );
+    let document = TreeBuilder::parse(&html).document();
+    let canvas = render_document(
+        &document,
+        Rect { x: 0.0, y: 0.0, width: 2.0, height: 1.0 },
+    )
+    .unwrap();
+
+    assert_eq!(canvas.pixel(0, 0), Some(Color::rgb(0, 128, 0)));
+    assert_eq!(canvas.pixel(1, 0), Some(Color::rgba(0, 0, 0, 0)));
 }
