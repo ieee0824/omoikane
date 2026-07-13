@@ -1427,6 +1427,7 @@ fn grid_track_extension_rects(
     }
 
     let mut resolver = StyleResolver::new();
+    resolver.set_viewport(viewport_width, 800.0);
     resolver.add_stylesheet(
         Origin::Author,
         parse_stylesheet(&format!(

@@ -11,11 +11,34 @@ use super::{
 };
 
 #[derive(Clone, Copy, Debug, PartialEq)]
-enum Track {
+enum TrackSize {
     Px(f32),
     Percent(f32),
     Fr(f32),
+    Calc(f32, f32),
     Auto,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Track {
+    min: TrackSize,
+    max: TrackSize,
+    auto_fit: bool,
+}
+
+impl Track {
+    fn new(size: TrackSize) -> Self {
+        let min = if matches!(size, TrackSize::Fr(_)) {
+            TrackSize::Px(0.0)
+        } else {
+            size
+        };
+        Self { min, max: size, auto_fit: false }
+    }
+
+    fn auto() -> Self { Self::new(TrackSize::Auto) }
+
+    fn collapsed() -> Self { Self::new(TrackSize::Px(0.0)) }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -74,14 +97,18 @@ pub(super) fn layout_grid_container(
         }
     }
 
-    let mut columns = track_list(&style, "grid-template-columns")
-        .filter(|tracks| !tracks.is_empty())
-        .unwrap_or_else(|| vec![Track::Fr(1.0)]);
-    let explicit_column_count = columns.len();
-    let mut explicit_rows = track_list(&style, "grid-template-rows").unwrap_or_default();
-    let explicit_row_count = explicit_rows.len();
     let column_gap = gap(&style, "column-gap");
     let row_gap = gap(&style, "row-gap");
+    let specified_height = resolved_length(&style, "height", containing_block_height)
+        .map(|height| super::border_box_adjust_height(&style, height, &padding, &border));
+    let row_basis = specified_height.unwrap_or(0.0);
+    let mut columns = track_list(&style, "grid-template-columns", width, column_gap)
+        .filter(|tracks| !tracks.is_empty())
+        .unwrap_or_else(|| vec![Track::new(TrackSize::Fr(1.0))]);
+    let explicit_column_count = columns.len();
+    let mut explicit_rows = track_list(&style, "grid-template-rows", row_basis, row_gap)
+        .unwrap_or_default();
+    let explicit_row_count = explicit_rows.len();
     let requests: Vec<_> = items.iter().map(|child| {
         let child_style = resolver.computed_style(child);
         (
@@ -90,12 +117,11 @@ pub(super) fn layout_grid_container(
         )
     }).collect();
     let placements = place_items(&requests, &mut columns, &mut explicit_rows);
+    collapse_empty_auto_fit_tracks(&mut columns, &placements, true);
+    collapse_empty_auto_fit_tracks(&mut explicit_rows, &placements, false);
     let column_intrinsics = auto_column_intrinsics(&columns, &items, &placements, resolver);
     let column_widths = resolve_tracks(&columns, width, column_gap, &column_intrinsics);
     let row_count = placements.iter().map(|p| p.row + p.row_span).max().unwrap_or(explicit_rows.len()).max(explicit_rows.len());
-    let specified_height = resolved_length(&style, "height", containing_block_height)
-        .map(|height| super::border_box_adjust_height(&style, height, &padding, &border));
-    let row_basis = specified_height.unwrap_or(0.0);
     let fixed_row_heights: Vec<_> = explicit_rows.iter()
         .map(|track| fixed_track(*track, row_basis).unwrap_or(0.0))
         .collect();
@@ -117,7 +143,7 @@ pub(super) fn layout_grid_container(
     }
 
     let mut row_tracks = explicit_rows;
-    row_tracks.resize(row_count, Track::Auto);
+    row_tracks.resize(row_count, Track::auto());
     let row_heights = resolve_tracks(&row_tracks, row_basis, row_gap, &content_row_heights);
     let auto_height = row_heights.iter().sum::<f32>()
         + row_gap * row_heights.len().saturating_sub(1) as f32;
@@ -238,7 +264,9 @@ fn auto_column_intrinsics(tracks: &[Track], items: &[NodeHandle], placements: &[
     let mut values = vec![0.0f32; tracks.len()];
     for (index, child) in items.iter().enumerate() {
         let column = placements[index].column;
-        if placements[index].column_span == 1 && tracks[column] == Track::Auto {
+        if placements[index].column_span == 1
+            && (tracks[column].min == TrackSize::Auto || tracks[column].max == TrackSize::Auto)
+        {
             values[column] = values[column].max(intrinsic_width(child, resolver));
         }
     }
@@ -261,14 +289,14 @@ fn place_items(requests: &[(AxisRequest, AxisRequest)], columns: &mut Vec<Track>
                     && candidate_column + column_span > columns.len()
                 {
                     if column_span > columns.len() {
-                        columns.resize(column_span, Track::Auto);
+                        columns.resize(column_span, Track::auto());
                     } else {
                         candidate_column = 0;
                         candidate_row += 1;
                     }
                 }
                 let needed_columns = candidate_column + column_span;
-                if needed_columns > columns.len() { columns.resize(needed_columns, Track::Auto); }
+                if needed_columns > columns.len() { columns.resize(needed_columns, Track::auto()); }
                 ensure_occupancy(&mut occupied, candidate_row + row_span, columns.len());
                 if area_is_free(&occupied, candidate_column, candidate_row, column_span, row_span) { break; }
                 if column.start.is_some() {
@@ -287,7 +315,7 @@ fn place_items(requests: &[(AxisRequest, AxisRequest)], columns: &mut Vec<Track>
             for cells in &mut occupied[candidate_row..candidate_row + row_span] {
                 cells[candidate_column..candidate_column + column_span].fill(true);
             }
-            rows.resize(rows.len().max(candidate_row + row_span), Track::Auto);
+            rows.resize(rows.len().max(candidate_row + row_span), Track::auto());
             result[index] = Placement { column: candidate_column, row: candidate_row, column_span, row_span };
         }
     }
@@ -350,28 +378,69 @@ fn track_area(sizes: &[f32], start: usize, span: usize, gap: f32) -> f32 {
 fn resolve_tracks(tracks: &[Track], basis: f32, gap: f32, auto_sizes: &[f32]) -> Vec<f32> {
     let gaps = gap * tracks.len().saturating_sub(1) as f32;
     let mut sizes = vec![0.0; tracks.len()];
-    let mut fixed = gaps;
-    let mut fr_total = 0.0;
+    let mut flexible = Vec::new();
+    let mut non_flexible = gaps;
     for (index, track) in tracks.iter().enumerate() {
-        match *track {
-            Track::Px(value) => sizes[index] = value.max(0.0),
-            Track::Percent(value) => sizes[index] = (basis * value / 100.0).max(0.0),
-            Track::Auto => sizes[index] = auto_sizes.get(index).copied().unwrap_or(0.0),
-            Track::Fr(value) => fr_total += value.max(0.0),
+        let minimum = resolve_track_size(track.min, basis)
+            .unwrap_or_else(|| auto_sizes.get(index).copied().unwrap_or(0.0))
+            .max(0.0);
+        match track.max {
+            TrackSize::Fr(fraction) if fraction > 0.0 => {
+                sizes[index] = minimum;
+                flexible.push((index, fraction));
+            }
+            TrackSize::Auto => {
+                sizes[index] = minimum.max(auto_sizes.get(index).copied().unwrap_or(0.0));
+                non_flexible += sizes[index];
+            }
+            maximum => {
+                sizes[index] = resolve_track_size(maximum, basis).unwrap_or(minimum).max(minimum);
+                non_flexible += sizes[index];
+            }
         }
-        fixed += sizes[index];
     }
-    let remaining = (basis - fixed).max(0.0);
-    if fr_total > 0.0 {
-        for (index, track) in tracks.iter().enumerate() {
-            if let Track::Fr(value) = track { sizes[index] = remaining * value.max(0.0) / fr_total; }
+
+    let mut remaining_space = (basis - non_flexible).max(0.0);
+    let mut remaining_fraction = flexible.iter().map(|(_, fraction)| *fraction).sum::<f32>();
+    let mut frozen = vec![false; flexible.len()];
+    loop {
+        let mut changed = false;
+        for (flex_index, &(track_index, fraction)) in flexible.iter().enumerate() {
+            if frozen[flex_index] || remaining_fraction <= 0.0 { continue; }
+            let share = remaining_space * fraction / remaining_fraction;
+            if share < sizes[track_index] {
+                remaining_space = (remaining_space - sizes[track_index]).max(0.0);
+                remaining_fraction -= fraction;
+                frozen[flex_index] = true;
+                changed = true;
+            }
+        }
+        if !changed { break; }
+    }
+    for (flex_index, &(track_index, fraction)) in flexible.iter().enumerate() {
+        if !frozen[flex_index] && remaining_fraction > 0.0 {
+            sizes[track_index] = sizes[track_index]
+                .max(remaining_space * fraction / remaining_fraction);
         }
     }
     sizes
 }
 
 fn fixed_track(track: Track, basis: f32) -> Option<f32> {
-    match track { Track::Px(v) => Some(v), Track::Percent(v) => Some(basis * v / 100.0), _ => None }
+    if matches!(track.max, TrackSize::Fr(_) | TrackSize::Auto) {
+        return None;
+    }
+    let minimum = resolve_track_size(track.min, basis).unwrap_or(0.0);
+    resolve_track_size(track.max, basis).map(|maximum| maximum.max(minimum))
+}
+
+fn resolve_track_size(size: TrackSize, basis: f32) -> Option<f32> {
+    match size {
+        TrackSize::Px(value) => Some(value),
+        TrackSize::Percent(value) => Some(basis * value / 100.0),
+        TrackSize::Calc(px, percentage) => Some(px + basis * percentage / 100.0),
+        TrackSize::Fr(_) | TrackSize::Auto => None,
+    }
 }
 
 fn offsets(sizes: &[f32], gap: f32, start: f32) -> Vec<f32> {
@@ -379,35 +448,64 @@ fn offsets(sizes: &[f32], gap: f32, start: f32) -> Vec<f32> {
     sizes.iter().map(|size| { let current = cursor; cursor += size + gap; current }).collect()
 }
 
-fn track_list(style: &ComputedStyle, property: &str) -> Option<Vec<Track>> {
+fn track_list(style: &ComputedStyle, property: &str, basis: f32, gap: f32) -> Option<Vec<Track>> {
     let value = match style.get(property)? {
         ComputedValue::Keyword(value) => value,
-        ComputedValue::Px(value) => return Some(vec![Track::Px(*value)]),
-        ComputedValue::Percentage(value) => return Some(vec![Track::Percent(*value)]),
+        ComputedValue::Px(value) => return Some(vec![Track::new(TrackSize::Px(*value))]),
+        ComputedValue::Percentage(value) => {
+            return Some(vec![Track::new(TrackSize::Percent(*value))]);
+        }
         _ => return None,
     };
+    if value.eq_ignore_ascii_case("none") { return Some(Vec::new()); }
     let mut result = Vec::new();
     for token in split_tracks(value) {
+        let token = token.trim();
+        if token.starts_with('[') && token.ends_with(']') { continue; }
         if token.to_ascii_lowercase().starts_with("repeat(") && token.ends_with(')') {
             let inner = &token[7..token.len() - 1];
-            let (count, track) = inner.split_once(',')?;
-            let count: usize = count.trim().parse().ok()?;
-            let track = parse_track(track.trim())?;
-            result.extend(std::iter::repeat_n(track, count));
+            let Some((count, pattern)) = split_once_top_level(inner, ',') else {
+                result.push(Track::auto());
+                continue;
+            };
+            let pattern_tracks = parse_track_sequence(pattern);
+            if pattern_tracks.is_empty() {
+                result.push(Track::auto());
+                continue;
+            }
+            let repetition = count.trim();
+            let count = if repetition.eq_ignore_ascii_case("auto-fill")
+                || repetition.eq_ignore_ascii_case("auto-fit")
+            {
+                auto_repeat_count(&pattern_tracks, basis, gap)
+            } else {
+                repetition.parse::<usize>().unwrap_or(1)
+            };
+            let auto_fit = repetition.eq_ignore_ascii_case("auto-fit");
+            for _ in 0..count.max(1) {
+                result.extend(pattern_tracks.iter().map(|track| Track { auto_fit, ..*track }));
+            }
         } else {
-            result.push(parse_track(token.trim())?);
+            result.push(parse_track(token).unwrap_or_else(Track::auto));
         }
     }
     Some(result)
 }
 
 fn split_tracks(value: &str) -> Vec<String> {
-    let mut depth = 0usize;
+    let mut paren_depth = 0usize;
+    let mut bracket_depth = 0usize;
     let mut start = 0usize;
     let mut result = Vec::new();
     for (index, ch) in value.char_indices() {
-        match ch { '(' => depth += 1, ')' => depth = depth.saturating_sub(1), _ => {} }
-        if ch.is_whitespace() && depth == 0 {
+        match ch {
+            '(' => paren_depth += 1,
+            ')' => paren_depth = paren_depth.saturating_sub(1),
+            '[' => bracket_depth += 1,
+            ']' => bracket_depth = bracket_depth.saturating_sub(1),
+            _ => {}
+        }
+        if ch.is_whitespace() && paren_depth == 0 && bracket_depth == 0 {
             if start < index { result.push(value[start..index].to_string()); }
             start = index + ch.len_utf8();
         }
@@ -417,10 +515,112 @@ fn split_tracks(value: &str) -> Vec<String> {
 }
 
 fn parse_track(value: &str) -> Option<Track> {
-    if value.eq_ignore_ascii_case("auto") { return Some(Track::Auto); }
+    let value = value.trim();
+    if value.eq_ignore_ascii_case("auto")
+        || value.eq_ignore_ascii_case("min-content")
+        || value.eq_ignore_ascii_case("max-content")
+    {
+        return Some(Track::auto());
+    }
     let lower = value.to_ascii_lowercase();
-    if let Some(value) = lower.strip_suffix("px") { return value.trim().parse().ok().map(Track::Px); }
-    if let Some(value) = lower.strip_suffix('%') { return value.trim().parse().ok().map(Track::Percent); }
-    if let Some(value) = lower.strip_suffix("fr") { return value.trim().parse().ok().map(Track::Fr); }
+    if lower.starts_with("minmax(") && lower.ends_with(')') {
+        let inner = &value[7..value.len() - 1];
+        let (minimum, maximum) = split_once_top_level(inner, ',')?;
+        let min = parse_track_size(minimum.trim(), false)?;
+        let max = parse_track_size(maximum.trim(), true)?;
+        return Some(Track { min, max, auto_fit: false });
+    }
+    parse_track_size(value, true).map(Track::new)
+}
+
+fn parse_track_size(value: &str, allow_fr: bool) -> Option<TrackSize> {
+    let lower = value.trim().to_ascii_lowercase();
+    if lower == "auto" || lower == "min-content" || lower == "max-content" {
+        return Some(TrackSize::Auto);
+    }
+    if lower == "0" { return Some(TrackSize::Px(0.0)); }
+    if lower.starts_with("calc(") && lower.ends_with(')') {
+        return parse_calc_track(&lower);
+    }
+    if let Some(value) = lower.strip_suffix("px") {
+        return value.trim().parse().ok().map(TrackSize::Px);
+    }
+    if let Some(value) = lower.strip_suffix('%') {
+        return value.trim().parse().ok().map(TrackSize::Percent);
+    }
+    if allow_fr {
+        if let Some(value) = lower.strip_suffix("fr") {
+            return value.trim().parse().ok().map(TrackSize::Fr);
+        }
+    }
     None
+}
+
+fn parse_calc_track(value: &str) -> Option<TrackSize> {
+    let inner = value.strip_prefix("calc(")?.strip_suffix(')')?.trim();
+    let parts: Vec<_> = inner.split_whitespace().collect();
+    if parts.len() != 3 { return None; }
+    let (left_px, left_percentage) = calc_component(parts[0])?;
+    let sign = match parts[1] { "+" => 1.0, "-" => -1.0, _ => return None };
+    let (right_px, right_percentage) = calc_component(parts[2])?;
+    Some(TrackSize::Calc(
+        left_px + sign * right_px,
+        left_percentage + sign * right_percentage,
+    ))
+}
+
+fn calc_component(value: &str) -> Option<(f32, f32)> {
+    if let Some(value) = value.strip_suffix("px") {
+        return Some((value.parse().ok()?, 0.0));
+    }
+    if let Some(value) = value.strip_suffix('%') {
+        return Some((0.0, value.parse().ok()?));
+    }
+    None
+}
+
+fn parse_track_sequence(value: &str) -> Vec<Track> {
+    split_tracks(value)
+        .into_iter()
+        .filter(|token| !(token.starts_with('[') && token.ends_with(']')))
+        .map(|token| parse_track(&token).unwrap_or_else(Track::auto))
+        .collect()
+}
+
+fn split_once_top_level(value: &str, delimiter: char) -> Option<(&str, &str)> {
+    let mut depth = 0usize;
+    for (index, ch) in value.char_indices() {
+        match ch {
+            '(' | '[' => depth += 1,
+            ')' | ']' => depth = depth.saturating_sub(1),
+            _ if ch == delimiter && depth == 0 => {
+                return Some((&value[..index], &value[index + ch.len_utf8()..]));
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn auto_repeat_count(pattern: &[Track], basis: f32, gap: f32) -> usize {
+    let minimum = pattern.iter().map(|track| {
+        resolve_track_size(track.min, basis).unwrap_or(0.0).max(0.0)
+    }).sum::<f32>();
+    let stride = minimum + gap * pattern.len() as f32;
+    if stride <= 0.0 { 1 } else { ((basis + gap) / stride).floor().max(1.0) as usize }
+}
+
+fn collapse_empty_auto_fit_tracks(tracks: &mut [Track], placements: &[Placement], columns: bool) {
+    for (index, track) in tracks.iter_mut().enumerate() {
+        if !track.auto_fit { continue; }
+        let occupied = placements.iter().any(|placement| {
+            let (start, span) = if columns {
+                (placement.column, placement.column_span)
+            } else {
+                (placement.row, placement.row_span)
+            };
+            index >= start && index < start + span
+        });
+        if !occupied { *track = Track::collapsed(); }
+    }
 }
