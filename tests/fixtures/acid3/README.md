@@ -66,9 +66,14 @@ cargo test --test acid3_harness
 `examples/acid3.rs` と `tests/acid3_harness.rs` は共有ハーネス
 `tests/acid3_common/harness.rs` を `#[path]` で取り込んで利用する。
 
-## 現状のスコア（更新: 016-5 時点）
+## 現状のスコア（更新: 066 時点、2026-07-13）
 
-`cargo run --example acid3` の実測で **Faithful / DirectDrive 両モードとも 28/100**。
+`cargo run --example acid3` の実測で **Faithful / DirectDrive 両モードとも 100/100（満点、reached index 100）**。
+0/100 → 100/100 の到達経緯（子 issue 23 件のスコア推移表）は
+[`issues/closed/016-acid3-conformance.md`](/issues/closed/016-acid3-conformance.md) を参照。
+
+### 参考: 28/100 時点（016-5、履歴）
+
 016-2〜016-5 の実装で以下が解消済み:
 
 - **016-2**: トークナイザに script-data / RAWTEXT / RCDATA 状態を実装し、下記の
@@ -78,9 +83,8 @@ cargo test --test acid3_harness
   `update()` エミュレーションは撤去）。`.data` / `defaultView` / `Node` 定数 / `localName` を追加。
 - **016-5**: `data:` スキームのスクリプト取得に対応（d1〜d5 の 5 ベクタが実行され test 97 が PASS）。
 
-残る主要ブロッカーは iframe / `contentDocument` / `document.write`（P7/P8）、
-`getComputedStyle` 実値（P5）、DOMException（P9）など。詳細な次アクションは
-`issues/` の 016 系子 issue で追跡する。
+当時残っていた主要ブロッカー（iframe / `contentDocument` / `document.write`、
+`getComputedStyle` 実値、DOMException など）はすべて 016 系子 issue で解消済み。
 
 ### 参考: 016-2 実装前の 0 点だった根本原因（履歴）
 
@@ -99,4 +103,4 @@ cargo test --test acid3_harness
 - 副次的に、`data:` スキームの外部スクリプト（d1〜d5）が
   `fetch_script_source` の非対応でフェッチできず、`document.write` も未実装。
 
-詳細な次アクションは `issues/open/016-acid3-conformance.md` 系の子 issue で追跡する。
+解消の経緯は `issues/closed/016-acid3-conformance.md` 系の子 issue を参照。

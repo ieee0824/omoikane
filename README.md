@@ -208,9 +208,9 @@ CI=1 cargo test -- --include-ignored
 
 [Acid2 テスト](https://www.webstandards.org/files/acid2/test.html)の公式リファレンスレンダリングとの比較で**差分 0px** を達成しています。
 
-[Acid3 テスト](http://acid3.acidtests.org/)は `cargo run --example acid3` の実測で **97/100** です（詳細は [`tests/fixtures/acid3/README.md`](/tests/fixtures/acid3/README.md)）。
+[Acid3 テスト](http://acid3.acidtests.org/)は `cargo run --example acid3` の実測で **100/100（満点、FAITHFUL / DIRECT 両ドライブモード）** です（詳細は [`tests/fixtures/acid3/README.md`](/tests/fixtures/acid3/README.md)）。
 
-CSS パーサー、レイアウトエンジン、ペイントシステムの統合テストとして、1101 件のテストが常時通過しています（`cargo test --lib`: 1101 passed / 0 failed、doc テスト 10 件）。
+CSS パーサー、レイアウトエンジン、ペイントシステムの統合テストとして、1121 件のテストが常時通過しています（`cargo test --lib`: 1121 passed / 0 failed、doc テスト 10 件）。
 
 ## 進捗
 
