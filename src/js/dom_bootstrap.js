@@ -2515,7 +2515,11 @@
     }
 
     get data() {
-      return __omoikane_get_attribute(this.__id, "data") || "";
+      // URL-reflecting IDL attribute: resolve the raw `data` value against the
+      // document base URL so callers see an absolute URL. An absent attribute
+      // reflects as the empty string.
+      const raw = __omoikane_get_attribute(this.__id, "data");
+      return raw === null ? "" : __omoikane_resolve_url(raw);
     }
 
     set data(value) {
