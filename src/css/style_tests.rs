@@ -3568,3 +3568,69 @@ fn inline_cursor_validation_matches_cascade() {
         InlineDeclarationValidation::Unvalidated
     ));
 }
+
+#[test]
+fn expands_mask_shorthand_position_size_and_repeat() {
+    let stylesheet = parse_stylesheet(
+        "h1 { mask: url(mask.svg) 25% 6px / contain no-repeat; }",
+    )
+    .unwrap();
+    let Rule::Style(rule) = &stylesheet.rules[0] else {
+        panic!("expected style rule");
+    };
+    let declarations: Vec<_> = rule
+        .declarations
+        .iter()
+        .map(|declaration| (declaration.name.as_str(), &declaration.value))
+        .collect();
+
+    assert_eq!(
+        declarations,
+        vec![
+            ("mask-image", &Value::Keyword("url(mask.svg)".to_string())),
+            ("mask-position-x", &Value::Percentage(25.0)),
+            ("mask-position-y", &Value::Length(6.0, "px".to_string())),
+            ("mask-size", &Value::Keyword("contain".to_string())),
+            ("mask-repeat", &Value::Keyword("no-repeat".to_string())),
+        ]
+    );
+}
+
+#[test]
+fn canonicalizes_webkit_mask_properties_to_standard_names() {
+    let (_document, body, _title, _html) = sample_tree();
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "body { -webkit-mask-image: url(mask.svg); -webkit-mask-position: 3px 25%; \
+             -webkit-mask-size: 8px 4px; -webkit-mask-repeat: no-repeat; }",
+        )
+        .unwrap(),
+    );
+
+    let style = resolver.computed_style(&body);
+    assert_eq!(
+        style.get("mask-image"),
+        Some(&ComputedValue::Keyword("url(mask.svg)".to_string()))
+    );
+    assert_eq!(style.get("mask-position-x"), Some(&ComputedValue::Px(3.0)));
+    assert_eq!(style.get("mask-position-y"), Some(&ComputedValue::Percentage(25.0)));
+    assert_eq!(
+        style.get("mask-size"),
+        Some(&ComputedValue::Keyword("8px 4px".to_string()))
+    );
+    assert_eq!(
+        style.get("mask-repeat"),
+        Some(&ComputedValue::Keyword("no-repeat".to_string()))
+    );
+    for webkit_name in [
+        "-webkit-mask-image",
+        "-webkit-mask-position",
+        "-webkit-mask-size",
+        "-webkit-mask-repeat",
+    ] {
+        assert_eq!(style.get(webkit_name), None);
+        assert!(is_supported_property(webkit_name));
+    }
+}

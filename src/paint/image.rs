@@ -376,8 +376,23 @@ pub(crate) fn parse_background_image_value(value: &str) -> Option<Image> {
 /// Computes the background-size dimensions given the style and the painting area.
 /// Returns `(tile_width, tile_height)`.
 pub(crate) fn background_size(style: &ComputedStyle, area: Rect, image_w: f32, image_h: f32) -> (f32, f32) {
+    image_size(style, "background-size", area, image_w, image_h)
+}
+
+/// Computes mask tile dimensions with the same sizing rules as backgrounds.
+pub(crate) fn mask_size(style: &ComputedStyle, area: Rect, image_w: f32, image_h: f32) -> (f32, f32) {
+    image_size(style, "mask-size", area, image_w, image_h)
+}
+
+fn image_size(
+    style: &ComputedStyle,
+    property: &str,
+    area: Rect,
+    image_w: f32,
+    image_h: f32,
+) -> (f32, f32) {
     // Single Px value (e.g. background-size: 100px — width only, height auto)
-    if let Some(ComputedValue::Px(px)) = style.get("background-size") {
+    if let Some(ComputedValue::Px(px)) = style.get(property) {
         let w = *px;
         let h = if image_w > 0.0 {
             image_h * (w / image_w)
@@ -388,7 +403,7 @@ pub(crate) fn background_size(style: &ComputedStyle, area: Rect, image_w: f32, i
     }
 
     // Single Percentage value (e.g. background-size: 50% — width only, height auto)
-    if let Some(ComputedValue::Percentage(pct)) = style.get("background-size") {
+    if let Some(ComputedValue::Percentage(pct)) = style.get(property) {
         let w = area.width * (*pct / 100.0);
         let h = if image_w > 0.0 {
             image_h * (w / image_w)
@@ -398,7 +413,7 @@ pub(crate) fn background_size(style: &ComputedStyle, area: Rect, image_w: f32, i
         return (w, h);
     }
 
-    let kw = match style.get("background-size") {
+    let kw = match style.get(property) {
         Some(ComputedValue::Keyword(kw)) => kw.clone(),
         _ => return (image_w, image_h),
     };

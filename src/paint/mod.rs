@@ -885,9 +885,11 @@ fn paint_box_internal(
         inherited_clip
     };
 
-    // opacity が 1.0 未満の場合、オフスクリーンバッファに描画してから合成する
+    // opacity または解決可能な mask-image がある場合、要素サブツリーを
+    // オフスクリーンバッファに描画してからまとめて合成する。
     let opacity = element_opacity(&style);
-    let needs_offscreen = opacity.is_some_and(|v| v < 1.0);
+    let mask = mask_image(&style);
+    let needs_offscreen = opacity.is_some_and(|v| v < 1.0) || mask.is_some();
 
     if needs_offscreen {
         let opacity_value = opacity.unwrap_or(1.0);
@@ -941,6 +943,9 @@ fn paint_box_internal(
             offset_padding_box,
         );
         offscreen.multiply_alpha(opacity_value);
+        if let Some(mask) = &mask {
+            apply_mask_alpha(&mut offscreen, mask, &style, offset_border_box);
+        }
         // メインキャンバスに合成
         let dst_w = canvas.width() as i32;
         let dst_h = canvas.height() as i32;
@@ -987,6 +992,87 @@ fn paint_box_internal(
         border_box,
         padding_box,
     );
+}
+
+fn apply_mask_alpha(canvas: &mut Canvas, mask: &Image, style: &ComputedStyle, area: Rect) {
+    let (tile_width, tile_height) = mask_size(
+        style,
+        area,
+        mask.width().max(1) as f32,
+        mask.height().max(1) as f32,
+    );
+    if tile_width <= 0.0 || tile_height <= 0.0 {
+        canvas.multiply_alpha(0.0);
+        return;
+    }
+    let (position_x, position_y) =
+        mask_position(style, area.width, area.height, tile_width, tile_height);
+    let anchor_x = area.x + position_x;
+    let anchor_y = area.y + position_y;
+    let repeat = mask_repeat(style);
+    let width = canvas.width as i32;
+    let height = canvas.height as i32;
+    let area_x0 = area.x.floor().max(0.0) as i32;
+    let area_y0 = area.y.floor().max(0.0) as i32;
+    let area_x1 = (area.x + area.width).ceil().min(width as f32) as i32;
+    let area_y1 = (area.y + area.height).ceil().min(height as f32) as i32;
+
+    for y in 0..height {
+        for x in 0..width {
+            let pixel_x = x as f32;
+            let pixel_y = y as f32;
+            let inside_area = x >= area_x0 && x < area_x1 && y >= area_y0 && y < area_y1;
+            let mask_alpha = if inside_area {
+                sample_mask_alpha(
+                    mask,
+                    pixel_x,
+                    pixel_y,
+                    anchor_x,
+                    anchor_y,
+                    tile_width,
+                    tile_height,
+                    repeat,
+                )
+            } else {
+                0
+            };
+            let index = ((y * width + x) * 4) as usize;
+            canvas.pixels[index + 3] =
+                ((canvas.pixels[index + 3] as u16 * mask_alpha as u16 + 127) / 255) as u8;
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn sample_mask_alpha(
+    mask: &Image,
+    x: f32,
+    y: f32,
+    anchor_x: f32,
+    anchor_y: f32,
+    tile_width: f32,
+    tile_height: f32,
+    repeat: bool,
+) -> u8 {
+    let tile_x = if repeat {
+        anchor_x + ((x - anchor_x) / tile_width).floor() * tile_width
+    } else {
+        anchor_x
+    };
+    let tile_y = if repeat {
+        anchor_y + ((y - anchor_y) / tile_height).floor() * tile_height
+    } else {
+        anchor_y
+    };
+    let u = (x - tile_x) / tile_width;
+    let v = (y - tile_y) / tile_height;
+    if !(0.0..1.0).contains(&u) || !(0.0..1.0).contains(&v) {
+        return 0;
+    }
+    let source_x = (u * mask.width as f32).floor() as u32;
+    let source_y = (v * mask.height as f32).floor() as u32;
+    let index = ((source_y * mask.width + source_x) * 4) as usize;
+    mask.pixels[index + 3]
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1331,9 +1417,30 @@ fn background_image(style: &ComputedStyle) -> Option<Image> {
     }
 }
 
+fn mask_image(style: &ComputedStyle) -> Option<Image> {
+    let value = match style.get("mask-image") {
+        Some(ComputedValue::Keyword(value)) | Some(ComputedValue::String(value)) => value.trim(),
+        _ => return None,
+    };
+    // The scoped implementation accepts URL images only. Unsupported image
+    // functions (such as gradients) and load failures mean no mask.
+    if !value.to_ascii_lowercase().starts_with("url(") {
+        return None;
+    }
+    image::parse_background_image_value(value)
+}
+
 fn background_repeat(style: &ComputedStyle) -> bool {
+    image_repeat(style, "background-repeat")
+}
+
+fn mask_repeat(style: &ComputedStyle) -> bool {
+    image_repeat(style, "mask-repeat")
+}
+
+fn image_repeat(style: &ComputedStyle, property: &str) -> bool {
     !matches!(
-        style.get("background-repeat"),
+        style.get(property),
         Some(ComputedValue::Keyword(keyword)) if keyword.eq_ignore_ascii_case("no-repeat")
     )
 }
@@ -1356,12 +1463,35 @@ fn background_position(
     image_w: f32,
     image_h: f32,
 ) -> (f32, f32) {
-    let x = resolve_bg_position(style, "background-position-x", container_w, image_w);
-    let y = resolve_bg_position(style, "background-position-y", container_h, image_h);
+    image_position(style, "background-position", container_w, container_h, image_w, image_h)
+}
+
+fn mask_position(
+    style: &ComputedStyle,
+    container_w: f32,
+    container_h: f32,
+    image_w: f32,
+    image_h: f32,
+) -> (f32, f32) {
+    image_position(style, "mask-position", container_w, container_h, image_w, image_h)
+}
+
+fn image_position(
+    style: &ComputedStyle,
+    prefix: &str,
+    container_w: f32,
+    container_h: f32,
+    image_w: f32,
+    image_h: f32,
+) -> (f32, f32) {
+    let x_property = format!("{prefix}-x");
+    let y_property = format!("{prefix}-y");
+    let x = resolve_image_position(style, &x_property, container_w, image_w);
+    let y = resolve_image_position(style, &y_property, container_h, image_h);
     (x, y)
 }
 
-fn resolve_bg_position(
+fn resolve_image_position(
     style: &ComputedStyle,
     property: &str,
     container_size: f32,
@@ -1388,6 +1518,10 @@ fn resolve_bg_position(
 
 fn background_size(style: &ComputedStyle, area: Rect, image_w: f32, image_h: f32) -> (f32, f32) {
     image::background_size(style, area, image_w, image_h)
+}
+
+fn mask_size(style: &ComputedStyle, area: Rect, image_w: f32, image_h: f32) -> (f32, f32) {
+    image::mask_size(style, area, image_w, image_h)
 }
 
 fn border_color(style: &ComputedStyle) -> Option<Color> {
