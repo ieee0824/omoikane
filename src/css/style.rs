@@ -1403,6 +1403,7 @@ fn is_supported_property(name: &str) -> bool {
     matches!(
         name,
         "align-items"
+            | "align-content"
             | "animation-fill-mode"
             | "animation-name"
             | "align-self"
@@ -1463,6 +1464,11 @@ fn is_supported_property(name: &str) -> bool {
             | "grid-row-end"
             | "height"
             | "justify-content"
+            | "justify-items"
+            | "justify-self"
+            | "place-content"
+            | "place-items"
+            | "place-self"
             | "left"
             | "line-height"
             | "margin-bottom"

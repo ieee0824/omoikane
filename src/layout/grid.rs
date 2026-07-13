@@ -32,6 +32,17 @@ struct AxisRequest {
     span: usize,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Alignment {
+    Start,
+    End,
+    Center,
+    SpaceBetween,
+    SpaceAround,
+    SpaceEvenly,
+    Stretch,
+}
+
 pub(super) fn is_grid_container(style: &ComputedStyle) -> bool {
     matches!(style.get("display"), Some(ComputedValue::Keyword(value))
         if value.eq_ignore_ascii_case("grid") || value.eq_ignore_ascii_case("inline-grid"))
@@ -94,7 +105,8 @@ pub(super) fn layout_grid_container(
     for (index, child) in items.iter().enumerate() {
         let placement = placements[index];
         let height = track_area(&fixed_row_heights, placement.row, placement.row_span, row_gap);
-        let containing = Rect { x: 0.0, y: 0.0, width: track_area(&column_widths, placement.column, placement.column_span, column_gap), height };
+        let cell_width = track_area(&column_widths, placement.column, placement.column_span, column_gap);
+        let containing = Rect { x: 0.0, y: 0.0, width: cell_width, height };
         if let Some(layout) = layout_node(child, resolver, containing, viewport, None) {
             let occupied = content_row_heights[placement.row..placement.row + placement.row_span].iter().sum::<f32>()
                 + row_gap * placement.row_span.saturating_sub(1) as f32;
@@ -107,25 +119,46 @@ pub(super) fn layout_grid_container(
     let mut row_tracks = explicit_rows;
     row_tracks.resize(row_count, Track::Auto);
     let row_heights = resolve_tracks(&row_tracks, row_basis, row_gap, &content_row_heights);
-    let column_offsets = offsets(&column_widths, column_gap, x);
-    let row_offsets = offsets(&row_heights, row_gap, y);
-    let mut children = Vec::new();
-    for (index, mut child) in laid_out {
-        let placement = placements[index];
-        translate_layout_box_to_outer(
-            &mut child,
-            column_offsets[placement.column],
-            row_offsets[placement.row],
-        );
-        children.push(child);
-    }
-
     let auto_height = row_heights.iter().sum::<f32>()
         + row_gap * row_heights.len().saturating_sub(1) as f32;
     let mut content_height = specified_height.unwrap_or(auto_height);
     let (min_height, max_height) = normalized_min_max_lengths(&style, "min-height", "max-height", 0.0);
     if let Some(value) = min_height { content_height = content_height.max(super::border_box_adjust_height(&style, value, &padding, &border)); }
     if let Some(value) = max_height { content_height = content_height.min(super::border_box_adjust_height(&style, value, &padding, &border)); }
+
+    let (column_widths, column_start, aligned_column_gap) = align_tracks(
+        column_widths,
+        column_gap,
+        width,
+        alignment(&style, "justify-content", Alignment::Start),
+    );
+    let (row_heights, row_start, aligned_row_gap) = align_tracks(
+        row_heights,
+        row_gap,
+        content_height,
+        alignment(&style, "align-content", Alignment::Start),
+    );
+    let column_offsets = offsets(&column_widths, aligned_column_gap, x + column_start);
+    let row_offsets = offsets(&row_heights, aligned_row_gap, y + row_start);
+    let mut children = Vec::new();
+    for (index, mut child) in laid_out {
+        let placement = placements[index];
+        let child_style = resolver.computed_style(&items[index]);
+        let cell_width = track_area(&column_widths, placement.column, placement.column_span, aligned_column_gap);
+        let cell_height = track_area(&row_heights, placement.row, placement.row_span, aligned_row_gap);
+        let justify = self_alignment(&child_style, "justify-self")
+            .unwrap_or_else(|| alignment(&style, "justify-items", Alignment::Stretch));
+        let align = self_alignment(&child_style, "align-self")
+            .unwrap_or_else(|| alignment(&style, "align-items", Alignment::Stretch));
+        let dx = item_offset(justify, cell_width, child.total_width());
+        let dy = item_offset(align, cell_height, child.total_height());
+        translate_layout_box_to_outer(
+            &mut child,
+            column_offsets[placement.column] + dx,
+            row_offsets[placement.row] + dy,
+        );
+        children.push(child);
+    }
     let dimensions = BoxDimensions { content: Rect { x, y, width, height: content_height }, padding, border, margin };
     for (child, child_style) in positioned {
         if let Some(child) = layout_positioned_child(&child, resolver, &child_style, dimensions, dimensions.content, viewport) {
@@ -134,6 +167,67 @@ pub(super) fn layout_grid_container(
     }
     sort_children_by_z_index(&mut children);
     Some(LayoutBox { node: node.clone(), dimensions, visibility: visibility(&style), overflow: overflow(&style), z_index: z_index(&style), lines: Vec::new(), children, marker: None })
+}
+
+fn alignment(style: &ComputedStyle, property: &str, default: Alignment) -> Alignment {
+    match style.get(property) {
+        Some(ComputedValue::Keyword(value)) if value.eq_ignore_ascii_case("start") || value.eq_ignore_ascii_case("flex-start") => Alignment::Start,
+        Some(ComputedValue::Keyword(value)) if value.eq_ignore_ascii_case("end") || value.eq_ignore_ascii_case("flex-end") => Alignment::End,
+        Some(ComputedValue::Keyword(value)) if value.eq_ignore_ascii_case("center") => Alignment::Center,
+        Some(ComputedValue::Keyword(value)) if value.eq_ignore_ascii_case("space-between") => Alignment::SpaceBetween,
+        Some(ComputedValue::Keyword(value)) if value.eq_ignore_ascii_case("space-around") => Alignment::SpaceAround,
+        Some(ComputedValue::Keyword(value)) if value.eq_ignore_ascii_case("space-evenly") => Alignment::SpaceEvenly,
+        Some(ComputedValue::Keyword(value)) if value.eq_ignore_ascii_case("stretch") => Alignment::Stretch,
+        _ => default,
+    }
+}
+
+fn self_alignment(style: &ComputedStyle, property: &str) -> Option<Alignment> {
+    match style.get(property) {
+        Some(ComputedValue::Keyword(value)) if value.eq_ignore_ascii_case("auto") => None,
+        Some(_) => Some(alignment(style, property, Alignment::Stretch)),
+        None => None,
+    }
+}
+
+fn item_offset(alignment: Alignment, available: f32, occupied: f32) -> f32 {
+    let free = (available - occupied).max(0.0);
+    match alignment {
+        Alignment::End => free,
+        Alignment::Center => free / 2.0,
+        _ => 0.0,
+    }
+}
+
+fn align_tracks(
+    mut sizes: Vec<f32>,
+    gap: f32,
+    available: f32,
+    alignment: Alignment,
+) -> (Vec<f32>, f32, f32) {
+    let count = sizes.len();
+    let used = sizes.iter().sum::<f32>() + gap * count.saturating_sub(1) as f32;
+    let free = (available - used).max(0.0);
+    if free == 0.0 || count == 0 { return (sizes, 0.0, gap); }
+    match alignment {
+        Alignment::End => (sizes, free, gap),
+        Alignment::Center => (sizes, free / 2.0, gap),
+        Alignment::SpaceBetween if count > 1 => (sizes, 0.0, gap + free / (count - 1) as f32),
+        Alignment::SpaceAround => {
+            let share = free / count as f32;
+            (sizes, share / 2.0, gap + share)
+        }
+        Alignment::SpaceEvenly => {
+            let share = free / (count + 1) as f32;
+            (sizes, share, gap + share)
+        }
+        Alignment::Stretch => {
+            let share = free / count as f32;
+            for size in &mut sizes { *size += share; }
+            (sizes, 0.0, gap)
+        }
+        _ => (sizes, 0.0, gap),
+    }
 }
 
 fn gap(style: &ComputedStyle, property: &str) -> f32 {
