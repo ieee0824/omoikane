@@ -130,3 +130,9 @@ throw による false-pass を防ぐ。
 
 - tokyo6 の黒画面自体はレンダリング完成度の別問題であり、本 issue（Boa IC 根治）のスコープ外。
 - 057 の native 化緩和（`__omoikane_is_valid_xml_name`）は無害なため残置。
+
+## upstream 状況（2026-07-13 調査）
+
+本家 boa ではこのバグは**未修正**。関連する open issue [#4265 "Transitive prototype inline caching"](https://github.com/boa-dev/boa/issues/4265) が該当し、修正 PR [#4703](https://github.com/boa-dev/boa/pull/4703) は close されマージされていない。その後 IC は polymorphic 版へ書き換えられた（PR #4740 等マージ済み）が、upstream/main の inline cache も**レシーバの shape しか検証しておらず**プロトタイプ shape のガードは無い（同 class のバグが残存）。
+
+含意: フォーク運用（059 の直接 git 依存 rev 6b9778e）は本家 #4265 が修正されるまで必要。upstream へ貢献する場合は main の polymorphic IC 向けに修正を書き直す必要がある（0.21.1 ベースの本修正はそのままは適用不可）。

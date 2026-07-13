@@ -1,7 +1,7 @@
 ---
 number: 059
 slug: boa-patch-not-applied
-status: open
+status: closed
 ---
 
 # Boa フォーク patch が適用されず IC バグが再発する
