@@ -1,5 +1,7 @@
 //! Basic explicit CSS Grid track sizing and row-major auto-placement.
 
+use std::collections::HashMap;
+
 use crate::css::{ComputedStyle, ComputedValue, StyleResolver};
 use crate::dom::{NodeHandle, NodeType};
 
@@ -53,6 +55,14 @@ struct AxisRequest {
     span: usize,
 }
 
+#[derive(Clone, Copy, Debug)]
+struct NamedArea {
+    row_start: usize,
+    row_span: usize,
+    column_start: usize,
+    column_span: usize,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Alignment {
     Start,
@@ -100,18 +110,27 @@ pub(super) fn layout_grid_container(
     let specified_height = resolved_length(&style, "height", containing_block_height)
         .map(|height| super::border_box_adjust_height(&style, height, &padding, &border));
     let row_basis = specified_height.unwrap_or(0.0);
+    let (named_areas, area_row_count, area_column_count) = named_areas(&style);
     let mut columns = track_list(&style, "grid-template-columns", width, column_gap)
         .filter(|tracks| !tracks.is_empty())
-        .unwrap_or_else(|| vec![Track::new(TrackSize::Fr(1.0))]);
+        .unwrap_or_else(|| {
+            if area_column_count > 0 {
+                vec![Track::auto(); area_column_count]
+            } else {
+                vec![Track::new(TrackSize::Fr(1.0))]
+            }
+        });
+    columns.resize(columns.len().max(area_column_count), Track::auto());
     let explicit_column_count = columns.len();
     let mut explicit_rows = track_list(&style, "grid-template-rows", row_basis, row_gap)
         .unwrap_or_default();
+    explicit_rows.resize(explicit_rows.len().max(area_row_count), Track::auto());
     let explicit_row_count = explicit_rows.len();
     let requests: Vec<_> = items.iter().map(|child| {
         let child_style = resolver.computed_style(child);
         (
-            axis_request(&child_style, "grid-column", explicit_column_count),
-            axis_request(&child_style, "grid-row", explicit_row_count),
+            axis_request(&child_style, "grid-column", explicit_column_count, &named_areas, true),
+            axis_request(&child_style, "grid-row", explicit_row_count, &named_areas, false),
         )
     }).collect();
     let mut placements = place_items(&requests, &mut columns, &mut explicit_rows);
@@ -331,9 +350,25 @@ fn area_is_free(occupied: &[Vec<bool>], column: usize, row: usize, column_span: 
     occupied[row..row + row_span].iter().all(|cells| cells[column..column + column_span].iter().all(|cell| !cell))
 }
 
-fn axis_request(style: &ComputedStyle, axis: &str, explicit_tracks: usize) -> AxisRequest {
-    let start = grid_line(style.get(&format!("{axis}-start")));
-    let end = grid_line(style.get(&format!("{axis}-end")));
+fn axis_request(
+    style: &ComputedStyle,
+    axis: &str,
+    explicit_tracks: usize,
+    named_areas: &HashMap<String, NamedArea>,
+    column_axis: bool,
+) -> AxisRequest {
+    let start = grid_line(
+        style.get(&format!("{axis}-start")),
+        named_areas,
+        column_axis,
+        true,
+    );
+    let end = grid_line(
+        style.get(&format!("{axis}-end")),
+        named_areas,
+        column_axis,
+        false,
+    );
     match (start, end) {
         (GridLine::Line(start), GridLine::Line(end)) => {
             let start = resolve_line(start, explicit_tracks);
@@ -351,18 +386,131 @@ fn axis_request(style: &ComputedStyle, axis: &str, explicit_tracks: usize) -> Ax
 #[derive(Clone, Copy, Debug)]
 enum GridLine { Auto, Line(isize), Span(usize) }
 
-fn grid_line(value: Option<&ComputedValue>) -> GridLine {
+fn grid_line(
+    value: Option<&ComputedValue>,
+    named_areas: &HashMap<String, NamedArea>,
+    column_axis: bool,
+    start_side: bool,
+) -> GridLine {
     match value {
         Some(ComputedValue::Number(number)) => GridLine::Line(*number as isize),
         Some(ComputedValue::Keyword(value)) => {
             let parts: Vec<_> = value.split_whitespace().collect();
+            if parts.len() == 1
+                && (parts[0].eq_ignore_ascii_case("auto")
+                    || parts[0].eq_ignore_ascii_case("span"))
+            {
+                return GridLine::Auto;
+            }
             if parts.len() == 2 && parts[0].eq_ignore_ascii_case("span") {
                 return parts[1].parse::<usize>().ok().filter(|span| *span > 0).map(GridLine::Span).unwrap_or(GridLine::Auto);
             }
-            value.parse::<isize>().ok().filter(|line| *line != 0).map(GridLine::Line).unwrap_or(GridLine::Auto)
+            if let Some(line) = value.parse::<isize>().ok().filter(|line| *line != 0) {
+                return GridLine::Line(line);
+            }
+            named_area_line(value, named_areas, column_axis, start_side)
+                .map(|line| GridLine::Line((line + 1) as isize))
+                .unwrap_or(GridLine::Auto)
         }
         _ => GridLine::Auto,
     }
+}
+
+fn named_area_line(
+    name: &str,
+    named_areas: &HashMap<String, NamedArea>,
+    column_axis: bool,
+    start_side: bool,
+) -> Option<usize> {
+    let (area_name, boundary_is_start) = if named_areas.contains_key(name) {
+        (name, start_side)
+    } else if let Some(name) = name.strip_suffix("-start") {
+        (name, true)
+    } else if let Some(name) = name.strip_suffix("-end") {
+        (name, false)
+    } else {
+        (name, start_side)
+    };
+    let area = named_areas.get(area_name)?;
+    let (start, span) = if column_axis {
+        (area.column_start, area.column_span)
+    } else {
+        (area.row_start, area.row_span)
+    };
+    Some(if boundary_is_start { start } else { start + span })
+}
+
+fn named_areas(style: &ComputedStyle) -> (HashMap<String, NamedArea>, usize, usize) {
+    let Some(ComputedValue::Keyword(value)) = style.get("grid-template-areas") else {
+        return (HashMap::new(), 0, 0);
+    };
+    let rows = parse_area_rows(value);
+    let row_count = rows.len();
+    let column_count = rows.iter().map(Vec::len).max().unwrap_or(0);
+    let mut cells: HashMap<String, Vec<(usize, usize)>> = HashMap::new();
+    for (row, names) in rows.iter().enumerate() {
+        for (column, name) in names.iter().enumerate() {
+            if !name.is_empty() && !name.chars().all(|ch| ch == '.') {
+                cells.entry(name.clone()).or_default().push((row, column));
+            }
+        }
+    }
+
+    let mut areas = HashMap::new();
+    for (name, positions) in cells {
+        let row_start = positions.iter().map(|(row, _)| *row).min().unwrap_or(0);
+        let row_end = positions.iter().map(|(row, _)| *row).max().unwrap_or(row_start) + 1;
+        let column_start = positions.iter().map(|(_, column)| *column).min().unwrap_or(0);
+        let column_end = positions.iter().map(|(_, column)| *column).max().unwrap_or(column_start) + 1;
+        let rectangular = positions.len() == (row_end - row_start) * (column_end - column_start)
+            && (row_start..row_end).all(|row| {
+                (column_start..column_end).all(|column| {
+                    rows.get(row)
+                        .and_then(|row| row.get(column))
+                        .is_some_and(|cell| cell == &name)
+                })
+            });
+        if rectangular {
+            areas.insert(name, NamedArea {
+                row_start,
+                row_span: row_end - row_start,
+                column_start,
+                column_span: column_end - column_start,
+            });
+        }
+    }
+    (areas, row_count, column_count)
+}
+
+fn parse_area_rows(value: &str) -> Vec<Vec<String>> {
+    if value.trim().eq_ignore_ascii_case("none") {
+        return Vec::new();
+    }
+    let mut rows = Vec::new();
+    let mut current = String::new();
+    let mut quoted = false;
+    let mut escaped = false;
+    for ch in value.chars() {
+        if !quoted {
+            if ch == '"' {
+                quoted = true;
+                current.clear();
+            }
+            continue;
+        }
+        if escaped {
+            current.push(ch);
+            escaped = false;
+        } else if ch == '\\' {
+            escaped = true;
+        } else if ch == '"' {
+            rows.push(current.split_whitespace().map(str::to_string).collect());
+            quoted = false;
+        } else {
+            current.push(ch);
+        }
+    }
+    rows
 }
 
 fn resolve_line(line: isize, explicit_tracks: usize) -> usize {

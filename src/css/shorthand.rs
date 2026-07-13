@@ -24,6 +24,8 @@ pub(super) fn expand_shorthand(name: &str, value: Value, important: bool) -> Vec
         "animation" => expand_animation_shorthand(value, important),
         "outline" => expand_outline_shorthand(value, important),
         "grid-column" | "grid-row" => expand_grid_axis_shorthand(name, value, important),
+        "grid-area" => expand_grid_area_shorthand(value, important),
+        "grid-template" => expand_grid_template_shorthand(value, important),
         "place-items" => expand_place_shorthand("align-items", "justify-items", value, important),
         "place-self" => expand_place_shorthand("align-self", "justify-self", value, important),
         "place-content" => expand_place_shorthand("align-content", "justify-content", value, important),
@@ -87,6 +89,123 @@ fn collapse_grid_line(values: &[Value]) -> Value {
         [value] => value.clone(),
         values => Value::List(values.to_vec()),
     }
+}
+
+fn expand_grid_area_shorthand(value: Value, important: bool) -> Vec<Declaration> {
+    let values = match value {
+        Value::List(values) => values,
+        value => vec![value],
+    };
+    let mut parts: Vec<Vec<Value>> = vec![Vec::new()];
+    for value in values {
+        if matches!(&value, Value::Keyword(keyword) if keyword == "/") {
+            if parts.last().is_some_and(Vec::is_empty) || parts.len() == 4 {
+                return Vec::new();
+            }
+            parts.push(Vec::new());
+        } else {
+            parts.last_mut().expect("grid area has one part").push(value);
+        }
+    }
+    if parts.last().is_some_and(Vec::is_empty) {
+        return Vec::new();
+    }
+
+    let row_start = collapse_grid_line(&parts[0]);
+    let column_start = parts.get(1).map(|part| collapse_grid_line(part)).unwrap_or_else(|| {
+        custom_grid_identifier(&row_start).unwrap_or_else(auto_grid_line)
+    });
+    let row_end = parts.get(2).map(|part| collapse_grid_line(part)).unwrap_or_else(|| {
+        custom_grid_identifier(&row_start).unwrap_or_else(auto_grid_line)
+    });
+    let column_end = parts.get(3).map(|part| collapse_grid_line(part)).unwrap_or_else(|| {
+        custom_grid_identifier(&column_start).unwrap_or_else(auto_grid_line)
+    });
+
+    [
+        ("grid-row-start", row_start),
+        ("grid-column-start", column_start),
+        ("grid-row-end", row_end),
+        ("grid-column-end", column_end),
+    ]
+    .into_iter()
+    .map(|(name, value)| Declaration { name: name.to_string(), value, important })
+    .collect()
+}
+
+fn custom_grid_identifier(value: &Value) -> Option<Value> {
+    let Value::Keyword(keyword) = value else { return None; };
+    if keyword.eq_ignore_ascii_case("auto")
+        || keyword.eq_ignore_ascii_case("span")
+        || keyword.parse::<isize>().is_ok()
+        || keyword.split_whitespace().count() != 1
+    {
+        None
+    } else {
+        Some(value.clone())
+    }
+}
+
+fn auto_grid_line() -> Value { Value::Keyword("auto".to_string()) }
+
+fn expand_grid_template_shorthand(value: Value, important: bool) -> Vec<Declaration> {
+    let values = match value {
+        Value::List(values) => values,
+        value => vec![value],
+    };
+    let slash = values
+        .iter()
+        .position(|value| matches!(value, Value::Keyword(keyword) if keyword == "/"));
+    let (before, columns) = match slash {
+        Some(index) if index > 0 && index + 1 < values.len() => {
+            (&values[..index], collapse_grid_line(&values[index + 1..]))
+        }
+        Some(_) => return Vec::new(),
+        None => (&values[..], Value::Keyword("none".to_string())),
+    };
+
+    if !before.iter().any(|value| matches!(value, Value::String(_))) {
+        if slash.is_none() {
+            return Vec::new();
+        }
+        return vec![
+            Declaration {
+                name: "grid-template-rows".to_string(),
+                value: collapse_grid_line(before),
+                important,
+            },
+            Declaration { name: "grid-template-columns".to_string(), value: columns, important },
+        ];
+    }
+
+    let mut areas = Vec::new();
+    let mut rows = Vec::new();
+    let mut index = 0;
+    while index < before.len() {
+        let Value::String(row) = &before[index] else { return Vec::new(); };
+        areas.push(Value::String(row.clone()));
+        index += 1;
+        if index < before.len() && !matches!(before[index], Value::String(_)) {
+            rows.push(before[index].clone());
+            index += 1;
+        } else {
+            rows.push(Value::Keyword("auto".to_string()));
+        }
+    }
+
+    vec![
+        Declaration {
+            name: "grid-template-areas".to_string(),
+            value: Value::List(areas),
+            important,
+        },
+        Declaration {
+            name: "grid-template-rows".to_string(),
+            value: Value::List(rows),
+            important,
+        },
+        Declaration { name: "grid-template-columns".to_string(), value: columns, important },
+    ]
 }
 
 fn expand_box_shorthand(prefix: &str, value: Value, important: bool) -> Vec<Declaration> {

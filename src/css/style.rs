@@ -1456,6 +1456,9 @@ fn is_supported_property(name: &str) -> bool {
             | "grid-column-gap"
             | "grid-template-columns"
             | "grid-template-rows"
+            | "grid-template-areas"
+            | "grid-template"
+            | "grid-area"
             | "grid-column"
             | "grid-column-start"
             | "grid-column-end"
@@ -1520,6 +1523,9 @@ fn is_supported_property(name: &str) -> bool {
 }
 
 fn compute_value(value: &Value, property_name: &str, ctx: ResolutionContext) -> ComputedValue {
+    if property_name.eq_ignore_ascii_case("grid-template-areas") {
+        return ComputedValue::Keyword(render_grid_template_areas(value));
+    }
     if property_name.eq_ignore_ascii_case("grid-template-columns")
         || property_name.eq_ignore_ascii_case("grid-template-rows")
     {
@@ -1619,6 +1625,24 @@ fn compute_value(value: &Value, property_name: &str, ctx: ResolutionContext) -> 
                 ComputedValue::Keyword(String::new())
             }
         }
+    }
+}
+
+fn render_grid_template_areas(value: &Value) -> String {
+    fn quoted(row: &str) -> String {
+        format!("\"{}\"", row.replace('\\', "\\\\").replace('"', "\\\""))
+    }
+    match value {
+        Value::String(row) => quoted(row),
+        Value::List(rows) => rows
+            .iter()
+            .map(|row| match row {
+                Value::String(row) => quoted(row),
+                value => render_value(value),
+            })
+            .collect::<Vec<_>>()
+            .join(" "),
+        value => render_value(value),
     }
 }
 
