@@ -409,8 +409,9 @@ pub(crate) fn rasterize_with_fallback(
     let prefer_cjk = is_cjk_preferred_character(ch);
     let try_index = |index: usize| -> Option<(usize, Option<GlyphRaster>, f32)> {
         let font = &fonts[index];
-        // Allow primary font to render .notdef as a visible last resort.
-        if index != 0 && !ch.is_whitespace() && !font.has_glyph(ch) {
+        // Missing glyphs must not rasterize as .notdef until every real
+        // fallback candidate has been exhausted.
+        if !ch.is_whitespace() && !font.has_glyph(ch) {
             return None;
         }
         match font.rasterize(ch, font_size) {
@@ -454,12 +455,24 @@ pub(crate) fn rasterize_with_fallback(
         }
     }
 
-    // Fallback to the primary font advance to avoid collapsing text runs.
-    let primary_advance = fonts
-        .first()
-        .map(|font| font.glyph_advance(ch, font_size))
-        .unwrap_or((font_size * 0.6).max(1.0));
-    (0, None, primary_advance)
+    // No font owns the character. Render the primary font's .notdef as the
+    // visible last resort, while retaining an advance if rasterization fails.
+    if let Some(primary) = fonts.first() {
+        if let Ok(glyph) = primary.rasterize(ch, font_size)
+            && glyph.width > 0
+            && glyph.height > 0
+            && !glyph.bitmap.is_empty()
+        {
+            let advance = if glyph.advance_x > 0.0 {
+                glyph.advance_x
+            } else {
+                primary.glyph_advance(ch, font_size)
+            };
+            return (0, Some(glyph), advance);
+        }
+        return (0, None, primary.glyph_advance(ch, font_size));
+    }
+    (0, None, (font_size * 0.6).max(1.0))
 }
 
 /// Like `rasterize_with_fallback` but accepts `&[&Font]` references.
@@ -471,7 +484,7 @@ pub(crate) fn rasterize_with_fallback_refs(
     let prefer_cjk = is_cjk_preferred_character(ch);
     let try_index = |index: usize| -> Option<(usize, Option<GlyphRaster>, f32)> {
         let font = fonts[index];
-        if index != 0 && !ch.is_whitespace() && !font.has_glyph(ch) {
+        if !ch.is_whitespace() && !font.has_glyph(ch) {
             return None;
         }
         match font.rasterize(ch, font_size) {
@@ -513,11 +526,22 @@ pub(crate) fn rasterize_with_fallback_refs(
         }
     }
 
-    let primary_advance = fonts
-        .first()
-        .map(|font| font.glyph_advance(ch, font_size))
-        .unwrap_or((font_size * 0.6).max(1.0));
-    (0, None, primary_advance)
+    if let Some(primary) = fonts.first() {
+        if let Ok(glyph) = primary.rasterize(ch, font_size)
+            && glyph.width > 0
+            && glyph.height > 0
+            && !glyph.bitmap.is_empty()
+        {
+            let advance = if glyph.advance_x > 0.0 {
+                glyph.advance_x
+            } else {
+                primary.glyph_advance(ch, font_size)
+            };
+            return (0, Some(glyph), advance);
+        }
+        return (0, None, primary.glyph_advance(ch, font_size));
+    }
+    (0, None, (font_size * 0.6).max(1.0))
 }
 
 pub(crate) use crate::font::is_cjk_preferred_character;
