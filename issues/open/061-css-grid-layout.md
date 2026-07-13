@@ -28,7 +28,7 @@ kasaneteto.jp の app.css は grid を多用: `display: grid` 131箇所、`grid-
 - [x] 061-2 明示的アイテム配置とスパン（PR #130）
       `grid-column` / `grid-row`（line ベース `a / b`、`span n`）、
       明示配置と自動配置の混在、暗黙トラック生成（`grid-auto-rows/columns` の最小対応）
-- [ ] 061-3 アラインメント
+- [x] 061-3 アラインメント（PR #131）
       `justify-items` / `align-items` / `justify-content` / `align-content` /
       `place-items` / `place-content` / `justify-self` / `align-self`
 - [ ] 061-4（必要なら）minmax() / auto-fill / auto-fit / 名前付きライン等の拡張

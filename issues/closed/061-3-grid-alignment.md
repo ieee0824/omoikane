@@ -2,7 +2,7 @@
 number: 061-3
 slug: grid-alignment
 parent: 061
-status: open
+status: closed
 ---
 
 # CSS Grid: アラインメント
