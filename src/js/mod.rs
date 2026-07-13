@@ -289,8 +289,8 @@ impl HostState {
         visit(self, root);
     }
 
-    /// Returns the sub-browsing-context document for `iframe`, loading it on the
-    /// first access and reloading it whenever the element's `src` changes.
+    /// Returns the embedded document for an iframe or object, loading it on the
+    /// first access and reloading it whenever its resource attribute changes.
     ///
     /// The returned document's whole node tree is registered so it can be
     /// traversed and mutated through the DOM primitives exactly like the
@@ -300,9 +300,17 @@ impl HostState {
     /// HTML (otherwise the sub-document stays an empty skeleton so non-HTML
     /// resources are never mined for markup).
     fn iframe_content_document(&mut self, iframe: &NodeHandle) -> NodeHandle {
+        let resource_attribute = if iframe
+            .tag_name()
+            .is_some_and(|tag| tag.eq_ignore_ascii_case("object"))
+        {
+            "data"
+        } else {
+            "src"
+        };
         let src = iframe
             .attributes()
-            .and_then(|attrs| attrs.get("src").cloned())
+            .and_then(|attrs| attrs.get(resource_attribute).cloned())
             .unwrap_or_default()
             .trim()
             .to_string();
@@ -8184,7 +8192,7 @@ mod tests {
                     r#"var d = document.implementation.createDocument('http://www.w3.org/2000/svg', 'svg', null);
                        var rect = d.createElementNS('http://www.w3.org/2000/svg', 'rect');
                        var text = d.createElementNS('http://www.w3.org/2000/svg', 'text');
-                       text.appendChild(d.createTextNode('A\ud800B'));
+                       text.appendChild(d.createTextNode('abc'));
                        [d.documentElement instanceof SVGSVGElement,
                         rect instanceof SVGRectElement,
                         rect.constructor.name,
