@@ -1521,6 +1521,20 @@ fn is_supported_property(name: &str) -> bool {
             | "list-style-type"
             | "list-style-position"
             | "list-style-image"
+            | "mask"
+            | "mask-image"
+            | "mask-position"
+            | "mask-position-x"
+            | "mask-position-y"
+            | "mask-repeat"
+            | "mask-size"
+            | "-webkit-mask"
+            | "-webkit-mask-image"
+            | "-webkit-mask-position"
+            | "-webkit-mask-position-x"
+            | "-webkit-mask-position-y"
+            | "-webkit-mask-repeat"
+            | "-webkit-mask-size"
     )
 }
 
@@ -1617,6 +1631,7 @@ fn compute_value(value: &Value, property_name: &str, ctx: ResolutionContext) -> 
                 || property_name.eq_ignore_ascii_case("overflow")
                 || property_name.eq_ignore_ascii_case("box-shadow")
                 || property_name.eq_ignore_ascii_case("background-size")
+                || property_name.eq_ignore_ascii_case("mask-size")
                 || property_name.eq_ignore_ascii_case("border-spacing")
             {
                 return ComputedValue::Keyword(render_value(value));
@@ -1636,6 +1651,20 @@ fn compute_value(value: &Value, property_name: &str, ctx: ResolutionContext) -> 
 fn canonical_property_name(name: &str) -> &str {
     if name.eq_ignore_ascii_case("-webkit-clip-path") {
         "clip-path"
+    } else if name.eq_ignore_ascii_case("-webkit-mask") {
+        "mask"
+    } else if name.eq_ignore_ascii_case("-webkit-mask-image") {
+        "mask-image"
+    } else if name.eq_ignore_ascii_case("-webkit-mask-position") {
+        "mask-position"
+    } else if name.eq_ignore_ascii_case("-webkit-mask-position-x") {
+        "mask-position-x"
+    } else if name.eq_ignore_ascii_case("-webkit-mask-position-y") {
+        "mask-position-y"
+    } else if name.eq_ignore_ascii_case("-webkit-mask-repeat") {
+        "mask-repeat"
+    } else if name.eq_ignore_ascii_case("-webkit-mask-size") {
+        "mask-size"
     } else {
         name
     }

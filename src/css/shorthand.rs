@@ -13,6 +13,10 @@ pub(super) fn expand_shorthand(name: &str, value: Value, important: bool) -> Vec
             expand_border_side_shorthand(name, value, important)
         }
         "background" => expand_background_shorthand(value, important),
+        "mask" | "-webkit-mask" => expand_mask_shorthand(value, important),
+        "mask-position" | "-webkit-mask-position" => {
+            expand_mask_position_shorthand(value, important)
+        }
         "font" => expand_font_shorthand(value, important),
         "overflow" => expand_overflow_shorthand(value, important),
         "flex" => expand_flex_shorthand(value, important),
@@ -633,6 +637,149 @@ fn expand_background_shorthand(value: Value, important: bool) -> Vec<Declaration
         }]
     } else {
         declarations
+    }
+}
+
+fn expand_mask_shorthand(value: Value, important: bool) -> Vec<Declaration> {
+    let values = match value {
+        Value::List(values) => values,
+        single => vec![single],
+    };
+    let slash = values
+        .iter()
+        .position(|value| matches!(value, Value::Keyword(keyword) if keyword == "/"));
+    let before_size = slash.map_or(values.as_slice(), |index| &values[..index]);
+    let after_size = slash.map_or(&[][..], |index| &values[index + 1..]);
+
+    let mut image = None;
+    let mut unsupported_image = false;
+    let mut position = Vec::new();
+    let mut size = Vec::new();
+    let mut repeat = None;
+
+    for item in before_size {
+        match item {
+            Value::Keyword(keyword) if keyword.to_ascii_lowercase().starts_with("url(") => {
+                if image.is_none() {
+                    image = Some(item.clone());
+                }
+            }
+            Value::Keyword(keyword) if keyword.eq_ignore_ascii_case("none") => {
+                image = Some(item.clone());
+            }
+            Value::Keyword(keyword)
+                if keyword.eq_ignore_ascii_case("repeat")
+                    || keyword.eq_ignore_ascii_case("no-repeat") =>
+            {
+                repeat = Some(item.clone());
+            }
+            Value::Function { .. } => unsupported_image = true,
+            item if is_mask_position_value(item) => position.push(item.clone()),
+            _ => {}
+        }
+    }
+    for item in after_size {
+        match item {
+            Value::Keyword(keyword)
+                if keyword.eq_ignore_ascii_case("repeat")
+                    || keyword.eq_ignore_ascii_case("no-repeat") =>
+            {
+                repeat = Some(item.clone());
+            }
+            item if is_mask_size_value(item) => size.push(item.clone()),
+            _ => {}
+        }
+    }
+
+    let mut declarations = Vec::new();
+    // This implementation supports only URL masks. Gradients and other image
+    // functions deliberately compute to `none`, i.e. no mask is applied.
+    if unsupported_image && image.is_none() {
+        image = Some(Value::Keyword("none".to_string()));
+    }
+    if let Some(value) = image {
+        declarations.push(Declaration {
+            name: "mask-image".to_string(),
+            value,
+            important,
+        });
+    }
+    declarations.extend(expand_mask_position_values(&position, important));
+    if !size.is_empty() {
+        declarations.push(Declaration {
+            name: "mask-size".to_string(),
+            value: collapse_mask_values(&size),
+            important,
+        });
+    }
+    if let Some(value) = repeat {
+        declarations.push(Declaration {
+            name: "mask-repeat".to_string(),
+            value,
+            important,
+        });
+    }
+    declarations
+}
+
+fn expand_mask_position_shorthand(value: Value, important: bool) -> Vec<Declaration> {
+    let values = match value {
+        Value::List(values) => values,
+        single => vec![single],
+    };
+    expand_mask_position_values(&values, important)
+}
+
+fn expand_mask_position_values(values: &[Value], important: bool) -> Vec<Declaration> {
+    let (x, y) = match values {
+        [] => return Vec::new(),
+        [value] => {
+            let keyword = value_keyword(value);
+            if matches!(keyword, Some("top" | "bottom")) {
+                (Value::Keyword("center".to_string()), value.clone())
+            } else {
+                (value.clone(), Value::Keyword("center".to_string()))
+            }
+        }
+        [first, second, ..] => {
+            let first_keyword = value_keyword(first);
+            let second_keyword = value_keyword(second);
+            if matches!(first_keyword, Some("top" | "bottom"))
+                || matches!(second_keyword, Some("left" | "right"))
+            {
+                (second.clone(), first.clone())
+            } else {
+                (first.clone(), second.clone())
+            }
+        }
+    };
+    vec![
+        Declaration { name: "mask-position-x".to_string(), value: x, important },
+        Declaration { name: "mask-position-y".to_string(), value: y, important },
+    ]
+}
+
+fn value_keyword(value: &Value) -> Option<&str> {
+    match value {
+        Value::Keyword(keyword) => Some(keyword.as_str()),
+        _ => None,
+    }
+}
+
+fn is_mask_position_value(value: &Value) -> bool {
+    matches!(value, Value::Length(..) | Value::Percentage(_) | Value::Number(_))
+        || matches!(value_keyword(value), Some("left" | "right" | "top" | "bottom" | "center"))
+}
+
+fn is_mask_size_value(value: &Value) -> bool {
+    matches!(value, Value::Length(..) | Value::Percentage(_) | Value::Number(_))
+        || matches!(value_keyword(value), Some("auto" | "contain" | "cover"))
+}
+
+fn collapse_mask_values(values: &[Value]) -> Value {
+    match values {
+        [value] => value.clone(),
+        values => Value::List(values.to_vec()),
     }
 }
 

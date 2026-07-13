@@ -556,7 +556,33 @@ impl Parser {
         }
 
         let (value_tokens, important) = split_important(&value_tokens);
-        let value = parse_value_tokens(&value_tokens)?;
+        // CSS masking is intentionally single-layer for now. Preserve the first
+        // top-level layer and ignore subsequent comma-separated layers before
+        // generic value parsing (which otherwise discards comma tokens).
+        let value_tokens = if matches!(
+            name.as_str(),
+            "mask"
+                | "-webkit-mask"
+                | "mask-image"
+                | "-webkit-mask-image"
+                | "mask-position"
+                | "-webkit-mask-position"
+                | "mask-size"
+                | "-webkit-mask-size"
+                | "mask-repeat"
+                | "-webkit-mask-repeat"
+        ) {
+            first_mask_layer(&value_tokens)
+        } else {
+            value_tokens
+        };
+        let value = if matches!(name.as_str(), "mask" | "-webkit-mask") {
+            // Preserve `/` even when authors omit surrounding whitespace, as
+            // in the common `top center/contain` form.
+            parse_value_tokens_with_mode(&value_tokens, true)?
+        } else {
+            parse_value_tokens(&value_tokens)?
+        };
         Ok(expand_shorthand(&name, value, important))
     }
 
@@ -625,6 +651,19 @@ impl Parser {
         self.index += 1;
         Some(token)
     }
+}
+
+fn first_mask_layer(tokens: &[CssToken]) -> Vec<CssToken> {
+    let mut depth = 0usize;
+    for (index, token) in tokens.iter().enumerate() {
+        match token {
+            CssToken::ParenOpen | CssToken::BracketOpen => depth += 1,
+            CssToken::ParenClose | CssToken::BracketClose => depth = depth.saturating_sub(1),
+            CssToken::Comma if depth == 0 => return tokens[..index].to_vec(),
+            _ => {}
+        }
+    }
+    tokens.to_vec()
 }
 
 fn render_nth_argument(tokens: &[CssToken]) -> String {
