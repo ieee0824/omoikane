@@ -423,13 +423,19 @@ impl StyleResolver {
                 viewport_width: self.viewport_width,
                 viewport_height: self.viewport_height,
             };
-            if candidate.name == "gap" {
+            if candidate.name == "gap" || candidate.name == "grid-gap" {
                 if let Some((row_gap, column_gap)) =
                     compute_gap_shorthand(&resolved_value, ctx)
                 {
                     insert_computed_property(&mut properties, "row-gap", row_gap);
                     insert_computed_property(&mut properties, "column-gap", column_gap);
                 }
+                continue;
+            }
+            if candidate.name == "grid-row-gap" || candidate.name == "grid-column-gap" {
+                let target = if candidate.name == "grid-row-gap" { "row-gap" } else { "column-gap" };
+                let computed = compute_value(&resolved_value, target, ctx);
+                insert_computed_property(&mut properties, target, computed);
                 continue;
             }
             let computed = compute_value(&resolved_value, &candidate.name, ctx);
@@ -1444,6 +1450,11 @@ fn is_supported_property(name: &str) -> bool {
             | "font-style"
             | "font-weight"
             | "gap"
+            | "grid-gap"
+            | "grid-row-gap"
+            | "grid-column-gap"
+            | "grid-template-columns"
+            | "grid-template-rows"
             | "height"
             | "justify-content"
             | "left"
@@ -1497,6 +1508,11 @@ fn is_supported_property(name: &str) -> bool {
 }
 
 fn compute_value(value: &Value, property_name: &str, ctx: ResolutionContext) -> ComputedValue {
+    if property_name.eq_ignore_ascii_case("grid-template-columns")
+        || property_name.eq_ignore_ascii_case("grid-template-rows")
+    {
+        return ComputedValue::Keyword(render_value(value));
+    }
     match value {
         Value::Keyword(keyword) => {
             // CSS-wide keywords must remain as Keyword for inherit/initial resolution.
