@@ -1513,6 +1513,40 @@ fn auto_fit_collapses_empty_repetitions_before_fractional_sizing() {
 }
 
 #[test]
+fn auto_fit_collapses_gutters_adjacent_to_empty_repetitions() {
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let grid = NodeHandle::element("div");
+    document.append_child(body.clone());
+    body.append_child(grid.clone());
+    for _ in 0..2 {
+        grid.append_child(NodeHandle::element("article"));
+    }
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "body { margin: 0; } div { display: grid; width: 430px; column-gap: 10px; grid-template-columns: repeat(auto-fit, minmax(100px, 1fr)); } article { height: 10px; }",
+        )
+        .unwrap(),
+    );
+    let layout = layout_tree(
+        &body,
+        &mut resolver,
+        Rect { x: 0.0, y: 0.0, width: 430.0, height: 0.0 },
+    )
+    .unwrap();
+    let rects: Vec<_> = layout.children[0]
+        .children
+        .iter()
+        .map(|child| child.dimensions.content)
+        .collect();
+    assert_eq!((rects[0].x, rects[0].width), (0.0, 210.0));
+    assert_eq!((rects[1].x, rects[1].width), (220.0, 210.0));
+}
+
+#[test]
 fn skips_named_grid_lines_while_parsing_tracks() {
     let rects = grid_track_extension_rects(
         "[start] 80px [middle alternate] 120px [end]",

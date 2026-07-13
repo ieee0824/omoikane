@@ -37,8 +37,6 @@ impl Track {
     }
 
     fn auto() -> Self { Self::new(TrackSize::Auto) }
-
-    fn collapsed() -> Self { Self::new(TrackSize::Px(0.0)) }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -116,9 +114,9 @@ pub(super) fn layout_grid_container(
             axis_request(&child_style, "grid-row", explicit_row_count),
         )
     }).collect();
-    let placements = place_items(&requests, &mut columns, &mut explicit_rows);
-    collapse_empty_auto_fit_tracks(&mut columns, &placements, true);
-    collapse_empty_auto_fit_tracks(&mut explicit_rows, &placements, false);
+    let mut placements = place_items(&requests, &mut columns, &mut explicit_rows);
+    collapse_empty_auto_fit_tracks(&mut columns, &mut placements, true);
+    collapse_empty_auto_fit_tracks(&mut explicit_rows, &mut placements, false);
     let column_intrinsics = auto_column_intrinsics(&columns, &items, &placements, resolver);
     let column_widths = resolve_tracks(&columns, width, column_gap, &column_intrinsics);
     let row_count = placements.iter().map(|p| p.row + p.row_span).max().unwrap_or(explicit_rows.len()).max(explicit_rows.len());
@@ -610,17 +608,33 @@ fn auto_repeat_count(pattern: &[Track], basis: f32, gap: f32) -> usize {
     if stride <= 0.0 { 1 } else { ((basis + gap) / stride).floor().max(1.0) as usize }
 }
 
-fn collapse_empty_auto_fit_tracks(tracks: &mut [Track], placements: &[Placement], columns: bool) {
-    for (index, track) in tracks.iter_mut().enumerate() {
-        if !track.auto_fit { continue; }
-        let occupied = placements.iter().any(|placement| {
-            let (start, span) = if columns {
-                (placement.column, placement.column_span)
-            } else {
-                (placement.row, placement.row_span)
-            };
-            index >= start && index < start + span
-        });
-        if !occupied { *track = Track::collapsed(); }
+fn collapse_empty_auto_fit_tracks(
+    tracks: &mut Vec<Track>,
+    placements: &mut [Placement],
+    columns: bool,
+) {
+    let collapsed: Vec<_> = tracks
+        .iter()
+        .enumerate()
+        .filter_map(|(index, track)| {
+            if !track.auto_fit { return None; }
+            let occupied = placements.iter().any(|placement| {
+                let (start, span) = if columns {
+                    (placement.column, placement.column_span)
+                } else {
+                    (placement.row, placement.row_span)
+                };
+                index >= start && index < start + span
+            });
+            (!occupied).then_some(index)
+        })
+        .collect();
+
+    for placement in placements {
+        let start = if columns { &mut placement.column } else { &mut placement.row };
+        *start -= collapsed.partition_point(|index| *index < *start);
+    }
+    for index in collapsed.into_iter().rev() {
+        tracks.remove(index);
     }
 }
