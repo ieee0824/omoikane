@@ -1,7 +1,7 @@
 ---
 number: 062
 slug: clip-path-inset
-status: open
+status: closed
 ---
 
 # clip-path: inset() の描画クリップ対応
