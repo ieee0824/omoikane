@@ -62,6 +62,32 @@ fn computes_block_box_dimensions_from_style() {
 }
 
 #[test]
+fn computes_block_box_dimensions_from_inline_style() {
+    let (_document, _html, body, card) = sample_tree();
+    card.set_attribute("style", "width: 120px; padding: 10px");
+    let mut resolver = StyleResolver::new();
+
+    let layout = layout_tree(
+        &body,
+        &mut resolver,
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 300.0,
+            height: 0.0,
+        },
+    )
+    .unwrap();
+
+    let child = &layout.children[0];
+    assert_eq!(child.dimensions.content.width, 120.0);
+    assert_eq!(child.dimensions.padding.top, 10.0);
+    assert_eq!(child.dimensions.padding.right, 10.0);
+    assert_eq!(child.dimensions.padding.bottom, 10.0);
+    assert_eq!(child.dimensions.padding.left, 10.0);
+}
+
+#[test]
 fn auto_width_fills_remaining_space() {
     let (_document, _html, body, _card) = sample_tree();
     let mut resolver = StyleResolver::new();

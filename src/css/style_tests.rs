@@ -69,6 +69,132 @@ fn important_user_rule_beats_important_author_rule() {
 }
 
 #[test]
+fn inline_style_beats_author_specificity() {
+    let (_document, _body, title, _html) = sample_tree();
+    title.set_attribute("style", "color: green");
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet("#hero { color: red; }").unwrap(),
+    );
+
+    let style = resolver.computed_style(&title);
+    assert_eq!(style.get("color"), Some(&ComputedValue::Color("green".to_string())));
+}
+
+#[test]
+fn author_important_beats_normal_inline_style() {
+    let (_document, _body, title, _html) = sample_tree();
+    title.set_attribute("style", "color: green");
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet("h1 { color: red !important; }").unwrap(),
+    );
+
+    let style = resolver.computed_style(&title);
+    assert_eq!(style.get("color"), Some(&ComputedValue::Color("red".to_string())));
+}
+
+#[test]
+fn inline_important_beats_author_important() {
+    let (_document, _body, title, _html) = sample_tree();
+    title.set_attribute("style", "color: green !important");
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet("#hero { color: red !important; }").unwrap(),
+    );
+
+    let style = resolver.computed_style(&title);
+    assert_eq!(style.get("color"), Some(&ComputedValue::Color("green".to_string())));
+}
+
+#[test]
+fn user_important_beats_inline_important() {
+    let (_document, _body, title, _html) = sample_tree();
+    title.set_attribute("style", "color: green !important");
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::User,
+        parse_stylesheet("h1 { color: purple !important; }").unwrap(),
+    );
+
+    let style = resolver.computed_style(&title);
+    assert_eq!(style.get("color"), Some(&ComputedValue::Color("purple".to_string())));
+}
+
+#[test]
+fn inline_width_beats_presentational_width_hint() {
+    let element = NodeHandle::element("div");
+    element.set_attribute("width", "50");
+    element.set_attribute("style", "width: 100px");
+    let mut resolver = StyleResolver::new();
+
+    let style = resolver.computed_style(&element);
+    assert_eq!(style.get("width"), Some(&ComputedValue::Px(100.0)));
+}
+
+#[test]
+fn inline_style_does_not_apply_to_pseudo_elements() {
+    let (_document, _body, title, _html) = sample_tree();
+    title.set_attribute("style", "color: green");
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet("h1::before { content: \"prefix\"; color: red; }").unwrap(),
+    );
+
+    let style = resolver
+        .computed_pseudo_style(&title, PseudoElement::Before)
+        .unwrap();
+    assert_eq!(style.get("color"), Some(&ComputedValue::Color("red".to_string())));
+}
+
+#[test]
+fn inline_style_uses_forgiving_declaration_parser() {
+    let element = NodeHandle::element("div");
+    element.set_attribute(
+        "style",
+        "background: url(data:image/png;base64,AAA); color red; width: 10px",
+    );
+    let mut resolver = StyleResolver::new();
+
+    let style = resolver.computed_style(&element);
+    assert_eq!(
+        style.get("background-image"),
+        Some(&ComputedValue::Keyword(
+            "url(data:image/png;base64,AAA)".to_string()
+        ))
+    );
+    assert_eq!(style.get("width"), Some(&ComputedValue::Px(10.0)));
+}
+
+#[test]
+fn inline_style_canonicalizes_webkit_properties() {
+    let element = NodeHandle::element("div");
+    element.set_attribute("style", "-webkit-transform: translateX(10px)");
+    let mut resolver = StyleResolver::new();
+
+    let style = resolver.computed_style(&element);
+    assert_eq!(
+        style.get("transform"),
+        Some(&ComputedValue::Keyword("translateX(10px)".to_string()))
+    );
+    assert_eq!(style.get("-webkit-transform"), None);
+}
+
+#[test]
+fn iframe_inline_width_remains_supported() {
+    let iframe = NodeHandle::element("iframe");
+    iframe.set_attribute("style", "width: 200px");
+    let mut resolver = StyleResolver::new();
+
+    let style = resolver.computed_style(&iframe);
+    assert_eq!(style.get("width"), Some(&ComputedValue::Px(200.0)));
+}
+
+#[test]
 fn identifies_supported_property_names() {
     assert!(is_supported_property("background-color"));
     assert!(is_supported_property("position"));

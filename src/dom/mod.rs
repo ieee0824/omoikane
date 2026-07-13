@@ -392,6 +392,17 @@ impl NodeHandle {
         }
     }
 
+    /// Returns a clone of one element attribute value, if it exists.
+    pub fn get_attribute(&self, name: &str) -> Option<String> {
+        match &self.0.borrow().data {
+            NodeData::Element(element) => element
+                .attributes
+                .get(&name.to_ascii_lowercase())
+                .cloned(),
+            _ => None,
+        }
+    }
+
     /// Sets an attribute on an element node. No-op for other node kinds.
     pub fn set_attribute(&self, name: impl Into<String>, value: impl Into<String>) {
         if let NodeData::Element(element) = &mut self.0.borrow_mut().data {
@@ -852,5 +863,16 @@ mod tests {
 
         let attributes = element.attributes().unwrap();
         assert_eq!(attributes.get("data-id"), Some(&"42".to_string()));
+    }
+
+    #[test]
+    fn gets_single_element_attribute_without_losing_empty_values() {
+        let element = NodeHandle::element("div");
+        element.set_attribute("id", "example");
+        element.set_attribute("style", "");
+
+        assert_eq!(element.get_attribute("id"), Some("example".to_string()));
+        assert_eq!(element.get_attribute("missing"), None);
+        assert_eq!(element.get_attribute("style"), Some(String::new()));
     }
 }
