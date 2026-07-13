@@ -15,10 +15,12 @@ use crate::paint::Image;
 use rusqlite::{Connection, params};
 
 mod flex;
+mod grid;
 mod inline;
 mod table;
 
 use flex::{flex_direction, is_flex_container, layout_flex_container};
+use grid::{is_grid_container, layout_grid_container};
 use inline::{
     InlineSegmentContent,
     font_metrics, generated_inline_segments,
@@ -920,6 +922,12 @@ fn layout_element(
     if is_flex_container(&style) {
         return layout_flex_container(
             node, resolver, style, margin, padding, border, x, y, width, viewport,
+        );
+    }
+    if is_grid_container(&style) {
+        return layout_grid_container(
+            node, resolver, style, margin, padding, border, x, y, width,
+            containing_block.height, viewport,
         );
     }
 

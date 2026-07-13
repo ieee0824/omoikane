@@ -1351,6 +1351,110 @@ fn lays_out_flex_row_with_center_justification() {
 }
 
 #[test]
+fn lays_out_grid_row_major_with_fractional_columns_and_gap() {
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let grid = NodeHandle::element("div");
+    document.append_child(body.clone());
+    body.append_child(grid.clone());
+    for _ in 0..4 {
+        grid.append_child(NodeHandle::element("article"));
+    }
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "body { margin: 0; } div { display: grid; width: 210px; grid-template-columns: 1fr 1fr; gap: 10px; } article { height: 20px; }",
+        )
+        .unwrap(),
+    );
+    let layout = layout_tree(&body, &mut resolver, Rect { x: 0.0, y: 0.0, width: 210.0, height: 0.0 }).unwrap();
+    let children = &layout.children[0].children;
+    assert_eq!(children.len(), 4);
+    let rects: Vec<_> = children.iter().map(|child| child.dimensions.content).collect();
+    assert_eq!((rects[0].x, rects[0].y, rects[0].width), (0.0, 0.0, 100.0));
+    assert_eq!((rects[1].x, rects[1].y, rects[1].width), (110.0, 0.0, 100.0));
+    assert_eq!((rects[2].x, rects[2].y, rects[2].width), (0.0, 30.0, 100.0));
+    assert_eq!((rects[3].x, rects[3].y, rects[3].width), (110.0, 30.0, 100.0));
+}
+
+#[test]
+fn sizes_repeat_auto_px_percent_and_fractional_grid_tracks() {
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let grid = NodeHandle::element("div");
+    grid.set_attribute("class", "mixed");
+    document.append_child(body.clone());
+    body.append_child(grid.clone());
+    for class_name in ["auto", "fixed", "percent", "fraction"] {
+        let child = NodeHandle::element("article");
+        child.set_attribute("class", class_name);
+        grid.append_child(child);
+    }
+    let repeated = NodeHandle::element("section");
+    repeated.set_attribute("class", "repeated");
+    body.append_child(repeated.clone());
+    for _ in 0..3 { repeated.append_child(NodeHandle::element("i")); }
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(Origin::Author, parse_stylesheet(
+        "body { margin: 0; } .mixed { display: grid; width: 400px; grid-template-columns: auto 50px 25% 1fr; } .auto { width: 40px; height: 10px; } article { height: 10px; } .repeated { display: grid; width: 300px; grid-template-columns: repeat(3, 1fr); } i { height: 5px; }"
+    ).unwrap());
+    let layout = layout_tree(&body, &mut resolver, Rect { x: 0.0, y: 0.0, width: 400.0, height: 0.0 }).unwrap();
+    let mixed = &layout.children[0];
+    let widths: Vec<_> = mixed.children.iter().map(|child| child.dimensions.content.width).collect();
+    assert_eq!(widths, vec![40.0, 50.0, 100.0, 210.0]);
+    let repeated = &layout.children[1];
+    for child in &repeated.children {
+        assert!((child.dimensions.content.width - 100.0).abs() < 0.01);
+    }
+}
+
+#[test]
+fn creates_implicit_grid_rows_using_row_content_height() {
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let grid = NodeHandle::element("div");
+    document.append_child(body.clone());
+    body.append_child(grid.clone());
+    for class_name in ["h10", "h20", "h15"] {
+        let child = NodeHandle::element("article");
+        child.set_attribute("class", class_name);
+        grid.append_child(child);
+    }
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(Origin::Author, parse_stylesheet(
+        "body { margin: 0; } div { display: inline-grid; width: 200px; grid-template-columns: repeat(2, 1fr); row-gap: 5px; } .h10 { height: 10px; } .h20 { height: 20px; } .h15 { height: 15px; }"
+    ).unwrap());
+    let layout = layout_tree(&body, &mut resolver, Rect { x: 0.0, y: 0.0, width: 200.0, height: 0.0 }).unwrap();
+    let grid = &layout.children[0];
+    assert_eq!(grid.children[0].dimensions.content.y, 0.0);
+    assert_eq!(grid.children[1].dimensions.content.y, 0.0);
+    assert_eq!(grid.children[2].dimensions.content.y, 25.0);
+    assert_eq!(grid.dimensions.content.height, 40.0);
+}
+
+#[test]
+fn resolves_percentage_grid_row_against_explicit_container_height() {
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let grid = NodeHandle::element("div");
+    let child = NodeHandle::element("article");
+    document.append_child(body.clone());
+    body.append_child(grid.clone());
+    grid.append_child(child);
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(Origin::Author, parse_stylesheet(
+        "body { margin: 0; } div { display: grid; height: 200px; grid-template-rows: 50%; } article { height: 100%; }"
+    ).unwrap());
+    let layout = layout_tree(&body, &mut resolver, Rect { x: 0.0, y: 0.0, width: 200.0, height: 0.0 }).unwrap();
+    let child = &layout.children[0].children[0];
+    assert_eq!(child.dimensions.content.height, 100.0);
+}
+
+#[test]
 fn grows_last_flex_item_to_fill_remaining_space() {
     let document = NodeHandle::document();
     let body = NodeHandle::element("body");
