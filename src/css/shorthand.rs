@@ -24,6 +24,9 @@ pub(super) fn expand_shorthand(name: &str, value: Value, important: bool) -> Vec
         "animation" => expand_animation_shorthand(value, important),
         "outline" => expand_outline_shorthand(value, important),
         "grid-column" | "grid-row" => expand_grid_axis_shorthand(name, value, important),
+        "place-items" => expand_place_shorthand("align-items", "justify-items", value, important),
+        "place-self" => expand_place_shorthand("align-self", "justify-self", value, important),
+        "place-content" => expand_place_shorthand("align-content", "justify-content", value, important),
         // `word-wrap` is a legacy alias for `overflow-wrap`
         "word-wrap" => vec![Declaration {
             name: "overflow-wrap".to_string(),
@@ -36,6 +39,27 @@ pub(super) fn expand_shorthand(name: &str, value: Value, important: bool) -> Vec
             important,
         }],
     }
+}
+
+fn expand_place_shorthand(
+    first_name: &str,
+    second_name: &str,
+    value: Value,
+    important: bool,
+) -> Vec<Declaration> {
+    let values = match value {
+        Value::List(values) => values,
+        value => vec![value],
+    };
+    let (first, second) = match values.as_slice() {
+        [value] => (value.clone(), value.clone()),
+        [first, second] => (first.clone(), second.clone()),
+        _ => return Vec::new(),
+    };
+    vec![
+        Declaration { name: first_name.to_string(), value: first, important },
+        Declaration { name: second_name.to_string(), value: second, important },
+    ]
 }
 
 fn expand_grid_axis_shorthand(name: &str, value: Value, important: bool) -> Vec<Declaration> {
