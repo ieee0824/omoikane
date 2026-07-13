@@ -923,7 +923,7 @@ pub fn is_cjk_preferred_character(ch: char) -> bool {
             | 0x3400..=0x4DBF // CJK Unified Ideographs Extension A
             | 0x4E00..=0x9FFF // CJK Unified Ideographs
             | 0xF900..=0xFAFF // CJK Compatibility Ideographs
-            | 0xFF66..=0xFF9F // Half-width Katakana
+            | 0xFF00..=0xFFEF // Half-width and Full-width Forms
     )
 }
 

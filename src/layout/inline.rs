@@ -1434,10 +1434,6 @@ fn measure_text_width_with_fallback(text: &str, font_size: f32, fonts: &[Font]) 
 fn select_layout_font_index(fonts: &[Font], ch: char) -> usize {
     let prefer_cjk = is_cjk_preferred_character(ch);
 
-    // Always try the primary font (index 0) first, even for CJK characters.
-    // The primary font is allowed to render .notdef (missing glyph) — this
-    // matches paint-side rasterize_with_fallback which also accepts index 0
-    // unconditionally. Only fallback fonts (index > 0) require has_glyph.
     if prefer_cjk && fonts.len() > 1 {
         // Try CJK-capable fallback fonts first
         for index in 1..fonts.len() {
@@ -1445,12 +1441,12 @@ fn select_layout_font_index(fonts: &[Font], ch: char) -> usize {
                 return index;
             }
         }
-        // Fall back to primary (accepts .notdef like paint side)
+        // Fall back to primary .notdef only when no font owns the glyph.
         return 0;
     }
 
     for index in 0..fonts.len() {
-        if index != 0 && !ch.is_whitespace() && !fonts[index].has_glyph(ch) {
+        if !ch.is_whitespace() && !fonts[index].has_glyph(ch) {
             continue;
         }
         return index;
