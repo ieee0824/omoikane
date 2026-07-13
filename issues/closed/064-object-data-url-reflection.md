@@ -2,7 +2,7 @@
 number: 064
 slug: object-data-url-reflection
 parent: 016
-status: open
+status: closed
 ---
 
 # HTMLObjectElement.data の URL 反射（Acid3 test 64）
@@ -59,3 +59,11 @@ assert(obj1.data.match(/^http:/));            // 絶対 http: URL であるべ�
 
 - Acid3 test 64 が FAITHFUL/DIRECT 両モードで PASS（97→98）
 - 上記単体テストの追加と既存テスト全通過
+
+## クローズ記録（2026-07-13、PR #136）
+
+方針どおり実装し受け入れ条件を達成。Acid3 は FAITHFUL/DIRECT 両モード 98/100（実測）、
+`cargo test --lib` 1107 passed。Copilot レビュー指摘（フラグメント除去・空参照の base
+ディレクトリ誤解決）を受け、IDL 反射の意味論（fragment 分離・再付与、空参照は RFC 3986
+§5.2 どおり base URL 自身）に修正し、フラグメント保持・fragment-only・空参照の3テストを追加した。
+実装は Opus（general-purpose, model: opus）。

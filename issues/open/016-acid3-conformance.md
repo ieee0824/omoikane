@@ -70,6 +70,7 @@ Acid3 は DOM / CSS / HTML parser / scripting / networking まで含む複合テ
 | 055 document.forms / document.links の HTMLCollection | **90/100** | Document の live HTMLCollection（`forms` / `links` / `images` / `anchors`）を実装。tree 順・index/`length`・`item`/`namedItem`・`name`/`id` 名前アクセスに対応し、保持した参照でも DOM 変更を反映する live 性を持つ（`collect()` を毎アクセス再実行）。`links` は `href` 属性を持つ `<a>`/`<area>` のみ、`anchors` は `name` を持つ `<a>` のみを対象とし、各コレクションはその Document 自身の tree にスコープされる（iframe contentDocument の form/link がメイン文書に混ざらない）。test 4 / test 5 が新規 PASS（FAITHFUL/DIRECT 両モード 90/100、実測）。加えて FAITHFUL harness の stall 判定を「保留タイマーが残る間は打ち切らない」よう修正（`has_pending_timers()` を条件に追加）。`document.links` が解決したことで新規に発火する test 80 の retry ループ（linktest の iframe onload 待ち）で FAITHFUL が index 80 で停止していた退行を解消し、両モードとも index 100 まで到達。 |
 | 016-14-1 XML/XHTML サブ文書 | **92/100** | strict XML parser、XML MIME 分岐、名前空間／大小文字保持／doctype IDL、XHTML script 実行、XHTML `Document.title` / `forms` を実装。test 69 / 98 が新規 PASS（FAITHFUL/DIRECT 両モード 92/100、index 100）。test 70 は従来も空 skeleton により PASS だったが、不正 UTF-8 と非 UTF-8 encoding 宣言を parser 自身の fatal error にした。test 80 は接続済み iframe の `src` 再 navigation / 動的 onload 未配線で XML script の検査まで到達せず残存。 |
 | 016-14-2 CSSOM / 016-14-3 SVG DOM | **97/100** | CSSOM（styleSheets/cssRules/insertRule/ownerNode、PR #123, test 72）と SVG DOM（SVGElement 基底 + SVGSVGElement/SVGRectElement/SVGTextContentElement、getSVGDocument、PR #125, test 74/75/77/79）を実装。FAITHFUL/DIRECT 両モード 97/100、index 100。残存は test 64（object の URL IDL 反射）/ 71（document.write 後の tree construction）/ 80（iframe 再 navigation・ネットワーク）。 |
+| 064 object.data の URL 反射 | **98/100** | native binding `__omoikane_resolve_url` を追加し `HTMLObjectElement.data` を URL 反射化（相対→絶対解決、fragment 保持、空参照は base URL、解決失敗は属性値フォールバック）。test 64 が新規 PASS（PR #136、FAITHFUL/DIRECT 両モード 98/100、実測）。残存は test 71（065）/ 80（066）。 |
 
 ### 82/100 到達時（016-12 `createDocument` 実装）に新規 PASS したテスト
 
@@ -150,6 +151,6 @@ Acid3 ギャップ分析（`tests/fixtures/acid3/GAP_ANALYSIS.md`）に基づく
 - [x] [051 CSS プロパティ値検証と computed style serialization](../closed/051-css-property-value-validation.md)（PR #117, test 47 PASS, 合流後 87/100）
 - [x] [054 table tree construction（暗黙 tbody 生成）](../closed/054-parser-table-tree-construction.md)（PR #119, test 29 PASS, 87→88）
 - [x] [055 document.forms / document.links の HTMLCollection](../closed/055-document-forms-links-collections.md)（PR #120, test 4/5 PASS, 88→90）
-- [ ] [064 HTMLObjectElement.data の URL 反射](064-object-data-url-reflection.md)（test 64）
+- [x] [064 HTMLObjectElement.data の URL 反射](../closed/064-object-data-url-reflection.md)（PR #136, test 64 PASS, 97→98）
 - [ ] [065 document.write の完全文書パースと doctype IDL](065-document-write-full-document-parsing.md)（test 71）
 - [ ] [066 接続済み iframe の src 再ナビゲーションと動的 on* 属性配線](066-iframe-renavigation-dynamic-onload.md)（test 80）
