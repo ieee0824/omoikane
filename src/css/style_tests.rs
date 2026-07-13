@@ -1702,6 +1702,37 @@ fn canonicalizes_grid_calc_multiplication_and_mixed_percentages() {
     );
 }
 
+#[test]
+fn canonicalizes_clip_path_inset_and_webkit_alias() {
+    let (_document, body, title, _html) = sample_tree();
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "body { clip-path: inset(calc(1rem + 2px) 10% calc(25% - 5px) 3px round 8px); } \
+             h1 { -webkit-clip-path: inset(0 0 100% 0); }",
+        )
+        .unwrap(),
+    );
+
+    let body_style = resolver.computed_style(&body);
+    assert_eq!(
+        body_style.get("clip-path"),
+        Some(&ComputedValue::Keyword(
+            "inset(18px 10% calc(-5px + 25%) 3px round 8px)".to_string()
+        ))
+    );
+
+    let title_style = resolver.computed_style(&title);
+    assert_eq!(
+        title_style.get("clip-path"),
+        Some(&ComputedValue::Keyword("inset(0 0 100% 0)".to_string()))
+    );
+    assert_eq!(title_style.get("-webkit-clip-path"), None);
+    assert!(is_supported_property("clip-path"));
+    assert!(is_supported_property("-webkit-clip-path"));
+}
+
 // --- border-radius shorthand 展開テスト ---
 
 #[test]
