@@ -17,7 +17,9 @@ pub use matcher::{
     selector_pseudo_element, specificity,
 };
 pub use media::{evaluate_media_query, parse_media_query_list};
-pub use parser::{extract_font_face_rules, parse_selector_list, parse_stylesheet};
+pub use parser::{
+    extract_font_face_rules, parse_selector_list, parse_style_attribute, parse_stylesheet,
+};
 pub use style::{ComputedStyle, ComputedValue, Origin, StyleResolver, StylesheetInput};
 pub use tokenizer::tokenize;
 
@@ -516,6 +518,118 @@ mod tests {
         assert!(rule.declarations.iter().any(|decl| decl.name == "border-width"));
         assert!(rule.declarations.iter().any(|decl| decl.name == "border-style"));
         assert!(rule.declarations.iter().any(|decl| decl.name == "border-color"));
+    }
+
+    #[test]
+    fn preserves_multi_token_important_shorthands() {
+        let stylesheet = parse_stylesheet(
+            "div { margin: 1px 2px !important; border: 1px solid red !important; }",
+        )
+        .unwrap();
+        let Rule::Style(rule) = &stylesheet.rules[0] else {
+            panic!("expected style rule");
+        };
+
+        for (name, expected) in [
+            ("margin-top", 1.0),
+            ("margin-right", 2.0),
+            ("margin-bottom", 1.0),
+            ("margin-left", 2.0),
+        ] {
+            assert!(rule.declarations.iter().any(|declaration| {
+                declaration.name == name
+                    && declaration.important
+                    && matches!(&declaration.value, Value::Length(value, unit) if *value == expected && unit == "px")
+            }));
+        }
+
+        for (name, expected) in [
+            ("border-width", Value::Length(1.0, "px".to_string())),
+            ("border-style", Value::Keyword("solid".to_string())),
+            ("border-color", Value::Keyword("red".to_string())),
+        ] {
+            assert!(rule.declarations.iter().any(|declaration| {
+                declaration.name == name
+                    && declaration.important
+                    && declaration.value == expected
+            }));
+        }
+    }
+
+    #[test]
+    fn recognizes_case_and_whitespace_variants_of_important() {
+        for css in ["div { color: red !IMPORTANT; }", "div { color: red ! important; }"] {
+            let stylesheet = parse_stylesheet(css).unwrap();
+            let Rule::Style(rule) = &stylesheet.rules[0] else {
+                panic!("expected style rule");
+            };
+            assert_eq!(rule.declarations.len(), 1);
+            assert_eq!(rule.declarations[0].value, Value::Keyword("red".to_string()));
+            assert!(rule.declarations[0].important);
+        }
+    }
+
+    #[test]
+    fn preserves_semicolons_inside_unquoted_urls() {
+        let stylesheet =
+            parse_stylesheet("div { background: url(data:image/png;base64,AAA) }").unwrap();
+        let Rule::Style(rule) = &stylesheet.rules[0] else {
+            panic!("expected style rule");
+        };
+        assert!(rule.declarations.iter().any(|declaration| {
+            declaration.name == "background-image"
+                && declaration.value
+                    == Value::Keyword("url(data:image/png;base64,AAA)".to_string())
+        }));
+    }
+
+    #[test]
+    fn parses_style_attributes_as_forgiving_declaration_lists() {
+        let declarations = parse_style_attribute("width: 100px; color: red");
+        assert_eq!(declarations.len(), 2);
+        assert_eq!(declarations[0].name, "width");
+        assert_eq!(declarations[0].value, Value::Length(100.0, "px".to_string()));
+        assert_eq!(declarations[1].name, "color");
+        assert_eq!(declarations[1].value, Value::Keyword("red".to_string()));
+
+        let declarations = parse_style_attribute("width: 100px");
+        assert_eq!(declarations.len(), 1);
+        assert_eq!(declarations[0].name, "width");
+
+        let declarations = parse_style_attribute(";; color: red ;");
+        assert_eq!(declarations.len(), 1);
+        assert_eq!(declarations[0].name, "color");
+
+        let declarations = parse_style_attribute("color red; width: 10px");
+        assert_eq!(declarations.len(), 1);
+        assert_eq!(declarations[0].name, "width");
+        assert_eq!(declarations[0].value, Value::Length(10.0, "px".to_string()));
+
+        assert!(parse_style_attribute("").is_empty());
+        assert!(parse_style_attribute("   ").is_empty());
+        assert!(parse_style_attribute("content: 'abc").is_empty());
+    }
+
+    #[test]
+    fn style_attributes_preserve_urls_and_important_shorthands() {
+        let declarations = parse_style_attribute("background: url(data:image/png;base64,AAA)");
+        assert!(declarations.iter().any(|declaration| {
+            declaration.name == "background-image"
+                && declaration.value
+                    == Value::Keyword("url(data:image/png;base64,AAA)".to_string())
+        }));
+
+        let declarations = parse_style_attribute("color: blue !important");
+        assert_eq!(declarations.len(), 1);
+        assert_eq!(declarations[0].value, Value::Keyword("blue".to_string()));
+        assert!(declarations[0].important);
+
+        let declarations = parse_style_attribute("margin: 1px 2px !important");
+        assert_eq!(declarations.len(), 4);
+        for (declaration, expected) in declarations.iter().zip([1.0, 2.0, 1.0, 2.0]) {
+            assert!(declaration.important);
+            assert_eq!(declaration.value, Value::Length(expected, "px".to_string()));
+        }
     }
 
     #[test]
