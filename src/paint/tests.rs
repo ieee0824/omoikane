@@ -9,6 +9,78 @@ use crate::layout::{
 };
 use crate::paint::*;
 
+fn load_cjk_fallback_test_fonts() -> Option<Vec<crate::font::Font>> {
+    let primary = crate::font::Font::load_from_file(std::path::Path::new(
+        "/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf",
+    ))
+    .ok()?;
+    let cjk = crate::font::Font::load_from_file(std::path::Path::new(
+        "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+    ))
+    .ok()?;
+    Some(vec![primary, cjk])
+}
+
+#[test]
+fn missing_cjk_glyph_uses_cjk_fallback_font() {
+    let Some(fonts) = load_cjk_fallback_test_fonts() else {
+        eprintln!("Skipping CJK fallback test: required Noto fonts are unavailable");
+        return;
+    };
+
+    assert!(!fonts[0].has_glyph('日'));
+    assert!(fonts[1].has_glyph('日'));
+    let (index, glyph, _) = rasterize_with_fallback(&fonts, '日', 20.0);
+    assert_ne!(index, 0);
+    assert!(glyph.is_some());
+}
+
+#[test]
+fn latin_glyph_stays_on_primary_font() {
+    let Some(fonts) = load_cjk_fallback_test_fonts() else {
+        eprintln!("Skipping CJK fallback test: required Noto fonts are unavailable");
+        return;
+    };
+
+    let (index, glyph, _) = rasterize_with_fallback(&fonts, 'A', 20.0);
+    assert_eq!(index, 0);
+    assert!(glyph.is_some());
+}
+
+#[test]
+fn missing_glyph_in_all_fonts_uses_primary_notdef() {
+    let Some(fonts) = load_cjk_fallback_test_fonts() else {
+        eprintln!("Skipping CJK fallback test: required Noto fonts are unavailable");
+        return;
+    };
+    let missing = char::MAX;
+    assert!(fonts.iter().all(|font| !font.has_glyph(missing)));
+
+    let (index, glyph, _) = rasterize_with_fallback(&fonts, missing, 20.0);
+    assert_eq!(index, 0);
+    assert!(glyph.is_some(), "primary .notdef should remain visible");
+}
+
+#[test]
+fn webfont_primary_refs_fall_back_for_cjk() {
+    let Some(fonts) = load_cjk_fallback_test_fonts() else {
+        eprintln!("Skipping CJK fallback test: required Noto fonts are unavailable");
+        return;
+    };
+    let refs = [&fonts[0], &fonts[1]];
+
+    let (index, glyph, _) = rasterize_with_fallback_refs(&refs, '日', 20.0);
+    assert_eq!(index, 1);
+    assert!(glyph.is_some());
+}
+
+#[test]
+fn cjk_preference_covers_japanese_and_fullwidth_blocks() {
+    for ch in ['あ', 'ア', '一', '！', '￯'] {
+        assert!(is_cjk_preferred_character(ch), "missing CJK range for {ch}");
+    }
+}
+
 #[test]
 fn fills_rectangles_on_canvas() {
     let mut canvas = Canvas::new(4, 4);
