@@ -1,7 +1,7 @@
 ---
 number: 061-5
 slug: grid-named-areas
-status: open
+status: closed
 parent: 061
 ---
 

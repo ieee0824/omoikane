@@ -1,7 +1,7 @@
 ---
 number: 061
 slug: css-grid-layout
-status: open
+status: closed
 ---
 
 # CSS Grid レイアウトの実装（親 issue）
@@ -33,7 +33,7 @@ kasaneteto.jp の app.css は grid を多用: `display: grid` 131箇所、`grid-
       `place-items` / `place-content` / `justify-self` / `align-self`
 - [x] 061-4 トラックサイジング拡張（PR #132）: calc() / vw 等単位 / minmax() / auto-fill / auto-fit /
       複数トラック repeat / 名前付きライン耐性（実測でトラックパース失敗→単一カラム崩壊が判明）
-- [ ] 061-5 名前付きエリア: grid-template-areas / grid-area / grid-template ショートハンド
+- [x] 061-5 名前付きエリア（PR #133）: grid-template-areas / grid-area / grid-template ショートハンド
       （kasaneteto.jp 実測で grid-area 22 箇所・grid-template 8 箇所が未対応、ヒーロー崩壊の主因）
 
 ## 方針
@@ -50,6 +50,16 @@ kasaneteto.jp の app.css は grid を多用: `display: grid` 131箇所、`grid-
 - 子 issue 061-1〜061-3 がすべて実装・マージされる
 - kasaneteto.jp のナビ/ヒーローが縦積み崩壊せず、意図に近い分割・重ねレイアウトで描画される
 - 既存テスト・Acid3 スコアの維持
+
+## 結果（2026-07-13 close 時）
+
+- 子 issue 061-1〜061-5 全て実装・マージ（PR #129〜#133）
+- kasaneteto.jp 実測: ナビの列組み・ヒーロー/フッターのエリア配置とも grid として
+  レイアウトされ、縦積み崩壊は解消。grid 関連の unsupported-css 警告は標準プロパティ分
+  ゼロ（残りは対象外の IE 用 `-ms-grid-*` 14 件のみ）
+- 既存テスト 1089 passed / 0 failed、Acid3 97/100 維持
+- 同サイトに残る「全面赤ブロック」は grid ではなく clip-path / mask 未対応が原因と
+  実測診断し、062（clip-path: inset）/ 063（CSS マスキング）として追跡
 
 ## 関連
 
