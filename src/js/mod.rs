@@ -8176,6 +8176,80 @@ mod tests {
     }
 
     #[test]
+    fn svg_namespace_elements_use_svg_dom_interfaces() {
+        let mut runtime = JsRuntime::new().unwrap();
+        assert_eq!(
+            runtime
+                .eval(
+                    r#"var d = document.implementation.createDocument('http://www.w3.org/2000/svg', 'svg', null);
+                       var rect = d.createElementNS('http://www.w3.org/2000/svg', 'rect');
+                       var text = d.createElementNS('http://www.w3.org/2000/svg', 'text');
+                       text.appendChild(d.createTextNode('A\ud800B'));
+                       [d.documentElement instanceof SVGSVGElement,
+                        rect instanceof SVGRectElement,
+                        rect.constructor.name,
+                        !!rect.width,
+                        text instanceof SVGTextElement,
+                        text instanceof SVGTextContentElement,
+                        text.getNumberOfChars()].join('|')"#,
+                )
+                .unwrap()
+                .as_string()
+                .map(|s| s.to_std_string_escaped())
+                .as_deref(),
+            Some("true|true|SVGRectElement|true|true|true|3")
+        );
+        assert_eq!(
+            runtime
+                .eval("document.createElement('rect') instanceof SVGRectElement")
+                .unwrap()
+                .as_boolean(),
+            Some(false),
+            "an HTML rect element must not receive an SVG interface"
+        );
+    }
+
+    #[test]
+    fn embedded_svg_documents_are_exposed_by_iframe_and_object() {
+        let port = spawn_static_http_server(
+            "image/svg+xml",
+            r#"<svg xmlns="http://www.w3.org/2000/svg"><text>svg</text></svg>"#,
+        );
+        let mut runtime = JsRuntime::new().unwrap();
+        runtime.set_base_url(
+            format!("http://127.0.0.1:{port}/index.html")
+                .parse()
+                .unwrap(),
+        );
+        assert_eq!(
+            runtime
+                .eval(
+                    r#"var frame = document.createElement('iframe'); frame.src = '/asset.svg';
+                       var object = document.createElement('object'); object.data = '/asset.svg';
+                       document.body.appendChild(frame); document.body.appendChild(object);
+                       [frame.getSVGDocument() === frame.contentDocument,
+                        object.getSVGDocument() === object.contentDocument,
+                        frame.getSVGDocument().documentElement instanceof SVGSVGElement,
+                        object.getSVGDocument().getElementsByTagName('text')[0] instanceof SVGTextElement].join('|')"#,
+                )
+                .unwrap()
+                .as_string()
+                .map(|s| s.to_std_string_escaped())
+                .as_deref(),
+            Some("true|true|true|true")
+        );
+
+        assert_eq!(
+            runtime
+                .eval("var htmlFrame = document.createElement('iframe'); htmlFrame.getSVGDocument()")
+                .unwrap()
+                .is_null(),
+            true,
+            "getSVGDocument must return null for a non-SVG document"
+        );
+    }
+
+    #[test]
     fn connected_iframe_load_supports_property_attribute_and_listener_handlers() {
         use crate::html::TreeBuilder;
         let doc = TreeBuilder::parse(
