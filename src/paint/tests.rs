@@ -6156,3 +6156,27 @@ body {{ margin: 0; }}
     assert_eq!(canvas.pixel(0, 0), Some(Color::rgb(0, 128, 0)));
     assert_eq!(canvas.pixel(1, 0), Some(Color::rgba(0, 0, 0, 0)));
 }
+
+#[test]
+fn mask_keeps_pixels_covered_by_a_fractional_border_box() {
+    let mask = rgba_mask_data_uri(1, 1, &[255]);
+    let html = format!(
+        r#"<html><head><style>
+body {{ margin: 0; }}
+div {{ position: absolute; left: 10.5px; top: 10.5px;
+       width: 2px; height: 2px; background: red;
+       mask-image: url("{mask}"); }}
+</style></head><body><div></div></body></html>"#
+    );
+    let document = TreeBuilder::parse(&html).document();
+    let canvas = render_document(
+        &document,
+        Rect { x: 0.0, y: 0.0, width: 16.0, height: 16.0 },
+    )
+    .unwrap();
+
+    assert_eq!(canvas.pixel(10, 10), Some(Color::rgb(255, 0, 0)));
+    assert_eq!(canvas.pixel(12, 12), Some(Color::rgb(255, 0, 0)));
+    assert_eq!(canvas.pixel(9, 10), Some(Color::rgba(0, 0, 0, 0)));
+    assert_eq!(canvas.pixel(10, 9), Some(Color::rgba(0, 0, 0, 0)));
+}

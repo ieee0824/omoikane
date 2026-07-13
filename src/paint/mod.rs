@@ -1012,15 +1012,16 @@ fn apply_mask_alpha(canvas: &mut Canvas, mask: &Image, style: &ComputedStyle, ar
     let repeat = mask_repeat(style);
     let width = canvas.width as i32;
     let height = canvas.height as i32;
+    let area_x0 = area.x.floor().max(0.0) as i32;
+    let area_y0 = area.y.floor().max(0.0) as i32;
+    let area_x1 = (area.x + area.width).ceil().min(width as f32) as i32;
+    let area_y1 = (area.y + area.height).ceil().min(height as f32) as i32;
 
     for y in 0..height {
         for x in 0..width {
             let pixel_x = x as f32;
             let pixel_y = y as f32;
-            let inside_area = pixel_x >= area.x
-                && pixel_x < area.x + area.width
-                && pixel_y >= area.y
-                && pixel_y < area.y + area.height;
+            let inside_area = x >= area_x0 && x < area_x1 && y >= area_y0 && y < area_y1;
             let mask_alpha = if inside_area {
                 sample_mask_alpha(
                     mask,
