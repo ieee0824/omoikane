@@ -2,7 +2,7 @@
 number: 061-2
 slug: grid-placement
 parent: 061
-status: open
+status: closed
 ---
 
 # CSS Grid: 明示的アイテム配置とスパン
