@@ -110,13 +110,20 @@ pub(super) fn layout_grid_container(
     let specified_height = resolved_length(&style, "height", containing_block_height)
         .map(|height| super::border_box_adjust_height(&style, height, &padding, &border));
     let row_basis = specified_height.unwrap_or(0.0);
+    let (named_areas, area_row_count, area_column_count) = named_areas(&style);
     let mut columns = track_list(&style, "grid-template-columns", width, column_gap)
         .filter(|tracks| !tracks.is_empty())
-        .unwrap_or_else(|| vec![Track::new(TrackSize::Fr(1.0))]);
+        .unwrap_or_else(|| {
+            if area_column_count > 0 {
+                vec![Track::auto(); area_column_count]
+            } else {
+                vec![Track::new(TrackSize::Fr(1.0))]
+            }
+        });
+    columns.resize(columns.len().max(area_column_count), Track::auto());
     let explicit_column_count = columns.len();
     let mut explicit_rows = track_list(&style, "grid-template-rows", row_basis, row_gap)
         .unwrap_or_default();
-    let (named_areas, area_row_count) = named_areas(&style);
     explicit_rows.resize(explicit_rows.len().max(area_row_count), Track::auto());
     let explicit_row_count = explicit_rows.len();
     let requests: Vec<_> = items.iter().map(|child| {
@@ -389,6 +396,12 @@ fn grid_line(
         Some(ComputedValue::Number(number)) => GridLine::Line(*number as isize),
         Some(ComputedValue::Keyword(value)) => {
             let parts: Vec<_> = value.split_whitespace().collect();
+            if parts.len() == 1
+                && (parts[0].eq_ignore_ascii_case("auto")
+                    || parts[0].eq_ignore_ascii_case("span"))
+            {
+                return GridLine::Auto;
+            }
             if parts.len() == 2 && parts[0].eq_ignore_ascii_case("span") {
                 return parts[1].parse::<usize>().ok().filter(|span| *span > 0).map(GridLine::Span).unwrap_or(GridLine::Auto);
             }
@@ -427,12 +440,13 @@ fn named_area_line(
     Some(if boundary_is_start { start } else { start + span })
 }
 
-fn named_areas(style: &ComputedStyle) -> (HashMap<String, NamedArea>, usize) {
+fn named_areas(style: &ComputedStyle) -> (HashMap<String, NamedArea>, usize, usize) {
     let Some(ComputedValue::Keyword(value)) = style.get("grid-template-areas") else {
-        return (HashMap::new(), 0);
+        return (HashMap::new(), 0, 0);
     };
     let rows = parse_area_rows(value);
     let row_count = rows.len();
+    let column_count = rows.iter().map(Vec::len).max().unwrap_or(0);
     let mut cells: HashMap<String, Vec<(usize, usize)>> = HashMap::new();
     for (row, names) in rows.iter().enumerate() {
         for (column, name) in names.iter().enumerate() {
@@ -465,7 +479,7 @@ fn named_areas(style: &ComputedStyle) -> (HashMap<String, NamedArea>, usize) {
             });
         }
     }
-    (areas, row_count)
+    (areas, row_count, column_count)
 }
 
 fn parse_area_rows(value: &str) -> Vec<Vec<String>> {

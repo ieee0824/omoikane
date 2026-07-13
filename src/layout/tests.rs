@@ -1713,6 +1713,48 @@ fn leaves_dot_cells_available_to_auto_placement() {
 }
 
 #[test]
+fn auto_grid_line_keyword_does_not_resolve_to_an_area_named_auto() {
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let grid = NodeHandle::element("div");
+    let child = NodeHandle::element("article");
+    document.append_child(body.clone());
+    body.append_child(grid.clone());
+    grid.append_child(child);
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(Origin::Author, parse_stylesheet(
+        "body { margin: 0; } div { display: grid; width: 200px; grid-template-columns: 100px 100px; grid-template-rows: 20px; grid-template-areas: \"free auto\"; } article { grid-column: auto; grid-row: 1; height: 20px; }"
+    ).unwrap());
+    let layout = layout_tree(&body, &mut resolver, Rect { x: 0.0, y: 0.0, width: 200.0, height: 0.0 }).unwrap();
+    let rect = layout.children[0].children[0].dimensions.content;
+    assert_eq!((rect.x, rect.y, rect.width, rect.height), (0.0, 0.0, 100.0, 20.0));
+}
+
+#[test]
+fn area_columns_expand_the_explicit_grid_for_names_and_negative_lines() {
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let grid = NodeHandle::element("div");
+    document.append_child(body.clone());
+    body.append_child(grid.clone());
+    for class_name in ["named", "negative"] {
+        let child = NodeHandle::element("article");
+        child.set_attribute("class", class_name);
+        grid.append_child(child);
+    }
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(Origin::Author, parse_stylesheet(
+        "body { margin: 0; } div { display: grid; width: 200px; grid-template-columns: 100px; grid-template-rows: 20px 20px; grid-template-areas: \"a b c\"; } article { height: 20px; } .named { grid-area: b; width: 60px; } .negative { grid-column: -2; grid-row: 2; width: 40px; }"
+    ).unwrap());
+    let layout = layout_tree(&body, &mut resolver, Rect { x: 0.0, y: 0.0, width: 200.0, height: 0.0 }).unwrap();
+    let rects: Vec<_> = layout.children[0].children.iter().map(|child| child.dimensions.content).collect();
+    assert_eq!((rects[0].x, rects[0].y, rects[0].width, rects[0].height), (100.0, 0.0, 60.0, 20.0));
+    assert_eq!((rects[1].x, rects[1].y, rects[1].width, rects[1].height), (160.0, 20.0, 40.0, 20.0));
+}
+
+#[test]
 fn invalid_non_rectangular_area_falls_back_to_auto_placement() {
     let document = NodeHandle::document();
     let body = NodeHandle::element("body");
