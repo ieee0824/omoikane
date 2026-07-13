@@ -1563,6 +1563,11 @@ fn register_host_bindings(
             1,
             NativeFunction::from_copy_closure(document_reset_native),
         ),
+        (
+            js_string!("__omoikane_resolve_url"),
+            1,
+            NativeFunction::from_copy_closure(resolve_url_native),
+        ),
     ] {
         context.register_global_builtin_callable(name, length, function)?;
     }
@@ -3170,6 +3175,33 @@ fn document_reset_native(
             state.borrow_mut().write_insertion_ref = None;
         }
         Ok(JsValue::undefined())
+    })
+}
+
+/// `__omoikane_resolve_url(reference)` -> `reference` resolved against the
+/// document's base URL and serialized as an absolute URL string. Backs URL IDL
+/// attribute reflection (e.g. `HTMLObjectElement.data`), which must expose an
+/// absolute URL rather than the raw attribute value.
+///
+/// The original reference is returned unchanged when there is no base URL, or
+/// when resolution fails (e.g. a non-HTTP(S) scheme such as `mailto:`), matching
+/// the spec's "return the attribute value" fallback. A missing argument yields
+/// the empty string.
+fn resolve_url_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let reference = match args.first() {
+        Some(value) => value.to_string(context)?.to_std_string_escaped(),
+        None => return Ok(js_string!("").into()),
+    };
+    with_host_state(|state| {
+        let base = state.borrow().base_url.clone();
+        let resolved = match base {
+            Some(base) => match crate::http::url::resolve_url(&base, &reference) {
+                Ok(url) => url.to_string(),
+                Err(_) => reference,
+            },
+            None => reference,
+        };
+        Ok(js_string!(resolved.as_str()).into())
     })
 }
 
@@ -8889,6 +8921,62 @@ mod tests {
             .as_deref(),
             Some("yes"),
             "a relative iframe src must resolve against the base URL"
+        );
+    }
+
+    /// `HTMLObjectElement.data` reflects as an absolute URL resolved against the
+    /// document base URL. A bare relative reference and a `./`-prefixed one must
+    /// resolve to the same absolute URL (Acid3 test 64).
+    #[test]
+    fn object_data_reflects_as_absolute_url_resolved_against_base_url() {
+        let mut runtime = JsRuntime::new().unwrap();
+        runtime.set_base_url("http://example.com/dir/page.html".parse().unwrap());
+        let script = r#"
+            var a = document.createElement('object');
+            a.setAttribute('data', 'test.html');
+            var b = document.createElement('object');
+            b.setAttribute('data', './test.html');
+            [a.data, b.data].join('|')
+        "#;
+        assert_eq!(
+            eval_string_value(&mut runtime, script).as_deref(),
+            Some("http://example.com/dir/test.html|http://example.com/dir/test.html"),
+            "object.data must reflect both relative forms as the same absolute URL"
+        );
+    }
+
+    /// An `<object>` with no `data` attribute reflects `.data` as the empty
+    /// string rather than `null`/`undefined`.
+    #[test]
+    fn object_data_absent_reflects_as_empty_string() {
+        let mut runtime = JsRuntime::new().unwrap();
+        runtime.set_base_url("http://example.com/dir/page.html".parse().unwrap());
+        assert_eq!(
+            eval_string_value(
+                &mut runtime,
+                "var o = document.createElement('object'); JSON.stringify(o.data)"
+            )
+            .as_deref(),
+            Some("\"\""),
+            "object.data with no data attribute must be the empty string"
+        );
+    }
+
+    /// `setAttribute` for a non-reflected attribute must not leak the attribute
+    /// as a same-named JS property on the wrapper: it stays reachable only via
+    /// `getAttribute` (Acid3 test 64's non-existent-property check).
+    #[test]
+    fn element_setattribute_does_not_leak_to_js_property() {
+        let mut runtime = JsRuntime::new().unwrap();
+        let script = r#"
+            var p = document.createElement('p');
+            p.setAttribute('foo', 'x');
+            [!('foo' in p), p.foo === undefined, p.getAttribute('foo') === 'x'].join('|')
+        "#;
+        assert_eq!(
+            eval_string_value(&mut runtime, script).as_deref(),
+            Some("true|true|true"),
+            "setAttribute must not create a JS property for the attribute"
         );
     }
 
