@@ -4856,6 +4856,98 @@ fn paint_border_radius_clips_background_corners() {
     assert_eq!(canvas.pixel(19, 19), Some(Color::rgba(0, 0, 0, 0)));
 }
 
+// --- clip-path: inset() 描画テスト ---
+
+fn paint_clip_path_document(css: &str, body: &str, width: f32, height: f32) -> Canvas {
+    let html = format!(
+        "<html><head><style>body {{ margin: 0; }} {css}</style></head><body>{body}</body></html>"
+    );
+    let document = TreeBuilder::parse(&html).document();
+    let viewport = Rect { x: 0.0, y: 0.0, width, height };
+    render_document(&document, viewport).unwrap()
+}
+
+#[test]
+fn clip_path_inset_full_bottom_hides_the_element() {
+    let canvas = paint_clip_path_document(
+        ".target { width: 100px; height: 80px; background: red; \
+         clip-path: inset(0 0 100% 0); }",
+        "<div class='target'></div>",
+        100.0,
+        80.0,
+    );
+
+    assert_eq!(count_pixels(&canvas, Color::rgb(255, 0, 0)), 0);
+    assert_eq!(canvas.pixel(0, 0), Some(Color::rgba(0, 0, 0, 0)));
+    assert_eq!(canvas.pixel(50, 40), Some(Color::rgba(0, 0, 0, 0)));
+    assert_eq!(canvas.pixel(99, 79), Some(Color::rgba(0, 0, 0, 0)));
+}
+
+#[test]
+fn clip_path_inset_px_clips_at_each_pixel_boundary() {
+    let canvas = paint_clip_path_document(
+        ".target { width: 100px; height: 80px; background: red; \
+         clip-path: inset(10px 20px 30px 40px); }",
+        "<div class='target'></div>",
+        100.0,
+        80.0,
+    );
+
+    let transparent = Some(Color::rgba(0, 0, 0, 0));
+    let red = Some(Color::rgb(255, 0, 0));
+    assert_eq!(canvas.pixel(40, 10), red);
+    assert_eq!(canvas.pixel(79, 49), red);
+    assert_eq!(canvas.pixel(39, 10), transparent);
+    assert_eq!(canvas.pixel(80, 10), transparent);
+    assert_eq!(canvas.pixel(40, 9), transparent);
+    assert_eq!(canvas.pixel(40, 50), transparent);
+    assert_eq!(count_pixels(&canvas, Color::rgb(255, 0, 0)), 40 * 40);
+}
+
+#[test]
+fn clip_path_inset_percentages_use_width_for_sides_and_height_for_edges() {
+    let canvas = paint_clip_path_document(
+        ".target { width: 100px; height: 80px; background: red; \
+         clip-path: inset(25% 10% 50% 20%); }",
+        "<div class='target'></div>",
+        100.0,
+        80.0,
+    );
+
+    let transparent = Some(Color::rgba(0, 0, 0, 0));
+    let red = Some(Color::rgb(255, 0, 0));
+    assert_eq!(canvas.pixel(20, 20), red);
+    assert_eq!(canvas.pixel(89, 39), red);
+    assert_eq!(canvas.pixel(19, 20), transparent);
+    assert_eq!(canvas.pixel(90, 20), transparent);
+    assert_eq!(canvas.pixel(20, 19), transparent);
+    assert_eq!(canvas.pixel(20, 40), transparent);
+    assert_eq!(count_pixels(&canvas, Color::rgb(255, 0, 0)), 70 * 20);
+}
+
+#[test]
+fn clip_path_inset_clips_descendants() {
+    let canvas = paint_clip_path_document(
+        ".parent { position: relative; width: 100px; height: 80px; \
+         clip-path: inset(10px 20px 30px 40px); } \
+         .child { position: absolute; left: 0; top: 0; width: 100px; height: 80px; \
+         background: blue; }",
+        "<div class='parent'><div class='child'></div></div>",
+        100.0,
+        80.0,
+    );
+
+    let transparent = Some(Color::rgba(0, 0, 0, 0));
+    let blue = Some(Color::rgb(0, 0, 255));
+    assert_eq!(canvas.pixel(40, 10), blue);
+    assert_eq!(canvas.pixel(79, 49), blue);
+    assert_eq!(canvas.pixel(39, 10), transparent);
+    assert_eq!(canvas.pixel(80, 10), transparent);
+    assert_eq!(canvas.pixel(40, 9), transparent);
+    assert_eq!(canvas.pixel(40, 50), transparent);
+    assert_eq!(count_pixels(&canvas, Color::rgb(0, 0, 255)), 40 * 40);
+}
+
 // --- box-shadow テスト ---
 
 #[test]

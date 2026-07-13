@@ -307,7 +307,7 @@ impl StyleResolver {
             {
                 for declaration in &rule.declarations {
                     candidates.push(Candidate {
-                        name: declaration.name.clone(),
+                        name: canonical_property_name(&declaration.name).to_string(),
                         value: declaration.value.clone(),
                         important: declaration.important,
                         origin: Origin::Author,
@@ -882,7 +882,7 @@ fn collect_rule_candidates(
                 if let Some(specificity) = matching_specificity {
                     for declaration in &style_rule.declarations {
                         out.push(Candidate {
-                            name: declaration.name.clone(),
+                            name: canonical_property_name(&declaration.name).to_string(),
                             value: declaration.value.clone(),
                             important: declaration.important,
                             origin,
@@ -1436,6 +1436,8 @@ fn is_supported_property(name: &str) -> bool {
             | "bottom"
             | "box-sizing"
             | "clear"
+            | "clip-path"
+            | "-webkit-clip-path"
             | "color"
             | "content"
             | "cursor"
@@ -1523,6 +1525,9 @@ fn is_supported_property(name: &str) -> bool {
 }
 
 fn compute_value(value: &Value, property_name: &str, ctx: ResolutionContext) -> ComputedValue {
+    if property_name.eq_ignore_ascii_case("clip-path") {
+        return ComputedValue::Keyword(render_clip_path_value(value, ctx));
+    }
     if property_name.eq_ignore_ascii_case("grid-template-areas") {
         return ComputedValue::Keyword(render_grid_template_areas(value));
     }
@@ -1625,6 +1630,50 @@ fn compute_value(value: &Value, property_name: &str, ctx: ResolutionContext) -> 
                 ComputedValue::Keyword(String::new())
             }
         }
+    }
+}
+
+fn canonical_property_name(name: &str) -> &str {
+    if name.eq_ignore_ascii_case("-webkit-clip-path") {
+        "clip-path"
+    } else {
+        name
+    }
+}
+
+fn render_clip_path_value(value: &Value, ctx: ResolutionContext) -> String {
+    match value {
+        Value::Length(number, unit) => resolve_length_to_px(*number, unit, ctx)
+            .map(|px| format!("{px}px"))
+            .unwrap_or_else(|| format!("{number}{unit}")),
+        Value::Function { name, arguments } if name.eq_ignore_ascii_case("calc") => {
+            if let Some(quantity) = evaluate_calc(arguments, ctx) {
+                return match quantity.unit {
+                    CalcUnit::Px => format!("{}px", quantity.value),
+                    CalcUnit::Percentage => format!("{}%", quantity.value),
+                    CalcUnit::Unitless => quantity.value.to_string(),
+                };
+            }
+            if let Some((px, percentage)) = try_extract_calc_px_percent(arguments, ctx) {
+                let operator = if percentage < 0.0 { '-' } else { '+' };
+                return format!("calc({px}px {operator} {}%)", percentage.abs());
+            }
+            render_value(value)
+        }
+        Value::Function { name, arguments } if name.eq_ignore_ascii_case("inset") => format!(
+            "inset({})",
+            arguments
+                .iter()
+                .map(|argument| render_clip_path_value(argument, ctx))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        Value::List(values) => values
+            .iter()
+            .map(|value| render_clip_path_value(value, ctx))
+            .collect::<Vec<_>>()
+            .join(" "),
+        _ => render_value(value),
     }
 }
 

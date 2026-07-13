@@ -869,6 +869,21 @@ fn paint_box_internal(
     let style = resolver.computed_style(&layout.node);
     let border_box = border_box_rect(layout);
     let padding_box = padding_box_rect(layout);
+    let inherited_clip = if let Some(inset_clip) = clip_path_inset_rect(&style, border_box) {
+        let Some(inset_clip) = inset_clip else {
+            return;
+        };
+        if let Some(current) = inherited_clip {
+            let Some(combined) = intersect(current, inset_clip) else {
+                return;
+            };
+            Some(combined)
+        } else {
+            Some(inset_clip)
+        }
+    } else {
+        inherited_clip
+    };
 
     // opacity が 1.0 未満の場合、オフスクリーンバッファに描画してから合成する
     let opacity = element_opacity(&style);
@@ -1013,7 +1028,12 @@ fn paint_box_internal_to(
 
     let clip = if layout.overflow == crate::layout::Overflow::Hidden {
         match inherited_clip {
-            Some(current) => intersect(current, padding_box),
+            Some(current) => {
+                let Some(combined) = intersect(current, padding_box) else {
+                    return;
+                };
+                Some(combined)
+            }
             None => Some(padding_box),
         }
     } else {
@@ -1405,6 +1425,128 @@ fn length_property(style: &ComputedStyle, name: &str) -> Option<f32> {
         Some(ComputedValue::Number(value)) => Some(*value),
         _ => None,
     }
+}
+
+#[derive(Clone, Copy, Default)]
+struct ClipPathInsetLength {
+    px: f32,
+    percentage: f32,
+}
+
+impl ClipPathInsetLength {
+    fn resolve(self, basis: f32) -> f32 {
+        self.px + basis * self.percentage / 100.0
+    }
+}
+
+/// Returns `None` for unsupported clip shapes, `Some(None)` for an empty inset,
+/// and `Some(Some(rect))` for a non-empty inset clip.
+fn clip_path_inset_rect(style: &ComputedStyle, border_box: Rect) -> Option<Option<Rect>> {
+    let value = match style.get("clip-path") {
+        Some(ComputedValue::Keyword(value)) | Some(ComputedValue::String(value)) => value.trim(),
+        _ => return None,
+    };
+    let open = value.find('(')?;
+    if !value[..open].trim().eq_ignore_ascii_case("inset") || !value.ends_with(')') {
+        return None;
+    }
+
+    let mut lengths = Vec::new();
+    for component in split_top_level_whitespace(&value[open + 1..value.len() - 1]) {
+        if component.eq_ignore_ascii_case("round") {
+            break;
+        }
+        lengths.push(parse_clip_path_inset_length(component)?);
+    }
+    let edges = match lengths.as_slice() {
+        [all] => [*all; 4],
+        [vertical, horizontal] => [*vertical, *horizontal, *vertical, *horizontal],
+        [top, horizontal, bottom] => [*top, *horizontal, *bottom, *horizontal],
+        [top, right, bottom, left] => [*top, *right, *bottom, *left],
+        _ => return None,
+    };
+
+    let top = edges[0].resolve(border_box.height);
+    let right = edges[1].resolve(border_box.width);
+    let bottom = edges[2].resolve(border_box.height);
+    let left = edges[3].resolve(border_box.width);
+    let rect = Rect {
+        x: border_box.x + left,
+        y: border_box.y + top,
+        width: border_box.width - left - right,
+        height: border_box.height - top - bottom,
+    };
+    Some(normalize_rect(rect))
+}
+
+fn split_top_level_whitespace(value: &str) -> Vec<&str> {
+    let mut parts = Vec::new();
+    let mut depth = 0usize;
+    let mut start = None;
+    for (index, ch) in value.char_indices() {
+        if ch.is_ascii_whitespace() && depth == 0 {
+            if let Some(part_start) = start.take() {
+                parts.push(&value[part_start..index]);
+            }
+            continue;
+        }
+        if start.is_none() {
+            start = Some(index);
+        }
+        match ch {
+            '(' => depth += 1,
+            ')' => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+    }
+    if let Some(part_start) = start {
+        parts.push(&value[part_start..]);
+    }
+    parts
+}
+
+fn parse_clip_path_inset_length(value: &str) -> Option<ClipPathInsetLength> {
+    let value = value.trim();
+    if value.len() >= 6
+        && value
+            .get(..5)
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case("calc("))
+        && value.ends_with(')')
+    {
+        return parse_clip_path_inset_calc(&value[5..value.len() - 1]);
+    }
+    if let Some(number) = value.strip_suffix("px") {
+        return Some(ClipPathInsetLength {
+            px: number.trim().parse().ok()?,
+            percentage: 0.0,
+        });
+    }
+    if let Some(number) = value.strip_suffix('%') {
+        return Some(ClipPathInsetLength {
+            px: 0.0,
+            percentage: number.trim().parse().ok()?,
+        });
+    }
+    let number = value.parse::<f32>().ok()?;
+    (number == 0.0).then_some(ClipPathInsetLength::default())
+}
+
+fn parse_clip_path_inset_calc(value: &str) -> Option<ClipPathInsetLength> {
+    if let Some((left, right)) = value.split_once(" + ") {
+        let mut result = parse_clip_path_inset_length(left)?;
+        let right = parse_clip_path_inset_length(right)?;
+        result.px += right.px;
+        result.percentage += right.percentage;
+        return Some(result);
+    }
+    if let Some((left, right)) = value.split_once(" - ") {
+        let mut result = parse_clip_path_inset_length(left)?;
+        let right = parse_clip_path_inset_length(right)?;
+        result.px -= right.px;
+        result.percentage -= right.percentage;
+        return Some(result);
+    }
+    parse_clip_path_inset_length(value)
 }
 
 /// スタイルから各コーナーの border-radius を返す（TL, TR, BR, BL）。
