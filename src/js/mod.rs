@@ -1569,11 +1569,6 @@ fn register_host_bindings(
             NativeFunction::from_copy_closure(layout_metrics_native),
         ),
         (
-            js_string!("__omoikane_validate_inline_css"),
-            2,
-            NativeFunction::from_copy_closure(validate_inline_css_native),
-        ),
-        (
             js_string!("__omoikane_css_rule_count"),
             1,
             NativeFunction::from_copy_closure(css_rule_count_native),
@@ -2367,42 +2362,6 @@ fn get_attribute_native(_: &JsValue, args: &[JsValue], context: &mut Context) ->
             None => JsValue::null(),
         })
     })
-}
-
-/// `__omoikane_validate_inline_css(name, value)` -> the value string to apply
-/// for an inline-style declaration, or `null` when the declaration is invalid
-/// and must be dropped (so the cascaded value is retained). This keeps the
-/// `getComputedStyle` inline override in step with the cascade's per-property
-/// value validation (issue 051): validated properties (e.g. `cursor`) are
-/// checked and normalized; every other property echoes its raw value unchanged.
-fn validate_inline_css_native(
-    _: &JsValue,
-    args: &[JsValue],
-    context: &mut Context,
-) -> JsResult<JsValue> {
-    let name = args
-        .first()
-        .cloned()
-        .unwrap_or_default()
-        .to_string(context)?
-        .to_std_string_escaped();
-    let value = args
-        .get(1)
-        .cloned()
-        .unwrap_or_default()
-        .to_string(context)?
-        .to_std_string_escaped();
-    Ok(
-        match crate::css::style::validate_inline_declaration(&name, &value) {
-            crate::css::style::InlineDeclarationValidation::Unvalidated => {
-                js_string!(value.as_str()).into()
-            }
-            crate::css::style::InlineDeclarationValidation::Valid(normalized) => {
-                js_string!(normalized.as_str()).into()
-            }
-            crate::css::style::InlineDeclarationValidation::Invalid => JsValue::null(),
-        },
-    )
 }
 
 /// Parses CSS with the engine parser and returns its top-level rule count.
@@ -7760,6 +7719,81 @@ mod tests {
         assert_eq!(eval_num(&mut runtime, "document.getElementById('box').offsetHeight"), 50.0);
         assert_eq!(eval_num(&mut runtime, "document.getElementById('box').offsetLeft"), 0.0);
         assert_eq!(eval_num(&mut runtime, "document.getElementById('box').offsetTop"), 0.0);
+    }
+
+    #[test]
+    fn inline_style_is_the_source_for_computed_width_and_layout() {
+        let html = r#"<html><head><style>
+            * { margin: 0; padding: 0; }
+            #box { width: 80px; }
+        </style></head><body><div id="box" style="width: 100px"></div></body></html>"#;
+        let mut runtime = runtime_from_html(html);
+
+        assert_eq!(
+            eval_num(&mut runtime, "document.getElementById('box').offsetWidth"),
+            100.0
+        );
+        assert_eq!(
+            eval_str(
+                &mut runtime,
+                "getComputedStyle(document.getElementById('box')).width"
+            ),
+            "100px"
+        );
+
+        runtime
+            .eval("document.getElementById('box').setAttribute('style', 'width: 250px');")
+            .unwrap();
+        assert_eq!(
+            eval_num(&mut runtime, "document.getElementById('box').offsetWidth"),
+            250.0
+        );
+
+        runtime
+            .eval("document.getElementById('box').removeAttribute('style');")
+            .unwrap();
+        assert_eq!(
+            eval_num(&mut runtime, "document.getElementById('box').offsetWidth"),
+            80.0
+        );
+        assert_eq!(
+            eval_str(
+                &mut runtime,
+                "getComputedStyle(document.getElementById('box')).width"
+            ),
+            "80px"
+        );
+    }
+
+    #[test]
+    fn computed_style_preserves_inline_data_uri() {
+        let html = r#"<html><body><div id="box"
+            style="background-image: url(data:image/png;base64,AAA)"></div></body></html>"#;
+        let mut runtime = runtime_from_html(html);
+
+        assert_eq!(
+            eval_str(
+                &mut runtime,
+                "getComputedStyle(document.getElementById('box')).getPropertyValue('background-image')"
+            ),
+            "url(data:image/png;base64,AAA)"
+        );
+    }
+
+    #[test]
+    fn inline_important_beats_author_important_in_computed_style() {
+        let html = r#"<html><head><style>
+            #box { color: red !important; }
+        </style></head><body><div id="box" style="color: blue !important"></div></body></html>"#;
+        let mut runtime = runtime_from_html(html);
+
+        assert_eq!(
+            eval_str(
+                &mut runtime,
+                "getComputedStyle(document.getElementById('box')).color"
+            ),
+            "blue"
+        );
     }
 
     #[test]

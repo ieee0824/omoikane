@@ -3699,32 +3699,32 @@ fn is_supported_property_includes_cursor() {
 
 #[test]
 fn inline_cursor_validation_matches_cascade() {
-    // The inline-style validator (used by getComputedStyle's inline override)
-    // must apply the same value validation as the cascade.
-    assert!(matches!(
-        validate_inline_declaration("cursor", "pointer"),
-        InlineDeclarationValidation::Valid(ref v) if v == "pointer"
-    ));
-    // Normalization to lowercase.
-    assert!(matches!(
-        validate_inline_declaration("cursor", "POINTER"),
-        InlineDeclarationValidation::Valid(ref v) if v == "pointer"
-    ));
-    // Invalid keyword is dropped.
-    assert!(matches!(
-        validate_inline_declaration("cursor", "bogus"),
-        InlineDeclarationValidation::Invalid
-    ));
-    // url() with valid fallback keyword is accepted.
-    assert!(matches!(
-        validate_inline_declaration("cursor", "url(cur.png), move"),
-        InlineDeclarationValidation::Valid(ref v) if v == "url(cur.png), move"
-    ));
-    // Non-validated properties are left untouched.
-    assert!(matches!(
-        validate_inline_declaration("color", "blue"),
-        InlineDeclarationValidation::Unvalidated
-    ));
+    let computed_value = |style_attribute: &str, property: &str| {
+        let element = NodeHandle::element("div");
+        element.set_attribute("style", style_attribute);
+        StyleResolver::new().computed_style(&element).get(property).cloned()
+    };
+
+    assert_eq!(
+        computed_value("cursor: pointer", "cursor"),
+        Some(ComputedValue::Keyword("pointer".to_string()))
+    );
+    assert_eq!(
+        computed_value("cursor: POINTER", "cursor"),
+        Some(ComputedValue::Keyword("pointer".to_string()))
+    );
+    assert_eq!(
+        computed_value("cursor: bogus", "cursor"),
+        Some(ComputedValue::Keyword("auto".to_string()))
+    );
+    assert_eq!(
+        computed_value("cursor: url(cur.png), move", "cursor"),
+        Some(ComputedValue::Keyword("url(cur.png), move".to_string()))
+    );
+    assert_eq!(
+        computed_value("color: blue", "color"),
+        Some(ComputedValue::Color("blue".to_string()))
+    );
 }
 
 #[test]
