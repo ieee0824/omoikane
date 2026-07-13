@@ -1,7 +1,7 @@
 ---
 number: 061-4
 slug: grid-track-sizing-extensions
-status: open
+status: closed
 parent: 061
 ---
 

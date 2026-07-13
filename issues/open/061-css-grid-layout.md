@@ -31,7 +31,7 @@ kasaneteto.jp の app.css は grid を多用: `display: grid` 131箇所、`grid-
 - [x] 061-3 アラインメント（PR #131）
       `justify-items` / `align-items` / `justify-content` / `align-content` /
       `place-items` / `place-content` / `justify-self` / `align-self`
-- [ ] 061-4 トラックサイジング拡張: calc() / vw 等単位 / minmax() / auto-fill / auto-fit /
+- [x] 061-4 トラックサイジング拡張（PR #132）: calc() / vw 等単位 / minmax() / auto-fill / auto-fit /
       複数トラック repeat / 名前付きライン耐性（実測でトラックパース失敗→単一カラム崩壊が判明）
 - [ ] 061-5 名前付きエリア: grid-template-areas / grid-area / grid-template ショートハンド
       （kasaneteto.jp 実測で grid-area 22 箇所・grid-template 8 箇所が未対応、ヒーロー崩壊の主因）
