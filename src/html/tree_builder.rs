@@ -106,8 +106,11 @@ impl Builder {
             Token::Comment(data) => self.document.append_child(NodeHandle::comment(data)),
             Token::Doctype(doctype) => {
                 if let Some(name) = doctype.name() {
-                    self.document
-                        .append_child(NodeHandle::document_type(name, "", ""));
+                    self.document.append_child(NodeHandle::document_type(
+                        name,
+                        doctype.public_id().unwrap_or(""),
+                        doctype.system_id().unwrap_or(""),
+                    ));
                 }
             }
             Token::Character(data) if data.trim().is_empty() => {}
@@ -951,6 +954,92 @@ mod tests {
         assert_eq!(children[0].node_name(), "html");
         assert_eq!(children[1].node_name(), "#comment");
         assert_eq!(children[2].node_name(), "HTML");
+    }
+
+    #[test]
+    fn full_parse_builds_doctype_and_head_body_split() {
+        // Acid3 test 71's first write: a public-id doctype followed by a title
+        // (which belongs in <head>) and body-level <span>/<script>.
+        let result = TreeBuilder::parse(
+            "<!DOCTYPE HTML PUBLIC \"-//W3C//DTD HTML 4.0 Transitional//EN\"><title></title><span></span><script type=\"text/javascript\"></script>",
+        );
+        let document = result.document();
+
+        // The document's children are exactly [doctype, html].
+        let children = document.child_nodes();
+        assert_eq!(children.len(), 2, "document children = [doctype, html]");
+        assert_eq!(children[0].node_type(), crate::dom::NodeType::DocumentType);
+        assert_eq!(children[1].tag_name().as_deref(), Some("html"));
+
+        // The doctype carries the (lowercased) name and its public identifier;
+        // no system identifier was given.
+        let doctype = &children[0];
+        assert_eq!(doctype.node_name(), "html");
+        assert_eq!(
+            doctype.public_id().as_deref(),
+            Some("-//W3C//DTD HTML 4.0 Transitional//EN")
+        );
+        assert_eq!(doctype.system_id(), None);
+
+        // <html> holds <head> then <body>; <title> is in <head>; <span> and
+        // <script> land in <body> in document order.
+        let html = &children[1];
+        let html_children: Vec<String> = html
+            .child_nodes()
+            .iter()
+            .filter_map(|n| n.tag_name())
+            .collect();
+        assert_eq!(html_children, vec!["head".to_string(), "body".to_string()]);
+
+        let head = document.query_selector("head").unwrap();
+        let head_children: Vec<String> = head
+            .child_nodes()
+            .iter()
+            .filter_map(|n| n.tag_name())
+            .collect();
+        assert_eq!(head_children, vec!["title".to_string()]);
+
+        let body = document.query_selector("body").unwrap();
+        let body_children: Vec<String> = body
+            .child_nodes()
+            .iter()
+            .filter_map(|n| n.tag_name())
+            .collect();
+        assert_eq!(body_children, vec!["span".to_string(), "script".to_string()]);
+    }
+
+    #[test]
+    fn full_parse_reads_public_and_system_doctype_identifiers() {
+        // Acid3 test 71's second write: a PUBLIC + SYSTEM doctype, and a
+        // <script> nested inside the <span> (so <body> has a single child).
+        let result = TreeBuilder::parse(
+            "<!DOCTYPE HTML PUBLIC \"-//W3C//DTD HTML 4.01 Transitional//EN\" \"http://www.w3.org/TR/html4/loose.dtd\"><title></title><span><script type=\"text/javascript\"></script></span>",
+        );
+        let document = result.document();
+        let doctype = &document.child_nodes()[0];
+        assert_eq!(
+            doctype.public_id().as_deref(),
+            Some("-//W3C//DTD HTML 4.01 Transitional//EN")
+        );
+        assert_eq!(
+            doctype.system_id().as_deref(),
+            Some("http://www.w3.org/TR/html4/loose.dtd")
+        );
+
+        let body = document.query_selector("body").unwrap();
+        let body_children: Vec<String> = body
+            .child_nodes()
+            .iter()
+            .filter_map(|n| n.tag_name())
+            .collect();
+        assert_eq!(body_children, vec!["span".to_string()]);
+        let span = document.query_selector("span").unwrap();
+        let span_children: Vec<String> = span
+            .child_nodes()
+            .iter()
+            .filter_map(|n| n.tag_name())
+            .collect();
+        assert_eq!(span_children, vec!["script".to_string()]);
     }
 
     #[test]

@@ -29,6 +29,15 @@ status: open
 4. **タグをまたぐ分割 write**: `write('<b')` + `write('>x</b>')` のような入力ストリーム連結は未対応
    （断片は write 1回で完結する前提）
 
+## 補足（065 による分岐追加、2026-07-13）
+
+065（Acid3 test 71）で write のパース経路が2分岐になった:
+対象文書に documentElement が無い場合（`doc.open()` 直後）は**完全文書パース**
+（doctype + 暗黙 html/head/body を構築）、documentElement がある場合は従来どおり
+`<body>` ラップのフラグメントパース。項目 4 の分割 write に取り組む際は、
+初回 write が documentElement を作った後の2回目以降がフラグメント経路になる、
+という新挙動を前提にすること。
+
 ## 優先度
 
 低〜中 — Acid3 には未発現。実サイトの広告タグ・計測タグ等で顕在化し得る。
