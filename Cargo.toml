@@ -30,3 +30,11 @@ rcgen = "0.13"
 
 [build-dependencies]
 cbindgen = "0.29"
+
+# Pinned to a commit SHA (not the mutable branch) so the IC fix is reproducible
+# and cannot silently change under us. rev 6b9778e is the fork's
+# `omoikane/ic-fix-0.21.1` head: "fix(vm): guard prototype-property inline cache
+# on the prototype's shape".
+[patch.crates-io]
+boa_engine = { git = "https://github.com/ieee0824/boa", rev = "6b9778e" }
+boa_gc = { git = "https://github.com/ieee0824/boa", rev = "6b9778e" }
