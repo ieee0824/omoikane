@@ -7248,6 +7248,23 @@ mod tests {
     }
 
     #[test]
+    fn detached_element_has_no_computed_style_properties() {
+        let mut runtime = runtime_from_html("<html><body></body></html>");
+
+        // Browsers expose no resolved properties for an element outside the
+        // document tree; its inline declaration remains available via `style`.
+        assert_eq!(
+            eval_str(
+                &mut runtime,
+                "(() => { const el = document.createElement('div'); \
+                 el.setAttribute('style', 'color: red'); \
+                 return getComputedStyle(el).getPropertyValue('color'); })()"
+            ),
+            ""
+        );
+    }
+
+    #[test]
     fn get_computed_style_drops_invalid_white_space_keyword() {
         // Mirrors Acid3 test 0: an invalid later declaration must not override a
         // valid earlier one.

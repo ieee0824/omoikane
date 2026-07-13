@@ -55,13 +55,55 @@ pub fn parse_selector_list(input: &str) -> Result<Vec<Selector>, CssParseError> 
 
 /// Parses an inline `style` attribute as a forgiving declaration list.
 ///
-/// Invalid declarations are skipped independently. If tokenization fails, an
-/// empty list is returned.
+/// Invalid declarations are skipped independently. If tokenization of the
+/// complete input fails, independently tokenizable top-level declarations are
+/// still retained.
 pub fn parse_style_attribute(input: &str) -> Vec<Declaration> {
-    let Ok(tokens) = tokenize(input) else {
-        return Vec::new();
-    };
-    Parser::new(tokens).parse_style_attribute()
+    match tokenize(input) {
+        Ok(tokens) => Parser::new(tokens).parse_style_attribute(),
+        Err(_) => split_style_attribute_chunks(input)
+            .into_iter()
+            .filter_map(|chunk| tokenize(chunk).ok())
+            .flat_map(|tokens| Parser::new(tokens).parse_style_attribute())
+            .collect(),
+    }
+}
+
+fn split_style_attribute_chunks(input: &str) -> Vec<&str> {
+    let mut chunks = Vec::new();
+    let mut start = 0usize;
+    let mut quote = None;
+    let mut escaped = false;
+    let mut paren_depth = 0usize;
+    let mut bracket_depth = 0usize;
+
+    for (index, ch) in input.char_indices() {
+        if let Some(active_quote) = quote {
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == active_quote {
+                quote = None;
+            }
+            continue;
+        }
+
+        match ch {
+            '\'' | '"' => quote = Some(ch),
+            '(' => paren_depth += 1,
+            ')' => paren_depth = paren_depth.saturating_sub(1),
+            '[' => bracket_depth += 1,
+            ']' => bracket_depth = bracket_depth.saturating_sub(1),
+            ';' if paren_depth == 0 && bracket_depth == 0 => {
+                chunks.push(&input[start..index]);
+                start = index + ch.len_utf8();
+            }
+            _ => {}
+        }
+    }
+    chunks.push(&input[start..]);
+    chunks
 }
 
 fn selector_is_supported_for_dom_query(selector: &Selector) -> bool {
@@ -600,9 +642,10 @@ impl Parser {
 
         let mut value_tokens = Vec::new();
         let mut paren_depth = 0usize;
+        let mut bracket_depth = 0usize;
         while let Some(token) = self.peek() {
             match token {
-                CssToken::Semicolon if paren_depth == 0 => break,
+                CssToken::Semicolon if paren_depth == 0 && bracket_depth == 0 => break,
                 CssToken::CurlyClose => break,
                 CssToken::ParenOpen => {
                     paren_depth += 1;
@@ -610,6 +653,14 @@ impl Parser {
                 }
                 CssToken::ParenClose => {
                     paren_depth = paren_depth.saturating_sub(1);
+                    value_tokens.push(self.next().expect("peeked token should exist"));
+                }
+                CssToken::BracketOpen => {
+                    bracket_depth += 1;
+                    value_tokens.push(self.next().expect("peeked token should exist"));
+                }
+                CssToken::BracketClose => {
+                    bracket_depth = bracket_depth.saturating_sub(1);
                     value_tokens.push(self.next().expect("peeked token should exist"));
                 }
                 _ => value_tokens.push(self.next().expect("peeked token should exist")),
@@ -985,6 +1036,7 @@ fn split_important(tokens: &[CssToken]) -> (Vec<CssToken>, bool) {
             .rposition(|token| !matches!(token, CssToken::Whitespace));
         if let Some(bang_index) = bang_index
             && matches!(tokens[bang_index], CssToken::Delim('!'))
+            && token_is_at_top_level(tokens, bang_index)
         {
             let mut value_end = bang_index;
             while value_end > 0 && matches!(tokens[value_end - 1], CssToken::Whitespace) {
@@ -995,6 +1047,21 @@ fn split_important(tokens: &[CssToken]) -> (Vec<CssToken>, bool) {
     }
 
     (tokens.to_vec(), false)
+}
+
+fn token_is_at_top_level(tokens: &[CssToken], index: usize) -> bool {
+    let mut paren_depth = 0usize;
+    let mut bracket_depth = 0usize;
+    for token in &tokens[..index] {
+        match token {
+            CssToken::ParenOpen => paren_depth += 1,
+            CssToken::ParenClose => paren_depth = paren_depth.saturating_sub(1),
+            CssToken::BracketOpen => bracket_depth += 1,
+            CssToken::BracketClose => bracket_depth = bracket_depth.saturating_sub(1),
+            _ => {}
+        }
+    }
+    paren_depth == 0 && bracket_depth == 0
 }
 
 /// Attempt to build a structured `FontFaceRule` from `@font-face` declarations.

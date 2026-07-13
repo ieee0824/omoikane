@@ -611,6 +611,40 @@ mod tests {
     }
 
     #[test]
+    fn style_attribute_recovers_declarations_before_tokenization_error() {
+        let declarations = parse_style_attribute("color: red; content: 'abc");
+        assert_eq!(declarations.len(), 1);
+        assert_eq!(declarations[0].name, "color");
+        assert_eq!(declarations[0].value, Value::Keyword("red".to_string()));
+
+        assert!(parse_style_attribute("content: 'abc; color: red").is_empty());
+        assert!(parse_style_attribute("content: 'abc").is_empty());
+    }
+
+    #[test]
+    fn important_marker_must_be_at_top_level() {
+        let declarations = parse_style_attribute("width: calc(1px + 2px) !important");
+        assert_eq!(declarations.len(), 1);
+        assert_eq!(declarations[0].name, "width");
+        assert!(declarations[0].important);
+
+        assert!(parse_style_attribute("width: foo(bar !important").is_empty());
+        assert!(
+            parse_style_attribute("width: foo(bar !important; color: red").is_empty()
+        );
+    }
+
+    #[test]
+    fn style_attribute_semicolons_inside_brackets_do_not_split_declarations() {
+        let declarations =
+            parse_style_attribute("grid-template-columns: [a;b] 1fr; color: red");
+        assert_eq!(declarations.len(), 2);
+        assert_eq!(declarations[0].name, "grid-template-columns");
+        assert_eq!(declarations[1].name, "color");
+        assert_eq!(declarations[1].value, Value::Keyword("red".to_string()));
+    }
+
+    #[test]
     fn style_attributes_preserve_urls_and_important_shorthands() {
         let declarations = parse_style_attribute("background: url(data:image/png;base64,AAA)");
         assert!(declarations.iter().any(|declaration| {

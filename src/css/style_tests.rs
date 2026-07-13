@@ -195,6 +195,41 @@ fn iframe_inline_width_remains_supported() {
 }
 
 #[test]
+fn inline_declarations_follow_priority_and_source_order() {
+    let element = NodeHandle::element("div");
+    element.set_attribute("style", "width: 10px; width: 20px");
+    let style = StyleResolver::new().computed_style(&element);
+    assert_eq!(style.get("width"), Some(&ComputedValue::Px(20.0)));
+
+    let element = NodeHandle::element("div");
+    element.set_attribute("style", "color: blue !important; color: red");
+    let style = StyleResolver::new().computed_style(&element);
+    assert_eq!(
+        style.get("color"),
+        Some(&ComputedValue::Color("blue".to_string()))
+    );
+}
+
+#[test]
+fn inline_custom_properties_resolve_in_inline_values() {
+    let element = NodeHandle::element("div");
+    element.set_attribute("style", "--x: 5px; width: var(--x)");
+    let style = StyleResolver::new().computed_style(&element);
+    assert_eq!(style.get("width"), Some(&ComputedValue::Px(5.0)));
+}
+
+#[test]
+fn inline_property_names_are_ascii_case_insensitive() {
+    let element = NodeHandle::element("div");
+    element.set_attribute("style", "COLOR: red");
+    let style = StyleResolver::new().computed_style(&element);
+    assert_eq!(
+        style.get("color"),
+        Some(&ComputedValue::Color("red".to_string()))
+    );
+}
+
+#[test]
 fn identifies_supported_property_names() {
     assert!(is_supported_property("background-color"));
     assert!(is_supported_property("position"));
