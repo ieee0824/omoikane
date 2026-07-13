@@ -1,7 +1,7 @@
 ---
 number: 060
 slug: cjk-font-fallback
-status: open
+status: closed
 ---
 
 # CJK グリフのフォントフォールバック修正（豆腐解消）
