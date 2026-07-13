@@ -1584,6 +1584,51 @@ fn explicit_grid_placement_creates_implicit_columns_and_rows() {
 }
 
 #[test]
+fn aligns_grid_items_inside_their_cells_and_allows_self_override() {
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let grid = NodeHandle::element("div");
+    document.append_child(body.clone());
+    body.append_child(grid.clone());
+    for class_name in ["default", "override"] {
+        let child = NodeHandle::element("article");
+        child.set_attribute("class", class_name);
+        grid.append_child(child);
+    }
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(Origin::Author, parse_stylesheet(
+        "body { margin: 0; } div { display: grid; width: 200px; height: 100px; grid-template-columns: repeat(2, 100px); grid-template-rows: 100px; justify-items: center; align-items: end; } article { width: 20px; height: 10px; } .override { justify-self: end; align-self: start; }"
+    ).unwrap());
+    let layout = layout_tree(&body, &mut resolver, Rect { x: 0.0, y: 0.0, width: 200.0, height: 0.0 }).unwrap();
+    let rects: Vec<_> = layout.children[0].children.iter().map(|child| child.dimensions.content).collect();
+    assert_eq!((rects[0].x, rects[0].y, rects[0].width, rects[0].height), (40.0, 90.0, 20.0, 10.0));
+    assert_eq!((rects[1].x, rects[1].y, rects[1].width, rects[1].height), (180.0, 0.0, 20.0, 10.0));
+}
+
+#[test]
+fn distributes_grid_track_space_and_expands_place_shorthands() {
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    document.append_child(body.clone());
+    for class_name in ["between", "centered"] {
+        let grid = NodeHandle::element("div");
+        grid.set_attribute("class", class_name);
+        body.append_child(grid.clone());
+        for _ in 0..2 { grid.append_child(NodeHandle::element("article")); }
+    }
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(Origin::Author, parse_stylesheet(
+        "body { margin: 0; } div { display: grid; width: 300px; height: 100px; grid-template-columns: repeat(2, 50px); grid-template-rows: 20px; } article { width: 10px; height: 10px; } .between { justify-content: space-between; } .centered { place-content: center; place-items: center; }"
+    ).unwrap());
+    let layout = layout_tree(&body, &mut resolver, Rect { x: 0.0, y: 0.0, width: 300.0, height: 0.0 }).unwrap();
+    let between = &layout.children[0];
+    assert_eq!((between.children[0].dimensions.content.x, between.children[1].dimensions.content.x), (0.0, 250.0));
+    let centered = &layout.children[1];
+    assert_eq!((centered.children[0].dimensions.content.x, centered.children[0].dimensions.content.y), (120.0, 145.0));
+    assert_eq!((centered.children[1].dimensions.content.x, centered.children[1].dimensions.content.y), (170.0, 145.0));
+}
+
+#[test]
 fn grows_last_flex_item_to_fill_remaining_space() {
     let document = NodeHandle::document();
     let body = NodeHandle::element("body");

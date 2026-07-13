@@ -98,6 +98,26 @@ fn expands_grid_placement_shorthands_and_keeps_longhands() {
 }
 
 #[test]
+fn expands_grid_alignment_shorthands() {
+    let (_document, _body, title, _html) = sample_tree();
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "h1 { place-items: end center; place-self: center; place-content: center; }",
+        )
+        .unwrap(),
+    );
+    let style = resolver.computed_style(&title);
+    assert_eq!(style.get("align-items"), Some(&ComputedValue::Keyword("end".to_string())));
+    assert_eq!(style.get("justify-items"), Some(&ComputedValue::Keyword("center".to_string())));
+    assert_eq!(style.get("align-self"), Some(&ComputedValue::Keyword("center".to_string())));
+    assert_eq!(style.get("justify-self"), Some(&ComputedValue::Keyword("center".to_string())));
+    assert_eq!(style.get("align-content"), Some(&ComputedValue::Keyword("center".to_string())));
+    assert_eq!(style.get("justify-content"), Some(&ComputedValue::Keyword("center".to_string())));
+}
+
+#[test]
 fn applies_legacy_html_presentational_hints() {
     let document = NodeHandle::document();
     let html = NodeHandle::element("html");
