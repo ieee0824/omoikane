@@ -1,7 +1,7 @@
 ---
 number: 063
 slug: css-masking
-status: open
+status: closed
 ---
 
 # CSS マスキング（mask / -webkit-mask / mask-image）対応
