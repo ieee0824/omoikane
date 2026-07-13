@@ -8711,12 +8711,16 @@ mod tests {
     }
 
     /// The `setAttribute('src', ...)` path re-navigates a connected iframe just
-    /// like the `.src` IDL setter does.
+    /// like the `.src` IDL setter does, fetching and parsing the new resource
+    /// (not merely re-firing `load`): after the change `contentDocument` exposes
+    /// the server's document, which the initial about:blank sub-document lacked.
     #[test]
     fn connected_iframe_set_attribute_src_renavigates_and_fires_load() {
         use crate::html::TreeBuilder;
-        let port =
-            spawn_static_http_server("text/html", r#"<html><body></body></html>"#);
+        let port = spawn_static_http_server(
+            "text/html",
+            r#"<html><body><p id="loaded">via-setattr</p></body></html>"#,
+        );
         let doc =
             TreeBuilder::parse(r#"<html><body><iframe id="f"></iframe></body></html>"#).document();
         let mut runtime = JsRuntime::with_document(doc).unwrap();
@@ -8739,6 +8743,17 @@ mod tests {
             runtime.eval("loads").unwrap().as_number(),
             Some(2.0),
             "setAttribute('src', ...) on a connected iframe must re-navigate and dispatch load"
+        );
+        // The re-navigation must actually load the new sub-document's content,
+        // which the initial about:blank document did not contain.
+        assert_eq!(
+            eval_string_value(
+                &mut runtime,
+                "document.getElementById('f').contentDocument.getElementById('loaded').textContent"
+            )
+            .as_deref(),
+            Some("via-setattr"),
+            "setAttribute('src', ...) must parse the new sub-document's content"
         );
     }
 
@@ -8849,15 +8864,69 @@ mod tests {
         );
     }
 
+    /// A crafted `on*` content-attribute name whose derived event type collides
+    /// with an `Object.prototype` member (`on__proto__` -> `"__proto__"`,
+    /// `onconstructor` -> `"constructor"`) must wire without throwing and
+    /// without corrupting the per-node handler store. Regression test for the
+    /// null-prototype (`Object.create(null)`) handler dictionary: a plain `{}`
+    /// store resolves the inherited member as a bogus "previous" handler and
+    /// throws while (re)wiring, besides letting such a key reach the prototype.
+    #[test]
+    fn crafted_on_attribute_name_does_not_break_or_pollute_handler_store() {
+        let mut runtime = JsRuntime::new().unwrap();
+        runtime
+            .eval(
+                r#"globalThis.threw = null;
+                   globalThis.clicks = 0;
+                   globalThis.el = document.createElement('div');
+                   try {
+                     // Handlers add 100 if they ever fire; they are wired to the
+                     // "__proto__"/"constructor" event types, which are never
+                     // dispatched below, so a passing run leaves them dormant.
+                     el.setAttribute('on__proto__', 'globalThis.clicks += 100');
+                     el.setAttribute('onconstructor', 'globalThis.clicks += 100');
+                   } catch (e) { globalThis.threw = String(e); }"#,
+            )
+            .unwrap();
+        assert_eq!(
+            eval_string_value(&mut runtime, "threw === null ? 'no-throw' : threw").as_deref(),
+            Some("no-throw"),
+            "wiring a crafted on* attribute name must not throw (null-prototype store)"
+        );
+
+        // The store stayed intact: a subsequent legitimate handler wires and
+        // fires exactly once, and the crafted-name event types did not fire.
+        runtime
+            .eval(
+                r#"el.setAttribute('onclick', 'globalThis.clicks += 1');
+                   el.dispatchEvent(new Event('click'));"#,
+            )
+            .unwrap();
+        assert_eq!(
+            runtime.eval("clicks").unwrap().as_number(),
+            Some(1.0),
+            "a normal on* handler must still fire once after crafted names were wired"
+        );
+    }
+
     /// Changing a connected `<object>`'s `data` resource re-navigates it and
-    /// dispatches `load` again, mirroring the iframe `src` path.
+    /// dispatches `load` again, mirroring the iframe `src` path. Beyond the
+    /// re-fired `load`, the new resource must actually be fetched and parsed:
+    /// two servers hand out distinguishable documents, and `contentDocument`
+    /// must expose the second document's content once the change is pumped.
     #[test]
     fn connected_object_data_change_renavigates_and_fires_load() {
         use crate::html::TreeBuilder;
-        let port =
-            spawn_static_http_server("text/html", r#"<html><body></body></html>"#);
+        let first_port = spawn_static_http_server(
+            "text/html",
+            r#"<html><body><p id="marker">first</p></body></html>"#,
+        );
+        let second_port = spawn_static_http_server(
+            "text/html",
+            r#"<html><body><p id="marker">second</p></body></html>"#,
+        );
         let doc = TreeBuilder::parse(&format!(
-            r#"<html><body><object id="o" data="http://127.0.0.1:{port}/first.html"></object></body></html>"#
+            r#"<html><body><object id="o" data="http://127.0.0.1:{first_port}/first.html"></object></body></html>"#
         ))
         .document();
         let mut runtime = JsRuntime::with_document(doc).unwrap();
@@ -8869,10 +8938,20 @@ mod tests {
             .unwrap();
         pump_zero_delay_tasks(&mut runtime);
         assert_eq!(runtime.eval("loads").unwrap().as_number(), Some(1.0));
+        // The initial navigation parses the first document into the sub-context.
+        assert_eq!(
+            eval_string_value(
+                &mut runtime,
+                "document.getElementById('o').contentDocument.getElementById('marker').textContent"
+            )
+            .as_deref(),
+            Some("first"),
+            "the initial object navigation must load the first sub-document"
+        );
 
         runtime
             .eval(&format!(
-                "document.getElementById('o').setAttribute('data', 'http://127.0.0.1:{port}/second.html');"
+                "document.getElementById('o').setAttribute('data', 'http://127.0.0.1:{second_port}/second.html');"
             ))
             .unwrap();
         pump_zero_delay_tasks(&mut runtime);
@@ -8880,6 +8959,17 @@ mod tests {
             runtime.eval("loads").unwrap().as_number(),
             Some(2.0),
             "changing an object's data must re-navigate and dispatch load again"
+        );
+        // The re-navigation must swap the sub-document's content for the second
+        // server's document, not just re-fire `load` over the stale first one.
+        assert_eq!(
+            eval_string_value(
+                &mut runtime,
+                "document.getElementById('o').contentDocument.getElementById('marker').textContent"
+            )
+            .as_deref(),
+            Some("second"),
+            "re-navigating the object must load the second sub-document's content"
         );
     }
 

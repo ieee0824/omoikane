@@ -3140,7 +3140,14 @@
     const tag = (__omoikane_node_name(node.__id) || "").toLowerCase();
     const reflectToWindow =
       (tag === "body" || tag === "frameset") && WINDOW_REFLECTED_HANDLERS.has(type);
-    const store = node.__contentAttrHandlers || (node.__contentAttrHandlers = {});
+    // Null-prototype dictionary: the key is the event type derived from the
+    // attribute name (e.g. `setAttribute('on__proto__', ...)` -> `"__proto__"`),
+    // which is attacker-influenced, so a plain `{}` would let such a name write
+    // through to `Object.prototype` (prototype pollution) or resolve inherited
+    // members (`constructor`, `toString`) as bogus "previous" handlers.
+    const store =
+      node.__contentAttrHandlers ||
+      (node.__contentAttrHandlers = Object.create(null));
     const previous = store[type];
     if (previous) {
       previous.target.removeEventListener(type, previous.handler);
