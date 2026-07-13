@@ -120,6 +120,10 @@ Acid3 は DOM / CSS / HTML parser / scripting / networking まで含む複合テ
 - ~~test 29~~ → 054 で解消（parser の暗黙 tbody 生成、87→88）。
 - ~~**test 4 / test 5**~~ → 055 で解消（Document の live HTMLCollection `forms`/`links`/`images`/`anchors` を実装、88→90）。test 4 は `document.forms[0]`／`document.forms.form.elements[0]`、test 5 は `document.links[1].firstChild` が解決するようになり両モードで PASS。
 - 残: test 64（object URI 解決）, 69/71/72/74/75/77/79/80/98（016-14 の SVG/XML/CSSOM + object/iframe URI + linktest networking）。test 80 は `document.links` 解決後 retry を経て `timeout -- could be a networking issue`（linktest の onload 未発火）へ前進したが、依然として残存。
+- 97/100 時点の残り3テストは原因調査済みで 064/065/066 に分解（2026-07-13）:
+  - test 64 → [064 object.data URL 反射](064-object-data-url-reflection.md)
+  - test 71 → [065 document.write 完全文書パース + doctype IDL](065-document-write-full-document-parsing.md)
+  - test 80 → [066 iframe src 再ナビゲーション + 動的 on* 配線](066-iframe-renavigation-dynamic-onload.md)
 
 ## 子issue
 
@@ -146,3 +150,6 @@ Acid3 ギャップ分析（`tests/fixtures/acid3/GAP_ANALYSIS.md`）に基づく
 - [x] [051 CSS プロパティ値検証と computed style serialization](../closed/051-css-property-value-validation.md)（PR #117, test 47 PASS, 合流後 87/100）
 - [x] [054 table tree construction（暗黙 tbody 生成）](../closed/054-parser-table-tree-construction.md)（PR #119, test 29 PASS, 87→88）
 - [x] [055 document.forms / document.links の HTMLCollection](../closed/055-document-forms-links-collections.md)（PR #120, test 4/5 PASS, 88→90）
+- [ ] [064 HTMLObjectElement.data の URL 反射](064-object-data-url-reflection.md)（test 64）
+- [ ] [065 document.write の完全文書パースと doctype IDL](065-document-write-full-document-parsing.md)（test 71）
+- [ ] [066 接続済み iframe の src 再ナビゲーションと動的 on* 属性配線](066-iframe-renavigation-dynamic-onload.md)（test 80）
