@@ -1665,6 +1665,121 @@ fn places_grid_items_by_explicit_lines_and_spans() {
 }
 
 #[test]
+fn places_items_in_named_grid_areas_with_exact_rectangles() {
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let grid = NodeHandle::element("div");
+    document.append_child(body.clone());
+    body.append_child(grid.clone());
+    for class_name in ["a", "b", "c"] {
+        let child = NodeHandle::element("article");
+        child.set_attribute("class", class_name);
+        grid.append_child(child);
+    }
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(Origin::Author, parse_stylesheet(
+        "body { margin: 0; } div { display: grid; width: 230px; grid-template-columns: 100px 120px; grid-template-rows: 30px 40px; gap: 10px; grid-template-areas: \"a a\" \"b c\"; } article { height: 100%; } .a { grid-area: a; } .b { grid-area: b; } .c { grid-area: c; }"
+    ).unwrap());
+    let layout = layout_tree(&body, &mut resolver, Rect { x: 0.0, y: 0.0, width: 230.0, height: 0.0 }).unwrap();
+    let rects: Vec<_> = layout.children[0].children.iter().map(|child| child.dimensions.content).collect();
+    assert_eq!((rects[0].x, rects[0].y, rects[0].width, rects[0].height), (0.0, 0.0, 230.0, 30.0));
+    assert_eq!((rects[1].x, rects[1].y, rects[1].width, rects[1].height), (0.0, 40.0, 100.0, 40.0));
+    assert_eq!((rects[2].x, rects[2].y, rects[2].width, rects[2].height), (110.0, 40.0, 120.0, 40.0));
+}
+
+#[test]
+fn leaves_dot_cells_available_to_auto_placement() {
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let grid = NodeHandle::element("div");
+    document.append_child(body.clone());
+    body.append_child(grid.clone());
+    for class_name in ["tall", "auto", "corner"] {
+        let child = NodeHandle::element("article");
+        child.set_attribute("class", class_name);
+        grid.append_child(child);
+    }
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(Origin::Author, parse_stylesheet(
+        "body { margin: 0; } div { display: grid; width: 210px; grid-template-columns: 100px 100px; grid-template-rows: 20px 30px; gap: 10px; grid-template-areas: \"tall ...\" \"tall corner\"; } article { height: 100%; } .tall { grid-area: tall; } .corner { grid-area: corner; }"
+    ).unwrap());
+    let layout = layout_tree(&body, &mut resolver, Rect { x: 0.0, y: 0.0, width: 210.0, height: 0.0 }).unwrap();
+    let rects: Vec<_> = layout.children[0].children.iter().map(|child| child.dimensions.content).collect();
+    assert_eq!((rects[0].x, rects[0].y, rects[0].width, rects[0].height), (0.0, 0.0, 100.0, 60.0));
+    assert_eq!((rects[1].x, rects[1].y, rects[1].width, rects[1].height), (110.0, 0.0, 100.0, 20.0));
+    assert_eq!((rects[2].x, rects[2].y, rects[2].width, rects[2].height), (110.0, 30.0, 100.0, 30.0));
+}
+
+#[test]
+fn invalid_non_rectangular_area_falls_back_to_auto_placement() {
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let grid = NodeHandle::element("div");
+    let child = NodeHandle::element("article");
+    child.set_attribute("class", "bad");
+    document.append_child(body.clone());
+    body.append_child(grid.clone());
+    grid.append_child(child);
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(Origin::Author, parse_stylesheet(
+        "body { margin: 0; } div { display: grid; width: 200px; grid-template-columns: 100px 100px; grid-template-rows: 20px 30px; grid-template-areas: \"bad bad\" \"bad .\"; } article { height: 100%; } .bad { grid-area: bad; }"
+    ).unwrap());
+    let layout = layout_tree(&body, &mut resolver, Rect { x: 0.0, y: 0.0, width: 200.0, height: 0.0 }).unwrap();
+    let rect = layout.children[0].children[0].dimensions.content;
+    assert_eq!((rect.x, rect.y, rect.width, rect.height), (0.0, 0.0, 100.0, 20.0));
+}
+
+#[test]
+fn grid_template_area_rows_create_implicit_auto_rows() {
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let grid = NodeHandle::element("div");
+    let child = NodeHandle::element("article");
+    child.set_attribute("class", "footer");
+    document.append_child(body.clone());
+    body.append_child(grid.clone());
+    grid.append_child(child);
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(Origin::Author, parse_stylesheet(
+        "body { margin: 0; } div { display: grid; width: 200px; grid-template-columns: 200px; grid-template-rows: 25px; grid-template-areas: \"header\" \"footer\"; } article { height: 35px; } .footer { grid-area: footer; }"
+    ).unwrap());
+    let layout = layout_tree(&body, &mut resolver, Rect { x: 0.0, y: 0.0, width: 200.0, height: 0.0 }).unwrap();
+    let grid = &layout.children[0];
+    let rect = grid.children[0].dimensions.content;
+    assert_eq!((rect.x, rect.y, rect.width, rect.height), (0.0, 25.0, 200.0, 35.0));
+    assert_eq!(grid.dimensions.content.height, 60.0);
+}
+
+#[test]
+fn lays_out_grid_template_shorthand_with_calc_and_viewport_tracks() {
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let grid = NodeHandle::element("div");
+    document.append_child(body.clone());
+    body.append_child(grid.clone());
+    for class_name in ["hero", "side", "main"] {
+        let child = NodeHandle::element("article");
+        child.set_attribute("class", class_name);
+        grid.append_child(child);
+    }
+
+    let mut resolver = StyleResolver::new();
+    resolver.set_viewport(1000.0, 800.0);
+    resolver.add_stylesheet(Origin::Author, parse_stylesheet(
+        "body { margin: 0; } div { display: grid; width: 400px; grid-template: \"hero hero\" 30px \"side main\" auto / calc(10vw + 20px) 1fr; } article { height: 40px; } .hero { grid-area: hero; height: 100%; } .side { grid-area: side; } .main { grid-area: main; }"
+    ).unwrap());
+    let layout = layout_tree(&body, &mut resolver, Rect { x: 0.0, y: 0.0, width: 1000.0, height: 0.0 }).unwrap();
+    let rects: Vec<_> = layout.children[0].children.iter().map(|child| child.dimensions.content).collect();
+    assert_eq!((rects[0].x, rects[0].y, rects[0].width, rects[0].height), (0.0, 0.0, 400.0, 30.0));
+    assert_eq!((rects[1].x, rects[1].y, rects[1].width, rects[1].height), (0.0, 30.0, 120.0, 40.0));
+    assert_eq!((rects[2].x, rects[2].y, rects[2].width, rects[2].height), (120.0, 30.0, 280.0, 40.0));
+}
+
+#[test]
 fn resolves_negative_grid_line_to_explicit_grid_end() {
     let document = NodeHandle::document();
     let body = NodeHandle::element("body");

@@ -98,6 +98,103 @@ fn expands_grid_placement_shorthands_and_keeps_longhands() {
 }
 
 #[test]
+fn expands_grid_area_shorthand_with_named_and_numeric_lines() {
+    let stylesheet = parse_stylesheet(
+        ".named { grid-area: title; } .lines { grid-area: 1 / 2 / 4; }",
+    )
+    .unwrap();
+
+    let Rule::Style(named) = &stylesheet.rules[0] else {
+        panic!("expected named style rule");
+    };
+    let named_values: Vec<_> = named
+        .declarations
+        .iter()
+        .map(|declaration| (declaration.name.as_str(), &declaration.value))
+        .collect();
+    assert_eq!(
+        named_values,
+        vec![
+            ("grid-row-start", &Value::Keyword("title".to_string())),
+            ("grid-column-start", &Value::Keyword("title".to_string())),
+            ("grid-row-end", &Value::Keyword("title".to_string())),
+            ("grid-column-end", &Value::Keyword("title".to_string())),
+        ]
+    );
+
+    let Rule::Style(lines) = &stylesheet.rules[1] else {
+        panic!("expected line style rule");
+    };
+    let line_values: Vec<_> = lines
+        .declarations
+        .iter()
+        .map(|declaration| (declaration.name.as_str(), &declaration.value))
+        .collect();
+    assert_eq!(
+        line_values,
+        vec![
+            ("grid-row-start", &Value::Number(1.0)),
+            ("grid-column-start", &Value::Number(2.0)),
+            ("grid-row-end", &Value::Number(4.0)),
+            ("grid-column-end", &Value::Keyword("auto".to_string())),
+        ]
+    );
+}
+
+#[test]
+fn expands_grid_template_track_and_area_forms() {
+    let stylesheet = parse_stylesheet(
+        ".tracks { grid-template: 30px 40px / 100px 1fr; } \
+         .areas { grid-template: \"hero hero\" 60px \"nav main\" auto / calc(10vw + 20px) 1fr; }",
+    )
+    .unwrap();
+
+    let Rule::Style(tracks) = &stylesheet.rules[0] else {
+        panic!("expected track style rule");
+    };
+    assert_eq!(tracks.declarations.len(), 2);
+    assert_eq!(tracks.declarations[0].name, "grid-template-rows");
+    assert_eq!(tracks.declarations[1].name, "grid-template-columns");
+
+    let Rule::Style(areas) = &stylesheet.rules[1] else {
+        panic!("expected area style rule");
+    };
+    assert_eq!(areas.declarations.len(), 3);
+    assert_eq!(areas.declarations[0].name, "grid-template-areas");
+    assert_eq!(
+        areas.declarations[0].value,
+        Value::List(vec![
+            Value::String("hero hero".to_string()),
+            Value::String("nav main".to_string()),
+        ])
+    );
+    assert_eq!(areas.declarations[1].name, "grid-template-rows");
+    assert_eq!(areas.declarations[2].name, "grid-template-columns");
+}
+
+#[test]
+fn preserves_grid_template_area_row_boundaries_in_computed_style() {
+    let (_document, _body, title, _html) = sample_tree();
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet("h1 { grid-template-areas: \"header header\" \"side main\"; }")
+            .unwrap(),
+    );
+
+    let style = resolver.computed_style(&title);
+    assert_eq!(
+        style.get("grid-template-areas"),
+        Some(&ComputedValue::Keyword(
+            "\"header header\" \"side main\"".to_string()
+        ))
+    );
+    for property in ["grid-template-areas", "grid-area", "grid-template"] {
+        assert!(is_supported_property(property));
+    }
+}
+
+#[test]
 fn expands_grid_alignment_shorthands() {
     let (_document, _body, title, _html) = sample_tree();
     let mut resolver = StyleResolver::new();
