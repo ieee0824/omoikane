@@ -22,7 +22,7 @@ kasaneteto.jp の app.css は grid を多用: `display: grid` 131箇所、`grid-
 
 大きいため段階実装する。各段は単体で意味のある前進とし、順に PR 化する。
 
-- [ ] 061-1 明示的グリッド定義とトラックサイジング
+- [x] 061-1 明示的グリッド定義とトラックサイジング（PR #129）
       `display: grid`、`grid-template-columns/rows`（px / %  / fr / auto / repeat()）、
       基本の行優先フロー配置、`gap` / `row-gap` / `column-gap`
 - [ ] 061-2 明示的アイテム配置とスパン

@@ -2,7 +2,7 @@
 number: 061-1
 slug: grid-track-sizing
 parent: 061
-status: open
+status: closed
 ---
 
 # CSS Grid: 明示的グリッド定義とトラックサイジング
