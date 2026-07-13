@@ -74,6 +74,38 @@ fn identifies_supported_property_names() {
     assert!(is_supported_property("position"));
     assert!(is_supported_property("transform"));
     assert!(!is_supported_property("filter"));
+
+    for property in [
+        "transform-origin",
+        "animation",
+        "animation-delay",
+        "animation-direction",
+        "animation-duration",
+        "animation-iteration-count",
+        "animation-play-state",
+        "animation-timing-function",
+    ] {
+        assert!(
+            is_supported_property(property),
+            "expected `{property}` to be registered as a supported property"
+        );
+    }
+
+    // `animation` shorthand (e.g. `animation: fade 0.3s forwards`) を解決すると
+    // `expand_animation_shorthand` が longhand へ展開しつつ元の `animation` 宣言も
+    // 再 emit する。ここで候補になる宣言名一式が supported であることを確認し、
+    // shorthand 使用ページで未対応ログが出ないことを担保する。
+    for property in [
+        "animation",
+        "animation-name",
+        "animation-fill-mode",
+        "animation-duration",
+    ] {
+        assert!(
+            is_supported_property(property),
+            "expected animation shorthand candidate `{property}` to be supported"
+        );
+    }
 }
 
 #[test]
