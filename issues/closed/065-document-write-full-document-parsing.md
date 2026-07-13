@@ -2,7 +2,7 @@
 number: 065
 slug: document-write-full-document-parsing
 parent: 016
-status: open
+status: closed
 ---
 
 # document.write の完全文書パースと doctype IDL（Acid3 test 71）
@@ -59,3 +59,11 @@ iframe contentDocument への
 
 - Acid3 test 71 が FAITHFUL/DIRECT 両モードで PASS、test 72 が PASS を維持
 - 上記単体テストの追加と既存テスト全通過（期待値更新は `document_open_write_close_leaves_only_written_content` のみ）
+
+## クローズ記録（2026-07-13、PR #137）
+
+方針どおり実装し受け入れ条件を達成。Acid3 は FAITHFUL/DIRECT 両モード 99/100（実測、test 72 も PASS 維持）、
+`cargo test --lib` 1114 passed。トークナイザの DOCTYPE 状態機械 13 state 追加、
+`DoctypeName` が空白で force_quirks のまま留まる既存バグの修正を含む。
+046 へパース経路2分岐の注記を追加済み。Copilot レビューは指摘ゼロ。
+実装は Opus（general-purpose, model: opus）。
