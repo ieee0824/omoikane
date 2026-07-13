@@ -1404,6 +1404,7 @@ fn is_supported_property(name: &str) -> bool {
         name,
         "align-items"
             | "align-content"
+            | "align-self"
             | "animation"
             | "animation-delay"
             | "animation-direction"
@@ -1413,7 +1414,6 @@ fn is_supported_property(name: &str) -> bool {
             | "animation-name"
             | "animation-play-state"
             | "animation-timing-function"
-            | "align-self"
             | "background-attachment"
             | "background-color"
             | "background-image"
