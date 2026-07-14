@@ -12,6 +12,7 @@ services:
     # Docker の既定 seccomp フィルターを無効化する。
     security_opt:
       - seccomp=unconfined
+      - apparmor=unconfined
     # 対話的に exec して使うため tty/stdin を有効化する。
     tty: true
     stdin_open: true
