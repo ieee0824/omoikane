@@ -33,6 +33,21 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         fonts-ipafont-mincho \
     && rm -rf /var/lib/apt/lists/*
 
+# Firefox（Mozilla 公式 APT リポジトリ）。レンダリング結果の比較用ブラウザとして使う。
+# 署名鍵は Mozilla が公開するフィンガープリントと完全一致することを確認してから登録する。
+RUN install -d -m 0755 /etc/apt/keyrings \
+    && curl -fsSL https://packages.mozilla.org/apt/repo-signing-key.gpg \
+        -o /etc/apt/keyrings/packages.mozilla.org.asc \
+    && test "$(gpg --batch --quiet --show-keys --with-colons /etc/apt/keyrings/packages.mozilla.org.asc \
+        | awk -F: '$1 == "fpr" { print $10; exit }')" = "35BAA0B33E9EB396F59CA838C0BA5CE6DC6315A3" \
+    && printf 'Types: deb\nURIs: https://packages.mozilla.org/apt\nSuites: mozilla\nComponents: main\nSigned-By: /etc/apt/keyrings/packages.mozilla.org.asc\n' \
+        > /etc/apt/sources.list.d/mozilla.sources \
+    && printf 'Package: *\nPin: origin packages.mozilla.org\nPin-Priority: 1000\n' \
+        > /etc/apt/preferences.d/mozilla \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends firefox firefox-l10n-ja \
+    && rm -rf /var/lib/apt/lists/*
+
 # GitHub CLI（gh）。PR 作成などの Claude Code / PR ワークフローで使う。
 # 公式 apt リポジトリ（cli.github.com/packages）を鍵付きで追加してインストールする。
 RUN mkdir -p -m 755 /etc/apt/keyrings \
