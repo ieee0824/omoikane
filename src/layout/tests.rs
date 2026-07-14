@@ -856,6 +856,68 @@ fn generated_empty_content_creates_a_zero_width_fragment() {
 }
 
 #[test]
+fn google_style_form_controls_create_visible_replaced_fragments() {
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let form = NodeHandle::element("form");
+    let hidden = NodeHandle::element("input");
+    let query = NodeHandle::element("input");
+    let submit_wrapper = NodeHandle::element("span");
+    let submit_inner = NodeHandle::element("span");
+    let submit = NodeHandle::element("input");
+    hidden.set_attribute("type", "hidden");
+    query.set_attribute("name", "q");
+    query.set_attribute("size", "57");
+    submit_wrapper.set_attribute("class", "submit-outer");
+    submit_inner.set_attribute("class", "submit-inner");
+    submit.set_attribute("type", "submit");
+    submit.set_attribute("value", "Google 検索");
+    document.append_child(body.clone());
+    body.append_child(form.clone());
+    form.append_child(hidden);
+    form.append_child(query);
+    form.append_child(submit_wrapper.clone());
+    submit_wrapper.append_child(submit_inner.clone());
+    submit_inner.append_child(submit);
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "form { text-align: center; }
+             input[name=q] { margin: 0; padding: 5px 8px 0 6px; font-size: 18px; }
+             .submit-outer { display: inline-block; }
+             .submit-inner { display: block; }
+             input[type=submit] { margin: 0 4px; padding: 0 12px; height: 36px; }",
+        )
+        .unwrap(),
+    );
+    let layout = layout_tree(
+        &body,
+        &mut resolver,
+        Rect { x: 0.0, y: 0.0, width: 1000.0, height: 0.0 },
+    )
+    .unwrap();
+    let fragments: Vec<_> = layout.children[0]
+        .lines
+        .iter()
+        .flat_map(|line| &line.fragments)
+        .filter_map(|fragment| match &fragment.content {
+            InlineFragmentContent::FormControl(_, value) => {
+                Some((fragment.rect, value.clone()))
+            }
+            _ => None,
+        })
+        .collect();
+
+    assert_eq!(fragments.len(), 2, "hidden input must not create a fragment");
+    assert!(fragments[0].0.width > 400.0, "size=57 search input should be wide");
+    assert!(fragments[0].0.height >= 27.0);
+    assert_eq!(fragments[1].1, "Google 検索");
+    assert!(fragments[1].0.width > 80.0);
+}
+
+#[test]
 fn generated_data_uri_png_content_creates_image_fragment() {
     let document = NodeHandle::document();
     let body = NodeHandle::element("body");
@@ -4992,8 +5054,8 @@ fn supported_html_tags_are_not_logged() {
     assert!(!super::is_supported_html_tag("canvas"));
     assert!(!super::is_supported_html_tag("video"));
     assert!(!super::is_supported_html_tag("iframe"));
-    assert!(!super::is_supported_html_tag("form"));
-    assert!(!super::is_supported_html_tag("input"));
+    assert!(super::is_supported_html_tag("form"));
+    assert!(super::is_supported_html_tag("input"));
 }
 
 #[test]

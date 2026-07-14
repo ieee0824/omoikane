@@ -142,6 +142,50 @@ pub(crate) fn paint_text_with_registry(
                 InlineFragmentContent::GeneratedBox(style) => {
                     super::paint_generated_box(canvas, fragment.rect, style, clip, _viewport);
                 }
+                InlineFragmentContent::FormControl(style, value) => {
+                    if let Some(background) = background_color(style) {
+                        canvas.fill_rect_clipped(fragment.rect, background, clip);
+                    }
+                    let border = EdgeSizesForPaint::from_style(style);
+                    if border.total_horizontal() > 0.0 || border.total_vertical() > 0.0 {
+                        paint_rect_borders(canvas, fragment.rect, style, border, clip);
+                    }
+                    if !value.is_empty() {
+                        let color =
+                            fragment_text_color(&fragment.style).unwrap_or(fallback_color);
+                        let text_rect = Rect {
+                            x: fragment.rect.x + 6.0,
+                            y: fragment.rect.y
+                                + ((fragment.rect.height - fragment.metrics.font_size) / 2.0)
+                                    .max(0.0),
+                            width: (fragment.rect.width - 12.0).max(0.0),
+                            height: fragment.metrics.font_size,
+                        };
+                        if fonts.is_empty() {
+                            paint_text_placeholder(
+                                canvas,
+                                text_rect,
+                                value,
+                                fragment.metrics.font_size,
+                                color,
+                                clip,
+                                fragment.metrics.letter_spacing,
+                            );
+                        } else {
+                            paint_text_with_font(
+                                canvas,
+                                text_rect,
+                                value,
+                                fragment.metrics.font_size,
+                                fragment.metrics.ascent,
+                                fonts,
+                                color,
+                                clip,
+                                fragment.metrics.letter_spacing,
+                            );
+                        }
+                    }
+                }
             }
         }
     }
