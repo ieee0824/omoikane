@@ -66,16 +66,8 @@ pub(crate) fn paint_text_with_registry(
                     // Try to resolve the best web font variant for this fragment.
                     // If the fragment has a registered web-font family, use it as the
                     // primary font and fall back to the global system font list.
-                    let web_font_for_fragment = web_fonts.and_then(|registry| {
-                        let family = fragment.style.font_family.as_deref()?;
-                        let weight = FontWeight::parse(
-                            fragment.style.font_weight.as_deref().unwrap_or("normal"),
-                        );
-                        let style = FontStyle::parse(
-                            fragment.style.font_style.as_deref().unwrap_or("normal"),
-                        );
-                        registry.select_best(family, weight, style)
-                    });
+                    let web_font_for_fragment =
+                        select_fragment_web_font(web_fonts, &fragment.style);
 
                     if let Some(web_font) = web_font_for_fragment {
                         // Build a temporary font list: web variant first, then fallbacks
@@ -155,6 +147,15 @@ pub(crate) fn paint_text_with_registry(
                             inline_fragment_content_rect(fragment.rect, style, border);
                         let color =
                             fragment_text_color(&fragment.style).unwrap_or(fallback_color);
+                        // Same font policy as the Text branch: the fragment's
+                        // resolved web-font variant first, then the global fonts.
+                        let mut fragment_fonts: Vec<&Font> = Vec::new();
+                        if let Some(web_font) =
+                            select_fragment_web_font(web_fonts, &fragment.style)
+                        {
+                            fragment_fonts.push(web_font);
+                        }
+                        fragment_fonts.extend(fonts.iter());
                         // Center the value horizontally when `text-align: center`
                         // (used by the `<button>` UA default); otherwise keep the
                         // existing left-aligned rendering.
@@ -162,7 +163,7 @@ pub(crate) fn paint_text_with_registry(
                             let text_width = measure_form_control_text_width(
                                 value,
                                 fragment.metrics.font_size,
-                                fonts,
+                                &fragment_fonts,
                                 fragment.metrics.letter_spacing,
                             );
                             ((content_rect.width - text_width) / 2.0).max(0.0)
@@ -177,7 +178,7 @@ pub(crate) fn paint_text_with_registry(
                             width: (content_rect.width - x_offset).max(0.0),
                             height: fragment.metrics.font_size,
                         };
-                        if fonts.is_empty() {
+                        if fragment_fonts.is_empty() {
                             paint_text_placeholder(
                                 canvas,
                                 text_rect,
@@ -188,13 +189,13 @@ pub(crate) fn paint_text_with_registry(
                                 fragment.metrics.letter_spacing,
                             );
                         } else {
-                            paint_text_with_font(
+                            paint_text_with_font_refs(
                                 canvas,
                                 text_rect,
                                 value,
                                 fragment.metrics.font_size,
                                 fragment.metrics.ascent,
-                                fonts,
+                                &fragment_fonts,
                                 color,
                                 clip,
                                 fragment.metrics.letter_spacing,
@@ -801,31 +802,49 @@ fn is_text_align_center(style: &ComputedStyle) -> bool {
     )
 }
 
+/// Resolves the best registered web-font variant for a fragment's
+/// `font-family` / `font-weight` / `font-style`, if any.
+///
+/// Shared by the `Text` and `FormControl` paint branches so both apply the
+/// same web-font selection policy.
+fn select_fragment_web_font<'a>(
+    web_fonts: Option<&'a WebFontRegistry>,
+    style: &FragmentStyle,
+) -> Option<&'a Font> {
+    let registry = web_fonts?;
+    let family = style.font_family.as_deref()?;
+    let weight = FontWeight::parse(style.font_weight.as_deref().unwrap_or("normal"));
+    let font_style = FontStyle::parse(style.font_style.as_deref().unwrap_or("normal"));
+    registry.select_best(family, weight, font_style)
+}
+
 /// Measures the painted advance width of `text`, mirroring the advance model of
-/// [`paint_text_with_font`] / [`paint_text_placeholder`] exactly: per-character
-/// advances, kerning between adjacent characters drawn from the same font, and
-/// letter-spacing between characters.
+/// [`paint_text_with_font_refs`] / [`paint_text_placeholder`] exactly:
+/// per-character advances, kerning between adjacent characters drawn from the
+/// same font, and letter-spacing between characters.
 ///
 /// Used to horizontally center form-control labels; when `fonts` is empty the
 /// placeholder advance of `font_size * 0.6` is used to match the glyph fallback.
 pub(crate) fn measure_form_control_text_width(
     text: &str,
     font_size: f32,
-    fonts: &[Font],
+    fonts: &[&Font],
     letter_spacing: f32,
 ) -> f32 {
-    let chars: Vec<char> = text.chars().collect();
-    if chars.is_empty() {
-        return 0.0;
-    }
     if fonts.is_empty() {
-        return chars.len() as f32 * (font_size * 0.6).max(1.0)
-            + letter_spacing * (chars.len() - 1) as f32;
+        let char_count = text.chars().count();
+        if char_count == 0 {
+            return 0.0;
+        }
+        return char_count as f32 * (font_size * 0.6).max(1.0)
+            + letter_spacing * (char_count - 1) as f32;
     }
     let mut width = 0.0;
+    let mut char_count = 0usize;
     let mut previous: Option<(char, usize)> = None;
-    for &ch in &chars {
-        let (font_index, _, advance) = rasterize_with_fallback(fonts, ch, font_size);
+    for ch in text.chars() {
+        char_count += 1;
+        let (font_index, _, advance) = rasterize_with_fallback_refs(fonts, ch, font_size);
         if let Some((prev, prev_index)) = previous
             && prev_index == font_index
         {
@@ -834,5 +853,8 @@ pub(crate) fn measure_form_control_text_width(
         width += advance;
         previous = Some((ch, font_index));
     }
-    width + letter_spacing * (chars.len() - 1) as f32
+    if char_count > 1 {
+        width += letter_spacing * (char_count - 1) as f32;
+    }
+    width
 }

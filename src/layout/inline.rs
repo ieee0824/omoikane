@@ -453,7 +453,7 @@ fn collect_rendered_text(node: &NodeHandle, resolver: &mut StyleResolver) -> Str
     text
 }
 
-/// Collapses runs of ASCII whitespace to a single space and trims the ends.
+/// Collapses runs of Unicode whitespace to a single space and trims the ends.
 fn normalize_inline_whitespace(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
