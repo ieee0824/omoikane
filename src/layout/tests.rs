@@ -1848,6 +1848,59 @@ fn lays_out_grid_template_shorthand_with_calc_and_viewport_tracks() {
 }
 
 #[test]
+fn lays_out_kasaneteto_named_areas_with_compact_grid_slash() {
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let grid = NodeHandle::element("div");
+    document.append_child(body.clone());
+    body.append_child(grid.clone());
+    for class_name in ["kasane", "teto", "official", "singable", "since", "april"] {
+        let child = NodeHandle::element("article");
+        child.set_attribute("class", class_name);
+        grid.append_child(child);
+    }
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "body { margin: 0; }
+             div {
+               display: grid;
+               margin-inline: auto;
+               width: 840px;
+               grid-template:
+                 \"kasane teto teto\" auto
+                 \"official official official\" auto
+                 \"singable since april\" auto/1fr 210px 90px;
+             }
+             article { height: 20px; }
+             .kasane { grid-area: kasane; }
+             .teto { grid-area: teto; }
+             .official { grid-area: official; }
+             .singable { grid-area: singable; }
+             .since { grid-area: since; }
+             .april { grid-area: april; }",
+        )
+        .unwrap(),
+    );
+    let layout = layout_tree(
+        &body,
+        &mut resolver,
+        Rect { x: 0.0, y: 0.0, width: 1000.0, height: 0.0 },
+    )
+    .unwrap();
+    let children = &layout.children[0].children;
+
+    assert_eq!((children[0].dimensions.content.x, children[0].dimensions.content.y), (80.0, 0.0));
+    assert_eq!((children[1].dimensions.content.x, children[1].dimensions.content.y), (620.0, 0.0));
+    assert_eq!(children[2].dimensions.content.y, 20.0);
+    assert_eq!(children[3].dimensions.content.y, 40.0);
+    assert_eq!(children[4].dimensions.content.y, 40.0);
+    assert_eq!(children[5].dimensions.content.y, 40.0);
+}
+
+#[test]
 fn resolves_negative_grid_line_to_explicit_grid_end() {
     let document = NodeHandle::document();
     let body = NodeHandle::element("body");

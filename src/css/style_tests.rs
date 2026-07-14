@@ -3107,6 +3107,52 @@ fn animation_shorthand_forwards_applies_final_state() {
 }
 
 #[test]
+fn infinite_animation_uses_deterministic_visible_snapshot_and_delay() {
+    let document = NodeHandle::document();
+    let html = NodeHandle::element("html");
+    let body = NodeHandle::element("body");
+    let visible = NodeHandle::element("div");
+    let delayed = NodeHandle::element("div");
+    visible.set_attribute("class", "character visible");
+    delayed.set_attribute("class", "character delayed");
+    document.append_child(html.clone());
+    html.append_child(body.clone());
+    body.append_child(visible.clone());
+    body.append_child(delayed.clone());
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "@keyframes characterFade {
+                0% { opacity: 0; }
+                5% { opacity: 1; }
+                25% { opacity: 1; }
+                30%, 100% { opacity: 0; }
+             }
+             .character { opacity: 0; animation: characterFade 8s infinite linear; }
+             .delayed { animation-delay: 2.5s; }",
+        )
+        .unwrap(),
+    );
+
+    assert_eq!(
+        resolver.computed_style(&visible).get("opacity"),
+        Some(&ComputedValue::Number(1.0))
+    );
+    assert_eq!(
+        resolver.computed_style(&delayed).get("opacity"),
+        Some(&ComputedValue::Number(0.0))
+    );
+    assert_eq!(
+        resolver
+            .computed_style(&visible)
+            .get("animation-iteration-count"),
+        Some(&ComputedValue::Keyword("infinite".to_string()))
+    );
+}
+
+#[test]
 fn ua_defaults_dd_has_margin_left() {
     let document = NodeHandle::document();
     let html = NodeHandle::element("html");

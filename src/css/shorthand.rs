@@ -5,6 +5,9 @@ use super::{Declaration, Value};
 pub(super) fn expand_shorthand(name: &str, value: Value, important: bool) -> Vec<Declaration> {
     match name {
         "margin" | "padding" => expand_box_shorthand(name, value, important),
+        "margin-inline" | "margin-block" | "padding-inline" | "padding-block" => {
+            expand_logical_axis_shorthand(name, value, important)
+        }
         "border-width" | "border-style" | "border-color" => {
             expand_border_axis_shorthand(name, value, important)
         }
@@ -47,6 +50,40 @@ pub(super) fn expand_shorthand(name: &str, value: Value, important: bool) -> Vec
     }
 }
 
+fn expand_logical_axis_shorthand(
+    name: &str,
+    value: Value,
+    important: bool,
+) -> Vec<Declaration> {
+    let values = match value {
+        Value::List(values) => values,
+        value => vec![value],
+    };
+    let (start, end) = match values.as_slice() {
+        [value] => (value.clone(), value.clone()),
+        [start, end] => (start.clone(), end.clone()),
+        _ => return Vec::new(),
+    };
+    let (start_suffix, end_suffix) = if name.ends_with("-inline") {
+        ("inline-start", "inline-end")
+    } else {
+        ("block-start", "block-end")
+    };
+    let prefix = name.split('-').next().unwrap_or(name);
+    vec![
+        Declaration {
+            name: format!("{prefix}-{start_suffix}"),
+            value: start,
+            important,
+        },
+        Declaration {
+            name: format!("{prefix}-{end_suffix}"),
+            value: end,
+            important,
+        },
+    ]
+}
+
 fn expand_place_shorthand(
     first_name: &str,
     second_name: &str,
@@ -68,11 +105,35 @@ fn expand_place_shorthand(
     ]
 }
 
+fn split_compact_grid_slash(values: Vec<Value>) -> Vec<Value> {
+    values
+        .into_iter()
+        .flat_map(|value| match value {
+            Value::Keyword(keyword) if keyword.contains('/') && keyword != "/" => {
+                let mut parts = keyword.splitn(2, '/');
+                let before = parts.next().unwrap_or_default();
+                let after = parts.next().unwrap_or_default();
+                let mut values = Vec::new();
+                if !before.is_empty() {
+                    values.push(Value::Keyword(before.to_string()));
+                }
+                values.push(Value::Keyword("/".to_string()));
+                if !after.is_empty() {
+                    values.push(Value::Keyword(after.to_string()));
+                }
+                values
+            }
+            value => vec![value],
+        })
+        .collect()
+}
+
 fn expand_grid_axis_shorthand(name: &str, value: Value, important: bool) -> Vec<Declaration> {
     let values = match value {
         Value::List(values) => values,
         value => vec![value],
     };
+    let values = split_compact_grid_slash(values);
     let slash = values.iter().position(|value| matches!(value, Value::Keyword(keyword) if keyword == "/"));
     let (start, end) = match slash {
         Some(index) if index > 0 && index + 1 < values.len() => (
@@ -157,6 +218,7 @@ fn expand_grid_template_shorthand(value: Value, important: bool) -> Vec<Declarat
         Value::List(values) => values,
         value => vec![value],
     };
+    let values = split_compact_grid_slash(values);
     let slash = values
         .iter()
         .position(|value| matches!(value, Value::Keyword(keyword) if keyword == "/"));
@@ -1420,6 +1482,7 @@ fn expand_animation_shorthand(value: Value, important: bool) -> Vec<Declaration>
     let mut name: Option<String> = None;
     let mut fill_mode: Option<String> = None;
     let mut duration: Option<Value> = None;
+    let mut iteration_count: Option<String> = None;
 
     for item in &values {
         if let Value::Keyword(kw) = item {
@@ -1440,7 +1503,7 @@ fn expand_animation_shorthand(value: Value, important: bool) -> Vec<Declaration>
                     // animation-direction — skip for now
                 }
                 "infinite" => {
-                    // animation-iteration-count — skip for now
+                    iteration_count = Some(lower);
                 }
                 "ease" | "ease-in" | "ease-out" | "ease-in-out" | "linear" | "step-start"
                 | "step-end" => {
@@ -1481,6 +1544,13 @@ fn expand_animation_shorthand(value: Value, important: bool) -> Vec<Declaration>
         decls.push(Declaration {
             name: "animation-duration".to_string(),
             value: duration,
+            important,
+        });
+    }
+    if let Some(iteration_count) = iteration_count {
+        decls.push(Declaration {
+            name: "animation-iteration-count".to_string(),
+            value: Value::Keyword(iteration_count),
             important,
         });
     }

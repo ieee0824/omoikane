@@ -8,6 +8,12 @@ services:
     # 対話的に exec して使うため tty/stdin を有効化する。
     tty: true
     stdin_open: true
+    # Codex のファイル編集サンドボックスが使用する user namespace を許可する。
+    security_opt:
+      - seccomp:unconfined
+      - apparmor:unconfined
+    cap_add:
+      - NET_ADMIN
     volumes:
       # リポジトリをバインドマウントし、ソース編集をホストと共有する。
       - .:/workspace
