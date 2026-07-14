@@ -73,6 +73,9 @@ RUN groupadd --gid ${USER_GID} ${USERNAME} \
         > /etc/sudoers.d/${USERNAME} \
     && chmod 0440 /etc/sudoers.d/${USERNAME}
 
+# Rust の静的解析・フォーマットをコンテナ再作成後も利用できるようにする。
+RUN rustup component add clippy rustfmt
+
 # ビルド成果物はホストの target/ と分離した専用の場所に出力する。
 ENV CARGO_TARGET_DIR=/target
 RUN mkdir -p /target && chown ${USER_UID}:${USER_GID} /target
