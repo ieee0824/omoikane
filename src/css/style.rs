@@ -1734,7 +1734,14 @@ fn resolve_clamp_quantity(
             unit: CalcUnit::Unitless,
         }),
         Value::Function { name, arguments } if name.eq_ignore_ascii_case("calc") => {
-            evaluate_calc(arguments, ctx)
+            let mut quantity = evaluate_calc(arguments, ctx)?;
+            if property_name.eq_ignore_ascii_case("font-size")
+                && quantity.unit == CalcUnit::Percentage
+            {
+                quantity.value = ctx.parent_font_size * (quantity.value / 100.0);
+                quantity.unit = CalcUnit::Px;
+            }
+            Some(quantity)
         }
         _ => None,
     }
