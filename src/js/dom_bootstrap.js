@@ -2052,8 +2052,23 @@
           if (root) doc.appendChild(root);
           return doc;
         },
-        createHTMLDocument() {
-          return globalThis.document;
+        createHTMLDocument(title) {
+          const doc = wrapNode(__omoikane_create_document());
+          const doctype = doc.implementation.createDocumentType("html", "", "");
+          const html = doc.createElement("html");
+          const head = doc.createElement("head");
+          const titleElement = doc.createElement("title");
+          const body = doc.createElement("body");
+
+          if (title !== undefined) {
+            titleElement.appendChild(doc.createTextNode(String(title)));
+          }
+          head.appendChild(titleElement);
+          html.appendChild(head);
+          html.appendChild(body);
+          doc.appendChild(doctype);
+          doc.appendChild(html);
+          return doc;
         },
       };
     }

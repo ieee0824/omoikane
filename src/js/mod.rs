@@ -6344,6 +6344,33 @@ mod tests {
     }
 
     #[test]
+    fn implementation_create_html_document_is_independent() {
+        let mut runtime = JsRuntime::new().unwrap();
+        assert_js_ok(
+            &mut runtime,
+            r#"
+            (function () {
+                var originalBody = document.body;
+                var originalHtml = document.documentElement.innerHTML;
+                var doc = document.implementation.createHTMLDocument("Detached title");
+                if (doc === document || doc.nodeType !== 9) return 1;
+                if (!doc.doctype || doc.doctype.name !== "html") return 2;
+                if (!doc.documentElement || !doc.head || !doc.body) return 3;
+                if (doc.title !== "Detached title") return 4;
+                if (doc.defaultView !== null) return 5;
+                if (doc.body.ownerDocument !== doc) return 6;
+
+                doc.body.innerHTML = "<form></form><form></form>";
+                if (doc.body.children.length !== 2) return 7;
+                if (document.body !== originalBody) return 8;
+                if (document.documentElement.innerHTML !== originalHtml) return 9;
+                return 0;
+            })()
+        "#,
+        );
+    }
+
+    #[test]
     fn implementation_create_document_validates_qualified_name() {
         let mut runtime = JsRuntime::new().unwrap();
         assert_js_ok(
