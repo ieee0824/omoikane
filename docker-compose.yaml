@@ -5,6 +5,9 @@ services:
       dockerfile: Dockerfile
     image: omoikane-dev
     working_dir: /workspace
+    # Codex の bwrap サンドボックスが隔離ネットワークの loopback を設定するために必要。
+    cap_add:
+      - NET_ADMIN
     # 対話的に exec して使うため tty/stdin を有効化する。
     tty: true
     stdin_open: true

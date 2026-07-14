@@ -683,6 +683,33 @@ fn resolves_em_and_percentage_font_sizes() {
 }
 
 #[test]
+fn resolves_clamp_font_size_with_viewport_units() {
+    let (_document, _body, title, _html) = sample_tree();
+    let mut resolver = StyleResolver::new();
+    resolver.set_viewport(1280.0, 900.0);
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet("h1 { font-size: clamp(26px, 6.5vw, 38px); }").unwrap(),
+    );
+
+    let style = resolver.computed_style(&title);
+    assert_eq!(style.get("font-size"), Some(&ComputedValue::Px(38.0)));
+}
+
+#[test]
+fn clamp_uses_minimum_when_it_exceeds_maximum() {
+    let (_document, _body, title, _html) = sample_tree();
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet("h1 { font-size: clamp(40px, 30px, 20px); }").unwrap(),
+    );
+
+    let style = resolver.computed_style(&title);
+    assert_eq!(style.get("font-size"), Some(&ComputedValue::Px(40.0)));
+}
+
+#[test]
 fn caches_computed_styles() {
     let (_document, _body, title, _html) = sample_tree();
     let mut resolver = StyleResolver::new();

@@ -1658,6 +1658,10 @@ fn compute_value(value: &Value, property_name: &str, ctx: ResolutionContext) -> 
             }
             ComputedValue::Keyword(render_value(value))
         }
+        Value::Function { name, arguments } if name.eq_ignore_ascii_case("clamp") => {
+            compute_clamp_function(arguments, property_name, ctx)
+                .unwrap_or_else(|| ComputedValue::Keyword(render_value(value)))
+        }
         Value::Function { .. } => ComputedValue::Keyword(render_value(value)),
         Value::List(values) => {
             if property_name.eq_ignore_ascii_case("transform")
@@ -1678,6 +1682,61 @@ fn compute_value(value: &Value, property_name: &str, ctx: ResolutionContext) -> 
                 ComputedValue::Keyword(String::new())
             }
         }
+    }
+}
+
+fn compute_clamp_function(
+    arguments: &[Value],
+    property_name: &str,
+    ctx: ResolutionContext,
+) -> Option<ComputedValue> {
+    let [minimum, preferred, maximum] = arguments else {
+        return None;
+    };
+    let minimum = resolve_clamp_quantity(minimum, property_name, ctx)?;
+    let preferred = resolve_clamp_quantity(preferred, property_name, ctx)?;
+    let maximum = resolve_clamp_quantity(maximum, property_name, ctx)?;
+    if minimum.unit != preferred.unit || preferred.unit != maximum.unit {
+        return None;
+    }
+
+    // CSS Values 4 defines clamp(MIN, VAL, MAX) as max(MIN, min(VAL, MAX)).
+    let value = preferred.value.min(maximum.value).max(minimum.value);
+    Some(match minimum.unit {
+        CalcUnit::Px => ComputedValue::Px(value),
+        CalcUnit::Percentage => ComputedValue::Percentage(value),
+        CalcUnit::Unitless => ComputedValue::Number(value),
+    })
+}
+
+fn resolve_clamp_quantity(
+    value: &Value,
+    property_name: &str,
+    ctx: ResolutionContext,
+) -> Option<CalcQuantity> {
+    match value {
+        Value::Length(number, unit) => Some(CalcQuantity {
+            value: resolve_length_to_px(*number, unit, ctx)?,
+            unit: CalcUnit::Px,
+        }),
+        Value::Percentage(number) if property_name.eq_ignore_ascii_case("font-size") => {
+            Some(CalcQuantity {
+                value: ctx.parent_font_size * (*number / 100.0),
+                unit: CalcUnit::Px,
+            })
+        }
+        Value::Percentage(number) => Some(CalcQuantity {
+            value: *number,
+            unit: CalcUnit::Percentage,
+        }),
+        Value::Number(number) => Some(CalcQuantity {
+            value: *number,
+            unit: CalcUnit::Unitless,
+        }),
+        Value::Function { name, arguments } if name.eq_ignore_ascii_case("calc") => {
+            evaluate_calc(arguments, ctx)
+        }
+        _ => None,
     }
 }
 
