@@ -112,9 +112,17 @@ pub struct StyleResolver {
     /// color-scheme settings.
     media_query_cache: HashMap<String, Vec<MediaQuery>>,
     /// Parsed `@keyframes` rules keyed by animation name.
-    /// Each entry contains the declarations from the final keyframe (`to` / `100%`).
-    keyframes_final: HashMap<String, Vec<Declaration>>,
+    keyframes: HashMap<String, Vec<KeyframeStep>>,
 }
+
+#[derive(Debug, Clone)]
+struct KeyframeStep {
+    offset: f32,
+    declarations: Vec<Declaration>,
+}
+
+/// Deterministic post-load instant used for static screenshots.
+const STATIC_ANIMATION_TIME_SECONDS: f32 = 1.2;
 
 static UNSUPPORTED_CSS_LOGGED: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
 static UNSUPPORTED_CSS_CONFIG: OnceLock<UnsupportedCssConfig> = OnceLock::new();
@@ -188,7 +196,7 @@ impl StyleResolver {
     /// Adds a stylesheet with its origin.
     pub fn add_stylesheet(&mut self, origin: Origin, stylesheet: Stylesheet) {
         // Extract @keyframes rules before storing the stylesheet.
-        collect_keyframes(&stylesheet.rules, &mut self.keyframes_final);
+        collect_keyframes(&stylesheet.rules, &mut self.keyframes);
         self.stylesheets
             .push(StylesheetInput { origin, stylesheet });
         self.cache.clear();
@@ -437,26 +445,19 @@ impl StyleResolver {
         apply_inheritance(&mut properties, parent_style);
         apply_initial_values(&mut properties);
         zero_border_width_for_none_style(&mut properties);
-        self.apply_animation_final_state(&mut properties, parent_style);
+        self.apply_animation_snapshot(&mut properties, parent_style);
 
         ComputedStyle { properties }
     }
 
-    /// If the element has `animation-fill-mode: forwards` (or `both`),
-    /// apply the final keyframe's declarations on top of the computed style.
-    fn apply_animation_final_state(
+    /// Applies a deterministic animation snapshot. Completed forwards/both
+    /// animations keep their final state; running infinite animations are
+    /// sampled at a fixed post-load instant so screenshots remain stable.
+    fn apply_animation_snapshot(
         &self,
         properties: &mut BTreeMap<String, ComputedValue>,
         _parent_style: Option<&ComputedStyle>,
     ) {
-        let fill_mode = match properties.get("animation-fill-mode") {
-            Some(ComputedValue::Keyword(kw)) => kw.to_ascii_lowercase(),
-            _ => return,
-        };
-        if fill_mode != "forwards" && fill_mode != "both" {
-            return;
-        }
-
         let anim_name = match properties.get("animation-name") {
             Some(ComputedValue::Keyword(name)) => name.clone(),
             _ => return,
@@ -464,16 +465,40 @@ impl StyleResolver {
         if anim_name.eq_ignore_ascii_case("none") || anim_name.is_empty() {
             return;
         }
+        let Some(steps) = self.keyframes.get(&anim_name) else { return; };
 
-        let Some(final_decls) = self.keyframes_final.get(&anim_name) else {
-            return;
+        let fill_mode = match properties.get("animation-fill-mode") {
+            Some(ComputedValue::Keyword(value)) => value.to_ascii_lowercase(),
+            _ => "none".to_string(),
         };
+        let infinite = matches!(
+            properties.get("animation-iteration-count"),
+            Some(ComputedValue::Keyword(value)) if value.eq_ignore_ascii_case("infinite")
+        );
+        let declarations = if fill_mode == "forwards" || fill_mode == "both" {
+            steps.last().map(|step| &step.declarations)
+        } else if infinite {
+            let duration = animation_seconds(properties.get("animation-duration")).unwrap_or(0.0);
+            let delay = animation_seconds(properties.get("animation-delay")).unwrap_or(0.0);
+            if duration <= 0.0 || STATIC_ANIMATION_TIME_SECONDS < delay {
+                None
+            } else {
+                let progress =
+                    ((STATIC_ANIMATION_TIME_SECONDS - delay) / duration).rem_euclid(1.0);
+                steps
+                    .iter()
+                    .rev()
+                    .find(|step| step.offset <= progress)
+                    .map(|step| &step.declarations)
+            }
+        } else {
+            None
+        };
+        let Some(declarations) = declarations else { return; };
 
-        // Use the element's own computed font-size for em resolution,
-        // and the effective root font-size for rem resolution.
         let element_font_size = properties
             .get("font-size")
-            .and_then(|v| match v {
+            .and_then(|value| match value {
                 ComputedValue::Px(px) => Some(*px),
                 _ => None,
             })
@@ -484,20 +509,26 @@ impl StyleResolver {
             viewport_width: self.viewport_width,
             viewport_height: self.viewport_height,
         };
-
-        // Collect custom properties for var() resolution in keyframes.
         let custom_properties: BTreeMap<String, Value> = properties
             .iter()
             .filter(|(name, _)| name.starts_with("--"))
             .map(|(name, value)| (name.clone(), computed_value_to_value(value)))
             .collect();
 
-        for decl in final_decls {
-            let resolved = resolve_value_with_custom_properties(&decl.value, &custom_properties)
-                .unwrap_or_else(|| decl.value.clone());
-            let computed = compute_value(&resolved, &decl.name, ctx);
-            insert_computed_property(properties, &decl.name, computed);
+        for declaration in declarations {
+            let resolved =
+                resolve_value_with_custom_properties(&declaration.value, &custom_properties)
+                    .unwrap_or_else(|| declaration.value.clone());
+            let computed = compute_value(&resolved, &declaration.name, ctx);
+            insert_computed_property(properties, &declaration.name, computed);
         }
+    }
+}
+
+fn animation_seconds(value: Option<&ComputedValue>) -> Option<f32> {
+    match value {
+        Some(ComputedValue::Number(value)) => Some(*value),
+        _ => None,
     }
 }
 
@@ -922,10 +953,18 @@ fn is_length_property(name: &str) -> bool {
             | "max-width"
             | "max-height"
             | "margin-top"
+            | "margin-inline-start"
+            | "margin-inline-end"
+            | "margin-block-start"
+            | "margin-block-end"
             | "margin-right"
             | "margin-bottom"
             | "margin-left"
             | "padding-top"
+            | "padding-inline-start"
+            | "padding-inline-end"
+            | "padding-block-start"
+            | "padding-block-end"
             | "padding-right"
             | "padding-bottom"
             | "padding-left"
@@ -944,106 +983,113 @@ fn is_length_property(name: &str) -> bool {
     )
 }
 
-/// Extracts `@keyframes` rules from a stylesheet and stores the final
-/// keyframe's declarations (from `to` / `100%`) in the provided map.
-fn collect_keyframes(rules: &[Rule], keyframes_final: &mut HashMap<String, Vec<Declaration>>) {
+/// Extracts all `@keyframes` steps from a stylesheet.
+fn collect_keyframes(rules: &[Rule], keyframes: &mut HashMap<String, Vec<KeyframeStep>>) {
     for rule in rules {
         match rule {
             Rule::At(at_rule)
                 if at_rule.name.eq_ignore_ascii_case("keyframes")
                     || at_rule.name.eq_ignore_ascii_case("-webkit-keyframes") =>
             {
-                let anim_name = at_rule.prelude.trim().to_string();
-                if anim_name.is_empty() {
+                let animation_name = at_rule.prelude.trim().to_string();
+                if animation_name.is_empty() {
                     continue;
                 }
-                // The @keyframes block is stored as raw text in a special declaration.
                 let raw_block = at_rule
                     .declarations
                     .iter()
-                    .find(|d| d.name == "__keyframes_block")
-                    .and_then(|d| match &d.value {
+                    .find(|declaration| declaration.name == "__keyframes_block")
+                    .and_then(|declaration| match &declaration.value {
                         Value::Keyword(text) => Some(text.clone()),
                         _ => None,
                     });
                 if let Some(block_text) = raw_block {
-                    if let Some(decls) = parse_keyframe_final_declarations(&block_text) {
-                        keyframes_final.insert(anim_name, decls);
+                    let steps = parse_keyframe_steps(&block_text);
+                    if !steps.is_empty() {
+                        keyframes.insert(animation_name, steps);
                     }
                 }
             }
-            // Recurse into @media and other at-rule blocks to find nested @keyframes.
             Rule::At(at_rule) if at_rule.block.is_some() => {
-                collect_keyframes(at_rule.block.as_ref().unwrap(), keyframes_final);
+                collect_keyframes(at_rule.block.as_ref().unwrap(), keyframes);
             }
             _ => {}
         }
     }
 }
 
-/// Parses a raw @keyframes block text and extracts the declarations from
-/// the final keyframe (`to` or `100%`).
-fn parse_keyframe_final_declarations(block_text: &str) -> Option<Vec<Declaration>> {
-    // Split into individual keyframe steps by finding `selector { declarations }`
-    let mut final_decls = None;
-    let mut pos = 0;
+fn parse_keyframe_steps(block_text: &str) -> Vec<KeyframeStep> {
+    let mut steps = Vec::new();
+    let mut position = 0;
     let chars: Vec<char> = block_text.chars().collect();
 
-    while pos < chars.len() {
-        // Skip whitespace
-        while pos < chars.len() && chars[pos].is_ascii_whitespace() {
-            pos += 1;
+    while position < chars.len() {
+        while position < chars.len() && chars[position].is_ascii_whitespace() {
+            position += 1;
         }
-        if pos >= chars.len() {
+        if position >= chars.len() {
             break;
         }
-
-        // Read selector (everything before `{`)
-        let selector_start = pos;
-        while pos < chars.len() && chars[pos] != '{' {
-            pos += 1;
+        let selector_start = position;
+        while position < chars.len() && chars[position] != '{' {
+            position += 1;
         }
-        if pos >= chars.len() {
+        if position >= chars.len() {
             break;
         }
-        let selector: String = chars[selector_start..pos].iter().collect();
-        let selector = selector.trim().to_ascii_lowercase();
-        pos += 1; // skip '{'
+        let selector: String = chars[selector_start..position].iter().collect();
+        position += 1;
 
-        // Read declarations (everything before matching `}`)
-        let decl_start = pos;
+        let declaration_start = position;
         let mut depth = 1;
-        while pos < chars.len() && depth > 0 {
-            if chars[pos] == '{' {
-                depth += 1;
-            } else if chars[pos] == '}' {
-                depth -= 1;
+        while position < chars.len() && depth > 0 {
+            match chars[position] {
+                '{' => depth += 1,
+                '}' => depth -= 1,
+                _ => {}
             }
             if depth > 0 {
-                pos += 1;
+                position += 1;
             }
         }
-        let decl_text: String = chars[decl_start..pos].iter().collect();
-        if pos < chars.len() {
-            pos += 1; // skip '}'
+        let declaration_text: String = chars[declaration_start..position].iter().collect();
+        if position < chars.len() {
+            position += 1;
         }
 
-        // Check if this is the final keyframe
-        let is_final = selector == "to" || selector == "100%" || selector.contains("100%");
-        if is_final {
-            // Parse declarations using the CSS parser
-            let fake_rule = format!("x {{ {} }}", decl_text);
-            if let Ok(stylesheet) = super::parse_stylesheet(&fake_rule) {
-                for rule in &stylesheet.rules {
-                    if let Rule::Style(style_rule) = rule {
-                        final_decls = Some(style_rule.declarations.clone());
-                    }
-                }
-            }
+        let offsets: Vec<f32> = selector
+            .split(',')
+            .filter_map(|part| match part.trim().to_ascii_lowercase().as_str() {
+                "from" => Some(0.0),
+                "to" => Some(1.0),
+                percentage => percentage
+                    .strip_suffix('%')
+                    .and_then(|number| number.trim().parse::<f32>().ok())
+                    .map(|number| (number / 100.0).clamp(0.0, 1.0)),
+            })
+            .collect();
+        if offsets.is_empty() {
+            continue;
+        }
+
+        let fake_rule = format!("x {{ {declaration_text} }}");
+        let Ok(stylesheet) = super::parse_stylesheet(&fake_rule) else { continue; };
+        let Some(declarations) = stylesheet.rules.iter().find_map(|rule| match rule {
+            Rule::Style(style_rule) => Some(style_rule.declarations.clone()),
+            _ => None,
+        }) else {
+            continue;
+        };
+        for offset in offsets {
+            steps.push(KeyframeStep {
+                offset,
+                declarations: declarations.clone(),
+            });
         }
     }
 
-    final_decls
+    steps.sort_by(|left, right| left.offset.total_cmp(&right.offset));
+    steps
 }
 
 fn cascade_rank(candidate: &Candidate) -> (u8, u8) {
@@ -1416,6 +1462,10 @@ fn is_supported_property(name: &str) -> bool {
             | "margin-left"
             | "margin-right"
             | "margin-top"
+            | "margin-inline-start"
+            | "margin-inline-end"
+            | "margin-block-start"
+            | "margin-block-end"
             | "max-height"
             | "max-width"
             | "min-height"
@@ -1432,6 +1482,10 @@ fn is_supported_property(name: &str) -> bool {
             | "padding-left"
             | "padding-right"
             | "padding-top"
+            | "padding-inline-start"
+            | "padding-inline-end"
+            | "padding-block-start"
+            | "padding-block-end"
             | "position"
             | "right"
             | "row-gap"
@@ -1475,7 +1529,53 @@ fn is_supported_property(name: &str) -> bool {
     )
 }
 
+fn resolve_time_seconds(value: &Value) -> Option<f32> {
+    match value {
+        Value::Length(number, unit) if unit.eq_ignore_ascii_case("s") => Some(*number),
+        Value::Length(number, unit) if unit.eq_ignore_ascii_case("ms") => Some(*number / 1000.0),
+        Value::Number(number) if *number == 0.0 => Some(0.0),
+        Value::Function { name, arguments } if name.eq_ignore_ascii_case("calc") => {
+            resolve_time_calc(arguments.first()?)
+        }
+        Value::List(_) => resolve_time_calc(value),
+        _ => None,
+    }
+}
+
+fn resolve_time_calc(value: &Value) -> Option<f32> {
+    let Value::List(values) = value else {
+        return resolve_time_seconds(value);
+    };
+    let mut total = 0.0;
+    let mut sign = 1.0;
+    let mut expects_value = true;
+    for value in values {
+        match value {
+            Value::Keyword(operator) if operator == "+" || operator == "-" => {
+                if expects_value {
+                    return None;
+                }
+                sign = if operator == "-" { -1.0 } else { 1.0 };
+                expects_value = true;
+            }
+            value if expects_value => {
+                total += sign * resolve_time_seconds(value)?;
+                expects_value = false;
+            }
+            _ => return None,
+        }
+    }
+    (!expects_value).then_some(total)
+}
+
 fn compute_value(value: &Value, property_name: &str, ctx: ResolutionContext) -> ComputedValue {
+    if property_name.eq_ignore_ascii_case("animation-duration")
+        || property_name.eq_ignore_ascii_case("animation-delay")
+    {
+        return resolve_time_seconds(value)
+            .map(ComputedValue::Number)
+            .unwrap_or_else(|| ComputedValue::Keyword(render_value(value)));
+    }
     if property_name.eq_ignore_ascii_case("clip-path") {
         return ComputedValue::Keyword(render_clip_path_value(value, ctx));
     }

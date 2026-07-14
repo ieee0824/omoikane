@@ -211,11 +211,11 @@ CI=1 cargo test -- --include-ignored
 
 [Acid3 テスト](http://acid3.acidtests.org/)は `cargo run --example acid3` の実測で **100/100（満点、FAITHFUL / DIRECT 両ドライブモード）** です（詳細は [`tests/fixtures/acid3/README.md`](/tests/fixtures/acid3/README.md)）。
 
-CSS パーサー、レイアウトエンジン、ペイントシステムの統合テストとして、1148 件のテストが常時通過しています（`cargo test --lib`: 1148 passed / 0 failed、doc テスト 10 件）。
+CSS パーサー、レイアウトエンジン、ペイントシステムの統合テストとして、1151 件のテストが常時通過しています（`cargo test --lib`: 1151 passed / 0 failed、doc テスト 10 件）。
 
 ## 進捗
 
-issue ベースの開発状況では、以下の大きな実装フェーズは完了済みです（closed issue 177 件）。
+issue ベースの開発状況では、以下の大きな実装フェーズは完了済みです（closed issue 178 件）。
 
 - HTTP クライアント
 - HTML パーサー・文字エンコーディング検出
