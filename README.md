@@ -83,6 +83,12 @@ Omoikane は、HTTP クライアント、HTML/CSS パーサー、DOM、レイア
 - `<link rel="stylesheet">` による外部 CSS 読み込み
 - `media` 属性による screen/print 判定
 - HTML presentational hints（`bgcolor` / `text` / `align` / `width` / `height` 属性）
+- フォームコントロールの基本レンダリング
+  - `<form>`（ブロックコンテナ）、`<input>`（text/submit/button/reset/hidden、size/value に基づく寸法）
+  - `<button>`（inline-block、子孫テキストをフラット化したラベルの中央寄せ描画）
+  - `<textarea>`（inline-block、cols/rows からのサイズ導出、textContent の初期値表示）
+  - `<select>`（inline-block、selected 付き option（なければ先頭 option）のラベル表示）
+  - いずれも UA 既定スタイル（background / border / padding）を適用
 
 ### JavaScript・API
 - Boa ベースの JavaScript 実行
@@ -211,11 +217,11 @@ CI=1 cargo test -- --include-ignored
 
 [Acid3 テスト](http://acid3.acidtests.org/)は `cargo run --example acid3` の実測で **100/100（満点、FAITHFUL / DIRECT 両ドライブモード）** です（詳細は [`tests/fixtures/acid3/README.md`](/tests/fixtures/acid3/README.md)）。
 
-CSS パーサー、レイアウトエンジン、ペイントシステムの統合テストとして、1152 件のテストが常時通過しています（`cargo test --lib`: 1152 passed / 0 failed、doc テスト 10 件）。
+CSS パーサー、レイアウトエンジン、ペイントシステムの統合テストとして、1171 件のテストが常時通過しています（`cargo test --lib`: 1171 passed / 0 failed、doc テスト 10 件）。
 
 ## 進捗
 
-issue ベースの開発状況では、以下の大きな実装フェーズは完了済みです（closed issue 178 件）。
+issue ベースの開発状況では、以下の大きな実装フェーズは完了済みです（closed issue 179 件）。
 
 - HTTP クライアント
 - HTML パーサー・文字エンコーディング検出
@@ -232,7 +238,7 @@ issue ベースの開発状況では、以下の大きな実装フェーズは�
 - CJK テキスト行折り返し・禁則処理・フォールバック
 - 外部 CSS / 画像の HTTP フェッチ
 - 画像サイズ属性・alt フォールバック
-- フォーム基本表示（`form`、`input` の text/submit/button/reset/hidden、UA 既定スタイル）
+- フォーム基本表示（`form`、`input` の text/submit/button/reset/hidden、`button`/`textarea`/`select`、UA 既定スタイル）
 - JavaScript エンジン統合
 - CDP 互換 API
 - C FFI（スクリーンショット API）
@@ -248,7 +254,7 @@ issue ベースの開発状況では、以下の大きな実装フェーズは�
 - CSS マスキング `mask` / `-webkit-mask` / `mask-image`（063）
 - インライン style 属性のカスケード統合（047: 全要素対応、!important 含めスタイル計算・レイアウト・getComputedStyle へ一貫反映）
 
-現在の open issue は [`issues/open`](/issues/open) を参照してください（open issue 10 件）。
+現在の open issue は [`issues/open`](/issues/open) を参照してください（open issue 9 件）。
 
 ## 制約
 
