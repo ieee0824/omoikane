@@ -2233,6 +2233,54 @@ fn apply_ua_defaults(
     }
 
     match tag.as_str() {
+        "form" => {
+            properties
+                .entry("display".to_string())
+                .or_insert(ComputedValue::Keyword("block".to_string()));
+        }
+        "input" => {
+            let input_type = node
+                .get_attribute("type")
+                .unwrap_or_else(|| "text".to_string())
+                .trim()
+                .to_ascii_lowercase();
+            if input_type == "hidden" {
+                properties.insert(
+                    "display".to_string(),
+                    ComputedValue::Keyword("none".to_string()),
+                );
+            } else {
+                properties
+                    .entry("display".to_string())
+                    .or_insert(ComputedValue::Keyword("inline-block".to_string()));
+                properties
+                    .entry("background-color".to_string())
+                    .or_insert(ComputedValue::Color("white".to_string()));
+                for side in ["top", "right", "bottom", "left"] {
+                    properties
+                        .entry(format!("border-{side}-style"))
+                        .or_insert(ComputedValue::Keyword("solid".to_string()));
+                    properties
+                        .entry(format!("border-{side}-width"))
+                        .or_insert(ComputedValue::Px(2.0));
+                    properties
+                        .entry(format!("border-{side}-color"))
+                        .or_insert(ComputedValue::Color("#767676".to_string()));
+                }
+                properties
+                    .entry("padding-top".to_string())
+                    .or_insert(ComputedValue::Px(1.0));
+                properties
+                    .entry("padding-right".to_string())
+                    .or_insert(ComputedValue::Px(2.0));
+                properties
+                    .entry("padding-bottom".to_string())
+                    .or_insert(ComputedValue::Px(1.0));
+                properties
+                    .entry("padding-left".to_string())
+                    .or_insert(ComputedValue::Px(2.0));
+            }
+        }
         "p" => {
             let em = parent_font_size;
             properties.entry("margin-top".to_string()).or_insert(ComputedValue::Px(em));

@@ -9,7 +9,7 @@ use crate::paint::{DataUri, Image, parse_data_uri};
 use super::{
     FontMetrics, FragmentStyle, InlineFragment, InlineFragmentContent,
     LineBox, Rect, VerticalAlign,
-    edge_sizes, explicit_length, is_display_none, is_inline_child, is_non_rendered_html_element,
+    edge_sizes, explicit_length, is_display_none, is_non_rendered_html_element,
     IMAGE_BASE_URL, IMAGE_CACHE, HTTP_CLIENT, LAYOUT_FONTS,
 };
 
@@ -122,6 +122,7 @@ pub(super) enum InlineSegmentContent {
     Text(String),
     Image(Image, ComputedStyle, f32, f32),
     GeneratedBox(ComputedStyle),
+    FormControl(ComputedStyle, String, f32, f32),
 }
 
 // ── Inline segment collection ───────────────────────────────────────────────
@@ -186,6 +187,11 @@ fn collect_element_inline_segments(
         return;
     }
 
+    if node.tag_name().as_deref() == Some("input") {
+        collect_input_segment(node, &style, out);
+        return;
+    }
+
     out.extend(generated_inline_segments(node, resolver, PseudoElement::Before));
 
     if let Some((image_node, image)) = element_inline_image(node) {
@@ -219,13 +225,71 @@ fn collect_element_inline_segments(
                     out.extend(make_text_segment(child, &text, &style));
                 }
             }
-            NodeType::Element if is_inline_child(&child, resolver) => {
+            NodeType::Element => {
                 collect_inline_segments(&child, resolver, out);
             }
             _ => {}
         }
     }
     out.extend(generated_inline_segments(node, resolver, PseudoElement::After));
+}
+
+fn collect_input_segment(
+    node: &NodeHandle,
+    style: &ComputedStyle,
+    out: &mut Vec<InlineSegment>,
+) {
+    let attributes = node.attributes().unwrap_or_default();
+    let input_type = attributes
+        .get("type")
+        .map(|value| value.trim().to_ascii_lowercase())
+        .unwrap_or_else(|| "text".to_string());
+    if input_type == "hidden" {
+        return;
+    }
+
+    let metrics = font_metrics(style);
+    let button_like = matches!(input_type.as_str(), "submit" | "button" | "reset");
+    let value = attributes.get("value").cloned().unwrap_or_else(|| match input_type.as_str() {
+        "submit" => "Submit".to_string(),
+        "reset" => "Reset".to_string(),
+        _ => String::new(),
+    });
+    let content_width = explicit_length(style, "width").unwrap_or_else(|| {
+        if button_like {
+            measure_text_width(&value, metrics)
+        } else {
+            let columns = attributes
+                .get("size")
+                .and_then(|value| value.trim().parse::<usize>().ok())
+                .unwrap_or(20)
+                .clamp(1, 1000);
+            metrics.average_advance * columns as f32
+        }
+    });
+    let content_height =
+        explicit_length(style, "height").unwrap_or_else(|| metrics.font_size.max(13.0));
+    let padding = edge_sizes(style, "padding");
+    let border = edge_sizes(style, "border");
+    let total_height =
+        content_height + padding.top + padding.bottom + border.top + border.bottom;
+
+    out.push(InlineSegment {
+        node: node.clone(),
+        content: InlineSegmentContent::FormControl(
+            style.clone(),
+            value,
+            content_width,
+            content_height,
+        ),
+        metrics,
+        line_height: line_height(style).max(total_height),
+        vertical_align: vertical_align(style),
+        style: FragmentStyle::from_computed(style),
+        word_break: word_break(style),
+        overflow_wrap: overflow_wrap(style),
+        white_space_mode: white_space(style),
+    });
 }
 
 fn collect_image_segment(
@@ -1032,6 +1096,15 @@ fn split_segment(segment: &InlineSegment) -> Vec<InlinePiece> {
                     + border.bottom,
             }]
         }
+        InlineSegmentContent::FormControl(style, value, content_width, content_height) => {
+            let padding = edge_sizes(style, "padding");
+            let border = edge_sizes(style, "border");
+            vec![InlinePiece::Fragment {
+                content: InlineFragmentContent::FormControl(style.clone(), value.clone()),
+                width: *content_width + padding.left + padding.right + border.left + border.right,
+                height: *content_height + padding.top + padding.bottom + border.top + border.bottom,
+            }]
+        }
         InlineSegmentContent::GeneratedBox(style) => {
             let padding = edge_sizes(style, "padding");
             let border = edge_sizes(style, "border");
@@ -1344,7 +1417,17 @@ fn push_line(
     let baseline = fragments
         .iter()
         .filter_map(|fragment| match fragment.vertical_align {
-            VerticalAlign::Baseline | VerticalAlign::Length(_) => Some(fragment.metrics.ascent),
+            VerticalAlign::Baseline | VerticalAlign::Length(_) => Some(
+                if matches!(
+                    &fragment.content,
+                    InlineFragmentContent::Image(_, _)
+                        | InlineFragmentContent::FormControl(_, _)
+                ) && fragment.rect.height >= height {
+                    fragment.rect.height
+                } else {
+                    fragment.metrics.ascent
+                },
+            ),
             _ => None,
         })
         .fold(0.0f32, f32::max)
@@ -1352,8 +1435,30 @@ fn push_line(
 
     for fragment in fragments.iter_mut() {
         fragment.rect.y = match fragment.vertical_align {
-            VerticalAlign::Baseline => y + baseline - fragment.metrics.ascent,
-            VerticalAlign::Length(shift) => y + baseline - fragment.metrics.ascent - shift,
+            VerticalAlign::Baseline => {
+                let ascent = if matches!(
+                    &fragment.content,
+                    InlineFragmentContent::Image(_, _)
+                        | InlineFragmentContent::FormControl(_, _)
+                ) && fragment.rect.height >= height {
+                    fragment.rect.height
+                } else {
+                    fragment.metrics.ascent
+                };
+                y + baseline - ascent
+            },
+            VerticalAlign::Length(shift) => {
+                let ascent = if matches!(
+                    &fragment.content,
+                    InlineFragmentContent::Image(_, _)
+                        | InlineFragmentContent::FormControl(_, _)
+                ) && fragment.rect.height >= height {
+                    fragment.rect.height
+                } else {
+                    fragment.metrics.ascent
+                };
+                y + baseline - ascent - shift
+            },
             VerticalAlign::Top => y,
             VerticalAlign::Middle => y + (height - fragment.rect.height) / 2.0,
             VerticalAlign::Bottom => y + height - fragment.rect.height,

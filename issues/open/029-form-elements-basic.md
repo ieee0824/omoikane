@@ -31,6 +31,16 @@ status: open
 - ブラウザデフォルトのフォームスタイル（border, padding, background）
 - `<button>` のデフォルト appearance
 
+## 実装状況（2026-07-14）
+
+- [x] `<form>` をブロックコンテナとしてレイアウト
+- [x] `<input>` の text/submit/button/reset/hidden と `size`/`value` に基づく基本寸法
+- [x] input の UA 既定背景・padding・border と値テキスト描画
+- [x] block-in-inline ラッパー内の input を欠落させない収集
+- [x] 大きな置換要素の baseline を行内へ収める補正
+- [x] `https://www.google.co.jp/` でロゴ・検索欄・検索ボタン・フッターを実表示確認
+- [ ] `<button>`、`<textarea>`、`<select>`（Issue は継続）
+
 ## 受け入れ条件
 
 - `<form>` がブロックコンテナとしてレイアウトされる

@@ -90,7 +90,7 @@ fn is_supported_html_tag(tag: &str) -> bool {
             | "br" | "strong" | "em" | "b" | "i" | "u" | "s" | "a" | "pre" | "code"
             | "ul" | "ol" | "li"
             | "table" | "thead" | "tbody" | "tfoot" | "tr" | "td" | "th"
-            | "img" | "object" | "svg"
+            | "img" | "object" | "svg" | "form" | "input"
             | "style" | "link" | "meta" | "title" | "script" | "noscript"
             | "font" | "blockquote" | "hr" | "address"
             | "dl" | "dt" | "dd" | "figure" | "figcaption"
@@ -359,6 +359,7 @@ pub enum InlineFragmentContent {
     Text(String),
     Image(Image, ComputedStyle),
     GeneratedBox(ComputedStyle),
+    FormControl(ComputedStyle, String),
 }
 
 /// A single line box inside a block formatting context.
@@ -1798,6 +1799,11 @@ fn intrinsic_width(node: &NodeHandle, resolver: &mut StyleResolver) -> f32 {
                                 + border.left
                                 + border.right
                         }
+                        InlineSegmentContent::FormControl(style, _, width, _) => {
+                            let padding = edge_sizes(&style, "padding");
+                            let border = edge_sizes(&style, "border");
+                            width + padding.left + padding.right + border.left + border.right
+                        }
                         InlineSegmentContent::GeneratedBox(style) => {
                             let padding = edge_sizes(&style, "padding");
                             let border = edge_sizes(&style, "border");
@@ -2098,7 +2104,7 @@ fn is_inline_child(node: &NodeHandle, resolver: &mut StyleResolver) -> bool {
                 .map(|tag| {
                     matches!(
                         tag.as_str(),
-                        "span" | "a" | "em" | "strong" | "b" | "i" | "img" | "object" | "svg"
+                        "span" | "a" | "em" | "strong" | "b" | "i" | "img" | "object" | "svg" | "input"
                     )
                 })
                 .unwrap_or(false)
