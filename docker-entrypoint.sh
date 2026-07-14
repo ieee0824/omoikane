@@ -14,7 +14,7 @@ self_uid="$(id -u)"
 # CODEX_HOME（Dockerfile の ENV で定義、既定 /home/dev/.codex）は Codex CLI の named volume（codex-config）。
 # $HOME/.ssh は SSH 鍵の named volume（ssh-config）。
 for d in /target /usr/local/cargo/registry /usr/local/cargo/git \
-         "${CLAUDE_CONFIG_DIR:-/home/dev/.claude}" "${CODEX_HOME:-$HOME/.codex}" "$HOME/.ssh"; do
+         "${CLAUDE_CONFIG_DIR:-/home/dev/.claude}" "${CODEX_HOME:-$HOME/.codex}" "/home/dev/.ssh" "/home/dev/.bash-history"; do
     if [ -d "$d" ] && [ "$(stat -c %u "$d")" != "$self_uid" ]; then
         sudo chown -R "$(id -u):$(id -g)" "$d" || true
     fi
