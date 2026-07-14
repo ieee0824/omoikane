@@ -2,7 +2,7 @@
 number: 047
 slug: inline-style-cascade
 parent:
-status: open
+status: closed
 ---
 
 # インライン style 属性のカスケード・レイアウト適用
@@ -83,3 +83,24 @@ status: open
 
 - `el.style`（CSSOM）の `parseDecls` の `;` 分割バグは [067](067-element-style-cssom-parser-robustness.md) に切り出し
 - SVG のプレゼンテーション属性は StyleResolver を通らないため対象外
+
+## クローズ記録（2026-07-14、PR #140）
+
+- style 属性を Rust 側カスケードに統合。`Candidate` の `inline` フラグ + ソートキー拡張
+  `(cascade_rank, inline, specificity, source_order)` で CSS 2.1 §6.4.3 の優先順位を実現。
+  iframe 限定の偽ルールハックは一般実装で置換
+- forgiving 宣言リスト API `parse_style_attribute` を新設。過程で既存バグ2件も修正:
+  `split_important` の複数トークン値破壊（`margin: 1px 2px !important` → `"1px2px"`）、
+  引用符なし `url(data:...;base64,...)` 内 `;` での値切り詰め
+- getComputedStyle の JS 側マージ（`__parseInlineStyle`）を削除しカスケードに一元化。
+  受け入れ条件（offsetWidth / getComputedStyle の一貫反映、data-URI パース）は
+  パーサ・resolver・E2E の3層のテストで担保
+- `cargo test --lib` 1148 passed / 0 failed（ベースライン 1121 から +27）。
+  Acid2 ピクセル基準維持、Acid3 100/100（FAITHFUL / DIRECT 両モード）を実測確認
+- codex + critical-reviewer の並列レビューを実施（High 指摘ゼロ）。修正対応のほか派生 issue を起票:
+  [067](../open/067-element-style-cssom-parser-robustness.md)（el.style CSSOM パーサの同種バグ）、
+  [068](../open/068-cascade-important-origin-order.md)（既存の cascade important 段位・animation 後処理の仕様逸脱）
+- Copilot レビュー指摘 1 件（`get_attribute` の常時小文字化が `set_xml_attribute` と非互換）を
+  完全一致優先・小文字化フォールバックで修正
+- detached 要素の getComputedStyle は空を返す挙動に変更（実ブラウザ同等、テストで pin）
+- 設計は Fable（6領域並列調査 + 設計）、実装・レビュー修正は Codex（gpt-5.6-sol）
