@@ -492,21 +492,21 @@ pub(crate) fn parse_stylesheet_forgiving(input: &str) -> Stylesheet {
 }
 
 fn salvage_nested_at_rule(input: &str) -> Option<crate::css::Rule> {
-    let open = input.find("{")?;
-    let close = input.rfind("}")?;
+    let open = input.find('{')?;
+    let close = input.rfind('}')?;
     if close <= open {
         return None;
     }
 
     let header = input[..open].trim();
-    let rest = header.strip_prefix("")?;
-    if rest
-        .chars()
-        .next()
-        .is_some_and(|ch| ch.is_ascii_alphanumeric() || ch == char::from(45))
-    {
+    let after_at = header.strip_prefix('@')?;
+    let name_end = after_at
+        .find(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '-'))
+        .unwrap_or(after_at.len());
+    if name_end == 0 {
         return None;
     }
+    let (name, prelude) = after_at.split_at(name_end);
 
     let nested = parse_stylesheet_forgiving(&input[open + 1..close]);
     if nested.rules.is_empty() {
@@ -514,8 +514,8 @@ fn salvage_nested_at_rule(input: &str) -> Option<crate::css::Rule> {
     }
 
     Some(crate::css::Rule::At(crate::css::AtRule {
-        name: "media".to_string(),
-        prelude: rest.trim().to_string(),
+        name: name.to_ascii_lowercase(),
+        prelude: prelude.trim().to_string(),
         block: Some(nested.rules),
         declarations: Vec::new(),
     }))
@@ -1001,4 +1001,35 @@ fn fetch_font_bytes(
     }
 
     Some(body.to_vec())
+}
+
+#[cfg(test)]
+mod forgiving_tests {
+    use super::parse_stylesheet_forgiving;
+
+    #[test]
+    fn preserves_valid_rules_inside_invalid_media_block() {
+        let css = "@media screen and (min-width:48em){.before{color:red}[data-broken=]{color:black}.after{display:none}}";
+        let stylesheet = parse_stylesheet_forgiving(css);
+
+        let crate::css::Rule::At(media) = &stylesheet.rules[0] else {
+            panic!("expected a recovered media rule");
+        };
+        assert_eq!(media.name, "media");
+        assert_eq!(media.prelude, "screen and (min-width:48em)");
+        assert_eq!(media.block.as_ref().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn preserves_other_nested_at_rule_names() {
+        let css = "@supports (display:grid){.valid{display:block}[data-broken=]{color:black}}";
+        let stylesheet = parse_stylesheet_forgiving(css);
+
+        let crate::css::Rule::At(supports) = &stylesheet.rules[0] else {
+            panic!("expected a recovered supports rule");
+        };
+        assert_eq!(supports.name, "supports");
+        assert_eq!(supports.prelude, "(display:grid)");
+        assert_eq!(supports.block.as_ref().unwrap().len(), 1);
+    }
 }

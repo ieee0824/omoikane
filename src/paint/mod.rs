@@ -1075,6 +1075,37 @@ fn sample_mask_alpha(
     mask.pixels[index + 3]
 }
 
+fn paint_replaced_image_box(
+    canvas: &mut Canvas,
+    layout: &LayoutBox,
+    style: &ComputedStyle,
+    clip: Option<Rect>,
+) {
+    let is_positioned = matches!(
+        style.get("position"),
+        Some(ComputedValue::Keyword(position))
+            if position.eq_ignore_ascii_case("absolute")
+                || position.eq_ignore_ascii_case("fixed")
+    );
+    if !is_positioned {
+        return;
+    }
+    if layout.node.tag_name().as_deref() != Some("img") {
+        return;
+    }
+    let Some(attributes) = layout.node.attributes() else {
+        return;
+    };
+    let Some(source) = attributes.get("src") else {
+        return;
+    };
+    let Some(image) = crate::layout::decode_or_fetch_image_asset(source) else {
+        return;
+    };
+
+    canvas.draw_image_scaled_clipped(&image, layout.dimensions.content, clip);
+}
+
 #[allow(clippy::too_many_arguments)]
 fn paint_box_internal_to(
     canvas: &mut Canvas,
@@ -1101,6 +1132,7 @@ fn paint_box_internal_to(
         }
     }
     paint_background_image(canvas, style, border_box, inherited_clip, viewport);
+    paint_replaced_image_box(canvas, layout, style, inherited_clip);
     paint_block_generated_pseudo_box(
         canvas,
         layout,
