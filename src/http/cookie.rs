@@ -210,11 +210,10 @@ impl Cookie {
         }
 
         // Path matching
-        if let Some(cookie_path) = &self.path {
-            if !path_matches(url.path(), cookie_path) {
+        if let Some(cookie_path) = &self.path
+            && !path_matches(url.path(), cookie_path) {
                 return false;
             }
-        }
 
         // Secure flag: only send over HTTPS
         if self.secure && url.scheme() != "https" {
@@ -275,11 +274,10 @@ impl CookieJar {
                 cookie.host_only = false;
             }
 
-            if let Some(domain) = &cookie.domain {
-                if !domain_matches(&origin_domain, domain) {
+            if let Some(domain) = &cookie.domain
+                && !domain_matches(&origin_domain, domain) {
                     return; // Reject: server can't set cookie for unrelated domain
                 }
-            }
 
             if cookie.path.is_none() {
                 cookie.path = Some(default_path(origin_url.path()));
@@ -441,7 +439,7 @@ fn parse_http_date(s: &str) -> Option<SystemTime> {
 }
 
 fn is_leap_year(y: u64) -> bool {
-    (y % 4 == 0 && y % 100 != 0) || y % 400 == 0
+    (y.is_multiple_of(4) && !y.is_multiple_of(100)) || y.is_multiple_of(400)
 }
 
 #[cfg(test)]

@@ -889,14 +889,13 @@ fn search_font_dir_recursive(dir: &Path, name_lower: &str) -> Option<PathBuf> {
 fn fuzzy_font_match(filename: &str, query: &str) -> bool {
     // Remove common suffixes and separators for comparison
     let clean_filename = filename
-        .replace('-', "")
-        .replace('_', "")
+        .replace(['-', '_'], "")
         .replace("regular", "")
         .replace("bold", "")
         .replace("italic", "")
         .replace("oblique", "");
 
-    let clean_query = query.replace('-', "").replace('_', "").replace(' ', "");
+    let clean_query = query.replace(['-', '_', ' '], "");
 
     clean_filename.contains(&clean_query) || clean_query.contains(&clean_filename)
 }
@@ -985,9 +984,7 @@ impl FontWeight {
         let trimmed = value.trim();
         if trimmed.eq_ignore_ascii_case("normal") {
             Self(400)
-        } else if trimmed.eq_ignore_ascii_case("bold") {
-            Self(700)
-        } else if trimmed.eq_ignore_ascii_case("bolder") {
+        } else if trimmed.eq_ignore_ascii_case("bold") || trimmed.eq_ignore_ascii_case("bolder") {
             Self(700) // simplified — treat as bold
         } else if trimmed.eq_ignore_ascii_case("lighter") {
             Self(300) // simplified
@@ -1007,7 +1004,9 @@ impl Default for FontWeight {
 
 /// Parsed font-style value.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Default)]
 pub enum FontStyle {
+    #[default]
     Normal,
     Italic,
     Oblique,
@@ -1027,11 +1026,6 @@ impl FontStyle {
     }
 }
 
-impl Default for FontStyle {
-    fn default() -> Self {
-        Self::Normal
-    }
-}
 
 /// Cache key for a specific font variant (weight + style).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -1112,11 +1106,10 @@ impl FontCache {
         }
 
         // Evict an arbitrary entry if at capacity
-        if self.fonts.len() >= self.max_entries {
-            if let Some(oldest_key) = self.fonts.keys().next().cloned() {
+        if self.fonts.len() >= self.max_entries
+            && let Some(oldest_key) = self.fonts.keys().next().cloned() {
                 self.fonts.remove(&oldest_key);
             }
-        }
 
         let font = Arc::new(load_system_font(family)?);
         self.fonts.insert(key, Arc::clone(&font));
@@ -1145,11 +1138,10 @@ impl FontCache {
     ) -> Result<Arc<Font>, FontError> {
         let key = (family.to_lowercase(), FontVariantKey::new(weight, style));
         // Evict an arbitrary entry if at capacity and this variant is not already cached
-        if !self.fonts.contains_key(&key) && self.fonts.len() >= self.max_entries {
-            if let Some(oldest_key) = self.fonts.keys().next().cloned() {
+        if !self.fonts.contains_key(&key) && self.fonts.len() >= self.max_entries
+            && let Some(oldest_key) = self.fonts.keys().next().cloned() {
                 self.fonts.remove(&oldest_key);
             }
-        }
         let font = Arc::new(Font::load_from_bytes(data)?);
         self.fonts.insert(key, Arc::clone(&font));
         Ok(font)
@@ -1406,11 +1398,10 @@ impl GlyphCache {
     /// Insert a glyph raster into the cache.
     pub fn insert(&mut self, ch: char, size_px: f32, raster: GlyphRaster) {
         // Evict an arbitrary entry if at capacity (HashMap iteration order is non-deterministic)
-        if self.glyphs.len() >= self.max_entries {
-            if let Some(oldest_key) = self.glyphs.keys().next().cloned() {
+        if self.glyphs.len() >= self.max_entries
+            && let Some(oldest_key) = self.glyphs.keys().next().cloned() {
                 self.glyphs.remove(&oldest_key);
             }
-        }
 
         let key = GlyphCacheKey::new(ch, size_px);
         self.glyphs.insert(key, raster);
@@ -1428,11 +1419,10 @@ impl GlyphCache {
         // Use entry API for efficient get-or-insert
         if !self.glyphs.contains_key(&key) {
             // Evict an arbitrary entry if at capacity
-            if self.glyphs.len() >= self.max_entries {
-                if let Some(oldest_key) = self.glyphs.keys().next().cloned() {
+            if self.glyphs.len() >= self.max_entries
+                && let Some(oldest_key) = self.glyphs.keys().next().cloned() {
                     self.glyphs.remove(&oldest_key);
                 }
-            }
 
             let raster = font.rasterize(ch, size_px)?;
             self.glyphs.insert(key, raster);

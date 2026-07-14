@@ -694,11 +694,10 @@ fn parse_track_size(value: &str, allow_fr: bool) -> Option<TrackSize> {
     if let Some(value) = lower.strip_suffix('%') {
         return value.trim().parse().ok().map(TrackSize::Percent);
     }
-    if allow_fr {
-        if let Some(value) = lower.strip_suffix("fr") {
+    if allow_fr
+        && let Some(value) = lower.strip_suffix("fr") {
             return value.trim().parse().ok().map(TrackSize::Fr);
         }
-    }
     None
 }
 

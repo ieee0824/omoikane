@@ -358,11 +358,10 @@ impl HostState {
             .to_string();
         let iframe_id = iframe.identity();
 
-        if let Some(entry) = self.iframe_documents.get(&iframe_id) {
-            if entry.loaded_src == src {
+        if let Some(entry) = self.iframe_documents.get(&iframe_id)
+            && entry.loaded_src == src {
                 return entry.document.clone();
             }
-        }
 
         // The `src` changed (or this is the first load). Drop any previously
         // loaded sub-document tree from the node registry before loading the
@@ -497,12 +496,11 @@ impl HostState {
         // The iframe element belongs to the parent document, but its rendered
         // content-box establishes the child document's viewport. A width/height
         // style or attribute mutation must therefore invalidate both caches.
-        if node.tag_name().as_deref() == Some("iframe") {
-            if let Some(child) = self.iframe_documents.get(&node.identity()) {
+        if node.tag_name().as_deref() == Some("iframe")
+            && let Some(child) = self.iframe_documents.get(&node.identity()) {
                 let child_document = child.document.clone();
                 self.mark_document_style_dirty(&child_document);
             }
-        }
     }
 
     /// Marks every cached document's style resolver as stale and drops the main
@@ -1102,7 +1100,7 @@ impl JsRuntime {
 
             let src = attrs.get("src").cloned();
             // HTML spec: defer only applies to external (src) scripts.
-            let is_defer = attrs.get("defer").is_some() && src.is_some();
+            let is_defer = attrs.contains_key("defer") && src.is_some();
 
             let source_code = if let Some(src_url) = src {
                 // External script: fetch
@@ -2934,10 +2932,10 @@ fn clone_node_impl(node: &NodeHandle, deep: bool) -> NodeHandle {
             el
         }
         crate::dom::NodeType::Text => {
-            NodeHandle::text(&node.data().unwrap_or_default())
+            NodeHandle::text(node.data().unwrap_or_default())
         }
         crate::dom::NodeType::Comment => {
-            NodeHandle::comment(&node.data().unwrap_or_default())
+            NodeHandle::comment(node.data().unwrap_or_default())
         }
         crate::dom::NodeType::Document => NodeHandle::document(),
         crate::dom::NodeType::DocumentFragment => NodeHandle::document_fragment(),
@@ -3140,7 +3138,7 @@ fn is_inline_classic_script(node: &NodeHandle) -> bool {
         return false;
     }
     let attrs = node.attributes().unwrap_or_default();
-    if attrs.get("src").is_some() {
+    if attrs.contains_key("src") {
         return false;
     }
     is_executable_classic_script_type(attrs.get("type").map(|s| s.as_str()))
@@ -3436,13 +3434,11 @@ fn document_write_native(_: &JsValue, args: &[JsValue], context: &mut Context) -
             // Only the top-level document's parser insertion point advances; a
             // sub-document write must never repoint the main document's anchor
             // at one of the sub-document's nodes.
-            if is_main {
-                if let Some(last) = last_inserted {
-                    if s.write_insertion_ref.is_some() {
+            if is_main
+                && let Some(last) = last_inserted
+                    && s.write_insertion_ref.is_some() {
                         s.write_insertion_ref = Some(last);
                     }
-                }
-            }
         }
 
         // Collect the inline classic <script> descendants in document order for

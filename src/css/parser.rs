@@ -233,11 +233,10 @@ impl Parser {
                     let declarations = self.parse_declaration_list()?;
 
                     // Produce a structured FontFace rule when possible.
-                    if name.eq_ignore_ascii_case("font-face") {
-                        if let Some(ff) = build_font_face_rule(&declarations) {
+                    if name.eq_ignore_ascii_case("font-face")
+                        && let Some(ff) = build_font_face_rule(&declarations) {
                             return Ok(Rule::FontFace(ff));
                         }
-                    }
 
                     return Ok(Rule::At(AtRule {
                         name,
@@ -1137,7 +1136,7 @@ fn extract_string_value(value: &Value) -> String {
             // font-family can be a list of keywords like `Noto Sans`
             items
                 .iter()
-                .map(|v| extract_string_value(v))
+                .map(extract_string_value)
                 .collect::<Vec<_>>()
                 .join(" ")
         }
@@ -1165,11 +1164,10 @@ fn extract_src_descriptor(
             for item in items {
                 match item {
                     Value::Function { name, arguments } if name.eq_ignore_ascii_case("url") => {
-                        if out_url.is_none() {
-                            if let Some(arg) = arguments.first() {
+                        if out_url.is_none()
+                            && let Some(arg) = arguments.first() {
                                 *out_url = Some(extract_string_value(arg));
                             }
-                        }
                     }
                     Value::Keyword(k) if k.starts_with("url(") => {
                         if out_url.is_none() {

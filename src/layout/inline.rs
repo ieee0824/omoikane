@@ -215,8 +215,8 @@ fn collect_element_inline_segments(
         return;
     }
 
-    if node.tag_name().as_deref() == Some("img") {
-        if let Some(alt_text) = image_alt_fallback_text(node, &style) {
+    if node.tag_name().as_deref() == Some("img")
+        && let Some(alt_text) = image_alt_fallback_text(node, &style) {
             out.push(InlineSegment {
                 node: node.clone(),
                 content: InlineSegmentContent::Text(alt_text),
@@ -231,7 +231,6 @@ fn collect_element_inline_segments(
             out.extend(generated_inline_segments(node, resolver, PseudoElement::After));
             return;
         }
-    }
 
     for child in node.child_nodes() {
         match child.node_type() {
@@ -641,14 +640,13 @@ pub(crate) fn element_inline_image(node: &NodeHandle) -> Option<(NodeHandle, Ima
         }
         "svg" => {
             let image = crate::svg::render_svg_to_image(node)?;
-            return Some((node.clone(), image));
+            Some((node.clone(), image))
         }
         "object" => {
-            if let Some(data) = attributes.get("data") {
-                if let Some(image) = decode_or_fetch_image(data) {
+            if let Some(data) = attributes.get("data")
+                && let Some(image) = decode_or_fetch_image(data) {
                     return Some((node.clone(), image));
                 }
-            }
 
             for child in node.child_nodes() {
                 if let Some(image) = element_inline_image(&child) {
@@ -849,30 +847,26 @@ pub(super) fn resolve_image_rendered_size(
         (None, None) => (intrinsic_w, intrinsic_h),
     };
 
-    if let Some(max_width) = explicit_length(style, "max-width") {
-        if width > max_width {
+    if let Some(max_width) = explicit_length(style, "max-width")
+        && width > max_width {
             height = scale_with_aspect(height, width, max_width);
             width = max_width;
         }
-    }
-    if let Some(max_height) = explicit_length(style, "max-height") {
-        if height > max_height {
+    if let Some(max_height) = explicit_length(style, "max-height")
+        && height > max_height {
             width = scale_with_aspect(width, height, max_height);
             height = max_height;
         }
-    }
-    if let Some(min_width) = explicit_length(style, "min-width") {
-        if width < min_width {
+    if let Some(min_width) = explicit_length(style, "min-width")
+        && width < min_width {
             height = scale_with_aspect(height, width, min_width);
             width = min_width;
         }
-    }
-    if let Some(min_height) = explicit_length(style, "min-height") {
-        if height < min_height {
+    if let Some(min_height) = explicit_length(style, "min-height")
+        && height < min_height {
             width = scale_with_aspect(width, height, min_height);
             height = min_height;
         }
-    }
 
     (width, height)
 }
@@ -1237,8 +1231,8 @@ fn layout_inline_segments(
                         start_x,
                         width,
                         available_width,
-                    ) {
-                        if let InlineFragmentContent::Text(text) = content {
+                    )
+                        && let InlineFragmentContent::Text(text) = content {
                             break_text_by_characters(
                                 &text,
                                 segment,
@@ -1251,7 +1245,6 @@ fn layout_inline_segments(
                             );
                             continue;
                         }
-                    }
 
                     current_fragments.push(InlineFragment {
                         node: segment.node.clone(),
@@ -1714,8 +1707,8 @@ pub(super) fn measure_text_width(text: &str, metrics: FontMetrics) -> f32 {
             *fonts_ref = Some(load_layout_fonts());
         }
 
-        if let Some(ref fonts) = *fonts_ref {
-            if !fonts.is_empty() {
+        if let Some(ref fonts) = *fonts_ref
+            && !fonts.is_empty() {
                 let base = measure_text_width_with_fallback(text, metrics.font_size, fonts);
                 let char_count = text.chars().count();
                 let spacing = if char_count > 1 {
@@ -1725,7 +1718,6 @@ pub(super) fn measure_text_width(text: &str, metrics: FontMetrics) -> f32 {
                 };
                 return base + spacing;
             }
-        }
 
         // Fallback to approximation when no font is available
         let char_count = text.chars().count();
@@ -1769,8 +1761,8 @@ fn select_layout_font_index(fonts: &[Font], ch: char) -> usize {
 
     if prefer_cjk && fonts.len() > 1 {
         // Try CJK-capable fallback fonts first
-        for index in 1..fonts.len() {
-            if fonts[index].has_glyph(ch) {
+        for (index, font) in fonts.iter().enumerate().skip(1) {
+            if font.has_glyph(ch) {
                 return index;
             }
         }
@@ -1778,8 +1770,8 @@ fn select_layout_font_index(fonts: &[Font], ch: char) -> usize {
         return 0;
     }
 
-    for index in 0..fonts.len() {
-        if !ch.is_whitespace() && !fonts[index].has_glyph(ch) {
+    for (index, font) in fonts.iter().enumerate() {
+        if !ch.is_whitespace() && !font.has_glyph(ch) {
             continue;
         }
         return index;

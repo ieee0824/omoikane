@@ -1,3 +1,7 @@
+// The exported C ABI validates nullable pointers at each boundary; detailed ownership
+// contracts are also declared in the generated C header.
+#![allow(clippy::missing_safety_doc)]
+
 //! C FFI surface for embedding the browser engine from other languages.
 
 use std::cell::RefCell;

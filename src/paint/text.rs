@@ -378,8 +378,8 @@ pub(crate) fn paint_text_with_font(
             cursor_x += fonts[font_index].glyph_kerning(prev, ch, font_size);
         }
 
-        if let Some(glyph) = glyph {
-            if glyph.width > 0 && glyph.height > 0 && !glyph.bitmap.is_empty() {
+        if let Some(glyph) = glyph
+            && glyph.width > 0 && glyph.height > 0 && !glyph.bitmap.is_empty() {
                 let glyph_x = cursor_x + glyph.offset_x;
                 let glyph_y = baseline_y + glyph.offset_y;
 
@@ -393,7 +393,6 @@ pub(crate) fn paint_text_with_font(
                     clip,
                 );
             }
-        }
 
         cursor_x += advance_x;
         // Apply letter-spacing between characters only (not after the last one)
@@ -433,8 +432,8 @@ pub(crate) fn paint_text_with_font_refs(
             cursor_x += fonts[font_index].glyph_kerning(prev, ch, font_size);
         }
 
-        if let Some(glyph) = glyph {
-            if glyph.width > 0 && glyph.height > 0 && !glyph.bitmap.is_empty() {
+        if let Some(glyph) = glyph
+            && glyph.width > 0 && glyph.height > 0 && !glyph.bitmap.is_empty() {
                 let glyph_x = cursor_x + glyph.offset_x;
                 let glyph_y = baseline_y + glyph.offset_y;
 
@@ -448,7 +447,6 @@ pub(crate) fn paint_text_with_font_refs(
                     clip,
                 );
             }
-        }
 
         cursor_x += advance_x;
         if i + 1 < char_count {

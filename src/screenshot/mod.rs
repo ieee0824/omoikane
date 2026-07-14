@@ -285,11 +285,10 @@ fn parse_frameset_track_sizes(spec: Option<&str>, frame_count: usize, total_size
                 *last = last.saturating_add(delta);
             }
         }
-    } else if remaining > 0 {
-        if let Some(last) = widths.last_mut() {
+    } else if remaining > 0
+        && let Some(last) = widths.last_mut() {
             *last = last.saturating_add(remaining);
         }
-    }
 
     if widths.iter().all(|&w| w == 0) {
         let base = total_size / frame_count as u32;

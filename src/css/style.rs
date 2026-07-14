@@ -229,11 +229,10 @@ impl StyleResolver {
                     .parent_node()
                     .map(|p| p.node_type() == NodeType::Document)
                     .unwrap_or(false);
-            if is_root {
-                if let Some(ComputedValue::Px(px)) = style.get("font-size") {
+            if is_root
+                && let Some(ComputedValue::Px(px)) = style.get("font-size") {
                     self.root_font_size = *px;
                 }
-            }
         }
 
         self.cache.insert(key, style.clone());
@@ -344,8 +343,8 @@ impl StyleResolver {
 
         // Process font-size first so that em units in other properties
         // resolve against the element's own computed font-size.
-        if let Some(fs_candidate) = candidates.iter().filter(|c| c.name == "font-size").last() {
-            if let Some(resolved_value) =
+        if let Some(fs_candidate) = candidates.iter().rfind(|c| c.name == "font-size")
+            && let Some(resolved_value) =
                 resolve_value_with_custom_properties(&fs_candidate.value, &custom_properties)
             {
                 let parent_fs = parent_style
@@ -374,7 +373,6 @@ impl StyleResolver {
                 };
                 properties.insert("font-size".to_string(), resolved);
             }
-        }
 
         // For the root element, update root_font_size from its computed font-size
         // so that rem-based properties on the root itself resolve correctly.
@@ -384,11 +382,10 @@ impl StyleResolver {
                 .tag_name()
                 .as_deref()
                 .is_some_and(|t| t.eq_ignore_ascii_case("html"));
-            if is_root {
-                if let Some(ComputedValue::Px(px)) = properties.get("font-size") {
+            if is_root
+                && let Some(ComputedValue::Px(px)) = properties.get("font-size") {
                     root_font_size = *px;
                 }
-            }
         }
 
         for candidate in candidates {
@@ -593,8 +590,8 @@ fn should_skip_computed_property(name: &str, computed: &ComputedValue) -> bool {
     // override an earlier valid declaration of the same property. Acid3 test 0
     // relies on `white-space: pre-wrap; white-space: x-bogus;` keeping the
     // `pre-wrap` value (the invalid `x-bogus` declaration is dropped).
-    if let ComputedValue::Keyword(keyword) = computed {
-        if let Some(valid) = enumerated_keyword_set(name) {
+    if let ComputedValue::Keyword(keyword) = computed
+        && let Some(valid) = enumerated_keyword_set(name) {
             let lower = keyword.to_ascii_lowercase();
             // CSS-wide keywords are resolved in a later pass; never drop them.
             // `revert-layer` (CSS Cascade 5) is a CSS-wide keyword too and must
@@ -607,7 +604,6 @@ fn should_skip_computed_property(name: &str, computed: &ComputedValue) -> bool {
                 return true;
             }
         }
-    }
 
     false
 }
@@ -1905,11 +1901,8 @@ fn resolve_length_to_px(number: f32, unit: &str, ctx: ResolutionContext) -> Opti
 
 fn parse_calc_add_sub(tokens: &[CalcToken], index: &mut usize) -> Option<CalcQuantity> {
     let mut left = parse_calc_mul_div(tokens, index)?;
-    loop {
-        let op = match tokens.get(*index) {
-            Some(CalcToken::Operator(op @ ('+' | '-'))) => *op,
-            _ => break,
-        };
+    while let Some(CalcToken::Operator(op @ ('+' | '-'))) = tokens.get(*index) {
+        let op = *op;
         *index += 1;
         let right = parse_calc_mul_div(tokens, index)?;
         left = apply_calc_operator(left, op, right)?;
@@ -1919,11 +1912,8 @@ fn parse_calc_add_sub(tokens: &[CalcToken], index: &mut usize) -> Option<CalcQua
 
 fn parse_calc_mul_div(tokens: &[CalcToken], index: &mut usize) -> Option<CalcQuantity> {
     let mut left = parse_calc_factor(tokens, index)?;
-    loop {
-        let op = match tokens.get(*index) {
-            Some(CalcToken::Operator(op @ ('*' | '/'))) => *op,
-            _ => break,
-        };
+    while let Some(CalcToken::Operator(op @ ('*' | '/'))) = tokens.get(*index) {
+        let op = *op;
         *index += 1;
         let right = parse_calc_factor(tokens, index)?;
         left = apply_calc_operator(left, op, right)?;
@@ -2000,8 +1990,8 @@ fn apply_presentational_hints(
 
     let attributes = node.attributes().unwrap_or_default();
 
-    if !properties.contains_key("background-color") {
-        if let Some(background) = attributes
+    if !properties.contains_key("background-color")
+        && let Some(background) = attributes
             .get("bgcolor")
             .and_then(|value| parse_legacy_color_hint(value))
         {
@@ -2010,10 +2000,9 @@ fn apply_presentational_hints(
                 ComputedValue::Color(background),
             );
         }
-    }
 
-    if !properties.contains_key("background-image") {
-        if let Some(background) = attributes
+    if !properties.contains_key("background-image")
+        && let Some(background) = attributes
             .get("background")
             .map(|value| value.trim())
             .filter(|value| !value.is_empty())
@@ -2024,21 +2013,18 @@ fn apply_presentational_hints(
                 ComputedValue::Keyword(format!("url(\"{escaped}\")")),
             );
         }
-    }
 
     if !properties.contains_key("color")
         && node
             .tag_name()
             .as_deref()
             .is_some_and(|name| name.eq_ignore_ascii_case("body"))
-    {
-        if let Some(color) = attributes
+        && let Some(color) = attributes
             .get("text")
             .and_then(|value| parse_legacy_color_hint(value))
         {
             properties.insert("color".to_string(), ComputedValue::Color(color));
         }
-    }
 
     if let Some(align) = attributes
         .get("align")
@@ -2079,42 +2065,38 @@ fn apply_presentational_hints(
         }
     }
 
-    if !properties.contains_key("width") {
-        if let Some(width) = attributes
+    if !properties.contains_key("width")
+        && let Some(width) = attributes
             .get("width")
             .and_then(|value| parse_legacy_dimension_hint(value))
         {
             properties.insert("width".to_string(), width);
         }
-    }
 
-    if !properties.contains_key("height") {
-        if let Some(height) = attributes
+    if !properties.contains_key("height")
+        && let Some(height) = attributes
             .get("height")
             .and_then(|value| parse_legacy_dimension_hint(value))
         {
             properties.insert("height".to_string(), height);
         }
-    }
 
-    if !properties.contains_key("color") {
-        if let Some(color) = attributes
+    if !properties.contains_key("color")
+        && let Some(color) = attributes
             .get("color")
             .and_then(|value| parse_legacy_color_hint(value))
         {
             properties.insert("color".to_string(), ComputedValue::Color(color));
         }
-    }
 
-    if !properties.contains_key("font-family") {
-        if let Some(face) = attributes
+    if !properties.contains_key("font-family")
+        && let Some(face) = attributes
             .get("face")
             .map(|value| value.trim().to_string())
             .filter(|value| !value.is_empty())
         {
             properties.insert("font-family".to_string(), ComputedValue::Keyword(face));
         }
-    }
 }
 
 fn parse_legacy_color_hint(value: &str) -> Option<String> {
@@ -2571,12 +2553,11 @@ fn resolve_explicit_inherit(
         .collect();
 
     for name in inherited_names {
-        if let Some(parent_style) = parent_style {
-            if let Some(parent_value) = parent_style.get(&name) {
+        if let Some(parent_style) = parent_style
+            && let Some(parent_value) = parent_style.get(&name) {
                 properties.insert(name, parent_value.clone());
                 continue;
             }
-        }
         properties.remove(&name);
     }
 }
@@ -2619,11 +2600,10 @@ fn apply_inheritance(
         "word-break",
         "word-spacing",
     ] {
-        if !properties.contains_key(inherited_name) {
-            if let Some(value) = parent_style.get(inherited_name) {
+        if !properties.contains_key(inherited_name)
+            && let Some(value) = parent_style.get(inherited_name) {
                 properties.insert(inherited_name.to_string(), value.clone());
             }
-        }
     }
 
     // CSS custom properties inherit by default.
@@ -2641,11 +2621,10 @@ fn inherited_font_size(
     if let Some(ComputedValue::Px(value)) = current.get("font-size") {
         return *value;
     }
-    if let Some(parent_style) = parent_style {
-        if let Some(ComputedValue::Px(value)) = parent_style.get("font-size") {
+    if let Some(parent_style) = parent_style
+        && let Some(ComputedValue::Px(value)) = parent_style.get("font-size") {
             return *value;
         }
-    }
     16.0
 }
 
@@ -2816,11 +2795,10 @@ fn extract_alpha(v: &Value) -> Option<f32> {
 /// a `Value::List`.  This helper normalises both forms — comma-separated and
 /// space-separated — into a flat slice.
 fn flatten_color_args(arguments: &[Value]) -> Vec<&Value> {
-    if arguments.len() == 1 {
-        if let Value::List(items) = &arguments[0] {
+    if arguments.len() == 1
+        && let Value::List(items) = &arguments[0] {
             return items.iter().collect();
         }
-    }
     arguments.iter().collect()
 }
 

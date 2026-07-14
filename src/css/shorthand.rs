@@ -620,7 +620,7 @@ fn expand_background_shorthand(value: Value, important: bool) -> Vec<Declaration
                 value: item.clone(),
                 important,
             }),
-            Value::Keyword(keyword) if is_background_color_keyword(&keyword) => {
+            Value::Keyword(keyword) if is_background_color_keyword(keyword) => {
                 declarations.push(Declaration {
                     name: "background-color".to_string(),
                     value: Value::Keyword(keyword.to_string()),
@@ -1054,8 +1054,8 @@ fn expand_flex_shorthand(value: Value, important: bool) -> Vec<Declaration> {
     }
 
     // flex: <basis> → grow=1 shrink=1 basis  (単独の length/percentage)
-    if let [basis] = values.as_slice() {
-        if matches!(basis, Value::Length(_, _) | Value::Percentage(_)) {
+    if let [basis] = values.as_slice()
+        && matches!(basis, Value::Length(_, _) | Value::Percentage(_)) {
             return vec![
                 Declaration {
                     name: "flex-grow".to_string(),
@@ -1074,11 +1074,10 @@ fn expand_flex_shorthand(value: Value, important: bool) -> Vec<Declaration> {
                 },
             ];
         }
-    }
 
     // flex: <grow> <shrink> <basis>
-    if let [grow, shrink, basis] = values.as_slice() {
-        if matches!(grow, Value::Number(_)) && matches!(shrink, Value::Number(_)) {
+    if let [grow, shrink, basis] = values.as_slice()
+        && matches!(grow, Value::Number(_)) && matches!(shrink, Value::Number(_)) {
             return vec![
                 Declaration {
                     name: "flex-grow".to_string(),
@@ -1097,11 +1096,10 @@ fn expand_flex_shorthand(value: Value, important: bool) -> Vec<Declaration> {
                 },
             ];
         }
-    }
 
     // flex: <grow> <basis>  (数値 + length/percentage)
-    if let [grow, basis] = values.as_slice() {
-        if matches!(grow, Value::Number(_))
+    if let [grow, basis] = values.as_slice()
+        && matches!(grow, Value::Number(_))
             && matches!(basis, Value::Length(_, _) | Value::Percentage(_))
         {
             return vec![
@@ -1122,11 +1120,10 @@ fn expand_flex_shorthand(value: Value, important: bool) -> Vec<Declaration> {
                 },
             ];
         }
-    }
 
     // flex: <grow> <shrink>  (2値でどちらも数値)
-    if let [grow, shrink] = values.as_slice() {
-        if matches!(grow, Value::Number(_)) && matches!(shrink, Value::Number(_)) {
+    if let [grow, shrink] = values.as_slice()
+        && matches!(grow, Value::Number(_)) && matches!(shrink, Value::Number(_)) {
             return vec![
                 Declaration {
                     name: "flex-grow".to_string(),
@@ -1145,7 +1142,6 @@ fn expand_flex_shorthand(value: Value, important: bool) -> Vec<Declaration> {
                 },
             ];
         }
-    }
 
     // フォールバック: そのまま保持（単一値はListで包まない）
     let fallback_value = if values.len() == 1 {
@@ -1212,19 +1208,17 @@ fn expand_text_decoration_shorthand(value: Value, important: bool) -> Vec<Declar
                             style = Some(Value::Keyword(lower));
                         }
                     }
-                    _ if crate::css::style::is_color_keyword(&lower) => {
-                        if color.is_none() {
+                    _ if crate::css::style::is_color_keyword(&lower)
+                        && color.is_none() => {
                             color = Some(Value::Keyword(lower));
                         }
-                    }
                     _ => {}
                 }
             }
-            Value::Color(_) | Value::Function { .. } => {
-                if color.is_none() {
+            Value::Color(_) | Value::Function { .. }
+                if color.is_none() => {
                     color = Some(item.clone());
                 }
-            }
             _ => {}
         }
     }
@@ -1303,9 +1297,9 @@ fn expand_list_style_shorthand(value: Value, important: bool) -> Vec<Declaration
     let mut list_style_image: Option<Value> = None;
 
     // Check for bare `none` — sets both type and image to none
-    if values.len() == 1 {
-        if let Value::Keyword(kw) = &values[0] {
-            if kw.eq_ignore_ascii_case("none") {
+    if values.len() == 1
+        && let Value::Keyword(kw) = &values[0]
+            && kw.eq_ignore_ascii_case("none") {
                 return vec![
                     Declaration {
                         name: "list-style-type".to_string(),
@@ -1324,8 +1318,6 @@ fn expand_list_style_shorthand(value: Value, important: bool) -> Vec<Declaration
                     },
                 ];
             }
-        }
-    }
 
     // First pass: detect if a non-none type keyword is present (order-independent)
     let has_explicit_type = values.iter().any(|v| {
@@ -1349,8 +1341,6 @@ fn expand_list_style_shorthand(value: Value, important: bool) -> Vec<Declaration
                     } else {
                         list_style_type.get_or_insert(val);
                     }
-                } else if TYPE_KEYWORDS.contains(&lc.as_str()) {
-                    list_style_type.get_or_insert(val);
                 } else {
                     list_style_type.get_or_insert(val);
                 }
@@ -1365,25 +1355,19 @@ fn expand_list_style_shorthand(value: Value, important: bool) -> Vec<Declaration
     // CSS shorthand rule: always emit all three longhands, using initial values
     // for any subproperty that was not explicitly present in the shorthand.
     // Initial values: list-style-type = disc, list-style-position = outside, list-style-image = none
-    let mut decls = Vec::new();
-
-    decls.push(Declaration {
+    vec![Declaration {
         name: "list-style-type".to_string(),
         value: list_style_type.unwrap_or(Value::Keyword("disc".to_string())),
         important,
-    });
-    decls.push(Declaration {
+    }, Declaration {
         name: "list-style-position".to_string(),
         value: list_style_position.unwrap_or(Value::Keyword("outside".to_string())),
         important,
-    });
-    decls.push(Declaration {
+    }, Declaration {
         name: "list-style-image".to_string(),
         value: list_style_image.unwrap_or(Value::Keyword("none".to_string())),
         important,
-    });
-
-    decls
+    }]
 }
 
 /// Expands `flex-flow` shorthand into `flex-direction` and `flex-wrap` longhands.
@@ -1518,11 +1502,10 @@ fn expand_animation_shorthand(value: Value, important: bool) -> Vec<Declaration>
                     }
                 }
             }
-        } else if let Value::Length(_, unit) = item {
-            if (unit == "s" || unit == "ms") && duration.is_none() {
+        } else if let Value::Length(_, unit) = item
+            && (unit == "s" || unit == "ms") && duration.is_none() {
                 duration = Some(item.clone());
             }
-        }
     }
 
     let mut decls = Vec::new();
@@ -1573,8 +1556,8 @@ fn expand_outline_shorthand(value: Value, important: bool) -> Vec<Declaration> {
     };
 
     // CSS-wide keywords apply to all longhands at once.
-    if values.len() == 1 {
-        if let Value::Keyword(kw) = &values[0] {
+    if values.len() == 1
+        && let Value::Keyword(kw) = &values[0] {
             let lower = kw.to_ascii_lowercase();
             if matches!(lower.as_str(), "inherit" | "initial" | "unset" | "revert") {
                 return vec![
@@ -1584,7 +1567,6 @@ fn expand_outline_shorthand(value: Value, important: bool) -> Vec<Declaration> {
                 ];
             }
         }
-    }
 
     let mut style = None;
     let mut width = None;
@@ -1605,11 +1587,10 @@ fn expand_outline_shorthand(value: Value, important: bool) -> Vec<Declaration> {
                         width = Some(item.clone());
                     }
                 }
-                _ if is_background_color_keyword(&lower) => {
-                    if color.is_none() {
+                _ if is_background_color_keyword(&lower)
+                    && color.is_none() => {
                         color = Some(item.clone());
                     }
-                }
                 _ => {
                     // Unknown keyword — skip rather than mis-classify as color
                 }

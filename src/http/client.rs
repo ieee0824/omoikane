@@ -152,11 +152,10 @@ impl Client {
                 }
             }
 
-            if matches!(response.status_code(), 307 | 308) {
-                if let Some(body) = request.body() {
+            if matches!(response.status_code(), 307 | 308)
+                && let Some(body) = request.body() {
                     new_request.set_body(body.to_vec());
                 }
-            }
 
             request = new_request;
         }
@@ -180,7 +179,7 @@ fn is_redirect(status: u16) -> bool {
 /// - 307, 308: preserve the original method
 fn redirect_method(status: u16, original: Method) -> Method {
     match status {
-        301 | 302 | 303 => Method::Get,
+        301..=303 => Method::Get,
         307 | 308 => original,
         _ => original,
     }

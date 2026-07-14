@@ -293,15 +293,14 @@ impl Canvas {
                 let fy = py as f32 + 0.5;
 
                 // クリップチェック（ピクセル中心を基準に判定）
-                if let Some(ca) = clip_area {
-                    if fx < ca.x
+                if let Some(ca) = clip_area
+                    && (fx < ca.x
                         || fx >= ca.x + ca.width
                         || fy < ca.y
-                        || fy >= ca.y + ca.height
+                        || fy >= ca.y + ca.height)
                     {
                         continue;
                     }
-                }
 
                 // ピクセル中心が角丸矩形の内側かどうか判定
                 if !point_in_rounded_rect(fx, fy, rx, ry, rw, rh, tl, tr, br, bl) {
@@ -399,15 +398,14 @@ impl Canvas {
                 let fy = py as f32 + 0.5;
 
                 // クリップチェック（ピクセル中心を基準に判定）
-                if let Some(ca) = clip_area {
-                    if fx < ca.x
+                if let Some(ca) = clip_area
+                    && (fx < ca.x
                         || fx >= ca.x + ca.width
                         || fy < ca.y
-                        || fy >= ca.y + ca.height
+                        || fy >= ca.y + ca.height)
                     {
                         continue;
                     }
-                }
 
                 // outer の内側かつ inner の外側
                 if !point_in_rounded_rect(fx, fy, outer.x, outer.y, outer.width, outer.height, outer_tl, outer_tr, outer_br, outer_bl) {
@@ -1881,15 +1879,14 @@ fn fill_triangle_clipped_inner(
             }) {
                 continue;
             }
-            if let Some(clip_rect) = clip {
-                if px < clip_rect.x
+            if let Some(clip_rect) = clip
+                && (px < clip_rect.x
                     || px >= clip_rect.x + clip_rect.width
                     || py < clip_rect.y
-                    || py >= clip_rect.y + clip_rect.height
+                    || py >= clip_rect.y + clip_rect.height)
                 {
                     continue;
                 }
-            }
 
             let index = ((y as u32 * canvas.width + x as u32) * 4) as usize;
             blend_pixel(&mut canvas.pixels[index..index + 4], color);

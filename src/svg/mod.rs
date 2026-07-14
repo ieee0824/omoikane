@@ -222,12 +222,11 @@ fn parse_path_data(d: &str) -> Vec<PathCommand> {
     while chars.peek().is_some() {
         let remaining_before = chars.clone().count();
         skip_whitespace_and_commas(&mut chars);
-        if let Some(&ch) = chars.peek() {
-            if ch.is_ascii_alphabetic() {
+        if let Some(&ch) = chars.peek()
+            && ch.is_ascii_alphabetic() {
                 current_command = ch;
                 chars.next();
             }
-        }
         skip_whitespace_and_commas(&mut chars);
 
         match current_command {
@@ -365,12 +364,11 @@ fn skip_whitespace_and_commas(chars: &mut std::iter::Peekable<std::str::Chars>) 
 
 fn parse_number(chars: &mut std::iter::Peekable<std::str::Chars>) -> Option<f32> {
     let mut s = String::new();
-    if let Some(&ch) = chars.peek() {
-        if ch == '-' || ch == '+' {
+    if let Some(&ch) = chars.peek()
+        && (ch == '-' || ch == '+') {
             s.push(ch);
             chars.next();
         }
-    }
     let mut has_dot = false;
     while let Some(&ch) = chars.peek() {
         if ch.is_ascii_digit() {

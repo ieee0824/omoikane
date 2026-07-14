@@ -49,7 +49,7 @@ pub(crate) use inline::split_words_no_cjk_break;
 thread_local! {
     static IMAGE_CACHE: RefCell<HashMap<String, Option<Image>>> = RefCell::new(HashMap::new());
     static HTTP_CLIENT: RefCell<Client> = RefCell::new(Client::new());
-    static LAYOUT_FONTS: RefCell<Option<Vec<Font>>> = RefCell::new(None);
+    static LAYOUT_FONTS: RefCell<Option<Vec<Font>>> = const { RefCell::new(None) };
     static IMAGE_BASE_URL: RefCell<Option<Url>> = const { RefCell::new(None) };
     static HTML_TAG_SQLITE_CONNECTIONS: RefCell<HashMap<String, Connection>> = RefCell::new(HashMap::new());
 }
@@ -323,7 +323,7 @@ impl FragmentStyle {
         // The value may be quoted (e.g. `"My Font"`) or unquoted (e.g. `sans-serif`).
         let font_family = extract_str("font-family").map(|s| {
             // Take the first comma-separated entry and strip quotes
-            let first = s.splitn(2, ',').next().unwrap_or(&s).trim().to_string();
+            let first = s.split(',').next().unwrap_or(&s).trim().to_string();
             first.trim_matches('"').trim_matches('\'').to_string()
         });
 
@@ -597,12 +597,11 @@ fn layout_document(
             width: containing_block.width,
             height: 0.0,
         };
-        if let Some(style) = &child_style {
-            if is_out_of_flow_positioned(style) {
+        if let Some(style) = &child_style
+            && is_out_of_flow_positioned(style) {
                 positioned_children.push((child, style.clone(), child_containing));
                 continue;
             }
-        }
 
         if let Some(layout_child) = layout_node(
             &child,
@@ -617,12 +616,14 @@ fn layout_document(
         }
     }
 
-    let mut dimensions = BoxDimensions::default();
-    dimensions.content = Rect {
+    let dimensions = BoxDimensions {
+        content: Rect {
         x: containing_block.x,
         y: containing_block.y,
         width: containing_block.width,
         height: cursor_y - containing_block.y,
+    },
+        ..BoxDimensions::default()
     };
 
     let document_box = BoxDimensions {
@@ -886,12 +887,11 @@ fn layout_element(
     }
 
     let config = unsupported_html_config();
-    if config.logging_enabled || config.sqlite_path.is_some() {
-        if let Some(tag) = node.tag_name() {
+    if (config.logging_enabled || config.sqlite_path.is_some())
+        && let Some(tag) = node.tag_name() {
             let parent_tag = node.parent_node().and_then(|p| p.tag_name());
             log_unsupported_html_tag(&tag, parent_tag.as_deref());
         }
-    }
 
     let padding = edge_sizes(&style, "padding");
     let border = edge_sizes(&style, "border");
@@ -1491,7 +1491,7 @@ fn is_empty_for_margin_collapse(layout: &LayoutBox) -> bool {
         && layout
             .children
             .iter()
-            .all(|c| is_empty_for_margin_collapse(c))
+            .all(is_empty_for_margin_collapse)
 }
 
 /// Collapse all margins through an empty element and its empty descendants.
@@ -2241,8 +2241,8 @@ fn list_item_ordinal(node: &NodeHandle) -> usize {
     };
     let mut count = 0usize;
     for sibling in parent.child_nodes() {
-        if sibling.node_type() == NodeType::Element {
-            if sibling
+        if sibling.node_type() == NodeType::Element
+            && sibling
                 .tag_name()
                 .as_deref()
                 .map(|t| t.eq_ignore_ascii_case("li"))
@@ -2250,7 +2250,6 @@ fn list_item_ordinal(node: &NodeHandle) -> usize {
             {
                 count += 1;
             }
-        }
         if sibling.identity() == node.identity() {
             break;
         }

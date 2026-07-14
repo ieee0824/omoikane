@@ -130,7 +130,7 @@ impl std::str::FromStr for Url {
         // Split authority from path+query.
         // Authority ends at the first '/' or '?' (handles "http://host?q=1").
         let authority_end = rest
-            .find(|c: char| c == '/' || c == '?')
+            .find(['/', '?'])
             .unwrap_or(rest.len());
         let authority = &rest[..authority_end];
         let path_and_query = if authority_end < rest.len() {
@@ -161,9 +161,8 @@ impl std::str::FromStr for Url {
         }
 
         // path ? query
-        let (path, query) = if path_and_query.starts_with('?') {
+        let (path, query) = if let Some(q) = path_and_query.strip_prefix('?') {
             // No explicit path, e.g. "http://example.com?x=1"
-            let q = &path_and_query[1..];
             let query = if q.is_empty() {
                 None
             } else {
@@ -238,7 +237,7 @@ pub fn resolve_url(base: &Url, reference: &str) -> Result<Url, UrlParseError> {
     // also let the parser decide; since this crate only supports HTTP(S), such
     // inputs will be rejected instead of incorrectly merged.
     if let Some(colon_idx) = reference.find(':') {
-        let first_delim = reference.find(|c| c == '/' || c == '?' || c == '#');
+        let first_delim = reference.find(['/', '?', '#']);
         let colon_before_delim = match first_delim {
             Some(idx) => colon_idx < idx,
             None => true,
