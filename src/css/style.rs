@@ -288,44 +288,32 @@ impl StyleResolver {
             );
         }
 
-        // Inline declarations on an iframe must participate in its layout so
-        // the resulting content box is the authoritative child viewport. This
-        // is especially important when script resizes an iframe after its
-        // sub-document resolver has already been created.
         if pseudo.is_none()
-            && node
-                .tag_name()
-                .as_deref()
-                .is_some_and(|tag| tag.eq_ignore_ascii_case("iframe"))
-            && let Some(inline_style) = node
-                .attributes()
-                .and_then(|attributes| attributes.get("style").cloned())
+            && node.node_type() == NodeType::Element
+            && let Some(inline_style) = node.get_attribute("style")
         {
-            let fake_rule = format!("iframe {{ {inline_style} }}");
-            if let Ok(stylesheet) = super::parse_stylesheet(&fake_rule)
-                && let Some(Rule::Style(rule)) = stylesheet.rules.first()
-            {
-                for declaration in &rule.declarations {
-                    candidates.push(Candidate {
-                        name: canonical_property_name(&declaration.name).to_string(),
-                        value: declaration.value.clone(),
-                        important: declaration.important,
-                        origin: Origin::Author,
-                        specificity: Specificity {
-                            ids: u32::MAX,
-                            classes: u32::MAX,
-                            elements: u32::MAX,
-                        },
-                        source_order,
-                    });
-                    source_order += 1;
-                }
+            for declaration in super::parse_style_attribute(&inline_style) {
+                candidates.push(Candidate {
+                    name: canonical_property_name(&declaration.name).to_string(),
+                    value: declaration.value,
+                    important: declaration.important,
+                    origin: Origin::Author,
+                    inline: true,
+                    specificity: Specificity {
+                        ids: 0,
+                        classes: 0,
+                        elements: 0,
+                    },
+                    source_order,
+                });
+                source_order += 1;
             }
         }
 
         candidates.sort_by(|left, right| {
             cascade_rank(left)
                 .cmp(&cascade_rank(right))
+                .then(left.inline.cmp(&right.inline))
                 .then(left.specificity.cmp(&right.specificity))
                 .then(left.source_order.cmp(&right.source_order))
         });
@@ -782,73 +770,13 @@ fn compute_cursor_value(value: &Value) -> Option<ComputedValue> {
     }
 }
 
-/// Outcome of validating a single inline-style declaration (`style="..."`),
-/// used to keep the inline getComputedStyle override in step with the cascade's
-/// value validation. See [`validate_inline_declaration`].
-pub enum InlineDeclarationValidation {
-    /// The property is not grammar-validated here; keep the author's raw value.
-    Unvalidated,
-    /// Valid: override the cascaded value with this normalized string.
-    Valid(String),
-    /// Invalid: drop the inline declaration so the cascaded value is retained.
-    Invalid,
-}
-
-/// Validates a single inline-style declaration so the `getComputedStyle` inline
-/// override applies the *same* per-property value validation as the stylesheet
-/// cascade. Only validated properties (currently `cursor`) are parsed; every
-/// other property reports [`InlineDeclarationValidation::Unvalidated`] and keeps
-/// its raw author value, so existing inline behavior is unchanged.
-pub fn validate_inline_declaration(name: &str, raw_value: &str) -> InlineDeclarationValidation {
-    if !name.eq_ignore_ascii_case("cursor") {
-        return InlineDeclarationValidation::Unvalidated;
-    }
-    let Some(value) = parse_declaration_value(name, raw_value) else {
-        return InlineDeclarationValidation::Invalid;
-    };
-    match validate_declaration(name, &value) {
-        DeclarationValidation::Valid(ComputedValue::Keyword(keyword)) => {
-            InlineDeclarationValidation::Valid(keyword)
-        }
-        DeclarationValidation::Valid(other) => {
-            InlineDeclarationValidation::Valid(render_computed_value(&other))
-        }
-        DeclarationValidation::Invalid => InlineDeclarationValidation::Invalid,
-        DeclarationValidation::Unvalidated => InlineDeclarationValidation::Unvalidated,
-    }
-}
-
-/// Parses `name: raw_value` into a [`Value`] by round-tripping through the CSS
-/// parser. Returns `None` when the fragment is not a well-formed declaration.
-fn parse_declaration_value(name: &str, raw_value: &str) -> Option<Value> {
-    let css = format!("omoikane-inline{{{name}:{raw_value}}}");
-    let stylesheet = super::parse_stylesheet(&css).ok()?;
-    match stylesheet.rules.first()? {
-        Rule::Style(rule) => rule.declarations.first().map(|decl| decl.value.clone()),
-        _ => None,
-    }
-}
-
-/// Serializes a [`ComputedValue`] to its CSS string form. Mirrors the JS-side
-/// serializer so inline-validated values match cascade-serialized values.
-fn render_computed_value(value: &ComputedValue) -> String {
-    match value {
-        ComputedValue::Keyword(keyword) => keyword.clone(),
-        ComputedValue::Color(color) => color.clone(),
-        ComputedValue::String(string) => string.clone(),
-        ComputedValue::Px(px) => format!("{px}px"),
-        ComputedValue::Percentage(pct) => format!("{pct}%"),
-        ComputedValue::Number(number) => number.to_string(),
-        ComputedValue::CalcPxPercent(px, pct) => format!("calc({px}px + {pct}%)"),
-    }
-}
-
 #[derive(Debug, Clone)]
 struct Candidate {
     name: String,
     value: Value,
     important: bool,
     origin: Origin,
+    inline: bool,
     specificity: Specificity,
     source_order: usize,
 }
@@ -886,6 +814,7 @@ fn collect_rule_candidates(
                             value: declaration.value.clone(),
                             important: declaration.important,
                             origin,
+                            inline: false,
                             specificity,
                             source_order: *source_order,
                         });
@@ -1659,6 +1588,8 @@ fn compute_value(value: &Value, property_name: &str, ctx: ResolutionContext) -> 
 fn canonical_property_name(name: &str) -> &str {
     if name.eq_ignore_ascii_case("-webkit-clip-path") {
         "clip-path"
+    } else if name.eq_ignore_ascii_case("-webkit-transform") {
+        "transform"
     } else if name.eq_ignore_ascii_case("-webkit-mask") {
         "mask"
     } else if name.eq_ignore_ascii_case("-webkit-mask-image") {

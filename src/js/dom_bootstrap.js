@@ -3200,24 +3200,6 @@
     if (prop === "cssFloat" || prop === "styleFloat") return "float";
     return String(prop).replace(/[A-Z]/g, m => "-" + m.toLowerCase());
   }
-  // Parses an inline `style="a: b; c: d"` attribute into a kebab-case map so
-  // inline declarations override the cascade result in getComputedStyle.
-  function __parseInlineStyle(cssText, map) {
-    if (!cssText) return;
-    for (const decl of String(cssText).split(";")) {
-      const idx = decl.indexOf(":");
-      if (idx < 0) continue;
-      const name = decl.slice(0, idx).trim().toLowerCase();
-      const value = decl.slice(idx + 1).trim();
-      if (!name) continue;
-      // Apply the same per-property value validation as the stylesheet cascade.
-      // A `null` result means the inline declaration is invalid and must be
-      // dropped so the cascaded value (not the raw inline value) is retained.
-      const validated = __omoikane_validate_inline_css(name, value);
-      if (validated === null) continue;
-      map[name] = validated;
-    }
-  }
   // Builds a read-only CSSStyleDeclaration-like object over `map` (kebab-case
   // property names -> CSS string values). Supports camelCase access
   // (`style.whiteSpace`), `cssFloat`, `getPropertyValue('white-space')`,
@@ -3261,21 +3243,14 @@
   }
   globalThis.getComputedStyle = function(element, pseudoElt) {
     void pseudoElt;
-    const map = {};
     if (element && element.__id != null) {
-      let cascade;
       try {
-        cascade = JSON.parse(__omoikane_computed_style(element.__id));
+        return __makeComputedStyle(JSON.parse(__omoikane_computed_style(element.__id)));
       } catch (e) {
-        cascade = {};
+        return __makeComputedStyle({});
       }
-      for (const key in cascade) {
-        if (Object.prototype.hasOwnProperty.call(cascade, key)) map[key] = cascade[key];
-      }
-      // Inline styles take precedence over cascaded values.
-      __parseInlineStyle(__omoikane_get_attribute(element.__id, "style"), map);
     }
-    return __makeComputedStyle(map);
+    return __makeComputedStyle({});
   };
   globalThis.navigator = { userAgent: __omoikane_navigator_user_agent, language: "en", languages: ["en"], platform: "", cookieEnabled: false, onLine: true };
   globalThis.console = {

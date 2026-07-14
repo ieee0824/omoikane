@@ -69,6 +69,167 @@ fn important_user_rule_beats_important_author_rule() {
 }
 
 #[test]
+fn inline_style_beats_author_specificity() {
+    let (_document, _body, title, _html) = sample_tree();
+    title.set_attribute("style", "color: green");
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet("#hero { color: red; }").unwrap(),
+    );
+
+    let style = resolver.computed_style(&title);
+    assert_eq!(style.get("color"), Some(&ComputedValue::Color("green".to_string())));
+}
+
+#[test]
+fn author_important_beats_normal_inline_style() {
+    let (_document, _body, title, _html) = sample_tree();
+    title.set_attribute("style", "color: green");
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet("h1 { color: red !important; }").unwrap(),
+    );
+
+    let style = resolver.computed_style(&title);
+    assert_eq!(style.get("color"), Some(&ComputedValue::Color("red".to_string())));
+}
+
+#[test]
+fn inline_important_beats_author_important() {
+    let (_document, _body, title, _html) = sample_tree();
+    title.set_attribute("style", "color: green !important");
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet("#hero { color: red !important; }").unwrap(),
+    );
+
+    let style = resolver.computed_style(&title);
+    assert_eq!(style.get("color"), Some(&ComputedValue::Color("green".to_string())));
+}
+
+#[test]
+fn user_important_beats_inline_important() {
+    let (_document, _body, title, _html) = sample_tree();
+    title.set_attribute("style", "color: green !important");
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::User,
+        parse_stylesheet("h1 { color: purple !important; }").unwrap(),
+    );
+
+    let style = resolver.computed_style(&title);
+    assert_eq!(style.get("color"), Some(&ComputedValue::Color("purple".to_string())));
+}
+
+#[test]
+fn inline_width_beats_presentational_width_hint() {
+    let element = NodeHandle::element("div");
+    element.set_attribute("width", "50");
+    element.set_attribute("style", "width: 100px");
+    let mut resolver = StyleResolver::new();
+
+    let style = resolver.computed_style(&element);
+    assert_eq!(style.get("width"), Some(&ComputedValue::Px(100.0)));
+}
+
+#[test]
+fn inline_style_does_not_apply_to_pseudo_elements() {
+    let (_document, _body, title, _html) = sample_tree();
+    title.set_attribute("style", "color: green");
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet("h1::before { content: \"prefix\"; color: red; }").unwrap(),
+    );
+
+    let style = resolver
+        .computed_pseudo_style(&title, PseudoElement::Before)
+        .unwrap();
+    assert_eq!(style.get("color"), Some(&ComputedValue::Color("red".to_string())));
+}
+
+#[test]
+fn inline_style_uses_forgiving_declaration_parser() {
+    let element = NodeHandle::element("div");
+    element.set_attribute(
+        "style",
+        "background: url(data:image/png;base64,AAA); color red; width: 10px",
+    );
+    let mut resolver = StyleResolver::new();
+
+    let style = resolver.computed_style(&element);
+    assert_eq!(
+        style.get("background-image"),
+        Some(&ComputedValue::Keyword(
+            "url(data:image/png;base64,AAA)".to_string()
+        ))
+    );
+    assert_eq!(style.get("width"), Some(&ComputedValue::Px(10.0)));
+}
+
+#[test]
+fn inline_style_canonicalizes_webkit_properties() {
+    let element = NodeHandle::element("div");
+    element.set_attribute("style", "-webkit-transform: translateX(10px)");
+    let mut resolver = StyleResolver::new();
+
+    let style = resolver.computed_style(&element);
+    assert_eq!(
+        style.get("transform"),
+        Some(&ComputedValue::Keyword("translateX(10px)".to_string()))
+    );
+    assert_eq!(style.get("-webkit-transform"), None);
+}
+
+#[test]
+fn iframe_inline_width_remains_supported() {
+    let iframe = NodeHandle::element("iframe");
+    iframe.set_attribute("style", "width: 200px");
+    let mut resolver = StyleResolver::new();
+
+    let style = resolver.computed_style(&iframe);
+    assert_eq!(style.get("width"), Some(&ComputedValue::Px(200.0)));
+}
+
+#[test]
+fn inline_declarations_follow_priority_and_source_order() {
+    let element = NodeHandle::element("div");
+    element.set_attribute("style", "width: 10px; width: 20px");
+    let style = StyleResolver::new().computed_style(&element);
+    assert_eq!(style.get("width"), Some(&ComputedValue::Px(20.0)));
+
+    let element = NodeHandle::element("div");
+    element.set_attribute("style", "color: blue !important; color: red");
+    let style = StyleResolver::new().computed_style(&element);
+    assert_eq!(
+        style.get("color"),
+        Some(&ComputedValue::Color("blue".to_string()))
+    );
+}
+
+#[test]
+fn inline_custom_properties_resolve_in_inline_values() {
+    let element = NodeHandle::element("div");
+    element.set_attribute("style", "--x: 5px; width: var(--x)");
+    let style = StyleResolver::new().computed_style(&element);
+    assert_eq!(style.get("width"), Some(&ComputedValue::Px(5.0)));
+}
+
+#[test]
+fn inline_property_names_are_ascii_case_insensitive() {
+    let element = NodeHandle::element("div");
+    element.set_attribute("style", "COLOR: red");
+    let style = StyleResolver::new().computed_style(&element);
+    assert_eq!(
+        style.get("color"),
+        Some(&ComputedValue::Color("red".to_string()))
+    );
+}
+
+#[test]
 fn identifies_supported_property_names() {
     assert!(is_supported_property("background-color"));
     assert!(is_supported_property("position"));
@@ -3573,32 +3734,32 @@ fn is_supported_property_includes_cursor() {
 
 #[test]
 fn inline_cursor_validation_matches_cascade() {
-    // The inline-style validator (used by getComputedStyle's inline override)
-    // must apply the same value validation as the cascade.
-    assert!(matches!(
-        validate_inline_declaration("cursor", "pointer"),
-        InlineDeclarationValidation::Valid(ref v) if v == "pointer"
-    ));
-    // Normalization to lowercase.
-    assert!(matches!(
-        validate_inline_declaration("cursor", "POINTER"),
-        InlineDeclarationValidation::Valid(ref v) if v == "pointer"
-    ));
-    // Invalid keyword is dropped.
-    assert!(matches!(
-        validate_inline_declaration("cursor", "bogus"),
-        InlineDeclarationValidation::Invalid
-    ));
-    // url() with valid fallback keyword is accepted.
-    assert!(matches!(
-        validate_inline_declaration("cursor", "url(cur.png), move"),
-        InlineDeclarationValidation::Valid(ref v) if v == "url(cur.png), move"
-    ));
-    // Non-validated properties are left untouched.
-    assert!(matches!(
-        validate_inline_declaration("color", "blue"),
-        InlineDeclarationValidation::Unvalidated
-    ));
+    let computed_value = |style_attribute: &str, property: &str| {
+        let element = NodeHandle::element("div");
+        element.set_attribute("style", style_attribute);
+        StyleResolver::new().computed_style(&element).get(property).cloned()
+    };
+
+    assert_eq!(
+        computed_value("cursor: pointer", "cursor"),
+        Some(ComputedValue::Keyword("pointer".to_string()))
+    );
+    assert_eq!(
+        computed_value("cursor: POINTER", "cursor"),
+        Some(ComputedValue::Keyword("pointer".to_string()))
+    );
+    assert_eq!(
+        computed_value("cursor: bogus", "cursor"),
+        Some(ComputedValue::Keyword("auto".to_string()))
+    );
+    assert_eq!(
+        computed_value("cursor: url(cur.png), move", "cursor"),
+        Some(ComputedValue::Keyword("url(cur.png), move".to_string()))
+    );
+    assert_eq!(
+        computed_value("color: blue", "color"),
+        Some(ComputedValue::Color("blue".to_string()))
+    );
 }
 
 #[test]
