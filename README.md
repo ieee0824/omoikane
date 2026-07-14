@@ -17,6 +17,7 @@ Omoikane は、HTTP クライアント、HTML/CSS パーサー、DOM、レイア
 - UA stylesheet デフォルト（h1〜h6 フォントサイズ・太字・margin、p、b/strong、i/em、hr）
 - shorthand 完全展開（margin / padding / border-width / border-color / border-style / overflow / flex / border-radius / list-style / text-decoration）
 - 高度セレクタ（`:not()` / `[attr^=]` / `[attr$=]` / `[attr*=]` / `[attr|=]`）
+- インライン `style="..."` 属性のカスケード統合（全要素対応。specificity 最高位の author 宣言としてスタイル計算・レイアウト・描画・`getComputedStyle` に一貫反映。`!important` 対応、CSS 2.1 §6.4.3 準拠の優先順位、forgiving パース）
 - ブロック、インライン、Flexbox、Grid、テーブルを含むレイアウトエンジン
 - **CSS Grid レイアウト**（`display: grid` / `inline-grid`）
   - `grid-template-columns` / `grid-template-rows`（px / % / vw 等の単位、`fr`、`auto`、`min-content` / `max-content`、`calc()`、`minmax()`、`repeat(N | auto-fill | auto-fit, ...)`、名前付きラインへの耐性）
@@ -210,11 +211,11 @@ CI=1 cargo test -- --include-ignored
 
 [Acid3 テスト](http://acid3.acidtests.org/)は `cargo run --example acid3` の実測で **100/100（満点、FAITHFUL / DIRECT 両ドライブモード）** です（詳細は [`tests/fixtures/acid3/README.md`](/tests/fixtures/acid3/README.md)）。
 
-CSS パーサー、レイアウトエンジン、ペイントシステムの統合テストとして、1121 件のテストが常時通過しています（`cargo test --lib`: 1121 passed / 0 failed、doc テスト 10 件）。
+CSS パーサー、レイアウトエンジン、ペイントシステムの統合テストとして、1148 件のテストが常時通過しています（`cargo test --lib`: 1148 passed / 0 failed、doc テスト 10 件）。
 
 ## 進捗
 
-issue ベースの開発状況では、以下の大きな実装フェーズは完了済みです（closed issue 169 件）。
+issue ベースの開発状況では、以下の大きな実装フェーズは完了済みです（closed issue 177 件）。
 
 - HTTP クライアント
 - HTML パーサー・文字エンコーディング検出
@@ -244,8 +245,9 @@ issue ベースの開発状況では、以下の大きな実装フェーズは�
 - CSS Grid レイアウト（061-1〜061-5: トラックサイジング、明示配置・スパン、アラインメント、トラックサイジング拡張、名前付きエリア）
 - `clip-path: inset()` の描画クリッピング（062）
 - CSS マスキング `mask` / `-webkit-mask` / `mask-image`（063）
+- インライン style 属性のカスケード統合（047: 全要素対応、!important 含めスタイル計算・レイアウト・getComputedStyle へ一貫反映）
 
-現在の open issue は [`issues/open`](/issues/open) を参照してください（open issue 13 件）。
+現在の open issue は [`issues/open`](/issues/open) を参照してください（open issue 10 件）。
 
 ## 制約
 
