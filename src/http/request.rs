@@ -7,18 +7,17 @@ use super::url::Url;
 /// Returns the default `User-Agent` header sent by Omoikane HTTP requests.
 pub fn default_user_agent() -> String {
     format!(
-        "Omoikane/{} {}",
+        "Mozilla/5.0 ({}) Gecko/20100101 Firefox/140.0 Omoikane/{}",
+        compatibility_platform(),
         env!("CARGO_PKG_VERSION"),
-        target_os_name()
     )
 }
 
-fn target_os_name() -> &'static str {
+fn compatibility_platform() -> &'static str {
     match std::env::consts::OS {
-        "macos" => "macOS",
-        "linux" => "Linux",
-        "windows" => "Windows",
-        other => other,
+        "macos" => "Macintosh; Intel Mac OS X 10.15; rv:140.0",
+        "windows" => "Windows NT 10.0; Win64; x64; rv:140.0",
+        _ => "X11; Linux x86_64; rv:140.0",
     }
 }
 

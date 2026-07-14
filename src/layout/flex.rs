@@ -80,6 +80,7 @@ pub(super) fn layout_flex_container(
     let lines = build_flex_lines(&items, available_main_size, wrap, main_gap);
     let mut children = Vec::new();
     let mut cross_cursor = y;
+    let mut column_main_end = y;
     let line_count = lines.len();
 
     for (line_index, line) in lines.into_iter().enumerate() {
@@ -165,13 +166,19 @@ pub(super) fn layout_flex_container(
             }
         }
 
+        if direction == FlexDirection::Column {
+            column_main_end = column_main_end.max(main_cursor);
+        }
         cross_cursor += line_cross_size;
         if line_index + 1 < line_count {
             cross_cursor += line_gap;
         }
     }
 
-    let auto_height = cross_cursor - y;
+    let auto_height = match direction {
+        FlexDirection::Row => cross_cursor - y,
+        FlexDirection::Column => column_main_end - y,
+    };
     let mut content_height = resolved_length(&style, "height", 0.0)
         .map(|h| super::border_box_adjust_height(&style, h, &padding, &border))
         .unwrap_or(auto_height);

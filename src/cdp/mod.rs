@@ -608,7 +608,9 @@ impl CdpSession {
 
     /// Sets the HTTP client `User-Agent` used for subsequent navigations.
     pub fn set_user_agent(&mut self, user_agent: impl Into<String>) {
-        self.http_client.set_user_agent(user_agent);
+        let user_agent = user_agent.into();
+        self.http_client.set_user_agent(user_agent.clone());
+        self.runtime.set_user_agent(user_agent);
     }
 
     /// When `true`, disables TLS certificate verification for all subsequent
@@ -885,6 +887,8 @@ impl CdpSession {
     fn install_document(&mut self, url: &str, html: &str) -> Result<(), String> {
         let document = TreeBuilder::parse(html).document();
         self.runtime = JsRuntime::with_document(document).map_err(|error| error.to_string())?;
+        self.runtime
+            .set_user_agent(self.http_client.user_agent().to_string());
         self.current_url = url.to_string();
         self.last_html = html.to_string();
         self.rebuild_node_index();

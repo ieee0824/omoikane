@@ -12,7 +12,7 @@ use crate::css::{
     parse_selector_list,
 };
 use crate::dom::{Node, NodeHandle, NodeType};
-use crate::http::Client;
+use crate::http::{Client, default_user_agent};
 use crate::layout::{LayoutBox, Overflow, Rect};
 
 thread_local! {
@@ -245,7 +245,7 @@ impl HostState {
             nodes: HashMap::new(),
             console_logs: Vec::new(),
             location_href: "http://localhost/".to_string(),
-            navigator_user_agent: "Omoikane/0.1".to_string(),
+            navigator_user_agent: default_user_agent(),
             http_client: Client::new(),
             viewport: Rect {
                 x: 0.0,
@@ -731,6 +731,15 @@ impl JsRuntime {
     /// Returns the current DOM document.
     pub fn document(&self) -> NodeHandle {
         self.host_state.borrow().document.clone()
+    }
+
+    /// Sets the User-Agent exposed to scripts in this runtime.
+    pub fn set_user_agent(&mut self, user_agent: impl Into<String>) {
+        let user_agent = user_agent.into();
+        self.host_state.borrow_mut().navigator_user_agent = user_agent.clone();
+        if let Ok(quoted) = serde_json::to_string(&user_agent) {
+            let _ = self.eval(&format!("globalThis.navigator.userAgent = {quoted};"));
+        }
     }
 
     /// Sets the viewport dimensions (px) used by `getComputedStyle` and the
@@ -3765,7 +3774,7 @@ mod tests {
         let logs = runtime.console_logs();
         assert_eq!(logs.len(), 1);
         assert!(logs[0].contains("http://localhost/"));
-        assert!(logs[0].contains("Omoikane/0.1"));
+        assert!(logs[0].contains(&default_user_agent()));
     }
 
     #[test]
@@ -3798,6 +3807,27 @@ mod tests {
         handle.join().unwrap();
 
         assert_eq!(result, "hello");
+    }
+
+    #[test]
+    fn exposes_script_element_and_message_event_constructors() {
+        let html = r#"<html><head><script id="script"></script></head><body></body></html>"#;
+        let mut runtime = runtime_from_html(html);
+
+        assert!(
+            runtime
+                .eval(r#"document.getElementById("script") instanceof HTMLScriptElement"#)
+                .unwrap()
+                .as_boolean()
+                .unwrap()
+        );
+        assert!(
+            runtime
+                .eval(r#"(() => { const event = new MessageEvent("message", { data: "ok", origin: "https://example.com" }); return event instanceof Event && event.data === "ok" && event.origin === "https://example.com"; })()"#)
+                .unwrap()
+                .as_boolean()
+                .unwrap()
+        );
     }
 
     #[test]

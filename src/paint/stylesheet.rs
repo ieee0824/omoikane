@@ -1,6 +1,7 @@
 //! Author stylesheet extraction, @import resolution, and forgiving parsing.
 
 use std::collections::HashSet;
+use std::net::{IpAddr, Ipv4Addr, ToSocketAddrs};
 
 use crate::css::{Stylesheet, parse_stylesheet, extract_font_face_rules};
 use crate::dom::{Node, NodeHandle, NodeType};
@@ -28,7 +29,7 @@ pub(crate) fn extract_author_stylesheets(
     Ok(stylesheets)
 }
 
-const MAX_EXTERNAL_STYLESHEET_BYTES: usize = 1024 * 1024; // 1 MiB limit
+const MAX_EXTERNAL_STYLESHEET_BYTES: usize = 4 * 1024 * 1024; // 4 MiB limit
 const MAX_IMPORT_DEPTH: usize = 5;
 
 pub(crate) fn collect_author_stylesheets(
@@ -415,13 +416,63 @@ pub(crate) fn resolve_relative_stylesheet_url(
     document_base: Option<&crate::http::Url>,
 ) -> Option<crate::http::Url> {
     let resolved = resolve_url(base, href).ok()?;
-    // Fetch author styles only from the document origin. Resolve first so
-    // same-origin absolute and protocol-relative URLs work as they do in a
-    // browser, while cross-origin URLs remain blocked.
-    if !same_origin(&resolved, document_base.unwrap_or(base)) {
+    // Cross-origin author stylesheets are normal on the web, but allowing
+    // arbitrary destinations would let a public page probe private services.
+    // Keep same-origin behavior (including local test servers), and require
+    // cross-origin stylesheets to resolve exclusively to public HTTPS addresses.
+    if !same_origin(&resolved, document_base.unwrap_or(base))
+        && !is_public_cross_origin_stylesheet_url(&resolved)
+    {
         return None;
     }
     Some(resolved)
+}
+
+fn is_public_cross_origin_stylesheet_url(url: &crate::http::Url) -> bool {
+    if url.scheme() != "https" {
+        return false;
+    }
+    let Ok(addresses) = (url.host(), url.port()).to_socket_addrs() else {
+        return false;
+    };
+    let addresses = addresses.collect::<Vec<_>>();
+    !addresses.is_empty() && addresses.iter().all(|address| is_public_ip(address.ip()))
+}
+
+fn is_public_ip(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(ip) => is_public_ipv4(ip),
+        IpAddr::V6(ip) => {
+            if let Some(ipv4) = ip.to_ipv4_mapped() {
+                return is_public_ipv4(ipv4);
+            }
+            let segments = ip.segments();
+            !ip.is_unspecified()
+                && !ip.is_loopback()
+                && !ip.is_multicast()
+                && (segments[0] & 0xfe00) != 0xfc00
+                && (segments[0] & 0xffc0) != 0xfe80
+                && !(segments[0] == 0x2001 && segments[1] == 0x0db8)
+        }
+    }
+}
+
+fn is_public_ipv4(ip: Ipv4Addr) -> bool {
+    let [a, b, c, _] = ip.octets();
+    !(a == 0
+        || a == 10
+        || a == 127
+        || (a == 100 && (64..=127).contains(&b))
+        || (a == 169 && b == 254)
+        || (a == 172 && (16..=31).contains(&b))
+        || (a == 192 && b == 0 && c == 0)
+        || (a == 192 && b == 0 && c == 2)
+        || (a == 192 && b == 88 && c == 99)
+        || (a == 192 && b == 168)
+        || (a == 198 && (b == 18 || b == 19))
+        || (a == 198 && b == 51 && c == 100)
+        || (a == 203 && b == 0 && c == 113)
+        || a >= 224)
 }
 
 pub(crate) fn fetch_stylesheet_by_url(
