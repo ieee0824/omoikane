@@ -151,14 +151,16 @@ pub(crate) fn paint_text_with_registry(
                         paint_rect_borders(canvas, fragment.rect, style, border, clip);
                     }
                     if !value.is_empty() {
+                        let content_rect =
+                            inline_fragment_content_rect(fragment.rect, style, border);
                         let color =
                             fragment_text_color(&fragment.style).unwrap_or(fallback_color);
                         let text_rect = Rect {
-                            x: fragment.rect.x + 6.0,
-                            y: fragment.rect.y
-                                + ((fragment.rect.height - fragment.metrics.font_size) / 2.0)
+                            x: content_rect.x,
+                            y: content_rect.y
+                                + ((content_rect.height - fragment.metrics.font_size) / 2.0)
                                     .max(0.0),
-                            width: (fragment.rect.width - 12.0).max(0.0),
+                            width: content_rect.width,
                             height: fragment.metrics.font_size,
                         };
                         if fonts.is_empty() {

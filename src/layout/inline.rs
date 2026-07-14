@@ -257,18 +257,18 @@ fn collect_input_segment(
     });
     let content_width = explicit_length(style, "width").unwrap_or_else(|| {
         if button_like {
-            measure_text_width(&value, metrics) + 16.0
+            measure_text_width(&value, metrics)
         } else {
             let columns = attributes
                 .get("size")
                 .and_then(|value| value.trim().parse::<usize>().ok())
                 .unwrap_or(20)
                 .clamp(1, 1000);
-            metrics.average_advance * columns as f32 + 4.0
+            metrics.average_advance * columns as f32
         }
     });
-    let content_height = explicit_length(style, "height")
-        .unwrap_or_else(|| metrics.font_size.max(13.0) + 4.0);
+    let content_height =
+        explicit_length(style, "height").unwrap_or_else(|| metrics.font_size.max(13.0));
     let padding = edge_sizes(style, "padding");
     let border = edge_sizes(style, "border");
     let total_height =
