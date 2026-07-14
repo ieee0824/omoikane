@@ -527,13 +527,7 @@ impl StyleResolver {
 
 fn animation_seconds(value: Option<&ComputedValue>) -> Option<f32> {
     match value {
-        Some(ComputedValue::Px(value)) | Some(ComputedValue::Number(value)) => Some(*value),
-        Some(ComputedValue::Keyword(value)) => value
-            .trim()
-            .strip_suffix("ms")
-            .and_then(|number| number.trim().parse::<f32>().ok())
-            .map(|number| number / 1000.0)
-            .or_else(|| value.trim().strip_suffix('s')?.trim().parse::<f32>().ok()),
+        Some(ComputedValue::Number(value)) => Some(*value),
         _ => None,
     }
 }
@@ -959,10 +953,18 @@ fn is_length_property(name: &str) -> bool {
             | "max-width"
             | "max-height"
             | "margin-top"
+            | "margin-inline-start"
+            | "margin-inline-end"
+            | "margin-block-start"
+            | "margin-block-end"
             | "margin-right"
             | "margin-bottom"
             | "margin-left"
             | "padding-top"
+            | "padding-inline-start"
+            | "padding-inline-end"
+            | "padding-block-start"
+            | "padding-block-end"
             | "padding-right"
             | "padding-bottom"
             | "padding-left"
@@ -1460,6 +1462,10 @@ fn is_supported_property(name: &str) -> bool {
             | "margin-left"
             | "margin-right"
             | "margin-top"
+            | "margin-inline-start"
+            | "margin-inline-end"
+            | "margin-block-start"
+            | "margin-block-end"
             | "max-height"
             | "max-width"
             | "min-height"
@@ -1476,6 +1482,10 @@ fn is_supported_property(name: &str) -> bool {
             | "padding-left"
             | "padding-right"
             | "padding-top"
+            | "padding-inline-start"
+            | "padding-inline-end"
+            | "padding-block-start"
+            | "padding-block-end"
             | "position"
             | "right"
             | "row-gap"
@@ -1519,7 +1529,53 @@ fn is_supported_property(name: &str) -> bool {
     )
 }
 
+fn resolve_time_seconds(value: &Value) -> Option<f32> {
+    match value {
+        Value::Length(number, unit) if unit.eq_ignore_ascii_case("s") => Some(*number),
+        Value::Length(number, unit) if unit.eq_ignore_ascii_case("ms") => Some(*number / 1000.0),
+        Value::Number(number) if *number == 0.0 => Some(0.0),
+        Value::Function { name, arguments } if name.eq_ignore_ascii_case("calc") => {
+            resolve_time_calc(arguments.first()?)
+        }
+        Value::List(_) => resolve_time_calc(value),
+        _ => None,
+    }
+}
+
+fn resolve_time_calc(value: &Value) -> Option<f32> {
+    let Value::List(values) = value else {
+        return resolve_time_seconds(value);
+    };
+    let mut total = 0.0;
+    let mut sign = 1.0;
+    let mut expects_value = true;
+    for value in values {
+        match value {
+            Value::Keyword(operator) if operator == "+" || operator == "-" => {
+                if expects_value {
+                    return None;
+                }
+                sign = if operator == "-" { -1.0 } else { 1.0 };
+                expects_value = true;
+            }
+            value if expects_value => {
+                total += sign * resolve_time_seconds(value)?;
+                expects_value = false;
+            }
+            _ => return None,
+        }
+    }
+    (!expects_value).then_some(total)
+}
+
 fn compute_value(value: &Value, property_name: &str, ctx: ResolutionContext) -> ComputedValue {
+    if property_name.eq_ignore_ascii_case("animation-duration")
+        || property_name.eq_ignore_ascii_case("animation-delay")
+    {
+        return resolve_time_seconds(value)
+            .map(ComputedValue::Number)
+            .unwrap_or_else(|| ComputedValue::Keyword(render_value(value)));
+    }
     if property_name.eq_ignore_ascii_case("clip-path") {
         return ComputedValue::Keyword(render_clip_path_value(value, ctx));
     }

@@ -62,7 +62,7 @@ CSS animation 評価と Grid 配置を改善する。
 - `margin-inline`/`margin-block`/`padding-inline`/`padding-block` shorthand をstart/endへ展開
 - `grid-template` の空白なしslash（`auto/1fr`）を正規化
 - kasaneteto.jp縮小fixture 2件を追加し、実サイト1366x900でキャラクター表示と同一行Grid配置を確認
-- `cargo test --lib`: 1150 passed / 0 failed / 26 ignored
+- `cargo test --lib`: 1151 passed / 0 failed / 26 ignored
 
 ## 関連
 

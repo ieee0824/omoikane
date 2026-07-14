@@ -245,6 +245,14 @@ fn identifies_supported_property_names() {
         "animation-iteration-count",
         "animation-play-state",
         "animation-timing-function",
+        "margin-inline-start",
+        "margin-inline-end",
+        "margin-block-start",
+        "margin-block-end",
+        "padding-inline-start",
+        "padding-inline-end",
+        "padding-block-start",
+        "padding-block-end",
     ] {
         assert!(
             is_supported_property(property),
@@ -3130,8 +3138,8 @@ fn infinite_animation_uses_deterministic_visible_snapshot_and_delay() {
                 25% { opacity: 1; }
                 30%, 100% { opacity: 0; }
              }
-             .character { opacity: 0; animation: characterFade 8s infinite linear; }
-             .delayed { animation-delay: 2.5s; }",
+             .character { opacity: 0; animation: characterFade 8000ms infinite linear; }
+             .delayed { animation-delay: calc(2000ms + 500ms); }",
         )
         .unwrap(),
     );
@@ -3150,6 +3158,41 @@ fn infinite_animation_uses_deterministic_visible_snapshot_and_delay() {
             .get("animation-iteration-count"),
         Some(&ComputedValue::Keyword("infinite".to_string()))
     );
+    assert_eq!(
+        resolver.computed_style(&visible).get("animation-duration"),
+        Some(&ComputedValue::Number(8.0))
+    );
+    assert_eq!(
+        resolver.computed_style(&delayed).get("animation-delay"),
+        Some(&ComputedValue::Number(2.5))
+    );
+}
+
+#[test]
+fn invalid_animation_time_unit_does_not_drive_snapshot() {
+    let element = NodeHandle::element("div");
+    element.set_attribute("class", "character");
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "@keyframes fade { 0% { opacity: 0; } 100% { opacity: 1; } }
+             .character {
+                 opacity: 0;
+                 animation-name: fade;
+                 animation-duration: 8px;
+                 animation-iteration-count: infinite;
+             }",
+        )
+        .unwrap(),
+    );
+
+    let style = resolver.computed_style(&element);
+    assert_eq!(
+        style.get("animation-duration"),
+        Some(&ComputedValue::Keyword("8px".to_string()))
+    );
+    assert_eq!(style.get("opacity"), Some(&ComputedValue::Number(0.0)));
 }
 
 #[test]
