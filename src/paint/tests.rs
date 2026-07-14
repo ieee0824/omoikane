@@ -3543,6 +3543,44 @@ fn resolve_url_strips_fragment() {
 }
 
 #[test]
+fn stylesheet_url_allows_same_origin_absolute_references() {
+    let document: crate::http::Url = "https://example.com/page.html".parse().unwrap();
+
+    let absolute = crate::paint::stylesheet::resolve_relative_stylesheet_url(
+        &document,
+        "https://example.com/assets/theme.css",
+        Some(&document),
+    )
+    .unwrap();
+    assert_eq!(absolute.to_string(), "https://example.com/assets/theme.css");
+
+    let protocol_relative = crate::paint::stylesheet::resolve_relative_stylesheet_url(
+        &document,
+        "//example.com/assets/blocks.css",
+        Some(&document),
+    )
+    .unwrap();
+    assert_eq!(
+        protocol_relative.to_string(),
+        "https://example.com/assets/blocks.css"
+    );
+}
+
+#[test]
+fn stylesheet_url_rejects_cross_origin_absolute_references() {
+    let document: crate::http::Url = "https://example.com/page.html".parse().unwrap();
+
+    assert!(
+        crate::paint::stylesheet::resolve_relative_stylesheet_url(
+            &document,
+            "https://cdn.example.net/theme.css",
+            Some(&document),
+        )
+        .is_none()
+    );
+}
+
+#[test]
 fn resolve_url_rejects_non_http_schemes() {
     let base: crate::http::Url = "https://example.com/page.html".parse().unwrap();
 

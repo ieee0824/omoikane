@@ -417,18 +417,12 @@ pub(crate) fn resolve_relative_stylesheet_url(
     href: &str,
     document_base: Option<&crate::http::Url>,
 ) -> Option<crate::http::Url> {
-    // Only fetch same-origin URLs that do not specify a scheme, to prevent SSRF attacks.
-    // Absolute URLs (containing "://") and protocol-relative URLs ("//")
-    // are skipped; this still allows relative and absolute-path references.
-    if href.contains("://") || href.starts_with("//") {
-        return None;
-    }
-
     let resolved = resolve_url(base, href).ok()?;
-    if let Some(document_base) = document_base {
-        if !same_origin(&resolved, document_base) {
-            return None;
-        }
+    // Fetch author styles only from the document origin. Resolve first so
+    // same-origin absolute and protocol-relative URLs work as they do in a
+    // browser, while cross-origin URLs remain blocked.
+    if !same_origin(&resolved, document_base.unwrap_or(base)) {
+        return None;
     }
     Some(resolved)
 }
@@ -481,6 +475,8 @@ pub(crate) fn parse_stylesheet_forgiving(input: &str) -> Stylesheet {
                     if !trimmed.is_empty() {
                         if let Ok(stylesheet) = parse_stylesheet(trimmed) {
                             rules.extend(stylesheet.rules);
+                        } else if let Some(rule) = salvage_nested_at_rule(trimmed) {
+                            rules.push(rule);
                         } else if let Some(rule) = salvage_style_rule(trimmed) {
                             rules.push(crate::css::Rule::Style(rule));
                         }
@@ -493,6 +489,36 @@ pub(crate) fn parse_stylesheet_forgiving(input: &str) -> Stylesheet {
     }
 
     Stylesheet { rules }
+}
+
+fn salvage_nested_at_rule(input: &str) -> Option<crate::css::Rule> {
+    let open = input.find("{")?;
+    let close = input.rfind("}")?;
+    if close <= open {
+        return None;
+    }
+
+    let header = input[..open].trim();
+    let rest = header.strip_prefix("")?;
+    if rest
+        .chars()
+        .next()
+        .is_some_and(|ch| ch.is_ascii_alphanumeric() || ch == char::from(45))
+    {
+        return None;
+    }
+
+    let nested = parse_stylesheet_forgiving(&input[open + 1..close]);
+    if nested.rules.is_empty() {
+        return None;
+    }
+
+    Some(crate::css::Rule::At(crate::css::AtRule {
+        name: "media".to_string(),
+        prelude: rest.trim().to_string(),
+        block: Some(nested.rules),
+        declarations: Vec::new(),
+    }))
 }
 
 pub(crate) fn salvage_style_rule(input: &str) -> Option<crate::css::StyleRule> {
