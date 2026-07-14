@@ -33,6 +33,21 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         fonts-ipafont-mincho \
     && rm -rf /var/lib/apt/lists/*
 
+# Firefox（Mozilla 公式 APT リポジトリ）。レンダリング結果の比較用ブラウザとして使う。
+# 署名鍵は Mozilla が公開するフィンガープリントと完全一致することを確認してから登録する。
+RUN install -d -m 0755 /etc/apt/keyrings \
+    && curl -fsSL https://packages.mozilla.org/apt/repo-signing-key.gpg \
+        -o /etc/apt/keyrings/packages.mozilla.org.asc \
+    && test "$(gpg --batch --quiet --show-keys --with-colons /etc/apt/keyrings/packages.mozilla.org.asc \
+        | awk -F: '$1 == "fpr" { print $10; exit }')" = "35BAA0B33E9EB396F59CA838C0BA5CE6DC6315A3" \
+    && printf 'Types: deb\nURIs: https://packages.mozilla.org/apt\nSuites: mozilla\nComponents: main\nSigned-By: /etc/apt/keyrings/packages.mozilla.org.asc\n' \
+        > /etc/apt/sources.list.d/mozilla.sources \
+    && printf 'Package: *\nPin: origin packages.mozilla.org\nPin-Priority: 1000\n' \
+        > /etc/apt/preferences.d/mozilla \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends firefox firefox-l10n-ja \
+    && rm -rf /var/lib/apt/lists/*
+
 # GitHub CLI（gh）。PR 作成などの Claude Code / PR ワークフローで使う。
 # 公式 apt リポジトリ（cli.github.com/packages）を鍵付きで追加してインストールする。
 RUN mkdir -p -m 755 /etc/apt/keyrings \
@@ -58,6 +73,9 @@ RUN groupadd --gid ${USER_GID} ${USERNAME} \
         > /etc/sudoers.d/${USERNAME} \
     && chmod 0440 /etc/sudoers.d/${USERNAME}
 
+# Rust の静的解析・フォーマットをコンテナ再作成後も利用できるようにする。
+RUN rustup component add clippy rustfmt
+
 # ビルド成果物はホストの target/ と分離した専用の場所に出力する。
 ENV CARGO_TARGET_DIR=/target
 RUN mkdir -p /target && chown ${USER_UID}:${USER_GID} /target
@@ -82,6 +100,13 @@ ENV CLAUDE_CONFIG_DIR=/home/${USERNAME}/.claude
 # 所有者自己修復ループと整合させるため、ENV で明示的に固定する。
 ENV CODEX_HOME=/home/${USERNAME}/.codex
 
+# Bash 履歴を compose の named volume に保存し、対話シェル間で即時共有する。
+ENV HISTFILE=/home/${USERNAME}/.bash-history/history \
+    HISTSIZE=10000 \
+    HISTFILESIZE=20000 \
+    HISTCONTROL=ignoreboth:erasedups \
+    PROMPT_COMMAND="history -a; history -n"
+
 USER ${USERNAME}
 WORKDIR /workspace
 
@@ -92,7 +117,8 @@ RUN mkdir -p ${CLAUDE_CONFIG_DIR}
 # SSH 鍵の置き場所（compose の ssh-config volume でマウントして永続化する）。
 # ホストの ~/.ssh はマウントせず、コンテナ内で生成した鍵をここに置く運用。
 # 空の named volume は所有者・パーミッションを引き継ぐため、dev 所有・700 で用意しておく。
-RUN mkdir -p /home/${USERNAME}/.ssh && chmod 700 /home/${USERNAME}/.ssh
+RUN mkdir -p /home/${USERNAME}/.ssh /home/${USERNAME}/.bash-history \
+    && chmod 700 /home/${USERNAME}/.ssh /home/${USERNAME}/.bash-history
 
 # Claude Code のネイティブインストーラ。~/.local/bin にインストールされる。
 # 公式が推奨するインストール方法であり、チェックサム検証なしで取得する設計判断。

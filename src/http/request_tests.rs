@@ -49,6 +49,14 @@ fn get_request_includes_accept_encoding_gzip() {
 }
 
 #[test]
+fn get_request_includes_browser_language_preferences() {
+    let req = HttpRequest::get("http://example.com").unwrap();
+    let text = String::from_utf8(req.serialize()).unwrap();
+
+    assert!(text.contains("Accept-Language: en-US,en;q=0.5\r\n"));
+}
+
+#[test]
 fn add_custom_header() {
     let mut req = HttpRequest::get("http://example.com").unwrap();
     req.add_header("Accept", "text/html");

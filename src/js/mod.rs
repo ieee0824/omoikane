@@ -1998,14 +1998,29 @@ fn layout_metrics_native(_: &JsValue, args: &[JsValue], context: &mut Context) -
         let Some(node) = node else {
             return Ok(js_string!(LayoutMetrics::zero().to_json().as_str()).into());
         };
+        let is_root_element = node
+            .parent_node()
+            .is_some_and(|parent| parent.node_type() == NodeType::Document);
+        let document = document_root_for_node(&node);
         let mut state = state.borrow_mut();
+        let viewport = document
+            .as_ref()
+            .map(|document| state.viewport_for_document(document));
         state.ensure_layout();
-        let metrics = state
+        let mut metrics = state
             .layout_root
             .as_ref()
             .and_then(|root| find_layout_box(root, &node))
             .map(compute_layout_metrics)
             .unwrap_or_else(LayoutMetrics::zero);
+        if is_root_element && let Some(viewport) = viewport {
+            metrics.client_width = viewport.width;
+            metrics.client_height = viewport.height;
+            metrics.client_top = 0.0;
+            metrics.client_left = 0.0;
+            metrics.scroll_width = metrics.scroll_width.max(viewport.width);
+            metrics.scroll_height = metrics.scroll_height.max(viewport.height);
+        }
         Ok(js_string!(metrics.to_json().as_str()).into())
     })
 }
@@ -7858,6 +7873,23 @@ mod tests {
         // Border box starts at the origin.
         assert_eq!(eval_num(&mut runtime, "document.getElementById('box').getBoundingClientRect().left"), 0.0);
         assert_eq!(eval_num(&mut runtime, "document.getElementById('box').getBoundingClientRect().top"), 0.0);
+    }
+
+    #[test]
+    fn root_client_metrics_use_viewport_instead_of_document_height() {
+        let html = r#"<html><head><style>
+            * { margin: 0; padding: 0; }
+            body { height: 1400px; }
+        </style></head><body></body></html>"#;
+        let mut runtime = runtime_from_html(html);
+        runtime.set_viewport(800.0, 600.0);
+
+        assert_eq!(eval_num(&mut runtime, "document.documentElement.clientWidth"), 800.0);
+        assert_eq!(eval_num(&mut runtime, "document.documentElement.clientHeight"), 600.0);
+        assert!(
+            eval_num(&mut runtime, "document.documentElement.scrollHeight") > 600.0,
+            "root scrollHeight must still expose the full document height"
+        );
     }
 
     #[test]

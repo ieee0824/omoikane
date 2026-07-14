@@ -5,6 +5,14 @@ services:
       dockerfile: Dockerfile
     image: omoikane-dev
     working_dir: /workspace
+    # Codex の bwrap サンドボックスが隔離ネットワークの loopback を設定するために必要。
+    cap_add:
+      - NET_ADMIN
+    # Codex の bwrap が user/network namespace を作成できるよう、開発コンテナに限り
+    # Docker の既定 seccomp フィルターを無効化する。
+    security_opt:
+      - seccomp=unconfined
+      - apparmor=unconfined
     # 対話的に exec して使うため tty/stdin を有効化する。
     tty: true
     stdin_open: true
@@ -24,6 +32,8 @@ services:
       # コンテナ専用の SSH 鍵（~/.ssh）を永続化する。サンドボックスの隔離を保つため
       # ホストの ~/.ssh はマウントしない（鍵はコンテナ内で生成して個別に登録する）。
       - ssh-config:/home/dev/.ssh
+      # Bash のコマンド履歴をコンテナ再作成後も保持する。
+      - bash-history:/home/dev/.bash-history
     # コンテナを起動したままにして docker compose exec で入れるようにする。
     command: sleep infinity
 
@@ -34,3 +44,4 @@ volumes:
   claude-config:
   codex-config:
   ssh-config:
+  bash-history:
