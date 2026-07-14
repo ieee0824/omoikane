@@ -1132,7 +1132,18 @@ fn paint_box_internal_to(
         }
     }
     paint_background_image(canvas, style, border_box, inherited_clip, viewport);
-    paint_replaced_image_box(canvas, layout, style, inherited_clip);
+    if layout.overflow == crate::layout::Overflow::Hidden {
+        match inherited_clip {
+            Some(current) => {
+                if let Some(image_clip) = intersect(current, padding_box) {
+                    paint_replaced_image_box(canvas, layout, style, Some(image_clip));
+                }
+            }
+            None => paint_replaced_image_box(canvas, layout, style, Some(padding_box)),
+        }
+    } else {
+        paint_replaced_image_box(canvas, layout, style, inherited_clip);
+    }
     paint_block_generated_pseudo_box(
         canvas,
         layout,
