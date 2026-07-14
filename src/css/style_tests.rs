@@ -3031,6 +3031,126 @@ fn ua_defaults_a_has_underline_and_blue() {
 }
 
 #[test]
+fn ua_defaults_button_is_inline_block_bordered() {
+    let document = NodeHandle::document();
+    let html = NodeHandle::element("html");
+    let body = NodeHandle::element("body");
+    let button = NodeHandle::element("button");
+    document.append_child(html.clone());
+    html.append_child(body.clone());
+    body.append_child(button.clone());
+
+    let mut resolver = StyleResolver::new();
+    let style = resolver.computed_style(&button);
+    assert_eq!(
+        style.get("display"),
+        Some(&ComputedValue::Keyword("inline-block".to_string()))
+    );
+    assert_eq!(
+        style.get("background-color"),
+        Some(&ComputedValue::Color("#efefef".to_string()))
+    );
+    assert_eq!(
+        style.get("text-align"),
+        Some(&ComputedValue::Keyword("center".to_string()))
+    );
+    for side in ["top", "right", "bottom", "left"] {
+        assert_eq!(
+            style.get(&format!("border-{side}-width")),
+            Some(&ComputedValue::Px(2.0)),
+            "button border-{side}-width"
+        );
+        assert_eq!(
+            style.get(&format!("border-{side}-style")),
+            Some(&ComputedValue::Keyword("solid".to_string()))
+        );
+        assert_eq!(
+            style.get(&format!("border-{side}-color")),
+            Some(&ComputedValue::Color("#767676".to_string()))
+        );
+    }
+    assert_eq!(style.get("padding-top"), Some(&ComputedValue::Px(1.0)));
+    assert_eq!(style.get("padding-right"), Some(&ComputedValue::Px(6.0)));
+    assert_eq!(style.get("padding-bottom"), Some(&ComputedValue::Px(1.0)));
+    assert_eq!(style.get("padding-left"), Some(&ComputedValue::Px(6.0)));
+}
+
+#[test]
+fn ua_defaults_textarea_is_inline_block_bordered() {
+    let document = NodeHandle::document();
+    let html = NodeHandle::element("html");
+    let body = NodeHandle::element("body");
+    let textarea = NodeHandle::element("textarea");
+    document.append_child(html.clone());
+    html.append_child(body.clone());
+    body.append_child(textarea.clone());
+
+    let mut resolver = StyleResolver::new();
+    let style = resolver.computed_style(&textarea);
+    assert_eq!(
+        style.get("display"),
+        Some(&ComputedValue::Keyword("inline-block".to_string()))
+    );
+    assert_eq!(
+        style.get("background-color"),
+        Some(&ComputedValue::Color("white".to_string()))
+    );
+    for side in ["top", "right", "bottom", "left"] {
+        assert_eq!(
+            style.get(&format!("border-{side}-width")),
+            Some(&ComputedValue::Px(1.0)),
+            "textarea border-{side}-width"
+        );
+        assert_eq!(
+            style.get(&format!("border-{side}-style")),
+            Some(&ComputedValue::Keyword("solid".to_string()))
+        );
+        assert_eq!(
+            style.get(&format!("padding-{side}")),
+            Some(&ComputedValue::Px(2.0)),
+            "textarea padding-{side}"
+        );
+    }
+}
+
+#[test]
+fn ua_defaults_select_is_inline_block_bordered() {
+    let document = NodeHandle::document();
+    let html = NodeHandle::element("html");
+    let body = NodeHandle::element("body");
+    let select = NodeHandle::element("select");
+    document.append_child(html.clone());
+    html.append_child(body.clone());
+    body.append_child(select.clone());
+
+    let mut resolver = StyleResolver::new();
+    let style = resolver.computed_style(&select);
+    assert_eq!(
+        style.get("display"),
+        Some(&ComputedValue::Keyword("inline-block".to_string()))
+    );
+    assert_eq!(
+        style.get("background-color"),
+        Some(&ComputedValue::Color("#efefef".to_string()))
+    );
+    for side in ["top", "right", "bottom", "left"] {
+        assert_eq!(
+            style.get(&format!("border-{side}-width")),
+            Some(&ComputedValue::Px(1.0)),
+            "select border-{side}-width"
+        );
+        assert_eq!(
+            style.get(&format!("border-{side}-style")),
+            Some(&ComputedValue::Keyword("solid".to_string()))
+        );
+    }
+    assert_eq!(style.get("padding-top"), Some(&ComputedValue::Px(1.0)));
+    assert_eq!(style.get("padding-right"), Some(&ComputedValue::Px(4.0)));
+    assert_eq!(style.get("padding-bottom"), Some(&ComputedValue::Px(1.0)));
+    assert_eq!(style.get("padding-left"), Some(&ComputedValue::Px(4.0)));
+}
+
+#[test]
 fn animation_forwards_applies_keyframe_final_state() {
     let document = NodeHandle::document();
     let html = NodeHandle::element("html");

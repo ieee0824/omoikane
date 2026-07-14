@@ -6180,3 +6180,168 @@ div {{ position: absolute; left: 10.5px; top: 10.5px;
     assert_eq!(canvas.pixel(9, 10), Some(Color::rgba(0, 0, 0, 0)));
     assert_eq!(canvas.pixel(10, 9), Some(Color::rgba(0, 0, 0, 0)));
 }
+
+#[test]
+fn form_control_text_measure_matches_painter_advance_model() {
+    use super::text::measure_form_control_text_width;
+
+    // Placeholder path (no fonts): per-char advance is (font_size * 0.6).max(1.0)
+    // plus letter-spacing between characters, matching paint_text_placeholder.
+    let placeholder = measure_form_control_text_width("ab", 10.0, &[], 2.0);
+    assert!(
+        (placeholder - 14.0).abs() < 1e-4,
+        "placeholder width expected 6 + 2 + 6 = 14, got {placeholder}"
+    );
+    assert_eq!(measure_form_control_text_width("", 10.0, &[], 2.0), 0.0);
+
+    // Font path: the measured width must equal the exact cursor advance of
+    // paint_text_with_font_refs (per-char rasterize advance + same-font kerning +
+    // letter-spacing between characters), so centered labels stay centered.
+    let fonts = crate::font::load_default_text_fonts();
+    if fonts.is_empty() {
+        eprintln!("Skipping font path: no default text fonts available");
+        return;
+    }
+    let font_refs: Vec<&crate::font::Font> = fonts.iter().collect();
+    let font_size = 16.0;
+    let letter_spacing = 1.5;
+    let text = "AVAST Wavy 検索";
+    let chars: Vec<char> = text.chars().collect();
+    let mut expected = 0.0f32;
+    let mut previous: Option<(char, usize)> = None;
+    for (i, &ch) in chars.iter().enumerate() {
+        let (font_index, _, advance) = rasterize_with_fallback_refs(&font_refs, ch, font_size);
+        if let Some((prev, prev_index)) = previous
+            && prev_index == font_index
+        {
+            expected += font_refs[font_index].glyph_kerning(prev, ch, font_size);
+        }
+        expected += advance;
+        if i + 1 < chars.len() {
+            expected += letter_spacing;
+        }
+        previous = Some((ch, font_index));
+    }
+    let measured = measure_form_control_text_width(text, font_size, &font_refs, letter_spacing);
+    assert!(
+        (measured - expected).abs() < 1e-3,
+        "measured {measured} must equal painter cursor advance {expected}"
+    );
+}
+
+#[test]
+fn form_control_label_uses_web_font_variant() {
+    // A FormControl label whose fragment style names a registered web-font
+    // family must be measured and drawn with that variant. Painting with
+    // (global fonts = [F], no registry) and (global fonts = [], registry
+    // "btnface" -> F) must produce pixel-identical output; without web-font
+    // support the second run would fall back to placeholder rectangles.
+    let Some(font_path) = crate::font::find_system_font("sans-serif") else {
+        eprintln!("Skipping web font form control test: no sans-serif system font found");
+        return;
+    };
+    let (Ok(global_font), Ok(web_font)) = (
+        crate::font::Font::load_from_file(&font_path),
+        crate::font::Font::load_from_file(&font_path),
+    ) else {
+        eprintln!("Skipping web font form control test: failed to load system font");
+        return;
+    };
+
+    let mut registry = crate::font::WebFontRegistry::new();
+    registry.push(
+        "btnface",
+        crate::font::FontWeight::parse("normal"),
+        crate::font::FontStyle::parse("normal"),
+        web_font,
+    );
+
+    // The button UA defaults include `text-align: center`, so the centering
+    // measurement path is exercised alongside glyph drawing.
+    let button = NodeHandle::element("button");
+    let mut resolver = StyleResolver::new();
+    let control_style = resolver.computed_style(&button);
+    assert_eq!(
+        control_style.get("text-align"),
+        Some(&crate::css::ComputedValue::Keyword("center".to_string())),
+        "button UA default must center the label for this test to cover measurement"
+    );
+    let viewport = Rect { x: 0.0, y: 0.0, width: 60.0, height: 24.0 };
+    let layout = LayoutBox {
+        node: button.clone(),
+        dimensions: BoxDimensions {
+            content: viewport,
+            ..BoxDimensions::default()
+        },
+        visibility: crate::layout::Visibility::Visible,
+        overflow: crate::layout::Overflow::Visible,
+        z_index: 0,
+        lines: vec![LineBox {
+            rect: viewport,
+            baseline: 12.8,
+            fragments: vec![InlineFragment {
+                node: button,
+                content: InlineFragmentContent::FormControl(
+                    control_style.clone(),
+                    "AB".to_string(),
+                ),
+                rect: viewport,
+                metrics: FontMetrics::from_font_size(16.0),
+                vertical_align: VerticalAlign::Baseline,
+                style: FragmentStyle {
+                    font_family: Some("btnface".to_string()),
+                    ..FragmentStyle::default()
+                },
+            }],
+        }],
+        children: Vec::new(),
+        marker: None,
+    };
+
+    let mut with_global = Canvas::new(60, 24);
+    paint_text_with_registry(
+        &mut with_global,
+        &layout,
+        &control_style,
+        None,
+        viewport,
+        std::slice::from_ref(&global_font),
+        None,
+    );
+    let mut with_registry = Canvas::new(60, 24);
+    paint_text_with_registry(
+        &mut with_registry,
+        &layout,
+        &control_style,
+        None,
+        viewport,
+        &[],
+        Some(&registry),
+    );
+
+    // Glyph pixels must be present (anything that is neither transparent nor
+    // the UA background/border fill), so the comparison cannot pass vacuously.
+    let background = Color::rgb(0xef, 0xef, 0xef);
+    let border = Color::rgb(0x76, 0x76, 0x76);
+    let mut glyph_pixels = 0usize;
+    for y in 0..24 {
+        for x in 0..60 {
+            assert_eq!(
+                with_registry.pixel(x, y),
+                with_global.pixel(x, y),
+                "pixel ({x}, {y}) must match the same font painted as a global font"
+            );
+            let pixel = with_global.pixel(x, y);
+            if pixel != Some(Color::rgba(0, 0, 0, 0))
+                && pixel != Some(background)
+                && pixel != Some(border)
+            {
+                glyph_pixels += 1;
+            }
+        }
+    }
+    assert!(
+        glyph_pixels > 0,
+        "the label must actually paint glyph pixels for the comparison to be meaningful"
+    );
+}

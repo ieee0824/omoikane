@@ -917,6 +917,434 @@ fn google_style_form_controls_create_visible_replaced_fragments() {
     assert!(fragments[1].0.width > 80.0);
 }
 
+/// Collects `(rect, value)` for every `FormControl` fragment in `container`'s
+/// line boxes. Used by the `<button>`/`<textarea>`/`<select>` layout tests.
+fn form_control_fragments(container: &LayoutBox) -> Vec<(Rect, String)> {
+    container
+        .lines
+        .iter()
+        .flat_map(|line| &line.fragments)
+        .filter_map(|fragment| match &fragment.content {
+            InlineFragmentContent::FormControl(_, value) => Some((fragment.rect, value.clone())),
+            _ => None,
+        })
+        .collect()
+}
+
+fn layout_single_control_container(body: &NodeHandle) -> LayoutBox {
+    let mut resolver = StyleResolver::new();
+    layout_control_container(body, &mut resolver)
+}
+
+fn layout_control_container(body: &NodeHandle, resolver: &mut StyleResolver) -> LayoutBox {
+    let layout = layout_tree(
+        body,
+        resolver,
+        Rect { x: 0.0, y: 0.0, width: 1000.0, height: 0.0 },
+    )
+    .unwrap();
+    layout.children.into_iter().next().expect("container box")
+}
+
+#[test]
+fn button_label_width_is_text_plus_box_spacing() {
+    // A UA-styled button and one with padding/border stripped share the same
+    // label text width, so the difference is exactly the UA box spacing:
+    // padding-left(6) + padding-right(6) + border-left(2) + border-right(2) = 16.
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let div = NodeHandle::element("div");
+    let styled = NodeHandle::element("button");
+    let bare = NodeHandle::element("button");
+    styled.append_child(NodeHandle::text("送信する"));
+    bare.set_attribute("class", "bare");
+    bare.append_child(NodeHandle::text("送信する"));
+    document.append_child(body.clone());
+    body.append_child(div.clone());
+    div.append_child(styled);
+    div.append_child(bare);
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            ".bare { padding: 0px; border-top-width: 0px; border-right-width: 0px;
+                     border-bottom-width: 0px; border-left-width: 0px; }",
+        )
+        .unwrap(),
+    );
+    let container = layout_control_container(&body, &mut resolver);
+    let fragments = form_control_fragments(&container);
+    assert_eq!(fragments.len(), 2);
+    assert_eq!(fragments[0].1, "送信する");
+    assert_eq!(fragments[1].1, "送信する");
+    let spacing = fragments[0].0.width - fragments[1].0.width;
+    assert!(
+        (spacing - 16.0).abs() < 0.01,
+        "button width must be label text width + 16px box spacing, got diff {spacing}"
+    );
+}
+
+#[test]
+fn button_explicit_width_takes_precedence() {
+    // width:200px content + padding(6+6) + border(2+2) = 216.
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let div = NodeHandle::element("div");
+    let button = NodeHandle::element("button");
+    button.set_attribute("style", "width: 200px");
+    button.append_child(NodeHandle::text("OK"));
+    document.append_child(body.clone());
+    body.append_child(div.clone());
+    div.append_child(button);
+
+    let container = layout_single_control_container(&body);
+    let fragments = form_control_fragments(&container);
+    assert_eq!(fragments.len(), 1);
+    assert!(
+        (fragments[0].0.width - 216.0).abs() < 0.01,
+        "explicit width should win: expected 216, got {}",
+        fragments[0].0.width
+    );
+}
+
+#[test]
+fn button_flattens_descendant_text_into_single_fragment() {
+    // <button><span>a</span>b</button>: children are not laid out independently;
+    // the label is the flattened descendant text "ab".
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let div = NodeHandle::element("div");
+    let button = NodeHandle::element("button");
+    let span = NodeHandle::element("span");
+    span.append_child(NodeHandle::text("a"));
+    button.append_child(span);
+    button.append_child(NodeHandle::text("b"));
+    document.append_child(body.clone());
+    body.append_child(div.clone());
+    div.append_child(button);
+
+    let container = layout_single_control_container(&body);
+    let all_fragments: Vec<_> = container
+        .lines
+        .iter()
+        .flat_map(|line| &line.fragments)
+        .collect();
+    assert_eq!(
+        all_fragments.len(),
+        1,
+        "button children must not produce independent fragments"
+    );
+    let fragments = form_control_fragments(&container);
+    assert_eq!(fragments.len(), 1);
+    assert_eq!(fragments[0].1, "ab");
+}
+
+#[test]
+fn textarea_size_derives_from_cols_and_rows() {
+    // font-size:20px => average_advance = 12, line-height(normal) = 24.
+    // width  = cols(10) * 12 + padding(2+2) + border(1+1) = 126.
+    // height = rows(3)  * 24 + padding(2+2) + border(1+1) = 78.
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let div = NodeHandle::element("div");
+    let textarea = NodeHandle::element("textarea");
+    textarea.set_attribute("cols", "10");
+    textarea.set_attribute("rows", "3");
+    document.append_child(body.clone());
+    body.append_child(div.clone());
+    div.append_child(textarea);
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet("textarea { font-size: 20px; }").unwrap(),
+    );
+    let container = layout_control_container(&body, &mut resolver);
+    let fragments = form_control_fragments(&container);
+    assert_eq!(fragments.len(), 1);
+    assert!(
+        (fragments[0].0.width - 126.0).abs() < 0.01,
+        "cols-derived width expected 126, got {}",
+        fragments[0].0.width
+    );
+    assert!(
+        (fragments[0].0.height - 78.0).abs() < 0.01,
+        "rows-derived height expected 78, got {}",
+        fragments[0].0.height
+    );
+}
+
+#[test]
+fn textarea_initial_value_is_text_content() {
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let div = NodeHandle::element("div");
+    let textarea = NodeHandle::element("textarea");
+    textarea.append_child(NodeHandle::text("hello"));
+    document.append_child(body.clone());
+    body.append_child(div.clone());
+    div.append_child(textarea);
+
+    let container = layout_single_control_container(&body);
+    let fragments = form_control_fragments(&container);
+    assert_eq!(fragments.len(), 1);
+    assert_eq!(fragments[0].1, "hello");
+}
+
+#[test]
+fn select_uses_selected_option_label_and_longest_option_width() {
+    // Second option is `selected`, so the label is "Banana"; the control width is
+    // driven by the longest option, not the selected/first one.
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let div = NodeHandle::element("div");
+    let select = NodeHandle::element("select");
+    let opt1 = NodeHandle::element("option");
+    let opt2 = NodeHandle::element("option");
+    let opt3 = NodeHandle::element("option");
+    opt1.append_child(NodeHandle::text("Fig"));
+    opt2.set_attribute("selected", "selected");
+    opt2.append_child(NodeHandle::text("Banana"));
+    opt3.append_child(NodeHandle::text("A really long option label"));
+    select.append_child(opt1);
+    select.append_child(opt2);
+    select.append_child(opt3);
+    document.append_child(body.clone());
+    body.append_child(div.clone());
+    div.append_child(select);
+
+    let container = layout_single_control_container(&body);
+    let fragments = form_control_fragments(&container);
+    assert_eq!(fragments.len(), 1);
+    assert_eq!(fragments[0].1, "Banana");
+
+    // A select whose only option is the short selected label must be narrower,
+    // proving the width comes from the longest option, not the shown one.
+    let document2 = NodeHandle::document();
+    let body2 = NodeHandle::element("body");
+    let div2 = NodeHandle::element("div");
+    let select2 = NodeHandle::element("select");
+    let only = NodeHandle::element("option");
+    only.set_attribute("selected", "selected");
+    only.append_child(NodeHandle::text("Banana"));
+    select2.append_child(only);
+    document2.append_child(body2.clone());
+    body2.append_child(div2.clone());
+    div2.append_child(select2);
+
+    let container2 = layout_single_control_container(&body2);
+    let fragments2 = form_control_fragments(&container2);
+    assert_eq!(fragments2.len(), 1);
+    assert_eq!(fragments2[0].1, "Banana");
+    assert!(
+        fragments[0].0.width > fragments2[0].0.width,
+        "longest-option width {} should exceed shown-label-only width {}",
+        fragments[0].0.width,
+        fragments2[0].0.width
+    );
+}
+
+#[test]
+fn select_without_selected_uses_first_option() {
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let div = NodeHandle::element("div");
+    let select = NodeHandle::element("select");
+    let opt1 = NodeHandle::element("option");
+    let opt2 = NodeHandle::element("option");
+    opt1.append_child(NodeHandle::text("First"));
+    opt2.append_child(NodeHandle::text("Second"));
+    select.append_child(opt1);
+    select.append_child(opt2);
+    document.append_child(body.clone());
+    body.append_child(div.clone());
+    div.append_child(select);
+
+    let container = layout_single_control_container(&body);
+    let fragments = form_control_fragments(&container);
+    assert_eq!(fragments.len(), 1);
+    assert_eq!(fragments[0].1, "First");
+}
+
+#[test]
+fn select_without_options_has_arrow_and_box_spacing_width() {
+    // No options => widest = 0, so width = arrow(20) + padding(4+4) + border(1+1) = 30,
+    // and the label is empty.
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let div = NodeHandle::element("div");
+    let select = NodeHandle::element("select");
+    document.append_child(body.clone());
+    body.append_child(div.clone());
+    div.append_child(select);
+
+    let container = layout_single_control_container(&body);
+    let fragments = form_control_fragments(&container);
+    assert_eq!(fragments.len(), 1);
+    assert_eq!(fragments[0].1, "");
+    assert!(
+        (fragments[0].0.width - 30.0).abs() < 0.01,
+        "empty select width expected 30 (arrow 20 + spacing 10), got {}",
+        fragments[0].0.width
+    );
+}
+
+#[test]
+fn button_label_excludes_display_none_descendants() {
+    // <button>Send<span style="display:none">hidden</span></button> → label "Send".
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let div = NodeHandle::element("div");
+    let button = NodeHandle::element("button");
+    let hidden = NodeHandle::element("span");
+    hidden.set_attribute("style", "display: none");
+    hidden.append_child(NodeHandle::text("hidden"));
+    button.append_child(NodeHandle::text("Send"));
+    button.append_child(hidden);
+    document.append_child(body.clone());
+    body.append_child(div.clone());
+    div.append_child(button);
+
+    let container = layout_single_control_container(&body);
+    let fragments = form_control_fragments(&container);
+    assert_eq!(fragments.len(), 1);
+    assert_eq!(fragments[0].1, "Send");
+}
+
+#[test]
+fn button_label_excludes_non_rendered_elements() {
+    // <button><style>.x{}</style>Go</button> → label "Go" (style/script content
+    // must never leak into the label).
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let div = NodeHandle::element("div");
+    let button = NodeHandle::element("button");
+    let style = NodeHandle::element("style");
+    style.append_child(NodeHandle::text(".x{}"));
+    button.append_child(style);
+    button.append_child(NodeHandle::text("Go"));
+    document.append_child(body.clone());
+    body.append_child(div.clone());
+    div.append_child(button);
+
+    let container = layout_single_control_container(&body);
+    let fragments = form_control_fragments(&container);
+    assert_eq!(fragments.len(), 1);
+    assert_eq!(fragments[0].1, "Go");
+}
+
+#[test]
+fn select_multiple_selected_uses_last_selected() {
+    // Real browsers (non-multiple) show the LAST option carrying `selected`.
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let div = NodeHandle::element("div");
+    let select = NodeHandle::element("select");
+    let opt1 = NodeHandle::element("option");
+    let opt2 = NodeHandle::element("option");
+    opt1.set_attribute("selected", "selected");
+    opt1.append_child(NodeHandle::text("A"));
+    opt2.set_attribute("selected", "selected");
+    opt2.append_child(NodeHandle::text("B"));
+    select.append_child(opt1);
+    select.append_child(opt2);
+    document.append_child(body.clone());
+    body.append_child(div.clone());
+    div.append_child(select);
+
+    let container = layout_single_control_container(&body);
+    let fragments = form_control_fragments(&container);
+    assert_eq!(fragments.len(), 1);
+    assert_eq!(fragments[0].1, "B");
+}
+
+#[test]
+fn select_display_none_option_excluded_from_label_and_width() {
+    // A display:none option must contribute neither the label (even when
+    // `selected`) nor the longest-option width.
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let div = NodeHandle::element("div");
+    let select = NodeHandle::element("select");
+    let hidden = NodeHandle::element("option");
+    let visible = NodeHandle::element("option");
+    hidden.set_attribute("style", "display: none");
+    hidden.set_attribute("selected", "selected");
+    hidden.append_child(NodeHandle::text("A very long hidden option label"));
+    visible.append_child(NodeHandle::text("Vis"));
+    select.append_child(hidden);
+    select.append_child(visible);
+    document.append_child(body.clone());
+    body.append_child(div.clone());
+    div.append_child(select);
+
+    let container = layout_single_control_container(&body);
+    let fragments = form_control_fragments(&container);
+    assert_eq!(fragments.len(), 1);
+    assert_eq!(fragments[0].1, "Vis", "hidden selected option must not become the label");
+
+    // Reference select with only the visible option: widths must match exactly.
+    let document2 = NodeHandle::document();
+    let body2 = NodeHandle::element("body");
+    let div2 = NodeHandle::element("div");
+    let select2 = NodeHandle::element("select");
+    let only = NodeHandle::element("option");
+    only.append_child(NodeHandle::text("Vis"));
+    select2.append_child(only);
+    document2.append_child(body2.clone());
+    body2.append_child(div2.clone());
+    div2.append_child(select2);
+
+    let container2 = layout_single_control_container(&body2);
+    let fragments2 = form_control_fragments(&container2);
+    assert_eq!(fragments2.len(), 1);
+    assert!(
+        (fragments[0].0.width - fragments2[0].0.width).abs() < 0.01,
+        "hidden option must not affect width: {} vs {}",
+        fragments[0].0.width,
+        fragments2[0].0.width
+    );
+}
+
+#[test]
+fn textarea_strips_single_leading_newline_via_html_parse() {
+    // Per the HTML spec, a textarea initial value starting with a single newline
+    // has that newline removed. Exercised through real HTML parsing.
+    let html = "<html><body><div><textarea>\nhello</textarea></div></body></html>";
+    let document = crate::html::TreeBuilder::parse(html).document();
+    let body = document.query_selector("body").unwrap();
+
+    let container = layout_single_control_container(&body);
+    let fragments = form_control_fragments(&container);
+    assert_eq!(fragments.len(), 1);
+    assert_eq!(fragments[0].1, "hello");
+}
+
+#[test]
+fn textarea_strips_only_one_leading_newline() {
+    // Only a single leading \n or \r\n is removed; later newlines are preserved.
+    for (raw, expected) in [
+        ("\r\nhello", "hello"),
+        ("\n\nhi", "\nhi"),
+        ("hello", "hello"),
+    ] {
+        let document = NodeHandle::document();
+        let body = NodeHandle::element("body");
+        let div = NodeHandle::element("div");
+        let textarea = NodeHandle::element("textarea");
+        textarea.append_child(NodeHandle::text(raw));
+        document.append_child(body.clone());
+        body.append_child(div.clone());
+        div.append_child(textarea);
+
+        let container = layout_single_control_container(&body);
+        let fragments = form_control_fragments(&container);
+        assert_eq!(fragments.len(), 1);
+        assert_eq!(fragments[0].1, expected, "raw value {raw:?}");
+    }
+}
+
 #[test]
 fn generated_data_uri_png_content_creates_image_fragment() {
     let document = NodeHandle::document();
@@ -5056,6 +5484,10 @@ fn supported_html_tags_are_not_logged() {
     assert!(!super::is_supported_html_tag("iframe"));
     assert!(super::is_supported_html_tag("form"));
     assert!(super::is_supported_html_tag("input"));
+    assert!(super::is_supported_html_tag("button"));
+    assert!(super::is_supported_html_tag("textarea"));
+    assert!(super::is_supported_html_tag("select"));
+    assert!(super::is_supported_html_tag("option"));
 }
 
 #[test]
