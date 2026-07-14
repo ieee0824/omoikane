@@ -732,13 +732,12 @@ impl Builder {
     }
 
     fn foster_parent_text(&mut self, text: &str) {
-        if let Some(table) = self.current_table() {
-            if let Some(parent) = table.parent_node() {
+        if let Some(table) = self.current_table()
+            && let Some(parent) = table.parent_node() {
                 let text_node = NodeHandle::text(text);
                 let _ = parent.insert_before(text_node.clone(), &table);
                 return;
             }
-        }
 
         self.insert_text(text);
     }
@@ -749,8 +748,8 @@ impl Builder {
         attributes: &[super::Attribute],
         self_closing: bool,
     ) {
-        if let Some(table) = self.current_table() {
-            if let Some(parent) = table.parent_node() {
+        if let Some(table) = self.current_table()
+            && let Some(parent) = table.parent_node() {
                 let element = self.insert_into(&parent, name, attributes);
                 let _ = parent.remove_child(&element);
                 let _ = parent.insert_before(element.clone(), &table);
@@ -759,7 +758,6 @@ impl Builder {
                 }
                 return;
             }
-        }
 
         let element = self.insert_element_with_attributes(name, attributes);
         if !self_closing && !is_void_element(name) {

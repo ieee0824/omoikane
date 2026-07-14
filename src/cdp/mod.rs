@@ -1049,13 +1049,12 @@ fn percent_decode(input: &str) -> String {
     while index < bytes.len() {
         match bytes[index] {
             b'%' if index + 2 < bytes.len() => {
-                if let Ok(hex) = std::str::from_utf8(&bytes[index + 1..index + 3]) {
-                    if let Ok(value) = u8::from_str_radix(hex, 16) {
+                if let Ok(hex) = std::str::from_utf8(&bytes[index + 1..index + 3])
+                    && let Ok(value) = u8::from_str_radix(hex, 16) {
                         output.push(value as char);
                         index += 3;
                         continue;
                     }
-                }
                 output.push('%');
                 index += 1;
             }

@@ -94,15 +94,14 @@ fn percent_decode_bytes(input: &str) -> Vec<u8> {
     let mut out = Vec::with_capacity(bytes.len());
     let mut index = 0usize;
     while index < bytes.len() {
-        if bytes[index] == b'%' && index + 2 < bytes.len() {
-            if let (Some(high), Some(low)) =
+        if bytes[index] == b'%' && index + 2 < bytes.len()
+            && let (Some(high), Some(low)) =
                 (hex_value(bytes[index + 1]), hex_value(bytes[index + 2]))
             {
                 out.push((high << 4) | low);
                 index += 3;
                 continue;
             }
-        }
         out.push(bytes[index]);
         index += 1;
     }

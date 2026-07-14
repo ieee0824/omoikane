@@ -515,8 +515,8 @@ fn tokenize_shadow_value(value: &str) -> Vec<String> {
 /// CSS length 文字列（例: "10px", "-5px", "0"）を px 値として解析する。
 fn parse_shadow_length(s: &str) -> Option<f32> {
     let s = s.trim();
-    if s.ends_with("px") {
-        s[..s.len() - 2].parse::<f32>().ok()
+    if let Some(stripped) = s.strip_suffix("px") {
+        stripped.parse::<f32>().ok()
     } else if s == "0" {
         Some(0.0)
     } else {

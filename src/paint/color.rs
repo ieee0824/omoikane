@@ -385,9 +385,7 @@ pub(crate) fn split_gradient_args(args: &str) -> Vec<&str> {
         match ch {
             '(' => depth += 1,
             ')' => {
-                if depth > 0 {
-                    depth -= 1;
-                }
+                depth = depth.saturating_sub(1);
             }
             ',' if depth == 0 => {
                 parts.push(args[start..i].trim());
@@ -434,9 +432,9 @@ pub(crate) fn parse_linear_gradient(value: &str) -> Option<LinearGradient> {
     // If any stop can't be parsed as a color, treat the whole gradient as invalid.
     let mut colors = Vec::new();
     for s in stop_parts {
-        match parse_color(s.trim()) {
-            Some(c) => colors.push(c),
-            None => return None,
+        {
+            let c = parse_color(s.trim())?;
+            colors.push(c)
         }
     }
 

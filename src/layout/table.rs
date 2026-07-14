@@ -327,8 +327,8 @@ pub(super) fn spanned_cell_width(column_widths: &[f32], start: usize, span: usiz
 
 pub(super) fn column_x_offset(column_widths: &[f32], column: usize, spacing: f32) -> f32 {
     let mut offset = 0.0;
-    for i in 0..column.min(column_widths.len()) {
-        offset += column_widths[i] + spacing;
+    for width in column_widths.iter().take(column.min(column_widths.len())) {
+        offset += width + spacing;
     }
     offset
 }
@@ -765,11 +765,10 @@ pub(super) fn is_table_container_element(node: &NodeHandle, style: &ComputedStyl
         return true;
     }
     // HTML default: <table> is display: table
-    if matches!(style.get("display"), None) {
-        if let Some(tag) = node.tag_name() {
+    if style.get("display").is_none()
+        && let Some(tag) = node.tag_name() {
             return tag.eq_ignore_ascii_case("table");
         }
-    }
     false
 }
 
@@ -799,8 +798,8 @@ pub(super) fn table_display_for_node(node: &NodeHandle, style: &ComputedStyle) -
         return Some(display);
     }
     // HTML default display values for table elements
-    if matches!(style.get("display"), None) {
-        if let Some(tag) = node.tag_name() {
+    if style.get("display").is_none()
+        && let Some(tag) = node.tag_name() {
             return match tag.to_ascii_lowercase().as_str() {
                 "table" => Some(TableDisplay::Table),
                 "thead" | "tbody" | "tfoot" => Some(TableDisplay::RowGroup),
@@ -809,7 +808,6 @@ pub(super) fn table_display_for_node(node: &NodeHandle, style: &ComputedStyle) -
                 _ => None,
             };
         }
-    }
     None
 }
 

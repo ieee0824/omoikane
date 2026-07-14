@@ -83,7 +83,7 @@ impl HttpResponse {
         buf_reader
             .read_line(&mut status_line)
             .map_err(HttpParseError::Io)?;
-        let status_line = status_line.trim_end_matches(|c| c == '\r' || c == '\n');
+        let status_line = status_line.trim_end_matches(['\r', '\n']);
 
         let (status_code, reason) = parse_status_line(status_line)?;
 
@@ -94,7 +94,7 @@ impl HttpResponse {
             buf_reader
                 .read_line(&mut line)
                 .map_err(HttpParseError::Io)?;
-            let trimmed = line.trim_end_matches(|c| c == '\r' || c == '\n');
+            let trimmed = line.trim_end_matches(['\r', '\n']);
             if trimmed.is_empty() {
                 break;
             }

@@ -44,11 +44,10 @@ impl<'a> Parser<'a> {
         if self.input.starts_with('\u{feff}') { self.pos += '\u{feff}'.len_utf8(); }
         if self.starts("<?xml") {
             let declaration = self.take_until("?>")?;
-            if let Some(enc) = declaration_encoding(declaration) {
-                if !enc.eq_ignore_ascii_case("utf-8") && !enc.eq_ignore_ascii_case("utf8") {
+            if let Some(enc) = declaration_encoding(declaration)
+                && !enc.eq_ignore_ascii_case("utf-8") && !enc.eq_ignore_ascii_case("utf8") {
                     return Err(XmlParseError::new("XML declaration encoding conflicts with UTF-8 input"));
                 }
-            }
         }
         let mut root_seen = false;
         while self.pos < self.input.len() {

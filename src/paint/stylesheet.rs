@@ -93,8 +93,8 @@ pub(crate) fn collect_author_stylesheets(
                                 &mut active_import_urls,
                             )?,
                         }
-                    } else if let Some(base) = base_url {
-                        if let Some((css, resolved)) =
+                    } else if let Some(base) = base_url
+                        && let Some((css, resolved)) =
                             fetch_relative_stylesheet(base, &href, client, base_url)
                         {
                             let mut active_import_urls = HashSet::new();
@@ -108,7 +108,6 @@ pub(crate) fn collect_author_stylesheets(
                                 &mut active_import_urls,
                             )?;
                         }
-                    }
                 }
             }
             _ => {}
@@ -171,13 +170,11 @@ pub(crate) fn extract_import_hrefs(css: &str) -> Vec<String> {
 
     let mut hrefs = Vec::new();
     for rule in stylesheet.rules {
-        if let crate::css::Rule::At(at_rule) = rule {
-            if at_rule.name.eq_ignore_ascii_case("import") {
-                if let Some(href) = parse_import_href(&at_rule.prelude) {
+        if let crate::css::Rule::At(at_rule) = rule
+            && at_rule.name.eq_ignore_ascii_case("import")
+                && let Some(href) = parse_import_href(&at_rule.prelude) {
                     hrefs.push(href);
                 }
-            }
-        }
     }
     hrefs
 }
@@ -467,9 +464,7 @@ pub(crate) fn parse_stylesheet_forgiving(input: &str) -> Stylesheet {
         match ch {
             '{' => depth += 1,
             '}' => {
-                if depth > 0 {
-                    depth -= 1;
-                }
+                depth = depth.saturating_sub(1);
                 if depth == 0 {
                     let trimmed = current.trim_start_matches(|c: char| c.is_ascii_whitespace());
                     if !trimmed.is_empty() {
@@ -746,11 +741,10 @@ pub(crate) fn same_origin(a: &crate::http::Url, b: &crate::http::Url) -> bool {
 
 /// Recursively finds all `<base>` elements in document order.
 pub(crate) fn find_base_elements(node: &NodeHandle, result: &mut Vec<NodeHandle>) {
-    if node.node_type() == crate::dom::NodeType::Element {
-        if node.tag_name().as_deref() == Some("base") {
+    if node.node_type() == crate::dom::NodeType::Element
+        && node.tag_name().as_deref() == Some("base") {
             result.push(node.clone());
         }
-    }
     for child in node.child_nodes() {
         find_base_elements(&child, result);
     }
@@ -770,8 +764,8 @@ pub(crate) fn extract_document_base_url(
     find_base_elements(document, &mut base_elements);
 
     for base_elem in base_elements {
-        if let Some(attrs) = base_elem.attributes() {
-            if let Some(href) = attrs.get("href") {
+        if let Some(attrs) = base_elem.attributes()
+            && let Some(href) = attrs.get("href") {
                 let href = href.trim();
                 if href.is_empty() {
                     continue; // Skip empty href, try next <base>
@@ -781,11 +775,10 @@ pub(crate) fn extract_document_base_url(
                 if href.contains("://") {
                     if let Ok(url) = href.parse::<crate::http::Url>() {
                         // SSRF protection: only honor same-origin absolute base URLs
-                        if let Some(ref original) = fallback_base {
-                            if same_origin(&url, original) {
+                        if let Some(original) = fallback_base
+                            && same_origin(&url, original) {
                                 return Some(url);
                             }
-                        }
                         // If no fallback_base provided, don't enable fetching via <base>
                         continue;
                     }
@@ -793,14 +786,12 @@ pub(crate) fn extract_document_base_url(
                 }
 
                 // Relative URL (resolve against fallback_base)
-                if let Some(base) = fallback_base {
-                    if let Ok(url) = resolve_url(base, href) {
+                if let Some(base) = fallback_base
+                    && let Ok(url) = resolve_url(base, href) {
                         // Relative URLs always resolve to same origin
                         return Some(url);
                     }
-                }
             }
-        }
     }
     fallback_base.cloned()
 }
@@ -902,11 +893,10 @@ pub(crate) fn fetch_font_face_fonts(
             let family_lower = ff_rule.font_family.to_lowercase();
 
             // Skip WOFF2 when format hint says so (not supported yet)
-            if let Some(ref fmt) = ff_rule.format {
-                if fmt.eq_ignore_ascii_case("woff2") {
+            if let Some(ref fmt) = ff_rule.format
+                && fmt.eq_ignore_ascii_case("woff2") {
                     continue;
                 }
-            }
 
             let url_str = &ff_rule.src_url;
 
