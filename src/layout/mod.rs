@@ -91,6 +91,7 @@ fn is_supported_html_tag(tag: &str) -> bool {
             | "ul" | "ol" | "li"
             | "table" | "thead" | "tbody" | "tfoot" | "tr" | "td" | "th"
             | "img" | "object" | "svg" | "form" | "input"
+            | "button" | "textarea" | "select" | "option"
             | "style" | "link" | "meta" | "title" | "script" | "noscript"
             | "font" | "blockquote" | "hr" | "address"
             | "dl" | "dt" | "dd" | "figure" | "figcaption"
@@ -2104,7 +2105,8 @@ fn is_inline_child(node: &NodeHandle, resolver: &mut StyleResolver) -> bool {
                 .map(|tag| {
                     matches!(
                         tag.as_str(),
-                        "span" | "a" | "em" | "strong" | "b" | "i" | "img" | "object" | "svg" | "input"
+                        "span" | "a" | "em" | "strong" | "b" | "i" | "img" | "object" | "svg"
+                            | "input" | "button" | "textarea" | "select"
                     )
                 })
                 .unwrap_or(false)

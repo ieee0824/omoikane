@@ -2281,6 +2281,95 @@ fn apply_ua_defaults(
                     .or_insert(ComputedValue::Px(2.0));
             }
         }
+        "button" => {
+            properties
+                .entry("display".to_string())
+                .or_insert(ComputedValue::Keyword("inline-block".to_string()));
+            properties
+                .entry("background-color".to_string())
+                .or_insert(ComputedValue::Color("#efefef".to_string()));
+            properties
+                .entry("text-align".to_string())
+                .or_insert(ComputedValue::Keyword("center".to_string()));
+            for side in ["top", "right", "bottom", "left"] {
+                properties
+                    .entry(format!("border-{side}-style"))
+                    .or_insert(ComputedValue::Keyword("solid".to_string()));
+                properties
+                    .entry(format!("border-{side}-width"))
+                    .or_insert(ComputedValue::Px(2.0));
+                properties
+                    .entry(format!("border-{side}-color"))
+                    .or_insert(ComputedValue::Color("#767676".to_string()));
+            }
+            properties
+                .entry("padding-top".to_string())
+                .or_insert(ComputedValue::Px(1.0));
+            properties
+                .entry("padding-right".to_string())
+                .or_insert(ComputedValue::Px(6.0));
+            properties
+                .entry("padding-bottom".to_string())
+                .or_insert(ComputedValue::Px(1.0));
+            properties
+                .entry("padding-left".to_string())
+                .or_insert(ComputedValue::Px(6.0));
+        }
+        "textarea" => {
+            properties
+                .entry("display".to_string())
+                .or_insert(ComputedValue::Keyword("inline-block".to_string()));
+            properties
+                .entry("background-color".to_string())
+                .or_insert(ComputedValue::Color("white".to_string()));
+            for side in ["top", "right", "bottom", "left"] {
+                properties
+                    .entry(format!("border-{side}-style"))
+                    .or_insert(ComputedValue::Keyword("solid".to_string()));
+                properties
+                    .entry(format!("border-{side}-width"))
+                    .or_insert(ComputedValue::Px(1.0));
+                properties
+                    .entry(format!("border-{side}-color"))
+                    .or_insert(ComputedValue::Color("#767676".to_string()));
+            }
+            for side in ["top", "right", "bottom", "left"] {
+                properties
+                    .entry(format!("padding-{side}"))
+                    .or_insert(ComputedValue::Px(2.0));
+            }
+        }
+        "select" => {
+            properties
+                .entry("display".to_string())
+                .or_insert(ComputedValue::Keyword("inline-block".to_string()));
+            properties
+                .entry("background-color".to_string())
+                .or_insert(ComputedValue::Color("#efefef".to_string()));
+            for side in ["top", "right", "bottom", "left"] {
+                properties
+                    .entry(format!("border-{side}-style"))
+                    .or_insert(ComputedValue::Keyword("solid".to_string()));
+                properties
+                    .entry(format!("border-{side}-width"))
+                    .or_insert(ComputedValue::Px(1.0));
+                properties
+                    .entry(format!("border-{side}-color"))
+                    .or_insert(ComputedValue::Color("#767676".to_string()));
+            }
+            properties
+                .entry("padding-top".to_string())
+                .or_insert(ComputedValue::Px(1.0));
+            properties
+                .entry("padding-right".to_string())
+                .or_insert(ComputedValue::Px(4.0));
+            properties
+                .entry("padding-bottom".to_string())
+                .or_insert(ComputedValue::Px(1.0));
+            properties
+                .entry("padding-left".to_string())
+                .or_insert(ComputedValue::Px(4.0));
+        }
         "p" => {
             let em = parent_font_size;
             properties.entry("margin-top".to_string()).or_insert(ComputedValue::Px(em));

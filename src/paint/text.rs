@@ -155,12 +155,26 @@ pub(crate) fn paint_text_with_registry(
                             inline_fragment_content_rect(fragment.rect, style, border);
                         let color =
                             fragment_text_color(&fragment.style).unwrap_or(fallback_color);
+                        // Center the value horizontally when `text-align: center`
+                        // (used by the `<button>` UA default); otherwise keep the
+                        // existing left-aligned rendering.
+                        let x_offset = if is_text_align_center(style) {
+                            let text_width = measure_form_control_text_width(
+                                value,
+                                fragment.metrics.font_size,
+                                fonts,
+                                fragment.metrics.letter_spacing,
+                            );
+                            ((content_rect.width - text_width) / 2.0).max(0.0)
+                        } else {
+                            0.0
+                        };
                         let text_rect = Rect {
-                            x: content_rect.x,
+                            x: content_rect.x + x_offset,
                             y: content_rect.y
                                 + ((content_rect.height - fragment.metrics.font_size) / 2.0)
                                     .max(0.0),
-                            width: content_rect.width,
+                            width: (content_rect.width - x_offset).max(0.0),
                             height: fragment.metrics.font_size,
                         };
                         if fonts.is_empty() {
@@ -777,4 +791,39 @@ pub(crate) fn inline_fragment_content_rect(
 
 pub(crate) fn text_color(style: &ComputedStyle) -> Option<Color> {
     super::color_property(style.get("color"))
+}
+
+/// Returns `true` when `text-align: center` is set on `style`.
+fn is_text_align_center(style: &ComputedStyle) -> bool {
+    matches!(
+        style.get("text-align"),
+        Some(ComputedValue::Keyword(keyword)) if keyword.eq_ignore_ascii_case("center")
+    )
+}
+
+/// Measures the painted advance width of `text`, mirroring the advance model of
+/// [`paint_text_with_font`] / [`paint_text_placeholder`] (kerning excluded).
+///
+/// Used to horizontally center form-control labels; when `fonts` is empty the
+/// placeholder advance of `font_size * 0.6` is used to match the glyph fallback.
+fn measure_form_control_text_width(
+    text: &str,
+    font_size: f32,
+    fonts: &[Font],
+    letter_spacing: f32,
+) -> f32 {
+    let chars: Vec<char> = text.chars().collect();
+    if chars.is_empty() {
+        return 0.0;
+    }
+    let mut width = 0.0;
+    for &ch in &chars {
+        if fonts.is_empty() {
+            width += (font_size * 0.6).max(1.0);
+        } else {
+            let (_, _, advance) = rasterize_with_fallback(fonts, ch, font_size);
+            width += advance;
+        }
+    }
+    width + letter_spacing * (chars.len() - 1) as f32
 }

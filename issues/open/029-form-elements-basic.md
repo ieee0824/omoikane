@@ -41,6 +41,21 @@ status: open
 - [x] `https://www.google.co.jp/` でロゴ・検索欄・検索ボタン・フッターを実表示確認
 - [ ] `<button>`、`<textarea>`、`<select>`（Issue は継続）
 
+## 残りスコープの設計（2026-07-14 承認済み）
+
+PR #142 の input 実装（`InlineFragmentContent::FormControl` の4層: UA デフォルト →
+`is_supported_html_tag`/`is_inline_child` → インラインセグメント収集の早期 return → 専用ペイント）を
+3要素に拡張する。
+
+- `button`: inline-block。子孫テキストをフラット化してラベル描画（最小実装、子の独立レイアウトなし）。
+  UA 既定は background `#efefef`・border 2px solid `#767676`・padding 1px 6px・text-align center
+- `textarea`: **inline-block**（issue 当初案は「replaced block」だが実ブラウザ UA stylesheet 準拠に変更）。
+  `cols`（既定20）× 平均文字幅、`rows`（既定2）× line-height でサイズ導出、textContent を初期値として描画
+- `select`: inline-block。`selected` 付き option（なければ先頭 option）のテキストを表示、
+  幅は最長 option テキスト + 矢印分 20px。`option` 単独はレンダリングしない
+- 明示 width/height はすべて cols/rows/テキスト幅より優先
+- 実装体制: 設計 Fable、実装 Opus（general-purpose, model: opus）
+
 ## 受け入れ条件
 
 - `<form>` がブロックコンテナとしてレイアウトされる
