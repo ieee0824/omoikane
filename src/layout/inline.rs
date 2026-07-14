@@ -839,22 +839,42 @@ pub(super) fn resolve_image_rendered_size(
     let intrinsic_h = image.height() as f32;
     let css_w = explicit_length(style, "width");
     let css_h = explicit_length(style, "height");
-
-    match (css_w, css_h) {
-        (Some(w), Some(h)) => return (w, h),
-        (Some(w), None) => return (w, scale_with_aspect(intrinsic_h, intrinsic_w, w)),
-        (None, Some(h)) => return (scale_with_aspect(intrinsic_w, intrinsic_h, h), h),
-        (None, None) => {}
-    }
-
     let attr_w = html_image_dimension_attribute(node, "width");
     let attr_h = html_image_dimension_attribute(node, "height");
-    match (attr_w, attr_h) {
+
+    let (mut width, mut height) = match (css_w.or(attr_w), css_h.or(attr_h)) {
         (Some(w), Some(h)) => (w, h),
         (Some(w), None) => (w, scale_with_aspect(intrinsic_h, intrinsic_w, w)),
         (None, Some(h)) => (scale_with_aspect(intrinsic_w, intrinsic_h, h), h),
         (None, None) => (intrinsic_w, intrinsic_h),
+    };
+
+    if let Some(max_width) = explicit_length(style, "max-width") {
+        if width > max_width {
+            height = scale_with_aspect(height, width, max_width);
+            width = max_width;
+        }
     }
+    if let Some(max_height) = explicit_length(style, "max-height") {
+        if height > max_height {
+            width = scale_with_aspect(width, height, max_height);
+            height = max_height;
+        }
+    }
+    if let Some(min_width) = explicit_length(style, "min-width") {
+        if width < min_width {
+            height = scale_with_aspect(height, width, min_width);
+            width = min_width;
+        }
+    }
+    if let Some(min_height) = explicit_length(style, "min-height") {
+        if height < min_height {
+            width = scale_with_aspect(width, height, min_height);
+            height = min_height;
+        }
+    }
+
+    (width, height)
 }
 
 fn scale_with_aspect(numerator: f32, denominator: f32, target: f32) -> f32 {
