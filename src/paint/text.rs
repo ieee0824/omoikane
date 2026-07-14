@@ -802,11 +802,13 @@ fn is_text_align_center(style: &ComputedStyle) -> bool {
 }
 
 /// Measures the painted advance width of `text`, mirroring the advance model of
-/// [`paint_text_with_font`] / [`paint_text_placeholder`] (kerning excluded).
+/// [`paint_text_with_font`] / [`paint_text_placeholder`] exactly: per-character
+/// advances, kerning between adjacent characters drawn from the same font, and
+/// letter-spacing between characters.
 ///
 /// Used to horizontally center form-control labels; when `fonts` is empty the
 /// placeholder advance of `font_size * 0.6` is used to match the glyph fallback.
-fn measure_form_control_text_width(
+pub(crate) fn measure_form_control_text_width(
     text: &str,
     font_size: f32,
     fonts: &[Font],
@@ -816,14 +818,21 @@ fn measure_form_control_text_width(
     if chars.is_empty() {
         return 0.0;
     }
+    if fonts.is_empty() {
+        return chars.len() as f32 * (font_size * 0.6).max(1.0)
+            + letter_spacing * (chars.len() - 1) as f32;
+    }
     let mut width = 0.0;
+    let mut previous: Option<(char, usize)> = None;
     for &ch in &chars {
-        if fonts.is_empty() {
-            width += (font_size * 0.6).max(1.0);
-        } else {
-            let (_, _, advance) = rasterize_with_fallback(fonts, ch, font_size);
-            width += advance;
+        let (font_index, _, advance) = rasterize_with_fallback(fonts, ch, font_size);
+        if let Some((prev, prev_index)) = previous
+            && prev_index == font_index
+        {
+            width += fonts[font_index].glyph_kerning(prev, ch, font_size);
         }
+        width += advance;
+        previous = Some((ch, font_index));
     }
     width + letter_spacing * (chars.len() - 1) as f32
 }

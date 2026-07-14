@@ -193,15 +193,15 @@ fn collect_element_inline_segments(
             return;
         }
         Some("button") => {
-            collect_button_segment(node, &style, out);
+            collect_button_segment(node, &style, resolver, out);
             return;
         }
         Some("textarea") => {
-            collect_textarea_segment(node, &style, out);
+            collect_textarea_segment(node, &style, resolver, out);
             return;
         }
         Some("select") => {
-            collect_select_segment(node, &style, out);
+            collect_select_segment(node, &style, resolver, out);
             return;
         }
         _ => {}
@@ -290,14 +290,20 @@ fn collect_input_segment(
 
 /// Collects a `<button>` as a single inline `FormControl` fragment.
 ///
-/// The label is the concatenation of the button's descendant text with runs of
-/// whitespace collapsed to single spaces; child elements are never laid out
-/// independently. The width defaults to the label text width (box padding and
-/// border are added when the fragment is split), and an explicit `width`/`height`
-/// takes precedence.
-fn collect_button_segment(node: &NodeHandle, style: &ComputedStyle, out: &mut Vec<InlineSegment>) {
+/// The label is the concatenation of the button's rendered descendant text
+/// (non-rendered elements such as `<style>`/`<script>` and `display: none`
+/// subtrees are excluded) with runs of whitespace collapsed to single spaces;
+/// child elements are never laid out independently. The width defaults to the
+/// label text width (box padding and border are added when the fragment is
+/// split), and an explicit `width`/`height` takes precedence.
+fn collect_button_segment(
+    node: &NodeHandle,
+    style: &ComputedStyle,
+    resolver: &mut StyleResolver,
+    out: &mut Vec<InlineSegment>,
+) {
     let metrics = font_metrics(style);
-    let label = normalize_inline_whitespace(&collect_descendant_text(node));
+    let label = normalize_inline_whitespace(&collect_rendered_text(node, resolver));
     let content_width = explicit_length(style, "width")
         .unwrap_or_else(|| measure_text_width(&label, metrics));
     let content_height =
@@ -308,15 +314,21 @@ fn collect_button_segment(node: &NodeHandle, style: &ComputedStyle, out: &mut Ve
 
 /// Collects a `<textarea>` as a single inline `FormControl` fragment.
 ///
-/// The displayed value is the element's `textContent` (its initial value). The
-/// width defaults to `cols` (default 20, clamped to `1..=1000`) multiplied by the
-/// average character advance, and the height defaults to `rows` (default 2,
-/// clamped to `1..=1000`) multiplied by the line height. Explicit `width`/`height`
-/// take precedence.
-fn collect_textarea_segment(node: &NodeHandle, style: &ComputedStyle, out: &mut Vec<InlineSegment>) {
+/// The displayed value is the element's `textContent` (its initial value) with
+/// a single leading newline (`\n` or `\r\n`) removed, per the HTML spec's
+/// textarea value rules. The width defaults to `cols` (default 20, clamped to
+/// `1..=1000`) multiplied by the average character advance, and the height
+/// defaults to `rows` (default 2, clamped to `1..=1000`) multiplied by the line
+/// height. Explicit `width`/`height` take precedence.
+fn collect_textarea_segment(
+    node: &NodeHandle,
+    style: &ComputedStyle,
+    resolver: &mut StyleResolver,
+    out: &mut Vec<InlineSegment>,
+) {
     let attributes = node.attributes().unwrap_or_default();
     let metrics = font_metrics(style);
-    let value = collect_descendant_text(node);
+    let value = strip_textarea_leading_newline(&collect_rendered_text(node, resolver)).to_string();
     let content_width = explicit_length(style, "width").unwrap_or_else(|| {
         let cols = attributes
             .get("cols")
@@ -339,19 +351,27 @@ fn collect_textarea_segment(node: &NodeHandle, style: &ComputedStyle, out: &mut 
 
 /// Collects a `<select>` as a single inline `FormControl` fragment.
 ///
-/// The label is the text of the first `<option>` carrying a `selected` attribute,
-/// or the first `<option>` otherwise, or empty when there are no options. The
+/// The label is the text of the last `<option>` carrying a `selected` attribute
+/// (matching real non-`multiple` browser behavior), or the first `<option>`
+/// otherwise, or empty when there are no options. Options with `display: none`
+/// are excluded from both the label candidates and the width computation. The
 /// width defaults to the widest option text plus 20px for the dropdown arrow (box
 /// padding and border are added when the fragment is split). Explicit
 /// `width`/`height` take precedence. `<option>` elements are not rendered on their
 /// own.
-fn collect_select_segment(node: &NodeHandle, style: &ComputedStyle, out: &mut Vec<InlineSegment>) {
+fn collect_select_segment(
+    node: &NodeHandle,
+    style: &ComputedStyle,
+    resolver: &mut StyleResolver,
+    out: &mut Vec<InlineSegment>,
+) {
     let metrics = font_metrics(style);
     let mut options = Vec::new();
-    collect_option_entries(node, &mut options);
+    collect_option_entries(node, resolver, &mut options);
 
     let label = options
         .iter()
+        .rev()
         .find(|(_, selected)| *selected)
         .or_else(|| options.first())
         .map(|(text, _)| text.clone())
@@ -403,8 +423,12 @@ fn push_form_control_segment(
     });
 }
 
-/// Concatenates the text of all descendant text nodes (the `textContent`).
-fn collect_descendant_text(node: &NodeHandle) -> String {
+/// Concatenates the text of all rendered descendant text nodes.
+///
+/// Unlike a plain `textContent` walk, non-rendered elements (`<style>`,
+/// `<script>`, etc.) and subtrees whose computed style is `display: none` are
+/// skipped so that hidden text never leaks into form control labels.
+fn collect_rendered_text(node: &NodeHandle, resolver: &mut StyleResolver) -> String {
     let mut text = String::new();
     for child in node.child_nodes() {
         match child.node_type() {
@@ -413,7 +437,16 @@ fn collect_descendant_text(node: &NodeHandle) -> String {
                     text.push_str(&data);
                 }
             }
-            NodeType::Element => text.push_str(&collect_descendant_text(&child)),
+            NodeType::Element => {
+                if is_non_rendered_html_element(&child) {
+                    continue;
+                }
+                let style = resolver.computed_style(&child);
+                if is_display_none(&style) {
+                    continue;
+                }
+                text.push_str(&collect_rendered_text(&child, resolver));
+            }
             _ => {}
         }
     }
@@ -425,18 +458,44 @@ fn normalize_inline_whitespace(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-/// Recursively collects `(label, selected)` for each `<option>` descendant.
-fn collect_option_entries(node: &NodeHandle, out: &mut Vec<(String, bool)>) {
+/// Strips a single leading newline (`\n` or `\r\n`) from a textarea's initial
+/// value, per the HTML spec. Later newlines are preserved.
+fn strip_textarea_leading_newline(text: &str) -> &str {
+    if let Some(rest) = text.strip_prefix("\r\n") {
+        rest
+    } else if let Some(rest) = text.strip_prefix('\n') {
+        rest
+    } else {
+        text
+    }
+}
+
+/// Recursively collects `(label, selected)` for each rendered `<option>`
+/// descendant. Options (and container subtrees such as `<optgroup>`) that are
+/// non-rendered or `display: none` are excluded entirely, so they contribute
+/// neither a label candidate nor width.
+fn collect_option_entries(
+    node: &NodeHandle,
+    resolver: &mut StyleResolver,
+    out: &mut Vec<(String, bool)>,
+) {
     for child in node.child_nodes() {
         if child.node_type() != NodeType::Element {
             continue;
         }
+        if is_non_rendered_html_element(&child) {
+            continue;
+        }
+        let style = resolver.computed_style(&child);
+        if is_display_none(&style) {
+            continue;
+        }
         if child.tag_name().as_deref() == Some("option") {
-            let label = normalize_inline_whitespace(&collect_descendant_text(&child));
+            let label = normalize_inline_whitespace(&collect_rendered_text(&child, resolver));
             let selected = child.get_attribute("selected").is_some();
             out.push((label, selected));
         } else {
-            collect_option_entries(&child, out);
+            collect_option_entries(&child, resolver, out);
         }
     }
 }

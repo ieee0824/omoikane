@@ -1191,6 +1191,161 @@ fn select_without_options_has_arrow_and_box_spacing_width() {
 }
 
 #[test]
+fn button_label_excludes_display_none_descendants() {
+    // <button>Send<span style="display:none">hidden</span></button> → label "Send".
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let div = NodeHandle::element("div");
+    let button = NodeHandle::element("button");
+    let hidden = NodeHandle::element("span");
+    hidden.set_attribute("style", "display: none");
+    hidden.append_child(NodeHandle::text("hidden"));
+    button.append_child(NodeHandle::text("Send"));
+    button.append_child(hidden);
+    document.append_child(body.clone());
+    body.append_child(div.clone());
+    div.append_child(button);
+
+    let container = layout_single_control_container(&body);
+    let fragments = form_control_fragments(&container);
+    assert_eq!(fragments.len(), 1);
+    assert_eq!(fragments[0].1, "Send");
+}
+
+#[test]
+fn button_label_excludes_non_rendered_elements() {
+    // <button><style>.x{}</style>Go</button> → label "Go" (style/script content
+    // must never leak into the label).
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let div = NodeHandle::element("div");
+    let button = NodeHandle::element("button");
+    let style = NodeHandle::element("style");
+    style.append_child(NodeHandle::text(".x{}"));
+    button.append_child(style);
+    button.append_child(NodeHandle::text("Go"));
+    document.append_child(body.clone());
+    body.append_child(div.clone());
+    div.append_child(button);
+
+    let container = layout_single_control_container(&body);
+    let fragments = form_control_fragments(&container);
+    assert_eq!(fragments.len(), 1);
+    assert_eq!(fragments[0].1, "Go");
+}
+
+#[test]
+fn select_multiple_selected_uses_last_selected() {
+    // Real browsers (non-multiple) show the LAST option carrying `selected`.
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let div = NodeHandle::element("div");
+    let select = NodeHandle::element("select");
+    let opt1 = NodeHandle::element("option");
+    let opt2 = NodeHandle::element("option");
+    opt1.set_attribute("selected", "selected");
+    opt1.append_child(NodeHandle::text("A"));
+    opt2.set_attribute("selected", "selected");
+    opt2.append_child(NodeHandle::text("B"));
+    select.append_child(opt1);
+    select.append_child(opt2);
+    document.append_child(body.clone());
+    body.append_child(div.clone());
+    div.append_child(select);
+
+    let container = layout_single_control_container(&body);
+    let fragments = form_control_fragments(&container);
+    assert_eq!(fragments.len(), 1);
+    assert_eq!(fragments[0].1, "B");
+}
+
+#[test]
+fn select_display_none_option_excluded_from_label_and_width() {
+    // A display:none option must contribute neither the label (even when
+    // `selected`) nor the longest-option width.
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let div = NodeHandle::element("div");
+    let select = NodeHandle::element("select");
+    let hidden = NodeHandle::element("option");
+    let visible = NodeHandle::element("option");
+    hidden.set_attribute("style", "display: none");
+    hidden.set_attribute("selected", "selected");
+    hidden.append_child(NodeHandle::text("A very long hidden option label"));
+    visible.append_child(NodeHandle::text("Vis"));
+    select.append_child(hidden);
+    select.append_child(visible);
+    document.append_child(body.clone());
+    body.append_child(div.clone());
+    div.append_child(select);
+
+    let container = layout_single_control_container(&body);
+    let fragments = form_control_fragments(&container);
+    assert_eq!(fragments.len(), 1);
+    assert_eq!(fragments[0].1, "Vis", "hidden selected option must not become the label");
+
+    // Reference select with only the visible option: widths must match exactly.
+    let document2 = NodeHandle::document();
+    let body2 = NodeHandle::element("body");
+    let div2 = NodeHandle::element("div");
+    let select2 = NodeHandle::element("select");
+    let only = NodeHandle::element("option");
+    only.append_child(NodeHandle::text("Vis"));
+    select2.append_child(only);
+    document2.append_child(body2.clone());
+    body2.append_child(div2.clone());
+    div2.append_child(select2);
+
+    let container2 = layout_single_control_container(&body2);
+    let fragments2 = form_control_fragments(&container2);
+    assert_eq!(fragments2.len(), 1);
+    assert!(
+        (fragments[0].0.width - fragments2[0].0.width).abs() < 0.01,
+        "hidden option must not affect width: {} vs {}",
+        fragments[0].0.width,
+        fragments2[0].0.width
+    );
+}
+
+#[test]
+fn textarea_strips_single_leading_newline_via_html_parse() {
+    // Per the HTML spec, a textarea initial value starting with a single newline
+    // has that newline removed. Exercised through real HTML parsing.
+    let html = "<html><body><div><textarea>\nhello</textarea></div></body></html>";
+    let document = crate::html::TreeBuilder::parse(html).document();
+    let body = document.query_selector("body").unwrap();
+
+    let container = layout_single_control_container(&body);
+    let fragments = form_control_fragments(&container);
+    assert_eq!(fragments.len(), 1);
+    assert_eq!(fragments[0].1, "hello");
+}
+
+#[test]
+fn textarea_strips_only_one_leading_newline() {
+    // Only a single leading \n or \r\n is removed; later newlines are preserved.
+    for (raw, expected) in [
+        ("\r\nhello", "hello"),
+        ("\n\nhi", "\nhi"),
+        ("hello", "hello"),
+    ] {
+        let document = NodeHandle::document();
+        let body = NodeHandle::element("body");
+        let div = NodeHandle::element("div");
+        let textarea = NodeHandle::element("textarea");
+        textarea.append_child(NodeHandle::text(raw));
+        document.append_child(body.clone());
+        body.append_child(div.clone());
+        div.append_child(textarea);
+
+        let container = layout_single_control_container(&body);
+        let fragments = form_control_fragments(&container);
+        assert_eq!(fragments.len(), 1);
+        assert_eq!(fragments[0].1, expected, "raw value {raw:?}");
+    }
+}
+
+#[test]
 fn generated_data_uri_png_content_creates_image_fragment() {
     let document = NodeHandle::document();
     let body = NodeHandle::element("body");

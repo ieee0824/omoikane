@@ -6180,3 +6180,50 @@ div {{ position: absolute; left: 10.5px; top: 10.5px;
     assert_eq!(canvas.pixel(9, 10), Some(Color::rgba(0, 0, 0, 0)));
     assert_eq!(canvas.pixel(10, 9), Some(Color::rgba(0, 0, 0, 0)));
 }
+
+#[test]
+fn form_control_text_measure_matches_painter_advance_model() {
+    use super::text::{measure_form_control_text_width, rasterize_with_fallback};
+
+    // Placeholder path (no fonts): per-char advance is (font_size * 0.6).max(1.0)
+    // plus letter-spacing between characters, matching paint_text_placeholder.
+    let placeholder = measure_form_control_text_width("ab", 10.0, &[], 2.0);
+    assert!(
+        (placeholder - 14.0).abs() < 1e-4,
+        "placeholder width expected 6 + 2 + 6 = 14, got {placeholder}"
+    );
+    assert_eq!(measure_form_control_text_width("", 10.0, &[], 2.0), 0.0);
+
+    // Font path: the measured width must equal the exact cursor advance of
+    // paint_text_with_font (per-char rasterize advance + same-font kerning +
+    // letter-spacing between characters), so centered labels stay centered.
+    let fonts = crate::font::load_default_text_fonts();
+    if fonts.is_empty() {
+        eprintln!("Skipping font path: no default text fonts available");
+        return;
+    }
+    let font_size = 16.0;
+    let letter_spacing = 1.5;
+    let text = "AVAST Wavy 検索";
+    let chars: Vec<char> = text.chars().collect();
+    let mut expected = 0.0f32;
+    let mut previous: Option<(char, usize)> = None;
+    for (i, &ch) in chars.iter().enumerate() {
+        let (font_index, _, advance) = rasterize_with_fallback(&fonts, ch, font_size);
+        if let Some((prev, prev_index)) = previous
+            && prev_index == font_index
+        {
+            expected += fonts[font_index].glyph_kerning(prev, ch, font_size);
+        }
+        expected += advance;
+        if i + 1 < chars.len() {
+            expected += letter_spacing;
+        }
+        previous = Some((ch, font_index));
+    }
+    let measured = measure_form_control_text_width(text, font_size, &fonts, letter_spacing);
+    assert!(
+        (measured - expected).abs() < 1e-3,
+        "measured {measured} must equal painter cursor advance {expected}"
+    );
+}

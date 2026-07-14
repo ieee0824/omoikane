@@ -56,6 +56,13 @@ PR #142 の input 実装（`InlineFragmentContent::FormControl` の4層: UA デ�
 - 明示 width/height はすべて cols/rows/テキスト幅より優先
 - 実装体制: 設計 Fable、実装 Opus（general-purpose, model: opus）
 
+### 既知の制限（レビューで確認、最小実装のスコープ外）
+
+- button / textarea / select は input と同様にインラインセグメント収集で早期 return するため、
+  `::before` / `::after` 生成コンテンツが描画されない（実ブラウザは button で生成コンテンツを持てる）。
+  button ラベル内の子要素の独立レイアウト対応時に合わせて解消する
+- textarea の `white-space: pre-wrap` 相当の行整形・折り返しは未対応（初期値テキストを単一行描画でクリップ）
+
 ## 受け入れ条件
 
 - `<form>` がブロックコンテナとしてレイアウトされる
