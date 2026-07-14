@@ -2054,6 +2054,7 @@
         },
         createHTMLDocument(title) {
           const doc = wrapNode(__omoikane_create_document());
+          doc.__documentURL = "about:blank";
           const doctype = doc.implementation.createDocumentType("html", "", "");
           const html = doc.createElement("html");
           const head = doc.createElement("head");
@@ -2209,11 +2210,11 @@
     }
 
     get URL() {
-      return globalThis.location.href;
+      return this.__documentURL || globalThis.location.href;
     }
 
     get documentURI() {
-      return globalThis.location.href;
+      return this.__documentURL || globalThis.location.href;
     }
 
     get compatMode() {

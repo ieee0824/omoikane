@@ -6359,11 +6359,13 @@ mod tests {
                 if (doc.title !== "Detached title") return 4;
                 if (doc.defaultView !== null) return 5;
                 if (doc.body.ownerDocument !== doc) return 6;
+                if (doc.URL !== "about:blank") return 7;
+                if (doc.documentURI !== "about:blank") return 8;
 
                 doc.body.innerHTML = "<form></form><form></form>";
-                if (doc.body.children.length !== 2) return 7;
-                if (document.body !== originalBody) return 8;
-                if (document.documentElement.innerHTML !== originalHtml) return 9;
+                if (doc.body.children.length !== 2) return 9;
+                if (document.body !== originalBody) return 10;
+                if (document.documentElement.innerHTML !== originalHtml) return 11;
                 return 0;
             })()
         "#,
