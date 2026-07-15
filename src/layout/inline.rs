@@ -208,6 +208,10 @@ fn collect_element_inline_segments(
             collect_value_indicator_segment(node, &style, out);
             return;
         }
+        Some("audio" | "canvas" | "video") if element_inline_image(node).is_none() => {
+            collect_media_placeholder_segment(node, &style, out);
+            return;
+        }
         _ => {}
     }
 
@@ -391,6 +395,26 @@ fn collect_select_segment(
         explicit_length(style, "height").unwrap_or_else(|| metrics.font_size.max(13.0));
 
     push_form_control_segment(node, style, label, content_width, content_height, metrics, out);
+}
+
+fn collect_media_placeholder_segment(
+    node: &NodeHandle,
+    style: &ComputedStyle,
+    out: &mut Vec<InlineSegment>,
+) {
+    let metrics = font_metrics(style);
+    let default_size = match node.tag_name().as_deref() {
+        Some("audio") => (300.0, 54.0),
+        Some("canvas") => (300.0, 150.0),
+        _ => (300.0, 150.0),
+    };
+    let width = html_image_dimension_attribute(node, "width")
+        .or_else(|| explicit_length(style, "width"))
+        .unwrap_or(default_size.0);
+    let height = html_image_dimension_attribute(node, "height")
+        .or_else(|| explicit_length(style, "height"))
+        .unwrap_or(default_size.1);
+    push_form_control_segment(node, style, String::new(), width, height, metrics, out);
 }
 
 fn collect_value_indicator_segment(
@@ -661,6 +685,14 @@ pub(crate) fn element_inline_image(node: &NodeHandle) -> Option<(NodeHandle, Ima
             let src = attributes.get("src")?;
             decode_or_fetch_image(src).map(|image| (node.clone(), image))
         }
+        "video" => {
+            let poster = attributes.get("poster")?;
+            decode_or_fetch_image(poster).map(|image| (node.clone(), image))
+        }
+        "picture" => node
+            .child_nodes()
+            .into_iter()
+            .find_map(|child| element_inline_image(&child)),
         "svg" => {
             let image = crate::svg::render_svg_to_image(node)?;
             Some((node.clone(), image))

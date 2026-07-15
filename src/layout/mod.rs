@@ -98,6 +98,7 @@ fn is_supported_html_tag(tag: &str) -> bool {
             | "sup" | "sub" | "small" | "mark" | "abbr" | "cite" | "q"
             | "center" | "nobr" | "wbr"
             | "details" | "summary" | "dialog" | "time" | "progress" | "meter"
+            | "video" | "audio" | "canvas" | "source" | "picture"
     )
 }
 
@@ -2109,6 +2110,7 @@ fn is_inline_child(node: &NodeHandle, resolver: &mut StyleResolver) -> bool {
                         "span" | "a" | "em" | "strong" | "b" | "i" | "img" | "object" | "svg"
                             | "input" | "button" | "textarea" | "select"
                             | "time" | "progress" | "meter"
+                            | "video" | "audio" | "canvas" | "picture"
                     )
                 })
                 .unwrap_or(false)
@@ -2122,7 +2124,9 @@ fn is_inline_child(node: &NodeHandle, resolver: &mut StyleResolver) -> bool {
 fn is_non_rendered_html_element(node: &NodeHandle) -> bool {
     matches!(
         node.tag_name().as_deref(),
-        Some("head" | "title" | "meta" | "style" | "script" | "link" | "noscript")
+        Some(
+            "head" | "title" | "meta" | "style" | "script" | "link" | "noscript" | "source"
+        )
     )
 }
 

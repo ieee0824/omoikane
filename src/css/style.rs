@@ -2355,6 +2355,29 @@ fn apply_ua_defaults(
     }
 
     match tag.as_str() {
+        "video" | "canvas" | "picture" => {
+            properties
+                .entry("display".to_string())
+                .or_insert(ComputedValue::Keyword("inline-block".to_string()));
+        }
+        "audio" => {
+            if node.get_attribute("controls").is_none() {
+                properties.insert(
+                    "display".to_string(),
+                    ComputedValue::Keyword("none".to_string()),
+                );
+            } else {
+                properties
+                    .entry("display".to_string())
+                    .or_insert(ComputedValue::Keyword("inline-block".to_string()));
+            }
+        }
+        "source" => {
+            properties.insert(
+                "display".to_string(),
+                ComputedValue::Keyword("none".to_string()),
+            );
+        }
         "details" => {
             properties
                 .entry("display".to_string())

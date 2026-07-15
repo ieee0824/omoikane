@@ -3243,6 +3243,31 @@ fn ua_defaults_button_is_inline_block_bordered() {
 }
 
 #[test]
+fn ua_defaults_html5_media_element_visibility() {
+    let video = NodeHandle::element("video");
+    let canvas = NodeHandle::element("canvas");
+    let audio = NodeHandle::element("audio");
+    let controlled_audio = NodeHandle::element("audio");
+    controlled_audio.set_attribute("controls", "");
+    let source = NodeHandle::element("source");
+    let picture = NodeHandle::element("picture");
+    let mut resolver = StyleResolver::new();
+
+    for element in [&video, &canvas, &controlled_audio, &picture] {
+        assert_eq!(
+            resolver.computed_style(element).get("display"),
+            Some(&ComputedValue::Keyword("inline-block".to_string()))
+        );
+    }
+    for element in [&audio, &source] {
+        assert_eq!(
+            resolver.computed_style(element).get("display"),
+            Some(&ComputedValue::Keyword("none".to_string()))
+        );
+    }
+}
+
+#[test]
 fn ua_defaults_html5_interactive_element_visibility() {
     let details = NodeHandle::element("details");
     let summary = NodeHandle::element("summary");

@@ -1041,6 +1041,50 @@ fn button_flattens_descendant_text_into_single_fragment() {
 }
 
 #[test]
+fn media_elements_create_placeholders_from_default_and_attribute_sizes() {
+    for (tag, attributes, expected) in [
+        ("video", vec![("width", "320"), ("height", "180")], (320.0, 180.0)),
+        ("canvas", vec![("width", "200"), ("height", "100")], (200.0, 100.0)),
+        ("audio", vec![("controls", "")], (300.0, 54.0)),
+    ] {
+        let body = NodeHandle::element("body");
+        let container = NodeHandle::element("div");
+        let media = NodeHandle::element(tag);
+        for (name, value) in attributes {
+            media.set_attribute(name, value);
+        }
+        container.append_child(media);
+        body.append_child(container);
+
+        let layout = layout_single_control_container(&body);
+        let fragments = form_control_fragments(&layout);
+        assert_eq!(fragments.len(), 1, "{tag} should create one placeholder");
+        assert_eq!((fragments[0].0.width, fragments[0].0.height), expected);
+    }
+}
+
+#[test]
+fn video_poster_and_picture_img_use_image_fallback() {
+    let data_uri = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
+    let video = NodeHandle::element("video");
+    video.set_attribute("poster", data_uri);
+    let (_, poster) = super::element_inline_image(&video).expect("video poster image");
+    assert_eq!((poster.width(), poster.height()), (1, 1));
+
+    let picture = NodeHandle::element("picture");
+    let source = NodeHandle::element("source");
+    source.set_attribute("srcset", "unsupported.webp");
+    let img = NodeHandle::element("img");
+    img.set_attribute("src", data_uri);
+    picture.append_child(source);
+    picture.append_child(img.clone());
+    let (image_node, fallback) =
+        super::element_inline_image(&picture).expect("picture img fallback");
+    assert_eq!(image_node.identity(), img.identity());
+    assert_eq!((fallback.width(), fallback.height()), (1, 1));
+}
+
+#[test]
 fn progress_and_meter_create_placeholder_fragments() {
     for tag in ["progress", "meter"] {
         let body = NodeHandle::element("body");
@@ -5502,8 +5546,12 @@ fn supported_html_tags_are_not_logged() {
     assert!(super::is_supported_html_tag("div"));
     assert!(super::is_supported_html_tag("table"));
     assert!(super::is_supported_html_tag("img"));
-    assert!(!super::is_supported_html_tag("canvas"));
-    assert!(!super::is_supported_html_tag("video"));
+    for tag in [
+        "canvas", "video", "audio", "source", "picture", "details", "summary", "dialog",
+        "time", "progress", "meter",
+    ] {
+        assert!(super::is_supported_html_tag(tag), "{tag} should be supported");
+    }
     assert!(!super::is_supported_html_tag("iframe"));
     assert!(super::is_supported_html_tag("form"));
     assert!(super::is_supported_html_tag("input"));
