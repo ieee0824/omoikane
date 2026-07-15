@@ -97,6 +97,7 @@ fn is_supported_html_tag(tag: &str) -> bool {
             | "dl" | "dt" | "dd" | "figure" | "figcaption"
             | "sup" | "sub" | "small" | "mark" | "abbr" | "cite" | "q"
             | "center" | "nobr" | "wbr"
+            | "details" | "summary" | "dialog" | "time" | "progress" | "meter"
     )
 }
 
@@ -2107,6 +2108,7 @@ fn is_inline_child(node: &NodeHandle, resolver: &mut StyleResolver) -> bool {
                         tag.as_str(),
                         "span" | "a" | "em" | "strong" | "b" | "i" | "img" | "object" | "svg"
                             | "input" | "button" | "textarea" | "select"
+                            | "time" | "progress" | "meter"
                     )
                 })
                 .unwrap_or(false)

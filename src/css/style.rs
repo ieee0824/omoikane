@@ -2296,6 +2296,19 @@ fn apply_ua_defaults(
     };
     let parent_font_size = inherited_font_size(parent_style, properties);
 
+    if tag != "summary"
+        && node.parent_node().is_some_and(|parent| {
+            parent.tag_name().as_deref() == Some("details")
+                && parent.get_attribute("open").is_none()
+        })
+    {
+        properties.insert(
+            "display".to_string(),
+            ComputedValue::Keyword("none".to_string()),
+        );
+        return;
+    }
+
     // UA stylesheet defaults per CSS 2.1 Appendix D / HTML spec
     struct UaDefaults {
         font_size_em: f32,
@@ -2342,6 +2355,58 @@ fn apply_ua_defaults(
     }
 
     match tag.as_str() {
+        "details" => {
+            properties
+                .entry("display".to_string())
+                .or_insert(ComputedValue::Keyword("block".to_string()));
+        }
+        "summary" => {
+            properties
+                .entry("display".to_string())
+                .or_insert(ComputedValue::Keyword("list-item".to_string()));
+        }
+        "dialog" => {
+            if node.get_attribute("open").is_none() {
+                properties.insert(
+                    "display".to_string(),
+                    ComputedValue::Keyword("none".to_string()),
+                );
+            } else {
+                properties
+                    .entry("display".to_string())
+                    .or_insert(ComputedValue::Keyword("block".to_string()));
+            }
+        }
+        "time" => {
+            properties
+                .entry("display".to_string())
+                .or_insert(ComputedValue::Keyword("inline".to_string()));
+        }
+        "progress" | "meter" => {
+            properties
+                .entry("display".to_string())
+                .or_insert(ComputedValue::Keyword("inline-block".to_string()));
+            properties
+                .entry("width".to_string())
+                .or_insert(ComputedValue::Px(160.0));
+            properties
+                .entry("height".to_string())
+                .or_insert(ComputedValue::Px(16.0));
+            properties
+                .entry("background-color".to_string())
+                .or_insert(ComputedValue::Color("#e6e6e6".to_string()));
+            for side in ["top", "right", "bottom", "left"] {
+                properties
+                    .entry(format!("border-{side}-style"))
+                    .or_insert(ComputedValue::Keyword("solid".to_string()));
+                properties
+                    .entry(format!("border-{side}-width"))
+                    .or_insert(ComputedValue::Px(1.0));
+                properties
+                    .entry(format!("border-{side}-color"))
+                    .or_insert(ComputedValue::Color("#767676".to_string()));
+            }
+        }
         "form" => {
             properties
                 .entry("display".to_string())

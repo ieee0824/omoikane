@@ -1041,6 +1041,24 @@ fn button_flattens_descendant_text_into_single_fragment() {
 }
 
 #[test]
+fn progress_and_meter_create_placeholder_fragments() {
+    for tag in ["progress", "meter"] {
+        let body = NodeHandle::element("body");
+        let container = NodeHandle::element("div");
+        let indicator = NodeHandle::element(tag);
+        container.append_child(indicator);
+        body.append_child(container);
+
+        let layout = layout_single_control_container(&body);
+        let fragments = form_control_fragments(&layout);
+        assert_eq!(fragments.len(), 1, "{tag} should create one placeholder");
+        assert_eq!(fragments[0].0.width, 162.0);
+        assert_eq!(fragments[0].0.height, 18.0);
+        assert!(fragments[0].1.is_empty());
+    }
+}
+
+#[test]
 fn textarea_size_derives_from_cols_and_rows() {
     // font-size:20px => average_advance = 12, line-height(normal) = 24.
     // width  = cols(10) * 12 + padding(2+2) + border(1+1) = 126.

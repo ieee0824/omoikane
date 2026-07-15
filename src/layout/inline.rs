@@ -204,6 +204,10 @@ fn collect_element_inline_segments(
             collect_select_segment(node, &style, resolver, out);
             return;
         }
+        Some("progress" | "meter") => {
+            collect_value_indicator_segment(node, &style, out);
+            return;
+        }
         _ => {}
     }
 
@@ -387,6 +391,25 @@ fn collect_select_segment(
         explicit_length(style, "height").unwrap_or_else(|| metrics.font_size.max(13.0));
 
     push_form_control_segment(node, style, label, content_width, content_height, metrics, out);
+}
+
+fn collect_value_indicator_segment(
+    node: &NodeHandle,
+    style: &ComputedStyle,
+    out: &mut Vec<InlineSegment>,
+) {
+    let metrics = font_metrics(style);
+    let content_width = explicit_length(style, "width").unwrap_or(160.0);
+    let content_height = explicit_length(style, "height").unwrap_or(16.0);
+    push_form_control_segment(
+        node,
+        style,
+        String::new(),
+        content_width,
+        content_height,
+        metrics,
+        out,
+    );
 }
 
 /// Pushes a `FormControl` inline segment shared by all form control collectors.
