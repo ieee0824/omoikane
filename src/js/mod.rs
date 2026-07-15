@@ -5184,6 +5184,39 @@ mod tests {
     }
 
     #[test]
+    fn mutation_observer_validates_lifecycle_and_overlapping_registrations() {
+        let mut runtime = JsRuntime::with_document(default_document()).unwrap();
+        let actual = eval_str(
+            &mut runtime,
+            r#"(() => {
+                const parent = document.createElement("div");
+                const child = parent.appendChild(document.createElement("span"));
+                const observer = new MutationObserver(() => {});
+                let nullOptions;
+                try { observer.observe(child, null); } catch (error) { nullOptions = error.name; }
+
+                child.setAttribute("data-x", "before");
+                observer.observe(parent, { attributes: true, subtree: true });
+                observer.observe(child, { attributes: true, attributeOldValue: true });
+                child.setAttribute("data-x", "after");
+                const overlapping = observer.takeRecords();
+
+                observer.disconnect();
+                child.setAttribute("data-x", "disconnected");
+                const disconnected = observer.takeRecords().length;
+                observer.observe(child, { attributes: true });
+                child.setAttribute("data-x", "reconnected");
+                const reconnected = observer.takeRecords();
+                return [
+                    nullOptions, overlapping.length, overlapping[0].oldValue,
+                    disconnected, reconnected.length, reconnected[0].oldValue
+                ].join("|");
+            })()"#,
+        );
+        assert_eq!(actual, "TypeError|1|before|0|1|");
+    }
+
+    #[test]
     fn element_has_no_character_data_property() {
         let mut runtime = JsRuntime::with_document(default_document()).unwrap();
         // .data must not be defined on Element nodes (it is a CharacterData API).

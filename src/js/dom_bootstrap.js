@@ -3587,20 +3587,23 @@
 
   function queueMutation(target, type, init = {}) {
     for (const observer of mutationObservers) {
-      let matched = null;
+      let matched = false;
+      let includeOldValue = false;
       for (const registration of observer._registrations) {
         const inScope = registration.target === target ||
           (registration.options.subtree && isInclusiveDescendant(target, registration.target));
         if (!inScope || !registration.options[type]) continue;
         if (type === "attributes" && registration.options.attributeFilter &&
             !registration.options.attributeFilter.includes(init.attributeName)) continue;
-        matched = registration.options;
-        break;
+        matched = true;
+        if (type === "attributes" && registration.options.attributeOldValue) includeOldValue = true;
+        if (type === "characterData" && registration.options.characterDataOldValue) includeOldValue = true;
       }
       if (!matched) continue;
       const recordInit = { ...init };
-      if (type === "attributes" && !matched.attributeOldValue) recordInit.oldValue = null;
-      if (type === "characterData" && !matched.characterDataOldValue) recordInit.oldValue = null;
+      if ((type === "attributes" || type === "characterData") && !includeOldValue) {
+        recordInit.oldValue = null;
+      }
       observer._records.push(new MutationRecord(type, target, recordInit));
       observer._schedule();
     }
@@ -3614,10 +3617,9 @@
       this._records = [];
       this._registrations = [];
       this._scheduled = false;
-      mutationObservers.add(this);
     }
     observe(target, options) {
-      if (arguments.length < 2 || !target || typeof options !== "object") throw new TypeError("observe requires target and options");
+      if (arguments.length < 2 || !target || options === null || typeof options !== "object") throw new TypeError("observe requires target and options");
       const normalized = {
         childList: !!options.childList, subtree: !!options.subtree,
         attributes: options.attributes === undefined
@@ -3636,11 +3638,16 @@
           (!normalized.childList && !normalized.attributes && !normalized.characterData)) {
         throw new TypeError("At least one mutation type must be observed");
       }
+      mutationObservers.add(this);
       const existing = this._registrations.find(entry => entry.target === target);
       if (existing) existing.options = normalized;
       else this._registrations.push({ target, options: normalized });
     }
-    disconnect() { this._registrations = []; this._records = []; }
+    disconnect() {
+      this._registrations = [];
+      this._records = [];
+      mutationObservers.delete(this);
+    }
     takeRecords() { const records = this._records; this._records = []; return records; }
     _schedule() {
       if (this._scheduled) return;
