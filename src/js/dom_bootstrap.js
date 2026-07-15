@@ -1563,7 +1563,9 @@
     const descriptor = Object.getOwnPropertyDescriptor(Node.prototype, name);
     if (descriptor) {
       Object.defineProperty(Element.prototype, name, descriptor);
-      delete Node.prototype[name];
+      if (!delete Node.prototype[name]) {
+        throw new TypeError("Failed to move " + name + " off Node.prototype");
+      }
     }
   }
 
