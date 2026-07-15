@@ -45,6 +45,7 @@ enum NodeData {
     Element(Element),
     Text(Text),
     Comment(Comment),
+    ProcessingInstruction(ProcessingInstruction),
     DocumentType(DocumentType),
 }
 
@@ -56,6 +57,7 @@ pub enum NodeType {
     Element,
     Text,
     Comment,
+    ProcessingInstruction,
     DocumentType,
 }
 
@@ -181,6 +183,23 @@ impl Comment {
     }
 }
 
+/// A DOM processing instruction node.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProcessingInstruction {
+    target: String,
+    data: String,
+}
+
+impl ProcessingInstruction {
+    /// Creates a processing instruction payload.
+    pub fn new(target: impl Into<String>, data: impl Into<String>) -> Self {
+        Self {
+            target: target.into(),
+            data: data.into(),
+        }
+    }
+}
+
 /// A DOM document type node.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DocumentType {
@@ -273,6 +292,11 @@ impl NodeHandle {
     /// Creates a comment node.
     pub fn comment(data: impl Into<String>) -> Self {
         Self::new(NodeData::Comment(Comment::new(data)))
+    }
+
+    /// Creates a processing instruction node.
+    pub fn processing_instruction(target: impl Into<String>, data: impl Into<String>) -> Self {
+        Self::new(NodeData::ProcessingInstruction(ProcessingInstruction::new(target, data)))
     }
 
     /// Creates a document type node.
@@ -511,6 +535,7 @@ impl NodeHandle {
         match &mut self.0.borrow_mut().data {
             NodeData::Text(text) => text.data = data.to_string(),
             NodeData::Comment(comment) => comment.data = data.to_string(),
+            NodeData::ProcessingInstruction(pi) => pi.data = data.to_string(),
             _ => {}
         }
     }
@@ -520,6 +545,7 @@ impl NodeHandle {
         match &self.0.borrow().data {
             NodeData::Text(text) => Some(text.data().to_string()),
             NodeData::Comment(comment) => Some(comment.data().to_string()),
+            NodeData::ProcessingInstruction(pi) => Some(pi.data.clone()),
             NodeData::DocumentType(doctype) => Some(doctype.name().to_string()),
             _ => None,
         }
@@ -569,6 +595,7 @@ impl Node for NodeHandle {
             NodeData::Element(_) => NodeType::Element,
             NodeData::Text(_) => NodeType::Text,
             NodeData::Comment(_) => NodeType::Comment,
+            NodeData::ProcessingInstruction(_) => NodeType::ProcessingInstruction,
             NodeData::DocumentType(_) => NodeType::DocumentType,
         }
     }
@@ -581,6 +608,7 @@ impl Node for NodeHandle {
             NodeData::Element(element) => element.tag_name.clone(),
             NodeData::Text(_) => "#text".to_string(),
             NodeData::Comment(_) => "#comment".to_string(),
+            NodeData::ProcessingInstruction(pi) => pi.target.clone(),
             NodeData::DocumentType(doctype) => doctype.name.clone(),
         }
     }

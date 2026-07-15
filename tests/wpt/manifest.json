@@ -2,6 +2,10 @@
   "tests": [
     { "path": "dom/nodes/Element-childElement-null.html", "expected": "PASS" },
     { "path": "dom/nodes/Element-childElementCount-nochild.html", "expected": "PASS" },
-    { "path": "dom/nodes/Node-isConnected.html", "expected": "PASS" }
+    { "path": "dom/nodes/Node-isConnected.html", "expected": "PASS" },
+    { "path": "dom/nodes/Element-childElementCount.html", "expected": "PASS" },
+    { "path": "dom/nodes/Element-childElementCount-dynamic-add.html", "expected": "PASS" },
+    { "path": "dom/nodes/Element-childElementCount-dynamic-remove.html", "expected": "PASS" },
+    { "path": "dom/nodes/CharacterData-remove.html", "expected": "PASS" }
   ]
 }

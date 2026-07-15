@@ -1561,6 +1561,11 @@ fn register_host_bindings(
             NativeFunction::from_copy_closure(create_document_type_native),
         ),
         (
+            js_string!("__omoikane_create_processing_instruction"),
+            2,
+            NativeFunction::from_copy_closure(create_processing_instruction_native),
+        ),
+        (
             js_string!("__omoikane_create_comment"),
             1,
             NativeFunction::from_copy_closure(create_comment_native),
@@ -2561,7 +2566,9 @@ fn get_text_content_native(_: &JsValue, args: &[JsValue], context: &mut Context)
             // DocumentType returns null per DOM spec
             crate::dom::NodeType::DocumentType => Ok(JsValue::null()),
             // Text and Comment return their data
-            crate::dom::NodeType::Text | crate::dom::NodeType::Comment => {
+            crate::dom::NodeType::Text
+            | crate::dom::NodeType::Comment
+            | crate::dom::NodeType::ProcessingInstruction => {
                 let data = node.data().unwrap_or_default();
                 Ok(js_string!(data.as_str()).into())
             }
@@ -2583,7 +2590,9 @@ fn collect_text_recursive(node: &NodeHandle) -> String {
                     text.push_str(&data);
                 }
             }
-            crate::dom::NodeType::Comment | crate::dom::NodeType::DocumentType => {}
+            crate::dom::NodeType::Comment
+            | crate::dom::NodeType::ProcessingInstruction
+            | crate::dom::NodeType::DocumentType => {}
             _ => {
                 text.push_str(&collect_text_recursive(&child));
             }
@@ -2601,7 +2610,10 @@ fn set_text_content_native(_: &JsValue, args: &[JsValue], context: &mut Context)
             .get_node(id)
             .ok_or_else(|| JsError::from(JsNativeError::error().with_message("node not found")))?;
         // For text/comment leaf nodes, update data directly
-        if matches!(node.node_type(), crate::dom::NodeType::Text | crate::dom::NodeType::Comment) {
+        if matches!(node.node_type(), crate::dom::NodeType::Text
+                | crate::dom::NodeType::Comment
+                | crate::dom::NodeType::ProcessingInstruction
+        ) {
             node.set_data(&text);
         } else {
             // Remove all children
@@ -2662,6 +2674,17 @@ fn serialize_node(node: &NodeHandle, html: &mut String) {
                 html.push_str(&data);
                 html.push_str("-->");
             }
+        }
+        crate::dom::NodeType::ProcessingInstruction => {
+            html.push_str("<?");
+            html.push_str(&node.node_name());
+            if let Some(data) = node.data()
+                && !data.is_empty()
+            {
+                html.push(' ');
+                html.push_str(&data);
+            }
+            html.push_str("?>");
         }
         crate::dom::NodeType::DocumentType => {
             if let Some(name) = node.data() {
@@ -2934,6 +2957,7 @@ fn node_type_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsR
         let node_type = match node.node_type() {
             crate::dom::NodeType::Element => 1,
             crate::dom::NodeType::Text => 3,
+            crate::dom::NodeType::ProcessingInstruction => 7,
             crate::dom::NodeType::Comment => 8,
             crate::dom::NodeType::Document => 9,
             crate::dom::NodeType::DocumentType => 10,
@@ -2960,6 +2984,9 @@ fn clone_node_impl(node: &NodeHandle, deep: bool) -> NodeHandle {
         }
         crate::dom::NodeType::Comment => {
             NodeHandle::comment(node.data().unwrap_or_default())
+        }
+        crate::dom::NodeType::ProcessingInstruction => {
+            NodeHandle::processing_instruction(node.node_name(), node.data().unwrap_or_default())
         }
         crate::dom::NodeType::Document => NodeHandle::document(),
         crate::dom::NodeType::DocumentFragment => NodeHandle::document_fragment(),
@@ -3082,6 +3109,21 @@ fn create_document_type_native(
     with_host_state(|state| {
         state.borrow_mut().nodes.insert(id, node);
         Ok(JsValue::from(id as f64))
+    })
+}
+
+fn create_processing_instruction_native(
+    _: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let target = args.first().cloned().unwrap_or_default().to_string(context)?.to_std_string_escaped();
+    let data = args.get(1).cloned().unwrap_or_default().to_string(context)?.to_std_string_escaped();
+    let node = NodeHandle::processing_instruction(target, data);
+    let id = node.identity() as f64;
+    with_host_state(|state| {
+        state.borrow_mut().nodes.insert(node.identity(), node);
+        Ok(JsValue::from(id))
     })
 }
 
@@ -5930,6 +5972,30 @@ mod tests {
             .as_boolean()
             .unwrap();
         assert!(orphan_remove, "remove() should be a no-op for an orphan element");
+    }
+
+    #[test]
+    fn document_create_processing_instruction() {
+        let doc = NodeHandle::document();
+        let mut runtime = JsRuntime::with_document(doc).unwrap();
+
+        let result = eval_str(
+            &mut runtime,
+            r#"(() => {
+                const pi = document.createProcessingInstruction('xml-stylesheet', 'href="style.css"');
+                const clone = pi.cloneNode();
+                const errors = [];
+                for (const args of [['bad name', 'data'], ['ok', 'bad?>data']]) {
+                    try { document.createProcessingInstruction(...args); errors.push('none'); }
+                    catch (error) { errors.push(error.name); }
+                }
+                return [pi.nodeType, pi.nodeName, pi.target, pi.data, clone.nodeType, clone.nodeName, clone.data, ...errors].join('|');
+            })()"#,
+        );
+        assert_eq!(
+            result,
+            "7|xml-stylesheet|xml-stylesheet|href=\"style.css\"|7|xml-stylesheet|href=\"style.css\"|InvalidCharacterError|InvalidCharacterError"
+        );
     }
 
     #[test]

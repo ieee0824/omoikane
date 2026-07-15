@@ -37,6 +37,8 @@
       node = new Document(id);
     } else if (nodeType === 11) {
       node = new DocumentFragment(id);
+    } else if (nodeType === 7) {
+      node = new ProcessingInstruction(id);
     } else if (nodeType === 3) {
       node = new Text(id);
     } else if (nodeType === 8) {
@@ -1433,6 +1435,9 @@
     }
   }
   class Comment extends CharacterData {}
+  class ProcessingInstruction extends CharacterData {
+    get target() { return this.nodeName; }
+  }
 
   const NodeFilter = {
     FILTER_ACCEPT: 1, FILTER_REJECT: 2, FILTER_SKIP: 3,
@@ -2101,6 +2106,20 @@
 
     createTextNode(text) {
       return this.__own(wrapNode(__omoikane_create_text_node(String(text))));
+    }
+
+    createProcessingInstruction(target, data) {
+      const normalizedTarget = String(target);
+      const normalizedData = String(data);
+      if (!isValidXmlName(normalizedTarget) || normalizedData.includes("?>")) {
+        throw new DOMException(
+          "The processing instruction target or data is invalid.",
+          "InvalidCharacterError"
+        );
+      }
+      return this.__own(wrapNode(
+        __omoikane_create_processing_instruction(normalizedTarget, normalizedData)
+      ));
     }
 
     createComment(data) {
@@ -3084,6 +3103,7 @@
   globalThis.CharacterData = CharacterData;
   globalThis.Text = Text;
   globalThis.Comment = Comment;
+  globalThis.ProcessingInstruction = ProcessingInstruction;
   globalThis.Document = Document;
   globalThis.DocumentFragment = DocumentFragment;
   globalThis.DOMException = DOMException;
