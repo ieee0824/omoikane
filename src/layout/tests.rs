@@ -2997,6 +2997,86 @@ fn logical_margin_inline_start_offsets_flex_item() {
 }
 
 #[test]
+fn block_svg_flex_item_keeps_its_replaced_image_fragment() {
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let container = NodeHandle::element("div");
+    let svg = NodeHandle::element("svg");
+    svg.set_attribute("viewBox", "0 0 100 50");
+    let rect = NodeHandle::element("rect");
+    rect.set_attribute("width", "100");
+    rect.set_attribute("height", "50");
+    rect.set_attribute("fill", "black");
+    svg.append_child(rect);
+    container.append_child(svg);
+    body.append_child(container);
+    document.append_child(body.clone());
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet("div { display: flex; width: 200px; } svg { display: block; }")
+            .unwrap(),
+    );
+    let layout = layout_tree(
+        &body,
+        &mut resolver,
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 200.0,
+            height: 100.0,
+        },
+    )
+    .unwrap();
+
+    let svg_box = &layout.children[0].children[0];
+    assert!(svg_box.lines.iter().any(|line| line.fragments.iter().any(|fragment| {
+        matches!(fragment.content, InlineFragmentContent::Image(_, _))
+    })));
+    assert_eq!(svg_box.dimensions.content.height, 50.0);
+}
+
+#[test]
+fn block_svg_percentage_width_scales_image_to_flex_item() {
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let container = NodeHandle::element("div");
+    let svg = NodeHandle::element("svg");
+    svg.set_attribute("viewBox", "0 0 400 200");
+    let rect = NodeHandle::element("rect");
+    rect.set_attribute("width", "400");
+    rect.set_attribute("height", "200");
+    svg.append_child(rect);
+    container.append_child(svg);
+    body.append_child(container);
+    document.append_child(body.clone());
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "div { display: flex; width: 160px; } svg { display: block; width: 100%; }",
+        )
+        .unwrap(),
+    );
+    let layout = layout_tree(
+        &body,
+        &mut resolver,
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 160.0,
+            height: 100.0,
+        },
+    )
+    .unwrap();
+    let fragment = &layout.children[0].children[0].lines[0].fragments[0];
+    assert_eq!(fragment.rect.width, 160.0);
+    assert_eq!(fragment.rect.height, 80.0);
+}
+
+#[test]
 fn flex_row_honors_column_gap_between_items() {
     let document = NodeHandle::document();
     let body = NodeHandle::element("body");
