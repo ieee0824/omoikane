@@ -476,6 +476,42 @@
     queueMutation(parent, "childList", { removedNodes: [node], previousSibling, nextSibling });
   }
 
+  // Split a CSS declaration block only at top-level semicolons. Data URLs,
+  // functions and quoted strings may legally contain semicolons; a plain
+  // String.split would corrupt those values during a CSSStyleDeclaration
+  // read-modify-write cycle.
+  function splitCssDeclarations(input) {
+    const parts = [];
+    let start = 0;
+    let quote = "";
+    let depth = 0;
+    for (let i = 0; i < input.length; i++) {
+      const ch = input[i];
+      if (ch === "\\") {
+        // A CSS escape consumes the following code unit both inside and outside
+        // strings, so an escaped quote/semicolon cannot affect scanner state.
+        if (i + 1 < input.length) i++;
+        continue;
+      }
+      if (quote) {
+        if (ch === quote) quote = "";
+        continue;
+      }
+      if (ch === "\"" || ch === "'") {
+        quote = ch;
+      } else if (ch === "(") {
+        depth++;
+      } else if (ch === ")" && depth > 0) {
+        depth--;
+      } else if (ch === ";" && depth === 0) {
+        parts.push(input.slice(start, i));
+        start = i + 1;
+      }
+    }
+    parts.push(input.slice(start));
+    return parts;
+  }
+
   class Node {
     constructor(id) {
       this.__id = id;
@@ -763,7 +799,7 @@
       const parseDecls = () => {
         const attr = __omoikane_get_attribute(node.__id, "style") || "";
         const decls = [];
-        for (const part of attr.split(";")) {
+        for (const part of splitCssDeclarations(attr)) {
           const idx = part.indexOf(":");
           if (idx < 0) continue;
           const rawName = part.slice(0, idx).trim();

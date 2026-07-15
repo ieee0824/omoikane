@@ -4102,6 +4102,62 @@ mod tests {
     }
 
     #[test]
+    fn style_parser_preserves_quoted_and_unquoted_data_uri_semicolons() {
+        let doc = NodeHandle::document();
+        let unquoted = NodeHandle::element("div");
+        let quoted = NodeHandle::element("div");
+        unquoted.set_attribute("id", "unquoted");
+        quoted.set_attribute("id", "quoted");
+        doc.append_child(unquoted.clone());
+        doc.append_child(quoted.clone());
+
+        let mut runtime = JsRuntime::with_document(doc).unwrap();
+        runtime
+            .eval(
+                r#"
+                const unquoted = document.getElementById("unquoted");
+                const quoted = document.getElementById("quoted");
+                unquoted.setAttribute(
+                    "style",
+                    "background-image: url(data:image/png;base64,AAAA); color: red;"
+                );
+                quoted.setAttribute(
+                    "style",
+                    'background-image: url("data:image/svg+xml;utf8,<svg></svg>"); color: blue;'
+                );
+                // Force a read-modify-write cycle; both data URLs must survive
+                // when the declaration list is serialized again.
+                unquoted.style.marginTop = "1px";
+                quoted.style.marginTop = "2px";
+                "#,
+            )
+            .unwrap();
+
+        assert_eq!(
+            eval_str(&mut runtime, "unquoted.style.backgroundImage"),
+            "url(data:image/png;base64,AAAA)"
+        );
+        assert_eq!(eval_str(&mut runtime, "unquoted.style.color"), "red");
+        assert_eq!(
+            eval_str(&mut runtime, "quoted.style.backgroundImage"),
+            r#"url("data:image/svg+xml;utf8,<svg></svg>")"#
+        );
+        assert_eq!(eval_str(&mut runtime, "quoted.style.color"), "blue");
+        assert!(
+            unquoted
+                .attributes()
+                .unwrap()["style"]
+                .contains("data:image/png;base64,AAAA")
+        );
+        assert!(
+            quoted
+                .attributes()
+                .unwrap()["style"]
+                .contains("data:image/svg+xml;utf8,<svg></svg>")
+        );
+    }
+
+    #[test]
     fn style_set_property_kebab_and_camel_are_consistent() {
         // setProperty uses CSS (kebab-case) names; the value must be readable via
         // both the camelCase accessor and getPropertyValue, and vice versa.
