@@ -76,6 +76,7 @@ pub struct HttpRequest {
     url: Url,
     headers: Vec<(String, String)>,
     body: Option<Vec<u8>>,
+    require_public_ip: bool,
 }
 
 impl HttpRequest {
@@ -90,6 +91,7 @@ impl HttpRequest {
             url,
             headers: Vec::new(),
             body: None,
+            require_public_ip: false,
         };
         req.headers.push(("Host".to_string(), host));
         req.headers
@@ -135,6 +137,14 @@ impl HttpRequest {
     /// Returns the request body, if present.
     pub fn body(&self) -> Option<&[u8]> {
         self.body.as_deref()
+    }
+
+    pub(crate) fn require_public_ip(&mut self) {
+        self.require_public_ip = true;
+    }
+
+    pub(crate) fn requires_public_ip(&self) -> bool {
+        self.require_public_ip
     }
 
     /// Returns the first header value matching `name`, ignoring ASCII case.

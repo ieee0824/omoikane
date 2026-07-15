@@ -1,7 +1,6 @@
 //! Author stylesheet extraction, @import resolution, and forgiving parsing.
 
 use std::collections::HashSet;
-use std::net::{IpAddr, Ipv4Addr, ToSocketAddrs};
 
 use crate::css::{Stylesheet, parse_stylesheet, extract_font_face_rules};
 use crate::dom::{Node, NodeHandle, NodeType};
@@ -144,7 +143,9 @@ pub(crate) fn collect_stylesheet_with_imports(
                 if !active_import_urls.insert(import_url_string.clone()) {
                     continue;
                 }
-                if let Some(import_css) = fetch_stylesheet_by_url(&import_url, client) {
+                if let Some(import_css) =
+                    fetch_stylesheet_by_url(&import_url, client, document_base)
+                {
                     collect_stylesheet_with_imports(
                         import_css,
                         Some(&import_url),
@@ -406,7 +407,7 @@ pub(crate) fn fetch_relative_stylesheet(
     document_base: Option<&crate::http::Url>,
 ) -> Option<(String, crate::http::Url)> {
     let resolved = resolve_relative_stylesheet_url(base, href, document_base)?;
-    let css = fetch_stylesheet_by_url(&resolved, client)?;
+    let css = fetch_stylesheet_by_url(&resolved, client, document_base)?;
     Some((css, resolved))
 }
 
@@ -432,56 +433,24 @@ fn is_public_cross_origin_stylesheet_url(url: &crate::http::Url) -> bool {
     if url.scheme() != "https" {
         return false;
     }
-    let Ok(addresses) = (url.host(), url.port()).to_socket_addrs() else {
-        return false;
-    };
-    let addresses = addresses.collect::<Vec<_>>();
-    !addresses.is_empty() && addresses.iter().all(|address| is_public_ip(address.ip()))
-}
-
-fn is_public_ip(ip: IpAddr) -> bool {
-    match ip {
-        IpAddr::V4(ip) => is_public_ipv4(ip),
-        IpAddr::V6(ip) => {
-            if let Some(ipv4) = ip.to_ipv4_mapped() {
-                return is_public_ipv4(ipv4);
-            }
-            let segments = ip.segments();
-            !ip.is_unspecified()
-                && !ip.is_loopback()
-                && !ip.is_multicast()
-                && (segments[0] & 0xfe00) != 0xfc00
-                && (segments[0] & 0xffc0) != 0xfe80
-                && !(segments[0] == 0x2001 && segments[1] == 0x0db8)
-        }
+    match url.host().parse() {
+        Ok(ip) => crate::http::is_public_ip(ip),
+        Err(_) => true,
     }
-}
-
-fn is_public_ipv4(ip: Ipv4Addr) -> bool {
-    let [a, b, c, _] = ip.octets();
-    !(a == 0
-        || a == 10
-        || a == 127
-        || (a == 100 && (64..=127).contains(&b))
-        || (a == 169 && b == 254)
-        || (a == 172 && (16..=31).contains(&b))
-        || (a == 192 && b == 0 && c == 0)
-        || (a == 192 && b == 0 && c == 2)
-        || (a == 192 && b == 88 && c == 99)
-        || (a == 192 && b == 168)
-        || (a == 198 && (b == 18 || b == 19))
-        || (a == 198 && b == 51 && c == 100)
-        || (a == 203 && b == 0 && c == 113)
-        || a >= 224)
 }
 
 pub(crate) fn fetch_stylesheet_by_url(
     resolved: &crate::http::Url,
     client: &mut Option<crate::http::Client>,
+    document_base: Option<&crate::http::Url>,
 ) -> Option<String> {
     let url_str = resolved.to_string();
     let c = client.as_mut()?;
-    let resp = c.get(&url_str).ok()?;
+    let resp = if document_base.is_some_and(|base| !same_origin(resolved, base)) {
+        c.get_public(&url_str).ok()?
+    } else {
+        c.get(&url_str).ok()?
+    };
     if resp.status_code() != 200 {
         return None;
     }

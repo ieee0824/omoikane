@@ -20,6 +20,7 @@ mod request_tests;
 mod response_tests;
 
 pub use client::Client;
+pub(crate) use connection::is_public_ip;
 pub use connection::{send, send_with_options};
 pub use data_uri::{DataUri, parse_data_uri};
 pub use cookie::{Cookie, CookieJar, SameSite};

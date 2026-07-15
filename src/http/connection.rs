@@ -1,7 +1,7 @@
 //! TCP/TLS connection handling for HTTP requests.
 
 use std::io::{self, Write};
-use std::net::{TcpStream, ToSocketAddrs};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpStream, ToSocketAddrs};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -160,26 +160,74 @@ fn send_over_tcp(
 fn connect_stream(request: &HttpRequest) -> Result<TcpStream, HttpParseError> {
     let url = request.url();
     let addr = format!("{}:{}", url.host(), url.port());
-    let socket_addr = addr
-        .to_socket_addrs()
-        .map_err(HttpParseError::Io)?
-        .next()
-        .ok_or_else(|| {
-            HttpParseError::Io(io::Error::new(
-                io::ErrorKind::AddrNotAvailable,
-                format!("could not resolve address: {addr}"),
-            ))
-        })?;
+    let socket_addrs = addr.to_socket_addrs().map_err(HttpParseError::Io)?;
+    let socket_addrs = socket_addrs
+        .filter(|address| !request.requires_public_ip() || is_public_ip(address.ip()))
+        .collect::<Vec<_>>();
+    if socket_addrs.is_empty() {
+        return Err(HttpParseError::Io(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!("no permitted address for: {addr}"),
+        )));
+    }
 
+    let mut last_error = None;
+    for socket_addr in socket_addrs {
+        match connect_socket(socket_addr) {
+            Ok(stream) => return Ok(stream),
+            Err(error) => last_error = Some(error),
+        }
+    }
+    Err(HttpParseError::Io(last_error.unwrap_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::AddrNotAvailable,
+            format!("could not connect: {addr}"),
+        )
+    })))
+}
+
+fn connect_socket(socket_addr: SocketAddr) -> io::Result<TcpStream> {
     let stream =
-        TcpStream::connect_timeout(&socket_addr, Duration::from_secs(DEFAULT_TIMEOUT_SECS))
-            .map_err(HttpParseError::Io)?;
-
-    stream
-        .set_read_timeout(Some(Duration::from_secs(DEFAULT_TIMEOUT_SECS)))
-        .map_err(HttpParseError::Io)?;
-
+        TcpStream::connect_timeout(&socket_addr, Duration::from_secs(DEFAULT_TIMEOUT_SECS))?;
+    stream.set_read_timeout(Some(Duration::from_secs(DEFAULT_TIMEOUT_SECS)))?;
     Ok(stream)
+}
+
+pub(crate) fn is_public_ip(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(ip) => is_public_ipv4(ip),
+        IpAddr::V6(ip) => {
+            if let Some(ipv4) = ip.to_ipv4_mapped() {
+                return is_public_ipv4(ipv4);
+            }
+            let segments = ip.segments();
+            !ip.is_unspecified()
+                && !ip.is_loopback()
+                && !ip.is_multicast()
+                && (segments[0] & 0xfe00) != 0xfc00
+                && (segments[0] & 0xffc0) != 0xfe80
+                && (segments[0] & 0xffc0) != 0xfec0
+                && !(segments[0] == 0x2001 && segments[1] == 0x0db8)
+        }
+    }
+}
+
+fn is_public_ipv4(ip: Ipv4Addr) -> bool {
+    let [a, b, c, _] = ip.octets();
+    !(a == 0
+        || a == 10
+        || a == 127
+        || (a == 100 && (64..=127).contains(&b))
+        || (a == 169 && b == 254)
+        || (a == 172 && (16..=31).contains(&b))
+        || (a == 192 && b == 0 && c == 0)
+        || (a == 192 && b == 0 && c == 2)
+        || (a == 192 && b == 88 && c == 99)
+        || (a == 192 && b == 168)
+        || (a == 198 && (b == 18 || b == 19))
+        || (a == 198 && b == 51 && c == 100)
+        || (a == 203 && b == 0 && c == 113)
+        || a >= 224)
 }
 
 fn default_client_config(enable_http2: bool) -> ClientConfig {
@@ -662,6 +710,23 @@ mod tests {
         assert!(
             result.is_err(),
             "secure mode should still reject untrusted cert"
+        );
+    }
+
+    #[test]
+    fn public_ip_filter_rejects_site_local_ipv6() {
+        assert!(!is_public_ip("fec0::1".parse().unwrap()));
+        assert!(!is_public_ip("feff::1".parse().unwrap()));
+        assert!(is_public_ip("2606:4700:4700::1111".parse().unwrap()));
+    }
+
+    #[test]
+    fn restricted_request_rejects_the_resolved_loopback_address() {
+        let mut request = HttpRequest::get("http://127.0.0.1:9/").unwrap();
+        request.require_public_ip();
+        let error = connect_stream(&request).unwrap_err();
+        assert!(
+            matches!(error, HttpParseError::Io(ref error) if error.kind() == io::ErrorKind::PermissionDenied)
         );
     }
 }
