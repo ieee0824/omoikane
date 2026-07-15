@@ -3820,6 +3820,45 @@ mod tests {
     }
 
     #[test]
+    fn history_api_tracks_state_and_same_origin_urls() {
+        let mut runtime = JsRuntime::new().unwrap();
+        assert!(runtime
+            .eval(r##"(() => { history.pushState({page: 1}, "", "/one?q=1"); history.replaceState({page: 2}, "", "/two#hash"); return history.length === 2 && history.state.page === 2 && location.pathname === "/two" && location.hash === "#hash"; })()"##)
+            .unwrap()
+            .as_boolean()
+            .unwrap());
+    }
+
+    #[test]
+    fn streams_support_enqueue_read_and_transform() {
+        let mut runtime = JsRuntime::new().unwrap();
+        runtime
+            .eval(r#"globalThis.streamResult = ""; globalThis.streamSource = new ReadableStream({ start: function(c) { c.enqueue("a"); c.close(); } }); globalThis.streamReader = streamSource.getReader(); streamReader.read().then(function(r) { streamResult = r.value; });"#)
+            .unwrap();
+        runtime.run_jobs().unwrap();
+        let result = runtime
+            .eval("streamResult")
+            .unwrap()
+            .as_string()
+            .unwrap()
+            .to_std_string_escaped();
+        assert_eq!(result, "a");
+        runtime
+            .eval(r#"globalThis.transformResult = ""; globalThis.transformStream = new TransformStream({ transform: function(value, controller) { controller.enqueue(value.toUpperCase()); } }); globalThis.transformWriter = transformStream.writable.getWriter(); transformWriter.write("b"); transformStream.readable.getReader().read().then(function(result) { transformResult = result.value; });"#)
+            .unwrap();
+        runtime.run_jobs().unwrap();
+        assert_eq!(
+            runtime
+                .eval("transformResult")
+                .unwrap()
+                .as_string()
+                .unwrap()
+                .to_std_string_escaped(),
+            "B"
+        );
+    }
+
+    #[test]
     fn implements_fetch_api() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();

@@ -3638,6 +3638,54 @@
     }
   } catch(e) {}
   globalThis.location = __loc;
+  function __applyHistoryUrl(url) {
+    if (url == null || String(url) === "") return;
+    const raw = String(url);
+    let href = raw;
+    if (!/^[A-Za-z][A-Za-z0-9+.-]*:\/\//.test(raw)) {
+      href = raw.startsWith("/") ? __loc.origin + raw :
+        __loc.origin + (__loc.pathname.replace(/[^/]*$/, "")) + raw;
+    }
+    const match = href.match(/^(.*?):\/\/([^/?#]+)([^?#]*)(\?[^#]*)?(#.*)?$/);
+    if (!match || (match[1] + "://" + match[2]) !== __loc.origin) {
+      throw new DOMException("History state URL must be same-origin", "SecurityError");
+    }
+    __loc.href = href;
+    __loc.protocol = match[1] + ":";
+    __loc.host = match[2];
+    __loc.hostname = match[2].replace(/:\d+$/, "");
+    __loc.pathname = match[3] || "/";
+    __loc.search = match[4] || "";
+    __loc.hash = match[5] || "";
+  }
+  const __historyEntries = [{ state: null, href: __loc.href }];
+  let __historyIndex = 0;
+  globalThis.history = {
+    scrollRestoration: "auto",
+    get length() { return __historyEntries.length; },
+    get state() { return __historyEntries[__historyIndex].state; },
+    pushState(state, unused, url) {
+      void unused;
+      __applyHistoryUrl(url);
+      __historyEntries.splice(__historyIndex + 1);
+      __historyEntries.push({ state, href: __loc.href });
+      __historyIndex = __historyEntries.length - 1;
+    },
+    replaceState(state, unused, url) {
+      void unused;
+      __applyHistoryUrl(url);
+      __historyEntries[__historyIndex] = { state, href: __loc.href };
+    },
+    go(delta = 0) {
+      const target = __historyIndex + Number(delta || 0);
+      if (target < 0 || target >= __historyEntries.length || target === __historyIndex) return;
+      __historyIndex = target;
+      __applyHistoryUrl(__historyEntries[target].href);
+      globalThis.dispatchEvent(new Event("popstate"));
+    },
+    back() { this.go(-1); },
+    forward() { this.go(1); },
+  };
   // Maps a JS-style property name to its CSS (kebab-case) form. `cssFloat` /
   // `styleFloat` alias the `float` property, matching the CSSOM.
   function __styleNameToCss(prop) {
@@ -4030,6 +4078,123 @@
   globalThis.XMLHttpRequest.HEADERS_RECEIVED = 2;
   globalThis.XMLHttpRequest.LOADING = 3;
   globalThis.XMLHttpRequest.DONE = 4;
+
+  class ReadableStreamDefaultController {
+    constructor(stream) { this._stream = stream; }
+    enqueue(chunk) {
+      if (this._stream._closed) throw new TypeError("ReadableStream is closed");
+      const waiter = this._stream._waiters.shift();
+      if (waiter) waiter.resolve({ value: chunk, done: false });
+      else this._stream._queue.push(chunk);
+    }
+    close() {
+      if (this._stream._closed) return;
+      this._stream._closed = true;
+      for (const waiter of this._stream._waiters.splice(0)) {
+        waiter.resolve({ value: undefined, done: true });
+      }
+    }
+    error(reason) {
+      this._stream._error = reason;
+      this._stream._closed = true;
+      for (const waiter of this._stream._waiters.splice(0)) waiter.reject(reason);
+    }
+    get desiredSize() { return this._stream._closed ? 0 : 1; }
+  }
+  class ReadableStreamDefaultReader {
+    constructor(stream) {
+      if (!(stream instanceof ReadableStream) || stream.locked) throw new TypeError("Invalid or locked stream");
+      this._stream = stream;
+      stream._reader = this;
+      this.closed = stream._closed ? Promise.resolve() : new Promise(resolve => { stream._closedResolve = resolve; });
+    }
+    read() {
+      const stream = this._stream;
+      if (!stream) return Promise.reject(new TypeError("Reader has no stream"));
+      if (stream._queue.length) return Promise.resolve({ value: stream._queue.shift(), done: false });
+      if (stream._error !== undefined) return Promise.reject(stream._error);
+      if (stream._closed) return Promise.resolve({ value: undefined, done: true });
+      return new Promise((resolve, reject) => stream._waiters.push({ resolve, reject }));
+    }
+    cancel(reason) { return this._stream ? this._stream.cancel(reason) : Promise.reject(new TypeError("Reader has no stream")); }
+    releaseLock() { if (this._stream) this._stream._reader = null; this._stream = null; }
+  }
+  class ReadableStream {
+    constructor(underlyingSource = {}) {
+      this._queue = []; this._waiters = []; this._reader = null;
+      this._closed = false; this._error = undefined; this._source = underlyingSource || {};
+      this._controller = new ReadableStreamDefaultController(this);
+      if (typeof this._source.start === "function") {
+        Promise.resolve(this._source.start(this._controller)).catch(e => this._controller.error(e));
+      }
+    }
+    get locked() { return this._reader !== null; }
+    getReader() { return new ReadableStreamDefaultReader(this); }
+    cancel(reason) {
+      this._queue.length = 0; this._controller.close();
+      return Promise.resolve(typeof this._source.cancel === "function" ? this._source.cancel(reason) : undefined);
+    }
+    pipeTo(destination) {
+      const reader = this.getReader(); const writer = destination.getWriter();
+      const pump = () => reader.read().then(result => result.done ? writer.close() : Promise.resolve(writer.write(result.value)).then(pump));
+      return pump().finally(() => reader.releaseLock());
+    }
+    pipeThrough(pair) { this.pipeTo(pair.writable); return pair.readable; }
+  }
+  class WritableStreamDefaultWriter {
+    constructor(stream) { this._stream = stream; this.closed = stream._closedPromise; this.ready = Promise.resolve(); }
+    write(chunk) { return this._stream._write(chunk); }
+    close() { return this._stream._close(); }
+    abort(reason) { return this._stream.abort(reason); }
+    releaseLock() { this._stream._writer = null; this._stream = null; }
+  }
+  class WritableStream {
+    constructor(underlyingSink = {}) {
+      this._sink = underlyingSink || {}; this._writer = null; this._closed = false;
+      this._closedPromise = new Promise(resolve => { this._closedResolve = resolve; });
+      if (typeof this._sink.start === "function") Promise.resolve(this._sink.start(this));
+    }
+    get locked() { return this._writer !== null; }
+    getWriter() { if (this.locked) throw new TypeError("WritableStream is locked"); this._writer = new WritableStreamDefaultWriter(this); return this._writer; }
+    _write(chunk) { if (this._closed) return Promise.reject(new TypeError("WritableStream is closed")); return Promise.resolve(typeof this._sink.write === "function" ? this._sink.write(chunk, this) : undefined); }
+    _close() { this._closed = true; const result = typeof this._sink.close === "function" ? this._sink.close() : undefined; this._closedResolve(); return Promise.resolve(result); }
+    abort(reason) { this._closed = true; this._closedResolve(); return Promise.resolve(typeof this._sink.abort === "function" ? this._sink.abort(reason) : undefined); }
+  }
+  class TransformStreamSource {
+    constructor(owner) { this._owner = owner; }
+    start(controller) { this._owner._readableController = controller; }
+  }
+  class TransformStreamSink {
+    constructor(owner) { this._owner = owner; }
+    write(chunk) {
+      const owner = this._owner;
+      if (typeof owner._transformer.transform === "function") {
+        return owner._transformer.transform(chunk, owner._readableController);
+      }
+      owner._readableController.enqueue(chunk);
+    }
+    close() {
+      const owner = this._owner;
+      if (typeof owner._transformer.flush === "function") {
+        owner._transformer.flush(owner._readableController);
+      }
+      owner._readableController.close();
+    }
+  }
+  class TransformStream {
+    constructor(transformer = {}) {
+      this._transformer = transformer || {};
+      this._readableController = null;
+      this.readable = new ReadableStream(new TransformStreamSource(this));
+      this.writable = new WritableStream(new TransformStreamSink(this));
+    }
+  }
+  globalThis.ReadableStream = ReadableStream;
+  globalThis.ReadableStreamDefaultReader = ReadableStreamDefaultReader;
+  globalThis.ReadableStreamDefaultController = ReadableStreamDefaultController;
+  globalThis.WritableStream = WritableStream;
+  globalThis.WritableStreamDefaultWriter = WritableStreamDefaultWriter;
+  globalThis.TransformStream = TransformStream;
 
   globalThis.fetch = function(url) {
     return Promise.resolve(__omoikane_fetch(String(url))).then(raw => {
