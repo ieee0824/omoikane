@@ -469,7 +469,12 @@
   }
 
   function notifyImplicitRemoval(node) {
-    if (node && node.parentNode) preRemove(node.parentNode, node);
+    if (!node || !node.parentNode) return;
+    const parent = node.parentNode;
+    const previousSibling = node.previousSibling;
+    const nextSibling = node.nextSibling;
+    preRemove(parent, node);
+    queueMutation(parent, "childList", { removedNodes: [node], previousSibling, nextSibling });
   }
 
   class Node {
@@ -506,18 +511,20 @@
     }
 
     appendChild(child) {
-      // DOM semantics: appending a DocumentFragment appends its children
+      const previousSibling = this.lastChild;
       if (child && child.nodeType === 11) {
         const children = child.childNodes.slice();
         for (const c of children) {
           notifyImplicitRemoval(c);
           __omoikane_append_child(this.__id, c.__id);
         }
+        if (children.length) queueMutation(this, "childList", { addedNodes: children, previousSibling });
         return child;
       }
       this.__ensureNotAncestor(child);
       notifyImplicitRemoval(child);
       __omoikane_append_child(this.__id, child.__id);
+      queueMutation(this, "childList", { addedNodes: [child], previousSibling });
       return child;
     }
 
@@ -898,11 +905,16 @@
       const type = this.nodeType;
       if (type === 9 || type === 10) return;
       const text = value == null ? "" : String(value);
+      const removedNodes = this.childNodes.slice();
       // Native replaces all children at once. Notify from the end so boundary
       // offsets for later siblings are subsequently decremented by removals of
       // their preceding siblings, matching sequential pre-remove semantics.
       for (const child of this.childNodes.slice().reverse()) preRemove(this, child);
       __omoikane_set_text_content(this.__id, text);
+      const addedNodes = this.childNodes.slice();
+      if (removedNodes.length || addedNodes.length) {
+        queueMutation(this, "childList", { addedNodes, removedNodes });
+      }
     }
 
     get innerHTML() {
@@ -911,8 +923,13 @@
 
     set innerHTML(value) {
       const html = value == null ? "" : String(value);
-      for (const child of this.childNodes.slice().reverse()) preRemove(this, child);
+      const removedNodes = this.childNodes.slice();
+      for (const child of removedNodes.slice().reverse()) preRemove(this, child);
       __omoikane_set_inner_html(this.__id, html);
+      const addedNodes = this.childNodes.slice();
+      if (removedNodes.length || addedNodes.length) {
+        queueMutation(this, "childList", { addedNodes, removedNodes });
+      }
     }
 
     get childNodes() {
@@ -943,8 +960,11 @@
     }
 
     removeChild(child) {
+      const previousSibling = child.previousSibling;
+      const nextSibling = child.nextSibling;
       preRemove(this, child);
       __omoikane_remove_child(this.__id, child.__id);
+      queueMutation(this, "childList", { removedNodes: [child], previousSibling, nextSibling });
       return child;
     }
 
@@ -954,11 +974,18 @@
       }
       if (newNode && newNode.nodeType === 11) {
         const children = newNode.childNodes.slice();
-        for (const child of children) this.insertBefore(child, refNode);
+        const previousSibling = refNode ? refNode.previousSibling : this.lastChild;
+        for (const child of children) {
+          notifyImplicitRemoval(child);
+          __omoikane_insert_before(this.__id, child.__id, refNode ? refNode.__id : null);
+        }
+        if (children.length) queueMutation(this, "childList", { addedNodes: children, previousSibling, nextSibling: refNode });
         return newNode;
       }
+      const previousSibling = refNode ? refNode.previousSibling : this.lastChild;
       notifyImplicitRemoval(newNode);
       __omoikane_insert_before(this.__id, newNode.__id, refNode ? refNode.__id : null);
+      queueMutation(this, "childList", { addedNodes: [newNode], previousSibling, nextSibling: refNode });
       return newNode;
     }
 
@@ -1529,6 +1556,7 @@
         }
       }
       const current = this.data;
+      queueMutation(this, "characterData", { oldValue: current });
       this.textContent = current.slice(0, offset) + data + current.slice(offset + count);
     }
   }
