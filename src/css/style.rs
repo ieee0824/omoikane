@@ -532,14 +532,15 @@ impl StyleResolver {
             .collect();
 
         for declaration in declarations {
-            if important_properties.contains(&declaration.name.to_ascii_lowercase()) {
+            let property_name = canonical_property_name(&declaration.name);
+            if important_properties.contains(property_name) {
                 continue;
             }
             let resolved =
                 resolve_value_with_custom_properties(&declaration.value, &custom_properties)
                     .unwrap_or_else(|| declaration.value.clone());
-            let computed = compute_value(&resolved, &declaration.name, ctx);
-            insert_computed_property(properties, &declaration.name, computed);
+            let computed = compute_value(&resolved, property_name, ctx);
+            insert_computed_property(properties, property_name, computed);
         }
     }
 }

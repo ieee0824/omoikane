@@ -3299,6 +3299,36 @@ fn animation_does_not_override_inline_important_declaration() {
 }
 
 #[test]
+fn prefixed_animation_property_does_not_override_canonical_important_declaration() {
+    let document = NodeHandle::document();
+    let html = NodeHandle::element("html");
+    let body = NodeHandle::element("body");
+    let div = NodeHandle::element("div");
+    div.set_attribute("class", "move");
+    div.set_attribute("style", "transform: none !important");
+    document.append_child(html.clone());
+    html.append_child(body.clone());
+    body.append_child(div.clone());
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "@keyframes move { to { -webkit-transform: translateX(10px); } } \
+             .move { animation-name: move; animation-fill-mode: forwards; }",
+        )
+        .unwrap(),
+    );
+
+    let style = resolver.computed_style(&div);
+    assert_eq!(
+        style.get("transform"),
+        Some(&ComputedValue::Keyword("none".to_string()))
+    );
+    assert_eq!(style.get("-webkit-transform"), None);
+}
+
+#[test]
 fn animation_shorthand_forwards_applies_final_state() {
     let document = NodeHandle::document();
     let html = NodeHandle::element("html");
