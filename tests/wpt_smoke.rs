@@ -50,9 +50,10 @@ fn serve(mut stream: TcpStream, root: &Path) {
     if path == "/resources/testharnessreport.js" {
         let body = br#"
 globalThis.__wpt_results = [];
+globalThis.__wpt_harness_status = -1;
 globalThis.__wpt_complete = false;
-add_result_callback(test => __wpt_results.push({name:String(test.name),status:Number(test.status),message:String(test.message||"")}));
-add_completion_callback((tests,status) => { __wpt_harness_status=Number(status.status); __wpt_complete=true; });
+add_result_callback(test => globalThis.__wpt_results.push({name:String(test.name),status:Number(test.status),message:String(test.message||"")}));
+add_completion_callback((tests,status) => { globalThis.__wpt_harness_status=Number(status.status); globalThis.__wpt_complete=true; });
 "#;
         respond(&mut stream, 200, "text/javascript; charset=utf-8", body);
         return;
@@ -92,6 +93,9 @@ fn selected_wpt_testharness_cases_match_expectations() {
     let root = std::env::var("WPT_ROOT").map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from("target/wpt"));
     if !root.join("resources/testharness.js").is_file() {
+        if std::env::var_os("CI").is_some() {
+            panic!("WPT checkout missing in CI (WPT_ROOT={})", root.display());
+        }
         eprintln!(
             "WPT checkout missing; run scripts/fetch-wpt.sh (WPT_ROOT={})",
             root.display()

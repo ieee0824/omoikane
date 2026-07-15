@@ -21,6 +21,11 @@
     },
   });
 
+  function removeChildNode() {
+    const parent = this.parentNode;
+    if (parent) parent.removeChild(this);
+  }
+
   function wrapNode(id) {
     if (id === null || id === undefined) {
       return null;
@@ -48,6 +53,10 @@
       const constructors = namespace === SVG_NAMESPACE ? SVG_ELEMENT_CTORS : ELEMENT_CTORS;
       const ctor = constructors[(__omoikane_node_local_name(id) || __omoikane_node_name(id) || "").toLowerCase()];
       node = ctor ? new ctor(id) : namespace === SVG_NAMESPACE ? new SVGElement(id) : new Node(id);
+      Object.defineProperty(node, "remove", { value: removeChildNode, configurable: true });
+    } else if (nodeType === 10) {
+      node = new Node(id);
+      Object.defineProperty(node, "remove", { value: removeChildNode, configurable: true });
     } else {
       node = new Node(id);
     }
@@ -934,11 +943,6 @@
       return child;
     }
 
-    remove() {
-      const parent = this.parentNode;
-      if (parent) parent.removeChild(this);
-    }
-
     insertBefore(newNode, refNode) {
       if (newNode && newNode.nodeType !== 11) {
         this.__ensureNotAncestor(newNode);
@@ -1403,6 +1407,7 @@
   // than on the base Node — keeps `.data` off Element nodes, where e.g.
   // `HTMLObjectElement.data` reflects the `data` content attribute instead.
   class CharacterData extends Node {
+    remove() { removeChildNode.call(this); }
     get data() {
       const value = this.textContent;
       return value == null ? "" : String(value);

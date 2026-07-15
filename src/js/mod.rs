@@ -5972,6 +5972,15 @@ mod tests {
             .as_boolean()
             .unwrap();
         assert!(orphan_remove, "remove() should be a no-op for an orphan element");
+
+        let child_node_surface = runtime
+            .eval(
+                "typeof document.remove === 'undefined' && typeof document.createDocumentFragment().remove === 'undefined' && typeof document.createElement('div').remove === 'function' && typeof document.createTextNode('x').remove === 'function'",
+            )
+            .unwrap()
+            .as_boolean()
+            .unwrap();
+        assert!(child_node_surface, "remove() should only be exposed on ChildNode implementations");
     }
 
     #[test]

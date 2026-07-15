@@ -1114,11 +1114,14 @@ fn serialize_outer_html(node: &NodeHandle) -> String {
         }
         NodeType::Text => escape_html(&node.data().unwrap_or_default()),
         NodeType::Comment => format!("<!--{}-->", node.data().unwrap_or_default()),
-        NodeType::ProcessingInstruction => format!(
-            "<?{} {}?>",
-            node.node_name(),
-            node.data().unwrap_or_default()
-        ),
+        NodeType::ProcessingInstruction => {
+            let data = node.data().unwrap_or_default();
+            if data.is_empty() {
+                format!("<?{}?>", node.node_name())
+            } else {
+                format!("<?{} {}?>", node.node_name(), data)
+            }
+        }
         NodeType::DocumentType => format!("<!DOCTYPE {}>", node.data().unwrap_or_default()),
         NodeType::DocumentFragment => node
             .child_nodes()
