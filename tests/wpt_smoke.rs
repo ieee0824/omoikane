@@ -8,12 +8,23 @@ use std::thread;
 use omoikane::html::TreeBuilder;
 use omoikane::http::{Client, Url};
 use omoikane::js::JsRuntime;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 #[derive(Deserialize)]
 struct Manifest { tests: Vec<WptCase> }
 #[derive(Deserialize)]
 struct WptCase { path: String, expected: String }
+
+#[derive(Serialize)]
+struct WptReport { revision: String, results: Vec<WptResult> }
+#[derive(Serialize)]
+struct WptResult {
+    path: String,
+    expected: String,
+    actual: String,
+    script_errors: Vec<String>,
+    subtests: serde_json::Value,
+}
 
 struct StaticServer { base_url: String }
 impl StaticServer {
@@ -90,7 +101,11 @@ fn selected_wpt_testharness_cases_match_expectations() {
     let manifest: Manifest = serde_json::from_slice(
         &fs::read("tests/wpt/manifest.json").expect("read WPT manifest"))
         .expect("parse WPT manifest");
+    let revision = fs::read_to_string("tests/wpt/revision.txt")
+        .expect("read WPT revision").trim().to_string();
     let server = StaticServer::start(root);
+    let mut results = Vec::new();
+    let mut mismatches = Vec::new();
     for case in manifest.tests {
         let url = format!("{}/{}", server.base_url, case.path);
         let mut client = Client::new();
@@ -110,7 +125,27 @@ fn selected_wpt_testharness_cases_match_expectations() {
         let details = runtime.eval("JSON.stringify(globalThis.__wpt_results||[])").ok()
             .and_then(|value| value.as_string().map(|text| text.to_std_string_escaped()))
             .unwrap_or_else(|| "[]".to_string());
-        assert_eq!(actual, case.expected,
-            "WPT {} mismatch; script errors={errors:?}; results={details}", case.path);
+        println!("WPT {}: expected={} actual={}", case.path, case.expected, actual);
+        if actual != case.expected {
+            mismatches.push(format!(
+                "WPT {} mismatch: expected={} actual={}; script errors={errors:?}; results={details}",
+                case.path, case.expected, actual
+            ));
+        }
+        results.push(WptResult {
+            path: case.path,
+            expected: case.expected,
+            actual: actual.to_string(),
+            script_errors: errors,
+            subtests: serde_json::from_str(&details).unwrap_or(serde_json::Value::Null),
+        });
     }
+    let report = WptReport { revision, results };
+    if let Ok(path) = std::env::var("WPT_REPORT") {
+        let path = PathBuf::from(path);
+        if let Some(parent) = path.parent() { fs::create_dir_all(parent).expect("create report directory"); }
+        fs::write(&path, serde_json::to_vec_pretty(&report).expect("serialize WPT report"))
+            .expect("write WPT report");
+    }
+    assert!(mismatches.is_empty(), "{}", mismatches.join("\n"));
 }

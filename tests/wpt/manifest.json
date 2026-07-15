@@ -1,5 +1,7 @@
 {
   "tests": [
-    { "path": "dom/nodes/Element-childElement-null.html", "expected": "PASS" }
+    { "path": "dom/nodes/Element-childElement-null.html", "expected": "PASS" },
+    { "path": "dom/nodes/Element-childElementCount-nochild.html", "expected": "PASS" },
+    { "path": "dom/nodes/Node-isConnected.html", "expected": "FAIL" }
   ]
 }
