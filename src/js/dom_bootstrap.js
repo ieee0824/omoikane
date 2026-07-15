@@ -59,8 +59,7 @@
         : namespace === SVG_NAMESPACE ? new SVGElement(id)
         : htmlElement ? new HTMLElement(id) : new Element(id);
     } else if (nodeType === 10) {
-      node = new Node(id);
-      Object.defineProperty(node, "remove", { value: removeChildNode, configurable: true });
+      node = new DocumentType(id);
     } else {
       node = new Node(id);
     }
@@ -607,7 +606,8 @@
       // reset button whose click was not canceled submits or resets its owning
       // form. Running it here (rather than only in click()) means a synthetic
       // click dispatched directly through dispatchEvent behaves like a real one.
-      if (notCanceled && dispatchEvent.type === "click" && this.nodeType === 1) {
+      if (notCanceled && dispatchEvent.type === "click" && this.nodeType === 1 &&
+          typeof this.__runActivationBehavior === "function") {
         this.__runActivationBehavior();
       }
       return notCanceled;
@@ -1552,24 +1552,36 @@
   // descriptors preserves getters/setters and their attributes while ensuring
   // Document, DocumentFragment and CharacterData do not accidentally expose
   // element-only APIs through Node.prototype.
-  const elementPrototypeMembers = [
+  function distributePrototypeMembers(source, targets, names) {
+    for (const name of names) {
+      const descriptor = Object.getOwnPropertyDescriptor(source, name);
+      if (!descriptor) continue;
+      for (const target of targets) Object.defineProperty(target, name, descriptor);
+      if (!delete source[name]) {
+        throw new TypeError("Failed to move " + name + " off its source prototype");
+      }
+    }
+  }
+
+  distributePrototypeMembers(Node.prototype, [Element.prototype], [
     "namespaceURI", "prefix", "localName", "tagName",
     "id", "className", "classList",
     "getAttribute", "setAttribute", "hasAttribute", "removeAttribute",
     "setAttributeNS", "getAttributeNS", "removeAttributeNS", "attributes",
     "matches", "closest",
-  ];
-  for (const name of elementPrototypeMembers) {
-    const descriptor = Object.getOwnPropertyDescriptor(Node.prototype, name);
-    if (descriptor) {
-      Object.defineProperty(Element.prototype, name, descriptor);
-      if (!delete Node.prototype[name]) {
-        throw new TypeError("Failed to move " + name + " off Node.prototype");
-      }
-    }
-  }
+    "__layoutMetrics", "getBoundingClientRect", "getClientRects",
+    "clientWidth", "clientHeight", "clientTop", "clientLeft",
+    "scrollWidth", "scrollHeight", "scrollTop", "scrollLeft",
+  ]);
 
   class HTMLElement extends Element {}
+
+  distributePrototypeMembers(Node.prototype, [HTMLElement.prototype], [
+    "title", "innerText",
+    "offsetWidth", "offsetHeight", "offsetTop", "offsetLeft", "offsetParent",
+    "focus", "blur", "click", "hidden",
+    "__isDisabledControl", "__owningForm", "__runActivationBehavior",
+  ]);
 
   class CharacterData extends Node {
     remove() { removeChildNode.call(this); }
@@ -2628,6 +2640,30 @@
 
   class DocumentFragment extends Node {}
 
+  class DocumentType extends Node {
+    remove() { removeChildNode.call(this); }
+  }
+
+  // ParentNode is included by Document, DocumentFragment and Element. The two
+  // collection helpers are instead declared directly by Document and Element.
+  distributePrototypeMembers(Node.prototype, [
+    Element.prototype, Document.prototype, DocumentFragment.prototype,
+  ], [
+    "querySelector", "querySelectorAll", "children",
+    "firstElementChild", "lastElementChild", "childElementCount",
+  ]);
+  distributePrototypeMembers(Node.prototype, [Element.prototype, Document.prototype], [
+    "getElementsByTagName", "getElementsByClassName", "innerHTML",
+  ]);
+  distributePrototypeMembers(Node.prototype, [DocumentType.prototype], [
+    "publicId", "systemId", "internalSubset",
+  ]);
+
+  // NonDocumentTypeChildNode is included by Element and CharacterData.
+  distributePrototypeMembers(Node.prototype, [Element.prototype, CharacterData.prototype], [
+    "nextElementSibling", "previousElementSibling",
+  ]);
+
   // ── Minimal CSSOM ─────────────────────────────────────────────────────────
   // CSS syntax is accepted/rejected by the native engine parser. This scanner
   // only preserves each accepted top-level rule's source text for CSSOM
@@ -3287,6 +3323,39 @@
   }
   class SVGTextElement extends SVGTextContentElement {}
 
+  // HTMLOrSVGElement and ElementCSSInlineStyle are shared by HTML and SVG
+  // elements, but not by arbitrary Node objects.
+  distributePrototypeMembers(Node.prototype, [HTMLElement.prototype, SVGElement.prototype], [
+    "dataset", "style",
+  ]);
+
+  // Form-control state belongs to the corresponding HTML interfaces. Keep the
+  // existing implementation descriptors while removing them from Node.
+  distributePrototypeMembers(Node.prototype, [HTMLInputElement.prototype], [
+    "checked", "defaultChecked",
+  ]);
+  distributePrototypeMembers(Node.prototype, [
+    HTMLInputElement.prototype, HTMLButtonElement.prototype,
+    HTMLSelectElement.prototype, HTMLOptionElement.prototype,
+  ], ["disabled"]);
+  distributePrototypeMembers(Node.prototype, [HTMLSelectElement.prototype, HTMLButtonElement.prototype], ["value"]);
+  // DocumentType.name is the declared doctype name, unrelated to form-control
+  // name reflection. Copy it before the form interfaces consume and remove the
+  // shared implementation descriptor from Node.prototype.
+  Object.defineProperty(
+    DocumentType.prototype,
+    "name",
+    Object.getOwnPropertyDescriptor(Node.prototype, "name"),
+  );
+  distributePrototypeMembers(Node.prototype, [
+    HTMLFormElement.prototype, HTMLInputElement.prototype, HTMLButtonElement.prototype,
+    HTMLSelectElement.prototype, HTMLIFrameElement.prototype,
+    HTMLObjectElement.prototype, HTMLImageElement.prototype,
+  ], ["name"]);
+  // Input and button provide their own type behavior; the generic fallback must
+  // not remain visible on every Node or HTMLElement.
+  distributePrototypeMembers(Node.prototype, [], ["type"]);
+
   const SVG_ELEMENT_CTORS = {
     svg: SVGSVGElement,
     rect: SVGRectElement,
@@ -3375,6 +3444,7 @@
   globalThis.ProcessingInstruction = ProcessingInstruction;
   globalThis.Document = Document;
   globalThis.DocumentFragment = DocumentFragment;
+  globalThis.DocumentType = DocumentType;
   globalThis.DOMException = DOMException;
   globalThis.CSSStyleSheet = CSSStyleSheet;
   globalThis.CSSRuleList = CSSRuleList;
