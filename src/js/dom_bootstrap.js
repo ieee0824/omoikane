@@ -893,10 +893,14 @@
     }
 
     get textContent() {
+      const type = this.nodeType;
+      if (type === 9 || type === 10) return null;
       return __omoikane_get_text_content(this.__id);
     }
 
     set textContent(value) {
+      const type = this.nodeType;
+      if (type === 9 || type === 10) return;
       const text = value == null ? "" : String(value);
       // Native replaces all children at once. Notify from the end so boundary
       // offsets for later siblings are subsequently decremented by removals of
@@ -1001,7 +1005,35 @@
     }
 
     get nodeType() {
+      if (this.__cdataSection) return 4;
       return __omoikane_node_type(this.__id);
+    }
+
+    normalize() {
+      for (const child of this.childNodes.slice()) {
+        if (child.parentNode !== this) continue;
+        if (child.nodeType !== 3) {
+          child.normalize();
+          continue;
+        }
+        if (child.length === 0) {
+          this.removeChild(child);
+          continue;
+        }
+        while (child.nextSibling && child.nextSibling.nodeType === 3) {
+          const next = child.nextSibling;
+          const offset = child.length;
+          const index = indexOfNode(next);
+          child.appendData(next.data);
+          const state = traversalByDocument.get(traversalDocumentKey(nodeDocument(this)));
+          if (state) {
+            for (const range of traversalEntries(state.ranges)) {
+              range.__mergeText(child, next, offset, this, index);
+            }
+          }
+          this.removeChild(next);
+        }
+      }
     }
 
     cloneNode(deep = false) {
@@ -1018,6 +1050,10 @@
       // Preserve JS UTF-16 code units that Rust UTF-8 strings cannot represent,
       // including CharacterData descendants of a deep clone.
       const preserveCharacterData = (source, target) => {
+        if (source instanceof CDATASection) {
+          Object.setPrototypeOf(target, CDATASection.prototype);
+          Object.defineProperty(target, "__cdataSection", { value: true, configurable: true });
+        }
         if (source instanceof CharacterData) target.textContent = source.textContent;
         if (!deep) return;
         const sourceChildren = source.childNodes;
@@ -1516,6 +1552,7 @@
       return newNode;
     }
   }
+  class CDATASection extends Text {}
   class Comment extends CharacterData {}
   class ProcessingInstruction extends CharacterData {
     get target() { return this.nodeName; }
@@ -1963,6 +2000,15 @@
       [this.__startContainer,this.__startOffset]=adjust(this.__startContainer,this.__startOffset);
       [this.__endContainer,this.__endOffset]=adjust(this.__endContainer,this.__endOffset);
     }
+    __mergeText(target, removed, offset, parent, index) {
+      const adjust = (container, value) => {
+        if (container === removed) return [target, offset + value];
+        if (container === parent && value === index) return [target, offset];
+        return [container, value];
+      };
+      [this.__startContainer, this.__startOffset] = adjust(this.__startContainer, this.__startOffset);
+      [this.__endContainer, this.__endOffset] = adjust(this.__endContainer, this.__endOffset);
+    }
     __replaceData(node, offset, count, replacementLength) {
       const adjust = (container, value) => {
         if (container !== node || value <= offset) return [container, value];
@@ -2209,6 +2255,18 @@
 
     createTextNode(text) {
       return this.__own(wrapNode(__omoikane_create_text_node(String(text))));
+    }
+
+    createCDATASection(data) {
+      if (arguments.length < 1) throw new TypeError("createCDATASection requires 1 argument");
+      const text = String(data);
+      if (text.includes("]]>")) {
+        throw new DOMException("CDATA data must not contain ]]>", "InvalidCharacterError");
+      }
+      const node = this.createTextNode(text);
+      Object.setPrototypeOf(node, CDATASection.prototype);
+      Object.defineProperty(node, "__cdataSection", { value: true, configurable: true });
+      return node;
     }
 
     createProcessingInstruction(target, data) {
@@ -3205,6 +3263,7 @@
   globalThis.HTMLElement = HTMLElement;
   globalThis.CharacterData = CharacterData;
   globalThis.Text = Text;
+  globalThis.CDATASection = CDATASection;
   globalThis.Comment = Comment;
   globalThis.ProcessingInstruction = ProcessingInstruction;
   globalThis.Document = Document;
@@ -3547,9 +3606,22 @@
     measure: () => {},
   };
 
-  // DOMParser stub
   globalThis.DOMParser = class DOMParser {
-    parseFromString() { return globalThis.document; }
+    parseFromString(source, type) {
+      if (arguments.length < 2) throw new TypeError("parseFromString requires 2 arguments");
+      const input = String(source);
+      const mime = String(type).toLowerCase();
+      const supported = ["text/html", "text/xml", "application/xml", "application/xhtml+xml", "image/svg+xml"];
+      if (!supported.includes(mime)) throw new TypeError("Unsupported DOMParser MIME type: " + mime);
+      if (mime === "text/html") {
+        const parsed = document.implementation.createHTMLDocument("");
+        parsed.body.innerHTML = input;
+        return parsed;
+      }
+      const match = input.match(/<([A-Za-z_][A-Za-z0-9_.:-]*)(?:\s[^<>]*)?\s*\/?\s*>/);
+      if (!match) return document.implementation.createDocument("", "parsererror", null);
+      return document.implementation.createDocument("", match[1], null);
+    }
   };
 
   // URL and URLSearchParams (basic)
