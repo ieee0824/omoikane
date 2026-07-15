@@ -87,6 +87,15 @@ impl Client {
         self.send(request)
     }
 
+    /// Sends a GET request while refusing connections to non-public IP addresses.
+    pub(crate) fn get_public(&mut self, url: &str) -> Result<HttpResponse, HttpParseError> {
+        let mut request = HttpRequest::get(url).map_err(|e| {
+            HttpParseError::Io(std::io::Error::new(std::io::ErrorKind::InvalidInput, e))
+        })?;
+        request.require_public_ip();
+        self.send(request)
+    }
+
     /// Sends an [`HttpRequest`], following redirects and managing cookies.
     ///
     /// Cookies from the jar are attached to the request, and `Set-Cookie`
@@ -141,6 +150,9 @@ impl Client {
             let new_method = redirect_method(response.status_code(), request.method());
 
             let mut new_request = HttpRequest::new(new_method, new_url);
+            if request.requires_public_ip() {
+                new_request.require_public_ip();
+            }
 
             // Preserve headers (except Host, which is set by HttpRequest::new)
             for (name, value) in request.headers() {

@@ -297,6 +297,17 @@
     }
   }
 
+  class MessageEvent extends Event {
+    constructor(type, init = {}) {
+      super(type, init);
+      this.data = init.data ?? null;
+      this.origin = init.origin ?? "";
+      this.lastEventId = init.lastEventId ?? "";
+      this.source = init.source ?? null;
+      this.ports = init.ports ?? [];
+    }
+  }
+
   class MouseEvent extends Event {
     constructor(type, init = {}) {
       super(type, init);
@@ -2936,6 +2947,8 @@
     }
   }
 
+  class HTMLScriptElement extends Node {}
+
   class HTMLImageElement extends Node {
     get height() {
       const attr = this.getAttribute("height");
@@ -2993,6 +3006,7 @@
     iframe: HTMLIFrameElement,
     object: HTMLObjectElement,
     img: HTMLImageElement,
+    script: HTMLScriptElement,
   };
 
   // Standard Node.nodeType constant values, exposed both as static properties
@@ -3074,6 +3088,7 @@
   globalThis.HTMLSelectElement = HTMLSelectElement;
   globalThis.HTMLOptionElement = HTMLOptionElement;
   globalThis.HTMLImageElement = HTMLImageElement;
+  globalThis.HTMLScriptElement = HTMLScriptElement;
   globalThis.HTMLIFrameElement = HTMLIFrameElement;
   globalThis.HTMLObjectElement = HTMLObjectElement;
   globalThis.SVGElement = SVGElement;
@@ -3083,6 +3098,7 @@
   globalThis.SVGTextElement = SVGTextElement;
   globalThis.Event = Event;
   globalThis.CustomEvent = CustomEvent;
+  globalThis.MessageEvent = MessageEvent;
   globalThis.MouseEvent = MouseEvent;
   globalThis.KeyboardEvent = KeyboardEvent;
   globalThis.FocusEvent = FocusEvent;

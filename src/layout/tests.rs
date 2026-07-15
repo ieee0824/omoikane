@@ -2656,6 +2656,11 @@ fn lays_out_flex_column() {
     let container_box = &layout.children[0];
     assert_eq!(container_box.children[0].dimensions.content.y, 0.0);
     assert_eq!(container_box.children[1].dimensions.content.y, 30.0);
+    assert_eq!(
+        container_box.dimensions.content.height,
+        60.0,
+        "auto-height column flex containers must use their main-axis content height",
+    );
 }
 
 #[test]

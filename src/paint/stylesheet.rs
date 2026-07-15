@@ -28,7 +28,7 @@ pub(crate) fn extract_author_stylesheets(
     Ok(stylesheets)
 }
 
-const MAX_EXTERNAL_STYLESHEET_BYTES: usize = 1024 * 1024; // 1 MiB limit
+const MAX_EXTERNAL_STYLESHEET_BYTES: usize = 4 * 1024 * 1024; // 4 MiB limit
 const MAX_IMPORT_DEPTH: usize = 5;
 
 pub(crate) fn collect_author_stylesheets(
@@ -143,7 +143,9 @@ pub(crate) fn collect_stylesheet_with_imports(
                 if !active_import_urls.insert(import_url_string.clone()) {
                     continue;
                 }
-                if let Some(import_css) = fetch_stylesheet_by_url(&import_url, client) {
+                if let Some(import_css) =
+                    fetch_stylesheet_by_url(&import_url, client, document_base)
+                {
                     collect_stylesheet_with_imports(
                         import_css,
                         Some(&import_url),
@@ -405,7 +407,7 @@ pub(crate) fn fetch_relative_stylesheet(
     document_base: Option<&crate::http::Url>,
 ) -> Option<(String, crate::http::Url)> {
     let resolved = resolve_relative_stylesheet_url(base, href, document_base)?;
-    let css = fetch_stylesheet_by_url(&resolved, client)?;
+    let css = fetch_stylesheet_by_url(&resolved, client, document_base)?;
     Some((css, resolved))
 }
 
@@ -415,22 +417,40 @@ pub(crate) fn resolve_relative_stylesheet_url(
     document_base: Option<&crate::http::Url>,
 ) -> Option<crate::http::Url> {
     let resolved = resolve_url(base, href).ok()?;
-    // Fetch author styles only from the document origin. Resolve first so
-    // same-origin absolute and protocol-relative URLs work as they do in a
-    // browser, while cross-origin URLs remain blocked.
-    if !same_origin(&resolved, document_base.unwrap_or(base)) {
+    // Cross-origin author stylesheets are normal on the web, but allowing
+    // arbitrary destinations would let a public page probe private services.
+    // Keep same-origin behavior (including local test servers), and require
+    // cross-origin stylesheets to resolve exclusively to public HTTPS addresses.
+    if !same_origin(&resolved, document_base.unwrap_or(base))
+        && !is_public_cross_origin_stylesheet_url(&resolved)
+    {
         return None;
     }
     Some(resolved)
 }
 
+fn is_public_cross_origin_stylesheet_url(url: &crate::http::Url) -> bool {
+    if url.scheme() != "https" {
+        return false;
+    }
+    match url.host().parse() {
+        Ok(ip) => crate::http::is_public_ip(ip),
+        Err(_) => true,
+    }
+}
+
 pub(crate) fn fetch_stylesheet_by_url(
     resolved: &crate::http::Url,
     client: &mut Option<crate::http::Client>,
+    document_base: Option<&crate::http::Url>,
 ) -> Option<String> {
     let url_str = resolved.to_string();
     let c = client.as_mut()?;
-    let resp = c.get(&url_str).ok()?;
+    let resp = if document_base.is_some_and(|base| !same_origin(resolved, base)) {
+        c.get_public(&url_str).ok()?
+    } else {
+        c.get(&url_str).ok()?
+    };
     if resp.status_code() != 200 {
         return None;
     }

@@ -3567,17 +3567,36 @@ fn stylesheet_url_allows_same_origin_absolute_references() {
 }
 
 #[test]
-fn stylesheet_url_rejects_cross_origin_absolute_references() {
+fn stylesheet_url_allows_public_https_cross_origin_references() {
     let document: crate::http::Url = "https://example.com/page.html".parse().unwrap();
 
-    assert!(
-        crate::paint::stylesheet::resolve_relative_stylesheet_url(
-            &document,
-            "https://cdn.example.net/theme.css",
-            Some(&document),
-        )
-        .is_none()
-    );
+    let resolved = crate::paint::stylesheet::resolve_relative_stylesheet_url(
+        &document,
+        "https://1.1.1.1/theme.css",
+        Some(&document),
+    )
+    .unwrap();
+    assert_eq!(resolved.host(), "1.1.1.1");
+}
+
+#[test]
+fn stylesheet_url_rejects_private_cross_origin_references() {
+    let document: crate::http::Url = "https://example.com/page.html".parse().unwrap();
+
+    for href in [
+        "https://127.0.0.1/theme.css",
+        "https://10.0.0.1/theme.css",
+        "https://169.254.169.254/latest.css",
+        "http://1.1.1.1/insecure.css",
+    ] {
+        assert!(
+            crate::paint::stylesheet::resolve_relative_stylesheet_url(
+                &document, href, Some(&document),
+            )
+            .is_none(),
+            "must reject unsafe cross-origin stylesheet {href}"
+        );
+    }
 }
 
 #[test]
@@ -3601,7 +3620,7 @@ fn extract_stylesheets_respects_css_size_limit() {
     let port = listener.local_addr().unwrap().port();
 
     std::thread::spawn(move || {
-        // Large CSS (exceeds 1 MiB limit)
+        // Large CSS (exceeds 4 MiB limit)
         let (mut stream, _) = listener.accept().unwrap();
         let mut reader = BufReader::new(&stream);
         let mut line = String::new();
@@ -3616,7 +3635,7 @@ fn extract_stylesheets_respects_css_size_limit() {
         }
 
         // Create a response with oversized CSS
-        let large_css = "body { color: red; }".repeat(100_000); // ~2 MiB
+        let large_css = "body { color: red; }".repeat(250_000); // ~5 MiB
         let resp = format!(
             "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{}",
             large_css.len(),
