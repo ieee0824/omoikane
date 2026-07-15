@@ -50,9 +50,14 @@
       node = new Comment(id);
     } else if (nodeType === 1) {
       const namespace = __omoikane_node_namespace_uri(id);
-      const constructors = namespace === SVG_NAMESPACE ? SVG_ELEMENT_CTORS : ELEMENT_CTORS;
+      const htmlElement = namespace == null || namespace === HTML_NAMESPACE;
+      const constructors = namespace === SVG_NAMESPACE
+        ? SVG_ELEMENT_CTORS
+        : htmlElement ? ELEMENT_CTORS : {};
       const ctor = constructors[(__omoikane_node_local_name(id) || __omoikane_node_name(id) || "").toLowerCase()];
-      node = ctor ? new ctor(id) : namespace === SVG_NAMESPACE ? new SVGElement(id) : new HTMLElement(id);
+      node = ctor ? new ctor(id)
+        : namespace === SVG_NAMESPACE ? new SVGElement(id)
+        : htmlElement ? new HTMLElement(id) : new Element(id);
     } else if (nodeType === 10) {
       node = new Node(id);
       Object.defineProperty(node, "remove", { value: removeChildNode, configurable: true });
@@ -243,6 +248,7 @@
     return { namespace, prefix, localName };
   }
 
+  const HTML_NAMESPACE = "http://www.w3.org/1999/xhtml";
   const SVG_NAMESPACE = "http://www.w3.org/2000/svg";
 
   class Event {
@@ -2043,6 +2049,11 @@
       if (info.namespace === SVG_NAMESPACE) {
         const ctor = SVG_ELEMENT_CTORS[info.localName.toLowerCase()] || SVGElement;
         Object.setPrototypeOf(node, ctor.prototype);
+      } else if (info.namespace === HTML_NAMESPACE) {
+        const ctor = ELEMENT_CTORS[info.localName.toLowerCase()] || HTMLElement;
+        Object.setPrototypeOf(node, ctor.prototype);
+      } else {
+        Object.setPrototypeOf(node, Element.prototype);
       }
       return node;
     }

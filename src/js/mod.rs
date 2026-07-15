@@ -5030,12 +5030,18 @@ mod tests {
                 const generic = document.createElement('article');
                 const input = document.createElement('input');
                 const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+                const xml = document.createElementNS('urn:test', 'widget');
+                const nullNs = document.createElementNS(null, 'widget');
+                const xhtml = document.createElementNS('http://www.w3.org/1999/xhtml', 'input');
                 return [
                     Node === Element,
                     Element === HTMLElement,
                     generic instanceof Node, generic instanceof Element, generic instanceof HTMLElement,
                     input instanceof Node, input instanceof Element, input instanceof HTMLElement, input instanceof HTMLInputElement,
                     svg instanceof Node, svg instanceof Element, svg instanceof HTMLElement, svg instanceof SVGElement,
+                    xml instanceof Node, xml instanceof Element, xml instanceof HTMLElement,
+                    nullNs instanceof Element, nullNs instanceof HTMLElement,
+                    xhtml instanceof Element, xhtml instanceof HTMLElement, xhtml instanceof HTMLInputElement,
                     document instanceof Node, document instanceof Element, document instanceof HTMLElement,
                     document.createDocumentFragment() instanceof Node, document.createDocumentFragment() instanceof Element,
                     typeof Node.prototype.remove, typeof Element.prototype.remove
@@ -5044,7 +5050,7 @@ mod tests {
         );
         assert_eq!(
             actual,
-            "false|false|true|true|true|true|true|true|true|true|true|false|true|true|false|false|true|false|undefined|function"
+            "false|false|true|true|true|true|true|true|true|true|true|false|true|true|true|false|true|false|true|true|true|true|false|false|true|false|undefined|function"
         );
     }
 
