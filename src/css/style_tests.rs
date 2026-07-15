@@ -69,6 +69,28 @@ fn important_user_rule_beats_important_author_rule() {
 }
 
 #[test]
+fn important_origin_order_matches_css_cascade() {
+    let (_document, _body, title, _html) = sample_tree();
+    let mut resolver = StyleResolver::new();
+
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet("h1 { color: red !important; }").unwrap(),
+    );
+    resolver.add_stylesheet(
+        Origin::User,
+        parse_stylesheet("h1 { color: green !important; }").unwrap(),
+    );
+    resolver.add_stylesheet(
+        Origin::UserAgent,
+        parse_stylesheet("h1 { color: blue !important; }").unwrap(),
+    );
+
+    let style = resolver.computed_style(&title);
+    assert_eq!(style.get("color"), Some(&ComputedValue::Color("blue".to_string())));
+}
+
+#[test]
 fn inline_style_beats_author_specificity() {
     let (_document, _body, title, _html) = sample_tree();
     title.set_attribute("style", "color: green");
@@ -3248,6 +3270,32 @@ fn animation_fill_mode_none_does_not_apply_keyframe() {
         matches!(opacity, Some(ComputedValue::Number(v)) if (*v - 0.0).abs() < 0.01),
         "animation fill-mode: none should keep opacity: 0, got {opacity:?}"
     );
+}
+
+#[test]
+fn animation_does_not_override_inline_important_declaration() {
+    let document = NodeHandle::document();
+    let html = NodeHandle::element("html");
+    let body = NodeHandle::element("body");
+    let div = NodeHandle::element("div");
+    div.set_attribute("class", "fade");
+    div.set_attribute("style", "color: blue !important");
+    document.append_child(html.clone());
+    html.append_child(body.clone());
+    body.append_child(div.clone());
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "@keyframes recolor { from { color: black; } to { color: red; } } \
+             .fade { animation-name: recolor; animation-fill-mode: forwards; }",
+        )
+        .unwrap(),
+    );
+
+    let style = resolver.computed_style(&div);
+    assert_eq!(style.get("color"), Some(&ComputedValue::Color("blue".to_string())));
 }
 
 #[test]
