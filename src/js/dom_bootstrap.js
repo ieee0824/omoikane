@@ -606,7 +606,7 @@
       // reset button whose click was not canceled submits or resets its owning
       // form. Running it here (rather than only in click()) means a synthetic
       // click dispatched directly through dispatchEvent behaves like a real one.
-      if (notCanceled && dispatchEvent.type === "click" &&
+      if (notCanceled && dispatchEvent.type === "click" && this.nodeType === 1 &&
           typeof this.__runActivationBehavior === "function") {
         this.__runActivationBehavior();
       }
@@ -3342,8 +3342,11 @@
   distributePrototypeMembers(Node.prototype, [
     HTMLFormElement.prototype, HTMLInputElement.prototype, HTMLButtonElement.prototype,
     HTMLSelectElement.prototype, HTMLIFrameElement.prototype,
-    HTMLObjectElement.prototype, HTMLImageElement.prototype, DocumentType.prototype,
+    HTMLObjectElement.prototype, HTMLImageElement.prototype,
   ], ["name"]);
+  // DocumentType.name is the declared doctype name, unrelated to form-control
+  // name reflection.
+  distributePrototypeMembers(Node.prototype, [DocumentType.prototype], ["name"]);
   // Input and button provide their own type behavior; the generic fallback must
   // not remain visible on every Node or HTMLElement.
   distributePrototypeMembers(Node.prototype, [], ["type"]);

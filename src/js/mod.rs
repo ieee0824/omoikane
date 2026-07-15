@@ -5792,7 +5792,7 @@ mod tests {
                   const text = document.getElementById("text");
                   const div = document.getElementById("div");
                   const box = document.getElementById("box");
-                  return [text.checked, div.checked, box.checked,
+                  return [text.checked, div.checked === undefined, box.checked,
                           document.querySelector(":checked") === box].join("|");
                 })()
                 "#,
@@ -5801,7 +5801,7 @@ mod tests {
             .to_string(&mut runtime.context)
             .unwrap()
             .to_std_string_escaped();
-        assert_eq!(result, "false||true|true");
+        assert_eq!(result, "false|true|true|true");
     }
 
     #[test]
