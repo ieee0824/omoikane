@@ -5105,6 +5105,59 @@ mod tests {
     }
 
     #[test]
+    fn dom_mixins_and_html_members_have_spec_scoped_prototypes() {
+        let mut runtime = JsRuntime::with_document(default_document()).unwrap();
+        let actual = eval_str(
+            &mut runtime,
+            r#"(() => {
+                const own = (prototype, name) =>
+                    Object.prototype.hasOwnProperty.call(prototype, name);
+                const fragment = document.createDocumentFragment();
+                const text = document.createTextNode("x");
+                const div = document.createElement("div");
+                const input = document.createElement("input");
+                const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+                const moved = [
+                    "querySelector", "querySelectorAll", "children",
+                    "firstElementChild", "lastElementChild", "childElementCount",
+                    "getElementsByTagName", "getElementsByClassName",
+                    "nextElementSibling", "previousElementSibling",
+                    "innerHTML", "style", "dataset", "title", "innerText",
+                    "getBoundingClientRect", "clientWidth", "scrollTop",
+                    "offsetWidth", "click", "focus", "hidden",
+                    "checked", "defaultChecked", "disabled", "value", "type", "name",
+                    "publicId", "systemId", "internalSubset"
+                ];
+                return [
+                    moved.every(name => !own(Node.prototype, name)),
+                    own(Document.prototype, "querySelector"),
+                    own(DocumentFragment.prototype, "querySelector"),
+                    own(Element.prototype, "querySelector"),
+                    own(Element.prototype, "innerHTML"),
+                    own(Document.prototype, "innerHTML"),
+                    own(CharacterData.prototype, "nextElementSibling"),
+                    own(HTMLElement.prototype, "title"),
+                    own(HTMLElement.prototype, "style"),
+                    own(SVGElement.prototype, "style"),
+                    own(HTMLInputElement.prototype, "checked"),
+                    own(DocumentType.prototype, "publicId"),
+                    document.implementation.createDocumentType("html", "", "") instanceof DocumentType,
+                    !("innerHTML" in text),
+                    !("style" in text),
+                    !("checked" in div),
+                    "checked" in input,
+                    "style" in svg,
+                    typeof fragment.querySelector === "function"
+                ].join("|");
+            })()"#,
+        );
+        assert_eq!(
+            actual,
+            "true|true|true|true|true|true|true|true|true|true|true|true|true|true|true|true|true|true|true"
+        );
+    }
+
+    #[test]
     fn character_data_preserves_utf16_and_updates_ranges() {
         let mut runtime = JsRuntime::with_document(default_document()).unwrap();
         let actual = eval_str(
@@ -5748,7 +5801,7 @@ mod tests {
             .to_string(&mut runtime.context)
             .unwrap()
             .to_std_string_escaped();
-        assert_eq!(result, "false|false|true|true");
+        assert_eq!(result, "false||true|true");
     }
 
     #[test]
