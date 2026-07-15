@@ -2584,6 +2584,10 @@
       return "CSS1Compat";
     }
 
+    get currentScript() {
+      return this.__currentScript || null;
+    }
+
     get defaultView() {
       // The Window associated with this document. The top-level document's
       // Window is the global object itself; a sub-browsing-context document (an
@@ -2615,6 +2619,13 @@
 
     getElementsByClassName(cls) {
       return this.querySelectorAll("." + String(cls));
+    }
+
+    getElementsByName(name) {
+      const expected = String(name);
+      return this.querySelectorAll("[name]").filter(element =>
+        element.getAttribute("name") === expected
+      );
     }
 
     // Adds markup to the document at the parser's insertion point. During
@@ -3522,6 +3533,10 @@
   globalThis.AnimationEvent = Event;
   globalThis.TransitionEvent = Event;
   globalThis.document = wrapNode(__omoikane_document_id);
+  globalThis.__omoikane_set_current_script = function(id) {
+    globalThis.document.__currentScript =
+      id === null || id === undefined ? null : wrapNode(id);
+  };
   if (globalThis.window === undefined) {
     globalThis.window = globalThis;
   }
@@ -3624,6 +3639,28 @@
     const element = wrapNode(id);
     if (element) element.dispatchEvent(new Event("load", { bubbles: false }));
   };
+  const __documentCookies = new Map();
+  Object.defineProperty(Document.prototype, "cookie", {
+    configurable: true,
+    enumerable: true,
+    get() {
+      return Array.from(__documentCookies.entries())
+        .map(entry => entry[0] + "=" + entry[1])
+        .join("; ");
+    },
+    set(serialized) {
+      const parts = String(serialized).split(";");
+      const pair = parts.shift() || "";
+      const separator = pair.indexOf("=");
+      if (separator <= 0) return;
+      const name = pair.slice(0, separator).trim();
+      const value = pair.slice(separator + 1).trim();
+      const expired = parts.some(part => /^\s*max-age\s*=\s*0\s*$/i.test(part));
+      if (expired) __documentCookies.delete(name);
+      else __documentCookies.set(name, value);
+    },
+  });
+
   const __loc = { href: __omoikane_location_href, protocol: "", hostname: "", pathname: "/", search: "", hash: "", origin: "", host: "" };
   try {
     const __m = String(__omoikane_location_href).match(/^(.*?):\/\/([^/?#]+)([^?#]*)(\?[^#]*)?(#.*)?$/);
@@ -3744,7 +3781,7 @@
     }
     return __makeComputedStyle({});
   };
-  globalThis.navigator = { userAgent: __omoikane_navigator_user_agent, language: "en", languages: ["en"], platform: "", cookieEnabled: false, onLine: true };
+  globalThis.navigator = { userAgent: __omoikane_navigator_user_agent, language: "en", languages: ["en"], platform: "", cookieEnabled: true, onLine: true };
   globalThis.console = {
     log: (...args) => __omoikane_console_log(...args),
     warn: (...args) => __omoikane_console_log("[warn]", ...args),

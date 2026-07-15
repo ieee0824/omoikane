@@ -1096,7 +1096,7 @@ impl JsRuntime {
         let mut errors = Vec::new();
         let mut deferred = Vec::new();
 
-        for script in &scripts {
+        for (script_index, script) in scripts.iter().enumerate() {
             let attrs = script.attributes().unwrap_or_default();
 
             // Skip <script> types Omoikane does not run as classic scripts
@@ -1111,10 +1111,10 @@ impl JsRuntime {
             // HTML spec: defer only applies to external (src) scripts.
             let is_defer = attrs.contains_key("defer") && src.is_some();
 
-            let source_code = if let Some(src_url) = src {
+            let (source_code, script_label) = if let Some(src_url) = src {
                 // External script: fetch
                 match fetch_script_source(&src_url, base_url) {
-                    Some(code) => code,
+                    Some(code) => (code, src_url.clone()),
                     None => {
                         errors.push(format!("failed to fetch script: {src_url}"));
                         continue;
@@ -1122,7 +1122,10 @@ impl JsRuntime {
                 }
             } else {
                 // Inline script: collect text content
-                collect_text_content(script)
+                (
+                    collect_text_content(script),
+                    format!("inline-script-{}", script_index + 1),
+                )
             };
 
             if source_code.trim().is_empty() {
@@ -1135,7 +1138,7 @@ impl JsRuntime {
                 // reference at this script (exactly like the inline path), rather
                 // than letting a deferred write() fall back to appending at
                 // <body>.
-                deferred.push((source_code, script.clone()));
+                deferred.push((source_code, script.clone(), script_label));
                 continue;
             }
 
@@ -1144,16 +1147,22 @@ impl JsRuntime {
             // HTML tokenizer inserts written text at the "insertion point",
             // i.e. right where the running <script> sits in the tree).
             self.host_state.borrow_mut().write_insertion_ref = Some(script.clone());
+            let _ = self.eval(&format!(
+                "__omoikane_set_current_script({})",
+                script.identity()
+            ));
 
             // Execute immediately
+            let script_context = script_source_context(&source_code);
             if let Err(err) = self.eval_safe(&source_code) {
-                errors.push(err);
+                errors.push(format!("[script: {script_label}; {script_context}] {err}"));
             }
             if let Err(err) = self.run_jobs() {
-                errors.push(format!("{err}"));
+                errors.push(format!("[script jobs: {script_label}] {err}"));
             }
 
-            // The insertion point is only defined while a script is running.
+            // The insertion point and currentScript are only defined while a script runs.
+            let _ = self.eval("__omoikane_set_current_script(null)");
             self.host_state.borrow_mut().write_insertion_ref = None;
         }
 
@@ -1161,14 +1170,20 @@ impl JsRuntime {
         // to its <script> element, so a `document.write` from a deferred script
         // lands as that script's following siblings — the same treatment the
         // inline path applies above.
-        for (source_code, script) in deferred {
+        for (source_code, script, script_label) in deferred {
             self.host_state.borrow_mut().write_insertion_ref = Some(script.clone());
+            let _ = self.eval(&format!(
+                "__omoikane_set_current_script({})",
+                script.identity()
+            ));
+            let script_context = script_source_context(&source_code);
             if let Err(err) = self.eval_safe(&source_code) {
-                errors.push(err);
+                errors.push(format!("[script: {script_label}; {script_context}] {err}"));
             }
             if let Err(err) = self.run_jobs() {
-                errors.push(format!("{err}"));
+                errors.push(format!("[script jobs: {script_label}] {err}"));
             }
+            let _ = self.eval("__omoikane_set_current_script(null)");
             self.host_state.borrow_mut().write_insertion_ref = None;
         }
 
@@ -1189,6 +1204,15 @@ impl JsRuntime {
             result
         })
     }
+}
+
+fn script_source_context(source: &str) -> String {
+    let preview: String = source
+        .chars()
+        .take(160)
+        .map(|ch| if ch.is_control() { ' ' } else { ch })
+        .collect();
+    format!("{} chars; starts with: {preview}", source.chars().count())
 }
 
 /// Collects all `<script>` elements from the document tree in document order.
@@ -3820,6 +3844,28 @@ mod tests {
     }
 
     #[test]
+    fn document_get_elements_by_name_filters_exact_attribute_values() {
+        let mut runtime = runtime_from_html(
+            r#"<html><body><input name="failedScript"><div name="other"></div><span name="failedScript"></span></body></html>"#,
+        );
+        assert!(runtime
+            .eval(r#"document.getElementsByName("failedScript").length === 2 && document.getElementsByName("missing").length === 0"#)
+            .unwrap()
+            .as_boolean()
+            .unwrap());
+    }
+
+    #[test]
+    fn document_cookie_round_trips_name_value_pairs() {
+        let mut runtime = JsRuntime::new().unwrap();
+        assert!(runtime
+            .eval(r#"document.cookie = "theme=dark; Path=/"; document.cookie = "token=abc"; document.cookie === "theme=dark; token=abc" && navigator.cookieEnabled"#)
+            .unwrap()
+            .as_boolean()
+            .unwrap());
+    }
+
+    #[test]
     fn history_api_tracks_state_and_same_origin_urls() {
         let mut runtime = JsRuntime::new().unwrap();
         assert!(runtime
@@ -4936,6 +4982,29 @@ mod tests {
 
         let result = runtime.eval("jsRan").unwrap().as_boolean().unwrap();
         assert!(result, "JS script should run");
+    }
+
+    #[test]
+    fn document_current_script_tracks_and_can_remove_running_script() {
+        let html = r#"<html><body><script>globalThis.currentScriptId = document.currentScript.id; document.currentScript.remove();</script><script id="second">globalThis.secondRan = true;</script></body></html>"#;
+        let mut runtime = runtime_from_html(html);
+        let document = runtime.document();
+        let first = document.query_selector("script").unwrap();
+        first.set_attribute("id", "first");
+        let errors = runtime.execute_document_scripts(None);
+        assert!(errors.is_empty(), "unexpected errors: {errors:?}");
+        assert!(document.query_selector("#first").is_none());
+        assert_eq!(
+            runtime
+                .eval("currentScriptId")
+                .unwrap()
+                .as_string()
+                .unwrap()
+                .to_std_string_escaped(),
+            "first"
+        );
+        assert!(runtime.eval("secondRan").unwrap().as_boolean().unwrap());
+        assert!(runtime.eval("document.currentScript === null").unwrap().as_boolean().unwrap());
     }
 
     #[test]
