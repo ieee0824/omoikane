@@ -88,6 +88,71 @@ fn js_bool(runtime: &mut JsRuntime, source: &str) -> bool {
     runtime.eval(source).ok().and_then(|value| value.as_boolean()).unwrap_or(false)
 }
 
+fn escape_xml(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for character in value.chars() {
+        match character {
+            '&' => escaped.push_str("&amp;"),
+            '<' => escaped.push_str("&lt;"),
+            '>' => escaped.push_str("&gt;"),
+            '"' => escaped.push_str("&quot;"),
+            '\'' => escaped.push_str("&apos;"),
+            _ => escaped.push(character),
+        }
+    }
+    escaped
+}
+
+fn junit_xml(report: &WptReport) -> String {
+    let failures = report.results.iter()
+        .filter(|result| result.actual != result.expected)
+        .count();
+    let mut xml = format!(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<testsuite name=\"wpt-smoke\" tests=\"{}\" failures=\"{}\">\n",
+        report.results.len(), failures
+    );
+    for result in &report.results {
+        let details = serde_json::to_string(&result.subtests).expect("serialize WPT subtests");
+        let escaped_details = escape_xml(&details);
+        xml.push_str(&format!(
+            "  <testcase classname=\"wpt\" name=\"{}\">\n",
+            escape_xml(&result.path)
+        ));
+        if result.actual != result.expected {
+            xml.push_str(&format!(
+                "    <failure message=\"expected {}, got {}\">{}</failure>\n",
+                escape_xml(&result.expected),
+                escape_xml(&result.actual),
+                escaped_details
+            ));
+        }
+        xml.push_str(&format!(
+            "    <system-out>{}</system-out>\n  </testcase>\n",
+            escaped_details
+        ));
+    }
+    xml.push_str("</testsuite>\n");
+    xml
+}
+
+#[test]
+fn junit_report_escapes_xml_and_reports_mismatches() {
+    let report = WptReport {
+        revision: "test".to_string(),
+        results: vec![WptResult {
+            path: "a<&\"'".to_string(),
+            expected: "PASS".to_string(),
+            actual: "FAIL".to_string(),
+            script_errors: vec![],
+            subtests: serde_json::json!({"message": "boom <x>"}),
+        }],
+    };
+    let xml = junit_xml(&report);
+    assert!(xml.contains("tests=\"1\" failures=\"1\""));
+    assert!(xml.contains("name=\"a&lt;&amp;&quot;&apos;\""));
+    assert!(xml.contains("boom &lt;x&gt;"));
+}
+
 #[test]
 fn selected_wpt_testharness_cases_match_expectations() {
     let root = std::env::var("WPT_ROOT").map(PathBuf::from)
@@ -150,6 +215,13 @@ fn selected_wpt_testharness_cases_match_expectations() {
         if let Some(parent) = path.parent() { fs::create_dir_all(parent).expect("create report directory"); }
         fs::write(&path, serde_json::to_vec_pretty(&report).expect("serialize WPT report"))
             .expect("write WPT report");
+    }
+    if let Ok(path) = std::env::var("WPT_JUNIT") {
+        let path = PathBuf::from(path);
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).expect("create JUnit directory");
+        }
+        fs::write(&path, junit_xml(&report)).expect("write WPT JUnit report");
     }
     assert!(mismatches.is_empty(), "{}", mismatches.join("\n"));
 }
