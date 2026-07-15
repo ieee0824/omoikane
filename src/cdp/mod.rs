@@ -1079,6 +1079,7 @@ fn cdp_node_type(node: &NodeHandle) -> u8 {
     match node.node_type() {
         NodeType::Element => 1,
         NodeType::Text => 3,
+        NodeType::ProcessingInstruction => 7,
         NodeType::Comment => 8,
         NodeType::Document => 9,
         NodeType::DocumentType => 10,
@@ -1113,6 +1114,14 @@ fn serialize_outer_html(node: &NodeHandle) -> String {
         }
         NodeType::Text => escape_html(&node.data().unwrap_or_default()),
         NodeType::Comment => format!("<!--{}-->", node.data().unwrap_or_default()),
+        NodeType::ProcessingInstruction => {
+            let data = node.data().unwrap_or_default();
+            if data.is_empty() {
+                format!("<?{}?>", node.node_name())
+            } else {
+                format!("<?{} {}?>", node.node_name(), data)
+            }
+        }
         NodeType::DocumentType => format!("<!DOCTYPE {}>", node.data().unwrap_or_default()),
         NodeType::DocumentFragment => node
             .child_nodes()

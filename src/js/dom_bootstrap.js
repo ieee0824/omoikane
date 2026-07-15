@@ -21,6 +21,11 @@
     },
   });
 
+  function removeChildNode() {
+    const parent = this.parentNode;
+    if (parent) parent.removeChild(this);
+  }
+
   function wrapNode(id) {
     if (id === null || id === undefined) {
       return null;
@@ -37,6 +42,8 @@
       node = new Document(id);
     } else if (nodeType === 11) {
       node = new DocumentFragment(id);
+    } else if (nodeType === 7) {
+      node = new ProcessingInstruction(id);
     } else if (nodeType === 3) {
       node = new Text(id);
     } else if (nodeType === 8) {
@@ -46,6 +53,10 @@
       const constructors = namespace === SVG_NAMESPACE ? SVG_ELEMENT_CTORS : ELEMENT_CTORS;
       const ctor = constructors[(__omoikane_node_local_name(id) || __omoikane_node_name(id) || "").toLowerCase()];
       node = ctor ? new ctor(id) : namespace === SVG_NAMESPACE ? new SVGElement(id) : new Node(id);
+      Object.defineProperty(node, "remove", { value: removeChildNode, configurable: true });
+    } else if (nodeType === 10) {
+      node = new Node(id);
+      Object.defineProperty(node, "remove", { value: removeChildNode, configurable: true });
     } else {
       node = new Node(id);
     }
@@ -1396,6 +1407,7 @@
   // than on the base Node — keeps `.data` off Element nodes, where e.g.
   // `HTMLObjectElement.data` reflects the `data` content attribute instead.
   class CharacterData extends Node {
+    remove() { removeChildNode.call(this); }
     get data() {
       const value = this.textContent;
       return value == null ? "" : String(value);
@@ -1428,6 +1440,9 @@
     }
   }
   class Comment extends CharacterData {}
+  class ProcessingInstruction extends CharacterData {
+    get target() { return this.nodeName; }
+  }
 
   const NodeFilter = {
     FILTER_ACCEPT: 1, FILTER_REJECT: 2, FILTER_SKIP: 3,
@@ -2096,6 +2111,20 @@
 
     createTextNode(text) {
       return this.__own(wrapNode(__omoikane_create_text_node(String(text))));
+    }
+
+    createProcessingInstruction(target, data) {
+      const normalizedTarget = String(target);
+      const normalizedData = String(data);
+      if (!isValidXmlName(normalizedTarget) || normalizedData.includes("?>")) {
+        throw new DOMException(
+          "The processing instruction target or data is invalid.",
+          "InvalidCharacterError"
+        );
+      }
+      return this.__own(wrapNode(
+        __omoikane_create_processing_instruction(normalizedTarget, normalizedData)
+      ));
     }
 
     createComment(data) {
@@ -3079,6 +3108,7 @@
   globalThis.CharacterData = CharacterData;
   globalThis.Text = Text;
   globalThis.Comment = Comment;
+  globalThis.ProcessingInstruction = ProcessingInstruction;
   globalThis.Document = Document;
   globalThis.DocumentFragment = DocumentFragment;
   globalThis.DOMException = DOMException;

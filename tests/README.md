@@ -40,3 +40,16 @@ Example set:
 
 - Remove or anonymize site-identifying text and URL strings before check-in.
 - Keep fixture files minimal and focused on rendering behavior.
+
+## Web Platform Tests smoke subset
+
+The smoke runner executes selected upstream `testharness.js` tests inside Omoikane. The upstream checkout is not vendored; its commit is pinned in `tests/wpt/revision.txt`.
+
+```bash
+scripts/fetch-wpt.sh
+cargo test --test wpt_smoke -- --nocapture
+```
+
+Set `WPT_ROOT` to store the checkout elsewhere. Add cases to `tests/wpt/manifest.json` and add their paths to the sparse-checkout list in `scripts/fetch-wpt.sh`. Expectations may be `PASS`, `FAIL`, or `TIMEOUT`; both regressions and unexpected passes fail the runner so expectation changes stay explicit. Set `WPT_REPORT=path/to/report.json` to write the pinned revision, case outcomes, script errors, and individual subtest results as JSON.
+
+The initial job is intentionally a small PR smoke gate. Expansion toward the full WPT suite and official `wpt run` integration is tracked in GitHub issue #150.
