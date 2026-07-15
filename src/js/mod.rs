@@ -5159,17 +5159,28 @@ mod tests {
                 const xml = new DOMParser().parseFromString("<root/>", "text/xml");
                 const cdata = xml.documentElement.appendChild(xml.createCDATASection(""));
                 xml.documentElement.normalize();
+                const directClone = cdata.cloneNode();
+                const deepClone = xml.documentElement.cloneNode(true).lastChild;
+                let invalidCdata, missingArgs, unsupportedMime;
+                try { xml.createCDATASection("bad]]>data"); } catch (error) { invalidCdata = error.name; }
+                try { new DOMParser().parseFromString("<x/>"); } catch (error) { missingArgs = error.name; }
+                try { new DOMParser().parseFromString("<x/>", "text/plain"); } catch (error) { unsupportedMime = error.name; }
+                const html = new DOMParser().parseFromString("<p>parsed</p>", "text/html");
                 return [
                     div.childNodes.length, first.data,
                     range.startContainer === first, range.startOffset,
                     range.endContainer === first, range.endOffset,
                     document.textContent === null,
                     cdata.nodeType, cdata instanceof Text,
-                    xml.documentElement.lastChild === cdata
+                    xml.documentElement.lastChild === cdata,
+                    invalidCdata, missingArgs, unsupportedMime,
+                    directClone.nodeType, directClone instanceof CDATASection,
+                    deepClone.nodeType, deepClone instanceof CDATASection,
+                    html !== document, html.body.textContent
                 ].join("|");
             })()"#,
         );
-        assert_eq!(actual, "1|abcd|true|3|true|4|true|4|true|true");
+        assert_eq!(actual, "1|abcd|true|3|true|4|true|4|true|true|InvalidCharacterError|TypeError|TypeError|4|true|4|true|true|parsed");
     }
 
     #[test]

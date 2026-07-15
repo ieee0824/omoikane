@@ -1050,6 +1050,10 @@
       // Preserve JS UTF-16 code units that Rust UTF-8 strings cannot represent,
       // including CharacterData descendants of a deep clone.
       const preserveCharacterData = (source, target) => {
+        if (source instanceof CDATASection) {
+          Object.setPrototypeOf(target, CDATASection.prototype);
+          Object.defineProperty(target, "__cdataSection", { value: true, configurable: true });
+        }
         if (source instanceof CharacterData) target.textContent = source.textContent;
         if (!deep) return;
         const sourceChildren = source.childNodes;
@@ -2255,7 +2259,11 @@
 
     createCDATASection(data) {
       if (arguments.length < 1) throw new TypeError("createCDATASection requires 1 argument");
-      const node = this.createTextNode(String(data));
+      const text = String(data);
+      if (text.includes("]]>")) {
+        throw new DOMException("CDATA data must not contain ]]>", "InvalidCharacterError");
+      }
+      const node = this.createTextNode(text);
       Object.setPrototypeOf(node, CDATASection.prototype);
       Object.defineProperty(node, "__cdataSection", { value: true, configurable: true });
       return node;
@@ -3600,14 +3608,19 @@
 
   globalThis.DOMParser = class DOMParser {
     parseFromString(source, type) {
+      if (arguments.length < 2) throw new TypeError("parseFromString requires 2 arguments");
       const input = String(source);
       const mime = String(type).toLowerCase();
-      if (mime === "text/xml" || mime === "application/xml" || mime === "application/xhtml+xml" || mime === "image/svg+xml") {
-        const match = input.match(/<([A-Za-z_][A-Za-z0-9_.:-]*)(?:\s[^<>]*)?\s*\/?\s*>/);
-        if (!match) return document.implementation.createDocument("", "parsererror", null);
-        return document.implementation.createDocument("", match[1], null);
+      const supported = ["text/html", "text/xml", "application/xml", "application/xhtml+xml", "image/svg+xml"];
+      if (!supported.includes(mime)) throw new TypeError("Unsupported DOMParser MIME type: " + mime);
+      if (mime === "text/html") {
+        const parsed = document.implementation.createHTMLDocument("");
+        parsed.body.innerHTML = input;
+        return parsed;
       }
-      return globalThis.document;
+      const match = input.match(/<([A-Za-z_][A-Za-z0-9_.:-]*)(?:\s[^<>]*)?\s*\/?\s*>/);
+      if (!match) return document.implementation.createDocument("", "parsererror", null);
+      return document.implementation.createDocument("", match[1], null);
     }
   };
 
