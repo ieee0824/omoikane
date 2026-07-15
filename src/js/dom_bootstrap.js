@@ -647,18 +647,14 @@
       return __omoikane_get_attribute(this.__id, "id");
     }
 
-    set id(value) {
-      __omoikane_set_attribute(this.__id, "id", String(value));
-    }
+    set id(value) { this.setAttribute("id", value); }
 
     get title() {
       // DOMString-reflecting attributes use the empty string when absent.
       return __omoikane_get_attribute(this.__id, "title") ?? "";
     }
 
-    set title(value) {
-      __omoikane_set_attribute(this.__id, "title", String(value));
-    }
+    set title(value) { this.setAttribute("title", value); }
 
     getAttribute(name) {
       return __omoikane_get_attribute(this.__id, String(name));
@@ -666,7 +662,9 @@
 
     setAttribute(name, value) {
       const attr = String(name);
+      const oldValue = __omoikane_get_attribute(this.__id, attr);
       __omoikane_set_attribute(this.__id, attr, String(value));
+      queueMutation(this, "attributes", { attributeName: attr, oldValue });
       // A dynamically set `on*` content attribute is wired to a listener here
       // (parse-time attributes go through the initial wireInlineHandlers pass).
       if (/^on./i.test(attr)) applyInlineHandlerAttribute(this, attr);
@@ -676,9 +674,7 @@
       return __omoikane_get_attribute(this.__id, "class") || "";
     }
 
-    set className(value) {
-      __omoikane_set_attribute(this.__id, "class", String(value));
-    }
+    set className(value) { this.setAttribute("class", value); }
 
     get classList() {
       const node = this;
@@ -1072,7 +1068,9 @@
 
     removeAttribute(name) {
       const attr = String(name);
+      const oldValue = __omoikane_get_attribute(this.__id, attr);
       __omoikane_remove_attribute(this.__id, attr);
+      if (oldValue !== null) queueMutation(this, "attributes", { attributeName: attr, oldValue });
       // Removing an `on*` content attribute detaches the listener it wired.
       if (/^on./i.test(attr)) applyInlineHandlerAttribute(this, attr);
     }
@@ -3571,12 +3569,88 @@
   globalThis.localStorage = createStorage();
   globalThis.sessionStorage = createStorage();
 
-  // MutationObserver stub
+  const mutationObservers = new Set();
+
+  class MutationRecord {
+    constructor(type, target, init = {}) {
+      this.type = type;
+      this.target = target;
+      this.addedNodes = init.addedNodes || [];
+      this.removedNodes = init.removedNodes || [];
+      this.previousSibling = init.previousSibling || null;
+      this.nextSibling = init.nextSibling || null;
+      this.attributeName = init.attributeName || null;
+      this.attributeNamespace = null;
+      this.oldValue = init.oldValue === undefined ? null : init.oldValue;
+    }
+  }
+
+  function queueMutation(target, type, init = {}) {
+    for (const observer of mutationObservers) {
+      let matched = null;
+      for (const registration of observer._registrations) {
+        const inScope = registration.target === target ||
+          (registration.options.subtree && isInclusiveDescendant(target, registration.target));
+        if (!inScope || !registration.options[type]) continue;
+        if (type === "attributes" && registration.options.attributeFilter &&
+            !registration.options.attributeFilter.includes(init.attributeName)) continue;
+        matched = registration.options;
+        break;
+      }
+      if (!matched) continue;
+      const recordInit = { ...init };
+      if (type === "attributes" && !matched.attributeOldValue) recordInit.oldValue = null;
+      if (type === "characterData" && !matched.characterDataOldValue) recordInit.oldValue = null;
+      observer._records.push(new MutationRecord(type, target, recordInit));
+      observer._schedule();
+    }
+  }
+
+  globalThis.MutationRecord = MutationRecord;
   globalThis.MutationObserver = class MutationObserver {
-    constructor(callback) { this._callback = callback; }
-    observe() {}
-    disconnect() {}
-    takeRecords() { return []; }
+    constructor(callback) {
+      if (arguments.length < 1 || typeof callback !== "function") throw new TypeError("MutationObserver callback must be callable");
+      this._callback = callback;
+      this._records = [];
+      this._registrations = [];
+      this._scheduled = false;
+      mutationObservers.add(this);
+    }
+    observe(target, options) {
+      if (arguments.length < 2 || !target || typeof options !== "object") throw new TypeError("observe requires target and options");
+      const normalized = {
+        childList: !!options.childList, subtree: !!options.subtree,
+        attributes: options.attributes === undefined
+          ? ("attributeOldValue" in options || "attributeFilter" in options)
+          : !!options.attributes,
+        characterData: options.characterData === undefined
+          ? ("characterDataOldValue" in options)
+          : !!options.characterData,
+        attributeOldValue: !!options.attributeOldValue,
+        characterDataOldValue: !!options.characterDataOldValue,
+        attributeFilter: options.attributeFilter === undefined
+          ? null : Array.from(options.attributeFilter, String),
+      };
+      if ((!normalized.attributes && (normalized.attributeOldValue || normalized.attributeFilter)) ||
+          (!normalized.characterData && normalized.characterDataOldValue) ||
+          (!normalized.childList && !normalized.attributes && !normalized.characterData)) {
+        throw new TypeError("At least one mutation type must be observed");
+      }
+      const existing = this._registrations.find(entry => entry.target === target);
+      if (existing) existing.options = normalized;
+      else this._registrations.push({ target, options: normalized });
+    }
+    disconnect() { this._registrations = []; this._records = []; }
+    takeRecords() { const records = this._records; this._records = []; return records; }
+    _schedule() {
+      if (this._scheduled) return;
+      this._scheduled = true;
+      Promise.resolve().then(() => {
+        this._scheduled = false;
+        const records = this.takeRecords();
+        if (records.length) this._callback.call(this, records, this);
+      });
+    }
   };
 
   // ResizeObserver stub

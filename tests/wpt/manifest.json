@@ -19,6 +19,8 @@
     { "path": "dom/nodes/CharacterData-surrogates.html", "expected": "PASS" },
     { "path": "dom/nodes/Node-nodeValue.html", "expected": "PASS" },
     { "path": "dom/nodes/Node-normalize.html", "expected": "PASS" },
-    { "path": "dom/nodes/Node-textContent.html", "expected": "PASS" }
+    { "path": "dom/nodes/Node-textContent.html", "expected": "PASS" },
+    { "path": "dom/nodes/MutationObserver-sanity.html", "expected": "TIMEOUT" },
+    { "path": "dom/nodes/MutationObserver-callback-arguments.html", "expected": "PASS" }
   ]
 }
