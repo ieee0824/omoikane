@@ -3339,14 +3339,19 @@
     HTMLSelectElement.prototype, HTMLOptionElement.prototype,
   ], ["disabled"]);
   distributePrototypeMembers(Node.prototype, [HTMLSelectElement.prototype, HTMLButtonElement.prototype], ["value"]);
+  // DocumentType.name is the declared doctype name, unrelated to form-control
+  // name reflection. Copy it before the form interfaces consume and remove the
+  // shared implementation descriptor from Node.prototype.
+  Object.defineProperty(
+    DocumentType.prototype,
+    "name",
+    Object.getOwnPropertyDescriptor(Node.prototype, "name"),
+  );
   distributePrototypeMembers(Node.prototype, [
     HTMLFormElement.prototype, HTMLInputElement.prototype, HTMLButtonElement.prototype,
     HTMLSelectElement.prototype, HTMLIFrameElement.prototype,
     HTMLObjectElement.prototype, HTMLImageElement.prototype,
   ], ["name"]);
-  // DocumentType.name is the declared doctype name, unrelated to form-control
-  // name reflection.
-  distributePrototypeMembers(Node.prototype, [DocumentType.prototype], ["name"]);
   // Input and button provide their own type behavior; the generic fallback must
   // not remain visible on every Node or HTMLElement.
   distributePrototypeMembers(Node.prototype, [], ["type"]);
