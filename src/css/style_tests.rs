@@ -488,6 +488,54 @@ fn standard_flex_property_overrides_prefixed_fallback() {
         Some(&ComputedValue::Keyword("space-between".to_string()))
     );
     assert_eq!(style.get("flex-shrink"), Some(&ComputedValue::Number(1.0)));
+
+    let reverse = NodeHandle::element("div");
+    let mut reverse_resolver = StyleResolver::new();
+    reverse_resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "div { align-items: end; -webkit-align-items: start; \
+                    justify-content: space-between; -ms-flex-pack: start; \
+                    flex-shrink: 1; -webkit-flex-shrink: 2; }",
+        )
+        .unwrap(),
+    );
+
+    let reverse_style = reverse_resolver.computed_style(&reverse);
+    assert_eq!(
+        reverse_style.get("align-items"),
+        Some(&ComputedValue::Keyword("end".to_string()))
+    );
+    assert_eq!(
+        reverse_style.get("justify-content"),
+        Some(&ComputedValue::Keyword("space-between".to_string()))
+    );
+    assert_eq!(
+        reverse_style.get("flex-shrink"),
+        Some(&ComputedValue::Number(1.0))
+    );
+}
+
+#[test]
+fn keyframe_standard_property_overrides_prefixed_alias_in_either_order() {
+    let document = NodeHandle::document();
+    let div = NodeHandle::element("div");
+    document.append_child(div.clone());
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "@keyframes align { to { align-items: end; -webkit-align-items: start; } } \
+             div { animation-name: align; animation-fill-mode: forwards; }",
+        )
+        .unwrap(),
+    );
+
+    let style = resolver.computed_style(&div);
+    assert_eq!(
+        style.get("align-items"),
+        Some(&ComputedValue::Keyword("end".to_string()))
+    );
 }
 
 #[test]

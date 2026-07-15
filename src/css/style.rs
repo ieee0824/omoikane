@@ -302,6 +302,7 @@ impl StyleResolver {
             for declaration in super::parse_style_attribute(&inline_style) {
                 candidates.push(Candidate {
                     name: canonical_property_name(&declaration.name).to_string(),
+                    prefixed_alias: is_prefixed_property_alias(&declaration.name),
                     value: declaration.value,
                     important: declaration.important,
                     origin: Origin::Author,
@@ -320,6 +321,7 @@ impl StyleResolver {
         candidates.sort_by(|left, right| {
             cascade_rank(left)
                 .cmp(&cascade_rank(right))
+                .then(right.prefixed_alias.cmp(&left.prefixed_alias))
                 .then(left.inline.cmp(&right.inline))
                 .then(left.specificity.cmp(&right.specificity))
                 .then(left.source_order.cmp(&right.source_order))
@@ -531,8 +533,18 @@ impl StyleResolver {
             .map(|(name, value)| (name.clone(), computed_value_to_value(value)))
             .collect();
 
+        let standard_properties: HashSet<&str> = declarations
+            .iter()
+            .filter(|declaration| !is_prefixed_property_alias(&declaration.name))
+            .map(|declaration| canonical_property_name(&declaration.name))
+            .collect();
         for declaration in declarations {
             let property_name = canonical_property_name(&declaration.name);
+            if is_prefixed_property_alias(&declaration.name)
+                && standard_properties.contains(property_name)
+            {
+                continue;
+            }
             if important_properties.contains(property_name) {
                 continue;
             }
@@ -823,6 +835,7 @@ fn compute_cursor_value(value: &Value) -> Option<ComputedValue> {
 #[derive(Debug, Clone)]
 struct Candidate {
     name: String,
+    prefixed_alias: bool,
     value: Value,
     important: bool,
     origin: Origin,
@@ -861,6 +874,7 @@ fn collect_rule_candidates(
                     for declaration in &style_rule.declarations {
                         out.push(Candidate {
                             name: canonical_property_name(&declaration.name).to_string(),
+                            prefixed_alias: is_prefixed_property_alias(&declaration.name),
                             value: declaration.value.clone(),
                             important: declaration.important,
                             origin,
@@ -1768,6 +1782,10 @@ fn resolve_clamp_quantity(
         }
         _ => None,
     }
+}
+
+fn is_prefixed_property_alias(name: &str) -> bool {
+    !canonical_property_name(name).eq_ignore_ascii_case(name)
 }
 
 fn canonical_property_name(name: &str) -> &str {
