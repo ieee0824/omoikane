@@ -8,6 +8,14 @@
     { "path": "dom/nodes/Element-childElementCount-dynamic-remove.html", "expected": "PASS" },
     { "path": "dom/nodes/CharacterData-remove.html", "expected": "PASS" },
     { "path": "dom/nodes/Element-remove.html", "expected": "PASS" },
-    { "path": "dom/nodes/DocumentType-remove.html", "expected": "PASS" }
+    { "path": "dom/nodes/DocumentType-remove.html", "expected": "PASS" },
+    { "path": "dom/nodes/Text-splitText.html", "expected": "PASS" },
+    { "path": "dom/nodes/CharacterData-data.html", "expected": "PASS" },
+    { "path": "dom/nodes/CharacterData-appendData.html", "expected": "PASS" },
+    { "path": "dom/nodes/CharacterData-substringData.html", "expected": "PASS" },
+    { "path": "dom/nodes/CharacterData-insertData.html", "expected": "PASS" },
+    { "path": "dom/nodes/CharacterData-deleteData.html", "expected": "PASS" },
+    { "path": "dom/nodes/CharacterData-replaceData.html", "expected": "PASS" },
+    { "path": "dom/nodes/CharacterData-surrogates.html", "expected": "PASS" }
   ]
 }

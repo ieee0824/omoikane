@@ -5022,6 +5022,28 @@ mod tests {
     }
 
     #[test]
+    fn character_data_setter_distinguishes_null_from_undefined() {
+        let mut runtime = JsRuntime::with_document(default_document()).unwrap();
+        let actual = eval_str(
+            &mut runtime,
+            r#"(() => {
+                const nodes = [
+                    document.createTextNode('x'),
+                    document.createComment('x'),
+                    document.createProcessingInstruction('target', 'x')
+                ];
+                return nodes.map(node => {
+                    node.data = null;
+                    const nullValue = node.data;
+                    node.data = undefined;
+                    return [nullValue, node.data, node.length].join('|');
+                }).join(';');
+            })()"#,
+        );
+        assert_eq!(actual, "|undefined|9;|undefined|9;|undefined|9");
+    }
+
+    #[test]
     fn element_and_node_interfaces_have_distinct_prototype_chains() {
         let mut runtime = JsRuntime::with_document(default_document()).unwrap();
         let actual = eval_str(
@@ -5052,6 +5074,70 @@ mod tests {
             actual,
             "false|false|true|true|true|true|true|true|true|true|true|false|true|true|true|false|true|false|true|true|true|true|false|false|true|false|undefined|function"
         );
+    }
+
+    #[test]
+    fn character_data_preserves_utf16_and_updates_ranges() {
+        let mut runtime = JsRuntime::with_document(default_document()).unwrap();
+        let actual = eval_str(
+            &mut runtime,
+            r#"(() => {
+                const text = document.createTextNode("abcdef");
+                document.body.appendChild(text);
+                const range = document.createRange();
+                range.setStart(text, 2);
+                range.setEnd(text, 5);
+                text.replaceData(1, 3, "XY");
+                const offsets = [range.startOffset, range.endOffset];
+                text.data = "\uD83C--start";
+                text.appendData("--\uDF20");
+                const clone = text.cloneNode();
+                return [
+                    text.data.charCodeAt(0) === 0xD83C,
+                    text.data.charCodeAt(text.length - 1) === 0xDF20,
+                    clone.data === text.data,
+                    offsets[0], offsets[1]
+                ].join("|");
+            })()"#,
+        );
+        assert_eq!(actual, "true|true|true|1|4");
+    }
+
+    #[test]
+    fn character_data_review_regressions_preserve_ranges_pi_and_deep_clones() {
+        let mut runtime = JsRuntime::with_document(default_document()).unwrap();
+        let actual = eval_str(
+            &mut runtime,
+            r#"(() => {
+                const text = document.createTextNode("abcd");
+                document.body.appendChild(text);
+                const valueRange = document.createRange();
+                valueRange.setStart(text, 1);
+                valueRange.setEnd(text, 3);
+                text.nodeValue = "xy";
+
+                const pi = document.createProcessingInstruction("target", "abcdef");
+                document.body.appendChild(pi);
+                const piRange = document.createRange();
+                piRange.setStart(pi, 1);
+                piRange.setEnd(pi, 4);
+                const clonedPi = piRange.cloneContents().firstChild;
+                const extractedPi = piRange.extractContents().firstChild;
+
+                const parent = document.createElement("div");
+                const surrogate = parent.appendChild(document.createTextNode(""));
+                surrogate.data = "\uD83Cmiddle\uDF20";
+                const deepClone = parent.cloneNode(true).firstChild;
+                return [
+                    valueRange.startOffset, valueRange.endOffset,
+                    clonedPi.nodeType, clonedPi.target, clonedPi.data,
+                    extractedPi.data, pi.data,
+                    deepClone.data.charCodeAt(0) === 0xD83C,
+                    deepClone.data.charCodeAt(deepClone.length - 1) === 0xDF20
+                ].join("|");
+            })()"#,
+        );
+        assert_eq!(actual, "0|0|7|target|bcd|bcd|aef|true|true");
     }
 
     #[test]
