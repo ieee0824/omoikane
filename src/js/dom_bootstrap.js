@@ -4575,6 +4575,104 @@
     }
   }
 
+  class Animation extends EventTarget {
+    constructor(target, keyframes, options = {}) {
+      super();
+      const timing = typeof options === "number" ? { duration: options } : (options || {});
+      this.effect = { target, getKeyframes: () => this._keyframes.slice() };
+      this.timeline = globalThis.document && globalThis.document.timeline || null;
+      this.id = String(timing.id || "");
+      this.currentTime = 0;
+      this.startTime = null;
+      this.playbackRate = 1;
+      this.playState = "idle";
+      this.replaceState = "active";
+      this.pending = false;
+      this.onfinish = null;
+      this.oncancel = null;
+      this._target = target;
+      this._keyframes = Array.isArray(keyframes) ? keyframes.slice() : [keyframes || {}];
+      this._duration = Math.max(0, Number(timing.duration) || 0);
+      this._delay = Math.max(0, Number(timing.delay) || 0);
+      this._iterations = timing.iterations === Infinity ? Infinity : Math.max(0, Number(timing.iterations) || 1);
+      this._timer = null;
+      this._finishedResolve = null;
+      this.finished = new Promise(resolve => { this._finishedResolve = resolve; });
+      this.ready = Promise.resolve(this);
+      this.play();
+    }
+    _applyFinalKeyframe() {
+      const frame = this._keyframes[this._keyframes.length - 1];
+      if (!frame || !this._target || !this._target.style) return;
+      for (const name of Object.keys(frame)) {
+        if (name === "offset" || name === "easing" || name === "composite") continue;
+        this._target.style[name] = frame[name];
+      }
+    }
+    _complete() {
+      if (this.playState === "finished" || this.playState === "idle") return;
+      this._timer = null;
+      this.currentTime = this._duration * this._iterations;
+      this.playState = "finished";
+      this._applyFinalKeyframe();
+      this._finishedResolve(this);
+      const event = new Event("finish");
+      this.dispatchEvent(event);
+      if (typeof this.onfinish === "function") this.onfinish.call(this, event);
+    }
+    play() {
+      if (this._timer !== null) clearTimeout(this._timer);
+      this.playState = "running";
+      this.pending = false;
+      if (this._iterations !== Infinity) {
+        const total = this._delay + this._duration * this._iterations;
+        this._timer = setTimeout(() => this._complete(), total);
+      }
+    }
+    pause() {
+      if (this._timer !== null) clearTimeout(this._timer);
+      this._timer = null;
+      this.playState = "paused";
+    }
+    reverse() { this.playbackRate = -Math.abs(this.playbackRate || 1); this.play(); }
+    finish() { if (this._timer !== null) clearTimeout(this._timer); this._complete(); }
+    cancel() {
+      if (this._timer !== null) clearTimeout(this._timer);
+      this._timer = null;
+      this.currentTime = null;
+      this.playState = "idle";
+      const event = new Event("cancel");
+      this.dispatchEvent(event);
+      if (typeof this.oncancel === "function") this.oncancel.call(this, event);
+    }
+    updatePlaybackRate(rate) { this.playbackRate = Number(rate); }
+    persist() { this.replaceState = "persisted"; }
+    commitStyles() { this._applyFinalKeyframe(); }
+  }
+
+  Element.prototype.animate = function(keyframes, options) {
+    const animation = new Animation(this, keyframes, options);
+    if (!this.__animations) this.__animations = [];
+    this.__animations.push(animation);
+    return animation;
+  };
+  Element.prototype.getAnimations = function() {
+    return (this.__animations || []).filter(animation => animation.playState !== "idle").slice();
+  };
+  Document.prototype.getAnimations = function() {
+    const animations = [];
+    const visit = node => {
+      if (node && typeof node.getAnimations === "function") animations.push(...node.getAnimations());
+      for (const child of node && node.childNodes || []) visit(child);
+    };
+    visit(this.documentElement);
+    return animations;
+  };
+  if (!globalThis.document.timeline) {
+    globalThis.document.timeline = { currentTime: 0 };
+  }
+  globalThis.Animation = Animation;
+
   class AbortSignal extends EventTarget {
     constructor() {
       super();

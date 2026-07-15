@@ -4217,6 +4217,20 @@ mod tests {
     }
 
     #[test]
+    fn web_animations_finish_and_commit_final_keyframe() {
+        let mut runtime = JsRuntime::new().unwrap();
+        runtime
+            .eval(r#"(() => { const element = document.createElement("div"); document.body.appendChild(element); globalThis.finishedAnimation = false; const animation = element.animate([{ opacity: 0 }, { opacity: 1 }], { duration: 20 }); animation.finished.then(() => { finishedAnimation = true; }); globalThis.testAnimation = animation; globalThis.animatedElement = element; })()"#)
+            .unwrap();
+        runtime.run_timers(100, 10, 100);
+        assert!(runtime
+            .eval(r#"finishedAnimation && testAnimation instanceof Animation && testAnimation.playState === "finished" && animatedElement.style.opacity === "1" && animatedElement.getAnimations().length === 1 && document.getAnimations().length === 1"#)
+            .unwrap()
+            .as_boolean()
+            .unwrap());
+    }
+
+    #[test]
     fn streams_support_enqueue_read_and_transform() {
         let mut runtime = JsRuntime::new().unwrap();
         runtime
