@@ -1771,7 +1771,27 @@ fn resolve_clamp_quantity(
 }
 
 fn canonical_property_name(name: &str) -> &str {
-    if name.eq_ignore_ascii_case("-webkit-clip-path") {
+    if name.eq_ignore_ascii_case("-webkit-align-items")
+        || name.eq_ignore_ascii_case("-ms-flex-align")
+        || name.eq_ignore_ascii_case("-webkit-box-align")
+    {
+        "align-items"
+    } else if name.eq_ignore_ascii_case("-webkit-justify-content")
+        || name.eq_ignore_ascii_case("-ms-flex-pack")
+        || name.eq_ignore_ascii_case("-webkit-box-pack")
+    {
+        "justify-content"
+    } else if name.eq_ignore_ascii_case("-webkit-flex-shrink")
+        || name.eq_ignore_ascii_case("-ms-flex-negative")
+    {
+        "flex-shrink"
+    } else if name.eq_ignore_ascii_case("-webkit-flex-grow") {
+        "flex-grow"
+    } else if name.eq_ignore_ascii_case("-webkit-flex-direction") {
+        "flex-direction"
+    } else if name.eq_ignore_ascii_case("-webkit-flex-wrap") {
+        "flex-wrap"
+    } else if name.eq_ignore_ascii_case("-webkit-clip-path") {
         "clip-path"
     } else if name.eq_ignore_ascii_case("-webkit-transform") {
         "transform"

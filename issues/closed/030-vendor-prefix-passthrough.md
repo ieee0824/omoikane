@@ -2,7 +2,7 @@
 number: 030
 slug: vendor-prefix-passthrough
 parent:
-status: open
+status: closed
 ---
 
 # ベンダープレフィックスの標準プロパティへのマッピング
@@ -47,3 +47,9 @@ status: open
 - ベンダープレフィックス付きプロパティが標準プロパティとして適用される
 - 標準プロパティが既にある場合は上書きしない
 - 既存テスト全通過
+
+## 対応内容
+
+- WebKit/MS/旧 WebKit flexbox の11プロパティを標準プロパティ名へ正規化
+- stylesheet・inline style・keyframes が共有する正規化経路へ統合
+- 全マッピングと prefixed fallback 後の標準宣言優先を回帰テストで確認

@@ -438,6 +438,59 @@ fn expands_grid_alignment_shorthands() {
 }
 
 #[test]
+fn canonicalizes_prefixed_flex_properties_to_standard_names() {
+    let aliases = [
+        ("-webkit-align-items", "align-items", "center"),
+        ("-ms-flex-align", "align-items", "center"),
+        ("-webkit-box-align", "align-items", "center"),
+        ("-webkit-justify-content", "justify-content", "center"),
+        ("-ms-flex-pack", "justify-content", "center"),
+        ("-webkit-box-pack", "justify-content", "center"),
+        ("-webkit-flex-shrink", "flex-shrink", "2"),
+        ("-ms-flex-negative", "flex-shrink", "2"),
+        ("-webkit-flex-grow", "flex-grow", "2"),
+        ("-webkit-flex-direction", "flex-direction", "column"),
+        ("-webkit-flex-wrap", "flex-wrap", "wrap"),
+    ];
+
+    for (alias, standard, value) in aliases {
+        let element = NodeHandle::element("div");
+        let mut resolver = StyleResolver::new();
+        resolver.add_stylesheet(
+            Origin::Author,
+            parse_stylesheet(&format!("div {{ {alias}: {value}; }}")).unwrap(),
+        );
+
+        let style = resolver.computed_style(&element);
+        assert!(style.get(standard).is_some(), "{alias} should map to {standard}");
+        assert_eq!(style.get(alias), None, "{alias} should not remain in computed style");
+    }
+}
+
+#[test]
+fn standard_flex_property_overrides_prefixed_fallback() {
+    let element = NodeHandle::element("div");
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "div { -webkit-align-items: start; align-items: end; \
+                    -ms-flex-pack: start; justify-content: space-between; \
+                    -webkit-flex-shrink: 2; flex-shrink: 1; }",
+        )
+        .unwrap(),
+    );
+
+    let style = resolver.computed_style(&element);
+    assert_eq!(style.get("align-items"), Some(&ComputedValue::Keyword("end".to_string())));
+    assert_eq!(
+        style.get("justify-content"),
+        Some(&ComputedValue::Keyword("space-between".to_string()))
+    );
+    assert_eq!(style.get("flex-shrink"), Some(&ComputedValue::Number(1.0)));
+}
+
+#[test]
 fn applies_legacy_html_presentational_hints() {
     let document = NodeHandle::document();
     let html = NodeHandle::element("html");
