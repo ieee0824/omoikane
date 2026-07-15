@@ -5138,6 +5138,38 @@ mod tests {
             })()"#,
         );
         assert_eq!(actual, "0|0|7|target|bcd|bcd|aef|true|true");
+
+    }
+
+    #[test]
+    fn normalize_merges_text_and_preserves_range_boundaries() {
+        let mut runtime = JsRuntime::with_document(default_document()).unwrap();
+        let actual = eval_str(
+            &mut runtime,
+            r#"(() => {
+                const div = document.createElement("div");
+                const first = div.appendChild(document.createTextNode("ab"));
+                const second = div.appendChild(document.createTextNode("cd"));
+                div.appendChild(document.createTextNode(""));
+                document.body.appendChild(div);
+                const range = document.createRange();
+                range.setStart(second, 1);
+                range.setEnd(second, 2);
+                div.normalize();
+                const xml = new DOMParser().parseFromString("<root/>", "text/xml");
+                const cdata = xml.documentElement.appendChild(xml.createCDATASection(""));
+                xml.documentElement.normalize();
+                return [
+                    div.childNodes.length, first.data,
+                    range.startContainer === first, range.startOffset,
+                    range.endContainer === first, range.endOffset,
+                    document.textContent === null,
+                    cdata.nodeType, cdata instanceof Text,
+                    xml.documentElement.lastChild === cdata
+                ].join("|");
+            })()"#,
+        );
+        assert_eq!(actual, "1|abcd|true|3|true|4|true|4|true|true");
     }
 
     #[test]

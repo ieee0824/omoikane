@@ -16,6 +16,9 @@
     { "path": "dom/nodes/CharacterData-insertData.html", "expected": "PASS" },
     { "path": "dom/nodes/CharacterData-deleteData.html", "expected": "PASS" },
     { "path": "dom/nodes/CharacterData-replaceData.html", "expected": "PASS" },
-    { "path": "dom/nodes/CharacterData-surrogates.html", "expected": "PASS" }
+    { "path": "dom/nodes/CharacterData-surrogates.html", "expected": "PASS" },
+    { "path": "dom/nodes/Node-nodeValue.html", "expected": "PASS" },
+    { "path": "dom/nodes/Node-normalize.html", "expected": "PASS" },
+    { "path": "dom/nodes/Node-textContent.html", "expected": "PASS" }
   ]
 }
