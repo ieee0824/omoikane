@@ -275,6 +275,16 @@ impl<'a> Tokenizer<'a> {
                         state = State::EndTagOpen;
                     }
                     '!' => state = State::MarkupDeclarationOpen,
+                    '?' => {
+                        current_comment.clear();
+                        current_comment.push('?');
+                        while let Some(next) = cursor.consume() {
+                            if next == '>' { break; }
+                            current_comment.push(next);
+                        }
+                        tokens.push(Token::Comment(std::mem::take(&mut current_comment)));
+                        state = State::Data;
+                    },
                     c if is_tag_name_start(c) => {
                         current_tag_name.clear();
                         current_tag_name.push(c.to_ascii_lowercase());
@@ -1720,6 +1730,19 @@ mod tests {
                     ],
                     self_closing: true,
                 },
+                Token::Eof,
+            ]
+        );
+    }
+
+    #[test]
+    fn question_mark_markup_is_a_bogus_comment() {
+        assert_eq!(
+            Tokenizer::new("<p><?processing data?></p>").tokenize(),
+            vec![
+                Token::StartTag { name: "p".into(), attributes: vec![], self_closing: false },
+                Token::Comment("?processing data?".into()),
+                Token::EndTag { name: "p".into() },
                 Token::Eof,
             ]
         );

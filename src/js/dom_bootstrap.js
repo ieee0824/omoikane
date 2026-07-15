@@ -685,22 +685,33 @@
 
     get classList() {
       const node = this;
+      const validate = classes => classes.map(value => {
+        const token = String(value);
+        if (token === "") throw new DOMException("The token must not be empty.", "SyntaxError");
+        if (/\s/.test(token)) throw new DOMException("The token contains whitespace.", "InvalidCharacterError");
+        return token;
+      });
       return {
         add(...classes) {
+          classes = validate(classes);
           const current = new Set((node.className || "").split(/\s+/).filter(Boolean));
           for (const cls of classes) current.add(cls);
           node.className = [...current].join(" ");
         },
         remove(...classes) {
+          classes = validate(classes);
           const current = new Set((node.className || "").split(/\s+/).filter(Boolean));
           for (const cls of classes) current.delete(cls);
           node.className = [...current].join(" ");
         },
         toggle(cls, force) {
+          [cls] = validate([cls]);
           const current = new Set((node.className || "").split(/\s+/).filter(Boolean));
           const has = current.has(cls);
           if (force === undefined) {
             has ? current.delete(cls) : current.add(cls);
+          } else if (!!force === has) {
+            return has;
           } else if (force) {
             current.add(cls);
           } else {
@@ -1102,6 +1113,35 @@
       if (/^on./i.test(attr)) applyInlineHandlerAttribute(this, attr);
     }
 
+    setAttributeNS(namespace, qualifiedName, value) {
+      const ns = namespace == null || namespace === "" ? null : String(namespace);
+      const name = String(qualifiedName);
+      const localName = name.includes(":") ? name.slice(name.indexOf(":") + 1) : name;
+      if (!this.__namespacedAttributes) this.__namespacedAttributes = new Map();
+      const key = String(ns) + "|" + localName;
+      const previous = this.__namespacedAttributes.get(key);
+      const oldValue = previous ? previous.value : null;
+      this.__namespacedAttributes.set(key, { name, localName, namespaceURI: ns, value: String(value) });
+      __omoikane_set_attribute(this.__id, name, String(value));
+      queueMutation(this, "attributes", { attributeName: localName, attributeNamespace: ns, oldValue });
+    }
+
+    getAttributeNS(namespace, localName) {
+      const ns = namespace == null || namespace === "" ? null : String(namespace);
+      const entry = this.__namespacedAttributes && this.__namespacedAttributes.get(String(ns) + "|" + String(localName));
+      return entry ? entry.value : null;
+    }
+
+    removeAttributeNS(namespace, localName) {
+      const ns = namespace == null || namespace === "" ? null : String(namespace);
+      const key = String(ns) + "|" + String(localName);
+      const entry = this.__namespacedAttributes && this.__namespacedAttributes.get(key);
+      if (!entry) return;
+      this.__namespacedAttributes.delete(key);
+      __omoikane_remove_attribute(this.__id, entry.name);
+      queueMutation(this, "attributes", { attributeName: entry.localName, attributeNamespace: ns, oldValue: entry.value });
+    }
+
     get tagName() {
       if (this.nodeType !== 1) {
         return undefined;
@@ -1138,34 +1178,29 @@
 
     get attributes() {
       const node = this;
-      // NamedNodeMap-like object backed by getAttribute/setAttribute
+      const names = () => __omoikane_attribute_names(node.__id) || [];
+      const makeAttr = name => {
+        const attr = { name, localName: name, specified: true, expando: false };
+        Object.defineProperty(attr, "value", {
+          enumerable: true,
+          get() { return node.getAttribute(name); },
+          set(value) { node.setAttribute(name, value); },
+        });
+        return attr;
+      };
       return new Proxy([], {
-        get(target, prop) {
-          if (prop === "length") {
-            // Count by getting all via style hack — not ideal but functional
-            return 0;
+        get(_target, prop) {
+          const list = names();
+          if (prop === "length") return list.length;
+          if (prop === "item") return index => list[Number(index)] === undefined ? null : makeAttr(list[Number(index)]);
+          if (prop === "getNamedItem") return name => node.hasAttribute(name) ? makeAttr(String(name)) : null;
+          if (prop === "setNamedItem") return attr => { node.setAttribute(attr.name, attr.value); return attr; };
+          if (prop === "removeNamedItem") return name => { const old = makeAttr(String(name)); node.removeAttribute(name); return old; };
+          if (typeof prop === "string" && /^(?:0|[1-9]\d*)$/.test(prop)) {
+            return list[Number(prop)] === undefined ? undefined : makeAttr(list[Number(prop)]);
           }
-          if (prop === "getNamedItem") {
-            return function(name) {
-              const val = node.getAttribute(name);
-              return val !== null ? { name, value: val, specified: true } : null;
-            };
-          }
-          if (prop === "setNamedItem") {
-            return function(attr) { node.setAttribute(attr.name, attr.value); };
-          }
-          if (prop === "removeNamedItem") {
-            return function(name) { node.removeAttribute(name); };
-          }
-          if (typeof prop === "string" && !isNaN(prop)) {
-            return undefined;
-          }
-          // Named access: attributes["data-foo"]
-          if (typeof prop === "string") {
-            const val = node.getAttribute(prop);
-            return val !== null ? { name: prop, value: val, specified: true, expando: false } : undefined;
-          }
-          return undefined;
+          if (typeof prop === "string" && node.hasAttribute(prop)) return makeAttr(prop);
+          return Array.prototype[prop];
         }
       });
     }
@@ -3597,7 +3632,7 @@
   globalThis.localStorage = createStorage();
   globalThis.sessionStorage = createStorage();
 
-  const mutationObservers = new Set();
+  const mutationObservers = [];
 
   class MutationRecord {
     constructor(type, target, init = {}) {
@@ -3608,7 +3643,7 @@
       this.previousSibling = init.previousSibling || null;
       this.nextSibling = init.nextSibling || null;
       this.attributeName = init.attributeName || null;
-      this.attributeNamespace = null;
+      this.attributeNamespace = init.attributeNamespace || null;
       this.oldValue = init.oldValue === undefined ? null : init.oldValue;
     }
   }
@@ -3666,7 +3701,7 @@
           (!normalized.childList && !normalized.attributes && !normalized.characterData)) {
         throw new TypeError("At least one mutation type must be observed");
       }
-      mutationObservers.add(this);
+      if (!mutationObservers.includes(this)) mutationObservers.push(this);
       const existing = this._registrations.find(entry => entry.target === target);
       if (existing) existing.options = normalized;
       else this._registrations.push({ target, options: normalized });
@@ -3674,7 +3709,8 @@
     disconnect() {
       this._registrations = [];
       this._records = [];
-      mutationObservers.delete(this);
+      const index = mutationObservers.indexOf(this);
+      if (index >= 0) mutationObservers.splice(index, 1);
     }
     takeRecords() { const records = this._records; this._records = []; return records; }
     _schedule() {
