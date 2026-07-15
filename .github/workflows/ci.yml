@@ -44,11 +44,12 @@ jobs:
           WPT_ROOT: .cache/wpt
           WPT_REQUIRED: "1"
           WPT_REPORT: .artifacts/wpt/report.json
+          WPT_JUNIT: .artifacts/wpt/junit.xml
         run: cargo test --test wpt_smoke -- --nocapture
       - name: Upload WPT report
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: wpt-smoke-report
-          path: .artifacts/wpt/report.json
+          path: .artifacts/wpt/
           if-no-files-found: error
