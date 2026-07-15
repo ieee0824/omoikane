@@ -5900,6 +5900,36 @@ mod tests {
         let disconnected = runtime.eval("document.createElement('span').isConnected")
             .unwrap().as_boolean().unwrap();
         assert!(!disconnected, "orphan element should not be connected");
+
+        let removed = runtime
+            .eval(
+                r#"
+            const child = document.createElement('span');
+            document.querySelector('div').appendChild(child);
+            child.remove();
+            child.parentNode === null && child.isConnected === false
+        "#,
+            )
+            .unwrap()
+            .as_boolean()
+            .unwrap();
+        assert!(
+            removed,
+            "remove() should detach an element and update isConnected"
+        );
+
+        let orphan_remove = runtime
+            .eval(
+                r#"
+            const orphan = document.createElement('span');
+            orphan.remove();
+            orphan.parentNode === null && orphan.isConnected === false
+        "#,
+            )
+            .unwrap()
+            .as_boolean()
+            .unwrap();
+        assert!(orphan_remove, "remove() should be a no-op for an orphan element");
     }
 
     #[test]

@@ -932,6 +932,11 @@
       return child;
     }
 
+    remove() {
+      const parent = this.parentNode;
+      if (parent) parent.removeChild(this);
+    }
+
     insertBefore(newNode, refNode) {
       if (newNode && newNode.nodeType !== 11) {
         this.__ensureNotAncestor(newNode);
