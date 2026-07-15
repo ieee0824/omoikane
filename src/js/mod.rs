@@ -5022,6 +5022,28 @@ mod tests {
     }
 
     #[test]
+    fn character_data_setter_distinguishes_null_from_undefined() {
+        let mut runtime = JsRuntime::with_document(default_document()).unwrap();
+        let actual = eval_str(
+            &mut runtime,
+            r#"(() => {
+                const nodes = [
+                    document.createTextNode('x'),
+                    document.createComment('x'),
+                    document.createProcessingInstruction('target', 'x')
+                ];
+                return nodes.map(node => {
+                    node.data = null;
+                    const nullValue = node.data;
+                    node.data = undefined;
+                    return [nullValue, node.data, node.length].join('|');
+                }).join(';');
+            })()"#,
+        );
+        assert_eq!(actual, "|undefined|9;|undefined|9;|undefined|9");
+    }
+
+    #[test]
     fn element_and_node_interfaces_have_distinct_prototype_chains() {
         let mut runtime = JsRuntime::with_document(default_document()).unwrap();
         let actual = eval_str(

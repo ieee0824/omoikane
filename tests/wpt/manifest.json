@@ -8,6 +8,8 @@
     { "path": "dom/nodes/Element-childElementCount-dynamic-remove.html", "expected": "PASS" },
     { "path": "dom/nodes/CharacterData-remove.html", "expected": "PASS" },
     { "path": "dom/nodes/Element-remove.html", "expected": "PASS" },
-    { "path": "dom/nodes/DocumentType-remove.html", "expected": "PASS" }
+    { "path": "dom/nodes/DocumentType-remove.html", "expected": "PASS" },
+    { "path": "dom/nodes/Text-splitText.html", "expected": "PASS" },
+    { "path": "dom/nodes/CharacterData-data.html", "expected": "PASS" }
   ]
 }

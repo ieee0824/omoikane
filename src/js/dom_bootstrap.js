@@ -1425,7 +1425,7 @@
     }
 
     set data(value) {
-      this.textContent = value == null ? "" : String(value);
+      this.textContent = value === null ? "" : String(value);
     }
 
     get length() {
