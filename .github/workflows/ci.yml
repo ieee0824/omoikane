@@ -46,7 +46,7 @@ jobs:
           WPT_REPORT: .artifacts/wpt/report.json
           WPT_JUNIT: .artifacts/wpt/junit.xml
         run: cargo test --test wpt_smoke -- --nocapture
-      - name: Upload WPT report
+      - name: Upload WPT reports
         if: always()
         uses: actions/upload-artifact@v4
         with:

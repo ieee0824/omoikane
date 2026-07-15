@@ -89,12 +89,18 @@ fn js_bool(runtime: &mut JsRuntime, source: &str) -> bool {
 }
 
 fn escape_xml(value: &str) -> String {
-    value
-        .replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
-        .replace('\'', "&apos;")
+    let mut escaped = String::with_capacity(value.len());
+    for character in value.chars() {
+        match character {
+            '&' => escaped.push_str("&amp;"),
+            '<' => escaped.push_str("&lt;"),
+            '>' => escaped.push_str("&gt;"),
+            '"' => escaped.push_str("&quot;"),
+            '\'' => escaped.push_str("&apos;"),
+            _ => escaped.push(character),
+        }
+    }
+    escaped
 }
 
 fn junit_xml(report: &WptReport) -> String {
@@ -107,6 +113,7 @@ fn junit_xml(report: &WptReport) -> String {
     );
     for result in &report.results {
         let details = serde_json::to_string(&result.subtests).expect("serialize WPT subtests");
+        let escaped_details = escape_xml(&details);
         xml.push_str(&format!(
             "  <testcase classname=\"wpt\" name=\"{}\">\n",
             escape_xml(&result.path)
@@ -116,12 +123,12 @@ fn junit_xml(report: &WptReport) -> String {
                 "    <failure message=\"expected {}, got {}\">{}</failure>\n",
                 escape_xml(&result.expected),
                 escape_xml(&result.actual),
-                escape_xml(&details)
+                escaped_details
             ));
         }
         xml.push_str(&format!(
             "    <system-out>{}</system-out>\n  </testcase>\n",
-            escape_xml(&details)
+            escaped_details
         ));
     }
     xml.push_str("</testsuite>\n");
