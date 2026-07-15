@@ -5217,6 +5217,49 @@ mod tests {
     }
 
     #[test]
+    fn mutation_dom_operations_validate_before_mutating() {
+        let mut runtime = JsRuntime::with_document(default_document()).unwrap();
+        let actual = eval_str(
+            &mut runtime,
+            r#"(() => {
+                const parent = document.createElement("div");
+                const other = document.createElement("div");
+                const reference = other.appendChild(document.createElement("span"));
+                const observer = new MutationObserver(() => {});
+                observer.observe(parent, { childList: true });
+                let insertError;
+                try { parent.insertBefore(document.createElement("b"), reference); }
+                catch (error) { insertError = error.name; }
+
+                const element = document.createElement("div");
+                element.setAttributeNS(null, "plain", "one");
+                const nullNamespaceValue = element.getAttributeNS(null, "plain");
+                element.removeAttributeNS(null, "plain");
+
+                const ns = "https://example.test/ns";
+                element.setAttributeNS(ns, "old:item", "first");
+                element.setAttributeNS(ns, "new:item", "second");
+                const oldPrefixRemoved = !element.hasAttribute("old:item");
+                const namespacedValue = element.getAttributeNS(ns, "item");
+
+                let namespaceError;
+                try { element.setAttributeNS(null, "prefix:item", "bad"); }
+                catch (error) { namespaceError = error.name; }
+                let namedItemError;
+                try { element.attributes.removeNamedItem("missing"); }
+                catch (error) { namedItemError = error.name; }
+
+                return [
+                    insertError, parent.childNodes.length, observer.takeRecords().length,
+                    nullNamespaceValue, !element.hasAttribute("plain"),
+                    oldPrefixRemoved, namespacedValue, namespaceError, namedItemError
+                ].join("|");
+            })()"#,
+        );
+        assert_eq!(actual, "NotFoundError|0|0|one|true|true|second|NamespaceError|NotFoundError");
+    }
+
+    #[test]
     fn element_has_no_character_data_property() {
         let mut runtime = JsRuntime::with_document(default_document()).unwrap();
         // .data must not be defined on Element nodes (it is a CharacterData API).
