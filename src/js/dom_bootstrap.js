@@ -3460,8 +3460,15 @@
       this.onerror = null;
       this.onloadend = null;
       this._headers = {};
+      this._requestId = 0;
     }
     open(method, url, async = true) {
+      this._requestId++;
+      this.status = 0;
+      this.statusText = "";
+      this.responseText = "";
+      this.response = "";
+      this._headers = {};
       this._method = String(method).toUpperCase();
       this._url = String(url);
       this._async = async !== false;
@@ -3480,12 +3487,14 @@
       this._listeners[type] = (this._listeners[type] || []).filter(item => item !== callback);
     }
     abort() {
+      this._requestId++;
       this.readyState = 0;
       this._notify("abort");
       this._notify("loadend");
     }
     send() {
       if (this.readyState !== 1) throw new Error("InvalidStateError");
+      const requestId = this._requestId;
       if (this._method !== "GET") {
         this.readyState = 4;
         this._notify("readystatechange");
@@ -3494,6 +3503,7 @@
         return;
       }
       Promise.resolve(__omoikane_fetch(this._url)).then(raw => {
+        if (requestId !== this._requestId) return;
         const data = JSON.parse(String(raw));
         this.status = data.status;
         this.statusText = data.ok ? "OK" : "";
@@ -3504,6 +3514,7 @@
         this._notify("load");
         this._notify("loadend");
       }).catch(() => {
+        if (requestId !== this._requestId) return;
         this.readyState = 4;
         this._notify("readystatechange");
         this._notify("error");
