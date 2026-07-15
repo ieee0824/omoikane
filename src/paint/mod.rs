@@ -724,11 +724,19 @@ pub fn render_document_with_url(
         // time so that DOM mutations from deferred callbacks settle before
         // layout. Bounded by a virtual-time budget and a task-count cap so an
         // infinite setInterval cannot hang the render.
-        runtime.run_timers(
+        let tasks_run = runtime.run_timers(
             TIMER_PUMP_MAX_VIRTUAL_MS,
             TIMER_PUMP_STEP_MS,
             TIMER_PUMP_MAX_TASKS,
         );
+        if std::env::var_os("OMOIKANE_LOG_SCRIPTS").is_some() {
+            eprintln!("[omoikane][event-loop] completed {tasks_run} macrotasks");
+            if let Ok(value) = runtime.eval(
+                "JSON.stringify({ scripts: globalThis.__SCRIPTS_LOADED__ || null, rootChildren: (document.getElementById('react-root') || {}).childElementCount || 0, timersPending: false })",
+            ) && let Some(value) = value.as_string() {
+                eprintln!("[omoikane][bootstrap-state] {}", value.to_std_string_escaped());
+            }
+        }
         // Re-extract stylesheets and rebuild resolver after JS may have
         // modified the DOM (inserted/removed <style>/<link> elements).
         resolver = StyleResolver::new();

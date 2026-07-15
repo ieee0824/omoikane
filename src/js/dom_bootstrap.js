@@ -4522,17 +4522,154 @@
   globalThis.WritableStreamDefaultWriter = WritableStreamDefaultWriter;
   globalThis.TransformStream = TransformStream;
 
-  globalThis.fetch = function(url) {
-    return Promise.resolve(__omoikane_fetch(String(url))).then(raw => {
+  class EventTarget {
+    constructor() { this._listeners = new Map(); }
+    addEventListener(type, callback, options = {}) {
+      if (callback == null) return;
+      const key = String(type);
+      const capture = typeof options === "boolean" ? options : !!options.capture;
+      const once = typeof options === "object" && !!options.once;
+      const listeners = this._listeners.get(key) || [];
+      if (!listeners.some(entry => entry.callback === callback && entry.capture === capture)) {
+        listeners.push({ callback, capture, once });
+      }
+      this._listeners.set(key, listeners);
+    }
+    removeEventListener(type, callback, options = {}) {
+      const listeners = this._listeners.get(String(type));
+      if (!listeners) return;
+      const capture = typeof options === "boolean" ? options : !!options.capture;
+      const index = listeners.findIndex(entry => entry.callback === callback && entry.capture === capture);
+      if (index >= 0) listeners.splice(index, 1);
+    }
+    dispatchEvent(event) {
+      if (!(event instanceof Event)) throw new TypeError("dispatchEvent requires an Event");
+      event.target = this;
+      event.currentTarget = this;
+      for (const entry of (this._listeners.get(event.type) || []).slice()) {
+        if (entry.once) this.removeEventListener(event.type, entry.callback, entry.capture);
+        if (typeof entry.callback === "function") entry.callback.call(this, event);
+        else if (typeof entry.callback.handleEvent === "function") entry.callback.handleEvent(event);
+        if (event.__stoppedImmediate) break;
+      }
+      event.currentTarget = null;
+      return !event.defaultPrevented;
+    }
+  }
+
+  class AbortSignal extends EventTarget {
+    constructor() {
+      super();
+      this.aborted = false;
+      this.reason = undefined;
+      this.onabort = null;
+    }
+    throwIfAborted() { if (this.aborted) throw this.reason; }
+    static abort(reason = new DOMException("The operation was aborted.", "AbortError")) {
+      const controller = new AbortController();
+      controller.abort(reason);
+      return controller.signal;
+    }
+    static timeout(milliseconds) {
+      const controller = new AbortController();
+      setTimeout(() => controller.abort(new DOMException("The operation timed out.", "TimeoutError")), Number(milliseconds));
+      return controller.signal;
+    }
+    static any(signals) {
+      const controller = new AbortController();
+      for (const signal of signals) {
+        if (signal.aborted) { controller.abort(signal.reason); break; }
+        signal.addEventListener("abort", () => controller.abort(signal.reason), { once: true });
+      }
+      return controller.signal;
+    }
+  }
+
+  class AbortController {
+    constructor() { this.signal = new AbortSignal(); }
+    abort(reason = new DOMException("The operation was aborted.", "AbortError")) {
+      if (this.signal.aborted) return;
+      this.signal.aborted = true;
+      this.signal.reason = reason;
+      const event = new Event("abort");
+      this.signal.dispatchEvent(event);
+      if (typeof this.signal.onabort === "function") this.signal.onabort.call(this.signal, event);
+    }
+  }
+  globalThis.EventTarget = EventTarget;
+  globalThis.AbortSignal = AbortSignal;
+  globalThis.AbortController = AbortController;
+
+  class Headers {
+    constructor(init = undefined) {
+      this._headers = new Map();
+      if (init instanceof Headers) init.forEach((value, name) => this.append(name, value));
+      else if (Array.isArray(init)) for (const entry of init) this.append(entry[0], entry[1]);
+      else if (init && typeof init === "object") for (const name of Object.keys(init)) this.append(name, init[name]);
+    }
+    append(name, value) {
+      const key = String(name).toLowerCase();
+      const text = String(value).trim();
+      this._headers.set(key, this._headers.has(key) ? this._headers.get(key) + ", " + text : text);
+    }
+    set(name, value) { this._headers.set(String(name).toLowerCase(), String(value).trim()); }
+    get(name) { return this._headers.get(String(name).toLowerCase()) ?? null; }
+    has(name) { return this._headers.has(String(name).toLowerCase()); }
+    delete(name) { this._headers.delete(String(name).toLowerCase()); }
+    forEach(callback, thisArg) { for (const [name, value] of this._headers) callback.call(thisArg, value, name, this); }
+    *entries() { yield* this._headers.entries(); }
+    *keys() { yield* this._headers.keys(); }
+    *values() { yield* this._headers.values(); }
+    [Symbol.iterator]() { return this.entries(); }
+  }
+  class Request {
+    constructor(input, init = {}) {
+      const source = input instanceof Request ? input : null;
+      this.url = source ? source.url : String(input);
+      this.method = String(init.method || (source && source.method) || "GET").toUpperCase();
+      this.headers = new Headers(init.headers || (source && source.headers));
+      this.body = init.body === undefined ? (source && source.body) : init.body;
+      this.credentials = init.credentials || (source && source.credentials) || "same-origin";
+      this.mode = init.mode || (source && source.mode) || "cors";
+      this.signal = init.signal || (source && source.signal) || null;
+    }
+    clone() { return new Request(this); }
+  }
+  class Response {
+    constructor(body = null, init = {}) {
+      this._body = body === null ? "" : String(body);
+      this.status = init.status === undefined ? 200 : Number(init.status);
+      this.statusText = init.statusText || "";
+      this.headers = new Headers(init.headers);
+      this.url = init.url || "";
+      this.type = "basic";
+      this.redirected = false;
+      this.bodyUsed = false;
+    }
+    get ok() { return this.status >= 200 && this.status <= 299; }
+    text() { this.bodyUsed = true; return Promise.resolve(this._body); }
+    json() { return this.text().then(JSON.parse); }
+    arrayBuffer() { return Promise.resolve(new TextEncoder().encode(this._body).buffer); }
+    clone() { return new Response(this._body, { status: this.status, statusText: this.statusText, headers: this.headers, url: this.url }); }
+    static json(data, init = {}) {
+      const headers = new Headers(init.headers);
+      if (!headers.has("content-type")) headers.set("content-type", "application/json");
+      return new Response(JSON.stringify(data), { ...init, headers });
+    }
+    static redirect(url, status = 302) { return new Response(null, { status, headers: { location: String(url) } }); }
+    static error() { const response = new Response(null, { status: 0 }); response.type = "error"; return response; }
+  }
+  globalThis.Headers = Headers;
+  globalThis.Request = Request;
+  globalThis.Response = Response;
+
+  globalThis.fetch = function(input, init = {}) {
+    const request = input instanceof Request ? new Request(input, init) : new Request(input, init);
+    if (request.signal && request.signal.aborted) return Promise.reject(request.signal.reason);
+    return Promise.resolve(__omoikane_fetch(request.url)).then(raw => {
+      if (request.signal && request.signal.aborted) throw request.signal.reason;
       const data = JSON.parse(String(raw));
-      return {
-        status: data.status,
-        ok: data.ok,
-        url: data.url,
-        text() {
-          return Promise.resolve(data.bodyText);
-        },
-      };
+      return new Response(data.bodyText, { status: data.status, url: data.url });
     });
   };
 

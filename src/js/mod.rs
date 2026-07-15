@@ -7,10 +7,11 @@ use std::rc::Rc;
 
 use boa_engine::JsString;
 use boa_engine::Module;
-use boa_engine::builtins::promise::PromiseState;
+use boa_engine::builtins::promise::{OperationType, PromiseState};
+use boa_engine::context::HostHooks;
 use boa_engine::module::{ModuleLoader, Referrer};
 use boa_engine::native_function::NativeFunction;
-use boa_engine::object::JsObject;
+use boa_engine::object::{JsObject, builtins::JsPromise};
 use boa_engine::{Context, JsError, JsNativeError, JsResult, JsValue, Source, js_string};
 
 use crate::css::{
@@ -26,6 +27,34 @@ thread_local! {
 }
 
 const DOM_BOOTSTRAP: &str = include_str!("dom_bootstrap.js");
+
+#[derive(Debug)]
+struct BrowserHostHooks;
+
+impl HostHooks for BrowserHostHooks {
+    fn promise_rejection_tracker(
+        &self,
+        promise: &JsObject,
+        operation: OperationType,
+        _context: &mut Context,
+    ) {
+        if operation != OperationType::Reject || std::env::var_os("OMOIKANE_LOG_SCRIPTS").is_none() {
+            return;
+        }
+        let Ok(promise) = JsPromise::from_object(promise.clone()) else {
+            return;
+        };
+        if let PromiseState::Rejected(reason) = promise.state() {
+            eprintln!("[omoikane][unhandled-rejection] {}", reason.display());
+            if let Some(error) = reason.as_object()
+                && let Ok(stack) = error.get(js_string!("stack"), _context)
+                && !stack.is_undefined()
+            {
+                eprintln!("{}", stack.display());
+            }
+        }
+    }
+}
 
 #[derive(Debug, Default)]
 struct HttpModuleLoader {
@@ -341,11 +370,12 @@ impl HostState {
 
     /// Queue loads for iframe and data-bearing object descendants when a
     /// detached subtree first becomes connected to a document.
-    fn schedule_connected_resource_loads(&mut self, root: &NodeHandle) {
-        fn visit(state: &mut HostState, node: &NodeHandle) {
+    fn schedule_connected_resource_loads(&mut self, root: &NodeHandle, include_scripts: bool) {
+        fn visit(state: &mut HostState, node: &NodeHandle, include_scripts: bool) {
             let tag = node.tag_name().unwrap_or_default();
             let is_resource = tag.eq_ignore_ascii_case("iframe")
-                || (tag.eq_ignore_ascii_case("script")
+                || (include_scripts
+                    && tag.eq_ignore_ascii_case("script")
                     && node
                         .attributes()
                         .is_some_and(|attrs| attrs.contains_key("src")))
@@ -362,10 +392,10 @@ impl HostState {
                     });
             }
             for child in node.child_nodes() {
-                visit(state, &child);
+                visit(state, &child, include_scripts);
             }
         }
-        visit(self, root);
+        visit(self, root, include_scripts);
     }
 
     /// Queue a fresh navigation for a single resource element whose resource
@@ -789,6 +819,7 @@ impl JsRuntime {
         let host_state = Rc::new(RefCell::new(HostState::new(document.clone())));
         let mut context = Context::builder()
             .module_loader(Rc::new(HttpModuleLoader::default()))
+            .host_hooks(Rc::new(BrowserHostHooks))
             .build()?;
 
         register_host_bindings(&mut context, &host_state)?;
@@ -805,7 +836,7 @@ impl JsRuntime {
         runtime
             .host_state
             .borrow_mut()
-            .schedule_connected_resource_loads(&document);
+            .schedule_connected_resource_loads(&document, false);
         Ok(runtime)
     }
 
@@ -1126,6 +1157,9 @@ impl JsRuntime {
                     let _ = self.run_jobs();
                 }
                 if let Some((src, base_url)) = dynamic_script {
+                    if std::env::var_os("OMOIKANE_LOG_SCRIPTS").is_some() {
+                        eprintln!("[omoikane][script] loading dynamic {src}");
+                    }
                     let source = fetch_script_source(&src, base_url.as_ref()).ok_or_else(|| {
                         JsError::from(
                             JsNativeError::error()
@@ -1137,6 +1171,9 @@ impl JsRuntime {
                     let _ = self.eval("__omoikane_set_current_script(null)");
                     result?;
                     self.run_jobs()?;
+                    if std::env::var_os("OMOIKANE_LOG_SCRIPTS").is_some() {
+                        eprintln!("[omoikane][script] completed dynamic {src}");
+                    }
                 }
                 if should_dispatch {
                     self.eval(&format!("__omoikane_dispatch_resource_load({node_id})"))?;
@@ -2424,7 +2461,7 @@ fn append_child_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> 
             // only a detach/reconnect reloads (real browsers reload here too,
             // but that broader change is out of scope for this fix).
             if target_document.is_some() && source_document != target_document {
-                state.schedule_connected_resource_loads(&child);
+                state.schedule_connected_resource_loads(&child, true);
             }
         }
         Ok(JsValue::from(child.identity() as f64))
@@ -3083,7 +3120,7 @@ fn insert_before_native(_: &JsValue, args: &[JsValue], context: &mut Context) ->
             // a direct move across two different documents), but not for an
             // in-document reorder.
             if target_document.is_some() && source_document != target_document {
-                state.schedule_connected_resource_loads(&new_node);
+                state.schedule_connected_resource_loads(&new_node, true);
             }
         }
         Ok(JsValue::undefined())
@@ -3681,7 +3718,7 @@ fn document_write_native(_: &JsValue, args: &[JsValue], context: &mut Context) -
             let mut s = state.borrow_mut();
             for child in &parsed_children {
                 s.register_tree(child);
-                s.schedule_connected_resource_loads(child);
+                s.schedule_connected_resource_loads(child, true);
             }
             // `document.write` splices new nodes into the live tree, so the
             // written document's cached resolver is now stale. Invalidate only
@@ -4071,6 +4108,46 @@ mod tests {
                     return url.origin === "https://example.com" &&
                       url.pathname === "/app/../asset.js" &&
                       url.searchParams.get("q") === "hello world";
+                })()"#,
+            )
+            .unwrap()
+            .as_boolean()
+            .unwrap());
+    }
+
+    #[test]
+    fn fetch_standard_objects_expose_headers_and_body_helpers() {
+        let mut runtime = JsRuntime::new().unwrap();
+        assert!(runtime
+            .eval(
+                r#"(() => {
+                    const headers = new Headers({ "X-Test": "one" });
+                    headers.append("x-test", "two");
+                    const request = new Request("https://example.com", { headers });
+                    const response = Response.json({ ok: true });
+                    return request.headers.get("X-Test") === "one, two" &&
+                      response.ok && response.headers.get("content-type") === "application/json";
+                })()"#,
+            )
+            .unwrap()
+            .as_boolean()
+            .unwrap());
+    }
+
+    #[test]
+    fn abort_controller_exposes_signal_state_and_events() {
+        let mut runtime = JsRuntime::new().unwrap();
+        assert!(runtime
+            .eval(
+                r#"(() => {
+                    const controller = new AbortController();
+                    let events = 0;
+                    controller.signal.addEventListener("abort", () => events++);
+                    controller.abort("stopped");
+                    controller.abort("ignored");
+                    return controller.signal instanceof AbortSignal &&
+                      controller.signal.aborted && controller.signal.reason === "stopped" &&
+                      events === 1 && AbortSignal.abort().reason.name === "AbortError";
                 })()"#,
             )
             .unwrap()
