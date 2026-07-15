@@ -3831,6 +3831,84 @@ mod tests {
     }
 
     #[test]
+    fn exposes_document_location_and_date_locale_time_string() {
+        let mut runtime = JsRuntime::new().unwrap();
+        assert!(runtime
+            .eval("document.location === window.location && document.charset === \"UTF-8\" && document.referrer === \"\"")
+            .unwrap()
+            .as_boolean()
+            .unwrap());
+        let value = runtime
+            .eval("new Date(2020, 0, 1, 2, 3, 4).toLocaleTimeString()")
+            .unwrap()
+            .as_string()
+            .unwrap()
+            .to_std_string_escaped();
+        assert_eq!(value, "02:03:04");
+    }
+
+    #[test]
+    fn xml_http_request_get_completes_and_abort_suppresses_completion() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let handle = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buffer = [0u8; 1024];
+            let _ = stream.read(&mut buffer).unwrap();
+            let response = b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello";
+            stream.write_all(response).unwrap();
+        });
+
+        let mut runtime = JsRuntime::new().unwrap();
+        runtime
+            .eval(&format!(
+                r#"globalThis.xhrEvents = []; const xhr = new XMLHttpRequest(); xhr.onload = () => xhrEvents.push("load"); xhr.onloadend = () => xhrEvents.push("loadend"); xhr.open("GET", "http://127.0.0.1:{}/"); xhr.send(); globalThis.xhr = xhr;"#,
+                address.port()
+            ))
+            .unwrap();
+        runtime.run_jobs().unwrap();
+        handle.join().unwrap();
+        assert!(runtime
+            .eval(r#"xhr.readyState === XMLHttpRequest.DONE && xhr.status === 200 && xhr.responseText === "hello" && xhrEvents.join(",") === "load,loadend""#)
+            .unwrap()
+            .as_boolean()
+            .unwrap());
+
+        let abort_listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let abort_address = abort_listener.local_addr().unwrap();
+        let abort_handle = thread::spawn(move || {
+            let (mut stream, _) = abort_listener.accept().unwrap();
+            let mut buffer = [0u8; 1024];
+            let _ = stream.read(&mut buffer).unwrap();
+            let response = b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nlater";
+            stream.write_all(response).unwrap();
+        });
+        runtime
+            .eval(&format!(
+                r#"xhrEvents = []; xhr.open("GET", "http://127.0.0.1:{}/"); xhr.send(); xhr.abort();"#,
+                abort_address.port()
+            ))
+            .unwrap();
+        abort_handle.join().unwrap();
+        runtime.run_jobs().unwrap();
+        assert!(runtime
+            .eval(r#"xhr.readyState === XMLHttpRequest.UNSENT && xhr.status === 0 && xhr.responseText === "" && xhrEvents.join(",") === "loadend""#)
+            .unwrap()
+            .as_boolean()
+            .unwrap());
+    }
+
+    #[test]
+    fn exposes_minimal_xml_http_request() {
+        let mut runtime = JsRuntime::new().unwrap();
+        assert!(runtime
+            .eval(r#"(() => { const xhr = new XMLHttpRequest(); xhr.open("POST", "https://example.com/log"); let failed = false; xhr.onerror = () => { failed = true; }; xhr.send("x"); xhr.status = 204; xhr.responseText = "stale"; xhr.setRequestHeader("x-old", "yes"); xhr.open("POST", "https://example.com/next"); const reset = xhr.status === 0 && xhr.responseText === "" && Object.keys(xhr._headers).length === 0; xhr.send("x"); return reset && failed && xhr.readyState === XMLHttpRequest.DONE && xhr.status === 0; })()"#)
+            .unwrap()
+            .as_boolean()
+            .unwrap());
+    }
+
+    #[test]
     fn eval_safe_catches_syntax_error() {
         let mut runtime = JsRuntime::new().unwrap();
         let result = runtime.eval_safe("this is not valid javascript }{");

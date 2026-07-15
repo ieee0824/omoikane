@@ -2216,6 +2216,18 @@
       return "UTF-8";
     }
 
+    get charset() {
+      return this.characterSet;
+    }
+
+    get location() {
+      return globalThis.location;
+    }
+
+    get referrer() {
+      return "";
+    }
+
     get contentType() {
       return "text/html";
     }
@@ -3388,6 +3400,15 @@
     disconnect() {}
   };
 
+  // Boa does not currently implement locale-aware Date formatting. Pages commonly
+  // use this API for diagnostic timestamps, so provide a deterministic fallback.
+  Date.prototype.toLocaleTimeString = function() {
+    const hours = String(this.getHours()).padStart(2, "0");
+    const minutes = String(this.getMinutes()).padStart(2, "0");
+    const seconds = String(this.getSeconds()).padStart(2, "0");
+    return hours + ":" + minutes + ":" + seconds;
+  };
+
   // Performance stub
   globalThis.performance = {
     now: () => Date.now(),
@@ -3423,6 +3444,96 @@
       forEach(cb) { this._params.forEach((v, k) => cb(v, k, this)); }
     };
   }
+  globalThis.XMLHttpRequest = class XMLHttpRequest {
+    constructor() {
+      this._listeners = {};
+      this.readyState = 0;
+      this.status = 0;
+      this.statusText = "";
+      this.responseText = "";
+      this.response = "";
+      this.responseType = "";
+      this.timeout = 0;
+      this.withCredentials = false;
+      this.onreadystatechange = null;
+      this.onload = null;
+      this.onerror = null;
+      this.onloadend = null;
+      this._headers = {};
+      this._requestId = 0;
+    }
+    open(method, url, async = true) {
+      this._requestId++;
+      this.status = 0;
+      this.statusText = "";
+      this.responseText = "";
+      this.response = "";
+      this._headers = {};
+      this._method = String(method).toUpperCase();
+      this._url = String(url);
+      this._async = async !== false;
+      this.readyState = 1;
+      this._notify("readystatechange");
+    }
+    setRequestHeader(name, value) {
+      this._headers[String(name).toLowerCase()] = String(value);
+    }
+    getAllResponseHeaders() { return ""; }
+    getResponseHeader() { return null; }
+    addEventListener(type, callback) {
+      (this._listeners[type] ||= []).push(callback);
+    }
+    removeEventListener(type, callback) {
+      this._listeners[type] = (this._listeners[type] || []).filter(item => item !== callback);
+    }
+    abort() {
+      this._requestId++;
+      this.readyState = 0;
+      this._notify("abort");
+      this._notify("loadend");
+    }
+    send() {
+      if (this.readyState !== 1) throw new Error("InvalidStateError");
+      const requestId = this._requestId;
+      if (this._method !== "GET") {
+        this.readyState = 4;
+        this._notify("readystatechange");
+        this._notify("error");
+        this._notify("loadend");
+        return;
+      }
+      Promise.resolve(__omoikane_fetch(this._url)).then(raw => {
+        if (requestId !== this._requestId) return;
+        const data = JSON.parse(String(raw));
+        this.status = data.status;
+        this.statusText = data.ok ? "OK" : "";
+        this.responseText = data.bodyText;
+        this.response = this.responseText;
+        this.readyState = 4;
+        this._notify("readystatechange");
+        this._notify("load");
+        this._notify("loadend");
+      }).catch(() => {
+        if (requestId !== this._requestId) return;
+        this.readyState = 4;
+        this._notify("readystatechange");
+        this._notify("error");
+        this._notify("loadend");
+      });
+    }
+    _notify(type) {
+      const event = new Event(type);
+      const handler = this["on" + type];
+      if (typeof handler === "function") handler.call(this, event);
+      for (const callback of this._listeners[type] || []) callback.call(this, event);
+    }
+  };
+  globalThis.XMLHttpRequest.UNSENT = 0;
+  globalThis.XMLHttpRequest.OPENED = 1;
+  globalThis.XMLHttpRequest.HEADERS_RECEIVED = 2;
+  globalThis.XMLHttpRequest.LOADING = 3;
+  globalThis.XMLHttpRequest.DONE = 4;
+
   globalThis.fetch = function(url) {
     return Promise.resolve(__omoikane_fetch(String(url))).then(raw => {
       const data = JSON.parse(String(raw));
