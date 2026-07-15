@@ -52,8 +52,7 @@
       const namespace = __omoikane_node_namespace_uri(id);
       const constructors = namespace === SVG_NAMESPACE ? SVG_ELEMENT_CTORS : ELEMENT_CTORS;
       const ctor = constructors[(__omoikane_node_local_name(id) || __omoikane_node_name(id) || "").toLowerCase()];
-      node = ctor ? new ctor(id) : namespace === SVG_NAMESPACE ? new SVGElement(id) : new Node(id);
-      Object.defineProperty(node, "remove", { value: removeChildNode, configurable: true });
+      node = ctor ? new ctor(id) : namespace === SVG_NAMESPACE ? new SVGElement(id) : new HTMLElement(id);
     } else if (nodeType === 10) {
       node = new Node(id);
       Object.defineProperty(node, "remove", { value: removeChildNode, configurable: true });
@@ -1406,6 +1405,12 @@
   // `textContent`/`nodeValue` for these node types). Defining it here — rather
   // than on the base Node — keeps `.data` off Element nodes, where e.g.
   // `HTMLObjectElement.data` reflects the `data` content attribute instead.
+  class Element extends Node {
+    remove() { removeChildNode.call(this); }
+  }
+
+  class HTMLElement extends Element {}
+
   class CharacterData extends Node {
     remove() { removeChildNode.call(this); }
     get data() {
@@ -2534,7 +2539,7 @@
   // about:blank skeleton, while a src is fetched and parsed (only HTML content
   // types become a real DOM tree). Reading contentDocument again after changing
   // src reloads it.
-  class HTMLIFrameElement extends Node {
+  class HTMLIFrameElement extends HTMLElement {
     get contentDocument() {
       return wrapNode(__omoikane_iframe_content_document(this.__id));
     }
@@ -2576,7 +2581,7 @@
     }
   }
 
-  class HTMLObjectElement extends Node {
+  class HTMLObjectElement extends HTMLElement {
     get contentDocument() {
       return wrapNode(__omoikane_iframe_content_document(this.__id));
     }
@@ -2612,7 +2617,7 @@
     return node.childNodes.filter(c => c.nodeType === 1 && c.tagName === upperTag);
   }
 
-  class HTMLTableElement extends Node {
+  class HTMLTableElement extends HTMLElement {
     get caption() {
       return childElementsByTag(this, "CAPTION")[0] || null;
     }
@@ -2723,7 +2728,7 @@
   }
 
   // thead / tbody / tfoot share the HTMLTableSectionElement interface.
-  class HTMLTableSectionElement extends Node {
+  class HTMLTableSectionElement extends HTMLElement {
     get rows() {
       return childElementsByTag(this, "TR");
     }
@@ -2753,7 +2758,7 @@
     }
   }
 
-  class HTMLTableRowElement extends Node {
+  class HTMLTableRowElement extends HTMLElement {
     // td and th children, in tree order.
     get cells() {
       return this.childNodes.filter(
@@ -2819,7 +2824,7 @@
     "INPUT", "SELECT", "TEXTAREA", "BUTTON", "FIELDSET", "OBJECT", "OUTPUT", "KEYGEN",
   ]);
 
-  class HTMLFormElement extends Node {
+  class HTMLFormElement extends HTMLElement {
     __controls() {
       const controls = [];
       const walk = (node) => {
@@ -2866,7 +2871,7 @@
     }
   }
 
-  class HTMLInputElement extends Node {
+  class HTMLInputElement extends HTMLElement {
     get type() {
       const t = (this.getAttribute("type") || "").toLowerCase();
       return t || "text";
@@ -2893,7 +2898,7 @@
     }
   }
 
-  class HTMLButtonElement extends Node {
+  class HTMLButtonElement extends HTMLElement {
     get type() {
       const t = (this.getAttribute("type") || "").toLowerCase();
       if (t === "submit" || t === "reset" || t === "button" || t === "menu") {
@@ -2906,7 +2911,7 @@
     }
   }
 
-  class HTMLLabelElement extends Node {
+  class HTMLLabelElement extends HTMLElement {
     get htmlFor() {
       return this.getAttribute("for") || "";
     }
@@ -2915,7 +2920,7 @@
     }
   }
 
-  class HTMLMetaElement extends Node {
+  class HTMLMetaElement extends HTMLElement {
     get httpEquiv() {
       return this.getAttribute("http-equiv") || "";
     }
@@ -2924,7 +2929,7 @@
     }
   }
 
-  class HTMLSelectElement extends Node {
+  class HTMLSelectElement extends HTMLElement {
     get options() {
       return childElementsByTag(this, "OPTION");
     }
@@ -2958,7 +2963,7 @@
     }
   }
 
-  class HTMLOptionElement extends Node {
+  class HTMLOptionElement extends HTMLElement {
     get defaultSelected() {
       return this.hasAttribute("selected");
     }
@@ -2988,9 +2993,9 @@
     }
   }
 
-  class HTMLScriptElement extends Node {}
+  class HTMLScriptElement extends HTMLElement {}
 
-  class HTMLImageElement extends Node {
+  class HTMLImageElement extends HTMLElement {
     get height() {
       const attr = this.getAttribute("height");
       if (attr !== null && attr !== "") return Math.max(0, Number.parseInt(attr, 10) || 0);
@@ -3009,7 +3014,7 @@
 
   // Minimal SVG DOM layer. Rendering remains owned by src/svg; these wrappers
   // only provide the interfaces exercised by script and Acid3.
-  class SVGElement extends Node {}
+  class SVGElement extends Element {}
   class SVGSVGElement extends SVGElement {}
   class SVGRectElement extends SVGElement {
     get width() {
@@ -3103,8 +3108,8 @@
 
   globalThis.Node = Node;
   globalThis.Window = Window;
-  globalThis.Element = Node;
-  globalThis.HTMLElement = Node;
+  globalThis.Element = Element;
+  globalThis.HTMLElement = HTMLElement;
   globalThis.CharacterData = CharacterData;
   globalThis.Text = Text;
   globalThis.Comment = Comment;

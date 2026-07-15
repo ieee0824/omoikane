@@ -5022,6 +5022,33 @@ mod tests {
     }
 
     #[test]
+    fn element_and_node_interfaces_have_distinct_prototype_chains() {
+        let mut runtime = JsRuntime::with_document(default_document()).unwrap();
+        let actual = eval_str(
+            &mut runtime,
+            r#"(() => {
+                const generic = document.createElement('article');
+                const input = document.createElement('input');
+                const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+                return [
+                    Node === Element,
+                    Element === HTMLElement,
+                    generic instanceof Node, generic instanceof Element, generic instanceof HTMLElement,
+                    input instanceof Node, input instanceof Element, input instanceof HTMLElement, input instanceof HTMLInputElement,
+                    svg instanceof Node, svg instanceof Element, svg instanceof HTMLElement, svg instanceof SVGElement,
+                    document instanceof Node, document instanceof Element, document instanceof HTMLElement,
+                    document.createDocumentFragment() instanceof Node, document.createDocumentFragment() instanceof Element,
+                    typeof Node.prototype.remove, typeof Element.prototype.remove
+                ].join('|');
+            })()"#,
+        );
+        assert_eq!(
+            actual,
+            "false|false|true|true|true|true|true|true|true|true|true|false|true|true|false|false|true|false|undefined|function"
+        );
+    }
+
+    #[test]
     fn element_has_no_character_data_property() {
         let mut runtime = JsRuntime::with_document(default_document()).unwrap();
         // .data must not be defined on Element nodes (it is a CharacterData API).
