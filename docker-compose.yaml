@@ -7,6 +7,7 @@ services:
     working_dir: /workspace
     # Codex の bwrap サンドボックスが隔離ネットワークの loopback を設定するために必要。
     cap_add:
+      - SYS_ADMIN
       - NET_ADMIN
     # Codex の bwrap が user/network namespace を作成できるよう、開発コンテナに限り
     # Docker の既定 seccomp フィルターを無効化する。
