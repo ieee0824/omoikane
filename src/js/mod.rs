@@ -5104,6 +5104,43 @@ mod tests {
     }
 
     #[test]
+    fn character_data_review_regressions_preserve_ranges_pi_and_deep_clones() {
+        let mut runtime = JsRuntime::with_document(default_document()).unwrap();
+        let actual = eval_str(
+            &mut runtime,
+            r#"(() => {
+                const text = document.createTextNode("abcd");
+                document.body.appendChild(text);
+                const valueRange = document.createRange();
+                valueRange.setStart(text, 1);
+                valueRange.setEnd(text, 3);
+                text.nodeValue = "xy";
+
+                const pi = document.createProcessingInstruction("target", "abcdef");
+                document.body.appendChild(pi);
+                const piRange = document.createRange();
+                piRange.setStart(pi, 1);
+                piRange.setEnd(pi, 4);
+                const clonedPi = piRange.cloneContents().firstChild;
+                const extractedPi = piRange.extractContents().firstChild;
+
+                const parent = document.createElement("div");
+                const surrogate = parent.appendChild(document.createTextNode(""));
+                surrogate.data = "\uD83Cmiddle\uDF20";
+                const deepClone = parent.cloneNode(true).firstChild;
+                return [
+                    valueRange.startOffset, valueRange.endOffset,
+                    clonedPi.nodeType, clonedPi.target, clonedPi.data,
+                    extractedPi.data, pi.data,
+                    deepClone.data.charCodeAt(0) === 0xD83C,
+                    deepClone.data.charCodeAt(deepClone.length - 1) === 0xDF20
+                ].join("|");
+            })()"#,
+        );
+        assert_eq!(actual, "0|0|7|target|bcd|bcd|aef|true|true");
+    }
+
+    #[test]
     fn element_has_no_character_data_property() {
         let mut runtime = JsRuntime::with_document(default_document()).unwrap();
         // .data must not be defined on Element nodes (it is a CharacterData API).

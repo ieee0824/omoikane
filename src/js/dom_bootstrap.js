@@ -1015,8 +1015,18 @@
       if (clone && ownerDoc) {
         stampOwnerDoc(clone, ownerDoc);
       }
-      // Preserve JS UTF-16 code units that Rust UTF-8 strings cannot represent.
-      if (clone && this instanceof CharacterData) clone.textContent = this.textContent;
+      // Preserve JS UTF-16 code units that Rust UTF-8 strings cannot represent,
+      // including CharacterData descendants of a deep clone.
+      const preserveCharacterData = (source, target) => {
+        if (source instanceof CharacterData) target.textContent = source.textContent;
+        if (!deep) return;
+        const sourceChildren = source.childNodes;
+        const targetChildren = target.childNodes;
+        for (let i = 0; i < sourceChildren.length; i++) {
+          preserveCharacterData(sourceChildren[i], targetChildren[i]);
+        }
+      };
+      if (clone) preserveCharacterData(this, clone);
       return clone;
     }
 
@@ -1131,7 +1141,7 @@
 
     set nodeValue(value) {
       const t = this.nodeType;
-      if (t === 3 || t === 7 || t === 8) this.textContent = value;
+      if (t === 3 || t === 7 || t === 8) this.data = value;
     }
 
     replaceChild(newChild, oldChild) {
@@ -1860,9 +1870,14 @@
       return [from, to];
     }
     __copyNode(node, extract) {
-      if (node.nodeType === 3 || node.nodeType === 8) {
+      if (node.nodeType === 3 || node.nodeType === 7 || node.nodeType === 8) {
         const [from,to] = this.__characterSlice(node);
-        const copy = node.nodeType === 3 ? this.__doc.createTextNode(node.data.slice(from,to)) : this.__doc.createComment(node.data.slice(from,to));
+        const data = node.data.slice(from,to);
+        const copy = node.nodeType === 3
+          ? this.__doc.createTextNode(data)
+          : node.nodeType === 7
+            ? this.__doc.createProcessingInstruction(node.target, data)
+            : this.__doc.createComment(data);
         if (extract) node.data = node.data.slice(0,from) + node.data.slice(to);
         return copy;
       }
@@ -1881,11 +1896,11 @@
     __contents(extract) {
       const fragment = this.__doc.createDocumentFragment();
       if (this.collapsed) return fragment;
-      if (this.__startContainer === this.__endContainer && (this.__startContainer.nodeType === 3 || this.__startContainer.nodeType === 8)) {
+      if (this.__startContainer === this.__endContainer && (this.__startContainer.nodeType === 3 || this.__startContainer.nodeType === 7 || this.__startContainer.nodeType === 8)) {
         fragment.appendChild(this.__copyNode(this.__startContainer, extract));
       } else {
         const common = this.commonAncestorContainer;
-        if (common.nodeType === 3 || common.nodeType === 8) fragment.appendChild(this.__copyNode(common, extract));
+        if (common.nodeType === 3 || common.nodeType === 7 || common.nodeType === 8) fragment.appendChild(this.__copyNode(common, extract));
         else for (const child of common.childNodes.slice()) if (this.__nodeRelation(child)) fragment.appendChild(this.__copyNode(child, extract));
       }
       if (extract) this.collapse(true);
@@ -1913,8 +1928,8 @@
     surroundContents(newParent) {
       if ([9,10,11].includes(newParent.nodeType)) throw new DOMException("Invalid wrapper.", "InvalidNodeTypeError");
       if (this.__startContainer !== this.__endContainer &&
-          ((this.__startContainer.nodeType === 3 || this.__startContainer.nodeType === 8) ||
-           (this.__endContainer.nodeType === 3 || this.__endContainer.nodeType === 8))) {
+          ((this.__startContainer.nodeType === 3 || this.__startContainer.nodeType === 7 || this.__startContainer.nodeType === 8) ||
+           (this.__endContainer.nodeType === 3 || this.__endContainer.nodeType === 7 || this.__endContainer.nodeType === 8))) {
         throw new DOMException("Range partially contains a non-Text node.", "InvalidStateError");
       }
       const fragment = this.extractContents();
