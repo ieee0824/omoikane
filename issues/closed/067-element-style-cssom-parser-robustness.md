@@ -2,7 +2,7 @@
 number: 067
 slug: element-style-cssom-parser-robustness
 parent:
-status: open
+status: closed
 ---
 
 # el.style（CSSOM）パーサの `;` 分割誤パース修正
@@ -30,3 +30,11 @@ style 属性値を素朴に `split(';')` で分割するため、`url(data:...;b
 ## 優先度
 
 中 — 実サイトで data-URI 入りインライン style は頻出。047 完了後に着手可能。
+
+
+## 完了内容（2026-07-15）
+
+- CSS宣言をtop-levelのセミコロンだけで分割するスキャナを導入
+- 引用符、CSSエスケープ、括弧深度を考慮
+- 引用符あり／なしのdata URIをread-modify-writeしても保持する回帰テストを追加
+- 既存styleテスト、全ライブラリテスト、Clippyの成功を確認

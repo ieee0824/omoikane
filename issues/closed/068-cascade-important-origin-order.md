@@ -2,7 +2,7 @@
 number: 068
 slug: cascade-important-origin-order
 parent:
-status: open
+status: closed
 ---
 
 # カスケードの important 段位・animation 後処理の仕様準拠
@@ -45,3 +45,9 @@ CSS Cascade の important origin 順位に、047 のレビュー（critical-revi
 ## 関連
 
 - 047 のレビューで発見（[047](047-inline-style-cascade.md) のカスケード統合自体は正しい）
+
+## 対応内容
+
+- UA `!important` > user `!important` > author `!important` の順に修正
+- 実際に適用された important プロパティを保持し、animation snapshot による上書きを防止
+- origin 順位と inline important + forwards animation の回帰テストを追加

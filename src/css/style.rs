@@ -341,6 +341,8 @@ impl StyleResolver {
             16.0
         };
 
+        let mut important_properties = HashSet::new();
+
         // Process font-size first so that em units in other properties
         // resolve against the element's own computed font-size.
         if let Some(fs_candidate) = candidates.iter().rfind(|c| c.name == "font-size")
@@ -372,6 +374,9 @@ impl StyleResolver {
                     other => other.clone(),
                 };
                 properties.insert("font-size".to_string(), resolved);
+                if fs_candidate.important {
+                    important_properties.insert("font-size".to_string());
+                }
             }
 
         // For the root element, update root_font_size from its computed font-size
@@ -404,6 +409,9 @@ impl StyleResolver {
             match validate_declaration(&candidate.name, &resolved_value) {
                 DeclarationValidation::Valid(computed) => {
                     properties.insert(candidate.name.to_ascii_lowercase(), computed);
+                    if candidate.important {
+                        important_properties.insert(candidate.name.to_ascii_lowercase());
+                    }
                     continue;
                 }
                 DeclarationValidation::Invalid => continue,
@@ -422,6 +430,10 @@ impl StyleResolver {
                 {
                     insert_computed_property(&mut properties, "row-gap", row_gap);
                     insert_computed_property(&mut properties, "column-gap", column_gap);
+                    if candidate.important {
+                        important_properties.insert("row-gap".to_string());
+                        important_properties.insert("column-gap".to_string());
+                    }
                 }
                 continue;
             }
@@ -429,10 +441,16 @@ impl StyleResolver {
                 let target = if candidate.name == "grid-row-gap" { "row-gap" } else { "column-gap" };
                 let computed = compute_value(&resolved_value, target, ctx);
                 insert_computed_property(&mut properties, target, computed);
+                if candidate.important {
+                    important_properties.insert(target.to_string());
+                }
                 continue;
             }
             let computed = compute_value(&resolved_value, &candidate.name, ctx);
             insert_computed_property(&mut properties, &candidate.name, computed);
+            if candidate.important {
+                important_properties.insert(candidate.name.to_ascii_lowercase());
+            }
         }
 
         apply_ua_defaults(node, &mut properties, pseudo, parent_style);
@@ -442,7 +460,7 @@ impl StyleResolver {
         apply_inheritance(&mut properties, parent_style);
         apply_initial_values(&mut properties);
         zero_border_width_for_none_style(&mut properties);
-        self.apply_animation_snapshot(&mut properties, parent_style);
+        self.apply_animation_snapshot(&mut properties, parent_style, &important_properties);
 
         ComputedStyle { properties }
     }
@@ -454,6 +472,7 @@ impl StyleResolver {
         &self,
         properties: &mut BTreeMap<String, ComputedValue>,
         _parent_style: Option<&ComputedStyle>,
+        important_properties: &HashSet<String>,
     ) {
         let anim_name = match properties.get("animation-name") {
             Some(ComputedValue::Keyword(name)) => name.clone(),
@@ -513,11 +532,15 @@ impl StyleResolver {
             .collect();
 
         for declaration in declarations {
+            let property_name = canonical_property_name(&declaration.name);
+            if important_properties.contains(property_name) {
+                continue;
+            }
             let resolved =
                 resolve_value_with_custom_properties(&declaration.value, &custom_properties)
                     .unwrap_or_else(|| declaration.value.clone());
-            let computed = compute_value(&resolved, &declaration.name, ctx);
-            insert_computed_property(properties, &declaration.name, computed);
+            let computed = compute_value(&resolved, property_name, ctx);
+            insert_computed_property(properties, property_name, computed);
         }
     }
 }
@@ -1091,9 +1114,9 @@ fn parse_keyframe_steps(block_text: &str) -> Vec<KeyframeStep> {
 fn cascade_rank(candidate: &Candidate) -> (u8, u8) {
     let importance = if candidate.important { 1 } else { 0 };
     let origin = match (candidate.important, candidate.origin) {
-        (true, Origin::User) => 5,
-        (true, Origin::Author) => 4,
-        (true, Origin::UserAgent) => 3,
+        (true, Origin::UserAgent) => 5,
+        (true, Origin::User) => 4,
+        (true, Origin::Author) => 3,
         (false, Origin::Author) => 2,
         (false, Origin::User) => 1,
         (false, Origin::UserAgent) => 0,
