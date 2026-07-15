@@ -46,6 +46,15 @@ impl HostHooks for BrowserHostHooks {
         };
         if let PromiseState::Rejected(reason) = promise.state() {
             eprintln!("[omoikane][unhandled-rejection] {}", reason.display());
+            for frame in _context.stack_trace() {
+                let location = frame.position();
+                eprintln!(
+                    "[omoikane][unhandled-rejection-frame] function={} path={:?} position={:?}",
+                    location.function_name.to_std_string_escaped(),
+                    location.path,
+                    location.position
+                );
+            }
             if let Some(error) = reason.as_object()
                 && let Ok(stack) = error.get(js_string!("stack"), _context)
                 && !stack.is_undefined()
@@ -4182,6 +4191,26 @@ mod tests {
         let mut runtime = JsRuntime::new().unwrap();
         assert!(runtime
             .eval(r##"(() => { history.pushState({page: 1}, "", "/one?q=1"); history.replaceState({page: 2}, "", "/two#hash"); return history.length === 2 && history.state.page === 2 && location.pathname === "/two" && location.hash === "#hash"; })()"##)
+            .unwrap()
+            .as_boolean()
+            .unwrap());
+    }
+
+    #[test]
+    fn location_exposes_navigation_methods() {
+        let mut runtime = JsRuntime::new().unwrap();
+        assert!(runtime
+            .eval(r##"(() => { const result = location.reload(); location.assign("/assigned?q=1"); location.replace("/replaced#ok"); return result === undefined && location.pathname === "/replaced" && location.hash === "#ok"; })()"##)
+            .unwrap()
+            .as_boolean()
+            .unwrap());
+    }
+
+    #[test]
+    fn event_listener_objects_invoke_handle_event() {
+        let mut runtime = JsRuntime::new().unwrap();
+        assert!(runtime
+            .eval(r#"(() => { const target = document.createElement("div"); const listener = { calls: 0, handleEvent(event) { this.calls++; this.type = event.type; } }; target.addEventListener("ready", listener); target.dispatchEvent(new Event("ready")); return listener.calls === 1 && listener.type === "ready"; })()"#)
             .unwrap()
             .as_boolean()
             .unwrap());

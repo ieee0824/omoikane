@@ -90,7 +90,11 @@
       if (!!entry.capture === capture) {
         event.currentTarget = node;
         event.eventPhase = phase;
-        entry.listener.call(node, event);
+        if (typeof entry.listener === "function") {
+          entry.listener.call(node, event);
+        } else if (entry.listener && typeof entry.listener.handleEvent === "function") {
+          entry.listener.handleEvent.call(entry.listener, event);
+        }
         if (event.__stoppedImmediate) {
           return true;
         }
@@ -576,6 +580,10 @@
     }
 
     addEventListener(type, listener, options = false) {
+      if (listener == null ||
+          (typeof listener !== "function" && typeof listener.handleEvent !== "function")) {
+        return;
+      }
       const capture = typeof options === "boolean" ? options : !!options.capture;
       const key = String(type);
       const list = this.__listeners.get(key) ?? [];
@@ -3737,6 +3745,16 @@
     __loc.search = match[4] || "";
     __loc.hash = match[5] || "";
   }
+  __loc.assign = function(url) {
+    __applyHistoryUrl(url);
+  };
+  __loc.replace = function(url) {
+    __applyHistoryUrl(url);
+  };
+  __loc.reload = function() {
+    // A navigation-capable embedder can replace this with a full document
+    // reload. The synchronous Location API itself returns undefined.
+  };
   const __historyEntries = [{ state: null, href: __loc.href }];
   let __historyIndex = 0;
   globalThis.history = {
