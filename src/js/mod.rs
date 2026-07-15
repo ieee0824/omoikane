@@ -5077,6 +5077,34 @@ mod tests {
     }
 
     #[test]
+    fn element_only_members_are_owned_by_element_prototype() {
+        let mut runtime = JsRuntime::with_document(default_document()).unwrap();
+        let actual = eval_str(
+            &mut runtime,
+            r#"(() => {
+                const names = [
+                    "namespaceURI", "prefix", "localName", "tagName",
+                    "id", "className", "classList",
+                    "getAttribute", "setAttribute", "hasAttribute", "removeAttribute",
+                    "setAttributeNS", "getAttributeNS", "removeAttributeNS", "attributes",
+                    "matches", "closest"
+                ];
+                const element = document.createElement("div");
+                const text = document.createTextNode("text");
+                return [
+                    names.every(name => Object.prototype.hasOwnProperty.call(Element.prototype, name)),
+                    names.every(name => !Object.prototype.hasOwnProperty.call(Node.prototype, name)),
+                    names.every(name => !(name in document)),
+                    names.every(name => !(name in text)),
+                    element.getAttribute("missing") === null,
+                    element.matches("div")
+                ].join("|");
+            })()"#,
+        );
+        assert_eq!(actual, "true|true|true|true|true|true");
+    }
+
+    #[test]
     fn character_data_preserves_utf16_and_updates_ranges() {
         let mut runtime = JsRuntime::with_document(default_document()).unwrap();
         let actual = eval_str(
@@ -5341,7 +5369,7 @@ mod tests {
     }
 
     #[test]
-    fn local_name_lowercases_elements_and_is_null_for_others() {
+    fn local_name_is_owned_by_elements_only() {
         let mut runtime = JsRuntime::with_document(default_document()).unwrap();
         let el = runtime
             .eval("document.createElement('DIV').localName")
@@ -5350,10 +5378,10 @@ mod tests {
             .unwrap()
             .to_std_string_escaped();
         assert_eq!(el, "div", "element localName must be the lower-cased tag name");
-        // Non-element nodes (text, comment, document) have null localName.
-        assert!(runtime.eval("document.createTextNode('x').localName === null").unwrap().as_boolean().unwrap());
-        assert!(runtime.eval("document.createComment('x').localName === null").unwrap().as_boolean().unwrap());
-        assert!(runtime.eval("document.localName === null").unwrap().as_boolean().unwrap());
+        // localName is declared by Element, so non-element nodes do not expose it.
+        assert!(runtime.eval("document.createTextNode('x').localName === undefined").unwrap().as_boolean().unwrap());
+        assert!(runtime.eval("document.createComment('x').localName === undefined").unwrap().as_boolean().unwrap());
+        assert!(runtime.eval("document.localName === undefined").unwrap().as_boolean().unwrap());
     }
 
     // --- 016-5: data: URI scripts ---

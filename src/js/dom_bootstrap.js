@@ -607,7 +607,7 @@
       // reset button whose click was not canceled submits or resets its owning
       // form. Running it here (rather than only in click()) means a synthetic
       // click dispatched directly through dispatchEvent behaves like a real one.
-      if (notCanceled && dispatchEvent.type === "click") {
+      if (notCanceled && dispatchEvent.type === "click" && this.nodeType === 1) {
         this.__runActivationBehavior();
       }
       return notCanceled;
@@ -1544,6 +1544,27 @@
   // `HTMLObjectElement.data` reflects the `data` content attribute instead.
   class Element extends Node {
     remove() { removeChildNode.call(this); }
+  }
+
+  // The bootstrap originally implemented every DOM wrapper through one large
+  // Node class. Keep the implementation bodies together for now, but expose
+  // Element's WebIDL surface from the correct prototype. Moving the complete
+  // descriptors preserves getters/setters and their attributes while ensuring
+  // Document, DocumentFragment and CharacterData do not accidentally expose
+  // element-only APIs through Node.prototype.
+  const elementPrototypeMembers = [
+    "namespaceURI", "prefix", "localName", "tagName",
+    "id", "className", "classList",
+    "getAttribute", "setAttribute", "hasAttribute", "removeAttribute",
+    "setAttributeNS", "getAttributeNS", "removeAttributeNS", "attributes",
+    "matches", "closest",
+  ];
+  for (const name of elementPrototypeMembers) {
+    const descriptor = Object.getOwnPropertyDescriptor(Node.prototype, name);
+    if (descriptor) {
+      Object.defineProperty(Element.prototype, name, descriptor);
+      delete Node.prototype[name];
+    }
   }
 
   class HTMLElement extends Element {}
