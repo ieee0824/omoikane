@@ -980,6 +980,9 @@
     }
 
     insertBefore(newNode, refNode) {
+      if (refNode !== null && refNode.parentNode !== this) {
+        throw new DOMException("The reference node is not a child of this node.", "NotFoundError");
+      }
       if (newNode && newNode.nodeType !== 11) {
         this.__ensureNotAncestor(newNode);
       }
@@ -1116,11 +1119,18 @@
     setAttributeNS(namespace, qualifiedName, value) {
       const ns = namespace == null || namespace === "" ? null : String(namespace);
       const name = String(qualifiedName);
-      const localName = name.includes(":") ? name.slice(name.indexOf(":") + 1) : name;
+      const { localName } = validateAndExtractNS(ns, name);
+      if (ns === null) {
+        this.setAttribute(name, value);
+        return;
+      }
       if (!this.__namespacedAttributes) this.__namespacedAttributes = new Map();
       const key = String(ns) + "|" + localName;
       const previous = this.__namespacedAttributes.get(key);
       const oldValue = previous ? previous.value : null;
+      if (previous && previous.name !== name) {
+        __omoikane_remove_attribute(this.__id, previous.name);
+      }
       this.__namespacedAttributes.set(key, { name, localName, namespaceURI: ns, value: String(value) });
       __omoikane_set_attribute(this.__id, name, String(value));
       queueMutation(this, "attributes", { attributeName: localName, attributeNamespace: ns, oldValue });
@@ -1128,12 +1138,17 @@
 
     getAttributeNS(namespace, localName) {
       const ns = namespace == null || namespace === "" ? null : String(namespace);
+      if (ns === null) return this.getAttribute(localName);
       const entry = this.__namespacedAttributes && this.__namespacedAttributes.get(String(ns) + "|" + String(localName));
       return entry ? entry.value : null;
     }
 
     removeAttributeNS(namespace, localName) {
       const ns = namespace == null || namespace === "" ? null : String(namespace);
+      if (ns === null) {
+        this.removeAttribute(localName);
+        return;
+      }
       const key = String(ns) + "|" + String(localName);
       const entry = this.__namespacedAttributes && this.__namespacedAttributes.get(key);
       if (!entry) return;
@@ -1195,7 +1210,15 @@
           if (prop === "item") return index => list[Number(index)] === undefined ? null : makeAttr(list[Number(index)]);
           if (prop === "getNamedItem") return name => node.hasAttribute(name) ? makeAttr(String(name)) : null;
           if (prop === "setNamedItem") return attr => { node.setAttribute(attr.name, attr.value); return attr; };
-          if (prop === "removeNamedItem") return name => { const old = makeAttr(String(name)); node.removeAttribute(name); return old; };
+          if (prop === "removeNamedItem") return name => {
+            name = String(name);
+            if (!node.hasAttribute(name)) {
+              throw new DOMException("The requested attribute does not exist.", "NotFoundError");
+            }
+            const old = makeAttr(name);
+            node.removeAttribute(name);
+            return old;
+          };
           if (typeof prop === "string" && /^(?:0|[1-9]\d*)$/.test(prop)) {
             return list[Number(prop)] === undefined ? undefined : makeAttr(list[Number(prop)]);
           }
