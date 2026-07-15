@@ -2549,7 +2549,7 @@
     }
 
     get readyState() {
-      return "complete";
+      return this.__readyState || "complete";
     }
 
     get characterSet() {
@@ -3334,7 +3334,28 @@
     }
   }
 
-  class HTMLScriptElement extends HTMLElement {}
+  class HTMLScriptElement extends HTMLElement {
+    get src() {
+      return this.getAttribute("src") || "";
+    }
+    set src(value) {
+      this.setAttribute("src", String(value));
+    }
+    get async() {
+      return this.hasAttribute("async");
+    }
+    set async(value) {
+      if (value) this.setAttribute("async", "");
+      else this.removeAttribute("async");
+    }
+    get defer() {
+      return this.hasAttribute("defer");
+    }
+    set defer(value) {
+      if (value) this.setAttribute("defer", "");
+      else this.removeAttribute("defer");
+    }
+  }
 
   class HTMLImageElement extends HTMLElement {
     get height() {

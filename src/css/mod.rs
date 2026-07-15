@@ -919,6 +919,17 @@ mod tests {
     }
 
     #[test]
+    fn parse_media_query_level_four_width_ranges() {
+        let queries = parse_media_query_list("(width >= 851px), (48rem <= width)").unwrap();
+        assert_eq!(queries[0].conditions, vec![MediaCondition::MinWidth(851.0)]);
+        assert_eq!(queries[1].conditions, vec![MediaCondition::MinWidth(768.0)]);
+
+        let queries = parse_media_query_list("(width <= 1000px), (720px >= height)").unwrap();
+        assert_eq!(queries[0].conditions, vec![MediaCondition::MaxWidth(1000.0)]);
+        assert_eq!(queries[1].conditions, vec![MediaCondition::MaxHeight(720.0)]);
+    }
+
+    #[test]
     fn parse_media_query_orientation_portrait() {
         let queries = parse_media_query_list("(orientation: portrait)").unwrap();
         assert_eq!(queries[0].conditions, vec![MediaCondition::OrientationPortrait]);
@@ -1037,6 +1048,13 @@ mod tests {
         assert!(evaluate_media_query(&queries[0], 1024.0, 768.0, false));
         assert!(evaluate_media_query(&queries[0], 1280.0, 768.0, false));
         assert!(!evaluate_media_query(&queries[0], 800.0, 600.0, false));
+    }
+
+    #[test]
+    fn evaluate_negated_level_four_width_range() {
+        let query = &parse_media_query_list("not all and (width >= 851px)").unwrap()[0];
+        assert!(!evaluate_media_query(query, 1280.0, 720.0, false));
+        assert!(evaluate_media_query(query, 800.0, 720.0, false));
     }
 
     #[test]

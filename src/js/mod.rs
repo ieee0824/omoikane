@@ -270,6 +270,10 @@ impl HostState {
         fn visit(state: &mut HostState, node: &NodeHandle) {
             let tag = node.tag_name().unwrap_or_default();
             let is_resource = tag.eq_ignore_ascii_case("iframe")
+                || (tag.eq_ignore_ascii_case("script")
+                    && node
+                        .attributes()
+                        .is_some_and(|attrs| attrs.contains_key("src")))
                 || (tag.eq_ignore_ascii_case("object")
                     && node
                         .attributes()
@@ -956,16 +960,26 @@ impl JsRuntime {
                 Ok(())
             }),
             TimerPayload::ResourceLoad { node_id } => {
-                let (should_dispatch, xhtml_scripts) = {
+                let (should_dispatch, xhtml_scripts, dynamic_script) = {
                     let mut state = self.host_state.borrow_mut();
                     state.pending_resource_loads.remove(&node_id);
                     let Some(node) = state.get_node(node_id) else {
                         return Ok(());
                     };
                     if document_root_for_node(&node).is_none() {
-                        (false, Vec::new())
+                        (false, Vec::new(), None)
                     } else {
                         let mut xhtml_scripts = Vec::new();
+                        let dynamic_script = if node
+                            .tag_name()
+                            .is_some_and(|tag| tag.eq_ignore_ascii_case("script"))
+                        {
+                            node.attributes()
+                                .and_then(|attrs| attrs.get("src").cloned())
+                                .map(|src| (src, state.base_url.clone()))
+                        } else {
+                            None
+                        };
                         if node
                             .tag_name()
                             .is_some_and(|tag| tag.eq_ignore_ascii_case("iframe"))
@@ -999,7 +1013,7 @@ impl JsRuntime {
                             // allocated and cannot reuse the same address.
                             drop(previous);
                         }
-                        (true, xhtml_scripts)
+                        (true, xhtml_scripts, dynamic_script)
                     }
                 };
                 for source in xhtml_scripts {
@@ -1008,6 +1022,19 @@ impl JsRuntime {
                     // event from running.
                     let _ = self.eval(&source);
                     let _ = self.run_jobs();
+                }
+                if let Some((src, base_url)) = dynamic_script {
+                    let source = fetch_script_source(&src, base_url.as_ref()).ok_or_else(|| {
+                        JsError::from(
+                            JsNativeError::error()
+                                .with_message(format!("failed to fetch dynamic script: {src}")),
+                        )
+                    })?;
+                    self.eval(&format!("__omoikane_set_current_script({node_id})"))?;
+                    let result = self.eval(&source);
+                    let _ = self.eval("__omoikane_set_current_script(null)");
+                    result?;
+                    self.run_jobs()?;
                 }
                 if should_dispatch {
                     self.eval(&format!("__omoikane_dispatch_resource_load({node_id})"))?;
@@ -1024,7 +1051,9 @@ impl JsRuntime {
     /// and executing inline scripts). Listeners registered via
     /// `document.addEventListener('DOMContentLoaded', fn)` will be invoked.
     pub fn fire_dom_content_loaded(&mut self) -> JsResult<()> {
-        self.eval("document.dispatchEvent(new Event('DOMContentLoaded'))")?;
+        self.eval(
+            "document.__readyState = 'interactive'; document.dispatchEvent(new Event('DOMContentLoaded'))",
+        )?;
         self.run_jobs()
     }
 
@@ -1070,7 +1099,9 @@ impl JsRuntime {
     /// page's `<body onload="...">` handler runs at this point.
     pub fn fire_load(&mut self) -> JsResult<()> {
         // The load event does not bubble.
-        self.eval("window.dispatchEvent(new Event('load', { bubbles: false }))")?;
+        self.eval(
+            "document.__readyState = 'complete'; window.dispatchEvent(new Event('load', { bubbles: false }))",
+        )?;
         self.run_jobs()
     }
 
@@ -1090,11 +1121,13 @@ impl JsRuntime {
         if let Some(base) = base_url {
             self.host_state.borrow_mut().base_url = Some(base.clone());
         }
+        let _ = self.eval("document.__readyState = 'loading'");
 
         let document = self.document();
         let scripts = collect_script_elements(&document);
         let mut errors = Vec::new();
         let mut deferred = Vec::new();
+        let log_scripts = std::env::var_os("OMOIKANE_LOG_SCRIPTS").is_some();
 
         for (script_index, script) in scripts.iter().enumerate() {
             let attrs = script.attributes().unwrap_or_default();
@@ -1104,6 +1137,13 @@ impl JsRuntime {
             // with `is_inline_classic_script` so a script executes identically
             // whether it was parsed normally or inserted via `document.write`.
             if !is_executable_classic_script_type(attrs.get("type").map(|s| s.as_str())) {
+                if log_scripts {
+                    eprintln!(
+                        "[omoikane][script] skipped type={:?} src={:?}",
+                        attrs.get("type"),
+                        attrs.get("src")
+                    );
+                }
                 continue;
             }
 
@@ -1130,6 +1170,13 @@ impl JsRuntime {
 
             if source_code.trim().is_empty() {
                 continue;
+            }
+
+            if log_scripts {
+                eprintln!(
+                    "[omoikane][script] queued {script_label} ({} chars, defer={is_defer})",
+                    source_code.chars().count()
+                );
             }
 
             if is_defer {
@@ -1160,6 +1207,9 @@ impl JsRuntime {
             if let Err(err) = self.run_jobs() {
                 errors.push(format!("[script jobs: {script_label}] {err}"));
             }
+            if log_scripts {
+                eprintln!("[omoikane][script] completed {script_label}");
+            }
 
             // The insertion point and currentScript are only defined while a script runs.
             let _ = self.eval("__omoikane_set_current_script(null)");
@@ -1171,6 +1221,9 @@ impl JsRuntime {
         // lands as that script's following siblings — the same treatment the
         // inline path applies above.
         for (source_code, script, script_label) in deferred {
+            if log_scripts {
+                eprintln!("[omoikane][script] running deferred {script_label}");
+            }
             self.host_state.borrow_mut().write_insertion_ref = Some(script.clone());
             let _ = self.eval(&format!(
                 "__omoikane_set_current_script({})",
@@ -1182,6 +1235,9 @@ impl JsRuntime {
             }
             if let Err(err) = self.run_jobs() {
                 errors.push(format!("[script jobs: {script_label}] {err}"));
+            }
+            if log_scripts {
+                eprintln!("[omoikane][script] completed deferred {script_label}");
             }
             let _ = self.eval("__omoikane_set_current_script(null)");
             self.host_state.borrow_mut().write_insertion_ref = None;
@@ -2458,7 +2514,9 @@ fn set_attribute_native(_: &JsValue, args: &[JsValue], context: &mut Context) ->
         // starts a fresh navigation; detect it before `name` is moved into
         // `set_attribute`. Any other attribute leaves navigation untouched.
         let resource_attr = node.tag_name().and_then(|tag| {
-            if tag.eq_ignore_ascii_case("iframe") && name.eq_ignore_ascii_case("src") {
+            if (tag.eq_ignore_ascii_case("iframe") || tag.eq_ignore_ascii_case("script"))
+                && name.eq_ignore_ascii_case("src")
+            {
                 Some("src")
             } else if tag.eq_ignore_ascii_case("object") && name.eq_ignore_ascii_case("data") {
                 Some("data")
@@ -6511,6 +6569,40 @@ mod tests {
     }
 
     #[test]
+    fn document_ready_state_follows_script_and_load_lifecycle() {
+        let mut runtime = runtime_from_html(
+            r#"<html><body><script>
+                globalThis.readyStates = [document.readyState];
+                document.addEventListener("DOMContentLoaded", () => readyStates.push(document.readyState));
+                window.addEventListener("load", () => readyStates.push(document.readyState));
+            </script></body></html>"#,
+        );
+
+        let errors = runtime.execute_document_scripts(None);
+        assert!(errors.is_empty(), "unexpected errors: {errors:?}");
+        assert_eq!(
+            runtime
+                .eval("readyStates.join(',') + '|' + document.readyState")
+                .unwrap()
+                .as_string()
+                .unwrap()
+                .to_std_string_escaped(),
+            "loading,interactive|interactive"
+        );
+
+        runtime.fire_load().unwrap();
+        assert_eq!(
+            runtime
+                .eval("readyStates.join(',') + '|' + document.readyState")
+                .unwrap()
+                .as_string()
+                .unwrap()
+                .to_std_string_escaped(),
+            "loading,interactive,complete|complete"
+        );
+    }
+
+    #[test]
     fn matches_and_closest() {
         let doc = NodeHandle::document();
         let html = NodeHandle::element("html");
@@ -6629,6 +6721,27 @@ mod tests {
             Some(42.0),
             "callback should fire preserving captured closure variable"
         );
+    }
+
+    #[test]
+    fn connected_dynamic_external_script_loads_executes_and_fires_load() {
+        let mut runtime = runtime_from_html("<html><head></head><body></body></html>");
+        runtime
+            .eval(
+                r#"const script = document.createElement("script");
+                   script.src = "data:text/javascript,globalThis.dynamicScriptRan%20%3D%20true";
+                   script.addEventListener("load", () => globalThis.dynamicScriptLoaded = true);
+                   document.head.appendChild(script);"#,
+            )
+            .unwrap();
+
+        assert_eq!(runtime.run_timers(100, 1, 10), 1);
+        assert!(runtime.eval("dynamicScriptRan").unwrap().as_boolean().unwrap());
+        assert!(runtime
+            .eval("dynamicScriptLoaded")
+            .unwrap()
+            .as_boolean()
+            .unwrap());
     }
 
     #[test]
