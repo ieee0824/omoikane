@@ -3831,6 +3831,33 @@ mod tests {
     }
 
     #[test]
+    fn exposes_document_location_and_date_locale_time_string() {
+        let mut runtime = JsRuntime::new().unwrap();
+        assert!(runtime
+            .eval("document.location === window.location && document.charset === \"UTF-8\" && document.referrer === \"\"")
+            .unwrap()
+            .as_boolean()
+            .unwrap());
+        let value = runtime
+            .eval("new Date(2020, 0, 1, 2, 3, 4).toLocaleTimeString()")
+            .unwrap()
+            .as_string()
+            .unwrap()
+            .to_std_string_escaped();
+        assert_eq!(value, "02:03:04");
+    }
+
+    #[test]
+    fn exposes_minimal_xml_http_request() {
+        let mut runtime = JsRuntime::new().unwrap();
+        assert!(runtime
+            .eval(r#"(() => { const xhr = new XMLHttpRequest(); xhr.open("POST", "https://example.com/log"); let failed = false; xhr.onerror = () => { failed = true; }; xhr.send("x"); return failed && xhr.readyState === XMLHttpRequest.DONE && xhr.status === 0; })()"#)
+            .unwrap()
+            .as_boolean()
+            .unwrap());
+    }
+
+    #[test]
     fn eval_safe_catches_syntax_error() {
         let mut runtime = JsRuntime::new().unwrap();
         let result = runtime.eval_safe("this is not valid javascript }{");
