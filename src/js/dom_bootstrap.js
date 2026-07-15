@@ -1611,6 +1611,13 @@
   ]);
 
   class HTMLElement extends Element {}
+  class HTMLHtmlElement extends HTMLElement {}
+  class HTMLHeadElement extends HTMLElement {}
+  class HTMLBodyElement extends HTMLElement {}
+  class HTMLDivElement extends HTMLElement {}
+  class HTMLSpanElement extends HTMLElement {}
+  class HTMLParagraphElement extends HTMLElement {}
+  class HTMLAnchorElement extends HTMLElement {}
 
   distributePrototypeMembers(Node.prototype, [HTMLElement.prototype], [
     "title", "innerText",
@@ -3432,6 +3439,13 @@
 
   // Tag-name → constructor table consulted by wrapNode() for element nodes.
   const ELEMENT_CTORS = {
+    html: HTMLHtmlElement,
+    head: HTMLHeadElement,
+    body: HTMLBodyElement,
+    div: HTMLDivElement,
+    span: HTMLSpanElement,
+    p: HTMLParagraphElement,
+    a: HTMLAnchorElement,
     table: HTMLTableElement,
     thead: HTMLTableSectionElement,
     tbody: HTMLTableSectionElement,
@@ -3505,6 +3519,13 @@
   globalThis.Window = Window;
   globalThis.Element = Element;
   globalThis.HTMLElement = HTMLElement;
+  globalThis.HTMLHtmlElement = HTMLHtmlElement;
+  globalThis.HTMLHeadElement = HTMLHeadElement;
+  globalThis.HTMLBodyElement = HTMLBodyElement;
+  globalThis.HTMLDivElement = HTMLDivElement;
+  globalThis.HTMLSpanElement = HTMLSpanElement;
+  globalThis.HTMLParagraphElement = HTMLParagraphElement;
+  globalThis.HTMLAnchorElement = HTMLAnchorElement;
   globalThis.CharacterData = CharacterData;
   globalThis.Text = Text;
   globalThis.CDATASection = CDATASection;
@@ -3803,6 +3824,253 @@
     return __makeComputedStyle({});
   };
   globalThis.navigator = { userAgent: __omoikane_navigator_user_agent, language: "en", languages: ["en"], platform: "", cookieEnabled: true, onLine: true };
+  if (globalThis.Intl === undefined) {
+    class IntlFormatter {
+      constructor(locales, options) {
+        this.locales = locales;
+        this.options = options || {};
+      }
+      resolvedOptions() {
+        return { locale: "en-US", ...this.options };
+      }
+      static supportedLocalesOf(locales) {
+        if (locales === undefined) return [];
+        return Array.isArray(locales) ? locales.map(String) : [String(locales)];
+      }
+    }
+    class NumberFormat extends IntlFormatter {
+      format(value) { return String(Number(value)); }
+      formatToParts(value) { return [{ type: "integer", value: this.format(value) }]; }
+      formatRange(start, end) { return this.format(start) + "–" + this.format(end); }
+      formatRangeToParts(start, end) {
+        return [{ type: "integer", value: this.formatRange(start, end), source: "shared" }];
+      }
+    }
+    class DateTimeFormat extends IntlFormatter {
+      format(value) {
+        const date = value === undefined ? new Date() : new Date(value);
+        return Number.isNaN(date.getTime()) ? "Invalid Date" : date.toISOString();
+      }
+      formatToParts(value) { return [{ type: "literal", value: this.format(value) }]; }
+      formatRange(start, end) { return this.format(start) + " – " + this.format(end); }
+      formatRangeToParts(start, end) {
+        return [{ type: "literal", value: this.formatRange(start, end), source: "shared" }];
+      }
+    }
+    class PluralRules extends IntlFormatter {
+      select(value) { return Number(value) === 1 ? "one" : "other"; }
+      selectRange() { return "other"; }
+    }
+    class RelativeTimeFormat extends IntlFormatter {
+      format(value, unit) { return String(value) + " " + String(unit); }
+      formatToParts(value, unit) {
+        return [{ type: "integer", value: String(value), unit: String(unit) }];
+      }
+    }
+    class ListFormat extends IntlFormatter {
+      format(values) { return Array.from(values, String).join(", "); }
+      formatToParts(values) {
+        return [{ type: "element", value: this.format(values) }];
+      }
+    }
+    class Collator extends IntlFormatter {
+      compare(left, right) {
+        const a = String(left), b = String(right);
+        return a < b ? -1 : a > b ? 1 : 0;
+      }
+    }
+    class DisplayNames extends IntlFormatter {
+      of(code) { return String(code); }
+    }
+    class Locale {
+      constructor(tag) { this.baseName = String(tag); }
+      toString() { return this.baseName; }
+      maximize() { return this; }
+      minimize() { return this; }
+    }
+    const callableFormatter = Constructor => {
+      function Formatter(...args) { return new Constructor(...args); }
+      Formatter.prototype = Constructor.prototype;
+      Formatter.supportedLocalesOf = IntlFormatter.supportedLocalesOf;
+      return Formatter;
+    };
+    globalThis.Intl = {
+      NumberFormat: callableFormatter(NumberFormat),
+      DateTimeFormat: callableFormatter(DateTimeFormat),
+      PluralRules: callableFormatter(PluralRules),
+      RelativeTimeFormat: callableFormatter(RelativeTimeFormat),
+      ListFormat: callableFormatter(ListFormat),
+      Collator: callableFormatter(Collator),
+      DisplayNames: callableFormatter(DisplayNames),
+      Locale,
+      getCanonicalLocales(locales) {
+        if (locales === undefined) return [];
+        return Array.isArray(locales) ? locales.map(String) : [String(locales)];
+      },
+    };
+  }
+  if (globalThis.TextEncoder === undefined) {
+    globalThis.TextEncoder = class TextEncoder {
+      get encoding() { return "utf-8"; }
+      encode(input = "") {
+        const bytes = [];
+        for (const char of String(input)) {
+          const code = char.codePointAt(0);
+          if (code <= 0x7f) bytes.push(code);
+          else if (code <= 0x7ff) {
+            bytes.push(0xc0 | (code >> 6), 0x80 | (code & 0x3f));
+          } else if (code <= 0xffff) {
+            bytes.push(0xe0 | (code >> 12), 0x80 | ((code >> 6) & 0x3f), 0x80 | (code & 0x3f));
+          } else {
+            bytes.push(0xf0 | (code >> 18), 0x80 | ((code >> 12) & 0x3f),
+              0x80 | ((code >> 6) & 0x3f), 0x80 | (code & 0x3f));
+          }
+        }
+        return new Uint8Array(bytes);
+      }
+      encodeInto(source, destination) {
+        const bytes = this.encode(source);
+        const written = Math.min(bytes.length, destination.length);
+        for (let index = 0; index < written; index++) destination[index] = bytes[index];
+        return { read: String(source).length, written };
+      }
+    };
+  }
+  if (globalThis.TextDecoder === undefined) {
+    globalThis.TextDecoder = class TextDecoder {
+      constructor(label = "utf-8", options = {}) {
+        const normalized = String(label).toLowerCase().replace(/[_\s]/g, "-");
+        if (normalized !== "utf-8" && normalized !== "utf8") throw new RangeError("unsupported encoding");
+        this.encoding = "utf-8";
+        this.fatal = Boolean(options.fatal);
+        this.ignoreBOM = Boolean(options.ignoreBOM);
+      }
+      decode(input = new Uint8Array()) {
+        const bytes = input instanceof ArrayBuffer ? new Uint8Array(input) : new Uint8Array(input.buffer || input, input.byteOffset || 0, input.byteLength === undefined ? input.length : input.byteLength);
+        let result = "";
+        for (let index = 0; index < bytes.length;) {
+          const first = bytes[index++];
+          if (first <= 0x7f) { result += String.fromCodePoint(first); continue; }
+          let code, needed;
+          if ((first & 0xe0) === 0xc0) { code = first & 0x1f; needed = 1; }
+          else if ((first & 0xf0) === 0xe0) { code = first & 0x0f; needed = 2; }
+          else if ((first & 0xf8) === 0xf0) { code = first & 0x07; needed = 3; }
+          else { if (this.fatal) throw new TypeError("invalid UTF-8"); result += "\ufffd"; continue; }
+          if (index + needed > bytes.length) { if (this.fatal) throw new TypeError("invalid UTF-8"); result += "\ufffd"; break; }
+          let valid = true;
+          for (let offset = 0; offset < needed; offset++) {
+            const next = bytes[index++];
+            if ((next & 0xc0) !== 0x80) { valid = false; break; }
+            code = (code << 6) | (next & 0x3f);
+          }
+          if (!valid) { if (this.fatal) throw new TypeError("invalid UTF-8"); result += "\ufffd"; }
+          else result += String.fromCodePoint(code);
+        }
+        return result;
+      }
+    };
+  }
+  if (globalThis.btoa === undefined) {
+    const base64Alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    globalThis.btoa = function(input) {
+      const value = String(input);
+      let output = "";
+      for (let index = 0; index < value.length; index += 3) {
+        const a = value.charCodeAt(index);
+        const b = index + 1 < value.length ? value.charCodeAt(index + 1) : 0;
+        const c = index + 2 < value.length ? value.charCodeAt(index + 2) : 0;
+        if (a > 255 || b > 255 || c > 255) throw new DOMException("invalid character", "InvalidCharacterError");
+        const bits = (a << 16) | (b << 8) | c;
+        output += base64Alphabet[(bits >> 18) & 63];
+        output += base64Alphabet[(bits >> 12) & 63];
+        output += index + 1 < value.length ? base64Alphabet[(bits >> 6) & 63] : "=";
+        output += index + 2 < value.length ? base64Alphabet[bits & 63] : "=";
+      }
+      return output;
+    };
+    globalThis.atob = function(input) {
+      const value = String(input).replace(/[\t\n\f\r ]/g, "").replace(/=+$/, "");
+      if (value.length % 4 === 1 || /[^A-Za-z0-9+/]/.test(value)) {
+        throw new DOMException("invalid character", "InvalidCharacterError");
+      }
+      let output = "", buffer = 0, bits = 0;
+      for (const char of value) {
+        buffer = (buffer << 6) | base64Alphabet.indexOf(char);
+        bits += 6;
+        if (bits >= 8) {
+          bits -= 8;
+          output += String.fromCharCode((buffer >> bits) & 255);
+        }
+      }
+      return output;
+    };
+  }
+  if (globalThis.URL === undefined) {
+    class URLSearchParams {
+      constructor(init = "") {
+        this._entries = [];
+        const source = String(init).replace(/^\?/, "");
+        if (source) for (const pair of source.split("&")) {
+          const separator = pair.indexOf("=");
+          const key = separator < 0 ? pair : pair.slice(0, separator);
+          const value = separator < 0 ? "" : pair.slice(separator + 1);
+          this.append(decodeURIComponent(key.replace(/\+/g, " ")), decodeURIComponent(value.replace(/\+/g, " ")));
+        }
+      }
+      append(name, value) { this._entries.push([String(name), String(value)]); }
+      set(name, value) {
+        this.delete(name);
+        this.append(name, value);
+      }
+      get(name) {
+        const found = this._entries.find(entry => entry[0] === String(name));
+        return found ? found[1] : null;
+      }
+      getAll(name) { return this._entries.filter(entry => entry[0] === String(name)).map(entry => entry[1]); }
+      has(name) { return this._entries.some(entry => entry[0] === String(name)); }
+      delete(name) { this._entries = this._entries.filter(entry => entry[0] !== String(name)); }
+      *entries() { yield* this._entries; }
+      *keys() { for (const entry of this._entries) yield entry[0]; }
+      *values() { for (const entry of this._entries) yield entry[1]; }
+      [Symbol.iterator]() { return this.entries(); }
+      toString() {
+        return this._entries.map(entry => encodeURIComponent(entry[0]).replace(/%20/g, "+") + "=" + encodeURIComponent(entry[1]).replace(/%20/g, "+")).join("&");
+      }
+    }
+    class URL {
+      constructor(input, base) {
+        let value = String(input);
+        if (!/^[A-Za-z][A-Za-z0-9+.-]*:/.test(value)) {
+          const baseValue = base === undefined ? globalThis.location.href : String(base);
+          const match = baseValue.match(/^([A-Za-z][A-Za-z0-9+.-]*:)(?:\/\/([^/?#]*))?([^?#]*)/);
+          if (!match) throw new TypeError("invalid base URL");
+          if (value.startsWith("//")) value = match[1] + value;
+          else if (value.startsWith("/")) value = match[1] + "//" + (match[2] || "") + value;
+          else {
+            const directory = (match[3] || "/").replace(/[^/]*$/, "");
+            value = match[1] + "//" + (match[2] || "") + directory + value;
+          }
+        }
+        const parsed = value.match(/^([A-Za-z][A-Za-z0-9+.-]*:)(?:\/\/([^/?#]*))?([^?#]*)(\?[^#]*)?(#.*)?$/);
+        if (!parsed) throw new TypeError("invalid URL");
+        this.protocol = parsed[1];
+        this.host = parsed[2] || "";
+        this.hostname = this.host.replace(/:\d+$/, "");
+        this.port = this.host.slice(this.hostname.length).replace(/^:/, "");
+        this.pathname = parsed[3] || (this.host ? "/" : "");
+        this.search = parsed[4] || "";
+        this.hash = parsed[5] || "";
+        this.origin = this.host ? this.protocol + "//" + this.host : "null";
+        this.searchParams = new URLSearchParams(this.search);
+        this.href = this.toString();
+      }
+      toString() { return this.protocol + (this.host ? "//" + this.host : "") + this.pathname + this.search + this.hash; }
+      toJSON() { return this.toString(); }
+      static canParse(input, base) { try { new URL(input, base); return true; } catch (_) { return false; } }
+    }
+    globalThis.URL = URL;
+    globalThis.URLSearchParams = URLSearchParams;
+  }
   globalThis.console = {
     log: (...args) => __omoikane_console_log(...args),
     warn: (...args) => __omoikane_console_log("[warn]", ...args),
