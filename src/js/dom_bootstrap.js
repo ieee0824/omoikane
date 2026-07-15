@@ -1497,12 +1497,12 @@
       const newNode = nodeDocument(this).createTextNode(oldData.slice(offset));
       const parent = this.parentNode;
       const index = indexOfNode(this);
-      this.data = oldData.slice(0, offset);
+      if (parent) parent.insertBefore(newNode, this.nextSibling);
       const state = traversalByDocument.get(traversalDocumentKey(nodeDocument(this)));
       if (state) {
         for (const range of traversalEntries(state.ranges)) range.__splitText(this, newNode, offset, parent, index);
       }
-      if (parent) parent.insertBefore(newNode, this.nextSibling);
+      this.replaceData(offset, this.length - offset, "");
       return newNode;
     }
   }
