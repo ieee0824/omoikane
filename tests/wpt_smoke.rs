@@ -93,8 +93,8 @@ fn selected_wpt_testharness_cases_match_expectations() {
     let root = std::env::var("WPT_ROOT").map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from("target/wpt"));
     if !root.join("resources/testharness.js").is_file() {
-        if std::env::var_os("CI").is_some() {
-            panic!("WPT checkout missing in CI (WPT_ROOT={})", root.display());
+        if std::env::var_os("WPT_REQUIRED").is_some() {
+            panic!("WPT checkout required but missing (WPT_ROOT={})", root.display());
         }
         eprintln!(
             "WPT checkout missing; run scripts/fetch-wpt.sh (WPT_ROOT={})",

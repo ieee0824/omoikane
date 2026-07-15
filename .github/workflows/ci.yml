@@ -42,6 +42,7 @@ jobs:
       - name: Run WPT smoke subset
         env:
           WPT_ROOT: .cache/wpt
+          WPT_REQUIRED: "1"
           WPT_REPORT: .artifacts/wpt/report.json
         run: cargo test --test wpt_smoke -- --nocapture
       - name: Upload WPT report
