@@ -5077,6 +5077,33 @@ mod tests {
     }
 
     #[test]
+    fn character_data_preserves_utf16_and_updates_ranges() {
+        let mut runtime = JsRuntime::with_document(default_document()).unwrap();
+        let actual = eval_str(
+            &mut runtime,
+            r#"(() => {
+                const text = document.createTextNode("abcdef");
+                document.body.appendChild(text);
+                const range = document.createRange();
+                range.setStart(text, 2);
+                range.setEnd(text, 5);
+                text.replaceData(1, 3, "XY");
+                const offsets = [range.startOffset, range.endOffset];
+                text.data = "\uD83C--start";
+                text.appendData("--\uDF20");
+                const clone = text.cloneNode();
+                return [
+                    text.data.charCodeAt(0) === 0xD83C,
+                    text.data.charCodeAt(text.length - 1) === 0xDF20,
+                    clone.data === text.data,
+                    offsets[0], offsets[1]
+                ].join("|");
+            })()"#,
+        );
+        assert_eq!(actual, "true|true|true|1|4");
+    }
+
+    #[test]
     fn element_has_no_character_data_property() {
         let mut runtime = JsRuntime::with_document(default_document()).unwrap();
         // .data must not be defined on Element nodes (it is a CharacterData API).

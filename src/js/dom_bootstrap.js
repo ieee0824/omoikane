@@ -1015,6 +1015,8 @@
       if (clone && ownerDoc) {
         stampOwnerDoc(clone, ownerDoc);
       }
+      // Preserve JS UTF-16 code units that Rust UTF-8 strings cannot represent.
+      if (clone && this instanceof CharacterData) clone.textContent = this.textContent;
       return clone;
     }
 
@@ -1123,13 +1125,13 @@
 
     get nodeValue() {
       const t = this.nodeType;
-      if (t === 3 || t === 8) return this.textContent;
+      if (t === 3 || t === 7 || t === 8) return this.textContent;
       return null;
     }
 
     set nodeValue(value) {
       const t = this.nodeType;
-      if (t === 3 || t === 8) this.textContent = value;
+      if (t === 3 || t === 7 || t === 8) this.textContent = value;
     }
 
     replaceChild(newChild, oldChild) {
@@ -1419,17 +1421,71 @@
 
   class CharacterData extends Node {
     remove() { removeChildNode.call(this); }
+    get textContent() {
+      if (Object.prototype.hasOwnProperty.call(this, "__characterData")) return this.__characterData;
+      return super.textContent;
+    }
+
+    set textContent(value) {
+      const text = value == null ? "" : String(value);
+      // Preserve the authoritative WTF-16 value on the JS wrapper because
+      // the native Rust DOM cannot represent unpaired UTF-16 surrogates.
+      this.__characterData = text;
+      super.textContent = text;
+    }
+
     get data() {
       const value = this.textContent;
       return value == null ? "" : String(value);
     }
 
     set data(value) {
-      this.textContent = value === null ? "" : String(value);
+      this.replaceData(0, this.length, value === null ? "" : String(value));
     }
 
     get length() {
       return this.data.length;
+    }
+
+    appendData(data) {
+      if (arguments.length < 1) throw new TypeError("appendData requires 1 argument");
+      this.replaceData(this.length, 0, String(data));
+    }
+
+    substringData(offset, count) {
+      if (arguments.length < 2) throw new TypeError("substringData requires 2 arguments");
+      offset = Number(offset) >>> 0;
+      count = Number(count) >>> 0;
+      if (offset > this.length) throw new DOMException("Offset is outside the data.", "IndexSizeError");
+      return this.data.slice(offset, Math.min(this.length, offset + count));
+    }
+
+    insertData(offset, data) {
+      if (arguments.length < 2) throw new TypeError("insertData requires 2 arguments");
+      this.replaceData(Number(offset) >>> 0, 0, String(data));
+    }
+
+    deleteData(offset, count) {
+      if (arguments.length < 2) throw new TypeError("deleteData requires 2 arguments");
+      this.replaceData(Number(offset) >>> 0, Number(count) >>> 0, "");
+    }
+
+    replaceData(offset, count, data) {
+      if (arguments.length < 3) throw new TypeError("replaceData requires 3 arguments");
+      offset = Number(offset) >>> 0;
+      count = Number(count) >>> 0;
+      data = String(data);
+      const length = this.length;
+      if (offset > length) throw new DOMException("Offset is outside the data.", "IndexSizeError");
+      count = Math.min(count, length - offset);
+      const state = traversalByDocument.get(traversalDocumentKey(nodeDocument(this)));
+      if (state) {
+        for (const range of traversalEntries(state.ranges)) {
+          range.__replaceData(this, offset, count, data.length);
+        }
+      }
+      const current = this.data;
+      this.textContent = current.slice(0, offset) + data + current.slice(offset + count);
     }
   }
 
@@ -1665,7 +1721,9 @@
   }
 
   function nodeLength(node) {
-    return node.nodeType === 3 || node.nodeType === 8 ? node.length : node.childNodes.length;
+    return node.nodeType === 3 || node.nodeType === 7 || node.nodeType === 8
+      ? node.length
+      : node.childNodes.length;
   }
 
   function boundaryCompare(aNode, aOffset, bNode, bOffset) {
@@ -1889,6 +1947,15 @@
       };
       [this.__startContainer,this.__startOffset]=adjust(this.__startContainer,this.__startOffset);
       [this.__endContainer,this.__endOffset]=adjust(this.__endContainer,this.__endOffset);
+    }
+    __replaceData(node, offset, count, replacementLength) {
+      const adjust = (container, value) => {
+        if (container !== node || value <= offset) return [container, value];
+        if (value <= offset + count) return [container, offset];
+        return [container, value + replacementLength - count];
+      };
+      [this.__startContainer, this.__startOffset] = adjust(this.__startContainer, this.__startOffset);
+      [this.__endContainer, this.__endOffset] = adjust(this.__endContainer, this.__endOffset);
     }
     __splitText(oldNode,newNode,offset,parent,index) {
       const adjust=(container,value) => container===oldNode && value>offset ? [newNode,value-offset] : [container,value];
