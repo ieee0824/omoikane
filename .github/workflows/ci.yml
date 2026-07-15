@@ -46,7 +46,7 @@ jobs:
         run: cargo test --test wpt_smoke -- --nocapture
       - name: Upload WPT report
         if: always()
-        uses: actions/upload-artifact
+        uses: actions/upload-artifact@v4
         with:
           name: wpt-smoke-report
           path: .artifacts/wpt/report.json
