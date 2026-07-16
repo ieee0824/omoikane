@@ -1996,6 +1996,10 @@ fn is_top_left_edge(start: (f32, f32), end: (f32, f32)) -> bool {
 
 fn blend_pixel(pixel: &mut [u8], color: Color) {
     let src_a = color.a as u32;
+    if src_a == 255 {
+        pixel.copy_from_slice(&[color.r, color.g, color.b, color.a]);
+        return;
+    }
     let dst_a = pixel[3] as u32;
     let out_a = src_a + (dst_a * (255 - src_a) + 127) / 255;
     if out_a == 0 {

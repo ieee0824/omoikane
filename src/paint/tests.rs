@@ -17,6 +17,15 @@ fn png_checksums_match_standard_vectors() {
     assert_eq!(adler32(input), 0x091e_01de);
 }
 
+#[test]
+fn opaque_blend_replaces_the_destination_pixel() {
+    let mut pixel = [13, 27, 41, 99];
+
+    blend_pixel(&mut pixel, Color::rgba(201, 177, 153, 255));
+
+    assert_eq!(pixel, [201, 177, 153, 255]);
+}
+
 fn load_cjk_fallback_test_fonts() -> Option<Vec<std::sync::Arc<crate::font::Font>>> {
     let Some(primary_path) = crate::font::find_system_font("sans-serif") else {
         eprintln!("Skipping CJK fallback test: no primary sans-serif system font was found");
