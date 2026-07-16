@@ -506,6 +506,25 @@ impl Canvas {
         let x1 = (area.x + area.width).ceil().min(self.width as f32) as i32;
         let y1 = (area.y + area.height).ceil().min(self.height as f32) as i32;
 
+        if x0 >= x1 || y0 >= y1 {
+            return;
+        }
+
+        if color.a == 255 {
+            let row_start = x0 as usize * 4;
+            let row_end = x1 as usize * 4;
+            let stride = self.width as usize * 4;
+            let rgba = [color.r, color.g, color.b, color.a];
+            for y in y0 as usize..y1 as usize {
+                for pixel in self.pixels[y * stride + row_start..y * stride + row_end]
+                    .chunks_exact_mut(4)
+                {
+                    pixel.copy_from_slice(&rgba);
+                }
+            }
+            return;
+        }
+
         for y in y0..y1 {
             for x in x0..x1 {
                 let index = ((y as u32 * self.width + x as u32) * 4) as usize;
