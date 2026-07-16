@@ -2779,6 +2779,39 @@ fn flex_column_uses_height_as_main_axis_for_justify_content_and_gap() {
 }
 
 #[test]
+fn flex_column_distributes_min_height_to_growing_child() {
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let container = NodeHandle::element("div");
+    let child = NodeHandle::element("article");
+    document.append_child(body.clone());
+    body.append_child(container.clone());
+    container.append_child(child);
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "div { display: flex; flex-direction: column; min-height: 100px; } \
+             article { flex-grow: 1; }",
+        )
+        .unwrap(),
+    );
+
+    let layout = layout_tree(
+        &body,
+        &mut resolver,
+        Rect { x: 0.0, y: 0.0, width: 200.0, height: 0.0 },
+    )
+    .unwrap();
+
+    let container_box = &layout.children[0];
+    assert_eq!(container_box.dimensions.content.height, 100.0);
+    assert_eq!(container_box.children[0].dimensions.content.height, 100.0);
+}
+
+
+#[test]
 fn wraps_flex_items_across_multiple_lines() {
     let document = NodeHandle::document();
     let body = NodeHandle::element("body");

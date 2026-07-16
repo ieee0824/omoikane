@@ -1874,6 +1874,25 @@ fn resolves_vh_unit() {
 }
 
 #[test]
+fn resolves_dynamic_viewport_height_unit() {
+    let document = NodeHandle::document();
+    let div = NodeHandle::element("div");
+    document.append_child(div.clone());
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet("div { min-height: 100dvh; }").unwrap(),
+    );
+    resolver.set_viewport(1280.0, 720.0);
+
+    assert_eq!(
+        resolver.computed_style(&div).get("min-height"),
+        Some(&ComputedValue::Px(720.0))
+    );
+}
+
+#[test]
 fn resolves_vmin_unit() {
     let document = NodeHandle::document();
     let html = NodeHandle::element("html");
