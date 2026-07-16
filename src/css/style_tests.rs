@@ -1893,6 +1893,71 @@ fn resolves_dynamic_viewport_height_unit() {
 }
 
 #[test]
+fn matches_tailwind_arbitrary_breakpoint_class() {
+    let document = NodeHandle::document();
+    let div = NodeHandle::element("div");
+    div.set_attribute("class", "min-[851px]:ps-9");
+    document.append_child(div.clone());
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            r"@media (width >= 851px) { .min-\[851px\]\:ps-9 { padding-inline-start: 36px; } }",
+        )
+        .unwrap(),
+    );
+    resolver.set_viewport(1280.0, 720.0);
+
+    assert_eq!(
+        resolver.computed_style(&div).get("padding-inline-start"),
+        Some(&ComputedValue::Px(36.0))
+    );
+}
+
+#[test]
+fn resolves_tailwind_spacing_variable_in_logical_padding() {
+    let document = NodeHandle::document();
+    let div = NodeHandle::element("div");
+    div.set_attribute("class", "px-4");
+    document.append_child(div.clone());
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            ":root { --spacing: 0.25rem; } \
+             .px-4 { padding-inline: calc(var(--spacing) * 4); }",
+        )
+        .unwrap(),
+    );
+
+    let style = resolver.computed_style(&div);
+    assert_eq!(style.get("padding-inline-start"), Some(&ComputedValue::Px(16.0)));
+    assert_eq!(style.get("padding-inline-end"), Some(&ComputedValue::Px(16.0)));
+}
+
+#[test]
+fn applies_rules_nested_in_cascade_layer() {
+    let document = NodeHandle::document();
+    let div = NodeHandle::element("div");
+    div.set_attribute("class", "grouped");
+    document.append_child(div.clone());
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "@layer utilities { .grouped { padding-left: 12px; } }",
+        )
+        .unwrap(),
+    );
+
+    let style = resolver.computed_style(&div);
+    assert_eq!(style.get("padding-left"), Some(&ComputedValue::Px(12.0)));
+}
+
+#[test]
 fn resolves_vmin_unit() {
     let document = NodeHandle::document();
     let html = NodeHandle::element("html");

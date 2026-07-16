@@ -200,7 +200,9 @@ impl Parser {
                         return Err(CssParseError::InvalidDeclaration);
                     }
 
-                    if name.eq_ignore_ascii_case("media") {
+                    if name.eq_ignore_ascii_case("media")
+                        || name.eq_ignore_ascii_case("layer")
+                    {
                         let block = self.parse_rule_block()?;
                         return Ok(Rule::At(AtRule {
                             name,
