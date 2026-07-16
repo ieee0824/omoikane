@@ -12,6 +12,7 @@ crate-type = ["rlib", "cdylib"]
 ab_glyph = "0.2"
 base64 = "0.22"
 brotli = { version = "7", default-features = false, features = ["std"] }
+crc32fast = "1.5"
 # Pinned to the fork's `omoikane/ic-fix-0.21.1` head so the IC fix is
 # reproducible and cannot silently change under us.
 boa_engine = { git = "https://github.com/ieee0824/boa", rev = "4fc54b5c", features = ["annex-b"] }

@@ -2052,25 +2052,22 @@ fn zlib_compress_uncompressed(data: &[u8]) -> Vec<u8> {
 
 fn adler32(data: &[u8]) -> u32 {
     const MOD: u32 = 65_521;
+    const NMAX: usize = 5_552;
     let mut a = 1u32;
     let mut b = 0u32;
-    for byte in data {
-        a = (a + *byte as u32) % MOD;
-        b = (b + a) % MOD;
+    for chunk in data.chunks(NMAX) {
+        for &byte in chunk {
+            a += byte as u32;
+            b += a;
+        }
+        a %= MOD;
+        b %= MOD;
     }
     (b << 16) | a
 }
 
 fn crc32(data: &[u8]) -> u32 {
-    let mut crc = 0xffff_ffffu32;
-    for byte in data {
-        crc ^= *byte as u32;
-        for _ in 0..8 {
-            let mask = (crc & 1).wrapping_neg() & 0xedb8_8320;
-            crc = (crc >> 1) ^ mask;
-        }
-    }
-    !crc
+    crc32fast::hash(data)
 }
 
 fn paint_background_image(

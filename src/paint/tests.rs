@@ -9,6 +9,14 @@ use crate::layout::{
 };
 use crate::paint::*;
 
+#[test]
+fn png_checksums_match_standard_vectors() {
+    let input = b"123456789";
+
+    assert_eq!(crc32(input), 0xcbf4_3926);
+    assert_eq!(adler32(input), 0x091e_01de);
+}
+
 fn load_cjk_fallback_test_fonts() -> Option<Vec<std::sync::Arc<crate::font::Font>>> {
     let Some(primary_path) = crate::font::find_system_font("sans-serif") else {
         eprintln!("Skipping CJK fallback test: no primary sans-serif system font was found");
