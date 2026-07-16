@@ -2109,8 +2109,9 @@ fn layout_positioned_child(
         PositionScheme::Relative => containing_block,
     };
 
+    let inline_end = explicit_length(style, "inset-inline-end");
     let left = explicit_length(style, "left");
-    let right = explicit_length(style, "right");
+    let right = explicit_length(style, "right").or(inline_end);
     let top = explicit_length(style, "top");
     let bottom = explicit_length(style, "bottom");
     let static_outer = containing_block;

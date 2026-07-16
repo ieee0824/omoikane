@@ -3323,6 +3323,35 @@ fn fixed_position_uses_viewport_as_containing_block() {
 }
 
 #[test]
+fn fixed_position_resolves_logical_insets() {
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let ltr = NodeHandle::element("div");
+    ltr.set_attribute("class", "ltr");
+    document.append_child(body.clone());
+    body.append_child(ltr);
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            ".ltr { position: fixed; inset-inline-end: 10px; bottom: 20px; width: 50px; height: 30px; }",
+        )
+        .unwrap(),
+    );
+
+    let layout = layout_tree(
+        &body,
+        &mut resolver,
+        Rect { x: 0.0, y: 0.0, width: 300.0, height: 200.0 },
+    )
+    .unwrap();
+
+    assert_eq!(layout.children[0].dimensions.content.x, 240.0);
+    assert_eq!(layout.children[0].dimensions.content.y, 150.0);
+}
+
+#[test]
 fn absolute_uses_nearest_positioned_ancestor_content_box() {
     let document = NodeHandle::document();
     let body = NodeHandle::element("body");
