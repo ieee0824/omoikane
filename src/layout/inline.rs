@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use crate::css::{ComputedStyle, ComputedValue, PseudoElement, StyleResolver};
 use crate::dom::{Node, NodeHandle, NodeType};
-use crate::font::{Font, load_default_text_fonts};
+use crate::font::{Font, FontFamilyKey, FontStyle, FontWeight, load_default_text_fonts};
 use crate::http::url::resolve_url;
 use crate::paint::{DataUri, Image, parse_data_uri};
 
@@ -1109,7 +1109,38 @@ pub(super) fn font_size(style: &ComputedStyle) -> f32 {
 pub(super) fn font_metrics(style: &ComputedStyle) -> FontMetrics {
     let mut metrics = FontMetrics::from_font_size(font_size(style));
     metrics.letter_spacing = letter_spacing(style);
+    metrics.font_family = style.get("font-family").and_then(computed_font_family_key);
+    metrics.font_weight = computed_font_weight(style);
+    metrics.font_style = computed_font_property(style, "font-style")
+        .map(FontStyle::parse)
+        .unwrap_or_default();
     metrics
+}
+
+fn computed_font_weight(style: &ComputedStyle) -> FontWeight {
+    match style.get("font-weight") {
+        Some(ComputedValue::Number(value)) => FontWeight((*value as u16).clamp(1, 1000)),
+        Some(ComputedValue::Keyword(value) | ComputedValue::String(value)) => {
+            FontWeight::parse(value)
+        }
+        _ => FontWeight::default(),
+    }
+}
+
+fn computed_font_property<'a>(style: &'a ComputedStyle, property: &str) -> Option<&'a str> {
+    match style.get(property) {
+        Some(ComputedValue::Keyword(value) | ComputedValue::String(value)) => Some(value),
+        _ => None,
+    }
+}
+
+fn computed_font_family_key(value: &ComputedValue) -> Option<FontFamilyKey> {
+    let value = match value {
+        ComputedValue::Keyword(value) | ComputedValue::String(value) => value,
+        _ => return None,
+    };
+    let first = value.split(',').next()?.trim().trim_matches(['"', '\'']);
+    (!first.is_empty()).then(|| FontFamilyKey::new(first))
 }
 
 fn letter_spacing(style: &ComputedStyle) -> f32 {
@@ -1790,12 +1821,27 @@ pub(super) fn measure_text_width(text: &str, metrics: FontMetrics) -> f32 {
     LAYOUT_FONTS.with(|cell| {
         let mut fonts_ref = cell.borrow_mut();
         if fonts_ref.is_none() {
-            *fonts_ref = Some(load_layout_fonts());
+            *fonts_ref = Some(super::LayoutFontContext {
+                system_fonts: load_layout_fonts(),
+                web_fonts: None,
+            });
         }
 
-        if let Some(ref fonts) = *fonts_ref
-            && !fonts.is_empty() {
-                let base = measure_text_width_with_fallback(text, metrics.font_size, fonts);
+        if let Some(ref context) = *fonts_ref {
+            let primary = metrics.font_family.and_then(|family| {
+                context.web_fonts.as_ref()?.select_best_by_key(
+                    family,
+                    metrics.font_weight,
+                    metrics.font_style,
+                )
+            });
+            if primary.is_some() || !context.system_fonts.is_empty() {
+                let base = measure_text_width_with_fallback(
+                    text,
+                    metrics.font_size,
+                    primary,
+                    &context.system_fonts,
+                );
                 let char_count = text.chars().count();
                 let spacing = if char_count > 1 {
                     metrics.letter_spacing * (char_count - 1) as f32
@@ -1804,6 +1850,7 @@ pub(super) fn measure_text_width(text: &str, metrics: FontMetrics) -> f32 {
                 };
                 return base + spacing;
             }
+        }
 
         // Fallback to approximation when no font is available
         let char_count = text.chars().count();
@@ -1821,49 +1868,66 @@ fn load_layout_fonts() -> Vec<Arc<Font>> {
     load_default_text_fonts().into_iter().map(Arc::new).collect()
 }
 
-fn measure_text_width_with_fallback(text: &str, font_size: f32, fonts: &[Arc<Font>]) -> f32 {
+fn measure_text_width_with_fallback(
+    text: &str,
+    font_size: f32,
+    primary: Option<&Font>,
+    fonts: &[Arc<Font>],
+) -> f32 {
     let mut width = 0.0;
-    let mut previous: Option<(char, usize)> = None;
+    let mut previous: Option<(char, *const Font)> = None;
 
     for ch in text.chars() {
-        let font_index = select_layout_font_index(fonts, ch);
+        let Some(font) = select_layout_font(primary, fonts, ch) else {
+            continue;
+        };
+        let font_id = std::ptr::from_ref(font);
 
-        if let Some((prev_char, prev_index)) = previous
-            && prev_index == font_index
+        if let Some((prev_char, prev_font)) = previous
+            && prev_font == font_id
         {
-            width += fonts[font_index].glyph_kerning(prev_char, ch, font_size);
+            width += font.glyph_kerning(prev_char, ch, font_size);
         }
 
-        let advance = fonts[font_index].glyph_advance(ch, font_size);
+        let advance = font.glyph_advance(ch, font_size);
         width += if advance > 0.0 { advance } else { 0.0 };
-        previous = Some((ch, font_index));
+        previous = Some((ch, font_id));
     }
 
     width
 }
 
-fn select_layout_font_index(fonts: &[Arc<Font>], ch: char) -> usize {
+fn select_layout_font<'a>(
+    primary: Option<&'a Font>,
+    fonts: &'a [Arc<Font>],
+    ch: char,
+) -> Option<&'a Font> {
     let prefer_cjk = is_cjk_preferred_character(ch);
 
     if prefer_cjk && fonts.len() > 1 {
         // Try CJK-capable fallback fonts first
-        for (index, font) in fonts.iter().enumerate().skip(1) {
+        for font in fonts.iter().skip(1) {
             if font.has_glyph(ch) {
-                return index;
+                return Some(font);
             }
         }
-        // Fall back to primary .notdef only when no font owns the glyph.
-        return 0;
+        return primary.or_else(|| fonts.first().map(AsRef::as_ref));
     }
 
-    for (index, font) in fonts.iter().enumerate() {
+    if let Some(font) = primary
+        && (ch.is_whitespace() || font.has_glyph(ch))
+    {
+        return Some(font);
+    }
+
+    for font in fonts {
         if !ch.is_whitespace() && !font.has_glyph(ch) {
             continue;
         }
-        return index;
+        return Some(font);
     }
 
-    0
+    primary.or_else(|| fonts.first().map(AsRef::as_ref))
 }
 
 use crate::font::is_cjk_preferred_character;

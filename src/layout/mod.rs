@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use crate::css::{ComputedStyle, ComputedValue, PseudoElement, StyleResolver};
 use crate::dom::{Node, NodeHandle, NodeType};
-use crate::font::Font;
+use crate::font::{Font, FontFamilyKey, FontStyle, FontWeight, WebFontRegistry};
 use crate::http::{Client, Url};
 use crate::paint::Image;
 use rusqlite::{Connection, params};
@@ -49,14 +49,23 @@ pub(crate) use inline::split_words_no_cjk_break;
 thread_local! {
     static IMAGE_CACHE: RefCell<HashMap<String, Option<Image>>> = RefCell::new(HashMap::new());
     static HTTP_CLIENT: RefCell<Client> = RefCell::new(Client::new());
-    static LAYOUT_FONTS: RefCell<Option<Vec<Arc<Font>>>> = const { RefCell::new(None) };
+    static LAYOUT_FONTS: RefCell<Option<LayoutFontContext>> = const { RefCell::new(None) };
     static IMAGE_BASE_URL: RefCell<Option<Url>> = const { RefCell::new(None) };
     static HTML_TAG_SQLITE_CONNECTIONS: RefCell<HashMap<String, Connection>> = RefCell::new(HashMap::new());
 }
 
-pub(crate) fn with_layout_fonts<T>(fonts: Vec<Arc<Font>>, f: impl FnOnce() -> T) -> T {
+struct LayoutFontContext {
+    system_fonts: Vec<Arc<Font>>,
+    web_fonts: Option<Arc<WebFontRegistry>>,
+}
+
+pub(crate) fn with_layout_fonts<T>(
+    system_fonts: Vec<Arc<Font>>,
+    web_fonts: Option<Arc<WebFontRegistry>>,
+    f: impl FnOnce() -> T,
+) -> T {
     LAYOUT_FONTS.with(|cell| {
-        let previous = cell.replace(Some(fonts));
+        let previous = cell.replace(Some(LayoutFontContext { system_fonts, web_fonts }));
         let result = f();
         cell.replace(previous);
         result
@@ -392,6 +401,9 @@ pub struct FontMetrics {
     pub average_advance: f32,
     /// Extra spacing to add between each character (CSS `letter-spacing`).
     pub letter_spacing: f32,
+    pub(crate) font_family: Option<FontFamilyKey>,
+    pub(crate) font_weight: FontWeight,
+    pub(crate) font_style: FontStyle,
 }
 
 impl FontMetrics {
@@ -404,6 +416,9 @@ impl FontMetrics {
             line_gap: font_size * 0.2,
             average_advance: font_size * 0.6,
             letter_spacing: 0.0,
+            font_family: None,
+            font_weight: FontWeight::default(),
+            font_style: FontStyle::default(),
         }
     }
 }

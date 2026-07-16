@@ -1034,6 +1034,21 @@ pub struct FontVariantKey {
     pub style: FontStyle,
 }
 
+/// Stable, case-insensitive identifier for a CSS font family.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct FontFamilyKey(u64);
+
+impl FontFamilyKey {
+    pub fn new(family: &str) -> Self {
+        let mut hash = 0xcbf29ce484222325_u64;
+        for byte in family.trim().bytes() {
+            hash ^= byte.to_ascii_lowercase() as u64;
+            hash = hash.wrapping_mul(0x100000001b3);
+        }
+        Self(hash)
+    }
+}
+
 impl FontVariantKey {
     /// Create a new variant key.
     pub fn new(weight: FontWeight, style: FontStyle) -> Self {
@@ -1252,7 +1267,7 @@ impl Default for FontCache {
 #[derive(Default)]
 pub struct WebFontRegistry {
     /// `family_lowercase -> Vec<(key, font)>`
-    entries: HashMap<String, Vec<(FontVariantKey, Arc<Font>)>>,
+    entries: HashMap<FontFamilyKey, Vec<(FontVariantKey, Arc<Font>)>>,
 }
 
 impl WebFontRegistry {
@@ -1276,7 +1291,7 @@ impl WebFontRegistry {
     ) {
         let key = FontVariantKey::new(weight, style);
         self.entries
-            .entry(family.to_lowercase())
+            .entry(FontFamilyKey::new(family))
             .or_default()
             .push((key, font));
     }
@@ -1290,7 +1305,17 @@ impl WebFontRegistry {
         target_weight: FontWeight,
         target_style: FontStyle,
     ) -> Option<&Font> {
-        let variants = self.entries.get(&family.to_lowercase())?;
+        self.select_best_by_key(FontFamilyKey::new(family), target_weight, target_style)
+    }
+
+    /// Select the best variant using a precomputed family key.
+    pub fn select_best_by_key(
+        &self,
+        family: FontFamilyKey,
+        target_weight: FontWeight,
+        target_style: FontStyle,
+    ) -> Option<&Font> {
+        let variants = self.entries.get(&family)?;
         if variants.is_empty() {
             return None;
         }
@@ -1342,7 +1367,7 @@ impl WebFontRegistry {
 
     /// Returns `true` when any variant for the family is registered.
     pub fn contains_family(&self, family: &str) -> bool {
-        self.entries.contains_key(&family.to_lowercase())
+        self.entries.contains_key(&FontFamilyKey::new(family))
     }
 
     /// Returns `true` when no fonts have been registered.

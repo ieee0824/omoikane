@@ -688,7 +688,6 @@ pub fn render_document_with_url(
     let mut web_font_registry = WebFontRegistry::new();
     let mut layout_fonts = Vec::new();
     for wf in fetched_web_fonts {
-        layout_fonts.push(Arc::clone(&wf.font));
         web_font_registry.push_shared(&wf.family, wf.weight, wf.style, wf.font);
     }
 
@@ -697,11 +696,13 @@ pub fn render_document_with_url(
     layout_fonts.extend(text::load_text_fonts().into_iter().map(Arc::new));
 
     // Avoid passing an empty registry to skip unnecessary lookups.
+    let web_font_registry = Arc::new(web_font_registry);
     let web_font_registry_opt = if web_font_registry.is_empty() {
         None
     } else {
-        Some(&web_font_registry)
+        Some(web_font_registry.as_ref())
     };
+    let layout_web_fonts = web_font_registry_opt.map(|_| Arc::clone(&web_font_registry));
 
     // Execute <script> tags and fire DOMContentLoaded before layout.
     // JS may modify the DOM (e.g., classList.add for fade-in animations,
@@ -757,7 +758,7 @@ pub fn render_document_with_url(
         }
     }
 
-    crate::layout::with_layout_fonts(layout_fonts, || {
+    crate::layout::with_layout_fonts(layout_fonts, layout_web_fonts, || {
         crate::layout::with_image_base_url(effective_base, || {
             let layout = crate::layout::layout_tree(document, &mut resolver, viewport)?;
             Some(paint_layout_with_web_fonts(

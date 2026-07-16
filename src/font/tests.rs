@@ -832,6 +832,22 @@ fn web_font_registry_exact_match_weight_400() {
 }
 
 #[test]
+fn web_font_registry_selects_with_case_insensitive_family_key() {
+    let Some(font) = load_test_font_for_registry() else {
+        eprintln!("Skipping: no system font found");
+        return;
+    };
+    let mut registry = WebFontRegistry::new();
+    registry.push("TwitterChirp", FontWeight(700), FontStyle::Italic, font);
+
+    assert!(registry.select_best_by_key(
+        FontFamilyKey::new("twitterchirp"),
+        FontWeight(700),
+        FontStyle::Italic,
+    ).is_some());
+}
+
+#[test]
 fn web_font_registry_bold_selects_700_when_available() {
     let font_regular = match load_test_font_for_registry() {
         Some(f) => f,

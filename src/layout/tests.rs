@@ -650,6 +650,19 @@ fn approximates_font_metrics_from_font_size() {
 }
 
 #[test]
+fn font_metrics_carry_css_web_font_selection() {
+    let style = resolve_style_for_test(
+        "div { font-family: 'TwitterChirp', sans-serif; font-weight: 700; font-style: italic; }",
+        "div",
+    );
+    let metrics = font_metrics(&style);
+
+    assert_eq!(metrics.font_family, Some(crate::font::FontFamilyKey::new("twitterchirp")));
+    assert_eq!(metrics.font_weight, crate::font::FontWeight(700));
+    assert_eq!(metrics.font_style, crate::font::FontStyle::Italic);
+}
+
+#[test]
 fn vertical_align_top_and_bottom_adjust_fragment_positions() {
     let document = NodeHandle::document();
     let body = NodeHandle::element("body");
