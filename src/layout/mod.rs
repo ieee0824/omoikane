@@ -912,12 +912,10 @@ fn layout_element(
     // paint their image payload. Previously only inline formatting collected
     // image fragments, so `display: block` SVGs (a common Tailwind reset) had
     // a box but rendered none of their graphics.
-    if element_inline_image(node).is_some()
-        && matches!(
-            node.tag_name().as_deref(),
-            Some("img" | "picture" | "video" | "svg" | "object")
-        )
-    {
+    if matches!(
+        node.tag_name().as_deref(),
+        Some("img" | "picture" | "video" | "svg" | "object")
+    ) {
         let mut lines = layout_inline_nodes(
             std::slice::from_ref(node),
             resolver,
@@ -927,64 +925,74 @@ fn layout_element(
             text_align(&style),
             0.0,
         );
-        let percentage_width = matches!(style.get("width"), Some(ComputedValue::Percentage(_)));
-        for line in &mut lines {
-            for fragment in &mut line.fragments {
-                if matches!(fragment.content, InlineFragmentContent::Image(_, _))
-                    && fragment.rect.width > 0.0
-                    && width > 0.0
-                    && (percentage_width || fragment.rect.width > width)
+        if !lines.iter().any(|line| {
+            line.fragments
+                .iter()
+                .any(|fragment| matches!(fragment.content, InlineFragmentContent::Image(_, _)))
+        }) {
+            lines.clear();
+        }
+        if !lines.is_empty() {
+            let percentage_width =
+                matches!(style.get("width"), Some(ComputedValue::Percentage(_)));
+            for line in &mut lines {
+                for fragment in &mut line.fragments {
+                    if matches!(fragment.content, InlineFragmentContent::Image(_, _))
+                        && fragment.rect.width > 0.0
+                        && width > 0.0
+                        && (percentage_width || fragment.rect.width > width)
+                    {
+                        let scale = width / fragment.rect.width;
+                        fragment.rect.width = width;
+                        fragment.rect.height *= scale;
+                    }
+                }
+                if let Some(height) = line
+                    .fragments
+                    .iter()
+                    .map(|fragment| fragment.rect.height)
+                    .reduce(f32::max)
                 {
-                    let scale = width / fragment.rect.width;
-                    fragment.rect.width = width;
-                    fragment.rect.height *= scale;
+                    line.rect.width = width;
+                    line.rect.height = height;
+                    line.baseline = height;
                 }
             }
-            if let Some(height) = line
-                .fragments
-                .iter()
-                .map(|fragment| fragment.rect.height)
-                .reduce(f32::max)
-            {
-                line.rect.width = width;
-                line.rect.height = height;
-                line.baseline = height;
-            }
-        }
-        let cursor_y = lines
-            .last()
-            .map(|line| line.rect.y + line.rect.height)
-            .unwrap_or(y);
-        let content_height = resolve_content_height(
-            &style,
-            containing_block.height,
-            padding,
-            border,
-            y,
-            cursor_y,
-        );
-        let mut layout = LayoutBox {
-            node: node.clone(),
-            dimensions: BoxDimensions {
-                content: Rect {
-                    x,
-                    y,
-                    width,
-                    height: content_height,
-                },
+            let cursor_y = lines
+                .last()
+                .map(|line| line.rect.y + line.rect.height)
+                .unwrap_or(y);
+            let content_height = resolve_content_height(
+                &style,
+                containing_block.height,
                 padding,
                 border,
-                margin,
-            },
-            visibility: visibility(&style),
-            overflow: overflow(&style),
-            z_index: z_index(&style),
-            lines,
-            children: Vec::new(),
-            marker: None,
-        };
-        apply_relative_offset(&mut layout, &style);
-        return Some(layout);
+                y,
+                cursor_y,
+            );
+            let mut layout = LayoutBox {
+                node: node.clone(),
+                dimensions: BoxDimensions {
+                    content: Rect {
+                        x,
+                        y,
+                        width,
+                        height: content_height,
+                    },
+                    padding,
+                    border,
+                    margin,
+                },
+                visibility: visibility(&style),
+                overflow: overflow(&style),
+                z_index: z_index(&style),
+                lines,
+                children: Vec::new(),
+                marker: None,
+            };
+            apply_relative_offset(&mut layout, &style);
+            return Some(layout);
+        }
     }
 
     if is_table_container_element(node, &style) {

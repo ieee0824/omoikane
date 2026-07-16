@@ -80,31 +80,35 @@ impl ModuleLoader for HttpModuleLoader {
     ) -> impl Future<Output = JsResult<Module>> {
         let result = (|| {
             let specifier = specifier.to_std_string_escaped();
+            let referrer_url = referrer
+                .path()
+                .and_then(|path| path.to_str())
+                .and_then(|path| path.parse::<crate::http::Url>().ok());
             let resolved = if specifier.starts_with("http://") || specifier.starts_with("https://") {
-                specifier
+                specifier.parse::<crate::http::Url>().map_err(|error| {
+                    JsNativeError::typ().with_message(error.to_string())
+                })?
             } else {
-                let base = referrer
-                    .path()
-                    .and_then(|path| path.to_str())
-                    .and_then(|path| path.parse::<crate::http::Url>().ok())
-                    .ok_or_else(|| {
+                let base = referrer_url.as_ref().ok_or_else(|| {
                         JsNativeError::typ()
                             .with_message(format!("cannot resolve module specifier: {specifier}"))
                     })?;
-                crate::http::url::resolve_url(&base, &specifier)
+                crate::http::url::resolve_url(base, &specifier)
                     .map_err(|error| JsNativeError::typ().with_message(error.to_string()))?
-                    .to_string()
             };
+            let resolved_string = resolved.to_string();
 
-            if let Some(module) = self.modules.borrow().get(&resolved) {
+            if let Some(module) = self.modules.borrow().get(&resolved_string) {
                 return Ok(module.clone());
             }
 
-            let response = self
-                .client
-                .borrow_mut()
-                .get(&resolved)
-                .map_err(|error| JsNativeError::typ().with_message(error.to_string()))?;
+            let public_only = requires_public_fetch(&resolved, referrer_url.as_ref());
+            let response = if public_only {
+                self.client.borrow_mut().get_public(&resolved_string)
+            } else {
+                self.client.borrow_mut().get(&resolved_string)
+            }
+            .map_err(|error| JsNativeError::typ().with_message(error.to_string()))?;
             if response.status_code() != 200 {
                 return Err(JsNativeError::typ()
                     .with_message(format!("module request returned HTTP {}", response.status_code()))
@@ -112,11 +116,11 @@ impl ModuleLoader for HttpModuleLoader {
             }
             let source = String::from_utf8_lossy(response.body());
             let module = Module::parse(
-                Source::from_reader(source.as_bytes(), Some(Path::new(&resolved))),
+                Source::from_reader(source.as_bytes(), Some(Path::new(&resolved_string))),
                 None,
                 &mut context.borrow_mut(),
             )?;
-            self.modules.borrow_mut().insert(resolved, module.clone());
+            self.modules.borrow_mut().insert(resolved_string, module.clone());
             Ok(module)
         })();
         async { result }
@@ -1301,6 +1305,7 @@ impl JsRuntime {
             }
 
             let src = attrs.get("src").cloned();
+            let has_src = src.is_some();
             // HTML spec: defer only applies to external (src) scripts.
             let is_defer = is_module || (attrs.contains_key("defer") && src.is_some());
 
@@ -1325,6 +1330,10 @@ impl JsRuntime {
                 continue;
             }
 
+            let module_url = is_module.then(|| {
+                module_script_url(&script_label, base_url, !has_src)
+            });
+
             if log_scripts {
                 eprintln!(
                     "[omoikane][script] queued {script_label} ({} chars, defer={is_defer})",
@@ -1338,7 +1347,7 @@ impl JsRuntime {
                 // reference at this script (exactly like the inline path), rather
                 // than letting a deferred write() fall back to appending at
                 // <body>.
-                deferred.push((source_code, script.clone(), script_label, is_module));
+                deferred.push((source_code, script.clone(), script_label, module_url));
                 continue;
             }
 
@@ -1373,7 +1382,7 @@ impl JsRuntime {
         // to its <script> element, so a `document.write` from a deferred script
         // lands as that script's following siblings — the same treatment the
         // inline path applies above.
-        for (source_code, script, script_label, is_module) in deferred {
+        for (source_code, script, script_label, module_url) in deferred {
             if log_scripts {
                 eprintln!("[omoikane][script] running deferred {script_label}");
             }
@@ -1383,8 +1392,8 @@ impl JsRuntime {
                 script.identity()
             ));
             let script_context = script_source_context(&source_code);
-            let result = if is_module {
-                self.eval_module(&source_code, &script_label)
+            let result = if let Some(module_url) = module_url {
+                self.eval_module(&source_code, &module_url)
                     .map(|()| JsValue::undefined())
             } else {
                 self.eval_safe(&source_code)
@@ -1428,6 +1437,27 @@ fn script_source_context(source: &str) -> String {
         .map(|ch| if ch.is_control() { ' ' } else { ch })
         .collect();
     format!("{} chars; starts with: {preview}", source.chars().count())
+}
+
+fn module_script_url(
+    script_label: &str,
+    base_url: Option<&crate::http::Url>,
+    inline: bool,
+) -> String {
+    if inline {
+        return base_url
+            .map(|base| {
+                let base = base.to_string();
+                let base = base.split_once('#').map_or(base.as_str(), |(head, _)| head);
+                format!("{base}#{script_label}")
+            })
+            .unwrap_or_else(|| script_label.to_string());
+    }
+
+    match resolve_resource_ref(script_label, base_url) {
+        Some(ResolvedResource::Url(url)) => url,
+        _ => script_label.to_string(),
+    }
 }
 
 /// Collects all `<script>` elements from the document tree in document order.
@@ -1518,6 +1548,14 @@ fn resolve_resource_ref(
     }
 }
 
+fn same_origin_url(a: &crate::http::Url, b: &crate::http::Url) -> bool {
+    a.scheme() == b.scheme() && a.host() == b.host() && a.port() == b.port()
+}
+
+fn requires_public_fetch(url: &crate::http::Url, base_url: Option<&crate::http::Url>) -> bool {
+    base_url.is_none_or(|base| !same_origin_url(url, base))
+}
+
 /// Fetches an external script's source.
 ///
 /// Supports `http:`/`https:` (fetched over the network) and `data:` URIs
@@ -1541,8 +1579,14 @@ fn fetch_script_source(src: &str, base_url: Option<&crate::http::Url>) -> Option
             String::from_utf8(data).ok()
         }
         ResolvedResource::Url(url) => {
+            let resolved = url.parse::<crate::http::Url>().ok()?;
+            let public_only = requires_public_fetch(&resolved, base_url);
             let mut client = Client::new();
-            let response = client.get(&url).ok()?;
+            let response = if public_only {
+                client.get_public(&url).ok()?
+            } else {
+                client.get(&url).ok()?
+            };
             // Scripts require a successful (200) response; error pages are not
             // executed. This differs deliberately from iframe loading, which
             // adopts even an error response's body as the sub-document.
@@ -6910,6 +6954,56 @@ mod tests {
         let errors = runtime.execute_document_scripts(None);
         assert!(errors.is_empty(), "unexpected errors: {errors:?}");
         assert!(runtime.eval("moduleRan && moduleWasReady").unwrap().as_boolean().unwrap());
+    }
+
+    #[test]
+    fn network_scripts_require_public_fetch_outside_document_origin() {
+        let document_url: crate::http::Url = "https://example.com/app/index.html".parse().unwrap();
+        let same_origin: crate::http::Url = "https://example.com/app.js".parse().unwrap();
+        let cross_origin: crate::http::Url = "https://cdn.example.net/app.js".parse().unwrap();
+
+        assert!(!requires_public_fetch(&same_origin, Some(&document_url)));
+        assert!(requires_public_fetch(&cross_origin, Some(&document_url)));
+        assert!(requires_public_fetch(&cross_origin, None));
+    }
+
+    #[test]
+    fn inline_module_url_uses_parseable_document_base() {
+        let base: crate::http::Url = "https://example.com/app/index.html".parse().unwrap();
+        assert_eq!(
+            module_script_url("inline-script-1", Some(&base), true),
+            "https://example.com/app/index.html#inline-script-1"
+        );
+    }
+
+    #[test]
+    fn inline_module_resolves_relative_import_against_document_url() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let handle = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0u8; 1024];
+            let size = stream.read(&mut request).unwrap();
+            assert!(String::from_utf8_lossy(&request[..size]).contains("GET /app/dep.js "));
+            let body = b"export const answer = 42;";
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: text/javascript\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            )
+            .unwrap();
+            stream.write_all(body).unwrap();
+        });
+
+        let mut runtime = runtime_from_html(
+            r#"<script type="module">import { answer } from './dep.js'; globalThis.answer = answer;</script>"#,
+        );
+        let base: crate::http::Url = format!("http://{address}/app/index.html").parse().unwrap();
+        let errors = runtime.execute_document_scripts(Some(&base));
+        handle.join().unwrap();
+
+        assert!(errors.is_empty(), "unexpected module errors: {errors:?}");
+        assert_eq!(runtime.eval("answer").unwrap().as_number(), Some(42.0));
     }
 
     #[test]
