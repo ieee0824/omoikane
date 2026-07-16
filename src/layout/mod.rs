@@ -5,7 +5,7 @@
 
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use crate::css::{ComputedStyle, ComputedValue, PseudoElement, StyleResolver};
 use crate::dom::{Node, NodeHandle, NodeType};
@@ -49,9 +49,18 @@ pub(crate) use inline::split_words_no_cjk_break;
 thread_local! {
     static IMAGE_CACHE: RefCell<HashMap<String, Option<Image>>> = RefCell::new(HashMap::new());
     static HTTP_CLIENT: RefCell<Client> = RefCell::new(Client::new());
-    static LAYOUT_FONTS: RefCell<Option<Vec<Font>>> = const { RefCell::new(None) };
+    static LAYOUT_FONTS: RefCell<Option<Vec<Arc<Font>>>> = const { RefCell::new(None) };
     static IMAGE_BASE_URL: RefCell<Option<Url>> = const { RefCell::new(None) };
     static HTML_TAG_SQLITE_CONNECTIONS: RefCell<HashMap<String, Connection>> = RefCell::new(HashMap::new());
+}
+
+pub(crate) fn with_layout_fonts<T>(fonts: Vec<Arc<Font>>, f: impl FnOnce() -> T) -> T {
+    LAYOUT_FONTS.with(|cell| {
+        let previous = cell.replace(Some(fonts));
+        let result = f();
+        cell.replace(previous);
+        result
+    })
 }
 
 static UNSUPPORTED_HTML_CONFIG: OnceLock<UnsupportedHtmlConfig> = OnceLock::new();

@@ -1,6 +1,7 @@
 //! Author stylesheet extraction, @import resolution, and forgiving parsing.
 
 use std::collections::HashSet;
+use std::sync::Arc;
 
 use crate::css::{Stylesheet, parse_stylesheet, extract_font_face_rules};
 use crate::dom::{Node, NodeHandle, NodeType};
@@ -890,7 +891,7 @@ pub(crate) struct WebFont {
     pub family: String,
     pub weight: crate::font::FontWeight,
     pub style: crate::font::FontStyle,
-    pub font: Font,
+    pub font: Arc<Font>,
 }
 
 /// Extract `@font-face` rules from parsed stylesheets, fetch the font files
@@ -970,7 +971,7 @@ pub(crate) fn fetch_font_face_fonts(
                         family: ff_rule.font_family.clone(),
                         weight,
                         style,
-                        font,
+                        font: Arc::new(font),
                     });
                 }
                 Err(_) => continue,

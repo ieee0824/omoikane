@@ -8,6 +8,7 @@ pub(crate) mod text;
 
 use std::cell::Cell;
 use std::path::Path;
+use std::sync::Arc;
 
 /// Total virtual milliseconds the render pipeline advances the JS event loop to
 /// drain script-scheduled timers before layout.
@@ -685,12 +686,15 @@ pub fn render_document_with_url(
     let fetched_web_fonts = stylesheet::fetch_font_face_fonts(&parsed_sheets, effective_base.as_ref());
 
     let mut web_font_registry = WebFontRegistry::new();
+    let mut layout_fonts = Vec::new();
     for wf in fetched_web_fonts {
-        web_font_registry.push(&wf.family, wf.weight, wf.style, wf.font);
+        layout_fonts.push(Arc::clone(&wf.font));
+        web_font_registry.push_shared(&wf.family, wf.weight, wf.style, wf.font);
     }
 
     // Build combined system font list for glyph fallback
     let all_fonts = text::load_text_fonts();
+    layout_fonts.extend(text::load_text_fonts().into_iter().map(Arc::new));
 
     // Avoid passing an empty registry to skip unnecessary lookups.
     let web_font_registry_opt = if web_font_registry.is_empty() {
@@ -753,15 +757,17 @@ pub fn render_document_with_url(
         }
     }
 
-    crate::layout::with_image_base_url(effective_base, || {
-        let layout = crate::layout::layout_tree(document, &mut resolver, viewport)?;
-        Some(paint_layout_with_web_fonts(
-            &layout,
-            &mut resolver,
-            viewport,
-            all_fonts,
-            web_font_registry_opt,
-        ))
+    crate::layout::with_layout_fonts(layout_fonts, || {
+        crate::layout::with_image_base_url(effective_base, || {
+            let layout = crate::layout::layout_tree(document, &mut resolver, viewport)?;
+            Some(paint_layout_with_web_fonts(
+                &layout,
+                &mut resolver,
+                viewport,
+                all_fonts,
+                web_font_registry_opt,
+            ))
+        })
     })
     .ok_or(PaintError::InvalidImageBuffer)
 }

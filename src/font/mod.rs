@@ -1263,11 +1263,22 @@ impl WebFontRegistry {
 
     /// Add a font variant to the registry.
     pub fn push(&mut self, family: &str, weight: FontWeight, style: FontStyle, font: Font) {
+        self.push_shared(family, weight, style, Arc::new(font));
+    }
+
+    /// Add a shared font variant without duplicating its underlying font data.
+    pub fn push_shared(
+        &mut self,
+        family: &str,
+        weight: FontWeight,
+        style: FontStyle,
+        font: Arc<Font>,
+    ) {
         let key = FontVariantKey::new(weight, style);
         self.entries
             .entry(family.to_lowercase())
             .or_default()
-            .push((key, Arc::new(font)));
+            .push((key, font));
     }
 
     /// Select the best available font for the given family, weight, and style.

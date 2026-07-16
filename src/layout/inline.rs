@@ -1,5 +1,7 @@
 //! Inline layout: text segments, line breaking, and inline image handling.
 
+use std::sync::Arc;
+
 use crate::css::{ComputedStyle, ComputedValue, PseudoElement, StyleResolver};
 use crate::dom::{Node, NodeHandle, NodeType};
 use crate::font::{Font, load_default_text_fonts};
@@ -1815,11 +1817,11 @@ pub(super) fn measure_text_width(text: &str, metrics: FontMetrics) -> f32 {
     })
 }
 
-fn load_layout_fonts() -> Vec<Font> {
-    load_default_text_fonts()
+fn load_layout_fonts() -> Vec<Arc<Font>> {
+    load_default_text_fonts().into_iter().map(Arc::new).collect()
 }
 
-fn measure_text_width_with_fallback(text: &str, font_size: f32, fonts: &[Font]) -> f32 {
+fn measure_text_width_with_fallback(text: &str, font_size: f32, fonts: &[Arc<Font>]) -> f32 {
     let mut width = 0.0;
     let mut previous: Option<(char, usize)> = None;
 
@@ -1840,7 +1842,7 @@ fn measure_text_width_with_fallback(text: &str, font_size: f32, fonts: &[Font]) 
     width
 }
 
-fn select_layout_font_index(fonts: &[Font], ch: char) -> usize {
+fn select_layout_font_index(fonts: &[Arc<Font>], ch: char) -> usize {
     let prefer_cjk = is_cjk_preferred_character(ch);
 
     if prefer_cjk && fonts.len() > 1 {
