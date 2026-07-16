@@ -168,6 +168,16 @@ cargo run --example screenshot -- "https://example.com/" tests/output/example.pn
 cargo run --example screenshot -- --insecure "https://expired.example.com/" out.png
 ```
 
+レンダリング性能のbaseline取得（外部通信なし）:
+
+```bash
+cargo run --release --example render_benchmark -- --iterations 20 --warmup 3
+```
+
+固定fixtureを1280x720で描画し、HTML parse、style、layout、paint、PNG encode、全体の
+min / median / mean / p95をJSONで出力します。`warm_dom`は解析済みDOMを再利用し、`cold`は
+反復ごとにHTMLから再構築します。
+
 `Client::new()` の既定 `User-Agent` は `Omoikane/{version} {OS}` 形式です。
 必要に応じて [`src/http/client.rs`](/src/http/client.rs) の `set_user_agent` で上書きできます。
 
