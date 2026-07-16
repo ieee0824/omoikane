@@ -3243,6 +3243,88 @@ fn ua_defaults_button_is_inline_block_bordered() {
 }
 
 #[test]
+fn ua_defaults_html5_media_element_visibility() {
+    let video = NodeHandle::element("video");
+    let canvas = NodeHandle::element("canvas");
+    let audio = NodeHandle::element("audio");
+    let controlled_audio = NodeHandle::element("audio");
+    controlled_audio.set_attribute("controls", "");
+    let source = NodeHandle::element("source");
+    let picture = NodeHandle::element("picture");
+    let mut resolver = StyleResolver::new();
+
+    for element in [&video, &canvas, &controlled_audio, &picture] {
+        assert_eq!(
+            resolver.computed_style(element).get("display"),
+            Some(&ComputedValue::Keyword("inline-block".to_string()))
+        );
+    }
+    for element in [&audio, &source] {
+        assert_eq!(
+            resolver.computed_style(element).get("display"),
+            Some(&ComputedValue::Keyword("none".to_string()))
+        );
+    }
+}
+
+#[test]
+fn ua_defaults_html5_interactive_element_visibility() {
+    let details = NodeHandle::element("details");
+    let summary = NodeHandle::element("summary");
+    let content = NodeHandle::element("div");
+    details.append_child(summary.clone());
+    details.append_child(content.clone());
+    let closed_dialog = NodeHandle::element("dialog");
+    let open_dialog = NodeHandle::element("dialog");
+    open_dialog.set_attribute("open", "");
+    let time = NodeHandle::element("time");
+    let progress = NodeHandle::element("progress");
+    let meter = NodeHandle::element("meter");
+
+    let mut resolver = StyleResolver::new();
+    assert_eq!(
+        resolver.computed_style(&details).get("display"),
+        Some(&ComputedValue::Keyword("block".to_string()))
+    );
+    assert_eq!(
+        resolver.computed_style(&summary).get("display"),
+        Some(&ComputedValue::Keyword("list-item".to_string()))
+    );
+    assert_eq!(
+        resolver.computed_style(&content).get("display"),
+        Some(&ComputedValue::Keyword("none".to_string()))
+    );
+    assert_eq!(
+        resolver.computed_style(&closed_dialog).get("display"),
+        Some(&ComputedValue::Keyword("none".to_string()))
+    );
+    assert_eq!(
+        resolver.computed_style(&open_dialog).get("display"),
+        Some(&ComputedValue::Keyword("block".to_string()))
+    );
+    assert_eq!(
+        resolver.computed_style(&time).get("display"),
+        Some(&ComputedValue::Keyword("inline".to_string()))
+    );
+    for indicator in [&progress, &meter] {
+        let style = resolver.computed_style(indicator);
+        assert_eq!(
+            style.get("display"),
+            Some(&ComputedValue::Keyword("inline-block".to_string()))
+        );
+        assert_eq!(style.get("width"), Some(&ComputedValue::Px(160.0)));
+        assert_eq!(style.get("height"), Some(&ComputedValue::Px(16.0)));
+    }
+
+    details.set_attribute("open", "");
+    let mut open_resolver = StyleResolver::new();
+    assert_ne!(
+        open_resolver.computed_style(&content).get("display"),
+        Some(&ComputedValue::Keyword("none".to_string()))
+    );
+}
+
+#[test]
 fn ua_defaults_textarea_is_inline_block_bordered() {
     let document = NodeHandle::document();
     let html = NodeHandle::element("html");

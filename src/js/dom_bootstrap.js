@@ -90,7 +90,11 @@
       if (!!entry.capture === capture) {
         event.currentTarget = node;
         event.eventPhase = phase;
-        entry.listener.call(node, event);
+        if (typeof entry.listener === "function") {
+          entry.listener.call(node, event);
+        } else if (entry.listener && typeof entry.listener.handleEvent === "function") {
+          entry.listener.handleEvent.call(entry.listener, event);
+        }
         if (event.__stoppedImmediate) {
           return true;
         }
@@ -576,6 +580,10 @@
     }
 
     addEventListener(type, listener, options = false) {
+      if (listener == null ||
+          (typeof listener !== "function" && typeof listener.handleEvent !== "function")) {
+        return;
+      }
       const capture = typeof options === "boolean" ? options : !!options.capture;
       const key = String(type);
       const list = this.__listeners.get(key) ?? [];
@@ -1611,6 +1619,13 @@
   ]);
 
   class HTMLElement extends Element {}
+  class HTMLHtmlElement extends HTMLElement {}
+  class HTMLHeadElement extends HTMLElement {}
+  class HTMLBodyElement extends HTMLElement {}
+  class HTMLDivElement extends HTMLElement {}
+  class HTMLSpanElement extends HTMLElement {}
+  class HTMLParagraphElement extends HTMLElement {}
+  class HTMLAnchorElement extends HTMLElement {}
 
   distributePrototypeMembers(Node.prototype, [HTMLElement.prototype], [
     "title", "innerText",
@@ -2549,7 +2564,7 @@
     }
 
     get readyState() {
-      return "complete";
+      return this.__readyState || "complete";
     }
 
     get characterSet() {
@@ -2584,6 +2599,10 @@
       return "CSS1Compat";
     }
 
+    get currentScript() {
+      return this.__currentScript || null;
+    }
+
     get defaultView() {
       // The Window associated with this document. The top-level document's
       // Window is the global object itself; a sub-browsing-context document (an
@@ -2615,6 +2634,13 @@
 
     getElementsByClassName(cls) {
       return this.querySelectorAll("." + String(cls));
+    }
+
+    getElementsByName(name) {
+      const expected = String(name);
+      return this.querySelectorAll("[name]").filter(element =>
+        element.getAttribute("name") === expected
+      );
     }
 
     // Adds markup to the document at the parser's insertion point. During
@@ -3323,7 +3349,28 @@
     }
   }
 
-  class HTMLScriptElement extends HTMLElement {}
+  class HTMLScriptElement extends HTMLElement {
+    get src() {
+      return this.getAttribute("src") || "";
+    }
+    set src(value) {
+      this.setAttribute("src", String(value));
+    }
+    get async() {
+      return this.hasAttribute("async");
+    }
+    set async(value) {
+      if (value) this.setAttribute("async", "");
+      else this.removeAttribute("async");
+    }
+    get defer() {
+      return this.hasAttribute("defer");
+    }
+    set defer(value) {
+      if (value) this.setAttribute("defer", "");
+      else this.removeAttribute("defer");
+    }
+  }
 
   class HTMLImageElement extends HTMLElement {
     get height() {
@@ -3400,6 +3447,13 @@
 
   // Tag-name → constructor table consulted by wrapNode() for element nodes.
   const ELEMENT_CTORS = {
+    html: HTMLHtmlElement,
+    head: HTMLHeadElement,
+    body: HTMLBodyElement,
+    div: HTMLDivElement,
+    span: HTMLSpanElement,
+    p: HTMLParagraphElement,
+    a: HTMLAnchorElement,
     table: HTMLTableElement,
     thead: HTMLTableSectionElement,
     tbody: HTMLTableSectionElement,
@@ -3473,6 +3527,13 @@
   globalThis.Window = Window;
   globalThis.Element = Element;
   globalThis.HTMLElement = HTMLElement;
+  globalThis.HTMLHtmlElement = HTMLHtmlElement;
+  globalThis.HTMLHeadElement = HTMLHeadElement;
+  globalThis.HTMLBodyElement = HTMLBodyElement;
+  globalThis.HTMLDivElement = HTMLDivElement;
+  globalThis.HTMLSpanElement = HTMLSpanElement;
+  globalThis.HTMLParagraphElement = HTMLParagraphElement;
+  globalThis.HTMLAnchorElement = HTMLAnchorElement;
   globalThis.CharacterData = CharacterData;
   globalThis.Text = Text;
   globalThis.CDATASection = CDATASection;
@@ -3522,6 +3583,10 @@
   globalThis.AnimationEvent = Event;
   globalThis.TransitionEvent = Event;
   globalThis.document = wrapNode(__omoikane_document_id);
+  globalThis.__omoikane_set_current_script = function(id) {
+    globalThis.document.__currentScript =
+      id === null || id === undefined ? null : wrapNode(id);
+  };
   if (globalThis.window === undefined) {
     globalThis.window = globalThis;
   }
@@ -3624,6 +3689,28 @@
     const element = wrapNode(id);
     if (element) element.dispatchEvent(new Event("load", { bubbles: false }));
   };
+  const __documentCookies = new Map();
+  Object.defineProperty(Document.prototype, "cookie", {
+    configurable: true,
+    enumerable: true,
+    get() {
+      return Array.from(__documentCookies.entries())
+        .map(entry => entry[0] + "=" + entry[1])
+        .join("; ");
+    },
+    set(serialized) {
+      const parts = String(serialized).split(";");
+      const pair = parts.shift() || "";
+      const separator = pair.indexOf("=");
+      if (separator <= 0) return;
+      const name = pair.slice(0, separator).trim();
+      const value = pair.slice(separator + 1).trim();
+      const expired = parts.some(part => /^\s*max-age\s*=\s*0\s*$/i.test(part));
+      if (expired) __documentCookies.delete(name);
+      else __documentCookies.set(name, value);
+    },
+  });
+
   const __loc = { href: __omoikane_location_href, protocol: "", hostname: "", pathname: "/", search: "", hash: "", origin: "", host: "" };
   try {
     const __m = String(__omoikane_location_href).match(/^(.*?):\/\/([^/?#]+)([^?#]*)(\?[^#]*)?(#.*)?$/);
@@ -3638,6 +3725,64 @@
     }
   } catch(e) {}
   globalThis.location = __loc;
+  function __applyHistoryUrl(url) {
+    if (url == null || String(url) === "") return;
+    const raw = String(url);
+    let href = raw;
+    if (!/^[A-Za-z][A-Za-z0-9+.-]*:\/\//.test(raw)) {
+      href = raw.startsWith("/") ? __loc.origin + raw :
+        __loc.origin + (__loc.pathname.replace(/[^/]*$/, "")) + raw;
+    }
+    const match = href.match(/^(.*?):\/\/([^/?#]+)([^?#]*)(\?[^#]*)?(#.*)?$/);
+    if (!match || (match[1] + "://" + match[2]) !== __loc.origin) {
+      throw new DOMException("History state URL must be same-origin", "SecurityError");
+    }
+    __loc.href = href;
+    __loc.protocol = match[1] + ":";
+    __loc.host = match[2];
+    __loc.hostname = match[2].replace(/:\d+$/, "");
+    __loc.pathname = match[3] || "/";
+    __loc.search = match[4] || "";
+    __loc.hash = match[5] || "";
+  }
+  __loc.assign = function(url) {
+    __applyHistoryUrl(url);
+  };
+  __loc.replace = function(url) {
+    __applyHistoryUrl(url);
+  };
+  __loc.reload = function() {
+    // A navigation-capable embedder can replace this with a full document
+    // reload. The synchronous Location API itself returns undefined.
+  };
+  const __historyEntries = [{ state: null, href: __loc.href }];
+  let __historyIndex = 0;
+  globalThis.history = {
+    scrollRestoration: "auto",
+    get length() { return __historyEntries.length; },
+    get state() { return __historyEntries[__historyIndex].state; },
+    pushState(state, unused, url) {
+      void unused;
+      __applyHistoryUrl(url);
+      __historyEntries.splice(__historyIndex + 1);
+      __historyEntries.push({ state, href: __loc.href });
+      __historyIndex = __historyEntries.length - 1;
+    },
+    replaceState(state, unused, url) {
+      void unused;
+      __applyHistoryUrl(url);
+      __historyEntries[__historyIndex] = { state, href: __loc.href };
+    },
+    go(delta = 0) {
+      const target = __historyIndex + Number(delta || 0);
+      if (target < 0 || target >= __historyEntries.length || target === __historyIndex) return;
+      __historyIndex = target;
+      __applyHistoryUrl(__historyEntries[target].href);
+      globalThis.dispatchEvent(new Event("popstate"));
+    },
+    back() { this.go(-1); },
+    forward() { this.go(1); },
+  };
   // Maps a JS-style property name to its CSS (kebab-case) form. `cssFloat` /
   // `styleFloat` alias the `float` property, matching the CSSOM.
   function __styleNameToCss(prop) {
@@ -3696,7 +3841,254 @@
     }
     return __makeComputedStyle({});
   };
-  globalThis.navigator = { userAgent: __omoikane_navigator_user_agent, language: "en", languages: ["en"], platform: "", cookieEnabled: false, onLine: true };
+  globalThis.navigator = { userAgent: __omoikane_navigator_user_agent, language: "en", languages: ["en"], platform: "", cookieEnabled: true, onLine: true };
+  if (globalThis.Intl === undefined) {
+    class IntlFormatter {
+      constructor(locales, options) {
+        this.locales = locales;
+        this.options = options || {};
+      }
+      resolvedOptions() {
+        return { locale: "en-US", ...this.options };
+      }
+      static supportedLocalesOf(locales) {
+        if (locales === undefined) return [];
+        return Array.isArray(locales) ? locales.map(String) : [String(locales)];
+      }
+    }
+    class NumberFormat extends IntlFormatter {
+      format(value) { return String(Number(value)); }
+      formatToParts(value) { return [{ type: "integer", value: this.format(value) }]; }
+      formatRange(start, end) { return this.format(start) + "–" + this.format(end); }
+      formatRangeToParts(start, end) {
+        return [{ type: "integer", value: this.formatRange(start, end), source: "shared" }];
+      }
+    }
+    class DateTimeFormat extends IntlFormatter {
+      format(value) {
+        const date = value === undefined ? new Date() : new Date(value);
+        return Number.isNaN(date.getTime()) ? "Invalid Date" : date.toISOString();
+      }
+      formatToParts(value) { return [{ type: "literal", value: this.format(value) }]; }
+      formatRange(start, end) { return this.format(start) + " – " + this.format(end); }
+      formatRangeToParts(start, end) {
+        return [{ type: "literal", value: this.formatRange(start, end), source: "shared" }];
+      }
+    }
+    class PluralRules extends IntlFormatter {
+      select(value) { return Number(value) === 1 ? "one" : "other"; }
+      selectRange() { return "other"; }
+    }
+    class RelativeTimeFormat extends IntlFormatter {
+      format(value, unit) { return String(value) + " " + String(unit); }
+      formatToParts(value, unit) {
+        return [{ type: "integer", value: String(value), unit: String(unit) }];
+      }
+    }
+    class ListFormat extends IntlFormatter {
+      format(values) { return Array.from(values, String).join(", "); }
+      formatToParts(values) {
+        return [{ type: "element", value: this.format(values) }];
+      }
+    }
+    class Collator extends IntlFormatter {
+      compare(left, right) {
+        const a = String(left), b = String(right);
+        return a < b ? -1 : a > b ? 1 : 0;
+      }
+    }
+    class DisplayNames extends IntlFormatter {
+      of(code) { return String(code); }
+    }
+    class Locale {
+      constructor(tag) { this.baseName = String(tag); }
+      toString() { return this.baseName; }
+      maximize() { return this; }
+      minimize() { return this; }
+    }
+    const callableFormatter = Constructor => {
+      function Formatter(...args) { return new Constructor(...args); }
+      Formatter.prototype = Constructor.prototype;
+      Formatter.supportedLocalesOf = IntlFormatter.supportedLocalesOf;
+      return Formatter;
+    };
+    globalThis.Intl = {
+      NumberFormat: callableFormatter(NumberFormat),
+      DateTimeFormat: callableFormatter(DateTimeFormat),
+      PluralRules: callableFormatter(PluralRules),
+      RelativeTimeFormat: callableFormatter(RelativeTimeFormat),
+      ListFormat: callableFormatter(ListFormat),
+      Collator: callableFormatter(Collator),
+      DisplayNames: callableFormatter(DisplayNames),
+      Locale,
+      getCanonicalLocales(locales) {
+        if (locales === undefined) return [];
+        return Array.isArray(locales) ? locales.map(String) : [String(locales)];
+      },
+    };
+  }
+  if (globalThis.TextEncoder === undefined) {
+    globalThis.TextEncoder = class TextEncoder {
+      get encoding() { return "utf-8"; }
+      encode(input = "") {
+        const bytes = [];
+        for (const char of String(input)) {
+          const code = char.codePointAt(0);
+          if (code <= 0x7f) bytes.push(code);
+          else if (code <= 0x7ff) {
+            bytes.push(0xc0 | (code >> 6), 0x80 | (code & 0x3f));
+          } else if (code <= 0xffff) {
+            bytes.push(0xe0 | (code >> 12), 0x80 | ((code >> 6) & 0x3f), 0x80 | (code & 0x3f));
+          } else {
+            bytes.push(0xf0 | (code >> 18), 0x80 | ((code >> 12) & 0x3f),
+              0x80 | ((code >> 6) & 0x3f), 0x80 | (code & 0x3f));
+          }
+        }
+        return new Uint8Array(bytes);
+      }
+      encodeInto(source, destination) {
+        const bytes = this.encode(source);
+        const written = Math.min(bytes.length, destination.length);
+        for (let index = 0; index < written; index++) destination[index] = bytes[index];
+        return { read: String(source).length, written };
+      }
+    };
+  }
+  if (globalThis.TextDecoder === undefined) {
+    globalThis.TextDecoder = class TextDecoder {
+      constructor(label = "utf-8", options = {}) {
+        const normalized = String(label).toLowerCase().replace(/[_\s]/g, "-");
+        if (normalized !== "utf-8" && normalized !== "utf8") throw new RangeError("unsupported encoding");
+        this.encoding = "utf-8";
+        this.fatal = Boolean(options.fatal);
+        this.ignoreBOM = Boolean(options.ignoreBOM);
+      }
+      decode(input = new Uint8Array()) {
+        const bytes = input instanceof ArrayBuffer ? new Uint8Array(input) : new Uint8Array(input.buffer || input, input.byteOffset || 0, input.byteLength === undefined ? input.length : input.byteLength);
+        let result = "";
+        for (let index = 0; index < bytes.length;) {
+          const first = bytes[index++];
+          if (first <= 0x7f) { result += String.fromCodePoint(first); continue; }
+          let code, needed;
+          if ((first & 0xe0) === 0xc0) { code = first & 0x1f; needed = 1; }
+          else if ((first & 0xf0) === 0xe0) { code = first & 0x0f; needed = 2; }
+          else if ((first & 0xf8) === 0xf0) { code = first & 0x07; needed = 3; }
+          else { if (this.fatal) throw new TypeError("invalid UTF-8"); result += "\ufffd"; continue; }
+          if (index + needed > bytes.length) { if (this.fatal) throw new TypeError("invalid UTF-8"); result += "\ufffd"; break; }
+          let valid = true;
+          for (let offset = 0; offset < needed; offset++) {
+            const next = bytes[index++];
+            if ((next & 0xc0) !== 0x80) { valid = false; break; }
+            code = (code << 6) | (next & 0x3f);
+          }
+          if (!valid) { if (this.fatal) throw new TypeError("invalid UTF-8"); result += "\ufffd"; }
+          else result += String.fromCodePoint(code);
+        }
+        return result;
+      }
+    };
+  }
+  if (globalThis.btoa === undefined) {
+    const base64Alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    globalThis.btoa = function(input) {
+      const value = String(input);
+      let output = "";
+      for (let index = 0; index < value.length; index += 3) {
+        const a = value.charCodeAt(index);
+        const b = index + 1 < value.length ? value.charCodeAt(index + 1) : 0;
+        const c = index + 2 < value.length ? value.charCodeAt(index + 2) : 0;
+        if (a > 255 || b > 255 || c > 255) throw new DOMException("invalid character", "InvalidCharacterError");
+        const bits = (a << 16) | (b << 8) | c;
+        output += base64Alphabet[(bits >> 18) & 63];
+        output += base64Alphabet[(bits >> 12) & 63];
+        output += index + 1 < value.length ? base64Alphabet[(bits >> 6) & 63] : "=";
+        output += index + 2 < value.length ? base64Alphabet[bits & 63] : "=";
+      }
+      return output;
+    };
+    globalThis.atob = function(input) {
+      const value = String(input).replace(/[\t\n\f\r ]/g, "").replace(/=+$/, "");
+      if (value.length % 4 === 1 || /[^A-Za-z0-9+/]/.test(value)) {
+        throw new DOMException("invalid character", "InvalidCharacterError");
+      }
+      let output = "", buffer = 0, bits = 0;
+      for (const char of value) {
+        buffer = (buffer << 6) | base64Alphabet.indexOf(char);
+        bits += 6;
+        if (bits >= 8) {
+          bits -= 8;
+          output += String.fromCharCode((buffer >> bits) & 255);
+        }
+      }
+      return output;
+    };
+  }
+  if (globalThis.URL === undefined) {
+    class URLSearchParams {
+      constructor(init = "") {
+        this._entries = [];
+        const source = String(init).replace(/^\?/, "");
+        if (source) for (const pair of source.split("&")) {
+          const separator = pair.indexOf("=");
+          const key = separator < 0 ? pair : pair.slice(0, separator);
+          const value = separator < 0 ? "" : pair.slice(separator + 1);
+          this.append(decodeURIComponent(key.replace(/\+/g, " ")), decodeURIComponent(value.replace(/\+/g, " ")));
+        }
+      }
+      append(name, value) { this._entries.push([String(name), String(value)]); }
+      set(name, value) {
+        this.delete(name);
+        this.append(name, value);
+      }
+      get(name) {
+        const found = this._entries.find(entry => entry[0] === String(name));
+        return found ? found[1] : null;
+      }
+      getAll(name) { return this._entries.filter(entry => entry[0] === String(name)).map(entry => entry[1]); }
+      has(name) { return this._entries.some(entry => entry[0] === String(name)); }
+      delete(name) { this._entries = this._entries.filter(entry => entry[0] !== String(name)); }
+      *entries() { yield* this._entries; }
+      *keys() { for (const entry of this._entries) yield entry[0]; }
+      *values() { for (const entry of this._entries) yield entry[1]; }
+      [Symbol.iterator]() { return this.entries(); }
+      toString() {
+        return this._entries.map(entry => encodeURIComponent(entry[0]).replace(/%20/g, "+") + "=" + encodeURIComponent(entry[1]).replace(/%20/g, "+")).join("&");
+      }
+    }
+    class URL {
+      constructor(input, base) {
+        let value = String(input);
+        if (!/^[A-Za-z][A-Za-z0-9+.-]*:/.test(value)) {
+          const baseValue = base === undefined ? globalThis.location.href : String(base);
+          const match = baseValue.match(/^([A-Za-z][A-Za-z0-9+.-]*:)(?:\/\/([^/?#]*))?([^?#]*)/);
+          if (!match) throw new TypeError("invalid base URL");
+          if (value.startsWith("//")) value = match[1] + value;
+          else if (value.startsWith("/")) value = match[1] + "//" + (match[2] || "") + value;
+          else {
+            const directory = (match[3] || "/").replace(/[^/]*$/, "");
+            value = match[1] + "//" + (match[2] || "") + directory + value;
+          }
+        }
+        const parsed = value.match(/^([A-Za-z][A-Za-z0-9+.-]*:)(?:\/\/([^/?#]*))?([^?#]*)(\?[^#]*)?(#.*)?$/);
+        if (!parsed) throw new TypeError("invalid URL");
+        this.protocol = parsed[1];
+        this.host = parsed[2] || "";
+        this.hostname = this.host.replace(/:\d+$/, "");
+        this.port = this.host.slice(this.hostname.length).replace(/^:/, "");
+        this.pathname = parsed[3] || (this.host ? "/" : "");
+        this.search = parsed[4] || "";
+        this.hash = parsed[5] || "";
+        this.origin = this.host ? this.protocol + "//" + this.host : "null";
+        this.searchParams = new URLSearchParams(this.search);
+        this.href = this.toString();
+      }
+      toString() { return this.protocol + (this.host ? "//" + this.host : "") + this.pathname + this.search + this.hash; }
+      toJSON() { return this.toString(); }
+      static canParse(input, base) { try { new URL(input, base); return true; } catch (_) { return false; } }
+    }
+    globalThis.URL = URL;
+    globalThis.URLSearchParams = URLSearchParams;
+  }
   globalThis.console = {
     log: (...args) => __omoikane_console_log(...args),
     warn: (...args) => __omoikane_console_log("[warn]", ...args),
@@ -4031,17 +4423,369 @@
   globalThis.XMLHttpRequest.LOADING = 3;
   globalThis.XMLHttpRequest.DONE = 4;
 
-  globalThis.fetch = function(url) {
-    return Promise.resolve(__omoikane_fetch(String(url))).then(raw => {
+  class ReadableStreamDefaultController {
+    constructor(stream) { this._stream = stream; }
+    enqueue(chunk) {
+      if (this._stream._closed) throw new TypeError("ReadableStream is closed");
+      const waiter = this._stream._waiters.shift();
+      if (waiter) waiter.resolve({ value: chunk, done: false });
+      else this._stream._queue.push(chunk);
+    }
+    close() {
+      if (this._stream._closed) return;
+      this._stream._closed = true;
+      for (const waiter of this._stream._waiters.splice(0)) {
+        waiter.resolve({ value: undefined, done: true });
+      }
+    }
+    error(reason) {
+      this._stream._error = reason;
+      this._stream._closed = true;
+      for (const waiter of this._stream._waiters.splice(0)) waiter.reject(reason);
+    }
+    get desiredSize() { return this._stream._closed ? 0 : 1; }
+  }
+  class ReadableStreamDefaultReader {
+    constructor(stream) {
+      if (!(stream instanceof ReadableStream) || stream.locked) throw new TypeError("Invalid or locked stream");
+      this._stream = stream;
+      stream._reader = this;
+      this.closed = stream._closed ? Promise.resolve() : new Promise(resolve => { stream._closedResolve = resolve; });
+    }
+    read() {
+      const stream = this._stream;
+      if (!stream) return Promise.reject(new TypeError("Reader has no stream"));
+      if (stream._queue.length) return Promise.resolve({ value: stream._queue.shift(), done: false });
+      if (stream._error !== undefined) return Promise.reject(stream._error);
+      if (stream._closed) return Promise.resolve({ value: undefined, done: true });
+      return new Promise((resolve, reject) => stream._waiters.push({ resolve, reject }));
+    }
+    cancel(reason) { return this._stream ? this._stream.cancel(reason) : Promise.reject(new TypeError("Reader has no stream")); }
+    releaseLock() { if (this._stream) this._stream._reader = null; this._stream = null; }
+  }
+  class ReadableStream {
+    constructor(underlyingSource = {}) {
+      this._queue = []; this._waiters = []; this._reader = null;
+      this._closed = false; this._error = undefined; this._source = underlyingSource || {};
+      this._controller = new ReadableStreamDefaultController(this);
+      if (typeof this._source.start === "function") {
+        Promise.resolve(this._source.start(this._controller)).catch(e => this._controller.error(e));
+      }
+    }
+    get locked() { return this._reader !== null; }
+    getReader() { return new ReadableStreamDefaultReader(this); }
+    cancel(reason) {
+      this._queue.length = 0; this._controller.close();
+      return Promise.resolve(typeof this._source.cancel === "function" ? this._source.cancel(reason) : undefined);
+    }
+    pipeTo(destination) {
+      const reader = this.getReader(); const writer = destination.getWriter();
+      const pump = () => reader.read().then(result => result.done ? writer.close() : Promise.resolve(writer.write(result.value)).then(pump));
+      return pump().finally(() => reader.releaseLock());
+    }
+    pipeThrough(pair) { this.pipeTo(pair.writable); return pair.readable; }
+  }
+  class WritableStreamDefaultWriter {
+    constructor(stream) { this._stream = stream; this.closed = stream._closedPromise; this.ready = Promise.resolve(); }
+    write(chunk) { return this._stream._write(chunk); }
+    close() { return this._stream._close(); }
+    abort(reason) { return this._stream.abort(reason); }
+    releaseLock() { this._stream._writer = null; this._stream = null; }
+  }
+  class WritableStream {
+    constructor(underlyingSink = {}) {
+      this._sink = underlyingSink || {}; this._writer = null; this._closed = false;
+      this._closedPromise = new Promise(resolve => { this._closedResolve = resolve; });
+      if (typeof this._sink.start === "function") Promise.resolve(this._sink.start(this));
+    }
+    get locked() { return this._writer !== null; }
+    getWriter() { if (this.locked) throw new TypeError("WritableStream is locked"); this._writer = new WritableStreamDefaultWriter(this); return this._writer; }
+    _write(chunk) { if (this._closed) return Promise.reject(new TypeError("WritableStream is closed")); return Promise.resolve(typeof this._sink.write === "function" ? this._sink.write(chunk, this) : undefined); }
+    _close() { this._closed = true; const result = typeof this._sink.close === "function" ? this._sink.close() : undefined; this._closedResolve(); return Promise.resolve(result); }
+    abort(reason) { this._closed = true; this._closedResolve(); return Promise.resolve(typeof this._sink.abort === "function" ? this._sink.abort(reason) : undefined); }
+  }
+  class TransformStreamSource {
+    constructor(owner) { this._owner = owner; }
+    start(controller) { this._owner._readableController = controller; }
+  }
+  class TransformStreamSink {
+    constructor(owner) { this._owner = owner; }
+    write(chunk) {
+      const owner = this._owner;
+      if (typeof owner._transformer.transform === "function") {
+        return owner._transformer.transform(chunk, owner._readableController);
+      }
+      owner._readableController.enqueue(chunk);
+    }
+    close() {
+      const owner = this._owner;
+      if (typeof owner._transformer.flush === "function") {
+        owner._transformer.flush(owner._readableController);
+      }
+      owner._readableController.close();
+    }
+  }
+  class TransformStream {
+    constructor(transformer = {}) {
+      this._transformer = transformer || {};
+      this._readableController = null;
+      this.readable = new ReadableStream(new TransformStreamSource(this));
+      this.writable = new WritableStream(new TransformStreamSink(this));
+    }
+  }
+  globalThis.ReadableStream = ReadableStream;
+  globalThis.ReadableStreamDefaultReader = ReadableStreamDefaultReader;
+  globalThis.ReadableStreamDefaultController = ReadableStreamDefaultController;
+  globalThis.WritableStream = WritableStream;
+  globalThis.WritableStreamDefaultWriter = WritableStreamDefaultWriter;
+  globalThis.TransformStream = TransformStream;
+
+  class EventTarget {
+    constructor() { this._listeners = new Map(); }
+    addEventListener(type, callback, options = {}) {
+      if (callback == null) return;
+      const key = String(type);
+      const capture = typeof options === "boolean" ? options : !!options.capture;
+      const once = typeof options === "object" && !!options.once;
+      const listeners = this._listeners.get(key) || [];
+      if (!listeners.some(entry => entry.callback === callback && entry.capture === capture)) {
+        listeners.push({ callback, capture, once });
+      }
+      this._listeners.set(key, listeners);
+    }
+    removeEventListener(type, callback, options = {}) {
+      const listeners = this._listeners.get(String(type));
+      if (!listeners) return;
+      const capture = typeof options === "boolean" ? options : !!options.capture;
+      const index = listeners.findIndex(entry => entry.callback === callback && entry.capture === capture);
+      if (index >= 0) listeners.splice(index, 1);
+    }
+    dispatchEvent(event) {
+      if (!(event instanceof Event)) throw new TypeError("dispatchEvent requires an Event");
+      event.target = this;
+      event.currentTarget = this;
+      for (const entry of (this._listeners.get(event.type) || []).slice()) {
+        if (entry.once) this.removeEventListener(event.type, entry.callback, entry.capture);
+        if (typeof entry.callback === "function") entry.callback.call(this, event);
+        else if (typeof entry.callback.handleEvent === "function") entry.callback.handleEvent(event);
+        if (event.__stoppedImmediate) break;
+      }
+      event.currentTarget = null;
+      return !event.defaultPrevented;
+    }
+  }
+
+  class Animation extends EventTarget {
+    constructor(target, keyframes, options = {}) {
+      super();
+      const timing = typeof options === "number" ? { duration: options } : (options || {});
+      this.effect = { target, getKeyframes: () => this._keyframes.slice() };
+      this.timeline = globalThis.document && globalThis.document.timeline || null;
+      this.id = String(timing.id || "");
+      this.currentTime = 0;
+      this.startTime = null;
+      this.playbackRate = 1;
+      this.playState = "idle";
+      this.replaceState = "active";
+      this.pending = false;
+      this.onfinish = null;
+      this.oncancel = null;
+      this._target = target;
+      this._keyframes = Array.isArray(keyframes) ? keyframes.slice() : [keyframes || {}];
+      this._duration = Math.max(0, Number(timing.duration) || 0);
+      this._delay = Math.max(0, Number(timing.delay) || 0);
+      this._iterations = timing.iterations === Infinity ? Infinity : Math.max(0, Number(timing.iterations) || 1);
+      this._timer = null;
+      this._finishedResolve = null;
+      this.finished = new Promise(resolve => { this._finishedResolve = resolve; });
+      this.ready = Promise.resolve(this);
+      this.play();
+    }
+    _applyFinalKeyframe() {
+      const frame = this._keyframes[this._keyframes.length - 1];
+      if (!frame || !this._target || !this._target.style) return;
+      for (const name of Object.keys(frame)) {
+        if (name === "offset" || name === "easing" || name === "composite") continue;
+        this._target.style[name] = frame[name];
+      }
+    }
+    _complete() {
+      if (this.playState === "finished" || this.playState === "idle") return;
+      this._timer = null;
+      this.currentTime = this._duration * this._iterations;
+      this.playState = "finished";
+      this._applyFinalKeyframe();
+      this._finishedResolve(this);
+      const event = new Event("finish");
+      this.dispatchEvent(event);
+      if (typeof this.onfinish === "function") this.onfinish.call(this, event);
+    }
+    play() {
+      if (this._timer !== null) clearTimeout(this._timer);
+      this.playState = "running";
+      this.pending = false;
+      if (this._iterations !== Infinity) {
+        const total = this._delay + this._duration * this._iterations;
+        this._timer = setTimeout(() => this._complete(), total);
+      }
+    }
+    pause() {
+      if (this._timer !== null) clearTimeout(this._timer);
+      this._timer = null;
+      this.playState = "paused";
+    }
+    reverse() { this.playbackRate = -Math.abs(this.playbackRate || 1); this.play(); }
+    finish() { if (this._timer !== null) clearTimeout(this._timer); this._complete(); }
+    cancel() {
+      if (this._timer !== null) clearTimeout(this._timer);
+      this._timer = null;
+      this.currentTime = null;
+      this.playState = "idle";
+      const event = new Event("cancel");
+      this.dispatchEvent(event);
+      if (typeof this.oncancel === "function") this.oncancel.call(this, event);
+    }
+    updatePlaybackRate(rate) { this.playbackRate = Number(rate); }
+    persist() { this.replaceState = "persisted"; }
+    commitStyles() { this._applyFinalKeyframe(); }
+  }
+
+  Element.prototype.animate = function(keyframes, options) {
+    const animation = new Animation(this, keyframes, options);
+    if (!this.__animations) this.__animations = [];
+    this.__animations.push(animation);
+    return animation;
+  };
+  Element.prototype.getAnimations = function() {
+    return (this.__animations || []).filter(animation => animation.playState !== "idle").slice();
+  };
+  Document.prototype.getAnimations = function() {
+    const animations = [];
+    const visit = node => {
+      if (node && typeof node.getAnimations === "function") animations.push(...node.getAnimations());
+      for (const child of node && node.childNodes || []) visit(child);
+    };
+    visit(this.documentElement);
+    return animations;
+  };
+  if (!globalThis.document.timeline) {
+    globalThis.document.timeline = { currentTime: 0 };
+  }
+  globalThis.Animation = Animation;
+
+  class AbortSignal extends EventTarget {
+    constructor() {
+      super();
+      this.aborted = false;
+      this.reason = undefined;
+      this.onabort = null;
+    }
+    throwIfAborted() { if (this.aborted) throw this.reason; }
+    static abort(reason = new DOMException("The operation was aborted.", "AbortError")) {
+      const controller = new AbortController();
+      controller.abort(reason);
+      return controller.signal;
+    }
+    static timeout(milliseconds) {
+      const controller = new AbortController();
+      setTimeout(() => controller.abort(new DOMException("The operation timed out.", "TimeoutError")), Number(milliseconds));
+      return controller.signal;
+    }
+    static any(signals) {
+      const controller = new AbortController();
+      for (const signal of signals) {
+        if (signal.aborted) { controller.abort(signal.reason); break; }
+        signal.addEventListener("abort", () => controller.abort(signal.reason), { once: true });
+      }
+      return controller.signal;
+    }
+  }
+
+  class AbortController {
+    constructor() { this.signal = new AbortSignal(); }
+    abort(reason = new DOMException("The operation was aborted.", "AbortError")) {
+      if (this.signal.aborted) return;
+      this.signal.aborted = true;
+      this.signal.reason = reason;
+      const event = new Event("abort");
+      this.signal.dispatchEvent(event);
+      if (typeof this.signal.onabort === "function") this.signal.onabort.call(this.signal, event);
+    }
+  }
+  globalThis.EventTarget = EventTarget;
+  globalThis.AbortSignal = AbortSignal;
+  globalThis.AbortController = AbortController;
+
+  class Headers {
+    constructor(init = undefined) {
+      this._headers = new Map();
+      if (init instanceof Headers) init.forEach((value, name) => this.append(name, value));
+      else if (Array.isArray(init)) for (const entry of init) this.append(entry[0], entry[1]);
+      else if (init && typeof init === "object") for (const name of Object.keys(init)) this.append(name, init[name]);
+    }
+    append(name, value) {
+      const key = String(name).toLowerCase();
+      const text = String(value).trim();
+      this._headers.set(key, this._headers.has(key) ? this._headers.get(key) + ", " + text : text);
+    }
+    set(name, value) { this._headers.set(String(name).toLowerCase(), String(value).trim()); }
+    get(name) { return this._headers.get(String(name).toLowerCase()) ?? null; }
+    has(name) { return this._headers.has(String(name).toLowerCase()); }
+    delete(name) { this._headers.delete(String(name).toLowerCase()); }
+    forEach(callback, thisArg) { for (const [name, value] of this._headers) callback.call(thisArg, value, name, this); }
+    *entries() { yield* this._headers.entries(); }
+    *keys() { yield* this._headers.keys(); }
+    *values() { yield* this._headers.values(); }
+    [Symbol.iterator]() { return this.entries(); }
+  }
+  class Request {
+    constructor(input, init = {}) {
+      const source = input instanceof Request ? input : null;
+      this.url = source ? source.url : String(input);
+      this.method = String(init.method || (source && source.method) || "GET").toUpperCase();
+      this.headers = new Headers(init.headers || (source && source.headers));
+      this.body = init.body === undefined ? (source && source.body) : init.body;
+      this.credentials = init.credentials || (source && source.credentials) || "same-origin";
+      this.mode = init.mode || (source && source.mode) || "cors";
+      this.signal = init.signal || (source && source.signal) || null;
+    }
+    clone() { return new Request(this); }
+  }
+  class Response {
+    constructor(body = null, init = {}) {
+      this._body = body === null ? "" : String(body);
+      this.status = init.status === undefined ? 200 : Number(init.status);
+      this.statusText = init.statusText || "";
+      this.headers = new Headers(init.headers);
+      this.url = init.url || "";
+      this.type = "basic";
+      this.redirected = false;
+      this.bodyUsed = false;
+    }
+    get ok() { return this.status >= 200 && this.status <= 299; }
+    text() { this.bodyUsed = true; return Promise.resolve(this._body); }
+    json() { return this.text().then(JSON.parse); }
+    arrayBuffer() { return Promise.resolve(new TextEncoder().encode(this._body).buffer); }
+    clone() { return new Response(this._body, { status: this.status, statusText: this.statusText, headers: this.headers, url: this.url }); }
+    static json(data, init = {}) {
+      const headers = new Headers(init.headers);
+      if (!headers.has("content-type")) headers.set("content-type", "application/json");
+      return new Response(JSON.stringify(data), { ...init, headers });
+    }
+    static redirect(url, status = 302) { return new Response(null, { status, headers: { location: String(url) } }); }
+    static error() { const response = new Response(null, { status: 0 }); response.type = "error"; return response; }
+  }
+  globalThis.Headers = Headers;
+  globalThis.Request = Request;
+  globalThis.Response = Response;
+
+  globalThis.fetch = function(input, init = {}) {
+    const request = input instanceof Request ? new Request(input, init) : new Request(input, init);
+    if (request.signal && request.signal.aborted) return Promise.reject(request.signal.reason);
+    return Promise.resolve(__omoikane_fetch(request.url)).then(raw => {
+      if (request.signal && request.signal.aborted) throw request.signal.reason;
       const data = JSON.parse(String(raw));
-      return {
-        status: data.status,
-        ok: data.ok,
-        url: data.url,
-        text() {
-          return Promise.resolve(data.bodyText);
-        },
-      };
+      return new Response(data.bodyText, { status: data.status, url: data.url });
     });
   };
 

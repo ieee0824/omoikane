@@ -1,7 +1,7 @@
 ---
 number: 040
 slug: html5-interactive-elements
-status: open
+status: closed
 ---
 
 # HTML5 インタラクティブ要素対応
@@ -24,3 +24,10 @@ status: open
 ## 優先度
 
 中
+
+## 対応内容
+
+- `details`/`summary` の閉開状態と list-item UA 表示を実装
+- `dialog` の open 属性による表示切り替えと `time` の inline 表示を実装
+- `progress`/`meter` を既存フォームコントロール描画によるプレースホルダー矩形として実装
+- 対象タグを対応済みHTMLタグ一覧へ追加し、スタイル・レイアウト回帰テストを追加

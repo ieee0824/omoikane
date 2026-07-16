@@ -1,9 +1,9 @@
 //! Basic SVG rendering: rasterizes inline SVG elements to an RGBA image.
 
 use crate::dom::{Node, NodeHandle, NodeType};
-use crate::paint::color::{parse_color, Color};
 use crate::paint::Canvas;
 use crate::paint::Image;
+use crate::paint::color::{Color, parse_color};
 
 /// Renders an inline `<svg>` element to an RGBA image.
 ///
@@ -112,7 +112,11 @@ fn render_svg_children(
             "path" => {
                 let Some(fill_color) = fill else { continue };
                 if let Some(d) = attrs.get("d") {
-                    render_path(canvas, d, sx, sy, tx, ty, fill_color);
+                    let fill_rule = match attrs.get("fill-rule").map(String::as_str) {
+                        Some(value) if value.eq_ignore_ascii_case("evenodd") => FillRule::EvenOdd,
+                        _ => FillRule::NonZero,
+                    };
+                    render_path(canvas, d, sx, sy, tx, ty, fill_color, fill_rule);
                 }
             }
             _ => {
@@ -143,7 +147,16 @@ fn fill_circle(canvas: &mut Canvas, cx: f32, cy: f32, r: f32, color: Color) {
 
 /// Renders an SVG path `d` attribute using M, L, H, V, Z commands.
 /// Curved commands (C, S, Q, T, A) are approximated as straight lines to endpoints.
-fn render_path(canvas: &mut Canvas, d: &str, sx: f32, sy: f32, tx: f32, ty: f32, fill: Color) {
+fn render_path(
+    canvas: &mut Canvas,
+    d: &str,
+    sx: f32,
+    sy: f32,
+    tx: f32,
+    ty: f32,
+    fill: Color,
+    fill_rule: FillRule,
+) {
     let commands = parse_path_data(d);
     if commands.is_empty() {
         return;
@@ -151,6 +164,7 @@ fn render_path(canvas: &mut Canvas, d: &str, sx: f32, sy: f32, tx: f32, ty: f32,
 
     // Collect polygon points from path commands
     let mut points = Vec::new();
+    let mut subpaths = Vec::new();
     let mut cx = 0.0f32;
     let mut cy = 0.0f32;
 
@@ -159,9 +173,8 @@ fn render_path(canvas: &mut Canvas, d: &str, sx: f32, sy: f32, tx: f32, ty: f32,
             PathCommand::MoveTo(x, y) => {
                 // Flush previous subpath
                 if points.len() >= 3 {
-                    fill_polygon(canvas, &points, fill);
+                    subpaths.push(std::mem::take(&mut points));
                 }
-                points.clear();
                 cx = *x;
                 cy = *y;
                 points.push((cx * sx + tx, cy * sy + ty));
@@ -186,17 +199,25 @@ fn render_path(canvas: &mut Canvas, d: &str, sx: f32, sy: f32, tx: f32, ty: f32,
             }
             PathCommand::Close => {
                 if points.len() >= 3 {
-                    fill_polygon(canvas, &points, fill);
+                    subpaths.push(std::mem::take(&mut points));
                 }
-                points.clear();
             }
         }
     }
 
     // Flush remaining subpath
     if points.len() >= 3 {
-        fill_polygon(canvas, &points, fill);
+        subpaths.push(points);
     }
+    if !subpaths.is_empty() {
+        fill_compound_path(canvas, &subpaths, fill, fill_rule);
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FillRule {
+    NonZero,
+    EvenOdd,
 }
 
 #[derive(Debug)]
@@ -223,10 +244,11 @@ fn parse_path_data(d: &str) -> Vec<PathCommand> {
         let remaining_before = chars.clone().count();
         skip_whitespace_and_commas(&mut chars);
         if let Some(&ch) = chars.peek()
-            && ch.is_ascii_alphabetic() {
-                current_command = ch;
-                chars.next();
-            }
+            && ch.is_ascii_alphabetic()
+        {
+            current_command = ch;
+            chars.next();
+        }
         skip_whitespace_and_commas(&mut chars);
 
         match current_command {
@@ -365,10 +387,11 @@ fn skip_whitespace_and_commas(chars: &mut std::iter::Peekable<std::str::Chars>) 
 fn parse_number(chars: &mut std::iter::Peekable<std::str::Chars>) -> Option<f32> {
     let mut s = String::new();
     if let Some(&ch) = chars.peek()
-        && (ch == '-' || ch == '+') {
-            s.push(ch);
-            chars.next();
-        }
+        && (ch == '-' || ch == '+')
+    {
+        s.push(ch);
+        chars.next();
+    }
     let mut has_dot = false;
     while let Some(&ch) = chars.peek() {
         if ch.is_ascii_digit() {
@@ -389,14 +412,28 @@ fn parse_number(chars: &mut std::iter::Peekable<std::str::Chars>) -> Option<f32>
     }
 }
 
-/// Simple scanline polygon fill.
-fn fill_polygon(canvas: &mut Canvas, points: &[(f32, f32)], color: Color) {
-    if points.len() < 3 {
+/// Scanline fill for all subpaths together, preserving holes according to the
+/// SVG `fill-rule` property.
+fn fill_compound_path(
+    canvas: &mut Canvas,
+    subpaths: &[Vec<(f32, f32)>],
+    color: Color,
+    fill_rule: FillRule,
+) {
+    if subpaths.is_empty() {
         return;
     }
 
-    let min_y = points.iter().map(|p| p.1).fold(f32::MAX, f32::min);
-    let max_y = points.iter().map(|p| p.1).fold(f32::MIN, f32::max);
+    let min_y = subpaths
+        .iter()
+        .flatten()
+        .map(|p| p.1)
+        .fold(f32::MAX, f32::min);
+    let max_y = subpaths
+        .iter()
+        .flatten()
+        .map(|p| p.1)
+        .fold(f32::MIN, f32::max);
     let y_start = (min_y.floor() as i32).max(0) as u32;
     let y_end = (max_y.ceil() as u32).min(canvas.height());
 
@@ -404,23 +441,32 @@ fn fill_polygon(canvas: &mut Canvas, points: &[(f32, f32)], color: Color) {
         let scan_y = y as f32 + 0.5;
         let mut intersections = Vec::new();
 
-        for i in 0..points.len() {
-            let j = (i + 1) % points.len();
-            let (x0, y0) = points[i];
-            let (x1, y1) = points[j];
+        for points in subpaths {
+            for i in 0..points.len() {
+                let j = (i + 1) % points.len();
+                let (x0, y0) = points[i];
+                let (x1, y1) = points[j];
 
-            if (y0 <= scan_y && y1 > scan_y) || (y1 <= scan_y && y0 > scan_y) {
-                let t = (scan_y - y0) / (y1 - y0);
-                intersections.push(x0 + t * (x1 - x0));
+                if (y0 <= scan_y && y1 > scan_y) || (y1 <= scan_y && y0 > scan_y) {
+                    let t = (scan_y - y0) / (y1 - y0);
+                    let winding = if y1 > y0 { 1 } else { -1 };
+                    intersections.push((x0 + t * (x1 - x0), winding));
+                }
             }
         }
 
-        intersections.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        intersections.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
 
-        for pair in intersections.chunks(2) {
-            if pair.len() == 2 {
-                let x_start = (pair[0].floor() as i32).max(0) as u32;
-                let x_end = (pair[1].ceil() as u32).min(canvas.width());
+        let mut winding = 0i32;
+        for pair in intersections.windows(2) {
+            winding += pair[0].1;
+            let inside = match fill_rule {
+                FillRule::NonZero => winding != 0,
+                FillRule::EvenOdd => winding.unsigned_abs() % 2 == 1,
+            };
+            if inside {
+                let x_start = (pair[0].0.floor() as i32).max(0) as u32;
+                let x_end = (pair[1].0.ceil() as u32).min(canvas.width());
                 for x in x_start..x_end {
                     canvas.set_pixel(x, y, color);
                 }
@@ -456,10 +502,7 @@ fn parse_svg_size(value: Option<&String>) -> Option<f32> {
 /// Parses an SVG coordinate (may be negative, for x, y, cx, cy, etc.).
 fn parse_svg_coord(value: Option<&String>) -> Option<f32> {
     let s = value?.trim();
-    s.strip_suffix("px")
-        .unwrap_or(s)
-        .parse::<f32>()
-        .ok()
+    s.strip_suffix("px").unwrap_or(s).parse::<f32>().ok()
 }
 
 #[cfg(test)]
@@ -498,7 +541,8 @@ mod tests {
 
     #[test]
     fn renders_svg_circle() {
-        let html = r#"<svg width="20" height="20"><circle cx="10" cy="10" r="8" fill="blue"/></svg>"#;
+        let html =
+            r#"<svg width="20" height="20"><circle cx="10" cy="10" r="8" fill="blue"/></svg>"#;
         let doc = TreeBuilder::parse(html).document();
         let svg = find_svg(&doc).unwrap();
         let image = render_svg_to_image(&svg).unwrap();
@@ -531,5 +575,26 @@ mod tests {
     fn parse_path_data_m_l_z() {
         let cmds = parse_path_data("M 0 0 L 10 0 L 10 10 Z");
         assert_eq!(cmds.len(), 4);
+    }
+
+    #[test]
+    fn nonzero_fill_rule_preserves_oppositely_wound_hole() {
+        let html =
+            r#"<svg width="10" height="10"><path fill="black" d="M1 1H9V9H1Z M3 3V7H7V3Z"/></svg>"#;
+        let doc = TreeBuilder::parse(html).document();
+        let image = render_svg_to_image(&find_svg(&doc).unwrap()).unwrap();
+
+        assert_eq!(image.pixels()[(2 * 10 + 2) * 4 + 3], 255);
+        assert_eq!(image.pixels()[(5 * 10 + 5) * 4 + 3], 0);
+    }
+
+    #[test]
+    fn evenodd_fill_rule_preserves_same_winding_hole() {
+        let html = r#"<svg width="10" height="10"><path fill="black" fill-rule="evenodd" d="M1 1H9V9H1Z M3 3H7V7H3Z"/></svg>"#;
+        let doc = TreeBuilder::parse(html).document();
+        let image = render_svg_to_image(&find_svg(&doc).unwrap()).unwrap();
+
+        assert_eq!(image.pixels()[(2 * 10 + 2) * 4 + 3], 255);
+        assert_eq!(image.pixels()[(5 * 10 + 5) * 4 + 3], 0);
     }
 }

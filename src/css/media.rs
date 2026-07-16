@@ -179,6 +179,10 @@ fn find_matching_paren(s: &str) -> Option<usize> {
 }
 
 fn parse_media_feature(inner: &str) -> MediaCondition {
+    if let Some(condition) = parse_range_media_feature(inner) {
+        return condition;
+    }
+
     // inner is e.g. "max-width: 768px" or "orientation: portrait"
     let mut parts = inner.splitn(2, ':');
     let feature = parts.next().unwrap_or("").trim().to_ascii_lowercase();
@@ -262,6 +266,32 @@ fn parse_media_feature(inner: &str) -> MediaCondition {
         _ => {}
     }
     MediaCondition::Unknown
+}
+
+/// Parses the Media Queries Level 4 range syntax used by utility CSS frameworks,
+/// for example `(width >= 851px)` and `(48rem <= width)`.
+fn parse_range_media_feature(inner: &str) -> Option<MediaCondition> {
+    let compact: String = inner.chars().filter(|ch| !ch.is_whitespace()).collect();
+    for operator in [">=", "<="] {
+        let Some((left, right)) = compact.split_once(operator) else {
+            continue;
+        };
+        let left = left.to_ascii_lowercase();
+        let right = right.to_ascii_lowercase();
+
+        return match (left.as_str(), right.as_str(), operator) {
+            ("width", value, ">=") => parse_length_to_px(value).map(MediaCondition::MinWidth),
+            ("width", value, "<=") => parse_length_to_px(value).map(MediaCondition::MaxWidth),
+            ("height", value, ">=") => parse_length_to_px(value).map(MediaCondition::MinHeight),
+            ("height", value, "<=") => parse_length_to_px(value).map(MediaCondition::MaxHeight),
+            (value, "width", "<=") => parse_length_to_px(value).map(MediaCondition::MinWidth),
+            (value, "width", ">=") => parse_length_to_px(value).map(MediaCondition::MaxWidth),
+            (value, "height", "<=") => parse_length_to_px(value).map(MediaCondition::MinHeight),
+            (value, "height", ">=") => parse_length_to_px(value).map(MediaCondition::MaxHeight),
+            _ => None,
+        };
+    }
+    None
 }
 
 fn parse_non_negative_integer(value: &str) -> Option<u32> {

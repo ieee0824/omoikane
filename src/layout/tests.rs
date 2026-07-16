@@ -1041,6 +1041,68 @@ fn button_flattens_descendant_text_into_single_fragment() {
 }
 
 #[test]
+fn media_elements_create_placeholders_from_default_and_attribute_sizes() {
+    for (tag, attributes, expected) in [
+        ("video", vec![("width", "320"), ("height", "180")], (320.0, 180.0)),
+        ("canvas", vec![("width", "200"), ("height", "100")], (200.0, 100.0)),
+        ("audio", vec![("controls", "")], (300.0, 54.0)),
+    ] {
+        let body = NodeHandle::element("body");
+        let container = NodeHandle::element("div");
+        let media = NodeHandle::element(tag);
+        for (name, value) in attributes {
+            media.set_attribute(name, value);
+        }
+        container.append_child(media);
+        body.append_child(container);
+
+        let layout = layout_single_control_container(&body);
+        let fragments = form_control_fragments(&layout);
+        assert_eq!(fragments.len(), 1, "{tag} should create one placeholder");
+        assert_eq!((fragments[0].0.width, fragments[0].0.height), expected);
+    }
+}
+
+#[test]
+fn video_poster_and_picture_img_use_image_fallback() {
+    let data_uri = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
+    let video = NodeHandle::element("video");
+    video.set_attribute("poster", data_uri);
+    let (_, poster) = super::element_inline_image(&video).expect("video poster image");
+    assert_eq!((poster.width(), poster.height()), (1, 1));
+
+    let picture = NodeHandle::element("picture");
+    let source = NodeHandle::element("source");
+    source.set_attribute("srcset", "unsupported.webp");
+    let img = NodeHandle::element("img");
+    img.set_attribute("src", data_uri);
+    picture.append_child(source);
+    picture.append_child(img.clone());
+    let (image_node, fallback) =
+        super::element_inline_image(&picture).expect("picture img fallback");
+    assert_eq!(image_node.identity(), img.identity());
+    assert_eq!((fallback.width(), fallback.height()), (1, 1));
+}
+
+#[test]
+fn progress_and_meter_create_placeholder_fragments() {
+    for tag in ["progress", "meter"] {
+        let body = NodeHandle::element("body");
+        let container = NodeHandle::element("div");
+        let indicator = NodeHandle::element(tag);
+        container.append_child(indicator);
+        body.append_child(container);
+
+        let layout = layout_single_control_container(&body);
+        let fragments = form_control_fragments(&layout);
+        assert_eq!(fragments.len(), 1, "{tag} should create one placeholder");
+        assert_eq!(fragments[0].0.width, 162.0);
+        assert_eq!(fragments[0].0.height, 18.0);
+        assert!(fragments[0].1.is_empty());
+    }
+}
+
+#[test]
 fn textarea_size_derives_from_cols_and_rows() {
     // font-size:20px => average_advance = 12, line-height(normal) = 24.
     // width  = cols(10) * 12 + padding(2+2) + border(1+1) = 126.
@@ -2935,6 +2997,86 @@ fn logical_margin_inline_start_offsets_flex_item() {
 }
 
 #[test]
+fn block_svg_flex_item_keeps_its_replaced_image_fragment() {
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let container = NodeHandle::element("div");
+    let svg = NodeHandle::element("svg");
+    svg.set_attribute("viewBox", "0 0 100 50");
+    let rect = NodeHandle::element("rect");
+    rect.set_attribute("width", "100");
+    rect.set_attribute("height", "50");
+    rect.set_attribute("fill", "black");
+    svg.append_child(rect);
+    container.append_child(svg);
+    body.append_child(container);
+    document.append_child(body.clone());
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet("div { display: flex; width: 200px; } svg { display: block; }")
+            .unwrap(),
+    );
+    let layout = layout_tree(
+        &body,
+        &mut resolver,
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 200.0,
+            height: 100.0,
+        },
+    )
+    .unwrap();
+
+    let svg_box = &layout.children[0].children[0];
+    assert!(svg_box.lines.iter().any(|line| line.fragments.iter().any(|fragment| {
+        matches!(fragment.content, InlineFragmentContent::Image(_, _))
+    })));
+    assert_eq!(svg_box.dimensions.content.height, 50.0);
+}
+
+#[test]
+fn block_svg_percentage_width_scales_image_to_flex_item() {
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let container = NodeHandle::element("div");
+    let svg = NodeHandle::element("svg");
+    svg.set_attribute("viewBox", "0 0 400 200");
+    let rect = NodeHandle::element("rect");
+    rect.set_attribute("width", "400");
+    rect.set_attribute("height", "200");
+    svg.append_child(rect);
+    container.append_child(svg);
+    body.append_child(container);
+    document.append_child(body.clone());
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "div { display: flex; width: 160px; } svg { display: block; width: 100%; }",
+        )
+        .unwrap(),
+    );
+    let layout = layout_tree(
+        &body,
+        &mut resolver,
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 160.0,
+            height: 100.0,
+        },
+    )
+    .unwrap();
+    let fragment = &layout.children[0].children[0].lines[0].fragments[0];
+    assert_eq!(fragment.rect.width, 160.0);
+    assert_eq!(fragment.rect.height, 80.0);
+}
+
+#[test]
 fn flex_row_honors_column_gap_between_items() {
     let document = NodeHandle::document();
     let body = NodeHandle::element("body");
@@ -4807,6 +4949,38 @@ fn split_words_no_cjk_break_mixed_ascii_cjk() {
 // ── word-break layout tests ──────────────────────────────────────────────────
 
 #[test]
+fn adjacent_text_nodes_do_not_create_wrap_opportunity() {
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let paragraph = NodeHandle::element("p");
+    document.append_child(body.clone());
+    body.append_child(paragraph.clone());
+    paragraph.append_child(NodeHandle::text("hello world"));
+    paragraph.append_child(NodeHandle::comment("framework boundary"));
+    paragraph.append_child(NodeHandle::text("."));
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet("body { margin: 0; } p { width: 60px; font-size: 16px; }").unwrap(),
+    );
+    let layout = layout_tree(
+        &body,
+        &mut resolver,
+        Rect { x: 0.0, y: 0.0, width: 60.0, height: 0.0 },
+    )
+    .unwrap();
+    let paragraph = &layout.children[0];
+    assert_eq!(paragraph.lines.len(), 2);
+    let second_line = paragraph.lines[1]
+        .fragments
+        .iter()
+        .filter_map(InlineFragment::text)
+        .collect::<String>();
+    assert_eq!(second_line, "world.");
+}
+
+#[test]
 fn word_break_break_all_wraps_between_any_characters() {
     // With word-break: break-all, a long English word should be split into
     // individual characters, producing multiple line boxes on a narrow width.
@@ -5484,8 +5658,12 @@ fn supported_html_tags_are_not_logged() {
     assert!(super::is_supported_html_tag("div"));
     assert!(super::is_supported_html_tag("table"));
     assert!(super::is_supported_html_tag("img"));
-    assert!(!super::is_supported_html_tag("canvas"));
-    assert!(!super::is_supported_html_tag("video"));
+    for tag in [
+        "canvas", "video", "audio", "source", "picture", "details", "summary", "dialog",
+        "time", "progress", "meter",
+    ] {
+        assert!(super::is_supported_html_tag(tag), "{tag} should be supported");
+    }
     assert!(!super::is_supported_html_tag("iframe"));
     assert!(super::is_supported_html_tag("form"));
     assert!(super::is_supported_html_tag("input"));

@@ -1,7 +1,7 @@
 ---
 number: 039
 slug: html5-media-elements
-status: open
+status: closed
 ---
 
 # HTML5 メディア要素対応
@@ -23,3 +23,10 @@ status: open
 ## 優先度
 
 中 — モダンサイトでの出現頻度は中程度
+
+## 対応内容
+
+- `video` の poster画像表示とwidth/heightによるプレースホルダーサイズを実装
+- `audio` の通常非表示・controls時プレースホルダーと `canvas` の空矩形を実装
+- `source` を非レンダリング化し、`picture` 内の `img` fallbackを画像経路へ接続
+- 対象タグを対応済みHTMLタグ一覧へ追加し、UA表示・サイズ・画像fallbackテストを追加

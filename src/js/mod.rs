@@ -2,9 +2,16 @@
 
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::path::Path;
 use std::rc::Rc;
 
+use boa_engine::JsString;
+use boa_engine::Module;
+use boa_engine::builtins::promise::{OperationType, PromiseState};
+use boa_engine::context::HostHooks;
+use boa_engine::module::{ModuleLoader, Referrer};
 use boa_engine::native_function::NativeFunction;
+use boa_engine::object::{JsObject, builtins::JsPromise};
 use boa_engine::{Context, JsError, JsNativeError, JsResult, JsValue, Source, js_string};
 
 use crate::css::{
@@ -20,6 +27,116 @@ thread_local! {
 }
 
 const DOM_BOOTSTRAP: &str = include_str!("dom_bootstrap.js");
+
+#[derive(Debug)]
+struct BrowserHostHooks;
+
+impl HostHooks for BrowserHostHooks {
+    fn promise_rejection_tracker(
+        &self,
+        promise: &JsObject,
+        operation: OperationType,
+        _context: &mut Context,
+    ) {
+        if operation != OperationType::Reject || std::env::var_os("OMOIKANE_LOG_SCRIPTS").is_none() {
+            return;
+        }
+        let Ok(promise) = JsPromise::from_object(promise.clone()) else {
+            return;
+        };
+        if let PromiseState::Rejected(reason) = promise.state() {
+            eprintln!("[omoikane][unhandled-rejection] {}", reason.display());
+            for frame in _context.stack_trace() {
+                let location = frame.position();
+                eprintln!(
+                    "[omoikane][unhandled-rejection-frame] function={} path={:?} position={:?}",
+                    location.function_name.to_std_string_escaped(),
+                    location.path,
+                    location.position
+                );
+            }
+            if let Some(error) = reason.as_object()
+                && let Ok(stack) = error.get(js_string!("stack"), _context)
+                && !stack.is_undefined()
+            {
+                eprintln!("{}", stack.display());
+            }
+        }
+    }
+}
+
+#[derive(Debug, Default)]
+struct HttpModuleLoader {
+    modules: RefCell<HashMap<String, Module>>,
+    client: RefCell<Client>,
+}
+
+impl ModuleLoader for HttpModuleLoader {
+    fn load_imported_module(
+        self: Rc<Self>,
+        referrer: Referrer,
+        specifier: JsString,
+        context: &RefCell<&mut Context>,
+    ) -> impl Future<Output = JsResult<Module>> {
+        let result = (|| {
+            let specifier = specifier.to_std_string_escaped();
+            let referrer_url = referrer
+                .path()
+                .and_then(|path| path.to_str())
+                .and_then(|path| path.parse::<crate::http::Url>().ok());
+            let resolved = if specifier.starts_with("http://") || specifier.starts_with("https://") {
+                specifier.parse::<crate::http::Url>().map_err(|error| {
+                    JsNativeError::typ().with_message(error.to_string())
+                })?
+            } else {
+                let base = referrer_url.as_ref().ok_or_else(|| {
+                        JsNativeError::typ()
+                            .with_message(format!("cannot resolve module specifier: {specifier}"))
+                    })?;
+                crate::http::url::resolve_url(base, &specifier)
+                    .map_err(|error| JsNativeError::typ().with_message(error.to_string()))?
+            };
+            let resolved_string = resolved.to_string();
+
+            if let Some(module) = self.modules.borrow().get(&resolved_string) {
+                return Ok(module.clone());
+            }
+
+            let public_only = requires_public_fetch(&resolved, referrer_url.as_ref());
+            let response = if public_only {
+                self.client.borrow_mut().get_public(&resolved_string)
+            } else {
+                self.client.borrow_mut().get(&resolved_string)
+            }
+            .map_err(|error| JsNativeError::typ().with_message(error.to_string()))?;
+            if response.status_code() != 200 {
+                return Err(JsNativeError::typ()
+                    .with_message(format!("module request returned HTTP {}", response.status_code()))
+                    .into());
+            }
+            let source = String::from_utf8_lossy(response.body());
+            let module = Module::parse(
+                Source::from_reader(source.as_bytes(), Some(Path::new(&resolved_string))),
+                None,
+                &mut context.borrow_mut(),
+            )?;
+            self.modules.borrow_mut().insert(resolved_string, module.clone());
+            Ok(module)
+        })();
+        async { result }
+    }
+
+    fn init_import_meta(
+        self: Rc<Self>,
+        import_meta: &JsObject,
+        module: &Module,
+        context: &mut Context,
+    ) {
+        if let Some(url) = module.path().and_then(|path| path.to_str()) {
+            let _ = import_meta.set(js_string!("url"), js_string!(url), false, context);
+        }
+    }
+}
 
 
 /// What a scheduled timer executes when it fires.
@@ -266,10 +383,15 @@ impl HostState {
 
     /// Queue loads for iframe and data-bearing object descendants when a
     /// detached subtree first becomes connected to a document.
-    fn schedule_connected_resource_loads(&mut self, root: &NodeHandle) {
-        fn visit(state: &mut HostState, node: &NodeHandle) {
+    fn schedule_connected_resource_loads(&mut self, root: &NodeHandle, include_scripts: bool) {
+        fn visit(state: &mut HostState, node: &NodeHandle, include_scripts: bool) {
             let tag = node.tag_name().unwrap_or_default();
             let is_resource = tag.eq_ignore_ascii_case("iframe")
+                || (include_scripts
+                    && tag.eq_ignore_ascii_case("script")
+                    && node
+                        .attributes()
+                        .is_some_and(|attrs| attrs.contains_key("src")))
                 || (tag.eq_ignore_ascii_case("object")
                     && node
                         .attributes()
@@ -283,10 +405,10 @@ impl HostState {
                     });
             }
             for child in node.child_nodes() {
-                visit(state, &child);
+                visit(state, &child, include_scripts);
             }
         }
-        visit(self, root);
+        visit(self, root, include_scripts);
     }
 
     /// Queue a fresh navigation for a single resource element whose resource
@@ -708,7 +830,10 @@ impl JsRuntime {
         sandbox: SandboxConfig,
     ) -> JsResult<Self> {
         let host_state = Rc::new(RefCell::new(HostState::new(document.clone())));
-        let mut context = Context::default();
+        let mut context = Context::builder()
+            .module_loader(Rc::new(HttpModuleLoader::default()))
+            .host_hooks(Rc::new(BrowserHostHooks))
+            .build()?;
 
         register_host_bindings(&mut context, &host_state)?;
 
@@ -724,7 +849,7 @@ impl JsRuntime {
         runtime
             .host_state
             .borrow_mut()
-            .schedule_connected_resource_loads(&document);
+            .schedule_connected_resource_loads(&document, false);
         Ok(runtime)
     }
 
@@ -824,6 +949,22 @@ impl JsRuntime {
         match self.eval(source) {
             Ok(value) => Ok(value),
             Err(error) => Err(format!("{error}")),
+        }
+    }
+
+    fn eval_module(&mut self, source: &str, url: &str) -> Result<(), String> {
+        let module = Module::parse(
+            Source::from_reader(source.as_bytes(), Some(Path::new(url))),
+            None,
+            &mut self.context,
+        )
+        .map_err(|error| error.to_string())?;
+        let promise = module.load_link_evaluate(&mut self.context);
+        self.run_jobs().map_err(|error| error.to_string())?;
+        match promise.state() {
+            PromiseState::Fulfilled(_) => Ok(()),
+            PromiseState::Rejected(error) => Err(error.display().to_string()),
+            PromiseState::Pending => Err("module evaluation remained pending".to_string()),
         }
     }
 
@@ -927,9 +1068,18 @@ impl JsRuntime {
                         break;
                     }
                     // Swallow per-task JS errors: a single failing timer must
-                    // not abort the whole pump during rendering.
-                    let _ = self.run_timer_payload(task);
-                    let _ = self.run_jobs();
+                    // not abort the whole pump during rendering. Diagnostics
+                    // remain available on demand for complex app bootstraps.
+                    if let Err(error) = self.run_timer_payload(task)
+                        && std::env::var_os("OMOIKANE_LOG_SCRIPTS").is_some()
+                    {
+                        eprintln!("[omoikane][timer-error] {error}");
+                    }
+                    if let Err(error) = self.run_jobs()
+                        && std::env::var_os("OMOIKANE_LOG_SCRIPTS").is_some()
+                    {
+                        eprintln!("[omoikane][timer-job-error] {error}");
+                    }
                     tasks_run += 1;
                 }
                 if hit_cap {
@@ -956,16 +1106,26 @@ impl JsRuntime {
                 Ok(())
             }),
             TimerPayload::ResourceLoad { node_id } => {
-                let (should_dispatch, xhtml_scripts) = {
+                let (should_dispatch, xhtml_scripts, dynamic_script) = {
                     let mut state = self.host_state.borrow_mut();
                     state.pending_resource_loads.remove(&node_id);
                     let Some(node) = state.get_node(node_id) else {
                         return Ok(());
                     };
                     if document_root_for_node(&node).is_none() {
-                        (false, Vec::new())
+                        (false, Vec::new(), None)
                     } else {
                         let mut xhtml_scripts = Vec::new();
+                        let dynamic_script = if node
+                            .tag_name()
+                            .is_some_and(|tag| tag.eq_ignore_ascii_case("script"))
+                        {
+                            node.attributes()
+                                .and_then(|attrs| attrs.get("src").cloned())
+                                .map(|src| (src, state.base_url.clone()))
+                        } else {
+                            None
+                        };
                         if node
                             .tag_name()
                             .is_some_and(|tag| tag.eq_ignore_ascii_case("iframe"))
@@ -999,7 +1159,7 @@ impl JsRuntime {
                             // allocated and cannot reuse the same address.
                             drop(previous);
                         }
-                        (true, xhtml_scripts)
+                        (true, xhtml_scripts, dynamic_script)
                     }
                 };
                 for source in xhtml_scripts {
@@ -1008,6 +1168,25 @@ impl JsRuntime {
                     // event from running.
                     let _ = self.eval(&source);
                     let _ = self.run_jobs();
+                }
+                if let Some((src, base_url)) = dynamic_script {
+                    if std::env::var_os("OMOIKANE_LOG_SCRIPTS").is_some() {
+                        eprintln!("[omoikane][script] loading dynamic {src}");
+                    }
+                    let source = fetch_script_source(&src, base_url.as_ref()).ok_or_else(|| {
+                        JsError::from(
+                            JsNativeError::error()
+                                .with_message(format!("failed to fetch dynamic script: {src}")),
+                        )
+                    })?;
+                    self.eval(&format!("__omoikane_set_current_script({node_id})"))?;
+                    let result = self.eval(&source);
+                    let _ = self.eval("__omoikane_set_current_script(null)");
+                    result?;
+                    self.run_jobs()?;
+                    if std::env::var_os("OMOIKANE_LOG_SCRIPTS").is_some() {
+                        eprintln!("[omoikane][script] completed dynamic {src}");
+                    }
                 }
                 if should_dispatch {
                     self.eval(&format!("__omoikane_dispatch_resource_load({node_id})"))?;
@@ -1024,7 +1203,9 @@ impl JsRuntime {
     /// and executing inline scripts). Listeners registered via
     /// `document.addEventListener('DOMContentLoaded', fn)` will be invoked.
     pub fn fire_dom_content_loaded(&mut self) -> JsResult<()> {
-        self.eval("document.dispatchEvent(new Event('DOMContentLoaded'))")?;
+        self.eval(
+            "document.__readyState = 'interactive'; document.dispatchEvent(new Event('DOMContentLoaded'))",
+        )?;
         self.run_jobs()
     }
 
@@ -1070,7 +1251,9 @@ impl JsRuntime {
     /// page's `<body onload="...">` handler runs at this point.
     pub fn fire_load(&mut self) -> JsResult<()> {
         // The load event does not bubble.
-        self.eval("window.dispatchEvent(new Event('load', { bubbles: false }))")?;
+        self.eval(
+            "document.__readyState = 'complete'; window.dispatchEvent(new Event('load', { bubbles: false }))",
+        )?;
         self.run_jobs()
     }
 
@@ -1090,31 +1273,46 @@ impl JsRuntime {
         if let Some(base) = base_url {
             self.host_state.borrow_mut().base_url = Some(base.clone());
         }
+        let _ = self.eval("document.__readyState = 'loading'");
 
         let document = self.document();
         let scripts = collect_script_elements(&document);
         let mut errors = Vec::new();
         let mut deferred = Vec::new();
+        let log_scripts = std::env::var_os("OMOIKANE_LOG_SCRIPTS").is_some();
 
-        for script in &scripts {
+        for (script_index, script) in scripts.iter().enumerate() {
             let attrs = script.attributes().unwrap_or_default();
+            let is_module = attrs
+                .get("type")
+                .is_some_and(|value| value.trim().eq_ignore_ascii_case("module"));
 
             // Skip <script> types Omoikane does not run as classic scripts
             // (`type="module"` and non-JavaScript types). Shares the type gate
             // with `is_inline_classic_script` so a script executes identically
             // whether it was parsed normally or inserted via `document.write`.
-            if !is_executable_classic_script_type(attrs.get("type").map(|s| s.as_str())) {
+            if !is_module
+                && !is_executable_classic_script_type(attrs.get("type").map(|s| s.as_str()))
+            {
+                if log_scripts {
+                    eprintln!(
+                        "[omoikane][script] skipped type={:?} src={:?}",
+                        attrs.get("type"),
+                        attrs.get("src")
+                    );
+                }
                 continue;
             }
 
             let src = attrs.get("src").cloned();
+            let has_src = src.is_some();
             // HTML spec: defer only applies to external (src) scripts.
-            let is_defer = attrs.contains_key("defer") && src.is_some();
+            let is_defer = is_module || (attrs.contains_key("defer") && src.is_some());
 
-            let source_code = if let Some(src_url) = src {
+            let (source_code, script_label) = if let Some(src_url) = src {
                 // External script: fetch
                 match fetch_script_source(&src_url, base_url) {
-                    Some(code) => code,
+                    Some(code) => (code, src_url.clone()),
                     None => {
                         errors.push(format!("failed to fetch script: {src_url}"));
                         continue;
@@ -1122,11 +1320,25 @@ impl JsRuntime {
                 }
             } else {
                 // Inline script: collect text content
-                collect_text_content(script)
+                (
+                    collect_text_content(script),
+                    format!("inline-script-{}", script_index + 1),
+                )
             };
 
             if source_code.trim().is_empty() {
                 continue;
+            }
+
+            let module_url = is_module.then(|| {
+                module_script_url(&script_label, base_url, !has_src)
+            });
+
+            if log_scripts {
+                eprintln!(
+                    "[omoikane][script] queued {script_label} ({} chars, defer={is_defer})",
+                    source_code.chars().count()
+                );
             }
 
             if is_defer {
@@ -1135,7 +1347,7 @@ impl JsRuntime {
                 // reference at this script (exactly like the inline path), rather
                 // than letting a deferred write() fall back to appending at
                 // <body>.
-                deferred.push((source_code, script.clone()));
+                deferred.push((source_code, script.clone(), script_label, module_url));
                 continue;
             }
 
@@ -1144,16 +1356,25 @@ impl JsRuntime {
             // HTML tokenizer inserts written text at the "insertion point",
             // i.e. right where the running <script> sits in the tree).
             self.host_state.borrow_mut().write_insertion_ref = Some(script.clone());
+            let _ = self.eval(&format!(
+                "__omoikane_set_current_script({})",
+                script.identity()
+            ));
 
             // Execute immediately
+            let script_context = script_source_context(&source_code);
             if let Err(err) = self.eval_safe(&source_code) {
-                errors.push(err);
+                errors.push(format!("[script: {script_label}; {script_context}] {err}"));
             }
             if let Err(err) = self.run_jobs() {
-                errors.push(format!("{err}"));
+                errors.push(format!("[script jobs: {script_label}] {err}"));
+            }
+            if log_scripts {
+                eprintln!("[omoikane][script] completed {script_label}");
             }
 
-            // The insertion point is only defined while a script is running.
+            // The insertion point and currentScript are only defined while a script runs.
+            let _ = self.eval("__omoikane_set_current_script(null)");
             self.host_state.borrow_mut().write_insertion_ref = None;
         }
 
@@ -1161,14 +1382,32 @@ impl JsRuntime {
         // to its <script> element, so a `document.write` from a deferred script
         // lands as that script's following siblings — the same treatment the
         // inline path applies above.
-        for (source_code, script) in deferred {
+        for (source_code, script, script_label, module_url) in deferred {
+            if log_scripts {
+                eprintln!("[omoikane][script] running deferred {script_label}");
+            }
             self.host_state.borrow_mut().write_insertion_ref = Some(script.clone());
-            if let Err(err) = self.eval_safe(&source_code) {
-                errors.push(err);
+            let _ = self.eval(&format!(
+                "__omoikane_set_current_script({})",
+                script.identity()
+            ));
+            let script_context = script_source_context(&source_code);
+            let result = if let Some(module_url) = module_url {
+                self.eval_module(&source_code, &module_url)
+                    .map(|()| JsValue::undefined())
+            } else {
+                self.eval_safe(&source_code)
+            };
+            if let Err(err) = result {
+                errors.push(format!("[script: {script_label}; {script_context}] {err}"));
             }
             if let Err(err) = self.run_jobs() {
-                errors.push(format!("{err}"));
+                errors.push(format!("[script jobs: {script_label}] {err}"));
             }
+            if log_scripts {
+                eprintln!("[omoikane][script] completed deferred {script_label}");
+            }
+            let _ = self.eval("__omoikane_set_current_script(null)");
             self.host_state.borrow_mut().write_insertion_ref = None;
         }
 
@@ -1188,6 +1427,36 @@ impl JsRuntime {
             slot.replace(previous);
             result
         })
+    }
+}
+
+fn script_source_context(source: &str) -> String {
+    let preview: String = source
+        .chars()
+        .take(160)
+        .map(|ch| if ch.is_control() { ' ' } else { ch })
+        .collect();
+    format!("{} chars; starts with: {preview}", source.chars().count())
+}
+
+fn module_script_url(
+    script_label: &str,
+    base_url: Option<&crate::http::Url>,
+    inline: bool,
+) -> String {
+    if inline {
+        return base_url
+            .map(|base| {
+                let base = base.to_string();
+                let base = base.split_once('#').map_or(base.as_str(), |(head, _)| head);
+                format!("{base}#{script_label}")
+            })
+            .unwrap_or_else(|| script_label.to_string());
+    }
+
+    match resolve_resource_ref(script_label, base_url) {
+        Some(ResolvedResource::Url(url)) => url,
+        _ => script_label.to_string(),
     }
 }
 
@@ -1279,6 +1548,14 @@ fn resolve_resource_ref(
     }
 }
 
+fn same_origin_url(a: &crate::http::Url, b: &crate::http::Url) -> bool {
+    a.scheme() == b.scheme() && a.host() == b.host() && a.port() == b.port()
+}
+
+fn requires_public_fetch(url: &crate::http::Url, base_url: Option<&crate::http::Url>) -> bool {
+    base_url.is_none_or(|base| !same_origin_url(url, base))
+}
+
 /// Fetches an external script's source.
 ///
 /// Supports `http:`/`https:` (fetched over the network) and `data:` URIs
@@ -1302,8 +1579,14 @@ fn fetch_script_source(src: &str, base_url: Option<&crate::http::Url>) -> Option
             String::from_utf8(data).ok()
         }
         ResolvedResource::Url(url) => {
+            let resolved = url.parse::<crate::http::Url>().ok()?;
+            let public_only = requires_public_fetch(&resolved, base_url);
             let mut client = Client::new();
-            let response = client.get(&url).ok()?;
+            let response = if public_only {
+                client.get_public(&url).ok()?
+            } else {
+                client.get(&url).ok()?
+            };
             // Scripts require a successful (200) response; error pages are not
             // executed. This differs deliberately from iframe loading, which
             // adopts even an error response's body as the sub-document.
@@ -2231,7 +2514,7 @@ fn append_child_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> 
             // only a detach/reconnect reloads (real browsers reload here too,
             // but that broader change is out of scope for this fix).
             if target_document.is_some() && source_document != target_document {
-                state.schedule_connected_resource_loads(&child);
+                state.schedule_connected_resource_loads(&child, true);
             }
         }
         Ok(JsValue::from(child.identity() as f64))
@@ -2434,7 +2717,9 @@ fn set_attribute_native(_: &JsValue, args: &[JsValue], context: &mut Context) ->
         // starts a fresh navigation; detect it before `name` is moved into
         // `set_attribute`. Any other attribute leaves navigation untouched.
         let resource_attr = node.tag_name().and_then(|tag| {
-            if tag.eq_ignore_ascii_case("iframe") && name.eq_ignore_ascii_case("src") {
+            if (tag.eq_ignore_ascii_case("iframe") || tag.eq_ignore_ascii_case("script"))
+                && name.eq_ignore_ascii_case("src")
+            {
                 Some("src")
             } else if tag.eq_ignore_ascii_case("object") && name.eq_ignore_ascii_case("data") {
                 Some("data")
@@ -2888,7 +3173,7 @@ fn insert_before_native(_: &JsValue, args: &[JsValue], context: &mut Context) ->
             // a direct move across two different documents), but not for an
             // in-document reorder.
             if target_document.is_some() && source_document != target_document {
-                state.schedule_connected_resource_loads(&new_node);
+                state.schedule_connected_resource_loads(&new_node, true);
             }
         }
         Ok(JsValue::undefined())
@@ -3486,7 +3771,7 @@ fn document_write_native(_: &JsValue, args: &[JsValue], context: &mut Context) -
             let mut s = state.borrow_mut();
             for child in &parsed_children {
                 s.register_tree(child);
-                s.schedule_connected_resource_loads(child);
+                s.schedule_connected_resource_loads(child, true);
             }
             // `document.write` splices new nodes into the live tree, so the
             // written document's cached resolver is now stale. Invalidate only
@@ -3817,6 +4102,205 @@ mod tests {
         assert_eq!(logs.len(), 1);
         assert!(logs[0].contains("http://localhost/"));
         assert!(logs[0].contains(&default_user_agent()));
+    }
+
+    #[test]
+    fn intl_formatters_expose_common_bootstrap_surface() {
+        let mut runtime = JsRuntime::new().unwrap();
+        assert!(runtime
+            .eval(
+                r#"Intl.NumberFormat("en").format(12) === "12" &&
+                   Intl.PluralRules("en").select(1) === "one" &&
+                   Intl.ListFormat("en").format(["a", "b"]) === "a, b" &&
+                   Intl.getCanonicalLocales("en-US")[0] === "en-US""#,
+            )
+            .unwrap()
+            .as_boolean()
+            .unwrap());
+    }
+
+    #[test]
+    fn common_html_elements_use_specific_interfaces() {
+        let mut runtime = runtime_from_html("<html><head></head><body></body></html>");
+        assert!(runtime
+            .eval(
+                r#"document.body instanceof HTMLBodyElement &&
+                   document.head instanceof HTMLHeadElement &&
+                   document.documentElement instanceof HTMLHtmlElement &&
+                   document.createElement("a") instanceof HTMLAnchorElement"#,
+            )
+            .unwrap()
+            .as_boolean()
+            .unwrap());
+    }
+
+    #[test]
+    fn text_encoder_and_decoder_round_trip_utf8() {
+        let mut runtime = JsRuntime::new().unwrap();
+        assert!(runtime
+            .eval(
+                r#"(() => {
+                    const bytes = new TextEncoder().encode("A日本");
+                    return bytes.length === 7 && bytes[0] === 65 &&
+                      new TextDecoder().decode(bytes) === "A日本" &&
+                      btoa("hello") === "aGVsbG8=" && atob("aGVsbG8=") === "hello";
+                })()"#,
+            )
+            .unwrap()
+            .as_boolean()
+            .unwrap());
+    }
+
+    #[test]
+    fn url_and_search_params_parse_common_web_urls() {
+        let mut runtime = JsRuntime::new().unwrap();
+        assert!(runtime
+            .eval(
+                r#"(() => {
+                    const url = new URL("../asset.js?q=hello+world", "https://example.com/app/page.js");
+                    return url.origin === "https://example.com" &&
+                      url.pathname === "/app/../asset.js" &&
+                      url.searchParams.get("q") === "hello world";
+                })()"#,
+            )
+            .unwrap()
+            .as_boolean()
+            .unwrap());
+    }
+
+    #[test]
+    fn fetch_standard_objects_expose_headers_and_body_helpers() {
+        let mut runtime = JsRuntime::new().unwrap();
+        assert!(runtime
+            .eval(
+                r#"(() => {
+                    const headers = new Headers({ "X-Test": "one" });
+                    headers.append("x-test", "two");
+                    const request = new Request("https://example.com", { headers });
+                    const response = Response.json({ ok: true });
+                    return request.headers.get("X-Test") === "one, two" &&
+                      response.ok && response.headers.get("content-type") === "application/json";
+                })()"#,
+            )
+            .unwrap()
+            .as_boolean()
+            .unwrap());
+    }
+
+    #[test]
+    fn abort_controller_exposes_signal_state_and_events() {
+        let mut runtime = JsRuntime::new().unwrap();
+        assert!(runtime
+            .eval(
+                r#"(() => {
+                    const controller = new AbortController();
+                    let events = 0;
+                    controller.signal.addEventListener("abort", () => events++);
+                    controller.abort("stopped");
+                    controller.abort("ignored");
+                    return controller.signal instanceof AbortSignal &&
+                      controller.signal.aborted && controller.signal.reason === "stopped" &&
+                      events === 1 && AbortSignal.abort().reason.name === "AbortError";
+                })()"#,
+            )
+            .unwrap()
+            .as_boolean()
+            .unwrap());
+    }
+
+    #[test]
+    fn document_get_elements_by_name_filters_exact_attribute_values() {
+        let mut runtime = runtime_from_html(
+            r#"<html><body><input name="failedScript"><div name="other"></div><span name="failedScript"></span></body></html>"#,
+        );
+        assert!(runtime
+            .eval(r#"document.getElementsByName("failedScript").length === 2 && document.getElementsByName("missing").length === 0"#)
+            .unwrap()
+            .as_boolean()
+            .unwrap());
+    }
+
+    #[test]
+    fn document_cookie_round_trips_name_value_pairs() {
+        let mut runtime = JsRuntime::new().unwrap();
+        assert!(runtime
+            .eval(r#"document.cookie = "theme=dark; Path=/"; document.cookie = "token=abc"; document.cookie === "theme=dark; token=abc" && navigator.cookieEnabled"#)
+            .unwrap()
+            .as_boolean()
+            .unwrap());
+    }
+
+    #[test]
+    fn history_api_tracks_state_and_same_origin_urls() {
+        let mut runtime = JsRuntime::new().unwrap();
+        assert!(runtime
+            .eval(r##"(() => { history.pushState({page: 1}, "", "/one?q=1"); history.replaceState({page: 2}, "", "/two#hash"); return history.length === 2 && history.state.page === 2 && location.pathname === "/two" && location.hash === "#hash"; })()"##)
+            .unwrap()
+            .as_boolean()
+            .unwrap());
+    }
+
+    #[test]
+    fn location_exposes_navigation_methods() {
+        let mut runtime = JsRuntime::new().unwrap();
+        assert!(runtime
+            .eval(r##"(() => { const result = location.reload(); location.assign("/assigned?q=1"); location.replace("/replaced#ok"); return result === undefined && location.pathname === "/replaced" && location.hash === "#ok"; })()"##)
+            .unwrap()
+            .as_boolean()
+            .unwrap());
+    }
+
+    #[test]
+    fn event_listener_objects_invoke_handle_event() {
+        let mut runtime = JsRuntime::new().unwrap();
+        assert!(runtime
+            .eval(r#"(() => { const target = document.createElement("div"); const listener = { calls: 0, handleEvent(event) { this.calls++; this.type = event.type; } }; target.addEventListener("ready", listener); target.dispatchEvent(new Event("ready")); return listener.calls === 1 && listener.type === "ready"; })()"#)
+            .unwrap()
+            .as_boolean()
+            .unwrap());
+    }
+
+    #[test]
+    fn web_animations_finish_and_commit_final_keyframe() {
+        let mut runtime = JsRuntime::new().unwrap();
+        runtime
+            .eval(r#"(() => { const element = document.createElement("div"); document.body.appendChild(element); globalThis.finishedAnimation = false; const animation = element.animate([{ opacity: 0 }, { opacity: 1 }], { duration: 20 }); animation.finished.then(() => { finishedAnimation = true; }); globalThis.testAnimation = animation; globalThis.animatedElement = element; })()"#)
+            .unwrap();
+        runtime.run_timers(100, 10, 100);
+        assert!(runtime
+            .eval(r#"finishedAnimation && testAnimation instanceof Animation && testAnimation.playState === "finished" && animatedElement.style.opacity === "1" && animatedElement.getAnimations().length === 1 && document.getAnimations().length === 1"#)
+            .unwrap()
+            .as_boolean()
+            .unwrap());
+    }
+
+    #[test]
+    fn streams_support_enqueue_read_and_transform() {
+        let mut runtime = JsRuntime::new().unwrap();
+        runtime
+            .eval(r#"globalThis.streamResult = ""; globalThis.streamSource = new ReadableStream({ start: function(c) { c.enqueue("a"); c.close(); } }); globalThis.streamReader = streamSource.getReader(); streamReader.read().then(function(r) { streamResult = r.value; });"#)
+            .unwrap();
+        runtime.run_jobs().unwrap();
+        let result = runtime
+            .eval("streamResult")
+            .unwrap()
+            .as_string()
+            .unwrap()
+            .to_std_string_escaped();
+        assert_eq!(result, "a");
+        runtime
+            .eval(r#"globalThis.transformResult = ""; globalThis.transformStream = new TransformStream({ transform: function(value, controller) { controller.enqueue(value.toUpperCase()); } }); globalThis.transformWriter = transformStream.writable.getWriter(); transformWriter.write("b"); transformStream.readable.getReader().read().then(function(result) { transformResult = result.value; });"#)
+            .unwrap();
+        runtime.run_jobs().unwrap();
+        assert_eq!(
+            runtime
+                .eval("transformResult")
+                .unwrap()
+                .as_string()
+                .unwrap()
+                .to_std_string_escaped(),
+            "B"
+        );
     }
 
     #[test]
@@ -4897,6 +5381,29 @@ mod tests {
 
         let result = runtime.eval("jsRan").unwrap().as_boolean().unwrap();
         assert!(result, "JS script should run");
+    }
+
+    #[test]
+    fn document_current_script_tracks_and_can_remove_running_script() {
+        let html = r#"<html><body><script>globalThis.currentScriptId = document.currentScript.id; document.currentScript.remove();</script><script id="second">globalThis.secondRan = true;</script></body></html>"#;
+        let mut runtime = runtime_from_html(html);
+        let document = runtime.document();
+        let first = document.query_selector("script").unwrap();
+        first.set_attribute("id", "first");
+        let errors = runtime.execute_document_scripts(None);
+        assert!(errors.is_empty(), "unexpected errors: {errors:?}");
+        assert!(document.query_selector("#first").is_none());
+        assert_eq!(
+            runtime
+                .eval("currentScriptId")
+                .unwrap()
+                .as_string()
+                .unwrap()
+                .to_std_string_escaped(),
+            "first"
+        );
+        assert!(runtime.eval("secondRan").unwrap().as_boolean().unwrap());
+        assert!(runtime.eval("document.currentScript === null").unwrap().as_boolean().unwrap());
     }
 
     #[test]
@@ -6403,6 +6910,103 @@ mod tests {
     }
 
     #[test]
+    fn document_ready_state_follows_script_and_load_lifecycle() {
+        let mut runtime = runtime_from_html(
+            r#"<html><body><script>
+                globalThis.readyStates = [document.readyState];
+                document.addEventListener("DOMContentLoaded", () => readyStates.push(document.readyState));
+                window.addEventListener("load", () => readyStates.push(document.readyState));
+            </script></body></html>"#,
+        );
+
+        let errors = runtime.execute_document_scripts(None);
+        assert!(errors.is_empty(), "unexpected errors: {errors:?}");
+        assert_eq!(
+            runtime
+                .eval("readyStates.join(',') + '|' + document.readyState")
+                .unwrap()
+                .as_string()
+                .unwrap()
+                .to_std_string_escaped(),
+            "loading,interactive|interactive"
+        );
+
+        runtime.fire_load().unwrap();
+        assert_eq!(
+            runtime
+                .eval("readyStates.join(',') + '|' + document.readyState")
+                .unwrap()
+                .as_string()
+                .unwrap()
+                .to_std_string_escaped(),
+            "loading,interactive,complete|complete"
+        );
+    }
+
+    #[test]
+    fn module_script_executes_before_dom_content_loaded() {
+        let mut runtime = runtime_from_html(
+            r#"<html><body>
+                <script type="module">globalThis.moduleRan = true;</script>
+                <script>document.addEventListener("DOMContentLoaded", () => globalThis.moduleWasReady = moduleRan);</script>
+            </body></html>"#,
+        );
+        let errors = runtime.execute_document_scripts(None);
+        assert!(errors.is_empty(), "unexpected errors: {errors:?}");
+        assert!(runtime.eval("moduleRan && moduleWasReady").unwrap().as_boolean().unwrap());
+    }
+
+    #[test]
+    fn network_scripts_require_public_fetch_outside_document_origin() {
+        let document_url: crate::http::Url = "https://example.com/app/index.html".parse().unwrap();
+        let same_origin: crate::http::Url = "https://example.com/app.js".parse().unwrap();
+        let cross_origin: crate::http::Url = "https://cdn.example.net/app.js".parse().unwrap();
+
+        assert!(!requires_public_fetch(&same_origin, Some(&document_url)));
+        assert!(requires_public_fetch(&cross_origin, Some(&document_url)));
+        assert!(requires_public_fetch(&cross_origin, None));
+    }
+
+    #[test]
+    fn inline_module_url_uses_parseable_document_base() {
+        let base: crate::http::Url = "https://example.com/app/index.html".parse().unwrap();
+        assert_eq!(
+            module_script_url("inline-script-1", Some(&base), true),
+            "https://example.com/app/index.html#inline-script-1"
+        );
+    }
+
+    #[test]
+    fn inline_module_resolves_relative_import_against_document_url() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let handle = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0u8; 1024];
+            let size = stream.read(&mut request).unwrap();
+            assert!(String::from_utf8_lossy(&request[..size]).contains("GET /app/dep.js "));
+            let body = b"export const answer = 42;";
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: text/javascript\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            )
+            .unwrap();
+            stream.write_all(body).unwrap();
+        });
+
+        let mut runtime = runtime_from_html(
+            r#"<script type="module">import { answer } from './dep.js'; globalThis.answer = answer;</script>"#,
+        );
+        let base: crate::http::Url = format!("http://{address}/app/index.html").parse().unwrap();
+        let errors = runtime.execute_document_scripts(Some(&base));
+        handle.join().unwrap();
+
+        assert!(errors.is_empty(), "unexpected module errors: {errors:?}");
+        assert_eq!(runtime.eval("answer").unwrap().as_number(), Some(42.0));
+    }
+
+    #[test]
     fn matches_and_closest() {
         let doc = NodeHandle::document();
         let html = NodeHandle::element("html");
@@ -6521,6 +7125,27 @@ mod tests {
             Some(42.0),
             "callback should fire preserving captured closure variable"
         );
+    }
+
+    #[test]
+    fn connected_dynamic_external_script_loads_executes_and_fires_load() {
+        let mut runtime = runtime_from_html("<html><head></head><body></body></html>");
+        runtime
+            .eval(
+                r#"const script = document.createElement("script");
+                   script.src = "data:text/javascript,globalThis.dynamicScriptRan%20%3D%20true";
+                   script.addEventListener("load", () => globalThis.dynamicScriptLoaded = true);
+                   document.head.appendChild(script);"#,
+            )
+            .unwrap();
+
+        assert_eq!(runtime.run_timers(100, 1, 10), 1);
+        assert!(runtime.eval("dynamicScriptRan").unwrap().as_boolean().unwrap());
+        assert!(runtime
+            .eval("dynamicScriptLoaded")
+            .unwrap()
+            .as_boolean()
+            .unwrap());
     }
 
     #[test]
