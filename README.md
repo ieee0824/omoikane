@@ -178,6 +178,12 @@ cargo run --release --example render_benchmark -- --iterations 20 --warmup 3
 min / median / mean / p95をJSONで出力します。`warm_dom`は解析済みDOMを再利用し、`cold`は
 反復ごとにHTMLから再構築します。
 
+大規模DOM/CSSのstyle解決baseline:
+
+```bash
+cargo run --release --example style_benchmark
+```
+
 `Client::new()` の既定 `User-Agent` は `Omoikane/{version} {OS}` 形式です。
 必要に応じて [`src/http/client.rs`](/src/http/client.rs) の `set_user_agent` で上書きできます。
 

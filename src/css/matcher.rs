@@ -425,7 +425,7 @@ pub(super) fn parse_an_plus_b(expression: &str) -> Option<AnPlusB> {
 }
 
 fn get_attribute(node: &NodeHandle, name: &str) -> Option<String> {
-    node.attributes().and_then(|attrs| attrs.get(name).cloned())
+    node.get_attribute(name)
 }
 
 fn previous_element_sibling(node: &NodeHandle) -> Option<NodeHandle> {
