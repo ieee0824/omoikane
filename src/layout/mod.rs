@@ -59,16 +59,28 @@ struct LayoutFontContext {
     web_fonts: Option<Arc<WebFontRegistry>>,
 }
 
+/// Runs `f` with the given fonts installed as the thread-local layout font
+/// context, restoring the previous context afterwards — including when `f`
+/// panics, so a caught panic cannot leak fonts into later renders.
 pub(crate) fn with_layout_fonts<T>(
     system_fonts: Vec<Arc<Font>>,
     web_fonts: Option<Arc<WebFontRegistry>>,
     f: impl FnOnce() -> T,
 ) -> T {
+    struct LayoutFontsGuard(Option<LayoutFontContext>);
+
+    impl Drop for LayoutFontsGuard {
+        fn drop(&mut self) {
+            LAYOUT_FONTS.with(|cell| {
+                cell.replace(self.0.take());
+            });
+        }
+    }
+
     LAYOUT_FONTS.with(|cell| {
         let previous = cell.replace(Some(LayoutFontContext { system_fonts, web_fonts }));
-        let result = f();
-        cell.replace(previous);
-        result
+        let _guard = LayoutFontsGuard(previous);
+        f()
     })
 }
 
@@ -2109,9 +2121,20 @@ fn layout_positioned_child(
         PositionScheme::Relative => containing_block,
     };
 
+    // `inset-inline-end` is the right edge in LTR and the left edge in RTL.
     let inline_end = explicit_length(style, "inset-inline-end");
-    let left = explicit_length(style, "left");
-    let right = explicit_length(style, "right").or(inline_end);
+    let rtl = matches!(
+        style.get("direction"),
+        Some(ComputedValue::Keyword(value) | ComputedValue::String(value))
+            if value.eq_ignore_ascii_case("rtl")
+    );
+    let (inline_end_left, inline_end_right) = if rtl {
+        (inline_end, None)
+    } else {
+        (None, inline_end)
+    };
+    let left = explicit_length(style, "left").or(inline_end_left);
+    let right = explicit_length(style, "right").or(inline_end_right);
     let top = explicit_length(style, "top");
     let bottom = explicit_length(style, "bottom");
     let static_outer = containing_block;

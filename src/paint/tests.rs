@@ -9,7 +9,7 @@ use crate::layout::{
 };
 use crate::paint::*;
 
-fn load_cjk_fallback_test_fonts() -> Option<Vec<crate::font::Font>> {
+fn load_cjk_fallback_test_fonts() -> Option<Vec<std::sync::Arc<crate::font::Font>>> {
     let Some(primary_path) = crate::font::find_system_font("sans-serif") else {
         eprintln!("Skipping CJK fallback test: no primary sans-serif system font was found");
         return None;
@@ -45,7 +45,7 @@ fn load_cjk_fallback_test_fonts() -> Option<Vec<crate::font::Font>> {
             continue;
         };
         if font.has_glyph('日') {
-            return Some(vec![primary, font]);
+            return Some(vec![std::sync::Arc::new(primary), std::sync::Arc::new(font)]);
         }
     }
 
@@ -105,7 +105,7 @@ fn webfont_primary_refs_fall_back_for_cjk() {
         eprintln!("Skipping CJK fallback scenario: primary font already contains '日'");
         return;
     }
-    let refs = [&fonts[0], &fonts[1]];
+    let refs = [fonts[0].as_ref(), fonts[1].as_ref()];
 
     let (index, glyph, _) = rasterize_with_fallback_refs(&refs, '日', 20.0);
     assert_eq!(index, 1);
@@ -4095,7 +4095,7 @@ fn debug_painted_pixel_positions() {
     // Create a small canvas just for the text area
     let mut canvas = super::Canvas::new(200, 30);
 
-    let font = load_system_font("sans-serif").unwrap();
+    let font = std::sync::Arc::new(load_system_font("sans-serif").unwrap());
     let text = "Hello\u{00A0}World!";
     let font_size = 24.0;
     let start_x = 0.0;
@@ -6304,6 +6304,7 @@ fn form_control_label_uses_web_font_variant() {
         eprintln!("Skipping web font form control test: failed to load system font");
         return;
     };
+    let global_font = std::sync::Arc::new(global_font);
 
     let mut registry = crate::font::WebFontRegistry::new();
     registry.push(

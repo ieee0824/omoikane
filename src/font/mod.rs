@@ -6,7 +6,7 @@
 use ab_glyph::{Font as AbGlyphFont, FontVec, ScaleFont};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 use std::{fmt, io};
 
 #[cfg(test)]
@@ -1035,17 +1035,24 @@ pub struct FontVariantKey {
 }
 
 /// Stable, case-insensitive identifier for a CSS font family.
+///
+/// Keys are interned in a process-wide table: names that fold to the same
+/// trimmed, Unicode-lowercased string share a key, and distinct names always
+/// receive distinct keys, so key equality is exactly folded-name equality
+/// (no hash collisions).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct FontFamilyKey(u64);
+pub struct FontFamilyKey(u32);
+
+static FONT_FAMILY_KEY_INTERN: OnceLock<Mutex<HashMap<String, u32>>> = OnceLock::new();
 
 impl FontFamilyKey {
+    /// Interns `family` (trimmed and Unicode-lowercased) and returns its key.
     pub fn new(family: &str) -> Self {
-        let mut hash = 0xcbf29ce484222325_u64;
-        for byte in family.trim().bytes() {
-            hash ^= byte.to_ascii_lowercase() as u64;
-            hash = hash.wrapping_mul(0x100000001b3);
-        }
-        Self(hash)
+        let folded = family.trim().to_lowercase();
+        let intern = FONT_FAMILY_KEY_INTERN.get_or_init(|| Mutex::new(HashMap::new()));
+        let mut intern = intern.lock().unwrap_or_else(PoisonError::into_inner);
+        let next = intern.len() as u32;
+        Self(*intern.entry(folded).or_insert(next))
     }
 }
 

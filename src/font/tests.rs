@@ -848,6 +848,36 @@ fn web_font_registry_selects_with_case_insensitive_family_key() {
 }
 
 #[test]
+fn font_family_keys_are_distinct_for_different_families() {
+    assert_ne!(
+        FontFamilyKey::new("TwitterChirp"),
+        FontFamilyKey::new("Segoe UI"),
+    );
+    assert_ne!(
+        FontFamilyKey::new("Arial"),
+        FontFamilyKey::new("Arial Black"),
+    );
+}
+
+#[test]
+fn font_family_key_folds_unicode_case_and_trims() {
+    assert_eq!(
+        FontFamilyKey::new("  TwitterChirp "),
+        FontFamilyKey::new("twitterchirp"),
+    );
+    // Unicode case folding, matching the registry's previous `to_lowercase()`
+    // behaviour for non-ASCII family names.
+    assert_eq!(
+        FontFamilyKey::new("ГАРНИТУРА"),
+        FontFamilyKey::new("гарнитура"),
+    );
+    assert_ne!(
+        FontFamilyKey::new("ГАРНИТУРА"),
+        FontFamilyKey::new("шрифт"),
+    );
+}
+
+#[test]
 fn web_font_registry_bold_selects_700_when_available() {
     let font_regular = match load_test_font_for_registry() {
         Some(f) => f,

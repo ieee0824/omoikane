@@ -1,5 +1,7 @@
 //! Text painting, text decoration, list markers, and inline image fragments.
 
+use std::sync::Arc;
+
 use crate::css::{ComputedStyle, ComputedValue};
 use crate::font::{Font, FontStyle, FontWeight, GlyphRaster, WebFontRegistry, load_default_text_fonts};
 use crate::layout::{FragmentStyle, InlineFragmentContent, LayoutBox, ListMarker, Rect};
@@ -22,7 +24,7 @@ pub(crate) fn paint_text_with_registry(
     style: &ComputedStyle,
     clip: Option<Rect>,
     _viewport: Rect,
-    fonts: &[Font],
+    fonts: &[Arc<Font>],
     web_fonts: Option<&WebFontRegistry>,
 ) {
     // Fallback color from the containing block's style (used when fragment
@@ -72,7 +74,7 @@ pub(crate) fn paint_text_with_registry(
                     if let Some(web_font) = web_font_for_fragment {
                         // Build a temporary font list: web variant first, then fallbacks
                         let mut variant_fonts: Vec<&Font> = vec![web_font];
-                        variant_fonts.extend(fonts.iter());
+                        variant_fonts.extend(fonts.iter().map(|font| font.as_ref()));
                         paint_text_with_font_refs(
                             canvas,
                             fragment.rect,
@@ -155,7 +157,7 @@ pub(crate) fn paint_text_with_registry(
                         {
                             fragment_fonts.push(web_font);
                         }
-                        fragment_fonts.extend(fonts.iter());
+                        fragment_fonts.extend(fonts.iter().map(|font| font.as_ref()));
                         // Center the value horizontally when `text-align: center`
                         // (used by the `<button>` UA default); otherwise keep the
                         // existing left-aligned rendering.
@@ -358,7 +360,7 @@ pub(crate) fn paint_text_with_font(
     text: &str,
     font_size: f32,
     layout_ascent: f32,
-    fonts: &[Font],
+    fonts: &[Arc<Font>],
     color: Color,
     clip: Option<Rect>,
     letter_spacing: f32,
@@ -456,12 +458,14 @@ pub(crate) fn paint_text_with_font_refs(
     }
 }
 
-pub(crate) fn load_text_fonts() -> Vec<Font> {
-    load_default_text_fonts()
+/// Loads the default system text fonts, shared via `Arc` so that layout and
+/// paint can reuse a single set without re-reading font files from disk.
+pub(crate) fn load_text_fonts() -> Vec<Arc<Font>> {
+    load_default_text_fonts().into_iter().map(Arc::new).collect()
 }
 
 pub(crate) fn rasterize_with_fallback(
-    fonts: &[Font],
+    fonts: &[Arc<Font>],
     ch: char,
     font_size: f32,
 ) -> (usize, Option<GlyphRaster>, f32) {
@@ -652,7 +656,7 @@ pub(crate) fn paint_list_marker(
     layout: &LayoutBox,
     style: &ComputedStyle,
     clip: Option<Rect>,
-    fonts: &[Font],
+    fonts: &[Arc<Font>],
 ) {
     let Some(marker) = &layout.marker else {
         return;

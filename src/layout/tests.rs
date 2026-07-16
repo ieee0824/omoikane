@@ -663,6 +663,35 @@ fn font_metrics_carry_css_web_font_selection() {
 }
 
 #[test]
+fn with_layout_fonts_restores_previous_context_on_panic() {
+    use std::panic::{AssertUnwindSafe, catch_unwind};
+    use std::sync::Arc;
+
+    super::with_layout_fonts(Vec::new(), None, || {
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            super::with_layout_fonts(
+                Vec::new(),
+                Some(Arc::new(crate::font::WebFontRegistry::new())),
+                || panic!("layout fonts panic test"),
+            )
+        }));
+        assert!(result.is_err());
+
+        // The panicking inner scope must restore the outer context
+        // (which has no web fonts), not leave its own registry behind.
+        let outer_restored = super::LAYOUT_FONTS.with(|cell| {
+            cell.borrow()
+                .as_ref()
+                .is_some_and(|context| context.web_fonts.is_none())
+        });
+        assert!(outer_restored);
+    });
+
+    let cleared = super::LAYOUT_FONTS.with(|cell| cell.borrow().is_none());
+    assert!(cleared);
+}
+
+#[test]
 fn vertical_align_top_and_bottom_adjust_fragment_positions() {
     let document = NodeHandle::document();
     let body = NodeHandle::element("body");
@@ -3349,6 +3378,36 @@ fn fixed_position_resolves_logical_insets() {
 
     assert_eq!(layout.children[0].dimensions.content.x, 240.0);
     assert_eq!(layout.children[0].dimensions.content.y, 150.0);
+}
+
+#[test]
+fn fixed_position_inset_inline_end_maps_to_left_in_rtl() {
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let rtl = NodeHandle::element("div");
+    rtl.set_attribute("class", "rtl");
+    document.append_child(body.clone());
+    body.append_child(rtl);
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            ".rtl { direction: rtl; position: fixed; inset-inline-end: 10px; top: 20px; width: 50px; height: 30px; }",
+        )
+        .unwrap(),
+    );
+
+    let layout = layout_tree(
+        &body,
+        &mut resolver,
+        Rect { x: 0.0, y: 0.0, width: 300.0, height: 200.0 },
+    )
+    .unwrap();
+
+    // In RTL the inline-end edge is the left edge: 10px from the viewport's left.
+    assert_eq!(layout.children[0].dimensions.content.x, 10.0);
+    assert_eq!(layout.children[0].dimensions.content.y, 20.0);
 }
 
 #[test]

@@ -632,7 +632,7 @@ pub fn paint_layout_with_fonts(
     layout: &LayoutBox,
     resolver: &mut StyleResolver,
     viewport: Rect,
-    fonts: Vec<Font>,
+    fonts: Vec<Arc<Font>>,
 ) -> Canvas {
     paint_layout_with_web_fonts(layout, resolver, viewport, fonts, None)
 }
@@ -645,7 +645,7 @@ pub fn paint_layout_with_web_fonts(
     layout: &LayoutBox,
     resolver: &mut StyleResolver,
     viewport: Rect,
-    fonts: Vec<Font>,
+    fonts: Vec<Arc<Font>>,
     web_fonts: Option<&WebFontRegistry>,
 ) -> Canvas {
     let width = viewport.width.ceil().max(1.0) as u32;
@@ -686,14 +686,14 @@ pub fn render_document_with_url(
     let fetched_web_fonts = stylesheet::fetch_font_face_fonts(&parsed_sheets, effective_base.as_ref());
 
     let mut web_font_registry = WebFontRegistry::new();
-    let mut layout_fonts = Vec::new();
     for wf in fetched_web_fonts {
         web_font_registry.push_shared(&wf.family, wf.weight, wf.style, wf.font);
     }
 
-    // Build combined system font list for glyph fallback
+    // Build combined system font list for glyph fallback, loaded once and
+    // shared (via `Arc`) between layout text measurement and paint.
     let all_fonts = text::load_text_fonts();
-    layout_fonts.extend(text::load_text_fonts().into_iter().map(Arc::new));
+    let layout_fonts = all_fonts.clone();
 
     // Avoid passing an empty registry to skip unnecessary lookups.
     let web_font_registry = Arc::new(web_font_registry);
@@ -850,7 +850,7 @@ fn paint_box(
     resolver: &mut StyleResolver,
     inherited_clip: Option<Rect>,
     viewport: Rect,
-    text_fonts: &[Font],
+    text_fonts: &[Arc<Font>],
     web_fonts: Option<&WebFontRegistry>,
 ) {
     paint_box_internal(
@@ -872,7 +872,7 @@ fn paint_box_internal(
     inherited_clip: Option<Rect>,
     viewport: Rect,
     include_phase_descendants: bool,
-    text_fonts: &[Font],
+    text_fonts: &[Arc<Font>],
     web_fonts: Option<&WebFontRegistry>,
 ) {
     if layout.visibility == Visibility::Hidden {
@@ -1127,7 +1127,7 @@ fn paint_box_internal_to(
     inherited_clip: Option<Rect>,
     viewport: Rect,
     include_phase_descendants: bool,
-    text_fonts: &[Font],
+    text_fonts: &[Arc<Font>],
     web_fonts: Option<&WebFontRegistry>,
     style: &ComputedStyle,
     border_box: Rect,
