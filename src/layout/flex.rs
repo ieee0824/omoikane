@@ -123,6 +123,57 @@ pub(super) fn layout_flex_container(
             }
         }
 
+        if direction == FlexDirection::Column {
+            let natural_main_size: f32 = laid_out
+                .iter()
+                .map(|(_, child)| child.total_height())
+                .sum::<f32>()
+                + fixed_main_gap;
+            let free_space = (available_main_size - natural_main_size).max(0.0);
+            let total_grow: f32 = laid_out.iter().map(|(item, _)| item.flex_grow).sum();
+            if free_space > 0.0 && total_grow > 0.0 {
+                for (item, child) in &mut laid_out {
+                    if item.flex_grow > 0.0 {
+                        child.dimensions.content.height +=
+                            free_space * item.flex_grow / total_grow;
+                    }
+                }
+            }
+        }
+
+        // A single flex line uses the container's cross size. Using only the
+        // tallest item here makes align-items:center/flex-end ineffective in
+        // a definite-height row (and in a definite-width column).
+        if wrap == FlexWrap::NoWrap {
+            line_cross_size = match direction {
+                FlexDirection::Row => {
+                    let mut size = explicit_length(&style, "height")
+                        .map(|height| {
+                            super::border_box_adjust_height(&style, height, &padding, &border)
+                        })
+                        .unwrap_or(line_cross_size);
+                    if let Some(min_height) = explicit_length(&style, "min-height") {
+                        size = size.max(super::border_box_adjust_height(
+                            &style,
+                            min_height,
+                            &padding,
+                            &border,
+                        ));
+                    }
+                    if let Some(max_height) = explicit_length(&style, "max-height") {
+                        size = size.min(super::border_box_adjust_height(
+                            &style,
+                            max_height,
+                            &padding,
+                            &border,
+                        ));
+                    }
+                    size
+                }
+                FlexDirection::Column => line_cross_size,
+            };
+        }
+
         let total_main_size: f32 = laid_out
             .iter()
             .map(|(_, child)| match direction {
@@ -228,6 +279,7 @@ pub(super) fn layout_flex_container(
         marker: None,
     })
 }
+
 
 pub(super) fn is_flex_container(style: &ComputedStyle) -> bool {
     matches!(
@@ -367,15 +419,23 @@ fn flex_available_main_size(
 ) -> f32 {
     match direction {
         FlexDirection::Row => width,
-        FlexDirection::Column => explicit_main_size(style, direction).unwrap_or_else(|| {
+        FlexDirection::Column => {
             let item_count = items.len();
             let gap_total = if item_count > 1 {
                 main_gap * (item_count.saturating_sub(1)) as f32
             } else {
                 0.0
             };
-            items.iter().map(|item| item.base_main_size).sum::<f32>() + gap_total
-        }),
+            let natural = items.iter().map(|item| item.base_main_size).sum::<f32>() + gap_total;
+            let mut available = explicit_main_size(style, direction).unwrap_or(natural);
+            if let Some(min_height) = explicit_length(style, "min-height") {
+                available = available.max(min_height);
+            }
+            if let Some(max_height) = explicit_length(style, "max-height") {
+                available = available.min(max_height);
+            }
+            available
+        }
     }
 }
 

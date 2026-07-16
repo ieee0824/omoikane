@@ -8,6 +8,7 @@ pub(crate) mod text;
 
 use std::cell::Cell;
 use std::path::Path;
+use std::sync::Arc;
 
 /// Total virtual milliseconds the render pipeline advances the JS event loop to
 /// drain script-scheduled timers before layout.
@@ -631,7 +632,7 @@ pub fn paint_layout_with_fonts(
     layout: &LayoutBox,
     resolver: &mut StyleResolver,
     viewport: Rect,
-    fonts: Vec<Font>,
+    fonts: Vec<Arc<Font>>,
 ) -> Canvas {
     paint_layout_with_web_fonts(layout, resolver, viewport, fonts, None)
 }
@@ -644,7 +645,7 @@ pub fn paint_layout_with_web_fonts(
     layout: &LayoutBox,
     resolver: &mut StyleResolver,
     viewport: Rect,
-    fonts: Vec<Font>,
+    fonts: Vec<Arc<Font>>,
     web_fonts: Option<&WebFontRegistry>,
 ) -> Canvas {
     let width = viewport.width.ceil().max(1.0) as u32;
@@ -686,18 +687,22 @@ pub fn render_document_with_url(
 
     let mut web_font_registry = WebFontRegistry::new();
     for wf in fetched_web_fonts {
-        web_font_registry.push(&wf.family, wf.weight, wf.style, wf.font);
+        web_font_registry.push_shared(&wf.family, wf.weight, wf.style, wf.font);
     }
 
-    // Build combined system font list for glyph fallback
+    // Build combined system font list for glyph fallback, loaded once and
+    // shared (via `Arc`) between layout text measurement and paint.
     let all_fonts = text::load_text_fonts();
+    let layout_fonts = all_fonts.clone();
 
     // Avoid passing an empty registry to skip unnecessary lookups.
+    let web_font_registry = Arc::new(web_font_registry);
     let web_font_registry_opt = if web_font_registry.is_empty() {
         None
     } else {
-        Some(&web_font_registry)
+        Some(web_font_registry.as_ref())
     };
+    let layout_web_fonts = web_font_registry_opt.map(|_| Arc::clone(&web_font_registry));
 
     // Execute <script> tags and fire DOMContentLoaded before layout.
     // JS may modify the DOM (e.g., classList.add for fade-in animations,
@@ -753,15 +758,17 @@ pub fn render_document_with_url(
         }
     }
 
-    crate::layout::with_image_base_url(effective_base, || {
-        let layout = crate::layout::layout_tree(document, &mut resolver, viewport)?;
-        Some(paint_layout_with_web_fonts(
-            &layout,
-            &mut resolver,
-            viewport,
-            all_fonts,
-            web_font_registry_opt,
-        ))
+    crate::layout::with_layout_fonts(layout_fonts, layout_web_fonts, || {
+        crate::layout::with_image_base_url(effective_base, || {
+            let layout = crate::layout::layout_tree(document, &mut resolver, viewport)?;
+            Some(paint_layout_with_web_fonts(
+                &layout,
+                &mut resolver,
+                viewport,
+                all_fonts,
+                web_font_registry_opt,
+            ))
+        })
     })
     .ok_or(PaintError::InvalidImageBuffer)
 }
@@ -843,7 +850,7 @@ fn paint_box(
     resolver: &mut StyleResolver,
     inherited_clip: Option<Rect>,
     viewport: Rect,
-    text_fonts: &[Font],
+    text_fonts: &[Arc<Font>],
     web_fonts: Option<&WebFontRegistry>,
 ) {
     paint_box_internal(
@@ -865,7 +872,7 @@ fn paint_box_internal(
     inherited_clip: Option<Rect>,
     viewport: Rect,
     include_phase_descendants: bool,
-    text_fonts: &[Font],
+    text_fonts: &[Arc<Font>],
     web_fonts: Option<&WebFontRegistry>,
 ) {
     if layout.visibility == Visibility::Hidden {
@@ -1120,7 +1127,7 @@ fn paint_box_internal_to(
     inherited_clip: Option<Rect>,
     viewport: Rect,
     include_phase_descendants: bool,
-    text_fonts: &[Font],
+    text_fonts: &[Arc<Font>],
     web_fonts: Option<&WebFontRegistry>,
     style: &ComputedStyle,
     border_box: Rect,

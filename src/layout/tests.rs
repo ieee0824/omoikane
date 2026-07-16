@@ -650,6 +650,48 @@ fn approximates_font_metrics_from_font_size() {
 }
 
 #[test]
+fn font_metrics_carry_css_web_font_selection() {
+    let style = resolve_style_for_test(
+        "div { font-family: 'TwitterChirp', sans-serif; font-weight: 700; font-style: italic; }",
+        "div",
+    );
+    let metrics = font_metrics(&style);
+
+    assert_eq!(metrics.font_family, Some(crate::font::FontFamilyKey::new("twitterchirp")));
+    assert_eq!(metrics.font_weight, crate::font::FontWeight(700));
+    assert_eq!(metrics.font_style, crate::font::FontStyle::Italic);
+}
+
+#[test]
+fn with_layout_fonts_restores_previous_context_on_panic() {
+    use std::panic::{AssertUnwindSafe, catch_unwind};
+    use std::sync::Arc;
+
+    super::with_layout_fonts(Vec::new(), None, || {
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            super::with_layout_fonts(
+                Vec::new(),
+                Some(Arc::new(crate::font::WebFontRegistry::new())),
+                || panic!("layout fonts panic test"),
+            )
+        }));
+        assert!(result.is_err());
+
+        // The panicking inner scope must restore the outer context
+        // (which has no web fonts), not leave its own registry behind.
+        let outer_restored = super::LAYOUT_FONTS.with(|cell| {
+            cell.borrow()
+                .as_ref()
+                .is_some_and(|context| context.web_fonts.is_none())
+        });
+        assert!(outer_restored);
+    });
+
+    let cleared = super::LAYOUT_FONTS.with(|cell| cell.borrow().is_none());
+    assert!(cleared);
+}
+
+#[test]
 fn vertical_align_top_and_bottom_adjust_fragment_positions() {
     let document = NodeHandle::document();
     let body = NodeHandle::element("body");
@@ -2766,6 +2808,39 @@ fn flex_column_uses_height_as_main_axis_for_justify_content_and_gap() {
 }
 
 #[test]
+fn flex_column_distributes_min_height_to_growing_child() {
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let container = NodeHandle::element("div");
+    let child = NodeHandle::element("article");
+    document.append_child(body.clone());
+    body.append_child(container.clone());
+    container.append_child(child);
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "div { display: flex; flex-direction: column; min-height: 100px; } \
+             article { flex-grow: 1; }",
+        )
+        .unwrap(),
+    );
+
+    let layout = layout_tree(
+        &body,
+        &mut resolver,
+        Rect { x: 0.0, y: 0.0, width: 200.0, height: 0.0 },
+    )
+    .unwrap();
+
+    let container_box = &layout.children[0];
+    assert_eq!(container_box.dimensions.content.height, 100.0);
+    assert_eq!(container_box.children[0].dimensions.content.height, 100.0);
+}
+
+
+#[test]
 fn wraps_flex_items_across_multiple_lines() {
     let document = NodeHandle::document();
     let body = NodeHandle::element("body");
@@ -2846,8 +2921,38 @@ fn aligns_flex_items_with_align_items_and_align_self() {
     .unwrap();
 
     let container_box = &layout.children[0];
-    assert_eq!(container_box.children[0].dimensions.content.y, 0.0);
-    assert_eq!(container_box.children[1].dimensions.content.y, 10.0);
+    assert_eq!(container_box.children[0].dimensions.content.y, 30.0);
+    assert_eq!(container_box.children[1].dimensions.content.y, 70.0);
+}
+
+#[test]
+fn flex_row_aligns_items_within_min_height() {
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let container = NodeHandle::element("div");
+    let child = NodeHandle::element("article");
+    document.append_child(body.clone());
+    body.append_child(container.clone());
+    container.append_child(child);
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "div { display: flex; width: 200px; min-height: 100px; align-items: center; } \
+             article { width: 60px; height: 20px; }",
+        )
+        .unwrap(),
+    );
+
+    let layout = layout_tree(
+        &body,
+        &mut resolver,
+        Rect { x: 0.0, y: 0.0, width: 200.0, height: 100.0 },
+    )
+    .unwrap();
+
+    assert_eq!(layout.children[0].children[0].dimensions.content.y, 40.0);
 }
 
 #[test]
@@ -3247,6 +3352,65 @@ fn fixed_position_uses_viewport_as_containing_block() {
 }
 
 #[test]
+fn fixed_position_resolves_logical_insets() {
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let ltr = NodeHandle::element("div");
+    ltr.set_attribute("class", "ltr");
+    document.append_child(body.clone());
+    body.append_child(ltr);
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            ".ltr { position: fixed; inset-inline-end: 10px; bottom: 20px; width: 50px; height: 30px; }",
+        )
+        .unwrap(),
+    );
+
+    let layout = layout_tree(
+        &body,
+        &mut resolver,
+        Rect { x: 0.0, y: 0.0, width: 300.0, height: 200.0 },
+    )
+    .unwrap();
+
+    assert_eq!(layout.children[0].dimensions.content.x, 240.0);
+    assert_eq!(layout.children[0].dimensions.content.y, 150.0);
+}
+
+#[test]
+fn fixed_position_inset_inline_end_maps_to_left_in_rtl() {
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let rtl = NodeHandle::element("div");
+    rtl.set_attribute("class", "rtl");
+    document.append_child(body.clone());
+    body.append_child(rtl);
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            ".rtl { direction: rtl; position: fixed; inset-inline-end: 10px; top: 20px; width: 50px; height: 30px; }",
+        )
+        .unwrap(),
+    );
+
+    let layout = layout_tree(
+        &body,
+        &mut resolver,
+        Rect { x: 0.0, y: 0.0, width: 300.0, height: 200.0 },
+    )
+    .unwrap();
+
+    // In RTL the inline-end edge is the left edge: 10px from the viewport's left.
+    assert_eq!(layout.children[0].dimensions.content.x, 10.0);
+    assert_eq!(layout.children[0].dimensions.content.y, 20.0);
+}
+
+#[test]
 fn absolute_uses_nearest_positioned_ancestor_content_box() {
     let document = NodeHandle::document();
     let body = NodeHandle::element("body");
@@ -3563,6 +3727,45 @@ fn percentage_height_in_auto_sized_container_becomes_auto() {
 
     let child_box = find_layout_box_by_tag(&layout, "section").unwrap();
     assert_eq!(child_box.dimensions.content.height, 18.0);
+}
+
+#[test]
+fn root_percentage_heights_resolve_against_viewport() {
+    let document = NodeHandle::document();
+    let html = NodeHandle::element("html");
+    let body = NodeHandle::element("body");
+    let main = NodeHandle::element("main");
+    document.append_child(html.clone());
+    html.append_child(body.clone());
+    body.append_child(main);
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "html, body { height: 100%; margin: 0; } main { height: 100%; }",
+        )
+        .unwrap(),
+    );
+
+    let layout = layout_tree(
+        &document,
+        &mut resolver,
+        Rect { x: 0.0, y: 0.0, width: 1280.0, height: 720.0 },
+    )
+    .unwrap();
+
+    for tag in ["html", "body", "main"] {
+        assert_eq!(
+            find_layout_box_by_tag(&layout, tag)
+                .unwrap()
+                .dimensions
+                .content
+                .height,
+            720.0,
+            "{tag} should resolve height:100% against its containing block",
+        );
+    }
 }
 
 #[test]
@@ -6199,17 +6402,19 @@ fn redistribute_auto_margins_left_auto_only() {
 fn child_containing_rect_uses_float_offsets_for_auto_width() {
     let style = ComputedStyle::default();
     let offsets = FloatOffsets { left: 50.0, right: 30.0 };
-    let rect = child_containing_rect(&style, 10.0, &offsets, 0.0, 200.0);
+    let rect = child_containing_rect(&style, 10.0, &offsets, 0.0, 200.0, 120.0);
     assert_eq!(rect.x, 50.0);
     assert_eq!(rect.y, 10.0);
     assert_eq!(rect.width, 120.0);
+    assert_eq!(rect.height, 120.0);
 }
 
 #[test]
 fn child_containing_rect_ignores_offsets_for_explicit_width() {
     let style = resolve_style_for_test("div { width: 150px; }", "div");
     let offsets = FloatOffsets { left: 50.0, right: 30.0 };
-    let rect = child_containing_rect(&style, 10.0, &offsets, 0.0, 200.0);
+    let rect = child_containing_rect(&style, 10.0, &offsets, 0.0, 200.0, 120.0);
     assert_eq!(rect.x, 0.0);
     assert_eq!(rect.width, 200.0);
+    assert_eq!(rect.height, 120.0);
 }

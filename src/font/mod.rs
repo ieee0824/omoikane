@@ -6,7 +6,7 @@
 use ab_glyph::{Font as AbGlyphFont, FontVec, ScaleFont};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 use std::{fmt, io};
 
 #[cfg(test)]
@@ -1034,6 +1034,28 @@ pub struct FontVariantKey {
     pub style: FontStyle,
 }
 
+/// Stable, case-insensitive identifier for a CSS font family.
+///
+/// Keys are interned in a process-wide table: names that fold to the same
+/// trimmed, Unicode-lowercased string share a key, and distinct names always
+/// receive distinct keys, so key equality is exactly folded-name equality
+/// (no hash collisions).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct FontFamilyKey(u32);
+
+static FONT_FAMILY_KEY_INTERN: OnceLock<Mutex<HashMap<String, u32>>> = OnceLock::new();
+
+impl FontFamilyKey {
+    /// Interns `family` (trimmed and Unicode-lowercased) and returns its key.
+    pub fn new(family: &str) -> Self {
+        let folded = family.trim().to_lowercase();
+        let intern = FONT_FAMILY_KEY_INTERN.get_or_init(|| Mutex::new(HashMap::new()));
+        let mut intern = intern.lock().unwrap_or_else(PoisonError::into_inner);
+        let next = intern.len() as u32;
+        Self(*intern.entry(folded).or_insert(next))
+    }
+}
+
 impl FontVariantKey {
     /// Create a new variant key.
     pub fn new(weight: FontWeight, style: FontStyle) -> Self {
@@ -1252,7 +1274,7 @@ impl Default for FontCache {
 #[derive(Default)]
 pub struct WebFontRegistry {
     /// `family_lowercase -> Vec<(key, font)>`
-    entries: HashMap<String, Vec<(FontVariantKey, Arc<Font>)>>,
+    entries: HashMap<FontFamilyKey, Vec<(FontVariantKey, Arc<Font>)>>,
 }
 
 impl WebFontRegistry {
@@ -1263,11 +1285,22 @@ impl WebFontRegistry {
 
     /// Add a font variant to the registry.
     pub fn push(&mut self, family: &str, weight: FontWeight, style: FontStyle, font: Font) {
+        self.push_shared(family, weight, style, Arc::new(font));
+    }
+
+    /// Add a shared font variant without duplicating its underlying font data.
+    pub fn push_shared(
+        &mut self,
+        family: &str,
+        weight: FontWeight,
+        style: FontStyle,
+        font: Arc<Font>,
+    ) {
         let key = FontVariantKey::new(weight, style);
         self.entries
-            .entry(family.to_lowercase())
+            .entry(FontFamilyKey::new(family))
             .or_default()
-            .push((key, Arc::new(font)));
+            .push((key, font));
     }
 
     /// Select the best available font for the given family, weight, and style.
@@ -1279,7 +1312,17 @@ impl WebFontRegistry {
         target_weight: FontWeight,
         target_style: FontStyle,
     ) -> Option<&Font> {
-        let variants = self.entries.get(&family.to_lowercase())?;
+        self.select_best_by_key(FontFamilyKey::new(family), target_weight, target_style)
+    }
+
+    /// Select the best variant using a precomputed family key.
+    pub fn select_best_by_key(
+        &self,
+        family: FontFamilyKey,
+        target_weight: FontWeight,
+        target_style: FontStyle,
+    ) -> Option<&Font> {
+        let variants = self.entries.get(&family)?;
         if variants.is_empty() {
             return None;
         }
@@ -1331,7 +1374,7 @@ impl WebFontRegistry {
 
     /// Returns `true` when any variant for the family is registered.
     pub fn contains_family(&self, family: &str) -> bool {
-        self.entries.contains_key(&family.to_lowercase())
+        self.entries.contains_key(&FontFamilyKey::new(family))
     }
 
     /// Returns `true` when no fonts have been registered.

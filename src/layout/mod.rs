@@ -5,11 +5,11 @@
 
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use crate::css::{ComputedStyle, ComputedValue, PseudoElement, StyleResolver};
 use crate::dom::{Node, NodeHandle, NodeType};
-use crate::font::Font;
+use crate::font::{Font, FontFamilyKey, FontStyle, FontWeight, WebFontRegistry};
 use crate::http::{Client, Url};
 use crate::paint::Image;
 use rusqlite::{Connection, params};
@@ -49,9 +49,39 @@ pub(crate) use inline::split_words_no_cjk_break;
 thread_local! {
     static IMAGE_CACHE: RefCell<HashMap<String, Option<Image>>> = RefCell::new(HashMap::new());
     static HTTP_CLIENT: RefCell<Client> = RefCell::new(Client::new());
-    static LAYOUT_FONTS: RefCell<Option<Vec<Font>>> = const { RefCell::new(None) };
+    static LAYOUT_FONTS: RefCell<Option<LayoutFontContext>> = const { RefCell::new(None) };
     static IMAGE_BASE_URL: RefCell<Option<Url>> = const { RefCell::new(None) };
     static HTML_TAG_SQLITE_CONNECTIONS: RefCell<HashMap<String, Connection>> = RefCell::new(HashMap::new());
+}
+
+struct LayoutFontContext {
+    system_fonts: Vec<Arc<Font>>,
+    web_fonts: Option<Arc<WebFontRegistry>>,
+}
+
+/// Runs `f` with the given fonts installed as the thread-local layout font
+/// context, restoring the previous context afterwards — including when `f`
+/// panics, so a caught panic cannot leak fonts into later renders.
+pub(crate) fn with_layout_fonts<T>(
+    system_fonts: Vec<Arc<Font>>,
+    web_fonts: Option<Arc<WebFontRegistry>>,
+    f: impl FnOnce() -> T,
+) -> T {
+    struct LayoutFontsGuard(Option<LayoutFontContext>);
+
+    impl Drop for LayoutFontsGuard {
+        fn drop(&mut self) {
+            LAYOUT_FONTS.with(|cell| {
+                cell.replace(self.0.take());
+            });
+        }
+    }
+
+    LAYOUT_FONTS.with(|cell| {
+        let previous = cell.replace(Some(LayoutFontContext { system_fonts, web_fonts }));
+        let _guard = LayoutFontsGuard(previous);
+        f()
+    })
 }
 
 static UNSUPPORTED_HTML_CONFIG: OnceLock<UnsupportedHtmlConfig> = OnceLock::new();
@@ -383,6 +413,9 @@ pub struct FontMetrics {
     pub average_advance: f32,
     /// Extra spacing to add between each character (CSS `letter-spacing`).
     pub letter_spacing: f32,
+    pub(crate) font_family: Option<FontFamilyKey>,
+    pub(crate) font_weight: FontWeight,
+    pub(crate) font_style: FontStyle,
 }
 
 impl FontMetrics {
@@ -395,6 +428,9 @@ impl FontMetrics {
             line_gap: font_size * 0.2,
             average_advance: font_size * 0.6,
             letter_spacing: 0.0,
+            font_family: None,
+            font_weight: FontWeight::default(),
+            font_style: FontStyle::default(),
         }
     }
 }
@@ -597,7 +633,7 @@ fn layout_document(
             x: containing_block.x,
             y: cursor_y - collapse_delta,
             width: containing_block.width,
-            height: 0.0,
+            height: containing_block.height,
         };
         if let Some(style) = &child_style
             && is_out_of_flow_positioned(style) {
@@ -831,6 +867,7 @@ fn child_containing_rect(
     offsets: &FloatOffsets,
     x: f32,
     width: f32,
+    height: f32,
 ) -> Rect {
     let has_explicit_width = explicit_length(child_style, "width").is_some();
     Rect {
@@ -841,7 +878,7 @@ fn child_containing_rect(
         } else {
             (width - offsets.left - offsets.right).max(0.0)
         },
-        height: 0.0,
+        height,
     }
 }
 
@@ -1026,7 +1063,7 @@ fn layout_element(
         mut children, lines, cursor_y, float_bottom, positioned_children,
     } = layout_block_children(
         node, resolver, &style, padding, border, margin,
-        x, y, width, viewport, positioned_ancestor,
+        x, y, width, containing_block.height, viewport, positioned_ancestor,
     );
 
     let effective_cursor_y = cursor_y.max(float_bottom);
@@ -1092,9 +1129,13 @@ fn layout_block_children(
     x: f32,
     y: f32,
     width: f32,
+    containing_height: f32,
     viewport: Rect,
     positioned_ancestor: Option<BoxDimensions>,
 ) -> BlockChildrenResult {
+    let child_height_basis = resolved_length(style, "height", containing_height)
+        .map(|height| border_box_adjust_height(style, height, &padding, &border))
+        .unwrap_or(0.0);
     let mut children = Vec::new();
     let mut positioned_children = Vec::new();
     let mut lines = Vec::new();
@@ -1152,7 +1193,14 @@ fn layout_block_children(
             };
             let child_y = cursor_y - effective_collapse_delta;
             let offsets = active_float_offsets(&float_regions, child_y, x, width);
-            let child_containing = child_containing_rect(child_style, child_y, &offsets, x, width);
+            let child_containing = child_containing_rect(
+                child_style,
+                child_y,
+                &offsets,
+                x,
+                width,
+                child_height_basis,
+            );
 
             if is_out_of_flow_positioned(child_style) {
                 positioned_children.push((child, child_style.clone(), child_containing));
@@ -2073,8 +2121,20 @@ fn layout_positioned_child(
         PositionScheme::Relative => containing_block,
     };
 
-    let left = explicit_length(style, "left");
-    let right = explicit_length(style, "right");
+    // `inset-inline-end` is the right edge in LTR and the left edge in RTL.
+    let inline_end = explicit_length(style, "inset-inline-end");
+    let rtl = matches!(
+        style.get("direction"),
+        Some(ComputedValue::Keyword(value) | ComputedValue::String(value))
+            if value.eq_ignore_ascii_case("rtl")
+    );
+    let (inline_end_left, inline_end_right) = if rtl {
+        (inline_end, None)
+    } else {
+        (None, inline_end)
+    };
+    let left = explicit_length(style, "left").or(inline_end_left);
+    let right = explicit_length(style, "right").or(inline_end_right);
     let top = explicit_length(style, "top");
     let bottom = explicit_length(style, "bottom");
     let static_outer = containing_block;
