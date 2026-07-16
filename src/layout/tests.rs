@@ -2859,8 +2859,38 @@ fn aligns_flex_items_with_align_items_and_align_self() {
     .unwrap();
 
     let container_box = &layout.children[0];
-    assert_eq!(container_box.children[0].dimensions.content.y, 0.0);
-    assert_eq!(container_box.children[1].dimensions.content.y, 10.0);
+    assert_eq!(container_box.children[0].dimensions.content.y, 30.0);
+    assert_eq!(container_box.children[1].dimensions.content.y, 70.0);
+}
+
+#[test]
+fn flex_row_aligns_items_within_min_height() {
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let container = NodeHandle::element("div");
+    let child = NodeHandle::element("article");
+    document.append_child(body.clone());
+    body.append_child(container.clone());
+    container.append_child(child);
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "div { display: flex; width: 200px; min-height: 100px; align-items: center; } \
+             article { width: 60px; height: 20px; }",
+        )
+        .unwrap(),
+    );
+
+    let layout = layout_tree(
+        &body,
+        &mut resolver,
+        Rect { x: 0.0, y: 0.0, width: 200.0, height: 100.0 },
+    )
+    .unwrap();
+
+    assert_eq!(layout.children[0].children[0].dimensions.content.y, 40.0);
 }
 
 #[test]
@@ -3576,6 +3606,45 @@ fn percentage_height_in_auto_sized_container_becomes_auto() {
 
     let child_box = find_layout_box_by_tag(&layout, "section").unwrap();
     assert_eq!(child_box.dimensions.content.height, 18.0);
+}
+
+#[test]
+fn root_percentage_heights_resolve_against_viewport() {
+    let document = NodeHandle::document();
+    let html = NodeHandle::element("html");
+    let body = NodeHandle::element("body");
+    let main = NodeHandle::element("main");
+    document.append_child(html.clone());
+    html.append_child(body.clone());
+    body.append_child(main);
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "html, body { height: 100%; margin: 0; } main { height: 100%; }",
+        )
+        .unwrap(),
+    );
+
+    let layout = layout_tree(
+        &document,
+        &mut resolver,
+        Rect { x: 0.0, y: 0.0, width: 1280.0, height: 720.0 },
+    )
+    .unwrap();
+
+    for tag in ["html", "body", "main"] {
+        assert_eq!(
+            find_layout_box_by_tag(&layout, tag)
+                .unwrap()
+                .dimensions
+                .content
+                .height,
+            720.0,
+            "{tag} should resolve height:100% against its containing block",
+        );
+    }
 }
 
 #[test]
@@ -6212,17 +6281,19 @@ fn redistribute_auto_margins_left_auto_only() {
 fn child_containing_rect_uses_float_offsets_for_auto_width() {
     let style = ComputedStyle::default();
     let offsets = FloatOffsets { left: 50.0, right: 30.0 };
-    let rect = child_containing_rect(&style, 10.0, &offsets, 0.0, 200.0);
+    let rect = child_containing_rect(&style, 10.0, &offsets, 0.0, 200.0, 120.0);
     assert_eq!(rect.x, 50.0);
     assert_eq!(rect.y, 10.0);
     assert_eq!(rect.width, 120.0);
+    assert_eq!(rect.height, 120.0);
 }
 
 #[test]
 fn child_containing_rect_ignores_offsets_for_explicit_width() {
     let style = resolve_style_for_test("div { width: 150px; }", "div");
     let offsets = FloatOffsets { left: 50.0, right: 30.0 };
-    let rect = child_containing_rect(&style, 10.0, &offsets, 0.0, 200.0);
+    let rect = child_containing_rect(&style, 10.0, &offsets, 0.0, 200.0, 120.0);
     assert_eq!(rect.x, 0.0);
     assert_eq!(rect.width, 200.0);
+    assert_eq!(rect.height, 120.0);
 }

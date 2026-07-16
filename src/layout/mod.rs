@@ -621,7 +621,7 @@ fn layout_document(
             x: containing_block.x,
             y: cursor_y - collapse_delta,
             width: containing_block.width,
-            height: 0.0,
+            height: containing_block.height,
         };
         if let Some(style) = &child_style
             && is_out_of_flow_positioned(style) {
@@ -855,6 +855,7 @@ fn child_containing_rect(
     offsets: &FloatOffsets,
     x: f32,
     width: f32,
+    height: f32,
 ) -> Rect {
     let has_explicit_width = explicit_length(child_style, "width").is_some();
     Rect {
@@ -865,7 +866,7 @@ fn child_containing_rect(
         } else {
             (width - offsets.left - offsets.right).max(0.0)
         },
-        height: 0.0,
+        height,
     }
 }
 
@@ -1050,7 +1051,7 @@ fn layout_element(
         mut children, lines, cursor_y, float_bottom, positioned_children,
     } = layout_block_children(
         node, resolver, &style, padding, border, margin,
-        x, y, width, viewport, positioned_ancestor,
+        x, y, width, containing_block.height, viewport, positioned_ancestor,
     );
 
     let effective_cursor_y = cursor_y.max(float_bottom);
@@ -1116,9 +1117,13 @@ fn layout_block_children(
     x: f32,
     y: f32,
     width: f32,
+    containing_height: f32,
     viewport: Rect,
     positioned_ancestor: Option<BoxDimensions>,
 ) -> BlockChildrenResult {
+    let child_height_basis = resolved_length(style, "height", containing_height)
+        .map(|height| border_box_adjust_height(style, height, &padding, &border))
+        .unwrap_or(0.0);
     let mut children = Vec::new();
     let mut positioned_children = Vec::new();
     let mut lines = Vec::new();
@@ -1176,7 +1181,14 @@ fn layout_block_children(
             };
             let child_y = cursor_y - effective_collapse_delta;
             let offsets = active_float_offsets(&float_regions, child_y, x, width);
-            let child_containing = child_containing_rect(child_style, child_y, &offsets, x, width);
+            let child_containing = child_containing_rect(
+                child_style,
+                child_y,
+                &offsets,
+                x,
+                width,
+                child_height_basis,
+            );
 
             if is_out_of_flow_positioned(child_style) {
                 positioned_children.push((child, child_style.clone(), child_containing));

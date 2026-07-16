@@ -123,6 +123,39 @@ pub(super) fn layout_flex_container(
             }
         }
 
+        // A single flex line uses the container's cross size. Using only the
+        // tallest item here makes align-items:center/flex-end ineffective in
+        // a definite-height row (and in a definite-width column).
+        if wrap == FlexWrap::NoWrap {
+            line_cross_size = match direction {
+                FlexDirection::Row => {
+                    let mut size = explicit_length(&style, "height")
+                        .map(|height| {
+                            super::border_box_adjust_height(&style, height, &padding, &border)
+                        })
+                        .unwrap_or(line_cross_size);
+                    if let Some(min_height) = explicit_length(&style, "min-height") {
+                        size = size.max(super::border_box_adjust_height(
+                            &style,
+                            min_height,
+                            &padding,
+                            &border,
+                        ));
+                    }
+                    if let Some(max_height) = explicit_length(&style, "max-height") {
+                        size = size.min(super::border_box_adjust_height(
+                            &style,
+                            max_height,
+                            &padding,
+                            &border,
+                        ));
+                    }
+                    size
+                }
+                FlexDirection::Column => line_cross_size,
+            };
+        }
+
         let total_main_size: f32 = laid_out
             .iter()
             .map(|(_, child)| match direction {
