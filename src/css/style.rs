@@ -1,7 +1,7 @@
 //! CSS cascade and computed style resolution.
 
 use std::cell::RefCell;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
@@ -89,6 +89,7 @@ impl Default for ResolutionContext {
 #[derive(Debug, Default)]
 pub struct StyleResolver {
     stylesheets: Vec<StylesheetInput>,
+    rule_indexes: Vec<StylesheetRuleIndex>,
     cache: HashMap<usize, ComputedStyle>,
     pseudo_cache: HashMap<(usize, PseudoElement), ComputedStyle>,
     /// Root element's computed font-size in px (for `rem` unit resolution).
@@ -197,8 +198,8 @@ impl StyleResolver {
     pub fn add_stylesheet(&mut self, origin: Origin, stylesheet: Stylesheet) {
         // Extract @keyframes rules before storing the stylesheet.
         collect_keyframes(&stylesheet.rules, &mut self.keyframes);
-        self.stylesheets
-            .push(StylesheetInput { origin, stylesheet });
+        self.rule_indexes.push(StylesheetRuleIndex::build(&stylesheet));
+        self.stylesheets.push(StylesheetInput { origin, stylesheet });
         self.cache.clear();
         self.pseudo_cache.clear();
     }
@@ -281,10 +282,11 @@ impl StyleResolver {
         let color_scheme_dark = self.color_scheme_dark;
         let element_keys = ElementMatchKeys::from_node(node);
 
-        for input in &self.stylesheets {
-            collect_rule_candidates(
+        for (input, index) in self.stylesheets.iter().zip(&self.rule_indexes) {
+            collect_indexed_rule_candidates(
                 node,
                 &input.stylesheet.rules,
+                index,
                 input.origin,
                 pseudo,
                 &mut source_order,
@@ -878,6 +880,105 @@ struct ElementMatchKeys {
     tag_name: String,
 }
 
+#[derive(Debug, Default)]
+struct StylesheetRuleIndex {
+    by_id: HashMap<String, Vec<usize>>,
+    by_class: HashMap<String, Vec<usize>>,
+    by_tag: HashMap<String, Vec<usize>>,
+    fallback: Vec<usize>,
+    declaration_offsets: Vec<usize>,
+    total_declarations: usize,
+}
+
+impl StylesheetRuleIndex {
+    fn build(stylesheet: &Stylesheet) -> Self {
+        let mut index = Self::default();
+        let mut offset = 0;
+        for (rule_index, rule) in stylesheet.rules.iter().enumerate() {
+            index.declaration_offsets.push(offset);
+            offset += match rule {
+                Rule::Style(rule) => rule.declarations.len(),
+                Rule::At(rule) => rule
+                    .block
+                    .as_deref()
+                    .map(count_declarations)
+                    .unwrap_or(rule.declarations.len()),
+                Rule::FontFace(_) => 0,
+            };
+            let Rule::Style(style_rule) = rule else {
+                continue;
+            };
+            let keys: Option<Vec<RuleMatchKey>> = style_rule
+                .selectors
+                .iter()
+                .map(selector_match_key)
+                .collect();
+            let Some(keys) = keys else {
+                index.fallback.push(rule_index);
+                continue;
+            };
+            for key in keys {
+                let bucket = match key {
+                    RuleMatchKey::Id(value) => index.by_id.entry(value).or_default(),
+                    RuleMatchKey::Class(value) => index.by_class.entry(value).or_default(),
+                    RuleMatchKey::Tag(value) => index.by_tag.entry(value).or_default(),
+                };
+                if bucket.last() != Some(&rule_index) {
+                    bucket.push(rule_index);
+                }
+            }
+        }
+        index.total_declarations = offset;
+        index
+    }
+
+    fn candidates(&self, keys: &ElementMatchKeys) -> BTreeSet<usize> {
+        let mut candidates = self.fallback.iter().copied().collect::<BTreeSet<_>>();
+        if let Some(id) = &keys.id
+            && let Some(rules) = self.by_id.get(id) {
+                candidates.extend(rules);
+            }
+        for class in &keys.classes {
+            if let Some(rules) = self.by_class.get(class) {
+                candidates.extend(rules);
+            }
+        }
+        if let Some(rules) = self.by_tag.get(&keys.tag_name.to_ascii_lowercase()) {
+            candidates.extend(rules);
+        }
+        candidates
+    }
+}
+
+enum RuleMatchKey {
+    Id(String),
+    Class(String),
+    Tag(String),
+}
+
+fn selector_match_key(selector: &super::Selector) -> Option<RuleMatchKey> {
+    let rightmost = selector.parts.last()?;
+    rightmost
+        .simples
+        .iter()
+        .find_map(|simple| match simple {
+            SimpleSelector::Id(value) => Some(RuleMatchKey::Id(value.clone())),
+            _ => None,
+        })
+        .or_else(|| {
+            rightmost.simples.iter().find_map(|simple| match simple {
+                SimpleSelector::Class(value) => Some(RuleMatchKey::Class(value.clone())),
+                _ => None,
+            })
+        })
+        .or_else(|| {
+            rightmost.simples.iter().find_map(|simple| match simple {
+                SimpleSelector::Type(value) => Some(RuleMatchKey::Tag(value.to_ascii_lowercase())),
+                _ => None,
+            })
+        })
+}
+
 impl ElementMatchKeys {
     fn from_node(node: &NodeHandle) -> Option<Self> {
         Some(Self {
@@ -903,6 +1004,77 @@ fn style_rule_might_match(style_rule: &super::StyleRule, keys: &ElementMatchKeys
             _ => true,
         })
     })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn collect_indexed_rule_candidates(
+    node: &NodeHandle,
+    rules: &[Rule],
+    index: &StylesheetRuleIndex,
+    origin: Origin,
+    pseudo: Option<PseudoElement>,
+    source_order: &mut usize,
+    out: &mut Vec<Candidate>,
+    viewport_width: f32,
+    viewport_height: f32,
+    color_scheme_dark: bool,
+    media_cache: &mut HashMap<String, Vec<MediaQuery>>,
+    element_keys: Option<&ElementMatchKeys>,
+) {
+    let Some(element_keys) = element_keys else {
+        collect_rule_candidates(
+            node,
+            rules,
+            origin,
+            pseudo,
+            source_order,
+            out,
+            viewport_width,
+            viewport_height,
+            color_scheme_dark,
+            media_cache,
+            None,
+        );
+        return;
+    };
+
+    let base_order = *source_order;
+    for rule_index in index.candidates(element_keys) {
+        let mut rule_order = base_order + index.declaration_offsets[rule_index];
+        collect_rule_candidates(
+            node,
+            &rules[rule_index..=rule_index],
+            origin,
+            pseudo,
+            &mut rule_order,
+            out,
+            viewport_width,
+            viewport_height,
+            color_scheme_dark,
+            media_cache,
+            Some(element_keys),
+        );
+    }
+    for (rule_index, rule) in rules.iter().enumerate() {
+        if !matches!(rule, Rule::At(_)) {
+            continue;
+        }
+        let mut rule_order = base_order + index.declaration_offsets[rule_index];
+        collect_rule_candidates(
+            node,
+            &rules[rule_index..=rule_index],
+            origin,
+            pseudo,
+            &mut rule_order,
+            out,
+            viewport_width,
+            viewport_height,
+            color_scheme_dark,
+            media_cache,
+            Some(element_keys),
+        );
+    }
+    *source_order += index.total_declarations;
 }
 
 fn collect_rule_candidates(
