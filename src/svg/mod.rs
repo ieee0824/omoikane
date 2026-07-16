@@ -9,6 +9,14 @@ use crate::paint::color::{Color, parse_color};
 ///
 /// Returns `None` if the element is not an `<svg>` or has no renderable size.
 pub fn render_svg_to_image(svg_node: &NodeHandle) -> Option<Image> {
+    render_svg_to_image_with_current_color(svg_node, Color::rgb(0, 0, 0))
+}
+
+/// Renders an inline `<svg>` using `current_color` for `currentColor` paints.
+pub(crate) fn render_svg_to_image_with_current_color(
+    svg_node: &NodeHandle,
+    current_color: Color,
+) -> Option<Image> {
     if svg_node.tag_name().as_deref() != Some("svg") {
         return None;
     }
@@ -33,7 +41,23 @@ pub fn render_svg_to_image(svg_node: &NodeHandle) -> Option<Image> {
     let tx = -vb_x * sx;
     let ty = -vb_y * sy;
 
-    render_svg_children(svg_node, &mut canvas, sx, sy, tx, ty, Color::rgb(0, 0, 0));
+    let inherited_fill = match attrs.get("fill").map(String::as_str) {
+        Some(value) if value.eq_ignore_ascii_case("currentcolor") => current_color,
+        Some(value) if !value.eq_ignore_ascii_case("none") => {
+            parse_color(value).unwrap_or(Color::rgb(0, 0, 0))
+        }
+        _ => Color::rgb(0, 0, 0),
+    };
+    render_svg_children(
+        svg_node,
+        &mut canvas,
+        sx,
+        sy,
+        tx,
+        ty,
+        inherited_fill,
+        current_color,
+    );
 
     Image::new(w, h, canvas.into_pixels()).ok()
 }
@@ -59,6 +83,7 @@ fn render_svg_children(
     tx: f32,
     ty: f32,
     inherited_fill: Color,
+    current_color: Color,
 ) {
     for child in node.child_nodes() {
         if child.node_type() != NodeType::Element {
@@ -73,6 +98,7 @@ fn render_svg_children(
         // fill="none" means do not fill (transparent).
         let fill = match fill_attr {
             Some(v) if v.eq_ignore_ascii_case("none") => None,
+            Some(v) if v.eq_ignore_ascii_case("currentcolor") => Some(current_color),
             Some(v) => Some(parse_color(v).unwrap_or(inherited_fill)),
             None => Some(inherited_fill),
         };
@@ -80,7 +106,7 @@ fn render_svg_children(
         match tag.as_str() {
             "g" => {
                 let g_fill = fill.unwrap_or(inherited_fill);
-                render_svg_children(&child, canvas, sx, sy, tx, ty, g_fill);
+                render_svg_children(&child, canvas, sx, sy, tx, ty, g_fill, current_color);
             }
             "rect" => {
                 let Some(fill_color) = fill else { continue };
@@ -122,7 +148,16 @@ fn render_svg_children(
             _ => {
                 let recurse_fill = fill.unwrap_or(inherited_fill);
                 // Recurse into unknown elements (may contain renderable children)
-                render_svg_children(&child, canvas, sx, sy, tx, ty, recurse_fill);
+                render_svg_children(
+                    &child,
+                    canvas,
+                    sx,
+                    sy,
+                    tx,
+                    ty,
+                    recurse_fill,
+                    current_color,
+                );
             }
         }
     }
@@ -537,6 +572,26 @@ mod tests {
         assert_eq!(image.pixels()[idx + 1], 0); // G
         assert_eq!(image.pixels()[idx + 2], 0); // B
         assert_eq!(image.pixels()[idx + 3], 255); // A
+    }
+
+    #[test]
+    fn renders_root_current_color_with_supplied_css_color() {
+        let html = r#"<svg width="10" height="10" fill="currentColor"><rect width="10" height="10"/></svg>"#;
+        let doc = TreeBuilder::parse(html).document();
+        let svg = find_svg(&doc).unwrap();
+        let image = render_svg_to_image_with_current_color(&svg, Color::rgb(255, 255, 255)).unwrap();
+        let center = (5 * 10 + 5) * 4;
+        assert_eq!(&image.pixels()[center..center + 4], &[255, 255, 255, 255]);
+    }
+
+    #[test]
+    fn svg_without_fill_keeps_black_initial_fill() {
+        let html = r#"<svg width="10" height="10"><rect width="10" height="10"/></svg>"#;
+        let doc = TreeBuilder::parse(html).document();
+        let svg = find_svg(&doc).unwrap();
+        let image = render_svg_to_image_with_current_color(&svg, Color::rgb(255, 255, 255)).unwrap();
+        let center = (5 * 10 + 5) * 4;
+        assert_eq!(&image.pixels()[center..center + 4], &[0, 0, 0, 255]);
     }
 
     #[test]

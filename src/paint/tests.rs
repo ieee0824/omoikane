@@ -4932,6 +4932,20 @@ fn paint_border_radius_clips_background_corners() {
     assert_eq!(canvas.pixel(19, 19), Some(Color::rgba(0, 0, 0, 0)));
 }
 
+#[test]
+fn uniform_pill_border_paints_rounded_corner_arc() {
+    let canvas = paint_clip_path_document(
+        ".target { width: 40px; height: 20px; border: 1px solid red; \
+                    border-radius: 9999px; }",
+        "<div class='target'></div>",
+        50.0,
+        30.0,
+    );
+
+    assert_eq!(canvas.pixel(2, 4), Some(Color::rgb(255, 0, 0)));
+    assert_eq!(canvas.pixel(21, 11), Some(Color::rgba(0, 0, 0, 0)));
+}
+
 // --- clip-path: inset() 描画テスト ---
 
 fn paint_clip_path_document(css: &str, body: &str, width: f32, height: f32) -> Canvas {

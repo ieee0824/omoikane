@@ -410,7 +410,11 @@ impl StyleResolver {
             // handling), never overriding an earlier valid declaration.
             match validate_declaration(&candidate.name, &resolved_value) {
                 DeclarationValidation::Valid(computed) => {
-                    properties.insert(candidate.name.to_ascii_lowercase(), computed);
+                    insert_computed_property(
+                        &mut properties,
+                        &candidate.name.to_ascii_lowercase(),
+                        computed,
+                    );
                     if candidate.important {
                         important_properties.insert(candidate.name.to_ascii_lowercase());
                     }
@@ -610,7 +614,29 @@ fn insert_computed_property(
     if should_skip_computed_property(name, &computed) {
         return;
     }
+    // Logical and physical box properties participate in the same cascade.
+    // Keep the logical value for CSSOM exposure, while also updating the
+    // physical side consumed by the current horizontal LTR layout engine.
+    // Because candidates are inserted in cascade order, a later declaration
+    // in either spelling correctly wins for layout.
+    if let Some(physical_name) = logical_box_property_physical_name(name) {
+        properties.insert(physical_name.to_string(), computed.clone());
+    }
     properties.insert(name.to_string(), computed);
+}
+
+fn logical_box_property_physical_name(name: &str) -> Option<&'static str> {
+    match name {
+        "padding-inline-start" => Some("padding-left"),
+        "padding-inline-end" => Some("padding-right"),
+        "padding-block-start" => Some("padding-top"),
+        "padding-block-end" => Some("padding-bottom"),
+        "margin-inline-start" => Some("margin-left"),
+        "margin-inline-end" => Some("margin-right"),
+        "margin-block-start" => Some("margin-top"),
+        "margin-block-end" => Some("margin-bottom"),
+        _ => None,
+    }
 }
 
 fn should_skip_computed_property(name: &str, computed: &ComputedValue) -> bool {

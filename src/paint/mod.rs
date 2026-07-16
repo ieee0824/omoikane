@@ -177,6 +177,10 @@ pub(crate) enum BorderRegion {
     Bottom,
     Left,
     Right,
+    TopLeftCorner,
+    TopRightCorner,
+    BottomRightCorner,
+    BottomLeftCorner,
 }
 
 /// A simple RGBA bitmap canvas.
@@ -346,7 +350,14 @@ impl Canvas {
 
         let clip_area = clip.and_then(normalize_rect);
 
-        // 辺ごとに描画範囲を絞る（Left/Right はフル高さ、コーナーは Top/Bottom が後から上書き）
+        let outer_tl = outer_tl.min(outer.width / 2.0).min(outer.height / 2.0).max(0.0);
+        let outer_tr = outer_tr.min(outer.width / 2.0).min(outer.height / 2.0).max(0.0);
+        let outer_br = outer_br.min(outer.width / 2.0).min(outer.height / 2.0).max(0.0);
+        let outer_bl = outer_bl.min(outer.width / 2.0).min(outer.height / 2.0).max(0.0);
+
+        // Scan narrow edge strips plus corner squares. This keeps thin pill
+        // borders proportional to their perimeter instead of scanning the
+        // entire border-box area.
         let strip = match region {
             BorderRegion::Top => Rect {
                 x: outer.x,
@@ -372,15 +383,34 @@ impl Canvas {
                 width: border_width,
                 height: outer.height,
             },
+            BorderRegion::TopLeftCorner => Rect {
+                x: outer.x,
+                y: outer.y,
+                width: outer_tl,
+                height: outer_tl,
+            },
+            BorderRegion::TopRightCorner => Rect {
+                x: outer.x + outer.width - outer_tr,
+                y: outer.y,
+                width: outer_tr,
+                height: outer_tr,
+            },
+            BorderRegion::BottomRightCorner => Rect {
+                x: outer.x + outer.width - outer_br,
+                y: outer.y + outer.height - outer_br,
+                width: outer_br,
+                height: outer_br,
+            },
+            BorderRegion::BottomLeftCorner => Rect {
+                x: outer.x,
+                y: outer.y + outer.height - outer_bl,
+                width: outer_bl,
+                height: outer_bl,
+            },
         };
         let Some(strip) = normalize_rect(strip) else {
             return;
         };
-
-        let outer_tl = outer_tl.min(outer.width / 2.0).min(outer.height / 2.0).max(0.0);
-        let outer_tr = outer_tr.min(outer.width / 2.0).min(outer.height / 2.0).max(0.0);
-        let outer_br = outer_br.min(outer.width / 2.0).min(outer.height / 2.0).max(0.0);
-        let outer_bl = outer_bl.min(outer.width / 2.0).min(outer.height / 2.0).max(0.0);
 
         let inner = inner_rect;
         let inner_tl = inner_tl.min(inner.width / 2.0).min(inner.height / 2.0).max(0.0);

@@ -248,7 +248,7 @@ fn collect_element_inline_segments(
 
     out.extend(generated_inline_segments(node, resolver, PseudoElement::Before));
 
-    if let Some((image_node, image)) = element_inline_image(node) {
+    if let Some((image_node, image)) = element_inline_image_with_style(node, &style) {
         collect_image_segment(&image_node, &image, resolver, out);
         out.extend(generated_inline_segments(node, resolver, PseudoElement::After));
         return;
@@ -709,6 +709,26 @@ fn parse_generated_content_keyword(keyword: &str) -> Option<GeneratedContent> {
 // ── Image handling ──────────────────────────────────────────────────────────
 
 pub(crate) fn element_inline_image(node: &NodeHandle) -> Option<(NodeHandle, Image)> {
+    element_inline_image_with_current_color(node, None)
+}
+
+fn element_inline_image_with_style(
+    node: &NodeHandle,
+    style: &ComputedStyle,
+) -> Option<(NodeHandle, Image)> {
+    let current_color = style.get("color").and_then(|value| match value {
+        ComputedValue::Color(value) | ComputedValue::Keyword(value) => {
+            crate::paint::color::parse_color(value)
+        }
+        _ => None,
+    });
+    element_inline_image_with_current_color(node, current_color)
+}
+
+fn element_inline_image_with_current_color(
+    node: &NodeHandle,
+    current_color: Option<crate::paint::color::Color>,
+) -> Option<(NodeHandle, Image)> {
     let tag_name = node.tag_name()?;
     let attributes = node.attributes().unwrap_or_default();
     match tag_name.as_str() {
@@ -723,9 +743,12 @@ pub(crate) fn element_inline_image(node: &NodeHandle) -> Option<(NodeHandle, Ima
         "picture" => node
             .child_nodes()
             .into_iter()
-            .find_map(|child| element_inline_image(&child)),
+            .find_map(|child| element_inline_image_with_current_color(&child, current_color)),
         "svg" => {
-            let image = crate::svg::render_svg_to_image(node)?;
+            let image = crate::svg::render_svg_to_image_with_current_color(
+                node,
+                current_color.unwrap_or(crate::paint::color::Color::rgb(0, 0, 0)),
+            )?;
             Some((node.clone(), image))
         }
         "object" => {
@@ -735,7 +758,7 @@ pub(crate) fn element_inline_image(node: &NodeHandle) -> Option<(NodeHandle, Ima
                 }
 
             for child in node.child_nodes() {
-                if let Some(image) = element_inline_image(&child) {
+                if let Some(image) = element_inline_image_with_current_color(&child, current_color) {
                     return Some(image);
                 }
             }
@@ -1250,8 +1273,16 @@ fn needs_character_break(
         && (matches!(overflow_wrap, OverflowWrap::BreakWord | OverflowWrap::Anywhere)
             || word_break == WordBreak::BreakWord)
         && cursor_x == start_x
-        && fragment_width > available_width
+        && exceeds_available_inline_width(fragment_width, available_width)
         && available_width > 0.0
+}
+
+/// Text measured as a whole can differ by a tiny fraction of a pixel from the
+/// sum of separately shaped word fragments (notably around kerning pairs).
+/// Do not create an extra line for that floating-point-only overflow.
+pub(super) fn exceeds_available_inline_width(used: f32, available: f32) -> bool {
+    const INLINE_WRAP_EPSILON_PX: f32 = 0.01;
+    used > available + INLINE_WRAP_EPSILON_PX
 }
 
 /// Breaks a text fragment character by character, emitting fragments and
@@ -1269,7 +1300,10 @@ fn break_text_by_characters(
     for ch_str in split_chars(text) {
         let ch_width = measure_text_width(&ch_str, segment.metrics);
         if cursor.x > cursor.start_x
-            && cursor.x + ch_width > cursor.start_x + available_width
+            && exceeds_available_inline_width(
+                cursor.x + ch_width - cursor.start_x,
+                available_width,
+            )
         {
             cursor.wrap_line(lines, fragments, segment.line_height, available_width, align);
         }
@@ -1329,7 +1363,10 @@ fn layout_inline_segments(
 
                     if can_wrap
                         && cursor.x > start_x
-                        && cursor.x + width > start_x + available_width
+                        && exceeds_available_inline_width(
+                            cursor.x + width - start_x,
+                            available_width,
+                        )
                     {
                         cursor.wrap_line(
                             &mut lines,

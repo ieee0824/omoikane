@@ -35,6 +35,40 @@ pub(crate) fn paint_borders(
         let inner_br = (br - border.right.min(border.bottom)).max(0.0);
         let inner_bl = (bl - border.left.min(border.bottom)).max(0.0);
 
+        let solid_all_sides = ["top", "right", "bottom", "left"]
+            .into_iter()
+            .all(|side| has_solid_border_side(style, side));
+        let uniform_width = border.top == border.right
+            && border.top == border.bottom
+            && border.top == border.left;
+        let colors = ["top", "right", "bottom", "left"]
+            .map(|side| border_color_side(style, side).unwrap_or(Color::rgb(0, 0, 0)));
+        let uniform_color = colors.iter().all(|color| *color == colors[0]);
+        if solid_all_sides && uniform_width && uniform_color && border.top > 0.0 {
+            for region in [
+                BorderRegion::Top,
+                BorderRegion::Right,
+                BorderRegion::Bottom,
+                BorderRegion::Left,
+                BorderRegion::TopLeftCorner,
+                BorderRegion::TopRightCorner,
+                BorderRegion::BottomRightCorner,
+                BorderRegion::BottomLeftCorner,
+            ] {
+                canvas.fill_rounded_rect_annulus(
+                    border_box,
+                    tl, tr, br, bl,
+                    padding_box,
+                    inner_tl, inner_tr, inner_br, inner_bl,
+                    colors[0],
+                    clip,
+                    region,
+                    border.top,
+                );
+            }
+            return;
+        }
+
         // 描画順: Left/Right を先（フル高さで描画）、その後 Top/Bottom でコーナーを上書きして色が勝つ
         // left border
         if border.left > 0.0 && has_solid_border_side(style, "left") {
