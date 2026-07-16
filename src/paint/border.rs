@@ -45,16 +45,27 @@ pub(crate) fn paint_borders(
             .map(|side| border_color_side(style, side).unwrap_or(Color::rgb(0, 0, 0)));
         let uniform_color = colors.iter().all(|color| *color == colors[0]);
         if solid_all_sides && uniform_width && uniform_color && border.top > 0.0 {
-            canvas.fill_rounded_rect_annulus(
-                border_box,
-                tl, tr, br, bl,
-                padding_box,
-                inner_tl, inner_tr, inner_br, inner_bl,
-                colors[0],
-                clip,
-                BorderRegion::All,
-                border.top,
-            );
+            for region in [
+                BorderRegion::Top,
+                BorderRegion::Right,
+                BorderRegion::Bottom,
+                BorderRegion::Left,
+                BorderRegion::TopLeftCorner,
+                BorderRegion::TopRightCorner,
+                BorderRegion::BottomRightCorner,
+                BorderRegion::BottomLeftCorner,
+            ] {
+                canvas.fill_rounded_rect_annulus(
+                    border_box,
+                    tl, tr, br, bl,
+                    padding_box,
+                    inner_tl, inner_tr, inner_br, inner_bl,
+                    colors[0],
+                    clip,
+                    region,
+                    border.top,
+                );
+            }
             return;
         }
 
