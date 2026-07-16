@@ -5821,7 +5821,7 @@ fn box_blur_alpha_uniform_field_stays_uniform() {
     for i in 0..w as usize * h as usize {
         canvas.pixels[i * 4 + 3] = 200;
     }
-    canvas.box_blur_alpha(2);
+    canvas.box_blur_alpha_passes(2, 1);
     // 端を含む全ピクセルが 200 のまま（±1 許容）
     for y in 0..h {
         for x in 0..w {
@@ -5841,7 +5841,7 @@ fn box_blur_alpha_edge_equals_center_for_uniform_input() {
     for i in 0..100usize {
         canvas.pixels[i * 4 + 3] = 128;
     }
-    canvas.box_blur_alpha(3);
+    canvas.box_blur_alpha_passes(3, 1);
     let center = canvas.pixel(5, 5).unwrap().a;
     let corner = canvas.pixel(0, 0).unwrap().a;
     assert!(

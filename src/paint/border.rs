@@ -783,9 +783,7 @@ pub(crate) fn paint_outer_box_shadow(
 
         // 簡易 box blur: 半径 r = ceil(blur) のボックスで 3 回適用
         let r = blur.ceil() as u32;
-        shadow_buf.box_blur_alpha(r);
-        shadow_buf.box_blur_alpha(r);
-        shadow_buf.box_blur_alpha(r);
+        shadow_buf.box_blur_alpha_passes(r, 3);
 
         // color.a を alpha のスケールとして合成
         let alpha_scale = color.a as f32 / 255.0;

@@ -2240,69 +2240,62 @@ fn paint_background_image(
 }
 
 impl Canvas {
-    /// alpha チャンネルにのみ box blur を適用する（色成分は影の色のまま、アルファだけ拡散）。
-    ///
-    /// カーネルは常に `2r+1` ピクセル幅だが、端ではクランプして実効カーネルサイズを動的に計算する。
-    pub(crate) fn box_blur_alpha(&mut self, radius: u32) {
-        if radius == 0 {
+    /// alpha チャンネルへ複数回のbox blurを適用し、作業バッファを再利用する。
+    /// カーネルは常に`2r+1`ピクセル幅で、端では実効カーネルサイズを調整する。
+    pub(crate) fn box_blur_alpha_passes(&mut self, radius: u32, passes: usize) {
+        if radius == 0 || passes == 0 {
             return;
         }
         let w = self.width as usize;
         let h = self.height as usize;
         let r = radius as usize;
-
-        // 水平方向 blur
         let mut alphas: Vec<u8> = self.pixels.iter().skip(3).step_by(4).copied().collect();
         let mut blurred = vec![0u8; w * h];
-        for y in 0..h {
-            let row_start = y * w;
-            let mut sum: u32 = 0;
-            // x=0 の初期ウィンドウ: [max(0, 0-r), min(w-1, 0+r)] = [0, min(r, w-1)]
-            let init_right = r.min(w.saturating_sub(1));
-            for x in 0..=init_right {
-                sum += alphas[row_start + x] as u32;
-            }
-            for x in 0..w {
-                // 実効カーネルサイズ: min(w-1, x+r) - max(0, x-r) + 1
-                let left = x.saturating_sub(r);
-                let right = (x + r).min(w.saturating_sub(1));
-                let kernel_size = (right - left + 1) as u32;
-                blurred[row_start + x] = (sum / kernel_size) as u8;
-                // ウィンドウを右にずらす: 右端を追加、左端を除去
-                if x + r + 1 < w {
-                    sum += alphas[row_start + x + r + 1] as u32;
-                }
-                if x >= r {
-                    sum = sum.saturating_sub(alphas[row_start + x - r] as u32);
-                }
-            }
-        }
 
-        // 垂直方向 blur
-        alphas = blurred.clone();
-        for x in 0..w {
-            let mut sum: u32 = 0;
-            // y=0 の初期ウィンドウ
-            let init_bottom = r.min(h.saturating_sub(1));
-            for y in 0..=init_bottom {
-                sum += alphas[y * w + x] as u32;
-            }
+        for _ in 0..passes {
+            // 水平方向 blur
             for y in 0..h {
-                let top = y.saturating_sub(r);
-                let bottom = (y + r).min(h.saturating_sub(1));
-                let kernel_size = (bottom - top + 1) as u32;
-                blurred[y * w + x] = (sum / kernel_size) as u8;
-                if y + r + 1 < h {
-                    sum += alphas[(y + r + 1) * w + x] as u32;
+                let row_start = y * w;
+                let mut sum: u32 = 0;
+                let init_right = r.min(w.saturating_sub(1));
+                for x in 0..=init_right {
+                    sum += alphas[row_start + x] as u32;
                 }
-                if y >= r {
-                    sum = sum.saturating_sub(alphas[(y - r) * w + x] as u32);
+                for x in 0..w {
+                    let left = x.saturating_sub(r);
+                    let right = (x + r).min(w.saturating_sub(1));
+                    blurred[row_start + x] = (sum / (right - left + 1) as u32) as u8;
+                    if x + r + 1 < w {
+                        sum += alphas[row_start + x + r + 1] as u32;
+                    }
+                    if x >= r {
+                        sum = sum.saturating_sub(alphas[row_start + x - r] as u32);
+                    }
+                }
+            }
+
+            // 垂直方向 blur。結果をalphasへ戻し、次のpassの入力として再利用する。
+            for x in 0..w {
+                let mut sum: u32 = 0;
+                let init_bottom = r.min(h.saturating_sub(1));
+                for y in 0..=init_bottom {
+                    sum += blurred[y * w + x] as u32;
+                }
+                for y in 0..h {
+                    let top = y.saturating_sub(r);
+                    let bottom = (y + r).min(h.saturating_sub(1));
+                    alphas[y * w + x] = (sum / (bottom - top + 1) as u32) as u8;
+                    if y + r + 1 < h {
+                        sum += blurred[(y + r + 1) * w + x] as u32;
+                    }
+                    if y >= r {
+                        sum = sum.saturating_sub(blurred[(y - r) * w + x] as u32);
+                    }
                 }
             }
         }
 
-        // blurred alpha をピクセルに書き戻す
-        for (i, &a) in blurred.iter().enumerate() {
+        for (i, &a) in alphas.iter().enumerate() {
             self.pixels[i * 4 + 3] = a;
         }
     }
