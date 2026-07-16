@@ -1938,6 +1938,69 @@ fn resolves_tailwind_spacing_variable_in_logical_padding() {
 }
 
 #[test]
+fn logical_padding_start_overrides_earlier_physical_reset() {
+    let document = NodeHandle::document();
+    let div = NodeHandle::element("div");
+    div.set_attribute("class", "desktop-padding");
+    document.append_child(div.clone());
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "* { padding-left: 0; } \
+             .desktop-padding { padding-inline-start: 36px; }",
+        )
+        .unwrap(),
+    );
+
+    let style = resolver.computed_style(&div);
+    assert_eq!(style.get("padding-left"), Some(&ComputedValue::Px(36.0)));
+    assert_eq!(style.get("padding-inline-start"), Some(&ComputedValue::Px(36.0)));
+}
+
+#[test]
+fn later_physical_padding_overrides_logical_start() {
+    let document = NodeHandle::document();
+    let div = NodeHandle::element("div");
+    document.append_child(div.clone());
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "div { padding-inline-start: 36px; } \
+             div { padding-left: 12px; }",
+        )
+        .unwrap(),
+    );
+
+    let style = resolver.computed_style(&div);
+    assert_eq!(style.get("padding-left"), Some(&ComputedValue::Px(12.0)));
+}
+
+#[test]
+fn logical_block_padding_overrides_earlier_physical_reset() {
+    let document = NodeHandle::document();
+    let div = NodeHandle::element("div");
+    document.append_child(div.clone());
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "* { padding-top: 0; padding-bottom: 0; } \
+             div { padding-block: 40px 12px; }",
+        )
+        .unwrap(),
+    );
+
+    let style = resolver.computed_style(&div);
+    assert_eq!(style.get("padding-top"), Some(&ComputedValue::Px(40.0)));
+    assert_eq!(style.get("padding-bottom"), Some(&ComputedValue::Px(12.0)));
+}
+
+#[test]
 fn applies_rules_nested_in_cascade_layer() {
     let document = NodeHandle::document();
     let div = NodeHandle::element("div");

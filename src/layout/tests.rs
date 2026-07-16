@@ -3102,6 +3102,70 @@ fn logical_margin_inline_start_offsets_flex_item() {
 }
 
 #[test]
+fn centered_flex_button_keeps_intrinsic_text_on_one_line() {
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let button = NodeHandle::element("span");
+    let icon_wrapper = NodeHandle::element("span");
+    let icon = NodeHandle::element("svg");
+    let label = NodeHandle::element("span");
+    label.append_child(NodeHandle::text("Continue with phone"));
+    icon_wrapper.append_child(icon);
+    button.append_child(icon_wrapper);
+    button.append_child(label);
+    body.append_child(button);
+    document.append_child(body.clone());
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "body { margin: 0; width: 384px; font-size: 15px; } \
+             body > span { display: flex; align-items: center; justify-content: center; \
+                           padding-inline: 24px; padding-block: 12px; } \
+             span span:first-child { margin-inline-end: 8px; } \
+             svg { display: block; width: 22px; height: 22px; }",
+        )
+        .unwrap(),
+    );
+
+    let layout = layout_tree(
+        &body,
+        &mut resolver,
+        Rect { x: 0.0, y: 0.0, width: 384.0, height: 0.0 },
+    )
+    .unwrap();
+
+    let button_box = &layout.children[0];
+    let label_box = &button_box.children[1];
+    assert_eq!(
+        label_box.lines.len(),
+        1,
+        "label width was {} with lines {:?}",
+        label_box.dimensions.content.width,
+        label_box.lines,
+    );
+    let line = &label_box.lines[0];
+    assert!(
+        line.fragments
+            .iter()
+            .all(|fragment| fragment.rect.y == line.fragments[0].rect.y),
+        "fragments were vertically split: {:?}",
+        line.fragments,
+    );
+    assert_eq!(
+        line.fragments.iter().filter_map(InlineFragment::text).collect::<String>(),
+        "Continue with phone",
+    );
+}
+
+#[test]
+fn inline_wrapping_ignores_subpixel_font_fragment_rounding() {
+    assert!(!super::inline::exceeds_available_inline_width(125.99748, 125.99));
+    assert!(super::inline::exceeds_available_inline_width(126.01, 125.99));
+}
+
+#[test]
 fn block_svg_flex_item_keeps_its_replaced_image_fragment() {
     let document = NodeHandle::document();
     let body = NodeHandle::element("body");

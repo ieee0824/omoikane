@@ -173,6 +173,7 @@ pub enum DataUri {
 /// ボーダー描画で使う領域区分（角丸ボーダー時の色割り当て用）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum BorderRegion {
+    All,
     Top,
     Bottom,
     Left,
@@ -348,6 +349,7 @@ impl Canvas {
 
         // 辺ごとに描画範囲を絞る（Left/Right はフル高さ、コーナーは Top/Bottom が後から上書き）
         let strip = match region {
+            BorderRegion::All => outer,
             BorderRegion::Top => Rect {
                 x: outer.x,
                 y: outer.y,
