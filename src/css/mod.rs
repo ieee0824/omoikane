@@ -1130,6 +1130,20 @@ mod tests {
     }
 
     #[test]
+    fn font_face_uses_last_source_as_compatible_fallback() {
+        let stylesheet = parse_stylesheet(
+            r#"@font-face { font-family: Chirp; src: url(chirp.woff2) format("woff2"), url(chirp.woff) format("woff"); }"#,
+        )
+        .unwrap();
+
+        let Rule::FontFace(ff) = &stylesheet.rules[0] else {
+            panic!("expected FontFace rule");
+        };
+        assert_eq!(ff.src_url, "chirp.woff");
+        assert_eq!(ff.format.as_deref(), Some("woff"));
+    }
+
+    #[test]
     fn parses_font_face_with_weight_and_style() {
         let stylesheet = parse_stylesheet(
             r#"@font-face { font-family: "MyFont"; src: url(font.ttf); font-weight: bold; font-style: italic; }"#,

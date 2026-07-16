@@ -920,23 +920,17 @@ pub(crate) fn fetch_font_face_fonts(
 
             let url_str = &ff_rule.src_url;
 
-            // SSRF protection: reject absolute URLs and protocol-relative URLs.
-            // Only relative URLs that resolve to the same origin are allowed.
-            if url_str.contains("://") || url_str.starts_with("//") {
-                continue;
-            }
-
-            // Try to resolve relative URL; skip if no base is available
+            // Resolve relative and absolute font URLs. Cross-origin web fonts
+            // are common, but only public HTTPS destinations are permitted so
+            // an author stylesheet cannot use font loading to probe a private
+            // network address.
             let resolved = match base_url {
                 Some(base) => match resolve_url(base, url_str) {
-                    Ok(u) => {
-                        // Same-origin check
-                        if !same_origin(&u, base) {
-                            continue;
-                        }
-                        u.to_string()
-                    }
+                    Ok(url)
+                        if same_origin(&url, base)
+                            || is_public_cross_origin_stylesheet_url(&url) => url,
                     Err(_) => continue,
+                    _ => continue,
                 },
                 None => continue,
             };
@@ -961,7 +955,8 @@ pub(crate) fn fetch_font_face_fonts(
             }
 
             // Fetch font data
-            let data = match fetch_font_bytes(&resolved, &mut client) {
+            let cross_origin = base_url.is_some_and(|base| !same_origin(&resolved, base));
+            let data = match fetch_font_bytes(&resolved.to_string(), &mut client, cross_origin) {
                 Some(d) => d,
                 None => continue,
             };
@@ -993,13 +988,18 @@ const MAX_FONT_BYTES: usize = 10_000_000;
 fn fetch_font_bytes(
     url: &str,
     client: &mut Option<crate::http::Client>,
+    public_only: bool,
 ) -> Option<Vec<u8>> {
     if client.is_none() {
         *client = Some(crate::http::Client::new());
     }
     let c = client.as_mut()?;
 
-    let response = c.get(url).ok()?;
+    let response = if public_only {
+        c.get_public(url).ok()?
+    } else {
+        c.get(url).ok()?
+    };
 
     if response.status_code() < 200 || response.status_code() >= 300 {
         return None;

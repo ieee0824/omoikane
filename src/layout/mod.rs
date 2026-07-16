@@ -1096,6 +1096,12 @@ fn layout_block_children(
     let mut float_regions = Vec::new();
 
     for child in node.child_nodes() {
+        // Comments do not generate boxes and do not interrupt an inline
+        // formatting context. Keeping pending text together also preserves
+        // word-boundary behavior across framework hydration comments.
+        if child.node_type() == NodeType::Comment {
+            continue;
+        }
         if is_inline_child(&child, resolver) {
             pending_inline_nodes.push(child);
             continue;

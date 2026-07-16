@@ -4949,6 +4949,38 @@ fn split_words_no_cjk_break_mixed_ascii_cjk() {
 // ── word-break layout tests ──────────────────────────────────────────────────
 
 #[test]
+fn adjacent_text_nodes_do_not_create_wrap_opportunity() {
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let paragraph = NodeHandle::element("p");
+    document.append_child(body.clone());
+    body.append_child(paragraph.clone());
+    paragraph.append_child(NodeHandle::text("hello world"));
+    paragraph.append_child(NodeHandle::comment("framework boundary"));
+    paragraph.append_child(NodeHandle::text("."));
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet("body { margin: 0; } p { width: 60px; font-size: 16px; }").unwrap(),
+    );
+    let layout = layout_tree(
+        &body,
+        &mut resolver,
+        Rect { x: 0.0, y: 0.0, width: 60.0, height: 0.0 },
+    )
+    .unwrap();
+    let paragraph = &layout.children[0];
+    assert_eq!(paragraph.lines.len(), 2);
+    let second_line = paragraph.lines[1]
+        .fragments
+        .iter()
+        .filter_map(InlineFragment::text)
+        .collect::<String>();
+    assert_eq!(second_line, "world.");
+}
+
+#[test]
 fn word_break_break_all_wraps_between_any_characters() {
     // With word-break: break-all, a long English word should be split into
     // individual characters, producing multiple line boxes on a narrow width.

@@ -1164,15 +1164,14 @@ fn extract_src_descriptor(
             for item in items {
                 match item {
                     Value::Function { name, arguments } if name.eq_ignore_ascii_case("url") => {
-                        if out_url.is_none()
-                            && let Some(arg) = arguments.first() {
-                                *out_url = Some(extract_string_value(arg));
-                            }
+                        if let Some(arg) = arguments.first() {
+                            *out_url = Some(extract_string_value(arg));
+                            *out_format = None;
+                        }
                     }
                     Value::Keyword(k) if k.starts_with("url(") => {
-                        if out_url.is_none() {
-                            *out_url = Some(extract_url_from_keyword(k));
-                        }
+                        *out_url = Some(extract_url_from_keyword(k));
+                        *out_format = None;
                     }
                     Value::Function { name, arguments }
                         if name.eq_ignore_ascii_case("format") =>

@@ -49,6 +49,7 @@ pub(super) fn layout_inline_nodes(
     for node in nodes {
         collect_inline_segments(node, resolver, &mut segments);
     }
+    coalesce_adjacent_text_segments(&mut segments);
 
     layout_inline_segments(
         &segments,
@@ -58,6 +59,34 @@ pub(super) fn layout_inline_nodes(
         align,
         strut_line_height,
     )
+}
+
+/// Adjacent text nodes with identical formatting form one continuous inline
+/// text run. Comments and DOM node boundaries do not introduce a soft wrap
+/// opportunity (for example, `word<!-- -->.` must stay one word).
+fn coalesce_adjacent_text_segments(segments: &mut Vec<InlineSegment>) {
+    let mut coalesced: Vec<InlineSegment> = Vec::with_capacity(segments.len());
+    for segment in segments.drain(..) {
+        if let Some(previous) = coalesced.last_mut()
+            && previous.node.parent_node() == segment.node.parent_node()
+            && previous.metrics == segment.metrics
+            && previous.line_height == segment.line_height
+            && previous.vertical_align == segment.vertical_align
+            && previous.style == segment.style
+            && previous.word_break == segment.word_break
+            && previous.overflow_wrap == segment.overflow_wrap
+            && previous.white_space_mode == segment.white_space_mode
+            && let (
+                InlineSegmentContent::Text(previous_text),
+                InlineSegmentContent::Text(text),
+            ) = (&mut previous.content, &segment.content)
+        {
+            previous_text.push_str(text);
+            continue;
+        }
+        coalesced.push(segment);
+    }
+    *segments = coalesced;
 }
 
 // ── Inline segment types ────────────────────────────────────────────────────
