@@ -10,7 +10,7 @@ use crate::dom::{Node, NodeHandle, NodeType};
 use rusqlite::{Connection, params};
 
 use super::{
-    Declaration, MediaQuery, PseudoElement, Rule, Specificity, Stylesheet, Value,
+    Declaration, MediaQuery, PseudoElement, Rule, SimpleSelector, Specificity, Stylesheet, Value,
     evaluate_media_query, matches_selector_with_pseudo, parse_media_query_list, specificity,
 };
 
@@ -279,6 +279,7 @@ impl StyleResolver {
         let viewport_width = self.viewport_width;
         let viewport_height = self.viewport_height;
         let color_scheme_dark = self.color_scheme_dark;
+        let element_keys = ElementMatchKeys::from_node(node);
 
         for input in &self.stylesheets {
             collect_rule_candidates(
@@ -292,6 +293,7 @@ impl StyleResolver {
                 viewport_height,
                 color_scheme_dark,
                 &mut self.media_query_cache,
+                element_keys.as_ref(),
             );
         }
 
@@ -870,6 +872,39 @@ struct Candidate {
     source_order: usize,
 }
 
+struct ElementMatchKeys {
+    id: Option<String>,
+    classes: HashSet<String>,
+    tag_name: String,
+}
+
+impl ElementMatchKeys {
+    fn from_node(node: &NodeHandle) -> Option<Self> {
+        Some(Self {
+            id: node.get_attribute("id"),
+            classes: node
+                .get_attribute("class")
+                .map(|value| value.split_whitespace().map(str::to_string).collect())
+                .unwrap_or_default(),
+            tag_name: node.tag_name()?,
+        })
+    }
+}
+
+fn style_rule_might_match(style_rule: &super::StyleRule, keys: &ElementMatchKeys) -> bool {
+    style_rule.selectors.iter().any(|selector| {
+        let Some(rightmost) = selector.parts.last() else {
+            return false;
+        };
+        rightmost.simples.iter().all(|simple| match simple {
+            SimpleSelector::Id(id) => keys.id.as_deref() == Some(id.as_str()),
+            SimpleSelector::Class(class) => keys.classes.contains(class),
+            SimpleSelector::Type(tag) => tag.eq_ignore_ascii_case(&keys.tag_name),
+            _ => true,
+        })
+    })
+}
+
 fn collect_rule_candidates(
     node: &NodeHandle,
     rules: &[Rule],
@@ -881,6 +916,7 @@ fn collect_rule_candidates(
     viewport_height: f32,
     color_scheme_dark: bool,
     media_cache: &mut HashMap<String, Vec<MediaQuery>>,
+    element_keys: Option<&ElementMatchKeys>,
 ) {
     if node.node_type() != NodeType::Element {
         return;
@@ -889,6 +925,10 @@ fn collect_rule_candidates(
     for rule in rules {
         match rule {
             Rule::Style(style_rule) => {
+                if element_keys.is_some_and(|keys| !style_rule_might_match(style_rule, keys)) {
+                    *source_order += style_rule.declarations.len();
+                    continue;
+                }
                 let matching_specificity = style_rule
                     .selectors
                     .iter()
@@ -946,6 +986,7 @@ fn collect_rule_candidates(
                             viewport_height,
                             color_scheme_dark,
                             media_cache,
+                            element_keys,
                         );
                     } else {
                         // Count the rules inside for correct source_order numbering.

@@ -31,6 +31,10 @@ Linux aarch64、rustc 1.97.0、release build。1,000要素×1,000 class rule、1
 
 - 属性Map clone除去前: median 100.640ms
 - Issue 077適用後（rule index導入前）: median 31.588ms
+- 右端selector候補フィルタ適用後: median 18.974ms（Issue 077適用後から39.9%短縮）
+
+現在は各ruleの軽量な候補判定が残っている。次段階でID・class・tagのHashMap indexから
+候補ruleを直接列挙し、`O(N × R)`のrule走査自体を削減する。
 
 ## 関連issue
 
