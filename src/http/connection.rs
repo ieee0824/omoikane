@@ -3,6 +3,7 @@
 use std::io::{self, Write};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpStream, ToSocketAddrs};
 use std::sync::Arc;
+use std::sync::OnceLock;
 use std::time::Duration;
 
 use rustls::ClientConfig;
@@ -89,6 +90,13 @@ fn insecure_client_config(enable_http2: bool) -> ClientConfig {
     config
 }
 
+fn shared_insecure_client_config(enable_http2: bool) -> Arc<ClientConfig> {
+    static HTTP2: OnceLock<Arc<ClientConfig>> = OnceLock::new();
+    static HTTP1: OnceLock<Arc<ClientConfig>> = OnceLock::new();
+    let config = if enable_http2 { &HTTP2 } else { &HTTP1 };
+    Arc::clone(config.get_or_init(|| Arc::new(insecure_client_config(enable_http2))))
+}
+
 /// Sends an HTTP request over a new TCP connection and returns the response.
 ///
 /// For `http` URLs, uses a plain TCP connection. For `https` URLs, wraps the
@@ -134,9 +142,9 @@ pub fn send_with_options(
             || connect_stream(request),
             |enable_http2| {
                 if insecure {
-                    Arc::new(insecure_client_config(enable_http2))
+                    shared_insecure_client_config(enable_http2)
                 } else {
-                    Arc::new(default_client_config(enable_http2))
+                    shared_default_client_config(enable_http2)
                 }
             },
         )
@@ -245,6 +253,13 @@ fn default_client_config(enable_http2: bool) -> ClientConfig {
     config
 }
 
+fn shared_default_client_config(enable_http2: bool) -> Arc<ClientConfig> {
+    static HTTP2: OnceLock<Arc<ClientConfig>> = OnceLock::new();
+    static HTTP1: OnceLock<Arc<ClientConfig>> = OnceLock::new();
+    let config = if enable_http2 { &HTTP2 } else { &HTTP1 };
+    Arc::clone(config.get_or_init(|| Arc::new(default_client_config(enable_http2))))
+}
+
 fn send_over_tls_with_config(
     stream: TcpStream,
     request: &HttpRequest,
@@ -280,6 +295,18 @@ mod tests {
     use rustls::{ClientConnection, StreamOwned};
     use std::io::{BufRead, BufReader, Read};
     use std::net::TcpListener;
+
+    #[test]
+    fn tls_configs_are_shared_by_transport_mode() {
+        let http2 = shared_default_client_config(true);
+        let same_http2 = shared_default_client_config(true);
+        let http1 = shared_default_client_config(false);
+
+        assert!(Arc::ptr_eq(&http2, &same_http2));
+        assert!(!Arc::ptr_eq(&http2, &http1));
+        assert_eq!(http2.alpn_protocols, vec![b"h2".to_vec(), b"http/1.1".to_vec()]);
+        assert_eq!(http1.alpn_protocols, vec![b"http/1.1".to_vec()]);
+    }
 
     /// Starts a local TCP server that reads an HTTP request, validates it,
     /// and responds with a fixed 200 OK response. Returns the port.
