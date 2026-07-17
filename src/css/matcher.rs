@@ -169,14 +169,17 @@ fn matches_selector_part(
         Combinator::AdjacentSibling => previous_element_sibling(node)
             .is_some_and(|sibling| matches_selector_part(&sibling, selector, index - 1, None)),
         Combinator::GeneralSibling => {
-            let mut sibling = previous_element_sibling(node);
-            while let Some(current) = sibling {
-                if matches_selector_part(&current, selector, index - 1, None) {
-                    return true;
-                }
-                sibling = previous_element_sibling(&current);
-            }
-            false
+            let Some(parent) = node.parent_node() else {
+                return false;
+            };
+            let siblings = parent.child_nodes();
+            let Some(position) = siblings.iter().position(|candidate| candidate == node) else {
+                return false;
+            };
+            siblings[..position].iter().rev().any(|sibling| {
+                sibling.node_type() == NodeType::Element
+                    && matches_selector_part(sibling, selector, index - 1, None)
+            })
         }
     }
 }

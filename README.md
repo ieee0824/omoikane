@@ -184,6 +184,12 @@ min / median / mean / p95をJSONで出力します。`warm_dom`は解析済みDO
 cargo run --release --example style_benchmark
 ```
 
+多数の兄弟に対するgeneral sibling selectorのbaseline:
+
+```bash
+cargo run --release --example sibling_selector_benchmark
+```
+
 `Client::new()` の既定 `User-Agent` は `Omoikane/{version} {OS}` 形式です。
 必要に応じて [`src/http/client.rs`](/src/http/client.rs) の `set_user_agent` で上書きできます。
 
