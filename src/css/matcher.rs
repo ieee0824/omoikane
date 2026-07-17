@@ -1,5 +1,7 @@
 //! CSS selector matching against the DOM tree.
 
+use std::collections::HashMap;
+
 use crate::dom::{Node, NodeHandle, NodeType};
 
 use super::{AttributeOperator, Combinator, Selector, SelectorPart, SimpleSelector};
@@ -51,6 +53,26 @@ pub fn matches_selector_with_pseudo(
     selector: &Selector,
     pseudo: Option<PseudoElement>,
 ) -> bool {
+    matches_selector_with_pseudo_cached(node, selector, pseudo, &mut SelectorMatchCache::default())
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct SelectorMatchCache {
+    structural_positions: HashMap<usize, StructuralPositions>,
+}
+
+#[derive(Debug, Default)]
+struct StructuralPositions {
+    element: HashMap<usize, (usize, usize)>,
+    of_type: HashMap<usize, (usize, usize)>,
+}
+
+pub(crate) fn matches_selector_with_pseudo_cached(
+    node: &NodeHandle,
+    selector: &Selector,
+    pseudo: Option<PseudoElement>,
+    cache: &mut SelectorMatchCache,
+) -> bool {
     if selector.parts.is_empty() || node.node_type() != NodeType::Element {
         return false;
     }
@@ -59,7 +81,7 @@ pub fn matches_selector_with_pseudo(
         return false;
     }
 
-    matches_selector_part(node, selector, selector.parts.len() - 1, pseudo)
+    matches_selector_part(node, selector, selector.parts.len() - 1, pseudo, cache)
 }
 
 /// Returns the pseudo-element targeted by `selector`, if any.
@@ -138,9 +160,10 @@ fn matches_selector_part(
     selector: &Selector,
     index: usize,
     pseudo: Option<PseudoElement>,
+    cache: &mut SelectorMatchCache,
 ) -> bool {
     let part = &selector.parts[index];
-    if !matches_compound(node, part, pseudo) {
+    if !matches_compound(node, part, pseudo, cache) {
         return false;
     }
 
@@ -156,7 +179,7 @@ fn matches_selector_part(
         Combinator::Descendant => {
             let mut ancestor = node.parent_node();
             while let Some(parent) = ancestor {
-                if matches_selector_part(&parent, selector, index - 1, None) {
+                if matches_selector_part(&parent, selector, index - 1, None, cache) {
                     return true;
                 }
                 ancestor = parent.parent_node();
@@ -165,9 +188,9 @@ fn matches_selector_part(
         }
         Combinator::Child => node
             .parent_node()
-            .is_some_and(|parent| matches_selector_part(&parent, selector, index - 1, None)),
+            .is_some_and(|parent| matches_selector_part(&parent, selector, index - 1, None, cache)),
         Combinator::AdjacentSibling => previous_element_sibling(node)
-            .is_some_and(|sibling| matches_selector_part(&sibling, selector, index - 1, None)),
+            .is_some_and(|sibling| matches_selector_part(&sibling, selector, index - 1, None, cache)),
         Combinator::GeneralSibling => {
             let Some(parent) = node.parent_node() else {
                 return false;
@@ -178,22 +201,23 @@ fn matches_selector_part(
             };
             siblings[..position].iter().rev().any(|sibling| {
                 sibling.node_type() == NodeType::Element
-                    && matches_selector_part(sibling, selector, index - 1, None)
+                    && matches_selector_part(sibling, selector, index - 1, None, cache)
             })
         }
     }
 }
 
-fn matches_compound(node: &NodeHandle, part: &SelectorPart, pseudo: Option<PseudoElement>) -> bool {
+fn matches_compound(node: &NodeHandle, part: &SelectorPart, pseudo: Option<PseudoElement>, cache: &mut SelectorMatchCache) -> bool {
     part.simples
         .iter()
-        .all(|simple| matches_simple_selector(node, simple, pseudo))
+        .all(|simple| matches_simple_selector(node, simple, pseudo, cache))
 }
 
 fn matches_simple_selector(
     node: &NodeHandle,
     simple: &SimpleSelector,
     pseudo: Option<PseudoElement>,
+    cache: &mut SelectorMatchCache,
 ) -> bool {
     match simple {
         SimpleSelector::Type(name) => node
@@ -216,14 +240,14 @@ fn matches_simple_selector(
             operator,
             value,
         } => matches_attribute_selector(node, name, *operator, value.as_deref()),
-        SimpleSelector::PseudoClass(name) => matches_pseudo_class(node, name, pseudo),
+        SimpleSelector::PseudoClass(name) => matches_pseudo_class(node, name, pseudo, cache),
         SimpleSelector::PseudoElement(name) => matches_pseudo_element(name, pseudo),
         SimpleSelector::Not(inner) => {
             // CSS :not() negates the entire compound argument.
             // The node must not match ALL of the inner simple selectors simultaneously.
             !inner
                 .iter()
-                .all(|s| matches_simple_selector(node, s, pseudo))
+                .all(|s| matches_simple_selector(node, s, pseudo, cache))
         }
     }
 }
@@ -262,22 +286,22 @@ fn matches_attribute_selector(
     }
 }
 
-fn matches_pseudo_class(node: &NodeHandle, name: &str, pseudo: Option<PseudoElement>) -> bool {
+fn matches_pseudo_class(node: &NodeHandle, name: &str, pseudo: Option<PseudoElement>, cache: &mut SelectorMatchCache) -> bool {
     if let Some((function, argument)) = functional_pseudo(name) {
         // Pseudo-class names are ASCII case-insensitive; the argument keeps
         // its original case (`:lang()` compares case-insensitively itself and
         // an+b parsing lowercases internally).
         let function = function.to_ascii_lowercase();
         return match function.as_str() {
-            "nth-child" => matches_nth_child(node, argument),
-            "nth-last-child" => element_position(node)
+            "nth-child" => matches_nth_child(node, argument, cache),
+            "nth-last-child" => element_position(node, cache)
                 .is_some_and(|(index, total)| {
                     parse_an_plus_b(argument).is_some_and(|formula| formula.matches(total - index + 1))
                 }),
-            "nth-of-type" => type_position(node).is_some_and(|(index, _)| {
+            "nth-of-type" => type_position(node, cache).is_some_and(|(index, _)| {
                 parse_an_plus_b(argument).is_some_and(|formula| formula.matches(index))
             }),
-            "nth-last-of-type" => type_position(node).is_some_and(|(index, total)| {
+            "nth-last-of-type" => type_position(node, cache).is_some_and(|(index, total)| {
                 parse_an_plus_b(argument).is_some_and(|formula| formula.matches(total - index + 1))
             }),
             "lang" => matches_language(node, argument),
@@ -292,17 +316,17 @@ fn matches_pseudo_class(node: &NodeHandle, name: &str, pseudo: Option<PseudoElem
         "root" => node
             .parent_node()
             .is_some_and(|parent| parent.node_type() == NodeType::Document),
-        "first-child" => element_index_in_parent(node) == Some(1),
+        "first-child" => element_index_in_parent(node, cache) == Some(1),
         "last-child" => {
-            let Some((index, total)) = element_position(node) else {
+            let Some((index, total)) = element_position(node, cache) else {
                 return false;
             };
             index == total
         }
-        "only-child" => element_position(node).is_some_and(|(_, total)| total == 1),
-        "first-of-type" => type_position(node).is_some_and(|(index, _)| index == 1),
-        "last-of-type" => type_position(node).is_some_and(|(index, total)| index == total),
-        "only-of-type" => type_position(node).is_some_and(|(_, total)| total == 1),
+        "only-child" => element_position(node, cache).is_some_and(|(_, total)| total == 1),
+        "first-of-type" => type_position(node, cache).is_some_and(|(index, _)| index == 1),
+        "last-of-type" => type_position(node, cache).is_some_and(|(index, total)| index == total),
+        "only-of-type" => type_position(node, cache).is_some_and(|(_, total)| total == 1),
         "enabled" => is_form_control(node) && get_attribute(node, "disabled").is_none(),
         "disabled" => is_form_control(node) && get_attribute(node, "disabled").is_some(),
         "checked" => node.checked(),
@@ -359,8 +383,8 @@ fn matches_pseudo_element(name: &str, pseudo: Option<PseudoElement>) -> bool {
     }
 }
 
-fn matches_nth_child(node: &NodeHandle, expression: &str) -> bool {
-    let Some(index) = element_index_in_parent(node) else {
+fn matches_nth_child(node: &NodeHandle, expression: &str, cache: &mut SelectorMatchCache) -> bool {
+    let Some(index) = element_index_in_parent(node, cache) else {
         return false;
     };
 
@@ -442,12 +466,12 @@ fn previous_element_sibling(node: &NodeHandle) -> Option<NodeHandle> {
         .cloned()
 }
 
-fn element_index_in_parent(node: &NodeHandle) -> Option<usize> {
-    let (index, _) = element_position(node)?;
+fn element_index_in_parent(node: &NodeHandle, cache: &mut SelectorMatchCache) -> Option<usize> {
+    let (index, _) = element_position(node, cache)?;
     Some(index)
 }
 
-fn element_position(node: &NodeHandle) -> Option<(usize, usize)> {
+fn element_position(node: &NodeHandle, cache: &mut SelectorMatchCache) -> Option<(usize, usize)> {
     let parent = node.parent_node()?;
     // Tree-structural pseudo-classes (`:first-child`, `:last-child`,
     // `:nth-child`) are defined in terms of an element being a child of *some
@@ -459,41 +483,45 @@ fn element_position(node: &NodeHandle) -> Option<(usize, usize)> {
     if parent.node_type() != NodeType::Element {
         return None;
     }
-    let mut index = None;
-    let mut total = 0;
-    for child in parent.child_nodes() {
-        if child.node_type() != NodeType::Element {
-            continue;
-        }
-        total += 1;
-        if &child == node {
-            index = Some(total);
-        }
-    }
-    Some((index?, total))
+    let positions = cache
+        .structural_positions
+        .entry(parent.identity())
+        .or_insert_with(|| build_structural_positions(&parent));
+    positions.element.get(&node.identity()).copied()
 }
 
-fn type_position(node: &NodeHandle) -> Option<(usize, usize)> {
+fn type_position(node: &NodeHandle, cache: &mut SelectorMatchCache) -> Option<(usize, usize)> {
     let parent = node.parent_node()?;
     if parent.node_type() != NodeType::Element {
         return None;
     }
-    let tag_name = node.tag_name()?;
-    let mut index = None;
-    let mut total = 0;
-    for child in parent.child_nodes() {
-        if !child
-            .tag_name()
-            .is_some_and(|tag| tag.eq_ignore_ascii_case(&tag_name))
-        {
-            continue;
-        }
-        total += 1;
-        if &child == node {
-            index = Some(total);
-        }
+    let positions = cache
+        .structural_positions
+        .entry(parent.identity())
+        .or_insert_with(|| build_structural_positions(&parent));
+    positions.of_type.get(&node.identity()).copied()
+}
+
+fn build_structural_positions(parent: &NodeHandle) -> StructuralPositions {
+    let elements: Vec<(usize, String)> = parent
+        .child_nodes()
+        .into_iter()
+        .filter_map(|child| child.tag_name().map(|tag| (child.identity(), tag.to_ascii_lowercase())))
+        .collect();
+    let total = elements.len();
+    let mut type_totals = HashMap::<String, usize>::new();
+    for (_, tag) in &elements {
+        *type_totals.entry(tag.clone()).or_default() += 1;
     }
-    Some((index?, total))
+    let mut type_indexes = HashMap::<String, usize>::new();
+    let mut positions = StructuralPositions::default();
+    for (offset, (identity, tag)) in elements.into_iter().enumerate() {
+        positions.element.insert(identity, (offset + 1, total));
+        let index = type_indexes.entry(tag.clone()).or_default();
+        *index += 1;
+        positions.of_type.insert(identity, (*index, type_totals[&tag]));
+    }
+    positions
 }
 
 #[cfg(test)]

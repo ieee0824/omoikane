@@ -8,10 +8,11 @@ use std::time::Duration;
 
 use crate::dom::{Node, NodeHandle, NodeType};
 use rusqlite::{Connection, params};
+use super::matcher::{SelectorMatchCache, matches_selector_with_pseudo_cached};
 
 use super::{
     Declaration, MediaQuery, PseudoElement, Rule, SimpleSelector, Specificity, Stylesheet, Value,
-    evaluate_media_query, matches_selector_with_pseudo, parse_media_query_list, specificity,
+    evaluate_media_query, parse_media_query_list, specificity,
 };
 
 /// CSS origin.
@@ -92,6 +93,7 @@ pub struct StyleResolver {
     rule_indexes: Vec<StylesheetRuleIndex>,
     cache: HashMap<usize, ComputedStyle>,
     pseudo_cache: HashMap<(usize, PseudoElement), ComputedStyle>,
+    selector_match_cache: SelectorMatchCache,
     /// Root element's computed font-size in px (for `rem` unit resolution).
     root_font_size: f32,
     /// `true` when `root_font_size` was explicitly set via `set_root_font_size()`,
@@ -170,6 +172,7 @@ impl StyleResolver {
         self.root_font_size_explicit = true;
         self.cache.clear();
         self.pseudo_cache.clear();
+        self.selector_match_cache = SelectorMatchCache::default();
     }
 
     /// Sets the viewport dimensions in px.
@@ -180,6 +183,7 @@ impl StyleResolver {
         self.viewport_height = height;
         self.cache.clear();
         self.pseudo_cache.clear();
+        self.selector_match_cache = SelectorMatchCache::default();
     }
 
     /// Sets whether the system is in dark mode.
@@ -192,6 +196,7 @@ impl StyleResolver {
         self.color_scheme_dark = dark;
         self.cache.clear();
         self.pseudo_cache.clear();
+        self.selector_match_cache = SelectorMatchCache::default();
     }
 
     /// Adds a stylesheet with its origin.
@@ -202,6 +207,7 @@ impl StyleResolver {
         self.stylesheets.push(StylesheetInput { origin, stylesheet });
         self.cache.clear();
         self.pseudo_cache.clear();
+        self.selector_match_cache = SelectorMatchCache::default();
     }
 
     /// Resolves computed style for `node`, using the cache when possible.
@@ -296,6 +302,7 @@ impl StyleResolver {
                 color_scheme_dark,
                 &mut self.media_query_cache,
                 element_keys.as_ref(),
+                &mut self.selector_match_cache,
             );
         }
 
@@ -1020,6 +1027,7 @@ fn collect_indexed_rule_candidates(
     color_scheme_dark: bool,
     media_cache: &mut HashMap<String, Vec<MediaQuery>>,
     element_keys: Option<&ElementMatchKeys>,
+    selector_cache: &mut SelectorMatchCache,
 ) {
     let Some(element_keys) = element_keys else {
         collect_rule_candidates(
@@ -1034,6 +1042,7 @@ fn collect_indexed_rule_candidates(
             color_scheme_dark,
             media_cache,
             None,
+            selector_cache,
         );
         return;
     };
@@ -1053,6 +1062,7 @@ fn collect_indexed_rule_candidates(
             color_scheme_dark,
             media_cache,
             Some(element_keys),
+            selector_cache,
         );
     }
     for (rule_index, rule) in rules.iter().enumerate() {
@@ -1072,6 +1082,7 @@ fn collect_indexed_rule_candidates(
             color_scheme_dark,
             media_cache,
             Some(element_keys),
+            selector_cache,
         );
     }
     *source_order += index.total_declarations;
@@ -1089,6 +1100,7 @@ fn collect_rule_candidates(
     color_scheme_dark: bool,
     media_cache: &mut HashMap<String, Vec<MediaQuery>>,
     element_keys: Option<&ElementMatchKeys>,
+    selector_cache: &mut SelectorMatchCache,
 ) {
     if node.node_type() != NodeType::Element {
         return;
@@ -1104,7 +1116,9 @@ fn collect_rule_candidates(
                 let matching_specificity = style_rule
                     .selectors
                     .iter()
-                    .filter(|selector| matches_selector_with_pseudo(node, selector, pseudo))
+                    .filter(|selector| {
+                        matches_selector_with_pseudo_cached(node, selector, pseudo, selector_cache)
+                    })
                     .map(specificity)
                     .max();
 
@@ -1159,6 +1173,7 @@ fn collect_rule_candidates(
                             color_scheme_dark,
                             media_cache,
                             element_keys,
+                            selector_cache,
                         );
                     } else {
                         // Count the rules inside for correct source_order numbering.
