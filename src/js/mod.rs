@@ -171,6 +171,16 @@ enum TimerPayload {
     ResourceLoad { node_id: usize },
 }
 
+impl TimerPayload {
+    fn kind(&self) -> &'static str {
+        match self {
+            Self::Source(_) => "source",
+            Self::Callback { .. } => "callback",
+            Self::ResourceLoad { .. } => "resource-load",
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 struct TimerTask {
     id: u64,
@@ -1149,15 +1159,31 @@ impl JsRuntime {
                     // Swallow per-task JS errors: a single failing timer must
                     // not abort the whole pump during rendering. Diagnostics
                     // remain available on demand for complex app bootstraps.
-                    if let Err(error) = self.run_timer_payload(task)
+                    let task_kind = task.kind();
+                    let callback_start = std::time::Instant::now();
+                    let callback_result = self.run_timer_payload(task);
+                    let callback_elapsed = callback_start.elapsed();
+                    if let Err(error) = callback_result
                         && std::env::var_os("OMOIKANE_LOG_SCRIPTS").is_some()
                     {
                         eprintln!("[omoikane][timer-error] {error}");
                     }
-                    if let Err(error) = self.run_jobs()
+                    let jobs_start = std::time::Instant::now();
+                    let jobs_result = self.run_jobs();
+                    let jobs_elapsed = jobs_start.elapsed();
+                    if let Err(error) = jobs_result
                         && std::env::var_os("OMOIKANE_LOG_SCRIPTS").is_some()
                     {
                         eprintln!("[omoikane][timer-job-error] {error}");
+                    }
+                    if std::env::var_os("OMOIKANE_LOG_TIMERS").is_some() {
+                        eprintln!(
+                            "[omoikane][timer] task={} kind={} callback_ms={:.3} jobs_ms={:.3}",
+                            tasks_run,
+                            task_kind,
+                            callback_elapsed.as_secs_f64() * 1_000.0,
+                            jobs_elapsed.as_secs_f64() * 1_000.0,
+                        );
                     }
                     tasks_run += 1;
                 }
