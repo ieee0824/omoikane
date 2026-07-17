@@ -99,10 +99,14 @@ impl ModuleLoader for HttpModuleLoader {
             let resolved_string = resolved.to_string();
 
             if let Some(module) = self.modules.borrow().get(&resolved_string) {
+                if std::env::var_os("OMOIKANE_LOG_SCRIPTS").is_some() {
+                    eprintln!("[omoikane][module] cache-hit {resolved_string}");
+                }
                 return Ok(module.clone());
             }
 
             let public_only = requires_public_fetch(&resolved, referrer_url.as_ref());
+            let fetch_start = std::time::Instant::now();
             let response = if public_only {
                 self.client.borrow_mut().get_public(&resolved_string)
             } else {
@@ -114,12 +118,23 @@ impl ModuleLoader for HttpModuleLoader {
                     .with_message(format!("module request returned HTTP {}", response.status_code()))
                     .into());
             }
+            let fetch_elapsed = fetch_start.elapsed();
+            let source_bytes = response.body().len();
             let source = String::from_utf8_lossy(response.body());
+            let parse_start = std::time::Instant::now();
             let module = Module::parse(
                 Source::from_reader(source.as_bytes(), Some(Path::new(&resolved_string))),
                 None,
                 &mut context.borrow_mut(),
             )?;
+            let parse_elapsed = parse_start.elapsed();
+            if std::env::var_os("OMOIKANE_LOG_SCRIPTS").is_some() {
+                eprintln!(
+                    "[omoikane][module] loaded {resolved_string} bytes={source_bytes} fetch_ms={:.3} parse_ms={:.3}",
+                    fetch_elapsed.as_secs_f64() * 1_000.0,
+                    parse_elapsed.as_secs_f64() * 1_000.0,
+                );
+            }
             self.modules.borrow_mut().insert(resolved_string, module.clone());
             Ok(module)
         })();
