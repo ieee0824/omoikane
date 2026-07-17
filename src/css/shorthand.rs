@@ -646,6 +646,14 @@ fn expand_background_shorthand(value: Value, important: bool) -> Vec<Declaration
                     important,
                 });
             }
+            Value::Keyword(keyword)
+                if matches!(
+                    keyword.to_ascii_lowercase().as_str(),
+                    "left" | "right" | "top" | "bottom" | "center"
+                ) =>
+            {
+                position_values.push(item.clone());
+            }
             Value::Length(_, unit) if unit == "px" || unit == "em" => {
                 position_values.push(item.clone());
             }

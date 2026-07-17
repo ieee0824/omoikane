@@ -3166,6 +3166,42 @@ fn inline_wrapping_ignores_subpixel_font_fragment_rounding() {
 }
 
 #[test]
+fn collapsible_whitespace_around_full_width_image_does_not_create_lines() {
+    let image = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAIAAAD91JpzAAAABnRSTlMAAAAAAABupgeRAAAABmJLR0QA%2FwD%2FAP%2BgvaeTAAAAEUlEQVR42mP4%2F58BCv7%2FZwAAHfAD%2FabwPj4AAAAASUVORK5CYII%3D";
+    let html = format!(
+        "<html><body><div>\n  <a>\n    <img src=\"{image}\" width=\"2\" height=\"2\">\n  </a>\n</div></body></html>"
+    );
+    let document = crate::html::TreeBuilder::parse(&html).document();
+    let body = document
+        .child_nodes()
+        .into_iter()
+        .find(|node| node.tag_name().as_deref() == Some("html"))
+        .and_then(|html| {
+            html.child_nodes()
+                .into_iter()
+                .find(|node| node.tag_name().as_deref() == Some("body"))
+        })
+        .unwrap();
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet("body { margin: 0; } div { width: 2px; line-height: 20px; }").unwrap(),
+    );
+
+    let layout = layout_tree(
+        &body,
+        &mut resolver,
+        Rect { x: 0.0, y: 0.0, width: 20.0, height: 0.0 },
+    )
+    .unwrap();
+    let container = find_layout_box_by_tag(&layout, "div").unwrap();
+
+    assert_eq!(container.lines.len(), 1, "lines: {:?}", container.lines);
+    assert_eq!(container.lines[0].rect.height, 20.0);
+    assert_eq!(container.dimensions.content.height, 20.0);
+}
+
+#[test]
 fn block_svg_flex_item_keeps_its_replaced_image_fragment() {
     let document = NodeHandle::document();
     let body = NodeHandle::element("body");
@@ -4191,6 +4227,47 @@ fn float_preserves_negative_top_margin_offset() {
 
     let floated_box = find_layout_box_by_tag(&layout, "section").unwrap();
     assert_eq!(floated_box.dimensions.content.y, 28.0);
+}
+
+#[test]
+fn negative_margin_float_fits_beside_full_width_float() {
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let main = NodeHandle::element("main");
+    let sidebar = NodeHandle::element("aside");
+
+    main.set_attribute("class", "main");
+    sidebar.set_attribute("class", "sidebar");
+    document.append_child(body.clone());
+    body.append_child(main.clone());
+    body.append_child(sidebar.clone());
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            ".main { float: left; width: 100%; height: 40px; } \
+             .sidebar { float: left; width: 30px; height: 20px; margin-left: -30px; }",
+        )
+        .unwrap(),
+    );
+
+    let layout = layout_tree(
+        &body,
+        &mut resolver,
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 100.0,
+            height: 100.0,
+        },
+    )
+    .unwrap();
+
+    let main_box = find_layout_box_by_tag(&layout, "main").unwrap();
+    let sidebar_box = find_layout_box_by_tag(&layout, "aside").unwrap();
+    assert_eq!(sidebar_box.dimensions.content.x, 70.0);
+    assert_eq!(sidebar_box.dimensions.content.y, main_box.dimensions.content.y);
 }
 
 #[test]

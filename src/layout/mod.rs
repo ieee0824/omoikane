@@ -797,16 +797,19 @@ fn layout_float_child(
     loop {
         let offsets = active_float_offsets(float_regions, float_y, x, width);
         let float_available_width = (width - offsets.left - offsets.right).max(0.0);
-        if float_width <= float_available_width + 0.5 {
-            let float_containing = Rect {
-                x: x + offsets.left,
-                y: float_y,
-                width: float_available_width.max(float_width),
-                height: 0.0,
-            };
-            if let Some(mut layout_child) = layout_node(
-                child, resolver, float_containing, viewport, positioned_ancestor,
-            ) {
+        let float_containing = Rect {
+            x: x + offsets.left,
+            y: float_y,
+            width: float_available_width.max(float_width),
+            height: 0.0,
+        };
+        if let Some(mut layout_child) = layout_node(
+            child, resolver, float_containing, viewport, positioned_ancestor,
+        ) {
+            // Float placement uses the margin box. In particular, a negative
+            // margin can make a specified-width float fit beside an earlier
+            // float (a common legacy two-column layout technique).
+            if layout_child.total_width() <= float_available_width + 0.5 {
                 if resolved_length(child_style, "width", float_available_width).is_none() {
                     layout_child.dimensions.content.width = float_width;
                 }
@@ -827,8 +830,8 @@ fn layout_float_child(
                     side,
                 });
                 children.push(layout_child);
+                break;
             }
-            break;
         }
         let Some(next_y) = next_float_boundary_after(float_regions, float_y) else {
             break;

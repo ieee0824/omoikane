@@ -1305,7 +1305,7 @@ fn break_text_by_characters(
                 available_width,
             )
         {
-            cursor.wrap_line(lines, fragments, segment.line_height, available_width, align);
+            cursor.wrap_line(lines, fragments, 0.0, available_width, align);
         }
         fragments.push(InlineFragment {
             node: segment.node.clone(),
@@ -1354,6 +1354,13 @@ fn layout_inline_segments(
                     );
                 }
                 InlinePiece::Fragment { content, width, height } => {
+                    let collapsible_whitespace = segment.white_space_mode.collapses_whitespace()
+                        && matches!(&content, InlineFragmentContent::Text(text) if text
+                            .chars()
+                            .all(|ch| ch != '\u{00A0}' && ch.is_whitespace()));
+                    if cursor.x == start_x && collapsible_whitespace {
+                        continue;
+                    }
                     let can_wrap = if is_first_piece_in_segment {
                         prev_segment_allows_wrapping
                     } else {
@@ -1371,10 +1378,13 @@ fn layout_inline_segments(
                         cursor.wrap_line(
                             &mut lines,
                             &mut current_fragments,
-                            segment.line_height,
+                            0.0,
                             available_width,
                             align,
                         );
+                        if collapsible_whitespace {
+                            continue;
+                        }
                     }
 
                     if needs_character_break(

@@ -43,6 +43,10 @@ pub(crate) fn collect_author_stylesheets(
             Some("style") => {
                 let css = collect_text_contents(node);
                 if !css.trim().is_empty() {
+                    let media = node
+                        .attributes()
+                        .and_then(|attributes| attributes.get("media").cloned());
+                    let start = out.len();
                     let mut active_import_urls = HashSet::new();
                     collect_stylesheet_with_imports(
                         css,
@@ -53,6 +57,7 @@ pub(crate) fn collect_author_stylesheets(
                         0,
                         &mut active_import_urls,
                     )?;
+                    wrap_stylesheets_in_media(&mut out[start..], media.as_deref());
                 }
             }
             Some("link") => {
@@ -72,6 +77,7 @@ pub(crate) fn collect_author_stylesheets(
                     && !href.is_empty()
                     && matches_screen_media(media)
                 {
+                    let start = out.len();
                     if href.starts_with("data:text/css") {
                         let mut active_import_urls = HashSet::new();
                         match parse_data_uri(&href)? {
@@ -109,6 +115,7 @@ pub(crate) fn collect_author_stylesheets(
                                 &mut active_import_urls,
                             )?;
                         }
+                    wrap_stylesheets_in_media(&mut out[start..], media);
                 }
             }
             _ => {}
@@ -120,6 +127,15 @@ pub(crate) fn collect_author_stylesheets(
     }
 
     Ok(())
+}
+
+fn wrap_stylesheets_in_media(stylesheets: &mut [String], media: Option<&str>) {
+    let Some(media) = media.map(str::trim).filter(|media| !media.is_empty()) else {
+        return;
+    };
+    for stylesheet in stylesheets {
+        *stylesheet = format!("@media {media} {{\n{stylesheet}\n}}");
+    }
 }
 
 pub(crate) fn collect_stylesheet_with_imports(
@@ -162,8 +178,72 @@ pub(crate) fn collect_stylesheet_with_imports(
         }
     }
 
-    out.push(css);
+    out.push(resolve_stylesheet_asset_urls(css, stylesheet_url));
     Ok(())
+}
+
+/// Resolve relative `url()` references against the stylesheet URL, rather than
+/// the document URL. CSS URLs are scoped to the stylesheet that contains them.
+fn resolve_stylesheet_asset_urls(
+    css: String,
+    stylesheet_url: Option<&crate::http::Url>,
+) -> String {
+    let Some(base) = stylesheet_url else {
+        return css;
+    };
+
+    let mut output = String::with_capacity(css.len());
+    let mut rest = css.as_str();
+    while let Some(start) = rest.to_ascii_lowercase().find("url(") {
+        output.push_str(&rest[..start]);
+        let after_open = &rest[start + 4..];
+        let Some(end) = find_url_closing_parenthesis(after_open) else {
+            output.push_str(&rest[start..]);
+            return output;
+        };
+
+        let raw = after_open[..end].trim();
+        let unquoted = raw
+            .strip_prefix('"')
+            .and_then(|value| value.strip_suffix('"'))
+            .or_else(|| raw.strip_prefix('\'').and_then(|value| value.strip_suffix('\'')))
+            .unwrap_or(raw);
+        if unquoted.starts_with("data:") || unquoted.starts_with('#') {
+            output.push_str(&rest[start..start + 4 + end + 1]);
+        } else if let Ok(resolved) = resolve_url(base, unquoted) {
+            output.push_str("url(\"");
+            output.push_str(&resolved.to_string());
+            output.push_str("\")");
+        } else {
+            output.push_str(&rest[start..start + 4 + end + 1]);
+        }
+        rest = &after_open[end + 1..];
+    }
+    output.push_str(rest);
+    output
+}
+
+fn find_url_closing_parenthesis(input: &str) -> Option<usize> {
+    let mut quote = None;
+    let mut escaped = false;
+    for (index, ch) in input.char_indices() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        if ch == '\\' {
+            escaped = true;
+            continue;
+        }
+        match quote {
+            Some(active) if ch == active => quote = None,
+            Some(_) => {}
+            None if ch == '"' || ch == '\'' => quote = Some(ch),
+            None if ch == ')' => return Some(index),
+            None => {}
+        }
+    }
+    None
 }
 
 pub(crate) fn extract_import_hrefs(css: &str) -> Vec<String> {

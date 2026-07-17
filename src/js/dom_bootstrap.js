@@ -21,6 +21,30 @@
     },
   });
 
+  class NodeList extends Array {
+    constructor() {
+      throw new TypeError("Illegal constructor");
+    }
+
+    static get [Symbol.species]() {
+      return Array;
+    }
+
+    item(index) {
+      const value = Number(index);
+      if (!Number.isFinite(value) || value < 0) return null;
+      return this[Math.trunc(value)] ?? null;
+    }
+  }
+  Object.defineProperty(NodeList.prototype, Symbol.toStringTag, {
+    configurable: true,
+    value: "NodeList",
+  });
+
+  function makeNodeList(nodes) {
+    return Object.setPrototypeOf(nodes, NodeList.prototype);
+  }
+
   function removeChildNode() {
     const parent = this.parentNode;
     if (parent) parent.removeChild(this);
@@ -989,7 +1013,7 @@
 
     get childNodes() {
       const ids = __omoikane_child_node_ids(this.__id);
-      return ids ? ids.map(id => wrapNode(id)) : [];
+      return makeNodeList(ids ? ids.map(id => wrapNode(id)) : []);
     }
 
     get children() {
@@ -1050,7 +1074,7 @@
     querySelectorAll(selector) {
       try {
         const ids = __omoikane_query_selector_all(this.__id, String(selector));
-        return ids ? ids.map(id => wrapNode(id)) : [];
+        return makeNodeList(ids ? ids.map(id => wrapNode(id)) : []);
       } catch (error) {
         if (error && error.name === "SyntaxError") {
           throw new DOMException(error.message, "SyntaxError");
@@ -3389,6 +3413,35 @@
     set width(value) { this.setAttribute("width", String(Math.max(0, Number(value) || 0))); }
   }
 
+  class HTMLLinkElement extends HTMLElement {
+    get rel() {
+      return this.getAttribute("rel") || "";
+    }
+    set rel(value) {
+      this.setAttribute("rel", String(value));
+    }
+    get relList() {
+      const link = this;
+      const tokens = () => link.rel.split(/\s+/).filter(Boolean);
+      return {
+        contains(token) {
+          return tokens().includes(String(token));
+        },
+        supports(token) {
+          const value = String(token).toLowerCase();
+          return ["dns-prefetch", "modulepreload", "preconnect", "preload", "stylesheet"]
+            .includes(value);
+        },
+        get length() {
+          return tokens().length;
+        },
+        item(index) {
+          return tokens()[Number(index)] ?? null;
+        },
+      };
+    }
+  }
+
   // Minimal SVG DOM layer. Rendering remains owned by src/svg; these wrappers
   // only provide the interfaces exercised by script and Acid3.
   class SVGElement extends Element {}
@@ -3469,6 +3522,7 @@
     iframe: HTMLIFrameElement,
     object: HTMLObjectElement,
     img: HTMLImageElement,
+    link: HTMLLinkElement,
     script: HTMLScriptElement,
   };
 
@@ -3524,6 +3578,7 @@
   }
 
   globalThis.Node = Node;
+  globalThis.NodeList = NodeList;
   globalThis.Window = Window;
   globalThis.Element = Element;
   globalThis.HTMLElement = HTMLElement;
@@ -3561,6 +3616,7 @@
   globalThis.HTMLSelectElement = HTMLSelectElement;
   globalThis.HTMLOptionElement = HTMLOptionElement;
   globalThis.HTMLImageElement = HTMLImageElement;
+  globalThis.HTMLLinkElement = HTMLLinkElement;
   globalThis.HTMLScriptElement = HTMLScriptElement;
   globalThis.HTMLIFrameElement = HTMLIFrameElement;
   globalThis.HTMLObjectElement = HTMLObjectElement;

@@ -723,6 +723,21 @@ mod tests {
     }
 
     #[test]
+    fn expands_background_position_keyword() {
+        let stylesheet =
+            parse_stylesheet("#hero { background: url(hero.png) no-repeat right 0; }").unwrap();
+        let Rule::Style(rule) = &stylesheet.rules[0] else {
+            panic!("expected style rule");
+        };
+
+        assert!(rule.declarations.iter().any(|decl| decl.name == "background-image"));
+        assert!(rule.declarations.iter().any(|decl| decl.name == "background-position-x"
+            && matches!(&decl.value, Value::Keyword(value) if value == "right")));
+        assert!(rule.declarations.iter().any(|decl| decl.name == "background-position-y"
+            && matches!(&decl.value, Value::Number(value) if *value == 0.0)));
+    }
+
+    #[test]
     fn expands_background_none_to_transparent_and_no_image() {
         let stylesheet = parse_stylesheet("div { background: none; }").unwrap();
         let Rule::Style(rule) = &stylesheet.rules[0] else {

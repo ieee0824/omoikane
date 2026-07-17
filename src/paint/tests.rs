@@ -3560,6 +3560,31 @@ fn resolve_url_strips_fragment() {
 }
 
 #[test]
+fn external_stylesheet_urls_are_resolved_against_the_stylesheet() {
+    let stylesheet_url: crate::http::Url =
+        "https://example.com/themes/demo/style.css".parse().unwrap();
+    let mut output = Vec::new();
+    let mut client = None;
+    let mut active_import_urls = std::collections::HashSet::new();
+
+    crate::paint::stylesheet::collect_stylesheet_with_imports(
+        "body { background: url(images/pattern.png); } #hero { background-image: URL('../hero.png'); } .data { background: url(data:image/png;base64,AAAA); }".to_string(),
+        Some(&stylesheet_url),
+        None,
+        &mut output,
+        &mut client,
+        0,
+        &mut active_import_urls,
+    )
+    .unwrap();
+
+    assert_eq!(output.len(), 1);
+    assert!(output[0].contains("url(\"https://example.com/themes/demo/images/pattern.png\")"));
+    assert!(output[0].contains("url(\"https://example.com/themes/hero.png\")"));
+    assert!(output[0].contains("url(data:image/png;base64,AAAA)"));
+}
+
+#[test]
 fn stylesheet_url_allows_same_origin_absolute_references() {
     let document: crate::http::Url = "https://example.com/page.html".parse().unwrap();
 
@@ -4361,6 +4386,19 @@ fn media_attribute_screen_with_query_included() {
     let stylesheets = extract_author_stylesheets(&document, None).unwrap();
     assert_eq!(stylesheets.len(), 1);
     assert!(stylesheets[0].contains("width:100%"));
+    assert!(stylesheets[0].contains("@media screen and (min-width: 800px)"));
+}
+
+#[test]
+fn style_media_attribute_query_is_preserved() {
+    let html = r#"<html><head>
+            <style media="all and (max-width: 768px)">nav{display:none}</style>
+        </head><body></body></html>"#;
+    let document = TreeBuilder::parse(html).document();
+    let stylesheets = extract_author_stylesheets(&document, None).unwrap();
+    assert_eq!(stylesheets.len(), 1);
+    assert!(stylesheets[0].contains("@media all and (max-width: 768px)"));
+    assert!(stylesheets[0].contains("nav{display:none}"));
 }
 
 #[test]

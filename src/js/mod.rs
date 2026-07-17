@@ -6459,6 +6459,63 @@ mod tests {
     }
 
     #[test]
+    fn node_lists_expose_the_dom_collection_interface() {
+        let document = sample_document();
+        let mut runtime = JsRuntime::with_document(document).unwrap();
+
+        let result = runtime
+            .eval(
+                r#"(() => {
+                    const childNodes = document.documentElement.childNodes;
+                    const matches = document.querySelectorAll("body, main");
+                    let visited = "";
+                    matches.forEach(node => visited += node.tagName + ",");
+                    return [
+                        typeof NodeList,
+                        childNodes instanceof NodeList,
+                        matches instanceof NodeList,
+                        matches.item(0).tagName,
+                        matches.item(99) === null,
+                        [...matches].length,
+                        visited,
+                        Object.prototype.toString.call(matches),
+                    ].join("|");
+                })()"#,
+            )
+            .unwrap();
+
+        assert_eq!(
+            result.as_string().unwrap().to_std_string_escaped(),
+            "function|true|true|BODY|true|2|BODY,MAIN,|[object NodeList]"
+        );
+    }
+
+    #[test]
+    fn link_rel_list_supports_modulepreload_detection() {
+        let mut runtime = JsRuntime::with_document(default_document()).unwrap();
+        let actual = runtime
+            .eval(
+                r#"(() => {
+                    const link = document.createElement("link");
+                    link.rel = "stylesheet preload";
+                    return [
+                        link instanceof HTMLLinkElement,
+                        link.rel,
+                        link.relList.length,
+                        link.relList.contains("preload"),
+                        link.relList.item(0),
+                        link.relList.supports("modulepreload")
+                    ].join("|");
+                })()"#,
+            )
+            .unwrap()
+            .as_string()
+            .unwrap()
+            .to_std_string_escaped();
+        assert_eq!(actual, "true|stylesheet preload|2|true|stylesheet|true");
+    }
+
+    #[test]
     fn query_selector_apis_use_full_css_matcher_and_strict_parser() {
         use crate::html::TreeBuilder;
         let doc = TreeBuilder::parse(
