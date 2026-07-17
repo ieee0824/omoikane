@@ -33,6 +33,9 @@ pub struct RenderTimings {
     pub stylesheets: Duration,
     pub fonts: Duration,
     pub javascript: Duration,
+    pub javascript_runtime_init: Duration,
+    pub javascript_document_scripts: Duration,
+    pub javascript_load_events: Duration,
     pub timers: Duration,
     pub style_refresh: Duration,
     pub layout: Duration,
@@ -45,6 +48,9 @@ impl RenderTimings {
         self.stylesheets += other.stylesheets;
         self.fonts += other.fonts;
         self.javascript += other.javascript;
+        self.javascript_runtime_init += other.javascript_runtime_init;
+        self.javascript_document_scripts += other.javascript_document_scripts;
+        self.javascript_load_events += other.javascript_load_events;
         self.timers += other.timers;
         self.style_refresh += other.style_refresh;
         self.layout += other.layout;
@@ -805,11 +811,15 @@ pub fn render_document_with_url(
     // JS may modify the DOM (e.g., classList.add for fade-in animations,
     // injecting <style> elements), so this must happen before layout.
     let javascript_start = Instant::now();
+    let runtime_init_start = Instant::now();
     if let Ok(mut runtime) = crate::js::JsRuntime::with_document(document.clone()) {
+        timings.javascript_runtime_init = runtime_init_start.elapsed();
         // Keep getComputedStyle / layout-metric queries issued by page scripts
         // consistent with the render viewport.
         runtime.set_viewport(viewport.width, viewport.height);
+        let document_scripts_start = Instant::now();
         let errors = runtime.execute_document_scripts(effective_base.as_ref());
+        timings.javascript_document_scripts = document_scripts_start.elapsed();
         for err in &errors {
             eprintln!("[omoikane][js-error] {err}");
         }
@@ -817,12 +827,14 @@ pub fn render_document_with_url(
         // event. Per the HTML load order this happens after scripts run and
         // DOMContentLoaded has fired (inside execute_document_scripts), so page
         // load handlers run before the timer pump advances virtual time.
+        let load_events_start = Instant::now();
         if let Err(err) = runtime.wire_inline_event_handlers() {
             eprintln!("[omoikane][js-error] {err}");
         }
         if let Err(err) = runtime.fire_load() {
             eprintln!("[omoikane][js-error] {err}");
         }
+        timings.javascript_load_events = load_events_start.elapsed();
         timings.javascript = javascript_start.elapsed();
         // Drive script-scheduled timers (setTimeout/setInterval) in virtual
         // time so that DOM mutations from deferred callbacks settle before
@@ -860,6 +872,7 @@ pub fn render_document_with_url(
         }
         timings.style_refresh = style_refresh_start.elapsed();
     } else {
+        timings.javascript_runtime_init = runtime_init_start.elapsed();
         timings.javascript = javascript_start.elapsed();
     }
 

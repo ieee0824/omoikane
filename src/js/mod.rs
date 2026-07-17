@@ -12,7 +12,7 @@ use boa_engine::context::HostHooks;
 use boa_engine::module::{ModuleLoader, Referrer};
 use boa_engine::native_function::NativeFunction;
 use boa_engine::object::{JsObject, builtins::JsPromise};
-use boa_engine::{Context, JsError, JsNativeError, JsResult, JsValue, Source, js_string};
+use boa_engine::{Context, JsError, JsNativeError, JsResult, JsValue, Script, Source, js_string};
 
 use crate::css::{
     ComputedStyle, ComputedValue, Origin, Selector, StyleResolver, matches_selector,
@@ -952,20 +952,84 @@ impl JsRuntime {
         }
     }
 
-    fn eval_module(&mut self, source: &str, url: &str) -> Result<(), String> {
-        let module = Module::parse(
+    fn eval_safe_timed(
+        &mut self,
+        source: &str,
+    ) -> (
+        Result<JsValue, String>,
+        std::time::Duration,
+        std::time::Duration,
+        std::time::Duration,
+    ) {
+        self.with_active_host_value(|context| {
+            let parse_start = std::time::Instant::now();
+            let script = match Script::parse(Source::from_bytes(source), None, context) {
+                Ok(script) => script,
+                Err(error) => {
+                    return (
+                        Err(error.to_string()),
+                        parse_start.elapsed(),
+                        std::time::Duration::ZERO,
+                        std::time::Duration::ZERO,
+                    );
+                }
+            };
+            let parse_elapsed = parse_start.elapsed();
+
+            let compile_start = std::time::Instant::now();
+            if let Err(error) = script.codeblock(context) {
+                return (
+                    Err(error.to_string()),
+                    parse_elapsed,
+                    compile_start.elapsed(),
+                    std::time::Duration::ZERO,
+                );
+            }
+            let compile_elapsed = compile_start.elapsed();
+
+            let execute_start = std::time::Instant::now();
+            let result = script.evaluate(context).map_err(|error| error.to_string());
+            (
+                result,
+                parse_elapsed,
+                compile_elapsed,
+                execute_start.elapsed(),
+            )
+        })
+    }
+
+    fn eval_module_timed(
+        &mut self,
+        source: &str,
+        url: &str,
+    ) -> (Result<JsValue, String>, std::time::Duration, std::time::Duration) {
+        let parse_start = std::time::Instant::now();
+        let module = match Module::parse(
             Source::from_reader(source.as_bytes(), Some(Path::new(url))),
             None,
             &mut self.context,
-        )
-        .map_err(|error| error.to_string())?;
+        ) {
+            Ok(module) => module,
+            Err(error) => {
+                return (
+                    Err(error.to_string()),
+                    parse_start.elapsed(),
+                    std::time::Duration::ZERO,
+                );
+            }
+        };
+        let parse_elapsed = parse_start.elapsed();
+        let execute_start = std::time::Instant::now();
         let promise = module.load_link_evaluate(&mut self.context);
-        self.run_jobs().map_err(|error| error.to_string())?;
-        match promise.state() {
-            PromiseState::Fulfilled(_) => Ok(()),
-            PromiseState::Rejected(error) => Err(error.display().to_string()),
-            PromiseState::Pending => Err("module evaluation remained pending".to_string()),
-        }
+        let result = self
+            .run_jobs()
+            .map_err(|error| error.to_string())
+            .and_then(|()| match promise.state() {
+                PromiseState::Fulfilled(_) => Ok(JsValue::undefined()),
+                PromiseState::Rejected(error) => Err(error.display().to_string()),
+                PromiseState::Pending => Err("module evaluation remained pending".to_string()),
+            });
+        (result, parse_elapsed, execute_start.elapsed())
     }
 
     /// Runs pending promise jobs.
@@ -1311,8 +1375,17 @@ impl JsRuntime {
 
             let (source_code, script_label) = if let Some(src_url) = src {
                 // External script: fetch
+                let fetch_start = std::time::Instant::now();
                 match fetch_script_source(&src_url, base_url) {
-                    Some(code) => (code, src_url.clone()),
+                    Some(code) => {
+                        if log_scripts {
+                            eprintln!(
+                                "[omoikane][script] fetched {src_url} elapsed_ms={:.3}",
+                                fetch_start.elapsed().as_secs_f64() * 1_000.0,
+                            );
+                        }
+                        (code, src_url.clone())
+                    }
                     None => {
                         errors.push(format!("failed to fetch script: {src_url}"));
                         continue;
@@ -1363,14 +1436,25 @@ impl JsRuntime {
 
             // Execute immediately
             let script_context = script_source_context(&source_code);
-            if let Err(err) = self.eval_safe(&source_code) {
+            let (eval_result, parse_elapsed, compile_elapsed, execute_elapsed) =
+                self.eval_safe_timed(&source_code);
+            if let Err(err) = eval_result {
                 errors.push(format!("[script: {script_label}; {script_context}] {err}"));
             }
-            if let Err(err) = self.run_jobs() {
+            let jobs_start = std::time::Instant::now();
+            let jobs_result = self.run_jobs();
+            let jobs_elapsed = jobs_start.elapsed();
+            if let Err(err) = jobs_result {
                 errors.push(format!("[script jobs: {script_label}] {err}"));
             }
             if log_scripts {
-                eprintln!("[omoikane][script] completed {script_label}");
+                eprintln!(
+                    "[omoikane][script] completed {script_label} parse_ms={:.3} compile_ms={:.3} execute_ms={:.3} jobs_ms={:.3}",
+                    parse_elapsed.as_secs_f64() * 1_000.0,
+                    compile_elapsed.as_secs_f64() * 1_000.0,
+                    execute_elapsed.as_secs_f64() * 1_000.0,
+                    jobs_elapsed.as_secs_f64() * 1_000.0,
+                );
             }
 
             // The insertion point and currentScript are only defined while a script runs.
@@ -1392,20 +1476,36 @@ impl JsRuntime {
                 script.identity()
             ));
             let script_context = script_source_context(&source_code);
-            let result = if let Some(module_url) = module_url {
-                self.eval_module(&source_code, &module_url)
-                    .map(|()| JsValue::undefined())
-            } else {
-                self.eval_safe(&source_code)
-            };
+            let (result, parse_elapsed, compile_elapsed, execute_elapsed) =
+                if let Some(module_url) = module_url {
+                    let (result, parse_elapsed, execute_elapsed) =
+                        self.eval_module_timed(&source_code, &module_url);
+                    (
+                        result,
+                        parse_elapsed,
+                        std::time::Duration::ZERO,
+                        execute_elapsed,
+                    )
+                } else {
+                    self.eval_safe_timed(&source_code)
+                };
             if let Err(err) = result {
                 errors.push(format!("[script: {script_label}; {script_context}] {err}"));
             }
-            if let Err(err) = self.run_jobs() {
+            let jobs_start = std::time::Instant::now();
+            let jobs_result = self.run_jobs();
+            let jobs_elapsed = jobs_start.elapsed();
+            if let Err(err) = jobs_result {
                 errors.push(format!("[script jobs: {script_label}] {err}"));
             }
             if log_scripts {
-                eprintln!("[omoikane][script] completed deferred {script_label}");
+                eprintln!(
+                    "[omoikane][script] completed deferred {script_label} parse_ms={:.3} compile_ms={:.3} execute_ms={:.3} jobs_ms={:.3}",
+                    parse_elapsed.as_secs_f64() * 1_000.0,
+                    compile_elapsed.as_secs_f64() * 1_000.0,
+                    execute_elapsed.as_secs_f64() * 1_000.0,
+                    jobs_elapsed.as_secs_f64() * 1_000.0,
+                );
             }
             let _ = self.eval("__omoikane_set_current_script(null)");
             self.host_state.borrow_mut().write_insertion_ref = None;
@@ -1420,6 +1520,10 @@ impl JsRuntime {
     }
 
     fn with_active_host<T>(&mut self, f: impl FnOnce(&mut Context) -> JsResult<T>) -> JsResult<T> {
+        self.with_active_host_value(f)
+    }
+
+    fn with_active_host_value<T>(&mut self, f: impl FnOnce(&mut Context) -> T) -> T {
         let host_state = Rc::clone(&self.host_state);
         ACTIVE_HOST_STATE.with(|slot| {
             let previous = slot.replace(Some(host_state));

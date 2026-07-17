@@ -171,7 +171,9 @@ fn run_screenshot(
         navigate_elapsed,
         render_elapsed,
     ));
-    println!("{}", format_render_phase_message(&take_last_render_timings()));
+    let timings = take_last_render_timings();
+    println!("{}", format_render_phase_message(&timings));
+    println!("{}", format_javascript_phase_message(&timings));
     Ok(())
 }
 
@@ -183,6 +185,16 @@ fn format_render_phase_message(timings: &RenderTimings) -> String {
         milliseconds(timings.javascript), milliseconds(timings.timers),
         milliseconds(timings.style_refresh), milliseconds(timings.layout),
         milliseconds(timings.paint), milliseconds(timings.png_encode),
+    )
+}
+
+fn format_javascript_phase_message(timings: &RenderTimings) -> String {
+    let milliseconds = |duration: Duration| duration.as_secs_f64() * 1_000.0;
+    format!(
+        "javascript phases: runtime-init={:.1}ms document-scripts={:.1}ms load-events={:.1}ms",
+        milliseconds(timings.javascript_runtime_init),
+        milliseconds(timings.javascript_document_scripts),
+        milliseconds(timings.javascript_load_events),
     )
 }
 
@@ -266,6 +278,9 @@ mod tests {
             stylesheets: Duration::from_micros(1_250),
             fonts: Duration::from_micros(2_500),
             javascript: Duration::from_micros(3_750),
+            javascript_runtime_init: Duration::from_micros(500),
+            javascript_document_scripts: Duration::from_micros(2_000),
+            javascript_load_events: Duration::from_micros(1_250),
             timers: Duration::from_micros(4_000),
             style_refresh: Duration::from_micros(5_250),
             layout: Duration::from_micros(6_500),
@@ -275,6 +290,10 @@ mod tests {
         assert_eq!(
             format_render_phase_message(&timings),
             "render phases: stylesheets=1.2ms fonts=2.5ms javascript=3.8ms timers=4.0ms style-refresh=5.2ms layout=6.5ms paint=7.8ms png-encode=8.0ms"
+        );
+        assert_eq!(
+            format_javascript_phase_message(&timings),
+            "javascript phases: runtime-init=0.5ms document-scripts=2.0ms load-events=1.2ms"
         );
     }
 }
