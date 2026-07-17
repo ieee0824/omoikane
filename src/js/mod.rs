@@ -1565,12 +1565,21 @@ impl JsRuntime {
     }
 
     fn with_active_host_value<T>(&mut self, f: impl FnOnce(&mut Context) -> T) -> T {
+        struct ActiveHostGuard(Option<Rc<RefCell<HostState>>>);
+
+        impl Drop for ActiveHostGuard {
+            fn drop(&mut self) {
+                ACTIVE_HOST_STATE.with(|slot| {
+                    slot.replace(self.0.take());
+                });
+            }
+        }
+
         let host_state = Rc::clone(&self.host_state);
         ACTIVE_HOST_STATE.with(|slot| {
             let previous = slot.replace(Some(host_state));
-            let result = f(&mut self.context);
-            slot.replace(previous);
-            result
+            let _guard = ActiveHostGuard(previous);
+            f(&mut self.context)
         })
     }
 }
@@ -4002,6 +4011,26 @@ mod tests {
         let value = runtime.eval("1 + 2 + 3").unwrap();
 
         assert_eq!(value.as_number(), Some(6.0));
+    }
+
+    #[test]
+    fn active_host_state_is_restored_after_panic() {
+        use std::panic::{AssertUnwindSafe, catch_unwind};
+
+        let outer_runtime = JsRuntime::new().unwrap();
+        let outer_state = Rc::clone(&outer_runtime.host_state);
+        ACTIVE_HOST_STATE.with(|slot| slot.replace(Some(Rc::clone(&outer_state))));
+
+        let mut inner_runtime = JsRuntime::new().unwrap();
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            inner_runtime.with_active_host_value(|_| panic!("active host panic test"));
+        }));
+
+        assert!(result.is_err());
+        ACTIVE_HOST_STATE.with(|slot| {
+            let restored = slot.replace(None).expect("outer host state should be restored");
+            assert!(Rc::ptr_eq(&restored, &outer_state));
+        });
     }
 
     #[test]
