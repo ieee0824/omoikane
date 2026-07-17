@@ -2,8 +2,9 @@ use std::env;
 use std::ffi::{CStr, CString};
 use std::fs;
 use std::os::raw::c_char;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::thread;
+use std::time::{Duration, Instant};
 
 use base64::Engine;
 use omoikane::ffi::{
@@ -100,6 +101,7 @@ fn run() -> Result<(), String> {
             run_screenshot(
                 browser,
                 &url_c,
+                url,
                 &output_path,
                 dump_html.as_ref(),
                 width,
@@ -107,7 +109,7 @@ fn run() -> Result<(), String> {
             )
         })
     } else {
-        run_screenshot(browser, &url_c, &output_path, dump_html.as_ref(), width, height)
+        run_screenshot(browser, &url_c, url, &output_path, dump_html.as_ref(), width, height)
     };
 
     // SAFETY: `browser` was allocated by `omoikane_init`.
@@ -118,22 +120,27 @@ fn run() -> Result<(), String> {
 fn run_screenshot(
     browser: *mut OmoikaneBrowser,
     url: &CString,
+    url_display: &str,
     output_path: &PathBuf,
     dump_html: Option<&PathBuf>,
     width: u32,
     height: u32,
 ) -> Result<(), String> {
+    let navigate_start = Instant::now();
     // SAFETY: `browser` is a valid handle and `url` is a NUL-terminated C string.
     let navigated = unsafe { omoikane_navigate(browser, url.as_ptr()) };
     if !navigated {
         return Err(last_error_message(browser));
     }
+    let navigate_elapsed = navigate_start.elapsed();
 
+    let render_start = Instant::now();
     // SAFETY: `browser` is a valid handle and dimensions are plain values.
     let png_b64_ptr = unsafe { omoikane_screenshot_png_with_viewport(browser, width, height) };
     if png_b64_ptr.is_null() {
         return Err(last_error_message(browser));
     }
+    let render_elapsed = render_start.elapsed();
 
     let png_b64 = take_owned_string(png_b64_ptr)?;
     let png = base64::engine::general_purpose::STANDARD
@@ -147,21 +154,42 @@ fn run_screenshot(
         fs::write(path, html).map_err(|error| format!("failed to write HTML dump: {error}"))?;
     }
 
-    if let Some(parent) = output_path.parent() {
-        if !parent.as_os_str().is_empty() {
-            fs::create_dir_all(parent)
-                .map_err(|error| format!("failed to create output directory: {error}"))?;
-        }
+    if let Some(parent) = output_path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        fs::create_dir_all(parent)
+            .map_err(|error| format!("failed to create output directory: {error}"))?;
     }
     fs::write(output_path, png).map_err(|error| format!("failed to write output PNG: {error}"))?;
 
-    println!(
-        "saved screenshot: {} ({}x{})",
+    println!("{}", format_success_message(
+        output_path,
+        width,
+        height,
+        url_display,
+        navigate_elapsed,
+        render_elapsed,
+    ));
+    Ok(())
+}
+
+fn format_success_message(
+    output_path: &Path,
+    width: u32,
+    height: u32,
+    url: &str,
+    navigate_elapsed: Duration,
+    render_elapsed: Duration,
+) -> String {
+    format!(
+        "saved screenshot: {} ({}x{}) url={} navigate={:.1}ms render={:.1}ms",
         output_path.display(),
         width,
-        height
-    );
-    Ok(())
+        height,
+        url,
+        navigate_elapsed.as_secs_f64() * 1_000.0,
+        render_elapsed.as_secs_f64() * 1_000.0,
+    )
 }
 
 fn parse_dimension(raw: Option<&str>, default_value: u32, label: &str) -> Result<u32, String> {
@@ -197,4 +225,24 @@ fn take_owned_string(ptr: *mut c_char) -> Result<String, String> {
 fn usage() -> String {
     "usage: cargo run --example screenshot -- [--insecure|-k] [--force-opacity] [--firefox-user-agent] [--dump-html <output.html>] <url> <output.png> [width] [height]"
         .to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn success_message_includes_url_and_phase_timings() {
+        assert_eq!(
+            format_success_message(
+                &PathBuf::from("/tmp/test.png"),
+                1280,
+                720,
+                "https://x.com/",
+                Duration::from_micros(842_345),
+                Duration::from_micros(126_749),
+            ),
+            "saved screenshot: /tmp/test.png (1280x720) url=https://x.com/ navigate=842.3ms render=126.7ms"
+        );
+    }
 }
