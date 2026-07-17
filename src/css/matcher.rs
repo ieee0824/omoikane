@@ -459,17 +459,18 @@ fn element_position(node: &NodeHandle) -> Option<(usize, usize)> {
     if parent.node_type() != NodeType::Element {
         return None;
     }
-    let element_children: Vec<NodeHandle> = parent
-        .child_nodes()
-        .into_iter()
-        .filter(|child| child.node_type() == NodeType::Element)
-        .collect();
-    let total = element_children.len();
-    let index = element_children
-        .iter()
-        .position(|candidate| candidate == node)
-        .map(|position| position + 1)?;
-    Some((index, total))
+    let mut index = None;
+    let mut total = 0;
+    for child in parent.child_nodes() {
+        if child.node_type() != NodeType::Element {
+            continue;
+        }
+        total += 1;
+        if &child == node {
+            index = Some(total);
+        }
+    }
+    Some((index?, total))
 }
 
 fn type_position(node: &NodeHandle) -> Option<(usize, usize)> {
@@ -478,18 +479,21 @@ fn type_position(node: &NodeHandle) -> Option<(usize, usize)> {
         return None;
     }
     let tag_name = node.tag_name()?;
-    let same_type: Vec<NodeHandle> = parent
-        .child_nodes()
-        .into_iter()
-        .filter(|child| {
-            child
-                .tag_name()
-                .is_some_and(|tag| tag.eq_ignore_ascii_case(&tag_name))
-        })
-        .collect();
-    let total = same_type.len();
-    let index = same_type.iter().position(|candidate| candidate == node)? + 1;
-    Some((index, total))
+    let mut index = None;
+    let mut total = 0;
+    for child in parent.child_nodes() {
+        if !child
+            .tag_name()
+            .is_some_and(|tag| tag.eq_ignore_ascii_case(&tag_name))
+        {
+            continue;
+        }
+        total += 1;
+        if &child == node {
+            index = Some(total);
+        }
+    }
+    Some((index?, total))
 }
 
 #[cfg(test)]

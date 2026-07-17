@@ -190,6 +190,12 @@ cargo run --release --example style_benchmark
 cargo run --release --example sibling_selector_benchmark
 ```
 
+多数の兄弟に対するstructural pseudo-classのbaseline:
+
+```bash
+cargo run --release --example structural_selector_benchmark
+```
+
 `Client::new()` の既定 `User-Agent` は `Omoikane/{version} {OS}` 形式です。
 必要に応じて [`src/http/client.rs`](/src/http/client.rs) の `set_user_agent` で上書きできます。
 
