@@ -6434,3 +6434,29 @@ fn form_control_label_uses_web_font_variant() {
         "the label must actually paint glyph pixels for the comparison to be meaningful"
     );
 }
+
+#[test]
+fn render_timings_accumulate_multiple_documents_and_reset_when_taken() {
+    clear_render_timings();
+    record_render_timings(&RenderTimings {
+        javascript: std::time::Duration::from_millis(12),
+        layout: std::time::Duration::from_millis(3),
+        ..RenderTimings::default()
+    });
+    record_render_timings(&RenderTimings {
+        javascript: std::time::Duration::from_millis(8),
+        png_encode: std::time::Duration::from_millis(2),
+        ..RenderTimings::default()
+    });
+
+    assert_eq!(
+        take_last_render_timings(),
+        RenderTimings {
+            javascript: std::time::Duration::from_millis(20),
+            layout: std::time::Duration::from_millis(3),
+            png_encode: std::time::Duration::from_millis(2),
+            ..RenderTimings::default()
+        }
+    );
+    assert_eq!(take_last_render_timings(), RenderTimings::default());
+}

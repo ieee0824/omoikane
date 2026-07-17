@@ -12,6 +12,7 @@ use omoikane::ffi::{
     omoikane_navigate, omoikane_screenshot_png_with_viewport, omoikane_set_insecure,
     omoikane_set_user_agent, omoikane_string_free,
 };
+use omoikane::paint::{RenderTimings, take_last_render_timings};
 
 const DEFAULT_WIDTH: u32 = 1280;
 const DEFAULT_HEIGHT: u32 = 720;
@@ -170,7 +171,19 @@ fn run_screenshot(
         navigate_elapsed,
         render_elapsed,
     ));
+    println!("{}", format_render_phase_message(&take_last_render_timings()));
     Ok(())
+}
+
+fn format_render_phase_message(timings: &RenderTimings) -> String {
+    let milliseconds = |duration: Duration| duration.as_secs_f64() * 1_000.0;
+    format!(
+        "render phases: stylesheets={:.1}ms fonts={:.1}ms javascript={:.1}ms timers={:.1}ms style-refresh={:.1}ms layout={:.1}ms paint={:.1}ms png-encode={:.1}ms",
+        milliseconds(timings.stylesheets), milliseconds(timings.fonts),
+        milliseconds(timings.javascript), milliseconds(timings.timers),
+        milliseconds(timings.style_refresh), milliseconds(timings.layout),
+        milliseconds(timings.paint), milliseconds(timings.png_encode),
+    )
 }
 
 fn format_success_message(
@@ -230,6 +243,7 @@ fn usage() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use omoikane::paint::RenderTimings;
 
     #[test]
     fn success_message_includes_url_and_phase_timings() {
@@ -243,6 +257,24 @@ mod tests {
                 Duration::from_micros(126_749),
             ),
             "saved screenshot: /tmp/test.png (1280x720) url=https://x.com/ navigate=842.3ms render=126.7ms"
+        );
+    }
+
+    #[test]
+    fn render_phase_message_includes_each_pipeline_stage() {
+        let timings = RenderTimings {
+            stylesheets: Duration::from_micros(1_250),
+            fonts: Duration::from_micros(2_500),
+            javascript: Duration::from_micros(3_750),
+            timers: Duration::from_micros(4_000),
+            style_refresh: Duration::from_micros(5_250),
+            layout: Duration::from_micros(6_500),
+            paint: Duration::from_micros(7_750),
+            png_encode: Duration::from_micros(8_000),
+        };
+        assert_eq!(
+            format_render_phase_message(&timings),
+            "render phases: stylesheets=1.2ms fonts=2.5ms javascript=3.8ms timers=4.0ms style-refresh=5.2ms layout=6.5ms paint=7.8ms png-encode=8.0ms"
         );
     }
 }

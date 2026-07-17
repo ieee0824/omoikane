@@ -6,9 +6,10 @@ pub(crate) mod image;
 pub(crate) mod stylesheet;
 pub(crate) mod text;
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::path::Path;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 /// Total virtual milliseconds the render pipeline advances the JS event loop to
 /// drain script-scheduled timers before layout.
@@ -21,6 +22,48 @@ const TIMER_PUMP_MAX_TASKS: usize = 100_000;
 
 thread_local! {
     static FORCE_OPACITY: Cell<bool> = const { Cell::new(false) };
+    static LAST_RENDER_TIMINGS: RefCell<RenderTimings> = RefCell::new(RenderTimings::default());
+}
+
+/// Processing time spent in each stage of the most recent screenshot render.
+///
+/// Multiple documents rendered for one screenshot are accumulated.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RenderTimings {
+    pub stylesheets: Duration,
+    pub fonts: Duration,
+    pub javascript: Duration,
+    pub timers: Duration,
+    pub style_refresh: Duration,
+    pub layout: Duration,
+    pub paint: Duration,
+    pub png_encode: Duration,
+}
+
+impl RenderTimings {
+    fn add_assign(&mut self, other: &Self) {
+        self.stylesheets += other.stylesheets;
+        self.fonts += other.fonts;
+        self.javascript += other.javascript;
+        self.timers += other.timers;
+        self.style_refresh += other.style_refresh;
+        self.layout += other.layout;
+        self.paint += other.paint;
+        self.png_encode += other.png_encode;
+    }
+}
+
+/// Takes the accumulated timings for the most recent screenshot render.
+pub fn take_last_render_timings() -> RenderTimings {
+    LAST_RENDER_TIMINGS.with(|timings| std::mem::take(&mut *timings.borrow_mut()))
+}
+
+pub(crate) fn clear_render_timings() {
+    LAST_RENDER_TIMINGS.with(|timings| *timings.borrow_mut() = RenderTimings::default());
+}
+
+pub(crate) fn record_render_timings(timings: &RenderTimings) {
+    LAST_RENDER_TIMINGS.with(|total| total.borrow_mut().add_assign(timings));
 }
 
 /// Runs the given closure with `opacity: 0` overridden to `opacity: 1`.
@@ -718,6 +761,8 @@ pub fn render_document_with_url(
     viewport: Rect,
     base_url: Option<&crate::http::Url>,
 ) -> Result<Canvas, PaintError> {
+    let mut timings = RenderTimings::default();
+    let stylesheets_start = Instant::now();
     let effective_base = stylesheet::extract_document_base_url(document, base_url);
     let mut resolver = StyleResolver::new();
     resolver.set_viewport(viewport.width, viewport.height);
@@ -730,8 +775,10 @@ pub fn render_document_with_url(
     for sheet in &parsed_sheets {
         resolver.add_stylesheet(Origin::Author, sheet.clone());
     }
+    timings.stylesheets = stylesheets_start.elapsed();
 
     // Collect @font-face rules and fetch web fonts, building a variant registry
+    let fonts_start = Instant::now();
     let fetched_web_fonts = stylesheet::fetch_font_face_fonts(&parsed_sheets, effective_base.as_ref());
 
     let mut web_font_registry = WebFontRegistry::new();
@@ -752,10 +799,12 @@ pub fn render_document_with_url(
         Some(web_font_registry.as_ref())
     };
     let layout_web_fonts = web_font_registry_opt.map(|_| Arc::clone(&web_font_registry));
+    timings.fonts = fonts_start.elapsed();
 
     // Execute <script> tags and fire DOMContentLoaded before layout.
     // JS may modify the DOM (e.g., classList.add for fade-in animations,
     // injecting <style> elements), so this must happen before layout.
+    let javascript_start = Instant::now();
     if let Ok(mut runtime) = crate::js::JsRuntime::with_document(document.clone()) {
         // Keep getComputedStyle / layout-metric queries issued by page scripts
         // consistent with the render viewport.
@@ -774,15 +823,18 @@ pub fn render_document_with_url(
         if let Err(err) = runtime.fire_load() {
             eprintln!("[omoikane][js-error] {err}");
         }
+        timings.javascript = javascript_start.elapsed();
         // Drive script-scheduled timers (setTimeout/setInterval) in virtual
         // time so that DOM mutations from deferred callbacks settle before
         // layout. Bounded by a virtual-time budget and a task-count cap so an
         // infinite setInterval cannot hang the render.
+        let timers_start = Instant::now();
         let tasks_run = runtime.run_timers(
             TIMER_PUMP_MAX_VIRTUAL_MS,
             TIMER_PUMP_STEP_MS,
             TIMER_PUMP_MAX_TASKS,
         );
+        timings.timers = timers_start.elapsed();
         if std::env::var_os("OMOIKANE_LOG_SCRIPTS").is_some() {
             eprintln!("[omoikane][event-loop] completed {tasks_run} macrotasks");
             if let Ok(value) = runtime.eval(
@@ -793,6 +845,7 @@ pub fn render_document_with_url(
         }
         // Re-extract stylesheets and rebuild resolver after JS may have
         // modified the DOM (inserted/removed <style>/<link> elements).
+        let style_refresh_start = Instant::now();
         resolver = StyleResolver::new();
         resolver.set_viewport(viewport.width, viewport.height);
         parsed_sheets.clear();
@@ -805,21 +858,30 @@ pub fn render_document_with_url(
         for sheet in &parsed_sheets {
             resolver.add_stylesheet(Origin::Author, sheet.clone());
         }
+        timings.style_refresh = style_refresh_start.elapsed();
+    } else {
+        timings.javascript = javascript_start.elapsed();
     }
 
-    crate::layout::with_layout_fonts(layout_fonts, layout_web_fonts, || {
+    let result = crate::layout::with_layout_fonts(layout_fonts, layout_web_fonts, || {
         crate::layout::with_image_base_url(effective_base, || {
+            let layout_start = Instant::now();
             let layout = crate::layout::layout_tree(document, &mut resolver, viewport)?;
-            Some(paint_layout_with_web_fonts(
+            timings.layout = layout_start.elapsed();
+            let paint_start = Instant::now();
+            let canvas = paint_layout_with_web_fonts(
                 &layout,
                 &mut resolver,
                 viewport,
                 all_fonts,
                 web_font_registry_opt,
-            ))
+            );
+            timings.paint = paint_start.elapsed();
+            Some(canvas)
         })
-    })
-    .ok_or(PaintError::InvalidImageBuffer)
+    });
+    record_render_timings(&timings);
+    result.ok_or(PaintError::InvalidImageBuffer)
 }
 
 /// Encodes the rendered document directly as PNG.
@@ -833,7 +895,14 @@ pub fn render_document_png_with_url(
     viewport: Rect,
     base_url: Option<&crate::http::Url>,
 ) -> Result<Vec<u8>, PaintError> {
-    Ok(render_document_with_url(document, viewport, base_url)?.encode_png())
+    let canvas = render_document_with_url(document, viewport, base_url)?;
+    let encode_start = Instant::now();
+    let png = canvas.encode_png();
+    record_render_timings(&RenderTimings {
+        png_encode: encode_start.elapsed(),
+        ..RenderTimings::default()
+    });
+    Ok(png)
 }
 
 /// Renders a DOM document into a canvas, resolving local fixture assets from `base_path`.
