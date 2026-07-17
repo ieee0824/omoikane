@@ -23,6 +23,7 @@ x.comのdocument scriptsに約40秒かかっている。計測の結果、entry 
 ## 対応方針
 
 - [x] rustls設定をtransport modeごとに共有し、依存module間でTLS session cacheを再利用する
+- [x] host・TLS mode・public IP制約単位でHTTP接続をpoolし、HTTP/1.1 keep-aliveとHTTP/2 sessionを再利用する
 - module graph取得が逐次化されている箇所とBoaのloader呼び出し順を確認する
 - 独立した依存moduleの並列取得、またはリンク前の先読みを検討する
 - URL単位のmodule source・parse結果のキャッシュ範囲を確認する
@@ -47,4 +48,11 @@ x.com実測では、表示結果を維持したまま以下となった。
 - 変更後2回目: `render=67.1s`、`document-scripts=36.4s`
 - 2回目の依存module内訳: 319 module、3,806,817 bytes、fetch合計27.7s、parse合計12.2s
 
-TLS session再利用だけでは各moduleのTCP接続と逐次待機は残るため、次段階ではHTTP/2接続再利用またはmodule fetchの並列化が必要。
+TLS session再利用だけでは各moduleのTCP接続と逐次待機が残ったため、接続poolを追加した。さらに短縮する場合はmodule fetchの並列化が必要。
+
+接続pool追加後、x.com/CDNはHTTP/2のheader decodeからHTTP/1.1へfallbackする経路だったため、HTTP/1.1 keep-aliveを含めて再利用した。実測では8接続を開き、322 requestで再利用、再利用失敗は0件だった。
+
+- 接続pool前: `render=66〜71s`、`document-scripts=36〜40s`
+- 接続pool後: `render=41.7s`、`document-scripts=12.4s`
+
+表示結果はログインフォーム、Xロゴ、QRコードを含めて維持された。残る最大フェーズは約26.9秒のtimer実行。

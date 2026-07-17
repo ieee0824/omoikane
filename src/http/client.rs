@@ -27,6 +27,7 @@ pub struct Client {
     max_redirects: u32,
     user_agent: String,
     insecure: bool,
+    connections: connection::ConnectionPool,
 }
 
 impl Client {
@@ -37,6 +38,7 @@ impl Client {
             max_redirects: DEFAULT_MAX_REDIRECTS,
             user_agent: default_user_agent(),
             insecure: false,
+            connections: connection::ConnectionPool::default(),
         }
     }
 
@@ -119,7 +121,7 @@ impl Client {
                 request.add_header("Cookie", cookie_header);
             }
 
-            let response = connection::send_with_options(&request, self.insecure)?;
+            let response = self.connections.send(&request, self.insecure)?;
 
             // Store Set-Cookie headers
             let origin = request.url().clone();
