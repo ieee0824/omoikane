@@ -4,7 +4,8 @@ use crate::html::{TreeBuilder, decode_html_response};
 use crate::http::Client;
 use crate::http::url::resolve_url;
 use crate::layout::Rect;
-use crate::paint::{Canvas, Image, render_document_png_with_url, render_document_with_url};
+use crate::paint::{Canvas, Image, RenderTimings, clear_render_timings, record_render_timings, render_document_png_with_url, render_document_with_url};
+use std::time::Instant;
 
 const MAX_FRAMESET_DEPTH: usize = 4;
 
@@ -12,6 +13,7 @@ pub(crate) fn capture_session_screenshot_png(
     session: &mut CdpSession,
     viewport: Rect,
 ) -> Result<Vec<u8>, String> {
+    clear_render_timings();
     let document = session.document();
     let base_url = session.current_url().parse::<crate::http::Url>().ok();
 
@@ -41,7 +43,13 @@ fn render_frameset_screenshot_png(
     let Some(canvas) = render_frameset_canvas(document, base_url, viewport, 0, client)? else {
         return Ok(None);
     };
-    Ok(Some(canvas.encode_png()))
+    let encode_start = Instant::now();
+    let png = canvas.encode_png();
+    record_render_timings(&RenderTimings {
+        png_encode: encode_start.elapsed(),
+        ..RenderTimings::default()
+    });
+    Ok(Some(png))
 }
 
 fn render_frameset_canvas(

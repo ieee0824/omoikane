@@ -1,8 +1,10 @@
 //! TCP/TLS connection handling for HTTP requests.
 
+use std::collections::HashMap;
 use std::io::{self, Write};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpStream, ToSocketAddrs};
 use std::sync::Arc;
+use std::sync::OnceLock;
 use std::time::Duration;
 
 use rustls::ClientConfig;
@@ -15,6 +17,132 @@ use super::response::{HttpParseError, HttpResponse};
 
 /// Default timeout in seconds for both connection and read operations.
 const DEFAULT_TIMEOUT_SECS: u64 = 30;
+
+#[derive(Debug, Default)]
+pub(crate) struct ConnectionPool {
+    http2: HashMap<String, http2::Http2Session>,
+    http1: HashMap<String, http2::Http1Session>,
+}
+
+impl ConnectionPool {
+    pub(crate) fn send(
+        &mut self,
+        request: &HttpRequest,
+        insecure: bool,
+    ) -> Result<HttpResponse, HttpParseError> {
+        if request.url().scheme() != "https" {
+            return send_with_options(request, insecure);
+        }
+
+        let key = format!(
+            "{}|{}|{}",
+            request.url().authority(),
+            insecure,
+            request.requires_public_ip()
+        );
+        if let Some(session) = self.http2.get_mut(&key) {
+            match session.send_request(request) {
+                Ok(response) => {
+                    if std::env::var_os("OMOIKANE_LOG_HTTP").is_some() {
+                        eprintln!("[omoikane][http2] reused {key}");
+                    }
+                    return Ok(response);
+                }
+                Err(error) => {
+                    if std::env::var_os("OMOIKANE_LOG_HTTP").is_some() {
+                        eprintln!("[omoikane][http2] reuse-failed {key}: {error}");
+                    }
+                    self.http2.remove(&key);
+                }
+            }
+        }
+        if let Some(session) = self.http1.get_mut(&key) {
+            match session.send_request(request) {
+                Ok(response) => {
+                    if response.header("connection").is_some_and(|value| {
+                        value.eq_ignore_ascii_case("close")
+                    }) {
+                        self.http1.remove(&key);
+                    }
+                    if std::env::var_os("OMOIKANE_LOG_HTTP").is_some() {
+                        eprintln!("[omoikane][http1] reused {key}");
+                    }
+                    return Ok(response);
+                }
+                Err(error) => {
+                    if std::env::var_os("OMOIKANE_LOG_HTTP").is_some() {
+                        eprintln!("[omoikane][http1] reuse-failed {key}: {error}");
+                    }
+                    self.http1.remove(&key);
+                }
+            }
+        }
+
+        let stream = connect_stream(request)?;
+        let config = if insecure {
+            shared_insecure_client_config(true)
+        } else {
+            shared_default_client_config(true)
+        };
+        match http2::connect_session(stream, request, config)? {
+            Ok(mut session) => {
+                let response = session.send_request(request);
+                if response.is_ok() {
+                    if std::env::var_os("OMOIKANE_LOG_HTTP").is_some() {
+                        eprintln!("[omoikane][http2] opened {key}");
+                    }
+                    self.http2.insert(key.clone(), session);
+                }
+                match response {
+                    Ok(response) => Ok(response),
+                    Err(HttpParseError::InvalidHeader) => {
+                        self.send_new_http1(request, insecure, key)
+                    }
+                    Err(error) => Err(error),
+                }
+            }
+            Err(mut session) => {
+                let response = session.send_request(request)?;
+                let should_keep = !response
+                    .header("connection")
+                    .is_some_and(|value| value.eq_ignore_ascii_case("close"));
+                if should_keep {
+                    if std::env::var_os("OMOIKANE_LOG_HTTP").is_some() {
+                        eprintln!("[omoikane][http1] opened {key}");
+                    }
+                    self.http1.insert(key, session);
+                }
+                Ok(response)
+            }
+        }
+    }
+
+    fn send_new_http1(
+        &mut self,
+        request: &HttpRequest,
+        insecure: bool,
+        key: String,
+    ) -> Result<HttpResponse, HttpParseError> {
+        let stream = connect_stream(request)?;
+        let config = if insecure {
+            shared_insecure_client_config(false)
+        } else {
+            shared_default_client_config(false)
+        };
+        let mut session = http2::connect_http1_session(stream, request, config)?;
+        let response = session.send_request(request)?;
+        let should_keep = !response
+            .header("connection")
+            .is_some_and(|value| value.eq_ignore_ascii_case("close"));
+        if should_keep {
+            if std::env::var_os("OMOIKANE_LOG_HTTP").is_some() {
+                eprintln!("[omoikane][http1] opened {key}");
+            }
+            self.http1.insert(key, session);
+        }
+        Ok(response)
+    }
+}
 
 /// A [`ServerCertVerifier`] that accepts any server certificate without validation.
 ///
@@ -89,6 +217,13 @@ fn insecure_client_config(enable_http2: bool) -> ClientConfig {
     config
 }
 
+fn shared_insecure_client_config(enable_http2: bool) -> Arc<ClientConfig> {
+    static HTTP2: OnceLock<Arc<ClientConfig>> = OnceLock::new();
+    static HTTP1: OnceLock<Arc<ClientConfig>> = OnceLock::new();
+    let config = if enable_http2 { &HTTP2 } else { &HTTP1 };
+    Arc::clone(config.get_or_init(|| Arc::new(insecure_client_config(enable_http2))))
+}
+
 /// Sends an HTTP request over a new TCP connection and returns the response.
 ///
 /// For `http` URLs, uses a plain TCP connection. For `https` URLs, wraps the
@@ -134,9 +269,9 @@ pub fn send_with_options(
             || connect_stream(request),
             |enable_http2| {
                 if insecure {
-                    Arc::new(insecure_client_config(enable_http2))
+                    shared_insecure_client_config(enable_http2)
                 } else {
-                    Arc::new(default_client_config(enable_http2))
+                    shared_default_client_config(enable_http2)
                 }
             },
         )
@@ -245,6 +380,13 @@ fn default_client_config(enable_http2: bool) -> ClientConfig {
     config
 }
 
+fn shared_default_client_config(enable_http2: bool) -> Arc<ClientConfig> {
+    static HTTP2: OnceLock<Arc<ClientConfig>> = OnceLock::new();
+    static HTTP1: OnceLock<Arc<ClientConfig>> = OnceLock::new();
+    let config = if enable_http2 { &HTTP2 } else { &HTTP1 };
+    Arc::clone(config.get_or_init(|| Arc::new(default_client_config(enable_http2))))
+}
+
 fn send_over_tls_with_config(
     stream: TcpStream,
     request: &HttpRequest,
@@ -280,6 +422,18 @@ mod tests {
     use rustls::{ClientConnection, StreamOwned};
     use std::io::{BufRead, BufReader, Read};
     use std::net::TcpListener;
+
+    #[test]
+    fn tls_configs_are_shared_by_transport_mode() {
+        let http2 = shared_default_client_config(true);
+        let same_http2 = shared_default_client_config(true);
+        let http1 = shared_default_client_config(false);
+
+        assert!(Arc::ptr_eq(&http2, &same_http2));
+        assert!(!Arc::ptr_eq(&http2, &http1));
+        assert_eq!(http2.alpn_protocols, vec![b"h2".to_vec(), b"http/1.1".to_vec()]);
+        assert_eq!(http1.alpn_protocols, vec![b"http/1.1".to_vec()]);
+    }
 
     /// Starts a local TCP server that reads an HTTP request, validates it,
     /// and responds with a fixed 200 OK response. Returns the port.
@@ -480,6 +634,48 @@ mod tests {
         });
 
         (port, ca_cert)
+    }
+
+    #[test]
+    fn connection_pool_reuses_http11_tls_connection() {
+        let (cert_der, key_der) = generate_test_cert("localhost");
+        let listener = TcpListener::bind("[::1]:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server_config = rustls::ServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(vec![cert_der], key_der)
+            .unwrap();
+        let mut server_config = Arc::new(server_config);
+        Arc::get_mut(&mut server_config).unwrap().alpn_protocols = vec![b"http/1.1".to_vec()];
+
+        let server = std::thread::spawn(move || {
+            let (tcp_stream, _) = listener.accept().unwrap();
+            let conn = rustls::ServerConnection::new(server_config).unwrap();
+            let mut tls_stream = StreamOwned::new(conn, tcp_stream);
+
+            for expected_path in ["/first", "/second"] {
+                let mut request = Vec::new();
+                while !request.ends_with(b"\r\n\r\n") {
+                    let mut byte = [0u8; 1];
+                    tls_stream.read_exact(&mut byte).unwrap();
+                    request.push(byte[0]);
+                }
+                let request = String::from_utf8(request).unwrap();
+                assert!(request.starts_with(&format!("GET {expected_path} HTTP/1.1\r\n")));
+                tls_stream
+                    .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok")
+                    .unwrap();
+                tls_stream.flush().unwrap();
+            }
+        });
+
+        let mut pool = ConnectionPool::default();
+        for path in ["first", "second"] {
+            let request = HttpRequest::get(&format!("https://localhost:{port}/{path}")).unwrap();
+            let response = pool.send(&request, true).unwrap();
+            assert_eq!(response.body(), b"ok");
+        }
+        server.join().unwrap();
     }
 
     /// Helper: connect to the local TLS server while exercising the same

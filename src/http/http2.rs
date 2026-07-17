@@ -147,33 +147,38 @@ struct StreamState {
 }
 
 #[derive(Debug)]
-struct Http2Connection<'a, IO> {
-    io: &'a mut IO,
+struct Http2Connection<IO> {
+    io: IO,
     next_stream_id: u32,
     connection_window: i32,
     stream_windows: HashMap<u32, i32>,
+    initialized: bool,
 }
 
-impl<'a, IO: Read + Write> Http2Connection<'a, IO> {
-    fn new(io: &'a mut IO) -> Self {
+impl<IO: Read + Write> Http2Connection<IO> {
+    fn new(io: IO) -> Self {
         Self {
             io,
             next_stream_id: 1,
             connection_window: DEFAULT_WINDOW_SIZE,
             stream_windows: HashMap::new(),
+            initialized: false,
         }
     }
 
     fn send_request(&mut self, request: &HttpRequest) -> Result<HttpResponse, HttpParseError> {
-        self.io
-            .write_all(CONNECTION_PREFACE)
-            .map_err(HttpParseError::Io)?;
-        self.write_frame(Frame {
-            frame_type: FrameType::Settings,
-            flags: 0,
-            stream_id: 0,
-            payload: Vec::new(),
-        })?;
+        if !self.initialized {
+            self.io
+                .write_all(CONNECTION_PREFACE)
+                .map_err(HttpParseError::Io)?;
+            self.write_frame(Frame {
+                frame_type: FrameType::Settings,
+                flags: 0,
+                stream_id: 0,
+                payload: Vec::new(),
+            })?;
+            self.initialized = true;
+        }
 
         let stream_id = self.next_stream_id;
         self.next_stream_id += 2;
@@ -236,7 +241,7 @@ impl<'a, IO: Read + Write> Http2Connection<'a, IO> {
     fn read_response(&mut self, target_stream_id: u32) -> Result<HttpResponse, HttpParseError> {
         let mut state = StreamState::default();
         loop {
-            let frame = Frame::read(self.io)?;
+            let frame = Frame::read(&mut self.io)?;
             match frame.frame_type {
                 FrameType::Settings => {
                     if frame.flags & 0x1 == 0 {
@@ -299,11 +304,89 @@ impl<'a, IO: Read + Write> Http2Connection<'a, IO> {
     }
 }
 
+type TlsStream = StreamOwned<ClientConnection, TcpStream>;
+
+#[derive(Debug)]
+pub(super) struct Http1Session {
+    stream: TlsStream,
+}
+
+impl Http1Session {
+    pub(super) fn send_request(
+        &mut self,
+        request: &HttpRequest,
+    ) -> Result<HttpResponse, HttpParseError> {
+        self.stream
+            .write_all(&request.serialize())
+            .map_err(HttpParseError::Io)?;
+        self.stream.flush().map_err(HttpParseError::Io)?;
+        HttpResponse::parse(&mut self.stream)
+    }
+}
+
+pub(super) fn connect_http1_session(
+    stream: TcpStream,
+    request: &HttpRequest,
+    config: std::sync::Arc<ClientConfig>,
+) -> Result<Http1Session, HttpParseError> {
+    Ok(Http1Session {
+        stream: connect_tls(stream, request, config)?,
+    })
+}
+
+#[derive(Debug)]
+pub(super) struct Http2Session {
+    connection: Http2Connection<TlsStream>,
+}
+
+impl Http2Session {
+    pub(super) fn send_request(
+        &mut self,
+        request: &HttpRequest,
+    ) -> Result<HttpResponse, HttpParseError> {
+        self.connection.send_request(request)
+    }
+}
+
+pub(super) fn connect_session(
+    stream: TcpStream,
+    request: &HttpRequest,
+    config: std::sync::Arc<ClientConfig>,
+) -> Result<Result<Http2Session, Http1Session>, HttpParseError> {
+    let tls_stream = connect_tls(stream, request, config)?;
+    if tls_stream.conn.alpn_protocol() == Some(b"h2") {
+        Ok(Ok(Http2Session {
+            connection: Http2Connection::new(tls_stream),
+        }))
+    } else {
+        Ok(Err(Http1Session { stream: tls_stream }))
+    }
+}
+
 pub(super) fn send_over_tls(
     stream: TcpStream,
     request: &HttpRequest,
     config: std::sync::Arc<ClientConfig>,
 ) -> Result<HttpResponse, HttpParseError> {
+    let mut tls_stream = connect_tls(stream, request, config)?;
+
+    if tls_stream.conn.alpn_protocol() == Some(b"h2") {
+        let mut connection = Http2Connection::new(tls_stream);
+        connection.send_request(request)
+    } else {
+        tls_stream
+            .write_all(&request.serialize())
+            .map_err(HttpParseError::Io)?;
+        tls_stream.flush().map_err(HttpParseError::Io)?;
+        HttpResponse::parse(&mut tls_stream)
+    }
+}
+
+fn connect_tls(
+    stream: TcpStream,
+    request: &HttpRequest,
+    config: std::sync::Arc<ClientConfig>,
+) -> Result<TlsStream, HttpParseError> {
     let server_name = rustls::pki_types::ServerName::try_from(request.url().host().to_string())
         .map_err(|e| {
             HttpParseError::Io(std::io::Error::new(
@@ -320,19 +403,7 @@ pub(super) fn send_over_tls(
     })?;
     let mut tcp = stream;
     conn.complete_io(&mut tcp).map_err(HttpParseError::Io)?;
-    let alpn = conn.alpn_protocol().map(|value| value.to_vec());
-    let mut tls_stream = StreamOwned::new(conn, tcp);
-
-    if alpn.as_deref() == Some(b"h2") {
-        let mut connection = Http2Connection::new(&mut tls_stream);
-        connection.send_request(request)
-    } else {
-        tls_stream
-            .write_all(&request.serialize())
-            .map_err(HttpParseError::Io)?;
-        tls_stream.flush().map_err(HttpParseError::Io)?;
-        HttpResponse::parse(&mut tls_stream)
-    }
+    Ok(StreamOwned::new(conn, tcp))
 }
 
 fn encode_literal(out: &mut Vec<u8>, name: &str, value: &str) {

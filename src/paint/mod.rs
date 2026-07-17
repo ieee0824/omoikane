@@ -6,9 +6,10 @@ pub(crate) mod image;
 pub(crate) mod stylesheet;
 pub(crate) mod text;
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::path::Path;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 /// Total virtual milliseconds the render pipeline advances the JS event loop to
 /// drain script-scheduled timers before layout.
@@ -21,6 +22,54 @@ const TIMER_PUMP_MAX_TASKS: usize = 100_000;
 
 thread_local! {
     static FORCE_OPACITY: Cell<bool> = const { Cell::new(false) };
+    static LAST_RENDER_TIMINGS: RefCell<RenderTimings> = RefCell::new(RenderTimings::default());
+}
+
+/// Processing time spent in each stage of the most recent screenshot render.
+///
+/// Multiple documents rendered for one screenshot are accumulated.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RenderTimings {
+    pub stylesheets: Duration,
+    pub fonts: Duration,
+    pub javascript: Duration,
+    pub javascript_runtime_init: Duration,
+    pub javascript_document_scripts: Duration,
+    pub javascript_load_events: Duration,
+    pub timers: Duration,
+    pub style_refresh: Duration,
+    pub layout: Duration,
+    pub paint: Duration,
+    pub png_encode: Duration,
+}
+
+impl RenderTimings {
+    fn add_assign(&mut self, other: &Self) {
+        self.stylesheets += other.stylesheets;
+        self.fonts += other.fonts;
+        self.javascript += other.javascript;
+        self.javascript_runtime_init += other.javascript_runtime_init;
+        self.javascript_document_scripts += other.javascript_document_scripts;
+        self.javascript_load_events += other.javascript_load_events;
+        self.timers += other.timers;
+        self.style_refresh += other.style_refresh;
+        self.layout += other.layout;
+        self.paint += other.paint;
+        self.png_encode += other.png_encode;
+    }
+}
+
+/// Takes the accumulated timings for the most recent screenshot render.
+pub fn take_last_render_timings() -> RenderTimings {
+    LAST_RENDER_TIMINGS.with(|timings| std::mem::take(&mut *timings.borrow_mut()))
+}
+
+pub(crate) fn clear_render_timings() {
+    LAST_RENDER_TIMINGS.with(|timings| *timings.borrow_mut() = RenderTimings::default());
+}
+
+pub(crate) fn record_render_timings(timings: &RenderTimings) {
+    LAST_RENDER_TIMINGS.with(|total| total.borrow_mut().add_assign(timings));
 }
 
 /// Runs the given closure with `opacity: 0` overridden to `opacity: 1`.
@@ -506,6 +555,25 @@ impl Canvas {
         let x1 = (area.x + area.width).ceil().min(self.width as f32) as i32;
         let y1 = (area.y + area.height).ceil().min(self.height as f32) as i32;
 
+        if x0 >= x1 || y0 >= y1 {
+            return;
+        }
+
+        if color.a == 255 {
+            let row_start = x0 as usize * 4;
+            let row_end = x1 as usize * 4;
+            let stride = self.width as usize * 4;
+            let rgba = [color.r, color.g, color.b, color.a];
+            for y in y0 as usize..y1 as usize {
+                for pixel in self.pixels[y * stride + row_start..y * stride + row_end]
+                    .chunks_exact_mut(4)
+                {
+                    pixel.copy_from_slice(&rgba);
+                }
+            }
+            return;
+        }
+
         for y in y0..y1 {
             for x in x0..x1 {
                 let index = ((y as u32 * self.width + x as u32) * 4) as usize;
@@ -699,6 +767,8 @@ pub fn render_document_with_url(
     viewport: Rect,
     base_url: Option<&crate::http::Url>,
 ) -> Result<Canvas, PaintError> {
+    let mut timings = RenderTimings::default();
+    let stylesheets_start = Instant::now();
     let effective_base = stylesheet::extract_document_base_url(document, base_url);
     let mut resolver = StyleResolver::new();
     resolver.set_viewport(viewport.width, viewport.height);
@@ -711,8 +781,10 @@ pub fn render_document_with_url(
     for sheet in &parsed_sheets {
         resolver.add_stylesheet(Origin::Author, sheet.clone());
     }
+    timings.stylesheets = stylesheets_start.elapsed();
 
     // Collect @font-face rules and fetch web fonts, building a variant registry
+    let fonts_start = Instant::now();
     let fetched_web_fonts = stylesheet::fetch_font_face_fonts(&parsed_sheets, effective_base.as_ref());
 
     let mut web_font_registry = WebFontRegistry::new();
@@ -733,15 +805,21 @@ pub fn render_document_with_url(
         Some(web_font_registry.as_ref())
     };
     let layout_web_fonts = web_font_registry_opt.map(|_| Arc::clone(&web_font_registry));
+    timings.fonts = fonts_start.elapsed();
 
     // Execute <script> tags and fire DOMContentLoaded before layout.
     // JS may modify the DOM (e.g., classList.add for fade-in animations,
     // injecting <style> elements), so this must happen before layout.
+    let javascript_start = Instant::now();
+    let runtime_init_start = Instant::now();
     if let Ok(mut runtime) = crate::js::JsRuntime::with_document(document.clone()) {
+        timings.javascript_runtime_init = runtime_init_start.elapsed();
         // Keep getComputedStyle / layout-metric queries issued by page scripts
         // consistent with the render viewport.
         runtime.set_viewport(viewport.width, viewport.height);
+        let document_scripts_start = Instant::now();
         let errors = runtime.execute_document_scripts(effective_base.as_ref());
+        timings.javascript_document_scripts = document_scripts_start.elapsed();
         for err in &errors {
             eprintln!("[omoikane][js-error] {err}");
         }
@@ -749,21 +827,26 @@ pub fn render_document_with_url(
         // event. Per the HTML load order this happens after scripts run and
         // DOMContentLoaded has fired (inside execute_document_scripts), so page
         // load handlers run before the timer pump advances virtual time.
+        let load_events_start = Instant::now();
         if let Err(err) = runtime.wire_inline_event_handlers() {
             eprintln!("[omoikane][js-error] {err}");
         }
         if let Err(err) = runtime.fire_load() {
             eprintln!("[omoikane][js-error] {err}");
         }
+        timings.javascript_load_events = load_events_start.elapsed();
+        timings.javascript = javascript_start.elapsed();
         // Drive script-scheduled timers (setTimeout/setInterval) in virtual
         // time so that DOM mutations from deferred callbacks settle before
         // layout. Bounded by a virtual-time budget and a task-count cap so an
         // infinite setInterval cannot hang the render.
+        let timers_start = Instant::now();
         let tasks_run = runtime.run_timers(
             TIMER_PUMP_MAX_VIRTUAL_MS,
             TIMER_PUMP_STEP_MS,
             TIMER_PUMP_MAX_TASKS,
         );
+        timings.timers = timers_start.elapsed();
         if std::env::var_os("OMOIKANE_LOG_SCRIPTS").is_some() {
             eprintln!("[omoikane][event-loop] completed {tasks_run} macrotasks");
             if let Ok(value) = runtime.eval(
@@ -774,6 +857,7 @@ pub fn render_document_with_url(
         }
         // Re-extract stylesheets and rebuild resolver after JS may have
         // modified the DOM (inserted/removed <style>/<link> elements).
+        let style_refresh_start = Instant::now();
         resolver = StyleResolver::new();
         resolver.set_viewport(viewport.width, viewport.height);
         parsed_sheets.clear();
@@ -786,21 +870,31 @@ pub fn render_document_with_url(
         for sheet in &parsed_sheets {
             resolver.add_stylesheet(Origin::Author, sheet.clone());
         }
+        timings.style_refresh = style_refresh_start.elapsed();
+    } else {
+        timings.javascript_runtime_init = runtime_init_start.elapsed();
+        timings.javascript = javascript_start.elapsed();
     }
 
-    crate::layout::with_layout_fonts(layout_fonts, layout_web_fonts, || {
+    let result = crate::layout::with_layout_fonts(layout_fonts, layout_web_fonts, || {
         crate::layout::with_image_base_url(effective_base, || {
+            let layout_start = Instant::now();
             let layout = crate::layout::layout_tree(document, &mut resolver, viewport)?;
-            Some(paint_layout_with_web_fonts(
+            timings.layout = layout_start.elapsed();
+            let paint_start = Instant::now();
+            let canvas = paint_layout_with_web_fonts(
                 &layout,
                 &mut resolver,
                 viewport,
                 all_fonts,
                 web_font_registry_opt,
-            ))
+            );
+            timings.paint = paint_start.elapsed();
+            Some(canvas)
         })
-    })
-    .ok_or(PaintError::InvalidImageBuffer)
+    });
+    record_render_timings(&timings);
+    result.ok_or(PaintError::InvalidImageBuffer)
 }
 
 /// Encodes the rendered document directly as PNG.
@@ -814,7 +908,14 @@ pub fn render_document_png_with_url(
     viewport: Rect,
     base_url: Option<&crate::http::Url>,
 ) -> Result<Vec<u8>, PaintError> {
-    Ok(render_document_with_url(document, viewport, base_url)?.encode_png())
+    let canvas = render_document_with_url(document, viewport, base_url)?;
+    let encode_start = Instant::now();
+    let png = canvas.encode_png();
+    record_render_timings(&RenderTimings {
+        png_encode: encode_start.elapsed(),
+        ..RenderTimings::default()
+    });
+    Ok(png)
 }
 
 /// Renders a DOM document into a canvas, resolving local fixture assets from `base_path`.
@@ -1996,6 +2097,10 @@ fn is_top_left_edge(start: (f32, f32), end: (f32, f32)) -> bool {
 
 fn blend_pixel(pixel: &mut [u8], color: Color) {
     let src_a = color.a as u32;
+    if src_a == 255 {
+        pixel.copy_from_slice(&[color.r, color.g, color.b, color.a]);
+        return;
+    }
     let dst_a = pixel[3] as u32;
     let out_a = src_a + (dst_a * (255 - src_a) + 127) / 255;
     if out_a == 0 {
@@ -2052,25 +2157,22 @@ fn zlib_compress_uncompressed(data: &[u8]) -> Vec<u8> {
 
 fn adler32(data: &[u8]) -> u32 {
     const MOD: u32 = 65_521;
+    const NMAX: usize = 5_552;
     let mut a = 1u32;
     let mut b = 0u32;
-    for byte in data {
-        a = (a + *byte as u32) % MOD;
-        b = (b + a) % MOD;
+    for chunk in data.chunks(NMAX) {
+        for &byte in chunk {
+            a += byte as u32;
+            b += a;
+        }
+        a %= MOD;
+        b %= MOD;
     }
     (b << 16) | a
 }
 
 fn crc32(data: &[u8]) -> u32 {
-    let mut crc = 0xffff_ffffu32;
-    for byte in data {
-        crc ^= *byte as u32;
-        for _ in 0..8 {
-            let mask = (crc & 1).wrapping_neg() & 0xedb8_8320;
-            crc = (crc >> 1) ^ mask;
-        }
-    }
-    !crc
+    crc32fast::hash(data)
 }
 
 fn paint_background_image(
@@ -2239,69 +2341,62 @@ fn paint_background_image(
 }
 
 impl Canvas {
-    /// alpha チャンネルにのみ box blur を適用する（色成分は影の色のまま、アルファだけ拡散）。
-    ///
-    /// カーネルは常に `2r+1` ピクセル幅だが、端ではクランプして実効カーネルサイズを動的に計算する。
-    pub(crate) fn box_blur_alpha(&mut self, radius: u32) {
-        if radius == 0 {
+    /// alpha チャンネルへ複数回のbox blurを適用し、作業バッファを再利用する。
+    /// カーネルは常に`2r+1`ピクセル幅で、端では実効カーネルサイズを調整する。
+    pub(crate) fn box_blur_alpha_passes(&mut self, radius: u32, passes: usize) {
+        if radius == 0 || passes == 0 {
             return;
         }
         let w = self.width as usize;
         let h = self.height as usize;
         let r = radius as usize;
-
-        // 水平方向 blur
         let mut alphas: Vec<u8> = self.pixels.iter().skip(3).step_by(4).copied().collect();
         let mut blurred = vec![0u8; w * h];
-        for y in 0..h {
-            let row_start = y * w;
-            let mut sum: u32 = 0;
-            // x=0 の初期ウィンドウ: [max(0, 0-r), min(w-1, 0+r)] = [0, min(r, w-1)]
-            let init_right = r.min(w.saturating_sub(1));
-            for x in 0..=init_right {
-                sum += alphas[row_start + x] as u32;
-            }
-            for x in 0..w {
-                // 実効カーネルサイズ: min(w-1, x+r) - max(0, x-r) + 1
-                let left = x.saturating_sub(r);
-                let right = (x + r).min(w.saturating_sub(1));
-                let kernel_size = (right - left + 1) as u32;
-                blurred[row_start + x] = (sum / kernel_size) as u8;
-                // ウィンドウを右にずらす: 右端を追加、左端を除去
-                if x + r + 1 < w {
-                    sum += alphas[row_start + x + r + 1] as u32;
-                }
-                if x >= r {
-                    sum = sum.saturating_sub(alphas[row_start + x - r] as u32);
-                }
-            }
-        }
 
-        // 垂直方向 blur
-        alphas = blurred.clone();
-        for x in 0..w {
-            let mut sum: u32 = 0;
-            // y=0 の初期ウィンドウ
-            let init_bottom = r.min(h.saturating_sub(1));
-            for y in 0..=init_bottom {
-                sum += alphas[y * w + x] as u32;
-            }
+        for _ in 0..passes {
+            // 水平方向 blur
             for y in 0..h {
-                let top = y.saturating_sub(r);
-                let bottom = (y + r).min(h.saturating_sub(1));
-                let kernel_size = (bottom - top + 1) as u32;
-                blurred[y * w + x] = (sum / kernel_size) as u8;
-                if y + r + 1 < h {
-                    sum += alphas[(y + r + 1) * w + x] as u32;
+                let row_start = y * w;
+                let mut sum: u32 = 0;
+                let init_right = r.min(w.saturating_sub(1));
+                for x in 0..=init_right {
+                    sum += alphas[row_start + x] as u32;
                 }
-                if y >= r {
-                    sum = sum.saturating_sub(alphas[(y - r) * w + x] as u32);
+                for x in 0..w {
+                    let left = x.saturating_sub(r);
+                    let right = (x + r).min(w.saturating_sub(1));
+                    blurred[row_start + x] = (sum / (right - left + 1) as u32) as u8;
+                    if x + r + 1 < w {
+                        sum += alphas[row_start + x + r + 1] as u32;
+                    }
+                    if x >= r {
+                        sum = sum.saturating_sub(alphas[row_start + x - r] as u32);
+                    }
+                }
+            }
+
+            // 垂直方向 blur。結果をalphasへ戻し、次のpassの入力として再利用する。
+            for x in 0..w {
+                let mut sum: u32 = 0;
+                let init_bottom = r.min(h.saturating_sub(1));
+                for y in 0..=init_bottom {
+                    sum += blurred[y * w + x] as u32;
+                }
+                for y in 0..h {
+                    let top = y.saturating_sub(r);
+                    let bottom = (y + r).min(h.saturating_sub(1));
+                    alphas[y * w + x] = (sum / (bottom - top + 1) as u32) as u8;
+                    if y + r + 1 < h {
+                        sum += blurred[(y + r + 1) * w + x] as u32;
+                    }
+                    if y >= r {
+                        sum = sum.saturating_sub(blurred[(y - r) * w + x] as u32);
+                    }
                 }
             }
         }
 
-        // blurred alpha をピクセルに書き戻す
-        for (i, &a) in blurred.iter().enumerate() {
+        for (i, &a) in alphas.iter().enumerate() {
             self.pixels[i * 4 + 3] = a;
         }
     }

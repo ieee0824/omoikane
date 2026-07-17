@@ -9,6 +9,23 @@ use crate::layout::{
 };
 use crate::paint::*;
 
+#[test]
+fn png_checksums_match_standard_vectors() {
+    let input = b"123456789";
+
+    assert_eq!(crc32(input), 0xcbf4_3926);
+    assert_eq!(adler32(input), 0x091e_01de);
+}
+
+#[test]
+fn opaque_blend_replaces_the_destination_pixel() {
+    let mut pixel = [13, 27, 41, 99];
+
+    blend_pixel(&mut pixel, Color::rgba(201, 177, 153, 255));
+
+    assert_eq!(pixel, [201, 177, 153, 255]);
+}
+
 fn load_cjk_fallback_test_fonts() -> Option<Vec<std::sync::Arc<crate::font::Font>>> {
     let Some(primary_path) = crate::font::find_system_font("sans-serif") else {
         eprintln!("Skipping CJK fallback test: no primary sans-serif system font was found");
@@ -5804,7 +5821,7 @@ fn box_blur_alpha_uniform_field_stays_uniform() {
     for i in 0..w as usize * h as usize {
         canvas.pixels[i * 4 + 3] = 200;
     }
-    canvas.box_blur_alpha(2);
+    canvas.box_blur_alpha_passes(2, 1);
     // 端を含む全ピクセルが 200 のまま（±1 許容）
     for y in 0..h {
         for x in 0..w {
@@ -5824,7 +5841,7 @@ fn box_blur_alpha_edge_equals_center_for_uniform_input() {
     for i in 0..100usize {
         canvas.pixels[i * 4 + 3] = 128;
     }
-    canvas.box_blur_alpha(3);
+    canvas.box_blur_alpha_passes(3, 1);
     let center = canvas.pixel(5, 5).unwrap().a;
     let corner = canvas.pixel(0, 0).unwrap().a;
     assert!(
@@ -6416,4 +6433,30 @@ fn form_control_label_uses_web_font_variant() {
         glyph_pixels > 0,
         "the label must actually paint glyph pixels for the comparison to be meaningful"
     );
+}
+
+#[test]
+fn render_timings_accumulate_multiple_documents_and_reset_when_taken() {
+    clear_render_timings();
+    record_render_timings(&RenderTimings {
+        javascript: std::time::Duration::from_millis(12),
+        layout: std::time::Duration::from_millis(3),
+        ..RenderTimings::default()
+    });
+    record_render_timings(&RenderTimings {
+        javascript: std::time::Duration::from_millis(8),
+        png_encode: std::time::Duration::from_millis(2),
+        ..RenderTimings::default()
+    });
+
+    assert_eq!(
+        take_last_render_timings(),
+        RenderTimings {
+            javascript: std::time::Duration::from_millis(20),
+            layout: std::time::Duration::from_millis(3),
+            png_encode: std::time::Duration::from_millis(2),
+            ..RenderTimings::default()
+        }
+    );
+    assert_eq!(take_last_render_timings(), RenderTimings::default());
 }
