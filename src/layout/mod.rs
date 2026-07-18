@@ -1920,9 +1920,18 @@ fn intrinsic_width(node: &NodeHandle, resolver: &mut StyleResolver) -> f32 {
                     content_width = content_width.max(row_width);
                 }
             } else {
+                let mut inline_run_width = 0.0f32;
                 for child in node.child_nodes() {
-                    content_width = content_width.max(intrinsic_width(&child, resolver));
+                    let child_width = intrinsic_width(&child, resolver);
+                    if is_inline_child(&child, resolver) {
+                        inline_run_width += child_width;
+                    } else {
+                        content_width = content_width.max(inline_run_width);
+                        inline_run_width = 0.0;
+                        content_width = content_width.max(child_width);
+                    }
                 }
+                content_width = content_width.max(inline_run_width);
             }
             let mut width = content_width;
             if width == 0.0 {

@@ -2723,6 +2723,44 @@ fn grows_last_flex_item_to_fill_remaining_space() {
 }
 
 #[test]
+fn flex_auto_basis_sums_consecutive_inline_children() {
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let container = NodeHandle::element("div");
+    let item = NodeHandle::element("article");
+    let first = NodeHandle::element("span");
+    let second = NodeHandle::element("span");
+    let fixed = NodeHandle::element("aside");
+    document.append_child(body.clone());
+    body.append_child(container.clone());
+    container.append_child(item.clone());
+    container.append_child(fixed);
+    item.append_child(first);
+    item.append_child(second);
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "div { display: flex; width: 200px; } \
+             span { display: inline-block; height: 10px; } \
+             span:first-child { width: 40px; } \
+             span:last-child { width: 50px; } \
+             aside { width: 20px; height: 10px; flex-shrink: 0; }",
+        )
+        .unwrap(),
+    );
+
+    let layout = layout_tree(
+        &body,
+        &mut resolver,
+        Rect { x: 0.0, y: 0.0, width: 200.0, height: 0.0 },
+    )
+    .unwrap();
+    assert_eq!(layout.children[0].children[0].dimensions.content.width, 90.0);
+}
+
+#[test]
 fn lays_out_flex_column() {
     let document = NodeHandle::document();
     let body = NodeHandle::element("body");
