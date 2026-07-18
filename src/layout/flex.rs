@@ -170,7 +170,11 @@ pub(super) fn layout_flex_container(
                     }
                     size
                 }
-                FlexDirection::Column => line_cross_size,
+                // A non-wrapping column has one flex line whose cross size is
+                // the container's content width.  Using the widest child's
+                // intrinsic width here makes align-items:center/flex-end align
+                // inside that child-sized strip instead of across the column.
+                FlexDirection::Column => width,
             };
         }
 

@@ -2926,6 +2926,42 @@ fn aligns_flex_items_with_align_items_and_align_self() {
 }
 
 #[test]
+fn column_flex_aligns_items_against_the_container_width() {
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let main = NodeHandle::element("main");
+    let span = NodeHandle::element("span");
+    document.append_child(body.clone());
+    body.append_child(main.clone());
+    main.append_child(span);
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "main { display: flex; flex-direction: column; align-items: center; width: 300px } \
+             span { width: 40px; height: 10px }",
+        )
+        .unwrap(),
+    );
+    let layout = layout_tree(
+        &body,
+        &mut resolver,
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 400.0,
+            height: 0.0,
+        },
+    )
+    .unwrap();
+
+    let main = &layout.children[0];
+    let span = &main.children[0];
+    assert_eq!(span.dimensions.content.x, 130.0);
+}
+
+#[test]
 fn flex_row_aligns_items_within_min_height() {
     let document = NodeHandle::document();
     let body = NodeHandle::element("body");
