@@ -1500,7 +1500,6 @@ impl JsRuntime {
                 "__omoikane_set_current_script({})",
                 script.identity()
             ));
-
             // Execute immediately
             let script_context = script_source_context(&source_code);
             let (eval_result, parse_elapsed, compile_elapsed, execute_elapsed) =
@@ -4867,7 +4866,7 @@ mod tests {
     fn image_constructor_creates_an_html_image_element() {
         let mut runtime = JsRuntime::new().unwrap();
         assert!(runtime
-            .eval(r#"(() => { const image = new Image(40, 30); return image instanceof HTMLImageElement && image.width === 40 && image.height === 30; })()"#)
+            .eval(r#"(() => { const image = new Image(40, 30); image.src = "asset.png"; return image instanceof HTMLImageElement && image.width === 40 && image.height === 30 && image.src === "asset.png"; })()"#)
             .unwrap()
             .as_boolean()
             .unwrap());
@@ -6663,13 +6662,17 @@ mod tests {
     fn document_default_view_is_global() {
         let mut runtime = JsRuntime::with_document(default_document()).unwrap();
         let same = runtime
-            .eval("document.defaultView === globalThis && document.defaultView === window")
+            .eval(
+                "document.defaultView === globalThis &&
+                 document.defaultView === window &&
+                 parent === window && top === window",
+            )
             .unwrap()
             .as_boolean()
             .unwrap();
         assert!(
             same,
-            "document.defaultView must be the global window object"
+            "document.defaultView and top-level browsing-context aliases must be global"
         );
     }
 

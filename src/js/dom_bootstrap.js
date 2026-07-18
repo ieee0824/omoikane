@@ -1,6 +1,7 @@
 (() => {
-  // The top-level browsing context is its own parent.
+  // The top-level browsing context is its own parent and top-level context.
   globalThis.parent = globalThis;
+  globalThis.top = globalThis;
   const cache = new Map();
 
   // Window objects are not ordinary DOM wrappers in Omoikane: the top-level
@@ -3424,6 +3425,12 @@
   }
 
   class HTMLImageElement extends HTMLElement {
+    get src() {
+      return this.getAttribute("src") || "";
+    }
+    set src(value) {
+      this.setAttribute("src", String(value));
+    }
     get height() {
       const attr = this.getAttribute("height");
       if (attr !== null && attr !== "") return Math.max(0, Number.parseInt(attr, 10) || 0);
