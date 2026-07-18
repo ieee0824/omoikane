@@ -2144,7 +2144,7 @@ fn layout_positioned_child(
     };
 
     // `inset-inline-end` is the right edge in LTR and the left edge in RTL.
-    let inline_end = explicit_length(style, "inset-inline-end");
+    let inline_end = resolved_length(style, "inset-inline-end", origin.width);
     let rtl = matches!(
         style.get("direction"),
         Some(ComputedValue::Keyword(value) | ComputedValue::String(value))
@@ -2155,10 +2155,10 @@ fn layout_positioned_child(
     } else {
         (None, inline_end)
     };
-    let left = explicit_length(style, "left").or(inline_end_left);
-    let right = explicit_length(style, "right").or(inline_end_right);
-    let top = explicit_length(style, "top");
-    let bottom = explicit_length(style, "bottom");
+    let left = resolved_length(style, "left", origin.width).or(inline_end_left);
+    let right = resolved_length(style, "right", origin.width).or(inline_end_right);
+    let top = resolved_length(style, "top", origin.height);
+    let bottom = resolved_length(style, "bottom", origin.height);
     let static_outer = containing_block;
     let specified_width = resolved_length(style, "width", origin.width);
     let child_width = if specified_width.is_none() {

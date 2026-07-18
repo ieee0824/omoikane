@@ -3722,6 +3722,42 @@ fn absolute_uses_nearest_positioned_ancestor_content_box() {
 }
 
 #[test]
+fn absolute_percentage_insets_resolve_against_positioned_ancestor() {
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let parent = NodeHandle::element("div");
+    let child = NodeHandle::element("aside");
+
+    parent.set_attribute("class", "parent");
+    child.set_attribute("class", "child");
+    document.append_child(body.clone());
+    body.append_child(parent.clone());
+    parent.append_child(child);
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            ".parent { position: relative; width: 200px; height: 100px; } \
+             .child { position: absolute; left: 100%; bottom: 10%; \
+                      width: 40px; height: 20px; }",
+        )
+        .unwrap(),
+    );
+
+    let layout = layout_tree(
+        &body,
+        &mut resolver,
+        Rect { x: 0.0, y: 0.0, width: 300.0, height: 200.0 },
+    )
+    .unwrap();
+
+    let child_box = find_layout_box_by_tag(&layout, "aside").unwrap();
+    assert_eq!(child_box.dimensions.content.x, 200.0);
+    assert_eq!(child_box.dimensions.content.y, 70.0);
+}
+
+#[test]
 fn absolute_auto_offsets_use_static_position() {
     let document = NodeHandle::document();
     let body = NodeHandle::element("body");
@@ -4072,6 +4108,41 @@ fn percentage_width_resolves_for_positioned_elements() {
 
     let child_box = find_layout_box_by_tag(&layout, "section").unwrap();
     assert_eq!(child_box.dimensions.content.width, 80.0);
+}
+
+#[test]
+fn grid_justify_items_center_shrink_wraps_auto_width_item() {
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let grid = NodeHandle::element("div");
+    let item = NodeHandle::element("article");
+    let content = NodeHandle::element("span");
+    document.append_child(body.clone());
+    body.append_child(grid.clone());
+    grid.append_child(item.clone());
+    item.append_child(content);
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "div { display: grid; width: 200px; justify-items: center; } \
+             article { position: relative; } \
+             span { display: inline-block; width: 40px; height: 10px; }",
+        )
+        .unwrap(),
+    );
+
+    let layout = layout_tree(
+        &body,
+        &mut resolver,
+        Rect { x: 0.0, y: 0.0, width: 200.0, height: 100.0 },
+    )
+    .unwrap();
+
+    let item_box = find_layout_box_by_tag(&layout, "article").unwrap();
+    assert_eq!(item_box.dimensions.content.width, 40.0);
+    assert_eq!(item_box.dimensions.content.x, 80.0);
 }
 
 #[test]

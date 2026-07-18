@@ -6,7 +6,7 @@ use crate::css::{ComputedStyle, ComputedValue, StyleResolver};
 use crate::dom::{NodeHandle, NodeType};
 
 use super::{
-    BoxDimensions, EdgeSizes, LayoutBox, Rect, intrinsic_width, is_display_none,
+    BoxDimensions, EdgeSizes, LayoutBox, Rect, edge_sizes, intrinsic_width, is_display_none,
     is_out_of_flow_positioned, layout_node, layout_positioned_child,
     normalized_min_max_lengths, overflow, resolved_length, sort_children_by_z_index,
     translate_layout_box_to_outer, visibility, z_index,
@@ -147,9 +147,20 @@ pub(super) fn layout_grid_container(
     let mut content_row_heights = vec![0.0f32; row_count];
     for (index, child) in items.iter().enumerate() {
         let placement = placements[index];
+        let child_style = resolver.computed_style(child);
         let height = track_area(&fixed_row_heights, placement.row, placement.row_span, row_gap);
         let cell_width = track_area(&column_widths, placement.column, placement.column_span, column_gap);
-        let containing = Rect { x: 0.0, y: 0.0, width: cell_width, height };
+        let justify = self_alignment(&child_style, "justify-self")
+            .unwrap_or_else(|| alignment(&style, "justify-items", Alignment::Stretch));
+        let item_width = if justify != Alignment::Stretch
+            && resolved_length(&child_style, "width", cell_width).is_none()
+        {
+            let margin = edge_sizes(&child_style, "margin");
+            (intrinsic_width(child, resolver) + margin.horizontal()).min(cell_width)
+        } else {
+            cell_width
+        };
+        let containing = Rect { x: 0.0, y: 0.0, width: item_width, height };
         if let Some(layout) = layout_node(child, resolver, containing, viewport, None) {
             let occupied = content_row_heights[placement.row..placement.row + placement.row_span].iter().sum::<f32>()
                 + row_gap * placement.row_span.saturating_sub(1) as f32;
