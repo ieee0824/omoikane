@@ -393,6 +393,7 @@ pub enum InlineFragmentContent {
     Image(Image, ComputedStyle),
     GeneratedBox(ComputedStyle),
     FormControl(ComputedStyle, String),
+    IconFormControl(ComputedStyle, Image, f32, f32),
 }
 
 /// A single line box inside a block formatting context.
@@ -1966,6 +1967,11 @@ fn intrinsic_width(node: &NodeHandle, resolver: &mut StyleResolver) -> f32 {
                                 + border.right
                         }
                         InlineSegmentContent::FormControl(style, _, width, _) => {
+                            let padding = edge_sizes(&style, "padding");
+                            let border = edge_sizes(&style, "border");
+                            width + padding.left + padding.right + border.left + border.right
+                        }
+                        InlineSegmentContent::IconFormControl(style, _, width, _, _, _) => {
                             let padding = edge_sizes(&style, "padding");
                             let border = edge_sizes(&style, "border");
                             width + padding.left + padding.right + border.left + border.right

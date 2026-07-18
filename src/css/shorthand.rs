@@ -447,6 +447,7 @@ fn expand_border_shorthand(value: Value, important: bool) -> Vec<Declaration> {
 
         match item {
             Value::Length(_, _) if width.is_none() => width = Some(item),
+            Value::Number(number) if number == 0.0 && width.is_none() => width = Some(item),
             Value::Keyword(_) if is_width_keyword && width.is_none() => width = Some(item),
             Value::Keyword(_) if is_border_style && style.is_none() => style = Some(item),
             Value::Color(_) | Value::Function { .. } | Value::Keyword(_) if color.is_none() => {
@@ -460,23 +461,26 @@ fn expand_border_shorthand(value: Value, important: bool) -> Vec<Declaration> {
     if let Some(width) = width {
         declarations.push(Declaration {
             name: "border-width".to_string(),
-            value: width,
+            value: width.clone(),
             important,
         });
+        declarations.extend(expand_border_axis_shorthand("border-width", width, important));
     }
     if let Some(style) = style {
         declarations.push(Declaration {
             name: "border-style".to_string(),
-            value: style,
+            value: style.clone(),
             important,
         });
+        declarations.extend(expand_border_axis_shorthand("border-style", style, important));
     }
     if let Some(color) = color {
         declarations.push(Declaration {
             name: "border-color".to_string(),
-            value: color,
+            value: color.clone(),
             important,
         });
+        declarations.extend(expand_border_axis_shorthand("border-color", color, important));
     }
 
     if declarations.is_empty() {

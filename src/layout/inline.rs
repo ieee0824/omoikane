@@ -154,6 +154,7 @@ pub(super) enum InlineSegmentContent {
     Image(Image, ComputedStyle, f32, f32),
     GeneratedBox(ComputedStyle),
     FormControl(ComputedStyle, String, f32, f32),
+    IconFormControl(ComputedStyle, Image, f32, f32, f32, f32),
 }
 
 // ── Inline segment collection ───────────────────────────────────────────────
@@ -331,9 +332,10 @@ fn collect_input_segment(
 /// The label is the concatenation of the button's rendered descendant text
 /// (non-rendered elements such as `<style>`/`<script>` and `display: none`
 /// subtrees are excluded) with runs of whitespace collapsed to single spaces;
-/// child elements are never laid out independently. The width defaults to the
-/// label text width (box padding and border are added when the fragment is
-/// split), and an explicit `width`/`height` takes precedence.
+/// child elements are never laid out independently. An icon-only button keeps
+/// its first descendant image or SVG and centers it in the control. The width
+/// defaults to the label text width (box padding and border are added when the
+/// fragment is split), and an explicit `width`/`height` takes precedence.
 fn collect_button_segment(
     node: &NodeHandle,
     style: &ComputedStyle,
@@ -347,7 +349,48 @@ fn collect_button_segment(
     let content_height =
         explicit_length(style, "height").unwrap_or_else(|| metrics.font_size.max(13.0));
 
+    if label.is_empty()
+        && let Some((image_node, image)) = find_descendant_inline_image(node, resolver)
+    {
+        let image_style = resolver.computed_style(&image_node);
+        let (icon_width, icon_height) =
+            resolve_image_rendered_size(&image_node, &image, &image_style);
+        let padding = edge_sizes(style, "padding");
+        let border = edge_sizes(style, "border");
+        let total_height = content_height + padding.top + padding.bottom + border.top + border.bottom;
+        out.push(InlineSegment {
+            node: node.clone(),
+            content: InlineSegmentContent::IconFormControl(
+                style.clone(), image, content_width, content_height, icon_width, icon_height,
+            ),
+            metrics,
+            line_height: line_height(style).max(total_height),
+            vertical_align: vertical_align(style),
+            style: FragmentStyle::from_computed(style),
+            word_break: word_break(style),
+            overflow_wrap: overflow_wrap(style),
+            white_space_mode: white_space(style),
+        });
+        return;
+    }
+
     push_form_control_segment(node, style, label, content_width, content_height, metrics, out);
+}
+
+fn find_descendant_inline_image(
+    node: &NodeHandle,
+    resolver: &mut StyleResolver,
+) -> Option<(NodeHandle, Image)> {
+    for child in node.child_nodes() {
+        let child_style = resolver.computed_style(&child);
+        if let Some(image) = element_inline_image_with_style(&child, &child_style) {
+            return Some(image);
+        }
+        if let Some(image) = find_descendant_inline_image(&child, resolver) {
+            return Some(image);
+        }
+    }
+    None
 }
 
 /// Collects a `<textarea>` as a single inline `FormControl` fragment.
@@ -1491,6 +1534,24 @@ fn split_segment(segment: &InlineSegment) -> Vec<InlinePiece> {
             let border = edge_sizes(style, "border");
             vec![InlinePiece::Fragment {
                 content: InlineFragmentContent::FormControl(style.clone(), value.clone()),
+                width: *content_width + padding.left + padding.right + border.left + border.right,
+                height: *content_height + padding.top + padding.bottom + border.top + border.bottom,
+            }]
+        }
+        InlineSegmentContent::IconFormControl(
+            style,
+            image,
+            content_width,
+            content_height,
+            icon_width,
+            icon_height,
+        ) => {
+            let padding = edge_sizes(style, "padding");
+            let border = edge_sizes(style, "border");
+            vec![InlinePiece::Fragment {
+                content: InlineFragmentContent::IconFormControl(
+                    style.clone(), image.clone(), *icon_width, *icon_height,
+                ),
                 width: *content_width + padding.left + padding.right + border.left + border.right,
                 height: *content_height + padding.top + padding.bottom + border.top + border.bottom,
             }]

@@ -1083,6 +1083,45 @@ fn button_flattens_descendant_text_into_single_fragment() {
 }
 
 #[test]
+fn icon_only_button_preserves_nested_svg() {
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let div = NodeHandle::element("div");
+    let button = NodeHandle::element("button");
+    let span = NodeHandle::element("span");
+    let svg = NodeHandle::element("svg");
+    let path = NodeHandle::element("path");
+    document.append_child(body.clone());
+    body.append_child(div.clone());
+    div.append_child(button.clone());
+    button.append_child(span.clone());
+    span.append_child(svg.clone());
+    svg.append_child(path.clone());
+    svg.set_attribute("viewBox", "0 0 24 24");
+    path.set_attribute("d", "M11 5h2v14h-2zM5 11h14v2H5z");
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet("button { width: 36px; height: 36px; padding: 0; border: 0; } svg { width: 24px; height: 24px; }").unwrap(),
+    );
+    let layout = layout_tree(
+        &body,
+        &mut resolver,
+        Rect { x: 0.0, y: 0.0, width: 100.0, height: 0.0 },
+    )
+    .unwrap();
+    let fragment = &layout.children[0].lines[0].fragments[0];
+
+    assert_eq!(fragment.rect.width, 36.0);
+    assert_eq!(fragment.rect.height, 36.0);
+    assert!(matches!(
+        fragment.content,
+        InlineFragmentContent::IconFormControl(_, _, 24.0, 24.0)
+    ));
+}
+
+#[test]
 fn media_elements_create_placeholders_from_default_and_attribute_sizes() {
     for (tag, attributes, expected) in [
         ("video", vec![("width", "320"), ("height", "180")], (320.0, 180.0)),

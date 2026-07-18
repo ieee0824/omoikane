@@ -521,6 +521,19 @@ mod tests {
     }
 
     #[test]
+    fn expands_unitless_zero_border_width() {
+        let stylesheet = parse_stylesheet("button { border: 0; }").unwrap();
+        let Rule::Style(rule) = &stylesheet.rules[0] else {
+            panic!("expected style rule");
+        };
+
+        assert!(rule.declarations.iter().any(|decl| {
+            decl.name == "border-top-width"
+                && matches!(decl.value, Value::Number(value) if value == 0.0)
+        }));
+    }
+
+    #[test]
     fn preserves_multi_token_important_shorthands() {
         let stylesheet = parse_stylesheet(
             "div { margin: 1px 2px !important; border: 1px solid red !important; }",
