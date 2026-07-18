@@ -2895,6 +2895,33 @@
     }
   }
 
+  // Minimal CSS namespace used for feature detection and selector escaping.
+  // Unsupported declarations conservatively report false so sites choose their
+  // fallback path instead of aborting while probing browser capabilities.
+  globalThis.CSS = {
+    escape(value) {
+      const input = String(value);
+      let output = "";
+      for (let index = 0; index < input.length; index++) {
+        const code = input.charCodeAt(index);
+        if (code === 0) { output += "\uFFFD"; continue; }
+        if ((code >= 1 && code <= 31) || code === 127 ||
+            (index === 0 && code >= 48 && code <= 57) ||
+            (index === 1 && code >= 48 && code <= 57 && input.charCodeAt(0) === 45)) {
+          output += "\\" + code.toString(16) + " ";
+          continue;
+        }
+        if (index === 0 && code === 45 && input.length === 1) { output += "\\-"; continue; }
+        if (code >= 128 || code === 45 || code === 95 ||
+            (code >= 48 && code <= 57) || (code >= 65 && code <= 90) ||
+            (code >= 97 && code <= 122)) output += input[index];
+        else output += "\\" + input[index];
+      }
+      return output;
+    },
+    supports() { return false; },
+  };
+
   const styleSheetCache = new WeakMap();
   function sheetFor(style) {
     if (!styleSheetCache.has(style)) styleSheetCache.set(style, new CSSStyleSheet(style));
@@ -3616,6 +3643,13 @@
   globalThis.HTMLSelectElement = HTMLSelectElement;
   globalThis.HTMLOptionElement = HTMLOptionElement;
   globalThis.HTMLImageElement = HTMLImageElement;
+  globalThis.Image = function(width, height) {
+    const image = document.createElement("img");
+    if (width !== undefined) image.width = Number(width);
+    if (height !== undefined) image.height = Number(height);
+    return image;
+  };
+  globalThis.Image.prototype = HTMLImageElement.prototype;
   globalThis.HTMLLinkElement = HTMLLinkElement;
   globalThis.HTMLScriptElement = HTMLScriptElement;
   globalThis.HTMLIFrameElement = HTMLIFrameElement;
@@ -4145,6 +4179,12 @@
     globalThis.URL = URL;
     globalThis.URLSearchParams = URLSearchParams;
   }
+  function resolveNetworkUrl(value) {
+    const raw = String(value);
+    const resolved = String(__omoikane_resolve_url(raw));
+    if (/^[A-Za-z][A-Za-z0-9+.-]*:\/\//.test(resolved)) return resolved;
+    return new URL(raw, document.URL).href;
+  }
   globalThis.console = {
     log: (...args) => __omoikane_console_log(...args),
     warn: (...args) => __omoikane_console_log("[warn]", ...args),
@@ -4415,7 +4455,7 @@
       this.response = "";
       this._headers = {};
       this._method = String(method).toUpperCase();
-      this._url = String(url);
+      this._url = resolveNetworkUrl(url);
       this._async = async !== false;
       this.readyState = 1;
       this._notify("readystatechange");
@@ -4797,7 +4837,7 @@
   class Request {
     constructor(input, init = {}) {
       const source = input instanceof Request ? input : null;
-      this.url = source ? source.url : String(input);
+      this.url = source ? source.url : resolveNetworkUrl(input);
       this.method = String(init.method || (source && source.method) || "GET").toUpperCase();
       this.headers = new Headers(init.headers || (source && source.headers));
       this.body = init.body === undefined ? (source && source.body) : init.body;

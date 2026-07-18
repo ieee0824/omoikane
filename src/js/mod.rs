@@ -38,7 +38,8 @@ impl HostHooks for BrowserHostHooks {
         operation: OperationType,
         _context: &mut Context,
     ) {
-        if operation != OperationType::Reject || std::env::var_os("OMOIKANE_LOG_SCRIPTS").is_none() {
+        if operation != OperationType::Reject || std::env::var_os("OMOIKANE_LOG_SCRIPTS").is_none()
+        {
             return;
         }
         let Ok(promise) = JsPromise::from_object(promise.clone()) else {
@@ -84,15 +85,16 @@ impl ModuleLoader for HttpModuleLoader {
                 .path()
                 .and_then(|path| path.to_str())
                 .and_then(|path| path.parse::<crate::http::Url>().ok());
-            let resolved = if specifier.starts_with("http://") || specifier.starts_with("https://") {
-                specifier.parse::<crate::http::Url>().map_err(|error| {
-                    JsNativeError::typ().with_message(error.to_string())
-                })?
+            let resolved = if specifier.starts_with("http://") || specifier.starts_with("https://")
+            {
+                specifier
+                    .parse::<crate::http::Url>()
+                    .map_err(|error| JsNativeError::typ().with_message(error.to_string()))?
             } else {
                 let base = referrer_url.as_ref().ok_or_else(|| {
-                        JsNativeError::typ()
-                            .with_message(format!("cannot resolve module specifier: {specifier}"))
-                    })?;
+                    JsNativeError::typ()
+                        .with_message(format!("cannot resolve module specifier: {specifier}"))
+                })?;
                 crate::http::url::resolve_url(base, &specifier)
                     .map_err(|error| JsNativeError::typ().with_message(error.to_string()))?
             };
@@ -115,7 +117,10 @@ impl ModuleLoader for HttpModuleLoader {
             .map_err(|error| JsNativeError::typ().with_message(error.to_string()))?;
             if response.status_code() != 200 {
                 return Err(JsNativeError::typ()
-                    .with_message(format!("module request returned HTTP {}", response.status_code()))
+                    .with_message(format!(
+                        "module request returned HTTP {}",
+                        response.status_code()
+                    ))
                     .into());
             }
             let fetch_elapsed = fetch_start.elapsed();
@@ -135,7 +140,9 @@ impl ModuleLoader for HttpModuleLoader {
                     parse_elapsed.as_secs_f64() * 1_000.0,
                 );
             }
-            self.modules.borrow_mut().insert(resolved_string, module.clone());
+            self.modules
+                .borrow_mut()
+                .insert(resolved_string, module.clone());
             Ok(module)
         })();
         async { result }
@@ -153,7 +160,6 @@ impl ModuleLoader for HttpModuleLoader {
     }
 }
 
-
 /// What a scheduled timer executes when it fires.
 ///
 /// `setTimeout`/`setInterval` accept either a code string (legal per the HTML
@@ -166,7 +172,10 @@ enum TimerPayload {
     /// A code string, evaluated in the global scope when the timer fires.
     Source(String),
     /// A retained function callback plus the extra arguments to invoke it with.
-    Callback { callback: JsValue, args: Vec<JsValue> },
+    Callback {
+        callback: JsValue,
+        args: Vec<JsValue>,
+    },
     /// A connected iframe/object resource load, followed by `load` dispatch.
     ResourceLoad { node_id: usize },
 }
@@ -452,7 +461,11 @@ impl HostState {
     ///
     /// The `pending_resource_loads` guard collapses a change that races an
     /// already-queued load (e.g. "set `src`, then append") into a single task.
-    fn schedule_resource_load_on_attribute_change(&mut self, node: &NodeHandle, resource_attr: &str) {
+    fn schedule_resource_load_on_attribute_change(
+        &mut self,
+        node: &NodeHandle,
+        resource_attr: &str,
+    ) {
         if document_root_for_node(node).is_none() {
             return;
         }
@@ -506,9 +519,10 @@ impl HostState {
         let iframe_id = iframe.identity();
 
         if let Some(entry) = self.iframe_documents.get(&iframe_id)
-            && entry.loaded_src == src {
-                return entry.document.clone();
-            }
+            && entry.loaded_src == src
+        {
+            return entry.document.clone();
+        }
 
         // The `src` changed (or this is the first load). Drop any previously
         // loaded sub-document tree from the node registry before loading the
@@ -567,12 +581,10 @@ impl HostState {
         let fetched: Option<(String, Vec<u8>)> =
             match resolve_resource_ref(src, self.base_url.as_ref()) {
                 Some(ResolvedResource::Data { mime_type, data }) => Some((mime_type, data)),
-                Some(ResolvedResource::Url(url)) => {
-                    self.http_client.get(&url).ok().map(|resp| {
-                        let mime = resp.header("Content-Type").unwrap_or("").to_string();
-                        (mime, resp.body().to_vec())
-                    })
-                }
+                Some(ResolvedResource::Url(url)) => self.http_client.get(&url).ok().map(|resp| {
+                    let mime = resp.header("Content-Type").unwrap_or("").to_string();
+                    (mime, resp.body().to_vec())
+                }),
                 None => None,
             };
 
@@ -581,8 +593,9 @@ impl HostState {
                 let html = String::from_utf8_lossy(&body);
                 crate::html::TreeBuilder::parse(&html).document()
             }
-            Some((mime, body)) if is_xml_mime_type(&mime) => crate::xml::parse(&body)
-                .unwrap_or_else(|_| blank_html_document()),
+            Some((mime, body)) if is_xml_mime_type(&mime) => {
+                crate::xml::parse(&body).unwrap_or_else(|_| blank_html_document())
+            }
             // Unsupported content types (image/png, text/plain, ...) leave the
             // sub-document as an empty skeleton so a page cannot mine markup
             // from them. Acid3 tests 14 and 15 depend on this (a PNG/text file
@@ -644,10 +657,11 @@ impl HostState {
         // content-box establishes the child document's viewport. A width/height
         // style or attribute mutation must therefore invalidate both caches.
         if node.tag_name().as_deref() == Some("iframe")
-            && let Some(child) = self.iframe_documents.get(&node.identity()) {
-                let child_document = child.document.clone();
-                self.mark_document_style_dirty(&child_document);
-            }
+            && let Some(child) = self.iframe_documents.get(&node.identity())
+        {
+            let child_document = child.document.clone();
+            self.mark_document_style_dirty(&child_document);
+        }
     }
 
     /// Marks every cached document's style resolver as stale and drops the main
@@ -730,7 +744,8 @@ impl HostState {
 
         let attrs = iframe.attributes().unwrap_or_default();
         let parse_dimension = |name: &str, default: f32| {
-            attrs.get(name)
+            attrs
+                .get(name)
                 .and_then(|value| value.trim().parse::<f32>().ok())
                 .filter(|value| value.is_finite() && *value >= 0.0)
                 .unwrap_or(default)
@@ -827,7 +842,10 @@ pub struct JsRuntime {
 impl std::fmt::Debug for JsRuntime {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("JsRuntime")
-            .field("sandbox", &format_args!("timeout={:?}", self.sandbox.timeout))
+            .field(
+                "sandbox",
+                &format_args!("timeout={:?}", self.sandbox.timeout),
+            )
             .finish_non_exhaustive()
     }
 }
@@ -1027,7 +1045,11 @@ impl JsRuntime {
         &mut self,
         source: &str,
         url: &str,
-    ) -> (Result<JsValue, String>, std::time::Duration, std::time::Duration) {
+    ) -> (
+        Result<JsValue, String>,
+        std::time::Duration,
+        std::time::Duration,
+    ) {
         let parse_start = std::time::Instant::now();
         let module = match Module::parse(
             Source::from_reader(source.as_bytes(), Some(Path::new(url))),
@@ -1046,14 +1068,14 @@ impl JsRuntime {
         let parse_elapsed = parse_start.elapsed();
         let execute_start = std::time::Instant::now();
         let promise = module.load_link_evaluate(&mut self.context);
-        let result = self
-            .run_jobs()
-            .map_err(|error| error.to_string())
-            .and_then(|()| match promise.state() {
-                PromiseState::Fulfilled(_) => Ok(JsValue::undefined()),
-                PromiseState::Rejected(error) => Err(error.display().to_string()),
-                PromiseState::Pending => Err("module evaluation remained pending".to_string()),
-            });
+        let result =
+            self.run_jobs()
+                .map_err(|error| error.to_string())
+                .and_then(|()| match promise.state() {
+                    PromiseState::Fulfilled(_) => Ok(JsValue::undefined()),
+                    PromiseState::Rejected(error) => Err(error.display().to_string()),
+                    PromiseState::Pending => Err("module evaluation remained pending".to_string()),
+                });
         (result, parse_elapsed, execute_start.elapsed())
     }
 
@@ -1064,18 +1086,20 @@ impl JsRuntime {
 
     /// Schedules a timeout task from Rust that evaluates `source` as code.
     pub fn set_timeout(&mut self, source: impl Into<String>, delay_ms: u64) -> u64 {
-        self.host_state
-            .borrow_mut()
-            .event_loop
-            .schedule_timer(TimerPayload::Source(source.into()), delay_ms, false)
+        self.host_state.borrow_mut().event_loop.schedule_timer(
+            TimerPayload::Source(source.into()),
+            delay_ms,
+            false,
+        )
     }
 
     /// Schedules an interval task from Rust that evaluates `source` as code.
     pub fn set_interval(&mut self, source: impl Into<String>, interval_ms: u64) -> u64 {
-        self.host_state
-            .borrow_mut()
-            .event_loop
-            .schedule_timer(TimerPayload::Source(source.into()), interval_ms, true)
+        self.host_state.borrow_mut().event_loop.schedule_timer(
+            TimerPayload::Source(source.into()),
+            interval_ms,
+            true,
+        )
     }
 
     /// Clears a previously scheduled timer.
@@ -1254,7 +1278,10 @@ impl JsRuntime {
                             if is_xhtml {
                                 xhtml_scripts = collect_script_elements(&document)
                                     .into_iter()
-                                    .filter(|script| script.namespace_uri().as_deref() == Some("http://www.w3.org/1999/xhtml"))
+                                    .filter(|script| {
+                                        script.namespace_uri().as_deref()
+                                            == Some("http://www.w3.org/1999/xhtml")
+                                    })
                                     .filter(is_inline_classic_script)
                                     .map(|script| collect_text_content(&script))
                                     .collect();
@@ -1444,9 +1471,8 @@ impl JsRuntime {
                 continue;
             }
 
-            let module_url = is_module.then(|| {
-                module_script_url(&script_label, base_url, !has_src)
-            });
+            let module_url =
+                is_module.then(|| module_script_url(&script_label, base_url, !has_src));
 
             if log_scripts {
                 eprintln!(
@@ -2103,8 +2129,10 @@ fn is_html_mime_type(content_type: &str) -> bool {
 
 fn is_xml_mime_type(content_type: &str) -> bool {
     let essence = content_type.split(';').next().unwrap_or("").trim();
-    matches!(essence.to_ascii_lowercase().as_str(),
-        "text/xml" | "application/xml" | "image/svg+xml" | "application/xhtml+xml")
+    matches!(
+        essence.to_ascii_lowercase().as_str(),
+        "text/xml" | "application/xml" | "image/svg+xml" | "application/xhtml+xml"
+    )
 }
 
 fn parse_node_id(value: Option<&JsValue>, context: &mut Context) -> JsResult<usize> {
@@ -2182,7 +2210,11 @@ fn computed_value_to_css_string(value: &ComputedValue) -> String {
         ComputedValue::Percentage(pct) => format!("{}%", format_css_number(*pct)),
         ComputedValue::Number(number) => format_css_number(*number),
         ComputedValue::CalcPxPercent(px, pct) => {
-            format!("calc({}px + {}%)", format_css_number(*px), format_css_number(*pct))
+            format!(
+                "calc({}px + {}%)",
+                format_css_number(*px),
+                format_css_number(*pct)
+            )
         }
     }
 }
@@ -2406,7 +2438,11 @@ fn expand_scroll_bounds(boxes: &[LayoutBox], max_right: &mut f32, max_bottom: &m
 /// `__omoikane_computed_style(nodeId)` -> JSON string of computed CSS
 /// properties (kebab-case name to CSS string value). Forces a synchronous
 /// style recompute if the DOM changed since the last query.
-fn computed_style_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+fn computed_style_native(
+    _: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
     let node_id = parse_node_id(args.first(), context)?;
     with_host_state(|state| {
         let node = state.borrow().get_node(node_id);
@@ -2442,7 +2478,11 @@ fn computed_style_native(_: &JsValue, args: &[JsValue], context: &mut Context) -
 /// the element (see [`compute_layout_metrics`]). Forces a synchronous reflow if
 /// the DOM changed since the last query. Elements that produce no box (e.g.
 /// `display: none`) report all-zero metrics.
-fn layout_metrics_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+fn layout_metrics_native(
+    _: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
     let node_id = parse_node_id(args.first(), context)?;
     with_host_state(|state| {
         let node = state.borrow().get_node(node_id);
@@ -2691,7 +2731,11 @@ fn parent_node_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> J
 /// (a freshly created, not-yet-inserted element): the JS layer then falls back
 /// to the node's creation-time owner. An attached node correctly reports the
 /// top-level document or the iframe sub-document it currently lives in.
-fn owner_document_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+fn owner_document_native(
+    _: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
     let node_id = parse_node_id(args.first(), context)?;
     with_host_state(|state| {
         let s = state.borrow();
@@ -2750,37 +2794,87 @@ fn node_name_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsR
     })
 }
 
-fn node_local_name_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+fn node_local_name_native(
+    _: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
     let id = parse_node_id(args.first(), context)?;
-    with_host_state(|state| Ok(state.borrow().get_node(id).and_then(|n| n.local_name())
-        .map(|s| js_string!(s.as_str()).into()).unwrap_or_else(JsValue::null)))
+    with_host_state(|state| {
+        Ok(state
+            .borrow()
+            .get_node(id)
+            .and_then(|n| n.local_name())
+            .map(|s| js_string!(s.as_str()).into())
+            .unwrap_or_else(JsValue::null))
+    })
 }
 
-fn node_namespace_uri_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+fn node_namespace_uri_native(
+    _: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
     let id = parse_node_id(args.first(), context)?;
-    with_host_state(|state| Ok(state.borrow().get_node(id).and_then(|n| n.namespace_uri())
-        .map(|s| js_string!(s.as_str()).into()).unwrap_or_else(JsValue::null)))
+    with_host_state(|state| {
+        Ok(state
+            .borrow()
+            .get_node(id)
+            .and_then(|n| n.namespace_uri())
+            .map(|s| js_string!(s.as_str()).into())
+            .unwrap_or_else(JsValue::null))
+    })
 }
 
 fn node_prefix_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
     let id = parse_node_id(args.first(), context)?;
-    with_host_state(|state| Ok(state.borrow().get_node(id).and_then(|n| n.prefix())
-        .map(|s| js_string!(s.as_str()).into()).unwrap_or_else(JsValue::null)))
+    with_host_state(|state| {
+        Ok(state
+            .borrow()
+            .get_node(id)
+            .and_then(|n| n.prefix())
+            .map(|s| js_string!(s.as_str()).into())
+            .unwrap_or_else(JsValue::null))
+    })
 }
 
-fn doctype_public_id_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+fn doctype_public_id_native(
+    _: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
     let id = parse_node_id(args.first(), context)?;
-    with_host_state(|state| Ok(state.borrow().get_node(id).and_then(|n| n.public_id())
-        .map(|s| js_string!(s.as_str()).into()).unwrap_or_else(|| js_string!("").into())))
+    with_host_state(|state| {
+        Ok(state
+            .borrow()
+            .get_node(id)
+            .and_then(|n| n.public_id())
+            .map(|s| js_string!(s.as_str()).into())
+            .unwrap_or_else(|| js_string!("").into()))
+    })
 }
 
-fn doctype_system_id_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+fn doctype_system_id_native(
+    _: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
     let id = parse_node_id(args.first(), context)?;
-    with_host_state(|state| Ok(state.borrow().get_node(id).and_then(|n| n.system_id())
-        .map(|s| js_string!(s.as_str()).into()).unwrap_or_else(|| js_string!("").into())))
+    with_host_state(|state| {
+        Ok(state
+            .borrow()
+            .get_node(id)
+            .and_then(|n| n.system_id())
+            .map(|s| js_string!(s.as_str()).into())
+            .unwrap_or_else(|| js_string!("").into()))
+    })
 }
 
-fn attribute_names_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+fn attribute_names_native(
+    _: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
     let node_id = parse_node_id(args.first(), context)?;
     with_host_state(|state| {
         let node = state.borrow().get_node(node_id);
@@ -2842,9 +2936,8 @@ fn css_rule_count_native(
         .unwrap_or_default()
         .to_string(context)?
         .to_std_string_escaped();
-    let sheet = crate::css::parse_stylesheet(&css).map_err(|error| {
-        JsError::from(JsNativeError::syntax().with_message(error.to_string()))
-    })?;
+    let sheet = crate::css::parse_stylesheet(&css)
+        .map_err(|error| JsError::from(JsNativeError::syntax().with_message(error.to_string())))?;
     Ok(JsValue::from(sheet.rules.len() as f64))
 }
 
@@ -2996,11 +3089,21 @@ fn escape_json_string(value: &str) -> String {
 
 // ── Additional DOM native bindings ──────────────────────────────────────────
 
-fn get_text_content_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
-    let id = args.first().cloned().unwrap_or_default().to_number(context)? as usize;
+fn get_text_content_native(
+    _: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let id = args
+        .first()
+        .cloned()
+        .unwrap_or_default()
+        .to_number(context)? as usize;
     with_host_state(|state| {
         let state = state.borrow();
-        let node = state.get_node(id).ok_or_else(|| JsError::from(JsNativeError::error().with_message("node not found")))?;
+        let node = state
+            .get_node(id)
+            .ok_or_else(|| JsError::from(JsNativeError::error().with_message("node not found")))?;
         match node.node_type() {
             // DocumentType returns null per DOM spec
             crate::dom::NodeType::DocumentType => Ok(JsValue::null()),
@@ -3040,16 +3143,31 @@ fn collect_text_recursive(node: &NodeHandle) -> String {
     text
 }
 
-fn set_text_content_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
-    let id = args.first().cloned().unwrap_or_default().to_number(context)? as usize;
-    let text = args.get(1).cloned().unwrap_or_default().to_string(context)?.to_std_string_escaped();
+fn set_text_content_native(
+    _: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let id = args
+        .first()
+        .cloned()
+        .unwrap_or_default()
+        .to_number(context)? as usize;
+    let text = args
+        .get(1)
+        .cloned()
+        .unwrap_or_default()
+        .to_string(context)?
+        .to_std_string_escaped();
     with_host_state(|state| {
         let node = state
             .borrow()
             .get_node(id)
             .ok_or_else(|| JsError::from(JsNativeError::error().with_message("node not found")))?;
         // For text/comment leaf nodes, update data directly
-        if matches!(node.node_type(), crate::dom::NodeType::Text
+        if matches!(
+            node.node_type(),
+            crate::dom::NodeType::Text
                 | crate::dom::NodeType::Comment
                 | crate::dom::NodeType::ProcessingInstruction
         ) {
@@ -3074,22 +3192,37 @@ fn set_text_content_native(_: &JsValue, args: &[JsValue], context: &mut Context)
     })
 }
 
-fn get_inner_html_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
-    let id = args.first().cloned().unwrap_or_default().to_number(context)? as usize;
+fn get_inner_html_native(
+    _: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let id = args
+        .first()
+        .cloned()
+        .unwrap_or_default()
+        .to_number(context)? as usize;
     with_host_state(|state| {
         let state = state.borrow();
-        let node = state.get_node(id).ok_or_else(|| JsError::from(JsNativeError::error().with_message("node not found")))?;
+        let node = state
+            .get_node(id)
+            .ok_or_else(|| JsError::from(JsNativeError::error().with_message("node not found")))?;
         let html = serialize_inner_html(&node);
         Ok(js_string!(html.as_str()).into())
     })
 }
 
 fn escape_html_text(s: &str) -> String {
-    s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
 }
 
 fn escape_html_attr(s: &str) -> String {
-    s.replace('&', "&amp;").replace('"', "&quot;").replace('<', "&lt;").replace('>', "&gt;")
+    s.replace('&', "&amp;")
+        .replace('"', "&quot;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
 }
 
 fn serialize_inner_html(node: &NodeHandle) -> String {
@@ -3170,9 +3303,22 @@ fn serialize_node(node: &NodeHandle, html: &mut String) {
     }
 }
 
-fn set_inner_html_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
-    let id = args.first().cloned().unwrap_or_default().to_number(context)? as usize;
-    let html = args.get(1).cloned().unwrap_or_default().to_string(context)?.to_std_string_escaped();
+fn set_inner_html_native(
+    _: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let id = args
+        .first()
+        .cloned()
+        .unwrap_or_default()
+        .to_number(context)? as usize;
+    let html = args
+        .get(1)
+        .cloned()
+        .unwrap_or_default()
+        .to_string(context)?
+        .to_std_string_escaped();
     with_host_state(|state| {
         let node = state
             .borrow()
@@ -3183,7 +3329,8 @@ fn set_inner_html_native(_: &JsValue, args: &[JsValue], context: &mut Context) -
         }
         if !html.is_empty() {
             // Parse as fragment: wrap in body context and extract children
-            let parsed = crate::html::TreeBuilder::parse(&format!("<body>{html}</body>")).document();
+            let parsed =
+                crate::html::TreeBuilder::parse(&format!("<body>{html}</body>")).document();
             let body = parsed.query_selector("body");
             let source = body.as_ref().map(|b| b.child_nodes()).unwrap_or_default();
             for child in source {
@@ -3197,12 +3344,22 @@ fn set_inner_html_native(_: &JsValue, args: &[JsValue], context: &mut Context) -
     })
 }
 
-fn child_node_ids_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
-    let id = args.first().cloned().unwrap_or_default().to_number(context)? as usize;
+fn child_node_ids_native(
+    _: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let id = args
+        .first()
+        .cloned()
+        .unwrap_or_default()
+        .to_number(context)? as usize;
     with_host_state(|state| {
         let children = {
             let s = state.borrow();
-            let node = s.get_node(id).ok_or_else(|| JsError::from(JsNativeError::error().with_message("node not found")))?;
+            let node = s.get_node(id).ok_or_else(|| {
+                JsError::from(JsNativeError::error().with_message("node not found"))
+            })?;
             node.child_nodes()
         };
         {
@@ -3211,16 +3368,27 @@ fn child_node_ids_native(_: &JsValue, args: &[JsValue], context: &mut Context) -
                 s.register_tree(child);
             }
         }
-        let ids: Vec<JsValue> = children.iter().map(|c| JsValue::from(c.identity() as f64)).collect();
-        Ok(boa_engine::JsValue::from(boa_engine::object::builtins::JsArray::from_iter(ids, context)))
+        let ids: Vec<JsValue> = children
+            .iter()
+            .map(|c| JsValue::from(c.identity() as f64))
+            .collect();
+        Ok(boa_engine::JsValue::from(
+            boa_engine::object::builtins::JsArray::from_iter(ids, context),
+        ))
     })
 }
 
 fn next_sibling_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
-    let id = args.first().cloned().unwrap_or_default().to_number(context)? as usize;
+    let id = args
+        .first()
+        .cloned()
+        .unwrap_or_default()
+        .to_number(context)? as usize;
     with_host_state(|state| {
         let state = state.borrow();
-        let node = state.get_node(id).ok_or_else(|| JsError::from(JsNativeError::error().with_message("node not found")))?;
+        let node = state
+            .get_node(id)
+            .ok_or_else(|| JsError::from(JsNativeError::error().with_message("node not found")))?;
         let parent = match node.parent_node() {
             Some(p) => p,
             None => return Ok(JsValue::null()),
@@ -3239,11 +3407,21 @@ fn next_sibling_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> 
     })
 }
 
-fn previous_sibling_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
-    let id = args.first().cloned().unwrap_or_default().to_number(context)? as usize;
+fn previous_sibling_native(
+    _: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let id = args
+        .first()
+        .cloned()
+        .unwrap_or_default()
+        .to_number(context)? as usize;
     with_host_state(|state| {
         let state = state.borrow();
-        let node = state.get_node(id).ok_or_else(|| JsError::from(JsNativeError::error().with_message("node not found")))?;
+        let node = state
+            .get_node(id)
+            .ok_or_else(|| JsError::from(JsNativeError::error().with_message("node not found")))?;
         let parent = match node.parent_node() {
             Some(p) => p,
             None => return Ok(JsValue::null()),
@@ -3252,7 +3430,9 @@ fn previous_sibling_native(_: &JsValue, args: &[JsValue], context: &mut Context)
         let mut prev: Option<&NodeHandle> = None;
         for sibling in &siblings {
             if sibling.identity() == id {
-                return Ok(prev.map(|p| JsValue::from(p.identity() as f64)).unwrap_or(JsValue::null()));
+                return Ok(prev
+                    .map(|p| JsValue::from(p.identity() as f64))
+                    .unwrap_or(JsValue::null()));
             }
             prev = Some(sibling);
         }
@@ -3261,20 +3441,34 @@ fn previous_sibling_native(_: &JsValue, args: &[JsValue], context: &mut Context)
 }
 
 fn remove_child_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
-    let parent_id = args.first().cloned().unwrap_or_default().to_number(context)? as usize;
-    let child_id = args.get(1).cloned().unwrap_or_default().to_number(context)? as usize;
+    let parent_id = args
+        .first()
+        .cloned()
+        .unwrap_or_default()
+        .to_number(context)? as usize;
+    let child_id = args
+        .get(1)
+        .cloned()
+        .unwrap_or_default()
+        .to_number(context)? as usize;
     with_host_state(|state| {
         let (parent, child) = {
             let state = state.borrow();
-            let parent = state.get_node(parent_id).ok_or_else(|| JsError::from(JsNativeError::error().with_message("parent not found")))?;
-            let child = state.get_node(child_id).ok_or_else(|| JsError::from(JsNativeError::error().with_message("child not found")))?;
+            let parent = state.get_node(parent_id).ok_or_else(|| {
+                JsError::from(JsNativeError::error().with_message("parent not found"))
+            })?;
+            let child = state.get_node(child_id).ok_or_else(|| {
+                JsError::from(JsNativeError::error().with_message("child not found"))
+            })?;
             (parent, child)
         };
         // Save the parent's document *before* removing `child`: afterwards the
         // detached child has no document root, so the affected document could no
         // longer be found from it. The parent keeps its place in the tree.
         let parent_document = document_root_for_node(&parent);
-        parent.remove_child(&child).map_err(|e| JsError::from(JsNativeError::error().with_message(e.to_string())))?;
+        parent
+            .remove_child(&child)
+            .map_err(|e| JsError::from(JsNativeError::error().with_message(e.to_string())))?;
         if let Some(document) = &parent_document {
             state.borrow_mut().mark_document_style_dirty(document);
         }
@@ -3283,8 +3477,16 @@ fn remove_child_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> 
 }
 
 fn insert_before_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
-    let parent_id = args.first().cloned().unwrap_or_default().to_number(context)? as usize;
-    let new_id = args.get(1).cloned().unwrap_or_default().to_number(context)? as usize;
+    let parent_id = args
+        .first()
+        .cloned()
+        .unwrap_or_default()
+        .to_number(context)? as usize;
+    let new_id = args
+        .get(1)
+        .cloned()
+        .unwrap_or_default()
+        .to_number(context)? as usize;
     let ref_value = args.get(2).cloned().unwrap_or_default();
     with_host_state(|state| {
         let ref_node = if ref_value.is_null() || ref_value.is_undefined() {
@@ -3295,8 +3497,12 @@ fn insert_before_native(_: &JsValue, args: &[JsValue], context: &mut Context) ->
         };
         let (parent, new_node) = {
             let state = state.borrow();
-            let parent = state.get_node(parent_id).ok_or_else(|| JsError::from(JsNativeError::error().with_message("parent not found")))?;
-            let new_node = state.get_node(new_id).ok_or_else(|| JsError::from(JsNativeError::error().with_message("new node not found")))?;
+            let parent = state.get_node(parent_id).ok_or_else(|| {
+                JsError::from(JsNativeError::error().with_message("parent not found"))
+            })?;
+            let new_node = state.get_node(new_id).ok_or_else(|| {
+                JsError::from(JsNativeError::error().with_message("new node not found"))
+            })?;
             (parent, new_node)
         };
         // Like `append_child`, the inserted node may move out of another
@@ -3334,14 +3540,29 @@ fn insert_before_native(_: &JsValue, args: &[JsValue], context: &mut Context) ->
     })
 }
 
-fn query_selector_all_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
-    let parent_id = args.first().cloned().unwrap_or_default().to_number(context)? as usize;
-    let selector = args.get(1).cloned().unwrap_or_default().to_string(context)?.to_std_string_escaped();
+fn query_selector_all_native(
+    _: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let parent_id = args
+        .first()
+        .cloned()
+        .unwrap_or_default()
+        .to_number(context)? as usize;
+    let selector = args
+        .get(1)
+        .cloned()
+        .unwrap_or_default()
+        .to_string(context)?
+        .to_std_string_escaped();
     let selectors = parse_dom_selector_list(&selector)?;
     with_host_state(|state| {
         let results = {
             let s = state.borrow();
-            let parent = s.get_node(parent_id).ok_or_else(|| JsError::from(JsNativeError::error().with_message("node not found")))?;
+            let parent = s.get_node(parent_id).ok_or_else(|| {
+                JsError::from(JsNativeError::error().with_message("node not found"))
+            })?;
             query_all_matching_descendants(&parent, &selectors)
         };
         {
@@ -3350,21 +3571,30 @@ fn query_selector_all_native(_: &JsValue, args: &[JsValue], context: &mut Contex
                 s.register_tree(node);
             }
         }
-        let ids: Vec<JsValue> = results.iter().map(|n| JsValue::from(n.identity() as f64)).collect();
-        Ok(boa_engine::JsValue::from(boa_engine::object::builtins::JsArray::from_iter(ids, context)))
+        let ids: Vec<JsValue> = results
+            .iter()
+            .map(|n| JsValue::from(n.identity() as f64))
+            .collect();
+        Ok(boa_engine::JsValue::from(
+            boa_engine::object::builtins::JsArray::from_iter(ids, context),
+        ))
     })
 }
 
 fn parse_dom_selector_list(selector: &str) -> JsResult<Vec<Selector>> {
-    parse_selector_list(selector).map_err(|error| {
-        JsError::from(JsNativeError::syntax().with_message(error.to_string()))
-    })
+    parse_selector_list(selector)
+        .map_err(|error| JsError::from(JsNativeError::syntax().with_message(error.to_string())))
 }
 
-fn query_first_matching_descendant(node: &NodeHandle, selectors: &[Selector]) -> Option<NodeHandle> {
+fn query_first_matching_descendant(
+    node: &NodeHandle,
+    selectors: &[Selector],
+) -> Option<NodeHandle> {
     for child in node.child_nodes() {
         if child.node_type() == NodeType::Element
-            && selectors.iter().any(|selector| matches_selector(&child, selector))
+            && selectors
+                .iter()
+                .any(|selector| matches_selector(&child, selector))
         {
             return Some(child);
         }
@@ -3379,7 +3609,9 @@ fn query_all_matching_descendants(node: &NodeHandle, selectors: &[Selector]) -> 
     let mut results = Vec::new();
     for child in node.child_nodes() {
         if child.node_type() == NodeType::Element
-            && selectors.iter().any(|selector| matches_selector(&child, selector))
+            && selectors
+                .iter()
+                .any(|selector| matches_selector(&child, selector))
         {
             results.push(child.clone());
         }
@@ -3389,10 +3621,16 @@ fn query_all_matching_descendants(node: &NodeHandle, selectors: &[Selector]) -> 
 }
 
 fn node_type_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
-    let id = args.first().cloned().unwrap_or_default().to_number(context)? as usize;
+    let id = args
+        .first()
+        .cloned()
+        .unwrap_or_default()
+        .to_number(context)? as usize;
     with_host_state(|state| {
         let state = state.borrow();
-        let node = state.get_node(id).ok_or_else(|| JsError::from(JsNativeError::error().with_message("node not found")))?;
+        let node = state
+            .get_node(id)
+            .ok_or_else(|| JsError::from(JsNativeError::error().with_message("node not found")))?;
         let node_type = match node.node_type() {
             crate::dom::NodeType::Element => 1,
             crate::dom::NodeType::Text => 3,
@@ -3418,24 +3656,18 @@ fn clone_node_impl(node: &NodeHandle, deep: bool) -> NodeHandle {
             }
             el
         }
-        crate::dom::NodeType::Text => {
-            NodeHandle::text(node.data().unwrap_or_default())
-        }
-        crate::dom::NodeType::Comment => {
-            NodeHandle::comment(node.data().unwrap_or_default())
-        }
+        crate::dom::NodeType::Text => NodeHandle::text(node.data().unwrap_or_default()),
+        crate::dom::NodeType::Comment => NodeHandle::comment(node.data().unwrap_or_default()),
         crate::dom::NodeType::ProcessingInstruction => {
             NodeHandle::processing_instruction(node.node_name(), node.data().unwrap_or_default())
         }
         crate::dom::NodeType::Document => NodeHandle::document(),
         crate::dom::NodeType::DocumentFragment => NodeHandle::document_fragment(),
-        crate::dom::NodeType::DocumentType => {
-            NodeHandle::document_type(
-                node.data().unwrap_or_default(),
-                node.public_id().unwrap_or_default(),
-                node.system_id().unwrap_or_default(),
-            )
-        }
+        crate::dom::NodeType::DocumentType => NodeHandle::document_type(
+            node.data().unwrap_or_default(),
+            node.public_id().unwrap_or_default(),
+            node.system_id().unwrap_or_default(),
+        ),
     };
     if deep {
         for child in node.child_nodes() {
@@ -3446,12 +3678,18 @@ fn clone_node_impl(node: &NodeHandle, deep: bool) -> NodeHandle {
 }
 
 fn clone_node_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
-    let id = args.first().cloned().unwrap_or_default().to_number(context)? as usize;
+    let id = args
+        .first()
+        .cloned()
+        .unwrap_or_default()
+        .to_number(context)? as usize;
     let deep = args.get(1).cloned().unwrap_or_default().to_boolean();
     with_host_state(|state| {
         let clone = {
             let s = state.borrow();
-            let node = s.get_node(id).ok_or_else(|| JsError::from(JsNativeError::error().with_message("node not found")))?;
+            let node = s.get_node(id).ok_or_else(|| {
+                JsError::from(JsNativeError::error().with_message("node not found"))
+            })?;
             clone_node_impl(&node, deep)
         };
         let clone_id = clone.identity() as f64;
@@ -3460,9 +3698,22 @@ fn clone_node_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> Js
     })
 }
 
-fn remove_attribute_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
-    let id = args.first().cloned().unwrap_or_default().to_number(context)? as usize;
-    let name = args.get(1).cloned().unwrap_or_default().to_string(context)?.to_std_string_escaped();
+fn remove_attribute_native(
+    _: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let id = args
+        .first()
+        .cloned()
+        .unwrap_or_default()
+        .to_number(context)? as usize;
+    let name = args
+        .get(1)
+        .cloned()
+        .unwrap_or_default()
+        .to_string(context)?
+        .to_std_string_escaped();
     with_host_state(|state| {
         let node = state
             .borrow()
@@ -3476,8 +3727,17 @@ fn remove_attribute_native(_: &JsValue, args: &[JsValue], context: &mut Context)
     })
 }
 
-fn create_text_node_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
-    let text = args.first().cloned().unwrap_or_default().to_string(context)?.to_std_string_escaped();
+fn create_text_node_native(
+    _: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let text = args
+        .first()
+        .cloned()
+        .unwrap_or_default()
+        .to_string(context)?
+        .to_std_string_escaped();
     let node = NodeHandle::text(&text);
     let id = node.identity() as f64;
     with_host_state(|state| {
@@ -3486,7 +3746,11 @@ fn create_text_node_native(_: &JsValue, args: &[JsValue], context: &mut Context)
     })
 }
 
-fn create_document_fragment_native(_: &JsValue, _args: &[JsValue], _context: &mut Context) -> JsResult<JsValue> {
+fn create_document_fragment_native(
+    _: &JsValue,
+    _args: &[JsValue],
+    _context: &mut Context,
+) -> JsResult<JsValue> {
     let node = NodeHandle::document_fragment();
     let id = node.identity() as f64;
     with_host_state(|state| {
@@ -3556,8 +3820,18 @@ fn create_processing_instruction_native(
     args: &[JsValue],
     context: &mut Context,
 ) -> JsResult<JsValue> {
-    let target = args.first().cloned().unwrap_or_default().to_string(context)?.to_std_string_escaped();
-    let data = args.get(1).cloned().unwrap_or_default().to_string(context)?.to_std_string_escaped();
+    let target = args
+        .first()
+        .cloned()
+        .unwrap_or_default()
+        .to_string(context)?
+        .to_std_string_escaped();
+    let data = args
+        .get(1)
+        .cloned()
+        .unwrap_or_default()
+        .to_string(context)?
+        .to_std_string_escaped();
     let node = NodeHandle::processing_instruction(target, data);
     let id = node.identity() as f64;
     with_host_state(|state| {
@@ -3566,8 +3840,17 @@ fn create_processing_instruction_native(
     })
 }
 
-fn create_comment_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
-    let data = args.first().cloned().unwrap_or_default().to_string(context)?.to_std_string_escaped();
+fn create_comment_native(
+    _: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let data = args
+        .first()
+        .cloned()
+        .unwrap_or_default()
+        .to_string(context)?
+        .to_std_string_escaped();
     let node = NodeHandle::comment(&data);
     let id = node.identity() as f64;
     with_host_state(|state| {
@@ -3623,7 +3906,12 @@ fn is_executable_classic_script_type(type_attr: Option<&str>) -> bool {
         None => true,
         Some(t) => {
             // Strip any MIME parameters (e.g. "text/javascript; charset=utf-8").
-            let mime = t.split(';').next().unwrap_or("").trim().to_ascii_lowercase();
+            let mime = t
+                .split(';')
+                .next()
+                .unwrap_or("")
+                .trim()
+                .to_ascii_lowercase();
             mime.is_empty() || mime == "text/javascript" || mime == "application/javascript"
         }
     }
@@ -3806,7 +4094,11 @@ fn resolve_url_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> J
 /// - There is no recursion-depth guard: a written script that itself writes a
 ///   script (and so on) recurses through the JS wrapper unbounded and can
 ///   overflow the stack. No supported page does this today.
-fn document_write_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+fn document_write_native(
+    _: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
     // `document.write` passes the target document's node id first, so a write to
     // an iframe sub-document (`iframe.contentDocument.write(...)`) is routed to
     // that sub-document rather than the top-level document.
@@ -3823,9 +4115,7 @@ fn document_write_native(_: &JsValue, args: &[JsValue], context: &mut Context) -
         // unresolved id falls back to the top-level document.
         let (target_doc, is_main) = {
             let s = state.borrow();
-            let target_doc = s
-                .get_node(target_id)
-                .unwrap_or_else(|| s.document.clone());
+            let target_doc = s.get_node(target_id).unwrap_or_else(|| s.document.clone());
             let is_main = target_doc == s.document;
             (target_doc, is_main)
         };
@@ -3941,9 +4231,10 @@ fn document_write_native(_: &JsValue, args: &[JsValue], context: &mut Context) -
             // at one of the sub-document's nodes.
             if is_main
                 && let Some(last) = last_inserted
-                    && s.write_insertion_ref.is_some() {
-                        s.write_insertion_ref = Some(last);
-                    }
+                && s.write_insertion_ref.is_some()
+            {
+                s.write_insertion_ref = Some(last);
+            }
         }
 
         // Collect the inline classic <script> descendants in document order for
@@ -4028,7 +4319,9 @@ mod tests {
 
         assert!(result.is_err());
         ACTIVE_HOST_STATE.with(|slot| {
-            let restored = slot.replace(None).expect("outer host state should be restored");
+            let restored = slot
+                .replace(None)
+                .expect("outer host state should be restored");
             assert!(Rc::ptr_eq(&restored, &outer_state));
         });
     }
@@ -4158,7 +4451,10 @@ mod tests {
             .unwrap()
             .to_std_string_escaped();
 
-        assert_eq!(result, "0,0", "unreachable traversal objects must be swept from the registry");
+        assert_eq!(
+            result, "0,0",
+            "unreachable traversal objects must be swept from the registry"
+        );
     }
 
     #[test]
@@ -4281,48 +4577,54 @@ mod tests {
     #[test]
     fn intl_formatters_expose_common_bootstrap_surface() {
         let mut runtime = JsRuntime::new().unwrap();
-        assert!(runtime
-            .eval(
-                r#"Intl.NumberFormat("en").format(12) === "12" &&
+        assert!(
+            runtime
+                .eval(
+                    r#"Intl.NumberFormat("en").format(12) === "12" &&
                    Intl.PluralRules("en").select(1) === "one" &&
                    Intl.ListFormat("en").format(["a", "b"]) === "a, b" &&
                    Intl.getCanonicalLocales("en-US")[0] === "en-US""#,
-            )
-            .unwrap()
-            .as_boolean()
-            .unwrap());
+                )
+                .unwrap()
+                .as_boolean()
+                .unwrap()
+        );
     }
 
     #[test]
     fn common_html_elements_use_specific_interfaces() {
         let mut runtime = runtime_from_html("<html><head></head><body></body></html>");
-        assert!(runtime
-            .eval(
-                r#"document.body instanceof HTMLBodyElement &&
+        assert!(
+            runtime
+                .eval(
+                    r#"document.body instanceof HTMLBodyElement &&
                    document.head instanceof HTMLHeadElement &&
                    document.documentElement instanceof HTMLHtmlElement &&
                    document.createElement("a") instanceof HTMLAnchorElement"#,
-            )
-            .unwrap()
-            .as_boolean()
-            .unwrap());
+                )
+                .unwrap()
+                .as_boolean()
+                .unwrap()
+        );
     }
 
     #[test]
     fn text_encoder_and_decoder_round_trip_utf8() {
         let mut runtime = JsRuntime::new().unwrap();
-        assert!(runtime
-            .eval(
-                r#"(() => {
+        assert!(
+            runtime
+                .eval(
+                    r#"(() => {
                     const bytes = new TextEncoder().encode("A日本");
                     return bytes.length === 7 && bytes[0] === 65 &&
                       new TextDecoder().decode(bytes) === "A日本" &&
                       btoa("hello") === "aGVsbG8=" && atob("aGVsbG8=") === "hello";
                 })()"#,
-            )
-            .unwrap()
-            .as_boolean()
-            .unwrap());
+                )
+                .unwrap()
+                .as_boolean()
+                .unwrap()
+        );
     }
 
     #[test]
@@ -4345,9 +4647,10 @@ mod tests {
     #[test]
     fn fetch_standard_objects_expose_headers_and_body_helpers() {
         let mut runtime = JsRuntime::new().unwrap();
-        assert!(runtime
-            .eval(
-                r#"(() => {
+        assert!(
+            runtime
+                .eval(
+                    r#"(() => {
                     const headers = new Headers({ "X-Test": "one" });
                     headers.append("x-test", "two");
                     const request = new Request("https://example.com", { headers });
@@ -4355,18 +4658,20 @@ mod tests {
                     return request.headers.get("X-Test") === "one, two" &&
                       response.ok && response.headers.get("content-type") === "application/json";
                 })()"#,
-            )
-            .unwrap()
-            .as_boolean()
-            .unwrap());
+                )
+                .unwrap()
+                .as_boolean()
+                .unwrap()
+        );
     }
 
     #[test]
     fn abort_controller_exposes_signal_state_and_events() {
         let mut runtime = JsRuntime::new().unwrap();
-        assert!(runtime
-            .eval(
-                r#"(() => {
+        assert!(
+            runtime
+                .eval(
+                    r#"(() => {
                     const controller = new AbortController();
                     let events = 0;
                     controller.signal.addEventListener("abort", () => events++);
@@ -4376,10 +4681,11 @@ mod tests {
                       controller.signal.aborted && controller.signal.reason === "stopped" &&
                       events === 1 && AbortSignal.abort().reason.name === "AbortError";
                 })()"#,
-            )
-            .unwrap()
-            .as_boolean()
-            .unwrap());
+                )
+                .unwrap()
+                .as_boolean()
+                .unwrap()
+        );
     }
 
     #[test]
@@ -4548,6 +4854,36 @@ mod tests {
     }
 
     #[test]
+    fn exposes_css_namespace_and_escapes_identifiers() {
+        let mut runtime = JsRuntime::new().unwrap();
+        assert!(runtime
+            .eval(r#"CSS.escape("0a b") === "\\30 a\\ b" && CSS.supports("unknown", "value") === false"#)
+            .unwrap()
+            .as_boolean()
+            .unwrap());
+    }
+
+    #[test]
+    fn image_constructor_creates_an_html_image_element() {
+        let mut runtime = JsRuntime::new().unwrap();
+        assert!(runtime
+            .eval(r#"(() => { const image = new Image(40, 30); return image instanceof HTMLImageElement && image.width === 40 && image.height === 30; })()"#)
+            .unwrap()
+            .as_boolean()
+            .unwrap());
+    }
+
+    #[test]
+    fn request_and_xhr_resolve_relative_urls() {
+        let mut runtime = JsRuntime::new().unwrap();
+        assert!(runtime
+            .eval(r#"(() => { const xhr = new XMLHttpRequest(); xhr.open("GET", "/api/data"); return new Request("asset.js").url === "http://localhost/asset.js" && xhr._url === "http://localhost/api/data"; })()"#)
+            .unwrap()
+            .as_boolean()
+            .unwrap());
+    }
+
+    #[test]
     fn xml_http_request_get_completes_and_abort_suppresses_completion() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
@@ -4612,14 +4948,20 @@ mod tests {
     fn eval_safe_catches_syntax_error() {
         let mut runtime = JsRuntime::new().unwrap();
         let result = runtime.eval_safe("this is not valid javascript }{");
-        assert!(result.is_err(), "eval_safe should return Err for syntax errors");
+        assert!(
+            result.is_err(),
+            "eval_safe should return Err for syntax errors"
+        );
     }
 
     #[test]
     fn eval_safe_catches_runtime_error() {
         let mut runtime = JsRuntime::new().unwrap();
         let result = runtime.eval_safe("undefinedFunction()");
-        assert!(result.is_err(), "eval_safe should return Err for runtime errors");
+        assert!(
+            result.is_err(),
+            "eval_safe should return Err for runtime errors"
+        );
     }
 
     #[test]
@@ -4664,9 +5006,15 @@ mod tests {
         );
         // Accessing them directly should throw ReferenceError
         let result = runtime.eval_safe("process");
-        assert!(result.is_err(), "accessing 'process' should throw ReferenceError");
+        assert!(
+            result.is_err(),
+            "accessing 'process' should throw ReferenceError"
+        );
         let result = runtime.eval_safe("require");
-        assert!(result.is_err(), "accessing 'require' should throw ReferenceError");
+        assert!(
+            result.is_err(),
+            "accessing 'require' should throw ReferenceError"
+        );
     }
 
     #[test]
@@ -4681,10 +5029,16 @@ mod tests {
                 r#"
             const el = document.querySelector("div");
             el.className = "foo bar";
-        "#).unwrap();
+        "#,
+            )
+            .unwrap();
 
-        let result = runtime.eval("document.querySelector('div').className")
-            .unwrap().as_string().unwrap().to_std_string_escaped();
+        let result = runtime
+            .eval("document.querySelector('div').className")
+            .unwrap()
+            .as_string()
+            .unwrap()
+            .to_std_string_escaped();
         assert_eq!(result, "foo bar");
     }
 
@@ -4695,22 +5049,40 @@ mod tests {
         doc.append_child(div.clone());
 
         let mut runtime = JsRuntime::with_document(doc).unwrap();
-        runtime.eval(r#"
+        runtime
+            .eval(
+                r#"
             const el = document.querySelector("div");
             el.classList.add("alpha", "beta");
-        "#).unwrap();
+        "#,
+            )
+            .unwrap();
 
-        let has_alpha = runtime.eval("document.querySelector('div').classList.contains('alpha')")
-            .unwrap().as_boolean().unwrap();
+        let has_alpha = runtime
+            .eval("document.querySelector('div').classList.contains('alpha')")
+            .unwrap()
+            .as_boolean()
+            .unwrap();
         assert!(has_alpha, "classList should contain 'alpha'");
 
-        runtime.eval("document.querySelector('div').classList.remove('alpha')").unwrap();
-        let has_alpha = runtime.eval("document.querySelector('div').classList.contains('alpha')")
-            .unwrap().as_boolean().unwrap();
-        assert!(!has_alpha, "classList should not contain 'alpha' after remove");
+        runtime
+            .eval("document.querySelector('div').classList.remove('alpha')")
+            .unwrap();
+        let has_alpha = runtime
+            .eval("document.querySelector('div').classList.contains('alpha')")
+            .unwrap()
+            .as_boolean()
+            .unwrap();
+        assert!(
+            !has_alpha,
+            "classList should not contain 'alpha' after remove"
+        );
 
-        let has_beta = runtime.eval("document.querySelector('div').classList.contains('beta')")
-            .unwrap().as_boolean().unwrap();
+        let has_beta = runtime
+            .eval("document.querySelector('div').classList.contains('beta')")
+            .unwrap()
+            .as_boolean()
+            .unwrap();
         assert!(has_beta, "classList should still contain 'beta'");
     }
 
@@ -4721,14 +5093,23 @@ mod tests {
         doc.append_child(div.clone());
 
         let mut runtime = JsRuntime::with_document(doc).unwrap();
-        let result = runtime.eval(r#"
+        let result = runtime
+            .eval(
+                r#"
             const el = document.querySelector("div");
             el.classList.toggle("active");
-        "#).unwrap().as_boolean().unwrap();
+        "#,
+            )
+            .unwrap()
+            .as_boolean()
+            .unwrap();
         assert!(result, "toggle should return true when adding");
 
-        let result = runtime.eval("document.querySelector('div').classList.toggle('active')")
-            .unwrap().as_boolean().unwrap();
+        let result = runtime
+            .eval("document.querySelector('div').classList.toggle('active')")
+            .unwrap()
+            .as_boolean()
+            .unwrap();
         assert!(!result, "toggle should return false when removing");
     }
 
@@ -4739,24 +5120,47 @@ mod tests {
         doc.append_child(div.clone());
 
         let mut runtime = JsRuntime::with_document(doc).unwrap();
-        runtime.eval(r#"
+        runtime
+            .eval(
+                r#"
             const el = document.querySelector("div");
             el.style.backgroundColor = "red";
             el.style.fontSize = "16px";
-        "#).unwrap();
+        "#,
+            )
+            .unwrap();
 
-        let bg = runtime.eval("document.querySelector('div').style.backgroundColor")
-            .unwrap().as_string().unwrap().to_std_string_escaped();
+        let bg = runtime
+            .eval("document.querySelector('div').style.backgroundColor")
+            .unwrap()
+            .as_string()
+            .unwrap()
+            .to_std_string_escaped();
         assert_eq!(bg, "red");
 
-        let fs = runtime.eval("document.querySelector('div').style.fontSize")
-            .unwrap().as_string().unwrap().to_std_string_escaped();
+        let fs = runtime
+            .eval("document.querySelector('div').style.fontSize")
+            .unwrap()
+            .as_string()
+            .unwrap()
+            .to_std_string_escaped();
         assert_eq!(fs, "16px");
 
         // Verify the style attribute on the DOM node
-        let style_attr = div.attributes().unwrap().get("style").cloned().unwrap_or_default();
-        assert!(style_attr.contains("background-color: red"), "style attr: {style_attr}");
-        assert!(style_attr.contains("font-size: 16px"), "style attr: {style_attr}");
+        let style_attr = div
+            .attributes()
+            .unwrap()
+            .get("style")
+            .cloned()
+            .unwrap_or_default();
+        assert!(
+            style_attr.contains("background-color: red"),
+            "style attr: {style_attr}"
+        );
+        assert!(
+            style_attr.contains("font-size: 16px"),
+            "style attr: {style_attr}"
+        );
     }
 
     #[test]
@@ -4801,17 +5205,9 @@ mod tests {
             r#"url("data:image/svg+xml;utf8,<svg></svg>")"#
         );
         assert_eq!(eval_str(&mut runtime, "quoted.style.color"), "blue");
+        assert!(unquoted.attributes().unwrap()["style"].contains("data:image/png;base64,AAAA"));
         assert!(
-            unquoted
-                .attributes()
-                .unwrap()["style"]
-                .contains("data:image/png;base64,AAAA")
-        );
-        assert!(
-            quoted
-                .attributes()
-                .unwrap()["style"]
-                .contains("data:image/svg+xml;utf8,<svg></svg>")
+            quoted.attributes().unwrap()["style"].contains("data:image/svg+xml;utf8,<svg></svg>")
         );
     }
 
@@ -4836,7 +5232,10 @@ mod tests {
 
         // kebab set -> camelCase read and getPropertyValue read.
         assert_eq!(
-            eval_str(&mut runtime, "document.querySelector('div').style.backgroundColor"),
+            eval_str(
+                &mut runtime,
+                "document.querySelector('div').style.backgroundColor"
+            ),
             "blue"
         );
         assert_eq!(
@@ -4873,7 +5272,10 @@ mod tests {
             .unwrap();
 
         assert_eq!(
-            eval_str(&mut runtime, "document.querySelector('div').style.getPropertyValue('color')"),
+            eval_str(
+                &mut runtime,
+                "document.querySelector('div').style.getPropertyValue('color')"
+            ),
             "red",
             "getPropertyValue must return the value without the priority flag"
         );
@@ -4884,7 +5286,12 @@ mod tests {
             ),
             "important"
         );
-        let style_attr = div.attributes().unwrap().get("style").cloned().unwrap_or_default();
+        let style_attr = div
+            .attributes()
+            .unwrap()
+            .get("style")
+            .cloned()
+            .unwrap_or_default();
         assert_eq!(
             style_attr, "color: red !important;",
             "priority must be serialized into the style attribute"
@@ -5014,7 +5421,12 @@ mod tests {
             eval_str(&mut runtime, "document.querySelector('div').style.display"),
             "block"
         );
-        let style_attr = div.attributes().unwrap().get("style").cloned().unwrap_or_default();
+        let style_attr = div
+            .attributes()
+            .unwrap()
+            .get("style")
+            .cloned()
+            .unwrap_or_default();
         assert_eq!(
             style_attr, "display: block;",
             "style attribute must no longer contain the removed declaration"
@@ -5041,9 +5453,7 @@ mod tests {
 
         // Inline setProperty overrides the cascade.
         runtime
-            .eval(
-                "document.getElementById('target').style.setProperty('white-space', 'pre-wrap')",
-            )
+            .eval("document.getElementById('target').style.setProperty('white-space', 'pre-wrap')")
             .unwrap();
         assert_eq!(
             eval_str(
@@ -5110,7 +5520,12 @@ mod tests {
             "",
             "the property must be undeclared after removeProperty"
         );
-        let style_attr = body.attributes().unwrap().get("style").cloned().unwrap_or_default();
+        let style_attr = body
+            .attributes()
+            .unwrap()
+            .get("style")
+            .cloned()
+            .unwrap_or_default();
         assert!(
             !style_attr.contains("border-top"),
             "style attribute must no longer mention border-top: {style_attr}"
@@ -5133,18 +5548,30 @@ mod tests {
         doc.append_child(div.clone());
 
         let mut runtime = JsRuntime::with_document(doc).unwrap();
-        runtime.eval(r#"
+        runtime
+            .eval(
+                r#"
             const el = document.querySelector("div");
             el.setAttribute("data-value", "42");
-        "#).unwrap();
+        "#,
+            )
+            .unwrap();
 
-        let result = runtime.eval("document.querySelector('div').getAttribute('data-value')")
-            .unwrap().as_string().unwrap().to_std_string_escaped();
+        let result = runtime
+            .eval("document.querySelector('div').getAttribute('data-value')")
+            .unwrap()
+            .as_string()
+            .unwrap()
+            .to_std_string_escaped();
         assert_eq!(result, "42");
 
-        let missing = runtime.eval("document.querySelector('div').getAttribute('nonexistent')")
+        let missing = runtime
+            .eval("document.querySelector('div').getAttribute('nonexistent')")
             .unwrap();
-        assert!(missing.is_null(), "getAttribute for missing attr should return null");
+        assert!(
+            missing.is_null(),
+            "getAttribute for missing attr should return null"
+        );
     }
 
     #[test]
@@ -5154,20 +5581,32 @@ mod tests {
         doc.append_child(div.clone());
 
         let mut runtime = JsRuntime::with_document(doc).unwrap();
-        runtime.eval(r#"
+        runtime
+            .eval(
+                r#"
             const el = document.querySelector("div");
             el.classList.add("a", "b", "c");
-        "#).unwrap();
+        "#,
+            )
+            .unwrap();
 
-        let len = runtime.eval("document.querySelector('div').classList.length")
-            .unwrap().to_number(&mut runtime.context).unwrap();
+        let len = runtime
+            .eval("document.querySelector('div').classList.length")
+            .unwrap()
+            .to_number(&mut runtime.context)
+            .unwrap();
         assert_eq!(len, 3.0);
 
-        let item0 = runtime.eval("document.querySelector('div').classList.item(0)")
-            .unwrap().as_string().unwrap().to_std_string_escaped();
+        let item0 = runtime
+            .eval("document.querySelector('div').classList.item(0)")
+            .unwrap()
+            .as_string()
+            .unwrap()
+            .to_std_string_escaped();
         assert_eq!(item0, "a");
 
-        let item_oob = runtime.eval("document.querySelector('div').classList.item(99)")
+        let item_oob = runtime
+            .eval("document.querySelector('div').classList.item(99)")
             .unwrap();
         assert!(item_oob.is_null(), "out-of-range item should return null");
     }
@@ -5181,24 +5620,39 @@ mod tests {
         let mut runtime = JsRuntime::with_document(doc).unwrap();
 
         // force=true always adds
-        let result = runtime.eval(r#"
+        let result = runtime
+            .eval(
+                r#"
             const el = document.querySelector("div");
             el.classList.toggle("x", true);
-        "#).unwrap().as_boolean().unwrap();
+        "#,
+            )
+            .unwrap()
+            .as_boolean()
+            .unwrap();
         assert!(result, "toggle(cls, true) should return true");
 
         // force=true when already present keeps it
-        let result = runtime.eval("document.querySelector('div').classList.toggle('x', true)")
-            .unwrap().as_boolean().unwrap();
+        let result = runtime
+            .eval("document.querySelector('div').classList.toggle('x', true)")
+            .unwrap()
+            .as_boolean()
+            .unwrap();
         assert!(result, "toggle(cls, true) when present should return true");
 
         // force=false always removes
-        let result = runtime.eval("document.querySelector('div').classList.toggle('x', false)")
-            .unwrap().as_boolean().unwrap();
+        let result = runtime
+            .eval("document.querySelector('div').classList.toggle('x', false)")
+            .unwrap()
+            .as_boolean()
+            .unwrap();
         assert!(!result, "toggle(cls, false) should return false");
 
-        let has = runtime.eval("document.querySelector('div').classList.contains('x')")
-            .unwrap().as_boolean().unwrap();
+        let has = runtime
+            .eval("document.querySelector('div').classList.contains('x')")
+            .unwrap()
+            .as_boolean()
+            .unwrap();
         assert!(!has, "x should be removed after toggle(x, false)");
     }
 
@@ -5209,14 +5663,25 @@ mod tests {
         doc.append_child(div.clone());
 
         let mut runtime = JsRuntime::with_document(doc).unwrap();
-        runtime.eval(r#"
+        runtime
+            .eval(
+                r#"
             const el = document.querySelector("div");
             el.style.marginTop = 0;
-        "#).unwrap();
+        "#,
+            )
+            .unwrap();
 
-        let result = runtime.eval("document.querySelector('div').style.marginTop")
-            .unwrap().as_string().unwrap().to_std_string_escaped();
-        assert_eq!(result, "0", "style value 0 should be preserved, not removed");
+        let result = runtime
+            .eval("document.querySelector('div').style.marginTop")
+            .unwrap()
+            .as_string()
+            .unwrap()
+            .to_std_string_escaped();
+        assert_eq!(
+            result, "0",
+            "style value 0 should be preserved, not removed"
+        );
     }
 
     #[test]
@@ -5235,7 +5700,12 @@ mod tests {
             .unwrap();
 
         // The declaration is serialized with its case preserved.
-        let style_attr = div.attributes().unwrap().get("style").cloned().unwrap_or_default();
+        let style_attr = div
+            .attributes()
+            .unwrap()
+            .get("style")
+            .cloned()
+            .unwrap_or_default();
         assert_eq!(
             style_attr, "--Foo: 10px;",
             "custom property name must keep its original case in the style attribute"
@@ -5269,7 +5739,12 @@ mod tests {
             "10px",
             "removeProperty must return the prior value of the custom property"
         );
-        let style_attr = div.attributes().unwrap().get("style").cloned().unwrap_or_default();
+        let style_attr = div
+            .attributes()
+            .unwrap()
+            .get("style")
+            .cloned()
+            .unwrap_or_default();
         assert_eq!(
             style_attr, "",
             "the custom property must be gone after removeProperty"
@@ -5309,7 +5784,12 @@ mod tests {
             1.0,
             "duplicate declarations must collapse to a single one"
         );
-        let style_attr = div.attributes().unwrap().get("style").cloned().unwrap_or_default();
+        let style_attr = div
+            .attributes()
+            .unwrap()
+            .get("style")
+            .cloned()
+            .unwrap_or_default();
         assert_eq!(
             style_attr, "color: green;",
             "the style attribute must contain exactly one normalized declaration"
@@ -5348,7 +5828,12 @@ mod tests {
             "",
             "every duplicate occurrence of the property must be removed"
         );
-        let style_attr = div.attributes().unwrap().get("style").cloned().unwrap_or_default();
+        let style_attr = div
+            .attributes()
+            .unwrap()
+            .get("style")
+            .cloned()
+            .unwrap_or_default();
         assert_eq!(
             style_attr, "display: block;",
             "only the unrelated declaration must remain"
@@ -5401,7 +5886,12 @@ mod tests {
             "important",
             "priority matching is ASCII case-insensitive"
         );
-        let style_attr = div.attributes().unwrap().get("style").cloned().unwrap_or_default();
+        let style_attr = div
+            .attributes()
+            .unwrap()
+            .get("style")
+            .cloned()
+            .unwrap_or_default();
         assert_eq!(
             style_attr, "color: red; display: block !important;",
             "invalid priority must not serialize a bogus flag; valid one must"
@@ -5415,7 +5905,9 @@ mod tests {
         doc.append_child(div.clone());
 
         let mut runtime = JsRuntime::with_document(doc).unwrap();
-        runtime.eval(r#"
+        runtime
+            .eval(
+                r#"
             let count = 0;
             const el = document.querySelector("div");
             function handler() { count++; }
@@ -5423,11 +5915,19 @@ mod tests {
             el.dispatchEvent(new Event("click"));
             el.removeEventListener("click", handler);
             el.dispatchEvent(new Event("click"));
-        "#).unwrap();
+        "#,
+            )
+            .unwrap();
 
-        let count = runtime.eval("count").unwrap()
-            .to_number(&mut runtime.context).unwrap();
-        assert_eq!(count, 1.0, "handler should fire once before removal, not after");
+        let count = runtime
+            .eval("count")
+            .unwrap()
+            .to_number(&mut runtime.context)
+            .unwrap();
+        assert_eq!(
+            count, 1.0,
+            "handler should fire once before removal, not after"
+        );
     }
 
     #[test]
@@ -5435,10 +5935,14 @@ mod tests {
         let doc = NodeHandle::document();
         let mut runtime = JsRuntime::with_document(doc).unwrap();
 
-        runtime.eval(r#"
+        runtime
+            .eval(
+                r#"
             let loaded = false;
             document.addEventListener("DOMContentLoaded", () => { loaded = true; });
-        "#).unwrap();
+        "#,
+            )
+            .unwrap();
 
         let before = runtime.eval("loaded").unwrap().as_boolean().unwrap();
         assert!(!before, "loaded should be false before DOMContentLoaded");
@@ -5454,15 +5958,23 @@ mod tests {
         let doc = NodeHandle::document();
         let mut runtime = JsRuntime::with_document(doc).unwrap();
 
-        runtime.eval(r#"
+        runtime
+            .eval(
+                r#"
             let eventFired = "";
             document.addEventListener("myevent", (e) => { eventFired = e.type; });
-        "#).unwrap();
+        "#,
+            )
+            .unwrap();
 
         runtime.fire_document_event("myevent").unwrap();
 
-        let result = runtime.eval("eventFired").unwrap()
-            .as_string().unwrap().to_std_string_escaped();
+        let result = runtime
+            .eval("eventFired")
+            .unwrap()
+            .as_string()
+            .unwrap()
+            .to_std_string_escaped();
         assert_eq!(result, "myevent");
     }
 
@@ -5471,15 +5983,23 @@ mod tests {
         let doc = NodeHandle::document();
         let mut runtime = JsRuntime::with_document(doc).unwrap();
 
-        runtime.eval(r#"
+        runtime
+            .eval(
+                r#"
             let special = "";
             document.addEventListener("te'st", (e) => { special = e.type; });
-        "#).unwrap();
+        "#,
+            )
+            .unwrap();
 
         runtime.fire_document_event("te'st").unwrap();
 
-        let result = runtime.eval("special").unwrap()
-            .as_string().unwrap().to_std_string_escaped();
+        let result = runtime
+            .eval("special")
+            .unwrap()
+            .as_string()
+            .unwrap()
+            .to_std_string_escaped();
         assert_eq!(result, "te'st");
     }
 
@@ -5490,7 +6010,9 @@ mod tests {
         doc.append_child(div.clone());
 
         let mut runtime = JsRuntime::with_document(doc).unwrap();
-        runtime.eval(r#"
+        runtime
+            .eval(
+                r#"
             let count = 0;
             const el = document.querySelector("div");
             function handler() { count++; }
@@ -5498,11 +6020,19 @@ mod tests {
             el.addEventListener("click", handler);
             el.addEventListener("click", handler);
             el.dispatchEvent(new Event("click"));
-        "#).unwrap();
+        "#,
+            )
+            .unwrap();
 
-        let count = runtime.eval("count").unwrap()
-            .to_number(&mut runtime.context).unwrap();
-        assert_eq!(count, 1.0, "duplicate addEventListener should only fire once");
+        let count = runtime
+            .eval("count")
+            .unwrap()
+            .to_number(&mut runtime.context)
+            .unwrap();
+        assert_eq!(
+            count, 1.0,
+            "duplicate addEventListener should only fire once"
+        );
     }
 
     #[test]
@@ -5538,7 +6068,10 @@ mod tests {
         runtime.execute_document_scripts(None);
 
         let result = runtime.eval("loaded").unwrap().as_boolean().unwrap();
-        assert!(result, "DOMContentLoaded should fire after execute_document_scripts");
+        assert!(
+            result,
+            "DOMContentLoaded should fire after execute_document_scripts"
+        );
     }
 
     #[test]
@@ -5577,7 +6110,13 @@ mod tests {
             "first"
         );
         assert!(runtime.eval("secondRan").unwrap().as_boolean().unwrap());
-        assert!(runtime.eval("document.currentScript === null").unwrap().as_boolean().unwrap());
+        assert!(
+            runtime
+                .eval("document.currentScript === null")
+                .unwrap()
+                .as_boolean()
+                .unwrap()
+        );
     }
 
     #[test]
@@ -5618,8 +6157,11 @@ mod tests {
         let html = TreeBuilder::parse("<html><body><div a='html'></div></body></html>").document();
         let mut html_runtime = JsRuntime::with_document(html).unwrap();
         assert_eq!(
-            eval_string_value(&mut html_runtime, "document.querySelector('div').getAttribute('A')")
-                .as_deref(),
+            eval_string_value(
+                &mut html_runtime,
+                "document.querySelector('div').getAttribute('A')"
+            )
+            .as_deref(),
             Some("html"),
             "HTML getAttribute must retain ASCII case-insensitive lookup",
         );
@@ -5638,9 +6180,16 @@ mod tests {
         let mut runtime = JsRuntime::with_document(doc).unwrap();
         runtime.execute_document_scripts(None);
 
-        let result = runtime.eval("order").unwrap()
-            .as_string().unwrap().to_std_string_escaped();
-        assert_eq!(result, "first,second,", "defer on inline should be ignored; both run in order");
+        let result = runtime
+            .eval("order")
+            .unwrap()
+            .as_string()
+            .unwrap()
+            .to_std_string_escaped();
+        assert_eq!(
+            result, "first,second,",
+            "defer on inline should be ignored; both run in order"
+        );
     }
 
     // --- 016-4: load event + on* inline handlers + drivers primitives ---
@@ -5666,7 +6215,11 @@ mod tests {
         runtime.wire_inline_event_handlers().unwrap();
         runtime.fire_load().unwrap();
 
-        let count = runtime.eval("globalThis.loadCount").unwrap().as_number().unwrap();
+        let count = runtime
+            .eval("globalThis.loadCount")
+            .unwrap()
+            .as_number()
+            .unwrap();
         assert_eq!(count, 1.0, "body onload should fire exactly once on load");
         let attr = runtime
             .eval("document.body.getAttribute('data-loaded')")
@@ -5695,7 +6248,10 @@ mod tests {
             .as_string()
             .unwrap()
             .to_std_string_escaped();
-        assert_eq!(ty, "click", "onclick handler should receive the event argument");
+        assert_eq!(
+            ty, "click",
+            "onclick handler should receive the event argument"
+        );
     }
 
     #[test]
@@ -5738,7 +6294,10 @@ mod tests {
             .as_string()
             .unwrap()
             .to_std_string_escaped();
-        assert_eq!(value, "hello|world|world|true|5", "Text.data get/set must map to character data");
+        assert_eq!(
+            value, "hello|world|world|true|5",
+            "Text.data get/set must map to character data"
+        );
     }
 
     #[test]
@@ -5755,7 +6314,10 @@ mod tests {
             .as_string()
             .unwrap()
             .to_std_string_escaped();
-        assert_eq!(value, "note|changed|true", "Comment.data get/set must map to character data");
+        assert_eq!(
+            value, "note|changed|true",
+            "Comment.data get/set must map to character data"
+        );
     }
 
     #[test]
@@ -5956,7 +6518,6 @@ mod tests {
             })()"#,
         );
         assert_eq!(actual, "0|0|7|target|bcd|bcd|aef|true|true");
-
     }
 
     #[test]
@@ -5998,7 +6559,10 @@ mod tests {
                 ].join("|");
             })()"#,
         );
-        assert_eq!(actual, "1|abcd|true|3|true|4|true|4|true|true|InvalidCharacterError|TypeError|TypeError|4|true|4|true|true|parsed");
+        assert_eq!(
+            actual,
+            "1|abcd|true|3|true|4|true|4|true|true|InvalidCharacterError|TypeError|TypeError|4|true|4|true|true|parsed"
+        );
     }
 
     #[test]
@@ -6074,7 +6638,10 @@ mod tests {
                 ].join("|");
             })()"#,
         );
-        assert_eq!(actual, "NotFoundError|0|0|one|true|true|second|NamespaceError|NotFoundError");
+        assert_eq!(
+            actual,
+            "NotFoundError|0|0|one|true|true|second|NamespaceError|NotFoundError"
+        );
     }
 
     #[test]
@@ -6086,7 +6653,10 @@ mod tests {
             .unwrap()
             .as_boolean()
             .unwrap();
-        assert!(is_undefined, "Element nodes must not expose CharacterData.data");
+        assert!(
+            is_undefined,
+            "Element nodes must not expose CharacterData.data"
+        );
     }
 
     #[test]
@@ -6097,7 +6667,10 @@ mod tests {
             .unwrap()
             .as_boolean()
             .unwrap();
-        assert!(same, "document.defaultView must be the global window object");
+        assert!(
+            same,
+            "document.defaultView must be the global window object"
+        );
     }
 
     #[test]
@@ -6128,8 +6701,7 @@ mod tests {
             .unwrap()
             .to_std_string_escaped();
         assert_eq!(
-            actual,
-            "true|true|true|true|true|true|true|false|false|win",
+            actual, "true|true|true|true|true|true|true|false|false|win",
             "Window must recognize the main global and iframe facades, but no DOM nodes",
         );
     }
@@ -6138,21 +6710,74 @@ mod tests {
     fn node_type_constants_are_exposed() {
         let mut runtime = JsRuntime::with_document(default_document()).unwrap();
         // On the Node constructor.
-        assert_eq!(runtime.eval("Node.ELEMENT_NODE").unwrap().as_number().unwrap(), 1.0);
-        assert_eq!(runtime.eval("Node.TEXT_NODE").unwrap().as_number().unwrap(), 3.0);
-        assert_eq!(runtime.eval("Node.COMMENT_NODE").unwrap().as_number().unwrap(), 8.0);
-        assert_eq!(runtime.eval("Node.DOCUMENT_NODE").unwrap().as_number().unwrap(), 9.0);
-        assert_eq!(runtime.eval("Node.DOCUMENT_TYPE_NODE").unwrap().as_number().unwrap(), 10.0);
-        assert_eq!(runtime.eval("Node.DOCUMENT_FRAGMENT_NODE").unwrap().as_number().unwrap(), 11.0);
-        assert_eq!(runtime.eval("Node.NOTATION_NODE").unwrap().as_number().unwrap(), 12.0);
+        assert_eq!(
+            runtime
+                .eval("Node.ELEMENT_NODE")
+                .unwrap()
+                .as_number()
+                .unwrap(),
+            1.0
+        );
+        assert_eq!(
+            runtime.eval("Node.TEXT_NODE").unwrap().as_number().unwrap(),
+            3.0
+        );
+        assert_eq!(
+            runtime
+                .eval("Node.COMMENT_NODE")
+                .unwrap()
+                .as_number()
+                .unwrap(),
+            8.0
+        );
+        assert_eq!(
+            runtime
+                .eval("Node.DOCUMENT_NODE")
+                .unwrap()
+                .as_number()
+                .unwrap(),
+            9.0
+        );
+        assert_eq!(
+            runtime
+                .eval("Node.DOCUMENT_TYPE_NODE")
+                .unwrap()
+                .as_number()
+                .unwrap(),
+            10.0
+        );
+        assert_eq!(
+            runtime
+                .eval("Node.DOCUMENT_FRAGMENT_NODE")
+                .unwrap()
+                .as_number()
+                .unwrap(),
+            11.0
+        );
+        assert_eq!(
+            runtime
+                .eval("Node.NOTATION_NODE")
+                .unwrap()
+                .as_number()
+                .unwrap(),
+            12.0
+        );
         // On instances via the prototype (as Acid3 test 19 checks).
         assert_eq!(
-            runtime.eval("document.DOCUMENT_FRAGMENT_NODE").unwrap().as_number().unwrap(),
+            runtime
+                .eval("document.DOCUMENT_FRAGMENT_NODE")
+                .unwrap()
+                .as_number()
+                .unwrap(),
             11.0,
             "document must inherit DOCUMENT_FRAGMENT_NODE"
         );
         assert_eq!(
-            runtime.eval("document.createTextNode('').ELEMENT_NODE").unwrap().as_number().unwrap(),
+            runtime
+                .eval("document.createTextNode('').ELEMENT_NODE")
+                .unwrap()
+                .as_number()
+                .unwrap(),
             1.0,
             "text node must inherit ELEMENT_NODE"
         );
@@ -6167,11 +6792,32 @@ mod tests {
             .as_string()
             .unwrap()
             .to_std_string_escaped();
-        assert_eq!(el, "div", "element localName must be the lower-cased tag name");
+        assert_eq!(
+            el, "div",
+            "element localName must be the lower-cased tag name"
+        );
         // localName is declared by Element, so non-element nodes do not expose it.
-        assert!(runtime.eval("document.createTextNode('x').localName === undefined").unwrap().as_boolean().unwrap());
-        assert!(runtime.eval("document.createComment('x').localName === undefined").unwrap().as_boolean().unwrap());
-        assert!(runtime.eval("document.localName === undefined").unwrap().as_boolean().unwrap());
+        assert!(
+            runtime
+                .eval("document.createTextNode('x').localName === undefined")
+                .unwrap()
+                .as_boolean()
+                .unwrap()
+        );
+        assert!(
+            runtime
+                .eval("document.createComment('x').localName === undefined")
+                .unwrap()
+                .as_boolean()
+                .unwrap()
+        );
+        assert!(
+            runtime
+                .eval("document.localName === undefined")
+                .unwrap()
+                .as_boolean()
+                .unwrap()
+        );
     }
 
     // --- 016-5: data: URI scripts ---
@@ -6181,7 +6827,10 @@ mod tests {
         // The five Acid3 (test 97) vectors and the JS source each must yield.
         let cases = [
             ("data:text/javascript,d1%20%3D%20'one'%3B", "d1 = 'one';"),
-            ("data:text/javascript;base64,ZDIgPSAndHdvJzs%3D", "d2 = 'two';"),
+            (
+                "data:text/javascript;base64,ZDIgPSAndHdvJzs%3D",
+                "d2 = 'two';",
+            ),
             (
                 "data:text/javascript;base64,%5a%44%4d%67%50%53%41%6e%64%47%68%79%5a%57%55%6e%4f%77%3D%3D",
                 "d3 = 'three';",
@@ -6242,7 +6891,9 @@ mod tests {
         doc.append_child(div.clone());
 
         let mut runtime = JsRuntime::with_document(doc).unwrap();
-        runtime.eval(r#"
+        runtime
+            .eval(
+                r#"
             var observed = false;
             var intersecting = false;
             const el = document.querySelector("div");
@@ -6251,14 +6902,22 @@ mod tests {
                 intersecting = entries[0].isIntersecting;
             });
             observer.observe(el);
-        "#).unwrap();
+        "#,
+            )
+            .unwrap();
         runtime.run_jobs().unwrap();
 
         let observed = runtime.eval("observed").unwrap().as_boolean().unwrap();
-        assert!(observed, "IntersectionObserver callback should fire after observe()");
+        assert!(
+            observed,
+            "IntersectionObserver callback should fire after observe()"
+        );
 
         let intersecting = runtime.eval("intersecting").unwrap().as_boolean().unwrap();
-        assert!(intersecting, "entry.isIntersecting should be true in headless mode");
+        assert!(
+            intersecting,
+            "entry.isIntersecting should be true in headless mode"
+        );
     }
 
     #[test]
@@ -6268,18 +6927,25 @@ mod tests {
         doc.append_child(div.clone());
 
         let mut runtime = JsRuntime::with_document(doc).unwrap();
-        runtime.eval(r#"
+        runtime
+            .eval(
+                r#"
             var count = 0;
             const el = document.querySelector("div");
             const observer = new IntersectionObserver((entries) => { count++; });
             observer.observe(el);
             observer.unobserve(el);
             observer.observe(el);
-        "#).unwrap();
+        "#,
+            )
+            .unwrap();
         runtime.run_jobs().unwrap();
 
-        let count = runtime.eval("count").unwrap()
-            .to_number(&mut runtime.context).unwrap();
+        let count = runtime
+            .eval("count")
+            .unwrap()
+            .to_number(&mut runtime.context)
+            .unwrap();
         // observe → unobserve → observe: callback fires for each observe (2 times)
         assert_eq!(count, 2.0, "callback should fire for each observe() call");
     }
@@ -6291,19 +6957,29 @@ mod tests {
         doc.append_child(div.clone());
 
         let mut runtime = JsRuntime::with_document(doc).unwrap();
-        runtime.eval(r#"
+        runtime
+            .eval(
+                r#"
             var count = 0;
             const el = document.querySelector("div");
             const observer = new IntersectionObserver((entries) => { count++; });
             observer.observe(el);
             observer.disconnect();
             observer.observe(el);
-        "#).unwrap();
+        "#,
+            )
+            .unwrap();
         runtime.run_jobs().unwrap();
 
-        let count = runtime.eval("count").unwrap()
-            .to_number(&mut runtime.context).unwrap();
-        assert_eq!(count, 2.0, "disconnect then re-observe should fire callback again");
+        let count = runtime
+            .eval("count")
+            .unwrap()
+            .to_number(&mut runtime.context)
+            .unwrap();
+        assert_eq!(
+            count, 2.0,
+            "disconnect then re-observe should fire callback again"
+        );
     }
 
     #[test]
@@ -6315,7 +6991,9 @@ mod tests {
         doc.append_child(div.clone());
 
         let mut runtime = JsRuntime::with_document(doc).unwrap();
-        runtime.eval(r#"
+        runtime
+            .eval(
+                r#"
             const el = document.querySelector("div");
             const observer = new IntersectionObserver((entries) => {
                 entries.forEach(entry => {
@@ -6325,16 +7003,29 @@ mod tests {
                 });
             });
             observer.observe(el);
-        "#).unwrap();
+        "#,
+            )
+            .unwrap();
         runtime.run_jobs().unwrap();
 
-        let has_on = runtime.eval("document.querySelector('div').classList.contains('on')")
-            .unwrap().as_boolean().unwrap();
+        let has_on = runtime
+            .eval("document.querySelector('div').classList.contains('on')")
+            .unwrap()
+            .as_boolean()
+            .unwrap();
         assert!(has_on, "IO should add 'on' class via classList.add");
 
         // Verify the DOM attribute
-        let class_attr = div.attributes().unwrap().get("class").cloned().unwrap_or_default();
-        assert!(class_attr.contains("on"), "DOM class attr should contain 'on': {class_attr}");
+        let class_attr = div
+            .attributes()
+            .unwrap()
+            .get("class")
+            .cloned()
+            .unwrap_or_default();
+        assert!(
+            class_attr.contains("on"),
+            "DOM class attr should contain 'on': {class_attr}"
+        );
     }
 
     #[test]
@@ -6346,13 +7037,23 @@ mod tests {
         doc.append_child(div.clone());
 
         let mut runtime = JsRuntime::with_document(doc).unwrap();
-        let result = runtime.eval("document.querySelector('div').textContent")
-            .unwrap().as_string().unwrap().to_std_string_escaped();
+        let result = runtime
+            .eval("document.querySelector('div').textContent")
+            .unwrap()
+            .as_string()
+            .unwrap()
+            .to_std_string_escaped();
         assert_eq!(result, "Hello world");
 
-        runtime.eval("document.querySelector('div').textContent = 'Changed'").unwrap();
-        let result = runtime.eval("document.querySelector('div').textContent")
-            .unwrap().as_string().unwrap().to_std_string_escaped();
+        runtime
+            .eval("document.querySelector('div').textContent = 'Changed'")
+            .unwrap();
+        let result = runtime
+            .eval("document.querySelector('div').textContent")
+            .unwrap()
+            .as_string()
+            .unwrap()
+            .to_std_string_escaped();
         assert_eq!(result, "Changed");
     }
 
@@ -6360,13 +7061,47 @@ mod tests {
     fn cssom_lists_style_sheets_and_rules_in_tree_order() {
         let doc = crate::html::TreeBuilder::parse("<html><head><style>p { color: red; } span { display: block; }</style><style>#x { width: 7px; }</style></head><body><p id='x'></p></body></html>").document();
         let mut runtime = JsRuntime::with_document(doc).unwrap();
-        assert!(runtime.eval("document.styleSheets === document.styleSheets").unwrap().as_boolean().unwrap(), "StyleSheetList identity must be stable");
+        assert!(
+            runtime
+                .eval("document.styleSheets === document.styleSheets")
+                .unwrap()
+                .as_boolean()
+                .unwrap(),
+            "StyleSheetList identity must be stable"
+        );
         assert_eq!(eval_num(&mut runtime, "document.styleSheets.length"), 2.0);
-        assert_eq!(eval_num(&mut runtime, "document.styleSheets[0].cssRules.length"), 2.0);
-        assert_eq!(eval_str(&mut runtime, "document.styleSheets[0].cssRules[0].selectorText"), "p");
-        assert_eq!(eval_str(&mut runtime, "document.styleSheets[0].cssRules[1].selectorText"), "span");
-        assert!(runtime.eval("document.styleSheets[0].ownerNode === document.querySelector('style')").unwrap().as_boolean().unwrap());
-        assert_eq!(eval_str(&mut runtime, "document.styleSheets[0].cssRules[0].style.color"), "red");
+        assert_eq!(
+            eval_num(&mut runtime, "document.styleSheets[0].cssRules.length"),
+            2.0
+        );
+        assert_eq!(
+            eval_str(
+                &mut runtime,
+                "document.styleSheets[0].cssRules[0].selectorText"
+            ),
+            "p"
+        );
+        assert_eq!(
+            eval_str(
+                &mut runtime,
+                "document.styleSheets[0].cssRules[1].selectorText"
+            ),
+            "span"
+        );
+        assert!(
+            runtime
+                .eval("document.styleSheets[0].ownerNode === document.querySelector('style')")
+                .unwrap()
+                .as_boolean()
+                .unwrap()
+        );
+        assert_eq!(
+            eval_str(
+                &mut runtime,
+                "document.styleSheets[0].cssRules[0].style.color"
+            ),
+            "red"
+        );
     }
 
     #[test]
@@ -6374,20 +7109,41 @@ mod tests {
         let doc = crate::html::TreeBuilder::parse("<html><head><style>img { height: 10px; } img { height: 20px; }</style></head><body><img></body></html>").document();
         let mut runtime = JsRuntime::with_document(doc).unwrap();
         runtime.eval("globalThis.rules = document.styleSheets[0].cssRules; document.styleSheets[0].insertRule('img { height: 40px; }', 2)").unwrap();
-        assert_eq!(eval_num(&mut runtime, "rules.length"), 3.0, "retained CSSRuleList must be live");
+        assert_eq!(
+            eval_num(&mut runtime, "rules.length"),
+            3.0,
+            "retained CSSRuleList must be live"
+        );
         assert_eq!(eval_num(&mut runtime, "document.images[0].height"), 40.0);
-        runtime.eval("document.styleSheets[0].deleteRule(2)").unwrap();
+        runtime
+            .eval("document.styleSheets[0].deleteRule(2)")
+            .unwrap();
         assert_eq!(eval_num(&mut runtime, "rules.length"), 2.0);
         assert_eq!(eval_num(&mut runtime, "document.images[0].height"), 20.0);
     }
 
     #[test]
     fn cssom_insert_and_delete_report_dom_exceptions() {
-        let doc = crate::html::TreeBuilder::parse("<html><head><style>p { color: red; }</style></head><body></body></html>").document();
+        let doc = crate::html::TreeBuilder::parse(
+            "<html><head><style>p { color: red; }</style></head><body></body></html>",
+        )
+        .document();
         let mut runtime = JsRuntime::with_document(doc).unwrap();
         assert!(runtime.eval("(() => { try { document.styleSheets[0].insertRule('not css', 0); return false; } catch (e) { return e.name === 'SyntaxError' && e instanceof DOMException; } })()").unwrap().as_boolean().unwrap(), "invalid insertRule input must throw a SyntaxError DOMException");
-        assert_eq!(eval_str(&mut runtime, "(() => { try { document.styleSheets[0].insertRule('p { color: blue; }', 2); return ''; } catch (e) { return e.name + ':' + e.code; } })()"), "IndexSizeError:1");
-        assert_eq!(eval_str(&mut runtime, "(() => { try { document.styleSheets[0].deleteRule(1); return ''; } catch (e) { return e.name + ':' + e.code; } })()"), "IndexSizeError:1");
+        assert_eq!(
+            eval_str(
+                &mut runtime,
+                "(() => { try { document.styleSheets[0].insertRule('p { color: blue; }', 2); return ''; } catch (e) { return e.name + ':' + e.code; } })()"
+            ),
+            "IndexSizeError:1"
+        );
+        assert_eq!(
+            eval_str(
+                &mut runtime,
+                "(() => { try { document.styleSheets[0].deleteRule(1); return ''; } catch (e) { return e.name + ':' + e.code; } })()"
+            ),
+            "IndexSizeError:1"
+        );
         assert!(runtime.eval("(() => { document.styleSheets[0].ownerNode.textContent = 'not css'; try { document.styleSheets[0].insertRule('p { color: blue; }', 0); return false; } catch (e) { return e.name === 'SyntaxError' && e instanceof DOMException; } })()").unwrap().as_boolean().unwrap(), "stylesheet enumeration errors must be wrapped as SyntaxError DOMExceptions");
     }
 
@@ -6395,12 +7151,39 @@ mod tests {
     fn cssom_braceless_at_rule_has_healthy_rule_views() {
         let doc = crate::html::TreeBuilder::parse("<html><head><style>@charset \"UTF-8\"; p { color: red; }</style></head><body></body></html>").document();
         let mut runtime = JsRuntime::with_document(doc).unwrap();
-        assert_eq!(eval_num(&mut runtime, "document.styleSheets[0].cssRules.length"), 2.0);
-        assert_eq!(eval_str(&mut runtime, "document.styleSheets[0].cssRules[0].selectorText"), "");
-        assert_eq!(eval_str(&mut runtime, "document.styleSheets[0].cssRules[0].cssText"), "@charset \"UTF-8\";");
-        assert_eq!(eval_str(&mut runtime, "document.styleSheets[0].cssRules[0].style.cssText"), "");
-        assert_eq!(eval_str(&mut runtime, "document.styleSheets[0].cssRules[1].selectorText"), "p");
-        assert_eq!(eval_str(&mut runtime, "document.styleSheets[0].cssRules[1].cssText"), "p { color: red; }");
+        assert_eq!(
+            eval_num(&mut runtime, "document.styleSheets[0].cssRules.length"),
+            2.0
+        );
+        assert_eq!(
+            eval_str(
+                &mut runtime,
+                "document.styleSheets[0].cssRules[0].selectorText"
+            ),
+            ""
+        );
+        assert_eq!(
+            eval_str(&mut runtime, "document.styleSheets[0].cssRules[0].cssText"),
+            "@charset \"UTF-8\";"
+        );
+        assert_eq!(
+            eval_str(
+                &mut runtime,
+                "document.styleSheets[0].cssRules[0].style.cssText"
+            ),
+            ""
+        );
+        assert_eq!(
+            eval_str(
+                &mut runtime,
+                "document.styleSheets[0].cssRules[1].selectorText"
+            ),
+            "p"
+        );
+        assert_eq!(
+            eval_str(&mut runtime, "document.styleSheets[0].cssRules[1].cssText"),
+            "p { color: red; }"
+        );
     }
 
     #[test]
@@ -6414,8 +7197,11 @@ mod tests {
         doc.append_child(div.clone());
 
         let mut runtime = JsRuntime::with_document(doc).unwrap();
-        let len = runtime.eval("document.querySelector('div').childNodes.length")
-            .unwrap().to_number(&mut runtime.context).unwrap();
+        let len = runtime
+            .eval("document.querySelector('div').childNodes.length")
+            .unwrap()
+            .to_number(&mut runtime.context)
+            .unwrap();
         assert_eq!(len, 2.0);
     }
 
@@ -6426,17 +7212,28 @@ mod tests {
         let doc = TreeBuilder::parse(html).document();
 
         let mut runtime = JsRuntime::with_document(doc).unwrap();
-        let has_body = runtime.eval("document.body !== null")
-            .unwrap().as_boolean().unwrap();
+        let has_body = runtime
+            .eval("document.body !== null")
+            .unwrap()
+            .as_boolean()
+            .unwrap();
         assert!(has_body, "document.body should not be null");
 
-        runtime.eval(r#"
+        runtime
+            .eval(
+                r#"
             const t = document.createTextNode("Hello");
             document.body.appendChild(t);
-        "#).unwrap();
+        "#,
+            )
+            .unwrap();
 
-        let result = runtime.eval("document.body.textContent")
-            .unwrap().as_string().unwrap().to_std_string_escaped();
+        let result = runtime
+            .eval("document.body.textContent")
+            .unwrap()
+            .as_string()
+            .unwrap()
+            .to_std_string_escaped();
         assert_eq!(result, "Hello");
     }
 
@@ -6453,8 +7250,11 @@ mod tests {
         doc.append_child(div.clone());
 
         let mut runtime = JsRuntime::with_document(doc).unwrap();
-        let len = runtime.eval("document.querySelectorAll('span').length")
-            .unwrap().to_number(&mut runtime.context).unwrap();
+        let len = runtime
+            .eval("document.querySelectorAll('span').length")
+            .unwrap()
+            .to_number(&mut runtime.context)
+            .unwrap();
         assert_eq!(len, 2.0);
     }
 
@@ -6554,18 +7354,23 @@ mod tests {
     #[test]
     fn get_element_by_id_does_not_parse_id_as_a_selector() {
         use crate::html::TreeBuilder;
-        let doc = TreeBuilder::parse(r#"<html><body><div id="plain"></div></body></html>"#).document();
+        let doc =
+            TreeBuilder::parse(r#"<html><body><div id="plain"></div></body></html>"#).document();
         let mut runtime = JsRuntime::with_document(doc).unwrap();
-        assert!(runtime
-            .eval("document.getElementById('plain\\0suffix') === null")
-            .unwrap()
-            .as_boolean()
-            .unwrap());
-        assert!(runtime
-            .eval("document.getElementById('plain').id === 'plain'")
-            .unwrap()
-            .as_boolean()
-            .unwrap());
+        assert!(
+            runtime
+                .eval("document.getElementById('plain\\0suffix') === null")
+                .unwrap()
+                .as_boolean()
+                .unwrap()
+        );
+        assert!(
+            runtime
+                .eval("document.getElementById('plain').id === 'plain'")
+                .unwrap()
+                .as_boolean()
+                .unwrap()
+        );
     }
 
     #[test]
@@ -6704,12 +7509,18 @@ mod tests {
         let doc = TreeBuilder::parse(html).document();
 
         let mut runtime = JsRuntime::with_document(doc).unwrap();
-        let div_type = runtime.eval("document.querySelector('div').nodeType")
-            .unwrap().to_number(&mut runtime.context).unwrap();
+        let div_type = runtime
+            .eval("document.querySelector('div').nodeType")
+            .unwrap()
+            .to_number(&mut runtime.context)
+            .unwrap();
         assert_eq!(div_type, 1.0, "element nodeType should be 1");
 
-        let doc_type = runtime.eval("document.nodeType")
-            .unwrap().to_number(&mut runtime.context).unwrap();
+        let doc_type = runtime
+            .eval("document.nodeType")
+            .unwrap()
+            .to_number(&mut runtime.context)
+            .unwrap();
         assert_eq!(doc_type, 9.0, "document nodeType should be 9");
     }
 
@@ -6725,22 +7536,44 @@ mod tests {
         let mut runtime = JsRuntime::with_document(doc).unwrap();
 
         // Shallow clone should copy attributes but not children
-        let shallow_children = runtime.eval(r#"
+        let shallow_children = runtime
+            .eval(
+                r#"
             const el = document.querySelector('div');
             const shallow = el.cloneNode(false);
             shallow.childNodes.length;
-        "#).unwrap().to_number(&mut runtime.context).unwrap();
-        assert_eq!(shallow_children, 0.0, "shallow clone should have no children");
+        "#,
+            )
+            .unwrap()
+            .to_number(&mut runtime.context)
+            .unwrap();
+        assert_eq!(
+            shallow_children, 0.0,
+            "shallow clone should have no children"
+        );
 
-        let shallow_class = runtime.eval("shallow.className")
-            .unwrap().as_string().unwrap().to_std_string_escaped();
-        assert_eq!(shallow_class, "original", "shallow clone should preserve attributes");
+        let shallow_class = runtime
+            .eval("shallow.className")
+            .unwrap()
+            .as_string()
+            .unwrap()
+            .to_std_string_escaped();
+        assert_eq!(
+            shallow_class, "original",
+            "shallow clone should preserve attributes"
+        );
 
         // Deep clone should copy children too
-        let deep_children = runtime.eval(r#"
+        let deep_children = runtime
+            .eval(
+                r#"
             const deep = el.cloneNode(true);
             deep.childNodes.length;
-        "#).unwrap().to_number(&mut runtime.context).unwrap();
+        "#,
+            )
+            .unwrap()
+            .to_number(&mut runtime.context)
+            .unwrap();
         assert_eq!(deep_children, 1.0, "deep clone should have children");
     }
 
@@ -6753,14 +7586,22 @@ mod tests {
 
         let mut runtime = JsRuntime::with_document(doc).unwrap();
 
-        let has = runtime.eval("document.querySelector('div').hasAttribute('data-value')")
-            .unwrap().as_boolean().unwrap();
+        let has = runtime
+            .eval("document.querySelector('div').hasAttribute('data-value')")
+            .unwrap()
+            .as_boolean()
+            .unwrap();
         assert!(has, "attribute should exist before removal");
 
-        runtime.eval("document.querySelector('div').removeAttribute('data-value')").unwrap();
+        runtime
+            .eval("document.querySelector('div').removeAttribute('data-value')")
+            .unwrap();
 
-        let has = runtime.eval("document.querySelector('div').hasAttribute('data-value')")
-            .unwrap().as_boolean().unwrap();
+        let has = runtime
+            .eval("document.querySelector('div').hasAttribute('data-value')")
+            .unwrap()
+            .as_boolean()
+            .unwrap();
         assert!(!has, "attribute should be removed");
     }
 
@@ -6769,8 +7610,11 @@ mod tests {
         let doc = NodeHandle::document();
         let mut runtime = JsRuntime::with_document(doc).unwrap();
 
-        let node_type = runtime.eval("document.createDocumentFragment().nodeType")
-            .unwrap().to_number(&mut runtime.context).unwrap();
+        let node_type = runtime
+            .eval("document.createDocumentFragment().nodeType")
+            .unwrap()
+            .to_number(&mut runtime.context)
+            .unwrap();
         assert_eq!(node_type, 11.0, "DocumentFragment nodeType should be 11");
     }
 
@@ -6781,18 +7625,28 @@ mod tests {
         let doc = TreeBuilder::parse(html).document();
 
         let mut runtime = JsRuntime::with_document(doc).unwrap();
-        runtime.eval(r#"
+        runtime
+            .eval(
+                r#"
             const frag = document.createDocumentFragment();
             frag.appendChild(document.createElement('p'));
             frag.appendChild(document.createElement('span'));
             document.getElementById('target').appendChild(frag);
-        "#).unwrap();
+        "#,
+            )
+            .unwrap();
 
-        let children = runtime.eval("document.getElementById('target').childNodes.length")
-            .unwrap().to_number(&mut runtime.context).unwrap();
+        let children = runtime
+            .eval("document.getElementById('target').childNodes.length")
+            .unwrap()
+            .to_number(&mut runtime.context)
+            .unwrap();
         // Fragment itself is appended (not its children individually) since we don't have
         // special fragment append semantics yet, but the fragment node holds the children.
-        assert!(children > 0.0, "target should have children after appending fragment");
+        assert!(
+            children > 0.0,
+            "target should have children after appending fragment"
+        );
     }
 
     #[test]
@@ -6802,17 +7656,33 @@ mod tests {
         let doc = TreeBuilder::parse(html).document();
 
         let mut runtime = JsRuntime::with_document(doc).unwrap();
-        let inner = runtime.eval("document.getElementById('box').innerHTML")
-            .unwrap().as_string().unwrap().to_std_string_escaped();
+        let inner = runtime
+            .eval("document.getElementById('box').innerHTML")
+            .unwrap()
+            .as_string()
+            .unwrap()
+            .to_std_string_escaped();
         assert!(inner.contains("<span"), "innerHTML should contain span tag");
         assert!(inner.contains("Hello"), "innerHTML should contain text");
 
         // Set and re-read
-        runtime.eval(r#"document.getElementById('box').innerHTML = '<b>Bold</b>'"#).unwrap();
-        let inner = runtime.eval("document.getElementById('box').innerHTML")
-            .unwrap().as_string().unwrap().to_std_string_escaped();
-        assert!(inner.contains("<b>"), "innerHTML should contain b tag after set");
-        assert!(inner.contains("Bold"), "innerHTML should contain text after set");
+        runtime
+            .eval(r#"document.getElementById('box').innerHTML = '<b>Bold</b>'"#)
+            .unwrap();
+        let inner = runtime
+            .eval("document.getElementById('box').innerHTML")
+            .unwrap()
+            .as_string()
+            .unwrap()
+            .to_std_string_escaped();
+        assert!(
+            inner.contains("<b>"),
+            "innerHTML should contain b tag after set"
+        );
+        assert!(
+            inner.contains("Bold"),
+            "innerHTML should contain text after set"
+        );
     }
 
     #[test]
@@ -6824,10 +7694,20 @@ mod tests {
         doc.append_child(div.clone());
 
         let mut runtime = JsRuntime::with_document(doc).unwrap();
-        let inner = runtime.eval("document.querySelector('div').innerHTML")
-            .unwrap().as_string().unwrap().to_std_string_escaped();
-        assert!(inner.contains("&lt;script&gt;"), "innerHTML should escape angle brackets in text: {inner}");
-        assert!(!inner.contains("<script>"), "innerHTML should not contain raw script tag");
+        let inner = runtime
+            .eval("document.querySelector('div').innerHTML")
+            .unwrap()
+            .as_string()
+            .unwrap()
+            .to_std_string_escaped();
+        assert!(
+            inner.contains("&lt;script&gt;"),
+            "innerHTML should escape angle brackets in text: {inner}"
+        );
+        assert!(
+            !inner.contains("<script>"),
+            "innerHTML should not contain raw script tag"
+        );
     }
 
     #[test]
@@ -6839,9 +7719,15 @@ mod tests {
         doc.append_child(div.clone());
 
         let mut runtime = JsRuntime::with_document(doc).unwrap();
-        runtime.eval("document.querySelector('div').textContent = null").unwrap();
-        let result = runtime.eval("document.querySelector('div').textContent")
-            .unwrap().as_string().unwrap().to_std_string_escaped();
+        runtime
+            .eval("document.querySelector('div').textContent = null")
+            .unwrap();
+        let result = runtime
+            .eval("document.querySelector('div').textContent")
+            .unwrap()
+            .as_string()
+            .unwrap()
+            .to_std_string_escaped();
         assert_eq!(result, "", "textContent = null should produce empty string");
     }
 
@@ -6854,9 +7740,15 @@ mod tests {
         doc.append_child(div.clone());
 
         let mut runtime = JsRuntime::with_document(doc).unwrap();
-        runtime.eval("document.querySelector('div').innerHTML = null").unwrap();
-        let result = runtime.eval("document.querySelector('div').innerHTML")
-            .unwrap().as_string().unwrap().to_std_string_escaped();
+        runtime
+            .eval("document.querySelector('div').innerHTML = null")
+            .unwrap();
+        let result = runtime
+            .eval("document.querySelector('div').innerHTML")
+            .unwrap()
+            .as_string()
+            .unwrap()
+            .to_std_string_escaped();
         assert_eq!(result, "", "innerHTML = null should produce empty string");
     }
 
@@ -6867,9 +7759,16 @@ mod tests {
         let doc = TreeBuilder::parse(html).document();
 
         let mut runtime = JsRuntime::with_document(doc).unwrap();
-        let result = runtime.eval("document.querySelector('div').textContent")
-            .unwrap().as_string().unwrap().to_std_string_escaped();
-        assert_eq!(result, "HelloWorld", "textContent should not include comment data");
+        let result = runtime
+            .eval("document.querySelector('div').textContent")
+            .unwrap()
+            .as_string()
+            .unwrap()
+            .to_std_string_escaped();
+        assert_eq!(
+            result, "HelloWorld",
+            "textContent should not include comment data"
+        );
     }
 
     #[test]
@@ -6879,20 +7778,28 @@ mod tests {
         let doc = TreeBuilder::parse(html).document();
 
         let mut runtime = JsRuntime::with_document(doc.clone()).unwrap();
-        runtime.eval(r#"
+        runtime
+            .eval(
+                r#"
             const frag = document.createDocumentFragment();
             const p = document.createElement('p');
             const span = document.createElement('span');
             frag.appendChild(p);
             frag.appendChild(span);
             document.getElementById('target').appendChild(frag);
-        "#).unwrap();
+        "#,
+            )
+            .unwrap();
 
         // Fragment's children should be directly under target
         let target = doc.query_selector("#target").unwrap();
         let children = target.child_nodes();
         let tags: Vec<_> = children.iter().filter_map(|c| c.tag_name()).collect();
-        assert_eq!(tags, vec!["p", "span"], "fragment children should be appended directly");
+        assert_eq!(
+            tags,
+            vec!["p", "span"],
+            "fragment children should be appended directly"
+        );
     }
 
     #[test]
@@ -6900,13 +7807,21 @@ mod tests {
         let doc = NodeHandle::document();
         let mut runtime = JsRuntime::with_document(doc).unwrap();
 
-        let is_null = runtime.eval("document.ownerDocument === null")
-            .unwrap().as_boolean().unwrap();
+        let is_null = runtime
+            .eval("document.ownerDocument === null")
+            .unwrap()
+            .as_boolean()
+            .unwrap();
         assert!(is_null, "document.ownerDocument should be null");
 
-        runtime.eval("const el = document.createElement('div')").unwrap();
-        let is_doc = runtime.eval("el.ownerDocument === document")
-            .unwrap().as_boolean().unwrap();
+        runtime
+            .eval("const el = document.createElement('div')")
+            .unwrap();
+        let is_doc = runtime
+            .eval("el.ownerDocument === document")
+            .unwrap()
+            .as_boolean()
+            .unwrap();
         assert!(is_doc, "element.ownerDocument should be document");
     }
 
@@ -6915,12 +7830,19 @@ mod tests {
         let doc = NodeHandle::document();
         let mut runtime = JsRuntime::with_document(doc).unwrap();
 
-        let is_undef = runtime.eval("document.createTextNode('x').tagName === undefined")
-            .unwrap().as_boolean().unwrap();
+        let is_undef = runtime
+            .eval("document.createTextNode('x').tagName === undefined")
+            .unwrap()
+            .as_boolean()
+            .unwrap();
         assert!(is_undef, "text node tagName should be undefined");
 
-        let tag = runtime.eval("document.createElement('div').tagName")
-            .unwrap().as_string().unwrap().to_std_string_escaped();
+        let tag = runtime
+            .eval("document.createElement('div').tagName")
+            .unwrap()
+            .as_string()
+            .unwrap()
+            .to_std_string_escaped();
         assert_eq!(tag, "DIV", "element tagName should be uppercase tag");
     }
 
@@ -6932,7 +7854,9 @@ mod tests {
 
         let mut runtime = JsRuntime::with_document(doc).unwrap();
         // Comment nodes are in the body's childNodes
-        let result = runtime.eval(r#"
+        let result = runtime
+            .eval(
+                r#"
             const body = document.body;
             let commentText = null;
             const nodes = body.childNodes;
@@ -6943,8 +7867,17 @@ mod tests {
                 }
             }
             commentText;
-        "#).unwrap().as_string().unwrap().to_std_string_escaped();
-        assert_eq!(result.trim(), "hello", "comment textContent should return its data");
+        "#,
+            )
+            .unwrap()
+            .as_string()
+            .unwrap()
+            .to_std_string_escaped();
+        assert_eq!(
+            result.trim(),
+            "hello",
+            "comment textContent should return its data"
+        );
     }
 
     #[test]
@@ -6966,17 +7899,28 @@ mod tests {
             prevented = evt.defaultPrevented;
         "#).unwrap();
 
-        let count = runtime.eval("count").unwrap()
-            .to_number(&mut runtime.context).unwrap();
-        assert_eq!(count, 1.0, "stopImmediatePropagation should prevent later listeners");
+        let count = runtime
+            .eval("count")
+            .unwrap()
+            .to_number(&mut runtime.context)
+            .unwrap();
+        assert_eq!(
+            count, 1.0,
+            "stopImmediatePropagation should prevent later listeners"
+        );
 
-        let prevented = runtime.eval("prevented").unwrap()
-            .as_boolean().unwrap();
+        let prevented = runtime.eval("prevented").unwrap().as_boolean().unwrap();
         assert!(prevented, "preventDefault should set defaultPrevented");
 
-        let dispatch_return = runtime.eval("dispatchReturn").unwrap()
-            .as_boolean().unwrap();
-        assert!(!dispatch_return, "dispatchEvent should return false when default prevented");
+        let dispatch_return = runtime
+            .eval("dispatchReturn")
+            .unwrap()
+            .as_boolean()
+            .unwrap();
+        assert!(
+            !dispatch_return,
+            "dispatchEvent should return false when default prevented"
+        );
     }
 
     #[test]
@@ -6990,7 +7934,9 @@ mod tests {
         body.append_child(div.clone());
 
         let mut runtime = JsRuntime::with_document(doc).unwrap();
-        runtime.eval(r#"
+        runtime
+            .eval(
+                r#"
             let count = 0;
             let parentFired = false;
             const el = document.querySelector("div");
@@ -6998,29 +7944,46 @@ mod tests {
             el.addEventListener("click", () => { count++; });
             document.querySelector("body").addEventListener("click", () => { parentFired = true; });
             el.dispatchEvent(new Event("click", { bubbles: true }));
-        "#).unwrap();
+        "#,
+            )
+            .unwrap();
 
-        let count = runtime.eval("count").unwrap()
-            .to_number(&mut runtime.context).unwrap();
-        assert_eq!(count, 2.0, "stopPropagation should NOT prevent other listeners on same node");
+        let count = runtime
+            .eval("count")
+            .unwrap()
+            .to_number(&mut runtime.context)
+            .unwrap();
+        assert_eq!(
+            count, 2.0,
+            "stopPropagation should NOT prevent other listeners on same node"
+        );
 
-        let parent_fired = runtime.eval("parentFired").unwrap()
-            .as_boolean().unwrap();
-        assert!(!parent_fired, "stopPropagation should prevent bubbling to parent");
+        let parent_fired = runtime.eval("parentFired").unwrap().as_boolean().unwrap();
+        assert!(
+            !parent_fired,
+            "stopPropagation should prevent bubbling to parent"
+        );
     }
 
     #[test]
     fn custom_event_has_detail() {
         let doc = NodeHandle::document();
         let mut runtime = JsRuntime::with_document(doc).unwrap();
-        runtime.eval(r#"
+        runtime
+            .eval(
+                r#"
             let detail = null;
             document.addEventListener("custom", (e) => { detail = e.detail; });
             document.dispatchEvent(new CustomEvent("custom", { detail: 42 }));
-        "#).unwrap();
+        "#,
+            )
+            .unwrap();
 
-        let detail = runtime.eval("detail").unwrap()
-            .to_number(&mut runtime.context).unwrap();
+        let detail = runtime
+            .eval("detail")
+            .unwrap()
+            .to_number(&mut runtime.context)
+            .unwrap();
         assert_eq!(detail, 42.0, "CustomEvent detail should be accessible");
     }
 
@@ -7032,13 +7995,23 @@ mod tests {
         doc.append_child(div.clone());
 
         let mut runtime = JsRuntime::with_document(doc).unwrap();
-        let result = runtime.eval("document.querySelector('div').dataset.foo")
-            .unwrap().as_string().unwrap().to_std_string_escaped();
+        let result = runtime
+            .eval("document.querySelector('div').dataset.foo")
+            .unwrap()
+            .as_string()
+            .unwrap()
+            .to_std_string_escaped();
         assert_eq!(result, "bar");
 
-        runtime.eval("document.querySelector('div').dataset.baz = 'qux'").unwrap();
+        runtime
+            .eval("document.querySelector('div').dataset.baz = 'qux'")
+            .unwrap();
         let attr = div.attributes().unwrap().get("data-baz").cloned();
-        assert_eq!(attr.as_deref(), Some("qux"), "dataset setter should set data- attribute");
+        assert_eq!(
+            attr.as_deref(),
+            Some("qux"),
+            "dataset setter should set data- attribute"
+        );
     }
 
     #[test]
@@ -7048,12 +8021,18 @@ mod tests {
         doc.append_child(div.clone());
 
         let mut runtime = JsRuntime::with_document(doc).unwrap();
-        let connected = runtime.eval("document.querySelector('div').isConnected")
-            .unwrap().as_boolean().unwrap();
+        let connected = runtime
+            .eval("document.querySelector('div').isConnected")
+            .unwrap()
+            .as_boolean()
+            .unwrap();
         assert!(connected, "element in document should be connected");
 
-        let disconnected = runtime.eval("document.createElement('span').isConnected")
-            .unwrap().as_boolean().unwrap();
+        let disconnected = runtime
+            .eval("document.createElement('span').isConnected")
+            .unwrap()
+            .as_boolean()
+            .unwrap();
         assert!(!disconnected, "orphan element should not be connected");
 
         let removed = runtime
@@ -7084,7 +8063,10 @@ mod tests {
             .unwrap()
             .as_boolean()
             .unwrap();
-        assert!(orphan_remove, "remove() should be a no-op for an orphan element");
+        assert!(
+            orphan_remove,
+            "remove() should be a no-op for an orphan element"
+        );
 
         let child_node_surface = runtime
             .eval(
@@ -7093,7 +8075,10 @@ mod tests {
             .unwrap()
             .as_boolean()
             .unwrap();
-        assert!(child_node_surface, "remove() should only be exposed on ChildNode implementations");
+        assert!(
+            child_node_surface,
+            "remove() should only be exposed on ChildNode implementations"
+        );
     }
 
     #[test]
@@ -7125,8 +8110,11 @@ mod tests {
         let doc = NodeHandle::document();
         let mut runtime = JsRuntime::with_document(doc).unwrap();
 
-        let node_type = runtime.eval("document.createComment('test').nodeType")
-            .unwrap().to_number(&mut runtime.context).unwrap();
+        let node_type = runtime
+            .eval("document.createComment('test').nodeType")
+            .unwrap()
+            .to_number(&mut runtime.context)
+            .unwrap();
         assert_eq!(node_type, 8.0, "comment nodeType should be 8");
     }
 
@@ -7135,8 +8123,12 @@ mod tests {
         let doc = NodeHandle::document();
         let mut runtime = JsRuntime::with_document(doc).unwrap();
 
-        let state = runtime.eval("document.readyState")
-            .unwrap().as_string().unwrap().to_std_string_escaped();
+        let state = runtime
+            .eval("document.readyState")
+            .unwrap()
+            .as_string()
+            .unwrap()
+            .to_std_string_escaped();
         assert_eq!(state, "complete");
     }
 
@@ -7184,7 +8176,13 @@ mod tests {
         );
         let errors = runtime.execute_document_scripts(None);
         assert!(errors.is_empty(), "unexpected errors: {errors:?}");
-        assert!(runtime.eval("moduleRan && moduleWasReady").unwrap().as_boolean().unwrap());
+        assert!(
+            runtime
+                .eval("moduleRan && moduleWasReady")
+                .unwrap()
+                .as_boolean()
+                .unwrap()
+        );
     }
 
     #[test]
@@ -7251,12 +8249,19 @@ mod tests {
         div.append_child(span.clone());
 
         let mut runtime = JsRuntime::with_document(doc).unwrap();
-        let matches = runtime.eval("document.querySelector('span').matches('span')")
-            .unwrap().as_boolean().unwrap();
+        let matches = runtime
+            .eval("document.querySelector('span').matches('span')")
+            .unwrap()
+            .as_boolean()
+            .unwrap();
         assert!(matches, "span should match 'span'");
 
-        let closest = runtime.eval("document.querySelector('span').closest('.wrapper').tagName")
-            .unwrap().as_string().unwrap().to_std_string_escaped();
+        let closest = runtime
+            .eval("document.querySelector('span').closest('.wrapper').tagName")
+            .unwrap()
+            .as_string()
+            .unwrap()
+            .to_std_string_escaped();
         assert_eq!(closest, "DIV");
     }
 
@@ -7264,12 +8269,20 @@ mod tests {
     fn local_storage_stub() {
         let doc = NodeHandle::document();
         let mut runtime = JsRuntime::with_document(doc).unwrap();
-        runtime.eval(r#"
+        runtime
+            .eval(
+                r#"
             localStorage.setItem("key", "value");
-        "#).unwrap();
+        "#,
+            )
+            .unwrap();
 
-        let result = runtime.eval("localStorage.getItem('key')")
-            .unwrap().as_string().unwrap().to_std_string_escaped();
+        let result = runtime
+            .eval("localStorage.getItem('key')")
+            .unwrap()
+            .as_string()
+            .unwrap()
+            .to_std_string_escaped();
         assert_eq!(result, "value");
 
         runtime.eval("localStorage.removeItem('key')").unwrap();
@@ -7281,8 +8294,11 @@ mod tests {
     fn match_media_returns_object() {
         let doc = NodeHandle::document();
         let mut runtime = JsRuntime::with_document(doc).unwrap();
-        let matches = runtime.eval("matchMedia('(min-width: 768px)').matches")
-            .unwrap().as_boolean().unwrap();
+        let matches = runtime
+            .eval("matchMedia('(min-width: 768px)').matches")
+            .unwrap()
+            .as_boolean()
+            .unwrap();
         assert!(!matches, "matchMedia stub should return matches=false");
     }
 
@@ -7307,20 +8323,26 @@ mod tests {
         doc.append_child(div.clone());
 
         let mut runtime = JsRuntime::with_document(doc).unwrap();
-        runtime.eval(r#"
+        runtime
+            .eval(
+                r#"
             const parent = document.querySelector('div');
             const oldChild = document.querySelector('#old');
             const newChild = document.createElement('b');
             newChild.id = 'new';
             parent.replaceChild(newChild, oldChild);
-        "#).unwrap();
+        "#,
+            )
+            .unwrap();
 
-        let found_new = runtime.eval("document.querySelector('#new') !== null")
-            .unwrap().as_boolean().unwrap();
+        let found_new = runtime
+            .eval("document.querySelector('#new') !== null")
+            .unwrap()
+            .as_boolean()
+            .unwrap();
         assert!(found_new, "new child should be in DOM");
 
-        let found_old = runtime.eval("document.querySelector('#old')")
-            .unwrap();
+        let found_old = runtime.eval("document.querySelector('#old')").unwrap();
         assert!(found_old.is_null(), "old child should be removed");
     }
 
@@ -7371,12 +8393,20 @@ mod tests {
             .unwrap();
 
         assert_eq!(runtime.run_timers(100, 1, 10), 1);
-        assert!(runtime.eval("dynamicScriptRan").unwrap().as_boolean().unwrap());
-        assert!(runtime
-            .eval("dynamicScriptLoaded")
-            .unwrap()
-            .as_boolean()
-            .unwrap());
+        assert!(
+            runtime
+                .eval("dynamicScriptRan")
+                .unwrap()
+                .as_boolean()
+                .unwrap()
+        );
+        assert!(
+            runtime
+                .eval("dynamicScriptLoaded")
+                .unwrap()
+                .as_boolean()
+                .unwrap()
+        );
     }
 
     #[test]
@@ -7440,9 +8470,15 @@ mod tests {
             .unwrap();
 
         runtime.tick(5).unwrap();
-        assert_eq!(runtime.eval("globalThis.count").unwrap().as_number(), Some(1.0));
+        assert_eq!(
+            runtime.eval("globalThis.count").unwrap().as_number(),
+            Some(1.0)
+        );
         runtime.tick(5).unwrap();
-        assert_eq!(runtime.eval("globalThis.count").unwrap().as_number(), Some(2.0));
+        assert_eq!(
+            runtime.eval("globalThis.count").unwrap().as_number(),
+            Some(2.0)
+        );
 
         runtime.eval("clearInterval(globalThis.tid);").unwrap();
         runtime.tick(5).unwrap();
@@ -7485,7 +8521,10 @@ mod tests {
             .unwrap();
 
         runtime.tick(4).unwrap();
-        assert_eq!(runtime.eval("globalThis.marker").unwrap().as_number(), Some(0.0));
+        assert_eq!(
+            runtime.eval("globalThis.marker").unwrap().as_number(),
+            Some(0.0)
+        );
         runtime.tick(1).unwrap();
         assert_eq!(
             runtime.eval("globalThis.marker").unwrap().as_number(),
@@ -7531,7 +8570,11 @@ mod tests {
         // Before pumping the timers, the DOM mutation has not happened yet.
         let target = doc.query_selector("#target").expect("find #target");
         assert_eq!(
-            target.attributes().unwrap_or_default().get("data-done").map(|s| s.as_str()),
+            target
+                .attributes()
+                .unwrap_or_default()
+                .get("data-done")
+                .map(|s| s.as_str()),
             None,
             "attribute must not be set before the timer fires"
         );
@@ -7556,7 +8599,10 @@ mod tests {
 
         // 100ms of virtual time at a 10ms step fires the interval exactly 10 times.
         let tasks = runtime.run_timers(100, 10, 10_000);
-        assert_eq!(tasks, 10, "virtual-time budget should bound interval firings");
+        assert_eq!(
+            tasks, 10,
+            "virtual-time budget should bound interval firings"
+        );
         assert_eq!(
             runtime.eval("globalThis.ticks").unwrap().as_number(),
             Some(10.0),
@@ -8516,8 +9562,8 @@ mod tests {
         use crate::html::TreeBuilder;
         // A form inside an iframe's contentDocument must not appear in the main
         // document's forms collection, and vice versa.
-        let doc = TreeBuilder::parse(r#"<html><body><iframe id="f"></iframe></body></html>"#)
-            .document();
+        let doc =
+            TreeBuilder::parse(r#"<html><body><iframe id="f"></iframe></body></html>"#).document();
         let mut runtime = JsRuntime::with_document(doc).unwrap();
         runtime
             .eval("globalThis.frame = document.getElementById('f');")
@@ -8657,7 +9703,10 @@ mod tests {
             .unwrap()
             .as_boolean()
             .unwrap();
-        assert!(matches, "String.prototype.substr must handle negative start");
+        assert!(
+            matches,
+            "String.prototype.substr must handle negative start"
+        );
     }
 
     #[test]
@@ -8669,7 +9718,10 @@ mod tests {
 
         // Effectively unlimited virtual time, but the task cap stops it.
         let tasks = runtime.run_timers(u64::MAX, 1, 50);
-        assert_eq!(tasks, 50, "task-count cap should bound total timer executions");
+        assert_eq!(
+            tasks, 50,
+            "task-count cap should bound total timer executions"
+        );
         assert_eq!(
             runtime.eval("globalThis.ticks").unwrap().as_number(),
             Some(50.0),
@@ -9021,7 +10073,10 @@ mod tests {
             .eval("globalThis.__t = document.getElementById('target');")
             .unwrap();
         assert_eq!(
-            eval_str(&mut runtime, "getComputedStyle(globalThis.__t, '').whiteSpace"),
+            eval_str(
+                &mut runtime,
+                "getComputedStyle(globalThis.__t, '').whiteSpace"
+            ),
             "pre-wrap",
             "the <style> rule applies before document.open()"
         );
@@ -9030,7 +10085,10 @@ mod tests {
         runtime.eval("document.open();").unwrap();
 
         assert_ne!(
-            eval_str(&mut runtime, "getComputedStyle(globalThis.__t, '').whiteSpace"),
+            eval_str(
+                &mut runtime,
+                "getComputedStyle(globalThis.__t, '').whiteSpace"
+            ),
             "pre-wrap",
             "after document.open() the removed <style> must no longer apply"
         );
@@ -9210,16 +10268,64 @@ mod tests {
         </style></head><body><div id="box"></div></body></html>"#;
         let mut runtime = runtime_from_html(html);
 
-        assert_eq!(eval_num(&mut runtime, "document.getElementById('box').getBoundingClientRect().width"), 100.0);
-        assert_eq!(eval_num(&mut runtime, "document.getElementById('box').getBoundingClientRect().height"), 50.0);
-        assert_eq!(eval_num(&mut runtime, "document.getElementById('box').getBoundingClientRect().left"), 0.0);
-        assert_eq!(eval_num(&mut runtime, "document.getElementById('box').getBoundingClientRect().top"), 0.0);
-        assert_eq!(eval_num(&mut runtime, "document.getElementById('box').getBoundingClientRect().right"), 100.0);
-        assert_eq!(eval_num(&mut runtime, "document.getElementById('box').getBoundingClientRect().bottom"), 50.0);
-        assert_eq!(eval_num(&mut runtime, "document.getElementById('box').offsetWidth"), 100.0);
-        assert_eq!(eval_num(&mut runtime, "document.getElementById('box').offsetHeight"), 50.0);
-        assert_eq!(eval_num(&mut runtime, "document.getElementById('box').offsetLeft"), 0.0);
-        assert_eq!(eval_num(&mut runtime, "document.getElementById('box').offsetTop"), 0.0);
+        assert_eq!(
+            eval_num(
+                &mut runtime,
+                "document.getElementById('box').getBoundingClientRect().width"
+            ),
+            100.0
+        );
+        assert_eq!(
+            eval_num(
+                &mut runtime,
+                "document.getElementById('box').getBoundingClientRect().height"
+            ),
+            50.0
+        );
+        assert_eq!(
+            eval_num(
+                &mut runtime,
+                "document.getElementById('box').getBoundingClientRect().left"
+            ),
+            0.0
+        );
+        assert_eq!(
+            eval_num(
+                &mut runtime,
+                "document.getElementById('box').getBoundingClientRect().top"
+            ),
+            0.0
+        );
+        assert_eq!(
+            eval_num(
+                &mut runtime,
+                "document.getElementById('box').getBoundingClientRect().right"
+            ),
+            100.0
+        );
+        assert_eq!(
+            eval_num(
+                &mut runtime,
+                "document.getElementById('box').getBoundingClientRect().bottom"
+            ),
+            50.0
+        );
+        assert_eq!(
+            eval_num(&mut runtime, "document.getElementById('box').offsetWidth"),
+            100.0
+        );
+        assert_eq!(
+            eval_num(&mut runtime, "document.getElementById('box').offsetHeight"),
+            50.0
+        );
+        assert_eq!(
+            eval_num(&mut runtime, "document.getElementById('box').offsetLeft"),
+            0.0
+        );
+        assert_eq!(
+            eval_num(&mut runtime, "document.getElementById('box').offsetTop"),
+            0.0
+        );
     }
 
     #[test]
@@ -9306,17 +10412,47 @@ mod tests {
         let mut runtime = runtime_from_html(html);
 
         // clientWidth/Height = content + padding (no border).
-        assert_eq!(eval_num(&mut runtime, "document.getElementById('box').clientWidth"), 120.0);
-        assert_eq!(eval_num(&mut runtime, "document.getElementById('box').clientHeight"), 70.0);
+        assert_eq!(
+            eval_num(&mut runtime, "document.getElementById('box').clientWidth"),
+            120.0
+        );
+        assert_eq!(
+            eval_num(&mut runtime, "document.getElementById('box').clientHeight"),
+            70.0
+        );
         // offsetWidth/Height = content + padding + border.
-        assert_eq!(eval_num(&mut runtime, "document.getElementById('box').offsetWidth"), 130.0);
-        assert_eq!(eval_num(&mut runtime, "document.getElementById('box').offsetHeight"), 80.0);
+        assert_eq!(
+            eval_num(&mut runtime, "document.getElementById('box').offsetWidth"),
+            130.0
+        );
+        assert_eq!(
+            eval_num(&mut runtime, "document.getElementById('box').offsetHeight"),
+            80.0
+        );
         // clientTop/Left = border widths.
-        assert_eq!(eval_num(&mut runtime, "document.getElementById('box').clientTop"), 5.0);
-        assert_eq!(eval_num(&mut runtime, "document.getElementById('box').clientLeft"), 5.0);
+        assert_eq!(
+            eval_num(&mut runtime, "document.getElementById('box').clientTop"),
+            5.0
+        );
+        assert_eq!(
+            eval_num(&mut runtime, "document.getElementById('box').clientLeft"),
+            5.0
+        );
         // Border box starts at the origin.
-        assert_eq!(eval_num(&mut runtime, "document.getElementById('box').getBoundingClientRect().left"), 0.0);
-        assert_eq!(eval_num(&mut runtime, "document.getElementById('box').getBoundingClientRect().top"), 0.0);
+        assert_eq!(
+            eval_num(
+                &mut runtime,
+                "document.getElementById('box').getBoundingClientRect().left"
+            ),
+            0.0
+        );
+        assert_eq!(
+            eval_num(
+                &mut runtime,
+                "document.getElementById('box').getBoundingClientRect().top"
+            ),
+            0.0
+        );
     }
 
     #[test]
@@ -9328,8 +10464,14 @@ mod tests {
         let mut runtime = runtime_from_html(html);
         runtime.set_viewport(800.0, 600.0);
 
-        assert_eq!(eval_num(&mut runtime, "document.documentElement.clientWidth"), 800.0);
-        assert_eq!(eval_num(&mut runtime, "document.documentElement.clientHeight"), 600.0);
+        assert_eq!(
+            eval_num(&mut runtime, "document.documentElement.clientWidth"),
+            800.0
+        );
+        assert_eq!(
+            eval_num(&mut runtime, "document.documentElement.clientHeight"),
+            600.0
+        );
         assert!(
             eval_num(&mut runtime, "document.documentElement.scrollHeight") > 600.0,
             "root scrollHeight must still expose the full document height"
@@ -9345,7 +10487,10 @@ mod tests {
         </style></head><body><div id="box"></div></body></html>"#;
         let mut runtime = runtime_from_html(html);
 
-        assert_eq!(eval_num(&mut runtime, "document.getElementById('box').offsetWidth"), 100.0);
+        assert_eq!(
+            eval_num(&mut runtime, "document.getElementById('box').offsetWidth"),
+            100.0
+        );
 
         // Adding the `wide` class matches a wider rule; the next metric query
         // must reflect the change via a forced reflow.
@@ -9371,7 +10516,10 @@ mod tests {
 
         // clientHeight is the (clipped) padding box; scrollHeight encloses the
         // taller child.
-        assert_eq!(eval_num(&mut runtime, "document.getElementById('box').clientHeight"), 50.0);
+        assert_eq!(
+            eval_num(&mut runtime, "document.getElementById('box').clientHeight"),
+            50.0
+        );
         assert_eq!(
             eval_num(&mut runtime, "document.getElementById('box').scrollHeight"),
             200.0,
@@ -9396,8 +10544,14 @@ mod tests {
         let mut runtime = runtime_from_html(html);
 
         // clientWidth/clientHeight stay at the padding box of `#box`.
-        assert_eq!(eval_num(&mut runtime, "document.getElementById('box').clientWidth"), 100.0);
-        assert_eq!(eval_num(&mut runtime, "document.getElementById('box').clientHeight"), 100.0);
+        assert_eq!(
+            eval_num(&mut runtime, "document.getElementById('box').clientWidth"),
+            100.0
+        );
+        assert_eq!(
+            eval_num(&mut runtime, "document.getElementById('box').clientHeight"),
+            100.0
+        );
         // scrollWidth/scrollHeight enclose the overflowing grandchild's border box.
         assert_eq!(
             eval_num(&mut runtime, "document.getElementById('box').scrollWidth"),
@@ -9468,22 +10622,34 @@ mod tests {
         let mut runtime = runtime_from_html(html);
 
         assert_eq!(
-            eval_num(&mut runtime, "document.getElementById('zero').getClientRects().length"),
+            eval_num(
+                &mut runtime,
+                "document.getElementById('zero').getClientRects().length"
+            ),
             1.0,
             "a zero-sized rendered box must still return one client rect"
         );
         assert_eq!(
-            eval_num(&mut runtime, "document.getElementById('gone').getClientRects().length"),
+            eval_num(
+                &mut runtime,
+                "document.getElementById('gone').getClientRects().length"
+            ),
             0.0,
             "an element that generates no box must return an empty client-rect list"
         );
         // The zero-sized box's single rect reports zero width/height.
         assert_eq!(
-            eval_num(&mut runtime, "document.getElementById('zero').getClientRects()[0].width"),
+            eval_num(
+                &mut runtime,
+                "document.getElementById('zero').getClientRects()[0].width"
+            ),
             0.0
         );
         assert_eq!(
-            eval_num(&mut runtime, "document.getElementById('zero').getClientRects()[0].height"),
+            eval_num(
+                &mut runtime,
+                "document.getElementById('zero').getClientRects()[0].height"
+            ),
             0.0
         );
     }
@@ -9600,11 +10766,7 @@ mod tests {
             .collect();
         assert_eq!(
             tags,
-            vec![
-                "script".to_string(),
-                "div".to_string(),
-                "p".to_string()
-            ],
+            vec!["script".to_string(), "div".to_string(), "p".to_string()],
             "written <div> must land between the <script> and the following <p>"
         );
     }
@@ -9650,7 +10812,10 @@ mod tests {
         assert!(errors.is_empty(), "no script errors expected: {errors:?}");
 
         assert_eq!(
-            runtime.eval("globalThis.__written_ran").unwrap().as_number(),
+            runtime
+                .eval("globalThis.__written_ran")
+                .unwrap()
+                .as_number(),
             Some(42.0),
             "a <script> written via document.write must run in global scope"
         );
@@ -9672,7 +10837,10 @@ mod tests {
         let body = doc.query_selector("body").expect("body");
         let has_newline_text = body.child_nodes().iter().any(|n| {
             n.node_type() == crate::dom::NodeType::Text
-                && n.data().as_deref().map(|d| d.contains('\n')).unwrap_or(false)
+                && n.data()
+                    .as_deref()
+                    .map(|d| d.contains('\n'))
+                    .unwrap_or(false)
         });
         assert!(has_newline_text, "writeln must append a newline text node");
     }
@@ -9740,7 +10908,11 @@ mod tests {
             .eval("document.getElementById('selectors').setAttribute('style', 'height: 100px')")
             .unwrap();
         assert_eq!(
-            selectors.attributes().unwrap_or_default().get("style").map(|s| s.as_str()),
+            selectors
+                .attributes()
+                .unwrap_or_default()
+                .get("style")
+                .map(|s| s.as_str()),
             Some("height: 100px"),
             "the written iframe must be mutable through the DOM API"
         );
@@ -9751,63 +10923,127 @@ mod tests {
     #[test]
     fn node_iterator_honors_mask_filter_exceptions_and_live_removal() {
         use crate::html::TreeBuilder;
-        let doc = TreeBuilder::parse("<html><body><div id='r'>a<i>b</i><b>c</b></div></body></html>").document();
+        let doc =
+            TreeBuilder::parse("<html><body><div id='r'>a<i>b</i><b>c</b></div></body></html>")
+                .document();
         let mut runtime = JsRuntime::with_document(doc).unwrap();
-        assert_eq!(eval_str(&mut runtime, r#"(()=>{
+        assert_eq!(
+            eval_str(
+                &mut runtime,
+                r#"(()=>{
           var r=document.getElementById('r'), seen=[];
           var it=document.createNodeIterator(r, NodeFilter.SHOW_ELEMENT, function(n) {
             if (n.tagName === 'I') return NodeFilter.FILTER_REJECT;
             return NodeFilter.FILTER_ACCEPT;
           });
           var n; while(n=it.nextNode()) seen.push(n.tagName);
-          return seen.join(',')})()"#), "DIV,B");
-        assert_eq!(eval_str(&mut runtime, r#"(()=>{
+          return seen.join(',')})()"#
+            ),
+            "DIV,B"
+        );
+        assert_eq!(
+            eval_str(
+                &mut runtime,
+                r#"(()=>{
           var r=document.getElementById('r');
           try { document.createNodeIterator(r, NodeFilter.SHOW_ALL, function(){throw 'filter-error'}).nextNode(); return 'miss' }
-          catch(e) { return String(e) }})()"#), "filter-error");
-        assert_eq!(eval_str(&mut runtime, r#"(()=>{
+          catch(e) { return String(e) }})()"#
+            ),
+            "filter-error"
+        );
+        assert_eq!(
+            eval_str(
+                &mut runtime,
+                r#"(()=>{
           var x=document.createElement('div'); var a=document.createElement('a'); var b=document.createElement('b');
           x.appendChild(a); x.appendChild(b); var live=document.createNodeIterator(x); live.nextNode(); live.nextNode();
-          x.removeChild(a); return live.nextNode().tagName})()"#), "B");
+          x.removeChild(a); return live.nextNode().tagName})()"#
+            ),
+            "B"
+        );
     }
 
     #[test]
     fn tree_walker_distinguishes_reject_from_skip_and_stays_in_root() {
         use crate::html::TreeBuilder;
-        let doc = TreeBuilder::parse("<html><body><div id='r'><section><i></i></section><b></b></div></body></html>").document();
+        let doc = TreeBuilder::parse(
+            "<html><body><div id='r'><section><i></i></section><b></b></div></body></html>",
+        )
+        .document();
         let mut runtime = JsRuntime::with_document(doc).unwrap();
-        assert_eq!(eval_str(&mut runtime, r#"(()=>{
+        assert_eq!(
+            eval_str(
+                &mut runtime,
+                r#"(()=>{
           var r=document.getElementById('r');
           var w=document.createTreeWalker(r, NodeFilter.SHOW_ELEMENT, function(n) {
             return n.tagName==='SECTION' ? NodeFilter.FILTER_SKIP : NodeFilter.FILTER_ACCEPT;
-          }); var out=[],n; while(n=w.nextNode()) out.push(n.tagName); return out.join(',')})()"#), "I,B");
-        assert_eq!(eval_str(&mut runtime, r#"(()=>{
+          }); var out=[],n; while(n=w.nextNode()) out.push(n.tagName); return out.join(',')})()"#
+            ),
+            "I,B"
+        );
+        assert_eq!(
+            eval_str(
+                &mut runtime,
+                r#"(()=>{
           var r=document.getElementById('r'); var w=document.createTreeWalker(r, NodeFilter.SHOW_ELEMENT, function(n) {
             return n.tagName==='SECTION' ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_ACCEPT;
-          }); var out=[],n; while(n=w.nextNode()) out.push(n.tagName); return out.join(',')})()"#), "B");
+          }); var out=[],n; while(n=w.nextNode()) out.push(n.tagName); return out.join(',')})()"#
+            ),
+            "B"
+        );
     }
 
     #[test]
     fn range_boundaries_clone_string_and_legacy_exception_are_explicit() {
         use crate::html::TreeBuilder;
-        let doc = TreeBuilder::parse("<html><body><p id='p'>Hello <em>World</em>!</p></body></html>").document();
+        let doc =
+            TreeBuilder::parse("<html><body><p id='p'>Hello <em>World</em>!</p></body></html>")
+                .document();
         let mut runtime = JsRuntime::with_document(doc).unwrap();
-        assert_eq!(eval_str(&mut runtime, r#"(()=>{var p=document.getElementById('p'),r=document.createRange();
+        assert_eq!(
+            eval_str(
+                &mut runtime,
+                r#"(()=>{var p=document.getElementById('p'),r=document.createRange();
           r.selectNodeContents(p); var c=r.cloneContents();
-          return [r.toString(),c.nodeType,c.childNodes.length,r.collapsed,r.commonAncestorContainer===p].join('|')})()"#), "Hello World!|11|3|false|true");
-        assert_eq!(eval_str(&mut runtime, r#"(()=>{var p=document.getElementById('p'),r=document.createRange();
-          r.setStart(p.firstChild,2); r.setEnd(p.firstChild,5); return [r.toString(),r.cloneRange().toString()].join('|')})()"#), "llo|llo");
-        assert_eq!(eval_str(&mut runtime, r#"(()=>{var r=document.createRange();try{r.setEndBefore(document);return 'none'}catch(e){return e.name+'|'+e.code+'|'+e.INVALID_NODE_TYPE_ERR}})()"#), "InvalidNodeTypeError|24|24");
+          return [r.toString(),c.nodeType,c.childNodes.length,r.collapsed,r.commonAncestorContainer===p].join('|')})()"#
+            ),
+            "Hello World!|11|3|false|true"
+        );
+        assert_eq!(
+            eval_str(
+                &mut runtime,
+                r#"(()=>{var p=document.getElementById('p'),r=document.createRange();
+          r.setStart(p.firstChild,2); r.setEnd(p.firstChild,5); return [r.toString(),r.cloneRange().toString()].join('|')})()"#
+            ),
+            "llo|llo"
+        );
+        assert_eq!(
+            eval_str(
+                &mut runtime,
+                r#"(()=>{var r=document.createRange();try{r.setEndBefore(document);return 'none'}catch(e){return e.name+'|'+e.code+'|'+e.INVALID_NODE_TYPE_ERR}})()"#
+            ),
+            "InvalidNodeTypeError|24|24"
+        );
     }
 
     #[test]
     fn range_extract_returns_fragment_with_partial_ancestor_clones() {
         use crate::html::TreeBuilder;
-        let doc = TreeBuilder::parse("<html><body><h1>Hello <em>Wonderful</em> Kitty</h1><p>How are you?</p></body></html>").document();
+        let doc = TreeBuilder::parse(
+            "<html><body><h1>Hello <em>Wonderful</em> Kitty</h1><p>How are you?</p></body></html>",
+        )
+        .document();
         let mut runtime = JsRuntime::with_document(doc).unwrap();
-        assert_eq!(eval_str(&mut runtime, r#"(()=>{var h=document.querySelector('h1'),em=document.querySelector('em'),p=document.querySelector('p');
+        assert_eq!(
+            eval_str(
+                &mut runtime,
+                r#"(()=>{var h=document.querySelector('h1'),em=document.querySelector('em'),p=document.querySelector('p');
           var r=document.createRange();r.setStart(em.firstChild,6);r.setEnd(p,0);var f=r.extractContents();
-          return [f.nodeType,f.childNodes.length,f.firstChild.tagName,f.firstChild.firstChild.tagName,f.firstChild.firstChild.textContent,f.firstChild.lastChild.textContent,f.lastChild.tagName,p.childNodes.length].join('|')})()"#), "11|2|H1|EM|ful| Kitty|P|1");
+          return [f.nodeType,f.childNodes.length,f.firstChild.tagName,f.firstChild.firstChild.tagName,f.firstChild.firstChild.textContent,f.firstChild.lastChild.textContent,f.lastChild.tagName,p.childNodes.length].join('|')})()"#
+            ),
+            "11|2|H1|EM|ful| Kitty|P|1"
+        );
     }
 
     #[test]
@@ -9815,9 +11051,15 @@ mod tests {
         use crate::html::TreeBuilder;
         let doc = TreeBuilder::parse("<html><body><p id='p'>12345</p></body></html>").document();
         let mut runtime = JsRuntime::with_document(doc).unwrap();
-        assert_eq!(eval_str(&mut runtime, r#"(()=>{var p=document.getElementById('p'),t1=p.firstChild,t2=document.createTextNode('ABCDE');p.appendChild(t2);
+        assert_eq!(
+            eval_str(
+                &mut runtime,
+                r#"(()=>{var p=document.getElementById('p'),t1=p.firstChild,t2=document.createTextNode('ABCDE');p.appendChild(t2);
           var r=document.createRange();r.setStart(t1,2);r.setEnd(t1,3);r.insertNode(t2);
-          return [p.childNodes.length,p.childNodes[0].data,p.childNodes[1].data,p.childNodes[2].data,r.toString()].join('|')})()"#), "3|12|ABCDE|345|ABCDE3");
+          return [p.childNodes.length,p.childNodes[0].data,p.childNodes[1].data,p.childNodes[2].data,r.toString()].join('|')})()"#
+            ),
+            "3|12|ABCDE|345|ABCDE3"
+        );
     }
 
     #[test]
@@ -9825,9 +11067,15 @@ mod tests {
         use crate::html::TreeBuilder;
         let doc = TreeBuilder::parse("<html><body><p id='p'>12345</p></body></html>").document();
         let mut runtime = JsRuntime::with_document(doc).unwrap();
-        assert_eq!(eval_str(&mut runtime, r#"(()=>{var p=document.getElementById('p'),b=document.body,r=document.createRange();
+        assert_eq!(
+            eval_str(
+                &mut runtime,
+                r#"(()=>{var p=document.getElementById('p'),b=document.body,r=document.createRange();
           r.setEnd(b,1);r.setStart(p.firstChild,2);b.removeChild(p);
-          return [r.collapsed,r.startContainer===b,r.startOffset,r.endContainer===b,r.endOffset].join('|')})()"#), "true|true|0|true|0");
+          return [r.collapsed,r.startContainer===b,r.startOffset,r.endContainer===b,r.endOffset].join('|')})()"#
+            ),
+            "true|true|0|true|0"
+        );
     }
 
     #[test]
@@ -9835,23 +11083,48 @@ mod tests {
         use crate::html::TreeBuilder;
         let doc = TreeBuilder::parse("<html><body></body></html>").document();
         let mut runtime = JsRuntime::with_document(doc).unwrap();
-        assert_eq!(eval_str(&mut runtime, r#"(()=>{var c=document.createComment('11111');document.appendChild(c);var r=document.createRange();r.selectNode(c);
-          try{r.surroundContents(document.createElement('a'));return 'none'}catch(e){document.removeChild(c);return e.name+'|'+e.code}})()"#), "HierarchyRequestError|3");
-        assert_eq!(eval_str(&mut runtime, r#"(()=>{var b=document.body,c1=document.createComment('111'),c2=document.createComment('222');b.appendChild(c1);b.appendChild(c2);
-          var r=document.createRange();r.setStart(c1,1);r.setEnd(c2,1);try{r.surroundContents(document.createElement('a'));return 'none'}catch(e){return e.name+'|'+e.code}})()"#), "InvalidStateError|11");
+        assert_eq!(
+            eval_str(
+                &mut runtime,
+                r#"(()=>{var c=document.createComment('11111');document.appendChild(c);var r=document.createRange();r.selectNode(c);
+          try{r.surroundContents(document.createElement('a'));return 'none'}catch(e){document.removeChild(c);return e.name+'|'+e.code}})()"#
+            ),
+            "HierarchyRequestError|3"
+        );
+        assert_eq!(
+            eval_str(
+                &mut runtime,
+                r#"(()=>{var b=document.body,c1=document.createComment('111'),c2=document.createComment('222');b.appendChild(c1);b.appendChild(c2);
+          var r=document.createRange();r.setStart(c1,1);r.setEnd(c2,1);try{r.surroundContents(document.createElement('a'));return 'none'}catch(e){return e.name+'|'+e.code}})()"#
+            ),
+            "InvalidStateError|11"
+        );
     }
 
     #[test]
     fn acid3_traversal_filter_mutation_and_tree_regrafting_regressions() {
         use crate::html::TreeBuilder;
-        let doc = TreeBuilder::parse("<html><head><title></title></head><body></body></html>").document();
+        let doc =
+            TreeBuilder::parse("<html><head><title></title></head><body></body></html>").document();
         let mut runtime = JsRuntime::with_document(doc).unwrap();
-        assert_eq!(eval_str(&mut runtime, r#"(()=>{var b=document.body;for(var k=0;k<5;k++){var s=document.createElement('section');s.title=k;b.appendChild(s)}
+        assert_eq!(
+            eval_str(
+                &mut runtime,
+                r#"(()=>{var b=document.body;for(var k=0;k<5;k++){var s=document.createElement('section');s.title=k;b.appendChild(s)}
           var count=0,it=document.createNodeIterator(b,0xffffffff,function(){if(count>3&&count<12)b.appendChild(b.firstChild);count++;return count%2===0?1:2});
-          var out=[],n;while(n=it.nextNode())out.push(n.title);return out.join(',')})()"#), "0,2,4,1,3,0,2");
-        assert_eq!(eval_str(&mut runtime, r#"(()=>{var b=document.body;b.textContent='';var p=document.createElement('p');b.appendChild(p);var w=document.createTreeWalker(b);
+          var out=[],n;while(n=it.nextNode())out.push(n.title);return out.join(',')})()"#
+            ),
+            "0,2,4,1,3,0,2"
+        );
+        assert_eq!(
+            eval_str(
+                &mut runtime,
+                r#"(()=>{var b=document.body;b.textContent='';var p=document.createElement('p');b.appendChild(p);var w=document.createTreeWalker(b);
           w.lastChild();w.previousNode();document.documentElement.removeChild(b);var a=w.lastChild()===p,z=w.nextNode()===null;
-          document.documentElement.appendChild(p);var title=w.previousNode();p.appendChild(b);return [a,z,title.tagName,w.nextNode()===p,w.nextNode()===b,w.previousNode()===null].join('|')})()"#), "true|true|TITLE|true|true|true");
+          document.documentElement.appendChild(p);var title=w.previousNode();p.appendChild(b);return [a,z,title.tagName,w.nextNode()===p,w.nextNode()===b,w.previousNode()===null].join('|')})()"#
+            ),
+            "true|true|TITLE|true|true|true"
+        );
     }
 
     // ── iframe / contentDocument (sub-browsing contexts) ────────────────────
@@ -9889,7 +11162,9 @@ mod tests {
     }
 
     fn pump_zero_delay_tasks(runtime: &mut JsRuntime) {
-        runtime.tick(0).expect("zero-delay resource tasks should run");
+        runtime
+            .tick(0)
+            .expect("zero-delay resource tasks should run");
     }
 
     #[test]
@@ -9960,7 +11235,9 @@ mod tests {
 
         assert_eq!(
             runtime
-                .eval("var htmlFrame = document.createElement('iframe'); htmlFrame.getSVGDocument()")
+                .eval(
+                    "var htmlFrame = document.createElement('iframe'); htmlFrame.getSVGDocument()"
+                )
                 .unwrap()
                 .is_null(),
             true,
@@ -9987,11 +11264,26 @@ mod tests {
             .unwrap();
         runtime.wire_inline_event_handlers().unwrap();
 
-        assert_eq!(runtime.eval("propertyLoads + attributeLoads + listenerLoads").unwrap().as_number(), Some(0.0));
+        assert_eq!(
+            runtime
+                .eval("propertyLoads + attributeLoads + listenerLoads")
+                .unwrap()
+                .as_number(),
+            Some(0.0)
+        );
         pump_zero_delay_tasks(&mut runtime);
-        assert_eq!(runtime.eval("propertyLoads").unwrap().as_number(), Some(1.0));
-        assert_eq!(runtime.eval("attributeLoads").unwrap().as_number(), Some(1.0));
-        assert_eq!(runtime.eval("listenerLoads").unwrap().as_number(), Some(1.0));
+        assert_eq!(
+            runtime.eval("propertyLoads").unwrap().as_number(),
+            Some(1.0)
+        );
+        assert_eq!(
+            runtime.eval("attributeLoads").unwrap().as_number(),
+            Some(1.0)
+        );
+        assert_eq!(
+            runtime.eval("listenerLoads").unwrap().as_number(),
+            Some(1.0)
+        );
     }
 
     #[test]
@@ -10223,8 +11515,10 @@ mod tests {
     #[test]
     fn connected_iframe_src_change_renavigates_and_fires_load() {
         use crate::html::TreeBuilder;
-        let port =
-            spawn_static_http_server("text/html", r#"<html><body><p id="x">frame</p></body></html>"#);
+        let port = spawn_static_http_server(
+            "text/html",
+            r#"<html><body><p id="x">frame</p></body></html>"#,
+        );
         let doc =
             TreeBuilder::parse(r#"<html><body><iframe id="f"></iframe></body></html>"#).document();
         let mut runtime = JsRuntime::with_document(doc).unwrap();
@@ -10315,8 +11609,7 @@ mod tests {
     #[test]
     fn dynamic_onload_attribute_runs_on_iframe_src_renavigation() {
         use crate::html::TreeBuilder;
-        let port =
-            spawn_static_http_server("text/html", r#"<html><body></body></html>"#);
+        let port = spawn_static_http_server("text/html", r#"<html><body></body></html>"#);
         let doc = TreeBuilder::parse(
             r#"<html><body><span id="target" class="hide"></span><iframe id="f"></iframe></body></html>"#,
         )
@@ -10334,8 +11627,11 @@ mod tests {
             .unwrap();
         // The class survives until the queued re-navigation load dispatches.
         assert_eq!(
-            eval_string_value(&mut runtime, "document.getElementById('target').getAttribute('class')")
-                .as_deref(),
+            eval_string_value(
+                &mut runtime,
+                "document.getElementById('target').getAttribute('class')"
+            )
+            .as_deref(),
             Some("hide")
         );
         pump_zero_delay_tasks(&mut runtime);
@@ -10385,7 +11681,9 @@ mod tests {
                    el.setAttribute('onclick', 'globalThis.clicks++');"#,
             )
             .unwrap();
-        runtime.eval("el.dispatchEvent(new Event('click'))").unwrap();
+        runtime
+            .eval("el.dispatchEvent(new Event('click'))")
+            .unwrap();
         assert_eq!(
             runtime.eval("clicks").unwrap().as_number(),
             Some(1.0),
@@ -10393,7 +11691,9 @@ mod tests {
         );
 
         runtime.eval("el.removeAttribute('onclick');").unwrap();
-        runtime.eval("el.dispatchEvent(new Event('click'))").unwrap();
+        runtime
+            .eval("el.dispatchEvent(new Event('click'))")
+            .unwrap();
         assert_eq!(
             runtime.eval("clicks").unwrap().as_number(),
             Some(1.0),
@@ -10408,7 +11708,9 @@ mod tests {
                    el.setAttribute('onclick', 'globalThis.clicks += 10');"#,
             )
             .unwrap();
-        runtime.eval("el.dispatchEvent(new Event('click'))").unwrap();
+        runtime
+            .eval("el.dispatchEvent(new Event('click'))")
+            .unwrap();
         assert_eq!(
             runtime.eval("clicks").unwrap().as_number(),
             Some(10.0),
@@ -10528,7 +11830,10 @@ mod tests {
     #[test]
     fn missing_title_reflects_as_empty_string() {
         let mut runtime = JsRuntime::new().unwrap();
-        assert_eq!(eval_string_value(&mut runtime, "document.createElement('p').title").as_deref(), Some(""));
+        assert_eq!(
+            eval_string_value(&mut runtime, "document.createElement('p').title").as_deref(),
+            Some("")
+        );
     }
 
     #[test]
@@ -10543,10 +11848,14 @@ mod tests {
         assert!(!is_html_mime_type(""));
     }
 
-
     #[test]
     fn is_xml_mime_type_matches_required_essences() {
-        for mime in ["text/xml", "application/xml;charset=utf-8", "image/svg+xml", "APPLICATION/XHTML+XML"] {
+        for mime in [
+            "text/xml",
+            "application/xml;charset=utf-8",
+            "image/svg+xml",
+            "APPLICATION/XHTML+XML",
+        ] {
             assert!(is_xml_mime_type(mime), "{mime}");
         }
         assert!(!is_xml_mime_type("text/html"));
@@ -10557,7 +11866,9 @@ mod tests {
         let doc = blank_html_document();
         assert_eq!(doc.node_type(), crate::dom::NodeType::Document);
         assert_eq!(
-            doc.query_selector("html").and_then(|h| h.tag_name()).as_deref(),
+            doc.query_selector("html")
+                .and_then(|h| h.tag_name())
+                .as_deref(),
             Some("html")
         );
         assert!(doc.query_selector("head").is_some(), "must have a head");
@@ -10656,7 +11967,9 @@ mod tests {
         );
         assert_eq!(
             runtime
-                .eval("document.getElementById('f').contentDocument.getElementsByTagName('p').length")
+                .eval(
+                    "document.getElementById('f').contentDocument.getElementsByTagName('p').length"
+                )
                 .unwrap()
                 .as_number(),
             Some(1.0)
@@ -10736,7 +12049,9 @@ mod tests {
             .unwrap();
         assert_eq!(
             runtime
-                .eval("document.getElementById('f').contentDocument.getElementsByTagName('i').length")
+                .eval(
+                    "document.getElementById('f').contentDocument.getElementsByTagName('i').length"
+                )
                 .unwrap()
                 .as_number(),
             Some(1.0),
@@ -10760,7 +12075,9 @@ mod tests {
 
         assert_eq!(
             runtime
-                .eval("document.getElementById('f').contentDocument.getElementsByTagName('p').length")
+                .eval(
+                    "document.getElementById('f').contentDocument.getElementsByTagName('p').length"
+                )
                 .unwrap()
                 .as_number(),
             Some(1.0)
@@ -10805,7 +12122,10 @@ mod tests {
     #[test]
     fn xhtml_scripts_run_only_for_well_formed_correct_namespace_documents() {
         use crate::html::TreeBuilder;
-        let port = spawn_static_http_server("text/xml", r#"<html xmlns='http://www.w3.org/1999/xhtml'><body><script>parent.xmlNotice=(parent.xmlNotice||0)+1</script></body></html>"#);
+        let port = spawn_static_http_server(
+            "text/xml",
+            r#"<html xmlns='http://www.w3.org/1999/xhtml'><body><script>parent.xmlNotice=(parent.xmlNotice||0)+1</script></body></html>"#,
+        );
         let doc = TreeBuilder::parse(&format!(
             r#"<html><body><iframe id="f" src="http://127.0.0.1:{port}/x.xhtml"></iframe></body></html>"#
         )).document();
@@ -10813,10 +12133,21 @@ mod tests {
         pump_zero_delay_tasks(&mut runtime);
         assert_eq!(runtime.eval("xmlNotice").unwrap().as_number(), Some(1.0));
 
-        let wrong_port = spawn_static_http_server("text/xml", r#"<html xmlns='http://www.w3.org/1999/xhtml#'><body><script>parent.wrongNotice=1</script></body></html>"#);
+        let wrong_port = spawn_static_http_server(
+            "text/xml",
+            r#"<html xmlns='http://www.w3.org/1999/xhtml#'><body><script>parent.wrongNotice=1</script></body></html>"#,
+        );
         runtime.eval(&format!("var f=document.getElementById('f');f.src='http://127.0.0.1:{wrong_port}/wrong.xhtml';document.body.removeChild(f);document.body.appendChild(f)")).unwrap();
         pump_zero_delay_tasks(&mut runtime);
-        assert_eq!(runtime.eval("typeof wrongNotice").unwrap().as_string().unwrap().to_std_string_escaped(), "undefined");
+        assert_eq!(
+            runtime
+                .eval("typeof wrongNotice")
+                .unwrap()
+                .as_string()
+                .unwrap()
+                .to_std_string_escaped(),
+            "undefined"
+        );
     }
 
     #[test]
@@ -10837,10 +12168,19 @@ mod tests {
 
         pump_zero_delay_tasks(&mut runtime);
 
-        assert_eq!(eval_string_value(&mut runtime, "globalThis.xhtmlAfterError").as_deref(), Some("ran"),
-            "a later XHTML script must run after an earlier script throws");
-        assert_eq!(runtime.eval("globalThis.xhtmlLoadCount").unwrap().as_number(), Some(1.0),
-            "the iframe load event must still dispatch exactly once");
+        assert_eq!(
+            eval_string_value(&mut runtime, "globalThis.xhtmlAfterError").as_deref(),
+            Some("ran"),
+            "a later XHTML script must run after an earlier script throws"
+        );
+        assert_eq!(
+            runtime
+                .eval("globalThis.xhtmlLoadCount")
+                .unwrap()
+                .as_number(),
+            Some(1.0),
+            "the iframe load event must still dispatch exactly once"
+        );
     }
 
     /// A resource served as `image/png` must never be parsed as HTML, even when
@@ -10848,7 +12188,8 @@ mod tests {
     #[test]
     fn iframe_png_src_is_not_parsed_as_html() {
         use crate::html::TreeBuilder;
-        let port = spawn_static_http_server("image/png", r#"<html><body><p>FAIL</p></body></html>"#);
+        let port =
+            spawn_static_http_server("image/png", r#"<html><body><p>FAIL</p></body></html>"#);
         let doc = TreeBuilder::parse(&format!(
             r#"<html><body><iframe id="f" src="http://127.0.0.1:{port}/empty.png"></iframe></body></html>"#
         ))
@@ -10856,7 +12197,9 @@ mod tests {
         let mut runtime = JsRuntime::with_document(doc).unwrap();
         assert_eq!(
             runtime
-                .eval("document.getElementById('f').contentDocument.getElementsByTagName('p').length")
+                .eval(
+                    "document.getElementById('f').contentDocument.getElementsByTagName('p').length"
+                )
                 .unwrap()
                 .as_number(),
             Some(0.0),
@@ -10880,7 +12223,9 @@ mod tests {
         let mut runtime = JsRuntime::with_document(doc).unwrap();
         assert_eq!(
             runtime
-                .eval("document.getElementById('f').contentDocument.getElementsByTagName('p').length")
+                .eval(
+                    "document.getElementById('f').contentDocument.getElementsByTagName('p').length"
+                )
                 .unwrap()
                 .as_number(),
             Some(0.0),
@@ -10892,12 +12237,18 @@ mod tests {
     #[test]
     fn iframe_relative_src_resolves_against_base_url() {
         use crate::html::TreeBuilder;
-        let port = spawn_static_http_server("text/html", r#"<html><body><p id="rel">yes</p></body></html>"#);
-        let doc =
-            TreeBuilder::parse(r#"<html><body><iframe id="f" src="sub.html"></iframe></body></html>"#)
-                .document();
+        let port = spawn_static_http_server(
+            "text/html",
+            r#"<html><body><p id="rel">yes</p></body></html>"#,
+        );
+        let doc = TreeBuilder::parse(
+            r#"<html><body><iframe id="f" src="sub.html"></iframe></body></html>"#,
+        )
+        .document();
         let mut runtime = JsRuntime::with_document(doc).unwrap();
-        let base: crate::http::Url = format!("http://127.0.0.1:{port}/index.html").parse().unwrap();
+        let base: crate::http::Url = format!("http://127.0.0.1:{port}/index.html")
+            .parse()
+            .unwrap();
         runtime.set_base_url(base);
 
         assert_eq!(
@@ -11025,8 +12376,10 @@ mod tests {
     #[test]
     fn iframe_changing_src_reloads_content_document() {
         use crate::html::TreeBuilder;
-        let port =
-            spawn_static_http_server("text/html", r#"<html><body><p id="x">loaded</p></body></html>"#);
+        let port = spawn_static_http_server(
+            "text/html",
+            r#"<html><body><p id="x">loaded</p></body></html>"#,
+        );
         let doc =
             TreeBuilder::parse(r#"<html><body><iframe id="f"></iframe></body></html>"#).document();
         let mut runtime = JsRuntime::with_document(doc).unwrap();
@@ -11034,7 +12387,9 @@ mod tests {
         // No src yet: an empty about:blank skeleton with no <p>.
         assert_eq!(
             runtime
-                .eval("document.getElementById('f').contentDocument.getElementsByTagName('p').length")
+                .eval(
+                    "document.getElementById('f').contentDocument.getElementsByTagName('p').length"
+                )
                 .unwrap()
                 .as_number(),
             Some(0.0)
@@ -11684,7 +13039,10 @@ mod tests {
 
         // #document children are exactly [doctype, html].
         assert_eq!(eval_num(&mut runtime, "doc.childNodes.length"), 2.0);
-        assert_eq!(eval_str(&mut runtime, "doc.firstChild.name.toUpperCase()"), "HTML");
+        assert_eq!(
+            eval_str(&mut runtime, "doc.firstChild.name.toUpperCase()"),
+            "HTML"
+        );
         assert_eq!(
             eval_str(&mut runtime, "doc.firstChild.publicId"),
             "-//W3C//DTD HTML 4.0 Transitional//EN"
@@ -11700,14 +13058,53 @@ mod tests {
         );
 
         // documentElement = [HEAD, BODY]; head = [TITLE]; body = [SPAN, SCRIPT].
-        assert_eq!(eval_num(&mut runtime, "doc.documentElement.childNodes.length"), 2.0);
-        assert_eq!(eval_str(&mut runtime, "doc.documentElement.firstChild.nodeName"), "HEAD");
-        assert_eq!(eval_num(&mut runtime, "doc.documentElement.firstChild.childNodes.length"), 1.0);
-        assert_eq!(eval_str(&mut runtime, "doc.documentElement.firstChild.firstChild.tagName"), "TITLE");
-        assert_eq!(eval_str(&mut runtime, "doc.documentElement.lastChild.nodeName"), "BODY");
-        assert_eq!(eval_num(&mut runtime, "doc.documentElement.lastChild.childNodes.length"), 2.0);
-        assert_eq!(eval_str(&mut runtime, "doc.documentElement.lastChild.firstChild.tagName"), "SPAN");
-        assert_eq!(eval_str(&mut runtime, "doc.documentElement.lastChild.lastChild.tagName"), "SCRIPT");
+        assert_eq!(
+            eval_num(&mut runtime, "doc.documentElement.childNodes.length"),
+            2.0
+        );
+        assert_eq!(
+            eval_str(&mut runtime, "doc.documentElement.firstChild.nodeName"),
+            "HEAD"
+        );
+        assert_eq!(
+            eval_num(
+                &mut runtime,
+                "doc.documentElement.firstChild.childNodes.length"
+            ),
+            1.0
+        );
+        assert_eq!(
+            eval_str(
+                &mut runtime,
+                "doc.documentElement.firstChild.firstChild.tagName"
+            ),
+            "TITLE"
+        );
+        assert_eq!(
+            eval_str(&mut runtime, "doc.documentElement.lastChild.nodeName"),
+            "BODY"
+        );
+        assert_eq!(
+            eval_num(
+                &mut runtime,
+                "doc.documentElement.lastChild.childNodes.length"
+            ),
+            2.0
+        );
+        assert_eq!(
+            eval_str(
+                &mut runtime,
+                "doc.documentElement.lastChild.firstChild.tagName"
+            ),
+            "SPAN"
+        );
+        assert_eq!(
+            eval_str(
+                &mut runtime,
+                "doc.documentElement.lastChild.lastChild.tagName"
+            ),
+            "SCRIPT"
+        );
     }
 
     /// Acid3 test 71 (second write): a PUBLIC + SYSTEM doctype exposes both
@@ -11737,10 +13134,25 @@ mod tests {
         );
 
         // body = [SPAN]; span = [SCRIPT] (the script is nested in the span).
-        assert_eq!(eval_num(&mut runtime, "doc.documentElement.lastChild.childNodes.length"), 1.0);
-        assert_eq!(eval_str(&mut runtime, "doc.documentElement.lastChild.firstChild.tagName"), "SPAN");
         assert_eq!(
-            eval_str(&mut runtime, "doc.documentElement.lastChild.firstChild.firstChild.tagName"),
+            eval_num(
+                &mut runtime,
+                "doc.documentElement.lastChild.childNodes.length"
+            ),
+            1.0
+        );
+        assert_eq!(
+            eval_str(
+                &mut runtime,
+                "doc.documentElement.lastChild.firstChild.tagName"
+            ),
+            "SPAN"
+        );
+        assert_eq!(
+            eval_str(
+                &mut runtime,
+                "doc.documentElement.lastChild.firstChild.firstChild.tagName"
+            ),
             "SCRIPT"
         );
     }
@@ -11907,7 +13319,10 @@ mod tests {
             .expect("written <script src> must exist in the DOM");
         assert_eq!(ext.tag_name().as_deref(), Some("script"));
         assert_eq!(
-            ext.attributes().unwrap_or_default().get("src").map(|s| s.as_str()),
+            ext.attributes()
+                .unwrap_or_default()
+                .get("src")
+                .map(|s| s.as_str()),
             Some("x.js")
         );
 
@@ -12109,9 +13524,8 @@ mod tests {
     /// behind Acid3's selectorTest (which styles the iframe contentDocument).
     #[test]
     fn get_computed_style_uses_iframe_subdocument_stylesheet() {
-        let mut runtime = runtime_from_html(
-            r#"<html><body><iframe id="f"></iframe></body></html>"#,
-        );
+        let mut runtime =
+            runtime_from_html(r#"<html><body><iframe id="f"></iframe></body></html>"#);
         runtime
             .eval(
                 r#"var d = document.getElementById('f').contentDocument;
@@ -12241,7 +13655,10 @@ mod tests {
             .unwrap();
 
         // Prime both resolvers.
-        assert_eq!(eval_str(&mut runtime, "getComputedStyle(t, '').zIndex"), "1");
+        assert_eq!(
+            eval_str(&mut runtime, "getComputedStyle(t, '').zIndex"),
+            "1"
+        );
         assert_eq!(
             eval_str(
                 &mut runtime,
@@ -12294,9 +13711,8 @@ mod tests {
     /// Acid3's selectorTest, which reads a node, then adds a rule, then re-reads.
     #[test]
     fn iframe_style_element_append_after_first_query_recomputes() {
-        let mut runtime = runtime_from_html(
-            r#"<html><body><iframe id="f"></iframe></body></html>"#,
-        );
+        let mut runtime =
+            runtime_from_html(r#"<html><body><iframe id="f"></iframe></body></html>"#);
         runtime
             .eval(
                 r#"var d = document.getElementById('f').contentDocument;
@@ -12331,9 +13747,8 @@ mod tests {
     /// resolver so the previously applied rule no longer matches.
     #[test]
     fn iframe_remove_style_recomputes_subdocument() {
-        let mut runtime = runtime_from_html(
-            r#"<html><body><iframe id="f"></iframe></body></html>"#,
-        );
+        let mut runtime =
+            runtime_from_html(r#"<html><body><iframe id="f"></iframe></body></html>"#);
         runtime
             .eval(
                 r#"var d = document.getElementById('f').contentDocument;
@@ -12344,7 +13759,10 @@ mod tests {
             )
             .unwrap();
 
-        assert_eq!(eval_str(&mut runtime, "getComputedStyle(t, '').zIndex"), "6");
+        assert_eq!(
+            eval_str(&mut runtime, "getComputedStyle(t, '').zIndex"),
+            "6"
+        );
 
         runtime.eval("s.parentNode.removeChild(s);").unwrap();
 
@@ -12360,9 +13778,8 @@ mod tests {
     /// present rule for the same id no longer matches.
     #[test]
     fn iframe_document_open_clears_cached_styles() {
-        let mut runtime = runtime_from_html(
-            r#"<html><body><iframe id="f"></iframe></body></html>"#,
-        );
+        let mut runtime =
+            runtime_from_html(r#"<html><body><iframe id="f"></iframe></body></html>"#);
         runtime
             .eval(
                 r#"var d = document.getElementById('f').contentDocument;
@@ -12372,7 +13789,10 @@ mod tests {
                    var o = d.createElement('div'); o.id = 'old'; d.body.appendChild(o);"#,
             )
             .unwrap();
-        assert_eq!(eval_str(&mut runtime, "getComputedStyle(o, '').zIndex"), "1");
+        assert_eq!(
+            eval_str(&mut runtime, "getComputedStyle(o, '').zIndex"),
+            "1"
+        );
 
         runtime
             .eval(
@@ -12492,7 +13912,10 @@ mod tests {
             ),
             "3"
         );
-        assert_eq!(eval_str(&mut runtime, "getComputedStyle(subT, '').zIndex"), "");
+        assert_eq!(
+            eval_str(&mut runtime, "getComputedStyle(subT, '').zIndex"),
+            ""
+        );
 
         // Move the <style> element from the main document into the sub-document.
         runtime
@@ -12519,9 +13942,8 @@ mod tests {
     /// width and has zero laid-out height.
     #[test]
     fn iframe_computed_style_uses_configured_viewport() {
-        let mut runtime = runtime_from_html(
-            r#"<html><body><iframe id="f"></iframe></body></html>"#,
-        );
+        let mut runtime =
+            runtime_from_html(r#"<html><body><iframe id="f"></iframe></body></html>"#);
         runtime.set_viewport(800.0, 600.0);
         runtime
             .eval(
@@ -12583,9 +14005,8 @@ mod tests {
     /// invalidates it, so a re-query resolves `vw`/`vh` against the new size.
     #[test]
     fn set_viewport_invalidates_existing_iframe_resolver() {
-        let mut runtime = runtime_from_html(
-            r#"<html><body><iframe id="f"></iframe></body></html>"#,
-        );
+        let mut runtime =
+            runtime_from_html(r#"<html><body><iframe id="f"></iframe></body></html>"#);
         runtime.set_viewport(800.0, 600.0);
         runtime
             .eval(
@@ -12596,7 +14017,10 @@ mod tests {
                    var t = d.createElement('div'); t.id = 't'; d.body.appendChild(t);"#,
             )
             .unwrap();
-        assert_eq!(eval_str(&mut runtime, "getComputedStyle(t, '').width"), "400px");
+        assert_eq!(
+            eval_str(&mut runtime, "getComputedStyle(t, '').width"),
+            "400px"
+        );
 
         // Widen the viewport: the cached sub-document resolver must rebuild.
         runtime.set_viewport(1000.0, 600.0);
@@ -12661,9 +14085,7 @@ mod tests {
         );
 
         runtime
-            .eval(
-                "document.getElementById('f').setAttribute('class', 'large')",
-            )
+            .eval("document.getElementById('f').setAttribute('class', 'large')")
             .unwrap();
         assert_eq!(
             eval_str(
@@ -12686,9 +14108,8 @@ mod tests {
     /// sub-document so the new rule is picked up on the next `getComputedStyle`.
     #[test]
     fn iframe_inner_html_style_injection_recomputes_subdocument() {
-        let mut runtime = runtime_from_html(
-            r#"<html><body><iframe id="f"></iframe></body></html>"#,
-        );
+        let mut runtime =
+            runtime_from_html(r#"<html><body><iframe id="f"></iframe></body></html>"#);
         runtime
             .eval(
                 r#"var d = document.getElementById('f').contentDocument;
@@ -12706,9 +14127,7 @@ mod tests {
 
         // Inject a `<style>` nested inside `host` through innerHTML.
         runtime
-            .eval(
-                r#"host.innerHTML = '<style>#t { z-index: 8; position: absolute; }</style>';"#,
-            )
+            .eval(r#"host.innerHTML = '<style>#t { z-index: 8; position: absolute; }</style>';"#)
             .unwrap();
 
         assert_eq!(
@@ -12723,9 +14142,8 @@ mod tests {
     /// re-matches on the next query.
     #[test]
     fn iframe_set_attribute_class_rematches_after_prime() {
-        let mut runtime = runtime_from_html(
-            r#"<html><body><iframe id="f"></iframe></body></html>"#,
-        );
+        let mut runtime =
+            runtime_from_html(r#"<html><body><iframe id="f"></iframe></body></html>"#);
         runtime
             .eval(
                 r#"var d = document.getElementById('f').contentDocument;
@@ -12762,9 +14180,8 @@ mod tests {
     /// so only already-supported selectors appear here.
     #[test]
     fn acid3_supported_selector_cases_resolve_in_iframe_document() {
-        let mut runtime = runtime_from_html(
-            r#"<html><body><iframe id="selectors"></iframe></body></html>"#,
-        );
+        let mut runtime =
+            runtime_from_html(r#"<html><body><iframe id="selectors"></iframe></body></html>"#);
         // Harness mirroring Acid3's getTestDocument()/selectorTest(): a fresh
         // sub-document with a `<style>` seeded with the universal baseline rule,
         // an `addRule` that appends `sel { z-index: N }`, and a `zi` reader that
@@ -12957,14 +14374,12 @@ mod tests {
         );
     }
 
-
     /// Deterministic iframe + computed-style regressions for the selectors
     /// added by issue 016-10 (Acid3 tests 34/37/38/39/40/43).
     #[test]
     fn acid3_extended_selector_cases_resolve_in_iframe_document() {
-        let mut runtime = runtime_from_html(
-            r#"<html><body><iframe id="selectors"></iframe></body></html>"#,
-        );
+        let mut runtime =
+            runtime_from_html(r#"<html><body><iframe id="selectors"></iframe></body></html>"#);
         let result = eval_str(
             &mut runtime,
             r#"
@@ -13014,9 +14429,6 @@ mod tests {
             })()
             "#,
         );
-        assert_eq!(
-            result,
-            "1,1,2;1,0,1;1,0;1,1,1,2,0;1,2,0,3,2,0;1,4,3,2,0"
-        );
+        assert_eq!(result, "1,1,2;1,0,1;1,0;1,1,1,2,0;1,2,0,3,2,0;1,4,3,2,0");
     }
 }

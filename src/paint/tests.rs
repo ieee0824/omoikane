@@ -5,7 +5,8 @@ use crate::css::{Origin, StyleResolver, parse_stylesheet};
 use crate::dom::NodeHandle;
 use crate::html::TreeBuilder;
 use crate::layout::{
-    BoxDimensions, FontMetrics, FragmentStyle, InlineFragment, LineBox, Rect, VerticalAlign, layout_tree,
+    BoxDimensions, FontMetrics, FragmentStyle, InlineFragment, LineBox, Rect, VerticalAlign,
+    layout_tree,
 };
 use crate::paint::*;
 
@@ -62,7 +63,10 @@ fn load_cjk_fallback_test_fonts() -> Option<Vec<std::sync::Arc<crate::font::Font
             continue;
         };
         if font.has_glyph('日') {
-            return Some(vec![std::sync::Arc::new(primary), std::sync::Arc::new(font)]);
+            return Some(vec![
+                std::sync::Arc::new(primary),
+                std::sync::Arc::new(font),
+            ]);
         }
     }
 
@@ -410,10 +414,7 @@ fn img_width_and_height_attributes_define_intrinsic_size() {
     let document = TreeBuilder::parse(&html).document();
     let mut resolver = StyleResolver::new();
     for stylesheet in extract_author_stylesheets(&document, None).unwrap() {
-        resolver.add_stylesheet(
-            Origin::Author,
-            parse_stylesheet_forgiving(&stylesheet),
-        );
+        resolver.add_stylesheet(Origin::Author, parse_stylesheet_forgiving(&stylesheet));
     }
     let layout = layout_tree(
         &document,
@@ -474,10 +475,7 @@ fn img_single_dimension_attribute_preserves_aspect_ratio() {
     let document = TreeBuilder::parse(&html).document();
     let mut resolver = StyleResolver::new();
     for stylesheet in extract_author_stylesheets(&document, None).unwrap() {
-        resolver.add_stylesheet(
-            Origin::Author,
-            parse_stylesheet_forgiving(&stylesheet),
-        );
+        resolver.add_stylesheet(Origin::Author, parse_stylesheet_forgiving(&stylesheet));
     }
     let layout = layout_tree(
         &document,
@@ -530,10 +528,7 @@ fn img_uses_alt_text_when_image_fetch_fails() {
     let document = TreeBuilder::parse(&html).document();
     let mut resolver = StyleResolver::new();
     for stylesheet in extract_author_stylesheets(&document, None).unwrap() {
-        resolver.add_stylesheet(
-            Origin::Author,
-            parse_stylesheet_forgiving(&stylesheet),
-        );
+        resolver.add_stylesheet(Origin::Author, parse_stylesheet_forgiving(&stylesheet));
     }
     let layout = layout_tree(
         &document,
@@ -801,10 +796,7 @@ fn nested_object_fallback_preserves_fixed_background_on_inline_image_fragment() 
     let document = TreeBuilder::parse(html).document();
     let mut resolver = StyleResolver::new();
     for stylesheet in extract_author_stylesheets(&document, None).unwrap() {
-        resolver.add_stylesheet(
-            Origin::Author,
-            parse_stylesheet_forgiving(&stylesheet),
-        );
+        resolver.add_stylesheet(Origin::Author, parse_stylesheet_forgiving(&stylesheet));
     }
     let layout = crate::layout::layout_tree(
         &document,
@@ -1220,6 +1212,15 @@ fn encodes_canvas_as_png() {
 }
 
 #[test]
+fn composites_transparent_canvas_over_opaque_background() {
+    let mut canvas = Canvas::new(2, 1);
+    canvas.set_pixel(1, 0, Color::rgba(255, 0, 0, 128));
+    canvas.composite_over(Color::rgb(255, 255, 255));
+    assert_eq!(canvas.pixel(0, 0), Some(Color::rgb(255, 255, 255)));
+    assert_eq!(canvas.pixel(1, 0), Some(Color::rgb(255, 127, 127)));
+}
+
+#[test]
 fn decodes_png_images_into_rgba_pixels() {
     let mut canvas = Canvas::new(2, 1);
     canvas.fill_rect(
@@ -1465,10 +1466,7 @@ fn official_reference_fixture_only_lays_out_hello_world_text() {
 
     let mut resolver = StyleResolver::new();
     for stylesheet in extract_author_stylesheets(&document, None).unwrap() {
-        resolver.add_stylesheet(
-            Origin::Author,
-            parse_stylesheet_forgiving(&stylesheet),
-        );
+        resolver.add_stylesheet(Origin::Author, parse_stylesheet_forgiving(&stylesheet));
     }
 
     let layout = crate::layout::layout_tree(
@@ -1494,10 +1492,7 @@ fn acid2_eyes_layout_contains_expected_boxes() {
     let acid2_document = TreeBuilder::parse(&acid2_html).document();
     let mut resolver = StyleResolver::new();
     for stylesheet in extract_author_stylesheets(&acid2_document, None).unwrap() {
-        resolver.add_stylesheet(
-            Origin::Author,
-            parse_stylesheet_forgiving(&stylesheet),
-        );
+        resolver.add_stylesheet(Origin::Author, parse_stylesheet_forgiving(&stylesheet));
     }
 
     let layout = crate::layout::layout_tree(
@@ -1554,10 +1549,7 @@ fn acid2_eyes_inline_layer_stays_at_same_origin_as_float_and_block_layers() {
     let acid2_document = TreeBuilder::parse(&acid2_html).document();
     let mut resolver = StyleResolver::new();
     for stylesheet in extract_author_stylesheets(&acid2_document, None).unwrap() {
-        resolver.add_stylesheet(
-            Origin::Author,
-            parse_stylesheet_forgiving(&stylesheet),
-        );
+        resolver.add_stylesheet(Origin::Author, parse_stylesheet_forgiving(&stylesheet));
     }
 
     let layout = crate::layout::layout_tree(
@@ -1617,10 +1609,7 @@ fn acid2_eyes_block_layer_stays_overlapping_float_layer() {
     let acid2_document = TreeBuilder::parse(&acid2_html).document();
     let mut resolver = StyleResolver::new();
     for stylesheet in extract_author_stylesheets(&acid2_document, None).unwrap() {
-        resolver.add_stylesheet(
-            Origin::Author,
-            parse_stylesheet_forgiving(&stylesheet),
-        );
+        resolver.add_stylesheet(Origin::Author, parse_stylesheet_forgiving(&stylesheet));
     }
 
     let layout = crate::layout::layout_tree(
@@ -1652,10 +1641,7 @@ fn acid2_smile_layout_contains_positioned_and_floated_descendants() {
     let acid2_document = TreeBuilder::parse(&acid2_html).document();
     let mut resolver = StyleResolver::new();
     for stylesheet in extract_author_stylesheets(&acid2_document, None).unwrap() {
-        resolver.add_stylesheet(
-            Origin::Author,
-            parse_stylesheet_forgiving(&stylesheet),
-        );
+        resolver.add_stylesheet(Origin::Author, parse_stylesheet_forgiving(&stylesheet));
     }
 
     let layout = crate::layout::layout_tree(
@@ -1741,10 +1727,7 @@ fn acid2_lower_face_boxes_keep_expected_vertical_order() {
     let acid2_document = TreeBuilder::parse(&acid2_html).document();
     let mut resolver = StyleResolver::new();
     for stylesheet in extract_author_stylesheets(&acid2_document, None).unwrap() {
-        resolver.add_stylesheet(
-            Origin::Author,
-            parse_stylesheet_forgiving(&stylesheet),
-        );
+        resolver.add_stylesheet(Origin::Author, parse_stylesheet_forgiving(&stylesheet));
     }
 
     let layout = crate::layout::layout_tree(
@@ -1792,10 +1775,7 @@ fn acid2_empty_block_creates_large_gap_before_smile() {
     let acid2_document = TreeBuilder::parse(&acid2_html).document();
     let mut resolver = StyleResolver::new();
     for stylesheet in extract_author_stylesheets(&acid2_document, None).unwrap() {
-        resolver.add_stylesheet(
-            Origin::Author,
-            parse_stylesheet_forgiving(&stylesheet),
-        );
+        resolver.add_stylesheet(Origin::Author, parse_stylesheet_forgiving(&stylesheet));
     }
 
     let layout = crate::layout::layout_tree(
@@ -1833,10 +1813,7 @@ fn acid2_empty_block_starts_shortly_after_nose() {
     let acid2_document = TreeBuilder::parse(&acid2_html).document();
     let mut resolver = StyleResolver::new();
     for stylesheet in extract_author_stylesheets(&acid2_document, None).unwrap() {
-        resolver.add_stylesheet(
-            Origin::Author,
-            parse_stylesheet_forgiving(&stylesheet),
-        );
+        resolver.add_stylesheet(Origin::Author, parse_stylesheet_forgiving(&stylesheet));
     }
 
     let layout = crate::layout::layout_tree(
@@ -1874,10 +1851,7 @@ fn acid2_second_line_absolute_shrink_wraps_float() {
     let acid2_document = TreeBuilder::parse(&acid2_html).document();
     let mut resolver = StyleResolver::new();
     for stylesheet in extract_author_stylesheets(&acid2_document, None).unwrap() {
-        resolver.add_stylesheet(
-            Origin::Author,
-            parse_stylesheet_forgiving(&stylesheet),
-        );
+        resolver.add_stylesheet(Origin::Author, parse_stylesheet_forgiving(&stylesheet));
     }
 
     let layout = crate::layout::layout_tree(
@@ -1911,10 +1885,7 @@ fn acid2_smile_nested_float_keeps_block_width_source_descendant() {
     let acid2_document = TreeBuilder::parse(&acid2_html).document();
     let mut resolver = StyleResolver::new();
     for stylesheet in extract_author_stylesheets(&acid2_document, None).unwrap() {
-        resolver.add_stylesheet(
-            Origin::Author,
-            parse_stylesheet_forgiving(&stylesheet),
-        );
+        resolver.add_stylesheet(Origin::Author, parse_stylesheet_forgiving(&stylesheet));
     }
 
     let layout = crate::layout::layout_tree(
@@ -1960,10 +1931,7 @@ fn acid2_smile_nested_float_uses_side_borders_only_on_span_and_top_bottom_on_em(
     let document = TreeBuilder::parse(&acid2_html).document();
     let mut resolver = StyleResolver::new();
     for stylesheet in extract_author_stylesheets(&document, None).unwrap() {
-        resolver.add_stylesheet(
-            Origin::Author,
-            parse_stylesheet_forgiving(&stylesheet),
-        );
+        resolver.add_stylesheet(Origin::Author, parse_stylesheet_forgiving(&stylesheet));
     }
 
     let span = find_first_descendant_by_tag(&document, "span").unwrap();
@@ -2122,10 +2090,7 @@ fn acid2_link_stylesheet_overrides_picture_background_to_none() {
 
     let mut resolver = StyleResolver::new();
     for stylesheet in &stylesheets {
-        resolver.add_stylesheet(
-            Origin::Author,
-            parse_stylesheet_forgiving(stylesheet),
-        );
+        resolver.add_stylesheet(Origin::Author, parse_stylesheet_forgiving(stylesheet));
     }
     let picture = find_first_descendant_by_class(&document, "picture").unwrap();
     let style = resolver.computed_style(&picture);
@@ -2150,10 +2115,7 @@ fn acid2_chin_negative_margin_pulls_it_toward_smile() {
     let acid2_document = TreeBuilder::parse(&acid2_html).document();
     let mut resolver = StyleResolver::new();
     for stylesheet in extract_author_stylesheets(&acid2_document, None).unwrap() {
-        resolver.add_stylesheet(
-            Origin::Author,
-            parse_stylesheet_forgiving(&stylesheet),
-        );
+        resolver.add_stylesheet(Origin::Author, parse_stylesheet_forgiving(&stylesheet));
     }
     let layout = crate::layout::layout_tree(
         &acid2_document,
@@ -2196,10 +2158,7 @@ fn acid2_chin_height_includes_strut_from_parent_line_height() {
     let acid2_document = TreeBuilder::parse(&acid2_html).document();
     let mut resolver = StyleResolver::new();
     for stylesheet in extract_author_stylesheets(&acid2_document, None).unwrap() {
-        resolver.add_stylesheet(
-            Origin::Author,
-            parse_stylesheet_forgiving(&stylesheet),
-        );
+        resolver.add_stylesheet(Origin::Author, parse_stylesheet_forgiving(&stylesheet));
     }
     let layout = crate::layout::layout_tree(
         &acid2_document,
@@ -2251,10 +2210,7 @@ fn acid2_ul_table_cells_cover_red_background() {
     let acid2_document = TreeBuilder::parse(&acid2_html).document();
     let mut resolver = StyleResolver::new();
     for stylesheet in extract_author_stylesheets(&acid2_document, None).unwrap() {
-        resolver.add_stylesheet(
-            Origin::Author,
-            parse_stylesheet_forgiving(&stylesheet),
-        );
+        resolver.add_stylesheet(Origin::Author, parse_stylesheet_forgiving(&stylesheet));
     }
     let layout = crate::layout::layout_tree(
         &acid2_document,
@@ -2288,10 +2244,7 @@ fn acid2_eyes_positioned_above_nose() {
     let acid2_document = TreeBuilder::parse(&acid2_html).document();
     let mut resolver = StyleResolver::new();
     for stylesheet in extract_author_stylesheets(&acid2_document, None).unwrap() {
-        resolver.add_stylesheet(
-            Origin::Author,
-            parse_stylesheet_forgiving(&stylesheet),
-        );
+        resolver.add_stylesheet(Origin::Author, parse_stylesheet_forgiving(&stylesheet));
     }
     let layout = crate::layout::layout_tree(
         &acid2_document,
@@ -2332,10 +2285,7 @@ fn acid2_p_bad_has_margin_top_from_adjacent_sibling_selector() {
     let document = TreeBuilder::parse(&acid2_html).document();
     let mut resolver = StyleResolver::new();
     for stylesheet in extract_author_stylesheets(&document, None).unwrap() {
-        resolver.add_stylesheet(
-            Origin::Author,
-            parse_stylesheet_forgiving(&stylesheet),
-        );
+        resolver.add_stylesheet(Origin::Author, parse_stylesheet_forgiving(&stylesheet));
     }
     let p_bad = find_first_descendant_by_class(&document, "bad").unwrap();
     let style = resolver.computed_style(&p_bad);
@@ -2356,10 +2306,7 @@ fn acid2_parser_has_yellow_background_and_correct_size() {
     let document = TreeBuilder::parse(&acid2_html).document();
     let mut resolver = StyleResolver::new();
     for stylesheet in extract_author_stylesheets(&document, None).unwrap() {
-        resolver.add_stylesheet(
-            Origin::Author,
-            parse_stylesheet_forgiving(&stylesheet),
-        );
+        resolver.add_stylesheet(Origin::Author, parse_stylesheet_forgiving(&stylesheet));
     }
     let parser = find_first_descendant_by_class(&document, "parser").unwrap();
     let style = resolver.computed_style(&parser);
@@ -2394,10 +2341,7 @@ fn acid2_forehead_background_image_decodes_to_yellow_pixel() {
     let document = TreeBuilder::parse(&acid2_html).document();
     let mut resolver = StyleResolver::new();
     for stylesheet in extract_author_stylesheets(&document, None).unwrap() {
-        resolver.add_stylesheet(
-            Origin::Author,
-            parse_stylesheet_forgiving(&stylesheet),
-        );
+        resolver.add_stylesheet(Origin::Author, parse_stylesheet_forgiving(&stylesheet));
     }
     let forehead = find_first_descendant_by_class(&document, "forehead").unwrap();
     let style = resolver.computed_style(&forehead);
@@ -2420,10 +2364,7 @@ fn acid2_nose_inner_div_has_before_and_after_pseudo_with_border() {
     let document = TreeBuilder::parse(&acid2_html).document();
     let mut resolver = StyleResolver::new();
     for stylesheet in extract_author_stylesheets(&document, None).unwrap() {
-        resolver.add_stylesheet(
-            Origin::Author,
-            parse_stylesheet_forgiving(&stylesheet),
-        );
+        resolver.add_stylesheet(Origin::Author, parse_stylesheet_forgiving(&stylesheet));
     }
     // .nose > div > div is the inner red square
     let nose = find_first_descendant_by_class(&document, "nose").unwrap();
@@ -2535,10 +2476,7 @@ fn acid2_fixture_matches_official_reference_rendering() {
     let acid2_document = TreeBuilder::parse(&acid2_html).document();
     let mut acid2_resolver = StyleResolver::new();
     for stylesheet in extract_author_stylesheets(&acid2_document, None).unwrap() {
-        acid2_resolver.add_stylesheet(
-            Origin::Author,
-            parse_stylesheet_forgiving(&stylesheet),
-        );
+        acid2_resolver.add_stylesheet(Origin::Author, parse_stylesheet_forgiving(&stylesheet));
     }
     let mut acid2_layout = crate::layout::layout_tree(
         &acid2_document,
@@ -2557,10 +2495,7 @@ fn acid2_fixture_matches_official_reference_rendering() {
     materialize_local_assets(&reference_document, &acid2_fixture_dir()).unwrap();
     let mut reference_resolver = StyleResolver::new();
     for stylesheet in extract_author_stylesheets(&reference_document, None).unwrap() {
-        reference_resolver.add_stylesheet(
-            Origin::Author,
-            parse_stylesheet_forgiving(&stylesheet),
-        );
+        reference_resolver.add_stylesheet(Origin::Author, parse_stylesheet_forgiving(&stylesheet));
     }
     let reference_layout = crate::layout::layout_tree(
         &reference_document,
@@ -2715,7 +2650,10 @@ fn renders_despite_unparseable_css() {
         },
     );
     // パース不能な CSS があっても Result::Ok が返る
-    assert!(canvas.is_ok(), "render_document should succeed even if one <style> block is unparseable");
+    assert!(
+        canvas.is_ok(),
+        "render_document should succeed even if one <style> block is unparseable"
+    );
     // パース可能なCSSは適用されている
     let canvas = canvas.unwrap();
     assert_eq!(canvas.pixel(0, 0), Some(Color::rgb(255, 0, 0)));
@@ -3633,7 +3571,9 @@ fn stylesheet_url_rejects_private_cross_origin_references() {
     ] {
         assert!(
             crate::paint::stylesheet::resolve_relative_stylesheet_url(
-                &document, href, Some(&document),
+                &document,
+                href,
+                Some(&document),
             )
             .is_none(),
             "must reject unsafe cross-origin stylesheet {href}"
@@ -3736,10 +3676,7 @@ fn debug_hello_world_layout() {
 
     let mut resolver = StyleResolver::new();
     for stylesheet in extract_author_stylesheets(&document, None).unwrap() {
-        resolver.add_stylesheet(
-            Origin::Author,
-            parse_stylesheet_forgiving(&stylesheet),
-        );
+        resolver.add_stylesheet(Origin::Author, parse_stylesheet_forgiving(&stylesheet));
     }
 
     let layout = crate::layout::layout_tree(
@@ -3797,10 +3734,7 @@ fn debug_acid2_hello_world_layout() {
 
     let mut resolver = StyleResolver::new();
     for stylesheet in extract_author_stylesheets(&document, None).unwrap() {
-        resolver.add_stylesheet(
-            Origin::Author,
-            parse_stylesheet_forgiving(&stylesheet),
-        );
+        resolver.add_stylesheet(Origin::Author, parse_stylesheet_forgiving(&stylesheet));
     }
 
     let layout = crate::layout::layout_tree(
@@ -3883,10 +3817,7 @@ fn debug_blog_ast_moe_layout_snapshot() {
 
     let mut resolver = StyleResolver::new();
     for stylesheet in extract_author_stylesheets(&document, Some(&base_url)).unwrap() {
-        resolver.add_stylesheet(
-            Origin::Author,
-            parse_stylesheet_forgiving(&stylesheet),
-        );
+        resolver.add_stylesheet(Origin::Author, parse_stylesheet_forgiving(&stylesheet));
     }
 
     let layout = crate::layout::layout_tree(
@@ -4067,10 +3998,7 @@ fn debug_reference_paint() {
 
     let mut resolver = StyleResolver::new();
     for stylesheet in extract_author_stylesheets(&document, None).unwrap() {
-        resolver.add_stylesheet(
-            Origin::Author,
-            parse_stylesheet_forgiving(&stylesheet),
-        );
+        resolver.add_stylesheet(Origin::Author, parse_stylesheet_forgiving(&stylesheet));
     }
 
     let layout = crate::layout::layout_tree(
@@ -4221,10 +4149,7 @@ fn debug_write_acid2_official_reference_outputs() {
     let acid2_document = TreeBuilder::parse(&acid2_html).document();
     let mut acid2_resolver = StyleResolver::new();
     for stylesheet in extract_author_stylesheets(&acid2_document, None).unwrap() {
-        acid2_resolver.add_stylesheet(
-            Origin::Author,
-            parse_stylesheet_forgiving(&stylesheet),
-        );
+        acid2_resolver.add_stylesheet(Origin::Author, parse_stylesheet_forgiving(&stylesheet));
     }
     let mut acid2_layout = crate::layout::layout_tree(
         &acid2_document,
@@ -4243,10 +4168,7 @@ fn debug_write_acid2_official_reference_outputs() {
     materialize_local_assets(&reference_document, &acid2_fixture_dir()).unwrap();
     let mut reference_resolver = StyleResolver::new();
     for stylesheet in extract_author_stylesheets(&reference_document, None).unwrap() {
-        reference_resolver.add_stylesheet(
-            Origin::Author,
-            parse_stylesheet_forgiving(&stylesheet),
-        );
+        reference_resolver.add_stylesheet(Origin::Author, parse_stylesheet_forgiving(&stylesheet));
     }
     let reference_layout = crate::layout::layout_tree(
         &reference_document,
@@ -4683,7 +4605,12 @@ fn paint_single_div_with_color(color_value: &str) -> Canvas {
     let layout = layout_tree(
         &document,
         &mut resolver,
-        Rect { x: 0.0, y: 0.0, width: 20.0, height: 20.0 },
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 20.0,
+            height: 20.0,
+        },
     )
     .unwrap();
 
@@ -4692,7 +4619,12 @@ fn paint_single_div_with_color(color_value: &str) -> Canvas {
     paint_layout(
         &layout,
         &mut paint_resolver,
-        Rect { x: 0.0, y: 0.0, width: 20.0, height: 20.0 },
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 20.0,
+            height: 20.0,
+        },
     )
 }
 
@@ -4705,7 +4637,11 @@ fn parses_rgba_color_with_alpha() {
     assert_eq!(pixel.g, 0);
     assert_eq!(pixel.b, 0);
     // alpha blended onto transparent background: out_a ≈ 128
-    assert!(pixel.a > 100 && pixel.a < 150, "expected alpha ~128, got {}", pixel.a);
+    assert!(
+        pixel.a > 100 && pixel.a < 150,
+        "expected alpha ~128, got {}",
+        pixel.a
+    );
 }
 
 #[test]
@@ -4877,9 +4813,13 @@ fn render_text_with_decoration(decoration: &str) -> Canvas {
         .unwrap(),
     );
 
-    let viewport = Rect { x: 0.0, y: 0.0, width: 200.0, height: 100.0 };
-    let layout =
-        layout_tree(&document, &mut resolver, viewport).expect("layout should succeed");
+    let viewport = Rect {
+        x: 0.0,
+        y: 0.0,
+        width: 200.0,
+        height: 100.0,
+    };
+    let layout = layout_tree(&document, &mut resolver, viewport).expect("layout should succeed");
     paint_layout(&layout, &mut resolver, viewport)
 }
 
@@ -4895,9 +4835,7 @@ fn text_decoration_underline_draws_pixels_below_text() {
     // Find the bottom-most row that contains colored pixels in the no-underline render.
     // This is the lower boundary of the text glyph area.
     let glyph_bottom: u32 = (0..h)
-        .filter(|&y| {
-            (0..w).any(|x| canvas_none.pixel(x, y).map_or(false, |c| c.a > 0))
-        })
+        .filter(|&y| (0..w).any(|x| canvas_none.pixel(x, y).map_or(false, |c| c.a > 0)))
         .last()
         .expect("no-decoration render must contain at least one colored pixel");
 
@@ -4942,9 +4880,17 @@ fn fill_rounded_rect_clips_corners() {
     // 4コーナーの最外ピクセルは透明のまま残るはず。
     let mut canvas = Canvas::new(20, 20);
     canvas.fill_rounded_rect(
-        Rect { x: 0.0, y: 0.0, width: 20.0, height: 20.0 },
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 20.0,
+            height: 20.0,
+        },
         Color::rgb(255, 0, 0),
-        5.0, 5.0, 5.0, 5.0,
+        5.0,
+        5.0,
+        5.0,
+        5.0,
         None,
     );
 
@@ -4973,7 +4919,12 @@ fn paint_border_radius_clips_background_corners() {
     let mut resolver = StyleResolver::new();
     resolver.add_stylesheet(Origin::Author, parse_stylesheet(css).unwrap());
 
-    let viewport = Rect { x: 0.0, y: 0.0, width: 40.0, height: 40.0 };
+    let viewport = Rect {
+        x: 0.0,
+        y: 0.0,
+        width: 40.0,
+        height: 40.0,
+    };
     let layout = layout_tree(&document, &mut resolver, viewport).unwrap();
     let canvas = paint_layout(&layout, &mut resolver, viewport);
 
@@ -5008,7 +4959,12 @@ fn paint_clip_path_document(css: &str, body: &str, width: f32, height: f32) -> C
         "<html><head><style>body {{ margin: 0; }} {css}</style></head><body>{body}</body></html>"
     );
     let document = TreeBuilder::parse(&html).document();
-    let viewport = Rect { x: 0.0, y: 0.0, width, height };
+    let viewport = Rect {
+        x: 0.0,
+        y: 0.0,
+        width,
+        height,
+    };
     render_document(&document, viewport).unwrap()
 }
 
@@ -5113,7 +5069,12 @@ fn box_shadow_renders_shadow_pixels() {
     let mut resolver = StyleResolver::new();
     resolver.add_stylesheet(Origin::Author, parse_stylesheet(css).unwrap());
 
-    let viewport = Rect { x: 0.0, y: 0.0, width: 60.0, height: 60.0 };
+    let viewport = Rect {
+        x: 0.0,
+        y: 0.0,
+        width: 60.0,
+        height: 60.0,
+    };
     let layout = layout_tree(&document, &mut resolver, viewport).unwrap();
     let canvas = paint_layout(&layout, &mut resolver, viewport);
 
@@ -5152,7 +5113,12 @@ fn box_shadow_none_renders_no_extra_pixels() {
     let mut resolver = StyleResolver::new();
     resolver.add_stylesheet(Origin::Author, parse_stylesheet(css).unwrap());
 
-    let viewport = Rect { x: 0.0, y: 0.0, width: 40.0, height: 40.0 };
+    let viewport = Rect {
+        x: 0.0,
+        y: 0.0,
+        width: 40.0,
+        height: 40.0,
+    };
     let layout = layout_tree(&document, &mut resolver, viewport).unwrap();
     let canvas = paint_layout(&layout, &mut resolver, viewport);
 
@@ -5180,14 +5146,23 @@ fn box_shadow_with_blur_renders_blurred_shadow() {
     let mut resolver = StyleResolver::new();
     resolver.add_stylesheet(Origin::Author, parse_stylesheet(css).unwrap());
 
-    let viewport = Rect { x: 0.0, y: 0.0, width: 60.0, height: 60.0 };
+    let viewport = Rect {
+        x: 0.0,
+        y: 0.0,
+        width: 60.0,
+        height: 60.0,
+    };
     let layout = layout_tree(&document, &mut resolver, viewport).unwrap();
     let canvas = paint_layout(&layout, &mut resolver, viewport);
 
     // シャドウの中心付近にピクセルがあるはず（blur があるのでいくらかアルファがある）
-    let has_shadow = (20..35u32).flat_map(|x| (20..35u32).map(move |y| (x, y)))
+    let has_shadow = (20..35u32)
+        .flat_map(|x| (20..35u32).map(move |y| (x, y)))
         .any(|(x, y)| canvas.pixel(x, y).map_or(false, |c| c.a > 0));
-    assert!(has_shadow, "box-shadow with blur should render some pixels in shadow area");
+    assert!(
+        has_shadow,
+        "box-shadow with blur should render some pixels in shadow area"
+    );
 }
 
 // --- opacity テスト ---
@@ -5207,7 +5182,12 @@ fn opacity_reduces_element_alpha() {
     let mut resolver = StyleResolver::new();
     resolver.add_stylesheet(Origin::Author, parse_stylesheet(css).unwrap());
 
-    let viewport = Rect { x: 0.0, y: 0.0, width: 40.0, height: 40.0 };
+    let viewport = Rect {
+        x: 0.0,
+        y: 0.0,
+        width: 40.0,
+        height: 40.0,
+    };
     let layout = layout_tree(&document, &mut resolver, viewport).unwrap();
     let canvas = paint_layout(&layout, &mut resolver, viewport);
 
@@ -5235,7 +5215,12 @@ fn opacity_zero_makes_element_invisible() {
     let mut resolver = StyleResolver::new();
     resolver.add_stylesheet(Origin::Author, parse_stylesheet(css).unwrap());
 
-    let viewport = Rect { x: 0.0, y: 0.0, width: 40.0, height: 40.0 };
+    let viewport = Rect {
+        x: 0.0,
+        y: 0.0,
+        width: 40.0,
+        height: 40.0,
+    };
     let layout = layout_tree(&document, &mut resolver, viewport).unwrap();
     let canvas = paint_layout(&layout, &mut resolver, viewport);
 
@@ -5264,7 +5249,12 @@ fn opacity_one_keeps_element_opaque() {
     let mut resolver = StyleResolver::new();
     resolver.add_stylesheet(Origin::Author, parse_stylesheet(css).unwrap());
 
-    let viewport = Rect { x: 0.0, y: 0.0, width: 40.0, height: 40.0 };
+    let viewport = Rect {
+        x: 0.0,
+        y: 0.0,
+        width: 40.0,
+        height: 40.0,
+    };
     let layout = layout_tree(&document, &mut resolver, viewport).unwrap();
     let canvas = paint_layout(&layout, &mut resolver, viewport);
 
@@ -5292,7 +5282,12 @@ fn linear_gradient_to_right_paints_left_as_red_right_as_blue() {
     let mut resolver = StyleResolver::new();
     resolver.add_stylesheet(Origin::Author, parse_stylesheet(css).unwrap());
 
-    let viewport = Rect { x: 0.0, y: 0.0, width: 100.0, height: 20.0 };
+    let viewport = Rect {
+        x: 0.0,
+        y: 0.0,
+        width: 100.0,
+        height: 20.0,
+    };
     let layout = layout_tree(&document, &mut resolver, viewport).unwrap();
     let canvas = paint_layout(&layout, &mut resolver, viewport);
 
@@ -5337,15 +5332,28 @@ fn linear_gradient_to_bottom_paints_top_as_red_bottom_as_blue() {
     let mut resolver = StyleResolver::new();
     resolver.add_stylesheet(Origin::Author, parse_stylesheet(css).unwrap());
 
-    let viewport = Rect { x: 0.0, y: 0.0, width: 20.0, height: 100.0 };
+    let viewport = Rect {
+        x: 0.0,
+        y: 0.0,
+        width: 20.0,
+        height: 100.0,
+    };
     let layout = layout_tree(&document, &mut resolver, viewport).unwrap();
     let canvas = paint_layout(&layout, &mut resolver, viewport);
 
     let top = canvas.pixel(10, 0).expect("pixel at (10,0)");
-    assert!(top.r > 200 && top.b < 50, "top should be red, got {:?}", top);
+    assert!(
+        top.r > 200 && top.b < 50,
+        "top should be red, got {:?}",
+        top
+    );
 
     let bottom = canvas.pixel(10, 99).expect("pixel at (10,99)");
-    assert!(bottom.b > 200 && bottom.r < 50, "bottom should be blue, got {:?}", bottom);
+    assert!(
+        bottom.b > 200 && bottom.r < 50,
+        "bottom should be blue, got {:?}",
+        bottom
+    );
 }
 
 #[test]
@@ -5364,13 +5372,22 @@ fn linear_gradient_degree_45_paints_diagonally() {
     let mut resolver = StyleResolver::new();
     resolver.add_stylesheet(Origin::Author, parse_stylesheet(css).unwrap());
 
-    let viewport = Rect { x: 0.0, y: 0.0, width: 100.0, height: 100.0 };
+    let viewport = Rect {
+        x: 0.0,
+        y: 0.0,
+        width: 100.0,
+        height: 100.0,
+    };
     let layout = layout_tree(&document, &mut resolver, viewport).unwrap();
     let canvas = paint_layout(&layout, &mut resolver, viewport);
 
     // どのピクセルも塗られているはず（透明でない）
     let center = canvas.pixel(50, 50).expect("pixel at (50,50)");
-    assert!(center.a == 255, "center pixel should be opaque, got {:?}", center);
+    assert!(
+        center.a == 255,
+        "center pixel should be opaque, got {:?}",
+        center
+    );
 }
 
 #[test]
@@ -5391,7 +5408,12 @@ fn background_size_cover_fills_box() {
     let mut resolver = StyleResolver::new();
     resolver.add_stylesheet(Origin::Author, parse_stylesheet(css).unwrap());
 
-    let viewport = Rect { x: 0.0, y: 0.0, width: 20.0, height: 20.0 };
+    let viewport = Rect {
+        x: 0.0,
+        y: 0.0,
+        width: 20.0,
+        height: 20.0,
+    };
     let layout = layout_tree(&document, &mut resolver, viewport).unwrap();
     let canvas = paint_layout(&layout, &mut resolver, viewport);
 
@@ -5415,19 +5437,36 @@ fn linear_gradient_three_color_stops() {
     let mut resolver = StyleResolver::new();
     resolver.add_stylesheet(Origin::Author, parse_stylesheet(css).unwrap());
 
-    let viewport = Rect { x: 0.0, y: 0.0, width: 100.0, height: 10.0 };
+    let viewport = Rect {
+        x: 0.0,
+        y: 0.0,
+        width: 100.0,
+        height: 10.0,
+    };
     let layout = layout_tree(&document, &mut resolver, viewport).unwrap();
     let canvas = paint_layout(&layout, &mut resolver, viewport);
 
     let left = canvas.pixel(0, 5).expect("pixel at (0,5)");
-    assert!(left.r > 200 && left.b < 50, "left should be red, got {:?}", left);
+    assert!(
+        left.r > 200 && left.b < 50,
+        "left should be red, got {:?}",
+        left
+    );
 
     let right = canvas.pixel(99, 5).expect("pixel at (99,5)");
-    assert!(right.b > 200 && right.r < 50, "right should be blue, got {:?}", right);
+    assert!(
+        right.b > 200 && right.r < 50,
+        "right should be blue, got {:?}",
+        right
+    );
 
     // 中点付近は緑っぽいはず
     let mid = canvas.pixel(50, 5).expect("pixel at (50,5)");
-    assert!(mid.g > mid.r && mid.g > mid.b, "middle should be greenish, got {:?}", mid);
+    assert!(
+        mid.g > mid.r && mid.g > mid.b,
+        "middle should be greenish, got {:?}",
+        mid
+    );
 }
 
 // ── paint_list_marker_placeholder tests ─────────────────────────────────────
@@ -5458,14 +5497,14 @@ fn bullet_marker_placeholder_renders_filled_square() {
 
         let filled: usize = (0..canvas_w)
             .flat_map(|x| (0..canvas_h).map(move |y| (x, y)))
-            .filter(|&(x, y)| {
-                canvas
-                    .pixel(x as u32, y as u32)
-                    .map_or(false, |p| p.a > 0)
-            })
+            .filter(|&(x, y)| canvas.pixel(x as u32, y as u32).map_or(false, |p| p.a > 0))
             .count();
 
-        assert!(filled > 0, "bullet marker '{}' should draw at least one pixel", text);
+        assert!(
+            filled > 0,
+            "bullet marker '{}' should draw at least one pixel",
+            text
+        );
 
         // A bullet placeholder draws only a small square, not a full glyph-width strip.
         // At font_size=20, size ≈ 7px → area ≈ 49 pixels at most.
@@ -5539,7 +5578,12 @@ fn placeholder_letter_spacing_shifts_pixels_right() {
     let color = Color::rgb(0, 0, 0);
     let canvas_w = 300_u32;
     let canvas_h = 30_u32;
-    let rect = Rect { x: 0.0, y: 0.0, width: canvas_w as f32, height: canvas_h as f32 };
+    let rect = Rect {
+        x: 0.0,
+        y: 0.0,
+        width: canvas_w as f32,
+        height: canvas_h as f32,
+    };
 
     let rightmost_filled = |canvas: &Canvas| -> u32 {
         (0..canvas_w)
@@ -5549,11 +5593,27 @@ fn placeholder_letter_spacing_shifts_pixels_right() {
     };
 
     let mut canvas_no_spacing = Canvas::new(canvas_w, canvas_h);
-    paint_text_placeholder(&mut canvas_no_spacing, rect, "hello", font_size, color, None, 0.0);
+    paint_text_placeholder(
+        &mut canvas_no_spacing,
+        rect,
+        "hello",
+        font_size,
+        color,
+        None,
+        0.0,
+    );
     let right_no_spacing = rightmost_filled(&canvas_no_spacing);
 
     let mut canvas_with_spacing = Canvas::new(canvas_w, canvas_h);
-    paint_text_placeholder(&mut canvas_with_spacing, rect, "hello", font_size, color, None, 20.0);
+    paint_text_placeholder(
+        &mut canvas_with_spacing,
+        rect,
+        "hello",
+        font_size,
+        color,
+        None,
+        20.0,
+    );
     let right_with_spacing = rightmost_filled(&canvas_with_spacing);
 
     assert!(
@@ -5649,16 +5709,19 @@ fn nested_inline_span_text_decoration_applied_per_fragment() {
         let document = build_doc();
         let mut resolver = StyleResolver::new();
         resolver.add_stylesheet(Origin::Author, parse_stylesheet(css).unwrap());
-        let viewport = Rect { x: 0.0, y: 0.0, width: 200.0, height: 60.0 };
+        let viewport = Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 200.0,
+            height: 60.0,
+        };
         let layout = layout_tree(&document, &mut resolver, viewport).expect("layout");
         paint_layout(&layout, &mut resolver, viewport)
     };
 
-    let css_span_underline =
-        "body { margin: 0; } p { color: #ff0000; font-size: 20px; } \
+    let css_span_underline = "body { margin: 0; } p { color: #ff0000; font-size: 20px; } \
          span { text-decoration-line: underline; }";
-    let css_no_decoration =
-        "body { margin: 0; } p { color: #ff0000; font-size: 20px; }";
+    let css_no_decoration = "body { margin: 0; } p { color: #ff0000; font-size: 20px; }";
 
     let canvas_with = render(css_span_underline);
     let canvas_without = render(css_no_decoration);
@@ -5706,19 +5769,24 @@ fn nested_inline_span_text_transform_differs_from_parent() {
     let mut resolver = StyleResolver::new();
     resolver.add_stylesheet(Origin::Author, parse_stylesheet(css).unwrap());
 
-    let viewport = Rect { x: 0.0, y: 0.0, width: 200.0, height: 60.0 };
+    let viewport = Rect {
+        x: 0.0,
+        y: 0.0,
+        width: 200.0,
+        height: 60.0,
+    };
     let layout = layout_tree(&document, &mut resolver, viewport).expect("layout");
 
     // Collect all text fragments and check that the span's fragment carries
     // text-transform:uppercase and that its text has been transformed.
-    fn collect_text_fragments(
-        layout: &crate::layout::LayoutBox,
-        out: &mut Vec<(String, String)>,
-    ) {
+    fn collect_text_fragments(layout: &crate::layout::LayoutBox, out: &mut Vec<(String, String)>) {
         for line in &layout.lines {
             for frag in &line.fragments {
                 if let Some(t) = frag.text() {
-                    let transform = frag.style.text_transform.as_deref()
+                    let transform = frag
+                        .style
+                        .text_transform
+                        .as_deref()
                         .map(|kw| kw.to_ascii_lowercase())
                         .unwrap_or_else(|| "none".to_string());
                     out.push((transform, t.to_string()));
@@ -5786,13 +5854,22 @@ fn tiled_linear_gradient_repeats_correctly() {
     let mut resolver = StyleResolver::new();
     resolver.add_stylesheet(Origin::Author, parse_stylesheet(css).unwrap());
 
-    let viewport = Rect { x: 0.0, y: 0.0, width: 10.0, height: 10.0 };
+    let viewport = Rect {
+        x: 0.0,
+        y: 0.0,
+        width: 10.0,
+        height: 10.0,
+    };
     let layout = layout_tree(&document, &mut resolver, viewport).unwrap();
     let canvas = paint_layout(&layout, &mut resolver, viewport);
 
     // 各タイルの左端は赤系、右端は青系
     let top_left = canvas.pixel(0, 0).expect("pixel at (0,0)");
-    assert!(top_left.r > 150, "top-left of tile should be red-ish, got {:?}", top_left);
+    assert!(
+        top_left.r > 150,
+        "top-left of tile should be red-ish, got {:?}",
+        top_left
+    );
 
     let top_right_of_first_tile = canvas.pixel(4, 0).expect("pixel at (4,0)");
     assert!(
@@ -5811,7 +5888,11 @@ fn tiled_linear_gradient_repeats_correctly() {
 
     // 下段タイルも同様に存在する
     let bottom_tile = canvas.pixel(0, 5).expect("pixel at (0,5)");
-    assert!(bottom_tile.r > 150, "bottom-row tile left should be red-ish, got {:?}", bottom_tile);
+    assert!(
+        bottom_tile.r > 150,
+        "bottom-row tile left should be red-ish, got {:?}",
+        bottom_tile
+    );
 }
 
 /// background-repeat: no-repeat のとき、gradient タイルは1枚だけ描画される。
@@ -5833,7 +5914,12 @@ fn tiled_linear_gradient_no_repeat_paints_once() {
     let mut resolver = StyleResolver::new();
     resolver.add_stylesheet(Origin::Author, parse_stylesheet(css).unwrap());
 
-    let viewport = Rect { x: 0.0, y: 0.0, width: 10.0, height: 10.0 };
+    let viewport = Rect {
+        x: 0.0,
+        y: 0.0,
+        width: 10.0,
+        height: 10.0,
+    };
     let layout = layout_tree(&document, &mut resolver, viewport).unwrap();
     let canvas = paint_layout(&layout, &mut resolver, viewport);
 
@@ -5843,7 +5929,11 @@ fn tiled_linear_gradient_no_repeat_paints_once() {
 
     // 第1タイルの外（右側）は透明なまま
     let outside = canvas.pixel(6, 0).expect("pixel at (6,0)");
-    assert_eq!(outside.a, 0, "outside tile area should be transparent with no-repeat, got {:?}", outside);
+    assert_eq!(
+        outside.a, 0,
+        "outside tile area should be transparent with no-repeat, got {:?}",
+        outside
+    );
 }
 
 // --- box_blur_alpha カーネルサイズ修正テスト ---
@@ -5907,17 +5997,30 @@ fn opacity_offscreen_buffer_does_not_crash_on_small_element() {
     resolver.add_stylesheet(Origin::Author, parse_stylesheet(css).unwrap());
 
     // 要素より大幅に大きいビューポート
-    let viewport = Rect { x: 0.0, y: 0.0, width: 200.0, height: 200.0 };
+    let viewport = Rect {
+        x: 0.0,
+        y: 0.0,
+        width: 200.0,
+        height: 200.0,
+    };
     let layout = layout_tree(&document, &mut resolver, viewport).unwrap();
     let canvas = paint_layout(&layout, &mut resolver, viewport);
 
     // 要素内のピクセルは半透明の赤
     let inside = canvas.pixel(5, 5).unwrap();
-    assert!(inside.a > 0 && inside.a < 255, "element should be semi-transparent, got a={}", inside.a);
+    assert!(
+        inside.a > 0 && inside.a < 255,
+        "element should be semi-transparent, got a={}",
+        inside.a
+    );
 
     // 要素の外側は透明なまま
     let outside = canvas.pixel(50, 50).unwrap();
-    assert_eq!(outside.a, 0, "outside element should be transparent, got {:?}", outside);
+    assert_eq!(
+        outside.a, 0,
+        "outside element should be transparent, got {:?}",
+        outside
+    );
 }
 
 // --- overflow: hidden での box-shadow クリップテスト ---
@@ -5939,7 +6042,12 @@ fn box_shadow_of_overflow_hidden_element_still_renders_outside() {
     let mut resolver = StyleResolver::new();
     resolver.add_stylesheet(Origin::Author, parse_stylesheet(css).unwrap());
 
-    let viewport = Rect { x: 0.0, y: 0.0, width: 60.0, height: 60.0 };
+    let viewport = Rect {
+        x: 0.0,
+        y: 0.0,
+        width: 60.0,
+        height: 60.0,
+    };
     let layout = layout_tree(&document, &mut resolver, viewport).unwrap();
     let canvas = paint_layout(&layout, &mut resolver, viewport);
 
@@ -5978,7 +6086,12 @@ fn child_box_shadow_clipped_by_overflow_hidden_parent() {
     let mut resolver = StyleResolver::new();
     resolver.add_stylesheet(Origin::Author, parse_stylesheet(css).unwrap());
 
-    let viewport = Rect { x: 0.0, y: 0.0, width: 60.0, height: 60.0 };
+    let viewport = Rect {
+        x: 0.0,
+        y: 0.0,
+        width: 60.0,
+        height: 60.0,
+    };
     let layout = layout_tree(&document, &mut resolver, viewport).unwrap();
     let canvas = paint_layout(&layout, &mut resolver, viewport);
 
@@ -5988,7 +6101,8 @@ fn child_box_shadow_clipped_by_overflow_hidden_parent() {
     assert_eq!(
         outside.map(|c| c.a),
         Some(0),
-        "child box-shadow should be clipped by parent overflow:hidden, got {:?}", outside
+        "child box-shadow should be clipped by parent overflow:hidden, got {:?}",
+        outside
     );
 }
 
@@ -6053,7 +6167,12 @@ fn box_shadow_no_blur_rounded_corners_do_not_paint_outside_shadow_shape() {
     let mut resolver = StyleResolver::new();
     resolver.add_stylesheet(Origin::Author, parse_stylesheet(css).unwrap());
 
-    let viewport = Rect { x: 0.0, y: 0.0, width: 40.0, height: 40.0 };
+    let viewport = Rect {
+        x: 0.0,
+        y: 0.0,
+        width: 40.0,
+        height: 40.0,
+    };
     let layout = layout_tree(&document, &mut resolver, viewport).unwrap();
     let canvas = paint_layout(&layout, &mut resolver, viewport);
 
@@ -6066,14 +6185,16 @@ fn box_shadow_no_blur_rounded_corners_do_not_paint_outside_shadow_shape() {
     assert_eq!(
         corner.map(|c| c.a),
         Some(0),
-        "blur=0 rounded box-shadow corner pixel should be transparent (outside arc), got {:?}", corner
+        "blur=0 rounded box-shadow corner pixel should be transparent (outside arc), got {:?}",
+        corner
     );
 
     // 影の中央部分は描画されているはず (bottom band の中央)
     let shadow_mid = canvas.pixel(12, 23);
     assert!(
         shadow_mid.map_or(false, |c| c.a > 0),
-        "blur=0 rounded box-shadow should paint center of bottom band at (12,23), got {:?}", shadow_mid
+        "blur=0 rounded box-shadow should paint center of bottom band at (12,23), got {:?}",
+        shadow_mid
     );
 }
 
@@ -6084,24 +6205,37 @@ body { margin: 0; background: white; }
 div { width: 10px; height: 10px; background: red; opacity: 0; }
 </style></head><body><div></div></body></html>"#;
     let document = TreeBuilder::parse(html).document();
-    let viewport = Rect { x: 0.0, y: 0.0, width: 10.0, height: 10.0 };
+    let viewport = Rect {
+        x: 0.0,
+        y: 0.0,
+        width: 10.0,
+        height: 10.0,
+    };
 
     // Without force_opacity: div is invisible
     let canvas_normal = render_document(&document, viewport).unwrap();
-    assert_eq!(canvas_normal.pixel(5, 5), Some(Color::rgb(255, 255, 255)),
-        "opacity:0 element should be invisible without force_opacity");
+    assert_eq!(
+        canvas_normal.pixel(5, 5),
+        Some(Color::rgb(255, 255, 255)),
+        "opacity:0 element should be invisible without force_opacity"
+    );
 
     // With force_opacity: div is visible
-    let canvas_forced = crate::paint::with_force_opacity(|| {
-        render_document(&document, viewport).unwrap()
-    });
-    assert_eq!(canvas_forced.pixel(5, 5), Some(Color::rgb(255, 0, 0)),
-        "opacity:0 element should be visible with force_opacity");
+    let canvas_forced =
+        crate::paint::with_force_opacity(|| render_document(&document, viewport).unwrap());
+    assert_eq!(
+        canvas_forced.pixel(5, 5),
+        Some(Color::rgb(255, 0, 0)),
+        "opacity:0 element should be visible with force_opacity"
+    );
 
     // After with_force_opacity: flag should not leak
     let canvas_after = render_document(&document, viewport).unwrap();
-    assert_eq!(canvas_after.pixel(5, 5), Some(Color::rgb(255, 255, 255)),
-        "force_opacity should not leak outside the closure");
+    assert_eq!(
+        canvas_after.pixel(5, 5),
+        Some(Color::rgb(255, 255, 255)),
+        "force_opacity should not leak outside the closure"
+    );
 }
 
 #[test]
@@ -6111,10 +6245,18 @@ body { margin: 0; }
 div { width: 10px; height: 10px; background: rgb(300, -50, 128); }
 </style></head><body><div></div></body></html>"#;
     let document = TreeBuilder::parse(html).document();
-    let viewport = Rect { x: 0.0, y: 0.0, width: 10.0, height: 10.0 };
+    let viewport = Rect {
+        x: 0.0,
+        y: 0.0,
+        width: 10.0,
+        height: 10.0,
+    };
     let canvas = render_document(&document, viewport).unwrap();
-    assert_eq!(canvas.pixel(5, 5), Some(Color::rgb(255, 0, 128)),
-        "rgb(300,-50,128) should clamp to rgb(255,0,128)");
+    assert_eq!(
+        canvas.pixel(5, 5),
+        Some(Color::rgb(255, 0, 128)),
+        "rgb(300,-50,128) should clamp to rgb(255,0,128)"
+    );
 }
 
 #[test]
@@ -6124,13 +6266,25 @@ body { margin: 0; background: white; }
 div { width: 10px; height: 10px; background: rgba(255, 0, 0, 50%); }
 </style></head><body><div></div></body></html>"#;
     let document = TreeBuilder::parse(html).document();
-    let viewport = Rect { x: 0.0, y: 0.0, width: 10.0, height: 10.0 };
+    let viewport = Rect {
+        x: 0.0,
+        y: 0.0,
+        width: 10.0,
+        height: 10.0,
+    };
     let canvas = render_document(&document, viewport).unwrap();
     let pixel = canvas.pixel(5, 5).unwrap();
     // rgba(255,0,0,50%) over white → blended ~(255,128,128)
     assert!(pixel.r > 200, "red channel should be high, got {}", pixel.r);
-    assert!(pixel.g > 100 && pixel.g < 180, "green channel should be ~128, got {}", pixel.g);
-    assert!(pixel.a == 255, "final pixel should be fully opaque after blending");
+    assert!(
+        pixel.g > 100 && pixel.g < 180,
+        "green channel should be ~128, got {}",
+        pixel.g
+    );
+    assert!(
+        pixel.a == 255,
+        "final pixel should be fully opaque after blending"
+    );
 }
 
 #[test]
@@ -6140,10 +6294,18 @@ body { margin: 0; }
 div { width: 10px; height: 10px; background: rgb(200%, 0%, 50%); }
 </style></head><body><div></div></body></html>"#;
     let document = TreeBuilder::parse(html).document();
-    let viewport = Rect { x: 0.0, y: 0.0, width: 10.0, height: 10.0 };
+    let viewport = Rect {
+        x: 0.0,
+        y: 0.0,
+        width: 10.0,
+        height: 10.0,
+    };
     let canvas = render_document(&document, viewport).unwrap();
-    assert_eq!(canvas.pixel(5, 5), Some(Color::rgb(255, 0, 128)),
-        "rgb(200%,0%,50%) should clamp to rgb(255,0,128)");
+    assert_eq!(
+        canvas.pixel(5, 5),
+        Some(Color::rgb(255, 0, 128)),
+        "rgb(200%,0%,50%) should clamp to rgb(255,0,128)"
+    );
 }
 
 #[test]
@@ -6153,11 +6315,19 @@ body { margin: 0; }
 div { width: 10px; height: 10px; color: red; border: 2px solid currentColor; }
 </style></head><body><div></div></body></html>"#;
     let document = TreeBuilder::parse(html).document();
-    let viewport = Rect { x: 0.0, y: 0.0, width: 14.0, height: 14.0 };
+    let viewport = Rect {
+        x: 0.0,
+        y: 0.0,
+        width: 14.0,
+        height: 14.0,
+    };
     let canvas = render_document(&document, viewport).unwrap();
     // Border should be red (from currentColor → color: red)
-    assert_eq!(canvas.pixel(0, 0), Some(Color::rgb(255, 0, 0)),
-        "border with currentColor should use element's color (red)");
+    assert_eq!(
+        canvas.pixel(0, 0),
+        Some(Color::rgb(255, 0, 0)),
+        "border with currentColor should use element's color (red)"
+    );
 }
 
 #[test]
@@ -6167,11 +6337,19 @@ body { margin: 0; color: blue; }
 div { color: currentColor; width: 10px; height: 10px; border: 2px solid currentColor; }
 </style></head><body><div></div></body></html>"#;
     let document = TreeBuilder::parse(html).document();
-    let viewport = Rect { x: 0.0, y: 0.0, width: 14.0, height: 14.0 };
+    let viewport = Rect {
+        x: 0.0,
+        y: 0.0,
+        width: 14.0,
+        height: 14.0,
+    };
     let canvas = render_document(&document, viewport).unwrap();
     // color: currentColor on the element should inherit from parent (blue)
-    assert_eq!(canvas.pixel(0, 0), Some(Color::rgb(0, 0, 255)),
-        "color: currentColor should resolve to parent color (blue)");
+    assert_eq!(
+        canvas.pixel(0, 0),
+        Some(Color::rgb(0, 0, 255)),
+        "color: currentColor should resolve to parent color (blue)"
+    );
 }
 
 #[test]
@@ -6185,11 +6363,19 @@ fn render_document_executes_inline_script() {
         <script>document.getElementById("target").classList.add("red");</script>
     </body></html>"#;
     let document = TreeBuilder::parse(html).document();
-    let viewport = Rect { x: 0.0, y: 0.0, width: 10.0, height: 10.0 };
+    let viewport = Rect {
+        x: 0.0,
+        y: 0.0,
+        width: 10.0,
+        height: 10.0,
+    };
     let canvas = render_document(&document, viewport).unwrap();
     // JS should add class "red" → background: red
-    assert_eq!(canvas.pixel(5, 5), Some(Color::rgb(255, 0, 0)),
-        "inline script should add 'red' class, making div background red");
+    assert_eq!(
+        canvas.pixel(5, 5),
+        Some(Color::rgb(255, 0, 0)),
+        "inline script should add 'red' class, making div background red"
+    );
 }
 
 #[test]
@@ -6205,7 +6391,12 @@ div {{ width: 3px; height: 1px; background: red;
     let document = TreeBuilder::parse(&html).document();
     let canvas = render_document(
         &document,
-        Rect { x: 0.0, y: 0.0, width: 3.0, height: 1.0 },
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 3.0,
+            height: 1.0,
+        },
     )
     .unwrap();
 
@@ -6228,7 +6419,12 @@ div {{ width: 6px; height: 4px; background: red;
     let document = TreeBuilder::parse(&html).document();
     let canvas = render_document(
         &document,
-        Rect { x: 0.0, y: 0.0, width: 6.0, height: 4.0 },
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 6.0,
+            height: 4.0,
+        },
     )
     .unwrap();
 
@@ -6252,7 +6448,12 @@ div {{ width: 8px; height: 8px; background: blue;
     let document = TreeBuilder::parse(&html).document();
     let canvas = render_document(
         &document,
-        Rect { x: 0.0, y: 0.0, width: 8.0, height: 8.0 },
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 8.0,
+            height: 8.0,
+        },
     )
     .unwrap();
 
@@ -6275,7 +6476,12 @@ body {{ margin: 0; }}
     let document = TreeBuilder::parse(&html).document();
     let canvas = render_document(
         &document,
-        Rect { x: 0.0, y: 0.0, width: 2.0, height: 1.0 },
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 2.0,
+            height: 1.0,
+        },
     )
     .unwrap();
 
@@ -6297,7 +6503,12 @@ div {{ position: absolute; left: 10.5px; top: 10.5px;
     let document = TreeBuilder::parse(&html).document();
     let canvas = render_document(
         &document,
-        Rect { x: 0.0, y: 0.0, width: 16.0, height: 16.0 },
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 16.0,
+            height: 16.0,
+        },
     )
     .unwrap();
 
@@ -6393,7 +6604,12 @@ fn form_control_label_uses_web_font_variant() {
         Some(&crate::css::ComputedValue::Keyword("center".to_string())),
         "button UA default must center the label for this test to cover measurement"
     );
-    let viewport = Rect { x: 0.0, y: 0.0, width: 60.0, height: 24.0 };
+    let viewport = Rect {
+        x: 0.0,
+        y: 0.0,
+        width: 60.0,
+        height: 24.0,
+    };
     let layout = LayoutBox {
         node: button.clone(),
         dimensions: BoxDimensions {

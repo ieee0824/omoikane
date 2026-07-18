@@ -148,16 +148,7 @@ fn render_svg_children(
             _ => {
                 let recurse_fill = fill.unwrap_or(inherited_fill);
                 // Recurse into unknown elements (may contain renderable children)
-                render_svg_children(
-                    &child,
-                    canvas,
-                    sx,
-                    sy,
-                    tx,
-                    ty,
-                    recurse_fill,
-                    current_color,
-                );
+                render_svg_children(&child, canvas, sx, sy, tx, ty, recurse_fill, current_color);
             }
         }
     }
@@ -180,8 +171,7 @@ fn fill_circle(canvas: &mut Canvas, cx: f32, cy: f32, r: f32, color: Color) {
     }
 }
 
-/// Renders an SVG path `d` attribute using M, L, H, V, Z commands.
-/// Curved commands (C, S, Q, T, A) are approximated as straight lines to endpoints.
+/// Renders an SVG path `d` attribute using common line and curve commands.
 fn render_path(
     canvas: &mut Canvas,
     d: &str,
@@ -227,10 +217,62 @@ fn render_path(
                 cy = *y;
                 points.push((cx * sx + tx, cy * sy + ty));
             }
-            PathCommand::CurveTo(_, _, _, _, x, y) => {
+            PathCommand::CurveTo(cp1x, cp1y, cp2x, cp2y, x, y) => {
+                let start_x = cx;
+                let start_y = cy;
+                // Flatten cubic Bezier curves into short line segments. Twelve
+                // segments are enough for the small inline icons and logos this
+                // rasterizer handles while keeping path painting inexpensive.
+                for step in 1..=12 {
+                    let t = step as f32 / 12.0;
+                    let inverse = 1.0 - t;
+                    let curve_x = inverse.powi(3) * start_x
+                        + 3.0 * inverse.powi(2) * t * cp1x
+                        + 3.0 * inverse * t.powi(2) * cp2x
+                        + t.powi(3) * x;
+                    let curve_y = inverse.powi(3) * start_y
+                        + 3.0 * inverse.powi(2) * t * cp1y
+                        + 3.0 * inverse * t.powi(2) * cp2y
+                        + t.powi(3) * y;
+                    points.push((curve_x * sx + tx, curve_y * sy + ty));
+                }
                 cx = *x;
                 cy = *y;
-                points.push((cx * sx + tx, cy * sy + ty));
+            }
+            PathCommand::QuadraticCurveTo(cpx, cpy, x, y) => {
+                let start_x = cx;
+                let start_y = cy;
+                for step in 1..=12 {
+                    let t = step as f32 / 12.0;
+                    let inverse = 1.0 - t;
+                    let curve_x =
+                        inverse.powi(2) * start_x + 2.0 * inverse * t * cpx + t.powi(2) * x;
+                    let curve_y =
+                        inverse.powi(2) * start_y + 2.0 * inverse * t * cpy + t.powi(2) * y;
+                    points.push((curve_x * sx + tx, curve_y * sy + ty));
+                }
+                cx = *x;
+                cy = *y;
+            }
+            PathCommand::ArcTo(rx, ry, rotation, large_arc, sweep, x, y) => {
+                flatten_arc(
+                    &mut points,
+                    cx,
+                    cy,
+                    *rx,
+                    *ry,
+                    *rotation,
+                    *large_arc,
+                    *sweep,
+                    *x,
+                    *y,
+                    sx,
+                    sy,
+                    tx,
+                    ty,
+                );
+                cx = *x;
+                cy = *y;
             }
             PathCommand::Close => {
                 if points.len() >= 3 {
@@ -249,6 +291,83 @@ fn render_path(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
+fn flatten_arc(
+    points: &mut Vec<(f32, f32)>,
+    x1: f32,
+    y1: f32,
+    mut rx: f32,
+    mut ry: f32,
+    rotation: f32,
+    large_arc: bool,
+    sweep: bool,
+    x2: f32,
+    y2: f32,
+    sx: f32,
+    sy: f32,
+    tx: f32,
+    ty: f32,
+) {
+    rx = rx.abs();
+    ry = ry.abs();
+    if rx == 0.0 || ry == 0.0 || (x1 == x2 && y1 == y2) {
+        points.push((x2 * sx + tx, y2 * sy + ty));
+        return;
+    }
+
+    let phi = rotation.to_radians();
+    let (sin_phi, cos_phi) = phi.sin_cos();
+    let dx = (x1 - x2) / 2.0;
+    let dy = (y1 - y2) / 2.0;
+    let x1p = cos_phi * dx + sin_phi * dy;
+    let y1p = -sin_phi * dx + cos_phi * dy;
+    let scale = (x1p * x1p / (rx * rx) + y1p * y1p / (ry * ry)).sqrt();
+    if scale > 1.0 {
+        rx *= scale;
+        ry *= scale;
+    }
+
+    let rx2 = rx * rx;
+    let ry2 = ry * ry;
+    let numerator = (rx2 * ry2 - rx2 * y1p * y1p - ry2 * x1p * x1p).max(0.0);
+    let denominator = rx2 * y1p * y1p + ry2 * x1p * x1p;
+    let sign = if large_arc == sweep { -1.0 } else { 1.0 };
+    let factor = if denominator == 0.0 {
+        0.0
+    } else {
+        sign * (numerator / denominator).sqrt()
+    };
+    let cxp = factor * rx * y1p / ry;
+    let cyp = factor * -ry * x1p / rx;
+    let cx = cos_phi * cxp - sin_phi * cyp + (x1 + x2) / 2.0;
+    let cy = sin_phi * cxp + cos_phi * cyp + (y1 + y2) / 2.0;
+
+    let angle =
+        |ux: f32, uy: f32, vx: f32, vy: f32| ux.mul_add(vy, -uy * vx).atan2(ux * vx + uy * vy);
+    let ux = (x1p - cxp) / rx;
+    let uy = (y1p - cyp) / ry;
+    let vx = (-x1p - cxp) / rx;
+    let vy = (-y1p - cyp) / ry;
+    let start = angle(1.0, 0.0, ux, uy);
+    let mut delta = angle(ux, uy, vx, vy);
+    if !sweep && delta > 0.0 {
+        delta -= std::f32::consts::TAU;
+    }
+    if sweep && delta < 0.0 {
+        delta += std::f32::consts::TAU;
+    }
+    let segments = (delta.abs() / (std::f32::consts::PI / 12.0))
+        .ceil()
+        .max(1.0) as usize;
+    for step in 1..=segments {
+        let theta = start + delta * step as f32 / segments as f32;
+        let (sin_theta, cos_theta) = theta.sin_cos();
+        let x = cx + cos_phi * rx * cos_theta - sin_phi * ry * sin_theta;
+        let y = cy + sin_phi * rx * cos_theta + cos_phi * ry * sin_theta;
+        points.push((x * sx + tx, y * sy + ty));
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum FillRule {
     NonZero,
@@ -262,9 +381,11 @@ enum PathCommand {
     HorizontalLineTo(f32),
     VerticalLineTo(f32),
     // Control points (cp1x, cp1y, cp2x, cp2y) + endpoint (x, y).
-    // Control points are parsed but currently only the endpoint is used for rendering.
-    #[allow(dead_code)]
     CurveTo(f32, f32, f32, f32, f32, f32),
+    // Control point (cpx, cpy) + endpoint (x, y).
+    QuadraticCurveTo(f32, f32, f32, f32),
+    // Radii, x-axis rotation, large-arc flag, sweep flag, endpoint.
+    ArcTo(f32, f32, f32, bool, bool, f32, f32),
     Close,
 }
 
@@ -274,6 +395,10 @@ fn parse_path_data(d: &str) -> Vec<PathCommand> {
     let mut current_command = ' ';
     let mut cx = 0.0f32;
     let mut cy = 0.0f32;
+    let mut subpath_start_x = 0.0f32;
+    let mut subpath_start_y = 0.0f32;
+    let mut last_cubic_control = None;
+    let mut last_quadratic_control = None;
 
     while chars.peek().is_some() {
         let remaining_before = chars.clone().count();
@@ -288,28 +413,38 @@ fn parse_path_data(d: &str) -> Vec<PathCommand> {
 
         match current_command {
             'M' => {
+                last_cubic_control = None;
+                last_quadratic_control = None;
                 if let Some(x) = parse_number(&mut chars) {
                     skip_whitespace_and_commas(&mut chars);
                     if let Some(y) = parse_number(&mut chars) {
                         cx = x;
                         cy = y;
+                        subpath_start_x = x;
+                        subpath_start_y = y;
                         commands.push(PathCommand::MoveTo(x, y));
                         current_command = 'L'; // subsequent coords are LineTo
                     }
                 }
             }
             'm' => {
+                last_cubic_control = None;
+                last_quadratic_control = None;
                 if let Some(dx) = parse_number(&mut chars) {
                     skip_whitespace_and_commas(&mut chars);
                     if let Some(dy) = parse_number(&mut chars) {
                         cx += dx;
                         cy += dy;
+                        subpath_start_x = cx;
+                        subpath_start_y = cy;
                         commands.push(PathCommand::MoveTo(cx, cy));
                         current_command = 'l';
                     }
                 }
             }
             'L' => {
+                last_cubic_control = None;
+                last_quadratic_control = None;
                 if let Some(x) = parse_number(&mut chars) {
                     skip_whitespace_and_commas(&mut chars);
                     if let Some(y) = parse_number(&mut chars) {
@@ -320,6 +455,8 @@ fn parse_path_data(d: &str) -> Vec<PathCommand> {
                 }
             }
             'l' => {
+                last_cubic_control = None;
+                last_quadratic_control = None;
                 if let Some(dx) = parse_number(&mut chars) {
                     skip_whitespace_and_commas(&mut chars);
                     if let Some(dy) = parse_number(&mut chars) {
@@ -330,30 +467,39 @@ fn parse_path_data(d: &str) -> Vec<PathCommand> {
                 }
             }
             'H' => {
+                last_cubic_control = None;
+                last_quadratic_control = None;
                 if let Some(x) = parse_number(&mut chars) {
                     cx = x;
                     commands.push(PathCommand::HorizontalLineTo(x));
                 }
             }
             'h' => {
+                last_cubic_control = None;
+                last_quadratic_control = None;
                 if let Some(dx) = parse_number(&mut chars) {
                     cx += dx;
                     commands.push(PathCommand::HorizontalLineTo(cx));
                 }
             }
             'V' => {
+                last_cubic_control = None;
+                last_quadratic_control = None;
                 if let Some(y) = parse_number(&mut chars) {
                     cy = y;
                     commands.push(PathCommand::VerticalLineTo(y));
                 }
             }
             'v' => {
+                last_cubic_control = None;
+                last_quadratic_control = None;
                 if let Some(dy) = parse_number(&mut chars) {
                     cy += dy;
                     commands.push(PathCommand::VerticalLineTo(cy));
                 }
             }
             'C' => {
+                last_quadratic_control = None;
                 let mut nums = Vec::new();
                 for _ in 0..6 {
                     skip_whitespace_and_commas(&mut chars);
@@ -364,12 +510,14 @@ fn parse_path_data(d: &str) -> Vec<PathCommand> {
                 if nums.len() == 6 {
                     cx = nums[4];
                     cy = nums[5];
+                    last_cubic_control = Some((nums[2], nums[3]));
                     commands.push(PathCommand::CurveTo(
                         nums[0], nums[1], nums[2], nums[3], nums[4], nums[5],
                     ));
                 }
             }
             'c' => {
+                last_quadratic_control = None;
                 let mut nums = Vec::new();
                 for _ in 0..6 {
                     skip_whitespace_and_commas(&mut chars);
@@ -378,20 +526,125 @@ fn parse_path_data(d: &str) -> Vec<PathCommand> {
                     }
                 }
                 if nums.len() == 6 {
+                    let start_x = cx;
+                    let start_y = cy;
                     cx += nums[4];
                     cy += nums[5];
+                    last_cubic_control = Some((start_x + nums[2], start_y + nums[3]));
                     commands.push(PathCommand::CurveTo(
-                        cx - nums[4] + nums[0],
-                        cy - nums[5] + nums[1],
-                        cx - nums[4] + nums[2],
-                        cy - nums[5] + nums[3],
+                        start_x + nums[0],
+                        start_y + nums[1],
+                        start_x + nums[2],
+                        start_y + nums[3],
                         cx,
                         cy,
                     ));
                 }
             }
+            'S' | 's' => {
+                last_quadratic_control = None;
+                let mut nums = Vec::new();
+                for _ in 0..4 {
+                    skip_whitespace_and_commas(&mut chars);
+                    if let Some(n) = parse_number(&mut chars) {
+                        nums.push(n);
+                    }
+                }
+                if nums.len() == 4 {
+                    let cp1 = last_cubic_control
+                        .map(|(x, y)| (2.0 * cx - x, 2.0 * cy - y))
+                        .unwrap_or((cx, cy));
+                    let (cp2x, cp2y, x, y) = if current_command == 's' {
+                        (cx + nums[0], cy + nums[1], cx + nums[2], cy + nums[3])
+                    } else {
+                        (nums[0], nums[1], nums[2], nums[3])
+                    };
+                    commands.push(PathCommand::CurveTo(cp1.0, cp1.1, cp2x, cp2y, x, y));
+                    cx = x;
+                    cy = y;
+                    last_cubic_control = Some((cp2x, cp2y));
+                }
+            }
+            'Q' | 'q' => {
+                last_cubic_control = None;
+                let mut nums = Vec::new();
+                for _ in 0..4 {
+                    skip_whitespace_and_commas(&mut chars);
+                    if let Some(n) = parse_number(&mut chars) {
+                        nums.push(n);
+                    }
+                }
+                if nums.len() == 4 {
+                    let (cpx, cpy, x, y) = if current_command == 'q' {
+                        (cx + nums[0], cy + nums[1], cx + nums[2], cy + nums[3])
+                    } else {
+                        (nums[0], nums[1], nums[2], nums[3])
+                    };
+                    commands.push(PathCommand::QuadraticCurveTo(cpx, cpy, x, y));
+                    cx = x;
+                    cy = y;
+                    last_quadratic_control = Some((cpx, cpy));
+                }
+            }
+            'T' | 't' => {
+                last_cubic_control = None;
+                let mut nums = Vec::new();
+                for _ in 0..2 {
+                    skip_whitespace_and_commas(&mut chars);
+                    if let Some(n) = parse_number(&mut chars) {
+                        nums.push(n);
+                    }
+                }
+                if nums.len() == 2 {
+                    let (cpx, cpy) = last_quadratic_control
+                        .map(|(x, y)| (2.0 * cx - x, 2.0 * cy - y))
+                        .unwrap_or((cx, cy));
+                    let (x, y) = if current_command == 't' {
+                        (cx + nums[0], cy + nums[1])
+                    } else {
+                        (nums[0], nums[1])
+                    };
+                    commands.push(PathCommand::QuadraticCurveTo(cpx, cpy, x, y));
+                    cx = x;
+                    cy = y;
+                    last_quadratic_control = Some((cpx, cpy));
+                }
+            }
+            'A' | 'a' => {
+                last_cubic_control = None;
+                last_quadratic_control = None;
+                let mut nums = Vec::new();
+                for _ in 0..7 {
+                    skip_whitespace_and_commas(&mut chars);
+                    if let Some(n) = parse_number(&mut chars) {
+                        nums.push(n);
+                    }
+                }
+                if nums.len() == 7 {
+                    let (x, y) = if current_command == 'a' {
+                        (cx + nums[5], cy + nums[6])
+                    } else {
+                        (nums[5], nums[6])
+                    };
+                    commands.push(PathCommand::ArcTo(
+                        nums[0],
+                        nums[1],
+                        nums[2],
+                        nums[3] != 0.0,
+                        nums[4] != 0.0,
+                        x,
+                        y,
+                    ));
+                    cx = x;
+                    cy = y;
+                }
+            }
             'Z' | 'z' => {
+                last_cubic_control = None;
+                last_quadratic_control = None;
                 commands.push(PathCommand::Close);
+                cx = subpath_start_x;
+                cy = subpath_start_y;
             }
             _ => {
                 // Skip unknown commands
@@ -579,7 +832,8 @@ mod tests {
         let html = r#"<svg width="10" height="10" fill="currentColor"><rect width="10" height="10"/></svg>"#;
         let doc = TreeBuilder::parse(html).document();
         let svg = find_svg(&doc).unwrap();
-        let image = render_svg_to_image_with_current_color(&svg, Color::rgb(255, 255, 255)).unwrap();
+        let image =
+            render_svg_to_image_with_current_color(&svg, Color::rgb(255, 255, 255)).unwrap();
         let center = (5 * 10 + 5) * 4;
         assert_eq!(&image.pixels()[center..center + 4], &[255, 255, 255, 255]);
     }
@@ -589,7 +843,8 @@ mod tests {
         let html = r#"<svg width="10" height="10"><rect width="10" height="10"/></svg>"#;
         let doc = TreeBuilder::parse(html).document();
         let svg = find_svg(&doc).unwrap();
-        let image = render_svg_to_image_with_current_color(&svg, Color::rgb(255, 255, 255)).unwrap();
+        let image =
+            render_svg_to_image_with_current_color(&svg, Color::rgb(255, 255, 255)).unwrap();
         let center = (5 * 10 + 5) * 4;
         assert_eq!(&image.pixels()[center..center + 4], &[0, 0, 0, 255]);
     }
@@ -630,6 +885,82 @@ mod tests {
     fn parse_path_data_m_l_z() {
         let cmds = parse_path_data("M 0 0 L 10 0 L 10 10 Z");
         assert_eq!(cmds.len(), 4);
+    }
+
+    #[test]
+    fn close_path_restores_current_point_for_relative_commands() {
+        let cmds = parse_path_data("M10 10L20 10Zm5 0");
+        assert!(matches!(cmds.last(), Some(PathCommand::MoveTo(15.0, 10.0))));
+    }
+
+    #[test]
+    fn smooth_cubic_curve_reflects_the_previous_control_point() {
+        let cmds = parse_path_data("M0 0C0 5 5 10 10 10S20 5 20 0");
+        assert!(matches!(
+            cmds.last(),
+            Some(PathCommand::CurveTo(15.0, 10.0, 20.0, 5.0, 20.0, 0.0))
+        ));
+    }
+
+    #[test]
+    fn relative_smooth_cubic_curve_uses_current_point() {
+        let cmds = parse_path_data("M10 10s5 5 10 0");
+        assert!(matches!(
+            cmds.last(),
+            Some(PathCommand::CurveTo(10.0, 10.0, 15.0, 15.0, 20.0, 10.0))
+        ));
+    }
+
+    #[test]
+    fn smooth_quadratic_curve_reflects_the_previous_control_point() {
+        let cmds = parse_path_data("M0 0Q5 10 10 0T20 0");
+        assert!(matches!(
+            cmds.last(),
+            Some(PathCommand::QuadraticCurveTo(15.0, -10.0, 20.0, 0.0))
+        ));
+    }
+
+    #[test]
+    fn absolute_and_relative_arc_commands_update_the_endpoint() {
+        let cmds = parse_path_data("M1 2A3 4 15 0 1 8 9a3 4 0 1 0 2-3");
+        assert!(matches!(
+            cmds.get(1),
+            Some(PathCommand::ArcTo(3.0, 4.0, 15.0, false, true, 8.0, 9.0))
+        ));
+        assert!(matches!(
+            cmds.get(2),
+            Some(PathCommand::ArcTo(3.0, 4.0, 0.0, true, false, 10.0, 6.0))
+        ));
+    }
+
+    #[test]
+    fn elliptical_arc_paths_are_flattened_before_filling() {
+        let html = r#"<svg width="20" height="20"><path fill="black" d="M2 10A8 8 0 0 1 18 10A8 8 0 0 1 2 10Z"/></svg>"#;
+        let doc = TreeBuilder::parse(html).document();
+        let image = render_svg_to_image(&find_svg(&doc).unwrap()).unwrap();
+
+        assert_eq!(image.pixels()[(10 * 20 + 10) * 4 + 3], 255);
+        assert_eq!(image.pixels()[(0 * 20) * 4 + 3], 0);
+    }
+
+    #[test]
+    fn quadratic_bezier_paths_are_flattened_before_filling() {
+        let html = r#"<svg width="10" height="10"><path fill="black" d="M1 8Q5 0 9 8Z"/></svg>"#;
+        let doc = TreeBuilder::parse(html).document();
+        let image = render_svg_to_image(&find_svg(&doc).unwrap()).unwrap();
+
+        assert_eq!(image.pixels()[(6 * 10 + 5) * 4 + 3], 255);
+        assert_eq!(image.pixels()[(0 * 10 + 5) * 4 + 3], 0);
+    }
+
+    #[test]
+    fn cubic_bezier_paths_are_flattened_before_filling() {
+        let html = r#"<svg width="10" height="10"><path fill="black" d="M1 5C1 1 9 1 9 5C9 9 1 9 1 5Z"/></svg>"#;
+        let doc = TreeBuilder::parse(html).document();
+        let image = render_svg_to_image(&find_svg(&doc).unwrap()).unwrap();
+
+        assert_eq!(image.pixels()[(5 * 10 + 5) * 4 + 3], 255);
+        assert_eq!(image.pixels()[(0 * 10) * 4 + 3], 0);
     }
 
     #[test]
