@@ -177,6 +177,11 @@ impl Image {
         image::decode_jpeg(bytes)
     }
 
+    /// Decodes the first frame of a GIF image into RGBA pixels.
+    pub fn decode_gif(bytes: &[u8]) -> Result<Self, PaintError> {
+        image::decode_gif(bytes)
+    }
+
     /// Returns the image width in pixels.
     pub fn width(&self) -> u32 {
         self.width

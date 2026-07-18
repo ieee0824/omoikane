@@ -1335,6 +1335,16 @@ fn decodes_jpeg_image() {
 }
 
 #[test]
+fn decodes_first_gif_frame_into_rgba_pixels() {
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode("R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==")
+        .unwrap();
+    let image = Image::decode_gif(&bytes).unwrap();
+    assert_eq!((image.width(), image.height()), (1, 1));
+    assert_eq!(image.pixels().len(), 4);
+}
+
+#[test]
 fn decodes_jpeg_data_uri() {
     // Minimal valid JPEG: 1x1 red pixel
     let jpeg_base64 = "/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAgGBgcGBQgHBwcJCQgKDBQNDAsLDBkSEw8UHRofHh0aHBwgJC4nICIsIxwcKDcpLDAxNDQ0Hyc5PTgyPC4zNDL/wAALCAABAAEBAREA/8QAFAABAAAAAAAAAAAAAAAAAAAACf/EABQQAQAAAAAAAAAAAAAAAAAAAAD/2gAIAQEAAD8AVN//2Q==";

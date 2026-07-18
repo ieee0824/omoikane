@@ -769,7 +769,7 @@ fn element_inline_image_with_current_color(
     }
 }
 
-/// Decode an image from a data: URI (PNG, JPEG, or SVG).
+/// Decode an image from a data: URI (PNG, JPEG, GIF, or SVG).
 fn decode_data_uri_image(uri: &str) -> Option<Image> {
     let data_uri = parse_data_uri(uri).ok()?;
     match data_uri {
@@ -780,6 +780,8 @@ fn decode_data_uri_image(uri: &str) -> Option<Image> {
                 || mime_type.eq_ignore_ascii_case("image/jpg")
             {
                 Image::decode_jpeg(&data).ok()
+            } else if mime_type.eq_ignore_ascii_case("image/gif") {
+                Image::decode_gif(&data).ok()
             } else if mime_type.eq_ignore_ascii_case("image/svg+xml") {
                 decode_svg_bytes(&data)
             } else {
@@ -870,7 +872,9 @@ fn fetch_image_uncached(url: &str) -> Option<Image> {
     if content_type.contains("image/svg+xml") || url.ends_with(".svg") {
         return decode_svg_bytes(body);
     }
-    if content_type.contains("image/png") {
+    if content_type.contains("image/gif") || url.ends_with(".gif") {
+        Image::decode_gif(body).ok()
+    } else if content_type.contains("image/png") {
         Image::decode_png(body).ok()
     } else if content_type.contains("image/jpeg") || content_type.contains("image/jpg") {
         Image::decode_jpeg(body).ok()
@@ -879,6 +883,7 @@ fn fetch_image_uncached(url: &str) -> Option<Image> {
         Image::decode_png(body)
             .ok()
             .or_else(|| Image::decode_jpeg(body).ok())
+            .or_else(|| Image::decode_gif(body).ok())
             .or_else(|| decode_svg_bytes(body))
     }
 }
