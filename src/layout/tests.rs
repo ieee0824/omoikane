@@ -2761,6 +2761,99 @@ fn flex_auto_basis_sums_consecutive_inline_children() {
 }
 
 #[test]
+fn flex_auto_basis_preserves_content_width_when_item_has_margins() {
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let container = NodeHandle::element("div");
+    let link = NodeHandle::element("a");
+    let filler = NodeHandle::element("span");
+    document.append_child(body.clone());
+    body.append_child(container.clone());
+    container.append_child(link.clone());
+    container.append_child(filler);
+    link.append_child(NodeHandle::text("about"));
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "div { display: flex; width: 200px; } \
+             a { display: inline-block; margin: 0 15px; padding: 0 5px; \
+                 font-size: 10px; white-space: nowrap; } \
+             span { flex-grow: 1; }",
+        )
+        .unwrap(),
+    );
+
+    let layout = layout_tree(
+        &body,
+        &mut resolver,
+        Rect { x: 0.0, y: 0.0, width: 200.0, height: 0.0 },
+    )
+    .unwrap();
+    let link_box = &layout.children[0].children[0];
+    assert_eq!(link_box.lines.len(), 1);
+    assert!(
+        link_box.dimensions.content.width >= link_box.lines[0].rect.width,
+        "content width {} should contain the unwrapped line width {}",
+        link_box.dimensions.content.width,
+        link_box.lines[0].rect.width,
+    );
+}
+
+#[test]
+fn flex_item_does_not_shrink_below_nowrap_content_width() {
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let container = NodeHandle::element("div");
+    let item = NodeHandle::element("span");
+    let text = NodeHandle::text("one two three four");
+    document.append_child(body.clone());
+    body.append_child(container.clone());
+    container.append_child(item.clone());
+    item.append_child(text);
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "div { display: flex; width: 30px; } \
+             span { white-space: nowrap; font-size: 10px; }",
+        )
+        .unwrap(),
+    );
+
+    let layout = layout_tree(
+        &body,
+        &mut resolver,
+        Rect { x: 0.0, y: 0.0, width: 30.0, height: 0.0 },
+    )
+    .unwrap();
+    assert!(layout.children[0].children[0].dimensions.content.width > 30.0);
+}
+
+#[test]
+fn intrinsic_width_ignores_display_none_descendants() {
+    let parent = NodeHandle::element("div");
+    let visible = NodeHandle::element("span");
+    let hidden = NodeHandle::element("aside");
+    parent.append_child(visible.clone());
+    parent.append_child(hidden);
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "span { display: inline-block; width: 20px; } \
+             aside { display: none; width: 1000px; }",
+        )
+        .unwrap(),
+    );
+
+    assert_eq!(intrinsic_width(&parent, &mut resolver), 20.0);
+}
+
+#[test]
 fn lays_out_flex_column() {
     let document = NodeHandle::document();
     let body = NodeHandle::element("body");

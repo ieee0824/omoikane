@@ -1816,7 +1816,11 @@ pub(super) fn minimum_content_width(node: &NodeHandle, resolver: &mut StyleResol
                 let metrics = font_metrics(&parent_style);
                 // Find the width of the longest unbreakable unit (word or CJK character).
                 use crate::layout::inline::split_words_preserving_spaces_cjk;
-                let normalized = normalize_text(&text, white_space(&parent_style));
+                let white_space_mode = white_space(&parent_style);
+                let normalized = normalize_text(&text, white_space_mode);
+                if !white_space_mode.allows_wrapping() {
+                    return measure_text_width(&normalized, metrics);
+                }
                 split_words_preserving_spaces_cjk(&normalized)
                     .into_iter()
                     .map(|word| measure_text_width(&word, metrics))
@@ -1825,6 +1829,9 @@ pub(super) fn minimum_content_width(node: &NodeHandle, resolver: &mut StyleResol
             .unwrap_or(0.0),
         NodeType::Element => {
             let style = resolver.computed_style(node);
+            if is_display_none(&style) || is_non_rendered_html_element(node) {
+                return 0.0;
+            }
             let padding = edge_sizes(&style, "padding");
             let border = edge_sizes(&style, "border");
             // Elements with explicit width use that as minimum.
@@ -1868,6 +1875,9 @@ fn intrinsic_width(node: &NodeHandle, resolver: &mut StyleResolver) -> f32 {
             .unwrap_or(0.0),
         NodeType::Element => {
             let style = resolver.computed_style(node);
+            if is_display_none(&style) || is_non_rendered_html_element(node) {
+                return 0.0;
+            }
             let padding = edge_sizes(&style, "padding");
             let border = edge_sizes(&style, "border");
             if let Some(width) = explicit_length(&style, "width") {
