@@ -7127,12 +7127,46 @@ mod tests {
                 .as_boolean()
                 .unwrap()
         );
+        assert!(
+            runtime
+                .eval("document.querySelector('style').sheet === document.styleSheets[0]")
+                .unwrap()
+                .as_boolean()
+                .unwrap(),
+            "HTMLStyleElement.sheet must expose the document's live stylesheet"
+        );
         assert_eq!(
             eval_str(
                 &mut runtime,
                 "document.styleSheets[0].cssRules[0].style.color"
             ),
             "red"
+        );
+    }
+
+    #[test]
+    fn dynamic_style_element_sheet_supports_rule_insertion() {
+        let doc = crate::html::TreeBuilder::parse(
+            "<html><head></head><body><div id='target'></div></body></html>",
+        )
+        .document();
+        let mut runtime = JsRuntime::with_document(doc).unwrap();
+
+        runtime
+            .eval(
+                r##"
+                const style = document.createElement("style");
+                style.id = "runtime-styles";
+                document.head.insertBefore(style, document.head.firstChild);
+                style.sheet.insertRule("#target { display: none; }", 0);
+                "##,
+            )
+            .unwrap();
+
+        assert_eq!(eval_num(&mut runtime, "document.styleSheets.length"), 1.0);
+        assert_eq!(
+            eval_str(&mut runtime, "getComputedStyle(document.getElementById('target')).display"),
+            "none"
         );
     }
 
@@ -7855,6 +7889,30 @@ mod tests {
             .as_boolean()
             .unwrap();
         assert!(is_doc, "element.ownerDocument should be document");
+    }
+
+    #[test]
+    fn get_root_node_returns_document_for_connected_nodes() {
+        let doc = crate::html::TreeBuilder::parse(
+            "<html><body><main><span id='target'></span></main></body></html>",
+        )
+        .document();
+        let mut runtime = JsRuntime::with_document(doc).unwrap();
+
+        assert!(
+            runtime
+                .eval("document.getElementById('target').getRootNode() === document")
+                .unwrap()
+                .as_boolean()
+                .unwrap()
+        );
+        assert!(
+            runtime
+                .eval("document.getElementById('target').getRootNode({ composed: true }) === document")
+                .unwrap()
+                .as_boolean()
+                .unwrap()
+        );
     }
 
     #[test]

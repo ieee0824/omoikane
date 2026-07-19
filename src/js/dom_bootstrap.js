@@ -686,6 +686,15 @@
       return wrapNode(__omoikane_parent_node(this.__id));
     }
 
+    getRootNode(options = {}) {
+      // Omoikane does not expose shadow trees yet, so composed and
+      // non-composed traversal currently have the same document root.
+      void options;
+      let root = this;
+      while (root.parentNode) root = root.parentNode;
+      return root;
+    }
+
     get nodeName() {
       return __omoikane_node_name(this.__id);
     }
@@ -1651,6 +1660,9 @@
   class HTMLSpanElement extends HTMLElement {}
   class HTMLParagraphElement extends HTMLElement {}
   class HTMLAnchorElement extends HTMLElement {}
+  class HTMLStyleElement extends HTMLElement {
+    get sheet() { return sheetFor(this); }
+  }
 
   distributePrototypeMembers(Node.prototype, [HTMLElement.prototype], [
     "title", "innerText",
@@ -2864,13 +2876,35 @@
     });
   }
 
+  const dirtyStyleSheets = new Set();
+
   class CSSStyleSheet {
     constructor(ownerNode) {
       this.ownerNode = ownerNode;
       this.href = null;
+      this.__rules = splitCssRules(ownerNode.textContent);
+      this.__ownerText = ownerNode.textContent;
       this.__cssRules = ruleListProxy(this);
     }
-    __ruleTexts() { return splitCssRules(this.ownerNode.textContent); }
+    __syncFromOwner() {
+      if (dirtyStyleSheets.has(this)) return;
+      const text = this.ownerNode.textContent;
+      if (text !== this.__ownerText) {
+        this.__rules = splitCssRules(text);
+        this.__ownerText = text;
+      }
+    }
+    __ruleTexts() {
+      this.__syncFromOwner();
+      return this.__rules;
+    }
+    __markDirty() { dirtyStyleSheets.add(this); }
+    __flush() {
+      if (!dirtyStyleSheets.delete(this)) return;
+      const text = this.__rules.join("\n");
+      this.ownerNode.textContent = text;
+      this.__ownerText = text;
+    }
     get cssRules() { return this.__cssRules; }
     insertRule(rule, index) {
       const text = String(rule);
@@ -2883,7 +2917,7 @@
       if (!Number.isInteger(position) || position < 0 || position > rules.length)
         throw new DOMException("The index is out of range.", "IndexSizeError");
       rules.splice(position, 0, text.trim());
-      this.ownerNode.textContent = rules.join("\n");
+      this.__markDirty();
       return position;
     }
     deleteRule(index) {
@@ -2892,9 +2926,14 @@
       if (!Number.isInteger(position) || position < 0 || position >= rules.length)
         throw new DOMException("The index is out of range.", "IndexSizeError");
       rules.splice(position, 1);
-      this.ownerNode.textContent = rules.join("\n");
+      this.__markDirty();
     }
   }
+
+  function flushStyleSheets() {
+    for (const sheet of Array.from(dirtyStyleSheets)) sheet.__flush();
+  }
+  globalThis.__omoikane_flush_stylesheets = flushStyleSheets;
 
   // Minimal CSS namespace used for feature detection and selector escaping.
   // Unsupported declarations conservatively report false so sites choose their
@@ -3558,6 +3597,7 @@
     img: HTMLImageElement,
     link: HTMLLinkElement,
     script: HTMLScriptElement,
+    style: HTMLStyleElement,
   };
 
   // Standard Node.nodeType constant values, exposed both as static properties
@@ -3623,6 +3663,7 @@
   globalThis.HTMLSpanElement = HTMLSpanElement;
   globalThis.HTMLParagraphElement = HTMLParagraphElement;
   globalThis.HTMLAnchorElement = HTMLAnchorElement;
+  globalThis.HTMLStyleElement = HTMLStyleElement;
   globalThis.CharacterData = CharacterData;
   globalThis.Text = Text;
   globalThis.CDATASection = CDATASection;
@@ -3929,6 +3970,7 @@
   }
   globalThis.getComputedStyle = function(element, pseudoElt) {
     void pseudoElt;
+    flushStyleSheets();
     if (element && element.__id != null) {
       try {
         return __makeComputedStyle(JSON.parse(__omoikane_computed_style(element.__id)));

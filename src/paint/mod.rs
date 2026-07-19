@@ -930,6 +930,12 @@ pub fn render_document_with_url(
                 eprintln!("[omoikane][bootstrap-state] {}", value.to_std_string_escaped());
             }
         }
+        // CSSOM insertRule/deleteRule mutations are batched by the JS shim so
+        // frameworks can install large generated stylesheets without an O(n²)
+        // text rewrite. Commit the batch before rebuilding the native resolver.
+        if let Err(err) = runtime.eval("__omoikane_flush_stylesheets()") {
+            eprintln!("[omoikane][js-error] {err}");
+        }
         // Re-extract stylesheets and rebuild resolver after JS may have
         // modified the DOM (inserted/removed <style>/<link> elements).
         let style_refresh_start = Instant::now();
