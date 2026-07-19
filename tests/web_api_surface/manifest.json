@@ -118,14 +118,14 @@
       "area": "css",
       "description": "CSS.supports accepts a supported declaration",
       "probe": "typeof CSS === 'object' && CSS.supports('display', 'block') === true",
-      "baseline_supported": false
+      "baseline_supported": true
     },
     {
       "id": "css.match-media-screen",
       "area": "css",
       "description": "matchMedia evaluates the screen media type",
       "probe": "matchMedia('screen').matches === true",
-      "baseline_supported": false
+      "baseline_supported": true
     },
     {
       "id": "css.stylesheet-insert-rule",

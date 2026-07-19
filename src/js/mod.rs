@@ -954,7 +954,9 @@ impl JsRuntime {
              globalThis.outerWidth = {w}; globalThis.outerHeight = {h}; \
              if (globalThis.screen) {{ \
              globalThis.screen.width = {w}; globalThis.screen.height = {h}; \
-             globalThis.screen.availWidth = {w}; globalThis.screen.availHeight = {h}; }}"
+             globalThis.screen.availWidth = {w}; globalThis.screen.availHeight = {h}; }} \
+             if (typeof globalThis.__omoikane_media_query_viewport_changed === 'function') \
+             globalThis.__omoikane_media_query_viewport_changed();"
         );
         // The bootstrap always defines these globals before any embedder call,
         // so this eval cannot fail in practice; ignore the result defensively.
@@ -2077,6 +2079,16 @@ fn register_host_bindings(
             NativeFunction::from_copy_closure(css_rule_count_native),
         ),
         (
+            js_string!("__omoikane_css_supports"),
+            2,
+            NativeFunction::from_copy_closure(css_supports_native),
+        ),
+        (
+            js_string!("__omoikane_match_media"),
+            1,
+            NativeFunction::from_copy_closure(match_media_native),
+        ),
+        (
             // (documentId, text) — the target document id plus the markup to
             // write, so a write to an iframe sub-document routes correctly.
             js_string!("__omoikane_document_write"),
@@ -2967,6 +2979,60 @@ fn css_rule_count_native(
     let sheet = crate::css::parse_stylesheet(&css)
         .map_err(|error| JsError::from(JsNativeError::syntax().with_message(error.to_string())))?;
     Ok(JsValue::from(sheet.rules.len() as f64))
+}
+
+/// Evaluates the two-argument form of `CSS.supports()` against the same parser
+/// and supported-property table used by style resolution.
+fn css_supports_native(
+    _: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let property = args
+        .first()
+        .cloned()
+        .unwrap_or_default()
+        .to_string(context)?
+        .to_std_string_escaped();
+    let value = args
+        .get(1)
+        .cloned()
+        .unwrap_or_default()
+        .to_string(context)?
+        .to_std_string_escaped();
+    Ok(JsValue::from(crate::css::supports_declaration(
+        &property, &value,
+    )))
+}
+
+/// Evaluates a media query list against the runtime's current viewport. This
+/// deliberately reuses the `@media` parser/evaluator so CSS and script-visible
+/// feature detection cannot disagree.
+fn match_media_native(
+    _: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let query = args
+        .first()
+        .cloned()
+        .unwrap_or_default()
+        .to_string(context)?
+        .to_std_string_escaped();
+    with_host_state(|state| {
+        let viewport = state.borrow().viewport;
+        let matches = crate::css::parse_media_query_list(&query).is_some_and(|queries| {
+            queries.iter().any(|query| {
+                crate::css::evaluate_media_query(
+                    query,
+                    viewport.width,
+                    viewport.height,
+                    false,
+                )
+            })
+        });
+        Ok(JsValue::from(matches))
+    })
 }
 
 fn set_attribute_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
@@ -4885,7 +4951,7 @@ mod tests {
     fn exposes_css_namespace_and_escapes_identifiers() {
         let mut runtime = JsRuntime::new().unwrap();
         assert!(runtime
-            .eval(r#"CSS.escape("0a b") === "\\30 a\\ b" && CSS.supports("unknown", "value") === false"#)
+            .eval(r#"CSS.escape("0a b") === "\\30 a\\ b" && CSS.supports("display", "block") === true && CSS.supports("(display: block)") === true && CSS.supports("unknown", "value") === false && CSS.supports("width", "12") === false"#)
             .unwrap()
             .as_boolean()
             .unwrap());
@@ -8381,15 +8447,44 @@ mod tests {
     }
 
     #[test]
-    fn match_media_returns_object() {
+    fn match_media_evaluates_current_viewport() {
         let doc = NodeHandle::document();
         let mut runtime = JsRuntime::with_document(doc).unwrap();
+        runtime.set_viewport(1024.0, 768.0);
         let matches = runtime
-            .eval("matchMedia('(min-width: 768px)').matches")
+            .eval("(() => { const query = matchMedia('screen and (min-width: 768px) and (orientation: landscape)'); return query instanceof MediaQueryList && query instanceof EventTarget && query.matches && !matchMedia('(max-width: 600px)').matches && !matchMedia('print').matches; })()")
             .unwrap()
             .as_boolean()
             .unwrap();
-        assert!(!matches, "matchMedia stub should return matches=false");
+        assert!(matches, "media queries should use the runtime viewport");
+    }
+
+    #[test]
+    fn match_media_notifies_when_viewport_changes_result() {
+        let doc = NodeHandle::document();
+        let mut runtime = JsRuntime::with_document(doc).unwrap();
+        runtime.set_viewport(1024.0, 768.0);
+        runtime
+            .eval(
+                r#"globalThis.viewportQuery = matchMedia('(min-width: 900px)');
+                   globalThis.mediaChanges = [];
+                   viewportQuery.addEventListener('change', event => mediaChanges.push([event.matches, event.media]));"#,
+            )
+            .unwrap();
+
+        runtime.set_viewport(800.0, 768.0);
+        assert!(runtime
+            .eval("!viewportQuery.matches && mediaChanges.length === 1 && mediaChanges[0][0] === false && mediaChanges[0][1] === '(min-width: 900px)'")
+            .unwrap()
+            .as_boolean()
+            .unwrap());
+
+        runtime.set_viewport(700.0, 768.0);
+        assert_eq!(
+            runtime.eval("mediaChanges.length").unwrap().as_number(),
+            Some(1.0),
+            "a viewport change that preserves the result must not fire change"
+        );
     }
 
     #[test]
