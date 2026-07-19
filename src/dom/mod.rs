@@ -91,13 +91,21 @@ pub struct Element {
     attributes: BTreeMap<String, String>,
     checked: bool,
     dirty_checkedness: bool,
+    /// The inert template contents owner for HTML `<template>` elements.
+    ///
+    /// Template contents are not children of the element itself. Keeping the
+    /// fragment in the native DOM model makes parser-created templates inert
+    /// before JavaScript wrappers or layout ever inspect the document tree.
+    template_content: Option<NodeHandle>,
 }
 
 impl Element {
     /// Creates a new element payload.
     pub fn new(tag_name: impl Into<String>) -> Self {
+        let tag_name = tag_name.into().to_ascii_lowercase();
+        let template_content = (tag_name == "template").then(NodeHandle::document_fragment);
         Self {
-            tag_name: tag_name.into().to_ascii_lowercase(),
+            tag_name,
             namespace_uri: None,
             prefix: None,
             local_name: String::new(),
@@ -105,6 +113,7 @@ impl Element {
             attributes: BTreeMap::new(),
             checked: false,
             dirty_checkedness: false,
+            template_content,
         }
     }
 
@@ -126,6 +135,7 @@ impl Element {
             attributes: BTreeMap::new(),
             checked: false,
             dirty_checkedness: false,
+            template_content: None,
         }
     }
 
@@ -328,6 +338,14 @@ impl NodeHandle {
     /// identity.
     pub(crate) fn identity(&self) -> usize {
         self.0.borrow().id
+    }
+
+    /// Returns the inert contents fragment owned by an HTML `<template>`.
+    pub fn template_content(&self) -> Option<NodeHandle> {
+        match &self.0.borrow().data {
+            NodeData::Element(element) => element.template_content.clone(),
+            _ => None,
+        }
     }
 
     /// Appends `child` to the node's children.

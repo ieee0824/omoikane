@@ -661,6 +661,9 @@ impl HostState {
 
     fn register_tree(&mut self, node: &NodeHandle) {
         self.nodes.insert(node.identity(), node.clone());
+        if let Some(content) = node.template_content() {
+            self.register_tree(&content);
+        }
         for child in node.child_nodes() {
             self.register_tree(&child);
         }
@@ -673,6 +676,9 @@ impl HostState {
     /// preventing stale nodes from accumulating in the registry across reloads.
     fn unregister_tree(&mut self, node: &NodeHandle) {
         self.nodes.remove(&node.identity());
+        if let Some(content) = node.template_content() {
+            self.unregister_tree(&content);
+        }
         for child in node.child_nodes() {
             self.unregister_tree(&child);
         }
@@ -2239,6 +2245,11 @@ fn register_host_bindings(
             NativeFunction::from_copy_closure(create_document_fragment_native),
         ),
         (
+            js_string!("__omoikane_template_content"),
+            1,
+            NativeFunction::from_copy_closure(template_content_native),
+        ),
+        (
             js_string!("__omoikane_create_document"),
             0,
             NativeFunction::from_copy_closure(create_document_native),
@@ -2906,7 +2917,7 @@ fn create_element_native(
     with_host_state(|state| {
         let node = NodeHandle::element(tag_name);
         let id = node.identity();
-        state.borrow_mut().nodes.insert(id, node);
+        state.borrow_mut().register_tree(&node);
         Ok(JsValue::from(id as f64))
     })
 }
@@ -3641,7 +3652,11 @@ fn escape_html_attr(s: &str) -> String {
 
 fn serialize_inner_html(node: &NodeHandle) -> String {
     let mut html = String::new();
-    for child in node.child_nodes() {
+    let children = node
+        .template_content()
+        .map(|content| content.child_nodes())
+        .unwrap_or_else(|| node.child_nodes());
+    for child in children {
         serialize_node(&child, &mut html);
     }
     html
@@ -3738,8 +3753,9 @@ fn set_inner_html_native(
             .borrow()
             .get_node(id)
             .ok_or_else(|| JsError::from(JsNativeError::error().with_message("node not found")))?;
-        for child in node.child_nodes() {
-            let _ = node.remove_child(&child);
+        let target = node.template_content().unwrap_or_else(|| node.clone());
+        for child in target.child_nodes() {
+            let _ = target.remove_child(&child);
         }
         if !html.is_empty() {
             // Parse as fragment: wrap in body context and extract children
@@ -3748,9 +3764,10 @@ fn set_inner_html_native(
             let body = parsed.query_selector("body");
             let source = body.as_ref().map(|b| b.child_nodes()).unwrap_or_default();
             for child in source {
-                node.append_child(child);
+                target.append_child(child);
             }
         }
+        state.borrow_mut().register_tree(&target);
         // The node stays attached to its document; invalidate that document's
         // resolver so a `<style>` inside the new markup is picked up.
         state.borrow_mut().mark_style_dirty_for_node(&node);
@@ -4084,8 +4101,16 @@ fn clone_node_impl(node: &NodeHandle, deep: bool) -> NodeHandle {
         ),
     };
     if deep {
-        for child in node.child_nodes() {
-            clone.append_child(clone_node_impl(&child, true));
+        if let (Some(source_content), Some(clone_content)) =
+            (node.template_content(), clone.template_content())
+        {
+            for child in source_content.child_nodes() {
+                clone_content.append_child(clone_node_impl(&child, true));
+            }
+        } else {
+            for child in node.child_nodes() {
+                clone.append_child(clone_node_impl(&child, true));
+            }
         }
     }
     clone
@@ -4170,6 +4195,26 @@ fn create_document_fragment_native(
     with_host_state(|state| {
         state.borrow_mut().nodes.insert(node.identity(), node);
         Ok(JsValue::from(id))
+    })
+}
+
+fn template_content_native(
+    _: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let id = parse_node_id(args.first(), context)?;
+    with_host_state(|state| {
+        let content = state
+            .borrow()
+            .get_node(id)
+            .and_then(|node| node.template_content())
+            .ok_or_else(|| {
+                JsError::from(
+                    JsNativeError::typ().with_message("node is not an HTML template element"),
+                )
+            })?;
+        Ok(JsValue::from(content.identity() as f64))
     })
 }
 
@@ -8588,6 +8633,70 @@ mod tests {
             .to_number(&mut runtime.context)
             .unwrap();
         assert_eq!(deep_children, 1.0, "deep clone should have children");
+    }
+
+    #[test]
+    fn parsed_template_exposes_inert_content_fragment() {
+        let mut runtime = runtime_from_html(
+            r#"<template id="tpl"><script>globalThis.templateScriptRan = true;</script><div class="inside">content</div></template><p>outside</p>"#,
+        );
+        let errors = runtime.execute_document_scripts(None);
+        assert!(errors.is_empty(), "unexpected script errors: {errors:?}");
+
+        assert!(runtime
+            .eval(
+                r#"(() => {
+                  const template = document.getElementById("tpl");
+                  const inside = template.content.querySelector(".inside");
+                  return template instanceof HTMLTemplateElement &&
+                    template.childNodes.length === 0 &&
+                    template.content instanceof DocumentFragment &&
+                    template.content.parentNode === null &&
+                    template.content.ownerDocument !== document &&
+                    template.content.ownerDocument.nodeType === 9 &&
+                    inside.ownerDocument === template.content.ownerDocument &&
+                    template.content.isConnected === false &&
+                    inside.textContent === "content" &&
+                    inside.isConnected === false &&
+                    document.querySelector(".inside") === null &&
+                    template.innerHTML.includes('class="inside"') &&
+                    globalThis.templateScriptRan === undefined;
+                })()"#,
+            )
+            .unwrap()
+            .as_boolean()
+            .unwrap());
+    }
+
+    #[test]
+    fn dynamic_template_inner_html_and_deep_clone_use_independent_contents() {
+        let mut runtime = JsRuntime::new().unwrap();
+        assert!(runtime
+            .eval(
+                r#"(() => {
+                  const template = document.createElement("template");
+                  template.innerHTML = '<span data-kind="original">one</span>';
+                  document.body.appendChild(template);
+                  const clone = template.cloneNode(true);
+                  const originalSpan = template.content.querySelector("span");
+                  const cloneSpan = clone.content.querySelector("span");
+                  cloneSpan.textContent = "two";
+                  clone.content.appendChild(document.createElement("b"));
+                  return template.content === template.content &&
+                    clone instanceof HTMLTemplateElement &&
+                    clone.content !== template.content &&
+                    originalSpan !== cloneSpan &&
+                    originalSpan.textContent === "one" &&
+                    cloneSpan.textContent === "two" &&
+                    template.content.children.length === 1 &&
+                    clone.content.children.length === 2 &&
+                    template.childNodes.length === 0 &&
+                    originalSpan.isConnected === false;
+                })()"#,
+            )
+            .unwrap()
+            .as_boolean()
+            .unwrap());
     }
 
     #[test]

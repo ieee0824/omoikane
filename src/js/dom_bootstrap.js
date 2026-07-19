@@ -103,10 +103,25 @@
       return;
     }
     node.__ownerDoc = doc;
+    if (node.nodeType === 1 && String(node.localName).toLowerCase() === "template") {
+      stampOwnerDoc(node.content, templateContentsOwnerDocument(doc));
+    }
     const children = node.childNodes;
     for (let i = 0; i < children.length; i++) {
       stampOwnerDoc(children[i], doc);
     }
+  }
+
+  // Each Document has a separate inert document that owns the contents of its
+  // template elements. Keep it stable and shared by all templates created by
+  // that document, matching the HTML template contents owner-document model.
+  function templateContentsOwnerDocument(doc) {
+    if (!doc.__templateContentsOwnerDocument) {
+      const owner = wrapNode(__omoikane_create_document());
+      owner.__documentURL = "about:blank";
+      doc.__templateContentsOwnerDocument = owner;
+    }
+    return doc.__templateContentsOwnerDocument;
   }
 
   function invokeListeners(node, event, capture, phase) {
@@ -1167,6 +1182,9 @@
         }
         if (source instanceof CharacterData) target.textContent = source.textContent;
         if (!deep) return;
+        if (source instanceof HTMLTemplateElement) {
+          preserveCharacterData(source.content, target.content);
+        }
         const sourceChildren = source.childNodes;
         const targetChildren = target.childNodes;
         for (let i = 0; i < sourceChildren.length; i++) {
@@ -1659,6 +1677,24 @@
   class HTMLAnchorElement extends HTMLElement {}
   class HTMLStyleElement extends HTMLElement {
     get sheet() { return sheetFor(this); }
+  }
+  class HTMLTemplateElement extends HTMLElement {
+    get content() {
+      const fragment = wrapNode(__omoikane_template_content(this.__id));
+      const owner = this.ownerDocument;
+      if (fragment && owner) {
+        stampOwnerDoc(fragment, templateContentsOwnerDocument(owner));
+      }
+      return fragment;
+    }
+    get innerHTML() {
+      return Object.getOwnPropertyDescriptor(Element.prototype, "innerHTML")
+        .get.call(this.content);
+    }
+    set innerHTML(value) {
+      Object.getOwnPropertyDescriptor(Element.prototype, "innerHTML")
+        .set.call(this.content, value);
+    }
   }
 
   distributePrototypeMembers(Node.prototype, [HTMLElement.prototype], [
@@ -3625,6 +3661,7 @@
     link: HTMLLinkElement,
     script: HTMLScriptElement,
     style: HTMLStyleElement,
+    template: HTMLTemplateElement,
   };
 
   // Standard Node.nodeType constant values, exposed both as static properties
@@ -3691,6 +3728,7 @@
   globalThis.HTMLParagraphElement = HTMLParagraphElement;
   globalThis.HTMLAnchorElement = HTMLAnchorElement;
   globalThis.HTMLStyleElement = HTMLStyleElement;
+  globalThis.HTMLTemplateElement = HTMLTemplateElement;
   globalThis.CharacterData = CharacterData;
   globalThis.Text = Text;
   globalThis.CDATASection = CDATASection;

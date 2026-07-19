@@ -153,7 +153,7 @@ impl Builder {
     fn handle_before_head(&mut self, token: Token, errors: &mut Vec<HtmlParseError>) {
         match token {
             Token::Character(data) if data.trim().is_empty() => {}
-            Token::Comment(data) => self.current_node().append_child(NodeHandle::comment(data)),
+            Token::Comment(data) => self.insertion_parent().append_child(NodeHandle::comment(data)),
             Token::StartTag { name, .. } if name == "head" => {
                 let head = self.insert_element("head");
                 self.open_elements.push(head);
@@ -176,7 +176,7 @@ impl Builder {
             Token::Character(data) => {
                 self.insert_text(&data);
             }
-            Token::Comment(data) => self.current_node().append_child(NodeHandle::comment(data)),
+            Token::Comment(data) => self.insertion_parent().append_child(NodeHandle::comment(data)),
             Token::Doctype(_) => {}
             Token::StartTag {
                 name,
@@ -232,7 +232,7 @@ impl Builder {
                     self.insert_text(&data);
                 }
             }
-            Token::Comment(data) => self.current_node().append_child(NodeHandle::comment(data)),
+            Token::Comment(data) => self.insertion_parent().append_child(NodeHandle::comment(data)),
             Token::Doctype(_) => {}
             Token::StartTag {
                 name,
@@ -344,7 +344,7 @@ impl Builder {
         match token {
             Token::Character(data) if data.trim().is_empty() => self.insert_text(&data),
             Token::Character(data) => self.foster_parent_text(&data),
-            Token::Comment(data) => self.current_node().append_child(NodeHandle::comment(data)),
+            Token::Comment(data) => self.insertion_parent().append_child(NodeHandle::comment(data)),
             Token::StartTag {
                 name,
                 attributes,
@@ -772,11 +772,21 @@ impl Builder {
             .unwrap_or_else(|| self.document.clone())
     }
 
+    /// Returns the node that receives newly parsed children.
+    ///
+    /// An HTML `<template>` stays on the stack of open elements for parsing
+    /// scope, but its tokens are inserted into the separate template contents
+    /// DocumentFragment rather than becoming children of the element.
+    fn insertion_parent(&self) -> NodeHandle {
+        let current = self.current_node();
+        current.template_content().unwrap_or(current)
+    }
+
     fn current_node_or_document(&mut self) -> NodeHandle {
         if self.open_elements.is_empty() {
             self.ensure_body_element()
         } else {
-            self.current_node()
+            self.insertion_parent()
         }
     }
 
@@ -1303,9 +1313,12 @@ mod tests {
     fn template_content_is_inserted_and_closed() {
         let result = TreeBuilder::parse("<template><div>inside</div></template><p>after</p>");
         let template = result.document().query_selector("template").unwrap();
-        let div = template.query_selector("div").unwrap();
+        let content = template.template_content().unwrap();
+        let div = content.query_selector("div").unwrap();
         let p = result.document().query_selector("p").unwrap();
 
+        assert!(template.child_nodes().is_empty());
+        assert!(result.document().query_selector("div").is_none());
         assert_eq!(div.child_nodes()[0].data(), Some("inside".to_string()));
         assert_eq!(p.child_nodes()[0].data(), Some("after".to_string()));
     }
