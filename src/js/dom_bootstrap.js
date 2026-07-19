@@ -4521,6 +4521,7 @@
       this.responseText = "";
       this.response = "";
       this.responseType = "";
+      this.responseURL = "";
       this.timeout = 0;
       this.withCredentials = false;
       this.onreadystatechange = null;
@@ -4528,7 +4529,9 @@
       this.onerror = null;
       this.onloadend = null;
       this._headers = {};
+      this._responseHeaders = [];
       this._requestId = 0;
+      this._sendFlag = false;
     }
     open(method, url, async = true) {
       this._requestId++;
@@ -4536,7 +4539,10 @@
       this.statusText = "";
       this.responseText = "";
       this.response = "";
+      this.responseURL = "";
       this._headers = {};
+      this._responseHeaders = [];
+      this._sendFlag = false;
       this._method = String(method).toUpperCase();
       this._url = resolveNetworkUrl(url);
       this._async = async !== false;
@@ -4544,10 +4550,27 @@
       this._notify("readystatechange");
     }
     setRequestHeader(name, value) {
-      this._headers[String(name).toLowerCase()] = String(value);
+      if (this.readyState !== 1 || this._sendFlag) throw new Error("InvalidStateError");
+      const key = String(name).toLowerCase();
+      const text = String(value).trim();
+      this._headers[key] = key in this._headers ? this._headers[key] + ", " + text : text;
     }
-    getAllResponseHeaders() { return ""; }
-    getResponseHeader() { return null; }
+    getAllResponseHeaders() {
+      if (this.readyState < 2) return "";
+      return this._responseHeaders
+        .filter(([name]) => String(name).toLowerCase() !== "set-cookie")
+        .map(([name, value]) => String(name).toLowerCase() + ": " + value + "\r\n")
+        .join("");
+    }
+    getResponseHeader(name) {
+      if (this.readyState < 2) return null;
+      const key = String(name).toLowerCase();
+      if (key === "set-cookie" || key === "set-cookie2") return null;
+      const values = this._responseHeaders
+        .filter(([headerName]) => String(headerName).toLowerCase() === key)
+        .map(([, value]) => String(value));
+      return values.length ? values.join(", ") : null;
+    }
     addEventListener(type, callback) {
       (this._listeners[type] ||= []).push(callback);
     }
@@ -4557,33 +4580,64 @@
     abort() {
       this._requestId++;
       this.readyState = 0;
+      this.status = 0;
+      this.statusText = "";
+      this.responseText = "";
+      this.response = "";
+      this.responseURL = "";
+      this._responseHeaders = [];
+      this._sendFlag = false;
       this._notify("abort");
       this._notify("loadend");
     }
-    send() {
-      if (this.readyState !== 1) throw new Error("InvalidStateError");
+    send(body = null) {
+      if (this.readyState !== 1 || this._sendFlag) throw new Error("InvalidStateError");
+      this._sendFlag = true;
       const requestId = this._requestId;
-      if (this._method !== "GET") {
-        this.readyState = 4;
-        this._notify("readystatechange");
-        this._notify("error");
-        this._notify("loadend");
-        return;
+      const requestBody = this._method === "GET" || this._method === "HEAD" ? null : body;
+      if (requestBody != null && !("content-type" in this._headers)) {
+        this._headers["content-type"] = "text/plain;charset=UTF-8";
       }
-      Promise.resolve(__omoikane_fetch(this._url)).then(raw => {
+      Promise.resolve().then(() =>
+        __omoikane_fetch(
+          this._url,
+          this._method,
+          JSON.stringify(Object.entries(this._headers)),
+          requestBody,
+        )
+      ).then(raw => {
         if (requestId !== this._requestId) return;
         const data = JSON.parse(String(raw));
         this.status = data.status;
-        this.statusText = data.ok ? "OK" : "";
+        this.statusText = data.statusText;
+        this.responseURL = data.url;
+        this._responseHeaders = data.headers;
+        this.readyState = 2;
+        this._notify("readystatechange");
+        this.readyState = 3;
+        this._notify("readystatechange");
         this.responseText = data.bodyText;
-        this.response = this.responseText;
+        if (this.responseType === "json") {
+          try { this.response = JSON.parse(this.responseText); }
+          catch (_) { this.response = null; }
+        } else {
+          this.response = this.responseText;
+        }
         this.readyState = 4;
+        this._sendFlag = false;
         this._notify("readystatechange");
         this._notify("load");
         this._notify("loadend");
       }).catch(() => {
         if (requestId !== this._requestId) return;
+        this.status = 0;
+        this.statusText = "";
+        this.responseText = "";
+        this.response = "";
+        this.responseURL = "";
+        this._responseHeaders = [];
         this.readyState = 4;
+        this._sendFlag = false;
         this._notify("readystatechange");
         this._notify("error");
         this._notify("loadend");
@@ -4972,10 +5026,17 @@
       this.url = source ? source.url : resolveNetworkUrl(input);
       this.method = String(init.method || (source && source.method) || "GET").toUpperCase();
       this.headers = new Headers(init.headers || (source && source.headers));
-      this.body = init.body === undefined ? (source && source.body) : init.body;
+      const selectedBody = init.body === undefined ? (source && source.body) : init.body;
+      this.body = selectedBody == null ? null : String(selectedBody);
       this.credentials = init.credentials || (source && source.credentials) || "same-origin";
       this.mode = init.mode || (source && source.mode) || "cors";
       this.signal = init.signal || (source && source.signal) || null;
+      if ((this.method === "GET" || this.method === "HEAD") && this.body != null) {
+        throw new TypeError("Request with GET/HEAD method cannot have body");
+      }
+      if (this.body != null && !this.headers.has("content-type")) {
+        this.headers.set("content-type", "text/plain;charset=UTF-8");
+      }
     }
     clone() { return new Request(this); }
   }
@@ -4987,14 +5048,14 @@
       this.headers = new Headers(init.headers);
       this.url = init.url || "";
       this.type = "basic";
-      this.redirected = false;
+      this.redirected = Boolean(init.redirected);
       this.bodyUsed = false;
     }
     get ok() { return this.status >= 200 && this.status <= 299; }
     text() { this.bodyUsed = true; return Promise.resolve(this._body); }
     json() { return this.text().then(JSON.parse); }
     arrayBuffer() { return Promise.resolve(new TextEncoder().encode(this._body).buffer); }
-    clone() { return new Response(this._body, { status: this.status, statusText: this.statusText, headers: this.headers, url: this.url }); }
+    clone() { return new Response(this._body, { status: this.status, statusText: this.statusText, headers: this.headers, url: this.url, redirected: this.redirected }); }
     static json(data, init = {}) {
       const headers = new Headers(init.headers);
       if (!headers.has("content-type")) headers.set("content-type", "application/json");
@@ -5010,10 +5071,24 @@
   globalThis.fetch = function(input, init = {}) {
     const request = input instanceof Request ? new Request(input, init) : new Request(input, init);
     if (request.signal && request.signal.aborted) return Promise.reject(request.signal.reason);
-    return Promise.resolve(__omoikane_fetch(request.url)).then(raw => {
+    return Promise.resolve().then(() => {
+      if (request.signal && request.signal.aborted) throw request.signal.reason;
+      return __omoikane_fetch(
+        request.url,
+        request.method,
+        JSON.stringify([...request.headers]),
+        request.body,
+      );
+    }).then(raw => {
       if (request.signal && request.signal.aborted) throw request.signal.reason;
       const data = JSON.parse(String(raw));
-      return new Response(data.bodyText, { status: data.status, url: data.url });
+      return new Response(data.bodyText, {
+        status: data.status,
+        statusText: data.statusText,
+        headers: data.headers,
+        url: data.url,
+        redirected: data.redirected,
+      });
     });
   };
 
