@@ -18,7 +18,7 @@ use crate::css::{
     ComputedStyle, ComputedValue, Origin, Selector, StyleResolver, matches_selector,
     parse_selector_list,
 };
-use crate::dom::{Node, NodeHandle, NodeType};
+use crate::dom::{Node, NodeHandle, NodeType, ShadowRootMode};
 use crate::http::{Client, HttpRequest, Method, default_user_agent};
 use crate::layout::{LayoutBox, Overflow, Rect};
 
@@ -664,6 +664,9 @@ impl HostState {
         if let Some(content) = node.template_content() {
             self.register_tree(&content);
         }
+        if let Some(root) = node.shadow_root() {
+            self.register_tree(&root);
+        }
         for child in node.child_nodes() {
             self.register_tree(&child);
         }
@@ -678,6 +681,9 @@ impl HostState {
         self.nodes.remove(&node.identity());
         if let Some(content) = node.template_content() {
             self.unregister_tree(&content);
+        }
+        if let Some(root) = node.shadow_root() {
+            self.unregister_tree(&root);
         }
         for child in node.child_nodes() {
             self.unregister_tree(&child);
@@ -858,8 +864,14 @@ fn document_root_for_node(node: &NodeHandle) -> Option<NodeHandle> {
         return Some(node.clone());
     }
     let mut current = node.clone();
-    while let Some(parent) = current.parent_node() {
-        current = parent;
+    loop {
+        if let Some(parent) = current.parent_node() {
+            current = parent;
+        } else if let Some(host) = current.shadow_host() {
+            current = host;
+        } else {
+            break;
+        }
     }
     if current.node_type() == NodeType::Document {
         Some(current)
@@ -2248,6 +2260,26 @@ fn register_host_bindings(
             js_string!("__omoikane_template_content"),
             1,
             NativeFunction::from_copy_closure(template_content_native),
+        ),
+        (
+            js_string!("__omoikane_attach_shadow"),
+            2,
+            NativeFunction::from_copy_closure(attach_shadow_native),
+        ),
+        (
+            js_string!("__omoikane_shadow_root"),
+            1,
+            NativeFunction::from_copy_closure(shadow_root_native),
+        ),
+        (
+            js_string!("__omoikane_shadow_host"),
+            1,
+            NativeFunction::from_copy_closure(shadow_host_native),
+        ),
+        (
+            js_string!("__omoikane_shadow_mode"),
+            1,
+            NativeFunction::from_copy_closure(shadow_mode_native),
         ),
         (
             js_string!("__omoikane_create_document"),
@@ -4215,6 +4247,80 @@ fn template_content_native(
                 )
             })?;
         Ok(JsValue::from(content.identity() as f64))
+    })
+}
+
+fn attach_shadow_native(
+    _: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let id = parse_node_id(args.first(), context)?;
+    let mode = if args.get(1).is_some_and(JsValue::to_boolean) {
+        ShadowRootMode::Closed
+    } else {
+        ShadowRootMode::Open
+    };
+    with_host_state(|state| {
+        let host = state
+            .borrow()
+            .get_node(id)
+            .ok_or_else(|| JsError::from(JsNativeError::error().with_message("node not found")))?;
+        let Some(root) = host.attach_shadow(mode) else {
+            return Ok(JsValue::null());
+        };
+        let root_id = root.identity();
+        state.borrow_mut().register_tree(&root);
+        Ok(JsValue::from(root_id as f64))
+    })
+}
+
+fn shadow_root_native(
+    _: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let id = parse_node_id(args.first(), context)?;
+    with_host_state(|state| {
+        let root = state
+            .borrow()
+            .get_node(id)
+            .and_then(|node| node.shadow_root());
+        Ok(node_to_js_value(root))
+    })
+}
+
+fn shadow_host_native(
+    _: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let id = parse_node_id(args.first(), context)?;
+    with_host_state(|state| {
+        let host = state
+            .borrow()
+            .get_node(id)
+            .and_then(|node| node.shadow_host());
+        Ok(node_to_js_value(host))
+    })
+}
+
+fn shadow_mode_native(
+    _: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let id = parse_node_id(args.first(), context)?;
+    with_host_state(|state| {
+        let mode = state
+            .borrow()
+            .get_node(id)
+            .and_then(|node| node.shadow_root_mode());
+        Ok(match mode {
+            Some(ShadowRootMode::Open) => js_string!("open").into(),
+            Some(ShadowRootMode::Closed) => js_string!("closed").into(),
+            None => JsValue::null(),
+        })
     })
 }
 
@@ -8692,6 +8798,86 @@ mod tests {
                     clone.content.children.length === 2 &&
                     template.childNodes.length === 0 &&
                     originalSpan.isConnected === false;
+                })()"#,
+            )
+            .unwrap()
+            .as_boolean()
+            .unwrap());
+    }
+
+    #[test]
+    fn open_shadow_root_preserves_tree_boundaries_and_composed_connectivity() {
+        let mut runtime = runtime_from_html(
+            r#"<div id="host"><span id="light">light</span></div>"#,
+        );
+        assert!(runtime
+            .eval(
+                r##"(() => {
+                  const host = document.getElementById("host");
+                  const root = host.attachShadow({ mode: "open" });
+                  root.innerHTML = '<span id="inside">shadow</span>';
+                  const inside = root.querySelector("#inside");
+                  const clone = host.cloneNode(true);
+                  const connectedBeforeDetach = root.isConnected && inside.isConnected;
+                  host.remove();
+                  const disconnectedWithHost = !root.isConnected && !inside.isConnected;
+                  document.body.appendChild(host);
+                  const reconnectedWithHost = root.isConnected && inside.isConnected;
+                  return root instanceof ShadowRoot &&
+                    root instanceof DocumentFragment &&
+                    root.host === host &&
+                    root.mode === "open" &&
+                    root.delegatesFocus === false &&
+                    host.shadowRoot === root &&
+                    host.childNodes.length === 1 &&
+                    root.childNodes.length === 1 &&
+                    host.querySelector("#light") !== null &&
+                    host.querySelector("#inside") === null &&
+                    document.querySelector("#inside") === null &&
+                    inside.parentNode === root &&
+                    root.parentNode === null &&
+                    root.ownerDocument === document &&
+                    root.getRootNode() === root &&
+                    inside.getRootNode() === root &&
+                    inside.getRootNode({ composed: true }) === document &&
+                    connectedBeforeDetach && disconnectedWithHost && reconnectedWithHost &&
+                    !host.contains(inside) && root.contains(inside) &&
+                    root.innerHTML.includes('id="inside"') &&
+                    clone.shadowRoot === null;
+                })()"##,
+            )
+            .unwrap()
+            .as_boolean()
+            .unwrap());
+    }
+
+    #[test]
+    fn closed_shadow_root_and_invalid_hosts_follow_attach_shadow_errors() {
+        let mut runtime = JsRuntime::new().unwrap();
+        assert!(runtime
+            .eval(
+                r#"(() => {
+                  const host = document.createElement("section");
+                  document.body.appendChild(host);
+                  const root = host.attachShadow({ mode: "closed" });
+                  let duplicate = "";
+                  let invalidHost = "";
+                  let invalidMode = "";
+                  let constructor = "";
+                  try { host.attachShadow({ mode: "open" }); } catch (e) { duplicate = e.name; }
+                  try { document.createElement("img").attachShadow({ mode: "open" }); }
+                  catch (e) { invalidHost = e.name; }
+                  try { document.createElement("div").attachShadow({ mode: "invalid" }); }
+                  catch (e) { invalidMode = e.name; }
+                  try { new ShadowRoot(); } catch (e) { constructor = e.name; }
+                  return root.mode === "closed" &&
+                    root.host === host &&
+                    host.shadowRoot === null &&
+                    root.isConnected &&
+                    duplicate === "NotSupportedError" &&
+                    invalidHost === "NotSupportedError" &&
+                    invalidMode === "TypeError" &&
+                    constructor === "TypeError";
                 })()"#,
             )
             .unwrap()
