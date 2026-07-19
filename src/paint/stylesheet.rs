@@ -39,6 +39,17 @@ pub(crate) fn collect_author_stylesheets(
     client: &mut Option<crate::http::Client>,
 ) -> Result<(), PaintError> {
     if node.node_type() == NodeType::Element {
+        // Rendering runs with scripting enabled, so fallback content inside
+        // <noscript> must not contribute author stylesheets. In particular,
+        // X includes a rule there that hides both #placeholder and #react-root.
+        if node
+            .tag_name()
+            .as_deref()
+            .is_some_and(|tag| tag.eq_ignore_ascii_case("noscript"))
+        {
+            return Ok(());
+        }
+
         match node.tag_name().as_deref() {
             Some("style") => {
                 let css = collect_text_contents(node);

@@ -2931,6 +2931,24 @@ fn extract_stylesheets_skips_http_link_without_base_url() {
 }
 
 #[test]
+fn extract_stylesheets_skips_noscript_fallback_content() {
+    let html = r#"<html><head>
+            <style>#react-root { display: block; }</style>
+            <noscript>
+                <style>#react-root { display: none !important; }</style>
+                <link rel="stylesheet" href="data:text/css,%23react-root%7Bvisibility%3Ahidden%7D">
+            </noscript>
+        </head><body><div id="react-root"></div></body></html>"#;
+    let document = TreeBuilder::parse(html).document();
+    let stylesheets = extract_author_stylesheets(&document, None).unwrap();
+
+    assert_eq!(stylesheets.len(), 1);
+    assert!(stylesheets[0].contains("display: block"));
+    assert!(!stylesheets[0].contains("display: none"));
+    assert!(!stylesheets[0].contains("visibility"));
+}
+
+#[test]
 fn extract_stylesheets_includes_data_uri_without_base_url() {
     let html = r#"<html><head>
             <link rel="stylesheet" href="data:text/css,body%7Bmargin%3A0%7D">
