@@ -205,7 +205,7 @@ fn resolve_stylesheet_asset_urls(
 
     let mut output = String::with_capacity(css.len());
     let mut rest = css.as_str();
-    while let Some(start) = rest.to_ascii_lowercase().find("url(") {
+    while let Some(start) = find_ascii_case_insensitive_url(rest) {
         output.push_str(&rest[..start]);
         let after_open = &rest[start + 4..];
         let Some(end) = find_url_closing_parenthesis(after_open) else {
@@ -232,6 +232,13 @@ fn resolve_stylesheet_asset_urls(
     }
     output.push_str(rest);
     output
+}
+
+fn find_ascii_case_insensitive_url(input: &str) -> Option<usize> {
+    input
+        .as_bytes()
+        .windows(4)
+        .position(|candidate| candidate.eq_ignore_ascii_case(b"url("))
 }
 
 fn find_url_closing_parenthesis(input: &str) -> Option<usize> {

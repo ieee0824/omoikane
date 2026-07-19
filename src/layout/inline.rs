@@ -382,7 +382,13 @@ fn find_descendant_inline_image(
     resolver: &mut StyleResolver,
 ) -> Option<(NodeHandle, Image)> {
     for child in node.child_nodes() {
+        if is_non_rendered_html_element(&child) {
+            continue;
+        }
         let child_style = resolver.computed_style(&child);
+        if is_display_none(&child_style) {
+            continue;
+        }
         if let Some(image) = element_inline_image_with_style(&child, &child_style) {
             return Some(image);
         }

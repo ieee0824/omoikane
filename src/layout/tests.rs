@@ -1122,6 +1122,54 @@ fn icon_only_button_preserves_nested_svg() {
 }
 
 #[test]
+fn icon_only_button_skips_hidden_and_non_rendered_images() {
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let div = NodeHandle::element("div");
+    let button = NodeHandle::element("button");
+    let style = NodeHandle::element("style");
+    let style_svg = NodeHandle::element("svg");
+    let hidden = NodeHandle::element("span");
+    let hidden_svg = NodeHandle::element("svg");
+    let visible_svg = NodeHandle::element("svg");
+
+    style_svg.set_attribute("viewBox", "0 0 6 6");
+    style.append_child(style_svg);
+    hidden.set_attribute("style", "display: none");
+    hidden_svg.set_attribute("viewBox", "0 0 12 12");
+    hidden.append_child(hidden_svg);
+    visible_svg.set_attribute("viewBox", "0 0 24 24");
+
+    document.append_child(body.clone());
+    body.append_child(div.clone());
+    div.append_child(button.clone());
+    button.append_child(style);
+    button.append_child(hidden);
+    button.append_child(visible_svg);
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "button { width: 36px; height: 36px; padding: 0; border: 0; }",
+        )
+        .unwrap(),
+    );
+    let layout = layout_tree(
+        &body,
+        &mut resolver,
+        Rect { x: 0.0, y: 0.0, width: 100.0, height: 0.0 },
+    )
+    .unwrap();
+    let fragment = &layout.children[0].lines[0].fragments[0];
+
+    assert!(matches!(
+        fragment.content,
+        InlineFragmentContent::IconFormControl(_, _, 24.0, 24.0)
+    ));
+}
+
+#[test]
 fn media_elements_create_placeholders_from_default_and_attribute_sizes() {
     for (tag, attributes, expected) in [
         ("video", vec![("width", "320"), ("height", "180")], (320.0, 180.0)),
