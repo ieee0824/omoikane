@@ -19,7 +19,7 @@ use crate::css::{
     parse_selector_list,
 };
 use crate::dom::{Node, NodeHandle, NodeType};
-use crate::http::{Client, default_user_agent};
+use crate::http::{Client, HttpRequest, Method, default_user_agent};
 use crate::layout::{LayoutBox, Overflow, Rect};
 
 thread_local! {
@@ -2160,7 +2160,7 @@ fn register_host_bindings(
         ),
         (
             js_string!("__omoikane_fetch"),
-            1,
+            4,
             NativeFunction::from_copy_closure(fetch_native),
         ),
         (
@@ -3384,23 +3384,75 @@ fn fetch_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResul
         .unwrap_or_default()
         .to_string(context)?
         .to_std_string_escaped();
+    let method_name = args
+        .get(1)
+        .cloned()
+        .unwrap_or_else(|| js_string!("GET").into())
+        .to_string(context)?
+        .to_std_string_escaped();
+    let method = match method_name.as_str() {
+        "GET" => Method::Get,
+        "POST" => Method::Post,
+        "HEAD" => Method::Head,
+        "PUT" => Method::Put,
+        "DELETE" => Method::Delete,
+        "OPTIONS" => Method::Options,
+        "PATCH" => Method::Patch,
+        _ => {
+            return Err(JsNativeError::typ()
+                .with_message(format!("unsupported HTTP method: {method_name}"))
+                .into());
+        }
+    };
+    let headers_json = args
+        .get(2)
+        .cloned()
+        .unwrap_or_else(|| js_string!("[]").into())
+        .to_string(context)?
+        .to_std_string_escaped();
+    let headers: Vec<(String, String)> = serde_json::from_str(&headers_json).map_err(|error| {
+        JsError::from(JsNativeError::typ().with_message(format!(
+            "invalid request headers: {error}"
+        )))
+    })?;
+    let body = args
+        .get(3)
+        .filter(|value| !value.is_null() && !value.is_undefined())
+        .map(|value| value.to_string(context).map(|text| text.to_std_string_escaped()))
+        .transpose()?;
+
     with_host_state(|state| {
         let mut state = state.borrow_mut();
-        let response = state.http_client.get(&url).map_err(|error| {
+        let parsed_url = url.parse::<crate::http::Url>().map_err(|error| {
+            JsError::from(JsNativeError::typ().with_message(error.to_string()))
+        })?;
+        let mut request = HttpRequest::new(method, parsed_url);
+        for (name, value) in headers {
+            request.set_header(name, value);
+        }
+        if let Some(body) = body {
+            request.set_body(body.into_bytes());
+        }
+
+        let response = state.http_client.send(request).map_err(|error| {
             JsError::from(JsNativeError::error().with_message(error.to_string()))
         })?;
         let body_text = String::from_utf8_lossy(response.body()).to_string();
-        let payload = format!(
-            r#"{{"status":{},"ok":{},"url":"{}","bodyText":"{}"}}"#,
-            response.status_code(),
-            if (200..300).contains(&response.status_code()) {
-                "true"
-            } else {
-                "false"
-            },
-            escape_json_string(&url),
-            escape_json_string(&body_text),
-        );
+        let effective_url = response
+            .effective_url()
+            .map(ToString::to_string)
+            .unwrap_or_else(|| url.clone());
+        let redirected = effective_url != url;
+        let payload = serde_json::json!({
+            "status": response.status_code(),
+            "statusText": response.reason(),
+            "ok": (200..300).contains(&response.status_code()),
+            "url": effective_url,
+            "redirected": redirected,
+            "headers": response.headers(),
+            "bodyText": body_text,
+        })
+        .to_string();
         Ok(js_string!(payload.as_str()).into())
     })
 }
@@ -4691,7 +4743,40 @@ mod tests {
     use super::*;
     use std::io::{Read, Write};
     use std::net::TcpListener;
+    use std::net::TcpStream;
     use std::thread;
+
+    fn read_http_request(stream: &mut TcpStream) -> Vec<u8> {
+        let mut request = Vec::new();
+        let mut buffer = [0u8; 1024];
+        let mut expected_len = None;
+        loop {
+            let read = stream.read(&mut buffer).unwrap();
+            if read == 0 {
+                break;
+            }
+            request.extend_from_slice(&buffer[..read]);
+            if expected_len.is_none()
+                && let Some(headers_end) = request.windows(4).position(|part| part == b"\r\n\r\n")
+            {
+                let headers = String::from_utf8_lossy(&request[..headers_end]);
+                let content_len = headers
+                    .lines()
+                    .find_map(|line| {
+                        let (name, value) = line.split_once(':')?;
+                        name.eq_ignore_ascii_case("content-length")
+                            .then(|| value.trim().parse::<usize>().ok())
+                            .flatten()
+                    })
+                    .unwrap_or(0);
+                expected_len = Some(headers_end + 4 + content_len);
+            }
+            if expected_len.is_some_and(|expected| request.len() >= expected) {
+                break;
+            }
+        }
+        request
+    }
 
     fn sample_document() -> NodeHandle {
         let document = NodeHandle::document();
@@ -5289,6 +5374,192 @@ mod tests {
     }
 
     #[test]
+    fn fetch_sends_method_headers_and_body_and_exposes_response_metadata() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let handle = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let request = read_http_request(&mut stream);
+            let request = String::from_utf8(request).unwrap();
+            assert!(request.starts_with("POST /submit HTTP/1.1\r\n"));
+            assert!(request.to_ascii_lowercase().contains("x-client: omoikane\r\n"));
+            assert!(request.ends_with("\r\n\r\nname=miku"));
+            let body = b"created";
+            write!(
+                stream,
+                "HTTP/1.1 201 Created\r\nX-Reply: accepted\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            )
+            .unwrap();
+            stream.write_all(body).unwrap();
+        });
+
+        let mut runtime = JsRuntime::new().unwrap();
+        runtime
+            .eval(&format!(
+                r#"globalThis.fetchMetadata = null;
+                    fetch("http://127.0.0.1:{}/submit", {{
+                      method: "POST",
+                      headers: {{ "X-Client": "omoikane" }},
+                      body: "name=miku"
+                    }}).then(async response => {{
+                      fetchMetadata = {{
+                        status: response.status,
+                        statusText: response.statusText,
+                        reply: response.headers.get("x-reply"),
+                        url: response.url,
+                        redirected: response.redirected,
+                        body: await response.text()
+                      }};
+                    }});"#,
+                address.port()
+            ))
+            .unwrap();
+        runtime.run_jobs().unwrap();
+        handle.join().unwrap();
+
+        assert!(runtime
+            .eval(&format!(
+                r#"fetchMetadata.status === 201 &&
+                    fetchMetadata.statusText === "Created" &&
+                    fetchMetadata.reply === "accepted" &&
+                    fetchMetadata.url === "http://127.0.0.1:{}/submit" &&
+                    fetchMetadata.redirected === false &&
+                    fetchMetadata.body === "created""#,
+                address.port()
+            ))
+            .unwrap()
+            .as_boolean()
+            .unwrap());
+    }
+
+    #[test]
+    fn fetch_reports_redirected_final_url() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let handle = thread::spawn(move || {
+            let (mut first, _) = listener.accept().unwrap();
+            let first_request = String::from_utf8(read_http_request(&mut first)).unwrap();
+            assert!(first_request.starts_with("GET /start HTTP/1.1\r\n"));
+            first
+                .write_all(
+                    b"HTTP/1.1 302 Found\r\nLocation: /final\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                )
+                .unwrap();
+
+            let (mut second, _) = listener.accept().unwrap();
+            let second_request = String::from_utf8(read_http_request(&mut second)).unwrap();
+            assert!(second_request.starts_with("GET /final HTTP/1.1\r\n"));
+            second
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\nConnection: close\r\n\r\ndone",
+                )
+                .unwrap();
+        });
+
+        let mut runtime = JsRuntime::new().unwrap();
+        runtime
+            .eval(&format!(
+                r#"globalThis.redirectResult = null;
+                    fetch("http://127.0.0.1:{}/start").then(response => {{
+                      redirectResult = {{ url: response.url, redirected: response.redirected }};
+                    }});"#,
+                address.port()
+            ))
+            .unwrap();
+        runtime.run_jobs().unwrap();
+        handle.join().unwrap();
+
+        assert!(runtime
+            .eval(&format!(
+                r#"redirectResult.redirected === true && redirectResult.url === "http://127.0.0.1:{}/final""#,
+                address.port()
+            ))
+            .unwrap()
+            .as_boolean()
+            .unwrap());
+    }
+
+    #[test]
+    fn network_failures_reject_fetch_and_fire_xhr_error_without_sync_throw() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+
+        let mut runtime = JsRuntime::new().unwrap();
+        runtime
+            .eval(&format!(
+                r#"globalThis.fetchThrew = false;
+                    globalThis.fetchRejected = false;
+                    try {{ fetch("http://127.0.0.1:{port}/fetch").catch(() => fetchRejected = true); }}
+                    catch (_) {{ fetchThrew = true; }}
+                    globalThis.xhrThrew = false;
+                    globalThis.xhrRequestLocked = false;
+                    globalThis.failureEvents = [];
+                    const failedXhr = new XMLHttpRequest();
+                    failedXhr.onerror = () => failureEvents.push("error");
+                    failedXhr.onload = () => failureEvents.push("load");
+                    failedXhr.onloadend = () => failureEvents.push("loadend");
+                    failedXhr.open("POST", "http://127.0.0.1:{port}/xhr");
+                    try {{ failedXhr.send("body"); }} catch (_) {{ xhrThrew = true; }}
+                    try {{ failedXhr.setRequestHeader("X-Late", "no"); }} catch (_) {{ xhrRequestLocked = true; }}"#
+            ))
+            .unwrap();
+        runtime.run_jobs().unwrap();
+
+        assert!(runtime
+            .eval(r#"!fetchThrew && fetchRejected && !xhrThrew && xhrRequestLocked && failedXhr.status === 0 && failedXhr.readyState === XMLHttpRequest.DONE && failureEvents.join(",") === "error,loadend""#)
+            .unwrap()
+            .as_boolean()
+            .unwrap());
+    }
+
+    #[test]
+    fn fetch_and_xhr_share_the_page_cookie_jar() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let handle = thread::spawn(move || {
+            let (mut first, _) = listener.accept().unwrap();
+            let first_request = String::from_utf8(read_http_request(&mut first)).unwrap();
+            assert!(first_request.starts_with("GET /session HTTP/1.1\r\n"));
+            first
+                .write_all(
+                    b"HTTP/1.1 204 No Content\r\nSet-Cookie: session=miku; Path=/\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                )
+                .unwrap();
+
+            let (mut second, _) = listener.accept().unwrap();
+            let second_request = String::from_utf8(read_http_request(&mut second)).unwrap();
+            assert!(second_request.starts_with("GET /profile HTTP/1.1\r\n"));
+            assert!(second_request.contains("Cookie: session=miku\r\n"));
+            second
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok",
+                )
+                .unwrap();
+        });
+
+        let mut runtime = JsRuntime::new().unwrap();
+        runtime
+            .eval(&format!(
+                r#"fetch("http://127.0.0.1:{}/session");"#,
+                address.port()
+            ))
+            .unwrap();
+        runtime.run_jobs().unwrap();
+        runtime
+            .eval(&format!(
+                r#"const cookieXhr = new XMLHttpRequest(); cookieXhr.open("GET", "http://127.0.0.1:{}/profile"); cookieXhr.send();"#,
+                address.port()
+            ))
+            .unwrap();
+        runtime.run_jobs().unwrap();
+        handle.join().unwrap();
+
+        assert_eq!(runtime.eval("cookieXhr.status").unwrap().as_number(), Some(200.0));
+    }
+
+    #[test]
     fn exposes_script_element_and_message_event_constructors() {
         let html = r#"<html><head><script id="script"></script></head><body></body></html>"#;
         let mut runtime = runtime_from_html(html);
@@ -5398,8 +5669,8 @@ mod tests {
                 abort_address.port()
             ))
             .unwrap();
-        abort_handle.join().unwrap();
         runtime.run_jobs().unwrap();
+        abort_handle.join().unwrap();
         assert!(runtime
             .eval(r#"xhr.readyState === XMLHttpRequest.UNSENT && xhr.status === 0 && xhr.responseText === "" && xhrEvents.join(",") === "loadend""#)
             .unwrap()
@@ -5408,10 +5679,64 @@ mod tests {
     }
 
     #[test]
-    fn exposes_minimal_xml_http_request() {
+    fn xml_http_request_sends_request_and_exposes_states_and_response_headers() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let handle = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let request = read_http_request(&mut stream);
+            let request = String::from_utf8(request).unwrap();
+            assert!(request.starts_with("PUT /api/item HTTP/1.1\r\n"));
+            assert!(request.to_ascii_lowercase().contains("x-requested-with: omoikane\r\n"));
+            assert!(request.ends_with("\r\n\r\nupdated"));
+            let body = b"accepted";
+            write!(
+                stream,
+                "HTTP/1.1 202 Accepted\r\nX-Result: saved\r\nSet-Cookie: secret=value\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            )
+            .unwrap();
+            stream.write_all(body).unwrap();
+        });
+
+        let mut runtime = JsRuntime::new().unwrap();
+        runtime
+            .eval(&format!(
+                r#"globalThis.xhrStates = [];
+                    const semanticXhr = new XMLHttpRequest();
+                    semanticXhr.onreadystatechange = () => xhrStates.push(semanticXhr.readyState);
+                    semanticXhr.open("PUT", "http://127.0.0.1:{}/api/item");
+                    semanticXhr.setRequestHeader("X-Requested-With", "omoikane");
+                    semanticXhr.send("updated");"#,
+                address.port()
+            ))
+            .unwrap();
+        runtime.run_jobs().unwrap();
+        handle.join().unwrap();
+
+        assert!(runtime
+            .eval(&format!(
+                r#"semanticXhr.status === 202 &&
+                    semanticXhr.statusText === "Accepted" &&
+                    semanticXhr.responseText === "accepted" &&
+                    semanticXhr.responseURL === "http://127.0.0.1:{}/api/item" &&
+                    semanticXhr.getResponseHeader("X-Result") === "saved" &&
+                    semanticXhr.getResponseHeader("Set-Cookie") === null &&
+                    semanticXhr.getAllResponseHeaders().includes("x-result: saved\r\n") &&
+                    !semanticXhr.getAllResponseHeaders().includes("set-cookie") &&
+                    xhrStates.join(",") === "1,2,3,4""#,
+                address.port()
+            ))
+            .unwrap()
+            .as_boolean()
+            .unwrap());
+    }
+
+    #[test]
+    fn xml_http_request_open_resets_request_and_response_state() {
         let mut runtime = JsRuntime::new().unwrap();
         assert!(runtime
-            .eval(r#"(() => { const xhr = new XMLHttpRequest(); xhr.open("POST", "https://example.com/log"); let failed = false; xhr.onerror = () => { failed = true; }; xhr.send("x"); xhr.status = 204; xhr.responseText = "stale"; xhr.setRequestHeader("x-old", "yes"); xhr.open("POST", "https://example.com/next"); const reset = xhr.status === 0 && xhr.responseText === "" && Object.keys(xhr._headers).length === 0; xhr.send("x"); return reset && failed && xhr.readyState === XMLHttpRequest.DONE && xhr.status === 0; })()"#)
+            .eval(r#"(() => { const xhr = new XMLHttpRequest(); xhr.open("POST", "https://example.com/log"); xhr.status = 204; xhr.statusText = "No Content"; xhr.responseText = "stale"; xhr.responseURL = "https://example.com/old"; xhr.setRequestHeader("x-old", "yes"); xhr.open("PUT", "https://example.com/next"); return xhr.readyState === XMLHttpRequest.OPENED && xhr.status === 0 && xhr.statusText === "" && xhr.responseText === "" && xhr.responseURL === "" && Object.keys(xhr._headers).length === 0; })()"#)
             .unwrap()
             .as_boolean()
             .unwrap());

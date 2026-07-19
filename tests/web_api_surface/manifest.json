@@ -168,6 +168,14 @@
       "baseline_supported": true
     },
     {
+      "id": "network.fetch-request-semantics",
+      "area": "network",
+      "description": "Request preserves non-GET method, headers and body metadata",
+      "setup": "globalThis.__surfaceRequest = new Request('/submit', { method: 'POST', headers: { 'X-Probe': 'yes' }, body: 'payload' })",
+      "probe": "__surfaceRequest.url === 'http://localhost/submit' && __surfaceRequest.method === 'POST' && __surfaceRequest.headers.get('x-probe') === 'yes' && __surfaceRequest.headers.get('content-type') === 'text/plain;charset=UTF-8' && __surfaceRequest.body === 'payload'",
+      "baseline_supported": false
+    },
+    {
       "id": "network.xhr",
       "area": "network",
       "description": "XMLHttpRequest is exposed",
