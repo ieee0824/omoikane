@@ -53,3 +53,22 @@ cargo test --test wpt_smoke -- --nocapture
 Set `WPT_ROOT` to store the checkout elsewhere. Add cases to `tests/wpt/manifest.json` and add their paths to the sparse-checkout list in `scripts/fetch-wpt.sh`. Expectations may be `PASS`, `FAIL`, or `TIMEOUT`; both regressions and unexpected passes fail the runner so expectation changes stay explicit. Set `WPT_REPORT=path/to/report.json` to write the pinned revision, case outcomes, script errors, and individual subtest results as JSON. Set `WPT_JUNIT=path/to/junit.xml` to emit a JUnit XML testsuite for CI test-report consumers; expectation mismatches are represented as failures and subtest details are XML-escaped in `system-out`.
 
 The initial job is intentionally a small PR smoke gate. Expansion toward the full WPT suite and official `wpt run` integration is tracked in GitHub issue #150.
+
+# Web API surface probe
+
+主要なWeb APIの存在・型・基本挙動は、manifest駆動のintegration testで継続計測します。
+
+```bash
+cargo test --test web_api_surface -- --nocapture
+```
+
+manifestは [`web_api_surface/manifest.json`](web_api_surface/manifest.json) にあります。
+各probeの`baseline_supported`が`true`の機能は非退行対象です。`false`の機能は出力上
+`unsupported`として集計され、後から実装されてprobeが通ると`improvements`に表示されます。
+
+machine-readable JSON reportが必要な場合は出力先を指定します。
+
+```bash
+OMOIKANE_WEB_API_REPORT=target/web-api-surface.json \
+  cargo test --test web_api_surface -- --nocapture
+```
