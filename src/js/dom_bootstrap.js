@@ -863,7 +863,7 @@
           .map(d => d.name + ": " + d.value + (d.priority ? " !" + d.priority : "") + ";")
           .join(" ");
       const writeDecls = (decls) =>
-        __omoikane_set_attribute(node.__id, "style", serializeDecls(decls));
+        node.setAttribute("style", serializeDecls(decls));
 
       // Returns the declared value for a kebab-case property ("" if absent).
       // Later declarations win, matching the inline cascade.
@@ -919,11 +919,7 @@
       // reflect the live attribute; `cssText` writes go through the proxy `set`
       // trap below (which routes to `setCssText`).
       const setCssText = (value) => {
-        __omoikane_set_attribute(
-          node.__id,
-          "style",
-          value == null ? "" : String(value),
-        );
+        node.setAttribute("style", value == null ? "" : String(value));
       };
       const decl = {
         getPropertyValue(name) { return getValue(toCssName(name)); },
@@ -1430,6 +1426,7 @@
       } catch (e) {
         return {
           x: 0, y: 0, width: 0, height: 0, top: 0, left: 0, right: 0, bottom: 0,
+          contentX: 0, contentY: 0, contentWidth: 0, contentHeight: 0,
           offsetWidth: 0, offsetHeight: 0, offsetTop: 0, offsetLeft: 0,
           clientWidth: 0, clientHeight: 0, clientTop: 0, clientLeft: 0,
           scrollWidth: 0, scrollHeight: 0, scrollTop: 0, scrollLeft: 0,
@@ -4371,6 +4368,9 @@
       observer._records.push(new MutationRecord(type, target, recordInit));
       observer._schedule();
     }
+    if (typeof globalThis.__omoikane_layout_observers_changed === "function") {
+      globalThis.__omoikane_layout_observers_changed();
+    }
   }
 
   globalThis.MutationRecord = MutationRecord;
@@ -4423,14 +4423,6 @@
         if (records.length) this._callback.call(this, records, this);
       });
     }
-  };
-
-  // ResizeObserver stub
-  globalThis.ResizeObserver = class ResizeObserver {
-    constructor(callback) { this._callback = callback; }
-    observe() {}
-    unobserve() {}
-    disconnect() {}
   };
 
   // Boa does not currently implement locale-aware Date formatting. Pages commonly
@@ -4995,60 +4987,279 @@
     });
   };
 
-  // IntersectionObserver polyfill for headless rendering.
-  // All elements are assumed to be within the viewport, so observe()
-  // immediately invokes the callback with isIntersecting: true.
-  const emptyRect = Object.freeze({ x: 0, y: 0, width: 0, height: 0, top: 0, left: 0, bottom: 0, right: 0 });
+  function observerRect(x, y, width, height) {
+    x = Number.isFinite(Number(x)) ? Number(x) : 0;
+    y = Number.isFinite(Number(y)) ? Number(y) : 0;
+    width = Math.max(0, Number.isFinite(Number(width)) ? Number(width) : 0);
+    height = Math.max(0, Number.isFinite(Number(height)) ? Number(height) : 0);
+    return Object.freeze({
+      x, y, width, height,
+      top: y, left: x, right: x + width, bottom: y + height,
+    });
+  }
 
-  class IntersectionObserverEntry {
-    constructor(target) {
-      this.target = target;
-      this.isIntersecting = true;
-      this.intersectionRatio = 1.0;
-      this.boundingClientRect = emptyRect;
-      this.intersectionRect = emptyRect;
-      this.rootBounds = null;
-      this.time = Date.now();
+  class ResizeObserverSize {
+    constructor(inlineSize, blockSize) {
+      this.inlineSize = inlineSize;
+      this.blockSize = blockSize;
+      Object.freeze(this);
     }
   }
 
-  if (!globalThis.IntersectionObserverEntry) {
-    globalThis.IntersectionObserverEntry = IntersectionObserverEntry;
+  class ResizeObserverEntry {
+    constructor(target, metrics) {
+      const contentX = metrics.contentX - metrics.x;
+      const contentY = metrics.contentY - metrics.y;
+      this.target = target;
+      this.contentRect = observerRect(
+        contentX,
+        contentY,
+        metrics.contentWidth,
+        metrics.contentHeight
+      );
+      this.contentBoxSize = Object.freeze([
+        new ResizeObserverSize(metrics.contentWidth, metrics.contentHeight),
+      ]);
+      this.borderBoxSize = Object.freeze([
+        new ResizeObserverSize(metrics.width, metrics.height),
+      ]);
+      this.devicePixelContentBoxSize = Object.freeze([
+        new ResizeObserverSize(
+          metrics.contentWidth * globalThis.devicePixelRatio,
+          metrics.contentHeight * globalThis.devicePixelRatio
+        ),
+      ]);
+    }
   }
 
-  if (!globalThis.IntersectionObserver) {
-    globalThis.IntersectionObserver = class IntersectionObserver {
-    constructor(callback, options = {}) {
-      if (typeof callback !== "function") {
-        throw new TypeError("IntersectionObserver constructor: callback must be a function");
+  const activeResizeObservers = new Set();
+
+  class ResizeObserver {
+    constructor(callback) {
+      if (arguments.length < 1 || typeof callback !== "function") {
+        throw new TypeError("ResizeObserver callback must be callable");
       }
       this._callback = callback;
-      this._options = options;
-      this._targets = new Set();
+      this._targets = new Map();
+      this._scheduled = false;
     }
-
-    observe(target) {
-      if (this._targets.has(target)) return;
-      this._targets.add(target);
-      // Schedule callback asynchronously (microtask) to match real browser behavior.
-      // Re-check that target is still observed when microtask runs.
-      Promise.resolve().then(() => {
-        if (!this._targets.has(target)) return;
-        this._callback([new IntersectionObserverEntry(target)], this);
-      });
+    observe(target, options = {}) {
+      if (!(target instanceof Element)) throw new TypeError("ResizeObserver target must be an Element");
+      const box = options.box === undefined ? "content-box" : String(options.box);
+      if (![
+        "content-box", "border-box", "device-pixel-content-box",
+      ].includes(box)) throw new TypeError("Unsupported ResizeObserver box option");
+      const previous = this._targets.get(target);
+      this._targets.set(target, { box, size: previous && previous.box === box ? previous.size : null });
+      activeResizeObservers.add(this);
+      this.__queueCheck();
     }
-
     unobserve(target) {
       this._targets.delete(target);
+      if (this._targets.size === 0) activeResizeObservers.delete(this);
     }
-
     disconnect() {
       this._targets.clear();
+      activeResizeObservers.delete(this);
     }
+    __queueCheck() {
+      if (this._scheduled || this._targets.size === 0) return;
+      this._scheduled = true;
+      Promise.resolve().then(() => {
+        this._scheduled = false;
+        const entries = [];
+        for (const [target, observation] of this._targets) {
+          const metrics = target.__layoutMetrics();
+          let inlineSize = metrics.contentWidth;
+          let blockSize = metrics.contentHeight;
+          if (observation.box === "border-box") {
+            inlineSize = metrics.width;
+            blockSize = metrics.height;
+          } else if (observation.box === "device-pixel-content-box") {
+            inlineSize *= globalThis.devicePixelRatio;
+            blockSize *= globalThis.devicePixelRatio;
+          }
+          const size = inlineSize + ":" + blockSize;
+          if (size === observation.size) continue;
+          observation.size = size;
+          entries.push(new ResizeObserverEntry(target, metrics));
+        }
+        if (entries.length) this._callback.call(this, entries, this);
+      });
+    }
+  }
 
-    takeRecords() {
-      return [];
+  function parseRootMargin(input) {
+    const tokens = String(input).trim().split(/\s+/).filter(Boolean);
+    if (tokens.length < 1 || tokens.length > 4) {
+      throw new DOMException("Invalid rootMargin", "SyntaxError");
     }
+    const parsed = tokens.map(token => {
+      const match = /^([+-]?(?:\d+(?:\.\d*)?|\.\d+))(px|%)$/i.exec(token);
+      if (!match) throw new DOMException("Invalid rootMargin", "SyntaxError");
+      return { value: Number(match[1]), unit: match[2].toLowerCase() };
+    });
+    const expanded = parsed.length === 1 ? [parsed[0], parsed[0], parsed[0], parsed[0]]
+      : parsed.length === 2 ? [parsed[0], parsed[1], parsed[0], parsed[1]]
+      : parsed.length === 3 ? [parsed[0], parsed[1], parsed[2], parsed[1]]
+      : parsed;
+    return {
+      values: expanded,
+      serialized: expanded.map(margin => margin.value + margin.unit).join(" "),
+    };
+  }
+
+  function intersectionRootRect(observer) {
+    let rect;
+    let hasBox = true;
+    if (observer.root === null || observer.root instanceof Document) {
+      rect = observerRect(0, 0, globalThis.innerWidth, globalThis.innerHeight);
+    } else {
+      const metrics = observer.root.__layoutMetrics();
+      hasBox = metrics.hasBox;
+      rect = observerRect(
+        metrics.x + metrics.clientLeft,
+        metrics.y + metrics.clientTop,
+        metrics.clientWidth,
+        metrics.clientHeight
+      );
+    }
+    const margins = observer._rootMarginValues.map(margin =>
+      margin.unit === "%" ? margin.value * rect.width / 100 : margin.value
+    );
+    return {
+      hasBox,
+      rect: observerRect(
+        rect.left - margins[3],
+        rect.top - margins[0],
+        rect.width + margins[1] + margins[3],
+        rect.height + margins[0] + margins[2]
+      ),
+    };
+  }
+
+  function intersectionEntry(observer, target) {
+    const targetSource = target.__layoutMetrics();
+    const targetRect = observerRect(
+      targetSource.x, targetSource.y, targetSource.width, targetSource.height
+    );
+    const root = intersectionRootRect(observer);
+    const rootRect = root.rect;
+    const left = Math.max(targetRect.left, rootRect.left);
+    const top = Math.max(targetRect.top, rootRect.top);
+    const right = Math.min(targetRect.right, rootRect.right);
+    const bottom = Math.min(targetRect.bottom, rootRect.bottom);
+    const isIntersecting = targetSource.hasBox && root.hasBox && right >= left && bottom >= top;
+    const intersectionRect = isIntersecting
+      ? observerRect(left, top, right - left, bottom - top)
+      : observerRect(0, 0, 0, 0);
+    const targetArea = targetRect.width * targetRect.height;
+    const intersectionArea = intersectionRect.width * intersectionRect.height;
+    const ratio = targetArea === 0 ? (isIntersecting ? 1 : 0) : intersectionArea / targetArea;
+    return new IntersectionObserverEntry({
+      target,
+      boundingClientRect: targetRect,
+      intersectionRect,
+      rootBounds: rootRect,
+      isIntersecting,
+      intersectionRatio: ratio,
+    });
+  }
+
+  class IntersectionObserverEntry {
+    constructor(init) {
+      this.time = globalThis.performance.now();
+      this.target = init.target;
+      this.rootBounds = init.rootBounds;
+      this.boundingClientRect = init.boundingClientRect;
+      this.intersectionRect = init.intersectionRect;
+      this.isIntersecting = init.isIntersecting;
+      this.intersectionRatio = init.intersectionRatio;
+    }
+  }
+
+  const activeIntersectionObservers = new Set();
+
+  class IntersectionObserver {
+    constructor(callback, options = {}) {
+      if (typeof callback !== "function") {
+        throw new TypeError("IntersectionObserver callback must be callable");
+      }
+      const root = options.root === undefined ? null : options.root;
+      if (root !== null && !(root instanceof Element) && !(root instanceof Document)) {
+        throw new TypeError("IntersectionObserver root must be an Element or Document");
+      }
+      const margin = parseRootMargin(options.rootMargin === undefined ? "0px" : options.rootMargin);
+      const thresholdInput = options.threshold === undefined ? [0] :
+        (Array.isArray(options.threshold) ? options.threshold : [options.threshold]);
+      const thresholds = thresholdInput.map(Number);
+      if (thresholds.some(value => !Number.isFinite(value) || value < 0 || value > 1)) {
+        throw new RangeError("IntersectionObserver threshold must be between 0 and 1");
+      }
+      this.root = root;
+      this.rootMargin = margin.serialized;
+      this.thresholds = Object.freeze([...new Set(thresholds)].sort((a, b) => a - b));
+      this._rootMarginValues = margin.values;
+      this._callback = callback;
+      this._targets = new Map();
+      this._records = [];
+      this._scheduled = false;
+      this._deliveryScheduled = false;
+    }
+    observe(target) {
+      if (!(target instanceof Element)) throw new TypeError("IntersectionObserver target must be an Element");
+      if (this._targets.has(target)) return;
+      this._targets.set(target, null);
+      activeIntersectionObservers.add(this);
+      this.__queueCheck();
+    }
+    unobserve(target) {
+      this._targets.delete(target);
+      this._records = this._records.filter(entry => entry.target !== target);
+      if (this._targets.size === 0) activeIntersectionObservers.delete(this);
+    }
+    disconnect() {
+      this._targets.clear();
+      this._records = [];
+      activeIntersectionObservers.delete(this);
+    }
+    takeRecords() {
+      const records = this._records;
+      this._records = [];
+      return records;
+    }
+    __queueCheck() {
+      if (this._scheduled || this._targets.size === 0) return;
+      this._scheduled = true;
+      Promise.resolve().then(() => {
+        this._scheduled = false;
+        for (const [target, previousState] of this._targets) {
+          const entry = intersectionEntry(this, target);
+          const thresholdIndex = this.thresholds.findIndex(value => value > entry.intersectionRatio);
+          const state = entry.isIntersecting + ":" + thresholdIndex;
+          if (state === previousState) continue;
+          this._targets.set(target, state);
+          this._records.push(entry);
+        }
+        if (this._records.length && !this._deliveryScheduled) {
+          this._deliveryScheduled = true;
+          Promise.resolve().then(() => {
+            this._deliveryScheduled = false;
+            const records = this.takeRecords();
+            if (records.length) this._callback.call(this, records, this);
+          });
+        }
+      });
+    }
+  }
+
+  globalThis.__omoikane_layout_observers_changed = function() {
+    for (const observer of activeResizeObservers) observer.__queueCheck();
+    for (const observer of activeIntersectionObservers) observer.__queueCheck();
   };
-  } // end if (!globalThis.IntersectionObserver)
+  globalThis.ResizeObserver = ResizeObserver;
+  globalThis.ResizeObserverEntry = ResizeObserverEntry;
+  globalThis.ResizeObserverSize = ResizeObserverSize;
+  globalThis.IntersectionObserver = IntersectionObserver;
+  globalThis.IntersectionObserverEntry = IntersectionObserverEntry;
 })();
