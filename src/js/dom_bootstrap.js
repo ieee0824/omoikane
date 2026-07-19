@@ -4293,28 +4293,6 @@
   globalThis.scroll = function() {};
   globalThis.screen = { width: 1280, height: 720, availWidth: 1280, availHeight: 720, colorDepth: 24, pixelDepth: 24 };
 
-  // requestAnimationFrame: execute callback asynchronously (microtask) with a timestamp
-  let __rafId = 0;
-  const __rafCallbacks = new Map();
-  globalThis.requestAnimationFrame = function(cb) {
-    const id = ++__rafId;
-    __rafCallbacks.set(id, cb);
-    Promise.resolve().then(() => {
-      try {
-        const callback = __rafCallbacks.get(id);
-        if (typeof callback === "function") {
-          callback(Date.now());
-        }
-      } finally {
-        __rafCallbacks.delete(id);
-      }
-    });
-    return id;
-  };
-  globalThis.cancelAnimationFrame = function(id) {
-    __rafCallbacks.delete(id);
-  };
-
   // In-memory storage stubs
   function createStorage() {
     const store = new Map();

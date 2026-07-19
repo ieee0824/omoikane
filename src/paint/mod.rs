@@ -19,6 +19,12 @@ const TIMER_PUMP_STEP_MS: u64 = 10;
 /// Hard cap on the number of timer tasks executed while pumping, guarding
 /// against callbacks that endlessly re-schedule zero-delay timers.
 const TIMER_PUMP_MAX_TASKS: usize = 100_000;
+/// Maximum rendering opportunities driven before a static screenshot. This
+/// settles short requestAnimationFrame initialization chains without allowing
+/// a perpetual animation loop to block rendering.
+const ANIMATION_FRAME_PUMP_MAX_FRAMES: usize = 8;
+/// Nominal headless refresh interval used for animation-frame timestamps.
+const ANIMATION_FRAME_INTERVAL_MS: u64 = 16;
 
 thread_local! {
     static FORCE_OPACITY: Cell<bool> = const { Cell::new(false) };
@@ -37,6 +43,7 @@ pub struct RenderTimings {
     pub javascript_document_scripts: Duration,
     pub javascript_load_events: Duration,
     pub timers: Duration,
+    pub animation_frames: Duration,
     pub style_refresh: Duration,
     pub layout: Duration,
     pub paint: Duration,
@@ -52,6 +59,7 @@ impl RenderTimings {
         self.javascript_document_scripts += other.javascript_document_scripts;
         self.javascript_load_events += other.javascript_load_events;
         self.timers += other.timers;
+        self.animation_frames += other.animation_frames;
         self.style_refresh += other.style_refresh;
         self.layout += other.layout;
         self.paint += other.paint;
@@ -922,8 +930,19 @@ pub fn render_document_with_url(
             TIMER_PUMP_MAX_TASKS,
         );
         timings.timers = timers_start.elapsed();
+        // A rendering opportunity is distinct from the promise-job and timer
+        // queues. Drive it explicitly after deferred page initialization and
+        // before rebuilding styles/layout for the screenshot.
+        let animation_frames_start = Instant::now();
+        let frame_callbacks_run = runtime.run_animation_frames(
+            ANIMATION_FRAME_PUMP_MAX_FRAMES,
+            ANIMATION_FRAME_INTERVAL_MS,
+        );
+        timings.animation_frames = animation_frames_start.elapsed();
         if std::env::var_os("OMOIKANE_LOG_SCRIPTS").is_some() {
-            eprintln!("[omoikane][event-loop] completed {tasks_run} macrotasks");
+            eprintln!(
+                "[omoikane][event-loop] completed {tasks_run} macrotasks and {frame_callbacks_run} animation-frame callbacks"
+            );
             if let Ok(value) = runtime.eval(
                 "JSON.stringify({ scripts: globalThis.__SCRIPTS_LOADED__ || null, rootChildren: (document.getElementById('react-root') || {}).childElementCount || 0, timersPending: false })",
             ) && let Some(value) = value.as_string() {

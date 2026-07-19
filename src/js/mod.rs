@@ -205,6 +205,10 @@ struct EventLoopState {
     now_ms: u64,
     macrotasks: VecDeque<TimerPayload>,
     timers: Vec<TimerTask>,
+    next_animation_frame_id: u64,
+    animation_frame_time_ms: f64,
+    animation_frame_order: Vec<u64>,
+    animation_frame_callbacks: HashMap<u64, JsValue>,
 }
 
 impl EventLoopState {
@@ -257,6 +261,38 @@ impl EventLoopState {
 
     fn has_pending_timers(&self) -> bool {
         !self.timers.is_empty() || !self.macrotasks.is_empty()
+    }
+
+    fn schedule_animation_frame(&mut self, callback: JsValue) -> u64 {
+        self.next_animation_frame_id = self.next_animation_frame_id.saturating_add(1);
+        let id = self.next_animation_frame_id;
+        self.animation_frame_order.push(id);
+        self.animation_frame_callbacks.insert(id, callback);
+        id
+    }
+
+    fn cancel_animation_frame(&mut self, id: u64) {
+        // Keep the registration-order vector compacting-free here. A frame
+        // snapshots that vector once, then skips ids whose callback was
+        // removed. This also lets an earlier callback cancel a later callback
+        // after the frame has already started.
+        self.animation_frame_callbacks.remove(&id);
+    }
+
+    fn begin_animation_frame(&mut self, elapsed_ms: u64) -> (f64, Vec<u64>) {
+        self.animation_frame_time_ms += elapsed_ms as f64;
+        (
+            self.animation_frame_time_ms,
+            std::mem::take(&mut self.animation_frame_order),
+        )
+    }
+
+    fn take_animation_frame_callback(&mut self, id: u64) -> Option<JsValue> {
+        self.animation_frame_callbacks.remove(&id)
+    }
+
+    fn has_pending_animation_frames(&self) -> bool {
+        !self.animation_frame_order.is_empty()
     }
 }
 
@@ -1146,6 +1182,105 @@ impl JsRuntime {
         self.host_state.borrow().event_loop.has_pending_timers()
     }
 
+    /// Runs one rendering opportunity and invokes its animation-frame callbacks.
+    ///
+    /// Pending macrotasks and promise jobs are drained before the frame starts.
+    /// All callbacks present at the start of the frame receive the same
+    /// monotonically increasing timestamp and run in registration order.
+    /// Callbacks registered while the frame is running are retained for the
+    /// next explicit call; [`run_jobs`](Self::run_jobs) alone never invokes
+    /// animation-frame callbacks.
+    pub fn run_animation_frame(&mut self, elapsed_ms: u64) -> JsResult<usize> {
+        self.run_until_idle()?;
+
+        let (timestamp, callback_ids) = self
+            .host_state
+            .borrow_mut()
+            .event_loop
+            .begin_animation_frame(elapsed_ms);
+        let mut callbacks_run = 0;
+        let mut first_error = None;
+
+        for id in callback_ids {
+            let callback = self
+                .host_state
+                .borrow_mut()
+                .event_loop
+                .take_animation_frame_callback(id);
+            let Some(callback) = callback else {
+                continue;
+            };
+
+            let result = self.with_active_host(|context| {
+                let callable = callback.as_callable().ok_or_else(|| {
+                    JsError::from(
+                        JsNativeError::typ()
+                            .with_message("animation frame callback is not callable"),
+                    )
+                })?;
+                callable.call(
+                    &JsValue::undefined(),
+                    &[JsValue::from(timestamp)],
+                    context,
+                )?;
+                Ok(())
+            });
+            callbacks_run += 1;
+            if let Err(error) = result
+                && first_error.is_none()
+            {
+                // Browser callback exceptions are reported without preventing
+                // the remaining callbacks in the same frame from running.
+                first_error = Some(error);
+            }
+        }
+
+        // DOM mutations performed by frame callbacks queue observer delivery;
+        // the microtask checkpoint completes that work before the embedder
+        // proceeds to style/layout/paint.
+        let jobs_result = self.run_jobs();
+        if let Some(error) = first_error {
+            return Err(error);
+        }
+        jobs_result?;
+        Ok(callbacks_run)
+    }
+
+    /// Returns whether a callback is waiting for the next rendering opportunity.
+    pub fn has_pending_animation_frames(&self) -> bool {
+        self.host_state
+            .borrow()
+            .event_loop
+            .has_pending_animation_frames()
+    }
+
+    /// Drives a bounded number of rendering opportunities until no callback is pending.
+    ///
+    /// Callback errors are logged when script diagnostics are enabled and do
+    /// not prevent later frames from settling, matching the render pipeline's
+    /// best-effort timer pump.
+    pub fn run_animation_frames(
+        &mut self,
+        max_frames: usize,
+        frame_interval_ms: u64,
+    ) -> usize {
+        let mut callbacks_run = 0;
+        for _ in 0..max_frames {
+            if !self.has_pending_animation_frames() {
+                break;
+            }
+            match self.run_animation_frame(frame_interval_ms) {
+                Ok(count) => callbacks_run += count,
+                Err(error) => {
+                    if std::env::var_os("OMOIKANE_LOG_SCRIPTS").is_some() {
+                        eprintln!("[omoikane][animation-frame-error] {error}");
+                    }
+                }
+            }
+        }
+        callbacks_run
+    }
+
     /// Drives the event loop forward in virtual time, firing due timer tasks
     /// until the timer queue empties or a safety budget is exhausted.
     ///
@@ -1966,6 +2101,16 @@ fn register_host_bindings(
             NativeFunction::from_copy_closure(clear_timer_native),
         ),
         (
+            js_string!("requestAnimationFrame"),
+            1,
+            NativeFunction::from_copy_closure(request_animation_frame_native),
+        ),
+        (
+            js_string!("cancelAnimationFrame"),
+            1,
+            NativeFunction::from_copy_closure(cancel_animation_frame_native),
+        ),
+        (
             js_string!("__omoikane_fetch"),
             1,
             NativeFunction::from_copy_closure(fetch_native),
@@ -2594,6 +2739,46 @@ fn clear_timer_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> J
 
     with_host_state(|state| {
         state.borrow_mut().event_loop.clear_timer(id);
+        Ok(JsValue::undefined())
+    })
+}
+
+fn request_animation_frame_native(
+    _: &JsValue,
+    args: &[JsValue],
+    _: &mut Context,
+) -> JsResult<JsValue> {
+    let callback = args.first().cloned().unwrap_or_default();
+    if !callback.is_callable() {
+        return Err(JsNativeError::typ()
+            .with_message("requestAnimationFrame callback must be callable")
+            .into());
+    }
+    with_host_state(|state| {
+        let id = state
+            .borrow_mut()
+            .event_loop
+            .schedule_animation_frame(callback);
+        Ok(JsValue::from(id as f64))
+    })
+}
+
+fn cancel_animation_frame_native(
+    _: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let id = args
+        .first()
+        .cloned()
+        .unwrap_or_default()
+        .to_u32(context)
+        .unwrap_or(0) as u64;
+    with_host_state(|state| {
+        state
+            .borrow_mut()
+            .event_loop
+            .cancel_animation_frame(id);
         Ok(JsValue::undefined())
     })
 }
@@ -8634,14 +8819,104 @@ mod tests {
     }
 
     #[test]
-    fn request_animation_frame_calls_callback() {
+    fn request_animation_frame_requires_explicit_rendering_opportunity() {
         let doc = NodeHandle::document();
         let mut runtime = JsRuntime::with_document(doc).unwrap();
-        runtime.eval("globalThis.rafCalled = false; requestAnimationFrame(() => { globalThis.rafCalled = true; });").unwrap();
+        runtime
+            .eval(
+                "globalThis.rafCalled = false; globalThis.rafTimestamp = -1; \
+                 requestAnimationFrame(timestamp => { rafCalled = true; rafTimestamp = timestamp; });",
+            )
+            .unwrap();
         runtime.run_jobs().unwrap();
 
-        let called = runtime.eval("rafCalled").unwrap().as_boolean().unwrap();
-        assert!(called, "requestAnimationFrame callback should be called");
+        assert_eq!(runtime.eval("rafCalled").unwrap().as_boolean(), Some(false));
+        assert_eq!(runtime.run_animation_frame(16).unwrap(), 1);
+        assert!(runtime
+            .eval("rafCalled && rafTimestamp === 16")
+            .unwrap()
+            .as_boolean()
+            .unwrap());
+    }
+
+    #[test]
+    fn animation_frame_callbacks_preserve_order_and_can_cancel_same_frame() {
+        let mut runtime = JsRuntime::new().unwrap();
+        runtime
+            .eval(
+                r#"globalThis.frameOrder = [];
+                   requestAnimationFrame(() => { frameOrder.push("first"); cancelAnimationFrame(third); });
+                   requestAnimationFrame(() => frameOrder.push("second"));
+                   globalThis.third = requestAnimationFrame(() => frameOrder.push("third"));"#,
+            )
+            .unwrap();
+
+        assert_eq!(runtime.run_animation_frame(16).unwrap(), 2);
+        assert_eq!(
+            runtime
+                .eval("frameOrder.join(',')")
+                .unwrap()
+                .as_string()
+                .unwrap()
+                .to_std_string_escaped(),
+            "first,second"
+        );
+    }
+
+    #[test]
+    fn animation_frame_registered_during_callback_waits_for_next_frame() {
+        let mut runtime = JsRuntime::new().unwrap();
+        runtime
+            .eval(
+                r#"globalThis.frameTimestamps = [];
+                   requestAnimationFrame(first => {
+                     frameTimestamps.push(first);
+                     requestAnimationFrame(second => frameTimestamps.push(second));
+                   });"#,
+            )
+            .unwrap();
+
+        assert_eq!(runtime.run_animation_frame(16).unwrap(), 1);
+        assert_eq!(runtime.eval("frameTimestamps.length").unwrap().as_number(), Some(1.0));
+        assert_eq!(runtime.run_animation_frame(16).unwrap(), 1);
+        assert!(runtime
+            .eval("frameTimestamps.length === 2 && frameTimestamps[0] === 16 && frameTimestamps[1] === 32")
+            .unwrap()
+            .as_boolean()
+            .unwrap());
+    }
+
+    #[test]
+    fn timer_and_microtask_run_before_animation_frame() {
+        let mut runtime = JsRuntime::new().unwrap();
+        runtime
+            .eval(
+                r#"globalThis.eventLoopOrder = [];
+                   setTimeout(() => {
+                     eventLoopOrder.push("timer");
+                     Promise.resolve().then(() => eventLoopOrder.push("microtask"));
+                     requestAnimationFrame(() => eventLoopOrder.push("animation-frame"));
+                   }, 0);"#,
+            )
+            .unwrap();
+
+        runtime.tick(0).unwrap();
+        assert_eq!(runtime.run_animation_frame(16).unwrap(), 1);
+        assert_eq!(
+            runtime
+                .eval("eventLoopOrder.join(',')")
+                .unwrap()
+                .as_string()
+                .unwrap()
+                .to_std_string_escaped(),
+            "timer,microtask,animation-frame"
+        );
+    }
+
+    #[test]
+    fn request_animation_frame_rejects_non_callable_callback() {
+        let mut runtime = JsRuntime::new().unwrap();
+        assert!(runtime.eval("requestAnimationFrame(null)").is_err());
     }
 
     #[test]

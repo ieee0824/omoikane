@@ -180,9 +180,10 @@ fn run_screenshot(
 fn format_render_phase_message(timings: &RenderTimings) -> String {
     let milliseconds = |duration: Duration| duration.as_secs_f64() * 1_000.0;
     format!(
-        "render phases: stylesheets={:.1}ms fonts={:.1}ms javascript={:.1}ms timers={:.1}ms style-refresh={:.1}ms layout={:.1}ms paint={:.1}ms png-encode={:.1}ms",
+        "render phases: stylesheets={:.1}ms fonts={:.1}ms javascript={:.1}ms timers={:.1}ms animation-frames={:.1}ms style-refresh={:.1}ms layout={:.1}ms paint={:.1}ms png-encode={:.1}ms",
         milliseconds(timings.stylesheets), milliseconds(timings.fonts),
         milliseconds(timings.javascript), milliseconds(timings.timers),
+        milliseconds(timings.animation_frames),
         milliseconds(timings.style_refresh), milliseconds(timings.layout),
         milliseconds(timings.paint), milliseconds(timings.png_encode),
     )
@@ -282,6 +283,7 @@ mod tests {
             javascript_document_scripts: Duration::from_micros(2_000),
             javascript_load_events: Duration::from_micros(1_250),
             timers: Duration::from_micros(4_000),
+            animation_frames: Duration::from_micros(4_500),
             style_refresh: Duration::from_micros(5_250),
             layout: Duration::from_micros(6_500),
             paint: Duration::from_micros(7_750),
@@ -289,7 +291,7 @@ mod tests {
         };
         assert_eq!(
             format_render_phase_message(&timings),
-            "render phases: stylesheets=1.2ms fonts=2.5ms javascript=3.8ms timers=4.0ms style-refresh=5.2ms layout=6.5ms paint=7.8ms png-encode=8.0ms"
+            "render phases: stylesheets=1.2ms fonts=2.5ms javascript=3.8ms timers=4.0ms animation-frames=4.5ms style-refresh=5.2ms layout=6.5ms paint=7.8ms png-encode=8.0ms"
         );
         assert_eq!(
             format_javascript_phase_message(&timings),

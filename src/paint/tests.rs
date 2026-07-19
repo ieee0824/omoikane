@@ -6407,6 +6407,41 @@ fn render_document_executes_inline_script() {
 }
 
 #[test]
+fn render_document_drives_animation_frames_before_layout() {
+    let html = r#"<html><head><style>
+        body { margin: 0; }
+        div { width: 10px; height: 10px; background: white; }
+        div.ready { background: red; }
+        div.settled { background: blue; }
+    </style></head><body>
+        <div id="target"></div>
+        <script>
+          requestAnimationFrame(() => {
+            document.getElementById("target").classList.add("ready");
+            requestAnimationFrame(() => {
+              document.getElementById("target").classList.add("settled");
+            });
+          });
+        </script>
+    </body></html>"#;
+    let document = TreeBuilder::parse(html).document();
+    let viewport = Rect {
+        x: 0.0,
+        y: 0.0,
+        width: 10.0,
+        height: 10.0,
+    };
+
+    let canvas = render_document(&document, viewport).unwrap();
+
+    assert_eq!(
+        canvas.pixel(5, 5),
+        Some(Color::rgb(0, 0, 255)),
+        "the bounded screenshot frame pump should settle nested animation-frame DOM updates"
+    );
+}
+
+#[test]
 fn mask_image_multiplies_element_alpha_per_pixel() {
     let mask = rgba_mask_data_uri(3, 1, &[255, 128, 0]);
     let html = format!(
