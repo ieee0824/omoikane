@@ -956,7 +956,9 @@ impl JsRuntime {
              globalThis.screen.width = {w}; globalThis.screen.height = {h}; \
              globalThis.screen.availWidth = {w}; globalThis.screen.availHeight = {h}; }} \
              if (typeof globalThis.__omoikane_media_query_viewport_changed === 'function') \
-             globalThis.__omoikane_media_query_viewport_changed();"
+             globalThis.__omoikane_media_query_viewport_changed(); \
+             if (typeof globalThis.__omoikane_layout_observers_changed === 'function') \
+             globalThis.__omoikane_layout_observers_changed();"
         );
         // The bootstrap always defines these globals before any embedder call,
         // so this eval cannot fail in practice; ignore the result defensively.
@@ -2301,6 +2303,10 @@ struct LayoutMetrics {
     y: f32,
     width: f32,
     height: f32,
+    content_x: f32,
+    content_y: f32,
+    content_width: f32,
+    content_height: f32,
     offset_width: f32,
     offset_height: f32,
     offset_top: f32,
@@ -2325,6 +2331,10 @@ impl LayoutMetrics {
             y: 0.0,
             width: 0.0,
             height: 0.0,
+            content_x: 0.0,
+            content_y: 0.0,
+            content_width: 0.0,
+            content_height: 0.0,
             offset_width: 0.0,
             offset_height: 0.0,
             offset_top: 0.0,
@@ -2346,6 +2356,8 @@ impl LayoutMetrics {
         format!(
             "{{\"x\":{x},\"y\":{y},\"width\":{w},\"height\":{h},\
 \"top\":{y},\"left\":{x},\"right\":{right},\"bottom\":{bottom},\
+\"contentX\":{content_x},\"contentY\":{content_y},\
+\"contentWidth\":{content_width},\"contentHeight\":{content_height},\
 \"offsetWidth\":{ow},\"offsetHeight\":{oh},\"offsetTop\":{ot},\"offsetLeft\":{ol},\
 \"clientWidth\":{cw},\"clientHeight\":{ch},\"clientTop\":{ct},\"clientLeft\":{cl},\
 \"scrollWidth\":{sw},\"scrollHeight\":{sh},\"scrollTop\":0,\"scrollLeft\":0,\
@@ -2356,6 +2368,10 @@ impl LayoutMetrics {
             h = json_number(self.height),
             right = json_number(self.x + self.width),
             bottom = json_number(self.y + self.height),
+            content_x = json_number(self.content_x),
+            content_y = json_number(self.content_y),
+            content_width = json_number(self.content_width),
+            content_height = json_number(self.content_height),
             ow = json_number(self.offset_width),
             oh = json_number(self.offset_height),
             ot = json_number(self.offset_top),
@@ -2433,6 +2449,10 @@ fn compute_layout_metrics(layout: &LayoutBox) -> LayoutMetrics {
         y: border_y,
         width: border_width,
         height: border_height,
+        content_x: content.x,
+        content_y: content.y,
+        content_width: content.width,
+        content_height: content.height,
         offset_width: border_width,
         offset_height: border_height,
         offset_top: border_y,
@@ -7019,7 +7039,7 @@ mod tests {
     }
 
     #[test]
-    fn intersection_observer_reobserve_fires_callback_again() {
+    fn intersection_observer_reobserve_before_delivery_is_coalesced() {
         let doc = NodeHandle::document();
         let div = NodeHandle::element("div");
         doc.append_child(div.clone());
@@ -7044,8 +7064,10 @@ mod tests {
             .unwrap()
             .to_number(&mut runtime.context)
             .unwrap();
-        // observe → unobserve → observe: callback fires for each observe (2 times)
-        assert_eq!(count, 2.0, "callback should fire for each observe() call");
+        assert_eq!(
+            count, 1.0,
+            "changes before the observer checkpoint should be coalesced"
+        );
     }
 
     #[test]
@@ -7074,10 +7096,134 @@ mod tests {
             .unwrap()
             .to_number(&mut runtime.context)
             .unwrap();
-        assert_eq!(
-            count, 2.0,
-            "disconnect then re-observe should fire callback again"
+        assert_eq!(count, 1.0, "disconnect should cancel the pending observation");
+    }
+
+    #[test]
+    fn resize_observer_reports_real_boxes_and_size_changes() {
+        let mut runtime = runtime_from_html(
+            r#"<div id="box" style="width:100px;height:40px;padding:5px;border:2px solid black"></div>"#,
         );
+        runtime
+            .eval(
+                r#"globalThis.resizeEntries = [];
+                   globalThis.resizeObserver = new ResizeObserver(entries => {
+                     resizeEntries.push({
+                       contentWidth: entries[0].contentRect.width,
+                       contentHeight: entries[0].contentRect.height,
+                       borderWidth: entries[0].borderBoxSize[0].inlineSize,
+                       borderHeight: entries[0].borderBoxSize[0].blockSize,
+                     });
+                   });
+                   resizeObserver.observe(document.getElementById('box'));"#,
+            )
+            .unwrap();
+        runtime.run_jobs().unwrap();
+
+        assert!(runtime
+            .eval("resizeEntries.length === 1 && resizeEntries[0].contentWidth === 100 && resizeEntries[0].contentHeight === 40 && resizeEntries[0].borderWidth === 114 && resizeEntries[0].borderHeight === 54")
+            .unwrap()
+            .as_boolean()
+            .unwrap());
+
+        runtime
+            .eval("document.getElementById('box').style.width = '120px'")
+            .unwrap();
+        runtime.run_jobs().unwrap();
+        assert!(runtime
+            .eval("resizeEntries.length === 2 && resizeEntries[1].contentWidth === 120")
+            .unwrap()
+            .as_boolean()
+            .unwrap());
+
+        runtime
+            .eval("document.getElementById('box').style.width = '120px'")
+            .unwrap();
+        runtime.run_jobs().unwrap();
+        assert_eq!(runtime.eval("resizeEntries.length").unwrap().as_number(), Some(2.0));
+    }
+
+    #[test]
+    fn intersection_observer_computes_partial_and_outside_geometry() {
+        let mut runtime = runtime_from_html(
+            r#"<div id="box" style="position:absolute;left:900px;top:0;width:200px;height:100px"></div>"#,
+        );
+        runtime.set_viewport(1000.0, 500.0);
+        runtime
+            .eval(
+                r#"globalThis.intersections = [];
+                   globalThis.geometryObserver = new IntersectionObserver(entries => {
+                     const entry = entries[0];
+                     intersections.push({
+                       intersecting: entry.isIntersecting,
+                       ratio: entry.intersectionRatio,
+                       targetWidth: entry.boundingClientRect.width,
+                       intersectionWidth: entry.intersectionRect.width,
+                       rootWidth: entry.rootBounds.width,
+                     });
+                   }, { threshold: [0, 0.5, 1] });
+                   geometryObserver.observe(document.getElementById('box'));"#,
+            )
+            .unwrap();
+        runtime.run_jobs().unwrap();
+
+        assert!(runtime
+            .eval("intersections.length === 1 && intersections[0].intersecting && intersections[0].ratio === 0.5 && intersections[0].targetWidth === 200 && intersections[0].intersectionWidth === 100 && intersections[0].rootWidth === 1000")
+            .unwrap()
+            .as_boolean()
+            .unwrap());
+
+        runtime.set_viewport(800.0, 500.0);
+        runtime.run_jobs().unwrap();
+        assert!(runtime
+            .eval("intersections.length === 2 && !intersections[1].intersecting && intersections[1].ratio === 0 && intersections[1].intersectionWidth === 0")
+            .unwrap()
+            .as_boolean()
+            .unwrap());
+    }
+
+    #[test]
+    fn intersection_observer_take_records_drains_before_callback() {
+        let mut runtime = runtime_from_html(r#"<div id="box" style="width:10px;height:10px"></div>"#);
+        runtime
+            .eval(
+                r#"globalThis.intersectionCallbacks = 0;
+                   globalThis.takenIntersections = [];
+                   const observer = new IntersectionObserver(() => intersectionCallbacks++);
+                   observer.observe(document.getElementById('box'));
+                   Promise.resolve().then(() => { takenIntersections = observer.takeRecords(); });"#,
+            )
+            .unwrap();
+        runtime.run_jobs().unwrap();
+        assert!(runtime
+            .eval("takenIntersections.length === 1 && intersectionCallbacks === 0")
+            .unwrap()
+            .as_boolean()
+            .unwrap());
+    }
+
+    #[test]
+    fn intersection_observer_normalizes_options_and_rejects_invalid_values() {
+        let mut runtime = JsRuntime::new().unwrap();
+        assert!(runtime
+            .eval(
+                r#"(() => {
+                  const observer = new IntersectionObserver(() => {}, {
+                    rootMargin: '10px 5%', threshold: [1, 0.5, 0, 0.5]
+                  });
+                  let badMargin = false;
+                  let badThreshold = false;
+                  try { new IntersectionObserver(() => {}, { rootMargin: '1em' }); }
+                  catch (error) { badMargin = error.name === 'SyntaxError'; }
+                  try { new IntersectionObserver(() => {}, { threshold: 2 }); }
+                  catch (error) { badThreshold = error instanceof RangeError; }
+                  return observer.rootMargin === '10px 5% 10px 5%' &&
+                    observer.thresholds.join(',') === '0,0.5,1' && badMargin && badThreshold;
+                })()"#,
+            )
+            .unwrap()
+            .as_boolean()
+            .unwrap());
     }
 
     #[test]

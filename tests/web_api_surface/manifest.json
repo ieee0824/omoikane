@@ -34,10 +34,18 @@
     {
       "id": "dom.resize-observer-callback",
       "area": "dom",
-      "description": "ResizeObserver reports an observed element",
-      "setup": "globalThis.__resizeDelivered = false; new ResizeObserver(() => { __resizeDelivered = true; }).observe(document.getElementById('probe'))",
+      "description": "ResizeObserver reports an observed element's real content box",
+      "setup": "globalThis.__resizeDelivered = false; new ResizeObserver(entries => { __resizeDelivered = entries[0].contentRect.width > 0; }).observe(document.getElementById('probe'))",
       "probe": "__resizeDelivered === true",
-      "baseline_supported": false
+      "baseline_supported": true
+    },
+    {
+      "id": "dom.intersection-observer-geometry",
+      "area": "dom",
+      "description": "IntersectionObserver identifies an element outside the viewport",
+      "setup": "globalThis.__intersectionDelivered = false; globalThis.__outside = document.createElement('div'); __outside.style.cssText = 'position:absolute;left:2000px;top:0;width:10px;height:10px'; document.body.appendChild(__outside); new IntersectionObserver(entries => { __intersectionDelivered = entries[0].isIntersecting === false && entries[0].boundingClientRect.width === 10; }).observe(__outside)",
+      "probe": "__intersectionDelivered === true",
+      "baseline_supported": true
     },
     {
       "id": "dom.shadow-root",
