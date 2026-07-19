@@ -4558,7 +4558,10 @@
     getAllResponseHeaders() {
       if (this.readyState < 2) return "";
       return this._responseHeaders
-        .filter(([name]) => String(name).toLowerCase() !== "set-cookie")
+        .filter(([name]) => {
+          const key = String(name).toLowerCase();
+          return key !== "set-cookie" && key !== "set-cookie2";
+        })
         .map(([name, value]) => String(name).toLowerCase() + ": " + value + "\r\n")
         .join("");
     }

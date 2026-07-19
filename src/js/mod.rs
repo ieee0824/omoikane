@@ -3426,6 +3426,7 @@ fn fetch_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResul
         let parsed_url = url.parse::<crate::http::Url>().map_err(|error| {
             JsError::from(JsNativeError::typ().with_message(error.to_string()))
         })?;
+        let normalized_url = parsed_url.to_string();
         let mut request = HttpRequest::new(method, parsed_url);
         for (name, value) in headers {
             request.set_header(name, value);
@@ -3441,15 +3442,24 @@ fn fetch_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResul
         let effective_url = response
             .effective_url()
             .map(ToString::to_string)
-            .unwrap_or_else(|| url.clone());
-        let redirected = effective_url != url;
+            .unwrap_or_else(|| normalized_url.clone());
+        let redirected = effective_url != normalized_url;
+        let exposed_headers: Vec<_> = response
+            .headers()
+            .iter()
+            .filter(|(name, _)| {
+                !name.eq_ignore_ascii_case("set-cookie")
+                    && !name.eq_ignore_ascii_case("set-cookie2")
+            })
+            .cloned()
+            .collect();
         let payload = serde_json::json!({
             "status": response.status_code(),
             "statusText": response.reason(),
             "ok": (200..300).contains(&response.status_code()),
             "url": effective_url,
             "redirected": redirected,
-            "headers": response.headers(),
+            "headers": exposed_headers,
             "bodyText": body_text,
         })
         .to_string();
@@ -5481,6 +5491,41 @@ mod tests {
     }
 
     #[test]
+    fn fetch_does_not_report_url_parser_normalization_as_a_redirect() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let handle = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let request = String::from_utf8(read_http_request(&mut stream)).unwrap();
+            assert!(request.starts_with("GET / HTTP/1.1\r\n"));
+            stream
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok",
+                )
+                .unwrap();
+        });
+
+        let mut runtime = JsRuntime::new().unwrap();
+        runtime
+            .eval(&format!(
+                r#"globalThis.normalizedResponse = null; fetch("http://127.0.0.1:{}").then(response => normalizedResponse = response);"#,
+                address.port()
+            ))
+            .unwrap();
+        runtime.run_jobs().unwrap();
+        handle.join().unwrap();
+
+        assert!(runtime
+            .eval(&format!(
+                r#"normalizedResponse.redirected === false && normalizedResponse.url === "http://127.0.0.1:{}/""#,
+                address.port()
+            ))
+            .unwrap()
+            .as_boolean()
+            .unwrap());
+    }
+
+    #[test]
     fn network_failures_reject_fetch_and_fire_xhr_error_without_sync_throw() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
@@ -5524,7 +5569,7 @@ mod tests {
             assert!(first_request.starts_with("GET /session HTTP/1.1\r\n"));
             first
                 .write_all(
-                    b"HTTP/1.1 204 No Content\r\nSet-Cookie: session=miku; Path=/\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                    b"HTTP/1.1 204 No Content\r\nSet-Cookie: session=miku; Path=/\r\nSet-Cookie2: legacy=hidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
                 )
                 .unwrap();
 
@@ -5542,11 +5587,16 @@ mod tests {
         let mut runtime = JsRuntime::new().unwrap();
         runtime
             .eval(&format!(
-                r#"fetch("http://127.0.0.1:{}/session");"#,
+                r#"globalThis.cookieResponse = null; fetch("http://127.0.0.1:{}/session").then(response => cookieResponse = response);"#,
                 address.port()
             ))
             .unwrap();
         runtime.run_jobs().unwrap();
+        assert!(runtime
+            .eval("cookieResponse.headers.get('set-cookie') === null && cookieResponse.headers.get('set-cookie2') === null")
+            .unwrap()
+            .as_boolean()
+            .unwrap());
         runtime
             .eval(&format!(
                 r#"const cookieXhr = new XMLHttpRequest(); cookieXhr.open("GET", "http://127.0.0.1:{}/profile"); cookieXhr.send();"#,
@@ -5692,7 +5742,7 @@ mod tests {
             let body = b"accepted";
             write!(
                 stream,
-                "HTTP/1.1 202 Accepted\r\nX-Result: saved\r\nSet-Cookie: secret=value\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                "HTTP/1.1 202 Accepted\r\nX-Result: saved\r\nSet-Cookie: secret=value\r\nSet-Cookie2: legacy=hidden\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
                 body.len()
             )
             .unwrap();
@@ -5722,6 +5772,7 @@ mod tests {
                     semanticXhr.responseURL === "http://127.0.0.1:{}/api/item" &&
                     semanticXhr.getResponseHeader("X-Result") === "saved" &&
                     semanticXhr.getResponseHeader("Set-Cookie") === null &&
+                    semanticXhr.getResponseHeader("Set-Cookie2") === null &&
                     semanticXhr.getAllResponseHeaders().includes("x-result: saved\r\n") &&
                     !semanticXhr.getAllResponseHeaders().includes("set-cookie") &&
                     xhrStates.join(",") === "1,2,3,4""#,
