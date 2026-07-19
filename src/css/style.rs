@@ -1818,6 +1818,70 @@ fn is_supported_property(name: &str) -> bool {
     )
 }
 
+/// Returns whether a property/value pair is both syntactically valid and
+/// implemented by Omoikane's style resolver.
+///
+/// This is the engine-side source of truth for the DOM `CSS.supports()` API.
+/// Parsing a forgiving declaration list alone is insufficient: the CSS parser
+/// deliberately retains unknown properties so they can be ignored by the
+/// cascade and reported by diagnostics. Feature detection must additionally
+/// require that every declaration produced by shorthand expansion is a
+/// property the resolver understands.
+pub(crate) fn supports_declaration(property: &str, value: &str) -> bool {
+    let property = property.trim();
+    let value = value.trim();
+    if property.is_empty() || value.is_empty() || contains_top_level_semicolon(value) {
+        return false;
+    }
+
+    let declarations = super::parse_style_attribute(&format!("{property}: {value}"));
+    if declarations.is_empty() {
+        return false;
+    }
+
+    // Custom properties accept the general CSS component-value grammar and
+    // are consumed by var() resolution rather than the fixed property table.
+    if property.starts_with("--") {
+        return declarations.len() == 1 && declarations[0].name == property.to_ascii_lowercase();
+    }
+
+    declarations.iter().all(|declaration| {
+        let name = canonical_property_name(&declaration.name);
+        if !is_supported_property(name) {
+            return false;
+        }
+        match validate_declaration(name, &declaration.value) {
+            DeclarationValidation::Invalid => false,
+            DeclarationValidation::Valid(_) => true,
+            DeclarationValidation::Unvalidated => {
+                let computed =
+                    compute_value(&declaration.value, name, ResolutionContext::default());
+                !should_skip_computed_property(name, &computed)
+            }
+        }
+    })
+}
+
+/// Reject a second top-level declaration while preserving semicolons inside
+/// strings and functions such as data URLs.
+fn contains_top_level_semicolon(value: &str) -> bool {
+    let Ok(tokens) = super::tokenize(value) else {
+        return true;
+    };
+    let mut depth = 0usize;
+    for token in tokens {
+        match token {
+            super::CssToken::ParenOpen | super::CssToken::BracketOpen => depth += 1,
+            super::CssToken::ParenClose | super::CssToken::BracketClose => {
+                depth = depth.saturating_sub(1);
+            }
+            super::CssToken::Semicolon if depth == 0 => return true,
+            _ => {}
+        }
+    }
+    false
+}
+
 fn resolve_time_seconds(value: &Value) -> Option<f32> {
     match value {
         Value::Length(number, unit) if unit.eq_ignore_ascii_case("s") => Some(*number),

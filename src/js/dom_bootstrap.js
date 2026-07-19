@@ -2959,7 +2959,33 @@
       }
       return output;
     },
-    supports() { return false; },
+    supports(propertyOrCondition, value) {
+      if (arguments.length >= 2) {
+        return __omoikane_css_supports(String(propertyOrCondition), String(value));
+      }
+      const condition = String(propertyOrCondition).trim();
+      if (condition.length < 3 || condition[0] !== "(" || condition[condition.length - 1] !== ")") {
+        return false;
+      }
+      const declaration = condition.slice(1, -1);
+      let depth = 0;
+      let quote = "";
+      for (let index = 0; index < declaration.length; index++) {
+        const character = declaration[index];
+        if (quote) {
+          if (character === "\\") index++;
+          else if (character === quote) quote = "";
+          continue;
+        }
+        if (character === "\"" || character === "'") { quote = character; continue; }
+        if (character === "(" || character === "[") depth++;
+        else if (character === ")" || character === "]") depth--;
+        else if (character === ":" && depth === 0) {
+          return __omoikane_css_supports(declaration.slice(0, index), declaration.slice(index + 1));
+        }
+      }
+      return false;
+    },
   };
 
   const styleSheetCache = new WeakMap();
@@ -4292,20 +4318,6 @@
     __rafCallbacks.delete(id);
   };
 
-  // matchMedia stub: always returns matches=false
-  globalThis.matchMedia = function(query) {
-    return {
-      matches: false,
-      media: String(query),
-      onchange: null,
-      addListener: function() {},
-      removeListener: function() {},
-      addEventListener: function() {},
-      removeEventListener: function() {},
-      dispatchEvent: function() { return true; },
-    };
-  };
-
   // In-memory storage stubs
   function createStorage() {
     const store = new Map();
@@ -4860,6 +4872,55 @@
   globalThis.EventTarget = EventTarget;
   globalThis.AbortSignal = AbortSignal;
   globalThis.AbortController = AbortController;
+
+  const mediaQueryListRefs = [];
+
+  class MediaQueryListEvent extends Event {
+    constructor(type, init = {}) {
+      super(type, {
+        bubbles: init.bubbles ?? false,
+        cancelable: init.cancelable ?? false,
+      });
+      this.matches = !!init.matches;
+      this.media = String(init.media ?? "");
+    }
+  }
+
+  class MediaQueryList extends EventTarget {
+    constructor(query) {
+      super();
+      this.media = String(query);
+      this.onchange = null;
+      this._matches = __omoikane_match_media(this.media);
+    }
+    get matches() { return this._matches; }
+    addListener(callback) { this.addEventListener("change", callback); }
+    removeListener(callback) { this.removeEventListener("change", callback); }
+    __reevaluate() {
+      const matches = __omoikane_match_media(this.media);
+      if (matches === this._matches) return;
+      this._matches = matches;
+      const event = new MediaQueryListEvent("change", { matches, media: this.media });
+      this.dispatchEvent(event);
+      if (typeof this.onchange === "function") this.onchange.call(this, event);
+    }
+  }
+
+  globalThis.matchMedia = function(query) {
+    const list = new MediaQueryList(query);
+    mediaQueryListRefs.push(typeof WeakRef === "function" ? new WeakRef(list) : list);
+    return list;
+  };
+  globalThis.__omoikane_media_query_viewport_changed = function() {
+    for (let index = mediaQueryListRefs.length - 1; index >= 0; index--) {
+      const entry = mediaQueryListRefs[index];
+      const list = typeof WeakRef === "function" ? entry.deref() : entry;
+      if (list) list.__reevaluate();
+      else mediaQueryListRefs.splice(index, 1);
+    }
+  };
+  globalThis.MediaQueryList = MediaQueryList;
+  globalThis.MediaQueryListEvent = MediaQueryListEvent;
 
   class Headers {
     constructor(init = undefined) {

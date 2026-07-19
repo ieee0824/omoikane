@@ -21,6 +21,7 @@ pub use parser::{
     extract_font_face_rules, parse_selector_list, parse_style_attribute, parse_stylesheet,
 };
 pub use style::{ComputedStyle, ComputedValue, Origin, StyleResolver, StylesheetInput};
+pub(crate) use style::supports_declaration;
 pub use tokenizer::tokenize;
 
 /// A token emitted by the CSS tokenizer.
