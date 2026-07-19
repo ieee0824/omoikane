@@ -1,0 +1,357 @@
+{
+  "version": 1,
+  "features": [
+    {
+      "id": "dom.query-selector",
+      "area": "dom",
+      "description": "Document querySelector supports compound selectors",
+      "probe": "document.querySelector('body > main#probe') !== null",
+      "baseline_supported": true
+    },
+    {
+      "id": "dom.get-root-node",
+      "area": "dom",
+      "description": "Connected nodes expose their Document root",
+      "probe": "document.getElementById('probe').getRootNode() === document",
+      "baseline_supported": true
+    },
+    {
+      "id": "dom.range",
+      "area": "dom",
+      "description": "Range can select node contents",
+      "setup": "globalThis.__range = document.createRange(); __range.selectNodeContents(document.getElementById('probe'))",
+      "probe": "__range.startContainer === document.getElementById('probe')",
+      "baseline_supported": true
+    },
+    {
+      "id": "dom.mutation-observer-callback",
+      "area": "dom",
+      "description": "MutationObserver delivers attribute records at a microtask checkpoint",
+      "setup": "globalThis.__mutationDelivered = false; new MutationObserver(records => { __mutationDelivered = records.some(record => record.type === 'attributes'); }).observe(document.getElementById('probe'), { attributes: true }); document.getElementById('probe').setAttribute('data-probed', 'yes')",
+      "probe": "__mutationDelivered === true",
+      "baseline_supported": true
+    },
+    {
+      "id": "dom.resize-observer-callback",
+      "area": "dom",
+      "description": "ResizeObserver reports an observed element",
+      "setup": "globalThis.__resizeDelivered = false; new ResizeObserver(() => { __resizeDelivered = true; }).observe(document.getElementById('probe'))",
+      "probe": "__resizeDelivered === true",
+      "baseline_supported": false
+    },
+    {
+      "id": "dom.shadow-root",
+      "area": "web-components",
+      "description": "Elements can attach a shadow root",
+      "probe": "typeof ShadowRoot === 'function' && typeof Element.prototype.attachShadow === 'function'",
+      "baseline_supported": false
+    },
+    {
+      "id": "dom.custom-elements",
+      "area": "web-components",
+      "description": "Custom element registry is available",
+      "probe": "typeof CustomElementRegistry === 'function' && typeof customElements === 'object'",
+      "baseline_supported": false
+    },
+    {
+      "id": "dom.template-content",
+      "area": "web-components",
+      "description": "HTMLTemplateElement exposes a DocumentFragment content tree",
+      "probe": "typeof HTMLTemplateElement === 'function' && document.createElement('template').content instanceof DocumentFragment",
+      "baseline_supported": false
+    },
+    {
+      "id": "dom.selection",
+      "area": "editing",
+      "description": "Window Selection API is available",
+      "probe": "typeof getSelection === 'function' && typeof Selection === 'function'",
+      "baseline_supported": false
+    },
+    {
+      "id": "html.iframe-content-document",
+      "area": "html",
+      "description": "Iframe elements expose an independent contentDocument",
+      "setup": "globalThis.__frame = document.createElement('iframe'); document.body.appendChild(__frame)",
+      "probe": "__frame.contentDocument && __frame.contentDocument !== document",
+      "baseline_supported": true
+    },
+    {
+      "id": "html.form-collection",
+      "area": "html",
+      "description": "Form controls are exposed through form.elements",
+      "setup": "globalThis.__form = document.createElement('form'); globalThis.__input = document.createElement('input'); __input.name = 'field'; __form.appendChild(__input); document.body.appendChild(__form)",
+      "probe": "__form.elements.length === 1 && __form.elements.field === __input",
+      "baseline_supported": true
+    },
+    {
+      "id": "html.dialog",
+      "area": "html",
+      "description": "Dialog elements implement showModal and close",
+      "probe": "typeof HTMLDialogElement === 'function' && typeof document.createElement('dialog').showModal === 'function'",
+      "baseline_supported": false
+    },
+    {
+      "id": "scheduling.animation-frame-callback",
+      "area": "scheduling",
+      "description": "requestAnimationFrame invokes a queued callback",
+      "setup": "globalThis.__animationFrameDelivered = false; requestAnimationFrame(() => { __animationFrameDelivered = true; })",
+      "probe": "__animationFrameDelivered === true",
+      "baseline_supported": true
+    },
+    {
+      "id": "performance.mark-entry",
+      "area": "scheduling",
+      "description": "Performance marks are recorded and queryable",
+      "setup": "performance.mark('omoikane-probe')",
+      "probe": "performance.getEntriesByName('omoikane-probe').length === 1",
+      "baseline_supported": false
+    },
+    {
+      "id": "css.computed-style",
+      "area": "css",
+      "description": "getComputedStyle returns cascaded author styles",
+      "probe": "getComputedStyle(document.getElementById('probe')).display === 'block'",
+      "baseline_supported": true
+    },
+    {
+      "id": "css.supports-display-block",
+      "area": "css",
+      "description": "CSS.supports accepts a supported declaration",
+      "probe": "typeof CSS === 'object' && CSS.supports('display', 'block') === true",
+      "baseline_supported": false
+    },
+    {
+      "id": "css.match-media-screen",
+      "area": "css",
+      "description": "matchMedia evaluates the screen media type",
+      "probe": "matchMedia('screen').matches === true",
+      "baseline_supported": false
+    },
+    {
+      "id": "css.stylesheet-insert-rule",
+      "area": "cssom",
+      "description": "Runtime stylesheets accept insertRule and affect computed style",
+      "setup": "globalThis.__style = document.createElement('style'); document.head.appendChild(__style); __style.sheet.insertRule('#probe { visibility: hidden; }', 0)",
+      "probe": "getComputedStyle(document.getElementById('probe')).visibility === 'hidden'",
+      "baseline_supported": true
+    },
+    {
+      "id": "css.web-animations",
+      "area": "cssom",
+      "description": "Elements expose the Web Animations entry point",
+      "probe": "typeof Element.prototype.animate === 'function' && typeof Animation === 'function'",
+      "baseline_supported": true
+    },
+    {
+      "id": "network.fetch",
+      "area": "network",
+      "description": "Fetch request and response classes are exposed",
+      "probe": "typeof fetch === 'function' && typeof Request === 'function' && typeof Response === 'function' && typeof Headers === 'function'",
+      "baseline_supported": true
+    },
+    {
+      "id": "network.xhr",
+      "area": "network",
+      "description": "XMLHttpRequest is exposed",
+      "probe": "typeof XMLHttpRequest === 'function' && XMLHttpRequest.DONE === 4",
+      "baseline_supported": true
+    },
+    {
+      "id": "network.streams",
+      "area": "network",
+      "description": "Readable, writable and transform streams are exposed",
+      "probe": "typeof ReadableStream === 'function' && typeof WritableStream === 'function' && typeof TransformStream === 'function'",
+      "baseline_supported": true
+    },
+    {
+      "id": "network.websocket",
+      "area": "realtime",
+      "description": "Page JavaScript can create WebSocket connections",
+      "probe": "typeof WebSocket === 'function'",
+      "baseline_supported": false
+    },
+    {
+      "id": "network.event-source",
+      "area": "realtime",
+      "description": "Server-sent events are exposed",
+      "probe": "typeof EventSource === 'function'",
+      "baseline_supported": false
+    },
+    {
+      "id": "network.web-transport",
+      "area": "realtime",
+      "description": "WebTransport is exposed",
+      "probe": "typeof WebTransport === 'function'",
+      "baseline_supported": false
+    },
+    {
+      "id": "storage.local-storage-roundtrip",
+      "area": "storage",
+      "description": "localStorage supports a same-context round trip",
+      "setup": "localStorage.setItem('omoikane-probe', 'ok')",
+      "probe": "localStorage.getItem('omoikane-probe') === 'ok'",
+      "baseline_supported": true
+    },
+    {
+      "id": "storage.indexed-db",
+      "area": "storage",
+      "description": "IndexedDB is exposed",
+      "probe": "typeof indexedDB === 'object' && typeof IDBDatabase === 'function'",
+      "baseline_supported": false
+    },
+    {
+      "id": "storage.cache-storage",
+      "area": "storage",
+      "description": "Cache Storage is exposed",
+      "probe": "typeof caches === 'object' && typeof Cache === 'function'",
+      "baseline_supported": false
+    },
+    {
+      "id": "workers.dedicated-worker",
+      "area": "workers",
+      "description": "Dedicated workers are exposed",
+      "probe": "typeof Worker === 'function'",
+      "baseline_supported": false
+    },
+    {
+      "id": "workers.shared-worker",
+      "area": "workers",
+      "description": "Shared workers are exposed",
+      "probe": "typeof SharedWorker === 'function'",
+      "baseline_supported": false
+    },
+    {
+      "id": "workers.service-worker",
+      "area": "workers",
+      "description": "Service worker container is exposed",
+      "probe": "navigator.serviceWorker && typeof navigator.serviceWorker.register === 'function'",
+      "baseline_supported": false
+    },
+    {
+      "id": "messaging.message-channel",
+      "area": "messaging",
+      "description": "MessageChannel is exposed",
+      "probe": "typeof MessageChannel === 'function' && typeof MessagePort === 'function'",
+      "baseline_supported": false
+    },
+    {
+      "id": "messaging.broadcast-channel",
+      "area": "messaging",
+      "description": "BroadcastChannel is exposed",
+      "probe": "typeof BroadcastChannel === 'function'",
+      "baseline_supported": false
+    },
+    {
+      "id": "data.url-search-params",
+      "area": "data",
+      "description": "URL and URLSearchParams handle common query strings",
+      "probe": "new URL('https://example.test/?a=1').searchParams.get('a') === '1'",
+      "baseline_supported": true
+    },
+    {
+      "id": "data.text-codecs",
+      "area": "data",
+      "description": "TextEncoder and TextDecoder round-trip UTF-8",
+      "probe": "new TextDecoder().decode(new TextEncoder().encode('日本語')) === '日本語'",
+      "baseline_supported": true
+    },
+    {
+      "id": "data.blob",
+      "area": "data",
+      "description": "Blob is exposed",
+      "probe": "typeof Blob === 'function'",
+      "baseline_supported": false
+    },
+    {
+      "id": "data.file-api",
+      "area": "data",
+      "description": "File and FileReader are exposed",
+      "probe": "typeof File === 'function' && typeof FileReader === 'function'",
+      "baseline_supported": false
+    },
+    {
+      "id": "data.form-data",
+      "area": "data",
+      "description": "FormData is exposed",
+      "probe": "typeof FormData === 'function'",
+      "baseline_supported": false
+    },
+    {
+      "id": "security.web-crypto",
+      "area": "security",
+      "description": "Web Crypto and random values are exposed",
+      "probe": "typeof crypto === 'object' && typeof crypto.getRandomValues === 'function' && crypto.subtle",
+      "baseline_supported": false
+    },
+    {
+      "id": "graphics.svg-dom",
+      "area": "graphics",
+      "description": "SVG namespace elements use SVG DOM interfaces",
+      "probe": "document.createElementNS('http://www.w3.org/2000/svg', 'svg') instanceof SVGSVGElement",
+      "baseline_supported": true
+    },
+    {
+      "id": "graphics.canvas-2d",
+      "area": "graphics",
+      "description": "Canvas elements expose a 2D drawing context",
+      "probe": "typeof HTMLCanvasElement === 'function' && typeof document.createElement('canvas').getContext === 'function' && document.createElement('canvas').getContext('2d') !== null",
+      "baseline_supported": false
+    },
+    {
+      "id": "graphics.webgl",
+      "area": "graphics",
+      "description": "WebGL rendering contexts are exposed",
+      "probe": "typeof WebGLRenderingContext === 'function'",
+      "baseline_supported": false
+    },
+    {
+      "id": "graphics.webgpu",
+      "area": "graphics",
+      "description": "WebGPU adapter entry point is exposed",
+      "probe": "navigator.gpu && typeof navigator.gpu.requestAdapter === 'function'",
+      "baseline_supported": false
+    },
+    {
+      "id": "media.html-media-element",
+      "area": "media",
+      "description": "Audio/video elements implement media playback controls",
+      "probe": "typeof HTMLMediaElement === 'function' && typeof document.createElement('video').play === 'function'",
+      "baseline_supported": false
+    },
+    {
+      "id": "media.web-audio",
+      "area": "media",
+      "description": "Web Audio is exposed",
+      "probe": "typeof AudioContext === 'function'",
+      "baseline_supported": false
+    },
+    {
+      "id": "platform.clipboard",
+      "area": "platform",
+      "description": "Clipboard API is exposed",
+      "probe": "navigator.clipboard && typeof navigator.clipboard.readText === 'function'",
+      "baseline_supported": false
+    },
+    {
+      "id": "platform.notifications",
+      "area": "platform",
+      "description": "Notifications API is exposed",
+      "probe": "typeof Notification === 'function'",
+      "baseline_supported": false
+    },
+    {
+      "id": "platform.geolocation",
+      "area": "platform",
+      "description": "Geolocation API is exposed",
+      "probe": "navigator.geolocation && typeof navigator.geolocation.getCurrentPosition === 'function'",
+      "baseline_supported": false
+    },
+    {
+      "id": "platform.webrtc",
+      "area": "platform",
+      "description": "WebRTC peer connections are exposed",
+      "probe": "typeof RTCPeerConnection === 'function'",
+      "baseline_supported": false
+    }
+  ]
+}
