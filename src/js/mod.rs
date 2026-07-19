@@ -180,6 +180,23 @@ enum TimerPayload {
     ResourceLoad { node_id: usize },
 }
 
+/// A top-level navigation requested by script in the current browsing context.
+///
+/// The JavaScript runtime only queues the request. The owning browser session
+/// decides when to fetch and install the next Document, keeping networking and
+/// browsing-history ownership outside the ECMAScript embedding layer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NavigationRequest {
+    Navigate { url: String, replace: bool },
+    UpdateHistory {
+        url: String,
+        replace: bool,
+        state_json: String,
+    },
+    Reload,
+    Traverse { delta: i32 },
+}
+
 impl TimerPayload {
     fn kind(&self) -> &'static str {
         match self {
@@ -346,6 +363,7 @@ struct HostState {
     /// Resource elements that already have a queued load task. This prevents a
     /// move within one connected document from producing duplicate events.
     pending_resource_loads: HashSet<usize>,
+    navigation_requests: VecDeque<NavigationRequest>,
 }
 
 /// A loaded sub-browsing-context document owned by an `<iframe>` element.
@@ -414,7 +432,7 @@ fn sanitize_viewport_dimension(dim: f32) -> f32 {
 }
 
 impl HostState {
-    fn new(document: NodeHandle) -> Self {
+    fn new(document: NodeHandle, location_href: String) -> Self {
         // Seed the main document's style entry immediately so its identity is a
         // known key from the start; iframe sub-document entries are created when
         // their content document is first loaded (see `iframe_content_document`).
@@ -431,7 +449,8 @@ impl HostState {
             document: document.clone(),
             nodes: HashMap::new(),
             console_logs: Vec::new(),
-            location_href: "http://localhost/".to_string(),
+            base_url: location_href.parse::<crate::http::Url>().ok(),
+            location_href,
             navigator_user_agent: default_user_agent(),
             http_client: Client::new(),
             viewport: Rect {
@@ -443,9 +462,9 @@ impl HostState {
             document_styles,
             layout_root: None,
             write_insertion_ref: None,
-            base_url: None,
             iframe_documents: HashMap::new(),
             pending_resource_loads: HashSet::new(),
+            navigation_requests: VecDeque::new(),
         };
         state.register_tree(&document);
         state
@@ -903,12 +922,32 @@ impl JsRuntime {
         Self::with_document_and_sandbox(document, SandboxConfig::default())
     }
 
+    /// Creates a runtime whose initial Location and resource base are `url`.
+    ///
+    /// The URL is installed before the DOM bootstrap executes, so
+    /// `location.href`, `document.URL`, and relative resource reflection never
+    /// temporarily expose the default localhost URL for a navigated Document.
+    pub fn with_document_and_url(document: NodeHandle, url: &str) -> JsResult<Self> {
+        Self::with_document_sandbox_and_url(document, SandboxConfig::default(), url)
+    }
+
     /// Creates a JavaScript runtime with custom sandbox configuration.
     pub fn with_document_and_sandbox(
         document: NodeHandle,
         sandbox: SandboxConfig,
     ) -> JsResult<Self> {
-        let host_state = Rc::new(RefCell::new(HostState::new(document.clone())));
+        Self::with_document_sandbox_and_url(document, sandbox, "http://localhost/")
+    }
+
+    fn with_document_sandbox_and_url(
+        document: NodeHandle,
+        sandbox: SandboxConfig,
+        url: &str,
+    ) -> JsResult<Self> {
+        let host_state = Rc::new(RefCell::new(HostState::new(
+            document.clone(),
+            url.to_string(),
+        )));
         let mut context = Context::builder()
             .module_loader(Rc::new(HttpModuleLoader::default()))
             .host_hooks(Rc::new(BrowserHostHooks))
@@ -1009,6 +1048,15 @@ impl JsRuntime {
     /// driving the runtime without running document scripts.
     pub fn set_base_url(&mut self, url: crate::http::Url) {
         self.host_state.borrow_mut().base_url = Some(url);
+    }
+
+    /// Takes navigation requests queued by Location/History APIs in FIFO order.
+    pub fn take_navigation_requests(&mut self) -> Vec<NavigationRequest> {
+        self.host_state
+            .borrow_mut()
+            .navigation_requests
+            .drain(..)
+            .collect()
     }
 
     /// Returns the console log buffer captured from `console.log`.
@@ -2266,6 +2314,11 @@ fn register_host_bindings(
             js_string!("__omoikane_resolve_url"),
             1,
             NativeFunction::from_copy_closure(resolve_url_native),
+        ),
+        (
+            js_string!("__omoikane_schedule_navigation"),
+            3,
+            NativeFunction::from_copy_closure(schedule_navigation_native),
         ),
     ] {
         context.register_global_builtin_callable(name, length, function)?;
@@ -4346,6 +4399,64 @@ fn resolve_url_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> J
     })
 }
 
+fn schedule_navigation_native(
+    _: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let kind = args
+        .first()
+        .cloned()
+        .unwrap_or_default()
+        .to_string(context)?
+        .to_std_string_escaped();
+    let value = args
+        .get(1)
+        .cloned()
+        .unwrap_or_default()
+        .to_string(context)?
+        .to_std_string_escaped();
+    let state_json = args
+        .get(2)
+        .cloned()
+        .unwrap_or_else(|| js_string!("null").into())
+        .to_string(context)?
+        .to_std_string_escaped();
+    let request = match kind.as_str() {
+        "assign" => NavigationRequest::Navigate {
+            url: value,
+            replace: false,
+        },
+        "replace" => NavigationRequest::Navigate {
+            url: value,
+            replace: true,
+        },
+        "reload" => NavigationRequest::Reload,
+        "push-state" => NavigationRequest::UpdateHistory {
+            url: value,
+            replace: false,
+            state_json,
+        },
+        "replace-state" => NavigationRequest::UpdateHistory {
+            url: value,
+            replace: true,
+            state_json,
+        },
+        "traverse" => NavigationRequest::Traverse {
+            delta: value.parse::<i32>().unwrap_or(0),
+        },
+        _ => {
+            return Err(JsNativeError::typ()
+                .with_message("unknown navigation request kind")
+                .into());
+        }
+    };
+    with_host_state(|state| {
+        state.borrow_mut().navigation_requests.push_back(request);
+        Ok(JsValue::undefined())
+    })
+}
+
 /// Backs `document.write` / `document.writeln`.
 ///
 /// The written text is parsed one of two ways depending on the target
@@ -5027,6 +5138,69 @@ mod tests {
             .unwrap()
             .as_boolean()
             .unwrap());
+        assert_eq!(
+            runtime.take_navigation_requests(),
+            vec![
+                NavigationRequest::Reload,
+                NavigationRequest::Navigate {
+                    url: "http://localhost/assigned?q=1".to_string(),
+                    replace: false,
+                },
+                NavigationRequest::Navigate {
+                    url: "http://localhost/replaced#ok".to_string(),
+                    replace: true,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn runtime_initial_url_is_visible_during_bootstrap_and_resolves_resources() {
+        let mut runtime = JsRuntime::with_document_and_url(
+            default_document(),
+            "https://example.com/dir/page.html?q=1#top",
+        )
+        .unwrap();
+
+        assert!(runtime
+            .eval(
+                r#"location.href === "https://example.com/dir/page.html?q=1#top" &&
+                   document.URL === location.href &&
+                   new Request("asset.json").url === "https://example.com/dir/asset.json""#,
+            )
+            .unwrap()
+            .as_boolean()
+            .unwrap());
+    }
+
+    #[test]
+    fn location_href_window_location_and_document_location_queue_navigation() {
+        let mut runtime = JsRuntime::new().unwrap();
+        runtime
+            .eval(
+                r#"location.href = "/href";
+                   window.location = "/window";
+                   document.location = "/document";"#,
+            )
+            .unwrap();
+
+        assert_eq!(
+            runtime.take_navigation_requests(),
+            vec![
+                NavigationRequest::Navigate {
+                    url: "http://localhost/href".to_string(),
+                    replace: false,
+                },
+                NavigationRequest::Navigate {
+                    url: "http://localhost/window".to_string(),
+                    replace: false,
+                },
+                NavigationRequest::Navigate {
+                    url: "http://localhost/document".to_string(),
+                    replace: false,
+                },
+            ]
+        );
     }
 
     #[test]

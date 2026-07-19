@@ -2613,6 +2613,10 @@
       return globalThis.location;
     }
 
+    set location(value) {
+      globalThis.location = value;
+    }
+
     get referrer() {
       return "";
     }
@@ -3872,7 +3876,8 @@
     },
   });
 
-  const __loc = { href: __omoikane_location_href, protocol: "", hostname: "", pathname: "/", search: "", hash: "", origin: "", host: "" };
+  let __locationHref = String(__omoikane_location_href);
+  const __loc = { protocol: "", hostname: "", pathname: "/", search: "", hash: "", origin: "", host: "" };
   try {
     const __m = String(__omoikane_location_href).match(/^(.*?):\/\/([^/?#]+)([^?#]*)(\?[^#]*)?(#.*)?$/);
     if (__m) {
@@ -3885,42 +3890,78 @@
       __loc.origin = __loc.protocol + "//" + __loc.host;
     }
   } catch(e) {}
-  globalThis.location = __loc;
-  function __applyHistoryUrl(url) {
+  Object.defineProperty(__loc, "href", {
+    enumerable: true,
+    configurable: false,
+    get() { return __locationHref; },
+    set(url) {
+      const href = __applyLocationUrl(url, false);
+      if (href !== undefined) __omoikane_schedule_navigation("assign", href);
+    },
+  });
+  Object.defineProperty(globalThis, "location", {
+    enumerable: true,
+    configurable: false,
+    get() { return __loc; },
+    set(url) { __loc.assign(url); },
+  });
+  function __applyLocationUrl(url, requireSameOrigin) {
     if (url == null || String(url) === "") return;
     const raw = String(url);
-    let href = raw;
-    if (!/^[A-Za-z][A-Za-z0-9+.-]*:\/\//.test(raw)) {
-      href = raw.startsWith("/") ? __loc.origin + raw :
-        __loc.origin + (__loc.pathname.replace(/[^/]*$/, "")) + raw;
-    }
+    const href = String(__omoikane_resolve_url(raw));
     const match = href.match(/^(.*?):\/\/([^/?#]+)([^?#]*)(\?[^#]*)?(#.*)?$/);
-    if (!match || (match[1] + "://" + match[2]) !== __loc.origin) {
+    if (!match || (requireSameOrigin && (match[1] + "://" + match[2]) !== __loc.origin)) {
       throw new DOMException("History state URL must be same-origin", "SecurityError");
     }
-    __loc.href = href;
+    __locationHref = href;
     __loc.protocol = match[1] + ":";
     __loc.host = match[2];
     __loc.hostname = match[2].replace(/:\d+$/, "");
     __loc.pathname = match[3] || "/";
     __loc.search = match[4] || "";
     __loc.hash = match[5] || "";
+    __loc.origin = match[1] + "://" + match[2];
+    return href;
+  }
+  function __applyHistoryUrl(url) {
+    return __applyLocationUrl(url, true);
   }
   __loc.assign = function(url) {
-    __applyHistoryUrl(url);
+    const href = __applyLocationUrl(url, false);
+    if (href !== undefined) __omoikane_schedule_navigation("assign", href);
   };
   __loc.replace = function(url) {
-    __applyHistoryUrl(url);
+    const href = __applyLocationUrl(url, false);
+    if (href !== undefined) __omoikane_schedule_navigation("replace", href);
   };
   __loc.reload = function() {
-    // A navigation-capable embedder can replace this with a full document
-    // reload. The synchronous Location API itself returns undefined.
+    __omoikane_schedule_navigation("reload", __loc.href);
   };
   const __historyEntries = [{ state: null, href: __loc.href }];
   let __historyIndex = 0;
+  let __sessionHistoryLength = 1;
+  globalThis.__omoikane_sync_history = function(length, stateJSON) {
+    const numeric = Math.trunc(Number(length));
+    if (Number.isFinite(numeric) && numeric > 0) __sessionHistoryLength = numeric;
+    if (stateJSON !== undefined) {
+      try { __historyEntries[__historyIndex].state = JSON.parse(String(stateJSON)); }
+      catch (_) { __historyEntries[__historyIndex].state = null; }
+    }
+  };
+  globalThis.__omoikane_commit_same_document_navigation = function(href, eventType, previousURL) {
+    const oldURL = previousURL === undefined ? __loc.href : String(previousURL);
+    __applyLocationUrl(href, false);
+    const event = new Event(String(eventType || "popstate"));
+    event.oldURL = oldURL;
+    event.newURL = __loc.href;
+    globalThis.dispatchEvent(event);
+  };
+  globalThis.__omoikane_set_location = function(href) {
+    __applyLocationUrl(href, false);
+  };
   globalThis.history = {
     scrollRestoration: "auto",
-    get length() { return __historyEntries.length; },
+    get length() { return Math.max(__historyEntries.length, __sessionHistoryLength); },
     get state() { return __historyEntries[__historyIndex].state; },
     pushState(state, unused, url) {
       void unused;
@@ -3928,18 +3969,29 @@
       __historyEntries.splice(__historyIndex + 1);
       __historyEntries.push({ state, href: __loc.href });
       __historyIndex = __historyEntries.length - 1;
+      const stateJSON = JSON.stringify(state);
+      __omoikane_schedule_navigation("push-state", __loc.href, stateJSON === undefined ? "null" : stateJSON);
     },
     replaceState(state, unused, url) {
       void unused;
       __applyHistoryUrl(url);
       __historyEntries[__historyIndex] = { state, href: __loc.href };
+      const stateJSON = JSON.stringify(state);
+      __omoikane_schedule_navigation("replace-state", __loc.href, stateJSON === undefined ? "null" : stateJSON);
     },
     go(delta = 0) {
-      const target = __historyIndex + Number(delta || 0);
-      if (target < 0 || target >= __historyEntries.length || target === __historyIndex) return;
-      __historyIndex = target;
-      __applyHistoryUrl(__historyEntries[target].href);
-      globalThis.dispatchEvent(new Event("popstate"));
+      const numeric = Math.trunc(Number(delta || 0));
+      if (!Number.isFinite(numeric)) return;
+      if (numeric === 0) {
+        __omoikane_schedule_navigation("reload", __loc.href);
+        return;
+      }
+      const localTarget = __historyIndex + numeric;
+      if (localTarget >= 0 && localTarget < __historyEntries.length) {
+        __historyIndex = localTarget;
+        __applyHistoryUrl(__historyEntries[localTarget].href);
+      }
+      __omoikane_schedule_navigation("traverse", String(numeric));
     },
     back() { this.go(-1); },
     forward() { this.go(1); },

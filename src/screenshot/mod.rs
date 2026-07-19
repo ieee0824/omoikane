@@ -6,7 +6,7 @@ use crate::http::url::resolve_url;
 use crate::layout::Rect;
 use crate::paint::{
     Canvas, Color, Image, RenderTimings, clear_render_timings, record_render_timings,
-    render_document_with_url,
+    render_document_snapshot_with_url, render_document_with_url,
 };
 use std::time::Instant;
 
@@ -17,6 +17,14 @@ pub(crate) fn capture_session_screenshot_png(
     viewport: Rect,
 ) -> Result<Vec<u8>, String> {
     clear_render_timings();
+    let settle_timings = session
+        .settle_for_render()
+        .map_err(|error| error.message)?;
+    record_render_timings(&RenderTimings {
+        timers: settle_timings.timers,
+        animation_frames: settle_timings.animation_frames,
+        ..RenderTimings::default()
+    });
     let document = session.document();
     let base_url = session.current_url().parse::<crate::http::Url>().ok();
 
@@ -31,9 +39,16 @@ pub(crate) fn capture_session_screenshot_png(
             let (render_document, render_base_url) =
                 resolve_frameset_render_document(&document, base_url.as_ref())
                     .unwrap_or((document.clone(), base_url.clone()));
-            let canvas =
+            let canvas = if render_document.identity() == document.identity() {
+                render_document_snapshot_with_url(
+                    &render_document,
+                    viewport,
+                    render_base_url.as_ref(),
+                )
+            } else {
                 render_document_with_url(&render_document, viewport, render_base_url.as_ref())
-                    .map_err(|error| format!("{error:?}"))?;
+            }
+            .map_err(|error| format!("{error:?}"))?;
             Ok(encode_screenshot_canvas(canvas))
         }
     }
@@ -397,6 +412,35 @@ mod tests {
     fn parses_frameset_rows_as_percentage_when_sum_is_100() {
         let heights = parse_frameset_track_sizes(Some("30,70"), 2, 1000);
         assert_eq!(heights, vec![300, 700]);
+    }
+
+    #[test]
+    fn session_screenshot_does_not_execute_document_scripts_twice() {
+        let mut session = CdpSession::new().unwrap();
+        session
+            .dispatch(
+                "Page.navigate",
+                serde_json::json!({
+                    "url": "data:text/html,<html><body><script>document.body.setAttribute('data-runs', String(Number(document.body.getAttribute('data-runs') || 0) %2B 1))</script></body></html>"
+                }),
+            )
+            .unwrap();
+
+        let viewport = Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 32.0,
+            height: 32.0,
+        };
+        let _png = capture_session_screenshot_png(&mut session, viewport).unwrap();
+        let runs = session
+            .dispatch(
+                "Runtime.evaluate",
+                serde_json::json!({ "expression": "document.body.getAttribute('data-runs')" }),
+            )
+            .unwrap();
+
+        assert_eq!(runs["result"]["value"], "1");
     }
 
     #[test]

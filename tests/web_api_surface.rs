@@ -24,6 +24,7 @@ struct Feature {
     setup: Option<String>,
     #[serde(default)]
     run_animation_frame: bool,
+    expected_navigation_requests: Option<usize>,
     probe: String,
     baseline_supported: bool,
 }
@@ -108,6 +109,22 @@ fn run_probe(runtime: &mut JsRuntime, feature: &Feature) -> ProbeResult {
             status: ProbeStatus::Error,
             error: Some(format!("animation frame: {error}")),
         };
+    }
+
+    if let Some(expected) = feature.expected_navigation_requests {
+        let actual = runtime.take_navigation_requests().len();
+        if actual != expected {
+            return ProbeResult {
+                id: feature.id.clone(),
+                area: feature.area.clone(),
+                description: feature.description.clone(),
+                baseline_supported: feature.baseline_supported,
+                status: ProbeStatus::Unsupported,
+                error: Some(format!(
+                    "navigation requests: expected {expected}, got {actual}"
+                )),
+            };
+        }
     }
 
     match runtime.eval(&format!("Boolean(({}))", feature.probe)) {

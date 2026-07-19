@@ -121,7 +121,7 @@ impl Client {
                 request.add_header("Cookie", cookie_header);
             }
 
-            let response = self.connections.send(&request, self.insecure)?;
+            let mut response = self.connections.send(&request, self.insecure)?;
 
             // Store Set-Cookie headers
             let origin = request.url().clone();
@@ -133,6 +133,7 @@ impl Client {
 
             // Check for redirect
             if !is_redirect(response.status_code()) {
+                response.set_effective_url(request.url().clone());
                 return Ok(response);
             }
 
@@ -406,6 +407,7 @@ mod tests {
 
         assert_eq!(resp.status_code(), 200);
         assert_eq!(resp.body(), b"done");
+        assert_eq!(resp.effective_url().unwrap().path(), "/final");
     }
 
     #[test]

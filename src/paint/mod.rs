@@ -849,6 +849,28 @@ pub fn render_document_with_url(
     viewport: Rect,
     base_url: Option<&crate::http::Url>,
 ) -> Result<Canvas, PaintError> {
+    render_document_with_url_internal(document, viewport, base_url, true)
+}
+
+/// Renders a Document whose browser lifecycle has already executed scripts.
+///
+/// Session-owned Documents must not run their script elements again merely
+/// because the embedder asks for a screenshot. Their current DOM is the input
+/// snapshot; only styles, layout, and paint are evaluated here.
+pub(crate) fn render_document_snapshot_with_url(
+    document: &NodeHandle,
+    viewport: Rect,
+    base_url: Option<&crate::http::Url>,
+) -> Result<Canvas, PaintError> {
+    render_document_with_url_internal(document, viewport, base_url, false)
+}
+
+fn render_document_with_url_internal(
+    document: &NodeHandle,
+    viewport: Rect,
+    base_url: Option<&crate::http::Url>,
+    execute_javascript: bool,
+) -> Result<Canvas, PaintError> {
     let mut timings = RenderTimings::default();
     let stylesheets_start = Instant::now();
     let effective_base = stylesheet::extract_document_base_url(document, base_url);
@@ -893,87 +915,89 @@ pub fn render_document_with_url(
     // Execute <script> tags and fire DOMContentLoaded before layout.
     // JS may modify the DOM (e.g., classList.add for fade-in animations,
     // injecting <style> elements), so this must happen before layout.
-    let javascript_start = Instant::now();
-    let runtime_init_start = Instant::now();
-    if let Ok(mut runtime) = crate::js::JsRuntime::with_document(document.clone()) {
-        timings.javascript_runtime_init = runtime_init_start.elapsed();
-        // Keep getComputedStyle / layout-metric queries issued by page scripts
-        // consistent with the render viewport.
-        runtime.set_viewport(viewport.width, viewport.height);
-        let document_scripts_start = Instant::now();
-        let errors = runtime.execute_document_scripts(effective_base.as_ref());
-        timings.javascript_document_scripts = document_scripts_start.elapsed();
-        for err in &errors {
-            eprintln!("[omoikane][js-error] {err}");
-        }
-        // Wire `on*` inline handlers (e.g. <body onload>) and fire the `load`
-        // event. Per the HTML load order this happens after scripts run and
-        // DOMContentLoaded has fired (inside execute_document_scripts), so page
-        // load handlers run before the timer pump advances virtual time.
-        let load_events_start = Instant::now();
-        if let Err(err) = runtime.wire_inline_event_handlers() {
-            eprintln!("[omoikane][js-error] {err}");
-        }
-        if let Err(err) = runtime.fire_load() {
-            eprintln!("[omoikane][js-error] {err}");
-        }
-        timings.javascript_load_events = load_events_start.elapsed();
-        timings.javascript = javascript_start.elapsed();
-        // Drive script-scheduled timers (setTimeout/setInterval) in virtual
-        // time so that DOM mutations from deferred callbacks settle before
-        // layout. Bounded by a virtual-time budget and a task-count cap so an
-        // infinite setInterval cannot hang the render.
-        let timers_start = Instant::now();
-        let tasks_run = runtime.run_timers(
-            TIMER_PUMP_MAX_VIRTUAL_MS,
-            TIMER_PUMP_STEP_MS,
-            TIMER_PUMP_MAX_TASKS,
-        );
-        timings.timers = timers_start.elapsed();
-        // A rendering opportunity is distinct from the promise-job and timer
-        // queues. Drive it explicitly after deferred page initialization and
-        // before rebuilding styles/layout for the screenshot.
-        let animation_frames_start = Instant::now();
-        let frame_callbacks_run = runtime.run_animation_frames(
-            ANIMATION_FRAME_PUMP_MAX_FRAMES,
-            ANIMATION_FRAME_INTERVAL_MS,
-        );
-        timings.animation_frames = animation_frames_start.elapsed();
-        if std::env::var_os("OMOIKANE_LOG_SCRIPTS").is_some() {
-            eprintln!(
-                "[omoikane][event-loop] completed {tasks_run} macrotasks and {frame_callbacks_run} animation-frame callbacks"
+    if execute_javascript {
+        let javascript_start = Instant::now();
+        let runtime_init_start = Instant::now();
+        if let Ok(mut runtime) = crate::js::JsRuntime::with_document(document.clone()) {
+            timings.javascript_runtime_init = runtime_init_start.elapsed();
+            // Keep getComputedStyle / layout-metric queries issued by page scripts
+            // consistent with the render viewport.
+            runtime.set_viewport(viewport.width, viewport.height);
+            let document_scripts_start = Instant::now();
+            let errors = runtime.execute_document_scripts(effective_base.as_ref());
+            timings.javascript_document_scripts = document_scripts_start.elapsed();
+            for err in &errors {
+                eprintln!("[omoikane][js-error] {err}");
+            }
+            // Wire `on*` inline handlers (e.g. <body onload>) and fire the `load`
+            // event. Per the HTML load order this happens after scripts run and
+            // DOMContentLoaded has fired (inside execute_document_scripts), so page
+            // load handlers run before the timer pump advances virtual time.
+            let load_events_start = Instant::now();
+            if let Err(err) = runtime.wire_inline_event_handlers() {
+                eprintln!("[omoikane][js-error] {err}");
+            }
+            if let Err(err) = runtime.fire_load() {
+                eprintln!("[omoikane][js-error] {err}");
+            }
+            timings.javascript_load_events = load_events_start.elapsed();
+            timings.javascript = javascript_start.elapsed();
+            // Drive script-scheduled timers (setTimeout/setInterval) in virtual
+            // time so that DOM mutations from deferred callbacks settle before
+            // layout. Bounded by a virtual-time budget and a task-count cap so an
+            // infinite setInterval cannot hang the render.
+            let timers_start = Instant::now();
+            let tasks_run = runtime.run_timers(
+                TIMER_PUMP_MAX_VIRTUAL_MS,
+                TIMER_PUMP_STEP_MS,
+                TIMER_PUMP_MAX_TASKS,
             );
-            if let Ok(value) = runtime.eval(
-                "JSON.stringify({ scripts: globalThis.__SCRIPTS_LOADED__ || null, rootChildren: (document.getElementById('react-root') || {}).childElementCount || 0, timersPending: false })",
-            ) && let Some(value) = value.as_string() {
-                eprintln!("[omoikane][bootstrap-state] {}", value.to_std_string_escaped());
+            timings.timers = timers_start.elapsed();
+            // A rendering opportunity is distinct from the promise-job and timer
+            // queues. Drive it explicitly after deferred page initialization and
+            // before rebuilding styles/layout for the screenshot.
+            let animation_frames_start = Instant::now();
+            let frame_callbacks_run = runtime.run_animation_frames(
+                ANIMATION_FRAME_PUMP_MAX_FRAMES,
+                ANIMATION_FRAME_INTERVAL_MS,
+            );
+            timings.animation_frames = animation_frames_start.elapsed();
+            if std::env::var_os("OMOIKANE_LOG_SCRIPTS").is_some() {
+                eprintln!(
+                    "[omoikane][event-loop] completed {tasks_run} macrotasks and {frame_callbacks_run} animation-frame callbacks"
+                );
+                if let Ok(value) = runtime.eval(
+                    "JSON.stringify({ scripts: globalThis.__SCRIPTS_LOADED__ || null, rootChildren: (document.getElementById('react-root') || {}).childElementCount || 0, timersPending: false })",
+                ) && let Some(value) = value.as_string() {
+                    eprintln!("[omoikane][bootstrap-state] {}", value.to_std_string_escaped());
+                }
             }
-        }
-        // CSSOM insertRule/deleteRule mutations are batched by the JS shim so
-        // frameworks can install large generated stylesheets without an O(n²)
-        // text rewrite. Commit the batch before rebuilding the native resolver.
-        if let Err(err) = runtime.eval("__omoikane_flush_stylesheets()") {
-            eprintln!("[omoikane][js-error] {err}");
-        }
-        // Re-extract stylesheets and rebuild resolver after JS may have
-        // modified the DOM (inserted/removed <style>/<link> elements).
-        let style_refresh_start = Instant::now();
-        resolver = StyleResolver::new();
-        resolver.set_viewport(viewport.width, viewport.height);
-        parsed_sheets.clear();
-        if let Ok(css_texts) = stylesheet::extract_author_stylesheets(document, base_url) {
-            for css_text in css_texts {
-                let sheet = stylesheet::parse_stylesheet_forgiving(&css_text);
-                parsed_sheets.push(sheet);
+            // CSSOM insertRule/deleteRule mutations are batched by the JS shim so
+            // frameworks can install large generated stylesheets without an O(n²)
+            // text rewrite. Commit the batch before rebuilding the native resolver.
+            if let Err(err) = runtime.eval("__omoikane_flush_stylesheets()") {
+                eprintln!("[omoikane][js-error] {err}");
             }
+            // Re-extract stylesheets and rebuild resolver after JS may have
+            // modified the DOM (inserted/removed <style>/<link> elements).
+            let style_refresh_start = Instant::now();
+            resolver = StyleResolver::new();
+            resolver.set_viewport(viewport.width, viewport.height);
+            parsed_sheets.clear();
+            if let Ok(css_texts) = stylesheet::extract_author_stylesheets(document, base_url) {
+                for css_text in css_texts {
+                    let sheet = stylesheet::parse_stylesheet_forgiving(&css_text);
+                    parsed_sheets.push(sheet);
+                }
+            }
+            for sheet in &parsed_sheets {
+                resolver.add_stylesheet(Origin::Author, sheet.clone());
+            }
+            timings.style_refresh = style_refresh_start.elapsed();
+        } else {
+            timings.javascript_runtime_init = runtime_init_start.elapsed();
+            timings.javascript = javascript_start.elapsed();
         }
-        for sheet in &parsed_sheets {
-            resolver.add_stylesheet(Origin::Author, sheet.clone());
-        }
-        timings.style_refresh = style_refresh_start.elapsed();
-    } else {
-        timings.javascript_runtime_init = runtime_init_start.elapsed();
-        timings.javascript = javascript_start.elapsed();
     }
 
     let result = crate::layout::with_layout_fonts(layout_fonts, layout_web_fonts, || {

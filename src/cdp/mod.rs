@@ -1,6 +1,7 @@
 //! CDP transport primitives: WebSocket upgrade, frame handling, and JSON-RPC routing.
 
 use std::collections::HashMap;
+use std::time::{Duration, Instant};
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
@@ -10,7 +11,7 @@ use sha1::{Digest, Sha1};
 use crate::dom::{Node, NodeHandle, NodeType};
 use crate::html::{TreeBuilder, decode_html_response};
 use crate::http::Client;
-use crate::js::JsRuntime;
+use crate::js::{JsRuntime, NavigationRequest};
 
 const WEBSOCKET_GUID: &str = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
 
@@ -519,6 +520,12 @@ pub struct CdpEvent {
     pub params: Value,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct SessionSettleTimings {
+    pub timers: Duration,
+    pub animation_frames: Duration,
+}
+
 /// Minimal stateful CDP session spanning Page, DOM, Network, Runtime, Target, and Input.
 #[derive(Debug)]
 pub struct CdpSession {
@@ -537,12 +544,33 @@ pub struct CdpSession {
     pending_events: Vec<CdpEvent>,
     last_key_event: Option<Value>,
     last_mouse_event: Option<Value>,
+    history_entries: Vec<SessionHistoryEntry>,
+    history_index: usize,
+    document_generation: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NavigationCommit {
+    Push,
+    Replace,
+    Reload,
+    Traverse(usize),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SessionHistoryEntry {
+    url: String,
+    state_json: String,
 }
 
 impl CdpSession {
     /// Creates a new session with an empty `about:blank` document.
     pub fn new() -> Result<Self, String> {
-        let runtime = JsRuntime::new().map_err(|error| error.to_string())?;
+        let runtime = JsRuntime::with_document_and_url(
+            TreeBuilder::parse("<html><head></head><body></body></html>").document(),
+            "about:blank",
+        )
+        .map_err(|error| error.to_string())?;
         let mut session = Self {
             runtime,
             http_client: Client::new(),
@@ -559,6 +587,12 @@ impl CdpSession {
             pending_events: Vec::new(),
             last_key_event: None,
             last_mouse_event: None,
+            history_entries: vec![SessionHistoryEntry {
+                url: "about:blank".to_string(),
+                state_json: "null".to_string(),
+            }],
+            history_index: 0,
+            document_generation: 0,
         };
         session
             .install_runtime_helpers()
@@ -606,6 +640,49 @@ impl CdpSession {
         &self.current_url
     }
 
+    /// Advances the active page event loop and commits script navigation.
+    ///
+    /// This is the browser-session lifecycle entry point for a future GUI
+    /// frame pump: timer tasks and their microtasks run first, then one
+    /// animation frame, then any resulting Location/History request installs
+    /// the next Document.
+    pub fn drive_event_loop(&mut self, elapsed_ms: u64) -> Result<(), JsonRpcError> {
+        self.runtime.tick(elapsed_ms).map_err(js_error)?;
+        self.runtime
+            .run_animation_frame(elapsed_ms)
+            .map_err(js_error)?;
+        self.drive_navigation_requests()
+    }
+
+    /// Settles deferred page initialization before a static render snapshot.
+    pub(crate) fn settle_for_render(&mut self) -> Result<SessionSettleTimings, JsonRpcError> {
+        const MAX_NAVIGATION_PASSES: usize = 8;
+        const MAX_VIRTUAL_MS: u64 = 10_000;
+        const TIMER_STEP_MS: u64 = 10;
+        const MAX_TIMER_TASKS: usize = 100_000;
+        const MAX_ANIMATION_FRAMES: usize = 8;
+
+        let mut timings = SessionSettleTimings::default();
+        for _ in 0..MAX_NAVIGATION_PASSES {
+            let previous_generation = self.document_generation;
+            let timers_start = Instant::now();
+            self.runtime
+                .run_timers(MAX_VIRTUAL_MS, TIMER_STEP_MS, MAX_TIMER_TASKS);
+            timings.timers += timers_start.elapsed();
+            let animation_frames_start = Instant::now();
+            self.runtime.run_animation_frames(MAX_ANIMATION_FRAMES, 16);
+            timings.animation_frames += animation_frames_start.elapsed();
+            self.drive_navigation_requests()?;
+            if self.document_generation == previous_generation {
+                return Ok(timings);
+            }
+        }
+        Err(JsonRpcError {
+            code: -32000,
+            message: "render navigation limit exceeded".to_string(),
+        })
+    }
+
     /// Sets the HTTP client `User-Agent` used for subsequent navigations.
     pub fn set_user_agent(&mut self, user_agent: impl Into<String>) {
         let user_agent = user_agent.into();
@@ -628,8 +705,49 @@ impl CdpSession {
 
     fn page_navigate(&mut self, params: &Value) -> Result<Value, JsonRpcError> {
         let url = require_string(params, "url")?;
+        // The first real navigation replaces the initial empty about:blank
+        // entry. Later Page.navigate calls append normal session-history
+        // entries.
+        let commit = if self.current_url == "about:blank"
+            && self.history_entries.len() == 1
+            && self.history_index == 0
+        {
+            NavigationCommit::Replace
+        } else {
+            NavigationCommit::Push
+        };
+        let result = self.navigate_to(&url, commit)?;
+        self.drive_navigation_requests()?;
+        Ok(result)
+    }
+
+    fn navigate_to(
+        &mut self,
+        url: &str,
+        commit: NavigationCommit,
+    ) -> Result<Value, JsonRpcError> {
         let loader_id = self.next_loader_id.to_string();
         self.next_loader_id += 1;
+
+        if commit != NavigationCommit::Reload
+            && is_fragment_only_navigation(&self.current_url, url)
+        {
+            let previous_url = self.current_url.clone();
+            self.commit_history_url(url, commit, None);
+            self.current_url = url.to_string();
+            self.runtime
+                .eval(&format!(
+                    "__omoikane_commit_same_document_navigation({url:?}, 'hashchange', {previous_url:?})"
+                ))
+                .and_then(|_| self.runtime.run_jobs())
+                .map_err(js_error)?;
+            self.sync_history_length()?;
+            self.emit(
+                "Page.navigatedWithinDocument",
+                json!({ "frameId": self.frame_id, "url": url, "navigationType": "fragment" }),
+            );
+            return Ok(json!({ "frameId": self.frame_id }));
+        }
 
         self.emit(
             "Network.requestWillBeSent",
@@ -641,18 +759,36 @@ impl CdpSession {
             }),
         );
 
-        let (html, status) = self
+        let (html, status, document_url) = self
             .load_page_source(&url)
             .map_err(|message| JsonRpcError {
                 code: -32000,
                 message,
             })?;
 
-        self.install_document(&url, &html)
+        let (next_history_length, next_history_state) =
+            self.prospective_history_state(commit);
+        self.install_document(
+            &document_url,
+            &html,
+            next_history_length,
+            &next_history_state,
+        )
             .map_err(|message| JsonRpcError {
                 code: -32000,
                 message,
             })?;
+
+        self.commit_history_url(&document_url, commit, None);
+        self.sync_history_length()?;
+        if matches!(commit, NavigationCommit::Traverse(_)) {
+            self.runtime
+                .eval(&format!(
+                    "__omoikane_commit_same_document_navigation({url:?}, 'popstate', {url:?})"
+                ))
+                .and_then(|_| self.runtime.run_jobs())
+                .map_err(js_error)?;
+        }
 
         self.emit(
             "Network.responseReceived",
@@ -660,7 +796,7 @@ impl CdpSession {
                 "requestId": loader_id,
                 "type": "Document",
                 "response": {
-                    "url": url,
+                    "url": document_url,
                     "status": status,
                     "mimeType": "text/html",
                 },
@@ -689,8 +825,145 @@ impl CdpSession {
 
     fn page_reload(&mut self) -> Result<Value, JsonRpcError> {
         let url = self.current_url.clone();
-        self.page_navigate(&json!({ "url": url }))?;
+        self.navigate_to(&url, NavigationCommit::Reload)?;
+        self.drive_navigation_requests()?;
         Ok(json!({}))
+    }
+
+    /// Commits navigation requests queued by the active Runtime.
+    ///
+    /// Startup scripts in a newly installed Document may queue another
+    /// navigation, so the new Runtime is checked again after every commit. The
+    /// cap prevents a script redirect loop from blocking the embedding API.
+    fn drive_navigation_requests(&mut self) -> Result<(), JsonRpcError> {
+        const MAX_SCRIPT_NAVIGATIONS: usize = 32;
+        for _ in 0..MAX_SCRIPT_NAVIGATIONS {
+            let Some(request) = self.runtime.take_navigation_requests().into_iter().next() else {
+                return Ok(());
+            };
+            match request {
+                NavigationRequest::Navigate { url, replace } => {
+                    let previous_url = self.current_url.clone();
+                    if let Err(error) = self.navigate_to(
+                        &url,
+                        if replace {
+                            NavigationCommit::Replace
+                        } else {
+                            NavigationCommit::Push
+                        },
+                    ) {
+                        self.restore_active_location(&previous_url);
+                        return Err(error);
+                    }
+                }
+                NavigationRequest::UpdateHistory {
+                    url,
+                    replace,
+                    state_json,
+                } => {
+                    self.commit_history_url(
+                        &url,
+                        if replace {
+                            NavigationCommit::Replace
+                        } else {
+                            NavigationCommit::Push
+                        },
+                        Some(state_json),
+                    );
+                    self.current_url = url.clone();
+                    self.sync_history_length()?;
+                    self.emit(
+                        "Page.navigatedWithinDocument",
+                        json!({ "frameId": self.frame_id, "url": url, "navigationType": "historyApi" }),
+                    );
+                }
+                NavigationRequest::Reload => {
+                    let url = self.current_url.clone();
+                    self.navigate_to(&url, NavigationCommit::Reload)?;
+                }
+                NavigationRequest::Traverse { delta } => {
+                    let target = self.history_index as i64 + i64::from(delta);
+                    if target < 0 || target >= self.history_entries.len() as i64 {
+                        continue;
+                    }
+                    let target = target as usize;
+                    if target == self.history_index {
+                        continue;
+                    }
+                    let url = self.history_entries[target].url.clone();
+                    let previous_url = self.current_url.clone();
+                    if let Err(error) =
+                        self.navigate_to(&url, NavigationCommit::Traverse(target))
+                    {
+                        self.restore_active_location(&previous_url);
+                        return Err(error);
+                    }
+                }
+            }
+        }
+        Err(JsonRpcError {
+            code: -32000,
+            message: "script navigation limit exceeded".to_string(),
+        })
+    }
+
+    fn commit_history_url(
+        &mut self,
+        url: &str,
+        commit: NavigationCommit,
+        state_json: Option<String>,
+    ) {
+        match commit {
+            NavigationCommit::Push => {
+                self.history_entries.truncate(self.history_index + 1);
+                self.history_entries.push(SessionHistoryEntry {
+                    url: url.to_string(),
+                    state_json: state_json.unwrap_or_else(|| "null".to_string()),
+                });
+                self.history_index = self.history_entries.len() - 1;
+            }
+            NavigationCommit::Replace => {
+                self.history_entries[self.history_index] = SessionHistoryEntry {
+                    url: url.to_string(),
+                    state_json: state_json.unwrap_or_else(|| "null".to_string()),
+                };
+            }
+            NavigationCommit::Reload => {}
+            NavigationCommit::Traverse(index) => self.history_index = index,
+        }
+    }
+
+    fn prospective_history_state(&self, commit: NavigationCommit) -> (usize, String) {
+        match commit {
+            NavigationCommit::Push => (self.history_index + 2, "null".to_string()),
+            NavigationCommit::Replace => (self.history_entries.len(), "null".to_string()),
+            NavigationCommit::Reload => (
+                self.history_entries.len(),
+                self.history_entries[self.history_index].state_json.clone(),
+            ),
+            NavigationCommit::Traverse(index) => (
+                self.history_entries.len(),
+                self.history_entries[index].state_json.clone(),
+            ),
+        }
+    }
+
+    fn sync_history_length(&mut self) -> Result<(), JsonRpcError> {
+        let state_json = &self.history_entries[self.history_index].state_json;
+        self.runtime
+            .eval(&format!(
+                "__omoikane_sync_history({}, {state_json:?})",
+                self.history_entries.len(),
+            ))
+            .and_then(|_| self.runtime.run_jobs())
+            .map_err(js_error)
+    }
+
+    fn restore_active_location(&mut self, url: &str) {
+        let _ = self
+            .runtime
+            .eval(&format!("__omoikane_set_location({url:?})"));
+        let _ = self.runtime.run_jobs();
     }
 
     fn page_get_frame_tree(&self) -> Value {
@@ -751,7 +1024,9 @@ impl CdpSession {
             .and_then(Value::as_bool)
             .unwrap_or(true);
 
-        self.evaluate_expression(&expression, return_by_value)
+        let result = self.evaluate_expression(&expression, return_by_value)?;
+        self.drive_navigation_requests()?;
+        Ok(result)
     }
 
     fn runtime_call_function_on(&mut self, params: &Value) -> Result<Value, JsonRpcError> {
@@ -782,7 +1057,9 @@ impl CdpSession {
             "(() => {{ const __fn = ({function_declaration}); return __fn.call({object_expr}{comma}{argument_expr}); }})()",
             comma = if argument_expr.is_empty() { "" } else { ", " }
         );
-        self.evaluate_expression(&expression, return_by_value)
+        let result = self.evaluate_expression(&expression, return_by_value)?;
+        self.drive_navigation_requests()?;
+        Ok(result)
     }
 
     fn target_create_browser_context(&mut self) -> Value {
@@ -833,7 +1110,8 @@ impl CdpSession {
             ))
             .and_then(|_| self.runtime.run_jobs())
             .map_err(js_error)
-            .map(|_| ())
+            .map(|_| ())?;
+        self.drive_navigation_requests()
     }
 
     fn evaluate_expression(
@@ -868,36 +1146,92 @@ impl CdpSession {
         Ok(parsed)
     }
 
-    fn load_page_source(&mut self, url: &str) -> Result<(String, u16), String> {
+    fn load_page_source(&mut self, url: &str) -> Result<(String, u16, String), String> {
         if url == "about:blank" {
-            return Ok(("<html><head></head><body></body></html>".to_string(), 200));
+            return Ok((
+                "<html><head></head><body></body></html>".to_string(),
+                200,
+                url.to_string(),
+            ));
         }
 
         if let Some(data) = url.strip_prefix("data:text/html,") {
-            return Ok((percent_decode(data), 200));
+            return Ok((percent_decode(data), 200, url.to_string()));
         }
 
         let response = self
             .http_client
             .get(url)
             .map_err(|error| error.to_string())?;
-        Ok((decode_html_response(&response), response.status_code()))
+        let effective_url = response
+            .effective_url()
+            .map(ToString::to_string)
+            .unwrap_or_else(|| url.to_string());
+        Ok((
+            decode_html_response(&response),
+            response.status_code(),
+            effective_url,
+        ))
     }
 
-    fn install_document(&mut self, url: &str, html: &str) -> Result<(), String> {
+    fn install_document(
+        &mut self,
+        url: &str,
+        html: &str,
+        history_length: usize,
+        history_state_json: &str,
+    ) -> Result<(), String> {
         let document = TreeBuilder::parse(html).document();
-        self.runtime = JsRuntime::with_document(document).map_err(|error| error.to_string())?;
-        self.runtime
-            .set_user_agent(self.http_client.user_agent().to_string());
+        let mut runtime = JsRuntime::with_document_and_url(document, url)
+            .map_err(|error| error.to_string())?;
+        runtime.set_user_agent(self.http_client.user_agent().to_string());
+        Self::install_runtime_helpers_on(&mut runtime).map_err(js_error_message)?;
+        runtime
+            .eval(&format!(
+                "__omoikane_sync_history({history_length}, {history_state_json:?})"
+            ))
+            .and_then(|_| runtime.run_jobs())
+            .map_err(js_error_message)?;
+
+        // The response and replacement Runtime are ready, so the active
+        // Document can now leave without risking an unload followed by a
+        // network failure that keeps the same Document alive. Listener errors
+        // are reported like browser event-handler errors and do not cancel the
+        // commit; cancellation policy for beforeunload dialogs belongs to the
+        // future GUI integration.
+        let _ = self.runtime.eval(
+            "window.dispatchEvent(new Event('beforeunload')); \
+             window.dispatchEvent(new Event('pagehide')); \
+             window.dispatchEvent(new Event('unload'));",
+        );
+        let _ = self.runtime.run_jobs();
+
+        let base_url = url.parse::<crate::http::Url>().ok();
+        let script_errors = runtime.execute_document_scripts(base_url.as_ref());
+        if std::env::var_os("OMOIKANE_LOG_SCRIPTS").is_some() {
+            for error in script_errors {
+                eprintln!("[omoikane][js-error] {error}");
+            }
+        }
+        runtime
+            .wire_inline_event_handlers()
+            .map_err(js_error_message)?;
+        runtime.fire_load().map_err(js_error_message)?;
+
+        self.runtime = runtime;
+        self.document_generation = self.document_generation.saturating_add(1);
         self.current_url = url.to_string();
         self.last_html = html.to_string();
         self.rebuild_node_index();
-        self.install_runtime_helpers().map_err(js_error_message)?;
         Ok(())
     }
 
     fn install_runtime_helpers(&mut self) -> Result<(), boa_engine::JsError> {
-        self.runtime.eval(
+        Self::install_runtime_helpers_on(&mut self.runtime)
+    }
+
+    fn install_runtime_helpers_on(runtime: &mut JsRuntime) -> Result<(), boa_engine::JsError> {
+        runtime.eval(
             r#"
             globalThis.__cdpSerializeValue = function(value) {
               if (value === undefined) return { type: "undefined" };
@@ -918,7 +1252,7 @@ impl CdpSession {
             };
             "#,
         )?;
-        self.runtime.run_jobs()
+        runtime.run_jobs()
     }
 
     fn emit(&mut self, method: &str, params: Value) {
@@ -931,7 +1265,10 @@ impl CdpSession {
     fn rebuild_node_index(&mut self) {
         self.node_to_id.clear();
         self.id_to_node.clear();
-        self.next_node_id = 1;
+        // Node ids are session-scoped remote handles. Never reuse an id after
+        // navigation: a client retaining an old Document's id must receive an
+        // unknown-node error, not accidentally address a similarly positioned
+        // node in the newly installed Document.
         let document = self.runtime.document();
         self.register_subtree(&document);
     }
@@ -1140,6 +1477,12 @@ fn escape_html(value: &str) -> String {
         .replace('"', "&quot;")
 }
 
+fn is_fragment_only_navigation(current: &str, target: &str) -> bool {
+    let (current_base, current_fragment) = current.split_once('#').unwrap_or((current, ""));
+    let (target_base, target_fragment) = target.split_once('#').unwrap_or((target, ""));
+    current_base == target_base && current_fragment != target_fragment
+}
+
 fn js_error(error: boa_engine::JsError) -> JsonRpcError {
     JsonRpcError {
         code: -32000,
@@ -1344,6 +1687,338 @@ mod tests {
     }
 
     #[test]
+    fn location_requests_install_new_documents_and_preserve_commit_semantics() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            for _ in 0..4 {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut buffer = [0u8; 4096];
+                let size = stream.read(&mut buffer).unwrap();
+                let request = String::from_utf8_lossy(&buffer[..size]);
+                let path = request
+                    .lines()
+                    .next()
+                    .and_then(|line| line.split_whitespace().nth(1))
+                    .unwrap_or("/");
+                let body = match path {
+                    "/first" => "<html><body><main id='first'></main></body></html>",
+                    "/second" => r#"<html><body><main id='second'></main><script>
+                        document.addEventListener('DOMContentLoaded', () => document.body.setAttribute('data-dcl', 'yes'));
+                        window.addEventListener('load', () => document.body.setAttribute('data-load', 'yes'));
+                    </script></body></html>"#,
+                    "/third" => "<html><body><main id='third'></main></body></html>",
+                    _ => "<html><body>missing</body></html>",
+                };
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                stream.write_all(response.as_bytes()).unwrap();
+            }
+        });
+
+        let origin = format!("http://127.0.0.1:{}", address.port());
+        let mut session = CdpSession::new().unwrap();
+        session
+            .dispatch(
+                "Page.navigate",
+                json!({ "url": format!("{origin}/first") }),
+            )
+            .unwrap();
+        session
+            .dispatch(
+                "Runtime.evaluate",
+                json!({ "expression": "location.assign('/second')" }),
+            )
+            .unwrap();
+
+        assert_eq!(session.current_url(), format!("{origin}/second"));
+        let lifecycle = session
+            .dispatch(
+                "Runtime.evaluate",
+                json!({
+                    "expression": "location.href === document.URL && document.querySelector('#second') !== null && document.body.getAttribute('data-dcl') === 'yes' && document.body.getAttribute('data-load') === 'yes'"
+                }),
+            )
+            .unwrap();
+        assert_eq!(lifecycle["result"]["value"], true);
+
+        let history_len_before_replace = session.history_entries.len();
+        session
+            .dispatch(
+                "Runtime.evaluate",
+                json!({ "expression": "location.replace('/third')" }),
+            )
+            .unwrap();
+        assert_eq!(session.current_url(), format!("{origin}/third"));
+        assert_eq!(session.history_entries.len(), history_len_before_replace);
+
+        session.dispatch("Page.reload", json!({})).unwrap();
+        assert_eq!(session.current_url(), format!("{origin}/third"));
+        assert_eq!(session.history_entries.len(), history_len_before_replace);
+
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn fragment_navigation_keeps_document_and_skips_network_fetch() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buffer = [0u8; 1024];
+            let _ = stream.read(&mut buffer).unwrap();
+            let body = "<html><body><main id='persistent'></main></body></html>";
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            stream.write_all(response.as_bytes()).unwrap();
+        });
+
+        let url = format!("http://127.0.0.1:{}/page", address.port());
+        let mut session = CdpSession::new().unwrap();
+        session
+            .dispatch("Page.navigate", json!({ "url": url }))
+            .unwrap();
+        session
+            .dispatch(
+                "Runtime.evaluate",
+                json!({ "expression": "globalThis.hashChanges = 0; addEventListener('hashchange', () => hashChanges++); location.assign('#section')" }),
+            )
+            .unwrap();
+
+        assert_eq!(session.current_url(), format!("{url}#section"));
+        let state = session
+            .dispatch(
+                "Runtime.evaluate",
+                json!({ "expression": "document.querySelector('#persistent') !== null && hashChanges === 1 && location.hash === '#section'" }),
+            )
+            .unwrap();
+        assert_eq!(state["result"]["value"], true);
+        assert!(session
+            .drain_events()
+            .iter()
+            .any(|event| event.method == "Page.navigatedWithinDocument"));
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn history_state_and_traversal_are_owned_by_browser_session() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            for _ in 0..3 {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut buffer = [0u8; 2048];
+                let size = stream.read(&mut buffer).unwrap();
+                let request = String::from_utf8_lossy(&buffer[..size]);
+                let path = request
+                    .lines()
+                    .next()
+                    .and_then(|line| line.split_whitespace().nth(1))
+                    .unwrap_or("/");
+                let body = if path == "/state" {
+                    format!(
+                        "<html><body><main data-path='{path}'></main><script>document.body.setAttribute('data-startup-history', history.length + ':' + history.state.page)</script></body></html>"
+                    )
+                } else {
+                    format!("<html><body><main data-path='{path}'></main></body></html>")
+                };
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                stream.write_all(response.as_bytes()).unwrap();
+            }
+        });
+
+        let origin = format!("http://127.0.0.1:{}", address.port());
+        let mut session = CdpSession::new().unwrap();
+        session
+            .dispatch(
+                "Page.navigate",
+                json!({ "url": format!("{origin}/start") }),
+            )
+            .unwrap();
+        session
+            .dispatch(
+                "Runtime.evaluate",
+                json!({ "expression": "history.pushState({ page: 2 }, '', '/state')" }),
+            )
+            .unwrap();
+        assert_eq!(session.current_url(), format!("{origin}/state"));
+        assert_eq!(session.history_entries.len(), 2);
+
+        session
+            .dispatch(
+                "Runtime.evaluate",
+                json!({ "expression": "history.back()" }),
+            )
+            .unwrap();
+        assert_eq!(session.current_url(), format!("{origin}/start"));
+
+        session
+            .dispatch(
+                "Runtime.evaluate",
+                json!({ "expression": "history.forward()" }),
+            )
+            .unwrap();
+        assert_eq!(session.current_url(), format!("{origin}/state"));
+        let restored = session
+            .dispatch(
+                "Runtime.evaluate",
+                json!({ "expression": "history.length === 2 && history.state.page === 2 && document.body.getAttribute('data-startup-history') === '2:2' && document.querySelector('main').getAttribute('data-path') === '/state'" }),
+            )
+            .unwrap();
+        assert_eq!(restored["result"]["value"], true);
+
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn failed_script_navigation_preserves_current_document_and_url() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buffer = [0u8; 1024];
+            let _ = stream.read(&mut buffer).unwrap();
+            let body = "<html><body><main id='stable'></main></body></html>";
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            stream.write_all(response.as_bytes()).unwrap();
+        });
+
+        let stable_url = format!("http://127.0.0.1:{}/stable", address.port());
+        let mut session = CdpSession::new().unwrap();
+        session
+            .dispatch("Page.navigate", json!({ "url": stable_url }))
+            .unwrap();
+        server.join().unwrap();
+
+        let failed = session.dispatch(
+            "Runtime.evaluate",
+            json!({ "expression": "location.assign('/unreachable')" }),
+        );
+        assert!(failed.is_err());
+        assert_eq!(session.current_url(), stable_url);
+        let preserved = session
+            .dispatch(
+                "Runtime.evaluate",
+                json!({ "expression": "location.href === document.URL && location.href.endsWith('/stable') && document.querySelector('#stable') !== null" }),
+            )
+            .unwrap();
+        assert_eq!(preserved["result"]["value"], true);
+    }
+
+    #[test]
+    fn redirect_commits_final_url_to_document_location_and_history() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            for request_index in 0..2 {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut buffer = [0u8; 1024];
+                let _ = stream.read(&mut buffer).unwrap();
+                let response = if request_index == 0 {
+                    "HTTP/1.1 302 Found\r\nLocation: /final\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_string()
+                } else {
+                    let body = "<html><body><main id='final'></main></body></html>";
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    )
+                };
+                stream.write_all(response.as_bytes()).unwrap();
+            }
+        });
+
+        let origin = format!("http://127.0.0.1:{}", address.port());
+        let mut session = CdpSession::new().unwrap();
+        session
+            .dispatch(
+                "Page.navigate",
+                json!({ "url": format!("{origin}/redirect") }),
+            )
+            .unwrap();
+
+        assert_eq!(session.current_url(), format!("{origin}/final"));
+        assert_eq!(session.history_entries[session.history_index].url, format!("{origin}/final"));
+        let state = session
+            .dispatch(
+                "Runtime.evaluate",
+                json!({ "expression": "location.href.endsWith('/final') && document.URL === location.href && document.querySelector('#final') !== null" }),
+            )
+            .unwrap();
+        assert_eq!(state["result"]["value"], true);
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn event_loop_driver_commits_timer_and_animation_frame_navigation() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            for _ in 0..3 {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut buffer = [0u8; 2048];
+                let size = stream.read(&mut buffer).unwrap();
+                let request = String::from_utf8_lossy(&buffer[..size]);
+                let path = request
+                    .lines()
+                    .next()
+                    .and_then(|line| line.split_whitespace().nth(1))
+                    .unwrap_or("/");
+                let body = format!("<html><body><main data-path='{path}'></main></body></html>");
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                stream.write_all(response.as_bytes()).unwrap();
+            }
+        });
+
+        let origin = format!("http://127.0.0.1:{}", address.port());
+        let mut session = CdpSession::new().unwrap();
+        session
+            .dispatch(
+                "Page.navigate",
+                json!({ "url": format!("{origin}/start") }),
+            )
+            .unwrap();
+        session
+            .dispatch(
+                "Runtime.evaluate",
+                json!({ "expression": "setTimeout(() => location.assign('/timer'), 10)" }),
+            )
+            .unwrap();
+        assert_eq!(session.current_url(), format!("{origin}/start"));
+        session.drive_event_loop(10).unwrap();
+        assert_eq!(session.current_url(), format!("{origin}/timer"));
+
+        session
+            .dispatch(
+                "Runtime.evaluate",
+                json!({ "expression": "requestAnimationFrame(() => location.assign('/frame'))" }),
+            )
+            .unwrap();
+        session.drive_event_loop(16).unwrap();
+        assert_eq!(session.current_url(), format!("{origin}/frame"));
+
+        server.join().unwrap();
+    }
+
+    #[test]
     fn dom_domain_exposes_document_query_attributes_and_outer_html() {
         let mut session = CdpSession::new().unwrap();
         session
@@ -1389,6 +2064,41 @@ mod tests {
             ])
         );
         assert_eq!(html["outerHTML"], "<main id=\"app\"><p>Hello</p></main>");
+    }
+
+    #[test]
+    fn navigation_invalidates_old_document_node_ids_without_reusing_them() {
+        let mut session = CdpSession::new().unwrap();
+        session
+            .dispatch(
+                "Page.navigate",
+                json!({ "url": "data:text/html,<html><body><main id='old'></main></body></html>" }),
+            )
+            .unwrap();
+        let old_document = session.dispatch("DOM.getDocument", json!({})).unwrap();
+        let old_root_id = old_document["root"]["nodeId"].as_u64().unwrap();
+        let old_main_id = session
+            .dispatch(
+                "DOM.querySelector",
+                json!({ "nodeId": old_root_id, "selector": "#old" }),
+            )
+            .unwrap()["nodeId"]
+            .as_u64()
+            .unwrap();
+
+        session
+            .dispatch(
+                "Page.navigate",
+                json!({ "url": "data:text/html,<html><body><main id='new'></main></body></html>" }),
+            )
+            .unwrap();
+        let new_document = session.dispatch("DOM.getDocument", json!({})).unwrap();
+        let new_root_id = new_document["root"]["nodeId"].as_u64().unwrap();
+
+        assert_ne!(new_root_id, old_root_id);
+        assert!(session
+            .dispatch("DOM.getOuterHTML", json!({ "nodeId": old_main_id }))
+            .is_err());
     }
 
     #[test]
