@@ -95,9 +95,7 @@ fn force_opacity_enabled() -> bool {
 #[allow(unused_imports)]
 use base64::Engine;
 
-use crate::css::{
-    ComputedStyle, ComputedValue, Origin, PseudoElement, StyleResolver,
-};
+use crate::css::{ComputedStyle, ComputedValue, Origin, PseudoElement, StyleResolver};
 use crate::dom::{Node, NodeHandle, NodeType};
 use crate::font::{Font, WebFontRegistry};
 #[allow(unused_imports)]
@@ -110,42 +108,41 @@ pub use image::parse_data_uri;
 // Re-export crate-internal items so that `use crate::paint::*` in tests and sibling modules works.
 // Many of these are only referenced from test code, hence the allow.
 #[allow(unused_imports)]
-pub(crate) use border::{EdgeSizesForPaint, has_solid_border_side, border_color_side};
+pub(crate) use border::{
+    BoxShadow, fill_quad_clipped, has_any_solid_border, paint_borders, paint_box_shadow,
+    paint_outer_box_shadow, paint_rect_borders, paint_zero_sized_border_box, parse_box_shadow,
+    split_box_shadow_layers,
+};
+#[allow(unused_imports)]
+pub(crate) use border::{EdgeSizesForPaint, border_color_side, has_solid_border_side};
 #[allow(unused_imports)]
 pub(crate) use color::{
-    parse_color, named_color, split_gradient_args, parse_linear_gradient, parse_gradient_direction,
-    interpolate_gradient_color, paint_linear_gradient, ColorStop, LinearGradient,
+    ColorStop, LinearGradient, interpolate_gradient_color, named_color, paint_linear_gradient,
+    parse_color, parse_gradient_direction, parse_linear_gradient, split_gradient_args,
 };
 #[allow(unused_imports)]
 pub(crate) use image::{
-    decode_png, decode_png_fallback, unfilter_png_scanline, paeth_predictor, decode_jpeg,
-    percent_decode, hex_value, parse_background_image_value, parse_size_token,
-};
-#[allow(unused_imports)]
-pub(crate) use text::{
-    paint_text_with_font, paint_text_with_font_refs, paint_text_with_registry,
-    paint_text_placeholder,
-    apply_text_transform, TextDecorationLines, text_decoration_line, text_decoration_color,
-    paint_text_decoration, paint_list_marker, paint_list_marker_placeholder, load_text_fonts,
-    rasterize_with_fallback, rasterize_with_fallback_refs, is_cjk_preferred_character,
-    paint_inline_image_fragment, inline_fragment_content_rect, text_color,
-};
-#[allow(unused_imports)]
-pub(crate) use border::{
-    paint_borders, paint_rect_borders, paint_zero_sized_border_box, fill_quad_clipped,
-    has_any_solid_border, BoxShadow, parse_box_shadow, split_box_shadow_layers,
-    paint_box_shadow, paint_outer_box_shadow,
+    decode_jpeg, decode_png, decode_png_fallback, hex_value, paeth_predictor,
+    parse_background_image_value, parse_size_token, percent_decode, unfilter_png_scanline,
 };
 #[allow(unused_imports)]
 pub(crate) use stylesheet::{
-    extract_author_stylesheets, collect_author_stylesheets, collect_stylesheet_with_imports,
-    extract_import_hrefs, extract_import_hrefs_forgiving, at_import_starts_at,
-    parse_import_href, unquote_css_token, non_empty_token, fetch_relative_stylesheet,
-    resolve_relative_stylesheet_url, fetch_stylesheet_by_url, parse_stylesheet_forgiving,
-    salvage_style_rule, normalize_unquoted_urls, split_declarations_forgiving,
-    matches_screen_media, same_origin, find_base_elements, extract_document_base_url,
-    collect_text_contents, materialize_local_assets, rewrite_local_asset_attribute,
-    fetch_font_face_fonts, WebFont,
+    WebFont, at_import_starts_at, collect_author_stylesheets, collect_stylesheet_with_imports,
+    collect_text_contents, extract_author_stylesheets, extract_document_base_url,
+    extract_import_hrefs, extract_import_hrefs_forgiving, fetch_font_face_fonts,
+    fetch_relative_stylesheet, fetch_stylesheet_by_url, find_base_elements, matches_screen_media,
+    materialize_local_assets, non_empty_token, normalize_unquoted_urls, parse_import_href,
+    parse_stylesheet_forgiving, resolve_relative_stylesheet_url, rewrite_local_asset_attribute,
+    salvage_style_rule, same_origin, split_declarations_forgiving, unquote_css_token,
+};
+#[allow(unused_imports)]
+pub(crate) use text::{
+    TextDecorationLines, apply_text_transform, inline_fragment_content_rect,
+    is_cjk_preferred_character, load_text_fonts, paint_inline_image_fragment, paint_list_marker,
+    paint_list_marker_placeholder, paint_text_decoration, paint_text_placeholder,
+    paint_text_with_font, paint_text_with_font_refs, paint_text_with_registry,
+    rasterize_with_fallback, rasterize_with_fallback_refs, text_color, text_decoration_color,
+    text_decoration_line,
 };
 
 /// A decoded RGBA image.
@@ -178,6 +175,11 @@ impl Image {
     /// Decodes a JPEG image into RGBA pixels.
     pub fn decode_jpeg(bytes: &[u8]) -> Result<Self, PaintError> {
         image::decode_jpeg(bytes)
+    }
+
+    /// Decodes the first frame of a GIF image into RGBA pixels.
+    pub fn decode_gif(bytes: &[u8]) -> Result<Self, PaintError> {
+        image::decode_gif(bytes)
     }
 
     /// Returns the image width in pixels.
@@ -348,13 +350,10 @@ impl Canvas {
 
                 // クリップチェック（ピクセル中心を基準に判定）
                 if let Some(ca) = clip_area
-                    && (fx < ca.x
-                        || fx >= ca.x + ca.width
-                        || fy < ca.y
-                        || fy >= ca.y + ca.height)
-                    {
-                        continue;
-                    }
+                    && (fx < ca.x || fx >= ca.x + ca.width || fy < ca.y || fy >= ca.y + ca.height)
+                {
+                    continue;
+                }
 
                 // ピクセル中心が角丸矩形の内側かどうか判定
                 if !point_in_rounded_rect(fx, fy, rx, ry, rw, rh, tl, tr, br, bl) {
@@ -399,10 +398,22 @@ impl Canvas {
 
         let clip_area = clip.and_then(normalize_rect);
 
-        let outer_tl = outer_tl.min(outer.width / 2.0).min(outer.height / 2.0).max(0.0);
-        let outer_tr = outer_tr.min(outer.width / 2.0).min(outer.height / 2.0).max(0.0);
-        let outer_br = outer_br.min(outer.width / 2.0).min(outer.height / 2.0).max(0.0);
-        let outer_bl = outer_bl.min(outer.width / 2.0).min(outer.height / 2.0).max(0.0);
+        let outer_tl = outer_tl
+            .min(outer.width / 2.0)
+            .min(outer.height / 2.0)
+            .max(0.0);
+        let outer_tr = outer_tr
+            .min(outer.width / 2.0)
+            .min(outer.height / 2.0)
+            .max(0.0);
+        let outer_br = outer_br
+            .min(outer.width / 2.0)
+            .min(outer.height / 2.0)
+            .max(0.0);
+        let outer_bl = outer_bl
+            .min(outer.width / 2.0)
+            .min(outer.height / 2.0)
+            .max(0.0);
 
         // Scan narrow edge strips plus corner squares. This keeps thin pill
         // borders proportional to their perimeter instead of scanning the
@@ -462,10 +473,22 @@ impl Canvas {
         };
 
         let inner = inner_rect;
-        let inner_tl = inner_tl.min(inner.width / 2.0).min(inner.height / 2.0).max(0.0);
-        let inner_tr = inner_tr.min(inner.width / 2.0).min(inner.height / 2.0).max(0.0);
-        let inner_br = inner_br.min(inner.width / 2.0).min(inner.height / 2.0).max(0.0);
-        let inner_bl = inner_bl.min(inner.width / 2.0).min(inner.height / 2.0).max(0.0);
+        let inner_tl = inner_tl
+            .min(inner.width / 2.0)
+            .min(inner.height / 2.0)
+            .max(0.0);
+        let inner_tr = inner_tr
+            .min(inner.width / 2.0)
+            .min(inner.height / 2.0)
+            .max(0.0);
+        let inner_br = inner_br
+            .min(inner.width / 2.0)
+            .min(inner.height / 2.0)
+            .max(0.0);
+        let inner_bl = inner_bl
+            .min(inner.width / 2.0)
+            .min(inner.height / 2.0)
+            .max(0.0);
 
         let x0 = strip.x.floor().max(0.0) as i32;
         let y0 = strip.y.floor().max(0.0) as i32;
@@ -479,19 +502,38 @@ impl Canvas {
 
                 // クリップチェック（ピクセル中心を基準に判定）
                 if let Some(ca) = clip_area
-                    && (fx < ca.x
-                        || fx >= ca.x + ca.width
-                        || fy < ca.y
-                        || fy >= ca.y + ca.height)
-                    {
-                        continue;
-                    }
-
-                // outer の内側かつ inner の外側
-                if !point_in_rounded_rect(fx, fy, outer.x, outer.y, outer.width, outer.height, outer_tl, outer_tr, outer_br, outer_bl) {
+                    && (fx < ca.x || fx >= ca.x + ca.width || fy < ca.y || fy >= ca.y + ca.height)
+                {
                     continue;
                 }
-                if point_in_rounded_rect(fx, fy, inner.x, inner.y, inner.width, inner.height, inner_tl, inner_tr, inner_br, inner_bl) {
+
+                // outer の内側かつ inner の外側
+                if !point_in_rounded_rect(
+                    fx,
+                    fy,
+                    outer.x,
+                    outer.y,
+                    outer.width,
+                    outer.height,
+                    outer_tl,
+                    outer_tr,
+                    outer_br,
+                    outer_bl,
+                ) {
+                    continue;
+                }
+                if point_in_rounded_rect(
+                    fx,
+                    fy,
+                    inner.x,
+                    inner.y,
+                    inner.width,
+                    inner.height,
+                    inner_tl,
+                    inner_tr,
+                    inner_br,
+                    inner_bl,
+                ) {
                     continue;
                 }
 
@@ -527,6 +569,25 @@ impl Canvas {
         write_chunk(&mut png, b"IDAT", &compressed);
         write_chunk(&mut png, b"IEND", &[]);
         png
+    }
+
+    /// Composites every pixel over an opaque background in place.
+    ///
+    /// Layout canvases retain transparency for embedding and paint tests, while
+    /// browser screenshots use this before encoding to match the opaque page
+    /// surface produced by desktop browsers.
+    pub(crate) fn composite_over(&mut self, background: Color) {
+        for pixel in self.pixels.chunks_exact_mut(4) {
+            let alpha = u32::from(pixel[3]);
+            let inverse = 255 - alpha;
+            pixel[0] =
+                ((u32::from(pixel[0]) * alpha + u32::from(background.r) * inverse) / 255) as u8;
+            pixel[1] =
+                ((u32::from(pixel[1]) * alpha + u32::from(background.g) * inverse) / 255) as u8;
+            pixel[2] =
+                ((u32::from(pixel[2]) * alpha + u32::from(background.b) * inverse) / 255) as u8;
+            pixel[3] = 255;
+        }
     }
 
     /// Draws an RGBA image at the given destination origin.
@@ -565,8 +626,8 @@ impl Canvas {
             let stride = self.width as usize * 4;
             let rgba = [color.r, color.g, color.b, color.a];
             for y in y0 as usize..y1 as usize {
-                for pixel in self.pixels[y * stride + row_start..y * stride + row_end]
-                    .chunks_exact_mut(4)
+                for pixel in
+                    self.pixels[y * stride + row_start..y * stride + row_end].chunks_exact_mut(4)
                 {
                     pixel.copy_from_slice(&rgba);
                 }
@@ -595,7 +656,12 @@ impl Canvas {
         );
     }
 
-    pub(crate) fn draw_image_scaled_clipped(&mut self, image: &Image, destination: Rect, clip: Option<Rect>) {
+    pub(crate) fn draw_image_scaled_clipped(
+        &mut self,
+        image: &Image,
+        destination: Rect,
+        clip: Option<Rect>,
+    ) {
         let Some(destination) = normalize_rect(destination) else {
             return;
         };
@@ -752,7 +818,15 @@ pub fn paint_layout_with_web_fonts(
     if let Some(background) = viewport_background_color(layout, resolver) {
         canvas.fill_rect(viewport, background);
     }
-    paint_box(&mut canvas, layout, resolver, None, viewport, &fonts, web_fonts);
+    paint_box(
+        &mut canvas,
+        layout,
+        resolver,
+        None,
+        viewport,
+        &fonts,
+        web_fonts,
+    );
     canvas
 }
 
@@ -785,7 +859,8 @@ pub fn render_document_with_url(
 
     // Collect @font-face rules and fetch web fonts, building a variant registry
     let fonts_start = Instant::now();
-    let fetched_web_fonts = stylesheet::fetch_font_face_fonts(&parsed_sheets, effective_base.as_ref());
+    let fetched_web_fonts =
+        stylesheet::fetch_font_face_fonts(&parsed_sheets, effective_base.as_ref());
 
     let mut web_font_registry = WebFontRegistry::new();
     for wf in fetched_web_fonts {
@@ -854,6 +929,12 @@ pub fn render_document_with_url(
             ) && let Some(value) = value.as_string() {
                 eprintln!("[omoikane][bootstrap-state] {}", value.to_std_string_escaped());
             }
+        }
+        // CSSOM insertRule/deleteRule mutations are batched by the JS shim so
+        // frameworks can install large generated stylesheets without an O(n²)
+        // text rewrite. Commit the batch before rebuilding the native resolver.
+        if let Err(err) = runtime.eval("__omoikane_flush_stylesheets()") {
+            eprintln!("[omoikane][js-error] {err}");
         }
         // Re-extract stylesheets and rebuild resolver after JS may have
         // modified the DOM (inserted/removed <style>/<link> elements).
@@ -1363,24 +1444,36 @@ fn paint_box_internal_to(
     positive_positioned_children.sort_by_key(|child| child.z_index);
 
     for child in negative_positioned_children {
-        paint_box_internal(canvas, child, resolver, clip, viewport, true, text_fonts, web_fonts);
+        paint_box_internal(
+            canvas, child, resolver, clip, viewport, true, text_fonts, web_fonts,
+        );
     }
     for child in normal_block_children {
-        paint_box_internal(canvas, child, resolver, clip, viewport, false, text_fonts, web_fonts);
+        paint_box_internal(
+            canvas, child, resolver, clip, viewport, false, text_fonts, web_fonts,
+        );
     }
     for child in float_children {
-        paint_box_internal(canvas, child, resolver, clip, viewport, true, text_fonts, web_fonts);
+        paint_box_internal(
+            canvas, child, resolver, clip, viewport, true, text_fonts, web_fonts,
+        );
     }
     text::paint_text_with_registry(canvas, layout, style, clip, viewport, text_fonts, web_fonts);
     text::paint_list_marker(canvas, layout, style, clip, text_fonts);
     for child in inline_children {
-        paint_box_internal(canvas, child, resolver, clip, viewport, false, text_fonts, web_fonts);
+        paint_box_internal(
+            canvas, child, resolver, clip, viewport, false, text_fonts, web_fonts,
+        );
     }
     for child in auto_positioned_children {
-        paint_box_internal(canvas, child, resolver, clip, viewport, true, text_fonts, web_fonts);
+        paint_box_internal(
+            canvas, child, resolver, clip, viewport, true, text_fonts, web_fonts,
+        );
     }
     for child in positive_positioned_children {
-        paint_box_internal(canvas, child, resolver, clip, viewport, true, text_fonts, web_fonts);
+        paint_box_internal(
+            canvas, child, resolver, clip, viewport, true, text_fonts, web_fonts,
+        );
     }
 
     paint_block_generated_pseudo_box(
@@ -1650,7 +1743,14 @@ fn background_position(
     image_w: f32,
     image_h: f32,
 ) -> (f32, f32) {
-    image_position(style, "background-position", container_w, container_h, image_w, image_h)
+    image_position(
+        style,
+        "background-position",
+        container_w,
+        container_h,
+        image_w,
+        image_h,
+    )
 }
 
 fn mask_position(
@@ -1660,7 +1760,14 @@ fn mask_position(
     image_w: f32,
     image_h: f32,
 ) -> (f32, f32) {
-    image_position(style, "mask-position", container_w, container_h, image_w, image_h)
+    image_position(
+        style,
+        "mask-position",
+        container_w,
+        container_h,
+        image_w,
+        image_h,
+    )
 }
 
 fn image_position(
@@ -1689,16 +1796,14 @@ fn resolve_image_position(
         Some(ComputedValue::Px(v)) => *v,
         Some(ComputedValue::Number(v)) if *v == 0.0 => 0.0,
         Some(ComputedValue::Percentage(p)) => (container_size - image_size) * p / 100.0,
-        Some(ComputedValue::Keyword(k)) => {
-            match k.to_ascii_lowercase().as_str() {
-                "center" => (container_size - image_size) * 0.5,
-                "right" if is_x => container_size - image_size,
-                "left" if is_x => 0.0,
-                "bottom" if !is_x => container_size - image_size,
-                "top" if !is_x => 0.0,
-                _ => 0.0,
-            }
-        }
+        Some(ComputedValue::Keyword(k)) => match k.to_ascii_lowercase().as_str() {
+            "center" => (container_size - image_size) * 0.5,
+            "right" if is_x => container_size - image_size,
+            "left" if is_x => 0.0,
+            "bottom" if !is_x => container_size - image_size,
+            "top" if !is_x => 0.0,
+            _ => 0.0,
+        },
         _ => 0.0,
     }
 }
@@ -2030,9 +2135,9 @@ fn fill_triangle_clipped_inner(
                     || px >= clip_rect.x + clip_rect.width
                     || py < clip_rect.y
                     || py >= clip_rect.y + clip_rect.height)
-                {
-                    continue;
-                }
+            {
+                continue;
+            }
 
             let index = ((y as u32 * canvas.width + x as u32) * 4) as usize;
             blend_pixel(&mut canvas.pixels[index..index + 4], color);
@@ -2216,16 +2321,28 @@ fn paint_background_image(
                 // Gradient with explicit tile size — render into an offscreen tile buffer once,
                 // then blit (draw_image_scaled_clipped) for each repeated position.
                 // This avoids per-pixel gradient computation for every tile copy.
-                let (tile_w, tile_h) =
-                    background_size(style, area, area.width, area.height);
+                let (tile_w, tile_h) = background_size(style, area, area.width, area.height);
                 let tile_w = tile_w.max(1.0);
                 let tile_h = tile_h.max(1.0);
                 let repeat = background_repeat(style);
                 let fixed = background_attachment_fixed(style);
-                let (pos_cw, pos_ch) = if fixed { (viewport.width, viewport.height) } else { (area.width, area.height) };
-                let (position_x, position_y) = background_position(style, pos_cw, pos_ch, tile_w, tile_h);
-                let anchor_x = if fixed { viewport.x + position_x } else { area.x + position_x };
-                let anchor_y = if fixed { viewport.y + position_y } else { area.y + position_y };
+                let (pos_cw, pos_ch) = if fixed {
+                    (viewport.width, viewport.height)
+                } else {
+                    (area.width, area.height)
+                };
+                let (position_x, position_y) =
+                    background_position(style, pos_cw, pos_ch, tile_w, tile_h);
+                let anchor_x = if fixed {
+                    viewport.x + position_x
+                } else {
+                    area.x + position_x
+                };
+                let anchor_y = if fixed {
+                    viewport.y + position_y
+                } else {
+                    area.y + position_y
+                };
                 let x_end = area.x + area.width;
                 let y_end = area.y + area.height;
 
@@ -2238,8 +2355,18 @@ fn paint_background_image(
                     let pixels = tw as u64 * th as u64;
                     if pixels <= MAX_TILE_PIXELS && tw > 0 && th > 0 {
                         let mut tile_canvas = Canvas::new(tw, th);
-                        let origin_rect = Rect { x: 0.0, y: 0.0, width: tile_w, height: tile_h };
-                        color::paint_linear_gradient(&mut tile_canvas, &gradient, origin_rect, None);
+                        let origin_rect = Rect {
+                            x: 0.0,
+                            y: 0.0,
+                            width: tile_w,
+                            height: tile_h,
+                        };
+                        color::paint_linear_gradient(
+                            &mut tile_canvas,
+                            &gradient,
+                            origin_rect,
+                            None,
+                        );
                         Image::new(tw, th, tile_canvas.pixels).ok()
                     } else {
                         None // tile too large, fall back to per-tile rendering
@@ -2260,13 +2387,23 @@ fn paint_background_image(
                         anchor_x
                     };
                     while tx < x_end {
-                        let tile_rect = Rect { x: tx, y: ty, width: tile_w, height: tile_h };
+                        let tile_rect = Rect {
+                            x: tx,
+                            y: ty,
+                            width: tile_w,
+                            height: tile_h,
+                        };
                         if let Some(ref img) = tile_image {
                             // Fast path: blit pre-rendered tile buffer
                             canvas.draw_image_scaled_clipped(img, tile_rect, clip.or(Some(area)));
                         } else {
                             // Fallback (no-repeat, tile too large, or image validation failed): render directly
-                            color::paint_linear_gradient(canvas, &gradient, tile_rect, clip.or(Some(area)));
+                            color::paint_linear_gradient(
+                                canvas,
+                                &gradient,
+                                tile_rect,
+                                clip.or(Some(area)),
+                            );
                         }
                         if !repeat {
                             return;
@@ -2288,8 +2425,12 @@ fn paint_background_image(
         return;
     };
 
-    let (tile_width, tile_height) =
-        background_size(style, area, image.width().max(1) as f32, image.height().max(1) as f32);
+    let (tile_width, tile_height) = background_size(
+        style,
+        area,
+        image.width().max(1) as f32,
+        image.height().max(1) as f32,
+    );
     let tile_width = tile_width.max(1.0);
     let tile_height = tile_height.max(1.0);
     let x_end = area.x + area.width;
@@ -2301,7 +2442,13 @@ fn paint_background_image(
     } else {
         (area.width, area.height)
     };
-    let (position_x, position_y) = background_position(style, pos_container_w, pos_container_h, tile_width, tile_height);
+    let (position_x, position_y) = background_position(
+        style,
+        pos_container_w,
+        pos_container_h,
+        tile_width,
+        tile_height,
+    );
     let anchor_x = if fixed {
         viewport.x + position_x
     } else {
@@ -2404,7 +2551,16 @@ impl Canvas {
     /// 別キャンバス（shadow_buf）をメインキャンバスに合成する（clip あり）。
     /// `r`, `g`, `b` は合成時に使う色成分（影の色）。
     /// `offset_x`, `offset_y` は shadow_buf の左上隅がメインキャンバスのどこに対応するか。
-    pub(crate) fn composite_canvas_clipped(&mut self, src: &Canvas, offset_x: i32, offset_y: i32, r: u8, g: u8, b: u8, clip: Option<Rect>) {
+    pub(crate) fn composite_canvas_clipped(
+        &mut self,
+        src: &Canvas,
+        offset_x: i32,
+        offset_y: i32,
+        r: u8,
+        g: u8,
+        b: u8,
+        clip: Option<Rect>,
+    ) {
         let dst_w = self.width as i32;
         let dst_h = self.height as i32;
         let src_w = src.width as i32;

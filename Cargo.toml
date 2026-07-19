@@ -17,6 +17,7 @@ crc32fast = "1.5"
 # reproducible and cannot silently change under us.
 boa_engine = { git = "https://github.com/ieee0824/boa", rev = "4fc54b5c", features = ["annex-b"] }
 flate2 = "1.1"
+gif = "0.13"
 jpeg-decoder = "0.3"
 png = "0.17"
 rustls = "0.23"

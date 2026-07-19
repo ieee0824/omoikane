@@ -4,7 +4,10 @@ use crate::html::{TreeBuilder, decode_html_response};
 use crate::http::Client;
 use crate::http::url::resolve_url;
 use crate::layout::Rect;
-use crate::paint::{Canvas, Image, RenderTimings, clear_render_timings, record_render_timings, render_document_png_with_url, render_document_with_url};
+use crate::paint::{
+    Canvas, Color, Image, RenderTimings, clear_render_timings, record_render_timings,
+    render_document_with_url,
+};
 use std::time::Instant;
 
 const MAX_FRAMESET_DEPTH: usize = 4;
@@ -28,8 +31,10 @@ pub(crate) fn capture_session_screenshot_png(
             let (render_document, render_base_url) =
                 resolve_frameset_render_document(&document, base_url.as_ref())
                     .unwrap_or((document.clone(), base_url.clone()));
-            render_document_png_with_url(&render_document, viewport, render_base_url.as_ref())
-                .map_err(|error| format!("{error:?}"))
+            let canvas =
+                render_document_with_url(&render_document, viewport, render_base_url.as_ref())
+                    .map_err(|error| format!("{error:?}"))?;
+            Ok(encode_screenshot_canvas(canvas))
         }
     }
 }
@@ -43,13 +48,18 @@ fn render_frameset_screenshot_png(
     let Some(canvas) = render_frameset_canvas(document, base_url, viewport, 0, client)? else {
         return Ok(None);
     };
+    Ok(Some(encode_screenshot_canvas(canvas)))
+}
+
+fn encode_screenshot_canvas(mut canvas: Canvas) -> Vec<u8> {
+    canvas.composite_over(Color::rgb(255, 255, 255));
     let encode_start = Instant::now();
     let png = canvas.encode_png();
     record_render_timings(&RenderTimings {
         png_encode: encode_start.elapsed(),
         ..RenderTimings::default()
     });
-    Ok(Some(png))
+    png
 }
 
 fn render_frameset_canvas(
@@ -294,9 +304,10 @@ fn parse_frameset_track_sizes(spec: Option<&str>, frame_count: usize, total_size
             }
         }
     } else if remaining > 0
-        && let Some(last) = widths.last_mut() {
-            *last = last.saturating_add(remaining);
-        }
+        && let Some(last) = widths.last_mut()
+    {
+        *last = last.saturating_add(remaining);
+    }
 
     if widths.iter().all(|&w| w == 0) {
         let base = total_size / frame_count as u32;

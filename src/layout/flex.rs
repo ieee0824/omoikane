@@ -6,7 +6,7 @@ use crate::dom::{Node, NodeHandle, NodeType};
 use super::{
     AlignItems, BoxDimensions, EdgeSizes, FlexDirection, FlexWrap, JustifyContent, LayoutBox,
     Rect,
-    explicit_length, intrinsic_width, is_display_none, is_out_of_flow_positioned,
+    edge_sizes, explicit_length, intrinsic_width, is_display_none, is_out_of_flow_positioned,
     layout_node, layout_positioned_child, normalized_min_max_lengths, overflow, resolved_length,
     sort_children_by_z_index, translate_layout_box_to_outer, visibility, z_index,
 };
@@ -15,6 +15,7 @@ use super::{
 struct FlexItemSpec {
     node: NodeHandle,
     base_main_size: f32,
+    min_main_size: f32,
     explicit_cross_size: Option<f32>,
     flex_grow: f32,
     flex_shrink: f32,
@@ -66,9 +67,15 @@ pub(super) fn layout_flex_container(
         let base_main_size = flex_basis(&child_style, direction)
             .or_else(|| resolved_main_size(&child_style, direction, main_basis))
             .unwrap_or_else(|| auto_flex_base_main_size(&child, resolver, direction));
+        let min_main_size = match direction {
+            FlexDirection::Row => explicit_length(&child_style, "min-width")
+                .unwrap_or_else(|| super::minimum_content_width(&child, resolver)),
+            FlexDirection::Column => explicit_length(&child_style, "min-height").unwrap_or(0.0),
+        };
         items.push(FlexItemSpec {
             node: child,
             base_main_size,
+            min_main_size,
             explicit_cross_size: explicit_cross_size(&child_style, direction),
             flex_grow: flex_grow(&child_style),
             flex_shrink: flex_shrink(&child_style),
@@ -170,7 +177,11 @@ pub(super) fn layout_flex_container(
                     }
                     size
                 }
-                FlexDirection::Column => line_cross_size,
+                // A non-wrapping column has one flex line whose cross size is
+                // the container's content width.  Using the widest child's
+                // intrinsic width here makes align-items:center/flex-end align
+                // inside that child-sized strip instead of across the column.
+                FlexDirection::Column => width,
             };
         }
 
@@ -445,7 +456,15 @@ fn auto_flex_base_main_size(
     direction: FlexDirection,
 ) -> f32 {
     match direction {
-        FlexDirection::Row => intrinsic_width(node, resolver),
+        // The resolved main size is passed to layout_node as the item's
+        // containing width.  That path subtracts the item's margins before
+        // computing its content width, so the flex base must be an outer size
+        // as well.  intrinsic_width intentionally excludes margins for
+        // shrink-to-fit callers.
+        FlexDirection::Row => {
+            let style = resolver.computed_style(node);
+            intrinsic_width(node, resolver) + edge_sizes(&style, "margin").horizontal()
+        }
         FlexDirection::Column => 0.0,
     }
 }
@@ -517,7 +536,7 @@ fn resolve_flex_main_sizes(items: &[&FlexItemSpec], available_main_size: f32) ->
                 let overflow = total_base - available_main_size;
                 let shrink =
                     overflow * ((item.flex_shrink * item.base_main_size) / total_shrink_factor);
-                (item.base_main_size - shrink).max(0.0)
+                (item.base_main_size - shrink).max(item.min_main_size)
             } else {
                 item.base_main_size
             }

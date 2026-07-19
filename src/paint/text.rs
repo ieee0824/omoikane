@@ -205,6 +205,23 @@ pub(crate) fn paint_text_with_registry(
                         }
                     }
                 }
+                InlineFragmentContent::IconFormControl(style, image, width, height) => {
+                    if let Some(background) = background_color(style) {
+                        canvas.fill_rect_clipped(fragment.rect, background, clip);
+                    }
+                    let border = EdgeSizesForPaint::from_style(style);
+                    if border.total_horizontal() > 0.0 || border.total_vertical() > 0.0 {
+                        paint_rect_borders(canvas, fragment.rect, style, border, clip);
+                    }
+                    let content_rect = inline_fragment_content_rect(fragment.rect, style, border);
+                    let image_rect = Rect {
+                        x: content_rect.x + ((content_rect.width - width) / 2.0).max(0.0),
+                        y: content_rect.y + ((content_rect.height - height) / 2.0).max(0.0),
+                        width: (*width).min(content_rect.width),
+                        height: (*height).min(content_rect.height),
+                    };
+                    canvas.draw_image_scaled_clipped(image, image_rect, clip);
+                }
             }
         }
     }

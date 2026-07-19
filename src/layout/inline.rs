@@ -154,6 +154,7 @@ pub(super) enum InlineSegmentContent {
     Image(Image, ComputedStyle, f32, f32),
     GeneratedBox(ComputedStyle),
     FormControl(ComputedStyle, String, f32, f32),
+    IconFormControl(ComputedStyle, Image, f32, f32, f32, f32),
 }
 
 // ── Inline segment collection ───────────────────────────────────────────────
@@ -331,9 +332,10 @@ fn collect_input_segment(
 /// The label is the concatenation of the button's rendered descendant text
 /// (non-rendered elements such as `<style>`/`<script>` and `display: none`
 /// subtrees are excluded) with runs of whitespace collapsed to single spaces;
-/// child elements are never laid out independently. The width defaults to the
-/// label text width (box padding and border are added when the fragment is
-/// split), and an explicit `width`/`height` takes precedence.
+/// child elements are never laid out independently. An icon-only button keeps
+/// its first descendant image or SVG and centers it in the control. The width
+/// defaults to the label text width (box padding and border are added when the
+/// fragment is split), and an explicit `width`/`height` takes precedence.
 fn collect_button_segment(
     node: &NodeHandle,
     style: &ComputedStyle,
@@ -347,7 +349,54 @@ fn collect_button_segment(
     let content_height =
         explicit_length(style, "height").unwrap_or_else(|| metrics.font_size.max(13.0));
 
+    if label.is_empty()
+        && let Some((image_node, image)) = find_descendant_inline_image(node, resolver)
+    {
+        let image_style = resolver.computed_style(&image_node);
+        let (icon_width, icon_height) =
+            resolve_image_rendered_size(&image_node, &image, &image_style);
+        let padding = edge_sizes(style, "padding");
+        let border = edge_sizes(style, "border");
+        let total_height = content_height + padding.top + padding.bottom + border.top + border.bottom;
+        out.push(InlineSegment {
+            node: node.clone(),
+            content: InlineSegmentContent::IconFormControl(
+                style.clone(), image, content_width, content_height, icon_width, icon_height,
+            ),
+            metrics,
+            line_height: line_height(style).max(total_height),
+            vertical_align: vertical_align(style),
+            style: FragmentStyle::from_computed(style),
+            word_break: word_break(style),
+            overflow_wrap: overflow_wrap(style),
+            white_space_mode: white_space(style),
+        });
+        return;
+    }
+
     push_form_control_segment(node, style, label, content_width, content_height, metrics, out);
+}
+
+fn find_descendant_inline_image(
+    node: &NodeHandle,
+    resolver: &mut StyleResolver,
+) -> Option<(NodeHandle, Image)> {
+    for child in node.child_nodes() {
+        if is_non_rendered_html_element(&child) {
+            continue;
+        }
+        let child_style = resolver.computed_style(&child);
+        if is_display_none(&child_style) {
+            continue;
+        }
+        if let Some(image) = element_inline_image_with_style(&child, &child_style) {
+            return Some(image);
+        }
+        if let Some(image) = find_descendant_inline_image(&child, resolver) {
+            return Some(image);
+        }
+    }
+    None
 }
 
 /// Collects a `<textarea>` as a single inline `FormControl` fragment.
@@ -769,7 +818,7 @@ fn element_inline_image_with_current_color(
     }
 }
 
-/// Decode an image from a data: URI (PNG, JPEG, or SVG).
+/// Decode an image from a data: URI (PNG, JPEG, GIF, or SVG).
 fn decode_data_uri_image(uri: &str) -> Option<Image> {
     let data_uri = parse_data_uri(uri).ok()?;
     match data_uri {
@@ -780,6 +829,8 @@ fn decode_data_uri_image(uri: &str) -> Option<Image> {
                 || mime_type.eq_ignore_ascii_case("image/jpg")
             {
                 Image::decode_jpeg(&data).ok()
+            } else if mime_type.eq_ignore_ascii_case("image/gif") {
+                Image::decode_gif(&data).ok()
             } else if mime_type.eq_ignore_ascii_case("image/svg+xml") {
                 decode_svg_bytes(&data)
             } else {
@@ -870,7 +921,9 @@ fn fetch_image_uncached(url: &str) -> Option<Image> {
     if content_type.contains("image/svg+xml") || url.ends_with(".svg") {
         return decode_svg_bytes(body);
     }
-    if content_type.contains("image/png") {
+    if content_type.contains("image/gif") || url.ends_with(".gif") {
+        Image::decode_gif(body).ok()
+    } else if content_type.contains("image/png") {
         Image::decode_png(body).ok()
     } else if content_type.contains("image/jpeg") || content_type.contains("image/jpg") {
         Image::decode_jpeg(body).ok()
@@ -879,6 +932,7 @@ fn fetch_image_uncached(url: &str) -> Option<Image> {
         Image::decode_png(body)
             .ok()
             .or_else(|| Image::decode_jpeg(body).ok())
+            .or_else(|| Image::decode_gif(body).ok())
             .or_else(|| decode_svg_bytes(body))
     }
 }
@@ -1305,7 +1359,7 @@ fn break_text_by_characters(
                 available_width,
             )
         {
-            cursor.wrap_line(lines, fragments, segment.line_height, available_width, align);
+            cursor.wrap_line(lines, fragments, 0.0, available_width, align);
         }
         fragments.push(InlineFragment {
             node: segment.node.clone(),
@@ -1354,6 +1408,13 @@ fn layout_inline_segments(
                     );
                 }
                 InlinePiece::Fragment { content, width, height } => {
+                    let collapsible_whitespace = segment.white_space_mode.collapses_whitespace()
+                        && matches!(&content, InlineFragmentContent::Text(text) if text
+                            .chars()
+                            .all(|ch| ch != '\u{00A0}' && ch.is_whitespace()));
+                    if cursor.x == start_x && collapsible_whitespace {
+                        continue;
+                    }
                     let can_wrap = if is_first_piece_in_segment {
                         prev_segment_allows_wrapping
                     } else {
@@ -1371,10 +1432,13 @@ fn layout_inline_segments(
                         cursor.wrap_line(
                             &mut lines,
                             &mut current_fragments,
-                            segment.line_height,
+                            0.0,
                             available_width,
                             align,
                         );
+                        if collapsible_whitespace {
+                            continue;
+                        }
                     }
 
                     if needs_character_break(
@@ -1476,6 +1540,24 @@ fn split_segment(segment: &InlineSegment) -> Vec<InlinePiece> {
             let border = edge_sizes(style, "border");
             vec![InlinePiece::Fragment {
                 content: InlineFragmentContent::FormControl(style.clone(), value.clone()),
+                width: *content_width + padding.left + padding.right + border.left + border.right,
+                height: *content_height + padding.top + padding.bottom + border.top + border.bottom,
+            }]
+        }
+        InlineSegmentContent::IconFormControl(
+            style,
+            image,
+            content_width,
+            content_height,
+            icon_width,
+            icon_height,
+        ) => {
+            let padding = edge_sizes(style, "padding");
+            let border = edge_sizes(style, "border");
+            vec![InlinePiece::Fragment {
+                content: InlineFragmentContent::IconFormControl(
+                    style.clone(), image.clone(), *icon_width, *icon_height,
+                ),
                 width: *content_width + padding.left + padding.right + border.left + border.right,
                 height: *content_height + padding.top + padding.bottom + border.top + border.bottom,
             }]

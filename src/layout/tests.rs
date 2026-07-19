@@ -1083,6 +1083,93 @@ fn button_flattens_descendant_text_into_single_fragment() {
 }
 
 #[test]
+fn icon_only_button_preserves_nested_svg() {
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let div = NodeHandle::element("div");
+    let button = NodeHandle::element("button");
+    let span = NodeHandle::element("span");
+    let svg = NodeHandle::element("svg");
+    let path = NodeHandle::element("path");
+    document.append_child(body.clone());
+    body.append_child(div.clone());
+    div.append_child(button.clone());
+    button.append_child(span.clone());
+    span.append_child(svg.clone());
+    svg.append_child(path.clone());
+    svg.set_attribute("viewBox", "0 0 24 24");
+    path.set_attribute("d", "M11 5h2v14h-2zM5 11h14v2H5z");
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet("button { width: 36px; height: 36px; padding: 0; border: 0; } svg { width: 24px; height: 24px; }").unwrap(),
+    );
+    let layout = layout_tree(
+        &body,
+        &mut resolver,
+        Rect { x: 0.0, y: 0.0, width: 100.0, height: 0.0 },
+    )
+    .unwrap();
+    let fragment = &layout.children[0].lines[0].fragments[0];
+
+    assert_eq!(fragment.rect.width, 36.0);
+    assert_eq!(fragment.rect.height, 36.0);
+    assert!(matches!(
+        fragment.content,
+        InlineFragmentContent::IconFormControl(_, _, 24.0, 24.0)
+    ));
+}
+
+#[test]
+fn icon_only_button_skips_hidden_and_non_rendered_images() {
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let div = NodeHandle::element("div");
+    let button = NodeHandle::element("button");
+    let style = NodeHandle::element("style");
+    let style_svg = NodeHandle::element("svg");
+    let hidden = NodeHandle::element("span");
+    let hidden_svg = NodeHandle::element("svg");
+    let visible_svg = NodeHandle::element("svg");
+
+    style_svg.set_attribute("viewBox", "0 0 6 6");
+    style.append_child(style_svg);
+    hidden.set_attribute("style", "display: none");
+    hidden_svg.set_attribute("viewBox", "0 0 12 12");
+    hidden.append_child(hidden_svg);
+    visible_svg.set_attribute("viewBox", "0 0 24 24");
+
+    document.append_child(body.clone());
+    body.append_child(div.clone());
+    div.append_child(button.clone());
+    button.append_child(style);
+    button.append_child(hidden);
+    button.append_child(visible_svg);
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "button { width: 36px; height: 36px; padding: 0; border: 0; }",
+        )
+        .unwrap(),
+    );
+    let layout = layout_tree(
+        &body,
+        &mut resolver,
+        Rect { x: 0.0, y: 0.0, width: 100.0, height: 0.0 },
+    )
+    .unwrap();
+    let fragment = &layout.children[0].lines[0].fragments[0];
+
+    assert!(matches!(
+        fragment.content,
+        InlineFragmentContent::IconFormControl(_, _, 24.0, 24.0)
+    ));
+}
+
+#[test]
 fn media_elements_create_placeholders_from_default_and_attribute_sizes() {
     for (tag, attributes, expected) in [
         ("video", vec![("width", "320"), ("height", "180")], (320.0, 180.0)),
@@ -2723,6 +2810,137 @@ fn grows_last_flex_item_to_fill_remaining_space() {
 }
 
 #[test]
+fn flex_auto_basis_sums_consecutive_inline_children() {
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let container = NodeHandle::element("div");
+    let item = NodeHandle::element("article");
+    let first = NodeHandle::element("span");
+    let second = NodeHandle::element("span");
+    let fixed = NodeHandle::element("aside");
+    document.append_child(body.clone());
+    body.append_child(container.clone());
+    container.append_child(item.clone());
+    container.append_child(fixed);
+    item.append_child(first);
+    item.append_child(second);
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "div { display: flex; width: 200px; } \
+             span { display: inline-block; height: 10px; } \
+             span:first-child { width: 40px; } \
+             span:last-child { width: 50px; } \
+             aside { width: 20px; height: 10px; flex-shrink: 0; }",
+        )
+        .unwrap(),
+    );
+
+    let layout = layout_tree(
+        &body,
+        &mut resolver,
+        Rect { x: 0.0, y: 0.0, width: 200.0, height: 0.0 },
+    )
+    .unwrap();
+    assert_eq!(layout.children[0].children[0].dimensions.content.width, 90.0);
+}
+
+#[test]
+fn flex_auto_basis_preserves_content_width_when_item_has_margins() {
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let container = NodeHandle::element("div");
+    let link = NodeHandle::element("a");
+    let filler = NodeHandle::element("span");
+    document.append_child(body.clone());
+    body.append_child(container.clone());
+    container.append_child(link.clone());
+    container.append_child(filler);
+    link.append_child(NodeHandle::text("about"));
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "div { display: flex; width: 200px; } \
+             a { display: inline-block; margin: 0 15px; padding: 0 5px; \
+                 font-size: 10px; white-space: nowrap; } \
+             span { flex-grow: 1; }",
+        )
+        .unwrap(),
+    );
+
+    let layout = layout_tree(
+        &body,
+        &mut resolver,
+        Rect { x: 0.0, y: 0.0, width: 200.0, height: 0.0 },
+    )
+    .unwrap();
+    let link_box = &layout.children[0].children[0];
+    assert_eq!(link_box.lines.len(), 1);
+    assert!(
+        link_box.dimensions.content.width >= link_box.lines[0].rect.width,
+        "content width {} should contain the unwrapped line width {}",
+        link_box.dimensions.content.width,
+        link_box.lines[0].rect.width,
+    );
+}
+
+#[test]
+fn flex_item_does_not_shrink_below_nowrap_content_width() {
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let container = NodeHandle::element("div");
+    let item = NodeHandle::element("span");
+    let text = NodeHandle::text("one two three four");
+    document.append_child(body.clone());
+    body.append_child(container.clone());
+    container.append_child(item.clone());
+    item.append_child(text);
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "div { display: flex; width: 30px; } \
+             span { white-space: nowrap; font-size: 10px; }",
+        )
+        .unwrap(),
+    );
+
+    let layout = layout_tree(
+        &body,
+        &mut resolver,
+        Rect { x: 0.0, y: 0.0, width: 30.0, height: 0.0 },
+    )
+    .unwrap();
+    assert!(layout.children[0].children[0].dimensions.content.width > 30.0);
+}
+
+#[test]
+fn intrinsic_width_ignores_display_none_descendants() {
+    let parent = NodeHandle::element("div");
+    let visible = NodeHandle::element("span");
+    let hidden = NodeHandle::element("aside");
+    parent.append_child(visible.clone());
+    parent.append_child(hidden);
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "span { display: inline-block; width: 20px; } \
+             aside { display: none; width: 1000px; }",
+        )
+        .unwrap(),
+    );
+
+    assert_eq!(intrinsic_width(&parent, &mut resolver), 20.0);
+}
+
+#[test]
 fn lays_out_flex_column() {
     let document = NodeHandle::document();
     let body = NodeHandle::element("body");
@@ -2923,6 +3141,42 @@ fn aligns_flex_items_with_align_items_and_align_self() {
     let container_box = &layout.children[0];
     assert_eq!(container_box.children[0].dimensions.content.y, 30.0);
     assert_eq!(container_box.children[1].dimensions.content.y, 70.0);
+}
+
+#[test]
+fn column_flex_aligns_items_against_the_container_width() {
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let main = NodeHandle::element("main");
+    let span = NodeHandle::element("span");
+    document.append_child(body.clone());
+    body.append_child(main.clone());
+    main.append_child(span);
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "main { display: flex; flex-direction: column; align-items: center; width: 300px } \
+             span { width: 40px; height: 10px }",
+        )
+        .unwrap(),
+    );
+    let layout = layout_tree(
+        &body,
+        &mut resolver,
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 400.0,
+            height: 0.0,
+        },
+    )
+    .unwrap();
+
+    let main = &layout.children[0];
+    let span = &main.children[0];
+    assert_eq!(span.dimensions.content.x, 130.0);
 }
 
 #[test]
@@ -3163,6 +3417,42 @@ fn centered_flex_button_keeps_intrinsic_text_on_one_line() {
 fn inline_wrapping_ignores_subpixel_font_fragment_rounding() {
     assert!(!super::inline::exceeds_available_inline_width(125.99748, 125.99));
     assert!(super::inline::exceeds_available_inline_width(126.01, 125.99));
+}
+
+#[test]
+fn collapsible_whitespace_around_full_width_image_does_not_create_lines() {
+    let image = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAIAAAD91JpzAAAABnRSTlMAAAAAAABupgeRAAAABmJLR0QA%2FwD%2FAP%2BgvaeTAAAAEUlEQVR42mP4%2F58BCv7%2FZwAAHfAD%2FabwPj4AAAAASUVORK5CYII%3D";
+    let html = format!(
+        "<html><body><div>\n  <a>\n    <img src=\"{image}\" width=\"2\" height=\"2\">\n  </a>\n</div></body></html>"
+    );
+    let document = crate::html::TreeBuilder::parse(&html).document();
+    let body = document
+        .child_nodes()
+        .into_iter()
+        .find(|node| node.tag_name().as_deref() == Some("html"))
+        .and_then(|html| {
+            html.child_nodes()
+                .into_iter()
+                .find(|node| node.tag_name().as_deref() == Some("body"))
+        })
+        .unwrap();
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet("body { margin: 0; } div { width: 2px; line-height: 20px; }").unwrap(),
+    );
+
+    let layout = layout_tree(
+        &body,
+        &mut resolver,
+        Rect { x: 0.0, y: 0.0, width: 20.0, height: 0.0 },
+    )
+    .unwrap();
+    let container = find_layout_box_by_tag(&layout, "div").unwrap();
+
+    assert_eq!(container.lines.len(), 1, "lines: {:?}", container.lines);
+    assert_eq!(container.lines[0].rect.height, 20.0);
+    assert_eq!(container.dimensions.content.height, 20.0);
 }
 
 #[test]
@@ -3519,6 +3809,42 @@ fn absolute_uses_nearest_positioned_ancestor_content_box() {
 }
 
 #[test]
+fn absolute_percentage_insets_resolve_against_positioned_ancestor() {
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let parent = NodeHandle::element("div");
+    let child = NodeHandle::element("aside");
+
+    parent.set_attribute("class", "parent");
+    child.set_attribute("class", "child");
+    document.append_child(body.clone());
+    body.append_child(parent.clone());
+    parent.append_child(child);
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            ".parent { position: relative; width: 200px; height: 100px; } \
+             .child { position: absolute; left: 100%; bottom: 10%; \
+                      width: 40px; height: 20px; }",
+        )
+        .unwrap(),
+    );
+
+    let layout = layout_tree(
+        &body,
+        &mut resolver,
+        Rect { x: 0.0, y: 0.0, width: 300.0, height: 200.0 },
+    )
+    .unwrap();
+
+    let child_box = find_layout_box_by_tag(&layout, "aside").unwrap();
+    assert_eq!(child_box.dimensions.content.x, 200.0);
+    assert_eq!(child_box.dimensions.content.y, 70.0);
+}
+
+#[test]
 fn absolute_auto_offsets_use_static_position() {
     let document = NodeHandle::document();
     let body = NodeHandle::element("body");
@@ -3872,6 +4198,41 @@ fn percentage_width_resolves_for_positioned_elements() {
 }
 
 #[test]
+fn grid_justify_items_center_shrink_wraps_auto_width_item() {
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let grid = NodeHandle::element("div");
+    let item = NodeHandle::element("article");
+    let content = NodeHandle::element("span");
+    document.append_child(body.clone());
+    body.append_child(grid.clone());
+    grid.append_child(item.clone());
+    item.append_child(content);
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "div { display: grid; width: 200px; justify-items: center; } \
+             article { position: relative; } \
+             span { display: inline-block; width: 40px; height: 10px; }",
+        )
+        .unwrap(),
+    );
+
+    let layout = layout_tree(
+        &body,
+        &mut resolver,
+        Rect { x: 0.0, y: 0.0, width: 200.0, height: 100.0 },
+    )
+    .unwrap();
+
+    let item_box = find_layout_box_by_tag(&layout, "article").unwrap();
+    assert_eq!(item_box.dimensions.content.width, 40.0);
+    assert_eq!(item_box.dimensions.content.x, 80.0);
+}
+
+#[test]
 fn min_height_overrides_smaller_max_height() {
     let document = NodeHandle::document();
     let body = NodeHandle::element("body");
@@ -4191,6 +4552,47 @@ fn float_preserves_negative_top_margin_offset() {
 
     let floated_box = find_layout_box_by_tag(&layout, "section").unwrap();
     assert_eq!(floated_box.dimensions.content.y, 28.0);
+}
+
+#[test]
+fn negative_margin_float_fits_beside_full_width_float() {
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let main = NodeHandle::element("main");
+    let sidebar = NodeHandle::element("aside");
+
+    main.set_attribute("class", "main");
+    sidebar.set_attribute("class", "sidebar");
+    document.append_child(body.clone());
+    body.append_child(main.clone());
+    body.append_child(sidebar.clone());
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            ".main { float: left; width: 100%; height: 40px; } \
+             .sidebar { float: left; width: 30px; height: 20px; margin-left: -30px; }",
+        )
+        .unwrap(),
+    );
+
+    let layout = layout_tree(
+        &body,
+        &mut resolver,
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 100.0,
+            height: 100.0,
+        },
+    )
+    .unwrap();
+
+    let main_box = find_layout_box_by_tag(&layout, "main").unwrap();
+    let sidebar_box = find_layout_box_by_tag(&layout, "aside").unwrap();
+    assert_eq!(sidebar_box.dimensions.content.x, 70.0);
+    assert_eq!(sidebar_box.dimensions.content.y, main_box.dimensions.content.y);
 }
 
 #[test]

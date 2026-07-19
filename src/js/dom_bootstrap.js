@@ -1,6 +1,7 @@
 (() => {
-  // The top-level browsing context is its own parent.
+  // The top-level browsing context is its own parent and top-level context.
   globalThis.parent = globalThis;
+  globalThis.top = globalThis;
   const cache = new Map();
 
   // Window objects are not ordinary DOM wrappers in Omoikane: the top-level
@@ -20,6 +21,30 @@
         candidate !== null && windowObjects.has(candidate);
     },
   });
+
+  class NodeList extends Array {
+    constructor() {
+      throw new TypeError("Illegal constructor");
+    }
+
+    static get [Symbol.species]() {
+      return Array;
+    }
+
+    item(index) {
+      const value = Number(index);
+      if (!Number.isFinite(value) || value < 0) return null;
+      return this[Math.trunc(value)] ?? null;
+    }
+  }
+  Object.defineProperty(NodeList.prototype, Symbol.toStringTag, {
+    configurable: true,
+    value: "NodeList",
+  });
+
+  function makeNodeList(nodes) {
+    return Object.setPrototypeOf(nodes, NodeList.prototype);
+  }
 
   function removeChildNode() {
     const parent = this.parentNode;
@@ -661,6 +686,15 @@
       return wrapNode(__omoikane_parent_node(this.__id));
     }
 
+    getRootNode(options = {}) {
+      // Omoikane does not expose shadow trees yet, so composed and
+      // non-composed traversal currently have the same document root.
+      void options;
+      let root = this;
+      while (root.parentNode) root = root.parentNode;
+      return root;
+    }
+
     get nodeName() {
       return __omoikane_node_name(this.__id);
     }
@@ -989,7 +1023,7 @@
 
     get childNodes() {
       const ids = __omoikane_child_node_ids(this.__id);
-      return ids ? ids.map(id => wrapNode(id)) : [];
+      return makeNodeList(ids ? ids.map(id => wrapNode(id)) : []);
     }
 
     get children() {
@@ -1050,7 +1084,7 @@
     querySelectorAll(selector) {
       try {
         const ids = __omoikane_query_selector_all(this.__id, String(selector));
-        return ids ? ids.map(id => wrapNode(id)) : [];
+        return makeNodeList(ids ? ids.map(id => wrapNode(id)) : []);
       } catch (error) {
         if (error && error.name === "SyntaxError") {
           throw new DOMException(error.message, "SyntaxError");
@@ -1626,6 +1660,9 @@
   class HTMLSpanElement extends HTMLElement {}
   class HTMLParagraphElement extends HTMLElement {}
   class HTMLAnchorElement extends HTMLElement {}
+  class HTMLStyleElement extends HTMLElement {
+    get sheet() { return sheetFor(this); }
+  }
 
   distributePrototypeMembers(Node.prototype, [HTMLElement.prototype], [
     "title", "innerText",
@@ -2839,13 +2876,35 @@
     });
   }
 
+  const dirtyStyleSheets = new Set();
+
   class CSSStyleSheet {
     constructor(ownerNode) {
       this.ownerNode = ownerNode;
       this.href = null;
+      this.__rules = splitCssRules(ownerNode.textContent);
+      this.__ownerText = ownerNode.textContent;
       this.__cssRules = ruleListProxy(this);
     }
-    __ruleTexts() { return splitCssRules(this.ownerNode.textContent); }
+    __syncFromOwner() {
+      if (dirtyStyleSheets.has(this)) return;
+      const text = this.ownerNode.textContent;
+      if (text !== this.__ownerText) {
+        this.__rules = splitCssRules(text);
+        this.__ownerText = text;
+      }
+    }
+    __ruleTexts() {
+      this.__syncFromOwner();
+      return this.__rules;
+    }
+    __markDirty() { dirtyStyleSheets.add(this); }
+    __flush() {
+      if (!dirtyStyleSheets.delete(this)) return;
+      const text = this.__rules.join("\n");
+      this.ownerNode.textContent = text;
+      this.__ownerText = text;
+    }
     get cssRules() { return this.__cssRules; }
     insertRule(rule, index) {
       const text = String(rule);
@@ -2858,7 +2917,7 @@
       if (!Number.isInteger(position) || position < 0 || position > rules.length)
         throw new DOMException("The index is out of range.", "IndexSizeError");
       rules.splice(position, 0, text.trim());
-      this.ownerNode.textContent = rules.join("\n");
+      this.__markDirty();
       return position;
     }
     deleteRule(index) {
@@ -2867,9 +2926,41 @@
       if (!Number.isInteger(position) || position < 0 || position >= rules.length)
         throw new DOMException("The index is out of range.", "IndexSizeError");
       rules.splice(position, 1);
-      this.ownerNode.textContent = rules.join("\n");
+      this.__markDirty();
     }
   }
+
+  function flushStyleSheets() {
+    for (const sheet of Array.from(dirtyStyleSheets)) sheet.__flush();
+  }
+  globalThis.__omoikane_flush_stylesheets = flushStyleSheets;
+
+  // Minimal CSS namespace used for feature detection and selector escaping.
+  // Unsupported declarations conservatively report false so sites choose their
+  // fallback path instead of aborting while probing browser capabilities.
+  globalThis.CSS = {
+    escape(value) {
+      const input = String(value);
+      let output = "";
+      for (let index = 0; index < input.length; index++) {
+        const code = input.charCodeAt(index);
+        if (code === 0) { output += "\uFFFD"; continue; }
+        if ((code >= 1 && code <= 31) || code === 127 ||
+            (index === 0 && code >= 48 && code <= 57) ||
+            (index === 1 && code >= 48 && code <= 57 && input.charCodeAt(0) === 45)) {
+          output += "\\" + code.toString(16) + " ";
+          continue;
+        }
+        if (index === 0 && code === 45 && input.length === 1) { output += "\\-"; continue; }
+        if (code >= 128 || code === 45 || code === 95 ||
+            (code >= 48 && code <= 57) || (code >= 65 && code <= 90) ||
+            (code >= 97 && code <= 122)) output += input[index];
+        else output += "\\" + input[index];
+      }
+      return output;
+    },
+    supports() { return false; },
+  };
 
   const styleSheetCache = new WeakMap();
   function sheetFor(style) {
@@ -3373,6 +3464,12 @@
   }
 
   class HTMLImageElement extends HTMLElement {
+    get src() {
+      return this.getAttribute("src") || "";
+    }
+    set src(value) {
+      this.setAttribute("src", String(value));
+    }
     get height() {
       const attr = this.getAttribute("height");
       if (attr !== null && attr !== "") return Math.max(0, Number.parseInt(attr, 10) || 0);
@@ -3387,6 +3484,35 @@
       return Math.max(0, Number.parseFloat(value) || 0);
     }
     set width(value) { this.setAttribute("width", String(Math.max(0, Number(value) || 0))); }
+  }
+
+  class HTMLLinkElement extends HTMLElement {
+    get rel() {
+      return this.getAttribute("rel") || "";
+    }
+    set rel(value) {
+      this.setAttribute("rel", String(value));
+    }
+    get relList() {
+      const link = this;
+      const tokens = () => link.rel.split(/\s+/).filter(Boolean);
+      return {
+        contains(token) {
+          return tokens().includes(String(token));
+        },
+        supports(token) {
+          const value = String(token).toLowerCase();
+          return ["dns-prefetch", "modulepreload", "preconnect", "preload", "stylesheet"]
+            .includes(value);
+        },
+        get length() {
+          return tokens().length;
+        },
+        item(index) {
+          return tokens()[Number(index)] ?? null;
+        },
+      };
+    }
   }
 
   // Minimal SVG DOM layer. Rendering remains owned by src/svg; these wrappers
@@ -3469,7 +3595,9 @@
     iframe: HTMLIFrameElement,
     object: HTMLObjectElement,
     img: HTMLImageElement,
+    link: HTMLLinkElement,
     script: HTMLScriptElement,
+    style: HTMLStyleElement,
   };
 
   // Standard Node.nodeType constant values, exposed both as static properties
@@ -3524,6 +3652,7 @@
   }
 
   globalThis.Node = Node;
+  globalThis.NodeList = NodeList;
   globalThis.Window = Window;
   globalThis.Element = Element;
   globalThis.HTMLElement = HTMLElement;
@@ -3534,6 +3663,7 @@
   globalThis.HTMLSpanElement = HTMLSpanElement;
   globalThis.HTMLParagraphElement = HTMLParagraphElement;
   globalThis.HTMLAnchorElement = HTMLAnchorElement;
+  globalThis.HTMLStyleElement = HTMLStyleElement;
   globalThis.CharacterData = CharacterData;
   globalThis.Text = Text;
   globalThis.CDATASection = CDATASection;
@@ -3561,6 +3691,14 @@
   globalThis.HTMLSelectElement = HTMLSelectElement;
   globalThis.HTMLOptionElement = HTMLOptionElement;
   globalThis.HTMLImageElement = HTMLImageElement;
+  globalThis.Image = function(width, height) {
+    const image = document.createElement("img");
+    if (width !== undefined) image.width = Number(width);
+    if (height !== undefined) image.height = Number(height);
+    return image;
+  };
+  globalThis.Image.prototype = HTMLImageElement.prototype;
+  globalThis.HTMLLinkElement = HTMLLinkElement;
   globalThis.HTMLScriptElement = HTMLScriptElement;
   globalThis.HTMLIFrameElement = HTMLIFrameElement;
   globalThis.HTMLObjectElement = HTMLObjectElement;
@@ -3832,6 +3970,7 @@
   }
   globalThis.getComputedStyle = function(element, pseudoElt) {
     void pseudoElt;
+    flushStyleSheets();
     if (element && element.__id != null) {
       try {
         return __makeComputedStyle(JSON.parse(__omoikane_computed_style(element.__id)));
@@ -4088,6 +4227,12 @@
     }
     globalThis.URL = URL;
     globalThis.URLSearchParams = URLSearchParams;
+  }
+  function resolveNetworkUrl(value) {
+    const raw = String(value);
+    const resolved = String(__omoikane_resolve_url(raw));
+    if (/^[A-Za-z][A-Za-z0-9+.-]*:\/\//.test(resolved)) return resolved;
+    return new URL(raw, document.URL).href;
   }
   globalThis.console = {
     log: (...args) => __omoikane_console_log(...args),
@@ -4359,7 +4504,7 @@
       this.response = "";
       this._headers = {};
       this._method = String(method).toUpperCase();
-      this._url = String(url);
+      this._url = resolveNetworkUrl(url);
       this._async = async !== false;
       this.readyState = 1;
       this._notify("readystatechange");
@@ -4741,7 +4886,7 @@
   class Request {
     constructor(input, init = {}) {
       const source = input instanceof Request ? input : null;
-      this.url = source ? source.url : String(input);
+      this.url = source ? source.url : resolveNetworkUrl(input);
       this.method = String(init.method || (source && source.method) || "GET").toUpperCase();
       this.headers = new Headers(init.headers || (source && source.headers));
       this.body = init.body === undefined ? (source && source.body) : init.body;

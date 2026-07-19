@@ -393,6 +393,7 @@ pub enum InlineFragmentContent {
     Image(Image, ComputedStyle),
     GeneratedBox(ComputedStyle),
     FormControl(ComputedStyle, String),
+    IconFormControl(ComputedStyle, Image, f32, f32),
 }
 
 /// A single line box inside a block formatting context.
@@ -797,16 +798,19 @@ fn layout_float_child(
     loop {
         let offsets = active_float_offsets(float_regions, float_y, x, width);
         let float_available_width = (width - offsets.left - offsets.right).max(0.0);
-        if float_width <= float_available_width + 0.5 {
-            let float_containing = Rect {
-                x: x + offsets.left,
-                y: float_y,
-                width: float_available_width.max(float_width),
-                height: 0.0,
-            };
-            if let Some(mut layout_child) = layout_node(
-                child, resolver, float_containing, viewport, positioned_ancestor,
-            ) {
+        let float_containing = Rect {
+            x: x + offsets.left,
+            y: float_y,
+            width: float_available_width.max(float_width),
+            height: 0.0,
+        };
+        if let Some(mut layout_child) = layout_node(
+            child, resolver, float_containing, viewport, positioned_ancestor,
+        ) {
+            // Float placement uses the margin box. In particular, a negative
+            // margin can make a specified-width float fit beside an earlier
+            // float (a common legacy two-column layout technique).
+            if layout_child.total_width() <= float_available_width + 0.5 {
                 if resolved_length(child_style, "width", float_available_width).is_none() {
                     layout_child.dimensions.content.width = float_width;
                 }
@@ -827,8 +831,8 @@ fn layout_float_child(
                     side,
                 });
                 children.push(layout_child);
+                break;
             }
-            break;
         }
         let Some(next_y) = next_float_boundary_after(float_regions, float_y) else {
             break;
@@ -1813,7 +1817,11 @@ pub(super) fn minimum_content_width(node: &NodeHandle, resolver: &mut StyleResol
                 let metrics = font_metrics(&parent_style);
                 // Find the width of the longest unbreakable unit (word or CJK character).
                 use crate::layout::inline::split_words_preserving_spaces_cjk;
-                let normalized = normalize_text(&text, white_space(&parent_style));
+                let white_space_mode = white_space(&parent_style);
+                let normalized = normalize_text(&text, white_space_mode);
+                if !white_space_mode.allows_wrapping() {
+                    return measure_text_width(&normalized, metrics);
+                }
                 split_words_preserving_spaces_cjk(&normalized)
                     .into_iter()
                     .map(|word| measure_text_width(&word, metrics))
@@ -1822,6 +1830,9 @@ pub(super) fn minimum_content_width(node: &NodeHandle, resolver: &mut StyleResol
             .unwrap_or(0.0),
         NodeType::Element => {
             let style = resolver.computed_style(node);
+            if is_display_none(&style) || is_non_rendered_html_element(node) {
+                return 0.0;
+            }
             let padding = edge_sizes(&style, "padding");
             let border = edge_sizes(&style, "border");
             // Elements with explicit width use that as minimum.
@@ -1865,6 +1876,9 @@ fn intrinsic_width(node: &NodeHandle, resolver: &mut StyleResolver) -> f32 {
             .unwrap_or(0.0),
         NodeType::Element => {
             let style = resolver.computed_style(node);
+            if is_display_none(&style) || is_non_rendered_html_element(node) {
+                return 0.0;
+            }
             let padding = edge_sizes(&style, "padding");
             let border = edge_sizes(&style, "border");
             if let Some(width) = explicit_length(&style, "width") {
@@ -1917,9 +1931,18 @@ fn intrinsic_width(node: &NodeHandle, resolver: &mut StyleResolver) -> f32 {
                     content_width = content_width.max(row_width);
                 }
             } else {
+                let mut inline_run_width = 0.0f32;
                 for child in node.child_nodes() {
-                    content_width = content_width.max(intrinsic_width(&child, resolver));
+                    let child_width = intrinsic_width(&child, resolver);
+                    if is_inline_child(&child, resolver) {
+                        inline_run_width += child_width;
+                    } else {
+                        content_width = content_width.max(inline_run_width);
+                        inline_run_width = 0.0;
+                        content_width = content_width.max(child_width);
+                    }
                 }
+                content_width = content_width.max(inline_run_width);
             }
             let mut width = content_width;
             if width == 0.0 {
@@ -1944,6 +1967,11 @@ fn intrinsic_width(node: &NodeHandle, resolver: &mut StyleResolver) -> f32 {
                                 + border.right
                         }
                         InlineSegmentContent::FormControl(style, _, width, _) => {
+                            let padding = edge_sizes(&style, "padding");
+                            let border = edge_sizes(&style, "border");
+                            width + padding.left + padding.right + border.left + border.right
+                        }
+                        InlineSegmentContent::IconFormControl(style, _, width, _, _, _) => {
                             let padding = edge_sizes(&style, "padding");
                             let border = edge_sizes(&style, "border");
                             width + padding.left + padding.right + border.left + border.right
@@ -2122,7 +2150,7 @@ fn layout_positioned_child(
     };
 
     // `inset-inline-end` is the right edge in LTR and the left edge in RTL.
-    let inline_end = explicit_length(style, "inset-inline-end");
+    let inline_end = resolved_length(style, "inset-inline-end", origin.width);
     let rtl = matches!(
         style.get("direction"),
         Some(ComputedValue::Keyword(value) | ComputedValue::String(value))
@@ -2133,10 +2161,10 @@ fn layout_positioned_child(
     } else {
         (None, inline_end)
     };
-    let left = explicit_length(style, "left").or(inline_end_left);
-    let right = explicit_length(style, "right").or(inline_end_right);
-    let top = explicit_length(style, "top");
-    let bottom = explicit_length(style, "bottom");
+    let left = resolved_length(style, "left", origin.width).or(inline_end_left);
+    let right = resolved_length(style, "right", origin.width).or(inline_end_right);
+    let top = resolved_length(style, "top", origin.height);
+    let bottom = resolved_length(style, "bottom", origin.height);
     let static_outer = containing_block;
     let specified_width = resolved_length(style, "width", origin.width);
     let child_width = if specified_width.is_none() {
