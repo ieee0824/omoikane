@@ -42,6 +42,7 @@ struct NodeInner {
 enum NodeData {
     Document(Document),
     DocumentFragment,
+    ShadowRoot(ShadowRoot),
     Element(Element),
     Text(Text),
     Comment(Comment),
@@ -59,6 +60,13 @@ pub enum NodeType {
     Comment,
     ProcessingInstruction,
     DocumentType,
+}
+
+/// Shadow tree visibility requested through `Element.attachShadow()`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ShadowRootMode {
+    Open,
+    Closed,
 }
 
 /// Basic DOM node operations.
@@ -80,6 +88,13 @@ pub trait Node {
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Document;
 
+/// The host relationship and visibility of a shadow tree root.
+#[derive(Debug, Clone)]
+struct ShadowRoot {
+    host: Weak<RefCell<NodeInner>>,
+    mode: ShadowRootMode,
+}
+
 /// A DOM element node.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Element {
@@ -97,6 +112,9 @@ pub struct Element {
     /// fragment in the native DOM model makes parser-created templates inert
     /// before JavaScript wrappers or layout ever inspect the document tree.
     template_content: Option<NodeHandle>,
+    /// The element's shadow tree. It is deliberately not part of `children`:
+    /// light DOM traversal and document selectors must not cross this boundary.
+    shadow_root: Option<NodeHandle>,
 }
 
 impl Element {
@@ -114,6 +132,7 @@ impl Element {
             checked: false,
             dirty_checkedness: false,
             template_content,
+            shadow_root: None,
         }
     }
 
@@ -136,6 +155,7 @@ impl Element {
             checked: false,
             dirty_checkedness: false,
             template_content: None,
+            shadow_root: None,
         }
     }
 
@@ -344,6 +364,48 @@ impl NodeHandle {
     pub fn template_content(&self) -> Option<NodeHandle> {
         match &self.0.borrow().data {
             NodeData::Element(element) => element.template_content.clone(),
+            _ => None,
+        }
+    }
+
+    /// Creates and attaches a shadow root, returning `None` when this is not an
+    /// element or it already owns one.
+    pub fn attach_shadow(&self, mode: ShadowRootMode) -> Option<NodeHandle> {
+        let mut inner = self.0.borrow_mut();
+        let NodeData::Element(element) = &mut inner.data else {
+            return None;
+        };
+        if element.shadow_root.is_some() {
+            return None;
+        }
+        let root = Self::new(NodeData::ShadowRoot(ShadowRoot {
+            host: Rc::downgrade(&self.0),
+            mode,
+        }));
+        element.shadow_root = Some(root.clone());
+        Some(root)
+    }
+
+    /// Returns the shadow root attached to an element, including closed roots.
+    pub fn shadow_root(&self) -> Option<NodeHandle> {
+        match &self.0.borrow().data {
+            NodeData::Element(element) => element.shadow_root.clone(),
+            _ => None,
+        }
+    }
+
+    /// Returns the host of a shadow root.
+    pub fn shadow_host(&self) -> Option<NodeHandle> {
+        match &self.0.borrow().data {
+            NodeData::ShadowRoot(root) => root.host.upgrade().map(NodeHandle),
+            _ => None,
+        }
+    }
+
+    /// Returns the visibility mode of a shadow root.
+    pub fn shadow_root_mode(&self) -> Option<ShadowRootMode> {
+        match &self.0.borrow().data {
+            NodeData::ShadowRoot(root) => Some(root.mode),
             _ => None,
         }
     }
@@ -609,7 +671,7 @@ impl Node for NodeHandle {
     fn node_type(&self) -> NodeType {
         match &self.0.borrow().data {
             NodeData::Document(_) => NodeType::Document,
-            NodeData::DocumentFragment => NodeType::DocumentFragment,
+            NodeData::DocumentFragment | NodeData::ShadowRoot(_) => NodeType::DocumentFragment,
             NodeData::Element(_) => NodeType::Element,
             NodeData::Text(_) => NodeType::Text,
             NodeData::Comment(_) => NodeType::Comment,
@@ -621,7 +683,7 @@ impl Node for NodeHandle {
     fn node_name(&self) -> String {
         match &self.0.borrow().data {
             NodeData::Document(_) => "#document".to_string(),
-            NodeData::DocumentFragment => "#document-fragment".to_string(),
+            NodeData::DocumentFragment | NodeData::ShadowRoot(_) => "#document-fragment".to_string(),
             NodeData::Element(element) if element.is_html() => element.tag_name.to_ascii_uppercase(),
             NodeData::Element(element) => element.tag_name.clone(),
             NodeData::Text(_) => "#text".to_string(),

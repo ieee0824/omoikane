@@ -66,7 +66,9 @@
       // are scoped to their own tree.
       node = new Document(id);
     } else if (nodeType === 11) {
-      node = new DocumentFragment(id);
+      node = __omoikane_shadow_host(id) === null
+        ? new DocumentFragment(id)
+        : new ShadowRoot(id, SHADOW_ROOT_CONSTRUCTION);
     } else if (nodeType === 7) {
       node = new ProcessingInstruction(id);
     } else if (nodeType === 3) {
@@ -293,6 +295,7 @@
 
   const HTML_NAMESPACE = "http://www.w3.org/1999/xhtml";
   const SVG_NAMESPACE = "http://www.w3.org/2000/svg";
+  const SHADOW_ROOT_CONSTRUCTION = {};
 
   class Event {
     constructor(type, init = {}) {
@@ -702,11 +705,14 @@
     }
 
     getRootNode(options = {}) {
-      // Omoikane does not expose shadow trees yet, so composed and
-      // non-composed traversal currently have the same document root.
-      void options;
       let root = this;
       while (root.parentNode) root = root.parentNode;
+      if (options && options.composed) {
+        while (root instanceof ShadowRoot) {
+          root = root.host;
+          while (root.parentNode) root = root.parentNode;
+        }
+      }
       return root;
     }
 
@@ -1278,7 +1284,8 @@
       let current = this;
       while (current) {
         if (current.nodeType === 9) return true;
-        current = current.parentNode;
+        current = current.parentNode ||
+          (current instanceof ShadowRoot ? current.host : null);
       }
       return false;
     }
@@ -1635,8 +1642,46 @@
   // `textContent`/`nodeValue` for these node types). Defining it here — rather
   // than on the base Node — keeps `.data` off Element nodes, where e.g.
   // `HTMLObjectElement.data` reflects the `data` content attribute instead.
+  const SHADOW_HOST_NAMES = new Set([
+    "article", "aside", "blockquote", "body", "div", "footer", "h1", "h2",
+    "h3", "h4", "h5", "h6", "header", "main", "nav", "p", "section", "span",
+  ]);
+  const RESERVED_CUSTOM_ELEMENT_NAMES = new Set([
+    "annotation-xml", "color-profile", "font-face", "font-face-src",
+    "font-face-uri", "font-face-format", "font-face-name", "missing-glyph",
+  ]);
+
   class Element extends Node {
     remove() { removeChildNode.call(this); }
+
+    attachShadow(init) {
+      if (init === null || init === undefined || init.mode === undefined) {
+        throw new TypeError("ShadowRootInit.mode is required");
+      }
+      const mode = String(init.mode);
+      if (mode !== "open" && mode !== "closed") {
+        throw new TypeError(mode + " is not a valid ShadowRootMode");
+      }
+      const name = String(this.localName || "").toLowerCase();
+      const customName = name.includes("-") && !RESERVED_CUSTOM_ELEMENT_NAMES.has(name);
+      const namespace = this.namespaceURI;
+      if ((namespace !== null && namespace !== HTML_NAMESPACE) ||
+          (!SHADOW_HOST_NAMES.has(name) && !customName)) {
+        throw new DOMException("Element cannot host a shadow tree", "NotSupportedError");
+      }
+      const root = wrapNode(__omoikane_attach_shadow(this.__id, mode === "closed"));
+      if (!root) {
+        throw new DOMException("Element already hosts a shadow tree", "NotSupportedError");
+      }
+      const owner = this.ownerDocument;
+      if (owner) stampOwnerDoc(root, owner);
+      return root;
+    }
+
+    get shadowRoot() {
+      const root = wrapNode(__omoikane_shadow_root(this.__id));
+      return root && root.mode === "open" ? root : null;
+    }
   }
 
   // The bootstrap originally implemented every DOM wrapper through one large
@@ -2776,6 +2821,29 @@
 
   class DocumentFragment extends Node {}
 
+  class ShadowRoot extends DocumentFragment {
+    constructor(id, construction) {
+      if (construction !== SHADOW_ROOT_CONSTRUCTION) {
+        throw new TypeError("Illegal constructor");
+      }
+      super(id);
+    }
+    get host() { return wrapNode(__omoikane_shadow_host(this.__id)); }
+    get mode() { return __omoikane_shadow_mode(this.__id); }
+    get delegatesFocus() { return false; }
+    get innerHTML() {
+      return Object.getOwnPropertyDescriptor(Element.prototype, "innerHTML")
+        .get.call(this);
+    }
+    set innerHTML(value) {
+      Object.getOwnPropertyDescriptor(Element.prototype, "innerHTML")
+        .set.call(this, value);
+    }
+    cloneNode() {
+      throw new DOMException("ShadowRoot cannot be cloned", "NotSupportedError");
+    }
+  }
+
   class DocumentType extends Node {
     remove() { removeChildNode.call(this); }
   }
@@ -3736,6 +3804,7 @@
   globalThis.ProcessingInstruction = ProcessingInstruction;
   globalThis.Document = Document;
   globalThis.DocumentFragment = DocumentFragment;
+  globalThis.ShadowRoot = ShadowRoot;
   globalThis.DocumentType = DocumentType;
   globalThis.DOMException = DOMException;
   globalThis.CSSStyleSheet = CSSStyleSheet;
