@@ -108,6 +108,15 @@
       "baseline_supported": true
     },
     {
+      "id": "navigation.location-request",
+      "area": "navigation",
+      "description": "Location assignment resolves its URL and queues a browser navigation",
+      "setup": "location.assign('/surface-next?from=probe')",
+      "expected_navigation_requests": 1,
+      "probe": "location.href === 'http://localhost/surface-next?from=probe' && document.URL === location.href",
+      "baseline_supported": false
+    },
+    {
       "id": "performance.mark-entry",
       "area": "scheduling",
       "description": "Performance marks are recorded and queryable",

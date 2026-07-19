@@ -4,6 +4,8 @@ use flate2::read::GzDecoder;
 use std::fmt;
 use std::io::{self, BufRead, Read};
 
+use super::url::Url;
+
 /// A parsed HTTP/1.1 response.
 ///
 /// # Examples
@@ -23,6 +25,7 @@ pub struct HttpResponse {
     reason: String,
     headers: Vec<(String, String)>,
     body: Vec<u8>,
+    effective_url: Option<Url>,
 }
 
 impl HttpResponse {
@@ -37,6 +40,7 @@ impl HttpResponse {
             reason: reason.into(),
             headers,
             body,
+            effective_url: None,
         }
     }
 
@@ -66,6 +70,15 @@ impl HttpResponse {
     /// Returns the response body bytes.
     pub fn body(&self) -> &[u8] {
         &self.body
+    }
+
+    /// Returns the final URL after redirects when the response came from [`Client`](super::Client).
+    pub fn effective_url(&self) -> Option<&Url> {
+        self.effective_url.as_ref()
+    }
+
+    pub(crate) fn set_effective_url(&mut self, url: Url) {
+        self.effective_url = Some(url);
     }
 
     /// Parses an HTTP/1.1 response from a readable stream.
