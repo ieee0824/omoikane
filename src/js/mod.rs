@@ -1305,7 +1305,15 @@ impl JsRuntime {
                     if std::env::var_os("OMOIKANE_LOG_SCRIPTS").is_some() {
                         eprintln!("[omoikane][script] loading dynamic {src}");
                     }
-                    let source = fetch_script_source(&src, base_url.as_ref()).ok_or_else(|| {
+                    let source = {
+                        let mut state = self.host_state.borrow_mut();
+                        fetch_script_source_with_client(
+                            &src,
+                            base_url.as_ref(),
+                            &mut state.http_client,
+                        )
+                    }
+                    .ok_or_else(|| {
                         JsError::from(
                             JsNativeError::error()
                                 .with_message(format!("failed to fetch dynamic script: {src}")),
@@ -1444,7 +1452,15 @@ impl JsRuntime {
             let (source_code, script_label) = if let Some(src_url) = src {
                 // External script: fetch
                 let fetch_start = std::time::Instant::now();
-                match fetch_script_source(&src_url, base_url) {
+                let fetched = {
+                    let mut state = self.host_state.borrow_mut();
+                    fetch_script_source_with_client(
+                        &src_url,
+                        base_url,
+                        &mut state.http_client,
+                    )
+                };
+                match fetched {
                     Some(code) => {
                         if log_scripts {
                             eprintln!(
@@ -1745,7 +1761,21 @@ fn requires_public_fetch(url: &crate::http::Url, base_url: Option<&crate::http::
 /// [`is_javascript_mime_type`]) are executed as classic scripts; a `data:` URI
 /// with a non-JavaScript media type returns `None` (treated as a fetch
 /// failure), matching how browsers refuse to run non-script `data:` sources.
+#[cfg(test)]
 fn fetch_script_source(src: &str, base_url: Option<&crate::http::Url>) -> Option<String> {
+    fetch_script_source_with_client(src, base_url, &mut Client::new())
+}
+
+/// Fetches script source through the supplied page-scoped HTTP client.
+///
+/// Keeping one client for a document preserves cookies and allows its
+/// connection pool to reuse TLS connections across external scripts. The
+/// standalone wrapper above remains useful for focused URI-decoding tests.
+fn fetch_script_source_with_client(
+    src: &str,
+    base_url: Option<&crate::http::Url>,
+    client: &mut Client,
+) -> Option<String> {
     match resolve_resource_ref(src, base_url)? {
         // data: URI scripts are decoded inline without a network fetch. Only
         // JavaScript media types are executed as classic scripts; any other
@@ -1760,7 +1790,6 @@ fn fetch_script_source(src: &str, base_url: Option<&crate::http::Url>) -> Option
         ResolvedResource::Url(url) => {
             let resolved = url.parse::<crate::http::Url>().ok()?;
             let public_only = requires_public_fetch(&resolved, base_url);
-            let mut client = Client::new();
             let response = if public_only {
                 client.get_public(&url).ok()?
             } else {
@@ -8409,6 +8438,68 @@ mod tests {
                 .unwrap()
                 .as_boolean()
                 .unwrap()
+        );
+    }
+
+    #[test]
+    fn external_scripts_share_page_http_cookies() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let handle = thread::spawn(move || {
+            let mut second_request_has_cookie = false;
+            for request_index in 0..2 {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut bytes = Vec::new();
+                let mut buffer = [0u8; 1024];
+                loop {
+                    let read = stream.read(&mut buffer).unwrap();
+                    bytes.extend_from_slice(&buffer[..read]);
+                    if read == 0 || bytes.windows(4).any(|window| window == b"\r\n\r\n") {
+                        break;
+                    }
+                }
+                let request = String::from_utf8_lossy(&bytes);
+                if request_index == 1 {
+                    second_request_has_cookie = request
+                        .lines()
+                        .any(|line| line.eq_ignore_ascii_case("Cookie: page_session=ready"));
+                }
+                let body = if request_index == 0 {
+                    "globalThis.firstExternalScript = true;"
+                } else {
+                    "globalThis.secondExternalScript = true;"
+                };
+                let cookie = if request_index == 0 {
+                    "Set-Cookie: page_session=ready; Path=/\r\n"
+                } else {
+                    ""
+                };
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/javascript\r\n{cookie}Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                stream.write_all(response.as_bytes()).unwrap();
+            }
+            second_request_has_cookie
+        });
+
+        let html = r#"<html><head><script src="/first.js"></script><script src="/second.js"></script></head><body></body></html>"#;
+        let document = crate::html::TreeBuilder::parse(html).document();
+        let mut runtime = JsRuntime::with_document(document).unwrap();
+        let base_url = format!("http://{address}/")
+            .parse::<crate::http::Url>()
+            .unwrap();
+        assert!(runtime.execute_document_scripts(Some(&base_url)).is_empty());
+        assert_eq!(
+            runtime
+                .eval("firstExternalScript && secondExternalScript")
+                .unwrap()
+                .as_boolean(),
+            Some(true)
+        );
+        assert!(
+            handle.join().unwrap(),
+            "the second script request must receive the first response's cookie"
         );
     }
 
