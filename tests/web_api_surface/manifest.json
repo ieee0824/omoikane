@@ -103,6 +103,7 @@
       "area": "scheduling",
       "description": "requestAnimationFrame invokes a queued callback",
       "setup": "globalThis.__animationFrameDelivered = false; requestAnimationFrame(() => { __animationFrameDelivered = true; })",
+      "run_animation_frame": true,
       "probe": "__animationFrameDelivered === true",
       "baseline_supported": true
     },

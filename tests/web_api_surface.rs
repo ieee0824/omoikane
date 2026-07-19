@@ -22,6 +22,8 @@ struct Feature {
     area: String,
     description: String,
     setup: Option<String>,
+    #[serde(default)]
+    run_animation_frame: bool,
     probe: String,
     baseline_supported: bool,
 }
@@ -92,6 +94,19 @@ fn run_probe(runtime: &mut JsRuntime, feature: &Feature) -> ProbeResult {
             baseline_supported: feature.baseline_supported,
             status: ProbeStatus::Error,
             error: Some(format!("jobs: {error}")),
+        };
+    }
+
+    if feature.run_animation_frame
+        && let Err(error) = runtime.run_animation_frame(16)
+    {
+        return ProbeResult {
+            id: feature.id.clone(),
+            area: feature.area.clone(),
+            description: feature.description.clone(),
+            baseline_supported: feature.baseline_supported,
+            status: ProbeStatus::Error,
+            error: Some(format!("animation frame: {error}")),
         };
     }
 
