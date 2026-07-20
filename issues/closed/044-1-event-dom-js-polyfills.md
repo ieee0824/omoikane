@@ -1,7 +1,7 @@
 ---
 number: 044-1
 slug: event-dom-js-polyfills
-status: open
+status: closed
 parent: 044
 ---
 
