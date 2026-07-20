@@ -24,10 +24,15 @@ x.comのdocument scriptsに約40秒かかっている。計測の結果、entry 
 
 - [x] rustls設定をtransport modeごとに共有し、依存module間でTLS session cacheを再利用する
 - [x] host・TLS mode・public IP制約単位でHTTP接続をpoolし、HTTP/1.1 keep-aliveとHTTP/2 sessionを再利用する
-- module graph取得が逐次化されている箇所とBoaのloader呼び出し順を確認する
-- 独立した依存moduleの並列取得、またはリンク前の先読みを検討する
-- URL単位のmodule source・parse結果のキャッシュ範囲を確認する
-- 巨大moduleのparse時間を分離し、不要なdynamic importを早期に読み込んでいないか確認する
+- [x] URL単位のmodule source・parse結果のキャッシュ範囲を確認する
+      → `HttpModuleLoader.modules`（`src/js/mod.rs`）が URL キーで parse 済み `Module` を保持し、
+        cache-hit 時は clone を返す。ただし Context 生存中のみ有効で、永続化・Context 跨ぎ共有はない
+- [x] module graph取得が逐次化されている箇所とBoaのloader呼び出し順を確認する
+      → `load_imported_module`（`src/js/mod.rs`）で依存 module ごとに同期 HTTP 取得 → `Module::parse` を
+        逐次実行していることを特定。末尾の `async { result }` は計算済み結果を包むだけで実際の並行性はない
+- [ ] 独立した依存moduleの並列取得、またはリンク前の先読みを検討する（**最大の残効果。未着手**）
+- [ ] 巨大moduleのparse時間を分離し、不要なdynamic importを早期に読み込んでいないか確認する（未着手。
+      parse は取得と同一スレッドで同期実行。例: `castle.umd` の parse 約 7 秒）
 - x.comの同一条件で変更前後を複数回計測する
 
 ## 完了条件

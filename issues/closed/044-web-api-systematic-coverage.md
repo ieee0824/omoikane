@@ -1,10 +1,27 @@
 ---
 number: 044
 slug: web-api-systematic-coverage
-status: open
+status: closed
 ---
 
 # Web API 体系的カバレッジ
+
+## 完了メモ（2026-07-20）
+
+Phase 1〜6 で列挙した API はすべて実装済みであることを確認し、close する。
+実装の所在は主に `src/js/dom_bootstrap.js`（JS ポリフィル束）と一部 `src/js/mod.rs`
+（Rust ネイティブバインディング）。
+
+- Phase 1（レイアウトメトリクス）: 044-2 / PR #105 で完了済み。
+- Phase 2（イベント・タイマー）〜 Phase 4（Observer・メディア）: 044-1 で完了済み。
+  `requestAnimationFrame` は stub ではなくイベントループ統合済み（`src/js/mod.rs`）。
+- Phase 5（ネットワーク・データ）・Phase 6（フォーム・入力）: 専用子 issue なしで実装済み。
+  `XMLHttpRequest` / `Headers`/`Request`/`Response` / `URL`/`URLSearchParams` /
+  `TextEncoder`/`TextDecoder` / `value`/`checked`/`disabled` / `submit()`/`reset()` を確認。
+
+残る改善余地は本 issue が追跡する「カバレッジ」ではなく忠実度（fidelity）の話:
+`attributes` は Proxy 実装で仕様名 `NamedNodeMap` 型ではない、`matchMedia`/`alert` 等の
+一部が簡易実装、など。必要なら別 issue として起票する。レイアウト側の後続は 047 / 048 で追跡中。
 
 ## 概要
 

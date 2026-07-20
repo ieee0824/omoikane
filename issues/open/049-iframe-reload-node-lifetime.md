@@ -17,8 +17,9 @@ JS ラッパの挙動を、実ブラウザの「detached だがアクセス可�
 - 016-9 の再ロード処理は、メモリの単調増加を防ぐため旧サブ文書ツリーを `HostState.nodes`
   レジストリから unregister する（`unregister_tree`、テスト `iframe_reload_unregisters_previous_sub_document_tree`）
 - その結果、旧文書への参照を保持していた JS コード（`oldDoc = iframe.contentDocument` のキャッシュや
-  旧文書から query したノード）が `__omoikane_node_type` / `__omoikane_get_attribute` 等の primitive で
-  「node not found」を throw する
+  旧文書から query したノード）が `__omoikane_node_type` / `__omoikane_node_name` 等の型情報系 primitive で
+  「node not found」を throw する（2026-07-20 実装照合: `__omoikane_get_attribute` は現状 node 不在時に
+  throw ではなく `null` を返すため、この例からは除外。throw するのは node_type/node_name 等の系統）
 - 実ブラウザでは旧文書のノードは detached な文書として生存し、アクセス自体は可能
 
 ## トレードオフ
