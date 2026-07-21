@@ -59,7 +59,7 @@
       "area": "web-components",
       "description": "Custom element registry is available",
       "probe": "typeof CustomElementRegistry === 'function' && typeof customElements === 'object'",
-      "baseline_supported": false
+      "baseline_supported": true
     },
     {
       "id": "dom.template-content",
