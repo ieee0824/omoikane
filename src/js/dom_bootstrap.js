@@ -186,7 +186,10 @@
   function invokeListeners(node, event, capture, phase) {
     const listeners = (node.__listeners.get(event.type) || []).slice();
     for (const entry of listeners) {
-      if (!!entry.capture === capture) {
+      if (!entry.removed && !!entry.capture === capture) {
+        if (entry.once) {
+          node.removeEventListener(event.type, entry.listener, entry.capture);
+        }
         event.currentTarget = node;
         event.eventPhase = phase;
         if (typeof entry.listener === "function") {
@@ -357,8 +360,9 @@
   class Event {
     constructor(type, init = {}) {
       this.type = String(type);
-      this.bubbles = init.bubbles ?? true;
-      this.cancelable = init.cancelable ?? false;
+      this.bubbles = init.bubbles === undefined ? true : !!init.bubbles;
+      this.cancelable = !!init.cancelable;
+      this.composed = !!init.composed;
       this.target = null;
       this.currentTarget = null;
       this.eventPhase = 0;
@@ -367,6 +371,8 @@
       this.timeStamp = Date.now();
       this.__stopped = false;
       this.__stoppedImmediate = false;
+      this.__dispatching = false;
+      this.__path = [];
     }
 
     stopPropagation() {
@@ -386,9 +392,23 @@
 
     // Legacy initialiser used by events created via `document.createEvent()`.
     initEvent(type, bubbles, cancelable) {
+      if (this.__dispatching) return;
       this.type = String(type);
       this.bubbles = !!bubbles;
       this.cancelable = !!cancelable;
+      this.composed = false;
+    }
+
+    composedPath() {
+      if (!this.currentTarget) return [];
+      // Visibility is based on the dispatch path snapshot. DOM mutations from
+      // an earlier listener must not reveal or hide closed-root entries for a
+      // later listener while the same dispatch is still in progress.
+      const currentEntry = this.__path.find(entry => entry.node === this.currentTarget);
+      const visibleClosedRoots = currentEntry ? currentEntry.closedRoots : [];
+      return this.__path
+        .filter(entry => entry.closedRoots.every(root => visibleClosedRoots.includes(root)))
+        .map(entry => entry.node);
     }
   }
 
@@ -466,6 +486,160 @@
       super(type, init);
       this.relatedTarget = init.relatedTarget ?? null;
     }
+  }
+
+  function shadowRootsContaining(node) {
+    if (!(node instanceof Node)) return [];
+    const roots = [];
+    let current = node;
+    while (current) {
+      const root = nodeRoot(current);
+      if (!(root instanceof ShadowRoot)) break;
+      if (root.mode === "closed") roots.push(root);
+      current = root.host;
+    }
+    return roots;
+  }
+
+  function isNodeInsideShadowRoot(node, root) {
+    if (!(node instanceof Node)) return false;
+    for (let current = node; current;) {
+      if (current === root) return true;
+      current = current.parentNode ||
+        (current instanceof ShadowRoot ? current.host : null);
+    }
+    return false;
+  }
+
+  // Retarget a node against the tree in which a listener lives. A listener
+  // outside a shadow root observes its host, while listeners in that same root
+  // retain the original target. Slotted light-DOM nodes keep their identity
+  // because their tree root remains the outer document.
+  function retargetNode(node, against) {
+    let target = node;
+    while (target instanceof Node) {
+      const root = nodeRoot(target);
+      if (!(root instanceof ShadowRoot)) return target;
+      if (isNodeInsideShadowRoot(against, root)) return target;
+      target = root.host;
+    }
+    return target;
+  }
+
+  function eventParent(node, event, originalRoot) {
+    if (!(node instanceof Node)) return null;
+    const assignedSlotId = __omoikane_internal_assigned_slot(node.__id);
+    if (assignedSlotId !== null && assignedSlotId !== undefined) {
+      return wrapNode(assignedSlotId);
+    }
+    if (node instanceof ShadowRoot) {
+      // A non-composed event only stops at the shadow root in which it was
+      // dispatched. Events from slotted light-DOM nodes still leave the root.
+      return event.composed || originalRoot !== node ? node.host : null;
+    }
+    if (node.nodeType === 9) return node.defaultView;
+    return node.parentNode;
+  }
+
+  function buildEventPath(target, event) {
+    const path = [];
+    const originalRoot = target instanceof Node ? nodeRoot(target) : null;
+    let current = target;
+    while (current) {
+      const entry = {
+        node: current,
+        closedRoots: shadowRootsContaining(current),
+        target: retargetNode(target, current),
+        relatedTarget: retargetNode(event.__originalRelatedTarget, current),
+        hostTarget: false,
+      };
+      // Once target and relatedTarget become indistinguishable at a boundary,
+      // the remainder of the event path is omitted. This prevents mouse/focus
+      // transitions inside one shadow tree from leaking out as host-to-host
+      // transitions.
+      if (entry.relatedTarget !== null && entry.relatedTarget === entry.target) break;
+      path.push(entry);
+      const parent = eventParent(current, event, originalRoot);
+      if (parent && current instanceof ShadowRoot &&
+          retargetNode(target, parent) === parent) {
+        // Capturing and bubbling listeners on a host are invoked as AT_TARGET
+        // when an event crosses out of its shadow root.
+        const hostEntry = {
+          node: parent,
+          closedRoots: shadowRootsContaining(parent),
+          target: parent,
+          relatedTarget: retargetNode(event.__originalRelatedTarget, parent),
+          hostTarget: true,
+        };
+        if (hostEntry.relatedTarget !== null && hostEntry.relatedTarget === hostEntry.target) break;
+        path.push(hostEntry);
+        current = eventParent(parent, event, originalRoot);
+      } else {
+        current = parent;
+      }
+    }
+    return path;
+  }
+
+  function invokeEventPathEntry(entry, event, capture, phase) {
+    event.target = entry.target;
+    event.relatedTarget = entry.relatedTarget;
+    if (entry.relatedTarget !== null && entry.relatedTarget === entry.target) {
+      return event.__stopped;
+    }
+    return invokeListeners(entry.node, event, capture, entry.hostTarget ? 2 : phase);
+  }
+
+  function dispatchEventOnTarget(target, event) {
+    if (!(event instanceof Event)) throw new TypeError("dispatchEvent requires an Event");
+    if (event.__dispatching || event.type === "") {
+      throw new DOMException("The event is already being dispatched or has no type.", "InvalidStateError");
+    }
+    event.__dispatching = true;
+    event.__stopped = false;
+    event.__stoppedImmediate = false;
+    event.__originalRelatedTarget = event.relatedTarget ?? null;
+    const path = buildEventPath(target, event);
+    event.__path = path;
+
+    try {
+      if (path.length === 0) return !event.defaultPrevented;
+      let stopped = false;
+      for (let i = path.length - 1; i >= 1; i -= 1) {
+        if (invokeEventPathEntry(path[i], event, true, 1)) {
+          stopped = true;
+          break;
+        }
+      }
+
+      if (!stopped) {
+        invokeEventPathEntry(path[0], event, true, 2);
+      }
+      if (!stopped && !event.__stoppedImmediate) {
+        invokeEventPathEntry(path[0], event, false, 2);
+      }
+      if (event.__stopped) stopped = true;
+
+      if (!stopped) {
+        for (let i = 1; i < path.length; i += 1) {
+          const entry = path[i];
+          if (!event.bubbles && !entry.hostTarget) continue;
+          if (invokeEventPathEntry(entry, event, false, 3)) break;
+        }
+      }
+    } finally {
+      event.__dispatching = false;
+      event.currentTarget = null;
+      event.eventPhase = 0;
+      const finalEntry = path[path.length - 1];
+      const clearTargets = !finalEntry ||
+        (finalEntry.target instanceof Node && nodeRoot(finalEntry.target) instanceof ShadowRoot) ||
+        (finalEntry.relatedTarget instanceof Node &&
+          nodeRoot(finalEntry.relatedTarget) instanceof ShadowRoot);
+      event.target = clearTargets ? null : finalEntry.target;
+      event.relatedTarget = clearTargets ? null : finalEntry.relatedTarget;
+    }
+    return !event.defaultPrevented;
   }
 
   // Boa 0.21 exposes WeakMap/WeakRef (but not FinalizationRegistry), so the
@@ -696,68 +870,32 @@
           (typeof listener !== "function" && typeof listener.handleEvent !== "function")) {
         return;
       }
-      const capture = typeof options === "boolean" ? options : !!options.capture;
+      const capture = typeof options === "boolean" ? options : !!(options && options.capture);
+      const once = typeof options === "object" && options !== null && !!options.once;
       const key = String(type);
       const list = this.__listeners.get(key) ?? [];
       // Deduplicate: same listener+capture is only registered once (DOM spec).
       if (!list.some(entry => entry.listener === listener && !!entry.capture === capture)) {
-        list.push({ listener, capture });
+        list.push({ listener, capture, once, removed: false });
       }
       this.__listeners.set(key, list);
     }
 
     removeEventListener(type, listener, options = false) {
-      const capture = typeof options === "boolean" ? options : !!options.capture;
+      const capture = typeof options === "boolean" ? options : !!(options && options.capture);
       const key = String(type);
       const list = this.__listeners.get(key);
       if (!list) return;
       const index = list.findIndex(entry => entry.listener === listener && !!entry.capture === capture);
-      if (index !== -1) list.splice(index, 1);
+      if (index !== -1) {
+        list[index].removed = true;
+        list.splice(index, 1);
+      }
     }
 
     dispatchEvent(event) {
       const dispatchEvent = event instanceof Event ? event : new Event(event);
-      dispatchEvent.target = this;
-
-      const path = [];
-      let current = this;
-      while (current) {
-        path.push(current);
-        current = current.parentNode;
-      }
-
-      // Capture phase
-      let stopped = false;
-      for (let i = path.length - 1; i >= 1; i -= 1) {
-        if (invokeListeners(path[i], dispatchEvent, true, 1)) {
-          stopped = true;
-          break;
-        }
-      }
-
-      // Target phase
-      if (!stopped) {
-        if (invokeListeners(this, dispatchEvent, true, 2)) {
-          stopped = true;
-        }
-      }
-      if (!stopped) {
-        if (invokeListeners(this, dispatchEvent, false, 2)) {
-          stopped = true;
-        }
-      }
-
-      // Bubble phase
-      if (!stopped && dispatchEvent.bubbles) {
-        for (let i = 1; i < path.length; i += 1) {
-          if (invokeListeners(path[i], dispatchEvent, false, 3)) {
-            break;
-          }
-        }
-      }
-
-      // Return value depends only on preventDefault, not stopPropagation
-      const notCanceled = !dispatchEvent.defaultPrevented;
+      const notCanceled = dispatchEventOnTarget(this, dispatchEvent);
       // Activation behavior is the default action of a click event: a submit or
       // reset button whose click was not canceled submits or resets its owning
       // form. Running it here (rather than only in click()) means a synthetic
@@ -1648,7 +1786,7 @@
       // The click event's activation behavior (form submit/reset) is its
       // default action; dispatchEvent runs it when the event is not canceled.
       this.dispatchEvent(
-        new MouseEvent("click", { bubbles: true, cancelable: true })
+        new MouseEvent("click", { bubbles: true, cancelable: true, composed: true })
       );
     }
 
@@ -3339,6 +3477,7 @@
       if (!this.__contentWindowFacade) {
         const iframe = this;
         this.__contentWindowFacade = {
+          __listeners: new Map(),
           get document() {
             return iframe.contentDocument;
           },
@@ -3347,6 +3486,15 @@
           },
           frameElement: iframe,
           getComputedStyle: globalThis.getComputedStyle,
+          addEventListener(type, listener, options) {
+            return Node.prototype.addEventListener.call(this, type, listener, options);
+          },
+          removeEventListener(type, listener, options) {
+            return Node.prototype.removeEventListener.call(this, type, listener, options);
+          },
+          dispatchEvent(event) {
+            return dispatchEventOnTarget(this, event);
+          },
         };
         windowObjects.add(this.__contentWindowFacade);
       }
@@ -4435,14 +4583,18 @@
     globalThis.window = globalThis;
   }
   globalThis.self = globalThis;
+  Object.defineProperty(globalThis, "__listeners", {
+    configurable: true,
+    value: new Map(),
+  });
   globalThis.addEventListener = function(type, listener, options) {
-    return document.addEventListener(type, listener, options);
+    return Node.prototype.addEventListener.call(globalThis, type, listener, options);
   };
   globalThis.removeEventListener = function(type, listener, options) {
-    return document.removeEventListener(type, listener, options);
+    return Node.prototype.removeEventListener.call(globalThis, type, listener, options);
   };
   globalThis.dispatchEvent = function(event) {
-    return document.dispatchEvent(event);
+    return dispatchEventOnTarget(globalThis, event);
   };
 
   // Wire `on*` inline event-handler content attributes (e.g.

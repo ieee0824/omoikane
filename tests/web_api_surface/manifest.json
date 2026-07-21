@@ -63,6 +63,14 @@
       "baseline_supported": false
     },
     {
+      "id": "dom.shadow-composed-events",
+      "area": "web-components",
+      "description": "Composed events cross and retarget across shadow boundaries",
+      "setup": "globalThis.__eventHost = document.createElement('div'); document.body.appendChild(__eventHost); globalThis.__eventRoot = __eventHost.attachShadow({mode:'open'}); globalThis.__eventTarget = document.createElement('span'); __eventRoot.appendChild(__eventTarget); globalThis.__eventObserved = false; __eventHost.addEventListener('surface-probe', event => { __eventObserved = event.target === __eventHost && event.composedPath().includes(__eventRoot); }); __eventTarget.dispatchEvent(new Event('surface-probe', {bubbles:true, composed:true}))",
+      "probe": "typeof Event.prototype.composedPath === 'function' && new Event('surface-probe', {composed:true}).composed === true && __eventObserved === true",
+      "baseline_supported": false
+    },
+    {
       "id": "dom.custom-elements",
       "area": "web-components",
       "description": "Custom element registry is available",

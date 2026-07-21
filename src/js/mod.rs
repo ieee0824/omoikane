@@ -2287,6 +2287,11 @@ fn register_host_bindings(
             NativeFunction::from_copy_closure(assigned_slot_native),
         ),
         (
+            js_string!("__omoikane_internal_assigned_slot"),
+            1,
+            NativeFunction::from_copy_closure(internal_assigned_slot_native),
+        ),
+        (
             js_string!("__omoikane_assigned_nodes"),
             2,
             NativeFunction::from_copy_closure(assigned_nodes_native),
@@ -4354,6 +4359,25 @@ fn assigned_slot_native(
     })
 }
 
+/// Event path construction must traverse assigned slots even when the slot is
+/// inside a closed shadow root. The public `assignedSlot` binding above applies
+/// the required visibility filter, while this bootstrap-only binding exposes
+/// the unfiltered tree relationship to the dispatch algorithm.
+fn internal_assigned_slot_native(
+    _: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let id = parse_node_id(args.first(), context)?;
+    with_host_state(|state| {
+        let slot = state
+            .borrow()
+            .get_node(id)
+            .and_then(|node| node.assigned_slot());
+        Ok(node_to_js_value(slot))
+    })
+}
+
 fn assigned_nodes_native(
     _: &JsValue,
     args: &[JsValue],
@@ -5340,12 +5364,12 @@ mod tests {
         let mut runtime = JsRuntime::new().unwrap();
         assert!(runtime
             .eval(
-                r#"(() => {
+                r##"(() => {
                     const url = new URL("../asset.js?q=hello+world", "https://example.com/app/page.js");
                     return url.origin === "https://example.com" &&
                       url.pathname === "/app/../asset.js" &&
                       url.searchParams.get("q") === "hello world";
-                })()"#,
+                })()"##,
             )
             .unwrap()
             .as_boolean()
@@ -9066,6 +9090,201 @@ mod tests {
             .unwrap()
             .to_std_string_escaped();
         assert_eq!(result, "1|1");
+    }
+
+    #[test]
+    fn shadow_events_respect_composed_boundaries_and_retarget_at_hosts() {
+        let mut runtime = JsRuntime::new().unwrap();
+        let result = runtime
+            .eval(
+                r#"(() => {
+                  const host = document.createElement("div");
+                  document.body.appendChild(host);
+                  const root = host.attachShadow({ mode: "open" });
+                  root.innerHTML = "<button>inside</button>";
+                  const inside = root.firstChild;
+                  const order = [];
+                  const listen = (node, name, capture) => node.addEventListener("probe", event => {
+                    order.push(name + ":" + event.eventPhase + ":" +
+                      (event.target === inside ? "inside" : event.target === host ? "host" : "other"));
+                  }, capture);
+                  listen(window, "window-capture", true);
+                  listen(document, "document-capture", true);
+                  listen(host, "host-capture", true);
+                  listen(root, "root-capture", true);
+                  listen(inside, "inside-capture", true);
+                  listen(inside, "inside-bubble", false);
+                  listen(root, "root-bubble", false);
+                  listen(host, "host-bubble", false);
+                  listen(document, "document-bubble", false);
+                  listen(window, "window-bubble", false);
+
+                  const local = new Event("probe", { bubbles: true });
+                  inside.dispatchEvent(local);
+                  const localOrder = order.splice(0).join("|");
+                  const crossing = new Event("probe", { bubbles: true, composed: true });
+                  inside.dispatchEvent(crossing);
+                  return [
+                    local.composed,
+                    local.target === null,
+                    crossing.composed,
+                    localOrder,
+                    order.join("|"),
+                    crossing.target === host,
+                    crossing.currentTarget === null,
+                    crossing.eventPhase,
+                    crossing.composedPath().length,
+                  ].join("\n");
+                })()"#,
+            )
+            .unwrap()
+            .to_string(&mut runtime.context)
+            .unwrap()
+            .to_std_string_escaped();
+        assert_eq!(
+            result,
+            concat!(
+                "false\ntrue\ntrue\n",
+                "root-capture:1:inside|inside-capture:2:inside|inside-bubble:2:inside|root-bubble:3:inside\n",
+                "window-capture:1:host|document-capture:1:host|host-capture:2:host|",
+                "root-capture:1:inside|inside-capture:2:inside|inside-bubble:2:inside|",
+                "root-bubble:3:inside|host-bubble:2:host|document-bubble:3:host|window-bubble:3:host\n",
+                "true\ntrue\n0\n0"
+            )
+        );
+    }
+
+    #[test]
+    fn slotted_events_follow_slots_without_retargeting_light_dom_target() {
+        let mut runtime = JsRuntime::new().unwrap();
+        assert!(runtime
+            .eval(
+                r##"(() => {
+                  const host = document.createElement("div");
+                  const light = document.createElement("span");
+                  host.appendChild(light);
+                  document.body.appendChild(host);
+                  const root = host.attachShadow({ mode: "open" });
+                  root.innerHTML = "<slot></slot>";
+                  const slot = root.firstChild;
+                  const seen = [];
+                  for (const [node, name] of [[slot, "slot"], [root, "root"], [host, "host"], [document, "document"]]) {
+                    node.addEventListener("probe", event => {
+                      seen.push(name + ":" + (event.target === light) + ":" +
+                        event.composedPath().map(node => node === window ? "window" : node.nodeName).join(","));
+                    });
+                  }
+                  light.dispatchEvent(new Event("probe", { bubbles: true }));
+                  return seen.length === 4 && seen.every(value => value.includes(":true:")) &&
+                    seen[0].includes("SPAN,SLOT,#document-fragment,DIV") &&
+                    seen[3].endsWith("#document,window");
+                })()"##,
+            )
+            .unwrap()
+            .as_boolean()
+            .unwrap());
+    }
+
+    #[test]
+    fn closed_shadow_event_paths_hide_internals_from_outside_listeners() {
+        let mut runtime = JsRuntime::new().unwrap();
+        assert!(runtime
+            .eval(
+                r#"(() => {
+                  const host = document.createElement("div");
+                  document.body.appendChild(host);
+                  const root = host.attachShadow({ mode: "closed" });
+                  root.innerHTML = "<span></span>";
+                  const inside = root.firstChild;
+                  let internalPath;
+                  let externalPath;
+                  let externalPathAfterMutation;
+                  let internalTarget;
+                  let externalTarget;
+                  root.addEventListener("probe", event => {
+                    internalPath = event.composedPath();
+                    internalTarget = event.target;
+                  });
+                  document.addEventListener("probe", event => {
+                    externalPath = event.composedPath();
+                    externalTarget = event.target;
+                    host.appendChild(inside);
+                    externalPathAfterMutation = event.composedPath();
+                  });
+                  inside.dispatchEvent(new Event("probe", { bubbles: true, composed: true }));
+                  return internalTarget === inside && externalTarget === host &&
+                    internalPath[0] === inside && internalPath.includes(root) &&
+                    externalPath[0] === host && !externalPath.includes(inside) &&
+                    !externalPath.includes(root) && externalPath.at(-1) === window &&
+                    externalPath.length === externalPathAfterMutation.length &&
+                    externalPath.every((node, index) => node === externalPathAfterMutation[index]);
+                })()"#,
+            )
+            .unwrap()
+            .as_boolean()
+            .unwrap());
+    }
+
+    #[test]
+    fn related_target_retargeting_suppresses_indistinguishable_outer_events() {
+        let mut runtime = JsRuntime::new().unwrap();
+        let result = runtime
+            .eval(
+                r#"(() => {
+                  const host = document.createElement("div");
+                  document.body.appendChild(host);
+                  const root = host.attachShadow({ mode: "open" });
+                  root.innerHTML = "<span></span><b></b>";
+                  const first = root.firstChild;
+                  const second = root.lastChild;
+                  let rootCalls = 0;
+                  let hostCalls = 0;
+                  let documentCalls = 0;
+                  let rootRelated = null;
+                  root.addEventListener("mouseout", event => { rootCalls++; rootRelated = event.relatedTarget; });
+                  host.addEventListener("mouseout", () => hostCalls++);
+                  document.addEventListener("mouseout", () => documentCalls++);
+                  first.dispatchEvent(new MouseEvent("mouseout", {
+                    bubbles: true, composed: true, relatedTarget: second,
+                  }));
+                  return [rootCalls, hostCalls, documentCalls, rootRelated === second].join("|");
+                })()"#,
+            )
+            .unwrap()
+            .to_string(&mut runtime.context)
+            .unwrap()
+            .to_std_string_escaped();
+        assert_eq!(result, "1|0|0|true");
+    }
+
+    #[test]
+    fn event_dispatch_reentry_and_listener_removal_follow_dom_semantics() {
+        let mut runtime = JsRuntime::new().unwrap();
+        let result = runtime
+            .eval(
+                r#"(() => {
+                  const node = document.createElement("div");
+                  let calls = 0;
+                  let reentry = "";
+                  const removed = () => calls += 100;
+                  node.addEventListener("probe", event => {
+                    calls++;
+                    node.removeEventListener("probe", removed);
+                    try { node.dispatchEvent(event); } catch (error) { reentry = error.name; }
+                  });
+                  node.addEventListener("probe", removed);
+                  node.addEventListener("probe", () => calls += 10, { once: true });
+                  const event = new Event("probe");
+                  node.dispatchEvent(event);
+                  node.dispatchEvent(event);
+                  return [calls, reentry, event.currentTarget, event.eventPhase].join("|");
+                })()"#,
+            )
+            .unwrap()
+            .to_string(&mut runtime.context)
+            .unwrap()
+            .to_std_string_escaped();
+        assert_eq!(result, "12|InvalidStateError||0");
     }
 
     #[test]
