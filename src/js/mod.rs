@@ -8886,6 +8886,174 @@ mod tests {
     }
 
     #[test]
+    fn custom_element_registry_defines_and_constructs_autonomous_elements() {
+        let mut runtime = JsRuntime::new().unwrap();
+        assert!(runtime
+            .eval(
+                r#"(() => {
+                  let illegalConstructor = false;
+                  let invalidName = "";
+                  let duplicateName = "";
+                  let duplicateConstructor = "";
+                  try { new CustomElementRegistry(); } catch (e) { illegalConstructor = e.name === "TypeError"; }
+                  try { customElements.define("invalid", class extends HTMLElement {}); }
+                  catch (e) { invalidName = e.name; }
+
+                  let calls = 0;
+                  class TestElement extends HTMLElement {
+                    constructor() {
+                      super();
+                      calls++;
+                      this.constructed = true;
+                    }
+                  }
+                  globalThis.customElementWhenDefinedResolved = false;
+                  const pendingDefinition = customElements.whenDefined("test-element");
+                  const samePendingPromise =
+                    pendingDefinition === customElements.whenDefined("test-element");
+                  pendingDefinition.then(value => {
+                    customElementWhenDefinedResolved = value === TestElement;
+                  });
+                  customElements.define("test-element", TestElement);
+                  try { customElements.define("test-element", class extends HTMLElement {}); }
+                  catch (e) { duplicateName = e.name; }
+                  try { customElements.define("other-element", TestElement); }
+                  catch (e) { duplicateConstructor = e.name; }
+                  customElements.define("base-html-element", HTMLElement);
+                  let htmlElementStayedIllegal = false;
+                  try { new HTMLElement(); } catch (e) {
+                    htmlElementStayedIllegal = e.name === "TypeError";
+                  }
+                  class NonAsciiElement extends HTMLElement {}
+                  customElements.define("x-À", NonAsciiElement);
+
+                  const created = document.createElement("test-element");
+                  const directlyConstructed = new TestElement();
+                  const nonAscii = document.createElement("x-À");
+                  return typeof CustomElementRegistry === "function" &&
+                    customElements instanceof CustomElementRegistry &&
+                    illegalConstructor && invalidName === "SyntaxError" &&
+                    duplicateName === "NotSupportedError" &&
+                    duplicateConstructor === "NotSupportedError" &&
+                    htmlElementStayedIllegal &&
+                    customElements.get("test-element") === TestElement &&
+                    customElements.get("missing-element") === undefined &&
+                    customElements.getName(TestElement) === "test-element" &&
+                    customElements.getName(class extends HTMLElement {}) === null &&
+                    samePendingPromise &&
+                    customElements.whenDefined("test-element") === pendingDefinition &&
+                    created instanceof TestElement && created.constructed &&
+                    directlyConstructed instanceof TestElement &&
+                    directlyConstructed.localName === "test-element" &&
+                    nonAscii instanceof NonAsciiElement &&
+                    nonAscii.localName === "x-À" &&
+                    calls === 2;
+                })()"#,
+            )
+            .unwrap()
+            .as_boolean()
+            .unwrap());
+        runtime.run_jobs().unwrap();
+        assert!(runtime
+            .eval("customElementWhenDefinedResolved")
+            .unwrap()
+            .as_boolean()
+            .unwrap());
+    }
+
+    #[test]
+    fn custom_elements_upgrade_existing_inner_html_and_shadow_tree_in_order() {
+        let mut runtime = runtime_from_html(
+            r#"<x-upgrade id="first"><x-upgrade id="nested"></x-upgrade></x-upgrade><x-host id="host"></x-host>"#,
+        );
+        assert!(runtime
+            .eval(
+                r##"(() => {
+                  const order = [];
+                  class UpgradeElement extends HTMLElement {
+                    constructor() {
+                      super();
+                      order.push(this.id);
+                    }
+                  }
+                  customElements.define("x-upgrade", UpgradeElement);
+
+                  const container = document.createElement("div");
+                  container.innerHTML = '<x-upgrade id="inner"></x-upgrade>';
+                  const host = document.getElementById("host");
+                  const root = host.attachShadow({ mode: "closed" });
+                  root.innerHTML = '<x-shadow id="shadow"></x-shadow>';
+                  class ShadowElement extends HTMLElement {
+                    constructor() {
+                      super();
+                      this.attachShadow({ mode: "open" });
+                    }
+                  }
+                  customElements.define("x-shadow", ShadowElement);
+                  const shadowElement = root.querySelector("#shadow");
+
+                  return order.join(",") === "first,nested,inner" &&
+                    document.getElementById("first") instanceof UpgradeElement &&
+                    document.getElementById("nested") instanceof UpgradeElement &&
+                    container.firstChild instanceof UpgradeElement &&
+                    shadowElement instanceof ShadowElement &&
+                    shadowElement.shadowRoot instanceof ShadowRoot;
+                })()"##,
+            )
+            .unwrap()
+            .as_boolean()
+            .unwrap());
+    }
+
+    #[test]
+    fn failed_custom_elements_are_not_retried_and_iframe_registry_is_isolated() {
+        let mut runtime = runtime_from_html(
+            r#"<x-fails id="candidate"></x-fails><iframe id="frame"></iframe>"#,
+        );
+        assert!(runtime
+            .eval(
+                r#"(() => {
+                  let attempts = 0;
+                  class FailingElement extends HTMLElement {
+                    constructor() {
+                      super();
+                      attempts++;
+                      throw new Error("expected failure");
+                    }
+                  }
+                  customElements.define("x-fails", FailingElement);
+                  const candidate = document.getElementById("candidate");
+                  customElements.upgrade(candidate);
+
+                  class TopElement extends HTMLElement {}
+                  customElements.define("x-isolated", TopElement);
+                  const frame = document.getElementById("frame");
+                  const childRegistry = frame.contentWindow.customElements;
+                  const childDocument = frame.contentDocument;
+                  const beforeDefinition = childDocument.createElement("x-isolated");
+                  class ChildElement extends HTMLElement {}
+                  childRegistry.define("x-isolated", ChildElement);
+                  const remainedUndefined = !(beforeDefinition instanceof ChildElement);
+                  childRegistry.upgrade(beforeDefinition);
+                  const afterDefinition = childDocument.createElement("x-isolated");
+
+                  return attempts === 1 &&
+                    candidate.__customElementState === "failed" &&
+                    childRegistry !== customElements &&
+                    childRegistry.get("x-isolated") === ChildElement &&
+                    customElements.get("x-isolated") === TopElement &&
+                    remainedUndefined &&
+                    beforeDefinition instanceof ChildElement &&
+                    !(beforeDefinition instanceof TopElement) &&
+                    afterDefinition instanceof ChildElement;
+                })()"#,
+            )
+            .unwrap()
+            .as_boolean()
+            .unwrap());
+    }
+
+    #[test]
     fn remove_attribute_removes_from_dom() {
         let doc = NodeHandle::document();
         let div = NodeHandle::element("div");

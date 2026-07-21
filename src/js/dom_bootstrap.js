@@ -3,6 +3,9 @@
   globalThis.parent = globalThis;
   globalThis.top = globalThis;
   const cache = new Map();
+  const customElementConstructionStack = [];
+  const customElementDefinitionByConstructor = new Map();
+  const customElementRegistryByDocument = new WeakMap();
 
   // Window objects are not ordinary DOM wrappers in Omoikane: the top-level
   // Window is Boa's global object, while nested browsing contexts currently
@@ -600,12 +603,14 @@
           notifyImplicitRemoval(c);
           __omoikane_append_child(this.__id, c.__id);
         }
+        upgradeInsertedCustomElements(this, children);
         if (children.length) queueMutation(this, "childList", { addedNodes: children, previousSibling });
         return child;
       }
       this.__ensureNotAncestor(child);
       notifyImplicitRemoval(child);
       __omoikane_append_child(this.__id, child.__id);
+      upgradeInsertedCustomElements(this, [child]);
       queueMutation(this, "childList", { addedNodes: [child], previousSibling });
       return child;
     }
@@ -1033,6 +1038,11 @@
       for (const child of removedNodes.slice().reverse()) preRemove(this, child);
       __omoikane_set_inner_html(this.__id, html);
       const addedNodes = this.childNodes.slice();
+      const owner = this.nodeType === 9 ? this : this.ownerDocument;
+      const registry = owner && customElementRegistryByDocument.get(owner);
+      if (registry) {
+        for (const node of addedNodes) upgradeCustomElementTree(registry, node);
+      }
       if (removedNodes.length || addedNodes.length) {
         queueMutation(this, "childList", { addedNodes, removedNodes });
       }
@@ -1088,12 +1098,14 @@
           notifyImplicitRemoval(child);
           __omoikane_insert_before(this.__id, child.__id, refNode ? refNode.__id : null);
         }
+        upgradeInsertedCustomElements(this, children);
         if (children.length) queueMutation(this, "childList", { addedNodes: children, previousSibling, nextSibling: refNode });
         return newNode;
       }
       const previousSibling = refNode ? refNode.previousSibling : this.lastChild;
       notifyImplicitRemoval(newNode);
       __omoikane_insert_before(this.__id, newNode.__id, refNode ? refNode.__id : null);
+      upgradeInsertedCustomElements(this, [newNode]);
       queueMutation(this, "childList", { addedNodes: [newNode], previousSibling, nextSibling: refNode });
       return newNode;
     }
@@ -1675,6 +1687,7 @@
       }
       const owner = this.ownerDocument;
       if (owner) stampOwnerDoc(root, owner);
+      this.__shadowRootInternal = root;
       return root;
     }
 
@@ -1712,7 +1725,38 @@
     "scrollWidth", "scrollHeight", "scrollTop", "scrollLeft",
   ]);
 
-  class HTMLElement extends Element {}
+  class HTMLElement extends Element {
+    constructor(id) {
+      if (id !== undefined) {
+        super(id);
+        return;
+      }
+
+      const entry = customElementConstructionStack[
+        customElementConstructionStack.length - 1
+      ];
+      if (entry && !entry.constructed) {
+        entry.constructed = true;
+        super(entry.element.__id);
+        return entry.element;
+      }
+
+      const definition = new.target === HTMLElement
+        ? null
+        : customElementDefinitionByConstructor.get(new.target);
+      if (definition) {
+        const element = wrapNode(__omoikane_create_element(definition.name));
+        definition.document.__own(element);
+        Object.setPrototypeOf(element, new.target.prototype);
+        element.__customElementState = "custom";
+        super(element.__id);
+        return element;
+      }
+
+      super(id);
+      throw new TypeError("Illegal constructor");
+    }
+  }
   class HTMLHtmlElement extends HTMLElement {}
   class HTMLHeadElement extends HTMLElement {}
   class HTMLBodyElement extends HTMLElement {}
@@ -2439,7 +2483,10 @@
           "InvalidCharacterError"
         );
       }
-      return this.__own(wrapNode(__omoikane_create_element(name)));
+      const element = this.__own(wrapNode(__omoikane_create_element(name)));
+      const registry = customElementRegistryByDocument.get(this);
+      if (registry) considerCustomElement(registry, element);
+      return element;
     }
 
     createElementNS(namespace, qualifiedName) {
@@ -2467,6 +2514,10 @@
         Object.setPrototypeOf(node, ctor.prototype);
       } else {
         Object.setPrototypeOf(node, Element.prototype);
+      }
+      if (info.namespace === HTML_NAMESPACE) {
+        const registry = customElementRegistryByDocument.get(this);
+        if (registry) considerCustomElement(registry, node);
       }
       return node;
     }
@@ -3142,6 +3193,9 @@
           get document() {
             return iframe.contentDocument;
           },
+          get customElements() {
+            return registryForDocument(iframe.contentDocument);
+          },
           frameElement: iframe,
           getComputedStyle: globalThis.getComputedStyle,
         };
@@ -3732,6 +3786,247 @@
     template: HTMLTemplateElement,
   };
 
+  const CUSTOM_ELEMENT_REGISTRY_CONSTRUCTION = {};
+
+  function isValidCustomElementName(name) {
+    if (name.length < 2 || name.charCodeAt(0) < 0x61 || name.charCodeAt(0) > 0x7a ||
+        RESERVED_CUSTOM_ELEMENT_NAMES.has(name)) {
+      return false;
+    }
+    let hasHyphen = false;
+    for (let i = 1; i < name.length;) {
+      const cp = name.codePointAt(i);
+      if (cp === 0x2d) hasHyphen = true;
+      const allowed = cp === 0x2d || cp === 0x2e || cp === 0x5f ||
+        (cp >= 0x30 && cp <= 0x39) || (cp >= 0x61 && cp <= 0x7a) ||
+        cp === 0xb7 || (cp >= 0xc0 && cp <= 0xd6) ||
+        (cp >= 0xd8 && cp <= 0xf6) || (cp >= 0xf8 && cp <= 0x37d) ||
+        (cp >= 0x37f && cp <= 0x1fff) || (cp >= 0x200c && cp <= 0x200d) ||
+        (cp >= 0x203f && cp <= 0x2040) || (cp >= 0x2070 && cp <= 0x218f) ||
+        (cp >= 0x2c00 && cp <= 0x2fef) || (cp >= 0x3001 && cp <= 0xd7ff) ||
+        (cp >= 0xf900 && cp <= 0xfdcf) || (cp >= 0xfdf0 && cp <= 0xfffd) ||
+        (cp >= 0x10000 && cp <= 0xeffff);
+      if (!allowed) return false;
+      i += cp > 0xffff ? 2 : 1;
+    }
+    return hasHyphen;
+  }
+
+  function isConstructor(value) {
+    if (typeof value !== "function") return false;
+    try {
+      const probe = new Proxy(value, {
+        construct() { return {}; },
+      });
+      new probe();
+      return true;
+    } catch (_error) {
+      return false;
+    }
+  }
+
+  function upgradeCustomElement(element, definition) {
+    if (!element || element.__customElementState === "custom" ||
+        element.__customElementState === "failed" ||
+        element.namespaceURI !== HTML_NAMESPACE && element.namespaceURI !== null ||
+        String(element.localName) !== definition.name) {
+      return;
+    }
+
+    Object.setPrototypeOf(element, definition.prototype);
+    element.__customElementState = "precustomized";
+    const entry = { element, constructed: false };
+    customElementConstructionStack.push(entry);
+    try {
+      const result = Reflect.construct(
+        definition.constructor,
+        [],
+        definition.constructor,
+      );
+      if (!entry.constructed || result !== element) {
+        throw new DOMException(
+          "The custom element constructor did not produce the element being upgraded.",
+          "InvalidStateError",
+        );
+      }
+      element.__customElementState = "custom";
+    } catch (error) {
+      element.__customElementState = "failed";
+      element.__customElementError = error;
+    } finally {
+      customElementConstructionStack.pop();
+    }
+  }
+
+  function upgradeCustomElementTree(registry, root) {
+    if (!root) return;
+    const owner = root.nodeType === 9 ? root : root.ownerDocument;
+    if (owner !== registry.__document) return;
+    if (root.nodeType === 1) {
+      const definition = registry.__definitions.get(
+        String(root.localName),
+      );
+      if (definition) upgradeCustomElement(root, definition);
+      if (root.__shadowRootInternal) {
+        upgradeCustomElementTree(registry, root.__shadowRootInternal);
+      }
+    }
+    const children = root.childNodes;
+    for (let i = 0; i < children.length; i++) {
+      upgradeCustomElementTree(registry, children[i]);
+    }
+  }
+
+  function considerCustomElement(registry, element) {
+    const name = String(element.localName);
+    const definition = registry.__definitions.get(name);
+    if (definition) {
+      upgradeCustomElement(element, definition);
+    }
+  }
+
+  function upgradeInsertedCustomElements(parent, nodes) {
+    if (!parent || !parent.isConnected) return;
+    const owner = parent.nodeType === 9 ? parent : parent.ownerDocument;
+    const registry = owner && customElementRegistryByDocument.get(owner);
+    if (!registry) return;
+    for (const node of nodes) upgradeCustomElementTree(registry, node);
+  }
+
+  function registryForDocument(document) {
+    let registry = customElementRegistryByDocument.get(document);
+    if (!registry) {
+      registry = new CustomElementRegistry(
+        CUSTOM_ELEMENT_REGISTRY_CONSTRUCTION,
+        document,
+      );
+      customElementRegistryByDocument.set(document, registry);
+    }
+    return registry;
+  }
+
+  class CustomElementRegistry {
+    constructor(token, document) {
+      if (token !== CUSTOM_ELEMENT_REGISTRY_CONSTRUCTION) {
+        throw new TypeError("Illegal constructor");
+      }
+      this.__document = document;
+      this.__definitions = new Map();
+      this.__constructors = new Map();
+      this.__whenDefined = new Map();
+      this.__definitionRunning = false;
+    }
+
+    define(nameValue, constructor, options) {
+      const name = String(nameValue);
+      if (!isConstructor(constructor)) {
+        throw new TypeError("The custom element constructor is not a constructor");
+      }
+      if (!isValidCustomElementName(name)) {
+        throw new DOMException(
+          "The custom element name ('" + name + "') is not valid.",
+          "SyntaxError",
+        );
+      }
+      if (this.__definitions.has(name) || this.__constructors.has(constructor)) {
+        throw new DOMException(
+          "The name or constructor has already been registered.",
+          "NotSupportedError",
+        );
+      }
+      if (this.__definitionRunning) {
+        throw new DOMException(
+          "A custom element definition is already running.",
+          "NotSupportedError",
+        );
+      }
+
+      this.__definitionRunning = true;
+      let prototype;
+      let extendsValue = null;
+      try {
+        prototype = constructor.prototype;
+        if ((typeof prototype !== "object" && typeof prototype !== "function") ||
+            prototype === null) {
+          throw new TypeError("The custom element constructor prototype is not an object");
+        }
+        if (options !== undefined && options !== null) {
+          extendsValue = options.extends;
+        }
+        if (extendsValue !== undefined && extendsValue !== null) {
+          throw new DOMException(
+            "Customized built-in elements are not supported yet.",
+            "NotSupportedError",
+          );
+        }
+      } finally {
+        this.__definitionRunning = false;
+      }
+
+      const pending = this.__whenDefined.get(name);
+      const definition = {
+        name,
+        constructor,
+        prototype,
+        document: this.__document,
+        promise: pending ? pending.promise : Promise.resolve(constructor),
+      };
+      this.__definitions.set(name, definition);
+      this.__constructors.set(constructor, name);
+      if (!customElementDefinitionByConstructor.has(constructor)) {
+        customElementDefinitionByConstructor.set(constructor, definition);
+      }
+
+      // Existing connected candidates are upgraded in shadow-including tree
+      // order. Detached candidates remain undefined until insertion or an
+      // explicit upgrade(), as required by the custom-elements algorithm.
+      upgradeCustomElementTree(this, this.__document);
+      if (pending) {
+        pending.resolve(constructor);
+        this.__whenDefined.delete(name);
+      }
+    }
+
+    get(nameValue) {
+      const definition = this.__definitions.get(String(nameValue));
+      return definition ? definition.constructor : undefined;
+    }
+
+    getName(constructor) {
+      if (!isConstructor(constructor)) {
+        throw new TypeError("The value is not a constructor");
+      }
+      return this.__constructors.get(constructor) || null;
+    }
+
+    whenDefined(nameValue) {
+      const name = String(nameValue);
+      if (!isValidCustomElementName(name)) {
+        return Promise.reject(new DOMException(
+          "The custom element name ('" + name + "') is not valid.",
+          "SyntaxError",
+        ));
+      }
+      const definition = this.__definitions.get(name);
+      if (definition) return definition.promise;
+      let pending = this.__whenDefined.get(name);
+      if (!pending) {
+        let resolve;
+        const promise = new Promise(resolver => { resolve = resolver; });
+        pending = { promise, resolve };
+        this.__whenDefined.set(name, pending);
+      }
+      return pending.promise;
+    }
+
+    upgrade(root) {
+      if (!(root instanceof Node)) {
+        throw new TypeError("CustomElementRegistry.upgrade requires a Node");
+      }
+      upgradeCustomElementTree(this, root);
+    }
+  }
+
   // Standard Node.nodeType constant values, exposed both as static properties
   // on the Node constructor (`Node.ELEMENT_NODE`) and on the prototype so they
   // are reachable from any node instance (`document.DOCUMENT_FRAGMENT_NODE`,
@@ -3807,6 +4102,7 @@
   globalThis.ShadowRoot = ShadowRoot;
   globalThis.DocumentType = DocumentType;
   globalThis.DOMException = DOMException;
+  globalThis.CustomElementRegistry = CustomElementRegistry;
   globalThis.CSSStyleSheet = CSSStyleSheet;
   globalThis.CSSRuleList = CSSRuleList;
   globalThis.CSSStyleRule = CSSStyleRule;
@@ -3855,6 +4151,7 @@
   globalThis.AnimationEvent = Event;
   globalThis.TransitionEvent = Event;
   globalThis.document = wrapNode(__omoikane_document_id);
+  globalThis.customElements = registryForDocument(globalThis.document);
   globalThis.__omoikane_set_current_script = function(id) {
     globalThis.document.__currentScript =
       id === null || id === undefined ? null : wrapNode(id);
