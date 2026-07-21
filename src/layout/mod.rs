@@ -616,7 +616,7 @@ fn layout_document(
     let mut cursor_y = containing_block.y;
     let mut previous_margin_bottom: Option<f32> = None;
 
-    for child in node.child_nodes() {
+    for child in node.layout_child_nodes() {
         let child_style = match child.node_type() {
             NodeType::Element => Some(resolver.computed_style(&child)),
             _ => None,
@@ -1148,7 +1148,7 @@ fn layout_block_children(
     let mut pending_inline_nodes = Vec::new();
     let mut float_regions = Vec::new();
 
-    for child in node.child_nodes() {
+    for child in node.layout_child_nodes() {
         // Comments do not generate boxes and do not interrupt an inline
         // formatting context. Keeping pending text together also preserves
         // word-boundary behavior across framework hydration comments.
@@ -1793,7 +1793,7 @@ fn cell_contains_image_recursive(node: &NodeHandle) -> bool {
     if element_inline_image(node).is_some() {
         return true;
     }
-    for child in node.child_nodes() {
+    for child in node.layout_child_nodes() {
         if cell_contains_image_recursive(&child) {
             return true;
         }
@@ -1850,7 +1850,7 @@ pub(super) fn minimum_content_width(node: &NodeHandle, resolver: &mut StyleResol
             }
             // Recurse: minimum of children's minimum widths
             let mut min_width = 0.0f32;
-            for child in node.child_nodes() {
+            for child in node.layout_child_nodes() {
                 min_width = min_width.max(minimum_content_width(&child, resolver));
             }
             min_width + padding.horizontal() + border.horizontal()
@@ -1900,7 +1900,7 @@ fn intrinsic_width(node: &NodeHandle, resolver: &mut StyleResolver) -> f32 {
             if is_flex_container(&style) {
                 let direction = flex_direction(&style);
                 let mut content_width = 0.0f32;
-                for child in node.child_nodes() {
+                for child in node.layout_child_nodes() {
                     if child.node_type() != NodeType::Element {
                         continue;
                     }
@@ -1932,7 +1932,7 @@ fn intrinsic_width(node: &NodeHandle, resolver: &mut StyleResolver) -> f32 {
                 }
             } else {
                 let mut inline_run_width = 0.0f32;
-                for child in node.child_nodes() {
+                for child in node.layout_child_nodes() {
                     let child_width = intrinsic_width(&child, resolver);
                     if is_inline_child(&child, resolver) {
                         inline_run_width += child_width;
@@ -2427,7 +2427,7 @@ fn list_item_ordinal(node: &NodeHandle) -> usize {
         return 1;
     };
     let mut count = 0usize;
-    for sibling in parent.child_nodes() {
+    for sibling in parent.layout_child_nodes() {
         if sibling.node_type() == NodeType::Element
             && sibling
                 .tag_name()

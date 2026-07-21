@@ -2282,6 +2282,16 @@ fn register_host_bindings(
             NativeFunction::from_copy_closure(shadow_mode_native),
         ),
         (
+            js_string!("__omoikane_assigned_slot"),
+            1,
+            NativeFunction::from_copy_closure(assigned_slot_native),
+        ),
+        (
+            js_string!("__omoikane_assigned_nodes"),
+            2,
+            NativeFunction::from_copy_closure(assigned_nodes_native),
+        ),
+        (
             js_string!("__omoikane_create_document"),
             0,
             NativeFunction::from_copy_closure(create_document_native),
@@ -4321,6 +4331,48 @@ fn shadow_mode_native(
             Some(ShadowRootMode::Closed) => js_string!("closed").into(),
             None => JsValue::null(),
         })
+    })
+}
+
+fn assigned_slot_native(
+    _: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let id = parse_node_id(args.first(), context)?;
+    with_host_state(|state| {
+        let slot = state
+            .borrow()
+            .get_node(id)
+            .and_then(|node| node.assigned_slot())
+            .filter(|slot| {
+                slot.containing_shadow_root()
+                    .and_then(|root| root.shadow_root_mode())
+                    != Some(ShadowRootMode::Closed)
+            });
+        Ok(node_to_js_value(slot))
+    })
+}
+
+fn assigned_nodes_native(
+    _: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let id = parse_node_id(args.first(), context)?;
+    let flatten = args.get(1).is_some_and(JsValue::to_boolean);
+    with_host_state(|state| {
+        let nodes = state
+            .borrow()
+            .get_node(id)
+            .map(|node| node.assigned_nodes(flatten))
+            .unwrap_or_default();
+        let ids = nodes
+            .into_iter()
+            .map(|node| JsValue::from(node.identity() as f64));
+        Ok(JsValue::from(
+            boa_engine::object::builtins::JsArray::from_iter(ids, context),
+        ))
     })
 }
 
@@ -8883,6 +8935,137 @@ mod tests {
             .unwrap()
             .as_boolean()
             .unwrap());
+    }
+
+    #[test]
+    fn html_slot_element_assigns_named_default_and_fallback_nodes_dynamically() {
+        let mut runtime = JsRuntime::new().unwrap();
+        assert!(runtime
+            .eval(
+                r#"(() => {
+                  const host = document.createElement("div");
+                  const title = document.createElement("h1");
+                  title.slot = "title";
+                  const text = document.createTextNode("default");
+                  const unmatched = document.createElement("i");
+                  unmatched.slot = "missing";
+                  host.appendChild(title);
+                  host.appendChild(text);
+                  host.appendChild(unmatched);
+                  document.body.appendChild(host);
+
+                  const root = host.attachShadow({ mode: "open" });
+                  root.innerHTML = '<slot name="title"><b>title fallback</b></slot>' +
+                    '<slot><em>default fallback</em></slot>';
+                  const titleSlot = root.firstElementChild;
+                  const defaultSlot = root.lastElementChild;
+                  const initial =
+                    titleSlot instanceof HTMLSlotElement &&
+                    titleSlot.name === "title" &&
+                    titleSlot.assignedNodes() instanceof NodeList &&
+                    titleSlot.assignedNodes().length === 1 &&
+                    titleSlot.assignedNodes()[0] === title &&
+                    titleSlot.assignedElements().length === 1 &&
+                    title.assignedSlot === titleSlot &&
+                    text.assignedSlot === defaultSlot &&
+                    unmatched.assignedSlot === null;
+
+                  title.slot = "";
+                  const reassigned = title.assignedSlot === defaultSlot &&
+                    defaultSlot.assignedNodes().length === 2;
+                  host.removeChild(title);
+                  host.removeChild(text);
+                  const fallback = defaultSlot.assignedNodes({ flatten: true });
+                  let illegalConstructor = false;
+                  try { new HTMLSlotElement(); } catch (error) {
+                    illegalConstructor = error instanceof TypeError;
+                  }
+                  return initial && reassigned &&
+                    defaultSlot.assignedNodes().length === 0 &&
+                    fallback.length === 1 && fallback[0].tagName === "EM" &&
+                    illegalConstructor;
+                })()"#,
+            )
+            .unwrap()
+            .as_boolean()
+            .unwrap());
+    }
+
+    #[test]
+    fn assigned_slot_hides_closed_roots_and_slotchange_is_microtask_coalesced() {
+        let mut runtime = JsRuntime::new().unwrap();
+        assert!(runtime
+            .eval(
+                r#"(() => {
+                  const openHost = document.createElement("div");
+                  document.body.appendChild(openHost);
+                  const root = openHost.attachShadow({ mode: "open" });
+                  root.innerHTML = "<slot></slot>";
+                  const slot = root.firstChild;
+                  globalThis.slotChanges = 0;
+                  slot.addEventListener("slotchange", () => slotChanges++);
+                  const first = document.createElement("span");
+                  const second = document.createTextNode("two");
+                  openHost.appendChild(first);
+                  openHost.appendChild(second);
+
+                  const closedHost = document.createElement("section");
+                  const closedChild = document.createElement("b");
+                  closedHost.appendChild(closedChild);
+                  document.body.appendChild(closedHost);
+                  const closedRoot = closedHost.attachShadow({ mode: "closed" });
+                  closedRoot.innerHTML = "<slot></slot>";
+                  return slot.assignedNodes().length === 2 &&
+                    closedRoot.firstChild.assignedNodes()[0] === closedChild &&
+                    closedChild.assignedSlot === null && slotChanges === 0;
+                })()"#,
+            )
+            .unwrap()
+            .as_boolean()
+            .unwrap());
+        runtime.run_jobs().unwrap();
+        assert_eq!(
+            runtime
+                .eval("slotChanges")
+                .unwrap()
+                .to_number(&mut runtime.context)
+                .unwrap(),
+            1.0
+        );
+    }
+
+    #[test]
+    fn fallback_mutations_signal_nested_slots_and_onslotchange() {
+        let mut runtime = JsRuntime::new().unwrap();
+        assert!(runtime
+            .eval(
+                r##"(() => {
+                  const host = document.createElement("div");
+                  const root = host.attachShadow({ mode: "open" });
+                  root.innerHTML = "<slot id='outer'><slot id='inner'></slot></slot>";
+                  const outer = root.querySelector("#outer");
+                  const inner = root.querySelector("#inner");
+                  globalThis.outerSlotChanges = 0;
+                  globalThis.innerSlotChanges = 0;
+                  outer.onslotchange = event => {
+                    if (event.target === outer) outerSlotChanges++;
+                  };
+                  inner.addEventListener("slotchange", () => innerSlotChanges++);
+                  inner.appendChild(document.createElement("span"));
+                  return outerSlotChanges === 0 && innerSlotChanges === 0;
+                })()"##,
+            )
+            .unwrap()
+            .as_boolean()
+            .unwrap());
+        runtime.run_jobs().unwrap();
+        let result = runtime
+            .eval("outerSlotChanges + '|' + innerSlotChanges")
+            .unwrap()
+            .to_string(&mut runtime.context)
+            .unwrap()
+            .to_std_string_escaped();
+        assert_eq!(result, "1|1");
     }
 
     #[test]

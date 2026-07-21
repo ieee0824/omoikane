@@ -5,6 +5,8 @@
     { "path": "dom/nodes/Node-isConnected.html", "expected": "PASS" },
     { "path": "shadow-dom/Element-interface-attachShadow.html", "expected": "PASS" },
     { "path": "shadow-dom/Element-interface-shadowRoot-attribute.html", "expected": "PASS" },
+    { "path": "shadow-dom/HTMLSlotElement-interface.html", "expected": "PASS" },
+    { "path": "shadow-dom/Slottable-mixin.html", "expected": "PASS" },
     { "path": "custom-elements/registries/upgrade.html", "expected": "PASS" },
     { "path": "custom-elements/connected-callbacks-template.html", "expected": "PASS" },
     { "path": "dom/nodes/Element-childElementCount.html", "expected": "PASS" },

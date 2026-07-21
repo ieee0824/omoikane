@@ -55,6 +55,14 @@
       "baseline_supported": false
     },
     {
+      "id": "dom.shadow-slotting",
+      "area": "web-components",
+      "description": "Shadow slots assign light DOM nodes through HTMLSlotElement",
+      "setup": "globalThis.__slotHost = document.createElement('div'); globalThis.__slotted = document.createElement('span'); __slotHost.appendChild(__slotted); globalThis.__slotRoot = __slotHost.attachShadow({mode:'open'}); globalThis.__slot = document.createElement('slot'); __slotRoot.appendChild(__slot)",
+      "probe": "typeof HTMLSlotElement === 'function' && __slot instanceof HTMLSlotElement && __slotted.assignedSlot === __slot && __slot.assignedNodes()[0] === __slotted",
+      "baseline_supported": false
+    },
+    {
       "id": "dom.custom-elements",
       "area": "web-components",
       "description": "Custom element registry is available",

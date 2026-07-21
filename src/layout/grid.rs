@@ -94,7 +94,7 @@ pub(super) fn layout_grid_container(
 ) -> Option<LayoutBox> {
     let mut items = Vec::new();
     let mut positioned = Vec::new();
-    for child in crate::dom::Node::child_nodes(node) {
+    for child in node.layout_child_nodes() {
         if crate::dom::Node::node_type(&child) != NodeType::Element { continue; }
         let child_style = resolver.computed_style(&child);
         if is_display_none(&child_style) { continue; }
