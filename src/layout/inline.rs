@@ -272,7 +272,7 @@ fn collect_element_inline_segments(
             return;
         }
 
-    for child in node.child_nodes() {
+    for child in node.layout_child_nodes() {
         match child.node_type() {
             NodeType::Text => {
                 if let Some(text) = child.data() {
@@ -381,7 +381,7 @@ fn find_descendant_inline_image(
     node: &NodeHandle,
     resolver: &mut StyleResolver,
 ) -> Option<(NodeHandle, Image)> {
-    for child in node.child_nodes() {
+    for child in node.layout_child_nodes() {
         if is_non_rendered_html_element(&child) {
             continue;
         }
@@ -556,7 +556,7 @@ fn push_form_control_segment(
 /// skipped so that hidden text never leaks into form control labels.
 fn collect_rendered_text(node: &NodeHandle, resolver: &mut StyleResolver) -> String {
     let mut text = String::new();
-    for child in node.child_nodes() {
+    for child in node.layout_child_nodes() {
         match child.node_type() {
             NodeType::Text => {
                 if let Some(data) = child.data() {
@@ -605,7 +605,7 @@ fn collect_option_entries(
     resolver: &mut StyleResolver,
     out: &mut Vec<(String, bool)>,
 ) {
-    for child in node.child_nodes() {
+    for child in node.layout_child_nodes() {
         if child.node_type() != NodeType::Element {
             continue;
         }
@@ -790,7 +790,7 @@ fn element_inline_image_with_current_color(
             decode_or_fetch_image(poster).map(|image| (node.clone(), image))
         }
         "picture" => node
-            .child_nodes()
+            .layout_child_nodes()
             .into_iter()
             .find_map(|child| element_inline_image_with_current_color(&child, current_color)),
         "svg" => {
@@ -806,7 +806,7 @@ fn element_inline_image_with_current_color(
                     return Some((node.clone(), image));
                 }
 
-            for child in node.child_nodes() {
+            for child in node.layout_child_nodes() {
                 if let Some(image) = element_inline_image_with_current_color(&child, current_color) {
                     return Some(image);
                 }

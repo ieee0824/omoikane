@@ -6,6 +6,12 @@
   const customElementConstructionStack = [];
   const customElementDefinitionByConstructor = new Map();
   const customElementRegistryByDocument = new WeakMap();
+  const knownSlots = [];
+  const slotAssignmentSignatures = new WeakMap();
+  const pendingSlotChanges = [];
+  let pendingSlotChangeSet = new WeakSet();
+  let slotChangeMicrotaskQueued = false;
+  let slotAssignmentRefreshQueued = false;
 
   // Window objects are not ordinary DOM wrappers in Omoikane: the top-level
   // Window is Boa's global object, while nested browsing contexts currently
@@ -54,6 +60,53 @@
     if (parent) parent.removeChild(this);
   }
 
+  // Slot assignment is calculated natively from the current light and shadow
+  // trees. Keep only the previous id sequence here so `slotchange` can be
+  // coalesced at the microtask boundary after any relevant DOM mutation.
+  function queueSlotChange(slot) {
+    if (!pendingSlotChangeSet.has(slot)) {
+      pendingSlotChangeSet.add(slot);
+      pendingSlotChanges.push(slot);
+    }
+    if (slotChangeMicrotaskQueued) return;
+    slotChangeMicrotaskQueued = true;
+    Promise.resolve().then(() => {
+      slotChangeMicrotaskQueued = false;
+      const slots = pendingSlotChanges.splice(0);
+      pendingSlotChangeSet = new WeakSet();
+      for (const changedSlot of slots) {
+        changedSlot.dispatchEvent(new Event("slotchange", { bubbles: true }));
+      }
+    });
+  }
+
+  function signalFallbackSlotChanges(node) {
+    for (let current = node; current; current = current.parentNode) {
+      if (current instanceof HTMLSlotElement &&
+          current.getRootNode() instanceof ShadowRoot &&
+          current.assignedNodes().length === 0) {
+        queueSlotChange(current);
+      }
+    }
+  }
+
+  function refreshSlotAssignments() {
+    if (slotAssignmentRefreshQueued) return;
+    slotAssignmentRefreshQueued = true;
+    Promise.resolve().then(() => {
+      slotAssignmentRefreshQueued = false;
+      for (let index = 0; index < knownSlots.length; index += 1) {
+        const node = knownSlots[index];
+        const ids = __omoikane_assigned_nodes(node.__id, false) || [];
+        const signature = ids.join(",");
+        const previous = slotAssignmentSignatures.get(node);
+        slotAssignmentSignatures.set(node, signature);
+        if (previous === undefined ? signature === "" : previous === signature) continue;
+        queueSlotChange(node);
+      }
+    });
+  }
+
   function wrapNode(id) {
     if (id === null || id === undefined) {
       return null;
@@ -94,6 +147,7 @@
       node = new Node(id);
     }
     cache.set(id, node);
+    if (node instanceof HTMLSlotElement) knownSlots.push(node);
     return node;
   }
 
@@ -609,6 +663,8 @@
         }
         upgradeInsertedCustomElements(this, children);
         if (children.length) queueMutation(this, "childList", { addedNodes: children, previousSibling });
+        refreshSlotAssignments();
+        signalFallbackSlotChanges(this);
         return child;
       }
       this.__ensureNotAncestor(child);
@@ -618,6 +674,8 @@
       if (connectedBeforeMove) disconnectCustomElementTree(child);
       upgradeInsertedCustomElements(this, [child]);
       queueMutation(this, "childList", { addedNodes: [child], previousSibling });
+      refreshSlotAssignments();
+      signalFallbackSlotChanges(this);
       return child;
     }
 
@@ -715,6 +773,10 @@
       return wrapNode(__omoikane_parent_node(this.__id));
     }
 
+    get assignedSlot() {
+      return wrapNode(__omoikane_assigned_slot(this.__id));
+    }
+
     getRootNode(options = {}) {
       let root = this;
       while (root.parentNode) root = root.parentNode;
@@ -787,6 +849,10 @@
         ? attr.replace(/[A-Z]/g, letter => letter.toLowerCase())
         : attr;
       notifyCustomElementAttributeChanged(this, callbackName, oldValue, newValue, null);
+      if (callbackName === "slot" ||
+          (callbackName === "name" && this instanceof HTMLSlotElement)) {
+        refreshSlotAssignments();
+      }
       // A dynamically set `on*` content attribute is wired to a listener here
       // (parse-time attributes go through the initial wireInlineHandlers pass).
       if (/^on./i.test(attr)) applyInlineHandlerAttribute(this, attr);
@@ -1041,6 +1107,8 @@
       if (removedNodes.length || addedNodes.length) {
         queueMutation(this, "childList", { addedNodes, removedNodes });
       }
+      refreshSlotAssignments();
+      signalFallbackSlotChanges(this);
     }
 
     get innerHTML() {
@@ -1065,6 +1133,8 @@
       if (removedNodes.length || addedNodes.length) {
         queueMutation(this, "childList", { addedNodes, removedNodes });
       }
+      refreshSlotAssignments();
+      signalFallbackSlotChanges(this);
     }
 
     get childNodes() {
@@ -1102,6 +1172,8 @@
       __omoikane_remove_child(this.__id, child.__id);
       if (wasConnected) disconnectCustomElementTree(child);
       queueMutation(this, "childList", { removedNodes: [child], previousSibling, nextSibling });
+      refreshSlotAssignments();
+      signalFallbackSlotChanges(this);
       return child;
     }
 
@@ -1125,6 +1197,8 @@
         }
         upgradeInsertedCustomElements(this, children);
         if (children.length) queueMutation(this, "childList", { addedNodes: children, previousSibling, nextSibling: refNode });
+        refreshSlotAssignments();
+        signalFallbackSlotChanges(this);
         return newNode;
       }
       const previousSibling = refNode ? refNode.previousSibling : this.lastChild;
@@ -1134,6 +1208,8 @@
       if (connectedBeforeMove) disconnectCustomElementTree(newNode);
       upgradeInsertedCustomElements(this, [newNode]);
       queueMutation(this, "childList", { addedNodes: [newNode], previousSibling, nextSibling: refNode });
+      refreshSlotAssignments();
+      signalFallbackSlotChanges(this);
       return newNode;
     }
 
@@ -1254,6 +1330,10 @@
           ? attr.replace(/[A-Z]/g, letter => letter.toLowerCase())
           : attr;
         notifyCustomElementAttributeChanged(this, callbackName, oldValue, null, null);
+        if (callbackName === "slot" ||
+            (callbackName === "name" && this instanceof HTMLSlotElement)) {
+          refreshSlotAssignments();
+        }
       }
       // Removing an `on*` content attribute detaches the listener it wired.
       if (/^on./i.test(attr)) applyInlineHandlerAttribute(this, attr);
@@ -1702,6 +1782,9 @@
   class Element extends Node {
     remove() { removeChildNode.call(this); }
 
+    get slot() { return this.getAttribute("slot") || ""; }
+    set slot(value) { this.setAttribute("slot", String(value)); }
+
     attachShadow(init) {
       if (init === null || init === undefined || init.mode === undefined) {
         throw new TypeError("ShadowRootInit.mode is required");
@@ -1823,6 +1906,18 @@
         .set.call(this.content, value);
     }
   }
+  class HTMLSlotElement extends HTMLElement {
+    get name() { return this.getAttribute("name") || ""; }
+    set name(value) { this.setAttribute("name", String(value)); }
+    assignedNodes(options = {}) {
+      const flatten = options != null && !!options.flatten;
+      const ids = __omoikane_assigned_nodes(this.__id, flatten);
+      return makeNodeList(ids ? ids.map(id => wrapNode(id)) : []);
+    }
+    assignedElements(options = {}) {
+      return this.assignedNodes(options).filter(node => node.nodeType === 1);
+    }
+  }
 
   distributePrototypeMembers(Node.prototype, [HTMLElement.prototype], [
     "title", "innerText",
@@ -1924,6 +2019,10 @@
   class ProcessingInstruction extends CharacterData {
     get target() { return this.nodeName; }
   }
+
+  distributePrototypeMembers(Node.prototype, [Element.prototype, Text.prototype], [
+    "assignedSlot",
+  ]);
 
   const NodeFilter = {
     FILTER_ACCEPT: 1, FILTER_REJECT: 2, FILTER_SKIP: 3,
@@ -3834,6 +3933,7 @@
     script: HTMLScriptElement,
     style: HTMLStyleElement,
     template: HTMLTemplateElement,
+    slot: HTMLSlotElement,
   };
 
   const CUSTOM_ELEMENT_REGISTRY_CONSTRUCTION = {};
@@ -4234,7 +4334,7 @@
     "click", "dblclick", "mousedown", "mouseup", "mouseover", "mousemove",
     "mouseout", "mouseenter", "mouseleave", "submit", "reset", "change",
     "input", "focus", "blur", "keydown", "keyup", "keypress", "select",
-    "contextmenu", "wheel", "error", "abort",
+    "contextmenu", "wheel", "error", "abort", "slotchange",
   ];
   for (const type of EVENT_HANDLER_TYPES) {
     const key = "__on_" + type;
@@ -4266,6 +4366,7 @@
   globalThis.HTMLAnchorElement = HTMLAnchorElement;
   globalThis.HTMLStyleElement = HTMLStyleElement;
   globalThis.HTMLTemplateElement = HTMLTemplateElement;
+  globalThis.HTMLSlotElement = HTMLSlotElement;
   globalThis.CharacterData = CharacterData;
   globalThis.Text = Text;
   globalThis.CDATASection = CDATASection;

@@ -1,4 +1,5 @@
 use crate::css::{Origin, parse_stylesheet};
+use crate::dom::ShadowRootMode;
 use crate::layout::*;
 
 fn sample_tree() -> (NodeHandle, NodeHandle, NodeHandle, NodeHandle) {
@@ -636,6 +637,59 @@ fn inline_elements_contribute_text_fragments() {
     let paragraph_box = &layout.children[0];
     assert_eq!(paragraph_box.lines.len(), 1);
     assert_eq!(paragraph_box.lines[0].fragments[0].text(), Some("inline"));
+}
+
+#[test]
+fn shadow_host_layout_uses_slot_assignment_and_fallback_flat_tree() {
+    fn rendered_text(layout: &LayoutBox) -> String {
+        let mut text = String::new();
+        for line in &layout.lines {
+            for fragment in &line.fragments {
+                if let Some(value) = fragment.text() {
+                    text.push_str(value);
+                }
+            }
+        }
+        for child in &layout.children {
+            text.push_str(&rendered_text(child));
+        }
+        text
+    }
+
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let host = NodeHandle::element("div");
+    let light = NodeHandle::element("span");
+    light.set_attribute("slot", "content");
+    light.append_child(NodeHandle::text("assigned"));
+    let unmatched = NodeHandle::element("span");
+    unmatched.append_child(NodeHandle::text("unmatched"));
+    host.append_child(light.clone());
+    host.append_child(unmatched);
+    document.append_child(body.clone());
+    body.append_child(host.clone());
+
+    let root = host.attach_shadow(ShadowRootMode::Open).unwrap();
+    let wrapper = NodeHandle::element("section");
+    let slot = NodeHandle::element("slot");
+    slot.set_attribute("name", "content");
+    slot.append_child(NodeHandle::text("fallback"));
+    wrapper.append_child(slot);
+    root.append_child(wrapper);
+
+    let viewport = Rect {
+        x: 0.0,
+        y: 0.0,
+        width: 300.0,
+        height: 0.0,
+    };
+    let mut resolver = StyleResolver::new();
+    let assigned_layout = layout_tree(&body, &mut resolver, viewport).unwrap();
+    assert_eq!(rendered_text(&assigned_layout), "assigned");
+
+    light.set_attribute("slot", "missing");
+    let fallback_layout = layout_tree(&body, &mut resolver, viewport).unwrap();
+    assert_eq!(rendered_text(&fallback_layout), "fallback");
 }
 
 #[test]

@@ -410,6 +410,99 @@ impl NodeHandle {
         }
     }
 
+    /// Returns the shadow root containing this node, if it is in a shadow tree.
+    /// The shadow root itself is returned when called on the root.
+    pub fn containing_shadow_root(&self) -> Option<NodeHandle> {
+        let mut current = Some(self.clone());
+        while let Some(node) = current {
+            if matches!(&node.0.borrow().data, NodeData::ShadowRoot(_)) {
+                return Some(node);
+            }
+            current = node.parent_node();
+        }
+        None
+    }
+
+    /// Returns the slot this light-tree child is assigned to.
+    ///
+    /// Assignment is derived from the current trees rather than cached. This
+    /// keeps all native mutation paths (parser insertion, `innerHTML`, and DOM
+    /// methods) consistent without requiring a second invalidation graph.
+    pub fn assigned_slot(&self) -> Option<NodeHandle> {
+        if !self.is_slottable() {
+            return None;
+        }
+        let host = self.parent_node()?;
+        let root = host.shadow_root()?;
+        slot_assignments(&root)
+            .into_iter()
+            .find_map(|(slot, nodes)| nodes.iter().any(|node| node == self).then_some(slot))
+    }
+
+    /// Returns the directly assigned slottables for an HTML `<slot>` element.
+    /// With `flatten`, nested slot elements are recursively replaced by their
+    /// assigned nodes, or by their fallback children when unassigned.
+    pub fn assigned_nodes(&self, flatten: bool) -> Vec<NodeHandle> {
+        if !self.is_html_slot() {
+            return Vec::new();
+        }
+        let Some(root) = self.containing_shadow_root() else {
+            return Vec::new();
+        };
+        let assigned = slot_assignments(&root)
+            .into_iter()
+            .find_map(|(slot, nodes)| (&slot == self).then_some(nodes))
+            .unwrap_or_default();
+        if !flatten {
+            return assigned;
+        }
+
+        let source = if assigned.is_empty() {
+            self.child_nodes()
+        } else {
+            assigned
+        };
+        let mut flattened = Vec::new();
+        flatten_slotables(source, &mut flattened);
+        flattened
+    }
+
+    /// Returns children in the flat tree used for rendering.
+    ///
+    /// A shadow host contributes its shadow tree instead of its light children,
+    /// and `<slot>` nodes are transparent, contributing assigned slottables or
+    /// fallback content. DOM APIs continue to use [`Node::child_nodes`] and
+    /// therefore preserve the light/shadow tree boundaries.
+    pub fn layout_child_nodes(&self) -> Vec<NodeHandle> {
+        let source = self
+            .shadow_root()
+            .map(|root| root.child_nodes())
+            .unwrap_or_else(|| self.child_nodes());
+        let mut children = Vec::new();
+        for child in source {
+            if child.is_html_slot() && child.containing_shadow_root().is_some() {
+                let assigned = child.assigned_nodes(false);
+                let slotables = if assigned.is_empty() {
+                    child.child_nodes()
+                } else {
+                    assigned
+                };
+                flatten_slotables(slotables, &mut children);
+            } else {
+                children.push(child);
+            }
+        }
+        children
+    }
+
+    fn is_html_slot(&self) -> bool {
+        self.is_html_element() && self.tag_name().as_deref() == Some("slot")
+    }
+
+    fn is_slottable(&self) -> bool {
+        matches!(self.node_type(), NodeType::Element | NodeType::Text)
+    }
+
     /// Appends `child` to the node's children.
     ///
     /// Appending an inclusive ancestor of this node (or this node itself) would
@@ -714,6 +807,65 @@ fn detach_from_parent(child: &NodeHandle) {
     }
 }
 
+fn collect_slots(node: &NodeHandle, slots: &mut Vec<NodeHandle>) {
+    for child in node.child_nodes() {
+        if child.is_html_slot() {
+            slots.push(child.clone());
+        }
+        collect_slots(&child, slots);
+    }
+}
+
+/// Computes every slot assignment for one shadow host in a single pass over
+/// the host's light children. This is the shared host-unit primitive used by
+/// DOM accessors and flat-tree layout, avoiding a fresh shadow-tree walk for
+/// each candidate slottable.
+fn slot_assignments(root: &NodeHandle) -> Vec<(NodeHandle, Vec<NodeHandle>)> {
+    let mut slots = Vec::new();
+    collect_slots(root, &mut slots);
+    let mut assignments: Vec<_> = slots
+        .iter()
+        .cloned()
+        .map(|slot| (slot, Vec::new()))
+        .collect();
+    let Some(host) = root.shadow_host() else {
+        return assignments;
+    };
+    for child in host.child_nodes() {
+        if !child.is_slottable() {
+            continue;
+        }
+        let requested_name = if child.node_type() == NodeType::Element {
+            child.get_attribute("slot").unwrap_or_default()
+        } else {
+            String::new()
+        };
+        if let Some(index) = slots
+            .iter()
+            .position(|slot| slot.get_attribute("name").unwrap_or_default() == requested_name)
+        {
+            assignments[index].1.push(child);
+        }
+    }
+    assignments
+}
+
+fn flatten_slotables(nodes: Vec<NodeHandle>, output: &mut Vec<NodeHandle>) {
+    for node in nodes {
+        if node.is_html_slot() {
+            let assigned = node.assigned_nodes(false);
+            let nested = if assigned.is_empty() {
+                node.child_nodes()
+            } else {
+                assigned
+            };
+            flatten_slotables(nested, output);
+        } else {
+            output.push(node);
+        }
+    }
+}
+
 fn matches_selector(node: &NodeHandle, selector: &str) -> bool {
     let Some(attributes) = node.attributes() else {
         return false;
@@ -919,6 +1071,83 @@ mod tests {
         assert!(first_parent.child_nodes().is_empty());
         assert_eq!(second_parent.child_nodes(), vec![child.clone()]);
         assert_eq!(child.parent_node(), Some(second_parent));
+    }
+
+    #[test]
+    fn shadow_slots_assign_named_default_and_first_matching_slot() {
+        let host = NodeHandle::element("div");
+        let named = NodeHandle::element("span");
+        named.set_attribute("slot", "title");
+        let text = NodeHandle::text("default");
+        let unmatched = NodeHandle::element("p");
+        unmatched.set_attribute("slot", "missing");
+        host.append_child(named.clone());
+        host.append_child(text.clone());
+        host.append_child(unmatched.clone());
+
+        let root = host.attach_shadow(ShadowRootMode::Open).unwrap();
+        let first_named_slot = NodeHandle::element("slot");
+        first_named_slot.set_attribute("name", "title");
+        let duplicate_named_slot = NodeHandle::element("slot");
+        duplicate_named_slot.set_attribute("name", "title");
+        let default_slot = NodeHandle::element("slot");
+        root.append_child(first_named_slot.clone());
+        root.append_child(duplicate_named_slot.clone());
+        root.append_child(default_slot.clone());
+
+        assert_eq!(named.assigned_slot(), Some(first_named_slot.clone()));
+        assert_eq!(text.assigned_slot(), Some(default_slot.clone()));
+        assert_eq!(unmatched.assigned_slot(), None);
+        assert_eq!(first_named_slot.assigned_nodes(false), vec![named]);
+        assert!(duplicate_named_slot.assigned_nodes(false).is_empty());
+        assert_eq!(default_slot.assigned_nodes(false), vec![text]);
+    }
+
+    #[test]
+    fn slot_assignment_reacts_to_tree_and_attribute_changes() {
+        let host = NodeHandle::element("div");
+        let child = NodeHandle::element("span");
+        host.append_child(child.clone());
+        let root = host.attach_shadow(ShadowRootMode::Open).unwrap();
+        let default_slot = NodeHandle::element("slot");
+        let named_slot = NodeHandle::element("slot");
+        named_slot.set_attribute("name", "named");
+        root.append_child(default_slot.clone());
+        root.append_child(named_slot.clone());
+
+        assert_eq!(child.assigned_slot(), Some(default_slot.clone()));
+        child.set_attribute("slot", "named");
+        assert_eq!(child.assigned_slot(), Some(named_slot.clone()));
+        named_slot.set_attribute("name", "other");
+        assert_eq!(child.assigned_slot(), None);
+        named_slot.set_attribute("name", "named");
+        root.remove_child(&named_slot).unwrap();
+        assert_eq!(child.assigned_slot(), None);
+    }
+
+    #[test]
+    fn flat_tree_uses_assigned_nodes_and_fallback_content() {
+        let host = NodeHandle::element("div");
+        let assigned = NodeHandle::element("strong");
+        assigned.set_attribute("slot", "content");
+        host.append_child(assigned.clone());
+        let root = host.attach_shadow(ShadowRootMode::Open).unwrap();
+        let wrapper = NodeHandle::element("section");
+        let slot = NodeHandle::element("slot");
+        slot.set_attribute("name", "content");
+        let fallback = NodeHandle::element("em");
+        slot.append_child(fallback.clone());
+        wrapper.append_child(slot.clone());
+        root.append_child(wrapper.clone());
+
+        assert_eq!(host.layout_child_nodes(), vec![wrapper.clone()]);
+        assert_eq!(wrapper.layout_child_nodes(), vec![assigned.clone()]);
+        assert_eq!(slot.assigned_nodes(true), vec![assigned]);
+
+        host.remove_child(&host.child_nodes()[0]).unwrap();
+        assert_eq!(slot.assigned_nodes(false), Vec::<NodeHandle>::new());
+        assert_eq!(slot.assigned_nodes(true), vec![fallback.clone()]);
+        assert_eq!(wrapper.layout_child_nodes(), vec![fallback]);
     }
 
     #[test]

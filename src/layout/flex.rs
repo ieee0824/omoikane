@@ -52,7 +52,7 @@ pub(super) fn layout_flex_container(
         FlexDirection::Row => width,
         FlexDirection::Column => 0.0, // Height percentage basis is unknown at this point
     };
-    for child in node.child_nodes() {
+    for child in node.layout_child_nodes() {
         if child.node_type() != NodeType::Element {
             continue;
         }

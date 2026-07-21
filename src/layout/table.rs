@@ -253,11 +253,11 @@ pub(super) fn collect_table_entries(node: &NodeHandle, resolver: &mut StyleResol
     let mut entries = Vec::new();
     let mut anonymous_cells = Vec::new();
 
-    for child in node.child_nodes() {
+    for child in node.layout_child_nodes() {
         match table_display_for_node(&child, &resolver.computed_style(&child)) {
             Some(TableDisplay::RowGroup) => {
                 flush_anonymous_row(&mut entries, &mut anonymous_cells);
-                for row in child.child_nodes() {
+                for row in child.layout_child_nodes() {
                     match table_display_for_node(&row, &resolver.computed_style(&row)) {
                         Some(TableDisplay::Row) => entries.push(TableRowEntry {
                             row_node: row.clone(),
@@ -307,7 +307,7 @@ fn flush_anonymous_row(entries: &mut Vec<TableRowEntry>, anonymous_cells: &mut V
 }
 
 fn collect_row_cells(row: &NodeHandle, resolver: &mut StyleResolver) -> Vec<NodeHandle> {
-    row.child_nodes()
+    row.layout_child_nodes()
         .into_iter()
         .filter(|child| {
             matches!(
@@ -852,7 +852,7 @@ fn cell_contains_image(node: &NodeHandle) -> bool {
     if node.tag_name().as_deref() == Some("img") {
         return true;
     }
-    for child in node.child_nodes() {
+    for child in node.layout_child_nodes() {
         if child.tag_name().as_deref() == Some("img") {
             return true;
         }
