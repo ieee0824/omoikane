@@ -9054,6 +9054,188 @@ mod tests {
     }
 
     #[test]
+    fn custom_element_lifecycle_orders_upgrade_attributes_and_connection() {
+        let mut runtime = runtime_from_html(
+            r#"<x-lifecycle id="candidate" data-value="one" ignored="no"></x-lifecycle>"#,
+        );
+        assert!(runtime
+            .eval(
+                r#"(() => {
+                  const calls = [];
+                  class LifecycleElement extends HTMLElement {
+                    static get observedAttributes() { return ["data-value"]; }
+                    constructor() {
+                      super();
+                      calls.push("constructor");
+                    }
+                    attributeChangedCallback(name, oldValue, newValue, namespace) {
+                      calls.push(`attribute:${name}:${oldValue}:${newValue}:${namespace}`);
+                    }
+                    connectedCallback() { calls.push("connected"); }
+                    disconnectedCallback() { calls.push("disconnected"); }
+                  }
+                  customElements.define("x-lifecycle", LifecycleElement);
+                  const element = document.getElementById("candidate");
+                  element.setAttribute("ignored", "yes");
+                  element.setAttribute("DATA-VALUE", "two");
+                  element.removeAttribute("data-value");
+                  element.remove();
+                  document.body.appendChild(element);
+                  return element instanceof LifecycleElement && calls.join("|") === [
+                    "constructor",
+                    "attribute:data-value:null:one:null",
+                    "connected",
+                    "attribute:data-value:one:two:null",
+                    "attribute:data-value:two:null:null",
+                    "disconnected",
+                    "connected",
+                  ].join("|");
+                })()"#,
+            )
+            .unwrap()
+            .as_boolean()
+            .unwrap());
+    }
+
+    #[test]
+    fn custom_element_subtree_reactions_follow_tree_order_and_inner_html_removal() {
+        let mut runtime = JsRuntime::new().unwrap();
+        assert!(runtime
+            .eval(
+                r#"(() => {
+                  const calls = [];
+                  class TreeElement extends HTMLElement {
+                    connectedCallback() { calls.push("connect:" + this.id); }
+                    disconnectedCallback() { calls.push("disconnect:" + this.id); }
+                  }
+                  customElements.define("x-tree", TreeElement);
+                  const container = document.createElement("div");
+                  container.innerHTML = '<x-tree id="outer"><x-tree id="inner"></x-tree></x-tree>';
+                  calls.length = 0;
+                  document.body.appendChild(container);
+                  container.remove();
+                  document.body.appendChild(container);
+                  container.textContent = "replaced";
+                  return calls.join("|") === [
+                    "connect:outer", "connect:inner",
+                    "disconnect:outer", "disconnect:inner",
+                    "connect:outer", "connect:inner",
+                    "disconnect:outer", "disconnect:inner",
+                  ].join("|");
+                })()"#,
+            )
+            .unwrap()
+            .as_boolean()
+            .unwrap());
+    }
+
+    #[test]
+    fn custom_element_callback_failures_do_not_stop_later_reactions() {
+        let mut runtime = runtime_from_html(
+            r#"<x-throws id="first"></x-throws><x-throws id="second"></x-throws><x-constructor-fails></x-constructor-fails>"#,
+        );
+        assert!(runtime
+            .eval(
+                r#"(() => {
+                  const connected = [];
+                  let failedLifecycle = 0;
+                  class ThrowingElement extends HTMLElement {
+                    connectedCallback() {
+                      connected.push(this.id);
+                      if (this.id === "first") throw new Error("expected callback error");
+                    }
+                  }
+                  const originalCallback = ThrowingElement.prototype.connectedCallback;
+                  customElements.define("x-throws", ThrowingElement);
+                  ThrowingElement.prototype.connectedCallback = () => connected.push("replacement");
+
+                  class FailingElement extends HTMLElement {
+                    constructor() { super(); throw new Error("expected constructor error"); }
+                    connectedCallback() { failedLifecycle++; }
+                    disconnectedCallback() { failedLifecycle++; }
+                  }
+                  customElements.define("x-constructor-fails", FailingElement);
+                  const failed = document.querySelector("x-constructor-fails");
+                  failed.remove();
+                  document.body.appendChild(failed);
+
+                  return connected.join(",") === "first,second" &&
+                    ThrowingElement.prototype.connectedCallback !== originalCallback &&
+                    document.getElementById("first").__customElementCallbackErrors.length === 1 &&
+                    failed.__customElementState === "failed" && failedLifecycle === 0;
+                })()"#,
+            )
+            .unwrap()
+            .as_boolean()
+            .unwrap());
+    }
+
+    #[test]
+    fn custom_element_reactions_preserve_upgrade_and_reentrant_connection_state() {
+        let mut runtime = runtime_from_html(r#"<x-removes-itself></x-removes-itself>"#);
+        assert!(runtime
+            .eval(
+                r#"(() => {
+                  const calls = [];
+                  const removedItself = document.querySelector("x-removes-itself");
+                  class RemovesItself extends HTMLElement {
+                    constructor() {
+                      super();
+                      this.remove();
+                      calls.push("constructor:connected=" + this.isConnected);
+                    }
+                    connectedCallback() { calls.push("connected"); }
+                    disconnectedCallback() { calls.push("disconnected"); }
+                  }
+                  customElements.define("x-removes-itself", RemovesItself);
+                  document.body.appendChild(removedItself);
+
+                  let detachedAttributes = 0;
+                  let detachedConnections = 0;
+                  const detached = document.createElement("x-connects-itself");
+                  class ConnectsItself extends HTMLElement {
+                    static get observedAttributes() { return ["data-created"]; }
+                    constructor() {
+                      super();
+                      this.setAttribute("data-created", "yes");
+                      document.body.appendChild(this);
+                    }
+                    attributeChangedCallback() { detachedAttributes++; }
+                    connectedCallback() { detachedConnections++; }
+                  }
+                  customElements.define("x-connects-itself", ConnectsItself);
+                  customElements.upgrade(detached);
+
+                  let childConnections = 0;
+                  class ReparentingParent extends HTMLElement {
+                    connectedCallback() {
+                      const child = this.firstChild;
+                      child.remove();
+                      this.appendChild(child);
+                    }
+                  }
+                  class ReparentedChild extends HTMLElement {
+                    connectedCallback() { childConnections++; }
+                  }
+                  customElements.define("x-reparenting-parent", ReparentingParent);
+                  customElements.define("x-reparented-child", ReparentedChild);
+                  const container = document.createElement("div");
+                  container.innerHTML =
+                    "<x-reparenting-parent><x-reparented-child></x-reparented-child></x-reparenting-parent>";
+                  document.body.appendChild(container);
+
+                  return calls.join("|") ===
+                      "constructor:connected=false|connected|connected" &&
+                    detached.isConnected && detachedAttributes === 0 &&
+                    detachedConnections === 0 && childConnections === 1;
+                })()"#,
+            )
+            .unwrap()
+            .as_boolean()
+            .unwrap());
+    }
+
+    #[test]
     fn remove_attribute_removes_from_dom() {
         let doc = NodeHandle::document();
         let div = NodeHandle::element("div");
