@@ -5280,7 +5280,7 @@ mod tests {
                  root.addEventListener('click', () => events.push('bubble')); \
                  root.addEventListener('click', () => events.push('capture'), true); \
                  child.addEventListener('click', () => events.push('target')); \
-                 child.dispatchEvent(new Event('click'));",
+                 child.dispatchEvent(new Event('click', { bubbles: true }));",
             )
             .unwrap();
 
@@ -5291,6 +5291,35 @@ mod tests {
             .unwrap()
             .to_std_string_escaped();
         assert_eq!(events, "capture,target,bubble");
+    }
+
+    #[test]
+    fn event_defaults_and_dispatch_internals_follow_dom_boundaries() {
+        let mut runtime = JsRuntime::new().unwrap();
+        let result = runtime
+            .eval(
+                r#"(() => {
+                  const node = document.createElement("div");
+                  const event = new Event("probe");
+                  let pathLengthDuringDispatch = -1;
+                  node.addEventListener("probe", current => {
+                    pathLengthDuringDispatch = current.composedPath().length;
+                  });
+                  node.dispatchEvent(event);
+                  return [
+                    event.bubbles,
+                    pathLengthDuringDispatch,
+                    event.__path.length,
+                    event.composedPath().length,
+                    typeof globalThis.__omoikane_internal_assigned_slot,
+                  ].join("|");
+                })()"#,
+            )
+            .unwrap()
+            .to_string(&mut runtime.context)
+            .unwrap()
+            .to_std_string_escaped();
+        assert_eq!(result, "false|1|0|0|undefined");
     }
 
     #[test]

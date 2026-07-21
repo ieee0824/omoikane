@@ -1,4 +1,10 @@
 (() => {
+  // Native bindings are installed before this bootstrap runs. Keep the
+  // unfiltered slot lookup private to the event dispatcher so page scripts
+  // cannot use it to inspect closed shadow trees.
+  const internalAssignedSlot = globalThis.__omoikane_internal_assigned_slot;
+  delete globalThis.__omoikane_internal_assigned_slot;
+
   // The top-level browsing context is its own parent and top-level context.
   globalThis.parent = globalThis;
   globalThis.top = globalThis;
@@ -360,7 +366,7 @@
   class Event {
     constructor(type, init = {}) {
       this.type = String(type);
-      this.bubbles = init.bubbles === undefined ? true : !!init.bubbles;
+      this.bubbles = !!init.bubbles;
       this.cancelable = !!init.cancelable;
       this.composed = !!init.composed;
       this.target = null;
@@ -528,7 +534,7 @@
 
   function eventParent(node, event, originalRoot) {
     if (!(node instanceof Node)) return null;
-    const assignedSlotId = __omoikane_internal_assigned_slot(node.__id);
+    const assignedSlotId = internalAssignedSlot(node.__id);
     if (assignedSlotId !== null && assignedSlotId !== undefined) {
       return wrapNode(assignedSlotId);
     }
@@ -638,6 +644,7 @@
           nodeRoot(finalEntry.relatedTarget) instanceof ShadowRoot);
       event.target = clearTargets ? null : finalEntry.target;
       event.relatedTarget = clearTargets ? null : finalEntry.relatedTarget;
+      event.__path = [];
     }
     return !event.defaultPrevented;
   }
