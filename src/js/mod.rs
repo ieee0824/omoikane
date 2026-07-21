@@ -5301,6 +5301,16 @@ mod tests {
                 r#"(() => {
                   const node = document.createElement("div");
                   const event = new Event("probe");
+                  const nullInitDefaults = [
+                    new Event("event", null).bubbles,
+                    new UIEvent("ui", null).detail,
+                    new CustomEvent("custom", null).detail,
+                    new MessageEvent("message", null).data,
+                    new MouseEvent("mouse", null).clientX,
+                    new KeyboardEvent("key", null).key,
+                    new FocusEvent("focus", null).relatedTarget,
+                    new MediaQueryListEvent("change", null).matches,
+                  ].join(",");
                   let pathLengthDuringDispatch = -1;
                   node.addEventListener("probe", current => {
                     pathLengthDuringDispatch = current.composedPath().length;
@@ -5312,6 +5322,7 @@ mod tests {
                     event.__path.length,
                     event.composedPath().length,
                     typeof globalThis.__omoikane_internal_assigned_slot,
+                    nullInitDefaults,
                   ].join("|");
                 })()"#,
             )
@@ -5319,7 +5330,7 @@ mod tests {
             .to_string(&mut runtime.context)
             .unwrap()
             .to_std_string_escaped();
-        assert_eq!(result, "false|1|0|0|undefined");
+        assert_eq!(result, "false|1|0|0|undefined|false,0,,,0,,,false");
     }
 
     #[test]

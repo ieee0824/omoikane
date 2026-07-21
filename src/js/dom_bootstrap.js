@@ -365,6 +365,7 @@
 
   class Event {
     constructor(type, init = {}) {
+      init = init ?? {};
       this.type = String(type);
       this.bubbles = !!init.bubbles;
       this.cancelable = !!init.cancelable;
@@ -420,6 +421,7 @@
 
   class UIEvent extends Event {
     constructor(type, init = {}) {
+      init = init ?? {};
       super(type, init);
       this.view = init.view ?? null;
       this.detail = init.detail ?? 0;
@@ -437,6 +439,7 @@
 
   class CustomEvent extends Event {
     constructor(type, init = {}) {
+      init = init ?? {};
       super(type, init);
       this.detail = init.detail ?? null;
     }
@@ -444,6 +447,7 @@
 
   class MessageEvent extends Event {
     constructor(type, init = {}) {
+      init = init ?? {};
       super(type, init);
       this.data = init.data ?? null;
       this.origin = init.origin ?? "";
@@ -455,6 +459,7 @@
 
   class MouseEvent extends Event {
     constructor(type, init = {}) {
+      init = init ?? {};
       super(type, init);
       this.clientX = init.clientX ?? 0;
       this.clientY = init.clientY ?? 0;
@@ -474,6 +479,7 @@
 
   class KeyboardEvent extends Event {
     constructor(type, init = {}) {
+      init = init ?? {};
       super(type, init);
       this.key = init.key ?? "";
       this.code = init.code ?? "";
@@ -489,6 +495,7 @@
 
   class FocusEvent extends Event {
     constructor(type, init = {}) {
+      init = init ?? {};
       super(type, init);
       this.relatedTarget = init.relatedTarget ?? null;
     }
@@ -5794,6 +5801,7 @@
 
   class MediaQueryListEvent extends Event {
     constructor(type, init = {}) {
+      init = init ?? {};
       super(type, {
         bubbles: init.bubbles ?? false,
         cancelable: init.cancelable ?? false,
