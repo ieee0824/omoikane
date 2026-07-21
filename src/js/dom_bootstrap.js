@@ -599,17 +599,23 @@
       const previousSibling = this.lastChild;
       if (child && child.nodeType === 11) {
         const children = child.childNodes.slice();
+        const connectedBeforeMove = children.map(node => node.isConnected);
         for (const c of children) {
           notifyImplicitRemoval(c);
           __omoikane_append_child(this.__id, c.__id);
+        }
+        for (let i = 0; i < children.length; i++) {
+          if (connectedBeforeMove[i]) disconnectCustomElementTree(children[i]);
         }
         upgradeInsertedCustomElements(this, children);
         if (children.length) queueMutation(this, "childList", { addedNodes: children, previousSibling });
         return child;
       }
       this.__ensureNotAncestor(child);
+      const connectedBeforeMove = !!(child && child.isConnected);
       notifyImplicitRemoval(child);
       __omoikane_append_child(this.__id, child.__id);
+      if (connectedBeforeMove) disconnectCustomElementTree(child);
       upgradeInsertedCustomElements(this, [child]);
       queueMutation(this, "childList", { addedNodes: [child], previousSibling });
       return child;
@@ -774,8 +780,13 @@
     setAttribute(name, value) {
       const attr = String(name);
       const oldValue = __omoikane_get_attribute(this.__id, attr);
-      __omoikane_set_attribute(this.__id, attr, String(value));
+      const newValue = String(value);
+      __omoikane_set_attribute(this.__id, attr, newValue);
       queueMutation(this, "attributes", { attributeName: attr, oldValue });
+      const callbackName = (this.namespaceURI === null || this.namespaceURI === HTML_NAMESPACE)
+        ? attr.replace(/[A-Z]/g, letter => letter.toLowerCase())
+        : attr;
+      notifyCustomElementAttributeChanged(this, callbackName, oldValue, newValue, null);
       // A dynamically set `on*` content attribute is wired to a listener here
       // (parse-time attributes go through the initial wireInlineHandlers pass).
       if (/^on./i.test(attr)) applyInlineHandlerAttribute(this, attr);
@@ -1016,6 +1027,7 @@
       const type = this.nodeType;
       if (type === 9 || type === 10) return;
       const text = value == null ? "" : String(value);
+      const wasConnected = this.isConnected;
       const removedNodes = this.childNodes.slice();
       // Native replaces all children at once. Notify from the end so boundary
       // offsets for later siblings are subsequently decremented by removals of
@@ -1023,6 +1035,9 @@
       for (const child of this.childNodes.slice().reverse()) preRemove(this, child);
       __omoikane_set_text_content(this.__id, text);
       const addedNodes = this.childNodes.slice();
+      if (wasConnected) {
+        for (const child of removedNodes) disconnectCustomElementTree(child);
+      }
       if (removedNodes.length || addedNodes.length) {
         queueMutation(this, "childList", { addedNodes, removedNodes });
       }
@@ -1034,10 +1049,14 @@
 
     set innerHTML(value) {
       const html = value == null ? "" : String(value);
+      const wasConnected = this.isConnected;
       const removedNodes = this.childNodes.slice();
       for (const child of removedNodes.slice().reverse()) preRemove(this, child);
       __omoikane_set_inner_html(this.__id, html);
       const addedNodes = this.childNodes.slice();
+      if (wasConnected) {
+        for (const child of removedNodes) disconnectCustomElementTree(child);
+      }
       const owner = this.nodeType === 9 ? this : this.ownerDocument;
       const registry = owner && customElementRegistryByDocument.get(owner);
       if (registry) {
@@ -1079,7 +1098,9 @@
       const previousSibling = child.previousSibling;
       const nextSibling = child.nextSibling;
       preRemove(this, child);
+      const wasConnected = child.isConnected;
       __omoikane_remove_child(this.__id, child.__id);
+      if (wasConnected) disconnectCustomElementTree(child);
       queueMutation(this, "childList", { removedNodes: [child], previousSibling, nextSibling });
       return child;
     }
@@ -1093,18 +1114,24 @@
       }
       if (newNode && newNode.nodeType === 11) {
         const children = newNode.childNodes.slice();
+        const connectedBeforeMove = children.map(node => node.isConnected);
         const previousSibling = refNode ? refNode.previousSibling : this.lastChild;
         for (const child of children) {
           notifyImplicitRemoval(child);
           __omoikane_insert_before(this.__id, child.__id, refNode ? refNode.__id : null);
+        }
+        for (let i = 0; i < children.length; i++) {
+          if (connectedBeforeMove[i]) disconnectCustomElementTree(children[i]);
         }
         upgradeInsertedCustomElements(this, children);
         if (children.length) queueMutation(this, "childList", { addedNodes: children, previousSibling, nextSibling: refNode });
         return newNode;
       }
       const previousSibling = refNode ? refNode.previousSibling : this.lastChild;
+      const connectedBeforeMove = !!(newNode && newNode.isConnected);
       notifyImplicitRemoval(newNode);
       __omoikane_insert_before(this.__id, newNode.__id, refNode ? refNode.__id : null);
+      if (connectedBeforeMove) disconnectCustomElementTree(newNode);
       upgradeInsertedCustomElements(this, [newNode]);
       queueMutation(this, "childList", { addedNodes: [newNode], previousSibling, nextSibling: refNode });
       return newNode;
@@ -1221,7 +1248,13 @@
       const attr = String(name);
       const oldValue = __omoikane_get_attribute(this.__id, attr);
       __omoikane_remove_attribute(this.__id, attr);
-      if (oldValue !== null) queueMutation(this, "attributes", { attributeName: attr, oldValue });
+      if (oldValue !== null) {
+        queueMutation(this, "attributes", { attributeName: attr, oldValue });
+        const callbackName = (this.namespaceURI === null || this.namespaceURI === HTML_NAMESPACE)
+          ? attr.replace(/[A-Z]/g, letter => letter.toLowerCase())
+          : attr;
+        notifyCustomElementAttributeChanged(this, callbackName, oldValue, null, null);
+      }
       // Removing an `on*` content attribute detaches the listener it wired.
       if (/^on./i.test(attr)) applyInlineHandlerAttribute(this, attr);
     }
@@ -1241,9 +1274,11 @@
       if (previous && previous.name !== name) {
         __omoikane_remove_attribute(this.__id, previous.name);
       }
-      this.__namespacedAttributes.set(key, { name, localName, namespaceURI: ns, value: String(value) });
-      __omoikane_set_attribute(this.__id, name, String(value));
+      const newValue = String(value);
+      this.__namespacedAttributes.set(key, { name, localName, namespaceURI: ns, value: newValue });
+      __omoikane_set_attribute(this.__id, name, newValue);
       queueMutation(this, "attributes", { attributeName: localName, attributeNamespace: ns, oldValue });
+      notifyCustomElementAttributeChanged(this, localName, oldValue, newValue, ns);
     }
 
     getAttributeNS(namespace, localName) {
@@ -1265,6 +1300,7 @@
       this.__namespacedAttributes.delete(key);
       __omoikane_remove_attribute(this.__id, entry.name);
       queueMutation(this, "attributes", { attributeName: entry.localName, attributeNamespace: ns, oldValue: entry.value });
+      notifyCustomElementAttributeChanged(this, entry.localName, entry.value, null, ns);
     }
 
     get tagName() {
@@ -1748,7 +1784,9 @@
         const element = wrapNode(__omoikane_create_element(definition.name));
         definition.document.__own(element);
         Object.setPrototypeOf(element, new.target.prototype);
+        element.__customElementDefinition = definition;
         element.__customElementState = "custom";
+        element.__customElementConnected = false;
         super(element.__id);
         return element;
       }
@@ -2520,6 +2558,18 @@
         if (registry) considerCustomElement(registry, node);
       }
       return node;
+    }
+
+    importNode(node, deep = false) {
+      if (!(node instanceof Node)) {
+        throw new TypeError("Document.importNode requires a Node");
+      }
+      if (node.nodeType === 9) {
+        throw new DOMException("Documents cannot be imported.", "NotSupportedError");
+      }
+      const clone = node.cloneNode(!!deep);
+      stampOwnerDoc(clone, this);
+      return clone;
     }
 
     get implementation() {
@@ -3825,15 +3875,90 @@
     }
   }
 
+  function invokeCustomElementCallback(element, callbackName, args) {
+    if (!element || element.__customElementState !== "custom") return;
+    const definition = element.__customElementDefinition;
+    const callback = definition && definition.callbacks[callbackName];
+    if (!callback) return;
+    try {
+      Reflect.apply(callback, element, args);
+    } catch (error) {
+      if (!element.__customElementCallbackErrors) {
+        element.__customElementCallbackErrors = [];
+      }
+      element.__customElementCallbackErrors.push(error);
+    }
+  }
+
+  function notifyCustomElementAttributeChanged(
+    element,
+    name,
+    oldValue,
+    newValue,
+    namespace,
+  ) {
+    if (!element || element.__customElementState !== "custom") return;
+    const definition = element.__customElementDefinition;
+    if (!definition || !definition.observedAttributes.has(name)) return;
+    invokeCustomElementCallback(element, "attributeChangedCallback", [
+      name,
+      oldValue,
+      newValue,
+      namespace,
+    ]);
+  }
+
+  function customElementTreeWalk(root, callback) {
+    if (!root) return;
+    if (root.nodeType === 1) {
+      callback(root);
+      if (root.__shadowRootInternal) {
+        customElementTreeWalk(root.__shadowRootInternal, callback);
+      }
+    }
+    const children = root.childNodes;
+    for (let i = 0; i < children.length; i++) {
+      customElementTreeWalk(children[i], callback);
+    }
+  }
+
+  function connectCustomElement(element) {
+    if (!element || element.__customElementState !== "custom" ||
+        element.__customElementConnected) {
+      return;
+    }
+    element.__customElementConnected = true;
+    invokeCustomElementCallback(element, "connectedCallback", []);
+  }
+
+  function disconnectCustomElementTree(root) {
+    customElementTreeWalk(root, element => {
+      if (element.__customElementState !== "custom" ||
+          !element.__customElementConnected) {
+        return;
+      }
+      element.__customElementConnected = false;
+      invokeCustomElementCallback(element, "disconnectedCallback", []);
+    });
+  }
+
   function upgradeCustomElement(element, definition) {
     if (!element || element.__customElementState === "custom" ||
+        element.__customElementState === "precustomized" ||
         element.__customElementState === "failed" ||
         element.namespaceURI !== HTML_NAMESPACE && element.namespaceURI !== null ||
         String(element.localName) !== definition.name) {
       return;
     }
 
+    const wasConnected = element.isConnected;
+    const initialAttributes = (__omoikane_attribute_names(element.__id) || [])
+      .map(name => ({
+        name,
+        value: __omoikane_get_attribute(element.__id, name),
+      }));
     Object.setPrototypeOf(element, definition.prototype);
+    element.__customElementDefinition = definition;
     element.__customElementState = "precustomized";
     const entry = { element, constructed: false };
     customElementConstructionStack.push(entry);
@@ -3850,6 +3975,23 @@
         );
       }
       element.__customElementState = "custom";
+      element.__customElementConnected = false;
+      for (const attribute of initialAttributes) {
+        notifyCustomElementAttributeChanged(
+          element,
+          attribute.name,
+          null,
+          attribute.value,
+          null,
+        );
+      }
+      if (wasConnected) {
+        connectCustomElement(element);
+        // The upgrade reaction is based on the element's connectivity when the
+        // upgrade started. If its constructor detached it, allow a later real
+        // insertion to deliver a new connected callback.
+        if (!element.isConnected) element.__customElementConnected = false;
+      }
     } catch (error) {
       element.__customElementState = "failed";
       element.__customElementError = error;
@@ -3890,7 +4032,16 @@
     const owner = parent.nodeType === 9 ? parent : parent.ownerDocument;
     const registry = owner && customElementRegistryByDocument.get(owner);
     if (!registry) return;
-    for (const node of nodes) upgradeCustomElementTree(registry, node);
+    for (const node of nodes) {
+      customElementTreeWalk(node, element => {
+        if (element.__customElementState === "custom") {
+          connectCustomElement(element);
+          return;
+        }
+        const definition = registry.__definitions.get(String(element.localName));
+        if (definition) upgradeCustomElement(element, definition);
+      });
+    }
   }
 
   function registryForDocument(document) {
@@ -3944,6 +4095,8 @@
       this.__definitionRunning = true;
       let prototype;
       let extendsValue = null;
+      const callbacks = {};
+      let observedAttributes = [];
       try {
         prototype = constructor.prototype;
         if ((typeof prototype !== "object" && typeof prototype !== "function") ||
@@ -3959,6 +4112,25 @@
             "NotSupportedError",
           );
         }
+        for (const callbackName of [
+          "connectedCallback",
+          "disconnectedCallback",
+          "adoptedCallback",
+          "attributeChangedCallback",
+        ]) {
+          const callback = prototype[callbackName];
+          if (callback !== undefined && callback !== null &&
+              typeof callback !== "function") {
+            throw new TypeError(callbackName + " is not callable");
+          }
+          callbacks[callbackName] = callback || null;
+        }
+        if (callbacks.attributeChangedCallback) {
+          const observed = constructor.observedAttributes;
+          if (observed !== undefined && observed !== null) {
+            observedAttributes = Array.from(observed, value => String(value));
+          }
+        }
       } finally {
         this.__definitionRunning = false;
       }
@@ -3968,6 +4140,8 @@
         name,
         constructor,
         prototype,
+        callbacks,
+        observedAttributes: new Set(observedAttributes),
         document: this.__document,
         promise: pending ? pending.promise : Promise.resolve(constructor),
       };
