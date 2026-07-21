@@ -1,4 +1,10 @@
 (() => {
+  // Native bindings are installed before this bootstrap runs. Keep the
+  // unfiltered slot lookup private to the event dispatcher so page scripts
+  // cannot use it to inspect closed shadow trees.
+  const internalAssignedSlot = globalThis.__omoikane_internal_assigned_slot;
+  delete globalThis.__omoikane_internal_assigned_slot;
+
   // The top-level browsing context is its own parent and top-level context.
   globalThis.parent = globalThis;
   globalThis.top = globalThis;
@@ -359,8 +365,9 @@
 
   class Event {
     constructor(type, init = {}) {
+      init = init ?? {};
       this.type = String(type);
-      this.bubbles = init.bubbles === undefined ? true : !!init.bubbles;
+      this.bubbles = !!init.bubbles;
       this.cancelable = !!init.cancelable;
       this.composed = !!init.composed;
       this.target = null;
@@ -414,6 +421,7 @@
 
   class UIEvent extends Event {
     constructor(type, init = {}) {
+      init = init ?? {};
       super(type, init);
       this.view = init.view ?? null;
       this.detail = init.detail ?? 0;
@@ -431,6 +439,7 @@
 
   class CustomEvent extends Event {
     constructor(type, init = {}) {
+      init = init ?? {};
       super(type, init);
       this.detail = init.detail ?? null;
     }
@@ -438,6 +447,7 @@
 
   class MessageEvent extends Event {
     constructor(type, init = {}) {
+      init = init ?? {};
       super(type, init);
       this.data = init.data ?? null;
       this.origin = init.origin ?? "";
@@ -449,6 +459,7 @@
 
   class MouseEvent extends Event {
     constructor(type, init = {}) {
+      init = init ?? {};
       super(type, init);
       this.clientX = init.clientX ?? 0;
       this.clientY = init.clientY ?? 0;
@@ -468,6 +479,7 @@
 
   class KeyboardEvent extends Event {
     constructor(type, init = {}) {
+      init = init ?? {};
       super(type, init);
       this.key = init.key ?? "";
       this.code = init.code ?? "";
@@ -483,6 +495,7 @@
 
   class FocusEvent extends Event {
     constructor(type, init = {}) {
+      init = init ?? {};
       super(type, init);
       this.relatedTarget = init.relatedTarget ?? null;
     }
@@ -528,7 +541,7 @@
 
   function eventParent(node, event, originalRoot) {
     if (!(node instanceof Node)) return null;
-    const assignedSlotId = __omoikane_internal_assigned_slot(node.__id);
+    const assignedSlotId = internalAssignedSlot(node.__id);
     if (assignedSlotId !== null && assignedSlotId !== undefined) {
       return wrapNode(assignedSlotId);
     }
@@ -638,6 +651,7 @@
           nodeRoot(finalEntry.relatedTarget) instanceof ShadowRoot);
       event.target = clearTargets ? null : finalEntry.target;
       event.relatedTarget = clearTargets ? null : finalEntry.relatedTarget;
+      event.__path = [];
     }
     return !event.defaultPrevented;
   }
@@ -5787,6 +5801,7 @@
 
   class MediaQueryListEvent extends Event {
     constructor(type, init = {}) {
+      init = init ?? {};
       super(type, {
         bubbles: init.bubbles ?? false,
         cancelable: init.cancelable ?? false,
