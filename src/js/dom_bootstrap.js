@@ -3829,7 +3829,7 @@
     if (!element || element.__customElementState === "custom" ||
         element.__customElementState === "failed" ||
         element.namespaceURI !== HTML_NAMESPACE && element.namespaceURI !== null ||
-        String(element.localName).toLowerCase() !== definition.name) {
+        String(element.localName) !== definition.name) {
       return;
     }
 
@@ -3864,7 +3864,7 @@
     if (owner !== registry.__document) return;
     if (root.nodeType === 1) {
       const definition = registry.__definitions.get(
-        String(root.localName).toLowerCase(),
+        String(root.localName),
       );
       if (definition) upgradeCustomElement(root, definition);
       if (root.__shadowRootInternal) {
@@ -3878,7 +3878,7 @@
   }
 
   function considerCustomElement(registry, element) {
-    const name = String(element.localName).toLowerCase();
+    const name = String(element.localName);
     const definition = registry.__definitions.get(name);
     if (definition) {
       upgradeCustomElement(element, definition);

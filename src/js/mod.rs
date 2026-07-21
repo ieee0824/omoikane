@@ -8924,9 +8924,12 @@ mod tests {
                   try { new HTMLElement(); } catch (e) {
                     htmlElementStayedIllegal = e.name === "TypeError";
                   }
+                  class NonAsciiElement extends HTMLElement {}
+                  customElements.define("x-À", NonAsciiElement);
 
                   const created = document.createElement("test-element");
                   const directlyConstructed = new TestElement();
+                  const nonAscii = document.createElement("x-À");
                   return typeof CustomElementRegistry === "function" &&
                     customElements instanceof CustomElementRegistry &&
                     illegalConstructor && invalidName === "SyntaxError" &&
@@ -8942,6 +8945,8 @@ mod tests {
                     created instanceof TestElement && created.constructed &&
                     directlyConstructed instanceof TestElement &&
                     directlyConstructed.localName === "test-element" &&
+                    nonAscii instanceof NonAsciiElement &&
+                    nonAscii.localName === "x-À" &&
                     calls === 2;
                 })()"#,
             )
