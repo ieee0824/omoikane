@@ -8471,6 +8471,49 @@ mod tests {
     }
 
     #[test]
+    fn retained_css_rule_tracks_insertions_and_deletions_before_it() {
+        let doc = crate::html::TreeBuilder::parse(
+            "<html><head><style>.first { width: 1px; } .second { width: 2px; }</style></head><body><div class='target'></div></body></html>",
+        )
+        .document();
+        let mut runtime = JsRuntime::with_document(doc).unwrap();
+
+        runtime
+            .eval(
+                r#"
+                globalThis.retainedRule = document.styleSheets[0].cssRules[1];
+                document.styleSheets[0].insertRule('.inserted { width: 3px; }', 0);
+                retainedRule.selectorText = '.target';
+                "#,
+            )
+            .unwrap();
+        assert_eq!(
+            eval_str(
+                &mut runtime,
+                "document.styleSheets[0].cssRules[2].selectorText"
+            ),
+            ".target"
+        );
+        assert_eq!(
+            eval_str(&mut runtime, "getComputedStyle(document.querySelector('div')).width"),
+            "2px"
+        );
+
+        runtime
+            .eval(
+                "document.styleSheets[0].deleteRule(0); retainedRule.selectorText = '.retargeted'",
+            )
+            .unwrap();
+        assert_eq!(
+            eval_str(
+                &mut runtime,
+                "document.styleSheets[0].cssRules[1].selectorText"
+            ),
+            ".retargeted"
+        );
+    }
+
+    #[test]
     fn cssom_insert_and_delete_report_dom_exceptions() {
         let doc = crate::html::TreeBuilder::parse(
             "<html><head><style>p { color: red; }</style></head><body></body></html>",
