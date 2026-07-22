@@ -8,7 +8,9 @@ use std::time::Duration;
 
 use crate::dom::{Node, NodeHandle, NodeType};
 use rusqlite::{Connection, params};
-use super::matcher::{SelectorMatchCache, matches_selector_with_pseudo_cached};
+use super::matcher::{
+    SelectorMatchCache, matches_selector_with_pseudo_cached, matches_selector_with_scope_cached,
+};
 
 use super::{
     Combinator, Declaration, MediaQuery, PseudoElement, Rule, Selector, SelectorPart,
@@ -116,6 +118,8 @@ pub struct StyleResolver {
     /// it depends only on the prelude text, not on viewport dimensions or
     /// color-scheme settings.
     media_query_cache: HashMap<String, Vec<MediaQuery>>,
+    /// Parsed `@scope` preludes, including invalid results, keyed by source text.
+    scope_prelude_cache: HashMap<String, Option<super::ScopePrelude>>,
     /// Parsed `@keyframes` rules keyed by animation name.
     keyframes: HashMap<String, Vec<KeyframeStep>>,
 }
@@ -129,6 +133,7 @@ struct KeyframeStep {
 #[derive(Debug, Clone)]
 struct StylesheetScope {
     root: Option<NodeHandle>,
+    implicit_scope_root: Option<NodeHandle>,
     encapsulation_order: usize,
 }
 
@@ -215,6 +220,28 @@ impl StyleResolver {
         self.stylesheets.push(StylesheetInput { origin, stylesheet });
         self.stylesheet_scopes.push(StylesheetScope {
             root: None,
+            implicit_scope_root: None,
+            encapsulation_order: 0,
+        });
+        self.cache.clear();
+        self.pseudo_cache.clear();
+        self.selector_match_cache = SelectorMatchCache::default();
+    }
+
+    /// Adds an inline stylesheet and records its owner element's parent for
+    /// an omitted `@scope` start boundary.
+    pub(crate) fn add_stylesheet_with_implicit_scope_root(
+        &mut self,
+        origin: Origin,
+        stylesheet: Stylesheet,
+        implicit_scope_root: NodeHandle,
+    ) {
+        collect_keyframes(&stylesheet.rules, &mut self.keyframes);
+        self.rule_indexes.push(StylesheetRuleIndex::build(&stylesheet));
+        self.stylesheets.push(StylesheetInput { origin, stylesheet });
+        self.stylesheet_scopes.push(StylesheetScope {
+            root: None,
+            implicit_scope_root: Some(implicit_scope_root),
             encapsulation_order: 0,
         });
         self.cache.clear();
@@ -259,6 +286,7 @@ impl StyleResolver {
         self.stylesheets.push(StylesheetInput { origin, stylesheet });
         self.stylesheet_scopes.push(StylesheetScope {
             root: Some(scope),
+            implicit_scope_root: None,
             encapsulation_order,
         });
         self.cache.clear();
@@ -376,9 +404,11 @@ impl StyleResolver {
                 viewport_height,
                 color_scheme_dark,
                 &mut self.media_query_cache,
+                &mut self.scope_prelude_cache,
                 element_keys.as_ref(),
                 &mut self.selector_match_cache,
                 stylesheet_scope.root.as_ref(),
+                stylesheet_scope.implicit_scope_root.as_ref(),
                 stylesheet_scope.encapsulation_order,
             );
         }
@@ -400,6 +430,7 @@ impl StyleResolver {
                         classes: 0,
                         elements: 0,
                     },
+                    scope_proximity: None,
                     source_order,
                     encapsulation_order: tree_scope_order(&self.stylesheet_scopes, node),
                 });
@@ -414,6 +445,7 @@ impl StyleResolver {
                 .then(right.prefixed_alias.cmp(&left.prefixed_alias))
                 .then(left.inline.cmp(&right.inline))
                 .then(left.specificity.cmp(&right.specificity))
+                .then_with(|| compare_scope_proximity(left, right))
                 .then(left.source_order.cmp(&right.source_order))
         });
 
@@ -1005,10 +1037,23 @@ struct Candidate {
     origin: Origin,
     inline: bool,
     specificity: Specificity,
+    /// Ancestor hops from the styled element to the applicable scoping root.
+    scope_proximity: Option<usize>,
     source_order: usize,
     /// Position of this declaration's tree scope in tree-of-trees order.
     /// Encapsulation order reverses for important declarations.
     encapsulation_order: usize,
+}
+
+#[derive(Debug, Clone)]
+struct ActiveScope {
+    roots: Vec<ScopeRoot>,
+}
+
+#[derive(Debug, Clone)]
+struct ScopeRoot {
+    node: NodeHandle,
+    proximity: usize,
 }
 
 struct ElementMatchKeys {
@@ -1451,9 +1496,11 @@ fn collect_indexed_rule_candidates(
     viewport_height: f32,
     color_scheme_dark: bool,
     media_cache: &mut HashMap<String, Vec<MediaQuery>>,
+    scope_cache: &mut HashMap<String, Option<super::ScopePrelude>>,
     element_keys: Option<&ElementMatchKeys>,
     selector_cache: &mut SelectorMatchCache,
     shadow_scope: Option<&NodeHandle>,
+    implicit_scope_root: Option<&NodeHandle>,
     encapsulation_order: usize,
 ) {
     let Some(element_keys) = element_keys else {
@@ -1468,10 +1515,13 @@ fn collect_indexed_rule_candidates(
             viewport_height,
             color_scheme_dark,
             media_cache,
+            scope_cache,
             None,
             selector_cache,
             shadow_scope,
+            implicit_scope_root,
             encapsulation_order,
+            None,
         );
         return;
     };
@@ -1490,10 +1540,13 @@ fn collect_indexed_rule_candidates(
             viewport_height,
             color_scheme_dark,
             media_cache,
+            scope_cache,
             Some(element_keys),
             selector_cache,
             shadow_scope,
+            implicit_scope_root,
             encapsulation_order,
+            None,
         );
     }
     for (rule_index, rule) in rules.iter().enumerate() {
@@ -1512,10 +1565,13 @@ fn collect_indexed_rule_candidates(
             viewport_height,
             color_scheme_dark,
             media_cache,
+            scope_cache,
             Some(element_keys),
             selector_cache,
             shadow_scope,
+            implicit_scope_root,
             encapsulation_order,
+            None,
         );
     }
     *source_order += index.total_declarations;
@@ -1532,10 +1588,13 @@ fn collect_rule_candidates(
     viewport_height: f32,
     color_scheme_dark: bool,
     media_cache: &mut HashMap<String, Vec<MediaQuery>>,
+    scope_cache: &mut HashMap<String, Option<super::ScopePrelude>>,
     element_keys: Option<&ElementMatchKeys>,
     selector_cache: &mut SelectorMatchCache,
     shadow_scope: Option<&NodeHandle>,
+    implicit_scope_root: Option<&NodeHandle>,
     encapsulation_order: usize,
+    active_scope: Option<&ActiveScope>,
 ) {
     if node.node_type() != NodeType::Element {
         return;
@@ -1548,11 +1607,30 @@ fn collect_rule_candidates(
                     *source_order += style_rule.declarations.len();
                     continue;
                 }
-                let matching_specificity = style_rule
-                    .selectors
-                    .iter()
-                    .filter(|selector| {
-                        if let Some(scope) = shadow_scope {
+                let mut matching = None;
+                for selector in &style_rule.selectors {
+                    let selector_specificity = specificity(selector);
+                    if let Some(active) = active_scope {
+                        for root in &active.roots {
+                            if root.node == *node && !selector_references_scope(selector) {
+                                continue;
+                            }
+                            if matches_selector_with_scope_cached(
+                                node,
+                                selector,
+                                pseudo,
+                                selector_cache,
+                                Some(&root.node),
+                            ) {
+                                retain_best_scoped_match(
+                                    &mut matching,
+                                    selector_specificity,
+                                    root.proximity,
+                                );
+                            }
+                        }
+                    } else {
+                        let matches = if let Some(scope) = shadow_scope {
                             matches_shadow_scoped_selector(
                                 node,
                                 selector,
@@ -1567,12 +1645,18 @@ fn collect_rule_candidates(
                                 pseudo,
                                 selector_cache,
                             )
+                        };
+                        if matches {
+                            retain_best_scoped_match(
+                                &mut matching,
+                                selector_specificity,
+                                usize::MAX,
+                            );
                         }
-                    })
-                    .map(specificity)
-                    .max();
+                    }
+                }
 
-                if let Some(specificity) = matching_specificity {
+                if let Some((specificity, proximity)) = matching {
                     for declaration in &style_rule.declarations {
                         out.push(Candidate {
                             name: canonical_property_name(&declaration.name).to_string(),
@@ -1582,6 +1666,7 @@ fn collect_rule_candidates(
                             origin,
                             inline: false,
                             specificity,
+                            scope_proximity: active_scope.map(|_| proximity),
                             source_order: *source_order,
                             encapsulation_order,
                         });
@@ -1593,6 +1678,45 @@ fn collect_rule_candidates(
             }
             Rule::At(at_rule) => {
                 if let Some(block) = &at_rule.block {
+                    if at_rule.name.eq_ignore_ascii_case("scope") {
+                        let prelude = scope_cache
+                            .entry(at_rule.prelude.clone())
+                            .or_insert_with(|| super::parse_scope_prelude(&at_rule.prelude));
+                        let Some(prelude) = prelude.as_ref() else {
+                            *source_order += count_declarations(block);
+                            continue;
+                        };
+                        let Some(scope) = applicable_scope(
+                            node,
+                            &prelude,
+                            active_scope,
+                            implicit_scope_root,
+                            selector_cache,
+                        ) else {
+                            *source_order += count_declarations(block);
+                            continue;
+                        };
+                        collect_rule_candidates(
+                            node,
+                            block,
+                            origin,
+                            pseudo,
+                            source_order,
+                            out,
+                            viewport_width,
+                            viewport_height,
+                            color_scheme_dark,
+                            media_cache,
+                            scope_cache,
+                            element_keys,
+                            selector_cache,
+                            shadow_scope,
+                            implicit_scope_root,
+                            encapsulation_order,
+                            Some(&scope),
+                        );
+                        continue;
+                    }
                     // Evaluate @media queries before descending into the block.
                     let should_apply = if at_rule.name == "media" {
                         media_query_matches(
@@ -1625,10 +1749,13 @@ fn collect_rule_candidates(
                             viewport_height,
                             color_scheme_dark,
                             media_cache,
+                            scope_cache,
                             element_keys,
                             selector_cache,
                             shadow_scope,
+                            implicit_scope_root,
                             encapsulation_order,
+                            active_scope,
                         );
                     } else {
                         // Count the rules inside for correct source_order numbering.
@@ -1641,6 +1768,119 @@ fn collect_rule_candidates(
             // @font-face rules are handled by the font loading layer, not style resolution.
             Rule::FontFace(_) => {}
         }
+    }
+}
+
+fn applicable_scope(
+    node: &NodeHandle,
+    prelude: &super::ScopePrelude,
+    outer: Option<&ActiveScope>,
+    implicit_scope_root: Option<&NodeHandle>,
+    selector_cache: &mut SelectorMatchCache,
+) -> Option<ActiveScope> {
+    let mut ancestors = Vec::new();
+    let mut current = Some(node.clone());
+    while let Some(candidate) = current {
+        if candidate.node_type() == NodeType::Element {
+            ancestors.push(candidate.clone());
+        }
+        current = candidate.parent_node();
+    }
+    if ancestors.is_empty() {
+        return None;
+    }
+
+    let ambient_roots: Vec<NodeHandle> = if let Some(outer) = outer {
+        outer.roots.iter().map(|root| root.node.clone()).collect()
+    } else {
+        vec![ancestors.last()?.clone()]
+    };
+
+    let mut roots = Vec::new();
+    for ambient_root in ambient_roots {
+        let Some(ambient_proximity) = ancestors
+            .iter()
+            .position(|candidate| candidate == &ambient_root)
+        else {
+            continue;
+        };
+        let candidates: Vec<(usize, NodeHandle)> = if let Some(start) = &prelude.start {
+            ancestors[..=ambient_proximity]
+                .iter()
+                .enumerate()
+                .filter(|(_, candidate)| {
+                    start.iter().any(|selector| {
+                        matches_selector_with_scope_cached(
+                            candidate,
+                            selector,
+                            None,
+                            selector_cache,
+                            Some(&ambient_root),
+                        )
+                    })
+                })
+                .map(|(proximity, root)| (proximity, root.clone()))
+                .collect()
+        } else if let Some(implicit_root) = implicit_scope_root {
+            ancestors[..=ambient_proximity]
+                .iter()
+                .position(|candidate| candidate == implicit_root)
+                .map(|proximity| vec![(proximity, implicit_root.clone())])
+                .unwrap_or_default()
+        } else {
+            vec![(ambient_proximity, ambient_root)]
+        };
+
+        for (proximity, root) in candidates {
+            let excluded_by_limit = prelude.end.as_ref().is_some_and(|limits| {
+                ancestors[..=proximity].iter().any(|candidate| {
+                    limits.iter().any(|selector| {
+                        matches_selector_with_scope_cached(
+                            candidate,
+                            selector,
+                            None,
+                            selector_cache,
+                            Some(&root),
+                        )
+                    })
+                })
+            });
+            if !excluded_by_limit
+                && !roots.iter().any(|existing: &ScopeRoot| existing.node == root)
+            {
+                roots.push(ScopeRoot { node: root, proximity });
+            }
+        }
+    }
+    (!roots.is_empty()).then_some(ActiveScope { roots })
+}
+
+fn selector_references_scope(selector: &Selector) -> bool {
+    selector.parts.iter().any(|part| {
+        part.simples.iter().any(|simple| match simple {
+            SimpleSelector::PseudoClass(name) => name.eq_ignore_ascii_case("scope"),
+            SimpleSelector::Is(selectors)
+            | SimpleSelector::Where(selectors)
+            | SimpleSelector::Not(selectors) => selectors.iter().any(selector_references_scope),
+            SimpleSelector::Has(relative) => relative
+                .iter()
+                .any(|relative| selector_references_scope(&relative.selector)),
+            _ => false,
+        })
+    })
+}
+
+fn retain_best_scoped_match(
+    current: &mut Option<(Specificity, usize)>,
+    specificity: Specificity,
+    proximity: usize,
+) {
+    let replace = current.is_none_or(|(current_specificity, current_proximity)| {
+        specificity > current_specificity
+            || specificity == current_specificity && proximity < current_proximity
+    });
+    if replace {
+        *current = Some((specificity, proximity));
     }
 }
 
@@ -1846,6 +2086,15 @@ fn cascade_rank(candidate: &Candidate) -> (u8, u8) {
         (false, Origin::UserAgent) => 0,
     };
     (importance, origin)
+}
+
+fn compare_scope_proximity(left: &Candidate, right: &Candidate) -> std::cmp::Ordering {
+    match (left.scope_proximity, right.scope_proximity) {
+        (Some(left), Some(right)) => right.cmp(&left),
+        (Some(_), None) => std::cmp::Ordering::Greater,
+        (None, Some(_)) => std::cmp::Ordering::Less,
+        (None, None) => std::cmp::Ordering::Equal,
+    }
 }
 
 fn encapsulation_rank(candidate: &Candidate) -> usize {
@@ -3520,6 +3769,9 @@ fn apply_ua_defaults(
 }
 
 fn apply_initial_values(properties: &mut BTreeMap<String, ComputedValue>) {
+    properties
+        .entry("background-color".to_string())
+        .or_insert_with(|| ComputedValue::Color("transparent".to_string()));
     properties
         .entry("color".to_string())
         .or_insert_with(|| ComputedValue::Color("black".to_string()));

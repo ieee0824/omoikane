@@ -74,6 +74,17 @@ pub(crate) fn matches_selector_with_pseudo_cached(
     pseudo: Option<PseudoElement>,
     cache: &mut SelectorMatchCache,
 ) -> bool {
+    matches_selector_with_scope_cached(node, selector, pseudo, cache, None)
+}
+
+/// Matches a selector with `:scope` bound to `scope_root`.
+pub(crate) fn matches_selector_with_scope_cached(
+    node: &NodeHandle,
+    selector: &Selector,
+    pseudo: Option<PseudoElement>,
+    cache: &mut SelectorMatchCache,
+    scope_root: Option<&NodeHandle>,
+) -> bool {
     if selector.parts.is_empty() || node.node_type() != NodeType::Element {
         return false;
     }
@@ -82,7 +93,14 @@ pub(crate) fn matches_selector_with_pseudo_cached(
         return false;
     }
 
-    matches_selector_part(node, selector, selector.parts.len() - 1, pseudo, cache)
+    matches_selector_part(
+        node,
+        selector,
+        selector.parts.len() - 1,
+        pseudo,
+        cache,
+        scope_root,
+    )
 }
 
 /// Returns the pseudo-element targeted by `selector`, if any.
@@ -201,9 +219,10 @@ fn matches_selector_part(
     index: usize,
     pseudo: Option<PseudoElement>,
     cache: &mut SelectorMatchCache,
+    scope_root: Option<&NodeHandle>,
 ) -> bool {
     let part = &selector.parts[index];
-    if !matches_compound(node, part, pseudo, cache) {
+    if !matches_compound(node, part, pseudo, cache, scope_root) {
         return false;
     }
 
@@ -214,13 +233,21 @@ fn matches_selector_part(
     if index == 0 {
         return false;
     }
+    if scope_root.is_some_and(|root| root == node) {
+        // Scoped selector matching cannot walk from the scoping root into its
+        // ancestors or siblings outside the scoped subtree.
+        return false;
+    }
 
     match combinator {
         Combinator::Descendant => {
             let mut ancestor = node.parent_node();
             while let Some(parent) = ancestor {
-                if matches_selector_part(&parent, selector, index - 1, None, cache) {
+                if matches_selector_part(&parent, selector, index - 1, None, cache, scope_root) {
                     return true;
+                }
+                if scope_root.is_some_and(|root| root == &parent) {
+                    break;
                 }
                 ancestor = parent.parent_node();
             }
@@ -228,9 +255,9 @@ fn matches_selector_part(
         }
         Combinator::Child => node
             .parent_node()
-            .is_some_and(|parent| matches_selector_part(&parent, selector, index - 1, None, cache)),
+            .is_some_and(|parent| matches_selector_part(&parent, selector, index - 1, None, cache, scope_root)),
         Combinator::AdjacentSibling => previous_element_sibling(node)
-            .is_some_and(|sibling| matches_selector_part(&sibling, selector, index - 1, None, cache)),
+            .is_some_and(|sibling| matches_selector_part(&sibling, selector, index - 1, None, cache, scope_root)),
         Combinator::GeneralSibling => {
             let Some(parent) = node.parent_node() else {
                 return false;
@@ -241,16 +268,22 @@ fn matches_selector_part(
             };
             siblings[..position].iter().rev().any(|sibling| {
                 sibling.node_type() == NodeType::Element
-                    && matches_selector_part(sibling, selector, index - 1, None, cache)
+                    && matches_selector_part(sibling, selector, index - 1, None, cache, scope_root)
             })
         }
     }
 }
 
-fn matches_compound(node: &NodeHandle, part: &SelectorPart, pseudo: Option<PseudoElement>, cache: &mut SelectorMatchCache) -> bool {
+fn matches_compound(
+    node: &NodeHandle,
+    part: &SelectorPart,
+    pseudo: Option<PseudoElement>,
+    cache: &mut SelectorMatchCache,
+    scope_root: Option<&NodeHandle>,
+) -> bool {
     part.simples
         .iter()
-        .all(|simple| matches_simple_selector(node, simple, pseudo, cache))
+        .all(|simple| matches_simple_selector(node, simple, pseudo, cache, scope_root))
 }
 
 fn matches_simple_selector(
@@ -258,6 +291,7 @@ fn matches_simple_selector(
     simple: &SimpleSelector,
     pseudo: Option<PseudoElement>,
     cache: &mut SelectorMatchCache,
+    scope_root: Option<&NodeHandle>,
 ) -> bool {
     match simple {
         SimpleSelector::Type(name) => node
@@ -280,14 +314,16 @@ fn matches_simple_selector(
             operator,
             value,
         } => matches_attribute_selector(node, name, *operator, value.as_deref()),
-        SimpleSelector::PseudoClass(name) => matches_pseudo_class(node, name, pseudo, cache),
+        SimpleSelector::PseudoClass(name) => {
+            matches_pseudo_class(node, name, pseudo, cache, scope_root)
+        }
         SimpleSelector::PseudoElement(name) => matches_pseudo_element(name, pseudo),
         SimpleSelector::Is(selectors) | SimpleSelector::Where(selectors) => selectors
             .iter()
-            .any(|selector| matches_selector_with_pseudo_cached(node, selector, pseudo, cache)),
+            .any(|selector| matches_selector_with_scope_cached(node, selector, pseudo, cache, scope_root)),
         SimpleSelector::Not(selectors) => !selectors
             .iter()
-            .any(|selector| matches_selector_with_pseudo_cached(node, selector, pseudo, cache)),
+            .any(|selector| matches_selector_with_scope_cached(node, selector, pseudo, cache, scope_root)),
         SimpleSelector::Has(selectors) => selectors
             .iter()
             .any(|selector| matches_relative_selector_cached(node, selector, cache)),
@@ -316,7 +352,7 @@ fn matches_relative_selector_part(
     index: usize,
     cache: &mut SelectorMatchCache,
 ) -> bool {
-    if !matches_compound(node, &selector.parts[index], None, cache) {
+    if !matches_compound(node, &selector.parts[index], None, cache, None) {
         return false;
     }
     let next_index = index + 1;
@@ -410,7 +446,13 @@ fn matches_attribute_selector(
     }
 }
 
-fn matches_pseudo_class(node: &NodeHandle, name: &str, pseudo: Option<PseudoElement>, cache: &mut SelectorMatchCache) -> bool {
+fn matches_pseudo_class(
+    node: &NodeHandle,
+    name: &str,
+    pseudo: Option<PseudoElement>,
+    cache: &mut SelectorMatchCache,
+    scope_root: Option<&NodeHandle>,
+) -> bool {
     if let Some((function, argument)) = functional_pseudo(name) {
         // Pseudo-class names are ASCII case-insensitive; the argument keeps
         // its original case (`:lang()` compares case-insensitively itself and
@@ -440,6 +482,7 @@ fn matches_pseudo_class(node: &NodeHandle, name: &str, pseudo: Option<PseudoElem
         "root" => node
             .parent_node()
             .is_some_and(|parent| parent.node_type() == NodeType::Document),
+        "scope" => scope_root.is_some_and(|root| root == node),
         "first-child" => element_index_in_parent(node, cache) == Some(1),
         "last-child" => {
             let Some((index, total)) = element_position(node, cache) else {

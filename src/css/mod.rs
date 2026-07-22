@@ -9,6 +9,7 @@ mod matcher;
 mod media;
 mod parser;
 mod shorthand;
+mod scope;
 mod supports;
 pub(crate) mod style;
 mod tokenizer;
@@ -23,6 +24,7 @@ pub use parser::{
 };
 pub use style::{ComputedStyle, ComputedValue, Origin, StyleResolver, StylesheetInput};
 pub(crate) use style::supports_declaration;
+pub(crate) use scope::{ScopePrelude, parse_scope_prelude};
 pub(crate) use supports::supports_condition_matches;
 pub use tokenizer::tokenize;
 
@@ -182,10 +184,18 @@ pub enum MediaCondition {
     MaxWidth(f32),
     /// `(min-width: <length>)` -- viewport width >= value.
     MinWidth(f32),
+    /// Range syntax `(width < <length>)`.
+    MaxWidthExclusive(f32),
+    /// Range syntax `(width > <length>)`.
+    MinWidthExclusive(f32),
     /// `(max-height: <length>)` -- viewport height <= value.
     MaxHeight(f32),
     /// `(min-height: <length>)` -- viewport height >= value.
     MinHeight(f32),
+    /// Range syntax `(height < <length>)`.
+    MaxHeightExclusive(f32),
+    /// Range syntax `(height > <length>)`.
+    MinHeightExclusive(f32),
     /// `(orientation: portrait)` -- height >= width.
     OrientationPortrait,
     /// `(orientation: landscape)` -- width > height.
