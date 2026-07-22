@@ -57,6 +57,9 @@ fn shadow_stylesheets_respect_tree_scope_host_and_slotted_boundaries() {
         parse_stylesheet(
             ".inside { width: 11px; } slot { color: orange; } \
              :host(.active) { height: 22px; } :host { height: 23px; } \
+             :host(.active) .inside { min-width: 12px; } \
+             :host(.active) > .inside { max-width: 13px; } \
+             :host::before { width: 14px; } \
              ::slotted(.item) { margin-left: 33px; padding-left: 5px !important; } \
              slot.special::slotted(.item) { border-left-width: 7px; } \
              ::slotted(#chosen) { outline-width: 8px; } ::slotted(*) { outline-width: 9px; }",
@@ -73,6 +76,24 @@ fn shadow_stylesheets_respect_tree_scope_host_and_slotted_boundaries() {
         resolver.computed_style(&inside).get("color"),
         Some(&ComputedValue::Color("purple".to_string())),
         "shadow children inherit from the host"
+    );
+    assert_eq!(
+        resolver.computed_style(&inside).get("min-width"),
+        Some(&ComputedValue::Px(12.0)),
+        ":host() can condition a descendant selector"
+    );
+    assert_eq!(
+        resolver.computed_style(&inside).get("max-width"),
+        Some(&ComputedValue::Px(13.0)),
+        ":host() participates in child combinator matching"
+    );
+    assert_eq!(
+        resolver
+            .computed_pseudo_style(&host, PseudoElement::Before)
+            .unwrap()
+            .get("width"),
+        Some(&ComputedValue::Px(14.0)),
+        ":host can target a host pseudo-element"
     );
     assert_eq!(
         resolver.computed_style(&host).get("height"),

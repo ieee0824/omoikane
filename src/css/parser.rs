@@ -523,6 +523,9 @@ impl Parser {
             if !matches!(self.peek(), Some(CssToken::ParenOpen)) {
                 return Ok(SimpleSelector::PseudoElement(name));
             }
+            if !name.eq_ignore_ascii_case("slotted") {
+                return Err(CssParseError::InvalidSelector);
+            }
             self.next(); // consume ParenOpen
             let argument = render_tokens(&self.collect_parenthesized_tokens()?)
                 .trim()
@@ -1273,6 +1276,20 @@ mod selector_list_tests {
     fn standalone_selector_list_accepts_uppercase_pseudo_names() {
         for valid in [":NTH-CHILD(odd)", ":First-Child", "::BEFORE", ":LANG(en)"] {
             assert!(parse_selector_list(valid).is_ok(), "rejected {valid:?}");
+        }
+    }
+
+    #[test]
+    fn stylesheet_only_accepts_slotted_as_functional_pseudo_element() {
+        for valid in ["::slotted(.item)", "::SLOTTED(*)"] {
+            let stylesheet = parse_stylesheet(&format!("{valid} {{ color: red; }}")).unwrap();
+            assert_eq!(stylesheet.rules.len(), 1, "rejected {valid:?}");
+        }
+        for invalid in ["::before(foo)", "::after(.item)", "::part(name)"] {
+            assert!(
+                parse_stylesheet(&format!("{invalid} {{ color: red; }}")).is_err(),
+                "accepted {invalid:?}"
+            );
         }
     }
 

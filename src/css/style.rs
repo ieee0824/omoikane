@@ -11,8 +11,9 @@ use rusqlite::{Connection, params};
 use super::matcher::{SelectorMatchCache, matches_selector_with_pseudo_cached};
 
 use super::{
-    Declaration, MediaQuery, PseudoElement, Rule, SimpleSelector, Specificity, Stylesheet, Value,
-    evaluate_media_query, parse_media_query_list, specificity,
+    Combinator, Declaration, MediaQuery, PseudoElement, Rule, Selector, SelectorPart,
+    SimpleSelector, Specificity, Stylesheet, Value, evaluate_media_query, parse_media_query_list,
+    specificity,
 };
 
 /// CSS origin.
@@ -1132,7 +1133,7 @@ fn matches_shadow_scoped_selector(
             matches!(simple, SimpleSelector::PseudoClass(name) if name.eq_ignore_ascii_case("host") || functional_selector(name).is_some_and(|(function, _)| function.eq_ignore_ascii_case("host")))
         })
     }) {
-        return pseudo.is_none() && matches_host_selector(node, selector, scope, cache);
+        return matches_host_selector(node, selector, scope, pseudo, cache);
     }
 
     if selector.parts.iter().any(|part| {
@@ -1151,37 +1152,171 @@ fn matches_host_selector(
     node: &NodeHandle,
     selector: &super::Selector,
     scope: &NodeHandle,
+    pseudo: Option<PseudoElement>,
     cache: &mut SelectorMatchCache,
 ) -> bool {
-    let Some(host) = scope.shadow_host() else {
+    if selector.parts.is_empty() {
         return false;
-    };
-    if node != &host || selector.parts.len() != 1 {
+    }
+    matches_host_selector_part(
+        node,
+        selector,
+        selector.parts.len() - 1,
+        scope,
+        pseudo,
+        cache,
+    )
+}
+
+fn matches_host_selector_part(
+    node: &NodeHandle,
+    selector: &Selector,
+    index: usize,
+    scope: &NodeHandle,
+    pseudo: Option<PseudoElement>,
+    cache: &mut SelectorMatchCache,
+) -> bool {
+    let part = &selector.parts[index];
+    if !matches_shadow_compound(node, part, scope, pseudo, cache) {
         return false;
     }
 
-    selector.parts[0].simples.iter().all(|simple| match simple {
-        SimpleSelector::PseudoClass(name) if name.eq_ignore_ascii_case("host") => true,
-        SimpleSelector::PseudoClass(name) => {
-            let Some((function, argument)) = functional_selector(name) else {
+    let Some(combinator) = part.combinator else {
+        return true;
+    };
+    if index == 0 {
+        return false;
+    }
+
+    match combinator {
+        Combinator::Descendant => {
+            let mut ancestor = shadow_selector_parent(node, scope);
+            while let Some(parent) = ancestor {
+                if matches_host_selector_part(&parent, selector, index - 1, scope, None, cache) {
+                    return true;
+                }
+                ancestor = shadow_selector_parent(&parent, scope);
+            }
+            false
+        }
+        Combinator::Child => shadow_selector_parent(node, scope).is_some_and(|parent| {
+            matches_host_selector_part(&parent, selector, index - 1, scope, None, cache)
+        }),
+        Combinator::AdjacentSibling => previous_element_sibling(node).is_some_and(|sibling| {
+            matches_host_selector_part(&sibling, selector, index - 1, scope, None, cache)
+        }),
+        Combinator::GeneralSibling => {
+            let Some(parent) = node.parent_node() else {
                 return false;
             };
-            if !function.eq_ignore_ascii_case("host") {
+            let siblings = parent.child_nodes();
+            let Some(position) = siblings.iter().position(|candidate| candidate == node) else {
                 return false;
-            }
-            super::parse_selector_list(argument).ok().is_some_and(|selectors| {
-                selectors.len() == 1
-                    && selectors[0].parts.len() == 1
-                    && matches_selector_with_pseudo_cached(
-                        &host,
-                        &selectors[0],
+            };
+            siblings[..position].iter().rev().any(|sibling| {
+                sibling.node_type() == NodeType::Element
+                    && matches_host_selector_part(
+                        sibling,
+                        selector,
+                        index - 1,
+                        scope,
                         None,
                         cache,
                     )
             })
         }
-        _ => false,
+    }
+}
+
+fn matches_shadow_compound(
+    node: &NodeHandle,
+    part: &SelectorPart,
+    scope: &NodeHandle,
+    pseudo: Option<PseudoElement>,
+    cache: &mut SelectorMatchCache,
+) -> bool {
+    let mut ordinary_part = part.clone();
+    ordinary_part.combinator = None;
+    let mut has_host = false;
+    ordinary_part.simples.retain(|simple| {
+        let SimpleSelector::PseudoClass(name) = simple else {
+            return true;
+        };
+        let is_host = name.eq_ignore_ascii_case("host")
+            || functional_selector(name)
+                .is_some_and(|(function, _)| function.eq_ignore_ascii_case("host"));
+        has_host |= is_host;
+        !is_host
+    });
+
+    if has_host {
+        let Some(host) = scope.shadow_host() else {
+            return false;
+        };
+        if node != &host || !host_arguments_match(&host, part, cache) {
+            return false;
+        }
+    } else if node.containing_shadow_root().as_ref() != Some(scope) {
+        return false;
+    }
+
+    if ordinary_part.simples.is_empty() {
+        return pseudo.is_none();
+    }
+    matches_selector_with_pseudo_cached(
+        node,
+        &Selector {
+            parts: vec![ordinary_part],
+        },
+        pseudo,
+        cache,
+    )
+}
+
+fn host_arguments_match(
+    host: &NodeHandle,
+    part: &SelectorPart,
+    cache: &mut SelectorMatchCache,
+) -> bool {
+    part.simples.iter().all(|simple| {
+        let SimpleSelector::PseudoClass(name) = simple else {
+            return true;
+        };
+        if name.eq_ignore_ascii_case("host") {
+            return true;
+        }
+        let Some((function, argument)) = functional_selector(name) else {
+            return true;
+        };
+        if !function.eq_ignore_ascii_case("host") {
+            return true;
+        }
+        super::parse_selector_list(argument).ok().is_some_and(|selectors| {
+            selectors.len() == 1
+                && selectors[0].parts.len() == 1
+                && matches_selector_with_pseudo_cached(host, &selectors[0], None, cache)
+        })
     })
+}
+
+fn shadow_selector_parent(node: &NodeHandle, scope: &NodeHandle) -> Option<NodeHandle> {
+    let parent = node.parent_node()?;
+    if &parent == scope {
+        scope.shadow_host()
+    } else {
+        Some(parent)
+    }
+}
+
+fn previous_element_sibling(node: &NodeHandle) -> Option<NodeHandle> {
+    let parent = node.parent_node()?;
+    let siblings = parent.child_nodes();
+    let position = siblings.iter().position(|candidate| candidate == node)?;
+    siblings[..position]
+        .iter()
+        .rev()
+        .find(|sibling| sibling.node_type() == NodeType::Element)
+        .cloned()
 }
 
 fn matches_slotted_selector(
