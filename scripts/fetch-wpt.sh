@@ -13,6 +13,8 @@ git_wpt sparse-checkout set "/resources/" "/html/resources/common.js" "/shadow-d
 git_wpt sparse-checkout add "/css/css-shadow/shadow-cascade-order-001.html"
 git_wpt sparse-checkout add "/css/selectors/is-where-error-recovery.html"
 git_wpt sparse-checkout add "/css/selectors/has-matches-to-uninserted-elements.html"
+git_wpt sparse-checkout add "/css/css-conditional/js/CSS-supports-L3.html"
+git_wpt sparse-checkout add "/css/css-conditional/js/supports-conditionText.html"
 if [[ "$(git_wpt rev-parse HEAD 2>/dev/null || true)" == "$revision" ]]; then exit 0; fi
 git_wpt fetch --depth 1 origin "$revision"
 git_wpt checkout --detach "$revision"

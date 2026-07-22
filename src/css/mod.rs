@@ -9,6 +9,7 @@ mod matcher;
 mod media;
 mod parser;
 mod shorthand;
+mod supports;
 pub(crate) mod style;
 mod tokenizer;
 
@@ -22,6 +23,7 @@ pub use parser::{
 };
 pub use style::{ComputedStyle, ComputedValue, Origin, StyleResolver, StylesheetInput};
 pub(crate) use style::supports_declaration;
+pub(crate) use supports::supports_condition_matches;
 pub use tokenizer::tokenize;
 
 /// A token emitted by the CSS tokenizer.
@@ -496,11 +498,11 @@ mod tests {
     #[test]
     fn parses_at_rules() {
         let stylesheet = parse_stylesheet(
-            r#"@import "base.css"; @font-face { font-family: "Demo"; src: url(font.woff2); } @media screen { h1 { color: blue; } }"#,
+            r#"@import "base.css"; @font-face { font-family: "Demo"; src: url(font.woff2); } @media screen { h1 { color: blue; } } @supports (display: grid) { main { display: grid; } }"#,
         )
         .unwrap();
 
-        assert_eq!(stylesheet.rules.len(), 3);
+        assert_eq!(stylesheet.rules.len(), 4);
         let Rule::At(import_rule) = &stylesheet.rules[0] else {
             panic!("expected import rule");
         };
@@ -517,6 +519,24 @@ mod tests {
             panic!("expected media rule");
         };
         assert!(media_rule.block.is_some());
+
+        let Rule::At(supports_rule) = &stylesheet.rules[3] else {
+            panic!("expected supports rule");
+        };
+        assert_eq!(supports_rule.name, "supports");
+        assert_eq!(supports_rule.prelude, "(display: grid)");
+        assert_eq!(supports_rule.block.as_ref().map(Vec::len), Some(1));
+    }
+
+    #[test]
+    fn parses_general_enclosed_braces_in_supports_prelude() {
+        let stylesheet = parse_stylesheet("@supports ({future}) { main { display: block; } }")
+            .expect("parse supports general-enclosed condition");
+        let Rule::At(rule) = &stylesheet.rules[0] else {
+            panic!("expected supports rule");
+        };
+        assert_eq!(rule.prelude, "({future})");
+        assert_eq!(rule.block.as_ref().map(Vec::len), Some(1));
     }
 
     #[test]

@@ -800,7 +800,47 @@ fn validate_declaration(name: &str, value: &Value) -> DeclarationValidation {
             None => DeclarationValidation::Invalid,
         };
     }
+    if matches!(
+        name,
+        "width" | "height" | "min-width" | "min-height" | "max-width" | "max-height"
+    ) {
+        return validate_sizing_value(name, value);
+    }
     DeclarationValidation::Unvalidated
+}
+
+fn validate_sizing_value(name: &str, value: &Value) -> DeclarationValidation {
+    let valid_keyword = |keyword: &str| {
+        let keyword = keyword.to_ascii_lowercase();
+        is_css_wide_keyword(&keyword)
+            || matches!(
+                keyword.as_str(),
+                "auto" | "min-content" | "max-content" | "fit-content" | "stretch"
+            )
+            || (name.starts_with("max-") && keyword == "none")
+    };
+    match value {
+        Value::Keyword(keyword) if valid_keyword(keyword) => DeclarationValidation::Unvalidated,
+        Value::Length(number, unit)
+            if *number >= 0.0
+                && resolve_length_to_px(*number, unit, ResolutionContext::default()).is_some() =>
+        {
+            DeclarationValidation::Unvalidated
+        }
+        Value::Percentage(number) if *number >= 0.0 => DeclarationValidation::Unvalidated,
+        Value::Number(number) if *number == 0.0 => DeclarationValidation::Unvalidated,
+        Value::Function { name: function, .. }
+            if function.eq_ignore_ascii_case("calc") || function.eq_ignore_ascii_case("clamp") =>
+        {
+            let computed = compute_value(value, name, ResolutionContext::default());
+            if matches!(computed, ComputedValue::Keyword(_)) {
+                DeclarationValidation::Invalid
+            } else {
+                DeclarationValidation::Unvalidated
+            }
+        }
+        _ => DeclarationValidation::Invalid,
+    }
 }
 
 /// A CSS-wide keyword (CSS Cascade). These are valid for every property and are
@@ -1554,13 +1594,15 @@ fn collect_rule_candidates(
                             color_scheme_dark,
                             media_cache,
                         )
+                    } else if at_rule.name.eq_ignore_ascii_case("supports") {
+                        super::supports_condition_matches(&at_rule.prelude)
                     } else if at_rule.name.eq_ignore_ascii_case("keyframes")
                         || at_rule.name.eq_ignore_ascii_case("-webkit-keyframes")
                     {
                         // @keyframes rules are handled separately; skip them in cascade.
                         false
                     } else {
-                        // Other at-rules (e.g. @supports) are passed through.
+                        // Non-conditional grouping rules (e.g. @layer) pass through.
                         true
                     };
                     if should_apply {
@@ -2274,6 +2316,11 @@ pub(crate) fn supports_declaration(property: &str, value: &str) -> bool {
         if !is_supported_property(name) {
             return false;
         }
+        // A declaration containing var() is syntactically valid at parse time;
+        // its property grammar is checked after custom-property substitution.
+        if value_contains_var_function(&declaration.value) {
+            return true;
+        }
         match validate_declaration(name, &declaration.value) {
             DeclarationValidation::Invalid => false,
             DeclarationValidation::Valid(_) => true,
@@ -2284,6 +2331,17 @@ pub(crate) fn supports_declaration(property: &str, value: &str) -> bool {
             }
         }
     })
+}
+
+fn value_contains_var_function(value: &Value) -> bool {
+    match value {
+        Value::Function { name, arguments } => {
+            name.eq_ignore_ascii_case("var")
+                || arguments.iter().any(value_contains_var_function)
+        }
+        Value::List(values) => values.iter().any(value_contains_var_function),
+        _ => false,
+    }
 }
 
 /// Reject a second top-level declaration while preserving semicolons inside
