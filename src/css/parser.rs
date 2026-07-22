@@ -1,6 +1,6 @@
 //! CSS parser: selectors, declarations, and value parsing.
 
-use super::{CssParseError, CssToken, Selector, SelectorPart, SimpleSelector, AttributeOperator, Combinator, Declaration, Value, Rule, StyleRule, AtRule, FontFaceRule, Stylesheet};
+use super::{CssParseError, CssToken, Selector, SelectorPart, RelativeSelector, SimpleSelector, AttributeOperator, Combinator, Declaration, Value, Rule, StyleRule, AtRule, FontFaceRule, Stylesheet};
 use super::tokenizer::{tokenize, render_tokens};
 use super::shorthand::expand_shorthand;
 
@@ -136,7 +136,7 @@ fn selector_is_supported_for_dom_query(selector: &Selector) -> bool {
             // :is() and :where() use forgiving selector lists. Unsupported
             // branches remain non-matching but do not invalidate the outer
             // selector in DOM selector APIs.
-            SimpleSelector::Is(_) | SimpleSelector::Where(_) => true,
+            SimpleSelector::Is(_) | SimpleSelector::Where(_) | SimpleSelector::Has(_) => true,
             SimpleSelector::Not(selectors) => {
                 selectors.iter().all(selector_is_supported_for_dom_query)
             }
@@ -540,7 +540,7 @@ impl Parser {
         }
         self.next(); // consume ParenOpen
         let argument_tokens = self.collect_parenthesized_tokens()?;
-        if matches!(name.to_ascii_lowercase().as_str(), "is" | "where" | "not") {
+        if matches!(name.to_ascii_lowercase().as_str(), "is" | "where" | "not" | "has") {
             let argument_str = render_tokens(&argument_tokens).trim().to_string();
             match name.to_ascii_lowercase().as_str() {
                 "is" => Ok(SimpleSelector::Is(parse_forgiving_selector_list(
@@ -551,6 +551,9 @@ impl Parser {
                 ))),
                 "not" => Ok(SimpleSelector::Not(parse_nested_selector_list(
                     &argument_str,
+                )?)),
+                "has" => Ok(SimpleSelector::Has(parse_relative_selector_list(
+                    &argument_tokens,
                 )?)),
                 _ => unreachable!(),
             }
@@ -1068,6 +1071,90 @@ fn parse_forgiving_selector_list(tokens: &[CssToken]) -> Vec<Selector> {
         selectors.push(selector);
     }
     selectors
+}
+
+/// Parses the strict relative selector list used by `:has()`.
+fn parse_relative_selector_list(
+    tokens: &[CssToken],
+) -> Result<Vec<RelativeSelector>, CssParseError> {
+    let mut selectors = Vec::new();
+    let mut start = 0usize;
+    let mut paren_depth = 0usize;
+    let mut bracket_depth = 0usize;
+
+    for (index, token) in tokens.iter().enumerate() {
+        match token {
+            CssToken::ParenOpen => paren_depth += 1,
+            CssToken::ParenClose => paren_depth = paren_depth.saturating_sub(1),
+            CssToken::BracketOpen => bracket_depth += 1,
+            CssToken::BracketClose => bracket_depth = bracket_depth.saturating_sub(1),
+            CssToken::Comma if paren_depth == 0 && bracket_depth == 0 => {
+                selectors.push(
+                    parse_single_relative_selector(&tokens[start..index])
+                        .ok_or(CssParseError::InvalidSelector)?,
+                );
+                start = index + 1;
+            }
+            _ => {}
+        }
+    }
+    selectors.push(
+        parse_single_relative_selector(&tokens[start..])
+            .ok_or(CssParseError::InvalidSelector)?,
+    );
+    Ok(selectors)
+}
+
+fn parse_single_relative_selector(tokens: &[CssToken]) -> Option<RelativeSelector> {
+    let mut parser = Parser::new(tokens.to_vec());
+    parser.skip_whitespace();
+    let leading_combinator = match parser.peek() {
+        Some(CssToken::Delim('>')) => {
+            parser.next();
+            Combinator::Child
+        }
+        Some(CssToken::Delim('+')) => {
+            parser.next();
+            Combinator::AdjacentSibling
+        }
+        Some(CssToken::Delim('~')) => {
+            parser.next();
+            Combinator::GeneralSibling
+        }
+        _ => Combinator::Descendant,
+    };
+    parser.skip_whitespace();
+    if parser.peek().is_none() {
+        return None;
+    }
+    let mut selector = parser.parse_selector().ok()?;
+    parser.skip_whitespace();
+    if parser.peek().is_some()
+        || !sanitize_has_argument(&mut selector)
+        || !selector_is_supported_for_dom_query(&selector)
+    {
+        return None;
+    }
+    Some(RelativeSelector {
+        leading_combinator,
+        selector,
+    })
+}
+
+fn sanitize_has_argument(selector: &mut Selector) -> bool {
+    selector.parts.iter_mut().all(|part| {
+        part.simples.iter_mut().all(|simple| match simple {
+            SimpleSelector::PseudoElement(_) | SimpleSelector::Has(_) => false,
+            SimpleSelector::Is(selectors) | SimpleSelector::Where(selectors) => {
+                selectors.retain_mut(sanitize_has_argument);
+                true
+            }
+            SimpleSelector::Not(selectors) => {
+                selectors.iter_mut().all(sanitize_has_argument)
+            }
+            _ => true,
+        })
+    })
 }
 
 fn parse_single_nested_selector(tokens: &[CssToken]) -> Option<Selector> {

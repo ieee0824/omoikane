@@ -2236,6 +2236,11 @@ fn register_host_bindings(
             NativeFunction::from_copy_closure(query_selector_all_native),
         ),
         (
+            js_string!("__omoikane_matches_selector"),
+            2,
+            NativeFunction::from_copy_closure(matches_selector_native),
+        ),
+        (
             js_string!("__omoikane_node_type"),
             1,
             NativeFunction::from_copy_closure(node_type_native),
@@ -4087,6 +4092,36 @@ fn query_selector_all_native(
             .collect();
         Ok(boa_engine::JsValue::from(
             boa_engine::object::builtins::JsArray::from_iter(ids, context),
+        ))
+    })
+}
+
+fn matches_selector_native(
+    _: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let node_id = args
+        .first()
+        .cloned()
+        .unwrap_or_default()
+        .to_number(context)? as usize;
+    let selector = args
+        .get(1)
+        .cloned()
+        .unwrap_or_default()
+        .to_string(context)?
+        .to_std_string_escaped();
+    let selectors = parse_dom_selector_list(&selector)?;
+    with_host_state(|state| {
+        let state = state.borrow();
+        let node = state
+            .get_node(node_id)
+            .ok_or_else(|| JsError::from(JsNativeError::error().with_message("node not found")))?;
+        Ok(JsValue::from(
+            selectors
+                .iter()
+                .any(|selector| matches_selector(&node, selector)),
         ))
     })
 }
@@ -8774,6 +8809,54 @@ mod tests {
         assert_eq!(
             eval_str(&mut runtime, "getComputedStyle(document.getElementById('target')).height"),
             "30px"
+        );
+    }
+
+    #[test]
+    fn has_relative_selectors_work_in_dom_queries_and_cascade() {
+        use crate::html::TreeBuilder;
+        let doc = TreeBuilder::parse(
+            r#"<html><head><style>
+                main { width: 10px; }
+                main:has(> #target) { width: 20px; }
+                main:has(.nested + #target) { height: 30px; }
+                #dynamic:has(> .added) { width: 40px; }
+            </style></head><body>
+                <main id="scope"><div class="nested"></div><div id="target"></div></main>
+                <main id="dynamic"></main>
+            </body></html>"#,
+        )
+        .document();
+        let mut runtime = JsRuntime::with_document(doc).unwrap();
+
+        assert_eq!(
+            eval_str(
+                &mut runtime,
+                "(() => { const scope = document.getElementById('scope'); return [document.querySelector('main:has(> #target)').id, scope.matches(':has(.nested + #target)'), scope.querySelectorAll(':has(+ #target)').length].join('|'); })()"
+            ),
+            "scope|true|1"
+        );
+        assert_eq!(
+            eval_str(&mut runtime, "getComputedStyle(document.getElementById('scope')).width"),
+            "20px"
+        );
+        assert_eq!(
+            eval_str(&mut runtime, "getComputedStyle(document.getElementById('scope')).height"),
+            "30px"
+        );
+        assert_eq!(
+            eval_str(
+                &mut runtime,
+                "(() => { const dynamic = document.getElementById('dynamic'); const before = getComputedStyle(dynamic).width; const child = document.createElement('span'); child.className = 'added'; dynamic.appendChild(child); return before + '|' + getComputedStyle(dynamic).width; })()"
+            ),
+            "10px|40px"
+        );
+        assert_eq!(
+            eval_str(
+                &mut runtime,
+                "(() => { const subject = document.createElement('section'); subject.innerHTML = '<div><span></span></div>'; return [subject.matches(':has(span)'), subject.matches(':has(> div)'), subject.matches(':has(> span)')].join('|'); })()"
+            ),
+            "true|true|false"
         );
     }
 
