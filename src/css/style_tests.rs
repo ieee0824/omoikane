@@ -191,6 +191,180 @@ fn applies_origin_importance_specificity_and_source_order() {
 }
 
 #[test]
+fn scope_roots_limits_and_scope_pseudo_control_the_cascade() {
+    let document = NodeHandle::document();
+    let html = NodeHandle::element("html");
+    let body = NodeHandle::element("body");
+    let card = NodeHandle::element("section");
+    card.set_attribute("class", "card");
+    let direct = NodeHandle::element("p");
+    direct.set_attribute("id", "direct");
+    let stop = NodeHandle::element("div");
+    stop.set_attribute("class", "stop");
+    let limited = NodeHandle::element("p");
+    limited.set_attribute("id", "limited");
+    let outside = NodeHandle::element("p");
+    outside.set_attribute("id", "outside");
+
+    document.append_child(html.clone());
+    html.append_child(body.clone());
+    body.append_child(card.clone());
+    card.append_child(direct.clone());
+    card.append_child(stop.clone());
+    stop.append_child(limited.clone());
+    body.append_child(outside.clone());
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "p { color: black; width: 1px; height: 2px; }\
+             @scope (.card) to (.stop) {\
+               p { color: red; height: 20px; }\
+               :scope > p { width: 10px; }\
+             }",
+        )
+        .unwrap(),
+    );
+
+    let direct_style = resolver.computed_style(&direct);
+    assert_eq!(
+        direct_style.get("color"),
+        Some(&ComputedValue::Color("red".to_string()))
+    );
+    assert_eq!(direct_style.get("width"), Some(&ComputedValue::Px(10.0)));
+    assert_eq!(direct_style.get("height"), Some(&ComputedValue::Px(20.0)));
+
+    let limited_style = resolver.computed_style(&limited);
+    assert_eq!(
+        limited_style.get("color"),
+        Some(&ComputedValue::Color("black".to_string()))
+    );
+    assert_eq!(limited_style.get("height"), Some(&ComputedValue::Px(2.0)));
+    assert_eq!(
+        resolver.computed_style(&outside).get("color"),
+        Some(&ComputedValue::Color("black".to_string()))
+    );
+}
+
+#[test]
+fn scope_proximity_wins_after_specificity_and_before_source_order() {
+    let document = NodeHandle::document();
+    let outer = NodeHandle::element("section");
+    outer.set_attribute("class", "outer");
+    let inner = NodeHandle::element("div");
+    inner.set_attribute("class", "inner");
+    let target = NodeHandle::element("p");
+    target.set_attribute("id", "target");
+    target.set_attribute("class", "specific");
+    document.append_child(outer.clone());
+    outer.append_child(inner.clone());
+    inner.append_child(target.clone());
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "@scope (.inner) { p { color: blue; width: 20px; } }\
+             @scope (.inner) { > p { margin-left: 7px; } }\
+             @scope (.outer) { p { color: red; width: 30px; } }\
+             @scope (.outer) { #target { color: green; } }\
+             .specific { width: 40px; }",
+        )
+        .unwrap(),
+    );
+
+    let style = resolver.computed_style(&target);
+    assert_eq!(
+        style.get("color"),
+        Some(&ComputedValue::Color("green".to_string())),
+        "higher selector specificity wins before scope proximity"
+    );
+    assert_eq!(
+        style.get("width"),
+        Some(&ComputedValue::Px(40.0)),
+        "the scope prelude does not add specificity"
+    );
+    assert_eq!(style.get("margin-left"), Some(&ComputedValue::Px(7.0)));
+
+    let mut proximity_only = StyleResolver::new();
+    proximity_only.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "@scope (.inner) { p { color: blue; } }\
+             @scope (.outer) { p { color: red; } }",
+        )
+        .unwrap(),
+    );
+    assert_eq!(
+        proximity_only.computed_style(&target).get("color"),
+        Some(&ComputedValue::Color("blue".to_string())),
+        "the closer root wins before the later source order"
+    );
+}
+
+#[test]
+fn scope_root_requires_scope_pseudo_but_can_match_in_an_outer_scope() {
+    let document = NodeHandle::document();
+    let outer = NodeHandle::element("section");
+    outer.set_attribute("class", "card");
+    let inner = NodeHandle::element("section");
+    inner.set_attribute("class", "card");
+    document.append_child(outer.clone());
+    outer.append_child(inner.clone());
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "@scope (.card) {\
+               .card { height: 8px; }\
+               :scope { width: 9px; }\
+             }",
+        )
+        .unwrap(),
+    );
+
+    let outer_style = resolver.computed_style(&outer);
+    assert_eq!(outer_style.get("height"), None);
+    assert_eq!(outer_style.get("width"), Some(&ComputedValue::Px(9.0)));
+
+    let inner_style = resolver.computed_style(&inner);
+    assert_eq!(
+        inner_style.get("height"),
+        Some(&ComputedValue::Px(8.0)),
+        "the nested root is still a descendant of the outer matching root"
+    );
+    assert_eq!(inner_style.get("width"), Some(&ComputedValue::Px(9.0)));
+}
+
+#[test]
+fn scoped_selector_ancestor_matching_stops_at_the_scope_root() {
+    let document = NodeHandle::document();
+    let outside = NodeHandle::element("div");
+    outside.set_attribute("class", "outside");
+    let root = NodeHandle::element("section");
+    root.set_attribute("class", "root");
+    let target = NodeHandle::element("p");
+    document.append_child(outside.clone());
+    outside.append_child(root.clone());
+    root.append_child(target.clone());
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "p { color: black; } @scope (.root) { .outside p { color: red; } }",
+        )
+        .unwrap(),
+    );
+    assert_eq!(
+        resolver.computed_style(&target).get("color"),
+        Some(&ComputedValue::Color("black".to_string()))
+    );
+}
+
+#[test]
 fn important_user_rule_beats_important_author_rule() {
     let (_document, _body, title, _html) = sample_tree();
     let mut resolver = StyleResolver::new();

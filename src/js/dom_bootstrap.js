@@ -3341,8 +3341,12 @@
     get style() { return this.__style; }
   }
 
-  class CSSSupportsRule {
+  class CSSGroupingRule {}
+  class CSSConditionRule extends CSSGroupingRule {}
+
+  class CSSSupportsRule extends CSSConditionRule {
     constructor(text, sheet = null, index = -1) {
+      super();
       this.__text = text;
       this.__sheet = sheet;
       this.__index = index;
@@ -3362,8 +3366,84 @@
     get cssText() { return this.__text.trim(); }
   }
 
+  function scopeBoundaryTexts(prelude) {
+    let index = 0;
+    const skipWhitespace = () => {
+      while (index < prelude.length) {
+        while (/\s/.test(prelude[index] || "")) index++;
+        if (prelude[index] !== "/" || prelude[index + 1] !== "*") break;
+        const close = prelude.indexOf("*/", index + 2);
+        index = close < 0 ? prelude.length : close + 2;
+      }
+    };
+    const boundary = () => {
+      skipWhitespace();
+      if (prelude[index] !== "(") return null;
+      const start = ++index;
+      let depth = 1, quote = "";
+      for (; index < prelude.length; index++) {
+        const ch = prelude[index];
+        if (quote) {
+          if (ch === "\\") index++;
+          else if (ch === quote) quote = "";
+          continue;
+        }
+        if (ch === "'" || ch === '"') { quote = ch; continue; }
+        if (ch === "(") depth++;
+        else if (ch === ")" && --depth === 0) {
+          const value = prelude.slice(start, index).trim();
+          index++;
+          return value;
+        }
+      }
+      return null;
+    };
+    skipWhitespace();
+    const start = prelude[index] === "(" ? boundary() : null;
+    skipWhitespace();
+    let end = null;
+    if (prelude.slice(index, index + 2).toLowerCase() === "to") {
+      index += 2;
+      end = boundary();
+    }
+    return { start, end };
+  }
+
+  class CSSScopeRule extends CSSGroupingRule {
+    constructor(text, sheet = null, index = -1) {
+      super();
+      this.__text = text;
+      this.__sheet = sheet;
+      this.__index = index;
+      const open = cssRuleBlockStart(this.__text);
+      const close = this.__text.lastIndexOf("}");
+      this.__hasBlock = open >= 0 && close > open;
+      const prelude = this.__hasBlock
+        ? this.__text.slice("@scope".length, open).trim()
+        : "";
+      const boundaries = scopeBoundaryTexts(prelude);
+      this.__start = boundaries.start;
+      this.__end = boundaries.end;
+      this.__innerText = this.__hasBlock ? this.__text.slice(open + 1, close) : "";
+      this.__innerSheet = new CSSStyleSheet({ textContent: this.__innerText });
+      if (this.__sheet) this.__sheet.__registerRuleView(this);
+    }
+    get start() { return this.__start; }
+    get end() { return this.__end; }
+    get cssRules() { return this.__innerSheet.cssRules; }
+    get cssText() {
+      let prelude = "@scope";
+      if (this.start !== null) prelude += " (" + this.start + ")";
+      if (this.end !== null) prelude += " to (" + this.end + ")";
+      const nested = Array.from(this.cssRules, rule => "  " + rule.cssText).join("\n");
+      return prelude + " {\n" + (nested ? nested + "\n" : "") + "}";
+    }
+  }
+
   function createCssRule(text, sheet = null, index = -1) {
-    return /^\s*@supports(?=\s|\/\*|\()/i.test(text)
+    return /^\s*@scope(?=\s|\/\*|\(|\{)/i.test(text)
+      ? new CSSScopeRule(text, sheet, index)
+      : /^\s*@supports(?=\s|\/\*|\()/i.test(text)
       ? new CSSSupportsRule(text, sheet, index)
       : new CSSStyleRule(text, sheet, index);
   }
@@ -3449,6 +3529,7 @@
       this.__ownerText = text;
     }
     get cssRules() { return this.__cssRules; }
+    get rules() { return this.__cssRules; }
     insertRule(rule, index) {
       const text = String(rule);
       let count;
@@ -4611,6 +4692,9 @@
   globalThis.CSSRuleList = CSSRuleList;
   globalThis.CSSStyleRule = CSSStyleRule;
   globalThis.CSSSupportsRule = CSSSupportsRule;
+  globalThis.CSSGroupingRule = CSSGroupingRule;
+  globalThis.CSSConditionRule = CSSConditionRule;
+  globalThis.CSSScopeRule = CSSScopeRule;
   globalThis.NodeFilter = NodeFilter;
   globalThis.NodeIterator = NodeIterator;
   globalThis.TreeWalker = TreeWalker;
@@ -4656,6 +4740,28 @@
   globalThis.AnimationEvent = Event;
   globalThis.TransitionEvent = Event;
   globalThis.document = wrapNode(__omoikane_document_id);
+  // Window named properties expose parsed elements with an `id` as global
+  // bindings (for example `<style id=theme>` is reachable as `theme`). Keep
+  // built-in globals intact. These properties remain writable because an
+  // explicit script global takes precedence over Window named access.
+  globalThis.__omoikane_install_window_named_properties = function() {
+    const visit = node => {
+      for (const child of node.childNodes) {
+        if (child.nodeType !== 1) continue;
+        const id = child.getAttribute("id");
+        if (id && !Object.prototype.hasOwnProperty.call(globalThis, id)) {
+          Object.defineProperty(globalThis, id, {
+            configurable: true,
+            enumerable: true,
+            writable: true,
+            value: child,
+          });
+        }
+        visit(child);
+      }
+    };
+    visit(globalThis.document);
+  };
   globalThis.customElements = registryForDocument(globalThis.document);
   globalThis.__omoikane_set_current_script = function(id) {
     globalThis.document.__currentScript =

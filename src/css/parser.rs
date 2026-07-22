@@ -116,7 +116,7 @@ fn selector_is_supported_for_dom_query(selector: &Selector) -> bool {
                 let base = base.to_ascii_lowercase();
                 let known = matches!(
                     base.as_str(),
-                    "root" | "first-child" | "last-child" | "only-child"
+                    "root" | "scope" | "first-child" | "last-child" | "only-child"
                         | "nth-child" | "nth-last-child" | "first-of-type"
                         | "last-of-type" | "only-of-type" | "nth-of-type"
                         | "nth-last-of-type" | "empty" | "lang" | "enabled"
@@ -148,11 +148,24 @@ fn selector_is_supported_for_dom_query(selector: &Selector) -> bool {
 struct Parser {
     tokens: Vec<CssToken>,
     index: usize,
+    scope_depth: usize,
+}
+
+fn implicit_scope_anchor() -> SelectorPart {
+    SelectorPart {
+        combinator: None,
+        simples: vec![SimpleSelector::Where(vec![Selector {
+            parts: vec![SelectorPart {
+                combinator: None,
+                simples: vec![SimpleSelector::PseudoClass("scope".to_string())],
+            }],
+        }])],
+    }
 }
 
 impl Parser {
     fn new(tokens: Vec<CssToken>) -> Self {
-        Self { tokens, index: 0 }
+        Self { tokens, index: 0, scope_depth: 0 }
     }
 
     fn parse_stylesheet(&mut self) -> Result<Stylesheet, CssParseError> {
@@ -206,8 +219,16 @@ impl Parser {
                     if name.eq_ignore_ascii_case("media")
                         || name.eq_ignore_ascii_case("supports")
                         || name.eq_ignore_ascii_case("layer")
+                        || name.eq_ignore_ascii_case("scope")
                     {
-                        let block = self.parse_rule_block()?;
+                        if name.eq_ignore_ascii_case("scope") {
+                            self.scope_depth += 1;
+                        }
+                        let block = self.parse_rule_block();
+                        if name.eq_ignore_ascii_case("scope") {
+                            self.scope_depth -= 1;
+                        }
+                        let block = block?;
                         return Ok(Rule::At(AtRule {
                             name,
                             prelude: render_tokens(&prelude_tokens).trim().to_string(),
@@ -381,6 +402,9 @@ impl Parser {
             match self.peek() {
                 Some(CssToken::CurlyOpen) | Some(CssToken::Comma) | None => break,
                 Some(CssToken::Delim('>')) => {
+                    if parts.is_empty() && self.scope_depth > 0 {
+                        parts.push(implicit_scope_anchor());
+                    }
                     if parts.is_empty() || combinator.is_some() {
                         return Err(CssParseError::InvalidSelector);
                     }
@@ -389,6 +413,9 @@ impl Parser {
                     continue;
                 }
                 Some(CssToken::Delim('+')) => {
+                    if parts.is_empty() && self.scope_depth > 0 {
+                        parts.push(implicit_scope_anchor());
+                    }
                     if parts.is_empty() || combinator.is_some() {
                         return Err(CssParseError::InvalidSelector);
                     }
@@ -397,6 +424,9 @@ impl Parser {
                     continue;
                 }
                 Some(CssToken::Delim('~')) => {
+                    if parts.is_empty() && self.scope_depth > 0 {
+                        parts.push(implicit_scope_anchor());
+                    }
                     if parts.is_empty() || combinator.is_some() {
                         return Err(CssParseError::InvalidSelector);
                     }
@@ -1463,5 +1493,21 @@ mod selector_list_tests {
         ] {
             assert!(parse_selector_list(invalid).is_err(), "accepted {invalid:?}");
         }
+    }
+
+    #[test]
+    fn relative_style_selectors_are_only_accepted_inside_scope() {
+        let stylesheet = parse_stylesheet("@scope (.card) { > p { color: red; } }").unwrap();
+        let Rule::At(scope) = &stylesheet.rules[0] else {
+            panic!("expected scope rule");
+        };
+        let Rule::Style(relative) = &scope.block.as_ref().unwrap()[0] else {
+            panic!("expected relative style rule");
+        };
+        assert_eq!(
+            crate::css::specificity(&relative.selectors[0]),
+            crate::css::Specificity { ids: 0, classes: 0, elements: 1 }
+        );
+        assert!(parse_stylesheet("> p { color: red; }").is_err());
     }
 }

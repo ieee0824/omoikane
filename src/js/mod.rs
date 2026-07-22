@@ -766,10 +766,16 @@ impl HostState {
         let viewport = self.viewport_for_document(document);
         let mut resolver = StyleResolver::new();
         resolver.set_viewport(viewport.width, viewport.height);
-        for (scope, css) in collect_inline_stylesheets(document) {
+        for (scope, implicit_scope_root, css) in collect_inline_stylesheets(document) {
             let sheet = crate::paint::stylesheet::parse_stylesheet_forgiving(&css);
             if let Some((scope, order)) = scope {
                 resolver.add_scoped_stylesheet_in_order(Origin::Author, sheet, scope, order);
+            } else if let Some(implicit_scope_root) = implicit_scope_root {
+                resolver.add_stylesheet_with_implicit_scope_root(
+                    Origin::Author,
+                    sheet,
+                    implicit_scope_root,
+                );
             } else {
                 resolver.add_stylesheet(Origin::Author, sheet);
             }
@@ -1622,6 +1628,7 @@ impl JsRuntime {
         if let Some(base) = base_url {
             self.host_state.borrow_mut().base_url = Some(base.clone());
         }
+        let _ = self.eval("__omoikane_install_window_named_properties()");
         let _ = self.eval("document.__readyState = 'loading'");
 
         let document = self.document();
@@ -2478,12 +2485,12 @@ fn with_host_state<T>(f: impl FnOnce(&Rc<RefCell<HostState>>) -> JsResult<T>) ->
 /// keep computed-style resolution synchronous and side-effect free.
 fn collect_inline_stylesheets(
     document: &NodeHandle,
-) -> Vec<(Option<(NodeHandle, usize)>, String)> {
+) -> Vec<(Option<(NodeHandle, usize)>, Option<NodeHandle>, String)> {
     fn walk(
         node: &NodeHandle,
         scope: Option<&(NodeHandle, usize)>,
         next_scope_order: &mut usize,
-        out: &mut Vec<(Option<(NodeHandle, usize)>, String)>,
+        out: &mut Vec<(Option<(NodeHandle, usize)>, Option<NodeHandle>, String)>,
     ) {
         if node.node_type() == NodeType::Element
             && node
@@ -2493,7 +2500,10 @@ fn collect_inline_stylesheets(
         {
             let css = collect_text_recursive(node);
             if !css.trim().is_empty() {
-                out.push((scope.cloned(), css));
+                let implicit_scope_root = node
+                    .parent_node()
+                    .filter(|parent| parent.node_type() == NodeType::Element);
+                out.push((scope.cloned(), implicit_scope_root, css));
             }
         }
         if let Some(root) = node.shadow_root() {
@@ -8471,6 +8481,126 @@ mod tests {
             .unwrap()
             .as_boolean()
             .unwrap());
+    }
+
+    #[test]
+    fn css_scope_rules_expose_boundaries_and_nested_rules() {
+        let doc = crate::html::TreeBuilder::parse(
+            "<html><head><style>@scope { p { color: black; } } @scope (.card) to (.stop) { p { color: red; } } @scope/* comment */(.commented) { span { color: blue; } }</style></head><body></body></html>",
+        )
+        .document();
+        let mut runtime = JsRuntime::with_document(doc).unwrap();
+        assert!(runtime
+            .eval(
+                r#"(() => {
+                    const implicit = document.styleSheets[0].cssRules[0];
+                    const bounded = document.styleSheets[0].cssRules[1];
+                    const commented = document.styleSheets[0].cssRules[2];
+                    return implicit instanceof CSSScopeRule &&
+                        implicit instanceof CSSGroupingRule &&
+                        !(implicit instanceof CSSConditionRule) &&
+                        implicit.start === null && implicit.end === null &&
+                        bounded instanceof CSSScopeRule &&
+                        bounded.start === ".card" && bounded.end === ".stop" &&
+                        bounded.cssRules.length === 1 &&
+                        bounded.cssRules[0].selectorText === "p" &&
+                        commented instanceof CSSScopeRule &&
+                        commented.start === ".commented";
+                })()"#,
+            )
+            .unwrap()
+            .as_boolean()
+            .unwrap());
+    }
+
+    #[test]
+    fn parsed_ids_are_window_named_properties_but_script_globals_can_override() {
+        let doc = crate::html::TreeBuilder::parse(
+            "<html><body><style id='theme'></style><div id='log'></div></body></html>",
+        )
+        .document();
+        let mut runtime = JsRuntime::with_document(doc).unwrap();
+        runtime.execute_document_scripts(None);
+        assert!(runtime
+            .eval("theme === document.getElementById('theme')")
+            .unwrap()
+            .as_boolean()
+            .unwrap());
+        assert_eq!(
+            eval_num(&mut runtime, "var log = []; log.push(1); log.length"),
+            1.0
+        );
+    }
+
+    #[test]
+    fn scope_rules_control_computed_style_in_javascript() {
+        let doc = crate::html::TreeBuilder::parse(
+            r#"<html><head><style>
+                p { color: black; width: 1px; }
+                @scope (.card) to (.stop) {
+                    p { color: red; }
+                    :scope > p { width: 9px; }
+                }
+            </style></head><body>
+                <section class="card"><p id="inside"></p><div class="stop"><p id="limited"></p></div></section>
+            </body></html>"#,
+        )
+        .document();
+        let mut runtime = JsRuntime::with_document(doc).unwrap();
+        assert_eq!(
+            eval_str(
+                &mut runtime,
+                "getComputedStyle(document.getElementById('inside')).color"
+            ),
+            "rgb(255, 0, 0)"
+        );
+        assert_eq!(
+            eval_str(
+                &mut runtime,
+                "getComputedStyle(document.getElementById('inside')).width"
+            ),
+            "9px"
+        );
+        assert_eq!(
+            eval_str(
+                &mut runtime,
+                "getComputedStyle(document.getElementById('limited')).color"
+            ),
+            "rgb(0, 0, 0)"
+        );
+    }
+
+    #[test]
+    fn implicit_scope_uses_inline_style_owner_parent() {
+        let doc = crate::html::TreeBuilder::parse(
+            r#"<html><body>
+                <section id="root"><style>@scope { .item { z-index: 7; } :scope { width: 11px; } }</style><div id="inside" class="item"></div></section>
+                <div id="outside" class="item"></div>
+            </body></html>"#,
+        )
+        .document();
+        let mut runtime = JsRuntime::with_document(doc).unwrap();
+        assert_eq!(
+            eval_str(
+                &mut runtime,
+                "getComputedStyle(document.getElementById('inside')).zIndex"
+            ),
+            "7"
+        );
+        assert_eq!(
+            eval_str(
+                &mut runtime,
+                "getComputedStyle(document.getElementById('outside')).zIndex"
+            ),
+            ""
+        );
+        assert_eq!(
+            eval_str(
+                &mut runtime,
+                "getComputedStyle(document.getElementById('root')).width"
+            ),
+            "11px"
+        );
     }
 
     #[test]
