@@ -1862,6 +1862,9 @@ fn selector_references_scope(selector: &Selector) -> bool {
             SimpleSelector::Is(selectors)
             | SimpleSelector::Where(selectors)
             | SimpleSelector::Not(selectors) => selectors.iter().any(selector_references_scope),
+            SimpleSelector::Has(relative) => relative
+                .iter()
+                .any(|relative| selector_references_scope(&relative.selector)),
             _ => false,
         })
     })

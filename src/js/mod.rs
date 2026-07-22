@@ -8486,7 +8486,7 @@ mod tests {
     #[test]
     fn css_scope_rules_expose_boundaries_and_nested_rules() {
         let doc = crate::html::TreeBuilder::parse(
-            "<html><head><style>@scope { p { color: black; } } @scope (.card) to (.stop) { p { color: red; } } @scope/* comment */(.commented) { span { color: blue; } }</style></head><body></body></html>",
+            "<html><head><style>@scope { p { color: black; } } @scope (.card) to (.stop) { p { color: red; } } @scope/* comment */(.commented) { span { color: blue; } } @scope to(.limit) { em { color: green; } }</style></head><body></body></html>",
         )
         .document();
         let mut runtime = JsRuntime::with_document(doc).unwrap();
@@ -8496,6 +8496,7 @@ mod tests {
                     const implicit = document.styleSheets[0].cssRules[0];
                     const bounded = document.styleSheets[0].cssRules[1];
                     const commented = document.styleSheets[0].cssRules[2];
+                    const limitOnly = document.styleSheets[0].cssRules[3];
                     return implicit instanceof CSSScopeRule &&
                         implicit instanceof CSSGroupingRule &&
                         !(implicit instanceof CSSConditionRule) &&
@@ -8505,7 +8506,8 @@ mod tests {
                         bounded.cssRules.length === 1 &&
                         bounded.cssRules[0].selectorText === "p" &&
                         commented instanceof CSSScopeRule &&
-                        commented.start === ".commented";
+                        commented.start === ".commented" &&
+                        limitOnly.start === null && limitOnly.end === ".limit";
                 })()"#,
             )
             .unwrap()

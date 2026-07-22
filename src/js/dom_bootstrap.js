@@ -3402,7 +3402,10 @@
     const start = prelude[index] === "(" ? boundary() : null;
     skipWhitespace();
     let end = null;
-    if (prelude.slice(index, index + 2).toLowerCase() === "to") {
+    const afterTo = prelude[index + 2];
+    const hasToBoundary = afterTo === undefined || /[\s(]/.test(afterTo) ||
+      (afterTo === "/" && prelude[index + 3] === "*");
+    if (prelude.slice(index, index + 2).toLowerCase() === "to" && hasToBoundary) {
       index += 2;
       end = boundary();
     }

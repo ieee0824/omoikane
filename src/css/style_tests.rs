@@ -365,6 +365,15 @@ fn scoped_selector_ancestor_matching_stops_at_the_scope_root() {
 }
 
 #[test]
+fn scope_reference_detection_descends_into_has_arguments() {
+    let stylesheet = parse_stylesheet(":has(:scope > .child) { color: red; }").unwrap();
+    let Rule::Style(rule) = &stylesheet.rules[0] else {
+        panic!("expected style rule");
+    };
+    assert!(selector_references_scope(&rule.selectors[0]));
+}
+
+#[test]
 fn important_user_rule_beats_important_author_rule() {
     let (_document, _body, title, _html) = sample_tree();
     let mut resolver = StyleResolver::new();
