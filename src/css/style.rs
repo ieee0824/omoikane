@@ -90,6 +90,7 @@ impl Default for ResolutionContext {
 #[derive(Debug, Default)]
 pub struct StyleResolver {
     stylesheets: Vec<StylesheetInput>,
+    stylesheet_scopes: Vec<StylesheetScope>,
     rule_indexes: Vec<StylesheetRuleIndex>,
     cache: HashMap<usize, ComputedStyle>,
     pseudo_cache: HashMap<(usize, PseudoElement), ComputedStyle>,
@@ -122,6 +123,12 @@ pub struct StyleResolver {
 struct KeyframeStep {
     offset: f32,
     declarations: Vec<Declaration>,
+}
+
+#[derive(Debug, Clone)]
+struct StylesheetScope {
+    root: Option<NodeHandle>,
+    encapsulation_order: usize,
 }
 
 /// Deterministic post-load instant used for static screenshots.
@@ -205,6 +212,54 @@ impl StyleResolver {
         collect_keyframes(&stylesheet.rules, &mut self.keyframes);
         self.rule_indexes.push(StylesheetRuleIndex::build(&stylesheet));
         self.stylesheets.push(StylesheetInput { origin, stylesheet });
+        self.stylesheet_scopes.push(StylesheetScope {
+            root: None,
+            encapsulation_order: 0,
+        });
+        self.cache.clear();
+        self.pseudo_cache.clear();
+        self.selector_match_cache = SelectorMatchCache::default();
+    }
+
+    /// Adds an author stylesheet owned by a ShadowRoot tree scope.
+    pub fn add_scoped_stylesheet(
+        &mut self,
+        origin: Origin,
+        stylesheet: Stylesheet,
+        scope: NodeHandle,
+    ) {
+        let encapsulation_order = self
+            .stylesheet_scopes
+            .iter()
+            .find(|input| input.root.as_ref() == Some(&scope))
+            .map(|input| input.encapsulation_order)
+            .unwrap_or_else(|| {
+                self.stylesheet_scopes
+                    .iter()
+                    .map(|input| input.encapsulation_order)
+                    .max()
+                    .unwrap_or(0)
+                    + 1
+            });
+        self.add_scoped_stylesheet_in_order(origin, stylesheet, scope, encapsulation_order);
+    }
+
+    /// Adds a ShadowRoot stylesheet with a tree-of-trees order computed by the
+    /// document traversal, independent of where its first `<style>` occurs.
+    pub(crate) fn add_scoped_stylesheet_in_order(
+        &mut self,
+        origin: Origin,
+        stylesheet: Stylesheet,
+        scope: NodeHandle,
+        encapsulation_order: usize,
+    ) {
+        collect_keyframes(&stylesheet.rules, &mut self.keyframes);
+        self.rule_indexes.push(StylesheetRuleIndex::build(&stylesheet));
+        self.stylesheets.push(StylesheetInput { origin, stylesheet });
+        self.stylesheet_scopes.push(StylesheetScope {
+            root: Some(scope),
+            encapsulation_order,
+        });
         self.cache.clear();
         self.pseudo_cache.clear();
         self.selector_match_cache = SelectorMatchCache::default();
@@ -217,9 +272,17 @@ impl StyleResolver {
             return style.clone();
         }
 
-        let inherited = node
-            .parent_node()
-            .map(|parent| self.computed_style(&parent));
+        let inheritance_parent = flattened_assigned_slot(node).or_else(|| node.parent_node());
+        let inherited = inheritance_parent.map(|parent| {
+            if parent.node_type() == NodeType::DocumentFragment {
+                parent
+                    .shadow_host()
+                    .map(|host| self.computed_style(&host))
+                    .unwrap_or_default()
+            } else {
+                self.computed_style(&parent)
+            }
+        });
         let style = self.compute_style(node, inherited.as_ref());
 
         // Auto-update root_font_size from the root element's computed font-size so that
@@ -288,7 +351,18 @@ impl StyleResolver {
         let color_scheme_dark = self.color_scheme_dark;
         let element_keys = ElementMatchKeys::from_node(node);
 
-        for (input, index) in self.stylesheets.iter().zip(&self.rule_indexes) {
+        for ((input, index), stylesheet_scope) in self
+            .stylesheets
+            .iter()
+            .zip(&self.rule_indexes)
+            .zip(&self.stylesheet_scopes)
+        {
+            if input.origin == Origin::Author
+                && stylesheet_scope.root.is_none()
+                && node.containing_shadow_root().is_some()
+            {
+                continue;
+            }
             collect_indexed_rule_candidates(
                 node,
                 &input.stylesheet.rules,
@@ -303,6 +377,8 @@ impl StyleResolver {
                 &mut self.media_query_cache,
                 element_keys.as_ref(),
                 &mut self.selector_match_cache,
+                stylesheet_scope.root.as_ref(),
+                stylesheet_scope.encapsulation_order,
             );
         }
 
@@ -324,6 +400,7 @@ impl StyleResolver {
                         elements: 0,
                     },
                     source_order,
+                    encapsulation_order: tree_scope_order(&self.stylesheet_scopes, node),
                 });
                 source_order += 1;
             }
@@ -332,6 +409,7 @@ impl StyleResolver {
         candidates.sort_by(|left, right| {
             cascade_rank(left)
                 .cmp(&cascade_rank(right))
+                .then(encapsulation_rank(left).cmp(&encapsulation_rank(right)))
                 .then(right.prefixed_alias.cmp(&left.prefixed_alias))
                 .then(left.inline.cmp(&right.inline))
                 .then(left.specificity.cmp(&right.specificity))
@@ -879,6 +957,9 @@ struct Candidate {
     inline: bool,
     specificity: Specificity,
     source_order: usize,
+    /// Position of this declaration's tree scope in tree-of-trees order.
+    /// Encapsulation order reverses for important declarations.
+    encapsulation_order: usize,
 }
 
 struct ElementMatchKeys {
@@ -964,6 +1045,9 @@ enum RuleMatchKey {
 }
 
 fn selector_match_key(selector: &super::Selector) -> Option<RuleMatchKey> {
+    if selector_uses_shadow_pseudo(selector) {
+        return None;
+    }
     let rightmost = selector.parts.last()?;
     rightmost
         .simples
@@ -1001,6 +1085,9 @@ impl ElementMatchKeys {
 
 fn style_rule_might_match(style_rule: &super::StyleRule, keys: &ElementMatchKeys) -> bool {
     style_rule.selectors.iter().any(|selector| {
+        if selector_uses_shadow_pseudo(selector) {
+            return true;
+        }
         let Some(rightmost) = selector.parts.last() else {
             return false;
         };
@@ -1011,6 +1098,161 @@ fn style_rule_might_match(style_rule: &super::StyleRule, keys: &ElementMatchKeys
             _ => true,
         })
     })
+}
+
+fn selector_uses_shadow_pseudo(selector: &super::Selector) -> bool {
+    selector.parts.iter().any(|part| {
+        part.simples.iter().any(|simple| match simple {
+            SimpleSelector::PseudoClass(name) => {
+                name.eq_ignore_ascii_case("host")
+                    || functional_selector(name)
+                        .is_some_and(|(function, _)| function.eq_ignore_ascii_case("host"))
+            }
+            SimpleSelector::PseudoElement(name) => functional_selector(name)
+                .is_some_and(|(function, _)| function.eq_ignore_ascii_case("slotted")),
+            _ => false,
+        })
+    })
+}
+
+fn functional_selector(name: &str) -> Option<(&str, &str)> {
+    let open = name.find('(')?;
+    Some((&name[..open], name[open + 1..].strip_suffix(')')?.trim()))
+}
+
+fn matches_shadow_scoped_selector(
+    node: &NodeHandle,
+    selector: &super::Selector,
+    scope: &NodeHandle,
+    pseudo: Option<PseudoElement>,
+    cache: &mut SelectorMatchCache,
+) -> bool {
+    if selector.parts.iter().any(|part| {
+        part.simples.iter().any(|simple| {
+            matches!(simple, SimpleSelector::PseudoClass(name) if name.eq_ignore_ascii_case("host") || functional_selector(name).is_some_and(|(function, _)| function.eq_ignore_ascii_case("host")))
+        })
+    }) {
+        return pseudo.is_none() && matches_host_selector(node, selector, scope, cache);
+    }
+
+    if selector.parts.iter().any(|part| {
+        part.simples.iter().any(|simple| {
+            matches!(simple, SimpleSelector::PseudoElement(name) if functional_selector(name).is_some_and(|(function, _)| function.eq_ignore_ascii_case("slotted")))
+        })
+    }) {
+        return pseudo.is_none() && matches_slotted_selector(node, selector, scope, cache);
+    }
+
+    node.containing_shadow_root().as_ref() == Some(scope)
+        && matches_selector_with_pseudo_cached(node, selector, pseudo, cache)
+}
+
+fn matches_host_selector(
+    node: &NodeHandle,
+    selector: &super::Selector,
+    scope: &NodeHandle,
+    cache: &mut SelectorMatchCache,
+) -> bool {
+    let Some(host) = scope.shadow_host() else {
+        return false;
+    };
+    if node != &host || selector.parts.len() != 1 {
+        return false;
+    }
+
+    selector.parts[0].simples.iter().all(|simple| match simple {
+        SimpleSelector::PseudoClass(name) if name.eq_ignore_ascii_case("host") => true,
+        SimpleSelector::PseudoClass(name) => {
+            let Some((function, argument)) = functional_selector(name) else {
+                return false;
+            };
+            if !function.eq_ignore_ascii_case("host") {
+                return false;
+            }
+            super::parse_selector_list(argument).ok().is_some_and(|selectors| {
+                selectors.len() == 1
+                    && selectors[0].parts.len() == 1
+                    && matches_selector_with_pseudo_cached(
+                        &host,
+                        &selectors[0],
+                        None,
+                        cache,
+                    )
+            })
+        }
+        _ => false,
+    })
+}
+
+fn matches_slotted_selector(
+    node: &NodeHandle,
+    selector: &super::Selector,
+    scope: &NodeHandle,
+    cache: &mut SelectorMatchCache,
+) -> bool {
+    let Some(slot) = assigned_slot_in_scope(node, scope) else {
+        return false;
+    };
+
+    let mut slot_selector = selector.clone();
+    let mut argument = None;
+    for part in &mut slot_selector.parts {
+        part.simples.retain(|simple| {
+            let SimpleSelector::PseudoElement(name) = simple else {
+                return true;
+            };
+            let Some((function, candidate)) = functional_selector(name) else {
+                return true;
+            };
+            if !function.eq_ignore_ascii_case("slotted") || argument.is_some() {
+                return true;
+            }
+            argument = Some(candidate.to_string());
+            false
+        });
+    }
+    let Some(argument) = argument else {
+        return false;
+    };
+    let argument_matches = super::parse_selector_list(&argument)
+        .ok()
+        .is_some_and(|selectors| {
+            selectors.len() == 1
+                && selectors[0].parts.len() == 1
+                && matches_selector_with_pseudo_cached(node, &selectors[0], None, cache)
+        });
+    if !argument_matches {
+        return false;
+    }
+
+    slot_selector.parts.retain(|part| !part.simples.is_empty());
+    if slot_selector.parts.is_empty() {
+        true
+    } else {
+        slot_selector.parts[0].combinator = None;
+        matches_selector_with_pseudo_cached(&slot, &slot_selector, None, cache)
+    }
+}
+
+fn assigned_slot_in_scope(node: &NodeHandle, scope: &NodeHandle) -> Option<NodeHandle> {
+    let mut current = node.clone();
+    while let Some(slot) = current.assigned_slot() {
+        if slot.containing_shadow_root().as_ref() == Some(scope) {
+            return Some(slot);
+        }
+        current = slot;
+    }
+    None
+}
+
+fn flattened_assigned_slot(node: &NodeHandle) -> Option<NodeHandle> {
+    let mut current = node.clone();
+    let mut outermost = None;
+    while let Some(slot) = current.assigned_slot() {
+        current = slot.clone();
+        outermost = Some(slot);
+    }
+    outermost
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1028,6 +1270,8 @@ fn collect_indexed_rule_candidates(
     media_cache: &mut HashMap<String, Vec<MediaQuery>>,
     element_keys: Option<&ElementMatchKeys>,
     selector_cache: &mut SelectorMatchCache,
+    shadow_scope: Option<&NodeHandle>,
+    encapsulation_order: usize,
 ) {
     let Some(element_keys) = element_keys else {
         collect_rule_candidates(
@@ -1043,6 +1287,8 @@ fn collect_indexed_rule_candidates(
             media_cache,
             None,
             selector_cache,
+            shadow_scope,
+            encapsulation_order,
         );
         return;
     };
@@ -1063,6 +1309,8 @@ fn collect_indexed_rule_candidates(
             media_cache,
             Some(element_keys),
             selector_cache,
+            shadow_scope,
+            encapsulation_order,
         );
     }
     for (rule_index, rule) in rules.iter().enumerate() {
@@ -1083,6 +1331,8 @@ fn collect_indexed_rule_candidates(
             media_cache,
             Some(element_keys),
             selector_cache,
+            shadow_scope,
+            encapsulation_order,
         );
     }
     *source_order += index.total_declarations;
@@ -1101,6 +1351,8 @@ fn collect_rule_candidates(
     media_cache: &mut HashMap<String, Vec<MediaQuery>>,
     element_keys: Option<&ElementMatchKeys>,
     selector_cache: &mut SelectorMatchCache,
+    shadow_scope: Option<&NodeHandle>,
+    encapsulation_order: usize,
 ) {
     if node.node_type() != NodeType::Element {
         return;
@@ -1117,7 +1369,22 @@ fn collect_rule_candidates(
                     .selectors
                     .iter()
                     .filter(|selector| {
-                        matches_selector_with_pseudo_cached(node, selector, pseudo, selector_cache)
+                        if let Some(scope) = shadow_scope {
+                            matches_shadow_scoped_selector(
+                                node,
+                                selector,
+                                scope,
+                                pseudo,
+                                selector_cache,
+                            )
+                        } else {
+                            matches_selector_with_pseudo_cached(
+                                node,
+                                selector,
+                                pseudo,
+                                selector_cache,
+                            )
+                        }
                     })
                     .map(specificity)
                     .max();
@@ -1133,6 +1400,7 @@ fn collect_rule_candidates(
                             inline: false,
                             specificity,
                             source_order: *source_order,
+                            encapsulation_order,
                         });
                         *source_order += 1;
                     }
@@ -1174,6 +1442,8 @@ fn collect_rule_candidates(
                             media_cache,
                             element_keys,
                             selector_cache,
+                            shadow_scope,
+                            encapsulation_order,
                         );
                     } else {
                         // Count the rules inside for correct source_order numbering.
@@ -1391,6 +1661,25 @@ fn cascade_rank(candidate: &Candidate) -> (u8, u8) {
         (false, Origin::UserAgent) => 0,
     };
     (importance, origin)
+}
+
+fn encapsulation_rank(candidate: &Candidate) -> usize {
+    if candidate.important {
+        candidate.encapsulation_order
+    } else {
+        usize::MAX.saturating_sub(candidate.encapsulation_order)
+    }
+}
+
+fn tree_scope_order(stylesheets: &[StylesheetScope], node: &NodeHandle) -> usize {
+    let Some(scope) = node.containing_shadow_root() else {
+        return 0;
+    };
+    stylesheets
+        .iter()
+        .find(|input| input.root.as_ref() == Some(&scope))
+        .map(|input| input.encapsulation_order)
+        .unwrap_or(0)
 }
 
 fn log_unsupported_css_if_enabled(property: &str, value: &Value) {

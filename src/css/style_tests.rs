@@ -2,7 +2,7 @@ use std::fs;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::css::{PseudoElement, parse_stylesheet};
-use crate::dom::NodeHandle;
+use crate::dom::{NodeHandle, ShadowRootMode};
 
 use super::*;
 
@@ -20,6 +20,128 @@ fn sample_tree() -> (NodeHandle, NodeHandle, NodeHandle, NodeHandle) {
     body.append_child(title.clone());
 
     (document, body, title, html)
+}
+
+#[test]
+fn shadow_stylesheets_respect_tree_scope_host_and_slotted_boundaries() {
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let host = NodeHandle::element("x-card");
+    host.set_attribute("class", "active");
+    let light = NodeHandle::element("span");
+    light.set_attribute("id", "chosen");
+    light.set_attribute("class", "item");
+    host.append_child(light.clone());
+    document.append_child(body.clone());
+    body.append_child(host.clone());
+
+    let root = host.attach_shadow(ShadowRootMode::Closed).unwrap();
+    let inside = NodeHandle::element("span");
+    inside.set_attribute("class", "inside");
+    let slot = NodeHandle::element("slot");
+    slot.set_attribute("class", "special");
+    root.append_child(inside.clone());
+    root.append_child(slot);
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "x-card { color: purple; } .inside { width: 99px; } \
+             .item { margin-left: 44px; padding-left: 6px !important; }",
+        )
+        .unwrap(),
+    );
+    resolver.add_scoped_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            ".inside { width: 11px; } slot { color: orange; } \
+             :host(.active) { height: 22px; } :host { height: 23px; } \
+             ::slotted(.item) { margin-left: 33px; padding-left: 5px !important; } \
+             slot.special::slotted(.item) { border-left-width: 7px; } \
+             ::slotted(#chosen) { outline-width: 8px; } ::slotted(*) { outline-width: 9px; }",
+        )
+        .unwrap(),
+        root,
+    );
+
+    assert_eq!(
+        resolver.computed_style(&inside).get("width"),
+        Some(&ComputedValue::Px(11.0))
+    );
+    assert_eq!(
+        resolver.computed_style(&inside).get("color"),
+        Some(&ComputedValue::Color("purple".to_string())),
+        "shadow children inherit from the host"
+    );
+    assert_eq!(
+        resolver.computed_style(&host).get("height"),
+        Some(&ComputedValue::Px(22.0))
+    );
+    let light_style = resolver.computed_style(&light);
+    assert_eq!(
+        light_style.get("margin-left"),
+        Some(&ComputedValue::Px(44.0)),
+        "normal declarations from the outer tree win"
+    );
+    assert_eq!(
+        light_style.get("padding-left"),
+        Some(&ComputedValue::Px(5.0)),
+        "important declarations from the inner tree win"
+    );
+    assert_eq!(
+        light_style.get("color"),
+        Some(&ComputedValue::Color("orange".to_string())),
+        "assigned elements inherit from their slot"
+    );
+    assert_eq!(
+        light_style.get("border-left-width"),
+        Some(&ComputedValue::Px(7.0)),
+        "the selector before ::slotted() matches the assigned slot"
+    );
+    assert_eq!(
+        light_style.get("outline-width"),
+        Some(&ComputedValue::Px(8.0)),
+        "the ::slotted() argument contributes specificity"
+    );
+}
+
+#[test]
+fn shadow_host_encapsulation_order_reverses_for_important_rules() {
+    fn host_color(document_important: bool, shadow_important: bool) -> ComputedStyle {
+        let document = NodeHandle::document();
+        let host = NodeHandle::element("x-card");
+        document.append_child(host.clone());
+        let root = host.attach_shadow(ShadowRootMode::Open).unwrap();
+        let mut resolver = StyleResolver::new();
+        resolver.add_stylesheet(
+            Origin::Author,
+            parse_stylesheet(&format!(
+                "x-card {{ color: green{}; }}",
+                if document_important { " !important" } else { "" }
+            ))
+            .unwrap(),
+        );
+        resolver.add_scoped_stylesheet(
+            Origin::Author,
+            parse_stylesheet(&format!(
+                ":host {{ color: red{}; }}",
+                if shadow_important { " !important" } else { "" }
+            ))
+            .unwrap(),
+            root,
+        );
+        resolver.computed_style(&host)
+    }
+
+    assert_eq!(
+        host_color(false, false).get("color"),
+        Some(&ComputedValue::Color("green".to_string()))
+    );
+    assert_eq!(
+        host_color(true, true).get("color"),
+        Some(&ComputedValue::Color("red".to_string()))
+    );
 }
 
 #[test]

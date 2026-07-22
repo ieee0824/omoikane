@@ -71,6 +71,14 @@
       "baseline_supported": false
     },
     {
+      "id": "css.shadow-cascade",
+      "area": "web-components",
+      "description": "Shadow styles scope normal, host, and slotted selectors",
+      "setup": "globalThis.__styleHost = document.createElement('x-surface'); globalThis.__styleLight = document.createElement('span'); __styleLight.className = 'surface-item'; __styleHost.appendChild(__styleLight); document.body.appendChild(__styleHost); globalThis.__styleRoot = __styleHost.attachShadow({mode:'open'}); __styleRoot.innerHTML = '<style>:host { width: 17px } .inside { height: 18px } ::slotted(.surface-item) { margin-left: 19px }</style><span class=inside></span><slot></slot>'",
+      "probe": "getComputedStyle(__styleHost).width === '17px' && getComputedStyle(__styleRoot.querySelector('.inside')).height === '18px' && getComputedStyle(__styleLight).marginLeft === '19px'",
+      "baseline_supported": false
+    },
+    {
       "id": "dom.custom-elements",
       "area": "web-components",
       "description": "Custom element registry is available",

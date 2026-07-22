@@ -134,6 +134,20 @@ fn add_simple_specificity(value: &mut Specificity, simple: &SimpleSelector) {
         SimpleSelector::PseudoClass(name) if matches!(name.as_str(), "before" | "after") => {
             value.elements += 1
         }
+        SimpleSelector::PseudoClass(name)
+            if functional_pseudo(name)
+                .is_some_and(|(function, _)| function.eq_ignore_ascii_case("host")) =>
+        {
+            value.classes += 1;
+            add_function_argument_specificity(value, name);
+        }
+        SimpleSelector::PseudoElement(name)
+            if functional_pseudo(name)
+                .is_some_and(|(function, _)| function.eq_ignore_ascii_case("slotted")) =>
+        {
+            value.elements += 1;
+            add_function_argument_specificity(value, name);
+        }
         SimpleSelector::PseudoClass(_) => value.classes += 1,
         SimpleSelector::Type(_) | SimpleSelector::PseudoElement(_) => value.elements += 1,
         SimpleSelector::Universal => {}
@@ -153,6 +167,21 @@ fn add_simple_specificity(value: &mut Specificity, simple: &SimpleSelector) {
             value.elements += inner_specificity.elements;
         }
     }
+}
+
+fn add_function_argument_specificity(value: &mut Specificity, name: &str) {
+    let Some((_, argument)) = functional_pseudo(name) else {
+        return;
+    };
+    let Ok(selectors) = super::parse_selector_list(argument) else {
+        return;
+    };
+    let Some(argument_specificity) = selectors.iter().map(specificity).max() else {
+        return;
+    };
+    value.ids += argument_specificity.ids;
+    value.classes += argument_specificity.classes;
+    value.elements += argument_specificity.elements;
 }
 
 fn matches_selector_part(

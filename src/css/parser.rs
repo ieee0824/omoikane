@@ -519,7 +519,18 @@ impl Parser {
         self.next(); // consume first Colon
         if matches!(self.peek(), Some(CssToken::Colon)) {
             self.next();
-            return Ok(SimpleSelector::PseudoElement(self.expect_ident()?));
+            let name = self.expect_ident()?;
+            if !matches!(self.peek(), Some(CssToken::ParenOpen)) {
+                return Ok(SimpleSelector::PseudoElement(name));
+            }
+            self.next(); // consume ParenOpen
+            let argument = render_tokens(&self.collect_parenthesized_tokens()?)
+                .trim()
+                .to_string();
+            if argument.is_empty() {
+                return Err(CssParseError::InvalidSelector);
+            }
+            return Ok(SimpleSelector::PseudoElement(format!("{name}({argument})")));
         }
         let name = self.expect_ident()?;
         if !matches!(self.peek(), Some(CssToken::ParenOpen)) {

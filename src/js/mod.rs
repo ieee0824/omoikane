@@ -766,9 +766,13 @@ impl HostState {
         let viewport = self.viewport_for_document(document);
         let mut resolver = StyleResolver::new();
         resolver.set_viewport(viewport.width, viewport.height);
-        for css in collect_inline_stylesheets(document) {
+        for (scope, css) in collect_inline_stylesheets(document) {
             let sheet = crate::paint::stylesheet::parse_stylesheet_forgiving(&css);
-            resolver.add_stylesheet(Origin::Author, sheet);
+            if let Some((scope, order)) = scope {
+                resolver.add_scoped_stylesheet_in_order(Origin::Author, sheet, scope, order);
+            } else {
+                resolver.add_stylesheet(Origin::Author, sheet);
+            }
         }
         self.document_styles.insert(
             document_id,
@@ -2462,8 +2466,15 @@ fn with_host_state<T>(f: impl FnOnce(&Rc<RefCell<HostState>>) -> JsResult<T>) ->
 ///
 /// Only inline styles are gathered; linked stylesheets are not fetched here to
 /// keep computed-style resolution synchronous and side-effect free.
-fn collect_inline_stylesheets(document: &NodeHandle) -> Vec<String> {
-    fn walk(node: &NodeHandle, out: &mut Vec<String>) {
+fn collect_inline_stylesheets(
+    document: &NodeHandle,
+) -> Vec<(Option<(NodeHandle, usize)>, String)> {
+    fn walk(
+        node: &NodeHandle,
+        scope: Option<&(NodeHandle, usize)>,
+        next_scope_order: &mut usize,
+        out: &mut Vec<(Option<(NodeHandle, usize)>, String)>,
+    ) {
         if node.node_type() == NodeType::Element
             && node
                 .tag_name()
@@ -2472,15 +2483,21 @@ fn collect_inline_stylesheets(document: &NodeHandle) -> Vec<String> {
         {
             let css = collect_text_recursive(node);
             if !css.trim().is_empty() {
-                out.push(css);
+                out.push((scope.cloned(), css));
             }
         }
+        if let Some(root) = node.shadow_root() {
+            *next_scope_order += 1;
+            let root_scope = (root.clone(), *next_scope_order);
+            walk(&root, Some(&root_scope), next_scope_order, out);
+        }
         for child in node.child_nodes() {
-            walk(&child, out);
+            walk(&child, scope, next_scope_order, out);
         }
     }
     let mut out = Vec::new();
-    walk(document, &mut out);
+    let mut next_scope_order = 0;
+    walk(document, None, &mut next_scope_order, &mut out);
     out
 }
 
@@ -2502,7 +2519,22 @@ fn format_css_number(value: f32) -> String {
 fn computed_value_to_css_string(value: &ComputedValue) -> String {
     match value {
         ComputedValue::Keyword(keyword) => keyword.clone(),
-        ComputedValue::Color(color) => color.clone(),
+        ComputedValue::Color(color) => crate::paint::color::parse_color(color).map_or_else(
+            || color.clone(),
+            |parsed| {
+                if parsed.a == 255 {
+                    format!("rgb({}, {}, {})", parsed.r, parsed.g, parsed.b)
+                } else {
+                    format!(
+                        "rgba({}, {}, {}, {})",
+                        parsed.r,
+                        parsed.g,
+                        parsed.b,
+                        format_css_number(f32::from(parsed.a) / 255.0)
+                    )
+                }
+            },
+        ),
         ComputedValue::String(string) => string.clone(),
         ComputedValue::Px(px) => format!("{}px", format_css_number(*px)),
         ComputedValue::Percentage(pct) => format!("{}%", format_css_number(*pct)),
@@ -9002,6 +9034,74 @@ mod tests {
     }
 
     #[test]
+    fn shadow_styles_apply_to_internal_host_and_slotted_elements_in_both_modes() {
+        for mode in ["open", "closed"] {
+            let mut runtime = JsRuntime::new().unwrap();
+            let result = runtime
+                .eval(&format!(
+                    r#"(() => {{
+                      const documentStyle = document.createElement("style");
+                      documentStyle.textContent =
+                        ".inside {{ width: 99px; }} .item {{ margin-left: 44px; padding-left: 6px !important; }}";
+                      document.body.appendChild(documentStyle);
+                      const host = document.createElement("x-card");
+                      host.className = "active";
+                      const light = document.createElement("span");
+                      light.className = "item";
+                      host.appendChild(light);
+                      document.body.appendChild(host);
+                      const root = host.attachShadow({{ mode: "{mode}" }});
+                      root.innerHTML = `<style>
+                        .inside {{ width: 11px; }}
+                        :host(.active) {{ height: 22px; }}
+                        ::slotted(.item) {{ margin-left: 33px; padding-left: 5px !important; }}
+                      </style><span class="inside"></span><slot></slot>`;
+                      const inside = root.querySelector(".inside");
+                      return [
+                        getComputedStyle(inside).width,
+                        getComputedStyle(host).height,
+                        getComputedStyle(light).marginLeft,
+                        getComputedStyle(light).paddingLeft,
+                      ].join("|");
+                    }})()"#,
+                ))
+                .unwrap()
+                .to_string(&mut runtime.context)
+                .unwrap()
+                .to_std_string_escaped();
+            assert_eq!(result, "11px|22px|44px|5px", "shadow mode: {mode}");
+        }
+    }
+
+    #[test]
+    fn shadow_style_and_slot_matching_recompute_after_dom_mutation() {
+        let mut runtime = JsRuntime::new().unwrap();
+        let result = runtime
+            .eval(
+                r#"(() => {
+                  const host = document.createElement("x-card");
+                  const light = document.createElement("span");
+                  host.appendChild(light);
+                  document.body.appendChild(host);
+                  const root = host.attachShadow({ mode: "open" });
+                  root.innerHTML = '<style>.inside { width: 10px; } ::slotted(.selected) { height: 20px; }</style>' +
+                    '<span class="inside"></span><slot></slot>';
+                  const style = root.querySelector("style");
+                  const inside = root.querySelector(".inside");
+                  const before = getComputedStyle(inside).width;
+                  style.textContent = '.inside { width: 12px; } ::slotted(.selected) { height: 20px; }';
+                  light.className = "selected";
+                  return [before, getComputedStyle(inside).width, getComputedStyle(light).height].join("|");
+                })()"#,
+            )
+            .unwrap()
+            .to_string(&mut runtime.context)
+            .unwrap()
+            .to_std_string_escaped();
+        assert_eq!(result, "10px|12px|20px");
+    }
+
+    #[test]
     fn html_slot_element_assigns_named_default_and_fallback_nodes_dynamically() {
         let mut runtime = JsRuntime::new().unwrap();
         assert!(runtime
@@ -12258,7 +12358,7 @@ mod tests {
                 &mut runtime,
                 "getComputedStyle(document.getElementById('target'), '').color"
             ),
-            "blue",
+            "rgb(0, 0, 255)",
             "inline style must win over the cascaded stylesheet rule"
         );
     }
@@ -12704,7 +12804,7 @@ mod tests {
                 &mut runtime,
                 "getComputedStyle(document.getElementById('box')).color"
             ),
-            "blue"
+            "rgb(0, 0, 255)"
         );
     }
 
