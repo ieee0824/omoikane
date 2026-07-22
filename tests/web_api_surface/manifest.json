@@ -17,6 +17,14 @@
       "baseline_supported": false
     },
     {
+      "id": "css.has-relative-selector",
+      "area": "css",
+      "description": ":has() evaluates descendant, child, and sibling selectors from an anchor",
+      "setup": "globalThis.__hasHost = document.createElement('section'); __hasHost.innerHTML = '<div class=first><span class=nested></span></div><div class=second></div>'",
+      "probe": "__hasHost.matches(':has(> .first + .second)') && __hasHost.matches(':has(.nested)') && __hasHost.querySelector('.first').matches(':has(+ .second)')",
+      "baseline_supported": false
+    },
+    {
       "id": "dom.get-root-node",
       "area": "dom",
       "description": "Connected nodes expose their Document root",

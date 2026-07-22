@@ -4,7 +4,7 @@ use std::collections::HashMap;
 
 use crate::dom::{Node, NodeHandle, NodeType};
 
-use super::{AttributeOperator, Combinator, Selector, SelectorPart, SimpleSelector};
+use super::{AttributeOperator, Combinator, RelativeSelector, Selector, SelectorPart, SimpleSelector};
 
 /// Supported pseudo-elements for style matching.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -59,6 +59,7 @@ pub fn matches_selector_with_pseudo(
 #[derive(Debug, Default)]
 pub(crate) struct SelectorMatchCache {
     structural_positions: HashMap<usize, StructuralPositions>,
+    relational_matches: HashMap<(usize, usize), bool>,
 }
 
 #[derive(Debug, Default)]
@@ -155,6 +156,18 @@ fn add_simple_specificity(value: &mut Specificity, simple: &SimpleSelector) {
             add_selector_list_specificity(value, selectors);
         }
         SimpleSelector::Where(_) => {}
+        SimpleSelector::Has(selectors) => {
+            let Some(argument_specificity) = selectors
+                .iter()
+                .map(|relative| specificity(&relative.selector))
+                .max()
+            else {
+                return;
+            };
+            value.ids += argument_specificity.ids;
+            value.classes += argument_specificity.classes;
+            value.elements += argument_specificity.elements;
+        }
     }
 }
 
@@ -275,7 +288,92 @@ fn matches_simple_selector(
         SimpleSelector::Not(selectors) => !selectors
             .iter()
             .any(|selector| matches_selector_with_pseudo_cached(node, selector, pseudo, cache)),
+        SimpleSelector::Has(selectors) => selectors
+            .iter()
+            .any(|selector| matches_relative_selector_cached(node, selector, cache)),
     }
+}
+
+fn matches_relative_selector_cached(
+    anchor: &NodeHandle,
+    relative: &RelativeSelector,
+    cache: &mut SelectorMatchCache,
+) -> bool {
+    let key = (anchor.identity(), relative as *const RelativeSelector as usize);
+    if let Some(result) = cache.relational_matches.get(&key) {
+        return *result;
+    }
+    let result = related_elements(anchor, relative.leading_combinator)
+        .into_iter()
+        .any(|candidate| matches_relative_selector_part(&candidate, &relative.selector, 0, cache));
+    cache.relational_matches.insert(key, result);
+    result
+}
+
+fn matches_relative_selector_part(
+    node: &NodeHandle,
+    selector: &Selector,
+    index: usize,
+    cache: &mut SelectorMatchCache,
+) -> bool {
+    if !matches_compound(node, &selector.parts[index], None, cache) {
+        return false;
+    }
+    let next_index = index + 1;
+    if next_index == selector.parts.len() {
+        return true;
+    }
+    let Some(combinator) = selector.parts[next_index].combinator else {
+        return false;
+    };
+    related_elements(node, combinator)
+        .into_iter()
+        .any(|candidate| matches_relative_selector_part(&candidate, selector, next_index, cache))
+}
+
+fn related_elements(node: &NodeHandle, combinator: Combinator) -> Vec<NodeHandle> {
+    match combinator {
+        Combinator::Descendant => {
+            let mut descendants = Vec::new();
+            collect_element_descendants(node, &mut descendants);
+            descendants
+        }
+        Combinator::Child => node
+            .child_nodes()
+            .into_iter()
+            .filter(|child| child.node_type() == NodeType::Element)
+            .collect(),
+        Combinator::AdjacentSibling => next_element_sibling(node).into_iter().collect(),
+        Combinator::GeneralSibling => following_element_siblings(node),
+    }
+}
+
+fn collect_element_descendants(node: &NodeHandle, output: &mut Vec<NodeHandle>) {
+    for child in node.child_nodes() {
+        if child.node_type() == NodeType::Element {
+            output.push(child.clone());
+        }
+        collect_element_descendants(&child, output);
+    }
+}
+
+fn following_element_siblings(node: &NodeHandle) -> Vec<NodeHandle> {
+    let Some(parent) = node.parent_node() else {
+        return Vec::new();
+    };
+    let siblings = parent.child_nodes();
+    let Some(index) = siblings.iter().position(|candidate| candidate == node) else {
+        return Vec::new();
+    };
+    siblings[index + 1..]
+        .iter()
+        .filter(|candidate| candidate.node_type() == NodeType::Element)
+        .cloned()
+        .collect()
+}
+
+fn next_element_sibling(node: &NodeHandle) -> Option<NodeHandle> {
+    following_element_siblings(node).into_iter().next()
 }
 
 fn matches_attribute_selector(
@@ -969,6 +1067,38 @@ mod tests {
     }
 
     #[test]
+    fn matches_has_relative_selectors_from_the_anchor() {
+        let (_document, _html, _body, main, lead, title, cta) = sample_tree();
+
+        assert!(matches_selector(&main, &selector(":has(h1) {}")));
+        assert!(matches_selector(&main, &selector(":has(> h1) {}")));
+        assert!(matches_selector(&main, &selector(":has(h1 + p.lead) {}")));
+        assert!(matches_selector(&main, &selector(":has(h1 ~ a.button) {}")));
+        assert!(matches_selector(&title, &selector(":has(+ p.lead) {}")));
+        assert!(matches_selector(&title, &selector(":has(~ a.button) {}")));
+        assert!(!matches_selector(&lead, &selector(":has(> a.button) {}")));
+        assert!(!matches_selector(&cta, &selector(":has(+ *) {}")));
+    }
+
+    #[test]
+    fn matches_has_complex_lists_and_forgiving_is_branches() {
+        let (_document, _html, _body, main, _lead, title, _cta) = sample_tree();
+
+        assert!(matches_selector(
+            &main,
+            &selector(":has(> .missing, > h1:first-child) {}")
+        ));
+        assert!(matches_selector(
+            &main,
+            &selector(":has(:is(:has(*), h1)) {}")
+        ));
+        assert!(!matches_selector(
+            &title,
+            &selector(":has(:where(:has(*))) {}")
+        ));
+    }
+
+    #[test]
     fn matches_complex_and_nested_selector_lists() {
         let (_, _, _, main, lead, title, cta) = sample_tree();
 
@@ -1028,5 +1158,14 @@ mod tests {
         );
 
         assert_eq!(specificity(&selector(":where(#bar, .foo) {}")), Specificity::zero());
+
+        assert_eq!(
+            specificity(&selector(":has(.foo, main > #target) {}")),
+            Specificity {
+                ids: 1,
+                classes: 0,
+                elements: 1,
+            }
+        );
     }
 }

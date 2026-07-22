@@ -69,6 +69,13 @@ pub struct SelectorPart {
     pub simples: Vec<SimpleSelector>,
 }
 
+/// A selector evaluated relative to an anchor element, as used by `:has()`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RelativeSelector {
+    pub leading_combinator: Combinator,
+    pub selector: Selector,
+}
+
 /// A basic CSS simple selector.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SimpleSelector {
@@ -89,6 +96,8 @@ pub enum SimpleSelector {
     Where(Vec<Selector>),
     /// `:not(<selector-list>)` -- negates every selector in the argument list.
     Not(Vec<Selector>),
+    /// `:has(<relative-selector-list>)` -- matches from this anchor.
+    Has(Vec<RelativeSelector>),
 }
 
 /// Attribute selector operators.
@@ -1419,27 +1428,42 @@ mod tests {
     }
 
     #[test]
-    fn parses_pseudo_class_with_nested_parentheses() {
+    fn parses_has_relative_selector_with_nested_parentheses() {
         let stylesheet =
             parse_stylesheet("div:has(> span:nth-child(odd)) { color: red; }").unwrap();
         let Rule::Style(rule) = &stylesheet.rules[0] else {
             panic!("expected style rule");
         };
-        // The argument should preserve the inner parenthesized content
-        let pseudo = &rule.selectors[0].parts[0].simples[1];
-        match pseudo {
-            SimpleSelector::PseudoClass(value) => {
-                assert!(
-                    value.starts_with("has("),
-                    "expected has(...), got: {value}"
-                );
-                assert!(
-                    value.contains("nth-child(odd)"),
-                    "nested parens should be preserved, got: {value}"
-                );
-            }
-            _ => panic!("expected PseudoClass, got: {:?}", pseudo),
+        let SimpleSelector::Has(relative) = &rule.selectors[0].parts[0].simples[1] else {
+            panic!("expected parsed :has()");
+        };
+        assert_eq!(relative.len(), 1);
+        assert_eq!(relative[0].leading_combinator, Combinator::Child);
+        assert_eq!(
+            relative[0].selector.parts[0].simples,
+            vec![
+                SimpleSelector::Type("span".to_string()),
+                SimpleSelector::PseudoClass("nth-child(odd)".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn has_uses_strict_relative_selector_list_and_disallows_nesting() {
+        for invalid in [
+            ":has()",
+            ":has(123)",
+            ":has(.valid, 123)",
+            ":has(.child:has(.nested))",
+            ":has(::before)",
+            ":has(:before)",
+            ":has(:AFTER)",
+        ] {
+            assert!(parse_selector_list(invalid).is_err(), "accepted {invalid:?}");
         }
+
+        assert!(parse_selector_list(":has(:is(:has(*), script))").is_ok());
+        assert!(parse_selector_list(":has(:where(:has(*)))").is_ok());
     }
 
     #[test]

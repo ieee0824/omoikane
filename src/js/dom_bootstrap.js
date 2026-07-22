@@ -1692,35 +1692,18 @@
     }
 
     matches(selector) {
-      if (!selector || this.nodeType !== 1) return false;
-      const sel = selector.trim();
-      // Tag selector
-      if (/^[a-zA-Z][a-zA-Z0-9]*$/.test(sel)) {
-        return this.tagName && this.tagName.toLowerCase() === sel.toLowerCase();
+      if (this.nodeType !== 1) return false;
+      if (arguments.length === 0) {
+        throw new TypeError("Element.matches requires a selector");
       }
-      // ID selector
-      if (sel.startsWith("#")) {
-        return this.id === sel.slice(1);
+      try {
+        return !!__omoikane_matches_selector(this.__id, String(selector));
+      } catch (error) {
+        if (error && error.name === "SyntaxError") {
+          throw new DOMException(error.message, "SyntaxError");
+        }
+        throw error;
       }
-      // Class selector
-      if (sel.startsWith(".")) {
-        return this.classList && this.classList.contains(sel.slice(1));
-      }
-      // Attribute selector [attr] or [attr="value"]
-      const attrMatch = /^\[([^\s=\]]+)(?:="([^"]*)")?\]$/.exec(sel);
-      if (attrMatch) {
-        if (!this.hasAttribute(attrMatch[1])) return false;
-        if (attrMatch[2] !== undefined) return this.getAttribute(attrMatch[1]) === attrMatch[2];
-        return true;
-      }
-      // Fallback: use querySelectorAll on parent
-      const parent = this.parentNode || this.ownerDocument;
-      if (!parent) return false;
-      const all = parent.querySelectorAll(sel);
-      for (let i = 0; i < all.length; i++) {
-        if (all[i].__id === this.__id) return true;
-      }
-      return false;
     }
 
     // Queries the native layout engine for this element's geometry, forcing a
