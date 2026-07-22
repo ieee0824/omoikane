@@ -133,14 +133,13 @@ fn selector_is_supported_for_dom_query(selector: &Selector) -> bool {
             SimpleSelector::PseudoElement(name) => {
                 name.eq_ignore_ascii_case("before") || name.eq_ignore_ascii_case("after")
             }
-            SimpleSelector::Not(inner) => inner.iter().all(|simple| {
-                selector_is_supported_for_dom_query(&Selector {
-                    parts: vec![SelectorPart {
-                        combinator: None,
-                        simples: vec![simple.clone()],
-                    }],
-                })
-            }),
+            // :is() and :where() use forgiving selector lists. Unsupported
+            // branches remain non-matching but do not invalidate the outer
+            // selector in DOM selector APIs.
+            SimpleSelector::Is(_) | SimpleSelector::Where(_) => true,
+            SimpleSelector::Not(selectors) => {
+                selectors.iter().all(selector_is_supported_for_dom_query)
+            }
             _ => true,
         })
     })
@@ -541,10 +540,20 @@ impl Parser {
         }
         self.next(); // consume ParenOpen
         let argument_tokens = self.collect_parenthesized_tokens()?;
-        if name == "not" {
+        if matches!(name.to_ascii_lowercase().as_str(), "is" | "where" | "not") {
             let argument_str = render_tokens(&argument_tokens).trim().to_string();
-            let inner = parse_not_argument(&argument_str)?;
-            Ok(SimpleSelector::Not(inner))
+            match name.to_ascii_lowercase().as_str() {
+                "is" => Ok(SimpleSelector::Is(parse_forgiving_selector_list(
+                    &argument_tokens,
+                ))),
+                "where" => Ok(SimpleSelector::Where(parse_forgiving_selector_list(
+                    &argument_tokens,
+                ))),
+                "not" => Ok(SimpleSelector::Not(parse_nested_selector_list(
+                    &argument_str,
+                )?)),
+                _ => unreachable!(),
+            }
         } else {
             let argument = if name.to_ascii_lowercase().starts_with("nth-") {
                 render_nth_argument(&argument_tokens)
@@ -1017,22 +1026,59 @@ fn parse_single_value(token: &CssToken) -> Result<Value, CssParseError> {
     }
 }
 
-/// Parses the argument of a `:not()` pseudo-class into a list of simple selectors.
-///
-/// The argument is a forgiving selector list; only simple selectors (no
-/// combinators) are supported here, which is sufficient for CSS Selectors Level 3.
-fn parse_not_argument(argument: &str) -> Result<Vec<SimpleSelector>, CssParseError> {
-    // Re-tokenize the argument and parse it as simple selectors.
-    // Reject if trailing tokens remain (commas, combinators, etc.).
+/// Parses a selector list nested inside a functional pseudo-class.
+fn parse_nested_selector_list(argument: &str) -> Result<Vec<Selector>, CssParseError> {
     let tokens = tokenize(argument)?;
     let mut parser = Parser::new(tokens);
     parser.skip_whitespace();
-    let selectors = parser.parse_simple_selectors()?;
+    if parser.peek().is_none() {
+        return Err(CssParseError::InvalidSelector);
+    }
+    let selectors = parser.parse_selector_list_until(false)?;
     parser.skip_whitespace();
     if parser.peek().is_some() {
         return Err(CssParseError::InvalidSelector);
     }
     Ok(selectors)
+}
+
+/// Parses a forgiving selector list, discarding invalid branches independently.
+fn parse_forgiving_selector_list(tokens: &[CssToken]) -> Vec<Selector> {
+    let mut selectors = Vec::new();
+    let mut start = 0usize;
+    let mut paren_depth = 0usize;
+    let mut bracket_depth = 0usize;
+
+    for (index, token) in tokens.iter().enumerate() {
+        match token {
+            CssToken::ParenOpen => paren_depth += 1,
+            CssToken::ParenClose => paren_depth = paren_depth.saturating_sub(1),
+            CssToken::BracketOpen => bracket_depth += 1,
+            CssToken::BracketClose => bracket_depth = bracket_depth.saturating_sub(1),
+            CssToken::Comma if paren_depth == 0 && bracket_depth == 0 => {
+                if let Some(selector) = parse_single_nested_selector(&tokens[start..index]) {
+                    selectors.push(selector);
+                }
+                start = index + 1;
+            }
+            _ => {}
+        }
+    }
+    if let Some(selector) = parse_single_nested_selector(&tokens[start..]) {
+        selectors.push(selector);
+    }
+    selectors
+}
+
+fn parse_single_nested_selector(tokens: &[CssToken]) -> Option<Selector> {
+    let mut parser = Parser::new(tokens.to_vec());
+    parser.skip_whitespace();
+    if parser.peek().is_none() {
+        return None;
+    }
+    let selector = parser.parse_selector().ok()?;
+    parser.skip_whitespace();
+    parser.peek().is_none().then_some(selector)
 }
 
 fn split_important(tokens: &[CssToken]) -> (Vec<CssToken>, bool) {

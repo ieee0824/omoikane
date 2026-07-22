@@ -9,6 +9,14 @@
       "baseline_supported": true
     },
     {
+      "id": "css.selector-list-pseudos",
+      "area": "css",
+      "description": ":is(), :where(), and selector-list :not() share Selectors Level 4 matching",
+      "setup": "globalThis.__selectorHost = document.createElement('section'); __selectorHost.innerHTML = '<div class=first><span id=selector-target></span></div><div class=second></div>'; document.body.appendChild(__selectorHost)",
+      "probe": "__selectorHost.querySelector(':is(.first, .missing) > :where(#selector-target)') !== null && __selectorHost.querySelectorAll('div:not(.first, .missing)').length === 1",
+      "baseline_supported": false
+    },
+    {
       "id": "dom.get-root-node",
       "area": "dom",
       "description": "Connected nodes expose their Document root",

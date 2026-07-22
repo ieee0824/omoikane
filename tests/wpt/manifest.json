@@ -11,6 +11,7 @@
     { "path": "shadow-dom/event-inside-shadow-tree.html", "expected": "PASS" },
     { "path": "shadow-dom/event-inside-slotted-node.html", "expected": "PASS" },
     { "path": "css/css-shadow/shadow-cascade-order-001.html", "expected": "PASS" },
+    { "path": "css/selectors/is-where-error-recovery.html", "expected": "PASS" },
     { "path": "custom-elements/registries/upgrade.html", "expected": "PASS" },
     { "path": "custom-elements/connected-callbacks-template.html", "expected": "PASS" },
     { "path": "dom/nodes/Element-childElementCount.html", "expected": "PASS" },
