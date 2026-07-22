@@ -151,22 +151,20 @@ fn add_simple_specificity(value: &mut Specificity, simple: &SimpleSelector) {
         SimpleSelector::PseudoClass(_) => value.classes += 1,
         SimpleSelector::Type(_) | SimpleSelector::PseudoElement(_) => value.elements += 1,
         SimpleSelector::Universal => {}
-        SimpleSelector::Not(inner) => {
-            // CSS Selectors Level 4 §17: :not() itself contributes zero specificity.
-            // The specificity of :not() is that of its argument.
-            // Currently we only support a single compound selector as the argument,
-            // so we sum the specificities of the inner simple selectors.
-            // TODO: When selector list support is added (e.g. :not(.a, #b)),
-            // use the *maximum* specificity among the list items instead of the sum.
-            let inner_specificity = inner.iter().fold(Specificity::zero(), |mut acc, s| {
-                add_simple_specificity(&mut acc, s);
-                acc
-            });
-            value.ids += inner_specificity.ids;
-            value.classes += inner_specificity.classes;
-            value.elements += inner_specificity.elements;
+        SimpleSelector::Is(selectors) | SimpleSelector::Not(selectors) => {
+            add_selector_list_specificity(value, selectors);
         }
+        SimpleSelector::Where(_) => {}
     }
+}
+
+fn add_selector_list_specificity(value: &mut Specificity, selectors: &[Selector]) {
+    let Some(argument_specificity) = selectors.iter().map(specificity).max() else {
+        return;
+    };
+    value.ids += argument_specificity.ids;
+    value.classes += argument_specificity.classes;
+    value.elements += argument_specificity.elements;
 }
 
 fn add_function_argument_specificity(value: &mut Specificity, name: &str) {
@@ -271,13 +269,12 @@ fn matches_simple_selector(
         } => matches_attribute_selector(node, name, *operator, value.as_deref()),
         SimpleSelector::PseudoClass(name) => matches_pseudo_class(node, name, pseudo, cache),
         SimpleSelector::PseudoElement(name) => matches_pseudo_element(name, pseudo),
-        SimpleSelector::Not(inner) => {
-            // CSS :not() negates the entire compound argument.
-            // The node must not match ALL of the inner simple selectors simultaneously.
-            !inner
-                .iter()
-                .all(|s| matches_simple_selector(node, s, pseudo, cache))
-        }
+        SimpleSelector::Is(selectors) | SimpleSelector::Where(selectors) => selectors
+            .iter()
+            .any(|selector| matches_selector_with_pseudo_cached(node, selector, pseudo, cache)),
+        SimpleSelector::Not(selectors) => !selectors
+            .iter()
+            .any(|selector| matches_selector_with_pseudo_cached(node, selector, pseudo, cache)),
     }
 }
 
@@ -961,6 +958,33 @@ mod tests {
     }
 
     #[test]
+    fn matches_is_and_where_selector_lists() {
+        let (_, _, _, main, lead, title, cta) = sample_tree();
+
+        assert!(matches_selector(&main, &selector(":is(#app, .missing) {}")));
+        assert!(matches_selector(&lead, &selector(":where(.lead, #missing) {}")));
+        assert!(!matches_selector(&title, &selector(":is(.lead, .button) {}")));
+        assert!(matches_selector(&cta, &selector(":is(main > .button, p) {}")));
+        assert!(!matches_selector(&main, &selector(":is() {}")));
+    }
+
+    #[test]
+    fn matches_complex_and_nested_selector_lists() {
+        let (_, _, _, main, lead, title, cta) = sample_tree();
+
+        assert!(!matches_selector(&lead, &selector(":not(main > p, .button) {}")));
+        assert!(matches_selector(&title, &selector(":not(main > p, .button) {}")));
+        assert!(matches_selector(
+            &cta,
+            &selector(":not(:is(p, #missing)) {}")
+        ));
+        assert!(!matches_selector(
+            &main,
+            &selector(":not(:where(#app, .missing)) {}")
+        ));
+    }
+
+    #[test]
     fn not_selector_specificity() {
         // :not() specificity counts the inner selector's specificity
         let value = specificity(&selector(":not(p) {}"));
@@ -982,5 +1006,27 @@ mod tests {
                 elements: 0,
             }
         );
+
+        let value = specificity(&selector(":not(.foo, #bar, main > p) {}"));
+        assert_eq!(
+            value,
+            Specificity {
+                ids: 1,
+                classes: 0,
+                elements: 0,
+            }
+        );
+
+        let value = specificity(&selector(":is(.foo, main > p) {}"));
+        assert_eq!(
+            value,
+            Specificity {
+                ids: 0,
+                classes: 1,
+                elements: 0,
+            }
+        );
+
+        assert_eq!(specificity(&selector(":where(#bar, .foo) {}")), Specificity::zero());
     }
 }

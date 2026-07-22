@@ -8435,6 +8435,85 @@ mod tests {
     }
 
     #[test]
+    fn cssom_selector_text_setter_is_live_and_restyles_synchronously() {
+        let doc = crate::html::TreeBuilder::parse(
+            "<html><head><style>.before { color: red; }</style></head><body><div class='after'></div></body></html>",
+        )
+        .document();
+        let mut runtime = JsRuntime::with_document(doc).unwrap();
+
+        runtime
+            .eval("document.styleSheets[0].cssRules[0].selectorText = ':is(.after, .missing)'")
+            .unwrap();
+        assert_eq!(
+            eval_str(
+                &mut runtime,
+                "document.styleSheets[0].cssRules[0].selectorText"
+            ),
+            ":is(.after, .missing)"
+        );
+        assert_eq!(
+            eval_str(&mut runtime, "getComputedStyle(document.querySelector('div')).color"),
+            "rgb(255, 0, 0)"
+        );
+
+        runtime
+            .eval("document.styleSheets[0].cssRules[0].selectorText = 'div,'")
+            .unwrap();
+        assert_eq!(
+            eval_str(
+                &mut runtime,
+                "document.styleSheets[0].cssRules[0].selectorText"
+            ),
+            ":is(.after, .missing)",
+            "an invalid selector must leave selectorText unchanged"
+        );
+    }
+
+    #[test]
+    fn retained_css_rule_tracks_insertions_and_deletions_before_it() {
+        let doc = crate::html::TreeBuilder::parse(
+            "<html><head><style>.first { width: 1px; } .second { width: 2px; }</style></head><body><div class='target'></div></body></html>",
+        )
+        .document();
+        let mut runtime = JsRuntime::with_document(doc).unwrap();
+
+        runtime
+            .eval(
+                r#"
+                globalThis.retainedRule = document.styleSheets[0].cssRules[1];
+                document.styleSheets[0].insertRule('.inserted { width: 3px; }', 0);
+                retainedRule.selectorText = '.target';
+                "#,
+            )
+            .unwrap();
+        assert_eq!(
+            eval_str(
+                &mut runtime,
+                "document.styleSheets[0].cssRules[2].selectorText"
+            ),
+            ".target"
+        );
+        assert_eq!(
+            eval_str(&mut runtime, "getComputedStyle(document.querySelector('div')).width"),
+            "2px"
+        );
+
+        runtime
+            .eval(
+                "document.styleSheets[0].deleteRule(0); retainedRule.selectorText = '.retargeted'",
+            )
+            .unwrap();
+        assert_eq!(
+            eval_str(
+                &mut runtime,
+                "document.styleSheets[0].cssRules[1].selectorText"
+            ),
+            ".retargeted"
+        );
+    }
+
+    #[test]
     fn cssom_insert_and_delete_report_dom_exceptions() {
         let doc = crate::html::TreeBuilder::parse(
             "<html><head><style>p { color: red; }</style></head><body></body></html>",
@@ -8661,6 +8740,41 @@ mod tests {
             .unwrap()
             .to_std_string_escaped();
         assert_eq!(result, "first|2|2|true|true|true|true");
+    }
+
+    #[test]
+    fn selector_list_pseudos_work_in_dom_queries_and_cascade() {
+        use crate::html::TreeBuilder;
+        let doc = TreeBuilder::parse(
+            r#"<html><head><style>
+                :is(.missing, #target) { width: 20px; }
+                .target { width: 10px; color: red; height: 10px; }
+                :where(#target) { color: blue; }
+                :not(.missing, #other) { height: 30px; }
+            </style></head><body><main><div id="target" class="target"></div><p class="other"></p></main></body></html>"#,
+        )
+        .document();
+        let mut runtime = JsRuntime::with_document(doc).unwrap();
+
+        assert_eq!(
+            eval_str(
+                &mut runtime,
+                "(() => { const target = document.querySelector('main > :is(.target, p)'); return [target.id, document.querySelector('main').querySelectorAll(':not(.target)').length, document.querySelector(':is(:unknown, #target)').id].join('|'); })()"
+            ),
+            "target|1|target"
+        );
+        assert_eq!(
+            eval_str(&mut runtime, "getComputedStyle(document.getElementById('target')).width"),
+            "20px"
+        );
+        assert_eq!(
+            eval_str(&mut runtime, "getComputedStyle(document.getElementById('target')).color"),
+            "rgb(255, 0, 0)"
+        );
+        assert_eq!(
+            eval_str(&mut runtime, "getComputedStyle(document.getElementById('target')).height"),
+            "30px"
+        );
     }
 
     #[test]

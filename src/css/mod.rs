@@ -83,8 +83,12 @@ pub enum SimpleSelector {
     },
     PseudoClass(String),
     PseudoElement(String),
-    /// `:not(<compound-selector>)` -- negation pseudo-class (single compound, no commas).
-    Not(Vec<SimpleSelector>),
+    /// `:is(<selector-list>)` -- matches any selector in the argument list.
+    Is(Vec<Selector>),
+    /// `:where(<selector-list>)` -- like `:is()`, with zero specificity.
+    Where(Vec<Selector>),
+    /// `:not(<selector-list>)` -- negates every selector in the argument list.
+    Not(Vec<Selector>),
 }
 
 /// Attribute selector operators.
@@ -1458,7 +1462,12 @@ mod tests {
         };
         assert_eq!(
             rule.selectors[0].parts[0].simples[0],
-            SimpleSelector::Not(vec![SimpleSelector::Class("hidden".to_string())])
+            SimpleSelector::Not(vec![Selector {
+                parts: vec![SelectorPart {
+                    combinator: None,
+                    simples: vec![SimpleSelector::Class("hidden".to_string())],
+                }],
+            }])
         );
     }
 
@@ -1470,7 +1479,12 @@ mod tests {
         };
         assert_eq!(
             rule.selectors[0].parts[0].simples[1],
-            SimpleSelector::Not(vec![SimpleSelector::Type("span".to_string())])
+            SimpleSelector::Not(vec![Selector {
+                parts: vec![SelectorPart {
+                    combinator: None,
+                    simples: vec![SimpleSelector::Type("span".to_string())],
+                }],
+            }])
         );
     }
 
@@ -1483,10 +1497,15 @@ mod tests {
         };
         assert_eq!(
             rule.selectors[0].parts[0].simples[0],
-            SimpleSelector::Not(vec![SimpleSelector::Attribute {
-                name: "disabled".to_string(),
-                operator: None,
-                value: None,
+            SimpleSelector::Not(vec![Selector {
+                parts: vec![SelectorPart {
+                    combinator: None,
+                    simples: vec![SimpleSelector::Attribute {
+                        name: "disabled".to_string(),
+                        operator: None,
+                        value: None,
+                    }],
+                }],
             }])
         );
     }

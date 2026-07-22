@@ -3298,15 +3298,29 @@
   }
 
   class CSSStyleRule {
-    constructor(text) {
+    constructor(text, sheet = null, index = -1) {
       this.__text = text;
+      this.__sheet = sheet;
+      this.__index = index;
       const open = this.__text.indexOf("{");
       const close = this.__text.lastIndexOf("}");
       this.__hasBlock = open >= 0 && close > open;
       this.__selectorText = this.__hasBlock ? this.__text.slice(0, open).trim() : "";
       this.__style = declarationView(this.__hasBlock ? this.__text.slice(open + 1, close) : "");
+      if (this.__sheet) this.__sheet.__registerRuleView(this);
     }
     get selectorText() { return this.__selectorText; }
+    set selectorText(value) {
+      if (!this.__hasBlock) return;
+      const selector = String(value).trim();
+      let count;
+      try { count = __omoikane_css_rule_count(selector + " {}"); }
+      catch (_error) { return; }
+      if (count !== 1) return;
+      this.__selectorText = selector;
+      this.__text = selector + " { " + this.style.cssText + " }";
+      if (this.__sheet) this.__sheet.__replaceRule(this.__index, this.__text);
+    }
     get cssText() {
       return this.__hasBlock
         ? this.selectorText + " { " + this.style.cssText + " }"
@@ -3317,7 +3331,11 @@
 
   class CSSRuleList {
     constructor(sheet) { this.__sheet = sheet; }
-    __rules() { return this.__sheet.__ruleTexts().map(text => new CSSStyleRule(text)); }
+    __rules() {
+      return this.__sheet.__ruleTexts().map(
+        (text, index) => new CSSStyleRule(text, this.__sheet, index)
+      );
+    }
     item(index) { return this.__rules()[Number(index) | 0] || null; }
     get length() { return this.__rules().length; }
   }
@@ -3341,12 +3359,18 @@
       this.href = null;
       this.__rules = splitCssRules(ownerNode.textContent);
       this.__ownerText = ownerNode.textContent;
+      this.__ruleViews = new Set();
       this.__cssRules = ruleListProxy(this);
     }
     __syncFromOwner() {
       if (dirtyStyleSheets.has(this)) return;
       const text = this.ownerNode.textContent;
       if (text !== this.__ownerText) {
+        for (const rule of this.__ruleViews) {
+          rule.__sheet = null;
+          rule.__index = -1;
+        }
+        this.__ruleViews.clear();
         this.__rules = splitCssRules(text);
         this.__ownerText = text;
       }
@@ -3356,6 +3380,29 @@
       return this.__rules;
     }
     __markDirty() { dirtyStyleSheets.add(this); }
+    __registerRuleView(rule) { this.__ruleViews.add(rule); }
+    __shiftRuleViewsForInsert(index) {
+      for (const rule of this.__ruleViews) {
+        if (rule.__index >= index) rule.__index++;
+      }
+    }
+    __shiftRuleViewsForDelete(index) {
+      for (const rule of Array.from(this.__ruleViews)) {
+        if (rule.__index === index) {
+          rule.__sheet = null;
+          rule.__index = -1;
+          this.__ruleViews.delete(rule);
+        } else if (rule.__index > index) {
+          rule.__index--;
+        }
+      }
+    }
+    __replaceRule(index, text) {
+      const rules = this.__ruleTexts();
+      if (index < 0 || index >= rules.length) return;
+      rules[index] = text;
+      this.__markDirty();
+    }
     __flush() {
       if (!dirtyStyleSheets.delete(this)) return;
       const text = this.__rules.join("\n");
@@ -3373,6 +3420,7 @@
       const position = index === undefined ? 0 : Number(index);
       if (!Number.isInteger(position) || position < 0 || position > rules.length)
         throw new DOMException("The index is out of range.", "IndexSizeError");
+      this.__shiftRuleViewsForInsert(position);
       rules.splice(position, 0, text.trim());
       this.__markDirty();
       return position;
@@ -3383,6 +3431,7 @@
       if (!Number.isInteger(position) || position < 0 || position >= rules.length)
         throw new DOMException("The index is out of range.", "IndexSizeError");
       rules.splice(position, 1);
+      this.__shiftRuleViewsForDelete(position);
       this.__markDirty();
     }
   }
