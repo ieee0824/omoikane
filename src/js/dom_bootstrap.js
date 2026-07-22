@@ -3363,7 +3363,7 @@
   }
 
   function createCssRule(text, sheet = null, index = -1) {
-    return /^\s*@supports(?:\s|\()/i.test(text)
+    return /^\s*@supports(?=\s|\/\*|\()/i.test(text)
       ? new CSSSupportsRule(text, sheet, index)
       : new CSSStyleRule(text, sheet, index);
   }

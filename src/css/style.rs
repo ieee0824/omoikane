@@ -800,10 +800,7 @@ fn validate_declaration(name: &str, value: &Value) -> DeclarationValidation {
             None => DeclarationValidation::Invalid,
         };
     }
-    if matches!(
-        name,
-        "width" | "height" | "min-width" | "min-height" | "max-width" | "max-height"
-    ) {
+    if is_non_negative_sizing_property(name) {
         return validate_sizing_value(name, value);
     }
     DeclarationValidation::Unvalidated
@@ -833,14 +830,25 @@ fn validate_sizing_value(name: &str, value: &Value) -> DeclarationValidation {
             if function.eq_ignore_ascii_case("calc") || function.eq_ignore_ascii_case("clamp") =>
         {
             let computed = compute_value(value, name, ResolutionContext::default());
-            if matches!(computed, ComputedValue::Keyword(_)) {
-                DeclarationValidation::Invalid
-            } else {
-                DeclarationValidation::Unvalidated
+            match computed {
+                ComputedValue::Px(_)
+                | ComputedValue::Percentage(_)
+                | ComputedValue::CalcPxPercent(_, _) => DeclarationValidation::Unvalidated,
+                ComputedValue::Number(number) if number == 0.0 => {
+                    DeclarationValidation::Unvalidated
+                }
+                _ => DeclarationValidation::Invalid,
             }
         }
         _ => DeclarationValidation::Invalid,
     }
+}
+
+fn is_non_negative_sizing_property(name: &str) -> bool {
+    matches!(
+        name,
+        "width" | "height" | "min-width" | "min-height" | "max-width" | "max-height"
+    )
 }
 
 /// A CSS-wide keyword (CSS Cascade). These are valid for every property and are
@@ -2479,16 +2487,23 @@ fn compute_value(value: &Value, property_name: &str, ctx: ResolutionContext) -> 
         }
         Value::Function { name, arguments } if name.eq_ignore_ascii_case("calc") => {
             if let Some(quantity) = evaluate_calc(arguments, ctx) {
+                let value = if is_non_negative_sizing_property(property_name)
+                    && quantity.unit != CalcUnit::Unitless
+                {
+                    quantity.value.max(0.0)
+                } else {
+                    quantity.value
+                };
                 return match quantity.unit {
-                    CalcUnit::Px => ComputedValue::Px(quantity.value),
+                    CalcUnit::Px => ComputedValue::Px(value),
                     CalcUnit::Percentage => {
                         if property_name == "font-size" {
-                            ComputedValue::Px(ctx.parent_font_size * (quantity.value / 100.0))
+                            ComputedValue::Px(ctx.parent_font_size * (value / 100.0))
                         } else {
-                            ComputedValue::Percentage(quantity.value)
+                            ComputedValue::Percentage(value)
                         }
                     }
-                    CalcUnit::Unitless => ComputedValue::Number(quantity.value),
+                    CalcUnit::Unitless => ComputedValue::Number(value),
                 };
             }
             // Try to extract mixed px + percentage from calc() arguments.
@@ -2499,6 +2514,7 @@ fn compute_value(value: &Value, property_name: &str, ctx: ResolutionContext) -> 
         }
         Value::Function { name, arguments } if name.eq_ignore_ascii_case("clamp") => {
             compute_clamp_function(arguments, property_name, ctx)
+                .map(|computed| clamp_sizing_computed_value(property_name, computed))
                 .unwrap_or_else(|| ComputedValue::Keyword(render_value(value)))
         }
         Value::Function { .. } => ComputedValue::Keyword(render_value(value)),
@@ -2521,6 +2537,17 @@ fn compute_value(value: &Value, property_name: &str, ctx: ResolutionContext) -> 
                 ComputedValue::Keyword(String::new())
             }
         }
+    }
+}
+
+fn clamp_sizing_computed_value(property_name: &str, value: ComputedValue) -> ComputedValue {
+    if !is_non_negative_sizing_property(property_name) {
+        return value;
+    }
+    match value {
+        ComputedValue::Px(number) => ComputedValue::Px(number.max(0.0)),
+        ComputedValue::Percentage(number) => ComputedValue::Percentage(number.max(0.0)),
+        other => other,
     }
 }
 

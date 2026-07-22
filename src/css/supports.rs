@@ -204,6 +204,8 @@ mod tests {
         ));
         assert!(!supports_condition_matches("width: blah"));
         assert!(supports_condition_matches("width: calc(100% - 24px)"));
+        assert!(supports_condition_matches("width: calc(-1px)"));
+        assert!(!supports_condition_matches("width: calc(-1)"));
         assert!(!supports_condition_matches("(unknown-property: value)"));
         assert!(supports_condition_matches(
             "(display: grid) and (color: red)"

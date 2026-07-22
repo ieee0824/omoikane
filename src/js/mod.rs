@@ -8451,7 +8451,7 @@ mod tests {
     #[test]
     fn css_supports_rules_expose_conditions_and_nested_rules() {
         let doc = crate::html::TreeBuilder::parse(
-            "<html><head><style>@supports (display: grid) { main { display: grid; } }</style></head><body><main></main></body></html>",
+            "<html><head><style>@supports (display: grid) { main { display: grid; } } @supports/* comment */(display: block) { section { display: block; } }</style></head><body><main></main></body></html>",
         )
         .document();
         let mut runtime = JsRuntime::with_document(doc).unwrap();
@@ -8463,7 +8463,9 @@ mod tests {
                         rule.conditionText === "(display: grid)" &&
                         rule.matches === true &&
                         rule.cssRules.length === 1 &&
-                        rule.cssRules[0].selectorText === "main";
+                        rule.cssRules[0].selectorText === "main" &&
+                        document.styleSheets[0].cssRules[1] instanceof CSSSupportsRule &&
+                        document.styleSheets[0].cssRules[1].matches === true;
                 })()"#,
             )
             .unwrap()
@@ -8480,6 +8482,7 @@ mod tests {
                 @supports (future-property: value) { #target { height: 30px; } }
                 @supports not (future-property: value) { #target { color: green; } }
                 @media all { @supports (display: block) { #target { height: 40px; } } }
+                @supports (width: calc(-1px)) { #target { width: calc(-1px); } }
             </style></head><body><div id="target"></div></body></html>"#,
         )
         .document();
@@ -8489,7 +8492,7 @@ mod tests {
                 &mut runtime,
                 "getComputedStyle(document.getElementById('target')).width"
             ),
-            "20px"
+            "0px"
         );
         assert_eq!(
             eval_str(
