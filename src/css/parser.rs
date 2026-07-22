@@ -1145,6 +1145,11 @@ fn sanitize_has_argument(selector: &mut Selector) -> bool {
     selector.parts.iter_mut().all(|part| {
         part.simples.iter_mut().all(|simple| match simple {
             SimpleSelector::PseudoElement(_) | SimpleSelector::Has(_) => false,
+            SimpleSelector::PseudoClass(name)
+                if name.eq_ignore_ascii_case("before") || name.eq_ignore_ascii_case("after") =>
+            {
+                false
+            }
             SimpleSelector::Is(selectors) | SimpleSelector::Where(selectors) => {
                 selectors.retain_mut(sanitize_has_argument);
                 true

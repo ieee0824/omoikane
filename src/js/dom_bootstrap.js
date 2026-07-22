@@ -1693,6 +1693,9 @@
 
     matches(selector) {
       if (this.nodeType !== 1) return false;
+      if (arguments.length === 0) {
+        throw new TypeError("Element.matches requires a selector");
+      }
       try {
         return !!__omoikane_matches_selector(this.__id, String(selector));
       } catch (error) {

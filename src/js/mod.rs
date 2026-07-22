@@ -10684,6 +10684,17 @@ mod tests {
             .unwrap()
             .to_std_string_escaped();
         assert_eq!(closest, "DIV");
+
+        assert!(runtime
+            .eval("(() => { try { document.querySelector('span').matches(); } catch (error) { return error instanceof TypeError; } return false; })()")
+            .unwrap()
+            .as_boolean()
+            .unwrap());
+        assert!(runtime
+            .eval("(() => { try { document.querySelector('span').matches(''); } catch (error) { return error instanceof DOMException && error.name === 'SyntaxError'; } return false; })()")
+            .unwrap()
+            .as_boolean()
+            .unwrap());
     }
 
     #[test]

@@ -1456,6 +1456,8 @@ mod tests {
             ":has(.valid, 123)",
             ":has(.child:has(.nested))",
             ":has(::before)",
+            ":has(:before)",
+            ":has(:AFTER)",
         ] {
             assert!(parse_selector_list(invalid).is_err(), "accepted {invalid:?}");
         }
