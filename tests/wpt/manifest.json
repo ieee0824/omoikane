@@ -13,6 +13,8 @@
     { "path": "css/css-shadow/shadow-cascade-order-001.html", "expected": "PASS" },
     { "path": "css/selectors/is-where-error-recovery.html", "expected": "PASS" },
     { "path": "css/selectors/has-matches-to-uninserted-elements.html", "expected": "PASS" },
+    { "path": "css/css-conditional/js/CSS-supports-L3.html", "expected": "PASS" },
+    { "path": "css/css-conditional/js/supports-conditionText.html", "expected": "PASS" },
     { "path": "custom-elements/registries/upgrade.html", "expected": "PASS" },
     { "path": "custom-elements/connected-callbacks-template.html", "expected": "PASS" },
     { "path": "dom/nodes/Element-childElementCount.html", "expected": "PASS" },

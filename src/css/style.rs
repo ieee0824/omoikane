@@ -800,7 +800,55 @@ fn validate_declaration(name: &str, value: &Value) -> DeclarationValidation {
             None => DeclarationValidation::Invalid,
         };
     }
+    if is_non_negative_sizing_property(name) {
+        return validate_sizing_value(name, value);
+    }
     DeclarationValidation::Unvalidated
+}
+
+fn validate_sizing_value(name: &str, value: &Value) -> DeclarationValidation {
+    let valid_keyword = |keyword: &str| {
+        let keyword = keyword.to_ascii_lowercase();
+        is_css_wide_keyword(&keyword)
+            || matches!(
+                keyword.as_str(),
+                "auto" | "min-content" | "max-content" | "fit-content" | "stretch"
+            )
+            || (name.starts_with("max-") && keyword == "none")
+    };
+    match value {
+        Value::Keyword(keyword) if valid_keyword(keyword) => DeclarationValidation::Unvalidated,
+        Value::Length(number, unit)
+            if *number >= 0.0
+                && resolve_length_to_px(*number, unit, ResolutionContext::default()).is_some() =>
+        {
+            DeclarationValidation::Unvalidated
+        }
+        Value::Percentage(number) if *number >= 0.0 => DeclarationValidation::Unvalidated,
+        Value::Number(number) if *number == 0.0 => DeclarationValidation::Unvalidated,
+        Value::Function { name: function, .. }
+            if function.eq_ignore_ascii_case("calc") || function.eq_ignore_ascii_case("clamp") =>
+        {
+            let computed = compute_value(value, name, ResolutionContext::default());
+            match computed {
+                ComputedValue::Px(_)
+                | ComputedValue::Percentage(_)
+                | ComputedValue::CalcPxPercent(_, _) => DeclarationValidation::Unvalidated,
+                ComputedValue::Number(number) if number == 0.0 => {
+                    DeclarationValidation::Unvalidated
+                }
+                _ => DeclarationValidation::Invalid,
+            }
+        }
+        _ => DeclarationValidation::Invalid,
+    }
+}
+
+fn is_non_negative_sizing_property(name: &str) -> bool {
+    matches!(
+        name,
+        "width" | "height" | "min-width" | "min-height" | "max-width" | "max-height"
+    )
 }
 
 /// A CSS-wide keyword (CSS Cascade). These are valid for every property and are
@@ -1554,13 +1602,15 @@ fn collect_rule_candidates(
                             color_scheme_dark,
                             media_cache,
                         )
+                    } else if at_rule.name.eq_ignore_ascii_case("supports") {
+                        super::supports_condition_matches(&at_rule.prelude)
                     } else if at_rule.name.eq_ignore_ascii_case("keyframes")
                         || at_rule.name.eq_ignore_ascii_case("-webkit-keyframes")
                     {
                         // @keyframes rules are handled separately; skip them in cascade.
                         false
                     } else {
-                        // Other at-rules (e.g. @supports) are passed through.
+                        // Non-conditional grouping rules (e.g. @layer) pass through.
                         true
                     };
                     if should_apply {
@@ -2274,6 +2324,11 @@ pub(crate) fn supports_declaration(property: &str, value: &str) -> bool {
         if !is_supported_property(name) {
             return false;
         }
+        // A declaration containing var() is syntactically valid at parse time;
+        // its property grammar is checked after custom-property substitution.
+        if value_contains_var_function(&declaration.value) {
+            return true;
+        }
         match validate_declaration(name, &declaration.value) {
             DeclarationValidation::Invalid => false,
             DeclarationValidation::Valid(_) => true,
@@ -2284,6 +2339,17 @@ pub(crate) fn supports_declaration(property: &str, value: &str) -> bool {
             }
         }
     })
+}
+
+fn value_contains_var_function(value: &Value) -> bool {
+    match value {
+        Value::Function { name, arguments } => {
+            name.eq_ignore_ascii_case("var")
+                || arguments.iter().any(value_contains_var_function)
+        }
+        Value::List(values) => values.iter().any(value_contains_var_function),
+        _ => false,
+    }
 }
 
 /// Reject a second top-level declaration while preserving semicolons inside
@@ -2421,16 +2487,23 @@ fn compute_value(value: &Value, property_name: &str, ctx: ResolutionContext) -> 
         }
         Value::Function { name, arguments } if name.eq_ignore_ascii_case("calc") => {
             if let Some(quantity) = evaluate_calc(arguments, ctx) {
+                let value = if is_non_negative_sizing_property(property_name)
+                    && quantity.unit != CalcUnit::Unitless
+                {
+                    quantity.value.max(0.0)
+                } else {
+                    quantity.value
+                };
                 return match quantity.unit {
-                    CalcUnit::Px => ComputedValue::Px(quantity.value),
+                    CalcUnit::Px => ComputedValue::Px(value),
                     CalcUnit::Percentage => {
                         if property_name == "font-size" {
-                            ComputedValue::Px(ctx.parent_font_size * (quantity.value / 100.0))
+                            ComputedValue::Px(ctx.parent_font_size * (value / 100.0))
                         } else {
-                            ComputedValue::Percentage(quantity.value)
+                            ComputedValue::Percentage(value)
                         }
                     }
-                    CalcUnit::Unitless => ComputedValue::Number(quantity.value),
+                    CalcUnit::Unitless => ComputedValue::Number(value),
                 };
             }
             // Try to extract mixed px + percentage from calc() arguments.
@@ -2441,6 +2514,7 @@ fn compute_value(value: &Value, property_name: &str, ctx: ResolutionContext) -> 
         }
         Value::Function { name, arguments } if name.eq_ignore_ascii_case("clamp") => {
             compute_clamp_function(arguments, property_name, ctx)
+                .map(|computed| clamp_sizing_computed_value(property_name, computed))
                 .unwrap_or_else(|| ComputedValue::Keyword(render_value(value)))
         }
         Value::Function { .. } => ComputedValue::Keyword(render_value(value)),
@@ -2463,6 +2537,17 @@ fn compute_value(value: &Value, property_name: &str, ctx: ResolutionContext) -> 
                 ComputedValue::Keyword(String::new())
             }
         }
+    }
+}
+
+fn clamp_sizing_computed_value(property_name: &str, value: ComputedValue) -> ComputedValue {
+    if !is_non_negative_sizing_property(property_name) {
+        return value;
+    }
+    match value {
+        ComputedValue::Px(number) => ComputedValue::Px(number.max(0.0)),
+        ComputedValue::Percentage(number) => ComputedValue::Percentage(number.max(0.0)),
+        other => other,
     }
 }
 

@@ -182,9 +182,13 @@ impl Parser {
         };
 
         let mut prelude_tokens = Vec::new();
+        let mut paren_depth = 0usize;
+        let mut bracket_depth = 0usize;
+        let mut curly_depth = 0usize;
         while let Some(token) = self.peek() {
+            let at_top_level = paren_depth == 0 && bracket_depth == 0 && curly_depth == 0;
             match token {
-                CssToken::Semicolon => {
+                CssToken::Semicolon if at_top_level => {
                     self.next();
                     return Ok(Rule::At(AtRule {
                         name,
@@ -193,13 +197,14 @@ impl Parser {
                         declarations: Vec::new(),
                     }));
                 }
-                CssToken::CurlyOpen => {
+                CssToken::CurlyOpen if at_top_level => {
                     self.next();
                     if name.eq_ignore_ascii_case("import") {
                         return Err(CssParseError::InvalidDeclaration);
                     }
 
                     if name.eq_ignore_ascii_case("media")
+                        || name.eq_ignore_ascii_case("supports")
                         || name.eq_ignore_ascii_case("layer")
                     {
                         let block = self.parse_rule_block()?;
@@ -246,7 +251,21 @@ impl Parser {
                         declarations,
                     }));
                 }
-                _ => prelude_tokens.push(self.next().expect("peeked token should exist")),
+                _ => {
+                    let token = self.next().expect("peeked token should exist");
+                    match token {
+                        CssToken::ParenOpen => paren_depth += 1,
+                        CssToken::ParenClose => paren_depth = paren_depth.saturating_sub(1),
+                        CssToken::BracketOpen => bracket_depth += 1,
+                        CssToken::BracketClose => {
+                            bracket_depth = bracket_depth.saturating_sub(1)
+                        }
+                        CssToken::CurlyOpen => curly_depth += 1,
+                        CssToken::CurlyClose => curly_depth = curly_depth.saturating_sub(1),
+                        _ => {}
+                    }
+                    prelude_tokens.push(token);
+                }
             }
         }
 

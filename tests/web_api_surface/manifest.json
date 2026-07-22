@@ -179,6 +179,14 @@
       "baseline_supported": true
     },
     {
+      "id": "css.supports-conditional-rule",
+      "area": "cssom",
+      "description": "@supports conditions control cascade and expose CSSSupportsRule",
+      "setup": "(() => { const style = document.createElement('style'); style.textContent = '@supports (display: grid) { #probe { width: 23px; } }'; document.head.appendChild(style); })()",
+      "probe": "CSS.supports('(display: grid) and (color: red)') && document.styleSheets[1].cssRules[0] instanceof CSSSupportsRule && document.styleSheets[1].cssRules[0].matches && getComputedStyle(document.getElementById('probe')).width === '23px'",
+      "baseline_supported": false
+    },
+    {
       "id": "css.match-media-screen",
       "area": "css",
       "description": "matchMedia evaluates the screen media type",

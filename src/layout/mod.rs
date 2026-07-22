@@ -1579,7 +1579,7 @@ fn percentage_length(style: &ComputedStyle, property: &str) -> Option<f32> {
 }
 
 fn resolved_length(style: &ComputedStyle, property: &str, basis: f32) -> Option<f32> {
-    explicit_length(style, property)
+    let resolved = explicit_length(style, property)
         .or_else(|| {
             percentage_length(style, property).and_then(|percent| {
                 if basis > 0.0 {
@@ -1598,7 +1598,15 @@ fn resolved_length(style: &ComputedStyle, property: &str, basis: f32) -> Option<
                 }
                 _ => None,
             }
-        })
+        });
+    if matches!(
+        property,
+        "width" | "height" | "min-width" | "min-height" | "max-width" | "max-height"
+    ) {
+        resolved.map(|value| value.max(0.0))
+    } else {
+        resolved
+    }
 }
 
 fn is_auto(value: Option<&ComputedValue>) -> bool {

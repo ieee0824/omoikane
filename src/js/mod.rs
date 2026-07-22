@@ -2346,6 +2346,11 @@ fn register_host_bindings(
             NativeFunction::from_copy_closure(css_supports_native),
         ),
         (
+            js_string!("__omoikane_css_supports_condition"),
+            1,
+            NativeFunction::from_copy_closure(css_supports_condition_native),
+        ),
+        (
             js_string!("__omoikane_match_media"),
             1,
             NativeFunction::from_copy_closure(match_media_native),
@@ -3355,6 +3360,24 @@ fn css_supports_native(
         .to_std_string_escaped();
     Ok(JsValue::from(crate::css::supports_declaration(
         &property, &value,
+    )))
+}
+
+/// Evaluates the condition-text form of `CSS.supports()` using the same
+/// parser used by `@supports` during cascade collection.
+fn css_supports_condition_native(
+    _: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let condition = args
+        .first()
+        .cloned()
+        .unwrap_or_default()
+        .to_string(context)?
+        .to_std_string_escaped();
+    Ok(JsValue::from(crate::css::supports_condition_matches(
+        &condition,
     )))
 }
 
@@ -5985,7 +6008,7 @@ mod tests {
     fn exposes_css_namespace_and_escapes_identifiers() {
         let mut runtime = JsRuntime::new().unwrap();
         assert!(runtime
-            .eval(r#"CSS.escape("0a b") === "\\30 a\\ b" && CSS.supports("display", "block") === true && CSS.supports("(display: block)") === true && CSS.supports("unknown", "value") === false && CSS.supports("width", "12") === false"#)
+            .eval(r#"CSS.escape("0a b") === "\\30 a\\ b" && CSS.supports("display", "block") === true && CSS.supports("(display: block)") === true && CSS.supports("(display: grid) and (color: red)") === true && CSS.supports("not (future-property: value)") === true && CSS.supports("unknown", "value") === false && CSS.supports("width", "12") === false"#)
             .unwrap()
             .as_boolean()
             .unwrap());
@@ -8422,6 +8445,68 @@ mod tests {
                 "document.styleSheets[0].cssRules[0].style.color"
             ),
             "red"
+        );
+    }
+
+    #[test]
+    fn css_supports_rules_expose_conditions_and_nested_rules() {
+        let doc = crate::html::TreeBuilder::parse(
+            "<html><head><style>@supports (display: grid) { main { display: grid; } } @supports/* comment */(display: block) { section { display: block; } }</style></head><body><main></main></body></html>",
+        )
+        .document();
+        let mut runtime = JsRuntime::with_document(doc).unwrap();
+        assert!(runtime
+            .eval(
+                r#"(() => {
+                    const rule = document.styleSheets[0].cssRules[0];
+                    return rule instanceof CSSSupportsRule &&
+                        rule.conditionText === "(display: grid)" &&
+                        rule.matches === true &&
+                        rule.cssRules.length === 1 &&
+                        rule.cssRules[0].selectorText === "main" &&
+                        document.styleSheets[0].cssRules[1] instanceof CSSSupportsRule &&
+                        document.styleSheets[0].cssRules[1].matches === true;
+                })()"#,
+            )
+            .unwrap()
+            .as_boolean()
+            .unwrap());
+    }
+
+    #[test]
+    fn supports_conditions_control_the_author_cascade() {
+        let doc = crate::html::TreeBuilder::parse(
+            r#"<html><head><style>
+                #target { width: 1px; height: 2px; color: red; }
+                @supports (display: grid) { #target { width: 20px; } }
+                @supports (future-property: value) { #target { height: 30px; } }
+                @supports not (future-property: value) { #target { color: green; } }
+                @media all { @supports (display: block) { #target { height: 40px; } } }
+                @supports (width: calc(-1px)) { #target { width: calc(-1px); } }
+            </style></head><body><div id="target"></div></body></html>"#,
+        )
+        .document();
+        let mut runtime = JsRuntime::with_document(doc).unwrap();
+        assert_eq!(
+            eval_str(
+                &mut runtime,
+                "getComputedStyle(document.getElementById('target')).width"
+            ),
+            "0px"
+        );
+        assert_eq!(
+            eval_str(
+                &mut runtime,
+                "getComputedStyle(document.getElementById('target')).height"
+            ),
+            "40px"
+        );
+        assert_eq!(
+            eval_str(
+                &mut runtime,
+                "getComputedStyle(document.getElementById('target')).color"
+            ),
+            "rgb(0, 128, 0)"
         );
     }
 

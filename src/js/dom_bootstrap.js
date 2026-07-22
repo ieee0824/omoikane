@@ -3216,7 +3216,8 @@
       throw new DOMException(error.message || "Invalid CSS rule.", "SyntaxError");
     }
     const rules = [];
-    let start = 0, depth = 0, quote = "", comment = false;
+    let start = 0, depth = 0, parenDepth = 0, bracketDepth = 0;
+    let quote = "", comment = false;
     for (let i = 0; i < css.length; i++) {
       const ch = css[i], next = css[i + 1];
       if (comment) {
@@ -3230,15 +3231,19 @@
       }
       if (ch === "/" && next === "*") { comment = true; i++; continue; }
       if (ch === "'" || ch === '"') { quote = ch; continue; }
-      if (ch === "{") depth++;
-      else if (ch === "}") {
+      if (ch === "(") parenDepth++;
+      else if (ch === ")") parenDepth = Math.max(0, parenDepth - 1);
+      else if (ch === "[") bracketDepth++;
+      else if (ch === "]") bracketDepth = Math.max(0, bracketDepth - 1);
+      else if (ch === "{" && parenDepth === 0 && bracketDepth === 0) depth++;
+      else if (ch === "}" && parenDepth === 0 && bracketDepth === 0) {
         depth--;
         if (depth === 0) {
           const text = css.slice(start, i + 1).trim();
           if (text) rules.push(text);
           start = i + 1;
         }
-      } else if (ch === ";" && depth === 0) {
+      } else if (ch === ";" && depth === 0 && parenDepth === 0 && bracketDepth === 0) {
         const text = css.slice(start, i + 1).trim();
         if (text) rules.push(text);
         start = i + 1;
@@ -3280,12 +3285,36 @@
     });
   }
 
+  function cssRuleBlockStart(source) {
+    let parenDepth = 0, bracketDepth = 0, quote = "", comment = false;
+    for (let index = 0; index < source.length; index++) {
+      const ch = source[index], next = source[index + 1];
+      if (comment) {
+        if (ch === "*" && next === "/") { comment = false; index++; }
+        continue;
+      }
+      if (quote) {
+        if (ch === "\\") index++;
+        else if (ch === quote) quote = "";
+        continue;
+      }
+      if (ch === "/" && next === "*") { comment = true; index++; continue; }
+      if (ch === "'" || ch === '"') { quote = ch; continue; }
+      if (ch === "(") parenDepth++;
+      else if (ch === ")") parenDepth = Math.max(0, parenDepth - 1);
+      else if (ch === "[") bracketDepth++;
+      else if (ch === "]") bracketDepth = Math.max(0, bracketDepth - 1);
+      else if (ch === "{" && parenDepth === 0 && bracketDepth === 0) return index;
+    }
+    return -1;
+  }
+
   class CSSStyleRule {
     constructor(text, sheet = null, index = -1) {
       this.__text = text;
       this.__sheet = sheet;
       this.__index = index;
-      const open = this.__text.indexOf("{");
+      const open = cssRuleBlockStart(this.__text);
       const close = this.__text.lastIndexOf("}");
       this.__hasBlock = open >= 0 && close > open;
       this.__selectorText = this.__hasBlock ? this.__text.slice(0, open).trim() : "";
@@ -3312,11 +3341,38 @@
     get style() { return this.__style; }
   }
 
+  class CSSSupportsRule {
+    constructor(text, sheet = null, index = -1) {
+      this.__text = text;
+      this.__sheet = sheet;
+      this.__index = index;
+      const open = cssRuleBlockStart(this.__text);
+      const close = this.__text.lastIndexOf("}");
+      this.__hasBlock = open >= 0 && close > open;
+      this.__conditionText = this.__hasBlock
+        ? this.__text.slice("@supports".length, open).trim()
+        : "";
+      this.__innerText = this.__hasBlock ? this.__text.slice(open + 1, close) : "";
+      this.__innerSheet = new CSSStyleSheet({ textContent: this.__innerText });
+      if (this.__sheet) this.__sheet.__registerRuleView(this);
+    }
+    get conditionText() { return this.__conditionText; }
+    get matches() { return CSS.supports(this.conditionText); }
+    get cssRules() { return this.__innerSheet.cssRules; }
+    get cssText() { return this.__text.trim(); }
+  }
+
+  function createCssRule(text, sheet = null, index = -1) {
+    return /^\s*@supports(?=\s|\/\*|\()/i.test(text)
+      ? new CSSSupportsRule(text, sheet, index)
+      : new CSSStyleRule(text, sheet, index);
+  }
+
   class CSSRuleList {
     constructor(sheet) { this.__sheet = sheet; }
     __rules() {
       return this.__sheet.__ruleTexts().map(
-        (text, index) => new CSSStyleRule(text, this.__sheet, index)
+        (text, index) => createCssRule(text, this.__sheet, index)
       );
     }
     item(index) { return this.__rules()[Number(index) | 0] || null; }
@@ -3452,28 +3508,7 @@
       if (arguments.length >= 2) {
         return __omoikane_css_supports(String(propertyOrCondition), String(value));
       }
-      const condition = String(propertyOrCondition).trim();
-      if (condition.length < 3 || condition[0] !== "(" || condition[condition.length - 1] !== ")") {
-        return false;
-      }
-      const declaration = condition.slice(1, -1);
-      let depth = 0;
-      let quote = "";
-      for (let index = 0; index < declaration.length; index++) {
-        const character = declaration[index];
-        if (quote) {
-          if (character === "\\") index++;
-          else if (character === quote) quote = "";
-          continue;
-        }
-        if (character === "\"" || character === "'") { quote = character; continue; }
-        if (character === "(" || character === "[") depth++;
-        else if (character === ")" || character === "]") depth--;
-        else if (character === ":" && depth === 0) {
-          return __omoikane_css_supports(declaration.slice(0, index), declaration.slice(index + 1));
-        }
-      }
-      return false;
+      return __omoikane_css_supports_condition(String(propertyOrCondition));
     },
   };
 
@@ -4575,6 +4610,7 @@
   globalThis.CSSStyleSheet = CSSStyleSheet;
   globalThis.CSSRuleList = CSSRuleList;
   globalThis.CSSStyleRule = CSSStyleRule;
+  globalThis.CSSSupportsRule = CSSSupportsRule;
   globalThis.NodeFilter = NodeFilter;
   globalThis.NodeIterator = NodeIterator;
   globalThis.TreeWalker = TreeWalker;
