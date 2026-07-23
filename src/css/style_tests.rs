@@ -986,6 +986,47 @@ fn keeps_transform_list_values_in_computed_style() {
 }
 
 #[test]
+fn computes_transform_origin_and_initial_transform_values() {
+    let (_document, _body, title, _html) = sample_tree();
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet("h1 { transform-origin: right 25%; }").unwrap(),
+    );
+
+    let style = resolver.computed_style(&title);
+    assert_eq!(
+        style.get("transform"),
+        Some(&ComputedValue::Keyword("none".to_string()))
+    );
+    assert_eq!(
+        style.get("transform-origin"),
+        Some(&ComputedValue::Keyword("right 25%".to_string()))
+    );
+}
+
+#[test]
+fn invalid_transform_does_not_override_an_earlier_valid_declaration() {
+    let (_document, _body, title, _html) = sample_tree();
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet("h1 { transform: rotate(45deg); transform: scale(2, nope); }")
+            .unwrap(),
+    );
+
+    assert_eq!(
+        resolver.computed_style(&title).get("transform"),
+        Some(&ComputedValue::Keyword("rotate(45deg)".to_string()))
+    );
+    assert!(!supports_declaration("transform", "translateX(10px) bogus(1)"));
+    assert!(supports_declaration(
+        "transform",
+        "translate(50%, 2em) rotate(.5turn) scale(2)"
+    ));
+}
+
+#[test]
 fn expands_two_value_gap_shorthand_into_row_and_column_gap() {
     let (_document, _body, title, _html) = sample_tree();
     let mut resolver = StyleResolver::new();

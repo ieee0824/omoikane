@@ -103,7 +103,9 @@ fn force_opacity_enabled() -> bool {
 #[allow(unused_imports)]
 use base64::Engine;
 
-use crate::css::{ComputedStyle, ComputedValue, Origin, PseudoElement, StyleResolver};
+use crate::css::{
+    AffineTransform, ComputedStyle, ComputedValue, Origin, PseudoElement, StyleResolver,
+};
 use crate::dom::{Node, NodeHandle, NodeType};
 use crate::font::{Font, WebFontRegistry};
 #[allow(unused_imports)]
@@ -1134,6 +1136,168 @@ fn paint_box_internal(
         return;
     }
 
+    if !layout.transform.is_identity() {
+        paint_transformed_box(
+            canvas,
+            layout,
+            resolver,
+            inherited_clip,
+            viewport,
+            text_fonts,
+            web_fonts,
+        );
+        return;
+    }
+
+    paint_box_internal_untransformed(
+        canvas,
+        layout,
+        resolver,
+        inherited_clip,
+        viewport,
+        include_phase_descendants,
+        text_fonts,
+        web_fonts,
+    );
+}
+
+const TRANSFORM_SURFACE_TILE_SIZE: u32 = 2048;
+
+#[allow(clippy::too_many_arguments)]
+fn paint_transformed_box(
+    canvas: &mut Canvas,
+    layout: &LayoutBox,
+    resolver: &mut StyleResolver,
+    inherited_clip: Option<Rect>,
+    viewport: Rect,
+    text_fonts: &[Arc<Font>],
+    web_fonts: Option<&WebFontRegistry>,
+) {
+    let Some(inverse) = layout.transform.inverse() else {
+        return;
+    };
+    let canvas_bounds = Rect {
+        x: 0.0,
+        y: 0.0,
+        width: canvas.width() as f32,
+        height: canvas.height() as f32,
+    };
+    let destination_bounds = if let Some(clip) = inherited_clip {
+        let Some(bounds) = intersect(clip, canvas_bounds) else {
+            return;
+        };
+        bounds
+    } else {
+        canvas_bounds
+    };
+    let required_source = transformed_rect_bounds(destination_bounds, inverse);
+    let required_source = Rect {
+        x: required_source.x - 1.0,
+        y: required_source.y - 1.0,
+        width: required_source.width + 2.0,
+        height: required_source.height + 2.0,
+    };
+    let Some(source_region) = intersect(subtree_paint_bounds(layout, resolver), required_source)
+    else {
+        return;
+    };
+    let source_x0 = source_region.x.floor() as i32;
+    let source_y0 = source_region.y.floor() as i32;
+    let source_x1 = (source_region.x + source_region.width).ceil() as i32;
+    let source_y1 = (source_region.y + source_region.height).ceil() as i32;
+    let tile_size = TRANSFORM_SURFACE_TILE_SIZE as i32;
+
+    // Paint source-space tiles instead of a viewport-sized surface. This keeps
+    // pixels that begin outside the viewport but transform into view, while the
+    // inverse-mapped destination bounds and tiling prevent unbounded allocation.
+    for tile_y in (source_y0..source_y1).step_by(tile_size as usize) {
+        for tile_x in (source_x0..source_x1).step_by(tile_size as usize) {
+            let tile_x1 = (tile_x + tile_size).min(source_x1);
+            let tile_y1 = (tile_y + tile_size).min(source_y1);
+            let tile_width = (tile_x1 - tile_x).max(1) as u32;
+            let tile_height = (tile_y1 - tile_y).max(1) as u32;
+            let mut translated_layout = layout.clone();
+            translate_layout_for_paint(
+                &mut translated_layout,
+                -(tile_x as f32),
+                -(tile_y as f32),
+            );
+            let translated_viewport = Rect {
+                x: viewport.x - tile_x as f32,
+                y: viewport.y - tile_y as f32,
+                width: viewport.width,
+                height: viewport.height,
+            };
+            let mut offscreen = Canvas::new(tile_width, tile_height);
+            // A transformed element establishes a paint containment boundary
+            // for positioned descendants. Its ancestor clip is applied later
+            // in destination space; local overflow/clip-path is painted here.
+            paint_box_internal_untransformed(
+                &mut offscreen,
+                &translated_layout,
+                resolver,
+                None,
+                translated_viewport,
+                true,
+                text_fonts,
+                web_fonts,
+            );
+            let tile_transform = layout
+                .transform
+                .multiply(AffineTransform::translate(tile_x as f32, tile_y as f32));
+            composite_affine(
+                canvas,
+                &offscreen,
+                tile_transform,
+                inherited_clip,
+                Rect {
+                    x: 0.0,
+                    y: 0.0,
+                    width: tile_width as f32,
+                    height: tile_height as f32,
+                },
+            );
+        }
+    }
+}
+
+fn translate_layout_for_paint(layout: &mut LayoutBox, dx: f32, dy: f32) {
+    layout.dimensions.content.x += dx;
+    layout.dimensions.content.y += dy;
+    for line in &mut layout.lines {
+        line.rect.x += dx;
+        line.rect.y += dy;
+        for fragment in &mut line.fragments {
+            fragment.rect.x += dx;
+            fragment.rect.y += dy;
+        }
+    }
+    if let Some(marker) = &mut layout.marker {
+        marker.x += dx;
+        marker.y += dy;
+    }
+    layout.transform = AffineTransform::translate(dx, dy)
+        .multiply(layout.transform)
+        .multiply(AffineTransform::translate(-dx, -dy));
+    for child in &mut layout.children {
+        translate_layout_for_paint(child, dx, dy);
+    }
+}
+
+fn paint_box_internal_untransformed(
+    canvas: &mut Canvas,
+    layout: &LayoutBox,
+    resolver: &mut StyleResolver,
+    inherited_clip: Option<Rect>,
+    viewport: Rect,
+    include_phase_descendants: bool,
+    text_fonts: &[Arc<Font>],
+    web_fonts: Option<&WebFontRegistry>,
+) {
+    if layout.visibility == Visibility::Hidden {
+        return;
+    }
+
     let style = resolver.computed_style(&layout.node);
     let border_box = border_box_rect(layout);
     let padding_box = padding_box_rect(layout);
@@ -1260,6 +1424,222 @@ fn paint_box_internal(
         border_box,
         padding_box,
     );
+}
+
+fn composite_affine(
+    destination: &mut Canvas,
+    source: &Canvas,
+    transform: AffineTransform,
+    clip: Option<Rect>,
+    source_hint: Rect,
+) {
+    let Some(inverse) = transform.inverse() else {
+        return;
+    };
+    let width = source.width() as i32;
+    let height = source.height() as i32;
+    let hint_x0 = source_hint.x.floor().max(0.0).min(width as f32) as i32;
+    let hint_y0 = source_hint.y.floor().max(0.0).min(height as f32) as i32;
+    let hint_x1 = (source_hint.x + source_hint.width)
+        .ceil()
+        .max(0.0)
+        .min(width as f32) as i32;
+    let hint_y1 = (source_hint.y + source_hint.height)
+        .ceil()
+        .max(0.0)
+        .min(height as f32) as i32;
+    let mut source_min_x = hint_x1;
+    let mut source_min_y = hint_y1;
+    let mut source_max_x = hint_x0;
+    let mut source_max_y = hint_y0;
+    for y in hint_y0..hint_y1 {
+        for x in hint_x0..hint_x1 {
+            let index = ((y * width + x) * 4 + 3) as usize;
+            if source.pixels[index] != 0 {
+                source_min_x = source_min_x.min(x);
+                source_min_y = source_min_y.min(y);
+                source_max_x = source_max_x.max(x + 1);
+                source_max_y = source_max_y.max(y + 1);
+            }
+        }
+    }
+    if source_min_x >= source_max_x || source_min_y >= source_max_y {
+        return;
+    }
+
+    let corners = [
+        transform.transform_point(source_min_x as f32, source_min_y as f32),
+        transform.transform_point(source_max_x as f32, source_min_y as f32),
+        transform.transform_point(source_min_x as f32, source_max_y as f32),
+        transform.transform_point(source_max_x as f32, source_max_y as f32),
+    ];
+    let min_x = corners
+        .iter()
+        .map(|point| point.0)
+        .fold(f32::INFINITY, f32::min)
+        .floor()
+        .max(0.0) as i32;
+    let min_y = corners
+        .iter()
+        .map(|point| point.1)
+        .fold(f32::INFINITY, f32::min)
+        .floor()
+        .max(0.0) as i32;
+    let max_x = corners
+        .iter()
+        .map(|point| point.0)
+        .fold(f32::NEG_INFINITY, f32::max)
+        .ceil()
+        .min(destination.width() as f32) as i32;
+    let max_y = corners
+        .iter()
+        .map(|point| point.1)
+        .fold(f32::NEG_INFINITY, f32::max)
+        .ceil()
+        .min(destination.height() as f32) as i32;
+
+    for y in min_y..max_y {
+        for x in min_x..max_x {
+            if let Some(clip) = clip
+                && (x as f32 + 0.5 < clip.x
+                    || y as f32 + 0.5 < clip.y
+                    || x as f32 + 0.5 >= clip.x + clip.width
+                    || y as f32 + 0.5 >= clip.y + clip.height)
+            {
+                continue;
+            }
+            let (source_x, source_y) = inverse.transform_point(x as f32 + 0.5, y as f32 + 0.5);
+            let source_x = source_x.floor() as i32;
+            let source_y = source_y.floor() as i32;
+            if source_x < source_min_x
+                || source_y < source_min_y
+                || source_x >= source_max_x
+                || source_y >= source_max_y
+            {
+                continue;
+            }
+            let source_index = ((source_y * width + source_x) * 4) as usize;
+            let alpha = source.pixels[source_index + 3];
+            if alpha == 0 {
+                continue;
+            }
+            let color = Color {
+                r: source.pixels[source_index],
+                g: source.pixels[source_index + 1],
+                b: source.pixels[source_index + 2],
+                a: alpha,
+            };
+            let destination_index =
+                ((y as u32 * destination.width() + x as u32) * 4) as usize;
+            blend_pixel(
+                &mut destination.pixels[destination_index..destination_index + 4],
+                color,
+            );
+        }
+    }
+}
+
+fn subtree_paint_bounds(layout: &LayoutBox, resolver: &mut StyleResolver) -> Rect {
+    let mut bounds = border_box_rect(layout);
+    for line in &layout.lines {
+        bounds = union_rect(bounds, line.rect);
+        for fragment in &line.fragments {
+            bounds = union_rect(bounds, fragment.rect);
+        }
+    }
+    if let Some(marker) = &layout.marker {
+        bounds = union_rect(
+            bounds,
+            Rect {
+                x: marker.x - marker.font_size,
+                y: marker.y,
+                width: marker.font_size * 2.0,
+                height: marker.font_size * 1.5,
+            },
+        );
+    }
+
+    let style = resolver.computed_style(&layout.node);
+    let shadow_value = match style.get("box-shadow") {
+        Some(ComputedValue::Keyword(value)) | Some(ComputedValue::String(value)) => {
+            Some(value.as_str())
+        }
+        _ => None,
+    };
+    if let Some(shadow_value) = shadow_value {
+        let border_box = border_box_rect(layout);
+        for shadow in border::parse_box_shadow(shadow_value) {
+            if shadow.inset {
+                continue;
+            }
+            let extent = shadow.blur_radius * 2.0 + shadow.spread_radius.abs();
+            bounds = union_rect(
+                bounds,
+                Rect {
+                    x: border_box.x + shadow.offset_x - extent,
+                    y: border_box.y + shadow.offset_y - extent,
+                    width: border_box.width + extent * 2.0,
+                    height: border_box.height + extent * 2.0,
+                },
+            );
+        }
+    }
+
+    for child in &layout.children {
+        let child_bounds = subtree_paint_bounds(child, resolver);
+        bounds = union_rect(
+            bounds,
+            transformed_rect_bounds(child_bounds, child.transform),
+        );
+    }
+    bounds
+}
+
+fn transformed_rect_bounds(rect: Rect, transform: AffineTransform) -> Rect {
+    if transform.is_identity() {
+        return rect;
+    }
+    let corners = [
+        transform.transform_point(rect.x, rect.y),
+        transform.transform_point(rect.x + rect.width, rect.y),
+        transform.transform_point(rect.x, rect.y + rect.height),
+        transform.transform_point(rect.x + rect.width, rect.y + rect.height),
+    ];
+    let min_x = corners
+        .iter()
+        .map(|point| point.0)
+        .fold(f32::INFINITY, f32::min);
+    let min_y = corners
+        .iter()
+        .map(|point| point.1)
+        .fold(f32::INFINITY, f32::min);
+    let max_x = corners
+        .iter()
+        .map(|point| point.0)
+        .fold(f32::NEG_INFINITY, f32::max);
+    let max_y = corners
+        .iter()
+        .map(|point| point.1)
+        .fold(f32::NEG_INFINITY, f32::max);
+    Rect {
+        x: min_x,
+        y: min_y,
+        width: max_x - min_x,
+        height: max_y - min_y,
+    }
+}
+
+fn union_rect(left: Rect, right: Rect) -> Rect {
+    let x = left.x.min(right.x);
+    let y = left.y.min(right.y);
+    let right_edge = (left.x + left.width).max(right.x + right.width);
+    let bottom_edge = (left.y + left.height).max(right.y + right.height);
+    Rect {
+        x,
+        y,
+        width: right_edge - x,
+        height: bottom_edge - y,
+    }
 }
 
 fn apply_mask_alpha(canvas: &mut Canvas, mask: &Image, style: &ComputedStyle, area: Rect) {
@@ -1537,6 +1917,9 @@ fn collect_phase_descendants<'a>(
     auto_positioned_children: &mut Vec<&'a LayoutBox>,
     positive_positioned_children: &mut Vec<&'a LayoutBox>,
 ) {
+    if !layout.transform.is_identity() {
+        return;
+    }
     for child in &layout.children {
         let child_style = resolver.computed_style(&child.node);
         if is_positioned_for_paint(&child_style) {

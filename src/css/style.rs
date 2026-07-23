@@ -208,6 +208,15 @@ impl StyleResolver {
         self.selector_match_cache = SelectorMatchCache::default();
     }
 
+    /// Returns the root font size used to resolve `rem` units.
+    pub(crate) fn root_font_size(&self) -> f32 {
+        if self.root_font_size > 0.0 {
+            self.root_font_size
+        } else {
+            16.0
+        }
+    }
+
     /// Sets the viewport dimensions in px.
     ///
     /// These values are used to resolve `vw`, `vh`, `vmin`, and `vmax` units.
@@ -622,7 +631,7 @@ impl StyleResolver {
         apply_presentational_hints(node, &mut properties, pseudo);
         resolve_current_color_on_color_property(&mut properties, parent_style);
         resolve_explicit_inherit(&mut properties, parent_style);
-        resolve_container_css_wide_keywords(&mut properties);
+        resolve_non_inherited_css_wide_keywords(&mut properties);
         apply_inheritance(&mut properties, parent_style);
         apply_initial_values(&mut properties);
         zero_border_width_for_none_style(&mut properties);
@@ -915,6 +924,38 @@ fn validate_declaration(name: &str, value: &Value) -> DeclarationValidation {
         };
         return if valid {
             DeclarationValidation::Valid(ComputedValue::Keyword(render_value(value)))
+        } else {
+            DeclarationValidation::Invalid
+        };
+    }
+    if name.eq_ignore_ascii_case("transform") {
+        let rendered = render_value(value);
+        let reference = super::TransformReferenceBox {
+            x: 0.0,
+            y: 0.0,
+            width: 100.0,
+            height: 100.0,
+            font_size: 16.0,
+            root_font_size: 16.0,
+        };
+        return if super::parse_transform_list(&rendered, reference).is_some() {
+            DeclarationValidation::Valid(ComputedValue::Keyword(rendered))
+        } else {
+            DeclarationValidation::Invalid
+        };
+    }
+    if name.eq_ignore_ascii_case("transform-origin") {
+        let rendered = render_value(value);
+        let reference = super::TransformReferenceBox {
+            x: 0.0,
+            y: 0.0,
+            width: 100.0,
+            height: 100.0,
+            font_size: 16.0,
+            root_font_size: 16.0,
+        };
+        return if super::parse_transform_with_origin("scale(2)", &rendered, reference).is_some() {
+            DeclarationValidation::Valid(ComputedValue::Keyword(rendered))
         } else {
             DeclarationValidation::Invalid
         };
@@ -2912,6 +2953,7 @@ fn compute_value(value: &Value, property_name: &str, ctx: ResolutionContext) -> 
         Value::Function { .. } => ComputedValue::Keyword(render_value(value)),
         Value::List(values) => {
             if property_name.eq_ignore_ascii_case("transform")
+                || property_name.eq_ignore_ascii_case("transform-origin")
                 || property_name.eq_ignore_ascii_case("overflow")
                 || property_name.eq_ignore_ascii_case("box-shadow")
                 || property_name.eq_ignore_ascii_case("background-size")
@@ -3936,10 +3978,21 @@ fn apply_initial_values(properties: &mut BTreeMap<String, ComputedValue>) {
     properties
         .entry("container-type".to_string())
         .or_insert_with(|| ComputedValue::Keyword("normal".to_string()));
+    properties
+        .entry("transform".to_string())
+        .or_insert_with(|| ComputedValue::Keyword("none".to_string()));
+    properties
+        .entry("transform-origin".to_string())
+        .or_insert_with(|| ComputedValue::Keyword("50% 50%".to_string()));
 }
 
-fn resolve_container_css_wide_keywords(properties: &mut BTreeMap<String, ComputedValue>) {
-    for name in ["container-name", "container-type"] {
+fn resolve_non_inherited_css_wide_keywords(properties: &mut BTreeMap<String, ComputedValue>) {
+    for name in [
+        "container-name",
+        "container-type",
+        "transform",
+        "transform-origin",
+    ] {
         let uses_initial_value = matches!(
             properties.get(name),
             Some(ComputedValue::Keyword(keyword))

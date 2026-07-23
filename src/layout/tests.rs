@@ -307,7 +307,7 @@ fn keeps_visibility_hidden_boxes_in_layout() {
 }
 
 #[test]
-fn transform_translate_offsets_layout_box() {
+fn transform_translate_is_paint_time_and_does_not_move_layout_box() {
     let (_document, _html, body, _card) = sample_tree();
     let mut resolver = StyleResolver::new();
     resolver.add_stylesheet(
@@ -329,8 +329,9 @@ fn transform_translate_offsets_layout_box() {
     .unwrap();
 
     let child = &layout.children[0];
-    assert_eq!(child.dimensions.content.x, 10.0);
-    assert_eq!(child.dimensions.content.y, 6.0);
+    assert_eq!(child.dimensions.content.x, 0.0);
+    assert_eq!(child.dimensions.content.y, 0.0);
+    assert_eq!(child.transform.transform_point(0.0, 0.0), (10.0, 6.0));
 }
 
 #[test]
@@ -358,8 +359,80 @@ fn transform_translate_function_variants_and_matrix_accumulate_offsets() {
     .unwrap();
 
     let child = &layout.children[0];
-    assert_eq!(child.dimensions.content.x, 17.0);
-    assert_eq!(child.dimensions.content.y, 13.0);
+    assert_eq!(child.dimensions.content.x, 0.0);
+    assert_eq!(child.dimensions.content.y, 0.0);
+    assert_eq!(child.transform.transform_point(0.0, 0.0), (17.0, 13.0));
+}
+
+#[test]
+fn transform_does_not_change_following_sibling_flow_position() {
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let first = NodeHandle::element("div");
+    first.set_attribute("class", "first");
+    let second = NodeHandle::element("div");
+    document.append_child(body.clone());
+    body.append_child(first);
+    body.append_child(second);
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "body { margin: 0; } div { height: 20px; } .first { transform: scale(3); }",
+        )
+        .unwrap(),
+    );
+
+    let layout = layout_tree(
+        &body,
+        &mut resolver,
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 200.0,
+            height: 0.0,
+        },
+    )
+    .unwrap();
+
+    assert_eq!(layout.children[0].dimensions.content.y, 0.0);
+    assert_eq!(layout.children[1].dimensions.content.y, 20.0);
+}
+
+#[test]
+fn transform_rem_uses_resolvers_computed_root_font_size_for_body_subtree_layout() {
+    let document = NodeHandle::document();
+    let html = NodeHandle::element("html");
+    let body = NodeHandle::element("body");
+    let child = NodeHandle::element("div");
+    document.append_child(html.clone());
+    html.append_child(body.clone());
+    body.append_child(child);
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "html { font-size: 20px; } body { margin: 0; } div { width: 10px; height: 10px; transform: translateX(2rem); }",
+        )
+        .unwrap(),
+    );
+
+    let layout = layout_tree(
+        &body,
+        &mut resolver,
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 100.0,
+            height: 0.0,
+        },
+    )
+    .unwrap();
+
+    assert_eq!(
+        layout.children[0].transform.transform_point(0.0, 0.0),
+        (40.0, 0.0)
+    );
 }
 
 #[test]

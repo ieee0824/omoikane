@@ -15,7 +15,7 @@ use boa_engine::object::{JsObject, builtins::JsPromise};
 use boa_engine::{Context, JsError, JsNativeError, JsResult, JsValue, Script, Source, js_string};
 
 use crate::css::{
-    ComputedStyle, ComputedValue, Origin, Selector, StyleResolver, matches_selector,
+    AffineTransform, ComputedStyle, ComputedValue, Origin, Selector, StyleResolver, matches_selector,
     parse_selector_list,
 };
 use crate::dom::{Node, NodeHandle, NodeType, ShadowRootMode};
@@ -2604,6 +2604,23 @@ fn find_layout_box<'a>(root: &'a LayoutBox, node: &NodeHandle) -> Option<&'a Lay
     None
 }
 
+fn find_layout_box_with_transform<'a>(
+    root: &'a LayoutBox,
+    node: &NodeHandle,
+    ancestor_transform: AffineTransform,
+) -> Option<(&'a LayoutBox, AffineTransform)> {
+    let transform = ancestor_transform.multiply(root.transform);
+    if &root.node == node {
+        return Some((root, transform));
+    }
+    for child in &root.children {
+        if let Some(found) = find_layout_box_with_transform(child, node, transform) {
+            return Some(found);
+        }
+    }
+    None
+}
+
 /// The eight geometry values `getBoundingClientRect()` exposes plus the derived
 /// `offset*` / `client*` / `scroll*` metrics, all in CSS pixels.
 struct LayoutMetrics {
@@ -2775,6 +2792,43 @@ fn compute_layout_metrics(layout: &LayoutBox) -> LayoutMetrics {
     }
 }
 
+fn compute_transformed_layout_metrics(
+    layout: &LayoutBox,
+    transform: AffineTransform,
+) -> LayoutMetrics {
+    let mut metrics = compute_layout_metrics(layout);
+    if transform.is_identity() {
+        return metrics;
+    }
+    let corners = [
+        transform.transform_point(metrics.x, metrics.y),
+        transform.transform_point(metrics.x + metrics.width, metrics.y),
+        transform.transform_point(metrics.x, metrics.y + metrics.height),
+        transform.transform_point(metrics.x + metrics.width, metrics.y + metrics.height),
+    ];
+    let min_x = corners
+        .iter()
+        .map(|point| point.0)
+        .fold(f32::INFINITY, f32::min);
+    let min_y = corners
+        .iter()
+        .map(|point| point.1)
+        .fold(f32::INFINITY, f32::min);
+    let max_x = corners
+        .iter()
+        .map(|point| point.0)
+        .fold(f32::NEG_INFINITY, f32::max);
+    let max_y = corners
+        .iter()
+        .map(|point| point.1)
+        .fold(f32::NEG_INFINITY, f32::max);
+    metrics.x = min_x;
+    metrics.y = min_y;
+    metrics.width = max_x - min_x;
+    metrics.height = max_y - min_y;
+    metrics
+}
+
 /// Expands `max_right`/`max_bottom` to enclose the border boxes of every box in
 /// `boxes` and (recursively) their descendants, for `scrollWidth`/`scrollHeight`.
 ///
@@ -2886,8 +2940,10 @@ fn layout_metrics_native(
         let mut metrics = state
             .layout_root
             .as_ref()
-            .and_then(|root| find_layout_box(root, &node))
-            .map(compute_layout_metrics)
+            .and_then(|root| {
+                find_layout_box_with_transform(root, &node, AffineTransform::identity())
+            })
+            .map(|(layout, transform)| compute_transformed_layout_metrics(layout, transform))
             .unwrap_or_else(LayoutMetrics::zero);
         if is_root_element && let Some(viewport) = viewport {
             metrics.client_width = viewport.width;
@@ -13286,6 +13342,42 @@ mod tests {
             eval_num(&mut runtime, "document.getElementById('box').offsetTop"),
             0.0
         );
+    }
+
+    #[test]
+    fn bounding_client_rect_includes_transforms_but_offset_size_does_not() {
+        let html = r#"<html><head><style>
+            * { margin: 0; padding: 0; }
+            #box { width: 100px; height: 50px; transform-origin: 0 0;
+                   transform: translateX(100px) rotate(90deg); }
+        </style></head><body><div id="box"></div></body></html>"#;
+        let mut runtime = runtime_from_html(html);
+        let expression = r#"(() => {
+            const box = document.getElementById('box');
+            const rect = box.getBoundingClientRect();
+            return [rect.left, rect.top, rect.width, rect.height,
+                    box.offsetWidth, box.offsetHeight].join('|');
+        })()"#;
+
+        assert_eq!(eval_str(&mut runtime, expression), "50|0|50|100|100|50");
+    }
+
+    #[test]
+    fn bounding_client_rect_composes_ancestor_and_element_transforms() {
+        let html = r#"<html><head><style>
+            * { margin: 0; padding: 0; }
+            #parent { width: 20px; height: 20px; transform: translateX(30px); }
+            #child { width: 10px; height: 10px; transform: scale(2); }
+        </style></head><body><div id="parent"><div id="child"></div></div></body></html>"#;
+        let mut runtime = runtime_from_html(html);
+        let expression = r#"(() => {
+            const rect = document.getElementById('child').getBoundingClientRect();
+            return [rect.left, rect.top, rect.width, rect.height].join('|');
+        })()"#;
+
+        // scale(2) around the child's center expands -5..15, then the parent
+        // translation moves that bounding box to 25..45.
+        assert_eq!(eval_str(&mut runtime, expression), "25|-5|20|20");
     }
 
     #[test]

@@ -1,6 +1,6 @@
 //! Flex layout: `display: flex` container layout.
 
-use crate::css::{ComputedStyle, ComputedValue, StyleResolver};
+use crate::css::{AffineTransform, ComputedStyle, ComputedValue, StyleResolver};
 use crate::dom::{Node, NodeHandle, NodeType};
 
 use super::{
@@ -285,6 +285,7 @@ pub(super) fn layout_flex_container(
         visibility: visibility(&style),
         overflow: overflow(&style),
         z_index: z_index(&style),
+        transform: AffineTransform::identity(),
         lines: Vec::new(),
         children,
         marker: None,

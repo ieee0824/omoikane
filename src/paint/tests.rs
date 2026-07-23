@@ -791,6 +791,86 @@ fn fixed_background_image_uses_viewport_origin() {
 }
 
 #[test]
+fn two_dimensional_transform_rotates_and_translates_the_painted_subtree() {
+    let document = TreeBuilder::parse(
+        r#"<html><head><style>
+            html, body { margin: 0; }
+            div { width: 4px; height: 2px; background: red;
+                  transform-origin: 0 0; transform: translate(4px, 0) rotate(90deg); }
+        </style></head><body><div></div></body></html>"#,
+    )
+    .document();
+    let canvas = render_document(
+        &document,
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 8.0,
+            height: 6.0,
+        },
+    )
+    .unwrap();
+
+    assert_eq!(canvas.pixel(2, 0), Some(Color::rgb(255, 0, 0)));
+    assert_eq!(canvas.pixel(3, 3), Some(Color::rgb(255, 0, 0)));
+    assert_eq!(canvas.pixel(1, 0), Some(Color::rgba(0, 0, 0, 0)));
+    assert_eq!(canvas.pixel(4, 0), Some(Color::rgba(0, 0, 0, 0)));
+}
+
+#[test]
+fn transformed_parent_moves_descendant_as_one_painted_subtree() {
+    let document = TreeBuilder::parse(
+        r#"<html><head><style>
+            html, body { margin: 0; }
+            .parent { width: 2px; height: 2px; transform: translateX(4px); }
+            .child { width: 2px; height: 2px; background: blue; }
+        </style></head><body><div class="parent"><div class="child"></div></div></body></html>"#,
+    )
+    .document();
+    let canvas = render_document(
+        &document,
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 8.0,
+            height: 4.0,
+        },
+    )
+    .unwrap();
+
+    assert_eq!(canvas.pixel(0, 0), Some(Color::rgba(0, 0, 0, 0)));
+    assert_eq!(canvas.pixel(4, 0), Some(Color::rgb(0, 0, 255)));
+    assert_eq!(canvas.pixel(5, 1), Some(Color::rgb(0, 0, 255)));
+}
+
+#[test]
+fn transform_can_move_an_offscreen_source_box_into_the_viewport() {
+    let document = TreeBuilder::parse(
+        r#"<html><head><style>
+            html, body { margin: 0; }
+            div { position: absolute; left: -20px; top: 0; width: 10px; height: 10px;
+                  background: red; transform: translateX(25px); }
+        </style></head><body><div></div></body></html>"#,
+    )
+    .document();
+    let canvas = render_document(
+        &document,
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 20.0,
+            height: 12.0,
+        },
+    )
+    .unwrap();
+
+    assert_eq!(canvas.pixel(4, 5), Some(Color::rgba(0, 0, 0, 0)));
+    assert_eq!(canvas.pixel(5, 5), Some(Color::rgb(255, 0, 0)));
+    assert_eq!(canvas.pixel(14, 5), Some(Color::rgb(255, 0, 0)));
+    assert_eq!(canvas.pixel(15, 5), Some(Color::rgba(0, 0, 0, 0)));
+}
+
+#[test]
 fn nested_object_fallback_preserves_fixed_background_on_inline_image_fragment() {
     let html = r#"<html><head><style>body { margin: 0; font: 2px/2px sans-serif; } object { display: inline; vertical-align: bottom; } object object object { background: url(data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAIAAAD91JpzAAAABnRSTlMAAAAAAABupgeRAAAABmJLR0QA%2FwD%2FAP%2BgvaeTAAAAEUlEQVR42mP4%2F58BCv7%2FZwAAHfAD%2FabwPj4AAAAASUVORK5CYII%3D) fixed 1px 0; }</style></head><body><object data="data:application/x-unknown,ERROR"><object data="data:application/x-unknown,ERROR" type="text/html"><object data="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAIAAAD91JpzAAAABnRSTlMAAAAAAABupgeRAAAABmJLR0QA%2FwD%2FAP%2BgvaeTAAAAEUlEQVR42mP4%2F58BCv7%2FZwAAHfAD%2FabwPj4AAAAASUVORK5CYII%3D"></object></object></object></body></html>"#;
     let document = TreeBuilder::parse(html).document();
@@ -869,6 +949,7 @@ fn absolute_inline_content_paints_above_float_siblings() {
         visibility: Visibility::Visible,
         overflow: crate::layout::Overflow::Visible,
         z_index: 0,
+        transform: crate::css::AffineTransform::identity(),
         lines: Vec::new(),
         children: vec![
             LayoutBox {
@@ -885,6 +966,7 @@ fn absolute_inline_content_paints_above_float_siblings() {
                 visibility: Visibility::Visible,
                 overflow: crate::layout::Overflow::Visible,
                 z_index: 0,
+                transform: crate::css::AffineTransform::identity(),
                 lines: Vec::new(),
                 children: Vec::new(),
                 marker: None,
@@ -903,6 +985,7 @@ fn absolute_inline_content_paints_above_float_siblings() {
                 visibility: Visibility::Visible,
                 overflow: crate::layout::Overflow::Visible,
                 z_index: 0,
+                transform: crate::css::AffineTransform::identity(),
                 lines: vec![LineBox {
                     rect: Rect {
                         x: 0.0,
@@ -1026,6 +1109,7 @@ fn float_grandchild_paints_above_block_uncle() {
         visibility: Visibility::Visible,
         overflow: crate::layout::Overflow::Visible,
         z_index: 0,
+        transform: crate::css::AffineTransform::identity(),
         lines: Vec::new(),
         children: vec![
             LayoutBox {
@@ -1042,6 +1126,7 @@ fn float_grandchild_paints_above_block_uncle() {
                 visibility: Visibility::Visible,
                 overflow: crate::layout::Overflow::Visible,
                 z_index: 0,
+                transform: crate::css::AffineTransform::identity(),
                 lines: Vec::new(),
                 children: vec![LayoutBox {
                     node: floated,
@@ -1057,6 +1142,7 @@ fn float_grandchild_paints_above_block_uncle() {
                     visibility: Visibility::Visible,
                     overflow: crate::layout::Overflow::Visible,
                     z_index: 0,
+                    transform: crate::css::AffineTransform::identity(),
                     lines: Vec::new(),
                     children: Vec::new(),
                     marker: None,
@@ -1077,6 +1163,7 @@ fn float_grandchild_paints_above_block_uncle() {
                 visibility: Visibility::Visible,
                 overflow: crate::layout::Overflow::Visible,
                 z_index: 0,
+                transform: crate::css::AffineTransform::identity(),
                 lines: Vec::new(),
                 children: Vec::new(),
                 marker: None,
@@ -6682,6 +6769,7 @@ fn form_control_label_uses_web_font_variant() {
         visibility: crate::layout::Visibility::Visible,
         overflow: crate::layout::Overflow::Visible,
         z_index: 0,
+        transform: crate::css::AffineTransform::identity(),
         lines: vec![LineBox {
             rect: viewport,
             baseline: 12.8,
