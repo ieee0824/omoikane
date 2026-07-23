@@ -3366,6 +3366,43 @@
     get cssText() { return this.__text.trim(); }
   }
 
+  class CSSContainerRule extends CSSConditionRule {
+    constructor(text, sheet = null, index = -1) {
+      super();
+      this.__text = text;
+      this.__sheet = sheet;
+      this.__index = index;
+      const open = cssRuleBlockStart(this.__text);
+      const close = this.__text.lastIndexOf("}");
+      this.__hasBlock = open >= 0 && close > open;
+      const prelude = (this.__hasBlock
+        ? this.__text.slice("@container".length, open)
+        : "").replace(/\/\*[\s\S]*?\*\//g, " ").trim();
+      const conditionStart = prelude.indexOf("(");
+      const prefix = conditionStart >= 0 ? prelude.slice(0, conditionStart).trim() : "";
+      this.__containerName = prefix.toLowerCase() === "not" ? "" : prefix;
+      this.__containerQuery = conditionStart < 0 ? "" :
+        (this.__containerName ? prelude.slice(conditionStart) : prelude);
+      this.__innerText = this.__hasBlock ? this.__text.slice(open + 1, close) : "";
+      this.__innerSheet = new CSSStyleSheet({ textContent: this.__innerText });
+      if (this.__sheet) this.__sheet.__registerRuleView(this);
+    }
+    get containerName() { return this.__containerName; }
+    get containerQuery() { return this.__containerQuery; }
+    get conditionText() {
+      return this.containerName
+        ? this.containerName + (this.containerQuery ? " " + this.containerQuery : "")
+        : this.containerQuery;
+    }
+    get cssRules() { return this.__innerSheet.cssRules; }
+    get cssText() {
+      const name = this.containerName ? " " + this.containerName : "";
+      const query = this.containerQuery ? " " + this.containerQuery : "";
+      const nested = Array.from(this.cssRules, rule => "  " + rule.cssText).join("\n");
+      return "@container" + name + query + " {\n" + (nested ? nested + "\n" : "") + "}";
+    }
+  }
+
   function scopeBoundaryTexts(prelude) {
     let index = 0;
     const skipWhitespace = () => {
@@ -3444,7 +3481,9 @@
   }
 
   function createCssRule(text, sheet = null, index = -1) {
-    return /^\s*@scope(?=\s|\/\*|\(|\{)/i.test(text)
+    return /^\s*@container(?=\s|\/\*|\()/i.test(text)
+      ? new CSSContainerRule(text, sheet, index)
+      : /^\s*@scope(?=\s|\/\*|\(|\{)/i.test(text)
       ? new CSSScopeRule(text, sheet, index)
       : /^\s*@supports(?=\s|\/\*|\()/i.test(text)
       ? new CSSSupportsRule(text, sheet, index)
@@ -4695,6 +4734,7 @@
   globalThis.CSSRuleList = CSSRuleList;
   globalThis.CSSStyleRule = CSSStyleRule;
   globalThis.CSSSupportsRule = CSSSupportsRule;
+  globalThis.CSSContainerRule = CSSContainerRule;
   globalThis.CSSGroupingRule = CSSGroupingRule;
   globalThis.CSSConditionRule = CSSConditionRule;
   globalThis.CSSScopeRule = CSSScopeRule;

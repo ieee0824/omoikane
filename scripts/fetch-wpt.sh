@@ -18,6 +18,7 @@ git_wpt sparse-checkout add "/css/css-conditional/js/supports-conditionText.html
 git_wpt sparse-checkout add "/css/css-cascade/scope-cssom.html"
 git_wpt sparse-checkout add "/css/css-cascade/scope-media.html"
 git_wpt sparse-checkout add "/css/css-cascade/scope-supports.html"
+git_wpt sparse-checkout add "/css/cssom/CSSContainerRule.tentative.html"
 if [[ "$(git_wpt rev-parse HEAD 2>/dev/null || true)" == "$revision" ]]; then exit 0; fi
 git_wpt fetch --depth 1 origin "$revision"
 git_wpt checkout --detach "$revision"

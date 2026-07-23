@@ -7,7 +7,7 @@ use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, OnceLock};
 
-use crate::css::{ComputedStyle, ComputedValue, PseudoElement, StyleResolver};
+use crate::css::{ContainerContext, ComputedStyle, ComputedValue, PseudoElement, StyleResolver};
 use crate::dom::{Node, NodeHandle, NodeType};
 use crate::font::{Font, FontFamilyKey, FontStyle, FontWeight, WebFontRegistry};
 use crate::http::{Client, Url};
@@ -575,7 +575,51 @@ pub fn layout_tree(
     resolver: &mut StyleResolver,
     containing_block: Rect,
 ) -> Option<LayoutBox> {
-    layout_node(node, resolver, containing_block, containing_block, None)
+    let mut layout = layout_node(node, resolver, containing_block, containing_block, None)?;
+    if !resolver.has_container_queries() {
+        return Some(layout);
+    }
+    for _ in 0..4 {
+        let mut contexts = HashMap::new();
+        collect_container_contexts(&layout, resolver, &mut contexts);
+        if !resolver.set_container_contexts(contexts) {
+            break;
+        }
+        layout = layout_node(node, resolver, containing_block, containing_block, None)?;
+    }
+    Some(layout)
+}
+
+fn collect_container_contexts(
+    layout: &LayoutBox,
+    resolver: &mut StyleResolver,
+    contexts: &mut HashMap<usize, ContainerContext>,
+) {
+    let style = resolver.computed_style(&layout.node);
+    let container_type = match style.get("container-type") {
+        Some(ComputedValue::Keyword(value)) => value.to_ascii_lowercase(),
+        _ => "normal".to_string(),
+    };
+    if container_type == "inline-size" || container_type == "size" {
+        let names = match style.get("container-name") {
+            Some(ComputedValue::Keyword(value)) if !value.eq_ignore_ascii_case("none") => {
+                value.split_whitespace().map(str::to_string).collect()
+            }
+            _ => Vec::new(),
+        };
+        contexts.insert(
+            layout.node.identity(),
+            ContainerContext {
+                width: layout.dimensions.content.width,
+                height: layout.dimensions.content.height,
+                container_type,
+                names,
+            },
+        );
+    }
+    for child in &layout.children {
+        collect_container_contexts(child, resolver, contexts);
+    }
 }
 
 fn layout_node(

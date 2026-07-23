@@ -18,6 +18,7 @@
     { "path": "css/css-cascade/scope-cssom.html", "expected": "PASS" },
     { "path": "css/css-cascade/scope-media.html", "expected": "PASS" },
     { "path": "css/css-cascade/scope-supports.html", "expected": "PASS" },
+    { "path": "css/cssom/CSSContainerRule.tentative.html", "expected": "PASS" },
     { "path": "custom-elements/registries/upgrade.html", "expected": "PASS" },
     { "path": "custom-elements/connected-callbacks-template.html", "expected": "PASS" },
     { "path": "dom/nodes/Element-childElementCount.html", "expected": "PASS" },
