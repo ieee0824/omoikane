@@ -304,7 +304,8 @@ fn parse_length_percentage(
     percentage_basis: f32,
     reference: TransformReferenceBox,
 ) -> Option<f32> {
-    let value = value.trim();
+    let normalized = value.trim().to_ascii_lowercase();
+    let value = normalized.as_str();
     if let Some(percent) = value.strip_suffix('%') {
         return Some(parse_number(percent)? * percentage_basis / 100.0);
     }
@@ -322,12 +323,14 @@ fn parse_length_percentage(
 }
 
 fn parse_zero_length(value: &str) -> bool {
-    let value = value.trim();
+    let normalized = value.trim().to_ascii_lowercase();
+    let value = normalized.as_str();
     value == "0" || value == "0px"
 }
 
 fn parse_angle(value: &str) -> Option<f32> {
-    let value = value.trim();
+    let normalized = value.trim().to_ascii_lowercase();
+    let value = normalized.as_str();
     if let Some(degrees) = value.strip_suffix("deg") {
         return Some(parse_number(degrees)? * PI / 180.0);
     }
@@ -443,6 +446,8 @@ mod tests {
         let (x, y) = rotated.transform_point(2.0, 0.0);
         assert!(x.abs() < 0.001);
         assert!((y - 2.0).abs() < 0.001);
+
+        assert!(parse_transform_list("translateX(2EM) rotate(90DEG)", reference()).is_some());
     }
 
     #[test]
