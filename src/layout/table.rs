@@ -1,7 +1,6 @@
 //! Table layout: `display: table`, rows, cells, and column width calculation.
 
-use crate::css::ComputedStyle;
-use crate::css::StyleResolver;
+use crate::css::{AffineTransform, ComputedStyle, StyleResolver};
 use crate::dom::{Node, NodeHandle, NodeType};
 
 use super::{
@@ -228,6 +227,7 @@ pub(super) fn layout_table_container(
         visibility: visibility(&style),
         overflow: overflow(&style),
         z_index: z_index(&style),
+        transform: AffineTransform::identity(),
         lines: Vec::new(),
         children,
         marker: None,
@@ -430,6 +430,7 @@ fn layout_table_row_entry(
         visibility: Visibility::Visible,
         overflow: Overflow::Visible,
         z_index: 0,
+        transform: AffineTransform::identity(),
         lines: Vec::new(),
         children,
         marker: None,
@@ -750,6 +751,7 @@ fn build_row_group_box(
         visibility: Visibility::Visible,
         overflow: Overflow::Visible,
         z_index: 0,
+        transform: AffineTransform::identity(),
         lines: Vec::new(),
         children: rows,
         marker: None,

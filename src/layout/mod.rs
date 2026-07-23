@@ -7,7 +7,10 @@ use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, OnceLock};
 
-use crate::css::{ContainerContext, ComputedStyle, ComputedValue, PseudoElement, StyleResolver};
+use crate::css::{
+    AffineTransform, ContainerContext, ComputedStyle, ComputedValue, PseudoElement, StyleResolver,
+    TransformReferenceBox, parse_transform_with_origin,
+};
 use crate::dom::{Node, NodeHandle, NodeType};
 use crate::font::{Font, FontFamilyKey, FontStyle, FontWeight, WebFontRegistry};
 use crate::http::{Client, Url};
@@ -268,6 +271,23 @@ pub struct BoxDimensions {
 }
 
 impl BoxDimensions {
+    pub fn border_box(&self) -> Rect {
+        Rect {
+            x: self.content.x - self.padding.left - self.border.left,
+            y: self.content.y - self.padding.top - self.border.top,
+            width: self.content.width
+                + self.padding.left
+                + self.padding.right
+                + self.border.left
+                + self.border.right,
+            height: self.content.height
+                + self.padding.top
+                + self.padding.bottom
+                + self.border.top
+                + self.border.bottom,
+        }
+    }
+
     /// Returns the total width including padding, border, and margin.
     pub fn total_width(&self) -> f32 {
         self.content.width
@@ -538,6 +558,9 @@ pub struct LayoutBox {
     pub visibility: Visibility,
     pub overflow: Overflow,
     pub z_index: i32,
+    /// Paint-time CSS transform in the document's absolute coordinate space.
+    /// It does not participate in normal-flow layout sizing or placement.
+    pub transform: AffineTransform,
     pub lines: Vec<LineBox>,
     pub children: Vec<LayoutBox>,
     /// List marker for `display: list-item` elements.
@@ -576,18 +599,65 @@ pub fn layout_tree(
     containing_block: Rect,
 ) -> Option<LayoutBox> {
     let mut layout = layout_node(node, resolver, containing_block, containing_block, None)?;
-    if !resolver.has_container_queries() {
-        return Some(layout);
-    }
-    for _ in 0..4 {
-        let mut contexts = HashMap::new();
-        collect_container_contexts(&layout, resolver, &mut contexts);
-        if !resolver.set_container_contexts(contexts) {
-            break;
+    if resolver.has_container_queries() {
+        for _ in 0..4 {
+            let mut contexts = HashMap::new();
+            collect_container_contexts(&layout, resolver, &mut contexts);
+            if !resolver.set_container_contexts(contexts) {
+                break;
+            }
+            layout = layout_node(node, resolver, containing_block, containing_block, None)?;
         }
-        layout = layout_node(node, resolver, containing_block, containing_block, None)?;
     }
+    populate_layout_transforms(&mut layout, resolver, 16.0);
     Some(layout)
+}
+
+fn populate_layout_transforms(
+    layout: &mut LayoutBox,
+    resolver: &mut StyleResolver,
+    root_font_size: f32,
+) {
+    let style = resolver.computed_style(&layout.node);
+    let transform = computed_keyword(&style, "transform").unwrap_or("none");
+    let origin = computed_keyword(&style, "transform-origin").unwrap_or("50% 50%");
+    let border_box = layout.dimensions.border_box();
+    let font_size = match style.get("font-size") {
+        Some(ComputedValue::Px(value)) => *value,
+        _ => 16.0,
+    };
+    let root_font_size = if layout
+        .node
+        .tag_name()
+        .is_some_and(|tag| tag.eq_ignore_ascii_case("html"))
+    {
+        font_size
+    } else {
+        root_font_size
+    };
+    layout.transform = parse_transform_with_origin(
+        transform,
+        origin,
+        TransformReferenceBox {
+            x: border_box.x,
+            y: border_box.y,
+            width: border_box.width,
+            height: border_box.height,
+            font_size,
+            root_font_size,
+        },
+    )
+    .unwrap_or_default();
+    for child in &mut layout.children {
+        populate_layout_transforms(child, resolver, root_font_size);
+    }
+}
+
+fn computed_keyword<'a>(style: &'a ComputedStyle, property: &str) -> Option<&'a str> {
+    match style.get(property) {
+        Some(ComputedValue::Keyword(value)) | Some(ComputedValue::String(value)) => Some(value),
+        _ => None,
+    }
 }
 
 fn collect_container_contexts(
@@ -733,6 +803,7 @@ fn layout_document(
         visibility: Visibility::Visible,
         overflow: Overflow::Visible,
         z_index: 0,
+        transform: AffineTransform::identity(),
         lines: Vec::new(),
         children,
         marker: None,
@@ -1071,6 +1142,7 @@ fn layout_element(
                 visibility: visibility(&style),
                 overflow: overflow(&style),
                 z_index: z_index(&style),
+                transform: AffineTransform::identity(),
                 lines,
                 children: Vec::new(),
                 marker: None,
@@ -1149,6 +1221,7 @@ fn layout_element(
         visibility: visibility(&style),
         overflow: overflow(&style),
         z_index: z_index(&style),
+        transform: AffineTransform::identity(),
         lines,
         children,
         marker,
@@ -2059,7 +2132,6 @@ fn z_index(style: &ComputedStyle) -> i32 {
 
 fn apply_relative_offset(layout: &mut LayoutBox, style: &ComputedStyle) {
     if position_scheme(style) != PositionScheme::Relative {
-        apply_transform_offset(layout, style);
         return;
     }
 
@@ -2071,116 +2143,6 @@ fn apply_relative_offset(layout: &mut LayoutBox, style: &ComputedStyle) {
     if dx != 0.0 || dy != 0.0 {
         translate_layout_box(layout, dx, dy);
     }
-    apply_transform_offset(layout, style);
-}
-
-fn apply_transform_offset(layout: &mut LayoutBox, style: &ComputedStyle) {
-    let (dx, dy) = transform_translate_offset(style);
-    if dx != 0.0 || dy != 0.0 {
-        translate_layout_box(layout, dx, dy);
-    }
-}
-
-fn transform_translate_offset(style: &ComputedStyle) -> (f32, f32) {
-    let value = match style.get("transform") {
-        Some(ComputedValue::Keyword(keyword)) => keyword.as_str(),
-        Some(ComputedValue::String(value)) => value.as_str(),
-        _ => return (0.0, 0.0),
-    };
-    let value = value.trim();
-    if value.is_empty() || value.eq_ignore_ascii_case("none") {
-        return (0.0, 0.0);
-    }
-
-    let mut dx = 0.0;
-    let mut dy = 0.0;
-    let mut cursor = 0usize;
-    while cursor < value.len() {
-        let tail = &value[cursor..];
-        let Some(open_rel) = tail.find('(') else {
-            break;
-        };
-        let name = tail[..open_rel].trim();
-        let args_start = open_rel + 1;
-        let Some(close_rel) = tail[args_start..].find(')') else {
-            break;
-        };
-        let args = &tail[args_start..args_start + close_rel];
-        let (x, y) = parse_transform_translate_function(name, args);
-        dx += x;
-        dy += y;
-        cursor += args_start + close_rel + 1;
-    }
-
-    (dx, dy)
-}
-
-fn parse_transform_translate_function(name: &str, args: &str) -> (f32, f32) {
-    let name = name.trim();
-    let args = split_transform_args(args);
-    if name.eq_ignore_ascii_case("translatex") {
-        let dx = args
-            .first()
-            .and_then(|value| parse_transform_length(value))
-            .unwrap_or(0.0);
-        return (dx, 0.0);
-    }
-    if name.eq_ignore_ascii_case("translatey") {
-        let dy = args
-            .first()
-            .and_then(|value| parse_transform_length(value))
-            .unwrap_or(0.0);
-        return (0.0, dy);
-    }
-    if name.eq_ignore_ascii_case("translate") || name.eq_ignore_ascii_case("translate3d") {
-        let dx = args
-            .first()
-            .and_then(|value| parse_transform_length(value))
-            .unwrap_or(0.0);
-        let dy = args
-            .get(1)
-            .and_then(|value| parse_transform_length(value))
-            .unwrap_or(0.0);
-        return (dx, dy);
-    }
-    if name.eq_ignore_ascii_case("matrix") {
-        let tx = args
-            .get(4)
-            .and_then(|value| parse_transform_length(value))
-            .unwrap_or(0.0);
-        let ty = args
-            .get(5)
-            .and_then(|value| parse_transform_length(value))
-            .unwrap_or(0.0);
-        return (tx, ty);
-    }
-    (0.0, 0.0)
-}
-
-fn split_transform_args(args: &str) -> Vec<&str> {
-    let comma_separated = args
-        .split(',')
-        .map(str::trim)
-        .filter(|token| !token.is_empty())
-        .collect::<Vec<_>>();
-    if comma_separated.len() > 1 {
-        return comma_separated;
-    }
-    args.split_whitespace()
-        .map(str::trim)
-        .filter(|token| !token.is_empty())
-        .collect()
-}
-
-fn parse_transform_length(token: &str) -> Option<f32> {
-    let token = token.trim();
-    if token.is_empty() {
-        return None;
-    }
-    if let Some(px) = token.strip_suffix("px") {
-        return px.trim().parse::<f32>().ok();
-    }
-    token.parse::<f32>().ok()
 }
 
 // ── Positioned child layout ─────────────────────────────────────────────────

@@ -12,6 +12,7 @@ mod parser;
 mod shorthand;
 mod scope;
 mod supports;
+mod transform;
 pub(crate) mod style;
 mod tokenizer;
 
@@ -29,6 +30,8 @@ pub(crate) use style::ContainerContext;
 pub(crate) use style::supports_declaration;
 pub(crate) use scope::{ScopePrelude, parse_scope_prelude};
 pub(crate) use supports::supports_condition_matches;
+pub use transform::AffineTransform;
+pub(crate) use transform::{TransformReferenceBox, parse_transform_list, parse_transform_with_origin};
 pub use tokenizer::tokenize;
 
 /// A token emitted by the CSS tokenizer.

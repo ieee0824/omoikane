@@ -203,6 +203,14 @@
       "baseline_supported": false
     },
     {
+      "id": "css.transforms-2d-geometry",
+      "area": "cssom",
+      "description": "2D transforms affect painted DOM geometry without changing layout size",
+      "setup": "globalThis.__transformProbe = document.createElement('div'); __transformProbe.style.cssText = 'position:absolute;left:0;top:0;width:100px;height:50px;transform-origin:0 0;transform:translateX(100px) rotate(90deg)'; document.body.appendChild(__transformProbe)",
+      "probe": "CSS.supports('transform', 'translateX(100px) rotate(90deg)') && (() => { const rect = __transformProbe.getBoundingClientRect(); return rect.left === 50 && rect.top === 0 && rect.width === 50 && rect.height === 100 && __transformProbe.offsetWidth === 100 && __transformProbe.offsetHeight === 50; })()",
+      "baseline_supported": false
+    },
+    {
       "id": "css.match-media-screen",
       "area": "css",
       "description": "matchMedia evaluates the screen media type",
