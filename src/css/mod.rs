@@ -32,7 +32,8 @@ pub(crate) use style::supports_declaration;
 pub(crate) use scope::{ScopePrelude, parse_scope_prelude};
 pub(crate) use supports::supports_condition_matches;
 pub(crate) use transition::{
-    expand_transition_shorthand, normalize_transition_longhand,
+    computed_transition_longhand, computed_transition_shorthand, expand_transition_shorthand,
+    normalize_transition_longhand, normalize_transition_shorthand,
 };
 pub use transform::AffineTransform;
 pub(crate) use transform::{TransformReferenceBox, parse_transform_list, parse_transform_with_origin};

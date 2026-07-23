@@ -126,6 +126,8 @@ pub struct StyleResolver {
     container_contexts: HashMap<usize, ContainerContext>,
     /// Parsed `@keyframes` rules keyed by animation name.
     keyframes: HashMap<String, Vec<KeyframeStep>>,
+    /// Before/after style snapshots and running CSS transitions.
+    transition_timeline: super::transition::TransitionTimeline,
 }
 
 #[derive(Debug, Clone)]
@@ -215,6 +217,41 @@ impl StyleResolver {
         } else {
             16.0
         }
+    }
+
+    /// Advances the CSS transition sampling clock without moving it backwards.
+    pub(crate) fn set_transition_time_ms(&mut self, time_ms: f64) -> bool {
+        if self.transition_timeline.set_time_ms(time_ms) {
+            self.cache.clear();
+            self.pseudo_cache.clear();
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Moves transition state into a replacement resolver after stylesheet
+    /// invalidation, preserving before-change values and running transitions.
+    pub(crate) fn take_transition_timeline(
+        &mut self,
+    ) -> super::transition::TransitionTimeline {
+        std::mem::take(&mut self.transition_timeline)
+    }
+
+    pub(crate) fn install_transition_timeline(
+        &mut self,
+        timeline: super::transition::TransitionTimeline,
+    ) {
+        self.transition_timeline = timeline;
+        self.cache.clear();
+        self.pseudo_cache.clear();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn invalidate_style_cache_for_test(&mut self) {
+        self.cache.clear();
+        self.pseudo_cache.clear();
+        self.selector_match_cache = SelectorMatchCache::default();
     }
 
     /// Sets the viewport dimensions in px.
@@ -634,7 +671,17 @@ impl StyleResolver {
         resolve_non_inherited_css_wide_keywords(&mut properties);
         apply_inheritance(&mut properties, parent_style);
         apply_initial_values(&mut properties);
+        properties.insert(
+            "transition".to_string(),
+            ComputedValue::Keyword(super::computed_transition_shorthand(&properties)),
+        );
         zero_border_width_for_none_style(&mut properties);
+        if pseudo.is_none() {
+            self.transition_timeline
+                .sample(node.identity(), &mut properties);
+        }
+        // CSS Animations outrank CSS Transitions in the cascade. Sampling the
+        // transition first lets an active keyframe effect override it.
         self.apply_animation_snapshot(&mut properties, parent_style, &important_properties);
 
         ComputedStyle { properties }
@@ -968,7 +1015,7 @@ fn validate_declaration(name: &str, value: &Value) -> DeclarationValidation {
             | "transition-delay"
     ) {
         let rendered = render_value(value);
-        return match super::normalize_transition_longhand(name, &rendered) {
+        return match super::computed_transition_longhand(name, &rendered) {
             Some(normalized) => DeclarationValidation::Valid(ComputedValue::Keyword(normalized)),
             None => DeclarationValidation::Invalid,
         };
@@ -2580,7 +2627,7 @@ fn truncate_log_value(value: &str, max_len: usize) -> String {
     out
 }
 
-fn is_supported_property(name: &str) -> bool {
+pub(super) fn is_supported_property(name: &str) -> bool {
     matches!(
         name,
         "align-items"

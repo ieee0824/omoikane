@@ -1142,6 +1142,9 @@
       // normalizes to a single declaration that matches the last-wins reads of
       // getValue/getPriority.
       const setValue = (kebab, value, priority) => {
+        const normalized = __omoikane_normalize_style_value(kebab, String(value));
+        if (normalized === null) return;
+        value = normalized;
         const decls = parseDecls();
         const matches = decls.filter(d => d.name === kebab);
         if (matches.length > 0) {

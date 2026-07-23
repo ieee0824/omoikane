@@ -1021,7 +1021,7 @@ fn transition_shorthand_expands_lists_and_computes_initial_values() {
     );
     assert_eq!(
         style.get("transition-duration"),
-        Some(&ComputedValue::Keyword("200ms, 1s".to_string()))
+        Some(&ComputedValue::Keyword("0.2s, 1s".to_string()))
     );
     assert_eq!(
         style.get("transition-timing-function"),
@@ -1029,7 +1029,13 @@ fn transition_shorthand_expands_lists_and_computes_initial_values() {
     );
     assert_eq!(
         style.get("transition-delay"),
-        Some(&ComputedValue::Keyword("50ms, 0s".to_string()))
+        Some(&ComputedValue::Keyword("0.05s, 0s".to_string()))
+    );
+    assert_eq!(
+        style.get("transition"),
+        Some(&ComputedValue::Keyword(
+            "opacity 0.2s linear 0.05s, transform 1s ease-in".to_string()
+        ))
     );
 
     let plain = NodeHandle::element("span");
@@ -1050,6 +1056,28 @@ fn transition_shorthand_expands_lists_and_computes_initial_values() {
         initial.get("transition-delay"),
         Some(&ComputedValue::Keyword("0s".to_string()))
     );
+    assert_eq!(
+        initial.get("transition"),
+        Some(&ComputedValue::Keyword("all".to_string()))
+    );
+}
+
+#[test]
+fn transition_property_preserves_unknown_custom_ident_case() {
+    let element = NodeHandle::element("div");
+    element.set_attribute(
+        "style",
+        "transition-property: ALL, INVALID, SYNTAX, SRC, WIDTH;",
+    );
+    let mut resolver = StyleResolver::new();
+    assert_eq!(
+        resolver
+            .computed_style(&element)
+            .get("transition-property"),
+        Some(&ComputedValue::Keyword(
+            "all, INVALID, SYNTAX, SRC, width".to_string()
+        ))
+    );
 }
 
 #[test]
@@ -1065,7 +1093,7 @@ fn invalid_transition_declaration_does_not_override_valid_value() {
 
     assert_eq!(
         style.get("transition-duration"),
-        Some(&ComputedValue::Keyword("200ms".to_string()))
+        Some(&ComputedValue::Keyword("0.2s".to_string()))
     );
     assert_eq!(
         style.get("transition-timing-function"),
@@ -1076,6 +1104,159 @@ fn invalid_transition_declaration_does_not_override_valid_value() {
         "opacity 200ms ease-in 50ms"
     ));
     assert!(!supports_declaration("transition-duration", "-1s"));
+}
+
+#[test]
+fn transition_timeline_samples_number_and_length_intermediate_values() {
+    let element = NodeHandle::element("div");
+    element.set_attribute(
+        "style",
+        "opacity: 0; width: 10px; transition: opacity 1s linear, width 2s linear;",
+    );
+    let mut resolver = StyleResolver::new();
+    let initial = resolver.computed_style(&element);
+    assert_eq!(initial.get("opacity"), Some(&ComputedValue::Number(0.0)));
+    assert_eq!(initial.get("width"), Some(&ComputedValue::Px(10.0)));
+
+    element.set_attribute(
+        "style",
+        "opacity: 1; width: 30px; transition: opacity 1s linear, width 2s linear;",
+    );
+    resolver.invalidate_style_cache_for_test();
+    let start = resolver.computed_style(&element);
+    assert_eq!(start.get("opacity"), Some(&ComputedValue::Number(0.0)));
+    assert_eq!(start.get("width"), Some(&ComputedValue::Px(10.0)));
+
+    resolver.set_transition_time_ms(500.0);
+    let middle = resolver.computed_style(&element);
+    assert_eq!(middle.get("opacity"), Some(&ComputedValue::Number(0.5)));
+    assert_eq!(middle.get("width"), Some(&ComputedValue::Px(15.0)));
+
+    resolver.set_transition_time_ms(2_000.0);
+    let end = resolver.computed_style(&element);
+    assert_eq!(end.get("opacity"), Some(&ComputedValue::Number(1.0)));
+    assert_eq!(end.get("width"), Some(&ComputedValue::Px(30.0)));
+}
+
+#[test]
+fn transition_uses_last_matching_property_and_repeats_shorter_lists() {
+    let element = NodeHandle::element("div");
+    element.set_attribute(
+        "style",
+        "opacity: 0; transition-property: all, opacity; transition-duration: 10s, 1s; transition-timing-function: linear;",
+    );
+    let mut resolver = StyleResolver::new();
+    let _ = resolver.computed_style(&element);
+
+    element.set_attribute(
+        "style",
+        "opacity: 1; transition-property: all, opacity; transition-duration: 10s, 1s; transition-timing-function: linear;",
+    );
+    resolver.invalidate_style_cache_for_test();
+    let _ = resolver.computed_style(&element);
+    resolver.set_transition_time_ms(500.0);
+
+    assert_eq!(
+        resolver.computed_style(&element).get("opacity"),
+        Some(&ComputedValue::Number(0.5))
+    );
+}
+
+#[test]
+fn transition_interpolates_color_with_premultiplied_alpha() {
+    let element = NodeHandle::element("div");
+    element.set_attribute(
+        "style",
+        "background-color: transparent; transition: background-color 1s linear;",
+    );
+    let mut resolver = StyleResolver::new();
+    let _ = resolver.computed_style(&element);
+
+    element.set_attribute(
+        "style",
+        "background-color: rgb(255, 0, 0); transition: background-color 1s linear;",
+    );
+    resolver.invalidate_style_cache_for_test();
+    let _ = resolver.computed_style(&element);
+    resolver.set_transition_time_ms(500.0);
+
+    assert_eq!(
+        resolver.computed_style(&element).get("background-color"),
+        Some(&ComputedValue::Color("rgba(255, 0, 0, 0.5)".to_string()))
+    );
+}
+
+#[test]
+fn reversing_transition_shortens_from_the_current_value() {
+    let element = NodeHandle::element("div");
+    element.set_attribute("style", "opacity: 0; transition: opacity 1s linear;");
+    let mut resolver = StyleResolver::new();
+    let _ = resolver.computed_style(&element);
+
+    element.set_attribute("style", "opacity: 1; transition: opacity 1s linear;");
+    resolver.invalidate_style_cache_for_test();
+    let _ = resolver.computed_style(&element);
+    resolver.set_transition_time_ms(500.0);
+    assert_eq!(
+        resolver.computed_style(&element).get("opacity"),
+        Some(&ComputedValue::Number(0.5))
+    );
+
+    element.set_attribute("style", "opacity: 0; transition: opacity 1s linear;");
+    resolver.invalidate_style_cache_for_test();
+    assert_eq!(
+        resolver.computed_style(&element).get("opacity"),
+        Some(&ComputedValue::Number(0.5))
+    );
+    resolver.set_transition_time_ms(750.0);
+    assert_eq!(
+        resolver.computed_style(&element).get("opacity"),
+        Some(&ComputedValue::Number(0.25))
+    );
+    resolver.set_transition_time_ms(1_000.0);
+    assert_eq!(
+        resolver.computed_style(&element).get("opacity"),
+        Some(&ComputedValue::Number(0.0))
+    );
+}
+
+#[test]
+fn negative_transition_delay_starts_from_the_advanced_value() {
+    let element = NodeHandle::element("div");
+    element.set_attribute(
+        "style",
+        "opacity: 0; transition: opacity 1s linear -500ms;",
+    );
+    let mut resolver = StyleResolver::new();
+    let _ = resolver.computed_style(&element);
+
+    element.set_attribute(
+        "style",
+        "opacity: 1; transition: opacity 1s linear -500ms;",
+    );
+    resolver.invalidate_style_cache_for_test();
+    assert_eq!(
+        resolver.computed_style(&element).get("opacity"),
+        Some(&ComputedValue::Number(0.5))
+    );
+}
+
+#[test]
+fn transition_all_does_not_interpolate_discrete_number_properties() {
+    let element = NodeHandle::element("div");
+    element.set_attribute("style", "z-index: 1; transition: all 1s linear;");
+    let mut resolver = StyleResolver::new();
+    let _ = resolver.computed_style(&element);
+
+    element.set_attribute("style", "z-index: 3; transition: all 1s linear;");
+    resolver.invalidate_style_cache_for_test();
+    let changed = resolver.computed_style(&element);
+    assert_eq!(changed.get("z-index"), Some(&ComputedValue::Number(3.0)));
+    resolver.set_transition_time_ms(500.0);
+    assert_eq!(
+        resolver.computed_style(&element).get("z-index"),
+        Some(&ComputedValue::Number(3.0))
+    );
 }
 
 #[test]

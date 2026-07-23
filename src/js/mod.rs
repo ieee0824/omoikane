@@ -311,6 +311,10 @@ impl EventLoopState {
     fn has_pending_animation_frames(&self) -> bool {
         !self.animation_frame_order.is_empty()
     }
+
+    fn rendering_time_ms(&self) -> f64 {
+        (self.now_ms as f64).max(self.animation_frame_time_ms)
+    }
 }
 
 struct HostState {
@@ -759,12 +763,31 @@ impl HostState {
             None => true,
         };
         if !needs_rebuild {
+            let transition_time_ms = self.event_loop.rendering_time_ms();
+            let time_changed = self
+                .document_styles
+                .get_mut(&document_id)
+                .and_then(|entry| entry.resolver.as_mut())
+                .is_some_and(|resolver| resolver.set_transition_time_ms(transition_time_ms));
+            if time_changed && document_id == self.document.identity() {
+                self.layout_root = None;
+            }
             return;
         }
         // Build the resolver as a local first so no `document_styles` borrow is
         // held while `self.viewport` / the document tree are read, then store it.
+        let timeline = self
+            .document_styles
+            .get_mut(&document_id)
+            .and_then(|entry| entry.resolver.as_mut())
+            .map(StyleResolver::take_transition_timeline);
+        let transition_time_ms = self.event_loop.rendering_time_ms();
         let viewport = self.viewport_for_document(document);
         let mut resolver = StyleResolver::new();
+        if let Some(timeline) = timeline {
+            resolver.install_transition_timeline(timeline);
+        }
+        let _ = resolver.set_transition_time_ms(transition_time_ms);
         resolver.set_viewport(viewport.width, viewport.height);
         for (scope, implicit_scope_root, css) in collect_inline_stylesheets(document) {
             let sheet = crate::paint::stylesheet::parse_stylesheet_forgiving(&css);
@@ -2338,6 +2361,11 @@ fn register_host_bindings(
             NativeFunction::from_copy_closure(computed_style_native),
         ),
         (
+            js_string!("__omoikane_normalize_style_value"),
+            2,
+            NativeFunction::from_copy_closure(normalize_style_value_native),
+        ),
+        (
             js_string!("__omoikane_layout_metrics"),
             1,
             NativeFunction::from_copy_closure(layout_metrics_native),
@@ -3444,6 +3472,45 @@ fn css_supports_native(
     Ok(JsValue::from(crate::css::supports_declaration(
         &property, &value,
     )))
+}
+
+/// Normalizes values assigned through CSSStyleDeclaration. Transition values
+/// use native grammar validation so invalid assignments are ignored and
+/// specified-value serialization is canonical.
+fn normalize_style_value_native(
+    _: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let property = args
+        .first()
+        .cloned()
+        .unwrap_or_default()
+        .to_string(context)?
+        .to_std_string_escaped()
+        .to_ascii_lowercase();
+    let value = args
+        .get(1)
+        .cloned()
+        .unwrap_or_default()
+        .to_string(context)?
+        .to_std_string_escaped();
+    let normalized = if property == "transition" {
+        crate::css::normalize_transition_shorthand(&value)
+    } else if matches!(
+        property.as_str(),
+        "transition-property"
+            | "transition-duration"
+            | "transition-timing-function"
+            | "transition-delay"
+    ) {
+        crate::css::normalize_transition_longhand(&property, &value)
+    } else {
+        Some(value)
+    };
+    Ok(normalized
+        .map(|value| js_string!(value).into())
+        .unwrap_or_else(JsValue::null))
 }
 
 /// Evaluates the condition-text form of `CSS.supports()` using the same
@@ -11185,6 +11252,65 @@ mod tests {
             .unwrap()
             .as_boolean()
             .unwrap());
+    }
+
+    #[test]
+    fn css_transition_uses_animation_frame_time_for_style_and_layout() {
+        let document = crate::html::TreeBuilder::parse(
+            r#"<html><head><style>
+                html, body { margin: 0; }
+                #target { opacity: 0; width: 10px; height: 10px;
+                          transition: opacity 1s linear, width 1s linear; }
+            </style></head><body><div id="target"></div></body></html>"#,
+        )
+        .document();
+        let mut runtime = JsRuntime::with_document(document).unwrap();
+
+        assert_eq!(
+            eval_str(
+                &mut runtime,
+                "getComputedStyle(document.getElementById('target')).opacity"
+            ),
+            "0"
+        );
+        assert_eq!(
+            runtime
+                .eval("document.getElementById('target').offsetWidth")
+                .unwrap()
+                .as_number(),
+            Some(10.0)
+        );
+
+        runtime
+            .eval(
+                "const target = document.getElementById('target'); \
+                 target.style.opacity = '1'; target.style.width = '30px';",
+            )
+            .unwrap();
+        assert_eq!(
+            eval_str(&mut runtime, "getComputedStyle(target).opacity"),
+            "0"
+        );
+
+        assert_eq!(runtime.run_animation_frame(500).unwrap(), 0);
+        assert_eq!(
+            eval_str(&mut runtime, "getComputedStyle(target).opacity"),
+            "0.5"
+        );
+        assert_eq!(
+            runtime.eval("target.offsetWidth").unwrap().as_number(),
+            Some(20.0)
+        );
+
+        assert_eq!(runtime.run_animation_frame(500).unwrap(), 0);
+        assert_eq!(
+            eval_str(&mut runtime, "getComputedStyle(target).opacity"),
+            "1"
+        );
+        assert_eq!(
+            runtime.eval("target.offsetWidth").unwrap().as_number(),
+            Some(30.0)
+        );
     }
 
     #[test]
