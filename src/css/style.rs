@@ -120,6 +120,10 @@ pub struct StyleResolver {
     media_query_cache: HashMap<String, Vec<MediaQuery>>,
     /// Parsed `@scope` preludes, including invalid results, keyed by source text.
     scope_prelude_cache: HashMap<String, Option<super::ScopePrelude>>,
+    /// Parsed `@container` preludes, including invalid results, keyed by source text.
+    container_query_cache: HashMap<String, Option<super::ContainerQuery>>,
+    /// Query-container geometry and metadata from the previous layout pass.
+    container_contexts: HashMap<usize, ContainerContext>,
     /// Parsed `@keyframes` rules keyed by animation name.
     keyframes: HashMap<String, Vec<KeyframeStep>>,
 }
@@ -135,6 +139,15 @@ struct StylesheetScope {
     root: Option<NodeHandle>,
     implicit_scope_root: Option<NodeHandle>,
     encapsulation_order: usize,
+}
+
+/// Geometry and computed containment properties captured after a layout pass.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct ContainerContext {
+    pub width: f32,
+    pub height: f32,
+    pub container_type: String,
+    pub names: Vec<String>,
 }
 
 /// Deterministic post-load instant used for static screenshots.
@@ -164,6 +177,13 @@ impl StyleResolver {
     /// Creates a new style resolver.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Whether any loaded stylesheet contains a size container query.
+    pub(crate) fn has_container_queries(&self) -> bool {
+        self.stylesheets.iter().any(|input| {
+            contains_at_rule_named(&input.stylesheet.rules, "container")
+        })
     }
 
     /// Returns the number of distinct `@media` prelude strings currently held
@@ -210,6 +230,21 @@ impl StyleResolver {
         self.cache.clear();
         self.pseudo_cache.clear();
         self.selector_match_cache = SelectorMatchCache::default();
+    }
+
+    /// Installs the query-container snapshot for the next style pass.
+    pub(crate) fn set_container_contexts(
+        &mut self,
+        contexts: HashMap<usize, ContainerContext>,
+    ) -> bool {
+        if self.container_contexts == contexts {
+            return false;
+        }
+        self.container_contexts = contexts;
+        self.cache.clear();
+        self.pseudo_cache.clear();
+        self.selector_match_cache = SelectorMatchCache::default();
+        true
     }
 
     /// Adds a stylesheet with its origin.
@@ -405,6 +440,8 @@ impl StyleResolver {
                 color_scheme_dark,
                 &mut self.media_query_cache,
                 &mut self.scope_prelude_cache,
+                &mut self.container_query_cache,
+                &self.container_contexts,
                 element_keys.as_ref(),
                 &mut self.selector_match_cache,
                 stylesheet_scope.root.as_ref(),
@@ -683,6 +720,17 @@ impl StyleResolver {
     }
 }
 
+fn contains_at_rule_named(rules: &[Rule], expected: &str) -> bool {
+    rules.iter().any(|rule| match rule {
+        Rule::At(at_rule) => at_rule.name.eq_ignore_ascii_case(expected)
+            || at_rule
+                .block
+                .as_deref()
+                .is_some_and(|block| contains_at_rule_named(block, expected)),
+        _ => false,
+    })
+}
+
 fn animation_seconds(value: Option<&ComputedValue>) -> Option<f32> {
     match value {
         Some(ComputedValue::Number(value)) => Some(*value),
@@ -834,6 +882,41 @@ fn validate_declaration(name: &str, value: &Value) -> DeclarationValidation {
     }
     if is_non_negative_sizing_property(name) {
         return validate_sizing_value(name, value);
+    }
+    if name.eq_ignore_ascii_case("container-type") {
+        return match value {
+            Value::Keyword(keyword)
+                if is_css_wide_keyword(&keyword.to_ascii_lowercase())
+                    || matches!(keyword.to_ascii_lowercase().as_str(), "normal" | "inline-size" | "size") =>
+            {
+                DeclarationValidation::Valid(ComputedValue::Keyword(keyword.to_ascii_lowercase()))
+            }
+            _ => DeclarationValidation::Invalid,
+        };
+    }
+    if name.eq_ignore_ascii_case("container-name") {
+        let valid_custom_name = |keyword: &str| {
+            let lower = keyword.to_ascii_lowercase();
+            !is_css_wide_keyword(&lower)
+                && !matches!(lower.as_str(), "none" | "and" | "or" | "not" | "default")
+        };
+        let valid = match value {
+            Value::Keyword(keyword) => {
+                keyword.eq_ignore_ascii_case("none")
+                    || is_css_wide_keyword(&keyword.to_ascii_lowercase())
+                    || valid_custom_name(keyword)
+            }
+            Value::List(values) => !values.is_empty()
+                && values
+                    .iter()
+                    .all(|value| matches!(value, Value::Keyword(keyword) if valid_custom_name(keyword))),
+            _ => false,
+        };
+        return if valid {
+            DeclarationValidation::Valid(ComputedValue::Keyword(render_value(value)))
+        } else {
+            DeclarationValidation::Invalid
+        };
     }
     DeclarationValidation::Unvalidated
 }
@@ -1497,6 +1580,8 @@ fn collect_indexed_rule_candidates(
     color_scheme_dark: bool,
     media_cache: &mut HashMap<String, Vec<MediaQuery>>,
     scope_cache: &mut HashMap<String, Option<super::ScopePrelude>>,
+    container_cache: &mut HashMap<String, Option<super::ContainerQuery>>,
+    container_contexts: &HashMap<usize, ContainerContext>,
     element_keys: Option<&ElementMatchKeys>,
     selector_cache: &mut SelectorMatchCache,
     shadow_scope: Option<&NodeHandle>,
@@ -1516,6 +1601,8 @@ fn collect_indexed_rule_candidates(
             color_scheme_dark,
             media_cache,
             scope_cache,
+            container_cache,
+            container_contexts,
             None,
             selector_cache,
             shadow_scope,
@@ -1541,6 +1628,8 @@ fn collect_indexed_rule_candidates(
             color_scheme_dark,
             media_cache,
             scope_cache,
+            container_cache,
+            container_contexts,
             Some(element_keys),
             selector_cache,
             shadow_scope,
@@ -1566,6 +1655,8 @@ fn collect_indexed_rule_candidates(
             color_scheme_dark,
             media_cache,
             scope_cache,
+            container_cache,
+            container_contexts,
             Some(element_keys),
             selector_cache,
             shadow_scope,
@@ -1589,6 +1680,8 @@ fn collect_rule_candidates(
     color_scheme_dark: bool,
     media_cache: &mut HashMap<String, Vec<MediaQuery>>,
     scope_cache: &mut HashMap<String, Option<super::ScopePrelude>>,
+    container_cache: &mut HashMap<String, Option<super::ContainerQuery>>,
+    container_contexts: &HashMap<usize, ContainerContext>,
     element_keys: Option<&ElementMatchKeys>,
     selector_cache: &mut SelectorMatchCache,
     shadow_scope: Option<&NodeHandle>,
@@ -1708,6 +1801,8 @@ fn collect_rule_candidates(
                             color_scheme_dark,
                             media_cache,
                             scope_cache,
+                            container_cache,
+                            container_contexts,
                             element_keys,
                             selector_cache,
                             shadow_scope,
@@ -1728,6 +1823,13 @@ fn collect_rule_candidates(
                         )
                     } else if at_rule.name.eq_ignore_ascii_case("supports") {
                         super::supports_condition_matches(&at_rule.prelude)
+                    } else if at_rule.name.eq_ignore_ascii_case("container") {
+                        container_query_matches(
+                            node,
+                            &at_rule.prelude,
+                            container_cache,
+                            container_contexts,
+                        )
                     } else if at_rule.name.eq_ignore_ascii_case("keyframes")
                         || at_rule.name.eq_ignore_ascii_case("-webkit-keyframes")
                     {
@@ -1750,6 +1852,8 @@ fn collect_rule_candidates(
                             color_scheme_dark,
                             media_cache,
                             scope_cache,
+                            container_cache,
+                            container_contexts,
                             element_keys,
                             selector_cache,
                             shadow_scope,
@@ -1909,6 +2013,42 @@ fn media_query_matches(
     queries
         .iter()
         .any(|q| evaluate_media_query(q, viewport_width, viewport_height, color_scheme_dark))
+}
+
+fn container_query_matches(
+    node: &NodeHandle,
+    prelude: &str,
+    cache: &mut HashMap<String, Option<super::ContainerQuery>>,
+    contexts: &HashMap<usize, ContainerContext>,
+) -> bool {
+    let prelude = prelude.trim();
+    let query = cache
+        .entry(prelude.to_string())
+        .or_insert_with(|| super::parse_container_query(prelude));
+    let Some(query) = query.as_ref() else {
+        return false;
+    };
+
+    let mut ancestor = node.parent_node();
+    while let Some(candidate) = ancestor {
+        if candidate.node_type() == NodeType::Element
+            && let Some(context) = contexts.get(&candidate.identity()) {
+                let supports_axis = context.container_type.eq_ignore_ascii_case("size")
+                    || (!query.requires_block_size()
+                        && context.container_type.eq_ignore_ascii_case("inline-size"));
+                let name_matches = query.name.as_ref().is_none_or(|name| {
+                    context
+                        .names
+                        .iter()
+                        .any(|candidate| candidate == name)
+                });
+                if supports_axis && name_matches {
+                    return query.matches(context.width, context.height);
+                }
+            }
+        ancestor = candidate.parent_node();
+    }
+    false
 }
 
 /// Counts the total number of declarations inside a rule list (used for
@@ -2433,6 +2573,8 @@ fn is_supported_property(name: &str) -> bool {
             | "clip-path"
             | "-webkit-clip-path"
             | "color"
+            | "container-name"
+            | "container-type"
             | "content"
             | "cursor"
             | "display"
@@ -3787,6 +3929,12 @@ fn apply_initial_values(properties: &mut BTreeMap<String, ComputedValue>) {
     properties
         .entry("cursor".to_string())
         .or_insert_with(|| ComputedValue::Keyword("auto".to_string()));
+    properties
+        .entry("container-name".to_string())
+        .or_insert_with(|| ComputedValue::Keyword("none".to_string()));
+    properties
+        .entry("container-type".to_string())
+        .or_insert_with(|| ComputedValue::Keyword("normal".to_string()));
 }
 
 /// CSS 2.1 §8.5.3: If border-style is 'none', the computed border-width is 0.

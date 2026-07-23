@@ -6938,3 +6938,75 @@ fn child_containing_rect_ignores_offsets_for_explicit_width() {
     assert_eq!(rect.width, 200.0);
     assert_eq!(rect.height, 120.0);
 }
+
+#[test]
+fn size_container_query_uses_named_ancestor_content_box() {
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let container = NodeHandle::element("section");
+    let item = NodeHandle::element("article");
+    item.set_attribute("class", "item");
+    document.append_child(body.clone());
+    body.append_child(container.clone());
+    container.append_child(item.clone());
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "section { width: 500px; container-type: inline-size; container-name: card-shell; } \
+             .item { width: 10px; } \
+             @container card-shell (width >= 400px) { .item { width: 100px; } } \
+             @container CARD-SHELL (width >= 400px) { .item { height: 25px; } }",
+        )
+        .unwrap(),
+    );
+    let layout = layout_tree(
+        &body,
+        &mut resolver,
+        Rect { x: 0.0, y: 0.0, width: 600.0, height: 0.0 },
+    )
+    .unwrap();
+
+    let item_box = find_layout_box_by_tag(&layout, "article").unwrap();
+    assert_eq!(item_box.dimensions.content.width, 100.0);
+    assert_eq!(item_box.dimensions.content.height, 0.0, "container names are case-sensitive");
+    assert_eq!(
+        resolver.computed_style(&container).get("container-type"),
+        Some(&ComputedValue::Keyword("inline-size".to_string()))
+    );
+}
+
+#[test]
+fn container_query_does_not_query_the_styled_element_itself() {
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let container = NodeHandle::element("section");
+    document.append_child(body.clone());
+    body.append_child(container);
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "section { width: 300px; container-type: inline-size; } \
+             @container (width > 200px) { section { width: 100px; } }",
+        )
+        .unwrap(),
+    );
+    let layout = layout_tree(
+        &body,
+        &mut resolver,
+        Rect { x: 0.0, y: 0.0, width: 400.0, height: 0.0 },
+    )
+    .unwrap();
+
+    assert_eq!(
+        find_layout_box_by_tag(&layout, "section")
+            .unwrap()
+            .dimensions
+            .content
+            .width,
+        300.0
+    );
+}

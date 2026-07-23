@@ -2830,6 +2830,23 @@ fn computed_style_native(
         let document_id = document.identity();
         let mut state = state.borrow_mut();
         state.ensure_style_resolver(&document);
+        let needs_container_layout = state
+            .document_styles
+            .get(&document_id)
+            .and_then(|entry| entry.resolver.as_ref())
+            .is_some_and(StyleResolver::has_container_queries);
+        if needs_container_layout {
+            if document_id == state.document.identity() {
+                state.ensure_layout();
+            } else {
+                let viewport = state.viewport_for_document(&document);
+                let _ = state
+                    .document_styles
+                    .get_mut(&document_id)
+                    .and_then(|entry| entry.resolver.as_mut())
+                    .and_then(|resolver| crate::layout::layout_tree(&document, resolver, viewport));
+            }
+        }
         let json = match state
             .document_styles
             .get_mut(&document_id)
@@ -8513,6 +8530,93 @@ mod tests {
             .unwrap()
             .as_boolean()
             .unwrap());
+    }
+
+    #[test]
+    fn css_container_rules_expose_name_query_and_nested_rules() {
+        let doc = crate::html::TreeBuilder::parse(
+            "<html><head><style>@container card (width >= 400px) { main { width: 20px; } } @container/* c */(inline-size > 10px) { p { color: red; } }</style></head><body></body></html>",
+        )
+        .document();
+        let mut runtime = JsRuntime::with_document(doc).unwrap();
+        assert!(runtime
+            .eval(
+                r#"(() => {
+                    const named = document.styleSheets[0].cssRules[0];
+                    const unnamed = document.styleSheets[0].cssRules[1];
+                    return named instanceof CSSContainerRule &&
+                        named instanceof CSSConditionRule &&
+                        named.containerName === "card" &&
+                        named.containerQuery === "(width >= 400px)" &&
+                        named.conditionText === "card (width >= 400px)" &&
+                        named.cssRules.length === 1 &&
+                        named.cssRules[0].selectorText === "main" &&
+                        unnamed instanceof CSSContainerRule &&
+                        unnamed.containerName === "" &&
+                        unnamed.containerQuery === "(inline-size > 10px)";
+                })()"#,
+            )
+            .unwrap()
+            .as_boolean()
+            .unwrap());
+    }
+
+    #[test]
+    fn size_container_query_controls_javascript_computed_style() {
+        let doc = crate::html::TreeBuilder::parse(
+            r#"<html><head><style>
+                #shell { width: 500px; container-type: inline-size; container-name: shell; }
+                #item { width: 10px; }
+                @container shell (inline-size >= 400px) { #item { width: 75px; } }
+            </style></head><body><section id="shell"><article id="item"></article></section></body></html>"#,
+        )
+        .document();
+        let mut runtime = JsRuntime::with_document(doc).unwrap();
+        assert_eq!(
+            eval_str(
+                &mut runtime,
+                "getComputedStyle(document.getElementById('item')).width"
+            ),
+            "75px"
+        );
+        assert_eq!(
+            eval_str(
+                &mut runtime,
+                "getComputedStyle(document.getElementById('shell')).containerType"
+            ),
+            "inline-size"
+        );
+        assert_eq!(
+            eval_str(
+                &mut runtime,
+                "(() => { document.getElementById('shell').style.width = '300px'; return getComputedStyle(document.getElementById('item')).width; })()"
+            ),
+            "10px",
+            "a forced layout after container geometry changes must re-evaluate the query"
+        );
+    }
+
+    #[test]
+    fn size_container_query_uses_iframe_document_layout() {
+        let mut runtime = runtime_from_html(
+            r#"<html><body><iframe id="frame" width="500" height="200"></iframe></body></html>"#,
+        );
+        runtime
+            .eval(
+                r#"const childDocument = document.getElementById('frame').contentDocument;
+                   const style = childDocument.createElement('style');
+                   style.textContent = '#shell { width: 420px; container-type: inline-size; } #item { width: 2px; } @container (width >= 400px) { #item { width: 42px; } }';
+                   childDocument.head.appendChild(style);
+                   const shell = childDocument.createElement('section'); shell.id = 'shell';
+                   const childItem = childDocument.createElement('div'); childItem.id = 'item';
+                   shell.appendChild(childItem); childDocument.body.appendChild(shell);"#,
+            )
+            .unwrap();
+
+        assert_eq!(
+            eval_str(&mut runtime, "getComputedStyle(childItem).width"),
+            "42px"
+        );
     }
 
     #[test]

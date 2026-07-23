@@ -220,6 +220,7 @@ impl Parser {
                         || name.eq_ignore_ascii_case("supports")
                         || name.eq_ignore_ascii_case("layer")
                         || name.eq_ignore_ascii_case("scope")
+                        || name.eq_ignore_ascii_case("container")
                     {
                         if name.eq_ignore_ascii_case("scope") {
                             self.scope_depth += 1;

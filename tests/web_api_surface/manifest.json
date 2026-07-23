@@ -195,6 +195,14 @@
       "baseline_supported": false
     },
     {
+      "id": "css.container-size-query",
+      "area": "cssom",
+      "description": "Size container queries feed layout geometry back into cascade and expose CSSContainerRule",
+      "setup": "(() => { const shell = document.createElement('section'); shell.id = 'surface-container'; shell.innerHTML = '<div id=surface-contained></div>'; document.body.appendChild(shell); const style = document.createElement('style'); style.textContent = '#surface-container { width: 420px; container-type: inline-size; container-name: surface-shell; } #surface-contained { width: 1px; } @container surface-shell (inline-size >= 400px) { #surface-contained { width: 31px; } }'; document.head.appendChild(style); })()",
+      "probe": "getComputedStyle(document.getElementById('surface-contained')).width === '31px' && (() => { const rule = document.styleSheets[document.styleSheets.length - 1].cssRules[2]; return rule instanceof CSSContainerRule && rule.containerName === 'surface-shell' && rule.containerQuery === '(inline-size >= 400px)'; })()",
+      "baseline_supported": false
+    },
+    {
       "id": "css.match-media-screen",
       "area": "css",
       "description": "matchMedia evaluates the screen media type",
