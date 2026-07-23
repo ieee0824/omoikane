@@ -609,7 +609,7 @@ pub fn layout_tree(
             layout = layout_node(node, resolver, containing_block, containing_block, None)?;
         }
     }
-    populate_layout_transforms(&mut layout, resolver, 16.0);
+    populate_layout_transforms(&mut layout, resolver, resolver.root_font_size());
     Some(layout)
 }
 
@@ -625,15 +625,6 @@ fn populate_layout_transforms(
     let font_size = match style.get("font-size") {
         Some(ComputedValue::Px(value)) => *value,
         _ => 16.0,
-    };
-    let root_font_size = if layout
-        .node
-        .tag_name()
-        .is_some_and(|tag| tag.eq_ignore_ascii_case("html"))
-    {
-        font_size
-    } else {
-        root_font_size
     };
     layout.transform = parse_transform_with_origin(
         transform,

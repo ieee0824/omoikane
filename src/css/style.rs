@@ -208,6 +208,15 @@ impl StyleResolver {
         self.selector_match_cache = SelectorMatchCache::default();
     }
 
+    /// Returns the root font size used to resolve `rem` units.
+    pub(crate) fn root_font_size(&self) -> f32 {
+        if self.root_font_size > 0.0 {
+            self.root_font_size
+        } else {
+            16.0
+        }
+    }
+
     /// Sets the viewport dimensions in px.
     ///
     /// These values are used to resolve `vw`, `vh`, `vmin`, and `vmax` units.

@@ -844,6 +844,33 @@ fn transformed_parent_moves_descendant_as_one_painted_subtree() {
 }
 
 #[test]
+fn transform_can_move_an_offscreen_source_box_into_the_viewport() {
+    let document = TreeBuilder::parse(
+        r#"<html><head><style>
+            html, body { margin: 0; }
+            div { position: absolute; left: -20px; top: 0; width: 10px; height: 10px;
+                  background: red; transform: translateX(25px); }
+        </style></head><body><div></div></body></html>"#,
+    )
+    .document();
+    let canvas = render_document(
+        &document,
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 20.0,
+            height: 12.0,
+        },
+    )
+    .unwrap();
+
+    assert_eq!(canvas.pixel(4, 5), Some(Color::rgba(0, 0, 0, 0)));
+    assert_eq!(canvas.pixel(5, 5), Some(Color::rgb(255, 0, 0)));
+    assert_eq!(canvas.pixel(14, 5), Some(Color::rgb(255, 0, 0)));
+    assert_eq!(canvas.pixel(15, 5), Some(Color::rgba(0, 0, 0, 0)));
+}
+
+#[test]
 fn nested_object_fallback_preserves_fixed_background_on_inline_image_fragment() {
     let html = r#"<html><head><style>body { margin: 0; font: 2px/2px sans-serif; } object { display: inline; vertical-align: bottom; } object object object { background: url(data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAIAAAD91JpzAAAABnRSTlMAAAAAAABupgeRAAAABmJLR0QA%2FwD%2FAP%2BgvaeTAAAAEUlEQVR42mP4%2F58BCv7%2FZwAAHfAD%2FabwPj4AAAAASUVORK5CYII%3D) fixed 1px 0; }</style></head><body><object data="data:application/x-unknown,ERROR"><object data="data:application/x-unknown,ERROR" type="text/html"><object data="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAIAAAD91JpzAAAABnRSTlMAAAAAAABupgeRAAAABmJLR0QA%2FwD%2FAP%2BgvaeTAAAAEUlEQVR42mP4%2F58BCv7%2FZwAAHfAD%2FabwPj4AAAAASUVORK5CYII%3D"></object></object></object></body></html>"#;
     let document = TreeBuilder::parse(html).document();

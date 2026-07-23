@@ -312,11 +312,11 @@ fn parse_length_percentage(
     if let Some(px) = value.strip_suffix("px") {
         return parse_number(px);
     }
-    if let Some(em) = value.strip_suffix("em") {
-        return Some(parse_number(em)? * reference.font_size);
-    }
     if let Some(rem) = value.strip_suffix("rem") {
         return Some(parse_number(rem)? * reference.root_font_size);
+    }
+    if let Some(em) = value.strip_suffix("em") {
+        return Some(parse_number(em)? * reference.font_size);
     }
     let zero = parse_number(value)?;
     (zero == 0.0).then_some(0.0)

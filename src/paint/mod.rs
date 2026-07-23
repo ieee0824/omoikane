@@ -103,7 +103,9 @@ fn force_opacity_enabled() -> bool {
 #[allow(unused_imports)]
 use base64::Engine;
 
-use crate::css::{ComputedStyle, ComputedValue, Origin, PseudoElement, StyleResolver};
+use crate::css::{
+    AffineTransform, ComputedStyle, ComputedValue, Origin, PseudoElement, StyleResolver,
+};
 use crate::dom::{Node, NodeHandle, NodeType};
 use crate::font::{Font, WebFontRegistry};
 #[allow(unused_imports)]
@@ -1135,28 +1137,14 @@ fn paint_box_internal(
     }
 
     if !layout.transform.is_identity() {
-        let source_bounds = subtree_paint_bounds(layout, resolver, viewport);
-        let mut offscreen = Canvas::new(canvas.width(), canvas.height());
-        // A transformed element establishes a paint containment boundary for
-        // its positioned descendants. The ancestor clip is applied in device
-        // space while compositing; element-local overflow/clip-path remains in
-        // the untransformed offscreen coordinate space.
-        paint_box_internal_untransformed(
-            &mut offscreen,
+        paint_transformed_box(
+            canvas,
             layout,
             resolver,
-            None,
+            inherited_clip,
             viewport,
-            true,
             text_fonts,
             web_fonts,
-        );
-        composite_affine(
-            canvas,
-            &offscreen,
-            layout.transform,
-            inherited_clip,
-            source_bounds,
         );
         return;
     }
@@ -1171,6 +1159,129 @@ fn paint_box_internal(
         text_fonts,
         web_fonts,
     );
+}
+
+const TRANSFORM_SURFACE_TILE_SIZE: u32 = 2048;
+
+#[allow(clippy::too_many_arguments)]
+fn paint_transformed_box(
+    canvas: &mut Canvas,
+    layout: &LayoutBox,
+    resolver: &mut StyleResolver,
+    inherited_clip: Option<Rect>,
+    viewport: Rect,
+    text_fonts: &[Arc<Font>],
+    web_fonts: Option<&WebFontRegistry>,
+) {
+    let Some(inverse) = layout.transform.inverse() else {
+        return;
+    };
+    let canvas_bounds = Rect {
+        x: 0.0,
+        y: 0.0,
+        width: canvas.width() as f32,
+        height: canvas.height() as f32,
+    };
+    let destination_bounds = if let Some(clip) = inherited_clip {
+        let Some(bounds) = intersect(clip, canvas_bounds) else {
+            return;
+        };
+        bounds
+    } else {
+        canvas_bounds
+    };
+    let required_source = transformed_rect_bounds(destination_bounds, inverse);
+    let required_source = Rect {
+        x: required_source.x - 1.0,
+        y: required_source.y - 1.0,
+        width: required_source.width + 2.0,
+        height: required_source.height + 2.0,
+    };
+    let Some(source_region) = intersect(subtree_paint_bounds(layout, resolver), required_source)
+    else {
+        return;
+    };
+    let source_x0 = source_region.x.floor() as i32;
+    let source_y0 = source_region.y.floor() as i32;
+    let source_x1 = (source_region.x + source_region.width).ceil() as i32;
+    let source_y1 = (source_region.y + source_region.height).ceil() as i32;
+    let tile_size = TRANSFORM_SURFACE_TILE_SIZE as i32;
+
+    // Paint source-space tiles instead of a viewport-sized surface. This keeps
+    // pixels that begin outside the viewport but transform into view, while the
+    // inverse-mapped destination bounds and tiling prevent unbounded allocation.
+    for tile_y in (source_y0..source_y1).step_by(tile_size as usize) {
+        for tile_x in (source_x0..source_x1).step_by(tile_size as usize) {
+            let tile_x1 = (tile_x + tile_size).min(source_x1);
+            let tile_y1 = (tile_y + tile_size).min(source_y1);
+            let tile_width = (tile_x1 - tile_x).max(1) as u32;
+            let tile_height = (tile_y1 - tile_y).max(1) as u32;
+            let mut translated_layout = layout.clone();
+            translate_layout_for_paint(
+                &mut translated_layout,
+                -(tile_x as f32),
+                -(tile_y as f32),
+            );
+            let translated_viewport = Rect {
+                x: viewport.x - tile_x as f32,
+                y: viewport.y - tile_y as f32,
+                width: viewport.width,
+                height: viewport.height,
+            };
+            let mut offscreen = Canvas::new(tile_width, tile_height);
+            // A transformed element establishes a paint containment boundary
+            // for positioned descendants. Its ancestor clip is applied later
+            // in destination space; local overflow/clip-path is painted here.
+            paint_box_internal_untransformed(
+                &mut offscreen,
+                &translated_layout,
+                resolver,
+                None,
+                translated_viewport,
+                true,
+                text_fonts,
+                web_fonts,
+            );
+            let tile_transform = layout
+                .transform
+                .multiply(AffineTransform::translate(tile_x as f32, tile_y as f32));
+            composite_affine(
+                canvas,
+                &offscreen,
+                tile_transform,
+                inherited_clip,
+                Rect {
+                    x: 0.0,
+                    y: 0.0,
+                    width: tile_width as f32,
+                    height: tile_height as f32,
+                },
+            );
+        }
+    }
+}
+
+fn translate_layout_for_paint(layout: &mut LayoutBox, dx: f32, dy: f32) {
+    layout.dimensions.content.x += dx;
+    layout.dimensions.content.y += dy;
+    for line in &mut layout.lines {
+        line.rect.x += dx;
+        line.rect.y += dy;
+        for fragment in &mut line.fragments {
+            fragment.rect.x += dx;
+            fragment.rect.y += dy;
+        }
+    }
+    if let Some(marker) = &mut layout.marker {
+        marker.x += dx;
+        marker.y += dy;
+    }
+    layout.transform = AffineTransform::translate(dx, dy)
+        .multiply(layout.transform)
+        .multiply(AffineTransform::translate(-dx, -dy));
+    for child in &mut layout.children {
+        translate_layout_for_paint(child, dx, dy);
+    }
 }
 
 fn paint_box_internal_untransformed(
@@ -1318,7 +1429,7 @@ fn paint_box_internal_untransformed(
 fn composite_affine(
     destination: &mut Canvas,
     source: &Canvas,
-    transform: crate::css::AffineTransform,
+    transform: AffineTransform,
     clip: Option<Rect>,
     source_hint: Rect,
 ) {
@@ -1428,11 +1539,7 @@ fn composite_affine(
     }
 }
 
-fn subtree_paint_bounds(
-    layout: &LayoutBox,
-    resolver: &mut StyleResolver,
-    viewport: Rect,
-) -> Rect {
+fn subtree_paint_bounds(layout: &LayoutBox, resolver: &mut StyleResolver) -> Rect {
     let mut bounds = border_box_rect(layout);
     for line in &layout.lines {
         bounds = union_rect(bounds, line.rect);
@@ -1479,21 +1586,16 @@ fn subtree_paint_bounds(
     }
 
     for child in &layout.children {
-        let child_bounds = subtree_paint_bounds(child, resolver, viewport);
+        let child_bounds = subtree_paint_bounds(child, resolver);
         bounds = union_rect(
             bounds,
             transformed_rect_bounds(child_bounds, child.transform),
         );
     }
-    intersect(bounds, viewport).unwrap_or(Rect {
-        x: 0.0,
-        y: 0.0,
-        width: 0.0,
-        height: 0.0,
-    })
+    bounds
 }
 
-fn transformed_rect_bounds(rect: Rect, transform: crate::css::AffineTransform) -> Rect {
+fn transformed_rect_bounds(rect: Rect, transform: AffineTransform) -> Rect {
     if transform.is_identity() {
         return rect;
     }
