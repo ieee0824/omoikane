@@ -8620,6 +8620,32 @@ mod tests {
     }
 
     #[test]
+    fn container_properties_resolve_css_wide_keywords_to_initial_values() {
+        let doc = crate::html::TreeBuilder::parse(
+            r#"<html><head><style>
+                #target { container-type: inline-size; container-type: initial;
+                          container-name: card; container-name: unset; }
+            </style></head><body><div id="target"></div></body></html>"#,
+        )
+        .document();
+        let mut runtime = JsRuntime::with_document(doc).unwrap();
+        assert_eq!(
+            eval_str(
+                &mut runtime,
+                "getComputedStyle(document.getElementById('target')).containerType"
+            ),
+            "normal"
+        );
+        assert_eq!(
+            eval_str(
+                &mut runtime,
+                "getComputedStyle(document.getElementById('target')).containerName"
+            ),
+            "none"
+        );
+    }
+
+    #[test]
     fn parsed_ids_are_window_named_properties_but_script_globals_can_override() {
         let doc = crate::html::TreeBuilder::parse(
             "<html><body><style id='theme'></style><div id='log'></div></body></html>",

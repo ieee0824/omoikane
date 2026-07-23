@@ -84,7 +84,9 @@ impl Feature {
         match self.comparison {
             Comparison::Less => actual < self.value_px,
             Comparison::LessEqual => actual <= self.value_px,
-            Comparison::Equal => (actual - self.value_px).abs() <= f32::EPSILON,
+            // Layout uses single-precision geometry, so decimal lengths and
+            // accumulated box arithmetic can differ by a tiny subpixel amount.
+            Comparison::Equal => (actual - self.value_px).abs() <= 0.01,
             Comparison::GreaterEqual => actual >= self.value_px,
             Comparison::Greater => actual > self.value_px,
         }
@@ -397,6 +399,10 @@ mod tests {
         assert!(query.matches(500.0, 0.0));
         assert!(!query.matches(300.0, 0.0));
         assert!(!query.matches(501.0, 0.0));
+
+        let query = parse_container_query("(width = 100px)").unwrap();
+        assert!(query.matches(100.005, 0.0));
+        assert!(!query.matches(100.02, 0.0));
     }
 
     #[test]

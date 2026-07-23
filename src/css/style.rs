@@ -622,6 +622,7 @@ impl StyleResolver {
         apply_presentational_hints(node, &mut properties, pseudo);
         resolve_current_color_on_color_property(&mut properties, parent_style);
         resolve_explicit_inherit(&mut properties, parent_style);
+        resolve_container_css_wide_keywords(&mut properties);
         apply_inheritance(&mut properties, parent_style);
         apply_initial_values(&mut properties);
         zero_border_width_for_none_style(&mut properties);
@@ -3935,6 +3936,22 @@ fn apply_initial_values(properties: &mut BTreeMap<String, ComputedValue>) {
     properties
         .entry("container-type".to_string())
         .or_insert_with(|| ComputedValue::Keyword("normal".to_string()));
+}
+
+fn resolve_container_css_wide_keywords(properties: &mut BTreeMap<String, ComputedValue>) {
+    for name in ["container-name", "container-type"] {
+        let uses_initial_value = matches!(
+            properties.get(name),
+            Some(ComputedValue::Keyword(keyword))
+                if matches!(
+                    keyword.to_ascii_lowercase().as_str(),
+                    "initial" | "unset" | "revert" | "revert-layer"
+                )
+        );
+        if uses_initial_value {
+            properties.remove(name);
+        }
+    }
 }
 
 /// CSS 2.1 §8.5.3: If border-style is 'none', the computed border-width is 0.
