@@ -960,6 +960,19 @@ fn validate_declaration(name: &str, value: &Value) -> DeclarationValidation {
             DeclarationValidation::Invalid
         };
     }
+    if matches!(
+        name,
+        "transition-property"
+            | "transition-duration"
+            | "transition-timing-function"
+            | "transition-delay"
+    ) {
+        let rendered = render_value(value);
+        return match super::normalize_transition_longhand(name, &rendered) {
+            Some(normalized) => DeclarationValidation::Valid(ComputedValue::Keyword(normalized)),
+            None => DeclarationValidation::Invalid,
+        };
+    }
     DeclarationValidation::Unvalidated
 }
 
@@ -2687,6 +2700,11 @@ fn is_supported_property(name: &str) -> bool {
             | "row-gap"
             | "transform"
             | "transform-origin"
+            | "transition"
+            | "transition-property"
+            | "transition-duration"
+            | "transition-timing-function"
+            | "transition-delay"
             | "text-align"
             | "text-decoration-line"
             | "text-decoration-color"
@@ -3984,6 +4002,18 @@ fn apply_initial_values(properties: &mut BTreeMap<String, ComputedValue>) {
     properties
         .entry("transform-origin".to_string())
         .or_insert_with(|| ComputedValue::Keyword("50% 50%".to_string()));
+    properties
+        .entry("transition-property".to_string())
+        .or_insert_with(|| ComputedValue::Keyword("all".to_string()));
+    properties
+        .entry("transition-duration".to_string())
+        .or_insert_with(|| ComputedValue::Keyword("0s".to_string()));
+    properties
+        .entry("transition-timing-function".to_string())
+        .or_insert_with(|| ComputedValue::Keyword("ease".to_string()));
+    properties
+        .entry("transition-delay".to_string())
+        .or_insert_with(|| ComputedValue::Keyword("0s".to_string()));
 }
 
 fn resolve_non_inherited_css_wide_keywords(properties: &mut BTreeMap<String, ComputedValue>) {
@@ -3992,6 +4022,10 @@ fn resolve_non_inherited_css_wide_keywords(properties: &mut BTreeMap<String, Com
         "container-type",
         "transform",
         "transform-origin",
+        "transition-property",
+        "transition-duration",
+        "transition-timing-function",
+        "transition-delay",
     ] {
         let uses_initial_value = matches!(
             properties.get(name),

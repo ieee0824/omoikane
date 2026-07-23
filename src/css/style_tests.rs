@@ -1006,6 +1006,79 @@ fn computes_transform_origin_and_initial_transform_values() {
 }
 
 #[test]
+fn transition_shorthand_expands_lists_and_computes_initial_values() {
+    let element = NodeHandle::element("div");
+    element.set_attribute(
+        "style",
+        "transition: opacity 200ms linear 50ms, transform 1s ease-in;",
+    );
+    let mut resolver = StyleResolver::new();
+    let style = resolver.computed_style(&element);
+
+    assert_eq!(
+        style.get("transition-property"),
+        Some(&ComputedValue::Keyword("opacity, transform".to_string()))
+    );
+    assert_eq!(
+        style.get("transition-duration"),
+        Some(&ComputedValue::Keyword("200ms, 1s".to_string()))
+    );
+    assert_eq!(
+        style.get("transition-timing-function"),
+        Some(&ComputedValue::Keyword("linear, ease-in".to_string()))
+    );
+    assert_eq!(
+        style.get("transition-delay"),
+        Some(&ComputedValue::Keyword("50ms, 0s".to_string()))
+    );
+
+    let plain = NodeHandle::element("span");
+    let initial = resolver.computed_style(&plain);
+    assert_eq!(
+        initial.get("transition-property"),
+        Some(&ComputedValue::Keyword("all".to_string()))
+    );
+    assert_eq!(
+        initial.get("transition-duration"),
+        Some(&ComputedValue::Keyword("0s".to_string()))
+    );
+    assert_eq!(
+        initial.get("transition-timing-function"),
+        Some(&ComputedValue::Keyword("ease".to_string()))
+    );
+    assert_eq!(
+        initial.get("transition-delay"),
+        Some(&ComputedValue::Keyword("0s".to_string()))
+    );
+}
+
+#[test]
+fn invalid_transition_declaration_does_not_override_valid_value() {
+    let element = NodeHandle::element("div");
+    element.set_attribute(
+        "style",
+        "transition-duration: 200ms; transition-duration: -1s; \
+         transition-timing-function: linear; transition-timing-function: cubic-bezier(2, 0, 0, 1);",
+    );
+    let mut resolver = StyleResolver::new();
+    let style = resolver.computed_style(&element);
+
+    assert_eq!(
+        style.get("transition-duration"),
+        Some(&ComputedValue::Keyword("200ms".to_string()))
+    );
+    assert_eq!(
+        style.get("transition-timing-function"),
+        Some(&ComputedValue::Keyword("linear".to_string()))
+    );
+    assert!(supports_declaration(
+        "transition",
+        "opacity 200ms ease-in 50ms"
+    ));
+    assert!(!supports_declaration("transition-duration", "-1s"));
+}
+
+#[test]
 fn invalid_transform_does_not_override_an_earlier_valid_declaration() {
     let (_document, _body, title, _html) = sample_tree();
     let mut resolver = StyleResolver::new();
