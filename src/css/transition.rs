@@ -28,6 +28,15 @@ struct TransitionDescriptor {
 pub(crate) struct TransitionTimeline {
     now_ms: f64,
     elements: HashMap<usize, ElementTransitionState>,
+    events: Vec<TransitionEventRecord>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct TransitionEventRecord {
+    pub node_id: usize,
+    pub event_type: &'static str,
+    pub property_name: String,
+    pub elapsed_time: f64,
 }
 
 #[derive(Debug, Default)]
@@ -46,6 +55,7 @@ struct RunningTransition {
     start_ms: f64,
     end_ms: f64,
     timing: TimingFunction,
+    started: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -96,9 +106,22 @@ impl TransitionTimeline {
         }
 
         let configuration = TransitionConfiguration::from_properties(properties);
-        state
+        let no_longer_matching: Vec<String> = state
             .running
-            .retain(|property, _| configuration.matching_parameters(property).is_some());
+            .keys()
+            .filter(|property| configuration.matching_parameters(property).is_none())
+            .cloned()
+            .collect();
+        for property in no_longer_matching {
+            if let Some(running) = state.running.remove(&property) {
+                self.events.push(running.event_record(
+                    node_id,
+                    "transitioncancel",
+                    property,
+                    now_ms,
+                ));
+            }
+        }
 
         let mut changed_properties = BTreeSet::new();
         changed_properties.extend(state.base_values.keys().cloned());
@@ -131,15 +154,48 @@ impl TransitionTimeline {
                 state.running.remove(&property);
                 continue;
             };
+            if start_value == end_value {
+                if let Some(running) = state.running.remove(&property) {
+                    self.events.push(running.event_record(
+                        node_id,
+                        "transitioncancel",
+                        property.clone(),
+                        now_ms,
+                    ));
+                }
+                continue;
+            }
             let Some(parameters) = configuration.matching_parameters(&property) else {
-                state.running.remove(&property);
+                if let Some(running) = state.running.remove(&property) {
+                    self.events.push(running.event_record(
+                        node_id,
+                        "transitioncancel",
+                        property.clone(),
+                        now_ms,
+                    ));
+                }
                 continue;
             };
             if parameters.duration_ms + parameters.delay_ms <= 0.0
                 || interpolate_property(&property, &start_value, &end_value, 0.5).is_none()
             {
-                state.running.remove(&property);
+                if let Some(running) = state.running.remove(&property) {
+                    self.events.push(running.event_record(
+                        node_id,
+                        "transitioncancel",
+                        property.clone(),
+                        now_ms,
+                    ));
+                }
                 continue;
+            }
+            if let Some(running) = interrupted.as_ref() {
+                self.events.push(running.event_record(
+                    node_id,
+                    "transitioncancel",
+                    property.clone(),
+                    now_ms,
+                ));
             }
             let (reversing_adjusted_start_value, reversing_shortening_factor) = interrupted
                 .as_ref()
@@ -160,33 +216,67 @@ impl TransitionTimeline {
                 parameters.delay_ms
             };
             let start_ms = now_ms + delay_ms;
-            state.running.insert(
-                property,
-                RunningTransition {
-                    start_value,
-                    end_value,
-                    reversing_adjusted_start_value,
-                    reversing_shortening_factor,
-                    start_ms,
-                    end_ms: start_ms + parameters.duration_ms * reversing_shortening_factor,
-                    timing: parameters.timing,
-                },
-            );
+            let end_ms = start_ms + parameters.duration_ms * reversing_shortening_factor;
+            let started = now_ms >= start_ms;
+            let running = RunningTransition {
+                start_value,
+                end_value,
+                reversing_adjusted_start_value,
+                reversing_shortening_factor,
+                start_ms,
+                end_ms,
+                timing: parameters.timing,
+                started,
+            };
+            self.events.push(running.event_record(
+                node_id,
+                "transitionrun",
+                property.clone(),
+                now_ms,
+            ));
+            if started {
+                self.events.push(running.event_record(
+                    node_id,
+                    "transitionstart",
+                    property.clone(),
+                    now_ms,
+                ));
+            }
+            state.running.insert(property, running);
         }
         state.base_values = properties.clone();
 
         let mut completed = Vec::new();
-        for (property, running) in &state.running {
+        for (property, running) in &mut state.running {
+            if !running.started && now_ms >= running.start_ms {
+                running.started = true;
+                self.events.push(running.event_record(
+                    node_id,
+                    "transitionstart",
+                    property.clone(),
+                    now_ms,
+                ));
+            }
             if let Some(value) = running.sample(property, now_ms) {
                 properties.insert(property.clone(), value);
             }
             if now_ms >= running.end_ms {
+                self.events.push(running.event_record(
+                    node_id,
+                    "transitionend",
+                    property.clone(),
+                    now_ms,
+                ));
                 completed.push(property.clone());
             }
         }
         for property in completed {
             state.running.remove(&property);
         }
+    }
+
+    pub(crate) fn take_events(&mut self) -> Vec<TransitionEventRecord> {
+        std::mem::take(&mut self.events)
     }
 }
 
@@ -209,6 +299,23 @@ impl RunningTransition {
             &self.end_value,
             self.timing.sample(progress) as f32,
         )
+    }
+
+    fn event_record(
+        &self,
+        node_id: usize,
+        event_type: &'static str,
+        property_name: String,
+        now_ms: f64,
+    ) -> TransitionEventRecord {
+        let active_duration = (self.end_ms - self.start_ms).max(0.0);
+        let elapsed_ms = (now_ms - self.start_ms).clamp(0.0, active_duration);
+        TransitionEventRecord {
+            node_id,
+            event_type,
+            property_name,
+            elapsed_time: elapsed_ms / 1000.0,
+        }
     }
 }
 

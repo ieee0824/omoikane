@@ -247,6 +247,12 @@ impl StyleResolver {
         self.pseudo_cache.clear();
     }
 
+    pub(crate) fn take_transition_events(
+        &mut self,
+    ) -> Vec<super::transition::TransitionEventRecord> {
+        self.transition_timeline.take_events()
+    }
+
     #[cfg(test)]
     pub(crate) fn invalidate_style_cache_for_test(&mut self) {
         self.cache.clear();
