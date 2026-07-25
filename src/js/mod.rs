@@ -1281,6 +1281,16 @@ impl JsRuntime {
         self.host_state.borrow().event_loop.has_pending_timers()
     }
 
+    fn has_pending_css_transition_work(&self) -> bool {
+        self.host_state.borrow().document_styles.values().any(|entry| {
+            entry.dirty
+                || entry
+                    .resolver
+                    .as_ref()
+                    .is_some_and(StyleResolver::has_running_transitions)
+        })
+    }
+
     /// Runs one rendering opportunity and invokes its animation-frame callbacks.
     ///
     /// Pending macrotasks and promise jobs are drained before the frame starts.
@@ -1346,8 +1356,7 @@ impl JsRuntime {
         // A rendering opportunity samples CSS transitions after animation-frame
         // callbacks and their microtask checkpoint. This also queues transition
         // events without requiring script to force a computed-style read.
-        self.eval("__omoikane_sample_css_transitions()")?;
-        self.run_jobs()?;
+        self.update_css_transitions()?;
         Ok(callbacks_run)
     }
 
@@ -1407,7 +1416,7 @@ impl JsRuntime {
         let mut tasks_run: usize = 0;
 
         while advanced < max_virtual_ms && tasks_run < max_tasks {
-            if !self.has_pending_timers() {
+            if !self.has_pending_timers() && !self.has_pending_css_transition_work() {
                 break;
             }
             self.host_state.borrow_mut().event_loop.advance(step);
@@ -1459,9 +1468,24 @@ impl JsRuntime {
                     break;
                 }
             }
+
+            // Browsers have rendering opportunities between event-loop tasks,
+            // even when a page has not requested an animation-frame callback.
+            // Sampling here lets short transitions finish and dispatch events
+            // while the embedder is pumping timers (notably testharness.js).
+            if let Err(error) = self.update_css_transitions()
+                && std::env::var_os("OMOIKANE_LOG_SCRIPTS").is_some()
+            {
+                eprintln!("[omoikane][transition-frame-error] {error}");
+            }
         }
 
         tasks_run
+    }
+
+    fn update_css_transitions(&mut self) -> JsResult<()> {
+        self.eval("__omoikane_sample_css_transitions()")?;
+        self.run_jobs()
     }
 
     /// Executes a single timer payload: evaluates a source string, or invokes a
@@ -11649,6 +11673,62 @@ mod tests {
         assert_eq!(
             eval_str(&mut runtime, "detachedEvents.join('|')"),
             "opacity:0.5"
+        );
+    }
+
+    #[test]
+    fn css_transition_shorthand_matches_changed_longhands_from_initial_values() {
+        let document = crate::html::TreeBuilder::parse(
+            r#"<html><head></head><body><div id="target"
+                style="transition: padding 10ms linear"></div></body></html>"#,
+        )
+        .document();
+        let mut runtime = JsRuntime::with_document(document).unwrap();
+        runtime
+            .eval(
+                r#"globalThis.paddingEvents = [];
+                   globalThis.paddingTarget = document.getElementById("target");
+                   getComputedStyle(paddingTarget).paddingLeft;
+                   paddingTarget.addEventListener("transitionend", event =>
+                     paddingEvents.push(event.propertyName));
+                   paddingTarget.style.padding = "10px";"#,
+            )
+            .unwrap();
+
+        assert_eq!(runtime.run_animation_frame(0).unwrap(), 0);
+        assert_eq!(runtime.run_animation_frame(10).unwrap(), 0);
+        assert_eq!(
+            eval_str(&mut runtime, "paddingEvents.sort().join('|')"),
+            "padding-bottom|padding-left|padding-right|padding-top"
+        );
+    }
+
+    #[test]
+    fn css_transitions_run_concurrently_on_multiple_elements() {
+        let document = crate::html::TreeBuilder::parse(
+            r#"<html><body></body></html>"#,
+        )
+        .document();
+        let mut runtime = JsRuntime::with_document(document).unwrap();
+        runtime
+            .eval(
+                r#"globalThis.concurrentEvents = [];
+                   for (let index = 0; index < 3; index++) {
+                     const target = document.createElement("div");
+                     target.style.cssText = "transition: all 10ms linear; padding: 1px";
+                     document.body.appendChild(target);
+                     getComputedStyle(target).paddingLeft;
+                     target.addEventListener("transitionend", event =>
+                       concurrentEvents.push(index + ":" + event.propertyName));
+                     target.style.padding = "10px";
+                   }"#,
+            )
+            .unwrap();
+        assert_eq!(runtime.run_animation_frame(0).unwrap(), 0);
+        assert_eq!(runtime.run_animation_frame(10).unwrap(), 0);
+        assert_eq!(
+            runtime.eval("concurrentEvents.length").unwrap().as_number(),
+            Some(12.0)
         );
     }
 

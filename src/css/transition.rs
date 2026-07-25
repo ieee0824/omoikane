@@ -305,6 +305,12 @@ impl TransitionTimeline {
             .collect()
     }
 
+    pub(crate) fn has_running_transitions(&self) -> bool {
+        self.elements
+            .values()
+            .any(|state| !state.running.is_empty())
+    }
+
     pub(crate) fn cancel_detached_transitions(
         &mut self,
         active_node_ids: &std::collections::HashSet<usize>,
@@ -450,13 +456,48 @@ impl TransitionConfiguration {
             .enumerate()
             .rev()
             .find_map(|(index, candidate)| {
-                (candidate == "all" || candidate == property).then_some(index)
+                transition_property_matches(candidate, property).then_some(index)
             })?;
         Some(TransitionParameters {
             duration_ms: *repeated(&self.durations_ms, index)?,
             delay_ms: *repeated(&self.delays_ms, index)?,
             timing: *repeated(&self.timings, index)?,
         })
+    }
+}
+
+fn transition_property_matches(candidate: &str, property: &str) -> bool {
+    if candidate == "all" || candidate == property {
+        return true;
+    }
+    match candidate {
+        "margin" => property.starts_with("margin-"),
+        "padding" => property.starts_with("padding-"),
+        "margin-inline" => matches!(property, "margin-inline-start" | "margin-inline-end"),
+        "margin-block" => matches!(property, "margin-block-start" | "margin-block-end"),
+        "padding-inline" => matches!(property, "padding-inline-start" | "padding-inline-end"),
+        "padding-block" => matches!(property, "padding-block-start" | "padding-block-end"),
+        "border-width" => property.starts_with("border-") && property.ends_with("-width"),
+        "border-color" => property.starts_with("border-") && property.ends_with("-color"),
+        "border-style" => property.starts_with("border-") && property.ends_with("-style"),
+        "border" => {
+            property.starts_with("border-")
+                && (property.ends_with("-width")
+                    || property.ends_with("-color")
+                    || property.ends_with("-style"))
+        }
+        "background" => property.starts_with("background-"),
+        "flex" => matches!(property, "flex-grow" | "flex-shrink" | "flex-basis"),
+        "flex-flow" => matches!(property, "flex-direction" | "flex-wrap"),
+        "overflow" => matches!(property, "overflow-x" | "overflow-y"),
+        "border-radius" => property.starts_with("border-") && property.ends_with("-radius"),
+        "outline" => property.starts_with("outline-"),
+        "grid-column" => matches!(property, "grid-column-start" | "grid-column-end"),
+        "grid-row" => matches!(property, "grid-row-start" | "grid-row-end"),
+        "place-items" => matches!(property, "align-items" | "justify-items"),
+        "place-self" => matches!(property, "align-self" | "justify-self"),
+        "place-content" => matches!(property, "align-content" | "justify-content"),
+        _ => false,
     }
 }
 
@@ -499,6 +540,16 @@ fn time_to_ms(input: &str, allow_negative: bool) -> Option<f64> {
 fn effective_value(property: &str, value: Option<&ComputedValue>) -> Option<ComputedValue> {
     value.cloned().or_else(|| match property {
         "opacity" => Some(ComputedValue::Number(1.0)),
+        "flex-grow" => Some(ComputedValue::Number(0.0)),
+        "flex-shrink" => Some(ComputedValue::Number(1.0)),
+        property
+            if property.starts_with("margin-")
+                || property.starts_with("padding-")
+                || (property.starts_with("border-") && property.ends_with("-width"))
+                || property.ends_with("-radius") =>
+        {
+            Some(ComputedValue::Px(0.0))
+        }
         _ => None,
     })
 }
