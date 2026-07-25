@@ -1317,11 +1317,13 @@ fn paint_box_internal_untransformed(
         inherited_clip
     };
 
-    // opacity または解決可能な mask-image がある場合、要素サブツリーを
+    // opacity、filter、または解決可能な mask-image がある場合、要素サブツリーを
     // オフスクリーンバッファに描画してからまとめて合成する。
     let opacity = element_opacity(&style);
+    let filters = element_filters(&style);
     let mask = mask_image(&style);
-    let needs_offscreen = opacity.is_some_and(|v| v < 1.0) || mask.is_some();
+    let needs_offscreen =
+        opacity.is_some_and(|v| v < 1.0) || !filters.is_empty() || mask.is_some();
 
     if needs_offscreen {
         let opacity_value = opacity.unwrap_or(1.0);
@@ -1374,6 +1376,7 @@ fn paint_box_internal_untransformed(
             offset_border_box,
             offset_padding_box,
         );
+        apply_filters(&mut offscreen, &filters);
         offscreen.multiply_alpha(opacity_value);
         if let Some(mask) = &mask {
             apply_mask_alpha(&mut offscreen, mask, &style, offset_border_box);
@@ -2429,6 +2432,122 @@ fn element_opacity(style: &ComputedStyle) -> Option<f32> {
         return Some(1.0);
     }
     value
+}
+
+fn element_filters(style: &ComputedStyle) -> Vec<crate::css::FilterFunction> {
+    match style.get("filter") {
+        Some(ComputedValue::Keyword(value)) | Some(ComputedValue::String(value)) => {
+            crate::css::parse_filter_list(value).unwrap_or_default()
+        }
+        _ => Vec::new(),
+    }
+}
+
+fn apply_filters(canvas: &mut Canvas, filters: &[crate::css::FilterFunction]) {
+    use crate::css::FilterFunction;
+    for filter in filters {
+        match filter {
+            FilterFunction::Blur(radius) => box_blur(canvas, radius.round() as usize),
+            FilterFunction::Brightness(amount) => {
+                apply_color_filter(canvas, |value| value * amount, 1.0)
+            }
+            FilterFunction::Contrast(amount) => {
+                apply_color_filter(canvas, |value| (value - 0.5) * amount + 0.5, 1.0)
+            }
+            FilterFunction::Grayscale(amount) => apply_color_matrix(canvas, grayscale_matrix(*amount)),
+            FilterFunction::HueRotate(degrees) => apply_color_matrix(canvas, hue_rotate_matrix(*degrees)),
+            FilterFunction::Invert(amount) => {
+                apply_color_filter(canvas, |value| value * (1.0 - amount) + (1.0 - value) * amount, 1.0)
+            }
+            FilterFunction::Opacity(amount) => apply_color_filter(canvas, |value| value, *amount),
+            FilterFunction::Saturate(amount) => apply_color_matrix(canvas, saturate_matrix(*amount)),
+            FilterFunction::Sepia(amount) => apply_color_matrix(canvas, sepia_matrix(*amount)),
+        }
+    }
+}
+
+fn apply_color_filter(canvas: &mut Canvas, map: impl Fn(f32) -> f32, alpha: f32) {
+    for pixel in canvas.pixels.chunks_exact_mut(4) {
+        for channel in &mut pixel[..3] {
+            *channel = (map(*channel as f32 / 255.0).clamp(0.0, 1.0) * 255.0).round() as u8;
+        }
+        pixel[3] = (pixel[3] as f32 * alpha.clamp(0.0, 1.0)).round() as u8;
+    }
+}
+
+fn apply_color_matrix(canvas: &mut Canvas, matrix: [[f32; 3]; 3]) {
+    for pixel in canvas.pixels.chunks_exact_mut(4) {
+        let rgb = [pixel[0] as f32 / 255.0, pixel[1] as f32 / 255.0, pixel[2] as f32 / 255.0];
+        for row in 0..3 {
+            let value = matrix[row][0] * rgb[0] + matrix[row][1] * rgb[1] + matrix[row][2] * rgb[2];
+            pixel[row] = (value.clamp(0.0, 1.0) * 255.0).round() as u8;
+        }
+    }
+}
+
+fn grayscale_matrix(amount: f32) -> [[f32; 3]; 3] {
+    let a = amount.clamp(0.0, 1.0);
+    let keep = 1.0 - a;
+    [[keep + 0.2126*a, 0.7152*a, 0.0722*a], [0.2126*a, keep + 0.7152*a, 0.0722*a], [0.2126*a, 0.7152*a, keep + 0.0722*a]]
+}
+
+fn saturate_matrix(amount: f32) -> [[f32; 3]; 3] {
+    let a = amount.max(0.0);
+    [[0.213 + 0.787*a, 0.715 - 0.715*a, 0.072 - 0.072*a], [0.213 - 0.213*a, 0.715 + 0.285*a, 0.072 - 0.072*a], [0.213 - 0.213*a, 0.715 - 0.715*a, 0.072 + 0.928*a]]
+}
+
+fn sepia_matrix(amount: f32) -> [[f32; 3]; 3] {
+    let a = amount.clamp(0.0, 1.0);
+    let keep = 1.0 - a;
+    [[keep + 0.393*a, 0.769*a, 0.189*a], [0.349*a, keep + 0.686*a, 0.168*a], [0.272*a, 0.534*a, keep + 0.131*a]]
+}
+
+fn hue_rotate_matrix(degrees: f32) -> [[f32; 3]; 3] {
+    let radians = degrees.to_radians();
+    let c = radians.cos();
+    let s = radians.sin();
+    [[0.213 + c*0.787 - s*0.213, 0.715 - c*0.715 - s*0.715, 0.072 - c*0.072 + s*0.928], [0.213 - c*0.213 + s*0.143, 0.715 + c*0.285 + s*0.140, 0.072 - c*0.072 - s*0.283], [0.213 - c*0.213 - s*0.787, 0.715 - c*0.715 + s*0.715, 0.072 + c*0.928 + s*0.072]]
+}
+
+fn box_blur(canvas: &mut Canvas, radius: usize) {
+    if radius == 0 || canvas.width == 0 || canvas.height == 0 {
+        return;
+    }
+    let width = canvas.width as usize;
+    let height = canvas.height as usize;
+    let stride = width + 1;
+    let mut sums = vec![[0u64; 4]; stride * (height + 1)];
+    for y in 0..height {
+        let mut row = [0u64; 4];
+        for x in 0..width {
+            let source = (y * width + x) * 4;
+            let above = y * stride + x + 1;
+            let current = (y + 1) * stride + x + 1;
+            for channel in 0..4 {
+                row[channel] += canvas.pixels[source + channel] as u64;
+                sums[current][channel] = sums[above][channel] + row[channel];
+            }
+        }
+    }
+    for y in 0..height {
+        for x in 0..width {
+            let x0 = x.saturating_sub(radius);
+            let x1 = (x + radius + 1).min(width);
+            let y0 = y.saturating_sub(radius);
+            let y1 = (y + radius + 1).min(height);
+            let count = ((x1 - x0) * (y1 - y0)) as u64;
+            let bottom_right = sums[y1 * stride + x1];
+            let bottom_left = sums[y1 * stride + x0];
+            let top_right = sums[y0 * stride + x1];
+            let top_left = sums[y0 * stride + x0];
+            let index = (y * width + x) * 4;
+            for channel in 0..4 {
+                let sum = bottom_right[channel] + top_left[channel]
+                    - bottom_left[channel] - top_right[channel];
+                canvas.pixels[index + channel] = (sum / count) as u8;
+            }
+        }
+    }
 }
 
 fn normalize_rect(rect: Rect) -> Option<Rect> {

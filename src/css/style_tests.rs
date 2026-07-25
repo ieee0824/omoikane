@@ -582,7 +582,8 @@ fn identifies_supported_property_names() {
     assert!(is_supported_property("background-color"));
     assert!(is_supported_property("position"));
     assert!(is_supported_property("transform"));
-    assert!(!is_supported_property("filter"));
+    assert!(is_supported_property("filter"));
+    assert!(is_supported_property("backdrop-filter"));
 
     for property in [
         "transform-origin",
@@ -630,11 +631,14 @@ fn css_supports_uses_parser_and_supported_property_table() {
     assert!(supports_declaration("display", "block"));
     assert!(supports_declaration("margin", "10px 20px"));
     assert!(supports_declaration("cursor", "pointer"));
+    assert!(supports_declaration("filter", "brightness(150%) blur(2px)"));
+    assert!(supports_declaration("backdrop-filter", "grayscale(1)"));
     assert!(supports_declaration("--theme-color", "rgb(1, 2, 3)"));
 
     assert!(!supports_declaration("future-property", "value"));
     assert!(!supports_declaration("width", "12"));
     assert!(!supports_declaration("cursor", "definitely-not-a-cursor"));
+    assert!(!supports_declaration("filter", "blur(-1px)"));
     assert!(!supports_declaration("color", "red; width: 10px"));
     assert!(!supports_declaration("display", ""));
 }

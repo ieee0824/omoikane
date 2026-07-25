@@ -7,6 +7,7 @@ use std::fmt;
 
 mod matcher;
 mod container;
+mod filter;
 mod media;
 mod parser;
 mod shorthand;
@@ -23,6 +24,9 @@ pub use matcher::{
 };
 pub use media::{evaluate_media_query, parse_media_query_list};
 pub(crate) use container::{ContainerQuery, parse_container_query};
+pub(crate) use filter::{
+    FilterFunction, interpolate_filter_lists, normalize_filter_list, parse_filter_list,
+};
 pub use parser::{
     extract_font_face_rules, parse_selector_list, parse_style_attribute, parse_stylesheet,
 };

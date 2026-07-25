@@ -5321,6 +5321,44 @@ fn box_shadow_with_blur_renders_blurred_shadow() {
 // --- opacity テスト ---
 
 #[test]
+fn filter_brightness_applies_to_the_element_subtree() {
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let div = NodeHandle::element("div");
+    document.append_child(body.clone());
+    body.append_child(div);
+
+    let css = "body { margin: 0; } div { width: 20px; height: 20px; \
+               background-color: #4080c0; filter: brightness(0.5); }";
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(Origin::Author, parse_stylesheet(css).unwrap());
+    let viewport = Rect { x: 0.0, y: 0.0, width: 40.0, height: 40.0 };
+    let layout = layout_tree(&document, &mut resolver, viewport).unwrap();
+    let canvas = paint_layout(&layout, &mut resolver, viewport);
+
+    assert_eq!(canvas.pixel(10, 10), Some(Color::rgba(32, 64, 96, 255)));
+}
+
+#[test]
+fn filter_functions_apply_in_declared_order() {
+    fn render(filter: &str) -> Color {
+        let document = NodeHandle::document();
+        let body = NodeHandle::element("body");
+        let div = NodeHandle::element("div");
+        document.append_child(body.clone());
+        body.append_child(div);
+        let css = format!("body {{ margin: 0; }} div {{ width: 10px; height: 10px; background-color: #4080c0; filter: {filter}; }}");
+        let mut resolver = StyleResolver::new();
+        resolver.add_stylesheet(Origin::Author, parse_stylesheet(&css).unwrap());
+        let viewport = Rect { x: 0.0, y: 0.0, width: 20.0, height: 20.0 };
+        let layout = layout_tree(&document, &mut resolver, viewport).unwrap();
+        paint_layout(&layout, &mut resolver, viewport).pixel(5, 5).unwrap()
+    }
+
+    assert_ne!(render("brightness(0.5) invert(1)"), render("invert(1) brightness(0.5)"));
+}
+
+#[test]
 fn opacity_reduces_element_alpha() {
     // opacity: 0.5 を指定すると、要素の描画結果の alpha が半分になる。
     let document = NodeHandle::document();
