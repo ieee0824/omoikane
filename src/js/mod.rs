@@ -223,7 +223,6 @@ struct EventLoopState {
     macrotasks: VecDeque<TimerPayload>,
     timers: Vec<TimerTask>,
     next_animation_frame_id: u64,
-    animation_frame_time_ms: f64,
     animation_frame_order: Vec<u64>,
     animation_frame_callbacks: HashMap<u64, JsValue>,
 }
@@ -297,9 +296,9 @@ impl EventLoopState {
     }
 
     fn begin_animation_frame(&mut self, elapsed_ms: u64) -> (f64, Vec<u64>) {
-        self.animation_frame_time_ms += elapsed_ms as f64;
+        self.advance(elapsed_ms);
         (
-            self.animation_frame_time_ms,
+            self.now_ms as f64,
             std::mem::take(&mut self.animation_frame_order),
         )
     }
@@ -313,7 +312,7 @@ impl EventLoopState {
     }
 
     fn rendering_time_ms(&self) -> f64 {
-        (self.now_ms as f64).max(self.animation_frame_time_ms)
+        self.now_ms as f64
     }
 }
 
@@ -7211,6 +7210,32 @@ mod tests {
     }
 
     #[test]
+    fn style_normalization_host_call_is_limited_to_transition_properties() {
+        let mut runtime = JsRuntime::new().unwrap();
+        assert_eq!(
+            runtime
+                .eval(
+                    r#"(() => {
+                      const original = __omoikane_normalize_style_value;
+                      let calls = 0;
+                      globalThis.__omoikane_normalize_style_value = (...args) => {
+                        calls++;
+                        return original(...args);
+                      };
+                      const target = document.createElement("div");
+                      target.style.width = "10px";
+                      target.style.opacity = "0.5";
+                      target.style.transition = "opacity 1s linear";
+                      return calls;
+                    })()"#,
+                )
+                .unwrap()
+                .as_number(),
+            Some(1.0)
+        );
+    }
+
+    #[test]
     fn style_custom_property_preserves_case_across_roundtrip() {
         // Custom properties are case-sensitive: `--Foo` must not be folded to
         // lowercase or camelCase→kebab mangled into `---foo`. The value set via
@@ -11480,6 +11505,43 @@ mod tests {
         assert_eq!(
             runtime.eval("target.offsetWidth").unwrap().as_number(),
             Some(30.0)
+        );
+    }
+
+    #[test]
+    fn timer_and_animation_frame_share_one_transition_clock() {
+        let document = crate::html::TreeBuilder::parse(
+            r#"<html><head><style>
+                #target { opacity: 0; transition: opacity 1s linear; }
+            </style></head><body><div id="target"></div></body></html>"#,
+        )
+        .document();
+        let mut runtime = JsRuntime::with_document(document).unwrap();
+        runtime
+            .eval(
+                "globalThis.target = document.getElementById('target'); \
+                 getComputedStyle(target).opacity; target.style.opacity = '1'; \
+                 getComputedStyle(target).opacity;",
+            )
+            .unwrap();
+
+        assert_eq!(runtime.run_animation_frame(500).unwrap(), 0);
+        runtime.tick(16).unwrap();
+        assert_eq!(
+            eval_str(&mut runtime, "getComputedStyle(target).opacity"),
+            "0.516"
+        );
+        runtime
+            .eval("requestAnimationFrame(timestamp => globalThis.sharedTimestamp = timestamp)")
+            .unwrap();
+        assert_eq!(runtime.run_animation_frame(16).unwrap(), 1);
+        assert_eq!(
+            runtime.eval("sharedTimestamp").unwrap().as_number(),
+            Some(532.0)
+        );
+        assert_eq!(
+            eval_str(&mut runtime, "getComputedStyle(target).opacity"),
+            "0.532"
         );
     }
 
