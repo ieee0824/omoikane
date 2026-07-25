@@ -253,6 +253,19 @@ impl StyleResolver {
         self.transition_timeline.take_events()
     }
 
+    pub(crate) fn finish_transition_sample(&mut self, active_node_ids: &HashSet<usize>) {
+        self.transition_timeline.retain_nodes(active_node_ids);
+    }
+
+    pub(crate) fn running_transition_node_ids(&self) -> Vec<usize> {
+        self.transition_timeline.running_node_ids()
+    }
+
+    pub(crate) fn cancel_detached_transitions(&mut self, active_node_ids: &HashSet<usize>) {
+        self.transition_timeline
+            .cancel_detached_transitions(active_node_ids);
+    }
+
     #[cfg(test)]
     pub(crate) fn invalidate_style_cache_for_test(&mut self) {
         self.cache.clear();
@@ -682,13 +695,14 @@ impl StyleResolver {
             ComputedValue::Keyword(super::computed_transition_shorthand(&properties)),
         );
         zero_border_width_for_none_style(&mut properties);
+        // CSS Animations contribute below CSS Transitions in the cascade. The
+        // transition compares and samples the animation-adjusted before/after
+        // values, then its active value wins for the transitioned property.
+        self.apply_animation_snapshot(&mut properties, parent_style, &important_properties);
         if pseudo.is_none() {
             self.transition_timeline
                 .sample(node.identity(), &mut properties);
         }
-        // CSS Animations outrank CSS Transitions in the cascade. Sampling the
-        // transition first lets an active keyframe effect override it.
-        self.apply_animation_snapshot(&mut properties, parent_style, &important_properties);
 
         ComputedStyle { properties }
     }

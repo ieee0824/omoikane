@@ -5134,9 +5134,7 @@
   }
   globalThis.__omoikane_sample_css_transitions = function() {
     flushStyleSheets();
-    for (const element of document.querySelectorAll("*")) {
-      __omoikane_computed_style(element.__id);
-    }
+    __omoikane_sample_css_transition_styles();
     __dispatchPendingTransitionEvents();
   };
   globalThis.getComputedStyle = function(element, pseudoElt) {

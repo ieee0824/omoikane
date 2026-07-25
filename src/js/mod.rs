@@ -2377,6 +2377,11 @@ fn register_host_bindings(
             NativeFunction::from_copy_closure(take_transition_events_native),
         ),
         (
+            js_string!("__omoikane_sample_css_transition_styles"),
+            0,
+            NativeFunction::from_copy_closure(sample_css_transition_styles_native),
+        ),
+        (
             js_string!("__omoikane_layout_metrics"),
             1,
             NativeFunction::from_copy_closure(layout_metrics_native),
@@ -3548,6 +3553,84 @@ fn take_transition_events_native(
             .collect::<Vec<_>>();
         Ok(js_string!(serde_json::to_string(&events).unwrap_or_else(|_| "[]".to_string())).into())
     })
+}
+
+fn sample_css_transition_styles_native(
+    _: &JsValue,
+    _: &[JsValue],
+    _: &mut Context,
+) -> JsResult<JsValue> {
+    with_host_state(|state| {
+        let documents = {
+            let state = state.borrow();
+            state
+                .document_styles
+                .keys()
+                .filter_map(|document_id| state.nodes.get(document_id).cloned())
+                .collect::<Vec<_>>()
+        };
+        let mut state = state.borrow_mut();
+        for document in documents {
+            let document_id = document.identity();
+            let full_sample = state
+                .document_styles
+                .get(&document_id)
+                .is_none_or(|entry| entry.dirty || entry.resolver.is_none());
+            state.ensure_style_resolver(&document);
+            let running_node_ids = state
+                .document_styles
+                .get(&document_id)
+                .and_then(|entry| entry.resolver.as_ref())
+                .map(StyleResolver::running_transition_node_ids)
+                .unwrap_or_default();
+            if !full_sample && running_node_ids.is_empty() {
+                continue;
+            }
+            let elements = if full_sample {
+                collect_element_nodes(&document)
+            } else {
+                running_node_ids
+                    .iter()
+                    .filter_map(|node_id| state.nodes.get(node_id).cloned())
+                    .filter(|node| {
+                        document_root_for_node(node)
+                            .is_some_and(|root| root.identity() == document_id)
+                    })
+                    .collect()
+            };
+            let active_node_ids = elements.iter().map(NodeHandle::identity).collect::<HashSet<_>>();
+            if let Some(resolver) = state
+                .document_styles
+                .get_mut(&document_id)
+                .and_then(|entry| entry.resolver.as_mut())
+            {
+                for element in elements {
+                    resolver.computed_style(&element);
+                }
+                if full_sample {
+                    resolver.finish_transition_sample(&active_node_ids);
+                } else {
+                    resolver.cancel_detached_transitions(&active_node_ids);
+                }
+            }
+        }
+        Ok(JsValue::undefined())
+    })
+}
+
+fn collect_element_nodes(root: &NodeHandle) -> Vec<NodeHandle> {
+    fn visit(node: &NodeHandle, elements: &mut Vec<NodeHandle>) {
+        if node.node_type() == NodeType::Element {
+            elements.push(node.clone());
+        }
+        for child in node.child_nodes() {
+            visit(&child, elements);
+        }
+    }
+
+    let mut elements = Vec::new();
+    visit(root, &mut elements);
+    elements
 }
 
 /// Evaluates the condition-text form of `CSS.supports()` using the same
@@ -11377,6 +11460,86 @@ mod tests {
     }
 
     #[test]
+    fn css_transition_interpolates_transform_lists_with_relative_lengths() {
+        let document = crate::html::TreeBuilder::parse(
+            r#"<html><head><style>
+                #target { transform: none; transition: transform 1s linear; }
+            </style></head><body><div id="target"></div></body></html>"#,
+        )
+        .document();
+        let mut runtime = JsRuntime::with_document(document).unwrap();
+        runtime
+            .eval(
+                "globalThis.target = document.getElementById('target'); \
+                 getComputedStyle(target).transform; \
+                 target.style.transform = 'translate(50%, 2rem) rotate(180deg)'; \
+                 getComputedStyle(target).transform;",
+            )
+            .unwrap();
+
+        assert_eq!(runtime.run_animation_frame(500).unwrap(), 0);
+        assert_eq!(
+            eval_str(&mut runtime, "getComputedStyle(target).transform"),
+            "translate(25%, 1rem) rotate(1.570796rad)"
+        );
+        assert_eq!(runtime.run_animation_frame(500).unwrap(), 0);
+        assert_eq!(
+            eval_str(&mut runtime, "getComputedStyle(target).transform"),
+            "translate(50%, 2rem) rotate(180deg)"
+        );
+    }
+
+    #[test]
+    fn css_transition_interpolates_mixed_px_and_percentage_lengths_for_layout() {
+        let document = crate::html::TreeBuilder::parse(
+            r#"<html><head><style>
+                html, body { margin: 0; width: 200px; }
+                #target { width: 10px; height: 10px; transition: width 1s linear; }
+            </style></head><body><div id="target"></div></body></html>"#,
+        )
+        .document();
+        let mut runtime = JsRuntime::with_document(document).unwrap();
+        runtime
+            .eval(
+                "globalThis.target = document.getElementById('target'); \
+                 target.offsetWidth; target.style.width = '50%'; \
+                 getComputedStyle(target).width;",
+            )
+            .unwrap();
+
+        assert_eq!(runtime.run_animation_frame(500).unwrap(), 0);
+        assert_eq!(
+            eval_str(&mut runtime, "getComputedStyle(target).width"),
+            "calc(5px + 25%)"
+        );
+        assert_eq!(runtime.eval("target.offsetWidth").unwrap().as_number(), Some(55.0));
+    }
+
+    #[test]
+    fn css_transition_value_outranks_css_animation_value() {
+        let document = crate::html::TreeBuilder::parse(
+            r#"<html><head><style>
+                @keyframes hold { from { opacity: 0.75; } to { opacity: 0.75; } }
+                #target { opacity: 0; transition: opacity 1s linear;
+                          animation: hold 1s infinite; }
+            </style></head><body><div id="target"></div></body></html>"#,
+        )
+        .document();
+        let mut runtime = JsRuntime::with_document(document).unwrap();
+        runtime
+            .eval(
+                "globalThis.target = document.getElementById('target'); \
+                 getComputedStyle(target).opacity; \
+                 target.style.animation = 'none'; target.style.opacity = '0.25'; \
+                 getComputedStyle(target).opacity;",
+            )
+            .unwrap();
+
+        assert_eq!(runtime.run_animation_frame(500).unwrap(), 0);
+        assert_eq!(eval_str(&mut runtime, "getComputedStyle(target).opacity"), "0.5");
+    }
+
+    #[test]
     fn css_transition_dispatches_run_start_and_end_events() {
         let document = crate::html::TreeBuilder::parse(
             r#"<html><head><style>
@@ -11457,6 +11620,35 @@ mod tests {
         assert!(
             eval_str(&mut runtime, "transitionEvents.join('|')")
                 .contains("transitioncancel:opacity:0.25")
+        );
+    }
+
+    #[test]
+    fn css_transition_cancels_when_its_element_is_detached() {
+        let document = crate::html::TreeBuilder::parse(
+            r#"<html><head><style>
+                #target { opacity: 0; transition: opacity 1s linear; }
+            </style></head><body><div id="target"></div></body></html>"#,
+        )
+        .document();
+        let mut runtime = JsRuntime::with_document(document).unwrap();
+        runtime
+            .eval(
+                r#"globalThis.detachedEvents = [];
+                   globalThis.detachedTarget = document.getElementById("target");
+                   getComputedStyle(detachedTarget).opacity;
+                   detachedTarget.addEventListener("transitioncancel", event =>
+                     detachedEvents.push([event.propertyName, event.elapsedTime].join(":")));
+                   detachedTarget.style.opacity = "1";
+                   getComputedStyle(detachedTarget).opacity;"#,
+            )
+            .unwrap();
+        assert_eq!(runtime.run_animation_frame(250).unwrap(), 0);
+        runtime.eval("detachedTarget.remove()").unwrap();
+        assert_eq!(runtime.run_animation_frame(250).unwrap(), 0);
+        assert_eq!(
+            eval_str(&mut runtime, "detachedEvents.join('|')"),
+            "opacity:0.5"
         );
     }
 

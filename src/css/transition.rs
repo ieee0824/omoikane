@@ -86,7 +86,10 @@ impl TransitionTimeline {
             let next = self.now_ms.max(time_ms.max(0.0));
             if next > self.now_ms {
                 self.now_ms = next;
-                return true;
+                return self
+                    .elements
+                    .values()
+                    .any(|state| !state.running.is_empty());
             }
         }
         false
@@ -257,10 +260,8 @@ impl TransitionTimeline {
                     now_ms,
                 ));
             }
-            if let Some(value) = running.sample(property, now_ms) {
-                properties.insert(property.clone(), value);
-            }
             if now_ms >= running.end_ms {
+                properties.insert(property.clone(), running.end_value.clone());
                 self.events.push(running.event_record(
                     node_id,
                     "transitionend",
@@ -268,6 +269,8 @@ impl TransitionTimeline {
                     now_ms,
                 ));
                 completed.push(property.clone());
+            } else if let Some(value) = running.sample(property, now_ms) {
+                properties.insert(property.clone(), value);
             }
         }
         for property in completed {
@@ -277,6 +280,50 @@ impl TransitionTimeline {
 
     pub(crate) fn take_events(&mut self) -> Vec<TransitionEventRecord> {
         std::mem::take(&mut self.events)
+    }
+
+    pub(crate) fn retain_nodes(&mut self, active_node_ids: &std::collections::HashSet<usize>) {
+        let detached = self
+            .elements
+            .keys()
+            .filter(|node_id| !active_node_ids.contains(node_id))
+            .copied()
+            .collect::<Vec<_>>();
+        for node_id in detached {
+            if let Some(state) = self.elements.remove(&node_id) {
+                self.events.extend(state.running.into_iter().map(|(property, running)| {
+                    running.event_record(node_id, "transitioncancel", property, self.now_ms)
+                }));
+            }
+        }
+    }
+
+    pub(crate) fn running_node_ids(&self) -> Vec<usize> {
+        self.elements
+            .iter()
+            .filter_map(|(node_id, state)| (!state.running.is_empty()).then_some(*node_id))
+            .collect()
+    }
+
+    pub(crate) fn cancel_detached_transitions(
+        &mut self,
+        active_node_ids: &std::collections::HashSet<usize>,
+    ) {
+        let detached = self
+            .elements
+            .iter()
+            .filter_map(|(node_id, state)| {
+                (!state.running.is_empty() && !active_node_ids.contains(node_id))
+                    .then_some(*node_id)
+            })
+            .collect::<Vec<_>>();
+        for node_id in detached {
+            if let Some(state) = self.elements.remove(&node_id) {
+                self.events.extend(state.running.into_iter().map(|(property, running)| {
+                    running.event_record(node_id, "transitioncancel", property, self.now_ms)
+                }));
+            }
+        }
     }
 }
 
@@ -482,6 +529,14 @@ fn interpolate_property(
             mix(*start_px, *end_px),
             mix(*start_percent, *end_percent),
         )),
+        _ if length_components(start).is_some() && length_components(end).is_some() => {
+            let (start_px, start_percent) = length_components(start)?;
+            let (end_px, end_percent) = length_components(end)?;
+            Some(ComputedValue::CalcPxPercent(
+                mix(start_px, end_px),
+                mix(start_percent, end_percent),
+            ))
+        }
         (ComputedValue::Color(start), ComputedValue::Color(end))
             if property == "color" || property.ends_with("-color") =>
         {
@@ -491,6 +546,20 @@ fn interpolate_property(
                 start, end, progress,
             )))
         }
+        (ComputedValue::Keyword(start), ComputedValue::Keyword(end)) if property == "transform" => {
+            Some(ComputedValue::Keyword(super::interpolate_transform_lists(
+                start, end, progress,
+            )?))
+        }
+        _ => None,
+    }
+}
+
+fn length_components(value: &ComputedValue) -> Option<(f32, f32)> {
+    match value {
+        ComputedValue::Px(px) => Some((*px, 0.0)),
+        ComputedValue::Percentage(percent) => Some((0.0, *percent)),
+        ComputedValue::CalcPxPercent(px, percent) => Some((*px, *percent)),
         _ => None,
     }
 }
