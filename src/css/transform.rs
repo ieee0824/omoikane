@@ -881,6 +881,34 @@ mod tests {
     }
 
     #[test]
+    fn interpolated_transform_matches_firefox_midpoint_matrix() {
+        let value = interpolate_transform_lists(
+            "none",
+            "translate(50%, 2rem) rotate(180deg)",
+            0.5,
+        )
+        .unwrap();
+        let matrix = parse_transform_list(
+            &value,
+            TransformReferenceBox {
+                x: 0.0,
+                y: 0.0,
+                width: 55.0,
+                height: 10.0,
+                font_size: 16.0,
+                root_font_size: 16.0,
+            },
+        )
+        .unwrap();
+        assert!(matrix.a.abs() < 0.000_01);
+        assert!((matrix.b - 1.0).abs() < 0.000_01);
+        assert!((matrix.c + 1.0).abs() < 0.000_01);
+        assert!(matrix.d.abs() < 0.000_01);
+        assert!((matrix.e - 13.75).abs() < 0.000_01);
+        assert!((matrix.f - 16.0).abs() < 0.000_01);
+    }
+
+    #[test]
     fn rejects_incompatible_transform_operations_and_length_units() {
         let decomposed = interpolate_transform_lists("scale(2)", "rotate(1rad)", 0.5).unwrap();
         assert!(parse_transform_list(&decomposed, reference()).is_some());
