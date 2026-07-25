@@ -765,7 +765,12 @@ impl Parser {
         } else {
             value_tokens
         };
-        let value = if matches!(name.as_str(), "mask" | "-webkit-mask") {
+        let value = if name == "transition" || name.starts_with("transition-") {
+            // Transition lists need their top-level commas. The generic Value
+            // parser intentionally discards commas, so retain the declaration
+            // text for the dedicated transition grammar instead.
+            Value::Keyword(render_tokens(&value_tokens).trim().to_string())
+        } else if matches!(name.as_str(), "mask" | "-webkit-mask") {
             // Preserve `/` even when authors omit surrounding whitespace, as
             // in the common `top center/contain` form.
             parse_value_tokens_with_mode(&value_tokens, true)?

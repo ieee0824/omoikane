@@ -29,6 +29,7 @@ pub(super) fn expand_shorthand(name: &str, value: Value, important: bool) -> Vec
         "list-style" => expand_list_style_shorthand(value, important),
         "flex-flow" => expand_flex_flow_shorthand(value, important),
         "animation" => expand_animation_shorthand(value, important),
+        "transition" => super::expand_transition_shorthand(value, important),
         "outline" => expand_outline_shorthand(value, important),
         "grid-column" | "grid-row" => expand_grid_axis_shorthand(name, value, important),
         "grid-area" => expand_grid_area_shorthand(value, important),

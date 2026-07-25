@@ -157,15 +157,28 @@ pub(crate) fn parse_transform_list(
     value: &str,
     reference: TransformReferenceBox,
 ) -> Option<AffineTransform> {
+    let functions = parse_transform_functions(value)?;
+    if functions.is_empty() {
+        return Some(AffineTransform::identity());
+    }
+
+    let mut result = AffineTransform::identity();
+    for (name, args) in functions {
+        result = result.multiply(parse_transform_function(name, args, reference)?);
+    }
+    Some(result)
+}
+
+fn parse_transform_functions(value: &str) -> Option<Vec<(&str, &str)>> {
     let value = value.trim();
     if value.eq_ignore_ascii_case("none") || is_css_wide_keyword(value) {
-        return Some(AffineTransform::identity());
+        return Some(Vec::new());
     }
     if value.is_empty() {
         return None;
     }
 
-    let mut result = AffineTransform::identity();
+    let mut functions = Vec::new();
     let mut cursor = 0;
     let bytes = value.as_bytes();
     while cursor < value.len() {
@@ -200,9 +213,390 @@ pub(crate) fn parse_transform_list(
             return None;
         }
         let args = &value[args_start..cursor - 1];
-        result = result.multiply(parse_transform_function(name, args, reference)?);
+        functions.push((name, args));
     }
-    Some(result)
+    Some(functions)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LengthUnit {
+    Zero,
+    Px,
+    Percent,
+    Em,
+    Rem,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct InterpolableLength {
+    value: f32,
+    unit: LengthUnit,
+}
+
+#[derive(Debug, Clone)]
+enum TransformOperation {
+    Matrix([f32; 6]),
+    Translate(InterpolableLength, InterpolableLength),
+    Scale(f32, f32),
+    Rotate(f32),
+    Skew(f32, f32),
+}
+
+/// Interpolates compatible CSS 2D transform lists without resolving relative
+/// lengths. Percentages and font-relative lengths therefore remain available
+/// for resolution against the element's real reference box during layout.
+pub(crate) fn interpolate_transform_lists(
+    start: &str,
+    end: &str,
+    progress: f32,
+) -> Option<String> {
+    let start_text = start;
+    let end_text = end;
+    let mut start = parse_interpolable_transform_list(start_text)?;
+    let mut end = parse_interpolable_transform_list(end_text)?;
+    if start.is_empty() && end.is_empty() {
+        return Some("none".to_string());
+    }
+    if start.is_empty() {
+        start = end.iter().map(TransformOperation::identity_like).collect();
+    } else if end.is_empty() {
+        end = start.iter().map(TransformOperation::identity_like).collect();
+    }
+    if start.len() < end.len() {
+        start.extend(
+            end[start.len()..]
+                .iter()
+                .map(TransformOperation::identity_like),
+        );
+    } else if end.len() < start.len() {
+        end.extend(
+            start[end.len()..]
+                .iter()
+                .map(TransformOperation::identity_like),
+        );
+    }
+
+    let compatible = start
+        .iter()
+        .zip(&end)
+        .map(|(start, end)| start.interpolate(end, progress))
+        .collect::<Option<Vec<_>>>()
+        .map(|items| items.join(" "));
+    compatible.or_else(|| interpolate_decomposed_matrices(start_text, end_text, progress))
+}
+
+fn parse_interpolable_transform_list(value: &str) -> Option<Vec<TransformOperation>> {
+    parse_transform_functions(value)?
+        .into_iter()
+        .map(|(name, args)| {
+            let args = split_args(args)?;
+            match name.to_ascii_lowercase().as_str() {
+                "matrix" if args.len() == 6 => Some(TransformOperation::Matrix([
+                    parse_number(args[0])?,
+                    parse_number(args[1])?,
+                    parse_number(args[2])?,
+                    parse_number(args[3])?,
+                    parse_number(args[4])?,
+                    parse_number(args[5])?,
+                ])),
+                "translate" if (1..=2).contains(&args.len()) => {
+                    Some(TransformOperation::Translate(
+                        parse_interpolable_length(args[0])?,
+                        if args.len() == 2 {
+                            parse_interpolable_length(args[1])?
+                        } else {
+                            InterpolableLength::zero()
+                        },
+                    ))
+                }
+                "translatex" if args.len() == 1 => Some(TransformOperation::Translate(
+                    parse_interpolable_length(args[0])?,
+                    InterpolableLength::zero(),
+                )),
+                "translatey" if args.len() == 1 => Some(TransformOperation::Translate(
+                    InterpolableLength::zero(),
+                    parse_interpolable_length(args[0])?,
+                )),
+                "translate3d" if args.len() == 3 && parse_zero_length(args[2]) => {
+                    Some(TransformOperation::Translate(
+                        parse_interpolable_length(args[0])?,
+                        parse_interpolable_length(args[1])?,
+                    ))
+                }
+                "scale" if (1..=2).contains(&args.len()) => {
+                    let x = parse_scale(args[0])?;
+                    Some(TransformOperation::Scale(
+                        x,
+                        if args.len() == 2 {
+                            parse_scale(args[1])?
+                        } else {
+                            x
+                        },
+                    ))
+                }
+                "scalex" if args.len() == 1 => {
+                    Some(TransformOperation::Scale(parse_scale(args[0])?, 1.0))
+                }
+                "scaley" if args.len() == 1 => {
+                    Some(TransformOperation::Scale(1.0, parse_scale(args[0])?))
+                }
+                "rotate" if args.len() == 1 => {
+                    Some(TransformOperation::Rotate(parse_angle(args[0])?))
+                }
+                "skew" if (1..=2).contains(&args.len()) => Some(TransformOperation::Skew(
+                    parse_angle(args[0])?,
+                    if args.len() == 2 {
+                        parse_angle(args[1])?
+                    } else {
+                        0.0
+                    },
+                )),
+                "skewx" if args.len() == 1 => {
+                    Some(TransformOperation::Skew(parse_angle(args[0])?, 0.0))
+                }
+                "skewy" if args.len() == 1 => {
+                    Some(TransformOperation::Skew(0.0, parse_angle(args[0])?))
+                }
+                _ => None,
+            }
+        })
+        .collect()
+}
+
+impl InterpolableLength {
+    fn zero() -> Self {
+        Self {
+            value: 0.0,
+            unit: LengthUnit::Zero,
+        }
+    }
+
+    fn interpolate(self, other: Self, progress: f32) -> Option<Self> {
+        let unit = match (self.unit, other.unit) {
+            (LengthUnit::Zero, unit) | (unit, LengthUnit::Zero) => unit,
+            (left, right) if left == right => left,
+            _ => return None,
+        };
+        Some(Self {
+            value: interpolate_number(self.value, other.value, progress),
+            unit,
+        })
+    }
+
+    fn render(self) -> String {
+        let suffix = match self.unit {
+            LengthUnit::Zero => "",
+            LengthUnit::Px => "px",
+            LengthUnit::Percent => "%",
+            LengthUnit::Em => "em",
+            LengthUnit::Rem => "rem",
+        };
+        format!("{}{suffix}", format_component(self.value))
+    }
+}
+
+impl TransformOperation {
+    fn identity_like(&self) -> Self {
+        match self {
+            Self::Matrix(_) => Self::Matrix([1.0, 0.0, 0.0, 1.0, 0.0, 0.0]),
+            Self::Translate(_, _) => {
+                Self::Translate(InterpolableLength::zero(), InterpolableLength::zero())
+            }
+            Self::Scale(_, _) => Self::Scale(1.0, 1.0),
+            Self::Rotate(_) => Self::Rotate(0.0),
+            Self::Skew(_, _) => Self::Skew(0.0, 0.0),
+        }
+    }
+
+    fn interpolate(&self, other: &Self, progress: f32) -> Option<String> {
+        match (self, other) {
+            (Self::Matrix(start), Self::Matrix(end)) => Some(format!(
+                "matrix({})",
+                start
+                    .iter()
+                    .zip(end)
+                    .map(|(start, end)| {
+                        format_component(interpolate_number(*start, *end, progress))
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )),
+            (Self::Translate(start_x, start_y), Self::Translate(end_x, end_y)) => Some(format!(
+                "translate({}, {})",
+                start_x.interpolate(*end_x, progress)?.render(),
+                start_y.interpolate(*end_y, progress)?.render()
+            )),
+            (Self::Scale(start_x, start_y), Self::Scale(end_x, end_y)) => Some(format!(
+                "scale({}, {})",
+                format_component(interpolate_number(*start_x, *end_x, progress)),
+                format_component(interpolate_number(*start_y, *end_y, progress))
+            )),
+            (Self::Rotate(start), Self::Rotate(end)) => Some(format!(
+                "rotate({}rad)",
+                format_component(interpolate_number(*start, *end, progress))
+            )),
+            (Self::Skew(start_x, start_y), Self::Skew(end_x, end_y)) => Some(format!(
+                "skew({}rad, {}rad)",
+                format_component(interpolate_number(*start_x, *end_x, progress)),
+                format_component(interpolate_number(*start_y, *end_y, progress))
+            )),
+            _ => None,
+        }
+    }
+
+    fn matrix(&self) -> Option<AffineTransform> {
+        match self {
+            Self::Matrix(values) => Some(AffineTransform {
+                a: values[0],
+                b: values[1],
+                c: values[2],
+                d: values[3],
+                e: values[4],
+                f: values[5],
+            }),
+            Self::Translate(x, y) => Some(AffineTransform::translate(
+                x.absolute_px()?,
+                y.absolute_px()?,
+            )),
+            Self::Scale(x, y) => Some(AffineTransform::scale(*x, *y)),
+            Self::Rotate(angle) => Some(AffineTransform::rotate(*angle)),
+            Self::Skew(x, y) => Some(AffineTransform::skew(*x, *y)),
+        }
+    }
+}
+
+impl InterpolableLength {
+    fn absolute_px(self) -> Option<f32> {
+        matches!(self.unit, LengthUnit::Zero | LengthUnit::Px).then_some(self.value)
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct DecomposedTransform {
+    translate_x: f32,
+    translate_y: f32,
+    rotation: f32,
+    skew_x: f32,
+    scale_x: f32,
+    scale_y: f32,
+}
+
+fn interpolate_decomposed_matrices(start: &str, end: &str, progress: f32) -> Option<String> {
+    let start = transform_operations_matrix(&parse_interpolable_transform_list(start)?)?;
+    let end = transform_operations_matrix(&parse_interpolable_transform_list(end)?)?;
+    let start = decompose_transform(start)?;
+    let mut end = decompose_transform(end)?;
+    if (start.rotation - end.rotation).abs() > PI {
+        if start.rotation < end.rotation {
+            end.rotation -= 2.0 * PI;
+        } else {
+            end.rotation += 2.0 * PI;
+        }
+    }
+    Some(format!(
+        "translate({}px, {}px) rotate({}rad) skewX({}rad) scale({}, {})",
+        format_component(interpolate_number(
+            start.translate_x,
+            end.translate_x,
+            progress
+        )),
+        format_component(interpolate_number(
+            start.translate_y,
+            end.translate_y,
+            progress
+        )),
+        format_component(interpolate_number(start.rotation, end.rotation, progress)),
+        format_component(interpolate_number(start.skew_x, end.skew_x, progress)),
+        format_component(interpolate_number(start.scale_x, end.scale_x, progress)),
+        format_component(interpolate_number(start.scale_y, end.scale_y, progress)),
+    ))
+}
+
+fn transform_operations_matrix(operations: &[TransformOperation]) -> Option<AffineTransform> {
+    operations
+        .iter()
+        .try_fold(AffineTransform::identity(), |matrix, operation| {
+            Some(matrix.multiply(operation.matrix()?))
+        })
+}
+
+fn decompose_transform(matrix: AffineTransform) -> Option<DecomposedTransform> {
+    let mut row0 = [matrix.a, matrix.b];
+    let mut row1 = [matrix.c, matrix.d];
+    let mut scale_x = row0[0].hypot(row0[1]);
+    if !scale_x.is_finite() || scale_x <= f32::EPSILON {
+        return None;
+    }
+    row0[0] /= scale_x;
+    row0[1] /= scale_x;
+
+    let mut skew = row0[0] * row1[0] + row0[1] * row1[1];
+    row1[0] -= row0[0] * skew;
+    row1[1] -= row0[1] * skew;
+    let mut scale_y = row1[0].hypot(row1[1]);
+    if !scale_y.is_finite() || scale_y <= f32::EPSILON {
+        return None;
+    }
+    row1[0] /= scale_y;
+    row1[1] /= scale_y;
+    skew /= scale_y;
+
+    if row0[0] * row1[1] - row0[1] * row1[0] < 0.0 {
+        if matrix.a < matrix.d {
+            scale_x = -scale_x;
+            row0[0] = -row0[0];
+            row0[1] = -row0[1];
+            skew = -skew;
+        } else {
+            scale_y = -scale_y;
+        }
+    }
+    Some(DecomposedTransform {
+        translate_x: matrix.e,
+        translate_y: matrix.f,
+        rotation: row0[1].atan2(row0[0]),
+        skew_x: skew.atan(),
+        scale_x,
+        scale_y,
+    })
+}
+
+fn parse_interpolable_length(value: &str) -> Option<InterpolableLength> {
+    let normalized = value.trim().to_ascii_lowercase();
+    let (number, unit) = if let Some(value) = normalized.strip_suffix("rem") {
+        (parse_number(value)?, LengthUnit::Rem)
+    } else if let Some(value) = normalized.strip_suffix("px") {
+        (parse_number(value)?, LengthUnit::Px)
+    } else if let Some(value) = normalized.strip_suffix("em") {
+        (parse_number(value)?, LengthUnit::Em)
+    } else if let Some(value) = normalized.strip_suffix('%') {
+        (parse_number(value)?, LengthUnit::Percent)
+    } else {
+        let number = parse_number(&normalized)?;
+        if number != 0.0 {
+            return None;
+        }
+        (number, LengthUnit::Zero)
+    };
+    Some(InterpolableLength {
+        value: number,
+        unit,
+    })
+}
+
+fn interpolate_number(start: f32, end: f32, progress: f32) -> f32 {
+    start + (end - start) * progress
+}
+
+fn format_component(value: f32) -> String {
+    if value.abs() < 1e-6 {
+        return "0".to_string();
+    }
+    let rendered = format!("{value:.6}");
+    rendered
+        .trim_end_matches('0')
+        .trim_end_matches('.')
+        .to_string()
 }
 
 fn parse_transform_function(
@@ -461,6 +855,66 @@ mod tests {
     fn rejects_unknown_or_partially_valid_lists() {
         assert!(parse_transform_list("translateX(10px) bogus(1)", reference()).is_none());
         assert!(parse_transform_list("scale(2, nope)", reference()).is_none());
+    }
+
+    #[test]
+    fn interpolates_compatible_transform_lists_without_losing_relative_units() {
+        assert_eq!(
+            interpolate_transform_lists(
+                "translate(10%, 2rem) scale(1)",
+                "translate(50%, 4rem) scale(3)",
+                0.5,
+            ),
+            Some("translate(30%, 3rem) scale(2, 2)".to_string())
+        );
+    }
+
+    #[test]
+    fn interpolates_none_using_each_transform_functions_identity() {
+        assert_eq!(
+            interpolate_transform_lists("none", "translateX(40px) rotate(180deg)", 0.5),
+            Some(format!(
+                "translate(20px, 0) rotate({}rad)",
+                format_component(PI / 2.0)
+            ))
+        );
+    }
+
+    #[test]
+    fn interpolated_transform_matches_firefox_midpoint_matrix() {
+        let value = interpolate_transform_lists(
+            "none",
+            "translate(50%, 2rem) rotate(180deg)",
+            0.5,
+        )
+        .unwrap();
+        let matrix = parse_transform_list(
+            &value,
+            TransformReferenceBox {
+                x: 0.0,
+                y: 0.0,
+                width: 55.0,
+                height: 10.0,
+                font_size: 16.0,
+                root_font_size: 16.0,
+            },
+        )
+        .unwrap();
+        assert!(matrix.a.abs() < 0.000_01);
+        assert!((matrix.b - 1.0).abs() < 0.000_01);
+        assert!((matrix.c + 1.0).abs() < 0.000_01);
+        assert!(matrix.d.abs() < 0.000_01);
+        assert!((matrix.e - 13.75).abs() < 0.000_01);
+        assert!((matrix.f - 16.0).abs() < 0.000_01);
+    }
+
+    #[test]
+    fn rejects_incompatible_transform_operations_and_length_units() {
+        let decomposed = interpolate_transform_lists("scale(2)", "rotate(1rad)", 0.5).unwrap();
+        assert!(parse_transform_list(&decomposed, reference()).is_some());
+        assert!(
+            interpolate_transform_lists("translateX(1em)", "translateX(1rem)", 0.5).is_none()
+        );
     }
 
     #[test]

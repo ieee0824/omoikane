@@ -501,6 +501,16 @@
     }
   }
 
+  class TransitionEvent extends Event {
+    constructor(type, init = {}) {
+      init = init ?? {};
+      super(type, init);
+      this.propertyName = String(init.propertyName ?? "");
+      this.elapsedTime = Number(init.elapsedTime ?? 0);
+      this.pseudoElement = String(init.pseudoElement ?? "");
+    }
+  }
+
   function shadowRootsContaining(node) {
     if (!(node instanceof Node)) return [];
     const roots = [];
@@ -1142,6 +1152,12 @@
       // normalizes to a single declaration that matches the last-wins reads of
       // getValue/getPriority.
       const setValue = (kebab, value, priority) => {
+        value = String(value);
+        if (kebab === "transition" || kebab.startsWith("transition-")) {
+          const normalized = __omoikane_normalize_style_value(kebab, value);
+          if (normalized === null) return;
+          value = normalized;
+        }
         const decls = parseDecls();
         const matches = decls.filter(d => d.name === kebab);
         if (matches.length > 0) {
@@ -4781,7 +4797,7 @@
   globalThis.PointerEvent = MouseEvent;
   globalThis.TouchEvent = Event;
   globalThis.AnimationEvent = Event;
-  globalThis.TransitionEvent = Event;
+  globalThis.TransitionEvent = TransitionEvent;
   globalThis.document = wrapNode(__omoikane_document_id);
   // Window named properties expose parsed elements with an `id` as global
   // bindings (for example `<style id=theme>` is reachable as `theme`). Keep
@@ -5105,12 +5121,33 @@
       },
     });
   }
+  function __dispatchPendingTransitionEvents() {
+    let records = [];
+    try { records = JSON.parse(__omoikane_take_transition_events()); } catch (_) {}
+    for (const record of records) {
+      const target = wrapNode(record.nodeId);
+      if (!target) continue;
+      target.dispatchEvent(new TransitionEvent(record.type, {
+        bubbles: true,
+        propertyName: record.propertyName,
+        elapsedTime: record.elapsedTime,
+        pseudoElement: record.pseudoElement,
+      }));
+    }
+  }
+  globalThis.__omoikane_sample_css_transitions = function() {
+    flushStyleSheets();
+    __omoikane_sample_css_transition_styles();
+    __dispatchPendingTransitionEvents();
+  };
   globalThis.getComputedStyle = function(element, pseudoElt) {
     void pseudoElt;
     flushStyleSheets();
     if (element && element.__id != null) {
       try {
-        return __makeComputedStyle(JSON.parse(__omoikane_computed_style(element.__id)));
+        const style = __makeComputedStyle(JSON.parse(__omoikane_computed_style(element.__id)));
+        __dispatchPendingTransitionEvents();
+        return style;
       } catch (e) {
         return __makeComputedStyle({});
       }

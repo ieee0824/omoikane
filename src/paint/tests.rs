@@ -871,6 +871,44 @@ fn transform_can_move_an_offscreen_source_box_into_the_viewport() {
 }
 
 #[test]
+fn transition_transform_midpoint_reaches_paint_coordinates() {
+    let document = TreeBuilder::parse(
+        r#"<html><body><div></div></body></html>"#,
+    )
+    .document();
+    let target = document.query_selector("div").unwrap();
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "html, body { margin: 0; } div { width: 4px; height: 2px; background: red; \
+             transform: none; transform-origin: 0 0; transition: transform 1s linear; }",
+        )
+        .unwrap(),
+    );
+    resolver.computed_style(&target);
+    target.set_attribute("style", "transform: translateX(20px)");
+    resolver.invalidate_style_cache_for_test();
+    resolver.computed_style(&target);
+    resolver.set_transition_time_ms(500.0);
+
+    let viewport = Rect {
+        x: 0.0,
+        y: 0.0,
+        width: 25.0,
+        height: 4.0,
+    };
+    let layout = layout_tree(&document, &mut resolver, viewport).unwrap();
+    let canvas = paint_layout(&layout, &mut resolver, viewport);
+
+    assert_eq!(canvas.pixel(0, 0), Some(Color::rgba(0, 0, 0, 0)));
+    assert_eq!(canvas.pixel(9, 0), Some(Color::rgba(0, 0, 0, 0)));
+    assert_eq!(canvas.pixel(10, 0), Some(Color::rgb(255, 0, 0)));
+    assert_eq!(canvas.pixel(13, 1), Some(Color::rgb(255, 0, 0)));
+    assert_eq!(canvas.pixel(14, 0), Some(Color::rgba(0, 0, 0, 0)));
+}
+
+#[test]
 fn nested_object_fallback_preserves_fixed_background_on_inline_image_fragment() {
     let html = r#"<html><head><style>body { margin: 0; font: 2px/2px sans-serif; } object { display: inline; vertical-align: bottom; } object object object { background: url(data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAIAAAD91JpzAAAABnRSTlMAAAAAAABupgeRAAAABmJLR0QA%2FwD%2FAP%2BgvaeTAAAAEUlEQVR42mP4%2F58BCv7%2FZwAAHfAD%2FabwPj4AAAAASUVORK5CYII%3D) fixed 1px 0; }</style></head><body><object data="data:application/x-unknown,ERROR"><object data="data:application/x-unknown,ERROR" type="text/html"><object data="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAIAAAD91JpzAAAABnRSTlMAAAAAAABupgeRAAAABmJLR0QA%2FwD%2FAP%2BgvaeTAAAAEUlEQVR42mP4%2F58BCv7%2FZwAAHfAD%2FabwPj4AAAAASUVORK5CYII%3D"></object></object></object></body></html>"#;
     let document = TreeBuilder::parse(html).document();

@@ -20,6 +20,22 @@ git_wpt sparse-checkout add "/css/css-cascade/scope-media.html"
 git_wpt sparse-checkout add "/css/css-cascade/scope-supports.html"
 git_wpt sparse-checkout add "/css/cssom/CSSContainerRule.tentative.html"
 git_wpt sparse-checkout add "/css/css-transforms/transform-getBoundingClientRect-001.html"
+git_wpt sparse-checkout add \
+  "/css/support/parsing-testcommon.js" \
+  "/css/support/computed-testcommon.js" \
+  "/css/css-transitions/parsing/transition-property-valid.html" \
+  "/css/css-transitions/parsing/transition-property-invalid.html" \
+  "/css/css-transitions/parsing/transition-property-computed.html" \
+  "/css/css-transitions/parsing/transition-duration-valid.html" \
+  "/css/css-transitions/parsing/transition-duration-invalid.html" \
+  "/css/css-transitions/parsing/transition-delay-valid.html" \
+  "/css/css-transitions/parsing/transition-delay-invalid.html" \
+  "/css/css-transitions/parsing/transition-valid.html" \
+  "/css/css-transitions/parsing/transition-invalid.html" \
+  "/css/css-transitions/parsing/transition-computed.html" \
+  "/css/css-transitions/support/helper.js" \
+  "/css/css-transitions/events-001.html" \
+  "/css/css-transitions/events-002.html"
 if [[ "$(git_wpt rev-parse HEAD 2>/dev/null || true)" == "$revision" ]]; then exit 0; fi
 git_wpt fetch --depth 1 origin "$revision"
 git_wpt checkout --detach "$revision"

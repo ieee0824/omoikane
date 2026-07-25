@@ -211,6 +211,15 @@
       "baseline_supported": false
     },
     {
+      "id": "css.transitions-timeline",
+      "area": "cssom",
+      "description": "CSS transitions sample one timeline value across computed style and layout geometry",
+      "setup": "globalThis.__transitionProbe = document.createElement('div'); __transitionProbe.style.cssText = 'width:10px;height:10px;opacity:0;transition:opacity 32ms linear,width 32ms linear'; document.body.appendChild(__transitionProbe); getComputedStyle(__transitionProbe).opacity; __transitionProbe.offsetWidth; __transitionProbe.style.opacity = '1'; __transitionProbe.style.width = '30px'; getComputedStyle(__transitionProbe).opacity; __transitionProbe.offsetWidth",
+      "run_animation_frame": true,
+      "probe": "Math.abs(Number(getComputedStyle(__transitionProbe).opacity) - 0.5) < 0.001 && __transitionProbe.offsetWidth === 20",
+      "baseline_supported": false
+    },
+    {
       "id": "css.match-media-screen",
       "area": "css",
       "description": "matchMedia evaluates the screen media type",
