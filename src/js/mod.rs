@@ -11553,6 +11553,40 @@ mod tests {
     }
 
     #[test]
+    fn filter_transitions_reuse_layout_between_frames() {
+        let document = crate::html::TreeBuilder::parse(
+            r#"<html><head><style>
+                #target { width: 10px; height: 10px;
+                          filter: blur(0px); backdrop-filter: brightness(1);
+                          transition: filter 1s linear, backdrop-filter 1s linear; }
+            </style></head><body><div id="target"></div></body></html>"#,
+        )
+        .document();
+        let mut runtime = JsRuntime::with_document(document).unwrap();
+        runtime
+            .eval(
+                "globalThis.target = document.getElementById('target'); \
+                 target.offsetWidth; target.style.filter = 'blur(10px)'; \
+                 target.style.backdropFilter = 'brightness(0.5)'; \
+                 getComputedStyle(target).filter; \
+                 getComputedStyle(target).backdropFilter;",
+            )
+            .unwrap();
+
+        runtime.run_animation_frame(250).unwrap();
+        assert_eq!(runtime.eval("target.offsetWidth").unwrap().as_number(), Some(10.0));
+        let first_sample_generation = runtime.host_state.borrow().layout_generation;
+
+        runtime.run_animation_frame(250).unwrap();
+        assert_eq!(runtime.eval("target.offsetWidth").unwrap().as_number(), Some(10.0));
+        assert_eq!(
+            runtime.host_state.borrow().layout_generation,
+            first_sample_generation,
+            "filter and backdrop-filter sampling must retain the cached layout tree"
+        );
+    }
+
+    #[test]
     fn geometry_transition_invalidates_layout_between_frames() {
         let document = crate::html::TreeBuilder::parse(
             r#"<html><head><style>
