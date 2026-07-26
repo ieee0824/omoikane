@@ -6280,6 +6280,53 @@ fn box_blur_alpha_edge_equals_center_for_uniform_input() {
     );
 }
 
+#[test]
+fn row_major_box_blur_matches_column_major_reference() {
+    let (w, h, radius, passes) = (13usize, 9usize, 3usize, 3usize);
+    let input = (0..w * h)
+        .map(|index| ((index * 73 + index / w * 19) % 256) as u8)
+        .collect::<Vec<_>>();
+    let mut expected = input.clone();
+    let mut scratch = vec![0u8; w * h];
+    for _ in 0..passes {
+        for y in 0..h {
+            for x in 0..w {
+                let left = x.saturating_sub(radius);
+                let right = (x + radius).min(w - 1);
+                let sum = expected[y * w + left..=y * w + right]
+                    .iter()
+                    .map(|&alpha| alpha as u32)
+                    .sum::<u32>();
+                scratch[y * w + x] = (sum / (right - left + 1) as u32) as u8;
+            }
+        }
+        for y in 0..h {
+            let top = y.saturating_sub(radius);
+            let bottom = (y + radius).min(h - 1);
+            for x in 0..w {
+                let sum = (top..=bottom)
+                    .map(|row| scratch[row * w + x] as u32)
+                    .sum::<u32>();
+                expected[y * w + x] = (sum / (bottom - top + 1) as u32) as u8;
+            }
+        }
+    }
+
+    let mut canvas = Canvas::new(w as u32, h as u32);
+    for (index, &alpha) in input.iter().enumerate() {
+        canvas.pixels[index * 4 + 3] = alpha;
+    }
+    canvas.box_blur_alpha_passes(radius as u32, passes);
+    let actual = canvas
+        .pixels
+        .iter()
+        .skip(3)
+        .step_by(4)
+        .copied()
+        .collect::<Vec<_>>();
+    assert_eq!(actual, expected);
+}
+
 // --- opacity オフスクリーンバッファサイズのテスト ---
 
 #[test]
