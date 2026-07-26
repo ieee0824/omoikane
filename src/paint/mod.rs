@@ -152,7 +152,7 @@ pub(crate) use text::{
     paint_list_marker_placeholder, paint_text_decoration, paint_text_placeholder,
     paint_text_with_font, paint_text_with_font_refs, paint_text_with_registry,
     rasterize_with_fallback, rasterize_with_fallback_refs, text_color, text_decoration_color,
-    text_decoration_line,
+    text_decoration_line, with_render_glyph_cache,
 };
 
 /// A decoded RGBA image.
@@ -858,15 +858,17 @@ pub fn paint_layout_with_web_fonts(
     if let Some(background) = viewport_background_color(layout, resolver) {
         canvas.fill_rect(viewport, background);
     }
-    paint_box(
-        &mut canvas,
-        layout,
-        resolver,
-        None,
-        viewport,
-        &fonts,
-        web_fonts,
-    );
+    text::with_render_glyph_cache(|| {
+        paint_box(
+            &mut canvas,
+            layout,
+            resolver,
+            None,
+            viewport,
+            &fonts,
+            web_fonts,
+        );
+    });
     canvas
 }
 

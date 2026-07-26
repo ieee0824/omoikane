@@ -7153,3 +7153,22 @@ fn render_timings_accumulate_multiple_documents_and_reset_when_taken() {
     );
     assert_eq!(take_last_render_timings(), RenderTimings::default());
 }
+
+#[test]
+fn render_glyph_cache_hits_and_separates_font_identity_and_size() {
+    let first_fonts = super::load_text_fonts();
+    let second_fonts = super::load_text_fonts();
+    assert!(!first_fonts.is_empty());
+    assert!(!second_fonts.is_empty());
+
+    super::with_render_glyph_cache(|| {
+        let _ = super::rasterize_with_fallback(&first_fonts[..1], 'A', 16.0);
+        let _ = super::rasterize_with_fallback(&first_fonts[..1], 'A', 16.0);
+        let _ = super::rasterize_with_fallback(&first_fonts[..1], 'A', 18.0);
+        let _ = super::rasterize_with_fallback(&second_fonts[..1], 'A', 16.0);
+    });
+
+    let (hits, misses) = super::text::render_glyph_cache_stats();
+    assert_eq!(hits, 1, "only the identical font/character/size may hit");
+    assert_eq!(misses, 3, "font identity and size must use distinct entries");
+}
