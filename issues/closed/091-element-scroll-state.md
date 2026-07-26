@@ -2,7 +2,7 @@
 number: 091
 slug: element-scroll-state
 github: 245
-status: open
+status: closed
 priority: high
 ---
 

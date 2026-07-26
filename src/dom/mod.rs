@@ -736,11 +736,15 @@ impl NodeHandle {
         }
     }
 
-    /// Returns this element's stored scroll offset in CSS pixels.
+    /// Returns this element's stored scroll offset in CSS pixels, or
+    /// `(0.0, 0.0)` for a node kind that has no scrolling box of its own.
     ///
-    /// The value is not clamped to the current scrollable extent; callers that
-    /// need the offset actually in effect use [`crate::layout::LayoutBox::scroll_offset`].
-    /// Nodes that cannot scroll report `(0.0, 0.0)`.
+    /// An element reports what was last stored on it whether or not it can
+    /// currently scroll: the offset outlives a `display: none` or an
+    /// `overflow: visible` and applies again once the box is back. Callers that
+    /// need the offset in effect right now — clamped to the scrollable extent,
+    /// and zero while the box cannot scroll — use
+    /// [`crate::layout::LayoutBox::scroll_offset`] instead.
     pub(crate) fn scroll_offset(&self) -> (f32, f32) {
         match &self.0.borrow().data {
             NodeData::Element(element) => element.scroll_offset,
