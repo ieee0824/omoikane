@@ -5565,8 +5565,14 @@
 
   // Performance Timeline and User Timing. Resource/Navigation Timing and
   // PerformanceObserver intentionally remain outside this core implementation.
+  const performanceEntryToken = Symbol("PerformanceEntry internal constructor");
+  function isDictionary(value) {
+    return value !== null && (typeof value === "object" || typeof value === "function");
+  }
+
   class PerformanceEntry {
-    constructor(name, entryType, startTime, duration) {
+    constructor(token, name, entryType, startTime, duration) {
+      if (token !== performanceEntryToken) throw new TypeError("Illegal constructor");
       Object.defineProperties(this, {
         name: { value: String(name), enumerable: true },
         entryType: { value: String(entryType), enumerable: true },
@@ -5587,22 +5593,23 @@
   class PerformanceMark extends PerformanceEntry {
     constructor(name, options = {}) {
       options = options ?? {};
-      if (typeof options !== "object") throw new TypeError("PerformanceMark options must be an object");
+      if (!isDictionary(options)) throw new TypeError("PerformanceMark options must be a dictionary");
       const startTime = options.startTime === undefined
         ? __omoikane_performance_now()
         : Number(options.startTime);
       if (Number.isNaN(startTime) || startTime < 0) {
         throw new TypeError("PerformanceMark startTime must be a non-negative number");
       }
-      super(name, "mark", startTime, 0);
+      super(performanceEntryToken, name, "mark", startTime, 0);
       Object.defineProperty(this, "detail", { value: options.detail ?? null, enumerable: true });
     }
     toJSON() { return { ...super.toJSON(), detail: this.detail }; }
   }
 
   class PerformanceMeasure extends PerformanceEntry {
-    constructor(name, startTime, duration, detail = null) {
-      super(name, "measure", startTime, duration);
+    constructor(token, name, startTime, duration, detail = null) {
+      if (token !== performanceEntryToken) throw new TypeError("Illegal constructor");
+      super(performanceEntryToken, name, "measure", startTime, duration);
       Object.defineProperty(this, "detail", { value: detail, enumerable: true });
     }
     toJSON() { return { ...super.toJSON(), detail: this.detail }; }
@@ -5639,7 +5646,6 @@
   }
 
   const performance = {
-    timeOrigin: Number(__omoikane_performance_time_origin),
     timing: {},
     now() { return __omoikane_performance_now(); },
     mark(name, options = {}) {
@@ -5649,7 +5655,7 @@
       let startTime;
       let endTime;
       let detail = null;
-      if (startOrOptions !== null && typeof startOrOptions === "object") {
+      if (isDictionary(startOrOptions)) {
         const options = startOrOptions;
         const hasStart = options.start !== undefined;
         const hasEnd = options.end !== undefined;
@@ -5675,7 +5681,8 @@
       if (startTime < 0 || endTime < startTime) {
         throw new TypeError("PerformanceMeasure end must not precede start");
       }
-      return addPerformanceEntry(new PerformanceMeasure(String(name), startTime, endTime - startTime, detail));
+      return addPerformanceEntry(new PerformanceMeasure(
+        performanceEntryToken, String(name), startTime, endTime - startTime, detail));
     },
     getEntries() { return sortedPerformanceEntries(performanceEntries); },
     getEntriesByType(type) {
@@ -5707,6 +5714,10 @@
       }
     },
   };
+  Object.defineProperty(performance, "timeOrigin", {
+    value: Number(__omoikane_performance_time_origin),
+    enumerable: true,
+  });
   globalThis.PerformanceEntry = PerformanceEntry;
   globalThis.PerformanceMark = PerformanceMark;
   globalThis.PerformanceMeasure = PerformanceMeasure;

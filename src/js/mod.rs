@@ -11509,7 +11509,10 @@ mod tests {
                 "(() => { const first = performance.now(); const second = performance.now(); \
                  return Number.isFinite(performance.timeOrigin) && performance.timeOrigin > 0 && \
                  first >= 0 && second >= first && \
-                 Math.abs(Date.now() - (performance.timeOrigin + second)) < 1000; })()"
+                 Math.abs(Date.now() - (performance.timeOrigin + second)) < 1000 && \
+                 Object.getOwnPropertyDescriptor(performance, 'timeOrigin').writable === false && \
+                 (() => { const origin = performance.timeOrigin; performance.timeOrigin = 0; \
+                   return performance.timeOrigin === origin; })(); })()"
             )
             .unwrap()
             .as_boolean()
@@ -11565,18 +11568,41 @@ mod tests {
                   performance.mark("finish", { startTime: 9 });
                   const byMarks = performance.measure("by-marks", "begin", "finish");
                   const byDuration = performance.measure("by-duration", { start: "begin", duration: 3 });
+                  function markOptions() {}
+                  markOptions.startTime = 12;
+                  markOptions.detail = "function-mark";
+                  const functionMark = performance.mark("function-mark", markOptions);
+                  function measureOptions() {}
+                  measureOptions.start = 12;
+                  measureOptions.duration = 2;
+                  measureOptions.detail = "function-measure";
+                  const functionMeasure = performance.measure("function-measure", measureOptions);
+                  const nullStart = performance.measure("null-start", null, "finish");
                   let missingIsSyntaxError = false;
                   let invalidOptionsTypeError = false;
                   let negativeTypeError = false;
+                  let entryConstructorTypeError = false;
+                  let measureConstructorTypeError = false;
                   try { performance.measure("missing", "unknown"); }
                   catch (error) { missingIsSyntaxError = error instanceof DOMException && error.name === "SyntaxError"; }
                   try { performance.measure("invalid", {}); }
                   catch (error) { invalidOptionsTypeError = error instanceof TypeError; }
                   try { performance.mark("negative", { startTime: -1 }); }
                   catch (error) { negativeTypeError = error instanceof TypeError; }
+                  try { new PerformanceEntry("entry", "mark", 0, 0); }
+                  catch (error) { entryConstructorTypeError = error instanceof TypeError; }
+                  try { new PerformanceMeasure("measure", 0, 1); }
+                  catch (error) { measureConstructorTypeError = error instanceof TypeError; }
                   return byMarks.startTime === 4 && byMarks.duration === 5 &&
                     byDuration.startTime === 4 && byDuration.duration === 3 &&
-                    missingIsSyntaxError && invalidOptionsTypeError && negativeTypeError;
+                    functionMark instanceof PerformanceMark && functionMark instanceof PerformanceEntry &&
+                    functionMark.startTime === 12 && functionMark.detail === "function-mark" &&
+                    functionMeasure instanceof PerformanceMeasure && functionMeasure instanceof PerformanceEntry &&
+                    functionMeasure.startTime === 12 && functionMeasure.duration === 2 &&
+                    functionMeasure.detail === "function-measure" &&
+                    nullStart.startTime === 0 && nullStart.duration === 9 &&
+                    missingIsSyntaxError && invalidOptionsTypeError && negativeTypeError &&
+                    entryConstructorTypeError && measureConstructorTypeError;
                 })()"#
             )
             .unwrap()
