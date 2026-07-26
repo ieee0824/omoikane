@@ -967,14 +967,7 @@ fn render_document_with_url_internal(
     for css_text in css_texts {
         parsed_sheets.push(stylesheet::parse_stylesheet_forgiving(&css_text));
     }
-    for sheet in &parsed_sheets {
-        resolver.add_stylesheet(Origin::Author, sheet.clone());
-    }
-    if execute_javascript {
-        timings.style_refresh = stylesheets_start.elapsed();
-    } else {
-        timings.stylesheets = stylesheets_start.elapsed();
-    }
+    let stylesheet_parse_elapsed = stylesheets_start.elapsed();
 
     // Collect @font-face rules from the same final stylesheet set used for
     // layout, including rules injected by page scripts.
@@ -995,6 +988,20 @@ fn render_document_with_url_internal(
     };
     let layout_web_fonts = web_font_registry_opt.map(|_| Arc::clone(&web_font_registry));
     timings.fonts = fonts_start.elapsed();
+
+    // Font discovery only borrows the parsed ASTs. Once it is complete, move
+    // each stylesheet into the resolver instead of deep-cloning its complete
+    // rule/declaration/selector tree.
+    let resolver_index_start = Instant::now();
+    for sheet in parsed_sheets {
+        resolver.add_stylesheet(Origin::Author, sheet);
+    }
+    let stylesheet_elapsed = stylesheet_parse_elapsed + resolver_index_start.elapsed();
+    if execute_javascript {
+        timings.style_refresh = stylesheet_elapsed;
+    } else {
+        timings.stylesheets = stylesheet_elapsed;
+    }
 
     let result = crate::layout::with_layout_fonts(layout_fonts, layout_web_fonts, || {
         crate::layout::with_image_base_url(effective_base, || {
