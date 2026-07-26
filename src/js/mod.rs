@@ -18528,4 +18528,473 @@ mod tests {
         );
         assert_eq!(result, "1,1,2;1,0,1;1,0;1,1,1,2,0;1,2,0,3,2,0;1,4,3,2,0");
     }
+
+    // --- Document focus state / focus event core (issue #243) ---
+
+    fn focus_runtime() -> JsRuntime {
+        runtime_from_html(
+            r#"<html><body>
+                 <input id="a">
+                 <input id="b">
+                 <input id="disabled" disabled>
+                 <div id="divdisabled" disabled></div>
+               </body></html>"#,
+        )
+    }
+
+    /// Installs a recorder for all four focus events on the given targets.
+    /// Each entry is `target:type:bubbles:relatedTarget:activeElement`.
+    const FOCUS_LOG_SETUP: &str = r#"
+        globalThis.focusLog = [];
+        globalThis.recordFocusEvents = (label, target, capture) => {
+          for (const type of ["blur", "focusout", "focus", "focusin"]) {
+            target.addEventListener(type, event => {
+              const related = event.relatedTarget ? event.relatedTarget.id : "null";
+              const active = document.activeElement === document.body
+                ? "body"
+                : (document.activeElement ? document.activeElement.id : "null");
+              focusLog.push([label, event.type, event.bubbles, related, active].join(":"));
+            }, !!capture);
+          }
+        };
+    "#;
+
+    #[test]
+    fn focus_tracks_active_element_and_blur_falls_back_to_body() {
+        let mut runtime = focus_runtime();
+        let result = eval_str(
+            &mut runtime,
+            r#"(() => {
+                const a = document.getElementById("a");
+                const b = document.getElementById("b");
+                const out = [];
+                out.push(document.activeElement === document.body);
+                a.focus();
+                out.push(document.activeElement === a);
+                b.focus();
+                out.push(document.activeElement === b);
+                b.blur();
+                out.push(document.activeElement === document.body);
+                return out.join(",");
+            })()"#,
+        );
+        assert_eq!(result, "true,true,true,true");
+    }
+
+    #[test]
+    fn focus_dispatches_blur_focusout_focus_focusin_in_order() {
+        let mut runtime = focus_runtime();
+        runtime.eval(FOCUS_LOG_SETUP).unwrap();
+        let result = eval_str(
+            &mut runtime,
+            r#"(() => {
+                const a = document.getElementById("a");
+                const b = document.getElementById("b");
+                recordFocusEvents("a", a);
+                recordFocusEvents("b", b);
+                recordFocusEvents("doc", document);
+                a.focus();
+                b.focus();
+                return focusLog.join("|");
+            })()"#,
+        );
+        // The first focus fires no blur (nothing was focused) and carries a null
+        // relatedTarget. Moving a -> b fires blur/focusout on a before
+        // focus/focusin on b, and only the bubbling pair reaches the document.
+        // During blur/focusout the active element is already the body fallback.
+        assert_eq!(
+            result,
+            concat!(
+                "a:focus:false:null:a",
+                "|a:focusin:true:null:a",
+                "|doc:focusin:true:null:a",
+                "|a:blur:false:b:body",
+                "|a:focusout:true:b:body",
+                "|doc:focusout:true:b:body",
+                "|b:focus:false:a:b",
+                "|b:focusin:true:a:b",
+                "|doc:focusin:true:a:b",
+            )
+        );
+    }
+
+    #[test]
+    fn focus_events_are_composed_and_not_cancelable() {
+        let mut runtime = focus_runtime();
+        let result = eval_str(
+            &mut runtime,
+            r#"(() => {
+                const a = document.getElementById("a");
+                const seen = [];
+                for (const type of ["focus", "focusin"]) {
+                  a.addEventListener(type, event => seen.push([
+                    event.type,
+                    event.composed,
+                    event.cancelable,
+                    event instanceof FocusEvent,
+                  ].join(":")));
+                }
+                a.focus();
+                return seen.join("|");
+            })()"#,
+        );
+        assert_eq!(result, "focus:true:false:true|focusin:true:false:true");
+    }
+
+    #[test]
+    fn focus_events_carry_related_target_both_directions() {
+        let mut runtime = focus_runtime();
+        let result = eval_str(
+            &mut runtime,
+            r#"(() => {
+                const a = document.getElementById("a");
+                const b = document.getElementById("b");
+                const related = [];
+                for (const target of [a, b]) {
+                  for (const type of ["blur", "focusout", "focus", "focusin"]) {
+                    target.addEventListener(type, event => related.push(
+                      target.id + "." + type + "=" +
+                      (event.relatedTarget === null ? "null" : event.relatedTarget.id)
+                    ));
+                  }
+                }
+                a.focus();
+                b.focus();
+                a.focus();
+                a.blur();
+                return related.join(",");
+            })()"#,
+        );
+        // relatedTarget is the element on the other side of the transition, and
+        // null when focus arrives from or returns to the document viewport.
+        assert_eq!(
+            result,
+            concat!(
+                "a.focus=null,a.focusin=null,",
+                "a.blur=b,a.focusout=b,b.focus=a,b.focusin=a,",
+                "b.blur=a,b.focusout=a,a.focus=b,a.focusin=b,",
+                "a.blur=null,a.focusout=null",
+            )
+        );
+    }
+
+    #[test]
+    fn refocusing_the_same_element_dispatches_no_events() {
+        let mut runtime = focus_runtime();
+        runtime.eval(FOCUS_LOG_SETUP).unwrap();
+        let result = eval_str(
+            &mut runtime,
+            r#"(() => {
+                const a = document.getElementById("a");
+                a.focus();
+                recordFocusEvents("a", a);
+                recordFocusEvents("doc", document);
+                a.focus();
+                a.focus();
+                return [focusLog.length, document.activeElement === a].join(",");
+            })()"#,
+        );
+        assert_eq!(result, "0,true");
+    }
+
+    #[test]
+    fn blur_on_a_non_focused_element_is_a_no_op() {
+        let mut runtime = focus_runtime();
+        runtime.eval(FOCUS_LOG_SETUP).unwrap();
+        let result = eval_str(
+            &mut runtime,
+            r#"(() => {
+                const a = document.getElementById("a");
+                const b = document.getElementById("b");
+                a.focus();
+                recordFocusEvents("a", a);
+                recordFocusEvents("b", b);
+                recordFocusEvents("doc", document);
+                b.blur();
+                document.body.blur();
+                return [focusLog.length, document.activeElement === a].join(",");
+            })()"#,
+        );
+        assert_eq!(result, "0,true");
+    }
+
+    #[test]
+    fn focus_ignores_disconnected_nodes_and_disabled_controls() {
+        let mut runtime = focus_runtime();
+        runtime.eval(FOCUS_LOG_SETUP).unwrap();
+        let result = eval_str(
+            &mut runtime,
+            r#"(() => {
+                const out = [];
+                recordFocusEvents("doc", document);
+
+                const detached = document.createElement("input");
+                detached.focus();
+                out.push(document.activeElement === document.body);
+
+                const disabled = document.getElementById("disabled");
+                disabled.focus();
+                out.push(document.activeElement === document.body);
+
+                // A disabled control stays unfocusable even with a tabindex.
+                disabled.setAttribute("tabindex", "0");
+                disabled.focus();
+                out.push(document.activeElement === document.body);
+
+                // focus()/blur() live on HTMLElement, so a Text node does not
+                // expose them at all (as in Firefox 152).
+                const text = document.createTextNode("t");
+                document.body.appendChild(text);
+                out.push(text.focus === undefined && text.blur === undefined);
+
+                out.push(focusLog.length === 0);
+
+                // Disabling a control only blocks new focus attempts; the
+                // already focused control keeps focus (as in Firefox 152).
+                const b = document.getElementById("b");
+                b.focus();
+                b.disabled = true;
+                out.push(document.activeElement === b);
+                return out.join(",");
+            })()"#,
+        );
+        assert_eq!(result, "true,true,true,true,true,true");
+    }
+
+    /// Focusability table verified against Firefox 152 via Marionette. Each
+    /// entry is `selector=focused|unchanged` where `unchanged` means `focus()`
+    /// left the previously focused anchor input alone.
+    #[test]
+    fn focus_only_applies_to_focusable_areas() {
+        let mut runtime = runtime_from_html(
+            r#"<html><body>
+                 <input id="anchor">
+                 <div id="tabindex-negative" tabindex="-1"></div>
+                 <div id="tabindex-zero" tabindex="0"></div>
+                 <span id="tabindex-float" tabindex="1.5"></span>
+                 <span id="tabindex-signed" tabindex="+2"></span>
+                 <span id="tabindex-invalid" tabindex="abc"></span>
+                 <a id="anchor-href" href="x">l</a>
+                 <a id="anchor-plain">l</a>
+                 <div id="editing-host" contenteditable="true"><span id="editing-child">x</span></div>
+                 <div id="editing-empty" contenteditable=""></div>
+                 <div id="editing-false" contenteditable="false"></div>
+                 <details><summary id="summary-in-details">s</summary>d</details>
+                 <summary id="summary-orphan">s</summary>
+                 <input id="input-hidden" type="hidden">
+                 <input id="input-readonly" readonly>
+                 <button id="button">b</button>
+                 <button id="button-disabled" disabled>b</button>
+                 <select id="select"><option id="option">o</option></select>
+                 <textarea id="textarea"></textarea>
+                 <iframe id="iframe"></iframe>
+                 <embed id="embed">
+                 <object id="object"></object>
+                 <audio id="audio-controls" controls></audio>
+                 <audio id="audio-plain"></audio>
+                 <video id="video-controls" controls></video>
+                 <fieldset id="fieldset"></fieldset>
+                 <img id="img" alt="i">
+                 <label id="label">l</label>
+                 <div id="plain-div"></div>
+                 <dialog id="dialog">d</dialog>
+                 <details id="details">d</details>
+               </body></html>"#,
+        );
+        let result = eval_str(
+            &mut runtime,
+            r#"(() => {
+                const anchor = document.getElementById("anchor");
+                const ids = [
+                  "tabindex-negative", "tabindex-zero", "tabindex-float", "tabindex-signed",
+                  "tabindex-invalid", "anchor-href", "anchor-plain", "editing-host",
+                  "editing-child", "editing-empty", "editing-false", "summary-in-details",
+                  "summary-orphan", "input-hidden", "input-readonly", "button",
+                  "button-disabled", "select", "option", "textarea", "iframe", "embed",
+                  "object", "audio-controls", "audio-plain", "video-controls", "fieldset",
+                  "img", "label", "plain-div", "dialog", "details",
+                ];
+                return ids.map(id => {
+                  anchor.focus();
+                  const element = document.getElementById(id);
+                  element.focus();
+                  const state = document.activeElement === element
+                    ? "focused"
+                    : (document.activeElement === anchor ? "unchanged" : "other");
+                  return id + "=" + state;
+                }).join(",");
+            })()"#,
+        );
+        assert_eq!(
+            result,
+            concat!(
+                "tabindex-negative=focused,tabindex-zero=focused,",
+                "tabindex-float=focused,tabindex-signed=focused,tabindex-invalid=unchanged,",
+                "anchor-href=focused,anchor-plain=unchanged,",
+                "editing-host=focused,editing-child=unchanged,editing-empty=focused,",
+                "editing-false=unchanged,",
+                "summary-in-details=focused,summary-orphan=unchanged,",
+                "input-hidden=unchanged,input-readonly=focused,",
+                "button=focused,button-disabled=unchanged,",
+                "select=focused,option=unchanged,textarea=focused,",
+                "iframe=focused,embed=focused,object=unchanged,",
+                "audio-controls=focused,audio-plain=unchanged,video-controls=focused,",
+                "fieldset=unchanged,img=unchanged,label=unchanged,plain-div=unchanged,",
+                "dialog=unchanged,details=unchanged",
+            )
+        );
+    }
+
+    /// The body is the active-element fallback but is not itself a focusable
+    /// area, so `body.focus()` does not move focus — unless it carries a
+    /// tabindex. Verified against Firefox 152.
+    #[test]
+    fn body_is_only_focusable_with_a_tabindex() {
+        let mut runtime = focus_runtime();
+        let result = eval_str(
+            &mut runtime,
+            r#"(() => {
+                const a = document.getElementById("a");
+                const out = [];
+                a.focus();
+                document.body.focus();
+                out.push(document.activeElement === a);
+                document.body.setAttribute("tabindex", "-1");
+                document.body.focus();
+                out.push(document.activeElement === document.body);
+                return out.join(",");
+            })()"#,
+        );
+        assert_eq!(result, "true,true");
+    }
+
+    #[test]
+    fn removing_the_focused_element_falls_back_to_body_without_events() {
+        let mut runtime = focus_runtime();
+        runtime.eval(FOCUS_LOG_SETUP).unwrap();
+        let result = eval_str(
+            &mut runtime,
+            r#"(() => {
+                const a = document.getElementById("a");
+                const b = document.getElementById("b");
+                a.focus();
+                recordFocusEvents("a", a);
+                recordFocusEvents("b", b);
+                recordFocusEvents("doc", document);
+
+                const out = [];
+                // The focus fixup rule moves the active element back to the
+                // viewport without firing blur or focusout.
+                a.remove();
+                out.push(document.activeElement === document.body);
+                out.push(focusLog.length === 0);
+
+                // The removed element must not receive a blur when focus moves
+                // on: only b's own focus pair is dispatched.
+                b.focus();
+                out.push(focusLog.join("/"));
+                return out.join(",");
+            })()"#,
+        );
+        assert_eq!(
+            result,
+            "true,true,b:focus:false:null:b/b:focusin:true:null:b/doc:focusin:true:null:b"
+        );
+    }
+
+    #[test]
+    fn moving_the_focused_element_to_another_document_clears_the_active_element() {
+        let mut runtime = runtime_from_html(
+            r#"<html><body><input id="a"><iframe id="f"></iframe></body></html>"#,
+        );
+        let result = eval_str(
+            &mut runtime,
+            r#"(() => {
+                const a = document.getElementById("a");
+                const sub = document.getElementById("f").contentDocument;
+                a.focus();
+                const out = [document.activeElement === a];
+                sub.body.appendChild(a);
+                out.push(document.activeElement === document.body);
+                out.push(sub.activeElement === sub.body);
+                return out.join(",");
+            })()"#,
+        );
+        assert_eq!(result, "true,true,true");
+    }
+
+    #[test]
+    fn active_element_falls_back_to_document_element_without_body() {
+        let mut runtime = focus_runtime();
+        let result = eval_str(
+            &mut runtime,
+            r#"(() => {
+                const out = [];
+                document.body.remove();
+                out.push(document.activeElement === document.documentElement);
+                document.documentElement.remove();
+                out.push(document.activeElement === null);
+                return out.join(",");
+            })()"#,
+        );
+        assert_eq!(result, "true,true");
+    }
+
+    #[test]
+    fn active_element_and_has_focus_are_isolated_per_iframe_document() {
+        let mut runtime = runtime_from_html(
+            r#"<html><body><input id="a"><iframe id="f"></iframe></body></html>"#,
+        );
+        let result = eval_str(
+            &mut runtime,
+            r#"(() => {
+                const a = document.getElementById("a");
+                const sub = document.getElementById("f").contentDocument;
+                const subInput = sub.createElement("input");
+                sub.body.appendChild(subInput);
+                const out = [];
+
+                // The top-level document starts out focused.
+                out.push(document.hasFocus() === true);
+                out.push(sub.hasFocus() === false);
+                out.push(sub.activeElement === sub.body);
+
+                a.focus();
+                out.push(document.activeElement === a);
+                out.push(sub.activeElement === sub.body);
+                out.push(document.hasFocus() === true && sub.hasFocus() === false);
+
+                // Focusing inside the iframe moves the focused browsing context.
+                // Each document keeps its own active element: propagating focus
+                // up the chain to the iframe element is out of scope (#254).
+                subInput.focus();
+                out.push(sub.activeElement === subInput);
+                out.push(document.activeElement === a);
+                out.push(document.hasFocus() === true && sub.hasFocus() === true);
+
+                // Blurring inside the iframe keeps that document focused.
+                subInput.blur();
+                out.push(sub.activeElement === sub.body);
+                out.push(sub.hasFocus() === true);
+                return out.join(",");
+            })()"#,
+        );
+        assert_eq!(
+            result,
+            "true,true,true,true,true,true,true,true,true,true,true"
+        );
+    }
+
+    #[test]
+    fn detached_document_never_reports_focus() {
+        let mut runtime = focus_runtime();
+        let result = eval_str(
+            &mut runtime,
+            r#"(() => {
+                const detached = document.implementation.createHTMLDocument("t");
+                return [detached.hasFocus() === false, document.hasFocus() === true].join(",");
+            })()"#,
+        );
+        assert_eq!(result, "true,true");
+    }
 }

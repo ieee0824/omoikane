@@ -666,6 +666,120 @@
     return !event.defaultPrevented;
   }
 
+  // --- Document focus state -------------------------------------------------
+  //
+  // The focused element is stored per Document, on the document wrapper itself
+  // (`__focusedElementId`), so an iframe's sub-document keeps its own active
+  // element. `focusedDocumentId` is the document whose browsing context holds
+  // focus; `null` means the top-level document, which is focused on load.
+  let focusedDocumentId = null;
+
+  // HTML's rules for parsing integers: optional whitespace, an optional sign,
+  // then at least one digit. Trailing junk is ignored, so `tabindex="1.5"` is
+  // valid while `tabindex="abc"` is not.
+  function hasIntegerTabindex(element) {
+    const value = element.getAttribute("tabindex");
+    return value !== null && /^[ \t\n\f\r]*[+-]?[0-9]/.test(value);
+  }
+
+  // An editing host is focusable; nodes merely *inside* one are not.
+  function isEditingHost(element) {
+    const value = element.getAttribute("contenteditable");
+    return value !== null && (value === "" || value.toLowerCase() === "true");
+  }
+
+  // Elements that are focusable without a tabindex attribute. Verified against
+  // Firefox 152: `object`, `area`, `details`, `dialog`, `img`, `label`, `option`
+  // and `fieldset` are not focusable, `a` needs an href, `input` must not be
+  // hidden, and media elements need a `controls` attribute.
+  function isInherentlyFocusable(element) {
+    switch ((element.localName || element.nodeName || "").toLowerCase()) {
+      case "a":
+        return element.hasAttribute("href");
+      case "input":
+        return (element.getAttribute("type") || "").toLowerCase() !== "hidden";
+      case "button":
+      case "select":
+      case "textarea":
+      case "iframe":
+      case "embed":
+        return true;
+      case "audio":
+      case "video":
+        return element.hasAttribute("controls");
+      case "summary": {
+        const parent = element.parentNode;
+        return !!parent && parent.nodeType === 1 &&
+          (parent.localName || parent.nodeName || "").toLowerCase() === "details";
+      }
+      default:
+        return false;
+    }
+  }
+
+  // Whether `focus()` on this node designates it as its document's focused area
+  // (HTML "focusable area"), restricted to what the DOM alone can decide.
+  //
+  // Not covered: an element in a `display: none` / `visibility: hidden` subtree
+  // is not focusable in browsers, which needs style resolution, and a control
+  // inside a `<fieldset disabled>` is disabled without carrying the attribute
+  // itself — the same gap `:disabled` matching has.
+  function canBeFocused(node) {
+    if (!(node instanceof Element) || node.nodeType !== 1) return false;
+    if (!node.isConnected) return false;
+    if (node.__isDisabledControl && node.__isDisabledControl()) return false;
+    return hasIntegerTabindex(node) || isInherentlyFocusable(node) || isEditingHost(node);
+  }
+
+  // Resolves the element explicitly focused in `doc`, applying HTML's focus
+  // fixup rule: an element removed from the document (or moved into another
+  // one) silently stops being the active element, without blur or focusout.
+  // Firefox behaves the same; Chromium fires blur from a later rendering
+  // update. Both `activeElement` and `focus()`/`blur()` go through here so a
+  // detached element can never receive a blur.
+  function focusedElementOf(doc) {
+    const id = doc.__focusedElementId;
+    if (id === null || id === undefined) return null;
+    const node = wrapNode(id);
+    if (node && node.nodeType === 1 && node.isConnected && node.ownerDocument === doc) {
+      return node;
+    }
+    doc.__focusedElementId = null;
+    return null;
+  }
+
+  // The focused document followed by its ancestor documents, up to the
+  // top-level one. A focused document that is no longer reachable (its iframe
+  // was reloaded or removed) hands focus back to the top-level document.
+  function focusChainDocuments() {
+    const top = wrapNode(__omoikane_document_id);
+    if (focusedDocumentId === null || focusedDocumentId === __omoikane_document_id) {
+      return [top];
+    }
+    const chain = [];
+    let doc = wrapNode(focusedDocumentId);
+    while (doc instanceof Document) {
+      chain.push(doc);
+      if (doc.__id === __omoikane_document_id) return chain;
+      const iframeId = __omoikane_document_owner_iframe(doc.__id);
+      const iframe = (iframeId === null || iframeId === undefined) ? null : wrapNode(iframeId);
+      doc = iframe ? iframe.ownerDocument : null;
+    }
+    focusedDocumentId = null;
+    return [top];
+  }
+
+  // No focus event is cancelable, and all four are composed so they cross
+  // shadow boundaries. Bubbling differs per event — `focusin` and `focusout`
+  // bubble, `focus` and `blur` do not — so each caller passes it in.
+  function fireFocusEvent(target, type, relatedTarget, bubbles) {
+    target.dispatchEvent(new FocusEvent(type, {
+      bubbles,
+      composed: true,
+      relatedTarget,
+    }));
+  }
+
   // Boa 0.21 exposes WeakMap/WeakRef (but not FinalizationRegistry), so the
   // traversal registry must not itself keep Documents, NodeIterators or Ranges
   // alive. Dead weak references are swept on registration, mutation and
@@ -1776,8 +1890,45 @@
     set scrollLeft(v) {}
     get offsetParent() { return null; }
 
-    focus() {}
-    blur() {}
+    // Designates this element as its document's focused area and dispatches
+    // `blur`/`focusout` on the previously focused element followed by
+    // `focus`/`focusin` on this one (UI Events focus event order).
+    //
+    // A non-focusable target (disconnected, disabled, or not a focusable area)
+    // is ignored, and re-focusing the already focused element dispatches
+    // nothing. `options.preventScroll` is accepted and ignored: focusing never
+    // scrolls because scrolling is not implemented.
+    focus(options) {
+      if (!canBeFocused(this)) return;
+      const doc = this.ownerDocument;
+      if (!(doc instanceof Document)) return;
+      const previous = focusedElementOf(doc);
+      focusedDocumentId = doc.__id;
+      if (previous === this) return;
+      // The spec takes focus away from the old element *before* dispatching
+      // blur, so the active element is the viewport fallback for that pair.
+      doc.__focusedElementId = null;
+      if (previous) {
+        fireFocusEvent(previous, "blur", this, false);
+        fireFocusEvent(previous, "focusout", this, true);
+      }
+      doc.__focusedElementId = this.__id;
+      fireFocusEvent(this, "focus", previous, false);
+      fireFocusEvent(this, "focusin", previous, true);
+    }
+
+    // Runs the unfocusing steps: focus returns to the document's viewport and
+    // this element gets `blur` and `focusout` with a null relatedTarget. The
+    // viewport itself receives no focus event. Blurring an element that is not
+    // focused does nothing.
+    blur() {
+      const doc = this.nodeType === 1 ? this.ownerDocument : null;
+      if (!(doc instanceof Document)) return;
+      if (focusedElementOf(doc) !== this) return;
+      doc.__focusedElementId = null;
+      fireFocusEvent(this, "blur", null, false);
+      fireFocusEvent(this, "focusout", null, true);
+    }
 
     // True when this element is a form control on which the `disabled`
     // attribute has meaning and is set. A stray `<div disabled>` is not a
@@ -2958,6 +3109,16 @@
       return this.querySelector("body");
     }
 
+    // The element focused in this document. With nothing focused — on load,
+    // after `blur()`, or once the focused element left the document — this is
+    // the viewport's stand-in: the body element, or the document element when
+    // there is no body.
+    get activeElement() {
+      const focused = focusedElementOf(this);
+      if (focused) return focused;
+      return this.body || this.documentElement || null;
+    }
+
     get head() {
       return this.querySelector("head");
     }
@@ -3094,8 +3255,13 @@
       return iframe ? iframe.contentWindow : null;
     }
 
+    // Whether this document holds system focus. The headless window is always
+    // focused, so this is true for the document containing the focused element
+    // and for its ancestor documents, and false for every other document —
+    // including one created by `createHTMLDocument`, which has no browsing
+    // context at all.
     hasFocus() {
-      return true;
+      return focusChainDocuments().includes(this);
     }
 
     getElementsByTagName(tag) {
