@@ -3294,6 +3294,7 @@ impl Canvas {
 
     /// 別キャンバス（shadow_buf）をメインキャンバスに合成する（clip あり）。
     /// `r`, `g`, `b` は合成時に使う色成分（影の色）。
+    /// `alpha_scale` はsource alphaへ乗算し、最も近い整数へ丸めてから合成する。
     /// `offset_x`, `offset_y` は shadow_buf の左上隅がメインキャンバスのどこに対応するか。
     pub(crate) fn composite_canvas_clipped(
         &mut self,
