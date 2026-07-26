@@ -94,12 +94,7 @@ pub(crate) fn interpolate_filter_lists(start: &str, end: &str, progress: f32) ->
                 offset_x: mix(*ax, *bx),
                 offset_y: mix(*ay, *by),
                 blur: mix(*ab, *bb),
-                color: Color::rgba(
-                    mix(ac.r as f32, bc.r as f32).round() as u8,
-                    mix(ac.g as f32, bc.g as f32).round() as u8,
-                    mix(ac.b as f32, bc.b as f32).round() as u8,
-                    mix(ac.a as f32, bc.a as f32).round() as u8,
-                ),
+                color: interpolate_color(*ac, *bc, progress),
             }),
             (FilterFunction::Grayscale(a), FilterFunction::Grayscale(b)) => Some(FilterFunction::Grayscale(mix(*a, *b))),
             (FilterFunction::HueRotate(a), FilterFunction::HueRotate(b)) => Some(FilterFunction::HueRotate(mix(*a, *b))),
@@ -113,15 +108,32 @@ pub(crate) fn interpolate_filter_lists(start: &str, end: &str, progress: f32) ->
     Some(functions.iter().map(format_function).collect::<Vec<_>>().join(" "))
 }
 
+fn interpolate_color(start: Color, end: Color, progress: f32) -> Color {
+    let start_alpha = start.a as f32 / 255.0;
+    let end_alpha = end.a as f32 / 255.0;
+    let alpha = start_alpha + (end_alpha - start_alpha) * progress;
+    let channel = |start: u8, end: u8| {
+        let premultiplied = start as f32 * start_alpha
+            + (end as f32 * end_alpha - start as f32 * start_alpha) * progress;
+        if alpha <= f32::EPSILON { 0 } else { (premultiplied / alpha).round() as u8 }
+    };
+    Color::rgba(
+        channel(start.r, end.r),
+        channel(start.g, end.g),
+        channel(start.b, end.b),
+        (alpha * 255.0).round() as u8,
+    )
+}
+
 fn identity_filter(function: &FilterFunction) -> FilterFunction {
     match function {
         FilterFunction::Blur(_) => FilterFunction::Blur(0.0),
         FilterFunction::Brightness(_) => FilterFunction::Brightness(1.0),
         FilterFunction::Contrast(_) => FilterFunction::Contrast(1.0),
-        FilterFunction::DropShadow { offset_x, offset_y, blur, .. } => FilterFunction::DropShadow {
-            offset_x: *offset_x,
-            offset_y: *offset_y,
-            blur: *blur,
+        FilterFunction::DropShadow { .. } => FilterFunction::DropShadow {
+            offset_x: 0.0,
+            offset_y: 0.0,
+            blur: 0.0,
             color: Color::rgba(0, 0, 0, 0),
         },
         FilterFunction::Grayscale(_) => FilterFunction::Grayscale(0.0),
@@ -306,6 +318,10 @@ mod tests {
         assert_eq!(
             interpolate_filter_lists("none", "blur(10px) brightness(2)", 0.5),
             Some("blur(5px) brightness(1.5)".into())
+        );
+        assert_eq!(
+            interpolate_filter_lists("none", "drop-shadow(10px 6px 4px red)", 0.5),
+            Some("drop-shadow(5px 3px 2px rgba(255, 0, 0, 0.5019608))".into())
         );
     }
 }

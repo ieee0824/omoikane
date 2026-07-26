@@ -2458,8 +2458,6 @@ fn apply_backdrop_filters(
     border_box: Rect,
     inherited_clip: Option<Rect>,
 ) {
-    let mut filtered = canvas.clone();
-    apply_filters(&mut filtered, filters);
     let Some(area) = normalize_rect(border_box) else {
         return;
     };
@@ -2471,6 +2469,8 @@ fn apply_backdrop_filters(
     } else {
         area
     };
+    let mut filtered = canvas.clone();
+    apply_filters(&mut filtered, filters);
     let x0 = area.x.floor().max(0.0) as usize;
     let y0 = area.y.floor().max(0.0) as usize;
     let x1 = (area.x + area.width).ceil().min(canvas.width as f32) as usize;

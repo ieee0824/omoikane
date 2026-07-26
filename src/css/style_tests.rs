@@ -633,6 +633,7 @@ fn css_supports_uses_parser_and_supported_property_table() {
     assert!(supports_declaration("cursor", "pointer"));
     assert!(supports_declaration("filter", "brightness(150%) blur(2px)"));
     assert!(supports_declaration("backdrop-filter", "grayscale(1)"));
+    assert!(supports_declaration("FILTER", "blur(2px)"));
     assert!(supports_declaration("--theme-color", "rgb(1, 2, 3)"));
 
     assert!(!supports_declaration("future-property", "value"));
