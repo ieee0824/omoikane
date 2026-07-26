@@ -5321,6 +5321,100 @@ fn box_shadow_with_blur_renders_blurred_shadow() {
 // --- opacity テスト ---
 
 #[test]
+fn filter_brightness_applies_to_the_element_subtree() {
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let div = NodeHandle::element("div");
+    document.append_child(body.clone());
+    body.append_child(div);
+
+    let css = "body { margin: 0; } div { width: 20px; height: 20px; \
+               background-color: #4080c0; filter: brightness(0.5); }";
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(Origin::Author, parse_stylesheet(css).unwrap());
+    let viewport = Rect { x: 0.0, y: 0.0, width: 40.0, height: 40.0 };
+    let layout = layout_tree(&document, &mut resolver, viewport).unwrap();
+    let canvas = paint_layout(&layout, &mut resolver, viewport);
+
+    assert_eq!(canvas.pixel(10, 10), Some(Color::rgba(32, 64, 96, 255)));
+}
+
+#[test]
+fn filter_blur_preserves_color_at_transparent_edges() {
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let div = NodeHandle::element("div");
+    document.append_child(body.clone());
+    body.append_child(div);
+    let css = "body { margin: 0; } div { width: 10px; height: 10px; background-color: red; filter: blur(1px); }";
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(Origin::Author, parse_stylesheet(css).unwrap());
+    let viewport = Rect { x: 0.0, y: 0.0, width: 20.0, height: 20.0 };
+    let layout = layout_tree(&document, &mut resolver, viewport).unwrap();
+    let pixel = paint_layout(&layout, &mut resolver, viewport).pixel(10, 5).unwrap();
+
+    assert_eq!((pixel.r, pixel.g, pixel.b), (255, 0, 0));
+    assert!(pixel.a > 0 && pixel.a < 255);
+}
+
+#[test]
+fn filter_functions_apply_in_declared_order() {
+    fn render(filter: &str) -> Color {
+        let document = NodeHandle::document();
+        let body = NodeHandle::element("body");
+        let div = NodeHandle::element("div");
+        document.append_child(body.clone());
+        body.append_child(div);
+        let css = format!("body {{ margin: 0; }} div {{ width: 10px; height: 10px; background-color: #4080c0; filter: {filter}; }}");
+        let mut resolver = StyleResolver::new();
+        resolver.add_stylesheet(Origin::Author, parse_stylesheet(&css).unwrap());
+        let viewport = Rect { x: 0.0, y: 0.0, width: 20.0, height: 20.0 };
+        let layout = layout_tree(&document, &mut resolver, viewport).unwrap();
+        paint_layout(&layout, &mut resolver, viewport).pixel(5, 5).unwrap()
+    }
+
+    assert_ne!(render("brightness(0.5) invert(1)"), render("invert(1) brightness(0.5)"));
+}
+
+#[test]
+fn backdrop_filter_changes_only_the_pixels_behind_the_element() {
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let div = NodeHandle::element("div");
+    document.append_child(body.clone());
+    body.append_child(div);
+    let css = "body { margin: 0; width: 20px; height: 20px; background-color: #4080c0; } \
+               div { width: 10px; height: 10px; backdrop-filter: brightness(0.5); }";
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(Origin::Author, parse_stylesheet(css).unwrap());
+    let viewport = Rect { x: 0.0, y: 0.0, width: 20.0, height: 20.0 };
+    let layout = layout_tree(&document, &mut resolver, viewport).unwrap();
+    let canvas = paint_layout(&layout, &mut resolver, viewport);
+
+    assert_eq!(canvas.pixel(5, 5), Some(Color::rgba(32, 64, 96, 255)));
+    assert_eq!(canvas.pixel(15, 15), Some(Color::rgba(64, 128, 192, 255)));
+}
+
+#[test]
+fn drop_shadow_uses_the_element_alpha_and_paints_behind_it() {
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let div = NodeHandle::element("div");
+    document.append_child(body.clone());
+    body.append_child(div);
+    let css = "body { margin: 0; } div { width: 10px; height: 10px; background-color: red; \
+               filter: drop-shadow(5px 0 0 #0000ff); }";
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(Origin::Author, parse_stylesheet(css).unwrap());
+    let viewport = Rect { x: 0.0, y: 0.0, width: 20.0, height: 20.0 };
+    let layout = layout_tree(&document, &mut resolver, viewport).unwrap();
+    let canvas = paint_layout(&layout, &mut resolver, viewport);
+
+    assert_eq!(canvas.pixel(5, 5), Some(Color::rgba(255, 0, 0, 255)));
+    assert_eq!(canvas.pixel(12, 5), Some(Color::rgba(0, 0, 255, 255)));
+}
+
+#[test]
 fn opacity_reduces_element_alpha() {
     // opacity: 0.5 を指定すると、要素の描画結果の alpha が半分になる。
     let document = NodeHandle::document();

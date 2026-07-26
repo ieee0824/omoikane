@@ -540,6 +540,7 @@ fn time_to_ms(input: &str, allow_negative: bool) -> Option<f64> {
 fn effective_value(property: &str, value: Option<&ComputedValue>) -> Option<ComputedValue> {
     value.cloned().or_else(|| match property {
         "opacity" => Some(ComputedValue::Number(1.0)),
+        "filter" | "backdrop-filter" => Some(ComputedValue::Keyword("none".into())),
         "flex-grow" => Some(ComputedValue::Number(0.0)),
         "flex-shrink" => Some(ComputedValue::Number(1.0)),
         property
@@ -599,6 +600,13 @@ fn interpolate_property(
         }
         (ComputedValue::Keyword(start), ComputedValue::Keyword(end)) if property == "transform" => {
             Some(ComputedValue::Keyword(super::interpolate_transform_lists(
+                start, end, progress,
+            )?))
+        }
+        (ComputedValue::Keyword(start), ComputedValue::Keyword(end))
+            if matches!(property, "filter" | "backdrop-filter") =>
+        {
+            Some(ComputedValue::Keyword(super::interpolate_filter_lists(
                 start, end, progress,
             )?))
         }
@@ -1207,6 +1215,21 @@ mod tests {
         assert_eq!(
             TimingFunction::parse("step-start").unwrap().sample(0.0),
             1.0
+        );
+    }
+
+    #[test]
+    fn interpolates_compatible_filter_values() {
+        assert_eq!(
+            interpolate_property(
+                "filter",
+                &ComputedValue::Keyword("brightness(1) blur(0px)".into()),
+                &ComputedValue::Keyword("brightness(2) blur(10px)".into()),
+                0.5,
+            ),
+            Some(ComputedValue::Keyword(
+                "brightness(1.5) blur(5px)".into()
+            ))
         );
     }
 }

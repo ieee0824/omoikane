@@ -1317,11 +1317,18 @@ fn paint_box_internal_untransformed(
         inherited_clip
     };
 
-    // opacity または解決可能な mask-image がある場合、要素サブツリーを
+    let backdrop_filters = style_filters(&style, "backdrop-filter");
+    if !backdrop_filters.is_empty() {
+        apply_backdrop_filters(canvas, &backdrop_filters, border_box, inherited_clip);
+    }
+
+    // opacity、filter、または解決可能な mask-image がある場合、要素サブツリーを
     // オフスクリーンバッファに描画してからまとめて合成する。
     let opacity = element_opacity(&style);
+    let filters = element_filters(&style);
     let mask = mask_image(&style);
-    let needs_offscreen = opacity.is_some_and(|v| v < 1.0) || mask.is_some();
+    let needs_offscreen =
+        opacity.is_some_and(|v| v < 1.0) || !filters.is_empty() || mask.is_some();
 
     if needs_offscreen {
         let opacity_value = opacity.unwrap_or(1.0);
@@ -1374,6 +1381,7 @@ fn paint_box_internal_untransformed(
             offset_border_box,
             offset_padding_box,
         );
+        apply_filters(&mut offscreen, &filters);
         offscreen.multiply_alpha(opacity_value);
         if let Some(mask) = &mask {
             apply_mask_alpha(&mut offscreen, mask, &style, offset_border_box);
@@ -2429,6 +2437,269 @@ fn element_opacity(style: &ComputedStyle) -> Option<f32> {
         return Some(1.0);
     }
     value
+}
+
+fn element_filters(style: &ComputedStyle) -> Vec<crate::css::FilterFunction> {
+    style_filters(style, "filter")
+}
+
+fn style_filters(style: &ComputedStyle, property: &str) -> Vec<crate::css::FilterFunction> {
+    match style.get(property) {
+        Some(ComputedValue::Keyword(value)) | Some(ComputedValue::String(value)) => {
+            crate::css::parse_filter_list(value).unwrap_or_default()
+        }
+        _ => Vec::new(),
+    }
+}
+
+fn apply_backdrop_filters(
+    canvas: &mut Canvas,
+    filters: &[crate::css::FilterFunction],
+    border_box: Rect,
+    inherited_clip: Option<Rect>,
+) {
+    let Some(area) = normalize_rect(border_box) else {
+        return;
+    };
+    let area = if let Some(clip) = inherited_clip {
+        let Some(intersection) = intersect(area, clip) else {
+            return;
+        };
+        intersection
+    } else {
+        area
+    };
+    let mut filtered = canvas.clone();
+    apply_filters(&mut filtered, filters);
+    let x0 = area.x.floor().max(0.0) as usize;
+    let y0 = area.y.floor().max(0.0) as usize;
+    let x1 = (area.x + area.width).ceil().min(canvas.width as f32) as usize;
+    let y1 = (area.y + area.height).ceil().min(canvas.height as f32) as usize;
+    for y in y0..y1 {
+        let start = (y * canvas.width as usize + x0) * 4;
+        let end = (y * canvas.width as usize + x1) * 4;
+        canvas.pixels[start..end].copy_from_slice(&filtered.pixels[start..end]);
+    }
+}
+
+fn apply_filters(canvas: &mut Canvas, filters: &[crate::css::FilterFunction]) {
+    let Some((x0, y0, x1, y1)) = alpha_bounds(canvas) else {
+        return;
+    };
+    let (left, top, right, bottom) = filter_padding(filters);
+    let crop_x0 = x0.saturating_sub(left);
+    let crop_y0 = y0.saturating_sub(top);
+    let crop_x1 = (x1 + right).min(canvas.width as usize);
+    let crop_y1 = (y1 + bottom).min(canvas.height as usize);
+    let crop_width = crop_x1 - crop_x0;
+    let crop_height = crop_y1 - crop_y0;
+    let mut cropped = Canvas::new(crop_width as u32, crop_height as u32);
+    for y in crop_y0..crop_y1 {
+        let source_start = (y * canvas.width as usize + crop_x0) * 4;
+        let source_end = source_start + crop_width * 4;
+        let target_start = (y - crop_y0) * crop_width * 4;
+        cropped.pixels[target_start..target_start + crop_width * 4]
+            .copy_from_slice(&canvas.pixels[source_start..source_end]);
+    }
+    apply_filters_full(&mut cropped, filters);
+    for y in crop_y0..crop_y1 {
+        let target_start = (y * canvas.width as usize + crop_x0) * 4;
+        let source_start = (y - crop_y0) * crop_width * 4;
+        canvas.pixels[target_start..target_start + crop_width * 4]
+            .copy_from_slice(&cropped.pixels[source_start..source_start + crop_width * 4]);
+    }
+}
+
+fn apply_filters_full(canvas: &mut Canvas, filters: &[crate::css::FilterFunction]) {
+    use crate::css::FilterFunction;
+    for filter in filters {
+        match filter {
+            FilterFunction::Blur(radius) => box_blur(canvas, radius.round() as usize),
+            FilterFunction::Brightness(amount) => {
+                apply_color_filter(canvas, |value| value * amount, 1.0)
+            }
+            FilterFunction::Contrast(amount) => {
+                apply_color_filter(canvas, |value| (value - 0.5) * amount + 0.5, 1.0)
+            }
+            FilterFunction::DropShadow { offset_x, offset_y, blur, color } => {
+                apply_drop_shadow(canvas, *offset_x, *offset_y, *blur, *color)
+            }
+            FilterFunction::Grayscale(amount) => apply_color_matrix(canvas, grayscale_matrix(*amount)),
+            FilterFunction::HueRotate(degrees) => apply_color_matrix(canvas, hue_rotate_matrix(*degrees)),
+            FilterFunction::Invert(amount) => {
+                apply_color_filter(canvas, |value| value * (1.0 - amount) + (1.0 - value) * amount, 1.0)
+            }
+            FilterFunction::Opacity(amount) => apply_color_filter(canvas, |value| value, *amount),
+            FilterFunction::Saturate(amount) => apply_color_matrix(canvas, saturate_matrix(*amount)),
+            FilterFunction::Sepia(amount) => apply_color_matrix(canvas, sepia_matrix(*amount)),
+        }
+    }
+}
+
+fn alpha_bounds(canvas: &Canvas) -> Option<(usize, usize, usize, usize)> {
+    let width = canvas.width as usize;
+    let mut x0 = width;
+    let mut y0 = canvas.height as usize;
+    let mut x1 = 0usize;
+    let mut y1 = 0usize;
+    for (index, pixel) in canvas.pixels.chunks_exact(4).enumerate() {
+        if pixel[3] == 0 { continue; }
+        let x = index % width;
+        let y = index / width;
+        x0 = x0.min(x);
+        y0 = y0.min(y);
+        x1 = x1.max(x + 1);
+        y1 = y1.max(y + 1);
+    }
+    (x0 < x1 && y0 < y1).then_some((x0, y0, x1, y1))
+}
+
+fn filter_padding(filters: &[crate::css::FilterFunction]) -> (usize, usize, usize, usize) {
+    use crate::css::FilterFunction;
+    let (mut left, mut top, mut right, mut bottom) = (0usize, 0usize, 0usize, 0usize);
+    for filter in filters {
+        match filter {
+            FilterFunction::Blur(radius) => {
+                let radius = radius.ceil() as usize;
+                left += radius; top += radius; right += radius; bottom += radius;
+            }
+            FilterFunction::DropShadow { offset_x, offset_y, blur, .. } => {
+                let blur = blur.ceil() as usize;
+                left += blur + (-offset_x.floor()).max(0.0) as usize;
+                right += blur + offset_x.ceil().max(0.0) as usize;
+                top += blur + (-offset_y.floor()).max(0.0) as usize;
+                bottom += blur + offset_y.ceil().max(0.0) as usize;
+            }
+            _ => {}
+        }
+    }
+    (left, top, right, bottom)
+}
+
+fn apply_drop_shadow(canvas: &mut Canvas, offset_x: f32, offset_y: f32, blur: f32, color: Color) {
+    let source = canvas.clone();
+    let mut shadow = Canvas::new(canvas.width, canvas.height);
+    let mut result = Canvas::new(canvas.width, canvas.height);
+    for (index, pixel) in source.pixels.chunks_exact(4).enumerate() {
+        shadow.pixels[index * 4 + 3] =
+            ((pixel[3] as u16 * color.a as u16) / 255) as u8;
+    }
+    box_blur(&mut shadow, blur.round() as usize);
+    let dx = offset_x.round() as i32;
+    let dy = offset_y.round() as i32;
+    for y in 0..canvas.height as i32 {
+        for x in 0..canvas.width as i32 {
+            let sx = x - dx;
+            let sy = y - dy;
+            if sx < 0 || sy < 0 || sx >= canvas.width as i32 || sy >= canvas.height as i32 {
+                continue;
+            }
+            let source_index = (sy as usize * canvas.width as usize + sx as usize) * 4;
+            let alpha = shadow.pixels[source_index + 3];
+            if alpha == 0 { continue; }
+            let target_index = (y as usize * canvas.width as usize + x as usize) * 4;
+            blend_pixel(&mut result.pixels[target_index..target_index + 4], Color { a: alpha, ..color });
+        }
+    }
+    for (target, source) in result.pixels.chunks_exact_mut(4).zip(source.pixels.chunks_exact(4)) {
+        blend_pixel(target, Color { r: source[0], g: source[1], b: source[2], a: source[3] });
+    }
+    *canvas = result;
+}
+
+fn apply_color_filter(canvas: &mut Canvas, map: impl Fn(f32) -> f32, alpha: f32) {
+    for pixel in canvas.pixels.chunks_exact_mut(4) {
+        for channel in &mut pixel[..3] {
+            *channel = (map(*channel as f32 / 255.0).clamp(0.0, 1.0) * 255.0).round() as u8;
+        }
+        pixel[3] = (pixel[3] as f32 * alpha.clamp(0.0, 1.0)).round() as u8;
+    }
+}
+
+fn apply_color_matrix(canvas: &mut Canvas, matrix: [[f32; 3]; 3]) {
+    for pixel in canvas.pixels.chunks_exact_mut(4) {
+        let rgb = [pixel[0] as f32 / 255.0, pixel[1] as f32 / 255.0, pixel[2] as f32 / 255.0];
+        for row in 0..3 {
+            let value = matrix[row][0] * rgb[0] + matrix[row][1] * rgb[1] + matrix[row][2] * rgb[2];
+            pixel[row] = (value.clamp(0.0, 1.0) * 255.0).round() as u8;
+        }
+    }
+}
+
+fn grayscale_matrix(amount: f32) -> [[f32; 3]; 3] {
+    let a = amount.clamp(0.0, 1.0);
+    let keep = 1.0 - a;
+    [[keep + 0.2126*a, 0.7152*a, 0.0722*a], [0.2126*a, keep + 0.7152*a, 0.0722*a], [0.2126*a, 0.7152*a, keep + 0.0722*a]]
+}
+
+fn saturate_matrix(amount: f32) -> [[f32; 3]; 3] {
+    let a = amount.max(0.0);
+    [[0.213 + 0.787*a, 0.715 - 0.715*a, 0.072 - 0.072*a], [0.213 - 0.213*a, 0.715 + 0.285*a, 0.072 - 0.072*a], [0.213 - 0.213*a, 0.715 - 0.715*a, 0.072 + 0.928*a]]
+}
+
+fn sepia_matrix(amount: f32) -> [[f32; 3]; 3] {
+    let a = amount.clamp(0.0, 1.0);
+    let keep = 1.0 - a;
+    [[keep + 0.393*a, 0.769*a, 0.189*a], [0.349*a, keep + 0.686*a, 0.168*a], [0.272*a, 0.534*a, keep + 0.131*a]]
+}
+
+fn hue_rotate_matrix(degrees: f32) -> [[f32; 3]; 3] {
+    let radians = degrees.to_radians();
+    let c = radians.cos();
+    let s = radians.sin();
+    [[0.213 + c*0.787 - s*0.213, 0.715 - c*0.715 - s*0.715, 0.072 - c*0.072 + s*0.928], [0.213 - c*0.213 + s*0.143, 0.715 + c*0.285 + s*0.140, 0.072 - c*0.072 - s*0.283], [0.213 - c*0.213 - s*0.787, 0.715 - c*0.715 + s*0.715, 0.072 + c*0.928 + s*0.072]]
+}
+
+fn box_blur(canvas: &mut Canvas, radius: usize) {
+    if radius == 0 || canvas.width == 0 || canvas.height == 0 {
+        return;
+    }
+    let width = canvas.width as usize;
+    let height = canvas.height as usize;
+    let stride = width + 1;
+    let mut sums = vec![[0u64; 4]; stride * (height + 1)];
+    for y in 0..height {
+        let mut row = [0u64; 4];
+        for x in 0..width {
+            let source = (y * width + x) * 4;
+            let above = y * stride + x + 1;
+            let current = (y + 1) * stride + x + 1;
+            let alpha = canvas.pixels[source + 3] as u64;
+            for channel in 0..3 {
+                row[channel] += canvas.pixels[source + channel] as u64 * alpha;
+                sums[current][channel] = sums[above][channel] + row[channel];
+            }
+            row[3] += alpha;
+            sums[current][3] = sums[above][3] + row[3];
+        }
+    }
+    for y in 0..height {
+        for x in 0..width {
+            let x0 = x.saturating_sub(radius);
+            let x1 = (x + radius + 1).min(width);
+            let y0 = y.saturating_sub(radius);
+            let y1 = (y + radius + 1).min(height);
+            let count = ((x1 - x0) * (y1 - y0)) as u64;
+            let bottom_right = sums[y1 * stride + x1];
+            let bottom_left = sums[y1 * stride + x0];
+            let top_right = sums[y0 * stride + x1];
+            let top_left = sums[y0 * stride + x0];
+            let index = (y * width + x) * 4;
+            let sum = |channel: usize| {
+                bottom_right[channel] + top_left[channel]
+                    - bottom_left[channel] - top_right[channel]
+            };
+            let alpha_sum = sum(3);
+            for channel in 0..3 {
+                canvas.pixels[index + channel] = if alpha_sum == 0 {
+                    0
+                } else {
+                    (sum(channel) / alpha_sum).min(255) as u8
+                };
+            }
+            canvas.pixels[index + 3] = (alpha_sum / count) as u8;
+        }
+    }
 }
 
 fn normalize_rect(rect: Rect) -> Option<Rect> {

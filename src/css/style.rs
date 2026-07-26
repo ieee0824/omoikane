@@ -1015,6 +1015,18 @@ fn validate_declaration(name: &str, value: &Value) -> DeclarationValidation {
             DeclarationValidation::Invalid
         };
     }
+    if name.eq_ignore_ascii_case("filter") || name.eq_ignore_ascii_case("backdrop-filter") {
+        let rendered = render_value(value);
+        if is_css_wide_keyword(&rendered.to_ascii_lowercase()) {
+            return DeclarationValidation::Valid(ComputedValue::Keyword(
+                rendered.to_ascii_lowercase(),
+            ));
+        }
+        return match super::normalize_filter_list(&rendered) {
+            Some(normalized) => DeclarationValidation::Valid(ComputedValue::Keyword(normalized)),
+            None => DeclarationValidation::Invalid,
+        };
+    }
     if name.eq_ignore_ascii_case("transform-origin") {
         let rendered = render_value(value);
         let reference = super::TransformReferenceBox {
@@ -2673,6 +2685,7 @@ pub(super) fn is_supported_property(name: &str) -> bool {
             | "background-position-y"
             | "background-repeat"
             | "background-size"
+            | "backdrop-filter"
             | "border-bottom-color"
             | "border-bottom-style"
             | "border-bottom-width"
@@ -2710,6 +2723,7 @@ pub(super) fn is_supported_property(name: &str) -> bool {
             | "flex-shrink"
             | "flex-wrap"
             | "float"
+            | "filter"
             | "font-family"
             | "font-size"
             | "font-style"
