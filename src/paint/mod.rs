@@ -3230,6 +3230,7 @@ impl Canvas {
         let r = radius as usize;
         let mut alphas: Vec<u8> = self.pixels.iter().skip(3).step_by(4).copied().collect();
         let mut blurred = vec![0u8; w * h];
+        let mut column_sums = vec![0u32; w];
 
         for _ in 0..passes {
             // 水平方向 blur
@@ -3256,7 +3257,7 @@ impl Canvas {
             // 垂直方向 blur。全columnのrolling sumを持ち、入力と出力を
             // row-majorに連続走査してstrided memory accessを避ける。
             let init_bottom = r.min(h.saturating_sub(1));
-            let mut column_sums = vec![0u32; w];
+            column_sums.fill(0);
             for y in 0..=init_bottom {
                 let row = &blurred[y * w..(y + 1) * w];
                 for (sum, &alpha) in column_sums.iter_mut().zip(row) {
