@@ -2,7 +2,7 @@
 number: 090
 slug: document-focus-state
 github: 243
-status: open
+status: closed
 priority: high
 ---
 

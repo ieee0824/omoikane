@@ -769,8 +769,9 @@
     return [top];
   }
 
-  // Focus events never bubble out as cancelable, and they are composed so they
-  // cross shadow boundaries (UI Events §focus event order).
+  // No focus event is cancelable, and all four are composed so they cross
+  // shadow boundaries. Bubbling differs per event — `focusin` and `focusout`
+  // bubble, `focus` and `blur` do not — so each caller passes it in.
   function fireFocusEvent(target, type, relatedTarget, bubbles) {
     target.dispatchEvent(new FocusEvent(type, {
       bubbles,
