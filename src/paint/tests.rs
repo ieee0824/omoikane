@@ -5058,6 +5058,61 @@ fn fill_rounded_rect_clips_corners() {
 }
 
 #[test]
+fn rounded_rect_scanlines_match_per_pixel_reference() {
+    let cases = [
+        (
+            Rect { x: 0.0, y: 0.0, width: 20.0, height: 20.0 },
+            [5.0, 5.0, 5.0, 5.0],
+            None,
+        ),
+        (
+            Rect { x: 1.25, y: 2.75, width: 17.5, height: 13.25 },
+            [7.0, 2.0, 5.0, 3.0],
+            None,
+        ),
+        (
+            Rect { x: 1.25, y: 2.75, width: 17.5, height: 13.25 },
+            [7.0, 2.0, 5.0, 3.0],
+            Some(Rect { x: 3.4, y: 4.2, width: 11.3, height: 8.1 }),
+        ),
+    ];
+    for (rect, radii, clip) in cases {
+        let color = Color::rgba(31, 97, 211, 173);
+        let mut actual = Canvas::new(24, 20);
+        actual.fill_rounded_rect(
+            rect, color, radii[0], radii[1], radii[2], radii[3], clip,
+        );
+
+        let mut expected = Canvas::new(24, 20);
+        let tl = radii[0].min(rect.width / 2.0).min(rect.height / 2.0).max(0.0);
+        let tr = radii[1].min(rect.width / 2.0).min(rect.height / 2.0).max(0.0);
+        let br = radii[2].min(rect.width / 2.0).min(rect.height / 2.0).max(0.0);
+        let bl = radii[3].min(rect.width / 2.0).min(rect.height / 2.0).max(0.0);
+        for y in 0..expected.height() {
+            for x in 0..expected.width() {
+                let fx = x as f32 + 0.5;
+                let fy = y as f32 + 0.5;
+                let in_clip = clip.is_none_or(|clip| {
+                    fx >= clip.x
+                        && fx < clip.x + clip.width
+                        && fy >= clip.y
+                        && fy < clip.y + clip.height
+                });
+                if in_clip
+                    && point_in_rounded_rect(
+                        fx, fy, rect.x, rect.y, rect.width, rect.height, tl, tr, br, bl,
+                    )
+                {
+                    let index = ((y * expected.width() + x) * 4) as usize;
+                    blend_pixel(&mut expected.pixels[index..index + 4], color);
+                }
+            }
+        }
+        assert_eq!(actual.pixels(), expected.pixels(), "rect={rect:?}, clip={clip:?}");
+    }
+}
+
+#[test]
 fn paint_border_radius_clips_background_corners() {
     // div に border-radius を指定すると、4コーナーのピクセルが背景色で塗られない
     let document = NodeHandle::document();
