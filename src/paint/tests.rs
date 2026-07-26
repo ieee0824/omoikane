@@ -6383,6 +6383,12 @@ fn opacity_offscreen_buffer_does_not_crash_on_small_element() {
     let layout = layout_tree(&document, &mut resolver, viewport).unwrap();
     let canvas = paint_layout(&layout, &mut resolver, viewport);
 
+    assert_eq!(
+        super::take_effect_surface_pixels(),
+        100,
+        "a 10x10 effect must not allocate a viewport-sized surface"
+    );
+
     // 要素内のピクセルは半透明の赤
     let inside = canvas.pixel(5, 5).unwrap();
     assert!(
@@ -6398,6 +6404,115 @@ fn opacity_offscreen_buffer_does_not_crash_on_small_element() {
         "outside element should be transparent, got {:?}",
         outside
     );
+}
+
+#[test]
+fn local_effect_surface_keeps_overflow_visible_descendant() {
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let parent = NodeHandle::element("div");
+    let child = NodeHandle::element("div");
+    parent.set_attribute("class", "effect");
+    child.set_attribute("class", "overflow");
+    document.append_child(body.clone());
+    body.append_child(parent.clone());
+    parent.append_child(child);
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "body { margin: 0; } .effect { margin: 20px; width: 10px; height: 10px; opacity: .5; } .overflow { width: 30px; height: 8px; background: red; }",
+        )
+        .unwrap(),
+    );
+    let viewport = Rect { x: 0.0, y: 0.0, width: 100.0, height: 100.0 };
+    let layout = layout_tree(&document, &mut resolver, viewport).unwrap();
+    let parent_border_box = border_box_rect(find_layout_box_by_class(&layout, "effect").unwrap());
+    let parent_right = parent_border_box.x + parent_border_box.width;
+    let canvas = paint_layout(&layout, &mut resolver, viewport);
+    let effect_surface_pixels = super::take_effect_surface_pixels();
+
+    // Only the child paints red. Requiring a red pixel strictly to the right of
+    // the parent's measured border box proves its overflow-visible part survived.
+    let has_red_outside_parent = canvas
+        .pixels
+        .chunks_exact(4)
+        .enumerate()
+        .any(|(index, pixel)| {
+            let x = index % canvas.width() as usize;
+            x as f32 + 0.5 >= parent_right && pixel[0] > 0 && pixel[3] > 0
+        });
+    assert!(has_red_outside_parent, "overflow-visible child was cropped");
+    assert!(effect_surface_pixels < 1_000);
+}
+
+#[test]
+fn local_effect_surface_clips_negative_coordinates_to_canvas() {
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let effect = NodeHandle::element("div");
+    document.append_child(body.clone());
+    body.append_child(effect);
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "body { margin: 0; } div { margin-left: -5px; width: 10px; height: 10px; background: red; opacity: .5; }",
+        )
+        .unwrap(),
+    );
+    let viewport = Rect { x: 0.0, y: 0.0, width: 100.0, height: 100.0 };
+    let layout = layout_tree(&document, &mut resolver, viewport).unwrap();
+    let canvas = paint_layout(&layout, &mut resolver, viewport);
+    let effect_surface_pixels = super::take_effect_surface_pixels();
+
+    assert!(canvas.pixel(0, 5).unwrap().a > 0);
+    assert_eq!(effect_surface_pixels, 50);
+}
+
+#[test]
+fn local_effect_surface_keeps_nested_filter_padding() {
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let parent = NodeHandle::element("div");
+    let child = NodeHandle::element("div");
+    parent.set_attribute("class", "outer");
+    child.set_attribute("class", "inner");
+    document.append_child(body.clone());
+    body.append_child(parent.clone());
+    parent.append_child(child);
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "body { margin: 0; } .outer { margin: 20px; width: 10px; height: 10px; opacity: .8; } .inner { display: block; width: 10px; height: 10px; background: red; filter: drop-shadow(12px 0 0 blue); }",
+        )
+        .unwrap(),
+    );
+    let viewport = Rect { x: 0.0, y: 0.0, width: 100.0, height: 100.0 };
+    let layout = layout_tree(&document, &mut resolver, viewport).unwrap();
+    let outer_border_box = border_box_rect(find_layout_box_by_class(&layout, "outer").unwrap());
+    let inner_border_box = border_box_rect(find_layout_box_by_class(&layout, "inner").unwrap());
+    let source_right = (outer_border_box.x + outer_border_box.width)
+        .max(inner_border_box.x + inner_border_box.width);
+    let canvas = paint_layout(&layout, &mut resolver, viewport);
+    let effect_surface_pixels = super::take_effect_surface_pixels();
+
+    // A blue pixel strictly beyond both measured source border boxes can only
+    // come from the nested 12px drop shadow, not either element background.
+    let has_shadow_outside_sources = canvas
+        .pixels
+        .chunks_exact(4)
+        .enumerate()
+        .any(|(index, pixel)| {
+            let x = index % canvas.width() as usize;
+            x as f32 + 0.5 >= source_right && pixel[2] > pixel[0] && pixel[3] > 0
+        });
+    assert!(has_shadow_outside_sources, "nested shadow was cropped");
+    assert!(effect_surface_pixels < 2_000);
 }
 
 // --- overflow: hidden での box-shadow クリップテスト ---
