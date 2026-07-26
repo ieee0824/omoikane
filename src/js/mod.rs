@@ -317,6 +317,10 @@ impl EventLoopState {
 }
 
 struct HostState {
+    /// Monotonic clock origin used by `performance.now()` for this global.
+    performance_start: std::time::Instant,
+    /// Unix epoch milliseconds corresponding to `performance_start`.
+    performance_time_origin: f64,
     event_loop: EventLoopState,
     document: NodeHandle,
     nodes: HashMap<usize, NodeHandle>,
@@ -455,7 +459,15 @@ impl HostState {
                 needs_full_sample: true,
             },
         );
+        let performance_start = std::time::Instant::now();
+        let performance_time_origin = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs_f64()
+            * 1_000.0;
         let mut state = Self {
+            performance_start,
+            performance_time_origin,
             event_loop: EventLoopState::default(),
             document: document.clone(),
             nodes: HashMap::new(),
@@ -2174,9 +2186,21 @@ fn register_host_bindings(
         js_string!(state.navigator_user_agent.as_str()),
         boa_engine::property::Attribute::all(),
     )?;
+    context.register_global_property(
+        js_string!("__omoikane_performance_time_origin"),
+        state.performance_time_origin,
+        boa_engine::property::Attribute::READONLY
+            | boa_engine::property::Attribute::NON_ENUMERABLE
+            | boa_engine::property::Attribute::PERMANENT,
+    )?;
     drop(state);
 
     for (name, length, function) in [
+        (
+            js_string!("__omoikane_performance_now"),
+            0,
+            NativeFunction::from_copy_closure(performance_now_native),
+        ),
         (
             js_string!("__omoikane_query_selector"),
             2,
@@ -2591,6 +2615,18 @@ fn with_host_state<T>(f: impl FnOnce(&Rc<RefCell<HostState>>) -> JsResult<T>) ->
             JsError::from(JsNativeError::error().with_message("host state is not active"))
         })?;
         f(&state)
+    })
+}
+
+fn performance_now_native(
+    _this: &JsValue,
+    _args: &[JsValue],
+    _context: &mut Context,
+) -> JsResult<JsValue> {
+    with_host_state(|state| {
+        Ok(JsValue::from(
+            state.borrow().performance_start.elapsed().as_secs_f64() * 1_000.0,
+        ))
     })
 }
 
@@ -11463,6 +11499,89 @@ mod tests {
         runtime.eval("localStorage.removeItem('key')").unwrap();
         let removed = runtime.eval("localStorage.getItem('key')").unwrap();
         assert!(removed.is_null(), "removed item should return null");
+    }
+
+    #[test]
+    fn performance_now_is_monotonic_and_has_epoch_time_origin() {
+        let mut runtime = JsRuntime::with_document(default_document()).unwrap();
+        assert!(runtime
+            .eval(
+                "(() => { const first = performance.now(); const second = performance.now(); \
+                 return Number.isFinite(performance.timeOrigin) && performance.timeOrigin > 0 && \
+                 first >= 0 && second >= first && \
+                 Math.abs(Date.now() - (performance.timeOrigin + second)) < 1000; })()"
+            )
+            .unwrap()
+            .as_boolean()
+            .unwrap());
+    }
+
+    #[test]
+    fn user_timing_records_orders_and_clears_entries() {
+        let mut runtime = JsRuntime::with_document(default_document()).unwrap();
+        assert!(runtime
+            .eval(
+                r#"(() => {
+                  const late = performance.mark("same", { startTime: 20, detail: { id: 1 } });
+                  const early = performance.mark("same", { startTime: 10 });
+                  const measure = performance.measure("span", "early-missing");
+                  return false;
+                })()"#
+            )
+            .is_err(), "an unknown mark must throw");
+
+        assert!(runtime
+            .eval(
+                r#"(() => {
+                  performance.clearMarks();
+                  performance.clearMeasures();
+                  const late = performance.mark("same", { startTime: 20, detail: { id: 1 } });
+                  const early = performance.mark("same", { startTime: 10 });
+                  const measure = performance.measure("span", { start: 10, end: 25, detail: "d" });
+                  const entries = performance.getEntries();
+                  const valid = late instanceof PerformanceMark && late instanceof PerformanceEntry &&
+                    measure instanceof PerformanceMeasure && measure.duration === 15 && measure.detail === "d" &&
+                    late.detail.id === 1 && entries.length === 3 &&
+                    entries[0] === early && entries[1] === measure && entries[2] === late &&
+                    performance.getEntriesByName("same", "mark").length === 2 &&
+                    performance.getEntriesByType("measure")[0] === measure;
+                  performance.clearMarks("same");
+                  performance.clearMeasures("span");
+                  return valid && performance.getEntries().length === 0;
+                })()"#
+            )
+            .unwrap()
+            .as_boolean()
+            .unwrap());
+    }
+
+    #[test]
+    fn user_timing_measure_resolves_marks_and_validates_options() {
+        let mut runtime = JsRuntime::with_document(default_document()).unwrap();
+        assert!(runtime
+            .eval(
+                r#"(() => {
+                  performance.mark("begin", { startTime: 4 });
+                  performance.mark("finish", { startTime: 9 });
+                  const byMarks = performance.measure("by-marks", "begin", "finish");
+                  const byDuration = performance.measure("by-duration", { start: "begin", duration: 3 });
+                  let missingIsSyntaxError = false;
+                  let invalidOptionsTypeError = false;
+                  let negativeTypeError = false;
+                  try { performance.measure("missing", "unknown"); }
+                  catch (error) { missingIsSyntaxError = error instanceof DOMException && error.name === "SyntaxError"; }
+                  try { performance.measure("invalid", {}); }
+                  catch (error) { invalidOptionsTypeError = error instanceof TypeError; }
+                  try { performance.mark("negative", { startTime: -1 }); }
+                  catch (error) { negativeTypeError = error instanceof TypeError; }
+                  return byMarks.startTime === 4 && byMarks.duration === 5 &&
+                    byDuration.startTime === 4 && byDuration.duration === 3 &&
+                    missingIsSyntaxError && invalidOptionsTypeError && negativeTypeError;
+                })()"#
+            )
+            .unwrap()
+            .as_boolean()
+            .unwrap());
     }
 
     #[test]

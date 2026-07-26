@@ -5563,15 +5563,154 @@
     return hours + ":" + minutes + ":" + seconds;
   };
 
-  // Performance stub
-  globalThis.performance = {
-    now: () => Date.now(),
+  // Performance Timeline and User Timing. Resource/Navigation Timing and
+  // PerformanceObserver intentionally remain outside this core implementation.
+  class PerformanceEntry {
+    constructor(name, entryType, startTime, duration) {
+      Object.defineProperties(this, {
+        name: { value: String(name), enumerable: true },
+        entryType: { value: String(entryType), enumerable: true },
+        startTime: { value: Number(startTime), enumerable: true },
+        duration: { value: Number(duration), enumerable: true },
+      });
+    }
+    toJSON() {
+      return {
+        name: this.name,
+        entryType: this.entryType,
+        startTime: this.startTime,
+        duration: this.duration,
+      };
+    }
+  }
+
+  class PerformanceMark extends PerformanceEntry {
+    constructor(name, options = {}) {
+      options = options ?? {};
+      if (typeof options !== "object") throw new TypeError("PerformanceMark options must be an object");
+      const startTime = options.startTime === undefined
+        ? __omoikane_performance_now()
+        : Number(options.startTime);
+      if (Number.isNaN(startTime) || startTime < 0) {
+        throw new TypeError("PerformanceMark startTime must be a non-negative number");
+      }
+      super(name, "mark", startTime, 0);
+      Object.defineProperty(this, "detail", { value: options.detail ?? null, enumerable: true });
+    }
+    toJSON() { return { ...super.toJSON(), detail: this.detail }; }
+  }
+
+  class PerformanceMeasure extends PerformanceEntry {
+    constructor(name, startTime, duration, detail = null) {
+      super(name, "measure", startTime, duration);
+      Object.defineProperty(this, "detail", { value: detail, enumerable: true });
+    }
+    toJSON() { return { ...super.toJSON(), detail: this.detail }; }
+  }
+
+  const performanceEntries = [];
+  let performanceEntrySequence = 0;
+
+  function sortedPerformanceEntries(entries) {
+    return entries.slice().sort((a, b) =>
+      a.startTime - b.startTime || a.__sequence - b.__sequence);
+  }
+
+  function addPerformanceEntry(entry) {
+    Object.defineProperty(entry, "__sequence", { value: performanceEntrySequence++ });
+    performanceEntries.push(entry);
+    return entry;
+  }
+
+  function resolvePerformanceTime(value, defaultValue) {
+    if (value === undefined) return defaultValue;
+    if (typeof value === "string") {
+      for (let index = performanceEntries.length - 1; index >= 0; index--) {
+        const entry = performanceEntries[index];
+        if (entry.entryType === "mark" && entry.name === value) return entry.startTime;
+      }
+      throw new DOMException("The mark '" + value + "' does not exist.", "SyntaxError");
+    }
+    const time = Number(value);
+    if (Number.isNaN(time) || time < 0) {
+      throw new TypeError("Performance measure timestamps must be non-negative numbers");
+    }
+    return time;
+  }
+
+  const performance = {
+    timeOrigin: Number(__omoikane_performance_time_origin),
     timing: {},
-    getEntriesByType: () => [],
-    getEntriesByName: () => [],
-    mark: () => {},
-    measure: () => {},
+    now() { return __omoikane_performance_now(); },
+    mark(name, options = {}) {
+      return addPerformanceEntry(new PerformanceMark(name, options));
+    },
+    measure(name, startOrOptions, endMark) {
+      let startTime;
+      let endTime;
+      let detail = null;
+      if (startOrOptions !== null && typeof startOrOptions === "object") {
+        const options = startOrOptions;
+        const hasStart = options.start !== undefined;
+        const hasEnd = options.end !== undefined;
+        const hasDuration = options.duration !== undefined;
+        if ((!hasStart && !hasEnd) || (hasStart && hasEnd && hasDuration)) {
+          throw new TypeError("PerformanceMeasure options require two of start, end, and duration");
+        }
+        startTime = resolvePerformanceTime(options.start, 0);
+        endTime = resolvePerformanceTime(options.end, this.now());
+        if (hasDuration) {
+          const duration = Number(options.duration);
+          if (Number.isNaN(duration) || duration < 0) {
+            throw new TypeError("PerformanceMeasure duration must be a non-negative number");
+          }
+          if (hasStart) endTime = startTime + duration;
+          else startTime = endTime - duration;
+        }
+        detail = options.detail ?? null;
+      } else {
+        startTime = resolvePerformanceTime(startOrOptions, 0);
+        endTime = resolvePerformanceTime(endMark, this.now());
+      }
+      if (startTime < 0 || endTime < startTime) {
+        throw new TypeError("PerformanceMeasure end must not precede start");
+      }
+      return addPerformanceEntry(new PerformanceMeasure(String(name), startTime, endTime - startTime, detail));
+    },
+    getEntries() { return sortedPerformanceEntries(performanceEntries); },
+    getEntriesByType(type) {
+      const normalized = String(type);
+      return sortedPerformanceEntries(performanceEntries.filter(entry => entry.entryType === normalized));
+    },
+    getEntriesByName(name, type) {
+      const normalizedName = String(name);
+      const normalizedType = type === undefined ? null : String(type);
+      return sortedPerformanceEntries(performanceEntries.filter(entry =>
+        entry.name === normalizedName && (normalizedType === null || entry.entryType === normalizedType)));
+    },
+    clearMarks(name) {
+      const normalized = name === undefined ? null : String(name);
+      for (let index = performanceEntries.length - 1; index >= 0; index--) {
+        if (performanceEntries[index].entryType === "mark" &&
+            (normalized === null || performanceEntries[index].name === normalized)) {
+          performanceEntries.splice(index, 1);
+        }
+      }
+    },
+    clearMeasures(name) {
+      const normalized = name === undefined ? null : String(name);
+      for (let index = performanceEntries.length - 1; index >= 0; index--) {
+        if (performanceEntries[index].entryType === "measure" &&
+            (normalized === null || performanceEntries[index].name === normalized)) {
+          performanceEntries.splice(index, 1);
+        }
+      }
+    },
   };
+  globalThis.PerformanceEntry = PerformanceEntry;
+  globalThis.PerformanceMark = PerformanceMark;
+  globalThis.PerformanceMeasure = PerformanceMeasure;
+  globalThis.performance = performance;
 
   globalThis.DOMParser = class DOMParser {
     parseFromString(source, type) {
