@@ -5340,6 +5340,24 @@ fn filter_brightness_applies_to_the_element_subtree() {
 }
 
 #[test]
+fn filter_blur_preserves_color_at_transparent_edges() {
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let div = NodeHandle::element("div");
+    document.append_child(body.clone());
+    body.append_child(div);
+    let css = "body { margin: 0; } div { width: 10px; height: 10px; background-color: red; filter: blur(1px); }";
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(Origin::Author, parse_stylesheet(css).unwrap());
+    let viewport = Rect { x: 0.0, y: 0.0, width: 20.0, height: 20.0 };
+    let layout = layout_tree(&document, &mut resolver, viewport).unwrap();
+    let pixel = paint_layout(&layout, &mut resolver, viewport).pixel(10, 5).unwrap();
+
+    assert_eq!((pixel.r, pixel.g, pixel.b), (255, 0, 0));
+    assert!(pixel.a > 0 && pixel.a < 255);
+}
+
+#[test]
 fn filter_functions_apply_in_declared_order() {
     fn render(filter: &str) -> Color {
         let document = NodeHandle::document();
