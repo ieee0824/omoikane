@@ -956,7 +956,15 @@ fn render_document_with_url_internal(
     // and batched CSSOM mutations have settled; the earlier resolver was never
     // consumed by layout or paint and only duplicated stylesheet parsing.
     let stylesheets_start = Instant::now();
-    for css_text in stylesheet::extract_author_stylesheets(document, base_url)? {
+    let css_texts = match stylesheet::extract_author_stylesheets(document, base_url) {
+        Ok(css_texts) => css_texts,
+        Err(error) if execute_javascript => {
+            eprintln!("[omoikane][css-error] {error:?}");
+            Vec::new()
+        }
+        Err(error) => return Err(error),
+    };
+    for css_text in css_texts {
         parsed_sheets.push(stylesheet::parse_stylesheet_forgiving(&css_text));
     }
     for sheet in &parsed_sheets {
