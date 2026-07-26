@@ -1058,9 +1058,7 @@ fn render_document_with_url_internal(
             let layout_start = Instant::now();
             let mut layout = crate::layout::layout_tree(document, &mut resolver, viewport)?;
             timings.layout = layout_start.elapsed();
-            if scroll != (0.0, 0.0) {
-                translate_layout_for_scroll(&mut layout, &mut resolver, -scroll.0, -scroll.1);
-            }
+            apply_scroll_offsets(&mut layout, &mut resolver, scroll);
             let paint_start = Instant::now();
             let canvas = paint_layout_with_web_fonts(
                 &layout,
@@ -1338,41 +1336,76 @@ fn translate_layout_for_paint(layout: &mut LayoutBox, dx: f32, dy: f32) {
     }
 }
 
-/// Translates document content for Window scrolling while keeping fixed
-/// positioned subtrees in viewport coordinates.
+/// Moves a laid out document so that painting reflects the Window scroll offset
+/// and every element scroll offset, leaving the layout geometry the CSSOM
+/// reports untouched (callers pass a tree they own).
+///
+/// Each box moves by the scroll offsets accumulated from its ancestors, while a
+/// scroll container's own inline content and children move by that plus the
+/// container's offset — so the container's border box stays put and its content
+/// slides underneath the clip its `overflow` already installs. A
+/// `position: fixed` box drops the accumulated offset, because it is anchored to
+/// the viewport; a scroll container inside it still scrolls its own content.
+pub(crate) fn apply_scroll_offsets(
+    layout: &mut LayoutBox,
+    resolver: &mut StyleResolver,
+    window_scroll: (f32, f32),
+) {
+    if window_scroll == (0.0, 0.0) && !crate::dom::any_element_scrolled() {
+        return;
+    }
+    translate_layout_for_scroll(layout, resolver, -window_scroll.0, -window_scroll.1);
+}
+
 fn translate_layout_for_scroll(
     layout: &mut LayoutBox,
     resolver: &mut StyleResolver,
     dx: f32,
     dy: f32,
 ) {
-    if matches!(
-        resolver.computed_style(&layout.node).get("position"),
-        Some(ComputedValue::Keyword(keyword)) if keyword.eq_ignore_ascii_case("fixed")
-    ) {
-        return;
+    let (dx, dy) = if is_fixed_for_paint(&resolver.computed_style(&layout.node)) {
+        (0.0, 0.0)
+    } else {
+        (dx, dy)
+    };
+    if (dx, dy) != (0.0, 0.0) {
+        layout.dimensions.content.x += dx;
+        layout.dimensions.content.y += dy;
+        layout.transform = AffineTransform::translate(dx, dy)
+            .multiply(layout.transform)
+            .multiply(AffineTransform::translate(-dx, -dy));
     }
-    layout.dimensions.content.x += dx;
-    layout.dimensions.content.y += dy;
-    for line in &mut layout.lines {
-        line.rect.x += dx;
-        line.rect.y += dy;
-        line.baseline += dy;
-        for fragment in &mut line.fragments {
-            fragment.rect.x += dx;
-            fragment.rect.y += dy;
+
+    // The box's own line boxes and list marker are scrollable content, so they
+    // move with the children rather than with the border box.
+    let (scroll_x, scroll_y) = layout.scroll_offset();
+    let (content_dx, content_dy) = (dx - scroll_x, dy - scroll_y);
+    if (content_dx, content_dy) != (0.0, 0.0) {
+        for line in &mut layout.lines {
+            line.rect.x += content_dx;
+            line.rect.y += content_dy;
+            line.baseline += content_dy;
+            for fragment in &mut line.fragments {
+                fragment.rect.x += content_dx;
+                fragment.rect.y += content_dy;
+            }
+        }
+        if let Some(marker) = &mut layout.marker {
+            marker.x += content_dx;
+            marker.y += content_dy;
         }
     }
-    if let Some(marker) = &mut layout.marker {
-        marker.x += dx;
-        marker.y += dy;
-    }
-    layout.transform = AffineTransform::translate(dx, dy)
-        .multiply(layout.transform)
-        .multiply(AffineTransform::translate(-dx, -dy));
     for child in &mut layout.children {
-        translate_layout_for_scroll(child, resolver, dx, dy);
+        translate_layout_for_scroll(child, resolver, content_dx, content_dy);
     }
+}
+
+/// Whether a box is anchored to the viewport rather than to scrolled content.
+fn is_fixed_for_paint(style: &ComputedStyle) -> bool {
+    matches!(
+        style.get("position"),
+        Some(ComputedValue::Keyword(keyword)) if keyword.eq_ignore_ascii_case("fixed")
+    )
 }
 
 fn paint_box_internal_untransformed(

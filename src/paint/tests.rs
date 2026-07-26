@@ -7601,3 +7601,308 @@ fn nested_render_glyph_cache_reuses_outer_entries_and_remains_active() {
     assert_eq!(hits, 2, "nested and post-nested lookups must hit the outer entry");
     assert_eq!(misses, 1, "the outermost lookup must be the only miss");
 }
+
+// --- Element scroll offsets (issue #245) ---
+
+/// Lays out `html`, applies the given element scroll offsets and the Window
+/// scroll, then paints. Each entry in `offsets` is a selector plus the offset to
+/// store on the element it matches.
+fn render_with_scroll(
+    html: &str,
+    viewport_size: f32,
+    offsets: &[(&str, f32, f32)],
+    window_scroll: (f32, f32),
+) -> Canvas {
+    let document = TreeBuilder::parse(html).document();
+    let mut resolver = StyleResolver::new();
+    for stylesheet in extract_author_stylesheets(&document, None).unwrap() {
+        resolver.add_stylesheet(Origin::Author, parse_stylesheet_forgiving(&stylesheet));
+    }
+    for (selector, x, y) in offsets {
+        document
+            .query_selector(selector)
+            .unwrap_or_else(|| panic!("no element matched {selector}"))
+            .set_scroll_offset(*x, *y);
+    }
+    let viewport = Rect { x: 0.0, y: 0.0, width: viewport_size, height: viewport_size };
+    let mut layout = layout_tree(&document, &mut resolver, viewport).unwrap();
+    super::apply_scroll_offsets(&mut layout, &mut resolver, window_scroll);
+    paint_layout(&layout, &mut resolver, viewport)
+}
+
+/// Two stacked 20x20 stripes inside a 20x20 scroll container at the origin.
+const STRIPED_SCROLLER: &str = "<html><head><style>\
+     body { margin: 0 } \
+     #sc { width: 20px; height: 20px; overflow: hidden } \
+     #top { width: 20px; height: 20px; background-color: #ff0000 } \
+     #bottom { width: 20px; height: 20px; background-color: #00ff00 } \
+     </style></head><body><div id=\"sc\"><div id=\"top\"></div><div id=\"bottom\"></div></div></body></html>";
+
+#[test]
+fn element_scroll_translates_content_and_keeps_the_clip() {
+    let red = Some(Color::rgba(255, 0, 0, 255));
+    let green = Some(Color::rgba(0, 255, 0, 255));
+
+    let unscrolled = render_with_scroll(STRIPED_SCROLLER, 40.0, &[], (0.0, 0.0));
+    assert_eq!(unscrolled.pixel(5, 5), red);
+    assert_eq!(unscrolled.pixel(5, 15), red);
+    // The second stripe is clipped away by the container.
+    assert_eq!(unscrolled.pixel(5, 25).unwrap().a, 0);
+
+    let half = render_with_scroll(STRIPED_SCROLLER, 40.0, &[("#sc", 0.0, 10.0)], (0.0, 0.0));
+    assert_eq!(half.pixel(5, 5), red);
+    assert_eq!(half.pixel(5, 15), green);
+    assert_eq!(half.pixel(5, 25).unwrap().a, 0);
+
+    let full = render_with_scroll(STRIPED_SCROLLER, 40.0, &[("#sc", 0.0, 20.0)], (0.0, 0.0));
+    assert_eq!(full.pixel(5, 5), green);
+    assert_eq!(full.pixel(5, 19), green);
+    // Scrolled-away content must not paint above the container either.
+    assert_eq!(full.pixel(5, 25).unwrap().a, 0);
+}
+
+#[test]
+fn element_scroll_left_moves_content_horizontally() {
+    // The absolutely positioned child's containing block is the scroll
+    // container itself, so it scrolls with the container's content.
+    let html = "<html><head><style>\
+         body { margin: 0 } \
+         #sc { position: relative; width: 20px; height: 20px; overflow: hidden } \
+         #right { position: absolute; left: 20px; top: 0; width: 20px; height: 20px; \
+                  background-color: #00ff00 } \
+         </style></head><body><div id=\"sc\"><div id=\"right\"></div></div></body></html>";
+    let green = Some(Color::rgba(0, 255, 0, 255));
+
+    let unscrolled = render_with_scroll(html, 40.0, &[], (0.0, 0.0));
+    assert_eq!(unscrolled.pixel(5, 5).unwrap().a, 0);
+    assert_eq!(unscrolled.pixel(25, 5).unwrap().a, 0, "content outside the container is clipped");
+
+    let scrolled = render_with_scroll(html, 40.0, &[("#sc", 20.0, 0.0)], (0.0, 0.0));
+    assert_eq!(scrolled.pixel(5, 5), green);
+    assert_eq!(scrolled.pixel(25, 5).unwrap().a, 0);
+}
+
+#[test]
+fn element_scroll_is_clamped_to_the_scrollable_extent_when_painting() {
+    // A stored offset past the extent paints the extent, so a shrunk document
+    // cannot scroll its content out of view.
+    let green = Some(Color::rgba(0, 255, 0, 255));
+    let clamped = render_with_scroll(
+        STRIPED_SCROLLER,
+        40.0,
+        &[("#sc", 500.0, 500.0)],
+        (0.0, 0.0),
+    );
+    assert_eq!(clamped.pixel(5, 5), green);
+    assert_eq!(clamped.pixel(5, 19), green);
+}
+
+#[test]
+fn overflow_auto_and_scroll_clip_and_scroll_their_content() {
+    let green = Some(Color::rgba(0, 255, 0, 255));
+    for keyword in ["auto", "scroll"] {
+        let html = STRIPED_SCROLLER.replace("overflow: hidden", &format!("overflow: {keyword}"));
+        let unscrolled = render_with_scroll(&html, 40.0, &[], (0.0, 0.0));
+        assert_eq!(
+            unscrolled.pixel(5, 25).unwrap().a,
+            0,
+            "overflow: {keyword} must clip its content"
+        );
+        let scrolled = render_with_scroll(&html, 40.0, &[("#sc", 0.0, 20.0)], (0.0, 0.0));
+        assert_eq!(
+            scrolled.pixel(5, 5),
+            green,
+            "overflow: {keyword} must scroll its content"
+        );
+    }
+}
+
+#[test]
+fn overflow_visible_and_clip_do_not_scroll_their_content() {
+    let red = Some(Color::rgba(255, 0, 0, 255));
+    for keyword in ["visible", "clip"] {
+        let html = STRIPED_SCROLLER.replace("overflow: hidden", &format!("overflow: {keyword}"));
+        let scrolled = render_with_scroll(&html, 40.0, &[("#sc", 0.0, 20.0)], (0.0, 0.0));
+        assert_eq!(
+            scrolled.pixel(5, 5),
+            red,
+            "overflow: {keyword} is not a scroll container"
+        );
+    }
+}
+
+#[test]
+fn fixed_descendant_stays_put_while_its_scroll_container_scrolls() {
+    let html = "<html><head><style>\
+         body { margin: 0 } \
+         #sc { width: 20px; height: 20px; overflow: hidden } \
+         #top { width: 20px; height: 20px; background-color: #ff0000 } \
+         #bottom { width: 20px; height: 20px; background-color: #00ff00 } \
+         #pin { position: fixed; left: 0; top: 0; width: 6px; height: 6px; \
+                background-color: #0000ff } \
+         </style></head><body><div id=\"sc\"><div id=\"top\"></div><div id=\"bottom\"></div>\
+         <div id=\"pin\"></div></div></body></html>";
+    let blue = Some(Color::rgba(0, 0, 255, 255));
+    let green = Some(Color::rgba(0, 255, 0, 255));
+
+    let scrolled = render_with_scroll(html, 40.0, &[("#sc", 0.0, 20.0)], (0.0, 0.0));
+    // Had the fixed box scrolled with the container it would sit at y = -20 and
+    // the green stripe would show through instead.
+    assert_eq!(scrolled.pixel(3, 3), blue);
+    assert_eq!(scrolled.pixel(10, 3), green);
+}
+
+#[test]
+fn scroll_container_inside_a_fixed_subtree_still_scrolls_its_content() {
+    let html = "<html><head><style>\
+         body { margin: 0; height: 400px } \
+         #pinned { position: fixed; left: 0; top: 0; width: 20px; height: 20px } \
+         #sc { width: 20px; height: 20px; overflow: hidden } \
+         #top { width: 20px; height: 20px; background-color: #ff0000 } \
+         #bottom { width: 20px; height: 20px; background-color: #00ff00 } \
+         </style></head><body><div id=\"pinned\"><div id=\"sc\"><div id=\"top\"></div>\
+         <div id=\"bottom\"></div></div></div></body></html>";
+    let green = Some(Color::rgba(0, 255, 0, 255));
+
+    // The Window is scrolled too: the fixed subtree must ignore that offset
+    // while the scroll container inside it still scrolls its own content.
+    let canvas = render_with_scroll(html, 40.0, &[("#sc", 0.0, 20.0)], (0.0, 8.0));
+    assert_eq!(canvas.pixel(5, 5), green);
+    assert_eq!(canvas.pixel(5, 19), green);
+}
+
+#[test]
+fn nested_scroll_containers_accumulate_offsets_when_painting() {
+    let html = "<html><head><style>\
+         body { margin: 0 } \
+         #outer { width: 30px; height: 30px; overflow: hidden } \
+         #inner { width: 20px; height: 20px; overflow: hidden; margin-top: 10px } \
+         #top { width: 20px; height: 20px; background-color: #ff0000 } \
+         #bottom { width: 20px; height: 20px; background-color: #00ff00 } \
+         </style></head><body><div id=\"outer\"><div id=\"inner\"><div id=\"top\"></div>\
+         <div id=\"bottom\"></div></div></div></body></html>";
+    let green = Some(Color::rgba(0, 255, 0, 255));
+
+    // The inner container starts 10px down; scrolling the outer container by 10
+    // lifts it to the top, and scrolling the inner one by 20 shows its second
+    // stripe. Both offsets have to apply for green to reach the origin.
+    let canvas = render_with_scroll(
+        html,
+        40.0,
+        &[("#outer", 0.0, 10.0), ("#inner", 0.0, 20.0)],
+        (0.0, 0.0),
+    );
+    assert_eq!(canvas.pixel(5, 0), green);
+    assert_eq!(canvas.pixel(5, 19), green);
+    assert_eq!(canvas.pixel(5, 25).unwrap().a, 0);
+}
+
+#[test]
+fn window_and_element_scroll_offsets_combine_when_painting() {
+    let green = Some(Color::rgba(0, 255, 0, 255));
+    let canvas = render_with_scroll(
+        STRIPED_SCROLLER,
+        40.0,
+        &[("#sc", 0.0, 20.0)],
+        (0.0, 10.0),
+    );
+    // The container itself moves up with the Window scroll, so its content ends
+    // up spanning y = -10..10 with the second stripe visible.
+    assert_eq!(canvas.pixel(5, 0), green);
+    assert_eq!(canvas.pixel(5, 9), green);
+    assert_eq!(canvas.pixel(5, 15).unwrap().a, 0);
+}
+
+/// The container's border box must stay where layout put it while its own line
+/// boxes, marker and children move — this is what keeps the clip and the
+/// element's own client rect stable while its content scrolls.
+#[test]
+fn apply_scroll_offsets_moves_content_but_not_the_scroll_container_box() {
+    let document = TreeBuilder::parse(
+        "<html><head><style>\
+         body { margin: 0 } \
+         #sc { width: 40px; height: 20px; overflow: hidden; font-size: 10px } \
+         #child { width: 40px; height: 40px } \
+         </style></head><body><div id=\"sc\">text<div id=\"child\"></div></div></body></html>",
+    )
+    .document();
+    let mut resolver = StyleResolver::new();
+    for stylesheet in extract_author_stylesheets(&document, None).unwrap() {
+        resolver.add_stylesheet(Origin::Author, parse_stylesheet_forgiving(&stylesheet));
+    }
+    let viewport = Rect { x: 0.0, y: 0.0, width: 100.0, height: 100.0 };
+    let scroller = document.query_selector("#sc").unwrap();
+    let child = document.query_selector("#child").unwrap();
+
+    let baseline = layout_tree(&document, &mut resolver, viewport).unwrap();
+    let baseline_scroller = find_layout_box_by_node(&baseline, &scroller).unwrap();
+    let baseline_box = baseline_scroller.dimensions.content;
+    let baseline_line = baseline_scroller.lines.first().map(|line| line.rect.y);
+    let baseline_child = find_layout_box_by_node(&baseline, &child)
+        .unwrap()
+        .dimensions
+        .content;
+
+    scroller.set_scroll_offset(0.0, 15.0);
+    let mut scrolled = layout_tree(&document, &mut resolver, viewport).unwrap();
+    super::apply_scroll_offsets(&mut scrolled, &mut resolver, (0.0, 0.0));
+    let scrolled_scroller = find_layout_box_by_node(&scrolled, &scroller).unwrap();
+
+    assert_eq!(
+        scrolled_scroller.dimensions.content, baseline_box,
+        "the scroll container's own box must not move"
+    );
+    assert_eq!(
+        scrolled_scroller.lines.first().map(|line| line.rect.y),
+        baseline_line.map(|y| y - 15.0),
+        "the container's own line boxes are scrollable content"
+    );
+    assert_eq!(
+        find_layout_box_by_node(&scrolled, &child)
+            .unwrap()
+            .dimensions
+            .content
+            .y,
+        baseline_child.y - 15.0,
+        "children scroll with the content"
+    );
+}
+
+fn find_layout_box_by_node<'a>(
+    layout: &'a crate::layout::LayoutBox,
+    node: &NodeHandle,
+) -> Option<&'a crate::layout::LayoutBox> {
+    if &layout.node == node {
+        return Some(layout);
+    }
+    layout
+        .children
+        .iter()
+        .find_map(|child| find_layout_box_by_node(child, node))
+}
+
+/// End-to-end check of the whole feature: a page script sets `scrollTop`, and
+/// the document rendered by the same call paints the scrolled content.
+#[test]
+fn scripted_element_scroll_reaches_the_rendered_document() {
+    let document = TreeBuilder::parse(
+        "<html><head><style>\
+         body { margin: 0 } \
+         #sc { width: 20px; height: 20px; overflow: hidden } \
+         #top { width: 20px; height: 20px; background-color: #ff0000 } \
+         #bottom { width: 20px; height: 20px; background-color: #00ff00 } \
+         </style></head><body><div id=\"sc\"><div id=\"top\"></div><div id=\"bottom\"></div></div>\
+         <script>document.getElementById('sc').scrollTop = 20;</script></body></html>",
+    )
+    .document();
+
+    let canvas = render_document(
+        &document,
+        Rect { x: 0.0, y: 0.0, width: 40.0, height: 40.0 },
+    )
+    .expect("render should succeed");
+
+    assert_eq!(canvas.pixel(5, 5), Some(Color::rgba(0, 255, 0, 255)));
+    assert_eq!(canvas.pixel(5, 19), Some(Color::rgba(0, 255, 0, 255)));
+    assert_eq!(canvas.pixel(5, 25).unwrap().a, 0);
+}

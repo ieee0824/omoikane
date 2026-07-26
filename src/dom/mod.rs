@@ -17,6 +17,20 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 /// iframe-reload lifetime hazard in issue 049.)
 static NEXT_NODE_ID: AtomicUsize = AtomicUsize::new(1);
 
+thread_local! {
+    /// Number of elements on this thread that currently hold a non-zero scroll
+    /// offset. Scrolling is rare, so paint and the layout-metrics bindings use
+    /// this to skip their scroll passes entirely on documents that never
+    /// scrolled. A released element does not decrement the count, which only
+    /// costs an avoidable pass.
+    static SCROLLED_ELEMENTS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Whether any element on this thread holds a non-zero scroll offset.
+pub(crate) fn any_element_scrolled() -> bool {
+    SCROLLED_ELEMENTS.with(|count| count.get() > 0)
+}
+
 /// A handle to a DOM node.
 #[derive(Clone, Debug)]
 pub struct NodeHandle(Rc<RefCell<NodeInner>>);
@@ -96,7 +110,10 @@ struct ShadowRoot {
 }
 
 /// A DOM element node.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// `Eq` is deliberately not derived: [`Element::scroll_offset`] is a float pair,
+/// and element identity comes from the node handle rather than field equality.
+#[derive(Debug, Clone, PartialEq)]
 pub struct Element {
     tag_name: String,
     namespace_uri: Option<String>,
@@ -106,6 +123,14 @@ pub struct Element {
     attributes: BTreeMap<String, String>,
     checked: bool,
     dirty_checkedness: bool,
+    /// Scroll offset of this element's scrolling box in CSS pixels, as set
+    /// through `scrollTop` / `scrollLeft` and friends.
+    ///
+    /// It is stored unclamped: consumers clamp it against the current scrollable
+    /// extent, so an offset survives a temporary `display: none` or
+    /// `overflow: visible` and comes back when the box does, matching browsers.
+    /// Detaching the element drops it, because that destroys the box.
+    scroll_offset: (f32, f32),
     /// The inert template contents owner for HTML `<template>` elements.
     ///
     /// Template contents are not children of the element itself. Keeping the
@@ -131,6 +156,7 @@ impl Element {
             attributes: BTreeMap::new(),
             checked: false,
             dirty_checkedness: false,
+            scroll_offset: (0.0, 0.0),
             template_content,
             shadow_root: None,
         }
@@ -154,6 +180,7 @@ impl Element {
             attributes: BTreeMap::new(),
             checked: false,
             dirty_checkedness: false,
+            scroll_offset: (0.0, 0.0),
             template_content: None,
             shadow_root: None,
         }
@@ -570,6 +597,12 @@ impl NodeHandle {
 
         let removed = self.0.borrow_mut().children.remove(index);
         removed.0.borrow_mut().parent = None;
+        // Detaching destroys the subtree's boxes, and with them their scroll
+        // offsets: re-inserting the node starts from the top of its content.
+        // Reordering within one parent detaches first, so it resets too.
+        if any_element_scrolled() {
+            clear_scroll_offsets(&removed);
+        }
         Ok(removed)
     }
 
@@ -703,6 +736,39 @@ impl NodeHandle {
         }
     }
 
+    /// Returns this element's stored scroll offset in CSS pixels.
+    ///
+    /// The value is not clamped to the current scrollable extent; callers that
+    /// need the offset actually in effect use [`crate::layout::LayoutBox::scroll_offset`].
+    /// Nodes that cannot scroll report `(0.0, 0.0)`.
+    pub(crate) fn scroll_offset(&self) -> (f32, f32) {
+        match &self.0.borrow().data {
+            NodeData::Element(element) => element.scroll_offset,
+            _ => (0.0, 0.0),
+        }
+    }
+
+    /// Stores this element's scroll offset in CSS pixels. No-op for other node
+    /// kinds, which have no scrolling box.
+    pub(crate) fn set_scroll_offset(&self, x: f32, y: f32) {
+        let mut inner = self.0.borrow_mut();
+        let NodeData::Element(element) = &mut inner.data else {
+            return;
+        };
+        let was_scrolled = element.scroll_offset != (0.0, 0.0);
+        element.scroll_offset = (x, y);
+        let is_scrolled = element.scroll_offset != (0.0, 0.0);
+        if was_scrolled != is_scrolled {
+            SCROLLED_ELEMENTS.with(|count| {
+                count.set(if is_scrolled {
+                    count.get().saturating_add(1)
+                } else {
+                    count.get().saturating_sub(1)
+                });
+            });
+        }
+    }
+
     /// Sets the data for a text or comment node. No-op for other node kinds.
     pub fn set_data(&self, data: &str) {
         match &mut self.0.borrow_mut().data {
@@ -797,6 +863,23 @@ impl Node for NodeHandle {
 
     fn child_nodes(&self) -> Vec<NodeHandle> {
         self.0.borrow().children.clone()
+    }
+}
+
+/// Clears the stored scroll offset of `node` and every node beneath it,
+/// including shadow trees and template contents.
+fn clear_scroll_offsets(node: &NodeHandle) {
+    if node.scroll_offset() != (0.0, 0.0) {
+        node.set_scroll_offset(0.0, 0.0);
+    }
+    if let Some(content) = node.template_content() {
+        clear_scroll_offsets(&content);
+    }
+    if let Some(root) = node.shadow_root() {
+        clear_scroll_offsets(&root);
+    }
+    for child in node.child_nodes() {
+        clear_scroll_offsets(&child);
     }
 }
 
@@ -1228,5 +1311,82 @@ mod tests {
             Some("0 0 10 10".to_string())
         );
         assert_eq!(element.get_attribute("ID"), Some("example".to_string()));
+    }
+
+    #[test]
+    fn scroll_offset_defaults_to_zero_and_round_trips_on_elements() {
+        let element = NodeHandle::element("div");
+        let text = NodeHandle::text("hello");
+
+        assert_eq!(element.scroll_offset(), (0.0, 0.0));
+        assert_eq!(text.scroll_offset(), (0.0, 0.0));
+
+        element.set_scroll_offset(12.5, 30.0);
+        assert_eq!(element.scroll_offset(), (12.5, 30.0));
+
+        // Non-elements have no scrolling box, so the setter is a no-op.
+        text.set_scroll_offset(4.0, 5.0);
+        assert_eq!(text.scroll_offset(), (0.0, 0.0));
+    }
+
+    #[test]
+    fn scroll_offset_resets_when_a_node_is_detached() {
+        let parent = NodeHandle::element("div");
+        let child = NodeHandle::element("div");
+        let grandchild = NodeHandle::element("div");
+        parent.append_child(child.clone());
+        child.append_child(grandchild.clone());
+        child.set_scroll_offset(10.0, 20.0);
+        grandchild.set_scroll_offset(3.0, 4.0);
+
+        parent.remove_child(&child).unwrap();
+
+        // Removing a subtree destroys its boxes, so every offset inside it is
+        // gone; re-inserting starts from the top again.
+        assert_eq!(child.scroll_offset(), (0.0, 0.0));
+        assert_eq!(grandchild.scroll_offset(), (0.0, 0.0));
+        parent.append_child(child.clone());
+        assert_eq!(child.scroll_offset(), (0.0, 0.0));
+    }
+
+    #[test]
+    fn scroll_offset_resets_when_a_node_moves_or_is_reordered() {
+        let first_parent = NodeHandle::element("div");
+        let second_parent = NodeHandle::element("div");
+        let moved = NodeHandle::element("div");
+        let reordered = NodeHandle::element("div");
+        let sibling = NodeHandle::element("div");
+        first_parent.append_child(moved.clone());
+        first_parent.append_child(reordered.clone());
+        first_parent.append_child(sibling.clone());
+        moved.set_scroll_offset(1.0, 2.0);
+        reordered.set_scroll_offset(3.0, 4.0);
+
+        // Both re-parenting and reordering within one parent detach the node
+        // first, which drops the scroll offset.
+        second_parent.append_child(moved.clone());
+        first_parent.insert_before(reordered.clone(), &sibling).unwrap();
+
+        assert_eq!(moved.scroll_offset(), (0.0, 0.0));
+        assert_eq!(reordered.scroll_offset(), (0.0, 0.0));
+    }
+
+    #[test]
+    fn scrolled_element_tracking_reports_whether_any_offset_is_set() {
+        let element = NodeHandle::element("div");
+        let scrolled_before = any_element_scrolled();
+
+        element.set_scroll_offset(0.0, 5.0);
+        assert!(
+            any_element_scrolled(),
+            "a non-zero offset must be observable to the paint fast path"
+        );
+
+        element.set_scroll_offset(0.0, 0.0);
+        assert_eq!(
+            any_element_scrolled(),
+            scrolled_before,
+            "clearing the offset must undo the tracking increment"
+        );
     }
 }

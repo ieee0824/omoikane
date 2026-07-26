@@ -1884,10 +1884,77 @@
     get clientLeft() { return this.__layoutMetrics().clientLeft; }
     get scrollWidth() { return this.__layoutMetrics().scrollWidth; }
     get scrollHeight() { return this.__layoutMetrics().scrollHeight; }
-    get scrollTop() { return 0; }
-    set scrollTop(v) {}
-    get scrollLeft() { return 0; }
-    set scrollLeft(v) {}
+
+    // The root element's scrolling box is the viewport, so its scroll offset is
+    // the Window's. (In quirks mode that role belongs to `<body>` instead;
+    // quirks mode is not modelled yet.)
+    __isViewportScrollingElement() {
+      const document = this.ownerDocument;
+      return !!document && document === globalThis.document &&
+        document.documentElement === this;
+    }
+
+    // Returns the scroll offset in effect: the stored offset clamped to the
+    // element's current scrollable extent, or zero when it has no scrolling box.
+    __scrollOffset() {
+      if (this.__isViewportScrollingElement()) return windowScrollOffset();
+      try {
+        return JSON.parse(__omoikane_element_scroll_offset(this.__id));
+      } catch (error) {
+        return { x: 0, y: 0 };
+      }
+    }
+
+    // Scrolls to (x, y), clamped natively, and fires `scroll` at this element
+    // when the offset in effect changed. An element with no scrolling box is
+    // left alone, so nothing is remembered that could not be applied.
+    __applyScroll(x, y) {
+      if (this.__isViewportScrollingElement()) {
+        applyWindowScroll(x, y);
+        return;
+      }
+      try {
+        const result = JSON.parse(__omoikane_set_element_scroll(this.__id, Number(x), Number(y)));
+        if (result.changed) this.dispatchEvent(new Event("scroll"));
+      } catch (error) {
+        // An unresolvable node has no scrolling box; nothing to scroll.
+      }
+    }
+
+    get scrollTop() { return this.__scrollOffset().y; }
+    set scrollTop(value) { this.__applyScroll(this.__scrollOffset().x, value); }
+    get scrollLeft() { return this.__scrollOffset().x; }
+    set scrollLeft(value) { this.__applyScroll(value, this.__scrollOffset().y); }
+
+    // `scroll()` and `scrollTo()` are the same operation. Both accept
+    // `(x, y)` or a ScrollToOptions dictionary whose absent members keep the
+    // current offset; `behavior` is accepted and ignored because only instant
+    // scrolling is implemented.
+    scrollTo(xOrOptions, y) {
+      const current = this.__scrollOffset();
+      if (isScrollOptions(xOrOptions)) {
+        this.__applyScroll(
+          xOrOptions.left === undefined ? current.x : Number(xOrOptions.left),
+          xOrOptions.top === undefined ? current.y : Number(xOrOptions.top)
+        );
+      } else {
+        this.__applyScroll(Number(xOrOptions), Number(y));
+      }
+    }
+
+    scroll(xOrOptions, y) { this.scrollTo(xOrOptions, y); }
+
+    scrollBy(xOrOptions, y) {
+      const current = this.__scrollOffset();
+      if (isScrollOptions(xOrOptions)) {
+        this.__applyScroll(
+          current.x + (xOrOptions.left === undefined ? 0 : Number(xOrOptions.left)),
+          current.y + (xOrOptions.top === undefined ? 0 : Number(xOrOptions.top))
+        );
+      } else {
+        this.__applyScroll(current.x + Number(xOrOptions), current.y + Number(y));
+      }
+    }
     get offsetParent() { return null; }
 
     // Designates this element as its document's focused area and dispatches
@@ -2144,6 +2211,8 @@
     "__layoutMetrics", "getBoundingClientRect", "getClientRects",
     "clientWidth", "clientHeight", "clientTop", "clientLeft",
     "scrollWidth", "scrollHeight", "scrollTop", "scrollLeft",
+    "scroll", "scrollTo", "scrollBy",
+    "__scrollOffset", "__applyScroll", "__isViewportScrollingElement",
   ]);
 
   class HTMLElement extends Element {
@@ -4868,7 +4937,7 @@
     "click", "dblclick", "mousedown", "mouseup", "mouseover", "mousemove",
     "mouseout", "mouseenter", "mouseleave", "submit", "reset", "change",
     "input", "focus", "blur", "keydown", "keyup", "keypress", "select",
-    "contextmenu", "wheel", "error", "abort", "slotchange",
+    "contextmenu", "wheel", "error", "abort", "slotchange", "scroll",
   ];
   for (const type of EVENT_HANDLER_TYPES) {
     const key = "__on_" + type;

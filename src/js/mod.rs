@@ -20,7 +20,7 @@ use crate::css::{
 };
 use crate::dom::{Node, NodeHandle, NodeType, ShadowRootMode};
 use crate::http::{Client, HttpRequest, Method, default_user_agent};
-use crate::layout::{LayoutBox, Overflow, Rect};
+use crate::layout::{LayoutBox, Rect};
 
 thread_local! {
     static ACTIVE_HOST_STATE: RefCell<Option<Rc<RefCell<HostState>>>> = const { RefCell::new(None) };
@@ -967,6 +967,46 @@ impl HostState {
         }
         self.window_scroll = next;
         true
+    }
+
+    /// Returns the scroll offset in effect for `node`: the offset stored on the
+    /// element, clamped to its current scrollable extent.
+    ///
+    /// An element with no box in the main document's layout — detached,
+    /// `display: none`, or living in an iframe sub-document, whose layout is not
+    /// maintained — reports zero without disturbing the stored value, so the
+    /// offset comes back when its box does.
+    fn element_scroll_offset(&mut self, node: &NodeHandle) -> (f32, f32) {
+        self.ensure_layout();
+        self.layout_root
+            .as_ref()
+            .and_then(|root| find_layout_box(root, node))
+            .map(|layout| layout.scroll_offset())
+            .unwrap_or((0.0, 0.0))
+    }
+
+    /// Stores a clamped scroll offset for `node`, returning whether the offset in
+    /// effect changed (which is what makes a `scroll` event observable).
+    ///
+    /// Per CSSOM View, an element with no box or no scrolling box is left
+    /// untouched rather than remembering an offset it cannot apply.
+    fn set_element_scroll(&mut self, node: &NodeHandle, x: f32, y: f32) -> bool {
+        self.ensure_layout();
+        let Some(layout) = self
+            .layout_root
+            .as_ref()
+            .and_then(|root| find_layout_box(root, node))
+        else {
+            return false;
+        };
+        if !layout.is_scroll_container() {
+            return false;
+        }
+        let previous = layout.scroll_offset();
+        let (max_x, max_y) = layout.max_scroll_offset();
+        let next = (x.clamp(0.0, max_x), y.clamp(0.0, max_y));
+        node.set_scroll_offset(next.0, next.1);
+        previous != next
     }
 }
 
@@ -2527,6 +2567,16 @@ fn register_host_bindings(
             NativeFunction::from_copy_closure(layout_metrics_native),
         ),
         (
+            js_string!("__omoikane_element_scroll_offset"),
+            1,
+            NativeFunction::from_copy_closure(element_scroll_offset_native),
+        ),
+        (
+            js_string!("__omoikane_set_element_scroll"),
+            3,
+            NativeFunction::from_copy_closure(set_element_scroll_native),
+        ),
+        (
             js_string!("__omoikane_window_scroll_offset"),
             0,
             NativeFunction::from_copy_closure(window_scroll_offset_native),
@@ -2827,6 +2877,50 @@ fn find_layout_box_with_transform<'a>(
     None
 }
 
+/// Finds `node`'s layout box together with the transform and the scroll offset
+/// that apply to it, for turning layout coordinates into client coordinates.
+///
+/// `scroll` starts as the Window scroll offset and grows by the offset in effect
+/// for every scroll container on the way down. A `position: fixed` box drops the
+/// accumulated offset because it is anchored to the viewport; a scroll container
+/// inside such a box still scrolls its own content. This mirrors what
+/// [`crate::paint::apply_scroll_offsets`] does when painting.
+fn find_layout_box_with_scroll<'a>(
+    root: &'a LayoutBox,
+    node: &NodeHandle,
+    resolver: &mut StyleResolver,
+    ancestor_transform: AffineTransform,
+    scroll: (f32, f32),
+) -> Option<(&'a LayoutBox, AffineTransform, (f32, f32))> {
+    let transform = ancestor_transform.multiply(root.transform);
+    let scroll = if is_fixed_position(resolver, &root.node) {
+        (0.0, 0.0)
+    } else {
+        scroll
+    };
+    if &root.node == node {
+        return Some((root, transform, scroll));
+    }
+    let (offset_x, offset_y) = root.scroll_offset();
+    let child_scroll = (scroll.0 + offset_x, scroll.1 + offset_y);
+    for child in &root.children {
+        if let Some(found) =
+            find_layout_box_with_scroll(child, node, resolver, transform, child_scroll)
+        {
+            return Some(found);
+        }
+    }
+    None
+}
+
+/// Whether `node` is anchored to the viewport instead of to scrolled content.
+fn is_fixed_position(resolver: &mut StyleResolver, node: &NodeHandle) -> bool {
+    matches!(
+        resolver.computed_style(node).get("position"),
+        Some(ComputedValue::Keyword(keyword)) if keyword.eq_ignore_ascii_case("fixed")
+    )
+}
+
 /// The eight geometry values `getBoundingClientRect()` exposes plus the derived
 /// `offset*` / `client*` / `scroll*` metrics, all in CSS pixels.
 struct LayoutMetrics {
@@ -2961,19 +3055,7 @@ fn compute_layout_metrics(layout: &LayoutBox) -> LayoutMetrics {
     let client_width = content.width + padding.left + padding.right;
     let client_height = content.height + padding.top + padding.bottom;
 
-    // scrollWidth/scrollHeight: the padding box grown to contain descendants.
-    // Layout coordinates are absolute (see `layout_document`/`layout_element`),
-    // so descendant border-box edges are comparable directly with this box's
-    // padding-box edges without accumulating per-level offsets.
-    let padding_right_edge = content.x + content.width + padding.right;
-    let padding_bottom_edge = content.y + content.height + padding.bottom;
-    let padding_left_edge = content.x - padding.left;
-    let padding_top_edge = content.y - padding.top;
-    let mut max_right = padding_right_edge;
-    let mut max_bottom = padding_bottom_edge;
-    expand_scroll_bounds(&layout.children, &mut max_right, &mut max_bottom);
-    let scroll_width = (max_right - padding_left_edge).max(client_width);
-    let scroll_height = (max_bottom - padding_top_edge).max(client_height);
+    let (scroll_width, scroll_height) = layout.scrollable_overflow();
 
     LayoutMetrics {
         x: border_x,
@@ -3033,34 +3115,6 @@ fn compute_transformed_layout_metrics(
     metrics.width = max_x - min_x;
     metrics.height = max_y - min_y;
     metrics
-}
-
-/// Expands `max_right`/`max_bottom` to enclose the border boxes of every box in
-/// `boxes` and (recursively) their descendants, for `scrollWidth`/`scrollHeight`.
-///
-/// Layout coordinates are absolute, so each descendant's border-box right/bottom
-/// edge is compared directly against the running maxima — no per-level offset
-/// accumulation is required. Traversal does not descend into a box that clips its
-/// overflow ([`Overflow::Hidden`]): the clipping box still contributes its own
-/// border box, but its clipped content is not part of an ancestor's scrollable
-/// area, matching how a scroll container establishes its own scroll region.
-fn expand_scroll_bounds(boxes: &[LayoutBox], max_right: &mut f32, max_bottom: &mut f32) {
-    for child in boxes {
-        let child_content = child.dimensions.content;
-        let child_padding = child.dimensions.padding;
-        let child_border = child.dimensions.border;
-        let child_right =
-            child_content.x + child_content.width + child_padding.right + child_border.right;
-        let child_bottom =
-            child_content.y + child_content.height + child_padding.bottom + child_border.bottom;
-        *max_right = max_right.max(child_right);
-        *max_bottom = max_bottom.max(child_bottom);
-        // A descendant that clips its overflow bounds its own subtree; deeper
-        // content cannot spill into this element's scrollable area.
-        if child.overflow == Overflow::Visible {
-            expand_scroll_bounds(&child.children, max_right, max_bottom);
-        }
-    }
 }
 
 /// `__omoikane_computed_style(nodeId)` -> JSON string of computed CSS
@@ -3149,38 +3203,41 @@ fn layout_metrics_native(
         let is_main_document = document
             .as_ref()
             .is_some_and(|document| document.identity() == main_document_id);
-        let is_fixed = is_main_document
-            && state
+        // Client coordinates subtract the Window scroll and the offset of every
+        // scroll container above the element. Documents that never scrolled skip
+        // the walk that needs the style resolver.
+        let window_scroll = state.window_scroll;
+        let scroll_active = is_main_document
+            && (window_scroll != (0.0, 0.0) || crate::dom::any_element_scrolled());
+        let mut metrics = LayoutMetrics::zero();
+        let mut scroll = (0.0, 0.0);
+        {
+            let state = &mut *state;
+            let resolver = state
                 .document_styles
                 .get_mut(&main_document_id)
-                .and_then(|entry| entry.resolver.as_mut())
-                .is_some_and(|resolver| {
-                    let mut current = Some(node.clone());
-                    while let Some(candidate) = current {
-                        if matches!(
-                            resolver.computed_style(&candidate).get("position"),
-                            Some(ComputedValue::Keyword(keyword))
-                                if keyword.eq_ignore_ascii_case("fixed")
-                        ) {
-                            return true;
-                        }
-                        current = candidate
-                            .parent_node()
-                            .filter(|parent| parent.node_type() == NodeType::Element);
-                    }
-                    false
-                });
-        let mut metrics = state
-            .layout_root
-            .as_ref()
-            .and_then(|root| {
-                find_layout_box_with_transform(root, &node, AffineTransform::identity())
-            })
-            .map(|(layout, transform)| compute_transformed_layout_metrics(layout, transform))
-            .unwrap_or_else(LayoutMetrics::zero);
-        if is_main_document && !is_fixed && metrics.has_box {
-            metrics.x -= state.window_scroll.0;
-            metrics.y -= state.window_scroll.1;
+                .and_then(|entry| entry.resolver.as_mut());
+            if let Some(root) = state.layout_root.as_ref() {
+                let found = match (scroll_active, resolver) {
+                    (true, Some(resolver)) => find_layout_box_with_scroll(
+                        root,
+                        &node,
+                        resolver,
+                        AffineTransform::identity(),
+                        window_scroll,
+                    ),
+                    _ => find_layout_box_with_transform(root, &node, AffineTransform::identity())
+                        .map(|(layout, transform)| (layout, transform, (0.0, 0.0))),
+                };
+                if let Some((layout, transform, accumulated)) = found {
+                    metrics = compute_transformed_layout_metrics(layout, transform);
+                    scroll = accumulated;
+                }
+            }
+        }
+        if metrics.has_box {
+            metrics.x -= scroll.0;
+            metrics.y -= scroll.1;
         }
         if is_root_element && let Some(viewport) = viewport {
             metrics.client_width = viewport.width;
@@ -3191,6 +3248,56 @@ fn layout_metrics_native(
             metrics.scroll_height = metrics.scroll_height.max(viewport.height);
         }
         Ok(js_string!(metrics.to_json().as_str()).into())
+    })
+}
+
+/// `__omoikane_element_scroll_offset(nodeId)` -> `{"x":..,"y":..}`, the scroll
+/// offset in effect for the element.
+fn element_scroll_offset_native(
+    _: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let node_id = parse_node_id(args.first(), context)?;
+    with_host_state(|state| {
+        let node = state.borrow().get_node(node_id);
+        let (x, y) = match node {
+            Some(node) => state.borrow_mut().element_scroll_offset(&node),
+            None => (0.0, 0.0),
+        };
+        let json = format!("{{\"x\":{},\"y\":{}}}", json_number(x), json_number(y));
+        Ok(js_string!(json).into())
+    })
+}
+
+/// `__omoikane_set_element_scroll(nodeId, x, y)` -> `{"x":..,"y":..,"changed":bool}`.
+/// Non-finite coordinates scroll to zero, matching how browsers normalize them.
+fn set_element_scroll_native(
+    _: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let node_id = parse_node_id(args.first(), context)?;
+    let coordinate = |value: Option<&JsValue>, context: &mut Context| -> JsResult<f32> {
+        let value = value.cloned().unwrap_or_default().to_number(context)? as f32;
+        Ok(if value.is_finite() { value } else { 0.0 })
+    };
+    let x = coordinate(args.get(1), context)?;
+    let y = coordinate(args.get(2), context)?;
+    with_host_state(|state| {
+        let node = state.borrow().get_node(node_id);
+        let Some(node) = node else {
+            return Ok(js_string!("{\"x\":0,\"y\":0,\"changed\":false}").into());
+        };
+        let mut state = state.borrow_mut();
+        let changed = state.set_element_scroll(&node, x, y);
+        let (x, y) = state.element_scroll_offset(&node);
+        let json = format!(
+            "{{\"x\":{},\"y\":{},\"changed\":{changed}}}",
+            json_number(x),
+            json_number(y)
+        );
+        Ok(js_string!(json).into())
     })
 }
 
@@ -19197,5 +19304,396 @@ mod tests {
             })()"#,
         );
         assert_eq!(result, "true,true");
+    }
+
+    // --- Element scroll offsets / scroll container state (issue #245) ---
+
+    /// A 100x50 scroll container holding 300x200 of content, plus variants for
+    /// the non-scrollable and box-less cases. Values below were verified against
+    /// Firefox 152 over Marionette.
+    fn scroll_runtime() -> JsRuntime {
+        let mut runtime = runtime_from_html(
+            r#"<html><head><style>
+                 * { margin: 0; padding: 0 }
+                 body { width: 600px; height: 400px }
+                 .box { width: 100px; height: 50px }
+                 .box > .content { width: 300px; height: 200px }
+                 #hidden { overflow: hidden }
+                 #visible { overflow: visible }
+                 #clip { overflow: clip }
+                 #auto { overflow: auto }
+                 #scroll { overflow: scroll }
+                 #fits { overflow: hidden }
+                 #fits > .content { width: 10px; height: 10px }
+                 #none { overflow: hidden; display: none }
+               </style></head><body>
+                 <div class="box" id="hidden"><div class="content"></div></div>
+                 <div class="box" id="visible"><div class="content"></div></div>
+                 <div class="box" id="clip"><div class="content"></div></div>
+                 <div class="box" id="auto"><div class="content"></div></div>
+                 <div class="box" id="scroll"><div class="content"></div></div>
+                 <div class="box" id="fits"><div class="content"></div></div>
+                 <div class="box" id="none"><div class="content"></div></div>
+               </body></html>"#,
+        );
+        runtime.set_viewport(600.0, 400.0);
+        runtime
+    }
+
+    #[test]
+    fn element_scroll_offset_clamps_to_the_scrollable_extent() {
+        let mut runtime = scroll_runtime();
+        let result = eval_str(
+            &mut runtime,
+            r#"(() => {
+                const box = document.getElementById("hidden");
+                const out = [];
+                out.push([box.scrollTop, box.scrollLeft].join(","));
+                box.scrollTop = 25;
+                box.scrollLeft = 40;
+                out.push([box.scrollTop, box.scrollLeft].join(","));
+                // scrollWidth 300 - clientWidth 100, scrollHeight 200 - clientHeight 50.
+                box.scrollTop = 99999;
+                box.scrollLeft = 99999;
+                out.push([box.scrollTop, box.scrollLeft].join(","));
+                box.scrollTop = -10;
+                box.scrollLeft = -10;
+                out.push([box.scrollTop, box.scrollLeft].join(","));
+                box.scrollTop = NaN;
+                out.push(box.scrollTop);
+                box.scrollLeft = Infinity;
+                out.push(box.scrollLeft);
+                return out.join("|");
+            })()"#,
+        );
+        assert_eq!(result, "0,0|25,40|150,200|0,0|0|0");
+    }
+
+    #[test]
+    fn element_scroll_requires_a_scroll_container_with_room_to_scroll() {
+        let mut runtime = scroll_runtime();
+        let result = eval_str(
+            &mut runtime,
+            r#"(() => {
+                const scrolled = id => {
+                  const element = document.getElementById(id);
+                  element.scrollTop = 25;
+                  element.scrollLeft = 40;
+                  return id + "=" + element.scrollTop + "," + element.scrollLeft;
+                };
+                return ["hidden", "auto", "scroll", "visible", "clip", "fits", "none"]
+                  .map(scrolled).join("|");
+            })()"#,
+        );
+        // `hidden`, `auto` and `scroll` are scroll containers; `visible` and
+        // `clip` are not, content that fits has nowhere to go, and a
+        // `display: none` element has no box at all.
+        assert_eq!(
+            result,
+            "hidden=25,40|auto=25,40|scroll=25,40|visible=0,0|clip=0,0|fits=0,0|none=0,0"
+        );
+    }
+
+    #[test]
+    fn element_scroll_methods_accept_numbers_and_options() {
+        let mut runtime = scroll_runtime();
+        let result = eval_str(
+            &mut runtime,
+            r#"(() => {
+                const box = document.getElementById("hidden");
+                const at = () => [box.scrollLeft, box.scrollTop].join(",");
+                const out = [];
+                box.scrollTo(5, 6);
+                out.push(at());
+                box.scrollBy(2, 3);
+                out.push(at());
+                box.scrollTo({ left: 11, top: 12 });
+                out.push(at());
+                box.scrollBy({ top: 1 });
+                out.push(at());
+                box.scroll(0, 0);
+                out.push(at());
+                // Absent dictionary members keep the current offset.
+                box.scrollTo(30, 30);
+                box.scrollTo({ left: 1 });
+                out.push(at());
+                box.scrollTo({ top: 2, behavior: "smooth" });
+                out.push(at());
+                return out.join("|");
+            })()"#,
+        );
+        assert_eq!(result, "5,6|7,9|11,12|11,13|0,0|1,30|1,2");
+    }
+
+    #[test]
+    fn element_scroll_dispatches_a_non_bubbling_scroll_event_on_change() {
+        let mut runtime = scroll_runtime();
+        let result = eval_str(
+            &mut runtime,
+            r#"(() => {
+                const box = document.getElementById("hidden");
+                const log = [];
+                box.addEventListener("scroll", event => log.push(
+                  "el:" + event.bubbles + ":" + event.cancelable + ":" + (event.target === box)
+                ));
+                document.addEventListener("scroll", () => log.push("doc"));
+                globalThis.addEventListener("scroll", () => log.push("win"));
+                box.onscroll = () => log.push("onscroll");
+
+                box.scrollTop = 20;
+                const afterChange = log.length;
+                // Re-scrolling to the same offset, and clamped no-ops, change
+                // nothing and must stay silent.
+                box.scrollTop = 20;
+                box.scrollTop = 99999;
+                box.scrollTop = 99999;
+                box.scrollLeft = -1;
+                return [afterChange, log.join("/")].join("|");
+            })()"#,
+        );
+        // The element sees one event per real change; nothing bubbles to the
+        // document or the Window.
+        assert_eq!(result, "2|el:false:false:true/onscroll/el:false:false:true/onscroll");
+    }
+
+    #[test]
+    fn element_scroll_moves_descendant_client_rects_but_not_its_own() {
+        let mut runtime = runtime_from_html(
+            r#"<html><head><style>
+                 * { margin: 0; padding: 0 }
+                 body { width: 600px; height: 400px }
+                 #outer { overflow: hidden; width: 100px; height: 100px }
+                 #mid { width: 400px; height: 400px }
+                 #static { width: 20px; height: 20px }
+                 #inner { overflow: hidden; width: 60px; height: 60px }
+                 #innerchild { width: 300px; height: 300px }
+                 #innerstatic { width: 10px; height: 10px }
+               </style></head><body><div id="outer"><div id="mid">
+                 <div id="static"></div>
+                 <div id="inner"><div id="innerchild"><div id="innerstatic"></div></div></div>
+               </div></div></body></html>"#,
+        );
+        runtime.set_viewport(600.0, 400.0);
+        let result = eval_str(
+            &mut runtime,
+            r#"(() => {
+                const at = id => {
+                  const rect = document.getElementById(id).getBoundingClientRect();
+                  return [rect.left, rect.top].join(",");
+                };
+                const outer = document.getElementById("outer");
+                const inner = document.getElementById("inner");
+                const out = [at("static"), at("inner"), at("innerstatic")];
+                outer.scrollTop = 30;
+                outer.scrollLeft = 15;
+                out.push(at("static"), at("inner"), at("innerstatic"));
+                inner.scrollTop = 40;
+                inner.scrollLeft = 20;
+                out.push(at("innerstatic"));
+                // The container's own box and its layout-relative metrics stay
+                // where layout put them.
+                out.push(at("outer"));
+                const target = document.getElementById("static");
+                out.push([target.offsetTop, target.offsetLeft, inner.clientTop].join(","));
+                return out.join("|");
+            })()"#,
+        );
+        assert_eq!(
+            result,
+            concat!(
+                "0,0|0,20|0,20",
+                "|-15,-30|-15,-10|-15,-10",
+                "|-35,-50",
+                "|0,0",
+                "|0,0,0",
+            )
+        );
+    }
+
+    #[test]
+    fn fixed_positioning_opts_out_of_ancestor_scroll_but_not_its_own() {
+        let mut runtime = runtime_from_html(
+            r#"<html><head><style>
+                 * { margin: 0; padding: 0 }
+                 body { width: 600px; height: 2000px }
+                 #outer { overflow: hidden; width: 100px; height: 100px }
+                 #tall { width: 400px; height: 400px }
+                 #pinned { position: fixed; left: 3px; top: 4px; width: 50px; height: 50px;
+                           overflow: hidden }
+                 #pinnedchild { width: 200px; height: 200px }
+                 #pinnedtarget { width: 5px; height: 5px }
+               </style></head><body><div id="outer"><div id="tall">
+                 <div id="pinned"><div id="pinnedchild"><div id="pinnedtarget"></div></div></div>
+               </div></div></body></html>"#,
+        );
+        runtime.set_viewport(600.0, 400.0);
+        let result = eval_str(
+            &mut runtime,
+            r#"(() => {
+                const at = id => {
+                  const rect = document.getElementById(id).getBoundingClientRect();
+                  return [rect.left, rect.top].join(",");
+                };
+                const out = [at("pinned"), at("pinnedtarget")];
+                scrollTo(0, 50);
+                document.getElementById("outer").scrollTop = 30;
+                document.getElementById("outer").scrollLeft = 15;
+                // Neither the Window scroll nor the scroll container above it
+                // moves a fixed box or its content.
+                out.push(at("pinned"), at("pinnedtarget"));
+                // The fixed box is itself a scroll container, so its own offset
+                // still moves its content.
+                document.getElementById("pinned").scrollTop = 20;
+                out.push(at("pinned"), at("pinnedtarget"));
+                return out.join("|");
+            })()"#,
+        );
+        assert_eq!(result, "3,4|3,4|3,4|3,4|3,4|3,-16");
+    }
+
+    #[test]
+    fn element_scroll_offset_resets_when_the_element_is_detached() {
+        let mut runtime = scroll_runtime();
+        let result = eval_str(
+            &mut runtime,
+            r#"(() => {
+                const box = document.getElementById("hidden");
+                const parent = box.parentNode;
+                const sibling = document.getElementById("visible");
+                const out = [];
+
+                box.scrollTop = 100;
+                out.push(box.scrollTop);
+                parent.removeChild(box);
+                out.push(box.scrollTop);
+                parent.appendChild(box);
+                out.push(box.scrollTop);
+
+                // Moving to another parent and reordering inside one parent both
+                // detach the element first, so both reset the offset.
+                box.scrollTop = 100;
+                document.getElementById("auto").appendChild(box);
+                out.push(box.scrollTop);
+                box.scrollTop = 100;
+                const before = box.scrollTop;
+                parent.insertBefore(box, sibling);
+                out.push([before, box.scrollTop].join(","));
+                return out.join("|");
+            })()"#,
+        );
+        assert_eq!(result, "100|0|0|0|100,0");
+    }
+
+    #[test]
+    fn element_scroll_offset_returns_when_the_box_comes_back() {
+        let mut runtime = scroll_runtime();
+        let result = eval_str(
+            &mut runtime,
+            r#"(() => {
+                const box = document.getElementById("hidden");
+                const out = [];
+                box.scrollTop = 100;
+                out.push(box.scrollTop);
+
+                // No box: reported as zero, remembered for later.
+                box.style.display = "none";
+                out.push(box.scrollTop);
+                box.style.display = "";
+                out.push(box.scrollTop);
+
+                // No scrolling box: same deal.
+                box.style.overflow = "visible";
+                out.push(box.scrollTop);
+                box.style.overflow = "hidden";
+                out.push(box.scrollTop);
+
+                // An unrelated style change keeps it untouched.
+                box.style.backgroundColor = "red";
+                out.push(box.scrollTop);
+                return out.join("|");
+            })()"#,
+        );
+        assert_eq!(result, "100|0|100|0|100|100");
+    }
+
+    #[test]
+    fn element_scroll_offset_reports_the_extent_after_content_shrinks() {
+        let mut runtime = scroll_runtime();
+        let result = eval_str(
+            &mut runtime,
+            r#"(() => {
+                const box = document.getElementById("hidden");
+                const content = box.firstElementChild;
+                box.scrollTop = 150;
+                const before = box.scrollTop;
+                content.style.height = "60px";
+                // scrollHeight 60 against a 50px padding box leaves 10.
+                return [before, box.scrollTop, box.scrollHeight].join(",");
+            })()"#,
+        );
+        assert_eq!(result, "150,10,60");
+    }
+
+    #[test]
+    fn element_scroll_setter_is_ignored_without_a_scrolling_box() {
+        let mut runtime = scroll_runtime();
+        let result = eval_str(
+            &mut runtime,
+            r#"(() => {
+                const orphan = document.createElement("div");
+                orphan.style.overflow = "hidden";
+                orphan.style.width = "10px";
+                orphan.style.height = "10px";
+                const child = document.createElement("div");
+                child.style.width = "100px";
+                child.style.height = "100px";
+                orphan.appendChild(child);
+                const out = [];
+                orphan.scrollTop = 5;
+                out.push(orphan.scrollTop);
+                document.body.appendChild(orphan);
+                // The discarded write must not resurface once the box exists.
+                out.push(orphan.scrollTop);
+                orphan.scrollTop = 5;
+                out.push(orphan.scrollTop);
+                return out.join("|");
+            })()"#,
+        );
+        assert_eq!(result, "0|0|5");
+    }
+
+    #[test]
+    fn document_element_scroll_reflects_the_window_scroll() {
+        let mut runtime = runtime_from_html(
+            r#"<html><head><style>
+                 * { margin: 0; padding: 0 }
+                 body { width: 600px; height: 2000px }
+               </style></head><body></body></html>"#,
+        );
+        runtime.set_viewport(600.0, 700.0);
+        let result = eval_str(
+            &mut runtime,
+            r#"(() => {
+                const root = document.documentElement;
+                const out = [];
+                scrollTo(0, 300);
+                out.push([root.scrollTop, document.body.scrollTop, scrollY].join(","));
+                root.scrollTop = 100;
+                out.push([scrollY, root.scrollTop].join(","));
+                // The body is not a scroll container here, so writing to it does
+                // not move the viewport.
+                document.body.scrollTop = 55;
+                out.push([scrollY, document.body.scrollTop].join(","));
+                // scrollHeight 2000 against a 700px viewport.
+                root.scrollTop = 99999;
+                out.push([scrollY, root.scrollTop].join(","));
+                root.scrollTo(0, 120);
+                out.push(scrollY);
+                root.scrollBy(0, 5);
+                out.push(scrollY);
+                return out.join("|");
+            })()"#,
+        );
+        assert_eq!(result, "300,0,300|100,100|100,0|1300,1300|120|125");
     }
 }
