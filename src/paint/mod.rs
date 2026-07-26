@@ -31,11 +31,20 @@ thread_local! {
     static LAST_RENDER_TIMINGS: RefCell<RenderTimings> = RefCell::new(RenderTimings::default());
     #[cfg(test)]
     static EFFECT_SURFACE_PIXELS: Cell<u64> = const { Cell::new(0) };
+    #[cfg(test)]
+    static BACKDROP_SURFACE_PIXELS: Cell<u64> = const { Cell::new(0) };
 }
 
 #[cfg(test)]
 pub(crate) fn take_effect_surface_pixels() -> u64 {
     EFFECT_SURFACE_PIXELS.with(|pixels| pixels.replace(0))
+}
+
+/// Takes the number of pixels copied into local backdrop-filter surfaces since
+/// the last call. Test-only guard against filtering the whole canvas again.
+#[cfg(test)]
+pub(crate) fn take_backdrop_surface_pixels() -> u64 {
+    BACKDROP_SURFACE_PIXELS.with(|pixels| pixels.replace(0))
 }
 
 /// Processing time spent in each stage of the most recent screenshot render.
@@ -2527,6 +2536,12 @@ fn style_filters(style: &ComputedStyle, property: &str) -> Vec<crate::css::Filte
     }
 }
 
+/// Applies `backdrop-filter` to the pixels already painted behind `border_box`.
+///
+/// Only the destination area (border box ∩ inherited clip ∩ canvas) is written
+/// back, so the source is limited to that area grown by the input reach of the
+/// filter chain. Growing by that reach is what keeps blur sampling the pixels
+/// just outside the element, exactly as filtering the whole canvas did.
 fn apply_backdrop_filters(
     canvas: &mut Canvas,
     filters: &[crate::css::FilterFunction],
@@ -2544,16 +2559,93 @@ fn apply_backdrop_filters(
     } else {
         area
     };
-    let mut filtered = canvas.clone();
-    apply_filters(&mut filtered, filters);
-    let x0 = area.x.floor().max(0.0) as usize;
-    let y0 = area.y.floor().max(0.0) as usize;
-    let x1 = (area.x + area.width).ceil().min(canvas.width as f32) as usize;
-    let y1 = (area.y + area.height).ceil().min(canvas.height as f32) as usize;
-    for y in y0..y1 {
-        let start = (y * canvas.width as usize + x0) * 4;
-        let end = (y * canvas.width as usize + x1) * 4;
-        canvas.pixels[start..end].copy_from_slice(&filtered.pixels[start..end]);
+    let canvas_bounds = Rect {
+        x: 0.0,
+        y: 0.0,
+        width: canvas.width as f32,
+        height: canvas.height as f32,
+    };
+    // 完全にキャンバス外の要素はここで終了する。交差を取らないと以降の
+    // 丸め結果が反転した範囲になる。
+    let Some(area) = intersect(area, canvas_bounds) else {
+        return;
+    };
+    let out_x0 = area.x.floor().max(0.0) as usize;
+    let out_y0 = area.y.floor().max(0.0) as usize;
+    let out_x1 = (area.x + area.width).ceil().min(canvas.width as f32) as usize;
+    let out_y1 = (area.y + area.height).ceil().min(canvas.height as f32) as usize;
+    if out_x0 >= out_x1 || out_y0 >= out_y1 {
+        return;
+    }
+
+    // filter chain が出力領域を得るために読む必要のある入力範囲だけを複製する。
+    let (left, top, right, bottom) = filter_source_padding(filters);
+    let source_x0 = out_x0.saturating_sub(left);
+    let source_y0 = out_y0.saturating_sub(top);
+    let source_x1 = (out_x1 + right).min(canvas.width as usize);
+    let source_y1 = (out_y1 + bottom).min(canvas.height as usize);
+    let source_width = source_x1 - source_x0;
+    let source_height = source_y1 - source_y0;
+
+    #[cfg(test)]
+    BACKDROP_SURFACE_PIXELS.with(|pixels| {
+        pixels.set(
+            pixels
+                .get()
+                .saturating_add(source_width as u64 * source_height as u64),
+        );
+    });
+
+    let mut surface = copy_region_out(canvas, source_x0, source_y0, source_width, source_height);
+    apply_filters(&mut surface, filters);
+    copy_region_in(
+        canvas,
+        &surface,
+        out_x0 - source_x0,
+        out_y0 - source_y0,
+        out_x0,
+        out_y0,
+        out_x1 - out_x0,
+        out_y1 - out_y0,
+    );
+}
+
+/// Copies a rectangular region of `canvas` into a new canvas of that size.
+///
+/// The region must be within the canvas bounds.
+fn copy_region_out(canvas: &Canvas, x: usize, y: usize, width: usize, height: usize) -> Canvas {
+    let mut region = Canvas::new(width as u32, height as u32);
+    let row_bytes = width * 4;
+    for row in 0..height {
+        let source_start = ((y + row) * canvas.width as usize + x) * 4;
+        let target_start = row * row_bytes;
+        region.pixels[target_start..target_start + row_bytes]
+            .copy_from_slice(&canvas.pixels[source_start..source_start + row_bytes]);
+    }
+    region
+}
+
+/// Copies a `width` x `height` block of `region` at (`source_x`, `source_y`)
+/// into `canvas` at (`dest_x`, `dest_y`), replacing the destination pixels.
+///
+/// Both rectangles must be within their canvas bounds.
+#[allow(clippy::too_many_arguments)]
+fn copy_region_in(
+    canvas: &mut Canvas,
+    region: &Canvas,
+    source_x: usize,
+    source_y: usize,
+    dest_x: usize,
+    dest_y: usize,
+    width: usize,
+    height: usize,
+) {
+    let row_bytes = width * 4;
+    for row in 0..height {
+        let source_start = ((source_y + row) * region.width as usize + source_x) * 4;
+        let target_start = ((dest_y + row) * canvas.width as usize + dest_x) * 4;
+        canvas.pixels[target_start..target_start + row_bytes]
+            .copy_from_slice(&region.pixels[source_start..source_start + row_bytes]);
     }
 }
 
@@ -2568,21 +2660,18 @@ fn apply_filters(canvas: &mut Canvas, filters: &[crate::css::FilterFunction]) {
     let crop_y1 = (y1 + bottom).min(canvas.height as usize);
     let crop_width = crop_x1 - crop_x0;
     let crop_height = crop_y1 - crop_y0;
-    let mut cropped = Canvas::new(crop_width as u32, crop_height as u32);
-    for y in crop_y0..crop_y1 {
-        let source_start = (y * canvas.width as usize + crop_x0) * 4;
-        let source_end = source_start + crop_width * 4;
-        let target_start = (y - crop_y0) * crop_width * 4;
-        cropped.pixels[target_start..target_start + crop_width * 4]
-            .copy_from_slice(&canvas.pixels[source_start..source_end]);
-    }
+    let mut cropped = copy_region_out(canvas, crop_x0, crop_y0, crop_width, crop_height);
     apply_filters_full(&mut cropped, filters);
-    for y in crop_y0..crop_y1 {
-        let target_start = (y * canvas.width as usize + crop_x0) * 4;
-        let source_start = (y - crop_y0) * crop_width * 4;
-        canvas.pixels[target_start..target_start + crop_width * 4]
-            .copy_from_slice(&cropped.pixels[source_start..source_start + crop_width * 4]);
-    }
+    copy_region_in(
+        canvas,
+        &cropped,
+        0,
+        0,
+        crop_x0,
+        crop_y0,
+        crop_width,
+        crop_height,
+    );
 }
 
 fn apply_filters_full(canvas: &mut Canvas, filters: &[crate::css::FilterFunction]) {
@@ -2629,6 +2718,11 @@ fn alpha_bounds(canvas: &Canvas) -> Option<(usize, usize, usize, usize)> {
     (x0 < x1 && y0 < y1).then_some((x0, y0, x1, y1))
 }
 
+/// Returns how far (left, top, right, bottom) the output of `filters` can reach
+/// beyond the source pixels, in whole pixels.
+///
+/// This is the output-side reach: a drop shadow offset to the right expands the
+/// output to the right. Use [`filter_source_padding`] for the inverse question.
 fn filter_padding(filters: &[crate::css::FilterFunction]) -> (usize, usize, usize, usize) {
     use crate::css::FilterFunction;
     let (mut left, mut top, mut right, mut bottom) = (0usize, 0usize, 0usize, 0usize);
@@ -2644,6 +2738,43 @@ fn filter_padding(filters: &[crate::css::FilterFunction]) -> (usize, usize, usiz
                 right += blur + offset_x.ceil().max(0.0) as usize;
                 top += blur + (-offset_y.floor()).max(0.0) as usize;
                 bottom += blur + offset_y.ceil().max(0.0) as usize;
+            }
+            _ => {}
+        }
+    }
+    (left, top, right, bottom)
+}
+
+/// Returns how far (left, top, right, bottom) outside an output area `filters`
+/// has to read source pixels, in whole pixels.
+///
+/// This is the mirror image of [`filter_padding`]: `apply_drop_shadow` reads the
+/// source at `x - offset_x`, so a shadow offset to the right needs source pixels
+/// further to the *left*. Blur is symmetric, and per-pixel filters read nothing
+/// outside the output area.
+///
+/// Padding is summed over the chain. That is an upper bound for any order: after
+/// applying a prefix whose total padding is `p`, every pixel at least `p` inside
+/// the source area already holds its full-canvas value, so the next filter's own
+/// reach only adds to that distance.
+fn filter_source_padding(filters: &[crate::css::FilterFunction]) -> (usize, usize, usize, usize) {
+    use crate::css::FilterFunction;
+    let (mut left, mut top, mut right, mut bottom) = (0usize, 0usize, 0usize, 0usize);
+    for filter in filters {
+        match filter {
+            FilterFunction::Blur(radius) => {
+                let radius = radius.ceil() as usize;
+                left += radius;
+                top += radius;
+                right += radius;
+                bottom += radius;
+            }
+            FilterFunction::DropShadow { offset_x, offset_y, blur, .. } => {
+                let blur = blur.ceil() as usize;
+                left += blur + offset_x.ceil().max(0.0) as usize;
+                right += blur + (-offset_x.floor()).max(0.0) as usize;
+                top += blur + offset_y.ceil().max(0.0) as usize;
+                bottom += blur + (-offset_y.floor()).max(0.0) as usize;
             }
             _ => {}
         }

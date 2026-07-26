@@ -5450,6 +5450,199 @@ fn backdrop_filter_changes_only_the_pixels_behind_the_element() {
     assert_eq!(canvas.pixel(15, 15), Some(Color::rgba(64, 128, 192, 255)));
 }
 
+/// backdrop-filter テスト用の DOM (`.a`, `.b > .c`) を描画し、キャンバスと
+/// 処理された backdrop pixel 数を返す。
+///
+/// `body` の margin と viewport サイズは自動で設定するため、CSS では
+/// 背景色と各要素のスタイルだけを指定する。
+fn render_backdrop(css: &str, viewport_size: f32) -> (Canvas, u64) {
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let a = NodeHandle::element("div");
+    let b = NodeHandle::element("div");
+    let c = NodeHandle::element("div");
+    a.set_attribute("class", "a");
+    b.set_attribute("class", "b");
+    c.set_attribute("class", "c");
+    document.append_child(body.clone());
+    body.append_child(a);
+    body.append_child(b.clone());
+    b.append_child(c);
+
+    let css = format!(
+        "body {{ margin: 0; width: {viewport_size}px; height: {viewport_size}px; }} {css}"
+    );
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(Origin::Author, parse_stylesheet(&css).unwrap());
+    let viewport = Rect { x: 0.0, y: 0.0, width: viewport_size, height: viewport_size };
+    let layout = layout_tree(&document, &mut resolver, viewport).unwrap();
+
+    super::take_backdrop_surface_pixels();
+    let canvas = paint_layout(&layout, &mut resolver, viewport);
+    let backdrop_pixels = super::take_backdrop_surface_pixels();
+    (canvas, backdrop_pixels)
+}
+
+#[test]
+fn backdrop_filter_processes_only_the_local_region() {
+    // 200x200 のキャンバスに 10x10 の blur(2px) backdrop がある場合、
+    // 処理されるのは border box (50..60) を padding 2px 拡張した 14x14 だけ。
+    let (canvas, backdrop_pixels) = render_backdrop(
+        "body { background-color: #4080c0; } \
+         .a { position: absolute; left: 50px; top: 50px; width: 10px; height: 10px; \
+              backdrop-filter: blur(2px); } \
+         .b { display: none; }",
+        200.0,
+    );
+
+    assert_eq!(backdrop_pixels, 14 * 14);
+    // 一様な背景の blur は同じ色になるため、要素の内外どちらも背景色のまま。
+    assert_eq!(canvas.pixel(55, 55), Some(Color::rgba(64, 128, 192, 255)));
+    assert_eq!(canvas.pixel(150, 150), Some(Color::rgba(64, 128, 192, 255)));
+}
+
+#[test]
+fn backdrop_filter_color_filter_processes_exactly_the_border_box() {
+    // 色 filter は周辺 pixel を参照しないため、処理面積は border box と完全に一致する。
+    let (canvas, backdrop_pixels) = render_backdrop(
+        "body { background-color: #4080c0; } \
+         .a { position: absolute; left: 50px; top: 50px; width: 10px; height: 10px; \
+              backdrop-filter: brightness(0.5); } \
+         .b { display: none; }",
+        200.0,
+    );
+
+    assert_eq!(backdrop_pixels, 100);
+    assert_eq!(canvas.pixel(55, 55), Some(Color::rgba(32, 64, 96, 255)));
+    assert_eq!(canvas.pixel(59, 59), Some(Color::rgba(32, 64, 96, 255)));
+    assert_eq!(canvas.pixel(60, 60), Some(Color::rgba(64, 128, 192, 255)));
+    assert_eq!(canvas.pixel(49, 49), Some(Color::rgba(64, 128, 192, 255)));
+}
+
+#[test]
+fn backdrop_filter_blur_samples_pixels_outside_the_element() {
+    // 要素の左隣にだけ赤があり、要素自身は青の上にある。blur が要素の外周
+    // pixel を参照していれば、要素内の左端付近に赤が混ざる。
+    let (canvas, backdrop_pixels) = render_backdrop(
+        "body { margin: 0; background-color: #0000ff; } \
+         .a { position: absolute; left: 0; top: 0; width: 20px; height: 40px; background-color: #ff0000; } \
+         .b { position: absolute; left: 20px; top: 0; width: 20px; height: 40px; backdrop-filter: blur(5px); }",
+        40.0,
+    );
+
+    // 出力領域 20..40 x 0..40 を padding 5px 拡張し、キャンバスで clamp した領域。
+    assert_eq!(backdrop_pixels, 25 * 40);
+
+    let near_boundary = canvas.pixel(21, 20).unwrap();
+    assert!(
+        near_boundary.r > 0,
+        "blur must sample the red pixels left of the element, got {near_boundary:?}"
+    );
+    assert!(
+        near_boundary.b > near_boundary.r,
+        "the boundary pixel must still be mostly blue, got {near_boundary:?}"
+    );
+
+    // 境界から blur 半径以上離れた pixel は青のまま。
+    assert_eq!(canvas.pixel(38, 20), Some(Color::rgba(0, 0, 255, 255)));
+    // 要素の外側（赤側）は filter されない。
+    assert_eq!(canvas.pixel(10, 20), Some(Color::rgba(255, 0, 0, 255)));
+}
+
+#[test]
+fn backdrop_filter_local_region_respects_inherited_clip() {
+    // overflow: hidden の親でクリップされた backdrop は、クリップ後の領域だけを処理する。
+    let (canvas, backdrop_pixels) = render_backdrop(
+        "body { background-color: #4080c0; } \
+         .a { display: none; } \
+         .b { position: absolute; left: 50px; top: 50px; width: 10px; height: 10px; \
+              overflow: hidden; } \
+         .c { width: 100px; height: 100px; backdrop-filter: brightness(0.5); }",
+        200.0,
+    );
+
+    assert_eq!(backdrop_pixels, 100);
+    assert_eq!(canvas.pixel(55, 55), Some(Color::rgba(32, 64, 96, 255)));
+    // クリップの外は元の背景色のまま。
+    assert_eq!(canvas.pixel(65, 55), Some(Color::rgba(64, 128, 192, 255)));
+    assert_eq!(canvas.pixel(55, 65), Some(Color::rgba(64, 128, 192, 255)));
+}
+
+#[test]
+fn backdrop_filter_local_region_clamps_to_canvas_edges() {
+    // 負座標へはみ出した要素は、キャンバス内に収まる領域だけを処理する。
+    let (canvas, backdrop_pixels) = render_backdrop(
+        "body { margin: 0; background-color: #4080c0; } \
+         .a { position: absolute; left: -5px; top: -5px; width: 20px; height: 20px; \
+              backdrop-filter: blur(3px); } \
+         .b { display: none; }",
+        40.0,
+    );
+
+    // 出力領域は 0..15 で、source 領域は右下だけ 3px 拡張される。
+    assert_eq!(backdrop_pixels, 18 * 18);
+    assert_eq!(canvas.pixel(0, 0), Some(Color::rgba(64, 128, 192, 255)));
+    assert_eq!(canvas.pixel(14, 14), Some(Color::rgba(64, 128, 192, 255)));
+}
+
+#[test]
+fn backdrop_filter_fully_offscreen_element_is_skipped() {
+    // キャンバスの完全に外側にある要素は 1 pixel も処理しない（旧実装は panic した）。
+    let (canvas, backdrop_pixels) = render_backdrop(
+        "body { margin: 0; background-color: #4080c0; } \
+         .a { position: absolute; left: 60px; top: 10px; width: 20px; height: 20px; \
+              backdrop-filter: blur(3px); } \
+         .b { display: none; }",
+        40.0,
+    );
+
+    assert_eq!(backdrop_pixels, 0);
+    assert_eq!(canvas.pixel(39, 15), Some(Color::rgba(64, 128, 192, 255)));
+}
+
+#[test]
+fn backdrop_filter_multiple_elements_each_use_a_local_region() {
+    // 複数の backdrop-filter 要素はそれぞれ自分の領域だけを処理する。
+    let (canvas, backdrop_pixels) = render_backdrop(
+        "body { margin: 0; background-color: #4080c0; } \
+         .a { position: absolute; left: 10px; top: 10px; width: 10px; height: 10px; \
+              backdrop-filter: brightness(0.5); } \
+         .b { position: absolute; left: 60px; top: 60px; width: 10px; height: 10px; \
+              backdrop-filter: brightness(0.25); }",
+        200.0,
+    );
+
+    assert_eq!(backdrop_pixels, 200);
+    assert_eq!(canvas.pixel(15, 15), Some(Color::rgba(32, 64, 96, 255)));
+    assert_eq!(canvas.pixel(65, 65), Some(Color::rgba(16, 32, 48, 255)));
+    assert_eq!(canvas.pixel(40, 40), Some(Color::rgba(64, 128, 192, 255)));
+}
+
+#[test]
+fn backdrop_filter_drop_shadow_reads_padding_from_the_source_side() {
+    // drop-shadow は出力を右へずらすため、入力は左側を余分に読む必要がある。
+    // 要素の左外にある赤の影が要素内へ入り込むことで、入力 padding の向きを検証する。
+    let (canvas, backdrop_pixels) = render_backdrop(
+        ".a { position: absolute; left: 0; top: 0; width: 10px; height: 40px; \
+              background-color: #ff0000; } \
+         .b { position: absolute; left: 20px; top: 0; width: 20px; height: 40px; \
+              backdrop-filter: drop-shadow(12px 0 0 #0000ff); }",
+        40.0,
+    );
+
+    // 出力領域 20..40 に対し、入力は左 12px だけ拡張される（右へは広げない）。
+    assert_eq!(backdrop_pixels, 32 * 40);
+
+    let shadow = canvas.pixel(21, 20).unwrap();
+    assert_eq!(
+        shadow,
+        Color::rgba(0, 0, 255, 255),
+        "the shadow cast from x=9 must appear at x=21"
+    );
+    // 影の届かない位置は透明のまま。
+    assert_eq!(canvas.pixel(30, 20).unwrap().a, 0);
+}
+
 #[test]
 fn drop_shadow_uses_the_element_alpha_and_paints_behind_it() {
     let document = NodeHandle::document();
