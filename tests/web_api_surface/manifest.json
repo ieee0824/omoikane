@@ -506,6 +506,29 @@
       "description": "Document.hasFocus() reflects the focused browsing context instead of always reporting true",
       "probe": "document.hasFocus() === true && document.implementation.createHTMLDocument('t').hasFocus() === false",
       "baseline_supported": true
+    },
+    {
+      "id": "css.element-scroll-offset",
+      "area": "cssom",
+      "description": "Element scrollTop/scrollLeft store a scroll offset clamped to the scrollable extent",
+      "setup": "globalThis.__scrollHost = document.createElement('div'); __scrollHost.style.cssText = 'overflow:hidden;width:100px;height:50px'; __scrollHost.innerHTML = '<div style=\"width:300px;height:200px\"><span id=\"scroll-target\" style=\"display:block;width:10px;height:10px\"></span></div>'; document.body.appendChild(__scrollHost)",
+      "probe": "(() => { __scrollHost.scrollTop = 25; __scrollHost.scrollLeft = 40; const stored = __scrollHost.scrollTop === 25 && __scrollHost.scrollLeft === 40; __scrollHost.scrollTop = 99999; __scrollHost.scrollLeft = 99999; const clamped = __scrollHost.scrollTop === __scrollHost.scrollHeight - __scrollHost.clientHeight && __scrollHost.scrollLeft === __scrollHost.scrollWidth - __scrollHost.clientWidth; __scrollHost.scrollTop = -1; __scrollHost.scrollLeft = -1; const floored = __scrollHost.scrollTop === 0 && __scrollHost.scrollLeft === 0; return stored && clamped && floored; })()",
+      "baseline_supported": true
+    },
+    {
+      "id": "css.element-scroll-methods",
+      "area": "cssom",
+      "description": "Element scroll/scrollTo/scrollBy accept coordinates and ScrollToOptions",
+      "probe": "(() => { const at = () => __scrollHost.scrollLeft + ',' + __scrollHost.scrollTop; __scrollHost.scroll(0, 0); __scrollHost.scrollTo(5, 6); const numbers = at() === '5,6'; __scrollHost.scrollBy(2, 3); const relative = at() === '7,9'; __scrollHost.scrollTo({ left: 11, top: 12 }); const options = at() === '11,12'; __scrollHost.scrollTo({ left: 1 }); const partial = at() === '1,12'; return numbers && relative && options && partial; })()",
+      "baseline_supported": true
+    },
+    {
+      "id": "css.element-scroll-geometry-and-event",
+      "area": "cssom",
+      "description": "Scrolling an element moves descendant client rects and fires a non-bubbling scroll event",
+      "setup": "globalThis.__scrollEvents = 0; globalThis.__scrollBubbled = 0; __scrollHost.addEventListener('scroll', () => { __scrollEvents += 1; }); document.addEventListener('scroll', () => { __scrollBubbled += 1; }); __scrollHost.scroll(0, 0)",
+      "probe": "(() => { const target = document.getElementById('scroll-target'); const before = target.getBoundingClientRect().top; const hostBefore = __scrollHost.getBoundingClientRect().top; const events = __scrollEvents; __scrollHost.scrollTop = 20; const moved = target.getBoundingClientRect().top === before - 20; const hostStayed = __scrollHost.getBoundingClientRect().top === hostBefore; return moved && hostStayed && __scrollEvents === events + 1 && __scrollBubbled === 0; })()",
+      "baseline_supported": true
     }
   ]
 }

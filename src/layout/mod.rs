@@ -318,6 +318,9 @@ pub enum Visibility {
 pub enum Overflow {
     #[default]
     Visible,
+    /// The box clips its overflow and establishes a scroll container, so it can
+    /// be scrolled programmatically (`hidden`, `scroll` and `auto`). Only user
+    /// scrolling distinguishes them, and there is no scrollbar UI yet.
     Hidden,
 }
 
@@ -576,6 +579,80 @@ impl LayoutBox {
     /// Returns the box height including padding, border, and margins.
     pub fn total_height(&self) -> f32 {
         self.dimensions.total_height()
+    }
+
+    /// Returns the size of this box's scrolling area (`scrollWidth` /
+    /// `scrollHeight`): its padding box grown to contain every descendant box,
+    /// and never smaller than the padding box itself.
+    ///
+    /// Layout coordinates are absolute (see `layout_document` / `layout_element`),
+    /// so descendant border-box edges compare directly against this box's
+    /// padding-box edges. Traversal stops at a descendant that clips its own
+    /// overflow: that descendant scrolls its own content, so what it clips is not
+    /// part of this box's scrolling area.
+    pub(crate) fn scrollable_overflow(&self) -> (f32, f32) {
+        let content = self.dimensions.content;
+        let padding = self.dimensions.padding;
+        let client_width = content.width + padding.horizontal();
+        let client_height = content.height + padding.vertical();
+        let mut max_right = content.x + content.width + padding.right;
+        let mut max_bottom = content.y + content.height + padding.bottom;
+        expand_scrollable_overflow(&self.children, &mut max_right, &mut max_bottom);
+        (
+            (max_right - (content.x - padding.left)).max(client_width),
+            (max_bottom - (content.y - padding.top)).max(client_height),
+        )
+    }
+
+    /// Returns the largest scroll offsets this box can reach, i.e. its
+    /// scrolling area minus its visible padding box. Both are non-negative, and
+    /// zero for a box whose content fits.
+    pub(crate) fn max_scroll_offset(&self) -> (f32, f32) {
+        let content = self.dimensions.content;
+        let padding = self.dimensions.padding;
+        let (scroll_width, scroll_height) = self.scrollable_overflow();
+        (
+            (scroll_width - (content.width + padding.horizontal())).max(0.0),
+            (scroll_height - (content.height + padding.vertical())).max(0.0),
+        )
+    }
+
+    /// Whether this box clips its overflow and can therefore be scrolled.
+    pub(crate) fn is_scroll_container(&self) -> bool {
+        self.overflow == Overflow::Hidden
+    }
+
+    /// Returns the scroll offset actually in effect for this box: the offset
+    /// stored on its element, clamped to [`Self::max_scroll_offset`].
+    ///
+    /// A box that does not establish a scroll container reports `(0.0, 0.0)`
+    /// while leaving the stored offset alone, so it comes back if the element
+    /// becomes scrollable again.
+    pub(crate) fn scroll_offset(&self) -> (f32, f32) {
+        if !self.is_scroll_container() {
+            return (0.0, 0.0);
+        }
+        let (x, y) = self.node.scroll_offset();
+        if (x, y) == (0.0, 0.0) {
+            return (0.0, 0.0);
+        }
+        let (max_x, max_y) = self.max_scroll_offset();
+        (x.clamp(0.0, max_x), y.clamp(0.0, max_y))
+    }
+}
+
+/// Expands `max_right` / `max_bottom` to enclose the border boxes of `boxes` and
+/// their descendants, stopping at boxes that clip their own overflow.
+fn expand_scrollable_overflow(boxes: &[LayoutBox], max_right: &mut f32, max_bottom: &mut f32) {
+    for child in boxes {
+        let content = child.dimensions.content;
+        let padding = child.dimensions.padding;
+        let border = child.dimensions.border;
+        *max_right = max_right.max(content.x + content.width + padding.right + border.right);
+        *max_bottom = max_bottom.max(content.y + content.height + padding.bottom + border.bottom);
+        if child.overflow == Overflow::Visible {
+            expand_scrollable_overflow(&child.children, max_right, max_bottom);
+        }
     }
 }
 
@@ -2336,7 +2413,7 @@ fn overflow(style: &ComputedStyle) -> Overflow {
     for property in ["overflow", "overflow-x", "overflow-y"] {
         if matches!(
             style.get(property),
-            Some(ComputedValue::Keyword(keyword)) if overflow_keyword_sets_hidden(keyword)
+            Some(ComputedValue::Keyword(keyword)) if overflow_keyword_scrolls(keyword)
         ) {
             return Overflow::Hidden;
         }
@@ -2344,10 +2421,19 @@ fn overflow(style: &ComputedStyle) -> Overflow {
     Overflow::Visible
 }
 
-fn overflow_keyword_sets_hidden(keyword: &str) -> bool {
+/// Whether an `overflow` keyword makes the box clip and scroll its content.
+///
+/// `hidden`, `scroll` and `auto` all do; `visible` and `clip` do not. A
+/// two-value `overflow` sets both axes at once, and a non-`visible` axis forces
+/// the other one to become scrollable, so one scrollable token is enough.
+fn overflow_keyword_scrolls(keyword: &str) -> bool {
     keyword
         .split(|ch: char| ch.is_ascii_whitespace() || ch == ',')
-        .any(|token| token.eq_ignore_ascii_case("hidden"))
+        .any(|token| {
+            token.eq_ignore_ascii_case("hidden")
+                || token.eq_ignore_ascii_case("scroll")
+                || token.eq_ignore_ascii_case("auto")
+        })
 }
 
 // ── List marker ─────────────────────────────────────────────────────────────
