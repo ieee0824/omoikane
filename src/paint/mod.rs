@@ -29,6 +29,13 @@ const ANIMATION_FRAME_INTERVAL_MS: u64 = 16;
 thread_local! {
     static FORCE_OPACITY: Cell<bool> = const { Cell::new(false) };
     static LAST_RENDER_TIMINGS: RefCell<RenderTimings> = RefCell::new(RenderTimings::default());
+    #[cfg(test)]
+    static EFFECT_SURFACE_PIXELS: Cell<u64> = const { Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn take_effect_surface_pixels() -> u64 {
+    EFFECT_SURFACE_PIXELS.with(|pixels| pixels.replace(0))
 }
 
 /// Processing time spent in each stage of the most recent screenshot render.
@@ -1363,29 +1370,54 @@ fn paint_box_internal_untransformed(
 
     if needs_offscreen {
         let opacity_value = opacity.unwrap_or(1.0);
-        // オフスクリーンバッファはキャンバス全体サイズで作成する。
-        // border_box に限定すると、子孫要素が border_box 外にはみ出した場合（例: overflow: visible の
-        // 子孫や box-shadow）に正しく合成できなくなるため、キャンバス全体を使う必要がある。
-        let buf_x = 0i32;
-        let buf_y = 0i32;
-        let buf_w = canvas.width();
-        let buf_h = canvas.height();
+        // Effects only need a surface covering pixels this subtree can paint.
+        // This includes overflow-visible descendants, shadows, transforms, and
+        // nested filter expansion, while clipping the allocation to the final
+        // destination canvas and the inherited clip.
+        let canvas_bounds = Rect {
+            x: 0.0,
+            y: 0.0,
+            width: canvas.width() as f32,
+            height: canvas.height() as f32,
+        };
+        let mut effect_bounds = subtree_paint_bounds(layout, resolver);
+        if mask.is_some() {
+            let Some(masked_bounds) = intersect(effect_bounds, border_box) else {
+                return;
+            };
+            effect_bounds = masked_bounds;
+        }
+        if let Some(clip) = inherited_clip {
+            let Some(clipped_bounds) = intersect(effect_bounds, clip) else {
+                return;
+            };
+            effect_bounds = clipped_bounds;
+        }
+        let Some(effect_bounds) = intersect(effect_bounds, canvas_bounds) else {
+            return;
+        };
+        let buf_x = effect_bounds.x.floor().max(0.0) as i32;
+        let buf_y = effect_bounds.y.floor().max(0.0) as i32;
+        let buf_right = (effect_bounds.x + effect_bounds.width)
+            .ceil()
+            .min(canvas.width() as f32) as i32;
+        let buf_bottom = (effect_bounds.y + effect_bounds.height)
+            .ceil()
+            .min(canvas.height() as f32) as i32;
+        let buf_w = (buf_right - buf_x).max(0) as u32;
+        let buf_h = (buf_bottom - buf_y).max(0) as u32;
         if buf_w == 0 || buf_h == 0 {
             return;
         }
-        // オフスクリーンバッファはキャンバス全体と同一座標系（原点は (0, 0)）
-        let offset_border_box = Rect {
-            x: border_box.x - buf_x as f32,
-            y: border_box.y - buf_y as f32,
-            width: border_box.width,
-            height: border_box.height,
-        };
-        let offset_padding_box = Rect {
-            x: padding_box.x - buf_x as f32,
-            y: padding_box.y - buf_y as f32,
-            width: padding_box.width,
-            height: padding_box.height,
-        };
+        #[cfg(test)]
+        EFFECT_SURFACE_PIXELS.with(|pixels| {
+            pixels.set(pixels.get().saturating_add(buf_w as u64 * buf_h as u64));
+        });
+
+        let mut offset_layout = layout.clone();
+        translate_layout_for_paint(&mut offset_layout, -(buf_x as f32), -(buf_y as f32));
+        let offset_border_box = border_box_rect(&offset_layout);
+        let offset_padding_box = padding_box_rect(&offset_layout);
         let offset_inherited_clip = inherited_clip.map(|c| Rect {
             x: c.x - buf_x as f32,
             y: c.y - buf_y as f32,
@@ -1401,7 +1433,7 @@ fn paint_box_internal_untransformed(
         let mut offscreen = Canvas::new(buf_w, buf_h);
         paint_box_internal_to(
             &mut offscreen,
-            layout,
+            &offset_layout,
             resolver,
             offset_inherited_clip,
             offset_viewport,
@@ -1631,6 +1663,16 @@ fn subtree_paint_bounds(layout: &LayoutBox, resolver: &mut StyleResolver) -> Rec
             transformed_rect_bounds(child_bounds, child.transform),
         );
     }
+
+    // A nested filter may paint beyond its unfiltered subtree. Propagating its
+    // padding here ensures an ancestor effect surface does not crop that output.
+    let filters = element_filters(&style);
+    let (left, top, right, bottom) = filter_padding(&filters);
+    bounds.x -= left as f32;
+    bounds.y -= top as f32;
+    bounds.width += (left + right) as f32;
+    bounds.height += (top + bottom) as f32;
+
     bounds
 }
 
