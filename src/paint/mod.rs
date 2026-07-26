@@ -2718,6 +2718,29 @@ fn alpha_bounds(canvas: &Canvas) -> Option<(usize, usize, usize, usize)> {
     (x0 < x1 && y0 < y1).then_some((x0, y0, x1, y1))
 }
 
+/// How far a drop shadow moves its source, per side, in whole pixels.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct DropShadowShift {
+    left: usize,
+    top: usize,
+    right: usize,
+    bottom: usize,
+}
+
+/// Splits a drop shadow into its blur radius and its per-side shift, rounded up.
+///
+/// The shift is where the shadow lands relative to its source: a positive
+/// `offset_x` fills `right`, a negative one fills `left`.
+fn drop_shadow_reach(offset_x: f32, offset_y: f32, blur: f32) -> (usize, DropShadowShift) {
+    let shift = DropShadowShift {
+        left: (-offset_x.floor()).max(0.0) as usize,
+        top: (-offset_y.floor()).max(0.0) as usize,
+        right: offset_x.ceil().max(0.0) as usize,
+        bottom: offset_y.ceil().max(0.0) as usize,
+    };
+    (blur.ceil() as usize, shift)
+}
+
 /// Returns how far (left, top, right, bottom) the output of `filters` can reach
 /// beyond the source pixels, in whole pixels.
 ///
@@ -2742,11 +2765,12 @@ fn filter_padding(filters: &[crate::css::FilterFunction]) -> (usize, usize, usiz
                 bottom = bottom.saturating_add(radius);
             }
             FilterFunction::DropShadow { offset_x, offset_y, blur, .. } => {
-                let blur = blur.ceil() as usize;
-                left = left.saturating_add(blur.saturating_add((-offset_x.floor()).max(0.0) as usize));
-                right = right.saturating_add(blur.saturating_add(offset_x.ceil().max(0.0) as usize));
-                top = top.saturating_add(blur.saturating_add((-offset_y.floor()).max(0.0) as usize));
-                bottom = bottom.saturating_add(blur.saturating_add(offset_y.ceil().max(0.0) as usize));
+                let (blur, shift) = drop_shadow_reach(*offset_x, *offset_y, *blur);
+                // 右下へずれる影は出力を右下へ広げる。
+                left = left.saturating_add(blur.saturating_add(shift.left));
+                right = right.saturating_add(blur.saturating_add(shift.right));
+                top = top.saturating_add(blur.saturating_add(shift.top));
+                bottom = bottom.saturating_add(blur.saturating_add(shift.bottom));
             }
             _ => {}
         }
@@ -2784,13 +2808,12 @@ fn filter_source_padding(filters: &[crate::css::FilterFunction]) -> (usize, usiz
                 bottom = bottom.saturating_add(radius);
             }
             FilterFunction::DropShadow { offset_x, offset_y, blur, .. } => {
-                let blur = blur.ceil() as usize;
-                left = left.saturating_add(blur.saturating_add(offset_x.ceil().max(0.0) as usize));
-                right =
-                    right.saturating_add(blur.saturating_add((-offset_x.floor()).max(0.0) as usize));
-                top = top.saturating_add(blur.saturating_add(offset_y.ceil().max(0.0) as usize));
-                bottom = bottom
-                    .saturating_add(blur.saturating_add((-offset_y.floor()).max(0.0) as usize));
+                let (blur, shift) = drop_shadow_reach(*offset_x, *offset_y, *blur);
+                // 出力側と逆の辺へ加算する。右下へずれる影は左上の入力を読む。
+                left = left.saturating_add(blur.saturating_add(shift.right));
+                right = right.saturating_add(blur.saturating_add(shift.left));
+                top = top.saturating_add(blur.saturating_add(shift.bottom));
+                bottom = bottom.saturating_add(blur.saturating_add(shift.top));
             }
             _ => {}
         }
