@@ -1,9 +1,13 @@
 //! Text painting, text decoration, list markers, and inline image fragments.
 
+use std::cell::RefCell;
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::css::{ComputedStyle, ComputedValue};
-use crate::font::{Font, FontStyle, FontWeight, GlyphRaster, WebFontRegistry, load_default_text_fonts};
+use crate::font::{
+    Font, FontError, FontStyle, FontWeight, GlyphRaster, WebFontRegistry, load_default_text_fonts,
+};
 use crate::layout::{FragmentStyle, InlineFragmentContent, LayoutBox, ListMarker, Rect};
 
 use super::border::{EdgeSizesForPaint, paint_rect_borders};
@@ -12,6 +16,113 @@ use super::{
     background_color, length_property, paint_background_image,
     Canvas, Image,
 };
+
+const MAX_RENDER_GLYPH_CACHE_ENTRIES: usize = 16_384;
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+struct RenderGlyphCacheKey {
+    font_identity: usize,
+    ch: char,
+    size_bits: u32,
+}
+
+#[derive(Default)]
+struct RenderGlyphCache {
+    active: bool,
+    glyphs: HashMap<RenderGlyphCacheKey, Arc<GlyphRaster>>,
+    #[cfg(test)]
+    hits: usize,
+    #[cfg(test)]
+    misses: usize,
+}
+
+thread_local! {
+    static RENDER_GLYPH_CACHE: RefCell<RenderGlyphCache> = RefCell::new(RenderGlyphCache::default());
+}
+
+struct RenderGlyphCacheGuard;
+
+impl Drop for RenderGlyphCacheGuard {
+    fn drop(&mut self) {
+        RENDER_GLYPH_CACHE.with(|cache| {
+            let mut cache = cache.borrow_mut();
+            cache.active = false;
+            cache.glyphs.clear();
+        });
+    }
+}
+
+/// Shares rasterized glyphs between text fragments in one paint operation.
+/// Clearing both boundaries ensures pointer identities never outlive fonts.
+pub(crate) fn with_render_glyph_cache<T>(paint: impl FnOnce() -> T) -> T {
+    let owns_cache = RENDER_GLYPH_CACHE.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        if cache.active {
+            return false;
+        }
+        cache.glyphs.clear();
+        cache.active = true;
+        #[cfg(test)]
+        {
+            cache.hits = 0;
+            cache.misses = 0;
+        }
+        true
+    });
+    let _guard = if owns_cache {
+        Some(RenderGlyphCacheGuard)
+    } else {
+        None
+    };
+    paint()
+}
+
+fn rasterize_cached(font: &Font, ch: char, size_px: f32) -> Result<Arc<GlyphRaster>, FontError> {
+    let key = RenderGlyphCacheKey {
+        font_identity: std::ptr::from_ref(font) as usize,
+        ch,
+        size_bits: size_px.to_bits(),
+    };
+    if let Some(glyph) = RENDER_GLYPH_CACHE.with(|cache| {
+        let glyph = {
+            let cache = cache.borrow();
+            if !cache.active {
+                return None;
+            }
+            cache.glyphs.get(&key).cloned()
+        };
+        #[cfg(test)]
+        if glyph.is_some() {
+            cache.borrow_mut().hits += 1;
+        }
+        glyph
+    }) {
+        return Ok(glyph);
+    }
+
+    let glyph = Arc::new(font.rasterize(ch, size_px)?);
+    RENDER_GLYPH_CACHE.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        if cache.active {
+            #[cfg(test)]
+            {
+                cache.misses += 1;
+            }
+            if cache.glyphs.len() < MAX_RENDER_GLYPH_CACHE_ENTRIES {
+                cache.glyphs.insert(key, glyph.clone());
+            }
+        }
+    });
+    Ok(glyph)
+}
+
+#[cfg(test)]
+pub(crate) fn render_glyph_cache_stats() -> (usize, usize) {
+    RENDER_GLYPH_CACHE.with(|cache| {
+        let cache = cache.borrow();
+        (cache.hits, cache.misses)
+    })
+}
 
 /// Paint text using the provided fonts and an optional web font registry.
 ///
@@ -485,16 +596,16 @@ pub(crate) fn rasterize_with_fallback(
     fonts: &[Arc<Font>],
     ch: char,
     font_size: f32,
-) -> (usize, Option<GlyphRaster>, f32) {
+) -> (usize, Option<Arc<GlyphRaster>>, f32) {
     let prefer_cjk = is_cjk_preferred_character(ch);
-    let try_index = |index: usize| -> Option<(usize, Option<GlyphRaster>, f32)> {
+    let try_index = |index: usize| -> Option<(usize, Option<Arc<GlyphRaster>>, f32)> {
         let font = &fonts[index];
         // Missing glyphs must not rasterize as .notdef until every real
         // fallback candidate has been exhausted.
         if !ch.is_whitespace() && !font.has_glyph(ch) {
             return None;
         }
-        match font.rasterize(ch, font_size) {
+        match rasterize_cached(font, ch, font_size) {
             Ok(glyph) => {
                 if glyph.width > 0 && glyph.height > 0 && !glyph.bitmap.is_empty() {
                     let advance = if glyph.advance_x > 0.0 {
@@ -538,7 +649,7 @@ pub(crate) fn rasterize_with_fallback(
     // No font owns the character. Render the primary font's .notdef as the
     // visible last resort, while retaining an advance if rasterization fails.
     if let Some(primary) = fonts.first() {
-        if let Ok(glyph) = primary.rasterize(ch, font_size)
+        if let Ok(glyph) = rasterize_cached(primary, ch, font_size)
             && glyph.width > 0
             && glyph.height > 0
             && !glyph.bitmap.is_empty()
@@ -560,14 +671,14 @@ pub(crate) fn rasterize_with_fallback_refs(
     fonts: &[&Font],
     ch: char,
     font_size: f32,
-) -> (usize, Option<GlyphRaster>, f32) {
+) -> (usize, Option<Arc<GlyphRaster>>, f32) {
     let prefer_cjk = is_cjk_preferred_character(ch);
-    let try_index = |index: usize| -> Option<(usize, Option<GlyphRaster>, f32)> {
+    let try_index = |index: usize| -> Option<(usize, Option<Arc<GlyphRaster>>, f32)> {
         let font = fonts[index];
         if !ch.is_whitespace() && !font.has_glyph(ch) {
             return None;
         }
-        match font.rasterize(ch, font_size) {
+        match rasterize_cached(font, ch, font_size) {
             Ok(glyph) => {
                 if glyph.width > 0 && glyph.height > 0 && !glyph.bitmap.is_empty() {
                     let advance = if glyph.advance_x > 0.0 {
@@ -607,7 +718,7 @@ pub(crate) fn rasterize_with_fallback_refs(
     }
 
     if let Some(primary) = fonts.first() {
-        if let Ok(glyph) = primary.rasterize(ch, font_size)
+        if let Ok(glyph) = rasterize_cached(primary, ch, font_size)
             && glyph.width > 0
             && glyph.height > 0
             && !glyph.bitmap.is_empty()
