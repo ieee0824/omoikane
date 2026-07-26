@@ -467,6 +467,45 @@
       "description": "WebRTC peer connections are exposed",
       "probe": "typeof RTCPeerConnection === 'function'",
       "baseline_supported": false
+    },
+    {
+      "id": "dom.active-element",
+      "area": "dom",
+      "description": "document.activeElement tracks focus() and falls back to the body after blur()",
+      "setup": "globalThis.__focusA = document.createElement('input'); globalThis.__focusB = document.createElement('input'); document.body.appendChild(__focusA); document.body.appendChild(__focusB)",
+      "probe": "(() => { const initial = document.activeElement === document.body; __focusA.focus(); const first = document.activeElement === __focusA; __focusB.focus(); const second = document.activeElement === __focusB; __focusB.blur(); const cleared = document.activeElement === document.body; return initial && first && second && cleared; })()",
+      "baseline_supported": true
+    },
+    {
+      "id": "dom.focus-event-order",
+      "area": "dom",
+      "description": "Moving focus fires blur, focusout, focus, focusin in order, and only the focusout/focusin pair bubbles",
+      "setup": "globalThis.__orderLog = []; globalThis.__orderA = document.createElement('input'); globalThis.__orderB = document.createElement('input'); document.body.appendChild(__orderA); document.body.appendChild(__orderB); for (const type of ['blur', 'focusout', 'focus', 'focusin']) { __orderA.addEventListener(type, event => __orderLog.push('a:' + event.type)); __orderB.addEventListener(type, event => __orderLog.push('b:' + event.type)); document.addEventListener(type, event => __orderLog.push('doc:' + event.type)); }",
+      "probe": "(() => { __orderA.focus(); __orderB.focus(); __orderB.blur(); return __orderLog.join(',') === 'a:focus,a:focusin,doc:focusin,a:blur,a:focusout,doc:focusout,b:focus,b:focusin,doc:focusin,b:blur,b:focusout,doc:focusout'; })()",
+      "baseline_supported": true
+    },
+    {
+      "id": "dom.focus-related-target",
+      "area": "dom",
+      "description": "Focus events carry the element on the other side of the transition as relatedTarget",
+      "setup": "globalThis.__relatedLog = []; globalThis.__relatedA = document.createElement('input'); globalThis.__relatedB = document.createElement('input'); document.body.appendChild(__relatedA); document.body.appendChild(__relatedB); for (const target of [__relatedA, __relatedB]) { for (const type of ['blur', 'focus']) { target.addEventListener(type, event => __relatedLog.push(event.type + '=' + (event.relatedTarget === null ? 'null' : (event.relatedTarget === __relatedA ? 'a' : 'b')))); } }",
+      "probe": "(() => { __relatedA.focus(); __relatedB.focus(); __relatedB.blur(); return __relatedLog.join(',') === 'focus=null,blur=b,focus=a,blur=null'; })()",
+      "baseline_supported": true
+    },
+    {
+      "id": "dom.focus-fixup-rule",
+      "area": "dom",
+      "description": "Removing the focused element restores the body as activeElement without firing blur or focusout",
+      "setup": "globalThis.__fixupEvents = 0; globalThis.__fixupTarget = document.createElement('input'); document.body.appendChild(__fixupTarget); __fixupTarget.focus(); for (const type of ['blur', 'focusout']) { __fixupTarget.addEventListener(type, () => { __fixupEvents += 1; }); }",
+      "probe": "(() => { __fixupTarget.remove(); return __fixupEvents === 0 && document.activeElement === document.body; })()",
+      "baseline_supported": true
+    },
+    {
+      "id": "dom.document-has-focus",
+      "area": "dom",
+      "description": "Document.hasFocus() reflects the focused browsing context instead of always reporting true",
+      "probe": "document.hasFocus() === true && document.implementation.createHTMLDocument('t').hasFocus() === false",
+      "baseline_supported": true
     }
   ]
 }
