@@ -3224,9 +3224,13 @@ impl Canvas {
         }
         let w = self.width as usize;
         let h = self.height as usize;
+        if w == 0 || h == 0 {
+            return;
+        }
         let r = radius as usize;
         let mut alphas: Vec<u8> = self.pixels.iter().skip(3).step_by(4).copied().collect();
         let mut blurred = vec![0u8; w * h];
+        let mut column_sums = vec![0u32; w];
 
         for _ in 0..passes {
             // 水平方向 blur
@@ -3250,22 +3254,34 @@ impl Canvas {
                 }
             }
 
-            // 垂直方向 blur。結果をalphasへ戻し、次のpassの入力として再利用する。
-            for x in 0..w {
-                let mut sum: u32 = 0;
-                let init_bottom = r.min(h.saturating_sub(1));
-                for y in 0..=init_bottom {
-                    sum += blurred[y * w + x] as u32;
+            // 垂直方向 blur。全columnのrolling sumを持ち、入力と出力を
+            // row-majorに連続走査してstrided memory accessを避ける。
+            let init_bottom = r.min(h.saturating_sub(1));
+            column_sums.fill(0);
+            for y in 0..=init_bottom {
+                let row = &blurred[y * w..(y + 1) * w];
+                for (sum, &alpha) in column_sums.iter_mut().zip(row) {
+                    *sum += alpha as u32;
                 }
-                for y in 0..h {
-                    let top = y.saturating_sub(r);
-                    let bottom = (y + r).min(h.saturating_sub(1));
-                    alphas[y * w + x] = (sum / (bottom - top + 1) as u32) as u8;
-                    if y + r + 1 < h {
-                        sum += blurred[(y + r + 1) * w + x] as u32;
+            }
+            for y in 0..h {
+                let top = y.saturating_sub(r);
+                let bottom = (y + r).min(h.saturating_sub(1));
+                let count = (bottom - top + 1) as u32;
+                let output = &mut alphas[y * w..(y + 1) * w];
+                for (alpha, &sum) in output.iter_mut().zip(&column_sums) {
+                    *alpha = (sum / count) as u8;
+                }
+                if y + r + 1 < h {
+                    let entering = &blurred[(y + r + 1) * w..(y + r + 2) * w];
+                    for (sum, &alpha) in column_sums.iter_mut().zip(entering) {
+                        *sum += alpha as u32;
                     }
-                    if y >= r {
-                        sum = sum.saturating_sub(blurred[(y - r) * w + x] as u32);
+                }
+                if y >= r {
+                    let leaving = &blurred[(y - r) * w..(y - r + 1) * w];
+                    for (sum, &alpha) in column_sums.iter_mut().zip(leaving) {
+                        *sum = sum.saturating_sub(alpha as u32);
                     }
                 }
             }
