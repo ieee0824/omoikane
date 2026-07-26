@@ -6626,6 +6626,32 @@ fn render_document_executes_inline_script() {
 }
 
 #[test]
+fn render_document_uses_stylesheet_injected_by_script() {
+    let html = r##"<html><head><style>
+        body { margin: 0; }
+        #target { width: 10px; height: 10px; background: red; }
+    </style></head><body>
+        <div id="target"></div>
+        <script>
+          const style = document.createElement("style");
+          style.textContent = "#target { background: blue; }";
+          document.head.appendChild(style);
+        </script>
+    </body></html>"##;
+    let document = TreeBuilder::parse(html).document();
+    let viewport = Rect {
+        x: 0.0,
+        y: 0.0,
+        width: 10.0,
+        height: 10.0,
+    };
+
+    let canvas = render_document(&document, viewport).unwrap();
+
+    assert_eq!(canvas.pixel(5, 5), Some(Color::rgb(0, 0, 255)));
+}
+
+#[test]
 fn render_document_drives_animation_frames_before_layout() {
     let html = r#"<html><head><style>
         body { margin: 0; }

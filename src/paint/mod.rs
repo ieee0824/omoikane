@@ -874,45 +874,10 @@ fn render_document_with_url_internal(
     execute_javascript: bool,
 ) -> Result<Canvas, PaintError> {
     let mut timings = RenderTimings::default();
-    let stylesheets_start = Instant::now();
     let effective_base = stylesheet::extract_document_base_url(document, base_url);
     let mut resolver = StyleResolver::new();
     resolver.set_viewport(viewport.width, viewport.height);
-
     let mut parsed_sheets = Vec::new();
-    for css_text in stylesheet::extract_author_stylesheets(document, base_url)? {
-        let sheet = stylesheet::parse_stylesheet_forgiving(&css_text);
-        parsed_sheets.push(sheet);
-    }
-    for sheet in &parsed_sheets {
-        resolver.add_stylesheet(Origin::Author, sheet.clone());
-    }
-    timings.stylesheets = stylesheets_start.elapsed();
-
-    // Collect @font-face rules and fetch web fonts, building a variant registry
-    let fonts_start = Instant::now();
-    let fetched_web_fonts =
-        stylesheet::fetch_font_face_fonts(&parsed_sheets, effective_base.as_ref());
-
-    let mut web_font_registry = WebFontRegistry::new();
-    for wf in fetched_web_fonts {
-        web_font_registry.push_shared(&wf.family, wf.weight, wf.style, wf.font);
-    }
-
-    // Build combined system font list for glyph fallback, loaded once and
-    // shared (via `Arc`) between layout text measurement and paint.
-    let all_fonts = text::load_text_fonts();
-    let layout_fonts = all_fonts.clone();
-
-    // Avoid passing an empty registry to skip unnecessary lookups.
-    let web_font_registry = Arc::new(web_font_registry);
-    let web_font_registry_opt = if web_font_registry.is_empty() {
-        None
-    } else {
-        Some(web_font_registry.as_ref())
-    };
-    let layout_web_fonts = web_font_registry_opt.map(|_| Arc::clone(&web_font_registry));
-    timings.fonts = fonts_start.elapsed();
 
     // Execute <script> tags and fire DOMContentLoaded before layout.
     // JS may modify the DOM (e.g., classList.add for fade-in animations,
@@ -980,27 +945,56 @@ fn render_document_with_url_internal(
             if let Err(err) = runtime.eval("__omoikane_flush_stylesheets()") {
                 eprintln!("[omoikane][js-error] {err}");
             }
-            // Re-extract stylesheets and rebuild resolver after JS may have
-            // modified the DOM (inserted/removed <style>/<link> elements).
-            let style_refresh_start = Instant::now();
-            resolver = StyleResolver::new();
-            resolver.set_viewport(viewport.width, viewport.height);
-            parsed_sheets.clear();
-            if let Ok(css_texts) = stylesheet::extract_author_stylesheets(document, base_url) {
-                for css_text in css_texts {
-                    let sheet = stylesheet::parse_stylesheet_forgiving(&css_text);
-                    parsed_sheets.push(sheet);
-                }
-            }
-            for sheet in &parsed_sheets {
-                resolver.add_stylesheet(Origin::Author, sheet.clone());
-            }
-            timings.style_refresh = style_refresh_start.elapsed();
         } else {
             timings.javascript_runtime_init = runtime_init_start.elapsed();
             timings.javascript = javascript_start.elapsed();
         }
     }
+
+    // Build the native resolver once from the final DOM. In the JavaScript
+    // path this deliberately happens after scripts, timers, animation frames,
+    // and batched CSSOM mutations have settled; the earlier resolver was never
+    // consumed by layout or paint and only duplicated stylesheet parsing.
+    let stylesheets_start = Instant::now();
+    let css_texts = match stylesheet::extract_author_stylesheets(document, base_url) {
+        Ok(css_texts) => css_texts,
+        Err(error) if execute_javascript => {
+            eprintln!("[omoikane][css-error] {error:?}");
+            Vec::new()
+        }
+        Err(error) => return Err(error),
+    };
+    for css_text in css_texts {
+        parsed_sheets.push(stylesheet::parse_stylesheet_forgiving(&css_text));
+    }
+    for sheet in &parsed_sheets {
+        resolver.add_stylesheet(Origin::Author, sheet.clone());
+    }
+    if execute_javascript {
+        timings.style_refresh = stylesheets_start.elapsed();
+    } else {
+        timings.stylesheets = stylesheets_start.elapsed();
+    }
+
+    // Collect @font-face rules from the same final stylesheet set used for
+    // layout, including rules injected by page scripts.
+    let fonts_start = Instant::now();
+    let fetched_web_fonts =
+        stylesheet::fetch_font_face_fonts(&parsed_sheets, effective_base.as_ref());
+    let mut web_font_registry = WebFontRegistry::new();
+    for wf in fetched_web_fonts {
+        web_font_registry.push_shared(&wf.family, wf.weight, wf.style, wf.font);
+    }
+    let all_fonts = text::load_text_fonts();
+    let layout_fonts = all_fonts.clone();
+    let web_font_registry = Arc::new(web_font_registry);
+    let web_font_registry_opt = if web_font_registry.is_empty() {
+        None
+    } else {
+        Some(web_font_registry.as_ref())
+    };
+    let layout_web_fonts = web_font_registry_opt.map(|_| Arc::clone(&web_font_registry));
+    timings.fonts = fonts_start.elapsed();
 
     let result = crate::layout::with_layout_fonts(layout_fonts, layout_web_fonts, || {
         crate::layout::with_image_base_url(effective_base, || {
