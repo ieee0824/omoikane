@@ -6429,13 +6429,14 @@ fn local_effect_surface_keeps_overflow_visible_descendant() {
     let viewport = Rect { x: 0.0, y: 0.0, width: 100.0, height: 100.0 };
     let layout = layout_tree(&document, &mut resolver, viewport).unwrap();
     let canvas = paint_layout(&layout, &mut resolver, viewport);
+    let effect_surface_pixels = super::take_effect_surface_pixels();
 
     let has_overflow_pixel = canvas
         .pixels
         .chunks_exact(4)
         .any(|pixel| pixel[0] > 0 && pixel[3] > 0);
     assert!(has_overflow_pixel, "overflow-visible child was cropped");
-    assert!(super::take_effect_surface_pixels() < 1_000);
+    assert!(effect_surface_pixels < 1_000);
 }
 
 #[test]
@@ -6457,9 +6458,10 @@ fn local_effect_surface_clips_negative_coordinates_to_canvas() {
     let viewport = Rect { x: 0.0, y: 0.0, width: 100.0, height: 100.0 };
     let layout = layout_tree(&document, &mut resolver, viewport).unwrap();
     let canvas = paint_layout(&layout, &mut resolver, viewport);
+    let effect_surface_pixels = super::take_effect_surface_pixels();
 
     assert!(canvas.pixel(0, 5).unwrap().a > 0);
-    assert_eq!(super::take_effect_surface_pixels(), 50);
+    assert_eq!(effect_surface_pixels, 50);
 }
 
 #[test]
@@ -6485,6 +6487,7 @@ fn local_effect_surface_keeps_nested_filter_padding() {
     let viewport = Rect { x: 0.0, y: 0.0, width: 100.0, height: 100.0 };
     let layout = layout_tree(&document, &mut resolver, viewport).unwrap();
     let canvas = paint_layout(&layout, &mut resolver, viewport);
+    let effect_surface_pixels = super::take_effect_surface_pixels();
 
     let has_shadow_pixel = canvas
         .pixels
@@ -6494,7 +6497,7 @@ fn local_effect_surface_keeps_nested_filter_padding() {
             index % (canvas.width() as usize) >= 30 && pixel[2] > pixel[0] && pixel[3] > 0
         });
     assert!(has_shadow_pixel, "nested shadow was cropped");
-    assert!(super::take_effect_surface_pixels() < 2_000);
+    assert!(effect_surface_pixels < 2_000);
 }
 
 // --- overflow: hidden での box-shadow クリップテスト ---
