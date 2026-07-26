@@ -1317,6 +1317,11 @@ fn paint_box_internal_untransformed(
         inherited_clip
     };
 
+    let backdrop_filters = style_filters(&style, "backdrop-filter");
+    if !backdrop_filters.is_empty() {
+        apply_backdrop_filters(canvas, &backdrop_filters, border_box, inherited_clip);
+    }
+
     // opacity、filter、または解決可能な mask-image がある場合、要素サブツリーを
     // オフスクリーンバッファに描画してからまとめて合成する。
     let opacity = element_opacity(&style);
@@ -2435,11 +2440,45 @@ fn element_opacity(style: &ComputedStyle) -> Option<f32> {
 }
 
 fn element_filters(style: &ComputedStyle) -> Vec<crate::css::FilterFunction> {
-    match style.get("filter") {
+    style_filters(style, "filter")
+}
+
+fn style_filters(style: &ComputedStyle, property: &str) -> Vec<crate::css::FilterFunction> {
+    match style.get(property) {
         Some(ComputedValue::Keyword(value)) | Some(ComputedValue::String(value)) => {
             crate::css::parse_filter_list(value).unwrap_or_default()
         }
         _ => Vec::new(),
+    }
+}
+
+fn apply_backdrop_filters(
+    canvas: &mut Canvas,
+    filters: &[crate::css::FilterFunction],
+    border_box: Rect,
+    inherited_clip: Option<Rect>,
+) {
+    let mut filtered = canvas.clone();
+    apply_filters(&mut filtered, filters);
+    let Some(area) = normalize_rect(border_box) else {
+        return;
+    };
+    let area = if let Some(clip) = inherited_clip {
+        let Some(intersection) = intersect(area, clip) else {
+            return;
+        };
+        intersection
+    } else {
+        area
+    };
+    let x0 = area.x.floor().max(0.0) as usize;
+    let y0 = area.y.floor().max(0.0) as usize;
+    let x1 = (area.x + area.width).ceil().min(canvas.width as f32) as usize;
+    let y1 = (area.y + area.height).ceil().min(canvas.height as f32) as usize;
+    for y in y0..y1 {
+        let start = (y * canvas.width as usize + x0) * 4;
+        let end = (y * canvas.width as usize + x1) * 4;
+        canvas.pixels[start..end].copy_from_slice(&filtered.pixels[start..end]);
     }
 }
 
@@ -2454,6 +2493,9 @@ fn apply_filters(canvas: &mut Canvas, filters: &[crate::css::FilterFunction]) {
             FilterFunction::Contrast(amount) => {
                 apply_color_filter(canvas, |value| (value - 0.5) * amount + 0.5, 1.0)
             }
+            FilterFunction::DropShadow { offset_x, offset_y, blur, color } => {
+                apply_drop_shadow(canvas, *offset_x, *offset_y, *blur, *color)
+            }
             FilterFunction::Grayscale(amount) => apply_color_matrix(canvas, grayscale_matrix(*amount)),
             FilterFunction::HueRotate(degrees) => apply_color_matrix(canvas, hue_rotate_matrix(*degrees)),
             FilterFunction::Invert(amount) => {
@@ -2464,6 +2506,37 @@ fn apply_filters(canvas: &mut Canvas, filters: &[crate::css::FilterFunction]) {
             FilterFunction::Sepia(amount) => apply_color_matrix(canvas, sepia_matrix(*amount)),
         }
     }
+}
+
+fn apply_drop_shadow(canvas: &mut Canvas, offset_x: f32, offset_y: f32, blur: f32, color: Color) {
+    let source = canvas.clone();
+    let mut shadow = Canvas::new(canvas.width, canvas.height);
+    let mut result = Canvas::new(canvas.width, canvas.height);
+    for (index, pixel) in source.pixels.chunks_exact(4).enumerate() {
+        shadow.pixels[index * 4 + 3] =
+            ((pixel[3] as u16 * color.a as u16) / 255) as u8;
+    }
+    box_blur(&mut shadow, blur.round() as usize);
+    let dx = offset_x.round() as i32;
+    let dy = offset_y.round() as i32;
+    for y in 0..canvas.height as i32 {
+        for x in 0..canvas.width as i32 {
+            let sx = x - dx;
+            let sy = y - dy;
+            if sx < 0 || sy < 0 || sx >= canvas.width as i32 || sy >= canvas.height as i32 {
+                continue;
+            }
+            let source_index = (sy as usize * canvas.width as usize + sx as usize) * 4;
+            let alpha = shadow.pixels[source_index + 3];
+            if alpha == 0 { continue; }
+            let target_index = (y as usize * canvas.width as usize + x as usize) * 4;
+            blend_pixel(&mut result.pixels[target_index..target_index + 4], Color { a: alpha, ..color });
+        }
+    }
+    for (target, source) in result.pixels.chunks_exact_mut(4).zip(source.pixels.chunks_exact(4)) {
+        blend_pixel(target, Color { r: source[0], g: source[1], b: source[2], a: source[3] });
+    }
+    *canvas = result;
 }
 
 fn apply_color_filter(canvas: &mut Canvas, map: impl Fn(f32) -> f32, alpha: f32) {

@@ -540,7 +540,7 @@ fn time_to_ms(input: &str, allow_negative: bool) -> Option<f64> {
 fn effective_value(property: &str, value: Option<&ComputedValue>) -> Option<ComputedValue> {
     value.cloned().or_else(|| match property {
         "opacity" => Some(ComputedValue::Number(1.0)),
-        "filter" => Some(ComputedValue::Keyword("none".into())),
+        "filter" | "backdrop-filter" => Some(ComputedValue::Keyword("none".into())),
         "flex-grow" => Some(ComputedValue::Number(0.0)),
         "flex-shrink" => Some(ComputedValue::Number(1.0)),
         property
@@ -603,7 +603,9 @@ fn interpolate_property(
                 start, end, progress,
             )?))
         }
-        (ComputedValue::Keyword(start), ComputedValue::Keyword(end)) if property == "filter" => {
+        (ComputedValue::Keyword(start), ComputedValue::Keyword(end))
+            if matches!(property, "filter" | "backdrop-filter") =>
+        {
             Some(ComputedValue::Keyword(super::interpolate_filter_lists(
                 start, end, progress,
             )?))

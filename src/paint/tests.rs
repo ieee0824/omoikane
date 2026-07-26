@@ -5359,6 +5359,44 @@ fn filter_functions_apply_in_declared_order() {
 }
 
 #[test]
+fn backdrop_filter_changes_only_the_pixels_behind_the_element() {
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let div = NodeHandle::element("div");
+    document.append_child(body.clone());
+    body.append_child(div);
+    let css = "body { margin: 0; width: 20px; height: 20px; background-color: #4080c0; } \
+               div { width: 10px; height: 10px; backdrop-filter: brightness(0.5); }";
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(Origin::Author, parse_stylesheet(css).unwrap());
+    let viewport = Rect { x: 0.0, y: 0.0, width: 20.0, height: 20.0 };
+    let layout = layout_tree(&document, &mut resolver, viewport).unwrap();
+    let canvas = paint_layout(&layout, &mut resolver, viewport);
+
+    assert_eq!(canvas.pixel(5, 5), Some(Color::rgba(32, 64, 96, 255)));
+    assert_eq!(canvas.pixel(15, 15), Some(Color::rgba(64, 128, 192, 255)));
+}
+
+#[test]
+fn drop_shadow_uses_the_element_alpha_and_paints_behind_it() {
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let div = NodeHandle::element("div");
+    document.append_child(body.clone());
+    body.append_child(div);
+    let css = "body { margin: 0; } div { width: 10px; height: 10px; background-color: red; \
+               filter: drop-shadow(5px 0 0 #0000ff); }";
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(Origin::Author, parse_stylesheet(css).unwrap());
+    let viewport = Rect { x: 0.0, y: 0.0, width: 20.0, height: 20.0 };
+    let layout = layout_tree(&document, &mut resolver, viewport).unwrap();
+    let canvas = paint_layout(&layout, &mut resolver, viewport);
+
+    assert_eq!(canvas.pixel(5, 5), Some(Color::rgba(255, 0, 0, 255)));
+    assert_eq!(canvas.pixel(12, 5), Some(Color::rgba(0, 0, 255, 255)));
+}
+
+#[test]
 fn opacity_reduces_element_alpha() {
     // opacity: 0.5 を指定すると、要素の描画結果の alpha が半分になる。
     let document = NodeHandle::document();

@@ -1,10 +1,18 @@
 //! CSS Filter Effects function-list parsing and normalization.
 
+use crate::paint::Color;
+
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum FilterFunction {
     Blur(f32),
     Brightness(f32),
     Contrast(f32),
+    DropShadow {
+        offset_x: f32,
+        offset_y: f32,
+        blur: f32,
+        color: Color,
+    },
     Grayscale(f32),
     HueRotate(f32),
     Invert(f32),
@@ -37,6 +45,7 @@ pub(crate) fn parse_filter_list(input: &str) -> Option<Vec<FilterFunction>> {
             "blur" => FilterFunction::Blur(parse_length(argument)?),
             "brightness" => FilterFunction::Brightness(parse_factor(argument, 1.0, false)?),
             "contrast" => FilterFunction::Contrast(parse_factor(argument, 1.0, false)?),
+            "drop-shadow" => parse_drop_shadow(argument)?,
             "grayscale" => FilterFunction::Grayscale(parse_factor(argument, 1.0, true)?),
             "hue-rotate" => FilterFunction::HueRotate(parse_angle(argument)?),
             "invert" => FilterFunction::Invert(parse_factor(argument, 1.0, true)?),
@@ -60,8 +69,13 @@ pub(crate) fn normalize_filter_list(input: &str) -> Option<String> {
 }
 
 pub(crate) fn interpolate_filter_lists(start: &str, end: &str, progress: f32) -> Option<String> {
-    let start = parse_filter_list(start)?;
-    let end = parse_filter_list(end)?;
+    let mut start = parse_filter_list(start)?;
+    let mut end = parse_filter_list(end)?;
+    if start.is_empty() && !end.is_empty() {
+        start = end.iter().map(identity_filter).collect();
+    } else if end.is_empty() && !start.is_empty() {
+        end = start.iter().map(identity_filter).collect();
+    }
     if start.len() != end.len() {
         return None;
     }
@@ -73,6 +87,20 @@ pub(crate) fn interpolate_filter_lists(start: &str, end: &str, progress: f32) ->
             (FilterFunction::Blur(a), FilterFunction::Blur(b)) => Some(FilterFunction::Blur(mix(*a, *b))),
             (FilterFunction::Brightness(a), FilterFunction::Brightness(b)) => Some(FilterFunction::Brightness(mix(*a, *b))),
             (FilterFunction::Contrast(a), FilterFunction::Contrast(b)) => Some(FilterFunction::Contrast(mix(*a, *b))),
+            (
+                FilterFunction::DropShadow { offset_x: ax, offset_y: ay, blur: ab, color: ac },
+                FilterFunction::DropShadow { offset_x: bx, offset_y: by, blur: bb, color: bc },
+            ) => Some(FilterFunction::DropShadow {
+                offset_x: mix(*ax, *bx),
+                offset_y: mix(*ay, *by),
+                blur: mix(*ab, *bb),
+                color: Color::rgba(
+                    mix(ac.r as f32, bc.r as f32).round() as u8,
+                    mix(ac.g as f32, bc.g as f32).round() as u8,
+                    mix(ac.b as f32, bc.b as f32).round() as u8,
+                    mix(ac.a as f32, bc.a as f32).round() as u8,
+                ),
+            }),
             (FilterFunction::Grayscale(a), FilterFunction::Grayscale(b)) => Some(FilterFunction::Grayscale(mix(*a, *b))),
             (FilterFunction::HueRotate(a), FilterFunction::HueRotate(b)) => Some(FilterFunction::HueRotate(mix(*a, *b))),
             (FilterFunction::Invert(a), FilterFunction::Invert(b)) => Some(FilterFunction::Invert(mix(*a, *b))),
@@ -83,6 +111,26 @@ pub(crate) fn interpolate_filter_lists(start: &str, end: &str, progress: f32) ->
         })
         .collect::<Option<Vec<_>>>()?;
     Some(functions.iter().map(format_function).collect::<Vec<_>>().join(" "))
+}
+
+fn identity_filter(function: &FilterFunction) -> FilterFunction {
+    match function {
+        FilterFunction::Blur(_) => FilterFunction::Blur(0.0),
+        FilterFunction::Brightness(_) => FilterFunction::Brightness(1.0),
+        FilterFunction::Contrast(_) => FilterFunction::Contrast(1.0),
+        FilterFunction::DropShadow { offset_x, offset_y, blur, .. } => FilterFunction::DropShadow {
+            offset_x: *offset_x,
+            offset_y: *offset_y,
+            blur: *blur,
+            color: Color::rgba(0, 0, 0, 0),
+        },
+        FilterFunction::Grayscale(_) => FilterFunction::Grayscale(0.0),
+        FilterFunction::HueRotate(_) => FilterFunction::HueRotate(0.0),
+        FilterFunction::Invert(_) => FilterFunction::Invert(0.0),
+        FilterFunction::Opacity(_) => FilterFunction::Opacity(1.0),
+        FilterFunction::Saturate(_) => FilterFunction::Saturate(1.0),
+        FilterFunction::Sepia(_) => FilterFunction::Sepia(0.0),
+    }
 }
 
 fn matching_paren(input: &str, open: usize) -> Option<usize> {
@@ -138,13 +186,66 @@ fn parse_angle(input: &str) -> Option<f32> {
         (value, 0.9)
     } else if let Some(value) = lower.strip_suffix("rad") {
         (value, 180.0 / std::f32::consts::PI)
-    } else if let Some(value) = lower.strip_suffix("turn") {
-        (value, 360.0)
     } else {
-        return None;
+        (lower.strip_suffix("turn")?, 360.0)
     };
     let degrees = number.trim().parse::<f32>().ok()? * scale;
     degrees.is_finite().then_some(degrees)
+}
+
+fn parse_drop_shadow(input: &str) -> Option<FilterFunction> {
+    let mut lengths = Vec::new();
+    let mut color = None;
+    for component in split_whitespace_components(input)? {
+        if color.is_none()
+            && let Some(parsed) = crate::paint::color::parse_color(component)
+        {
+            color = Some(parsed);
+            continue;
+        }
+        lengths.push(parse_signed_length(component)?);
+    }
+    if !(2..=3).contains(&lengths.len()) {
+        return None;
+    }
+    let blur = lengths.get(2).copied().unwrap_or(0.0);
+    if blur < 0.0 {
+        return None;
+    }
+    Some(FilterFunction::DropShadow {
+        offset_x: lengths[0],
+        offset_y: lengths[1],
+        blur,
+        color: color.unwrap_or(Color::rgba(0, 0, 0, 255)),
+    })
+}
+
+fn parse_signed_length(input: &str) -> Option<f32> {
+    let lower = input.trim().to_ascii_lowercase();
+    if lower == "0" {
+        return Some(0.0);
+    }
+    let value = lower.strip_suffix("px")?.trim().parse::<f32>().ok()?;
+    value.is_finite().then_some(value)
+}
+
+fn split_whitespace_components(input: &str) -> Option<Vec<&str>> {
+    let mut result = Vec::new();
+    let mut depth = 0usize;
+    let mut start = None;
+    for (index, ch) in input.char_indices() {
+        match ch {
+            '(' => { depth += 1; start.get_or_insert(index); }
+            ')' => { depth = depth.checked_sub(1)?; start.get_or_insert(index); }
+            _ if ch.is_whitespace() && depth == 0 => {
+                if let Some(begin) = start.take() { result.push(input[begin..index].trim()); }
+            }
+            _ => { start.get_or_insert(index); }
+        }
+    }
+    if depth != 0 { return None; }
+    if let Some(begin) = start { result.push(input[begin..].trim()); }
+    Some(result)
 }
 
 fn format_number(value: f32) -> String {
@@ -156,6 +257,11 @@ fn format_function(function: &FilterFunction) -> String {
         FilterFunction::Blur(value) => format!("blur({}px)", format_number(*value)),
         FilterFunction::Brightness(value) => format!("brightness({})", format_number(*value)),
         FilterFunction::Contrast(value) => format!("contrast({})", format_number(*value)),
+        FilterFunction::DropShadow { offset_x, offset_y, blur, color } => format!(
+            "drop-shadow({}px {}px {}px rgba({}, {}, {}, {}))",
+            format_number(*offset_x), format_number(*offset_y), format_number(*blur),
+            color.r, color.g, color.b, format_number(color.a as f32 / 255.0)
+        ),
         FilterFunction::Grayscale(value) => format!("grayscale({})", format_number(*value)),
         FilterFunction::HueRotate(value) => format!("hue-rotate({}deg)", format_number(*value)),
         FilterFunction::Invert(value) => format!("invert({})", format_number(*value)),
@@ -177,6 +283,10 @@ mod tests {
         );
         assert_eq!(normalize_filter_list("grayscale(200%)"), Some("grayscale(1)".into()));
         assert_eq!(normalize_filter_list("none"), Some("none".into()));
+        assert_eq!(
+            normalize_filter_list("drop-shadow(2px 3px 4px #ff0000)"),
+            Some("drop-shadow(2px 3px 4px rgba(255, 0, 0, 1))".into())
+        );
     }
 
     #[test]
@@ -193,5 +303,9 @@ mod tests {
             Some("brightness(1.5) blur(5px)".into())
         );
         assert_eq!(interpolate_filter_lists("blur(1px)", "sepia(1)", 0.5), None);
+        assert_eq!(
+            interpolate_filter_lists("none", "blur(10px) brightness(2)", 0.5),
+            Some("blur(5px) brightness(1.5)".into())
+        );
     }
 }
