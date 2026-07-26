@@ -4053,13 +4053,19 @@ fn set_text_content_native(
             .borrow()
             .get_node(id)
             .ok_or_else(|| JsError::from(JsNativeError::error().with_message("node not found")))?;
-        // For text/comment leaf nodes, update data directly
-        if matches!(
+        let is_character_data = matches!(
             node.node_type(),
             crate::dom::NodeType::Text
                 | crate::dom::NodeType::Comment
                 | crate::dom::NodeType::ProcessingInstruction
-        ) {
+        );
+        let rebuild_stylesheets = !is_character_data
+            || node
+                .parent_node()
+                .and_then(|parent| parent.tag_name())
+                .is_some_and(|tag| tag.eq_ignore_ascii_case("style"));
+        // For text/comment leaf nodes, update data directly
+        if is_character_data {
             node.set_data(&text);
         } else {
             // Remove all children
@@ -4072,11 +4078,10 @@ fn set_text_content_native(
                 node.append_child(text_node);
             }
         }
-        // The node stays attached to its document (only its text changes), so
-        // its document root is unchanged; invalidate that document's resolver.
-        // This covers the common `<style>.textContent = "..."` case, where the
-        // stylesheet text of the owning document must be re-collected.
-        if node.tag_name().as_deref() == Some("style") {
+        // Element textContent replaces an entire subtree and may add/remove a
+        // style element. CharacterData normally only affects selector/style
+        // results, except beneath <style>, where it changes stylesheet source.
+        if rebuild_stylesheets {
             state.borrow_mut().mark_style_dirty_for_node(&node);
         } else {
             state.borrow_mut().invalidate_style_cache_for_node(&node);
@@ -11739,6 +11744,32 @@ mod tests {
                 > initial_resolver_generation,
             "style element content mutation must rebuild parsed stylesheets"
         );
+    }
+
+    #[test]
+    fn stylesheet_tree_text_mutations_rebuild_resolver() {
+        let document = crate::html::TreeBuilder::parse(
+            r#"<html><head><style>.active { opacity: 0.3; }</style></head>
+               <body><div id="target" class="active"></div></body></html>"#,
+        )
+        .document();
+        let mut runtime = JsRuntime::with_document(document).unwrap();
+        runtime
+            .eval("globalThis.target = document.getElementById('target')")
+            .unwrap();
+        assert_eq!(eval_str(&mut runtime, "getComputedStyle(target).opacity"), "0.3");
+        let initial_generation = runtime.host_state.borrow().style_resolver_generation;
+
+        runtime
+            .eval("document.querySelector('style').firstChild.data = '.active { opacity: 0.4; }'")
+            .unwrap();
+        assert_eq!(eval_str(&mut runtime, "getComputedStyle(target).opacity"), "0.4");
+        let text_generation = runtime.host_state.borrow().style_resolver_generation;
+        assert!(text_generation > initial_generation);
+
+        runtime.eval("document.head.textContent = ''").unwrap();
+        assert_eq!(eval_str(&mut runtime, "getComputedStyle(target).opacity"), "");
+        assert!(runtime.host_state.borrow().style_resolver_generation > text_generation);
     }
 
     #[test]
