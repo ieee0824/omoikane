@@ -6428,14 +6428,22 @@ fn local_effect_surface_keeps_overflow_visible_descendant() {
     );
     let viewport = Rect { x: 0.0, y: 0.0, width: 100.0, height: 100.0 };
     let layout = layout_tree(&document, &mut resolver, viewport).unwrap();
+    let parent_border_box = border_box_rect(find_layout_box_by_class(&layout, "effect").unwrap());
+    let parent_right = parent_border_box.x + parent_border_box.width;
     let canvas = paint_layout(&layout, &mut resolver, viewport);
     let effect_surface_pixels = super::take_effect_surface_pixels();
 
-    let has_overflow_pixel = canvas
+    // Only the child paints red. Requiring a red pixel strictly to the right of
+    // the parent's measured border box proves its overflow-visible part survived.
+    let has_red_outside_parent = canvas
         .pixels
         .chunks_exact(4)
-        .any(|pixel| pixel[0] > 0 && pixel[3] > 0);
-    assert!(has_overflow_pixel, "overflow-visible child was cropped");
+        .enumerate()
+        .any(|(index, pixel)| {
+            let x = index % canvas.width() as usize;
+            x as f32 + 0.5 >= parent_right && pixel[0] > 0 && pixel[3] > 0
+        });
+    assert!(has_red_outside_parent, "overflow-visible child was cropped");
     assert!(effect_surface_pixels < 1_000);
 }
 
@@ -6486,17 +6494,24 @@ fn local_effect_surface_keeps_nested_filter_padding() {
     );
     let viewport = Rect { x: 0.0, y: 0.0, width: 100.0, height: 100.0 };
     let layout = layout_tree(&document, &mut resolver, viewport).unwrap();
+    let outer_border_box = border_box_rect(find_layout_box_by_class(&layout, "outer").unwrap());
+    let inner_border_box = border_box_rect(find_layout_box_by_class(&layout, "inner").unwrap());
+    let source_right = (outer_border_box.x + outer_border_box.width)
+        .max(inner_border_box.x + inner_border_box.width);
     let canvas = paint_layout(&layout, &mut resolver, viewport);
     let effect_surface_pixels = super::take_effect_surface_pixels();
 
-    let has_shadow_pixel = canvas
+    // A blue pixel strictly beyond both measured source border boxes can only
+    // come from the nested 12px drop shadow, not either element background.
+    let has_shadow_outside_sources = canvas
         .pixels
         .chunks_exact(4)
         .enumerate()
         .any(|(index, pixel)| {
-            index % (canvas.width() as usize) >= 30 && pixel[2] > pixel[0] && pixel[3] > 0
+            let x = index % canvas.width() as usize;
+            x as f32 + 0.5 >= source_right && pixel[2] > pixel[0] && pixel[3] > 0
         });
-    assert!(has_shadow_pixel, "nested shadow was cropped");
+    assert!(has_shadow_outside_sources, "nested shadow was cropped");
     assert!(effect_surface_pixels < 2_000);
 }
 
