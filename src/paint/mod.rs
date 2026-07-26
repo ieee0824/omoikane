@@ -337,9 +337,7 @@ impl Canvas {
         // クリップ矩形とのインターセクションを求める（描画範囲の制限のみ、形状は保持）
         let clip_area = clip.and_then(normalize_rect);
 
-        let x0 = area.x.floor().max(0.0) as i32;
         let y0 = area.y.floor().max(0.0) as i32;
-        let x1 = (area.x + area.width).ceil().min(self.width as f32) as i32;
         let y1 = (area.y + area.height).ceil().min(self.height as f32) as i32;
 
         let rx = area.x;
@@ -353,25 +351,57 @@ impl Canvas {
         let br = br.min(rw / 2.0).min(rh / 2.0).max(0.0);
         let bl = bl.min(rw / 2.0).min(rh / 2.0).max(0.0);
 
+        let canvas_right = self.width as i32;
+        let stride = self.width as usize * 4;
+        let rgba = [color.r, color.g, color.b, color.a];
         for py in y0..y1 {
-            for px in x0..x1 {
-                let fx = px as f32 + 0.5;
-                let fy = py as f32 + 0.5;
+            let fy = py as f32 + 0.5;
+            if fy < ry || fy > ry + rh {
+                continue;
+            }
+            if let Some(ca) = clip_area
+                && (fy < ca.y || fy >= ca.y + ca.height)
+            {
+                continue;
+            }
 
-                // クリップチェック（ピクセル中心を基準に判定）
-                if let Some(ca) = clip_area
-                    && (fx < ca.x || fx >= ca.x + ca.width || fy < ca.y || fy >= ca.y + ca.height)
-                {
-                    continue;
+            let mut left = rx;
+            let mut right = rx + rw;
+            if fy < ry + tl {
+                let dy = fy - (ry + tl);
+                left = left.max(rx + tl - (tl * tl - dy * dy).max(0.0).sqrt());
+            }
+            if fy < ry + tr {
+                let dy = fy - (ry + tr);
+                right = right.min(rx + rw - tr + (tr * tr - dy * dy).max(0.0).sqrt());
+            }
+            if fy > ry + rh - bl {
+                let dy = fy - (ry + rh - bl);
+                left = left.max(rx + bl - (bl * bl - dy * dy).max(0.0).sqrt());
+            }
+            if fy > ry + rh - br {
+                let dy = fy - (ry + rh - br);
+                right = right.min(rx + rw - br + (br * br - dy * dy).max(0.0).sqrt());
+            }
+            let mut span_start = ((left - 0.5).ceil() as i32).clamp(0, canvas_right);
+            let mut span_end = (((right - 0.5).floor() as i32) + 1).clamp(0, canvas_right);
+            if let Some(ca) = clip_area {
+                span_start = span_start.max((ca.x - 0.5).ceil() as i32);
+                span_end = span_end.min((ca.x + ca.width - 0.5).ceil() as i32);
+            }
+            if span_start >= span_end || py < 0 || py >= self.height as i32 {
+                continue;
+            }
+            let start = py as usize * stride + span_start as usize * 4;
+            let end = py as usize * stride + span_end as usize * 4;
+            if color.a == 255 {
+                for pixel in self.pixels[start..end].chunks_exact_mut(4) {
+                    pixel.copy_from_slice(&rgba);
                 }
-
-                // ピクセル中心が角丸矩形の内側かどうか判定
-                if !point_in_rounded_rect(fx, fy, rx, ry, rw, rh, tl, tr, br, bl) {
-                    continue;
+            } else {
+                for pixel in self.pixels[start..end].chunks_exact_mut(4) {
+                    blend_pixel(pixel, color);
                 }
-
-                let index = ((py as u32 * self.width + px as u32) * 4) as usize;
-                blend_pixel(&mut self.pixels[index..index + 4], color);
             }
         }
     }
