@@ -265,6 +265,10 @@ impl StyleResolver {
         self.transition_timeline.has_running_transitions()
     }
 
+    pub(crate) fn running_transitions_require_layout(&self) -> bool {
+        self.transition_timeline.running_transitions_require_layout()
+    }
+
     pub(crate) fn cancel_detached_transitions(&mut self, active_node_ids: &HashSet<usize>) {
         self.transition_timeline
             .cancel_detached_transitions(active_node_ids);

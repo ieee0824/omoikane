@@ -341,6 +341,8 @@ struct HostState {
     /// participate in layout (layout metrics for sub-document nodes report
     /// zero); only computed styles are document-scoped here.
     layout_root: Option<LayoutBox>,
+    #[cfg(test)]
+    layout_generation: u64,
     /// Insertion reference for `document.write`.
     ///
     /// Models the HTML tokenizer's "insertion point". While a `<script>` runs,
@@ -464,6 +466,8 @@ impl HostState {
             },
             document_styles,
             layout_root: None,
+            #[cfg(test)]
+            layout_generation: 0,
             write_insertion_ref: None,
             iframe_documents: HashMap::new(),
             pending_resource_loads: HashSet::new(),
@@ -763,12 +767,16 @@ impl HostState {
         };
         if !needs_rebuild {
             let transition_time_ms = self.event_loop.rendering_time_ms();
-            let time_changed = self
+            let (time_changed, requires_layout) = self
                 .document_styles
                 .get_mut(&document_id)
                 .and_then(|entry| entry.resolver.as_mut())
-                .is_some_and(|resolver| resolver.set_transition_time_ms(transition_time_ms));
-            if time_changed && document_id == self.document.identity() {
+                .map(|resolver| {
+                    let changed = resolver.set_transition_time_ms(transition_time_ms);
+                    (changed, resolver.running_transitions_require_layout())
+                })
+                .unwrap_or((false, false));
+            if time_changed && requires_layout && document_id == self.document.identity() {
                 self.layout_root = None;
             }
             return;
@@ -875,6 +883,10 @@ impl HostState {
             .get_mut(&document_id)
             .and_then(|entry| entry.resolver.as_mut())
             .and_then(|resolver| crate::layout::layout_tree(&document, resolver, viewport));
+        #[cfg(test)]
+        if layout.is_some() {
+            self.layout_generation = self.layout_generation.saturating_add(1);
+        }
         self.layout_root = layout;
     }
 }
@@ -11505,6 +11517,67 @@ mod tests {
         assert_eq!(
             runtime.eval("target.offsetWidth").unwrap().as_number(),
             Some(30.0)
+        );
+    }
+
+    #[test]
+    fn paint_only_transition_reuses_layout_between_frames() {
+        let document = crate::html::TreeBuilder::parse(
+            r#"<html><head><style>
+                #target { width: 10px; height: 10px; opacity: 0;
+                          transition: opacity 1s linear; }
+            </style></head><body><div id="target"></div></body></html>"#,
+        )
+        .document();
+        let mut runtime = JsRuntime::with_document(document).unwrap();
+        runtime
+            .eval(
+                "globalThis.target = document.getElementById('target'); \
+                 target.offsetWidth; target.style.opacity = '1'; \
+                 getComputedStyle(target).opacity;",
+            )
+            .unwrap();
+
+        runtime.run_animation_frame(250).unwrap();
+        assert_eq!(runtime.eval("target.offsetWidth").unwrap().as_number(), Some(10.0));
+        let first_sample_generation = runtime.host_state.borrow().layout_generation;
+
+        runtime.run_animation_frame(250).unwrap();
+        assert_eq!(runtime.eval("target.offsetWidth").unwrap().as_number(), Some(10.0));
+        assert_eq!(
+            runtime.host_state.borrow().layout_generation,
+            first_sample_generation,
+            "opacity sampling must retain the cached layout tree"
+        );
+        assert_eq!(eval_str(&mut runtime, "getComputedStyle(target).opacity"), "0.5");
+    }
+
+    #[test]
+    fn geometry_transition_invalidates_layout_between_frames() {
+        let document = crate::html::TreeBuilder::parse(
+            r#"<html><head><style>
+                #target { width: 10px; height: 10px; transition: width 1s linear; }
+            </style></head><body><div id="target"></div></body></html>"#,
+        )
+        .document();
+        let mut runtime = JsRuntime::with_document(document).unwrap();
+        runtime
+            .eval(
+                "globalThis.target = document.getElementById('target'); \
+                 target.offsetWidth; target.style.width = '30px'; \
+                 getComputedStyle(target).width;",
+            )
+            .unwrap();
+
+        runtime.run_animation_frame(250).unwrap();
+        assert_eq!(runtime.eval("target.offsetWidth").unwrap().as_number(), Some(15.0));
+        let first_sample_generation = runtime.host_state.borrow().layout_generation;
+
+        runtime.run_animation_frame(250).unwrap();
+        assert_eq!(runtime.eval("target.offsetWidth").unwrap().as_number(), Some(20.0));
+        assert!(
+            runtime.host_state.borrow().layout_generation > first_sample_generation,
+            "width sampling must invalidate cached layout geometry"
         );
     }
 

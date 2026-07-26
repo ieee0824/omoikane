@@ -311,6 +311,14 @@ impl TransitionTimeline {
             .any(|state| !state.running.is_empty())
     }
 
+    pub(crate) fn running_transitions_require_layout(&self) -> bool {
+        self.elements.values().any(|state| {
+            state.running.keys().any(|property| {
+                !matches!(property.as_str(), "opacity" | "filter" | "backdrop-filter")
+            })
+        })
+    }
+
     pub(crate) fn cancel_detached_transitions(
         &mut self,
         active_node_ids: &std::collections::HashSet<usize>,
