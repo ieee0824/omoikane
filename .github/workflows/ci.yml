@@ -18,10 +18,10 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           # Keep the repository crate artifacts as well as dependencies so a
-          # PR rerun can reuse an unchanged Omoikane build. Bump shared-key
+          # PR rerun can reuse an unchanged Omoikane build. Bump this key
           # when the cache policy changes to avoid restoring dependency-only
           # entries produced by the old configuration.
-          shared-key: workspace-v1
+          key: workspace-v1
           cache-workspace-crates: true
       - name: Install system fonts
         run: |
@@ -39,7 +39,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
-          shared-key: workspace-v1
+          key: workspace-v1
           cache-workspace-crates: true
       - uses: actions/cache@v4
         with:
