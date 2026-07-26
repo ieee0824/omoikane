@@ -55,8 +55,11 @@ impl Drop for RenderGlyphCacheGuard {
 /// Shares rasterized glyphs between text fragments in one paint operation.
 /// Clearing both boundaries ensures pointer identities never outlive fonts.
 pub(crate) fn with_render_glyph_cache<T>(paint: impl FnOnce() -> T) -> T {
-    RENDER_GLYPH_CACHE.with(|cache| {
+    let owns_cache = RENDER_GLYPH_CACHE.with(|cache| {
         let mut cache = cache.borrow_mut();
+        if cache.active {
+            return false;
+        }
         cache.glyphs.clear();
         cache.active = true;
         #[cfg(test)]
@@ -64,8 +67,13 @@ pub(crate) fn with_render_glyph_cache<T>(paint: impl FnOnce() -> T) -> T {
             cache.hits = 0;
             cache.misses = 0;
         }
+        true
     });
-    let _guard = RenderGlyphCacheGuard;
+    let _guard = if owns_cache {
+        Some(RenderGlyphCacheGuard)
+    } else {
+        None
+    };
     paint()
 }
 
