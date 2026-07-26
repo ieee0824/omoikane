@@ -274,11 +274,17 @@ impl StyleResolver {
             .cancel_detached_transitions(active_node_ids);
     }
 
-    #[cfg(test)]
-    pub(crate) fn invalidate_style_cache_for_test(&mut self) {
+    /// Drops values derived from the current DOM while retaining parsed
+    /// stylesheets, rule indexes, and condition-prelude parse caches.
+    pub(crate) fn invalidate_style_cache(&mut self) {
         self.cache.clear();
         self.pseudo_cache.clear();
         self.selector_match_cache = SelectorMatchCache::default();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn invalidate_style_cache_for_test(&mut self) {
+        self.invalidate_style_cache();
     }
 
     /// Sets the viewport dimensions in px.

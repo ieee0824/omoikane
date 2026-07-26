@@ -343,6 +343,8 @@ struct HostState {
     layout_root: Option<LayoutBox>,
     #[cfg(test)]
     layout_generation: u64,
+    #[cfg(test)]
+    style_resolver_generation: u64,
     /// Insertion reference for `document.write`.
     ///
     /// Models the HTML tokenizer's "insertion point". While a `<script>` runs,
@@ -398,6 +400,9 @@ struct DocumentStyleEntry {
     /// `true` when this document was mutated since `resolver` was built, so the
     /// next query must rebuild it (a forced synchronous style recompute).
     dirty: bool,
+    /// DOM-derived values changed and every element must be sampled once so
+    /// transition start/end values are discovered without rebuilding rules.
+    needs_full_sample: bool,
 }
 
 impl std::fmt::Debug for HostState {
@@ -447,6 +452,7 @@ impl HostState {
             DocumentStyleEntry {
                 resolver: None,
                 dirty: true,
+                needs_full_sample: true,
             },
         );
         let mut state = Self {
@@ -468,6 +474,8 @@ impl HostState {
             layout_root: None,
             #[cfg(test)]
             layout_generation: 0,
+            #[cfg(test)]
+            style_resolver_generation: 0,
             write_insertion_ref: None,
             iframe_documents: HashMap::new(),
             pending_resource_loads: HashSet::new(),
@@ -608,6 +616,7 @@ impl HostState {
             DocumentStyleEntry {
                 resolver: None,
                 dirty: true,
+                needs_full_sample: true,
             },
         );
         self.iframe_documents.insert(
@@ -716,6 +725,35 @@ impl HostState {
         }
     }
 
+    /// Invalidates values derived from the DOM without rebuilding the parsed
+    /// stylesheet/rule-index portion of an existing resolver.
+    fn invalidate_document_style_cache(&mut self, document: &NodeHandle) {
+        let document_id = document.identity();
+        if let Some(entry) = self.document_styles.get_mut(&document_id) {
+            entry.needs_full_sample = true;
+            if let Some(resolver) = entry.resolver.as_mut() {
+                resolver.invalidate_style_cache();
+            }
+        }
+        if document_id == self.document.identity() {
+            self.layout_root = None;
+        }
+    }
+
+    /// Invalidates computed/selector results for a node mutation while keeping
+    /// stylesheet parsing intact. Detached nodes affect no live document.
+    fn invalidate_style_cache_for_node(&mut self, node: &NodeHandle) {
+        if let Some(document) = document_root_for_node(node) {
+            self.invalidate_document_style_cache(&document);
+        }
+        if node.tag_name().as_deref() == Some("iframe")
+            && let Some(child) = self.iframe_documents.get(&node.identity())
+        {
+            let child_document = child.document.clone();
+            self.mark_document_style_dirty(&child_document);
+        }
+    }
+
     /// Marks the document that `node` currently lives in as stale.
     ///
     /// A detached node cannot affect a live document's style or layout. Its
@@ -812,8 +850,13 @@ impl HostState {
             DocumentStyleEntry {
                 resolver: Some(resolver),
                 dirty: false,
+                needs_full_sample: true,
             },
         );
+        #[cfg(test)]
+        {
+            self.style_resolver_generation = self.style_resolver_generation.saturating_add(1);
+        }
     }
 
     /// Returns the viewport belonging to a document. A child browsing context
@@ -1292,6 +1335,7 @@ impl JsRuntime {
     fn has_pending_css_transition_work(&self) -> bool {
         self.host_state.borrow().document_styles.values().any(|entry| {
             entry.dirty
+                || entry.needs_full_sample
                 || entry
                     .resolver
                     .as_ref()
@@ -3607,7 +3651,9 @@ fn sample_css_transition_styles_native(
             let full_sample = state
                 .document_styles
                 .get(&document_id)
-                .is_none_or(|entry| entry.dirty || entry.resolver.is_none());
+                .is_none_or(|entry| {
+                    entry.dirty || entry.needs_full_sample || entry.resolver.is_none()
+                });
             state.ensure_style_resolver(&document);
             let running_node_ids = state
                 .document_styles
@@ -3644,6 +3690,11 @@ fn sample_css_transition_styles_native(
                 } else {
                     resolver.cancel_detached_transitions(&active_node_ids);
                 }
+            }
+            if full_sample
+                && let Some(entry) = state.document_styles.get_mut(&document_id)
+            {
+                entry.needs_full_sample = false;
             }
         }
         Ok(JsValue::undefined())
@@ -3750,7 +3801,11 @@ fn set_attribute_native(_: &JsValue, args: &[JsValue], context: &mut Context) ->
         // Any attribute may participate in a selector (id/class/attribute
         // selectors), so invalidate the element's live document. Detached
         // elements cannot affect it until the insertion path invalidates it.
-        state.borrow_mut().mark_style_dirty_for_node(&node);
+        if node.tag_name().as_deref() == Some("style") {
+            state.borrow_mut().mark_style_dirty_for_node(&node);
+        } else {
+            state.borrow_mut().invalidate_style_cache_for_node(&node);
+        }
         if let Some(resource_attr) = resource_attr {
             state
                 .borrow_mut()
@@ -3780,7 +3835,7 @@ fn set_checked_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> J
             .get_node(node_id)
             .ok_or_else(|| JsError::from(JsNativeError::error().with_message("node not found")))?;
         node.set_checked(checked);
-        state.borrow_mut().mark_style_dirty_for_node(&node);
+        state.borrow_mut().invalidate_style_cache_for_node(&node);
         Ok(JsValue::undefined())
     })
 }
@@ -3998,13 +4053,19 @@ fn set_text_content_native(
             .borrow()
             .get_node(id)
             .ok_or_else(|| JsError::from(JsNativeError::error().with_message("node not found")))?;
-        // For text/comment leaf nodes, update data directly
-        if matches!(
+        let is_character_data = matches!(
             node.node_type(),
             crate::dom::NodeType::Text
                 | crate::dom::NodeType::Comment
                 | crate::dom::NodeType::ProcessingInstruction
-        ) {
+        );
+        let rebuild_stylesheets = !is_character_data
+            || node
+                .parent_node()
+                .and_then(|parent| parent.tag_name())
+                .is_some_and(|tag| tag.eq_ignore_ascii_case("style"));
+        // For text/comment leaf nodes, update data directly
+        if is_character_data {
             node.set_data(&text);
         } else {
             // Remove all children
@@ -4017,11 +4078,14 @@ fn set_text_content_native(
                 node.append_child(text_node);
             }
         }
-        // The node stays attached to its document (only its text changes), so
-        // its document root is unchanged; invalidate that document's resolver.
-        // This covers the common `<style>.textContent = "..."` case, where the
-        // stylesheet text of the owning document must be re-collected.
-        state.borrow_mut().mark_style_dirty_for_node(&node);
+        // Element textContent replaces an entire subtree and may add/remove a
+        // style element. CharacterData normally only affects selector/style
+        // results, except beneath <style>, where it changes stylesheet source.
+        if rebuild_stylesheets {
+            state.borrow_mut().mark_style_dirty_for_node(&node);
+        } else {
+            state.borrow_mut().invalidate_style_cache_for_node(&node);
+        }
         Ok(JsValue::undefined())
     })
 }
@@ -4600,7 +4664,11 @@ fn remove_attribute_native(
         node.remove_attribute(&name);
         // Any attribute may participate in a selector, so invalidate the
         // element's live document. Detached elements affect no document yet.
-        state.borrow_mut().mark_style_dirty_for_node(&node);
+        if node.tag_name().as_deref() == Some("style") {
+            state.borrow_mut().mark_style_dirty_for_node(&node);
+        } else {
+            state.borrow_mut().invalidate_style_cache_for_node(&node);
+        }
         Ok(JsValue::undefined())
     })
 }
@@ -4809,6 +4877,7 @@ fn create_document_native(
             DocumentStyleEntry {
                 resolver: None,
                 dirty: true,
+                needs_full_sample: true,
             },
         );
         Ok(JsValue::from(id as f64))
@@ -11626,6 +11695,81 @@ mod tests {
             runtime.host_state.borrow().layout_generation > initial_generation,
             "inserting the detached element must invalidate and rebuild layout"
         );
+    }
+
+    #[test]
+    fn ordinary_dom_mutations_reuse_parsed_stylesheets() {
+        let document = crate::html::TreeBuilder::parse(
+            r#"<html><head><style id="sheet">div { width: 10px; } .active { width: 30px; }</style></head>
+               <body><div id="target"></div></body></html>"#,
+        )
+        .document();
+        let mut runtime = JsRuntime::with_document(document).unwrap();
+        assert_eq!(
+            runtime
+                .eval("globalThis.target = document.getElementById('target'); target.offsetWidth")
+                .unwrap()
+                .as_number(),
+            Some(10.0)
+        );
+        let initial_resolver_generation =
+            runtime.host_state.borrow().style_resolver_generation;
+
+        runtime.eval("target.setAttribute('class', 'active')").unwrap();
+        assert_eq!(runtime.eval("target.offsetWidth").unwrap().as_number(), Some(30.0));
+        assert_eq!(
+            runtime.host_state.borrow().style_resolver_generation,
+            initial_resolver_generation,
+            "attribute mutation must retain parsed stylesheets and rule indexes"
+        );
+
+        runtime.eval("target.style.width = '40px'").unwrap();
+        assert_eq!(runtime.eval("target.offsetWidth").unwrap().as_number(), Some(40.0));
+        assert_eq!(
+            runtime.host_state.borrow().style_resolver_generation,
+            initial_resolver_generation,
+            "inline style mutation must retain the resolver"
+        );
+
+        runtime
+            .eval(
+                "target.style.removeProperty('width'); \
+                 document.getElementById('sheet').textContent = \
+                   'div { width: 10px; } .active { width: 50px; }';",
+            )
+            .unwrap();
+        assert_eq!(runtime.eval("target.offsetWidth").unwrap().as_number(), Some(50.0));
+        assert!(
+            runtime.host_state.borrow().style_resolver_generation
+                > initial_resolver_generation,
+            "style element content mutation must rebuild parsed stylesheets"
+        );
+    }
+
+    #[test]
+    fn stylesheet_tree_text_mutations_rebuild_resolver() {
+        let document = crate::html::TreeBuilder::parse(
+            r#"<html><head><style>.active { opacity: 0.3; }</style></head>
+               <body><div id="target" class="active"></div></body></html>"#,
+        )
+        .document();
+        let mut runtime = JsRuntime::with_document(document).unwrap();
+        runtime
+            .eval("globalThis.target = document.getElementById('target')")
+            .unwrap();
+        assert_eq!(eval_str(&mut runtime, "getComputedStyle(target).opacity"), "0.3");
+        let initial_generation = runtime.host_state.borrow().style_resolver_generation;
+
+        runtime
+            .eval("document.querySelector('style').firstChild.data = '.active { opacity: 0.4; }'")
+            .unwrap();
+        assert_eq!(eval_str(&mut runtime, "getComputedStyle(target).opacity"), "0.4");
+        let text_generation = runtime.host_state.borrow().style_resolver_generation;
+        assert!(text_generation > initial_generation);
+
+        runtime.eval("document.head.textContent = ''").unwrap();
+        assert_eq!(eval_str(&mut runtime, "getComputedStyle(target).opacity"), "");
+        assert!(runtime.host_state.borrow().style_resolver_generation > text_generation);
     }
 
     #[test]
