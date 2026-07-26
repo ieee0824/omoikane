@@ -220,6 +220,14 @@
       "baseline_supported": false
     },
     {
+      "id": "css.filter-effects",
+      "area": "cssom",
+      "description": "Filter Effects declarations validate and expose normalized computed values",
+      "setup": "globalThis.__filterProbe = document.createElement('div'); __filterProbe.style.cssText = 'filter:brightness(150%) blur(2px);backdrop-filter:grayscale(50%)'; document.body.appendChild(__filterProbe)",
+      "probe": "CSS.supports('filter', 'brightness(150%) blur(2px)') && !CSS.supports('filter', 'blur(-1px)') && getComputedStyle(__filterProbe).filter === 'brightness(1.5) blur(2px)' && getComputedStyle(__filterProbe).backdropFilter === 'grayscale(0.5)'",
+      "baseline_supported": false
+    },
+    {
       "id": "css.match-media-screen",
       "area": "css",
       "description": "matchMedia evaluates the screen media type",
