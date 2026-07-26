@@ -162,7 +162,7 @@
       "description": "Performance marks are recorded and queryable",
       "setup": "performance.mark('omoikane-probe')",
       "probe": "performance.getEntriesByName('omoikane-probe').length === 1",
-      "baseline_supported": false
+      "baseline_supported": true
     },
     {
       "id": "css.computed-style",
