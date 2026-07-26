@@ -739,10 +739,9 @@ impl HostState {
     /// Marks every cached document's style resolver as stale and drops the main
     /// document's layout tree.
     ///
-    /// Used when a change affects all documents at once — a viewport change
-    /// (every resolver shares the same viewport for `vw`/`vh` resolution) — and
-    /// as the conservative fallback when a mutated node's owning document cannot
-    /// be determined.
+    /// Used when a change affects all documents at once — currently a viewport
+    /// change, because every resolver shares the same viewport for `vw`/`vh`
+    /// resolution.
     fn mark_all_document_styles_dirty(&mut self) {
         for entry in self.document_styles.values_mut() {
             entry.dirty = true;
@@ -3749,8 +3748,8 @@ fn set_attribute_native(_: &JsValue, args: &[JsValue], context: &mut Context) ->
         });
         node.set_attribute(name, value);
         // Any attribute may participate in a selector (id/class/attribute
-        // selectors), so invalidate the element's document unconditionally. A
-        // detached element falls back to invalidating every document.
+        // selectors), so invalidate the element's live document. Detached
+        // elements cannot affect it until the insertion path invalidates it.
         state.borrow_mut().mark_style_dirty_for_node(&node);
         if let Some(resource_attr) = resource_attr {
             state
@@ -4600,7 +4599,7 @@ fn remove_attribute_native(
             .ok_or_else(|| JsError::from(JsNativeError::error().with_message("node not found")))?;
         node.remove_attribute(&name);
         // Any attribute may participate in a selector, so invalidate the
-        // element's document (or every document if it is detached).
+        // element's live document. Detached elements affect no document yet.
         state.borrow_mut().mark_style_dirty_for_node(&node);
         Ok(JsValue::undefined())
     })
