@@ -5644,6 +5644,91 @@ fn backdrop_filter_drop_shadow_reads_padding_from_the_source_side() {
 }
 
 #[test]
+fn backdrop_filter_canvas_checksum_does_not_regress() {
+    // blur + 色 filter の chain、画面外へはみ出した要素、ネストした 2 つ目の
+    // backdrop を 1 枚に含めたページの全 pixel を checksum で固定する。
+    // サンプル点の assert では拾えない領域外の 1 pixel の変化も検出する。
+    let (canvas, backdrop_pixels) = render_backdrop(
+        "body { background-color: #0000ff; } \
+         .a { position: absolute; left: 0; top: 0; width: 20px; height: 30px; \
+              background-color: #ff0000; } \
+         .b { position: absolute; left: -6px; top: 10px; width: 30px; height: 30px; \
+              backdrop-filter: blur(4px) grayscale(1); } \
+         .c { position: absolute; left: 26px; top: 5px; width: 20px; height: 20px; \
+              backdrop-filter: brightness(1.4); }",
+        40.0,
+    );
+
+    // .b: 出力 0..24 x 10..40 を左上は clamp、右下だけ 4px 拡張 → 28x34
+    // .c: 出力 20..40 x 15..35 を padding なしで処理 → 20x20
+    assert_eq!(backdrop_pixels, 28 * 34 + 20 * 20);
+    // 変更前の全 canvas clone 実装と同一の checksum。
+    assert_eq!(adler32(canvas.pixels()), 2_663_706_984);
+}
+
+#[test]
+fn filter_source_padding_mirrors_the_output_padding() {
+    use crate::css::parse_filter_list;
+
+    // blur は対称なので出力側と入力側が一致し、端数は切り上げる。
+    let blur = parse_filter_list("blur(2.1px)").unwrap();
+    assert_eq!(super::filter_padding(&blur), (3, 3, 3, 3));
+    assert_eq!(super::filter_source_padding(&blur), (3, 3, 3, 3));
+
+    // drop-shadow は左右・上下が入れ替わる。右下へずれる影の入力は左上側にある。
+    // blur 分の 2px は全方向に加算される。
+    let shadow = parse_filter_list("drop-shadow(12px 4px 2px #000)").unwrap();
+    assert_eq!(super::filter_padding(&shadow), (2, 2, 14, 6));
+    assert_eq!(super::filter_source_padding(&shadow), (14, 6, 2, 2));
+
+    // 負のoffsetでも鏡像関係が保たれる。
+    let negative = parse_filter_list("drop-shadow(-12px -4px 0 #000)").unwrap();
+    assert_eq!(super::filter_padding(&negative), (12, 4, 0, 0));
+    assert_eq!(super::filter_source_padding(&negative), (0, 0, 12, 4));
+
+    // 色 filter は周辺 pixel を読まない。chain では各 filter の和になる。
+    let chain = parse_filter_list("blur(3px) grayscale(1) drop-shadow(5px 0 0 #000)").unwrap();
+    assert_eq!(super::filter_source_padding(&chain), (8, 3, 3, 3));
+
+    // 病的な長さでも saturate して overflow しない。
+    let huge = parse_filter_list("blur(99999999999999999999999px)").unwrap();
+    assert_eq!(super::filter_source_padding(&huge), (usize::MAX, usize::MAX, usize::MAX, usize::MAX));
+}
+
+#[test]
+fn backdrop_filter_saturates_pathological_lengths_to_the_canvas() {
+    // padding が usize::MAX まで飽和しても、source 領域はキャンバス内に収まる。
+    let (canvas, backdrop_pixels) = render_backdrop(
+        "body { background-color: #4080c0; } \
+         .a { position: absolute; left: 10px; top: 10px; width: 10px; height: 10px; \
+              backdrop-filter: drop-shadow(99999999999999999999999px 0 0 #ff0000); } \
+         .b { display: none; }",
+        40.0,
+    );
+
+    // 入力は左端まで、右へは広がらない。
+    assert_eq!(backdrop_pixels, 20 * 10);
+    // 影は i32 の範囲外へずれるため、背景はそのまま残る。
+    assert_eq!(canvas.pixel(15, 15), Some(Color::rgba(64, 128, 192, 255)));
+}
+
+#[test]
+fn backdrop_filter_blur_larger_than_the_canvas_averages_the_source() {
+    // 半径がキャンバスを超える blur でも overflow せず、一様な背景は保たれる。
+    let (canvas, backdrop_pixels) = render_backdrop(
+        "body { background-color: #4080c0; } \
+         .a { position: absolute; left: 10px; top: 10px; width: 10px; height: 10px; \
+              backdrop-filter: blur(99999999999999999999999px); } \
+         .b { display: none; }",
+        40.0,
+    );
+
+    assert_eq!(backdrop_pixels, 40 * 40);
+    assert_eq!(canvas.pixel(15, 15), Some(Color::rgba(64, 128, 192, 255)));
+    assert_eq!(canvas.pixel(30, 30), Some(Color::rgba(64, 128, 192, 255)));
+}
+
+#[test]
 fn drop_shadow_uses_the_element_alpha_and_paints_behind_it() {
     let document = NodeHandle::document();
     let body = NodeHandle::element("body");
@@ -7498,3 +7583,4 @@ fn nested_render_glyph_cache_reuses_outer_entries_and_remains_active() {
     assert_eq!(hits, 2, "nested and post-nested lookups must hit the outer entry");
     assert_eq!(misses, 1, "the outermost lookup must be the only miss");
 }
+

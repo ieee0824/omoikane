@@ -2,7 +2,7 @@
 number: 089
 slug: backdrop-filter-local-region
 github: 251
-status: open
+status: closed
 priority: high
 ---
 
@@ -55,7 +55,14 @@ prefix 適用後の「正しい」pixel だけを参照して計算される（�
 端から radius 以上離れた pixel の値は全面計算と一致する。
 source area が canvas 境界で clamp される場合は全面計算と同じ境界になるため、こちらも一致する。
 
-## 副次的な修正
+## 副次的な修正（Copilot レビュー指摘を含む）
+
+`filter_padding` / `filter_source_padding` は `blur(1e23px)` のような病的な長さで
+`usize::MAX` まで飽和するため、`out_x1 + right` が overflow して panic していた
+（`filter` 側の `apply_filters` も同様）。加算を `saturating_add` にし、
+`box_blur` の半径をキャンバスサイズで clamp した（半径がキャンバスより大きい場合
+カーネルは常に全体を覆うため結果は不変）。
+
 
 border box が canvas の完全に外側にある場合、旧実装は
 `x0 = floor(area.x).max(0)` と `x1 = ceil(right).min(width)` で `x0 > x1` となり
@@ -72,7 +79,11 @@ border box が canvas の完全に外側にある場合、旧実装は
 - `backdrop_filter_fully_offscreen_element_is_skipped` — 完全画面外（panic 回帰）
 - `backdrop_filter_multiple_elements_each_use_a_local_region` — 複数 backdrop
 - `backdrop_filter_drop_shadow_reads_padding_from_the_source_side` — 入力 padding の向き
-- PNG 非退行 — 変更前後で blur / color / clip / 画面端を含むページの PNG が完全一致することを手動検証
+- `backdrop_filter_canvas_checksum_does_not_regress` — 全 pixel の checksum を固定
+- `filter_source_padding_mirrors_the_output_padding` — 出力側 padding との鏡像関係
+- `backdrop_filter_saturates_pathological_lengths_to_the_canvas` — `usize` 飽和
+- `backdrop_filter_blur_larger_than_the_canvas_averages_the_source` — canvas 超の blur 半径
+- PNG 非退行 — 変更前後で blur / color / clip / 画面端を含むページの PNG が完全一致することを確認
 
 ## 完了条件
 

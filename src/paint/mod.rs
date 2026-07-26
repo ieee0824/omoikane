@@ -2582,8 +2582,8 @@ fn apply_backdrop_filters(
     let (left, top, right, bottom) = filter_source_padding(filters);
     let source_x0 = out_x0.saturating_sub(left);
     let source_y0 = out_y0.saturating_sub(top);
-    let source_x1 = (out_x1 + right).min(canvas.width as usize);
-    let source_y1 = (out_y1 + bottom).min(canvas.height as usize);
+    let source_x1 = out_x1.saturating_add(right).min(canvas.width as usize);
+    let source_y1 = out_y1.saturating_add(bottom).min(canvas.height as usize);
     let source_width = source_x1 - source_x0;
     let source_height = source_y1 - source_y0;
 
@@ -2656,8 +2656,8 @@ fn apply_filters(canvas: &mut Canvas, filters: &[crate::css::FilterFunction]) {
     let (left, top, right, bottom) = filter_padding(filters);
     let crop_x0 = x0.saturating_sub(left);
     let crop_y0 = y0.saturating_sub(top);
-    let crop_x1 = (x1 + right).min(canvas.width as usize);
-    let crop_y1 = (y1 + bottom).min(canvas.height as usize);
+    let crop_x1 = x1.saturating_add(right).min(canvas.width as usize);
+    let crop_y1 = y1.saturating_add(bottom).min(canvas.height as usize);
     let crop_width = crop_x1 - crop_x0;
     let crop_height = crop_y1 - crop_y0;
     let mut cropped = copy_region_out(canvas, crop_x0, crop_y0, crop_width, crop_height);
@@ -2723,6 +2723,12 @@ fn alpha_bounds(canvas: &Canvas) -> Option<(usize, usize, usize, usize)> {
 ///
 /// This is the output-side reach: a drop shadow offset to the right expands the
 /// output to the right. Use [`filter_source_padding`] for the inverse question.
+///
+/// Lengths are rounded up. The filter implementations round instead
+/// (`box_blur(.., radius.round())`), so `ceil` stays a safe upper bound and can
+/// exceed the real reach by at most one pixel per side. Addition saturates: a
+/// pathological length such as `blur(1e23px)` reaches `usize::MAX` here, and the
+/// callers clamp the result to the canvas.
 fn filter_padding(filters: &[crate::css::FilterFunction]) -> (usize, usize, usize, usize) {
     use crate::css::FilterFunction;
     let (mut left, mut top, mut right, mut bottom) = (0usize, 0usize, 0usize, 0usize);
@@ -2730,14 +2736,17 @@ fn filter_padding(filters: &[crate::css::FilterFunction]) -> (usize, usize, usiz
         match filter {
             FilterFunction::Blur(radius) => {
                 let radius = radius.ceil() as usize;
-                left += radius; top += radius; right += radius; bottom += radius;
+                left = left.saturating_add(radius);
+                top = top.saturating_add(radius);
+                right = right.saturating_add(radius);
+                bottom = bottom.saturating_add(radius);
             }
             FilterFunction::DropShadow { offset_x, offset_y, blur, .. } => {
                 let blur = blur.ceil() as usize;
-                left += blur + (-offset_x.floor()).max(0.0) as usize;
-                right += blur + offset_x.ceil().max(0.0) as usize;
-                top += blur + (-offset_y.floor()).max(0.0) as usize;
-                bottom += blur + offset_y.ceil().max(0.0) as usize;
+                left = left.saturating_add(blur.saturating_add((-offset_x.floor()).max(0.0) as usize));
+                right = right.saturating_add(blur.saturating_add(offset_x.ceil().max(0.0) as usize));
+                top = top.saturating_add(blur.saturating_add((-offset_y.floor()).max(0.0) as usize));
+                bottom = bottom.saturating_add(blur.saturating_add(offset_y.ceil().max(0.0) as usize));
             }
             _ => {}
         }
@@ -2757,6 +2766,11 @@ fn filter_padding(filters: &[crate::css::FilterFunction]) -> (usize, usize, usiz
 /// applying a prefix whose total padding is `p`, every pixel at least `p` inside
 /// the source area already holds its full-canvas value, so the next filter's own
 /// reach only adds to that distance.
+///
+/// Lengths are rounded up and addition saturates, for the same reasons as in
+/// [`filter_padding`]. Rounding up must never be traded for a tighter region:
+/// reading one pixel too few would blend a canvas edge into the result, while
+/// reading one too many only copies an extra ring of pixels.
 fn filter_source_padding(filters: &[crate::css::FilterFunction]) -> (usize, usize, usize, usize) {
     use crate::css::FilterFunction;
     let (mut left, mut top, mut right, mut bottom) = (0usize, 0usize, 0usize, 0usize);
@@ -2764,17 +2778,19 @@ fn filter_source_padding(filters: &[crate::css::FilterFunction]) -> (usize, usiz
         match filter {
             FilterFunction::Blur(radius) => {
                 let radius = radius.ceil() as usize;
-                left += radius;
-                top += radius;
-                right += radius;
-                bottom += radius;
+                left = left.saturating_add(radius);
+                top = top.saturating_add(radius);
+                right = right.saturating_add(radius);
+                bottom = bottom.saturating_add(radius);
             }
             FilterFunction::DropShadow { offset_x, offset_y, blur, .. } => {
                 let blur = blur.ceil() as usize;
-                left += blur + offset_x.ceil().max(0.0) as usize;
-                right += blur + (-offset_x.floor()).max(0.0) as usize;
-                top += blur + offset_y.ceil().max(0.0) as usize;
-                bottom += blur + (-offset_y.floor()).max(0.0) as usize;
+                left = left.saturating_add(blur.saturating_add(offset_x.ceil().max(0.0) as usize));
+                right =
+                    right.saturating_add(blur.saturating_add((-offset_x.floor()).max(0.0) as usize));
+                top = top.saturating_add(blur.saturating_add(offset_y.ceil().max(0.0) as usize));
+                bottom = bottom
+                    .saturating_add(blur.saturating_add((-offset_y.floor()).max(0.0) as usize));
             }
             _ => {}
         }
@@ -2862,6 +2878,10 @@ fn box_blur(canvas: &mut Canvas, radius: usize) {
     }
     let width = canvas.width as usize;
     let height = canvas.height as usize;
+    // 半径がキャンバスより大きい場合、カーネルはどの pixel でも全体を覆うため
+    // clamp しても結果は変わらない。`blur(1e23px)` のような値で `x + radius + 1`
+    // が overflow するのを防ぐ。
+    let radius = radius.min(width.max(height));
     let stride = width + 1;
     let mut sums = vec![[0u64; 4]; stride * (height + 1)];
     for y in 0..height {
