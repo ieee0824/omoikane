@@ -718,14 +718,12 @@ impl HostState {
 
     /// Marks the document that `node` currently lives in as stale.
     ///
-    /// If `node` has no live document root (a detached, freshly created node),
-    /// every cached document is conservatively marked dirty: the node may later
-    /// be inserted into any document, and over-invalidating only costs a rebuild
-    /// while under-invalidating would serve stale styles.
+    /// A detached node cannot affect a live document's style or layout. Its
+    /// eventual insertion invalidates the target document in the tree-mutation
+    /// path, so mutations made while detached do not need to drop any cache.
     fn mark_style_dirty_for_node(&mut self, node: &NodeHandle) {
-        match document_root_for_node(node) {
-            Some(document) => self.mark_document_style_dirty(&document),
-            None => self.mark_all_document_styles_dirty(),
+        if let Some(document) = document_root_for_node(node) {
+            self.mark_document_style_dirty(&document);
         }
         // The iframe element belongs to the parent document, but its rendered
         // content-box establishes the child document's viewport. A width/height
@@ -11583,6 +11581,51 @@ mod tests {
             runtime.host_state.borrow().layout_generation,
             first_sample_generation,
             "filter and backdrop-filter sampling must retain the cached layout tree"
+        );
+    }
+
+    #[test]
+    fn detached_mutations_reuse_layout_until_insertion() {
+        let document = crate::html::TreeBuilder::parse(
+            r#"<html><head><style>.wide { width: 30px; }</style></head>
+               <body><div id="target" style="width: 10px"></div></body></html>"#,
+        )
+        .document();
+        let mut runtime = JsRuntime::with_document(document).unwrap();
+        assert_eq!(
+            runtime
+                .eval("document.getElementById('target').offsetWidth")
+                .unwrap()
+                .as_number(),
+            Some(10.0)
+        );
+        let initial_generation = runtime.host_state.borrow().layout_generation;
+
+        runtime
+            .eval(
+                "globalThis.detached = document.createElement('div'); \
+                 detached.setAttribute('class', 'wide'); \
+                 detached.style.height = '10px';",
+            )
+            .unwrap();
+        assert_eq!(
+            runtime
+                .eval("document.getElementById('target').offsetWidth")
+                .unwrap()
+                .as_number(),
+            Some(10.0)
+        );
+        assert_eq!(
+            runtime.host_state.borrow().layout_generation,
+            initial_generation,
+            "mutating a detached element must retain the live document layout"
+        );
+
+        runtime.eval("document.body.appendChild(detached)").unwrap();
+        assert_eq!(runtime.eval("detached.offsetWidth").unwrap().as_number(), Some(30.0));
+        assert!(
+            runtime.host_state.borrow().layout_generation > initial_generation,
+            "inserting the detached element must invalidate and rebuild layout"
         );
     }
 
