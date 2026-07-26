@@ -27,6 +27,7 @@ pub(crate) fn capture_session_screenshot_png(
     });
     let document = session.document();
     let base_url = session.current_url().parse::<crate::http::Url>().ok();
+    let scroll = session.window_scroll_offset();
 
     match render_frameset_screenshot_png(
         &document,
@@ -44,6 +45,7 @@ pub(crate) fn capture_session_screenshot_png(
                     &render_document,
                     viewport,
                     render_base_url.as_ref(),
+                    scroll,
                 )
             } else {
                 render_document_with_url(&render_document, viewport, render_base_url.as_ref())

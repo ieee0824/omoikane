@@ -331,6 +331,8 @@ struct HostState {
     /// Viewport used when resolving computed styles and running layout for the
     /// `getComputedStyle` / layout-metrics bindings (issues 016-8 and 044-2).
     viewport: Rect,
+    /// Top-level Window scroll offset in document CSS pixels.
+    window_scroll: (f32, f32),
     /// Per-document cached style resolvers, keyed by the identity of each
     /// document's root [`Document`] node (the top-level document and every
     /// `<iframe>` sub-browsing-context document). Each entry is rebuilt on
@@ -482,6 +484,7 @@ impl HostState {
                 width: DEFAULT_VIEWPORT_WIDTH,
                 height: DEFAULT_VIEWPORT_HEIGHT,
             },
+            window_scroll: (0.0, 0.0),
             document_styles,
             layout_root: None,
             #[cfg(test)]
@@ -941,6 +944,30 @@ impl HostState {
         }
         self.layout_root = layout;
     }
+
+    fn window_scroll_extent(&mut self) -> (f32, f32) {
+        self.ensure_layout();
+        let (scroll_width, scroll_height) = self
+            .layout_root
+            .as_ref()
+            .map(compute_layout_metrics)
+            .map(|metrics| (metrics.scroll_width, metrics.scroll_height))
+            .unwrap_or((self.viewport.width, self.viewport.height));
+        (
+            (scroll_width - self.viewport.width).max(0.0),
+            (scroll_height - self.viewport.height).max(0.0),
+        )
+    }
+
+    fn set_window_scroll(&mut self, x: f32, y: f32) -> bool {
+        let (max_x, max_y) = self.window_scroll_extent();
+        let next = (x.clamp(0.0, max_x), y.clamp(0.0, max_y));
+        if self.window_scroll == next {
+            return false;
+        }
+        self.window_scroll = next;
+        true
+    }
 }
 
 /// Returns the root [`Document`] node of `node`'s tree, or `node` itself when it
@@ -1090,6 +1117,11 @@ impl JsRuntime {
         self.host_state.borrow().document.clone()
     }
 
+    /// Returns the top-level Window scroll offset in CSS pixels.
+    pub(crate) fn window_scroll_offset(&self) -> (f32, f32) {
+        self.host_state.borrow().window_scroll
+    }
+
     /// Sets the User-Agent exposed to scripts in this runtime.
     pub fn set_user_agent(&mut self, user_agent: impl Into<String>) {
         let user_agent = user_agent.into();
@@ -1120,7 +1152,7 @@ impl JsRuntime {
         // consistent and well-defined.
         let width = sanitize_viewport_dimension(width);
         let height = sanitize_viewport_dimension(height);
-        {
+        let scroll_changed = {
             let mut state = self.host_state.borrow_mut();
             state.viewport = Rect {
                 x: 0.0,
@@ -1131,7 +1163,13 @@ impl JsRuntime {
             // Every document shares this viewport for `vw`/`vh` resolution, so
             // invalidate all cached resolvers (and the main layout tree).
             state.mark_all_document_styles_dirty();
-        }
+            let (scroll_x, scroll_y) = state.window_scroll;
+            if (scroll_x, scroll_y) == (0.0, 0.0) {
+                false
+            } else {
+                state.set_window_scroll(scroll_x, scroll_y)
+            }
+        };
         // `window.innerWidth`/`screen.width` are CSSOM integers, so round to the
         // nearest pixel. For integer viewports this exactly matches the `vw`/`vh`
         // resolution (which divides the same dimension by 100). `width`/`height`
@@ -1147,7 +1185,9 @@ impl JsRuntime {
              if (typeof globalThis.__omoikane_media_query_viewport_changed === 'function') \
              globalThis.__omoikane_media_query_viewport_changed(); \
              if (typeof globalThis.__omoikane_layout_observers_changed === 'function') \
-             globalThis.__omoikane_layout_observers_changed();"
+             globalThis.__omoikane_layout_observers_changed(); \
+             if ({scroll_changed} && typeof globalThis.dispatchEvent === 'function') \
+             globalThis.dispatchEvent(new Event('scroll'));"
         );
         // The bootstrap always defines these globals before any embedder call,
         // so this eval cannot fail in practice; ignore the result defensively.
@@ -2487,6 +2527,16 @@ fn register_host_bindings(
             NativeFunction::from_copy_closure(layout_metrics_native),
         ),
         (
+            js_string!("__omoikane_window_scroll_offset"),
+            0,
+            NativeFunction::from_copy_closure(window_scroll_offset_native),
+        ),
+        (
+            js_string!("__omoikane_set_window_scroll"),
+            2,
+            NativeFunction::from_copy_closure(set_window_scroll_native),
+        ),
+        (
             js_string!("__omoikane_css_rule_count"),
             1,
             NativeFunction::from_copy_closure(css_rule_count_native),
@@ -3093,6 +3143,33 @@ fn layout_metrics_native(
             .as_ref()
             .map(|document| state.viewport_for_document(document));
         state.ensure_layout();
+        let current_scroll = state.window_scroll;
+        state.set_window_scroll(current_scroll.0, current_scroll.1);
+        let main_document_id = state.document.identity();
+        let is_main_document = document
+            .as_ref()
+            .is_some_and(|document| document.identity() == main_document_id);
+        let is_fixed = is_main_document
+            && state
+                .document_styles
+                .get_mut(&main_document_id)
+                .and_then(|entry| entry.resolver.as_mut())
+                .is_some_and(|resolver| {
+                    let mut current = Some(node.clone());
+                    while let Some(candidate) = current {
+                        if matches!(
+                            resolver.computed_style(&candidate).get("position"),
+                            Some(ComputedValue::Keyword(keyword))
+                                if keyword.eq_ignore_ascii_case("fixed")
+                        ) {
+                            return true;
+                        }
+                        current = candidate
+                            .parent_node()
+                            .filter(|parent| parent.node_type() == NodeType::Element);
+                    }
+                    false
+                });
         let mut metrics = state
             .layout_root
             .as_ref()
@@ -3101,6 +3178,10 @@ fn layout_metrics_native(
             })
             .map(|(layout, transform)| compute_transformed_layout_metrics(layout, transform))
             .unwrap_or_else(LayoutMetrics::zero);
+        if is_main_document && !is_fixed && metrics.has_box {
+            metrics.x -= state.window_scroll.0;
+            metrics.y -= state.window_scroll.1;
+        }
         if is_root_element && let Some(viewport) = viewport {
             metrics.client_width = viewport.width;
             metrics.client_height = viewport.height;
@@ -3110,6 +3191,51 @@ fn layout_metrics_native(
             metrics.scroll_height = metrics.scroll_height.max(viewport.height);
         }
         Ok(js_string!(metrics.to_json().as_str()).into())
+    })
+}
+
+/// Returns the top-level Window scroll offset as a JSON object.
+fn window_scroll_offset_native(
+    _: &JsValue,
+    _: &[JsValue],
+    _: &mut Context,
+) -> JsResult<JsValue> {
+    with_host_state(|state| {
+        let mut state = state.borrow_mut();
+        let current = state.window_scroll;
+        let changed = current != (0.0, 0.0) && state.set_window_scroll(current.0, current.1);
+        let (x, y) = state.window_scroll;
+        let json = format!(
+            "{{\"x\":{},\"y\":{},\"changed\":{changed}}}",
+            json_number(x),
+            json_number(y)
+        );
+        Ok(js_string!(json).into())
+    })
+}
+
+/// Sets and clamps the top-level Window scroll offset, returning its new state.
+fn set_window_scroll_native(
+    _: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let coordinate = |value: Option<&JsValue>, context: &mut Context| -> JsResult<f32> {
+        let value = value.cloned().unwrap_or_default().to_number(context)? as f32;
+        Ok(if value.is_finite() { value } else { 0.0 })
+    };
+    let x = coordinate(args.first(), context)?;
+    let y = coordinate(args.get(1), context)?;
+    with_host_state(|state| {
+        let mut state = state.borrow_mut();
+        let changed = state.set_window_scroll(x, y);
+        let (x, y) = state.window_scroll;
+        let json = format!(
+            "{{\"x\":{},\"y\":{},\"changed\":{changed}}}",
+            json_number(x),
+            json_number(y)
+        );
+        Ok(js_string!(json).into())
     })
 }
 
@@ -14573,6 +14699,81 @@ mod tests {
             eval_num(&mut runtime, "document.documentElement.scrollHeight") > 600.0,
             "root scrollHeight must still expose the full document height"
         );
+    }
+
+    #[test]
+    fn window_scroll_api_clamps_syncs_aliases_dispatches_and_updates_rects() {
+        let html = r#"<html><head><style>
+            * { margin: 0; padding: 0; }
+            body { width: 600px; height: 1000px; }
+            #flow { position: absolute; left: 120px; top: 300px; width: 10px; height: 10px; }
+            #fixed { position: fixed; left: 5px; top: 20px; width: 10px; height: 10px; }
+            #fixed-child { display: block; width: 5px; height: 5px; }
+        </style></head><body><div id="flow"></div><div id="fixed"><span id="fixed-child"></span></div></body></html>"#;
+        let mut runtime = runtime_from_html(html);
+        runtime.set_viewport(200.0, 100.0);
+        runtime
+            .eval("globalThis.scrollEvents = 0; addEventListener('scroll', () => scrollEvents++);")
+            .unwrap();
+
+        runtime.eval("scrollTo(50, 200)").unwrap();
+        assert_eq!(
+            eval_str(
+                &mut runtime,
+                "[scrollX,scrollY,pageXOffset,pageYOffset,scrollEvents].join('|')"
+            ),
+            "50|200|50|200|1"
+        );
+        assert_eq!(
+            eval_str(
+                &mut runtime,
+                "[document.getElementById('flow').getBoundingClientRect().left,document.getElementById('flow').getBoundingClientRect().top,document.getElementById('fixed').getBoundingClientRect().left,document.getElementById('fixed').getBoundingClientRect().top,document.getElementById('fixed-child').getBoundingClientRect().top].join('|')"
+            ),
+            "70|100|5|20|20"
+        );
+
+        runtime.eval("scrollBy({ left: 25, top: 50 })").unwrap();
+        runtime.eval("scroll({ top: 275 })").unwrap();
+        assert_eq!(eval_str(&mut runtime, "[scrollX,scrollY,scrollEvents].join('|')"), "75|275|3");
+
+        // An unchanged request emits no event; non-finite coordinates normalize to zero.
+        runtime.eval("scrollTo({ left: 75, top: 275 })").unwrap();
+        runtime.eval("scrollTo(NaN, Infinity)").unwrap();
+        assert_eq!(eval_str(&mut runtime, "[scrollX,scrollY,scrollEvents].join('|')"), "0|0|4");
+
+        runtime.eval("scrollTo(1e9, 1e9)").unwrap();
+        assert!(runtime
+            .eval("scrollX === document.documentElement.scrollWidth - innerWidth && scrollY === document.documentElement.scrollHeight - innerHeight")
+            .unwrap()
+            .as_boolean()
+            .unwrap());
+    }
+
+    #[test]
+    fn viewport_resize_reclamps_window_scroll() {
+        let html = r#"<html><head><style>* { margin: 0; padding: 0; } body { height: 500px; }</style></head><body></body></html>"#;
+        let mut runtime = runtime_from_html(html);
+        runtime.set_viewport(100.0, 100.0);
+        runtime
+            .eval("globalThis.scrollEvents = 0; addEventListener('scroll', () => scrollEvents++); scrollTo(0, 350)")
+            .unwrap();
+        runtime.set_viewport(100.0, 300.0);
+        assert_eq!(eval_str(&mut runtime, "[scrollY,scrollEvents].join('|')"), "200|2");
+
+        runtime.eval("document.body.style.height = '320px'").unwrap();
+        assert_eq!(eval_str(&mut runtime, "[scrollY,scrollEvents].join('|')"), "20|3");
+    }
+
+    #[test]
+    fn window_scroll_state_is_isolated_per_runtime() {
+        let html = r#"<html><head><style>* { margin: 0; } body { height: 500px; }</style></head><body></body></html>"#;
+        let mut first = runtime_from_html(html);
+        let mut second = runtime_from_html(html);
+        first.set_viewport(100.0, 100.0);
+        second.set_viewport(100.0, 100.0);
+        first.eval("scrollTo(0, 120)").unwrap();
+        assert_eq!(eval_num(&mut first, "scrollY"), 120.0);
+        assert_eq!(eval_num(&mut second, "scrollY"), 0.0);
     }
 
     #[test]

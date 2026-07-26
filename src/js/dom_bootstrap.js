@@ -5601,13 +5601,49 @@
   globalThis.screenX = 0;
   globalThis.screenY = 0;
   globalThis.devicePixelRatio = 1;
-  globalThis.scrollX = 0;
-  globalThis.scrollY = 0;
-  globalThis.pageXOffset = 0;
-  globalThis.pageYOffset = 0;
-  globalThis.scrollTo = function() {};
-  globalThis.scrollBy = function() {};
-  globalThis.scroll = function() {};
+  function windowScrollOffset() {
+    try {
+      const result = JSON.parse(__omoikane_window_scroll_offset());
+      if (result.changed) globalThis.dispatchEvent(new Event("scroll"));
+      return result;
+    } catch (_) {
+      return { x: 0, y: 0 };
+    }
+  }
+  function applyWindowScroll(x, y) {
+    const result = JSON.parse(__omoikane_set_window_scroll(Number(x), Number(y)));
+    if (result.changed) globalThis.dispatchEvent(new Event("scroll"));
+  }
+  function isScrollOptions(value) {
+    return value !== null && (typeof value === "object" || typeof value === "function");
+  }
+  globalThis.scrollTo = function scrollTo(xOrOptions, y) {
+    const current = windowScrollOffset();
+    if (isScrollOptions(xOrOptions)) {
+      const left = xOrOptions.left === undefined ? current.x : Number(xOrOptions.left);
+      const top = xOrOptions.top === undefined ? current.y : Number(xOrOptions.top);
+      applyWindowScroll(left, top);
+    } else {
+      applyWindowScroll(Number(xOrOptions), Number(y));
+    }
+  };
+  globalThis.scroll = globalThis.scrollTo;
+  globalThis.scrollBy = function scrollBy(xOrOptions, y) {
+    const current = windowScrollOffset();
+    if (isScrollOptions(xOrOptions)) {
+      const left = xOrOptions.left === undefined ? 0 : Number(xOrOptions.left);
+      const top = xOrOptions.top === undefined ? 0 : Number(xOrOptions.top);
+      applyWindowScroll(current.x + left, current.y + top);
+    } else {
+      applyWindowScroll(current.x + Number(xOrOptions), current.y + Number(y));
+    }
+  };
+  Object.defineProperties(globalThis, {
+    scrollX: { configurable: true, enumerable: true, get() { return windowScrollOffset().x; } },
+    scrollY: { configurable: true, enumerable: true, get() { return windowScrollOffset().y; } },
+    pageXOffset: { configurable: true, enumerable: true, get() { return windowScrollOffset().x; } },
+    pageYOffset: { configurable: true, enumerable: true, get() { return windowScrollOffset().y; } },
+  });
   globalThis.screen = { width: 1280, height: 720, availWidth: 1280, availHeight: 720, colorDepth: 24, pixelDepth: 24 };
 
   // In-memory storage stubs

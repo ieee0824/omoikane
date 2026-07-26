@@ -899,7 +899,7 @@ pub fn render_document_with_url(
     viewport: Rect,
     base_url: Option<&crate::http::Url>,
 ) -> Result<Canvas, PaintError> {
-    render_document_with_url_internal(document, viewport, base_url, true)
+    render_document_with_url_internal(document, viewport, base_url, true, (0.0, 0.0))
 }
 
 /// Renders a Document whose browser lifecycle has already executed scripts.
@@ -911,8 +911,9 @@ pub(crate) fn render_document_snapshot_with_url(
     document: &NodeHandle,
     viewport: Rect,
     base_url: Option<&crate::http::Url>,
+    scroll: (f32, f32),
 ) -> Result<Canvas, PaintError> {
-    render_document_with_url_internal(document, viewport, base_url, false)
+    render_document_with_url_internal(document, viewport, base_url, false, scroll)
 }
 
 fn render_document_with_url_internal(
@@ -920,6 +921,7 @@ fn render_document_with_url_internal(
     viewport: Rect,
     base_url: Option<&crate::http::Url>,
     execute_javascript: bool,
+    scroll: (f32, f32),
 ) -> Result<Canvas, PaintError> {
     let mut timings = RenderTimings::default();
     let effective_base = stylesheet::extract_document_base_url(document, base_url);
@@ -1054,8 +1056,11 @@ fn render_document_with_url_internal(
     let result = crate::layout::with_layout_fonts(layout_fonts, layout_web_fonts, || {
         crate::layout::with_image_base_url(effective_base, || {
             let layout_start = Instant::now();
-            let layout = crate::layout::layout_tree(document, &mut resolver, viewport)?;
+            let mut layout = crate::layout::layout_tree(document, &mut resolver, viewport)?;
             timings.layout = layout_start.elapsed();
+            if scroll != (0.0, 0.0) {
+                translate_layout_for_scroll(&mut layout, &mut resolver, -scroll.0, -scroll.1);
+            }
             let paint_start = Instant::now();
             let canvas = paint_layout_with_web_fonts(
                 &layout,
@@ -1330,6 +1335,43 @@ fn translate_layout_for_paint(layout: &mut LayoutBox, dx: f32, dy: f32) {
         .multiply(AffineTransform::translate(-dx, -dy));
     for child in &mut layout.children {
         translate_layout_for_paint(child, dx, dy);
+    }
+}
+
+/// Translates document content for Window scrolling while keeping fixed
+/// positioned subtrees in viewport coordinates.
+fn translate_layout_for_scroll(
+    layout: &mut LayoutBox,
+    resolver: &mut StyleResolver,
+    dx: f32,
+    dy: f32,
+) {
+    if matches!(
+        resolver.computed_style(&layout.node).get("position"),
+        Some(ComputedValue::Keyword(keyword)) if keyword.eq_ignore_ascii_case("fixed")
+    ) {
+        return;
+    }
+    layout.dimensions.content.x += dx;
+    layout.dimensions.content.y += dy;
+    for line in &mut layout.lines {
+        line.rect.x += dx;
+        line.rect.y += dy;
+        line.baseline += dy;
+        for fragment in &mut line.fragments {
+            fragment.rect.x += dx;
+            fragment.rect.y += dy;
+        }
+    }
+    if let Some(marker) = &mut layout.marker {
+        marker.x += dx;
+        marker.y += dy;
+    }
+    layout.transform = AffineTransform::translate(dx, dy)
+        .multiply(layout.transform)
+        .multiply(AffineTransform::translate(-dx, -dy));
+    for child in &mut layout.children {
+        translate_layout_for_scroll(child, resolver, dx, dy);
     }
 }
 

@@ -635,6 +635,11 @@ impl CdpSession {
         self.runtime.document()
     }
 
+    /// Returns the active page's top-level Window scroll offset.
+    pub(crate) fn window_scroll_offset(&self) -> (f32, f32) {
+        self.runtime.window_scroll_offset()
+    }
+
     /// Returns the URL of the currently loaded document.
     pub fn current_url(&self) -> &str {
         &self.current_url

@@ -2146,6 +2146,24 @@ fn test_scroll_translation_keeps_fixed_positioned_boxes_in_viewport_place() {
 }
 
 #[test]
+fn scrolled_snapshot_moves_flow_content_but_keeps_fixed_pixels() {
+    let html = r#"<html><head><style>
+        * { margin: 0; padding: 0; }
+        body { width: 100px; height: 200px; }
+        .flow { position: absolute; left: 20px; top: 60px; width: 10px; height: 10px; background: red; }
+        .fixed { position: fixed; left: 5px; top: 5px; width: 10px; height: 10px; background: blue; }
+    </style></head><body><div class="flow"></div><div class="fixed"></div></body></html>"#;
+    let document = TreeBuilder::parse(html).document();
+    let viewport = Rect { x: 0.0, y: 0.0, width: 100.0, height: 100.0 };
+    let canvas = render_document_snapshot_with_url(&document, viewport, None, (0.0, 50.0))
+        .expect("scrolled snapshot should render");
+
+    assert_eq!(canvas.pixel(20, 10), Some(Color::rgb(255, 0, 0)));
+    assert_eq!(canvas.pixel(5, 5), Some(Color::rgb(0, 0, 255)));
+    assert_ne!(canvas.pixel(20, 60), Some(Color::rgb(255, 0, 0)));
+}
+
+#[test]
 fn acid2_eye_png_decodes() {
     let acid2_html = fs::read_to_string(acid2_fixture_path()).unwrap();
     let marker = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAGAAAAAY";
@@ -7583,4 +7601,3 @@ fn nested_render_glyph_cache_reuses_outer_entries_and_remains_active() {
     assert_eq!(hits, 2, "nested and post-nested lookups must hit the outer entry");
     assert_eq!(misses, 1, "the outermost lookup must be the only miss");
 }
-
