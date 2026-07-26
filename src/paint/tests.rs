@@ -6327,6 +6327,34 @@ fn row_major_box_blur_matches_column_major_reference() {
     assert_eq!(actual, expected);
 }
 
+#[test]
+fn composite_alpha_scale_matches_prescaled_source() {
+    let mut source = Canvas::new(3, 2);
+    for (index, alpha) in [0, 1, 63, 127, 191, 255].into_iter().enumerate() {
+        source.pixels[index * 4 + 3] = alpha;
+    }
+    let scale = 73.0 / 255.0;
+
+    let mut prescaled_source = source.clone();
+    prescaled_source.multiply_alpha(scale);
+    let mut expected = Canvas::new(5, 4);
+    expected.composite_canvas_clipped(
+        &prescaled_source,
+        1,
+        1,
+        20,
+        40,
+        60,
+        1.0,
+        None,
+    );
+
+    let mut actual = Canvas::new(5, 4);
+    actual.composite_canvas_clipped(&source, 1, 1, 20, 40, 60, scale, None);
+
+    assert_eq!(actual.pixels, expected.pixels);
+}
+
 // --- opacity オフスクリーンバッファサイズのテスト ---
 
 #[test]

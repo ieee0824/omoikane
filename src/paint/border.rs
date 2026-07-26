@@ -663,12 +663,11 @@ pub(crate) fn paint_outer_box_shadow(
                     }
                 }
             }
-            // color.a を alpha スケールとして適用
+            // color.a は合成時に適用し、一時バッファへの追加走査を避ける。
             let alpha_scale = color.a as f32 / 255.0;
-            if alpha_scale < 1.0 {
-                shadow_buf.multiply_alpha(alpha_scale);
-            }
-            canvas.composite_canvas_clipped(&shadow_buf, buf_x, buf_y, color.r, color.g, color.b, clip);
+            canvas.composite_canvas_clipped(
+                &shadow_buf, buf_x, buf_y, color.r, color.g, color.b, alpha_scale, clip,
+            );
         } else {
             // blur なし・角丸なし: shadow_rect のうち border_box の外側のみを矩形バンドで描画する。
             let sx = shadow_rect.x;
@@ -785,13 +784,12 @@ pub(crate) fn paint_outer_box_shadow(
         let r = blur.ceil() as u32;
         shadow_buf.box_blur_alpha_passes(r, 3);
 
-        // color.a を alpha のスケールとして合成
+        // color.a は合成時に適用し、一時バッファへの追加走査を避ける。
         let alpha_scale = color.a as f32 / 255.0;
-        if alpha_scale < 1.0 {
-            shadow_buf.multiply_alpha(alpha_scale);
-        }
 
         // メインキャンバスに合成（clip 適用）
-        canvas.composite_canvas_clipped(&shadow_buf, buf_x, buf_y, color.r, color.g, color.b, clip);
+        canvas.composite_canvas_clipped(
+            &shadow_buf, buf_x, buf_y, color.r, color.g, color.b, alpha_scale, clip,
+        );
     }
 }

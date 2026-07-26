@@ -3294,6 +3294,7 @@ impl Canvas {
 
     /// 別キャンバス（shadow_buf）をメインキャンバスに合成する（clip あり）。
     /// `r`, `g`, `b` は合成時に使う色成分（影の色）。
+    /// `alpha_scale` はsource alphaへ乗算し、最も近い整数へ丸めてから合成する。
     /// `offset_x`, `offset_y` は shadow_buf の左上隅がメインキャンバスのどこに対応するか。
     pub(crate) fn composite_canvas_clipped(
         &mut self,
@@ -3303,12 +3304,15 @@ impl Canvas {
         r: u8,
         g: u8,
         b: u8,
+        alpha_scale: f32,
         clip: Option<Rect>,
     ) {
         let dst_w = self.width as i32;
         let dst_h = self.height as i32;
         let src_w = src.width as i32;
         let src_h = src.height as i32;
+        let alpha_scale = alpha_scale.clamp(0.0, 1.0);
+        let scale_alpha = alpha_scale < 1.0;
 
         let clip_area = clip.and_then(normalize_rect);
 
@@ -3334,6 +3338,11 @@ impl Canvas {
 
                 let src_idx = (sy * src_w + sx) as usize * 4;
                 let src_a = src.pixels[src_idx + 3];
+                let src_a = if scale_alpha {
+                    (src_a as f32 * alpha_scale).round() as u8
+                } else {
+                    src_a
+                };
                 if src_a == 0 {
                     continue;
                 }
