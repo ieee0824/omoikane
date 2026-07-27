@@ -2,7 +2,7 @@
 number: 093
 slug: iframe-focus-chain
 github: 254
-status: open
+status: closed
 priority: high
 ---
 
@@ -70,9 +70,30 @@ sub-window へのイベント発火は追加の native 実装なしで動く。
 Document を target にしたイベントは event path に `defaultView` が入るので、
 window の capture リスナーにも Firefox と同じ順序で届く。
 
+## Copilot レビュー対応
+
+指摘 1 件は実際の内部不整合だった。イベント配信中の観測状態を Firefox 152 で測り直して修正した。
+
+`focusedDocumentId` を browsing context イベントの**後**に更新していたため、新 document の
+`focus` ハンドラ内で `hasFocus()` がまだ false を返していた。Firefox の実測:
+
+| 観測地点 | doc.hasFocus | sub.hasFocus | doc.activeElement | sub.activeElement |
+|---|---|---|---|---|
+| 旧要素の blur | true | false | body | subbody |
+| 旧 document / Window の blur | **false** | **false** | body | subbody |
+| 新 document / Window の focus | true | true | **f** | subbody |
+| 新要素の focus | true | true | f | x |
+
+つまり browsing context の blur 中は**どの document も focus を持たない** transit 状態で、
+新 document の focus 発火時には既に chain（祖先が frame を指す状態）が入っている。
+
+`NO_FOCUSED_DOCUMENT` sentinel を導入して transit 状態を表し、chain の設置と
+`focusedDocumentId` の更新を新 document の focus 発火**前**へ移した。
+`focusChainDocuments()` は transit 中に空配列を返すので `hasFocus()` が全て false になる。
+
 ## テスト
 
-`src/js/mod.rs` に 6 本追加。イベント列のテストは **Firefox のログをそのまま期待値として貼り付け**、
+`src/js/mod.rs` に 7 本追加。イベント列のテストは **Firefox のログをそのまま期待値として貼り付け**、
 18 エントリ単位で一致を固定している。
 
 - `focusing_inside_an_iframe_points_each_ancestor_at_its_frame` — 3 階層の `activeElement` と `hasFocus`
@@ -81,6 +102,8 @@ window の capture リスナーにも Firefox と同じ順序で届く。
 - `same_document_focus_moves_do_not_touch_the_browsing_context` — 回帰防止（document/window イベントを出さない、relatedTarget は維持）
 - `blurring_inside_an_iframe_keeps_the_frame_focused`
 - `removing_a_focused_iframe_hands_focus_back_to_the_top_document`
+- `browsing_context_focus_events_observe_the_state_they_announce` — 各ハンドラ内で観測した
+  `hasFocus()` / `activeElement` を Firefox の表と一致させる
 
 既存の `active_element_and_has_focus_are_isolated_per_iframe_document` は
 「親は自分の要素を指したまま」という #243 時点の挙動を固定していたので、新しい挙動へ更新した。

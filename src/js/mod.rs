@@ -19949,4 +19949,63 @@ mod tests {
         );
         assert_eq!(result, "f g y true/true/true|body|true");
     }
+
+    /// Every handler must see the state its own event announces. Snapshots taken
+    /// inside each handler of a cross-document move, compared against Firefox
+    /// 152: focus has left the old context by the time its `blur` pair runs, and
+    /// the new chain is already installed when its `focus` pair runs, while the
+    /// element itself is only focused for the element's own event.
+    #[test]
+    fn browsing_context_focus_events_observe_the_state_they_announce() {
+        let mut runtime = focus_chain_runtime();
+        let result = eval_str(
+            &mut runtime,
+            r#"(() => {
+                const snapshots = [];
+                const snap = tag => snapshots.push([
+                  tag,
+                  document.hasFocus(),
+                  sub.hasFocus(),
+                  label(document.activeElement),
+                  label(sub.activeElement),
+                ].join(":"));
+                a.focus();
+                a.addEventListener("blur", () => snap("element-blur"), true);
+                document.addEventListener("blur", event => {
+                  if (event.target === document) snap("doc-blur");
+                }, true);
+                globalThis.addEventListener("blur", event => {
+                  if (event.target === globalThis) snap("win-blur");
+                }, true);
+                sub.addEventListener("focus", event => {
+                  if (event.target === sub) snap("sub-focus");
+                }, true);
+                f.contentWindow.addEventListener("focus", event => {
+                  if (event.target === f.contentWindow) snap("subwin-focus");
+                }, true);
+                x.addEventListener("focus", () => snap("element-focus"), true);
+
+                x.focus();
+                snap("after");
+                return snapshots.join("|");
+            })()"#,
+        );
+        assert_eq!(
+            result,
+            concat!(
+                // The old context still holds focus while its element blurs.
+                "element-blur:true:false:body:subbody",
+                // In transit: no document reports focus.
+                "|doc-blur:false:false:body:subbody",
+                "|win-blur:false:false:body:subbody",
+                // The chain is in place — the parent already points at the frame —
+                // before the entered context is announced.
+                "|sub-focus:true:true:f:subbody",
+                "|subwin-focus:true:true:f:subbody",
+                // The element is focused only for its own event.
+                "|element-focus:true:true:f:x",
+                "|after:true:true:f:x",
+            )
+        );
+    }
 }

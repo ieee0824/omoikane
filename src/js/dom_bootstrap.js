@@ -672,6 +672,11 @@
   // (`__focusedElementId`), so an iframe's sub-document keeps its own active
   // element. `focusedDocumentId` is the document whose browsing context holds
   // focus; `null` means the top-level document, which is focused on load.
+  //
+  // While focus moves between browsing contexts it is `NO_FOCUSED_DOCUMENT`: no
+  // document reports focus for the duration of the `blur` pair announcing the
+  // context being left, matching Firefox 152.
+  const NO_FOCUSED_DOCUMENT = Symbol("no focused document");
   let focusedDocumentId = null;
 
   // HTML's rules for parsing integers: optional whitespace, an optional sign,
@@ -775,6 +780,7 @@
   // top-level one. A focused document that is no longer reachable (its iframe
   // was reloaded or removed) hands focus back to the top-level document.
   function focusChainDocuments() {
+    if (focusedDocumentId === NO_FOCUSED_DOCUMENT) return [];
     const top = wrapNode(__omoikane_document_id);
     if (focusedDocumentId === null || focusedDocumentId === __omoikane_document_id) {
       return [top];
@@ -2010,29 +2016,34 @@
 
       if (crossesDocuments) {
         // Documents dropping out of the chain lose their focused element; the
-        // ones that stay keep pointing at the frame below them (set further
-        // down), so `parent.document.activeElement` follows the focus inwards.
+        // ones that stay are pointed at the frame below them further down, so
+        // `parent.document.activeElement` follows the focus inwards.
         for (const document of previousChain) {
           if (!chain.some(entry => entry.document === document)) {
             document.__focusedElementId = null;
           }
         }
-        // The browsing context being left, then the one being entered. These
-        // have no bubbling counterpart, unlike the element events.
+        // Each handler must observe the state its own event announces, so focus
+        // leaves the old context before its `blur` pair and the new chain is
+        // installed before the `focus` pair. Neither pair has a bubbling
+        // counterpart, unlike the element events.
+        focusedDocumentId = NO_FOCUSED_DOCUMENT;
         fireFocusEvent(previousDocument, "blur", null, false);
         const previousWindow = previousDocument.defaultView;
         if (previousWindow) fireFocusEvent(previousWindow, "blur", null, false);
+
+        for (const entry of chain) {
+          if (entry.frame) {
+            entry.frame.ownerDocument.__focusedElementId = entry.frame.__id;
+          }
+        }
+        focusedDocumentId = doc.__id;
         fireFocusEvent(doc, "focus", null, false);
         const nextWindow = doc.defaultView;
         if (nextWindow) fireFocusEvent(nextWindow, "focus", null, false);
       }
 
       doc.__focusedElementId = this.__id;
-      for (const entry of chain) {
-        if (entry.frame) {
-          entry.frame.ownerDocument.__focusedElementId = entry.frame.__id;
-        }
-      }
       focusedDocumentId = doc.__id;
       fireFocusEvent(this, "focus", crossesDocuments ? null : previous, false);
       fireFocusEvent(this, "focusin", crossesDocuments ? null : previous, true);
