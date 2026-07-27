@@ -3213,13 +3213,15 @@ fn is_rendered_for_focus_native(
             if matches!(style.get("display"), Some(ComputedValue::Keyword(value)) if value.eq_ignore_ascii_case("none")) {
                 return Ok(JsValue::from(false));
             }
-            current = element.parent_node().and_then(|parent| {
-                if parent.node_type() == NodeType::Element {
-                    Some(parent)
-                } else {
-                    parent.shadow_host()
-                }
-            });
+            current = element
+                .assigned_slot()
+                .or_else(|| element.parent_node().and_then(|parent| {
+                    if parent.node_type() == NodeType::Element {
+                        Some(parent)
+                    } else {
+                        parent.shadow_host()
+                    }
+                }));
         }
 
         let style = state
