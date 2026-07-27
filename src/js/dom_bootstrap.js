@@ -723,17 +723,20 @@
   }
 
   // Whether `focus()` on this node designates it as its document's focused area
-  // (HTML "focusable area"), restricted to what the DOM alone can decide.
-  //
-  // Not covered: an element in a `display: none` / `visibility: hidden` subtree
-  // is not focusable in browsers, which needs style resolution, and a control
-  // inside a `<fieldset disabled>` is disabled without carrying the attribute
-  // itself — the same gap `:disabled` matching has.
+  // (HTML "focusable area"). Rendered-ness is resolved by the native style
+  // resolver because it must account for CSS rules and ancestor display state.
+  // A control inside a `<fieldset disabled>` is disabled without carrying the
+  // attribute itself — the same gap `:disabled` matching has.
   function canBeFocused(node) {
     if (!(node instanceof Element) || node.nodeType !== 1) return false;
     if (!node.isConnected) return false;
     if (node.__isDisabledControl && node.__isDisabledControl()) return false;
+    if (!isRenderedForFocus(node)) return false;
     return hasIntegerTabindex(node) || isInherentlyFocusable(node) || isEditingHost(node);
+  }
+
+  function isRenderedForFocus(node) {
+    return !!__omoikane_is_rendered_for_focus(node.__id);
   }
 
   // Resolves the element explicitly focused in `doc`, applying HTML's focus
@@ -746,7 +749,7 @@
     const id = doc.__focusedElementId;
     if (id === null || id === undefined) return null;
     const node = wrapNode(id);
-    if (node && node.nodeType === 1 && node.isConnected && node.ownerDocument === doc) {
+    if (node && node.nodeType === 1 && node.isConnected && node.ownerDocument === doc && isRenderedForFocus(node)) {
       return node;
     }
     doc.__focusedElementId = null;
