@@ -748,6 +748,29 @@
     return null;
   }
 
+  // `doc` and its ancestor documents, innermost first, each paired with the
+  // iframe element hosting it (`null` for the top-level document).
+  //
+  // Returns `null` when the walk does not reach the top-level document, which
+  // means `doc` has no browsing context: a document created by
+  // `createHTMLDocument`, or one whose frame was removed or reloaded.
+  function documentChain(doc) {
+    const chain = [];
+    let current = doc;
+    while (current instanceof Document) {
+      if (current.__id === __omoikane_document_id) {
+        chain.push({ document: current, frame: null });
+        return chain;
+      }
+      const frameId = __omoikane_document_owner_iframe(current.__id);
+      const frame = (frameId === null || frameId === undefined) ? null : wrapNode(frameId);
+      if (!frame) return null;
+      chain.push({ document: current, frame });
+      current = frame.ownerDocument;
+    }
+    return null;
+  }
+
   // The focused document followed by its ancestor documents, up to the
   // top-level one. A focused document that is no longer reachable (its iframe
   // was reloaded or removed) hands focus back to the top-level document.
@@ -756,17 +779,12 @@
     if (focusedDocumentId === null || focusedDocumentId === __omoikane_document_id) {
       return [top];
     }
-    const chain = [];
-    let doc = wrapNode(focusedDocumentId);
-    while (doc instanceof Document) {
-      chain.push(doc);
-      if (doc.__id === __omoikane_document_id) return chain;
-      const iframeId = __omoikane_document_owner_iframe(doc.__id);
-      const iframe = (iframeId === null || iframeId === undefined) ? null : wrapNode(iframeId);
-      doc = iframe ? iframe.ownerDocument : null;
+    const chain = documentChain(wrapNode(focusedDocumentId));
+    if (!chain) {
+      focusedDocumentId = null;
+      return [top];
     }
-    focusedDocumentId = null;
-    return [top];
+    return chain.map(entry => entry.document);
   }
 
   // No focus event is cancelable, and all four are composed so they cross
@@ -1969,19 +1987,55 @@
       if (!canBeFocused(this)) return;
       const doc = this.ownerDocument;
       if (!(doc instanceof Document)) return;
-      const previous = focusedElementOf(doc);
-      focusedDocumentId = doc.__id;
-      if (previous === this) return;
+      const chain = documentChain(doc);
+      // A document with no browsing context cannot hold system focus.
+      if (!chain) return;
+
+      const previousChain = focusChainDocuments();
+      const previousDocument = previousChain[0];
+      const previous = focusedElementOf(previousDocument);
+      if (previousDocument === doc && previous === this) return;
+      // A move across documents hides relatedTarget, because the element on the
+      // other side belongs to a different tree.
+      const crossesDocuments = previousDocument !== doc;
+      const related = crossesDocuments ? null : this;
+
       // The spec takes focus away from the old element *before* dispatching
       // blur, so the active element is the viewport fallback for that pair.
-      doc.__focusedElementId = null;
+      previousDocument.__focusedElementId = null;
       if (previous) {
-        fireFocusEvent(previous, "blur", this, false);
-        fireFocusEvent(previous, "focusout", this, true);
+        fireFocusEvent(previous, "blur", related, false);
+        fireFocusEvent(previous, "focusout", related, true);
       }
+
+      if (crossesDocuments) {
+        // Documents dropping out of the chain lose their focused element; the
+        // ones that stay keep pointing at the frame below them (set further
+        // down), so `parent.document.activeElement` follows the focus inwards.
+        for (const document of previousChain) {
+          if (!chain.some(entry => entry.document === document)) {
+            document.__focusedElementId = null;
+          }
+        }
+        // The browsing context being left, then the one being entered. These
+        // have no bubbling counterpart, unlike the element events.
+        fireFocusEvent(previousDocument, "blur", null, false);
+        const previousWindow = previousDocument.defaultView;
+        if (previousWindow) fireFocusEvent(previousWindow, "blur", null, false);
+        fireFocusEvent(doc, "focus", null, false);
+        const nextWindow = doc.defaultView;
+        if (nextWindow) fireFocusEvent(nextWindow, "focus", null, false);
+      }
+
       doc.__focusedElementId = this.__id;
-      fireFocusEvent(this, "focus", previous, false);
-      fireFocusEvent(this, "focusin", previous, true);
+      for (const entry of chain) {
+        if (entry.frame) {
+          entry.frame.ownerDocument.__focusedElementId = entry.frame.__id;
+        }
+      }
+      focusedDocumentId = doc.__id;
+      fireFocusEvent(this, "focus", crossesDocuments ? null : previous, false);
+      fireFocusEvent(this, "focusin", crossesDocuments ? null : previous, true);
     }
 
     // Runs the unfocusing steps: focus returns to the document's viewport and
