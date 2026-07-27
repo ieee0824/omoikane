@@ -57,9 +57,29 @@ priority: high
 同一の 31 ケースを両エンジンで測定し、**28 ケースが完全一致**。
 残る 3 件はすべて `box-sizing` 未適用に起因するもので #268 に切り出した。
 
+## Copilot レビュー対応
+
+`calc()` の値検証漏れの指摘（2 件、同一論点）。Firefox で正解を確認したところ、
+**ドロップではなく clamp** が正解だった:
+
+| 入力 | Firefox | 修正前の omoikane |
+|---|---|---|
+| `calc(-1)` | `0 / 1`（clamp。しかも earlier 宣言に勝つ） | `-1 / 1`（不正値がそのまま computed value に） |
+| `calc(-1) / 2` | `0 / 2` | `-1 / 2` |
+| `2 / calc(-1)` | `2 / 0` | `2 / -1` |
+| `1e40` / `calc(1/0)` | `3.40282e38 / 1`（float 上限へ飽和） | ドロップ |
+
+CSS Values 4 の範囲クランプ規則（`calc()` が許容範囲外に解決したら clamp、
+リテラルの負値は parse 時に無効）に合わせ、`clamp_ratio_number` を追加した。
+`calc()` の数値検証には `calc_unitless_number` を使う（長さや百分率を含む式は
+unit が Unitless にならないので、placeholder context でも判定は変わらない）。
+
+float 範囲を超える値だけは calc evaluator が結果を返さないためドロップされる。
+Firefox は飽和させるので差分として test に pin してある。
+
 ## テスト
 
-- `src/css/style_tests.rs` 3 本: computed value 15 パターン（Firefox 実測表）、無効値 13 パターンの破棄と earlier-valid の保護、css-wide keyword（`inherit` / `initial` / `unset` / `revert`）
+- `src/css/style_tests.rs` 4 本: computed value 15 パターン（Firefox 実測表）、無効値 13 パターンの破棄と earlier-valid の保護、css-wide keyword（`inherit` / `initial` / `unset` / `revert`）、範囲外 `calc()` の clamp と cascade での勝敗
 - `src/layout/tests.rs` 7 本: author ratio の上書き（HTML 属性含む）、両 auto での導出、両指定と退化 ratio の無視、`auto <ratio>` の intrinsic 優先、**min/max が derived な軸だけを再スケールすること**、ratio 無しの回帰、`box-sizing` の現状 pin
 
 共有ヘルパ `object_keyword` は 2 つの機能で使うようになったので `image_computed_keyword` へ改名した。

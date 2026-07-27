@@ -5395,7 +5395,10 @@ fn invalid_aspect_ratio_declarations_are_dropped() {
         "1/1 1/1",
         "1/1 auto 1/1",
         "10px/1",
+        // A percentage or length cannot be a ratio component, unlike an
+        // out-of-range number (see out_of_range_calc_aspect_ratio_is_clamped_not_dropped).
         "calc(50%) / 1",
+        "calc(1em) / 1",
     ] {
         assert_eq!(
             image_computed_keyword(&format!("aspect-ratio: {value}"), "aspect-ratio"),
@@ -5442,3 +5445,42 @@ fn aspect_ratio_resolves_css_wide_keywords() {
     assert_eq!(inherited(""), "auto");
 }
 
+/// A `calc()` that resolves outside `<number [0,∞]>` is clamped rather than
+/// dropped (CSS Values 4), so it still replaces an earlier declaration. Firefox
+/// 152 reports the same clamped values.
+#[test]
+fn out_of_range_calc_aspect_ratio_is_clamped_not_dropped() {
+    for (declared, expected) in [
+        ("calc(-1)", "0 / 1"),
+        ("calc(-1) / 2", "0 / 2"),
+        ("2 / calc(-1)", "2 / 0"),
+        ("calc(1 + 1)/calc(4)", "2 / 4"),
+    ] {
+        assert_eq!(
+            image_computed_keyword(&format!("aspect-ratio: {declared}"), "aspect-ratio"),
+            expected,
+            "aspect-ratio: {declared}"
+        );
+    }
+
+    // A clamped value is valid, so unlike a dropped one it wins the cascade.
+    assert_eq!(
+        image_computed_keyword("aspect-ratio: 3/2; aspect-ratio: calc(-1)", "aspect-ratio"),
+        "0 / 1"
+    );
+    assert_eq!(
+        image_computed_keyword("aspect-ratio: 3/2; aspect-ratio: bogus", "aspect-ratio"),
+        "3 / 2"
+    );
+
+    // Values that overflow the float range are dropped here, because the calc
+    // evaluator reports no result for them. Firefox 152 saturates at the largest
+    // float instead (`3.40282e38 / 1`).
+    for value in ["1e40", "calc(1e40)", "calc(1/0)", "calc(0/0)"] {
+        assert_eq!(
+            image_computed_keyword(&format!("aspect-ratio: {value}"), "aspect-ratio"),
+            "auto",
+            "aspect-ratio: {value}"
+        );
+    }
+}

@@ -3387,14 +3387,17 @@ fn aspect_ratio_parts(value: &Value) -> Option<(bool, Option<(Value, Value)>)> {
                     )?)));
                 }
             }
+            // A literal negative number is invalid; an overflowing one is
+            // clamped when the value is computed.
             Value::Number(number) if *number >= 0.0 => {
                 parts.push(AspectRatioPart::Number(component.clone()))
             }
-            // A `calc()` is only a ratio component when it evaluates to a bare
-            // number; the value itself is resolved later, with a context.
+            // A `calc()` is a ratio component when it evaluates to a bare
+            // number. Out-of-range results are clamped rather than invalid (CSS
+            // Values 4), so the sign is not checked here.
             Value::Function { name, arguments }
                 if name.eq_ignore_ascii_case("calc")
-                    && !calc_yields_length_or_percentage(arguments) =>
+                    && calc_unitless_number(arguments).is_some() =>
             {
                 parts.push(AspectRatioPart::Number(component.clone()))
             }
@@ -3436,6 +3439,39 @@ fn non_negative_number(text: &str) -> Option<f32> {
     (number.is_finite() && number >= 0.0).then_some(number)
 }
 
+/// Evaluates a `calc()` that must produce a bare number, for grammar checks that
+/// run before a resolution context exists.
+///
+/// A length or percentage anywhere in the expression makes the result carry that
+/// unit, which is rejected here, so the placeholder context cannot change the
+/// outcome: only the unit decides, and units do not depend on it.
+fn calc_unitless_number(arguments: &[Value]) -> Option<f32> {
+    let placeholder = ResolutionContext {
+        parent_font_size: 16.0,
+        root_font_size: 16.0,
+        viewport_width: 0.0,
+        viewport_height: 0.0,
+    };
+    match evaluate_calc(arguments, placeholder) {
+        Some(quantity) if quantity.unit == CalcUnit::Unitless => Some(quantity.value),
+        _ => None,
+    }
+}
+
+/// Clamps a ratio component into the `<number [0,∞]>` range the grammar allows.
+///
+/// A `calc()` resolving out of range is clamped rather than dropped, and a
+/// literal that overflows the float range saturates the same way. Firefox 152
+/// reports `calc(-1)` as `0`, and both `1e40` and `calc(1/0)` as the largest
+/// float.
+fn clamp_ratio_number(value: f32) -> f32 {
+    if value.is_nan() {
+        0.0
+    } else {
+        value.clamp(0.0, f32::MAX)
+    }
+}
+
 /// Renders `aspect-ratio` the way getComputedStyle reports it: `auto`, a
 /// `W / H` ratio, or `auto W / H` with `auto` first whichever order it was
 /// written in (Firefox 152).
@@ -3466,10 +3502,12 @@ fn render_aspect_ratio_value(value: &Value, ctx: ResolutionContext) -> String {
 
 fn aspect_ratio_number(value: &Value, ctx: ResolutionContext) -> Option<f32> {
     match value {
-        Value::Number(number) => Some(*number),
+        Value::Number(number) => Some(clamp_ratio_number(*number)),
         Value::Function { name, arguments } if name.eq_ignore_ascii_case("calc") => {
             match evaluate_calc(arguments, ctx) {
-                Some(quantity) if quantity.unit == CalcUnit::Unitless => Some(quantity.value),
+                Some(quantity) if quantity.unit == CalcUnit::Unitless => {
+                    Some(clamp_ratio_number(quantity.value))
+                }
                 _ => None,
             }
         }
