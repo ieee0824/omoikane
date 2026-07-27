@@ -18,7 +18,7 @@ use crate::css::{
     AffineTransform, ComputedStyle, ComputedValue, Origin, Selector, StyleResolver, matches_selector,
     parse_selector_list,
 };
-use crate::dom::{Node, NodeHandle, NodeType, ShadowRootMode};
+use crate::dom::{Node, NodeHandle, NodeType, ShadowRootMode, is_actually_disabled};
 use crate::http::{Client, HttpRequest, Method, default_user_agent};
 use crate::layout::{LayoutBox, Rect};
 
@@ -2552,6 +2552,11 @@ fn register_host_bindings(
             NativeFunction::from_copy_closure(is_rendered_for_focus_native),
         ),
         (
+            js_string!("__omoikane_is_actually_disabled"),
+            1,
+            NativeFunction::from_copy_closure(is_actually_disabled_native),
+        ),
+        (
             js_string!("__omoikane_normalize_style_value"),
             2,
             NativeFunction::from_copy_closure(normalize_style_value_native),
@@ -3238,6 +3243,23 @@ fn is_rendered_for_focus_native(
             )
         });
         Ok(JsValue::from(visible))
+    })
+}
+
+/// `__omoikane_is_actually_disabled(nodeId)` applies HTML's inherited
+/// `fieldset[disabled]` state, including the first-legend exception.
+fn is_actually_disabled_native(
+    _: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let node_id = parse_node_id(args.first(), context)?;
+    with_host_state(|state| {
+        let disabled = state
+            .borrow()
+            .get_node(node_id)
+            .is_some_and(|node| is_actually_disabled(&node));
+        Ok(JsValue::from(disabled))
     })
 }
 
@@ -10024,6 +10046,46 @@ mod tests {
             .unwrap()
             .to_std_string_escaped();
         assert_eq!(result, "true|false");
+    }
+
+    #[test]
+    fn disabled_fieldset_blocks_focus_and_activation_except_in_first_legend() {
+        use crate::html::TreeBuilder;
+        let doc = TreeBuilder::parse(
+            r#"<html><body><fieldset disabled><input id="direct" type="checkbox"><legend><input id="first" type="checkbox"></legend><legend><input id="second" type="checkbox"></legend><fieldset><input id="nested" type="checkbox"></fieldset></fieldset></body></html>"#,
+        )
+        .document();
+        let mut runtime = JsRuntime::with_document(doc).unwrap();
+        let result = runtime
+            .eval(
+                r#"
+                (() => {
+                  const direct = document.getElementById("direct");
+                  const first = document.getElementById("first");
+                  const second = document.getElementById("second");
+                  const nested = document.getElementById("nested");
+                  let directClicks = 0;
+                  direct.addEventListener("click", () => directClicks++);
+                  direct.focus();
+                  const directFocusBlocked = document.activeElement === document.body;
+                  direct.click();
+                  first.focus();
+                  const firstFocusAllowed = document.activeElement === first;
+                  first.click();
+                  second.click();
+                  nested.click();
+                  return [direct.matches(":disabled"), !direct.matches(":enabled"),
+                    first.matches(":enabled"), second.matches(":disabled"),
+                    nested.matches(":disabled"), directFocusBlocked, firstFocusAllowed,
+                    directClicks === 0, !direct.checked, first.checked,
+                    !second.checked, !nested.checked, direct.disabled === false].every(Boolean);
+                })()
+                "#,
+            )
+            .unwrap()
+            .as_boolean()
+            .unwrap();
+        assert!(result);
     }
 
     #[test]

@@ -31,6 +31,58 @@ pub(crate) fn any_element_scrolled() -> bool {
     SCROLLED_ELEMENTS.with(|count| count.get() > 0)
 }
 
+/// Returns whether an HTML form control is actually disabled.
+///
+/// Besides a control's own `disabled` attribute, a disabled `fieldset`
+/// disables descendant controls except those inside its first direct `legend`
+/// child. The exception is evaluated independently for every ancestor
+/// fieldset, which also covers nested fieldsets.
+pub(crate) fn is_actually_disabled(node: &NodeHandle) -> bool {
+    const DISABLEABLE_TAGS: &[&str] = &[
+        "button", "input", "select", "textarea", "option", "optgroup", "fieldset",
+    ];
+
+    let Some(tag) = node.tag_name() else {
+        return false;
+    };
+    if !DISABLEABLE_TAGS.contains(&tag.as_str()) {
+        return false;
+    }
+    if node.get_attribute("disabled").is_some() {
+        return true;
+    }
+
+    let mut ancestor = node.parent_node();
+    while let Some(current) = ancestor {
+        if current.tag_name().as_deref() == Some("fieldset")
+            && current.get_attribute("disabled").is_some()
+        {
+            let first_legend = current
+                .child_nodes()
+                .into_iter()
+                .find(|child| child.tag_name().as_deref() == Some("legend"));
+            let inside_first_legend = first_legend.is_some_and(|legend| {
+                let mut descendant = Some(node.clone());
+                while let Some(candidate) = descendant {
+                    if candidate == legend {
+                        return true;
+                    }
+                    if candidate == current {
+                        break;
+                    }
+                    descendant = candidate.parent_node();
+                }
+                false
+            });
+            if !inside_first_legend {
+                return true;
+            }
+        }
+        ancestor = current.parent_node();
+    }
+    false
+}
+
 /// A handle to a DOM node.
 #[derive(Clone, Debug)]
 pub struct NodeHandle(Rc<RefCell<NodeInner>>);
