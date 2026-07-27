@@ -485,6 +485,14 @@
       "baseline_supported": true
     },
     {
+      "id": "dom.disabled-fieldset",
+      "area": "dom",
+      "description": "fieldset[disabled] disables descendant controls except those in its first legend",
+      "setup": "globalThis.__disabledHost = document.createElement('div'); __disabledHost.innerHTML = '<fieldset disabled><input id=disabled-direct type=checkbox><legend><input id=disabled-first type=checkbox><fieldset disabled><legend><input id=disabled-nested-legend type=checkbox></legend><input id=disabled-nested type=checkbox></fieldset></legend><legend><input id=disabled-second type=checkbox></legend></fieldset>'; document.body.appendChild(__disabledHost)",
+      "probe": "(() => { const direct = document.getElementById('disabled-direct'); const first = document.getElementById('disabled-first'); const nestedLegend = document.getElementById('disabled-nested-legend'); const nested = document.getElementById('disabled-nested'); const second = document.getElementById('disabled-second'); let clicks = 0; direct.addEventListener('click', () => clicks++); direct.focus(); const blocked = document.activeElement === document.body; direct.click(); first.focus(); const allowed = document.activeElement === first; first.click(); nestedLegend.click(); nested.click(); second.click(); const passed = direct.matches(':disabled') && !direct.matches(':enabled') && first.matches(':enabled') && !first.matches(':disabled') && nestedLegend.matches(':enabled') && nested.matches(':disabled') && second.matches(':disabled') && blocked && allowed && clicks === 0 && !direct.checked && first.checked && nestedLegend.checked && !nested.checked && !second.checked && direct.disabled === false; first.blur(); return passed; })()",
+      "baseline_supported": true
+    },
+    {
       "id": "dom.focus-event-order",
       "area": "dom",
       "description": "Moving focus fires blur, focusout, focus, focusin in order, and only the focusout/focusin pair bubbles",

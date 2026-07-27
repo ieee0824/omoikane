@@ -2065,12 +2065,10 @@
       fireFocusEvent(this, "focusout", null, true);
     }
 
-    // True when this element is a form control on which the `disabled`
-    // attribute has meaning and is set. A stray `<div disabled>` is not a
-    // disabled control; only these tags honour the attribute.
+    // True when this form control is actually disabled, including inherited
+    // disabledness from a fieldset (with its first-legend exception).
     __isDisabledControl() {
-      const DISABLEABLE_TAGS = ["input", "button", "select", "textarea", "option", "optgroup", "fieldset"];
-      return this.disabled && DISABLEABLE_TAGS.includes(this.nodeName.toLowerCase());
+      return !!__omoikane_is_actually_disabled(this.__id);
     }
 
     click() {

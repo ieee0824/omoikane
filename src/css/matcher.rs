@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 
-use crate::dom::{Node, NodeHandle, NodeType};
+use crate::dom::{Node, NodeHandle, NodeType, is_actually_disabled};
 
 use super::{AttributeOperator, Combinator, RelativeSelector, Selector, SelectorPart, SimpleSelector};
 
@@ -494,8 +494,8 @@ fn matches_pseudo_class(
         "first-of-type" => type_position(node, cache).is_some_and(|(index, _)| index == 1),
         "last-of-type" => type_position(node, cache).is_some_and(|(index, total)| index == total),
         "only-of-type" => type_position(node, cache).is_some_and(|(_, total)| total == 1),
-        "enabled" => is_form_control(node) && get_attribute(node, "disabled").is_none(),
-        "disabled" => is_form_control(node) && get_attribute(node, "disabled").is_some(),
+        "enabled" => is_form_control(node) && !is_actually_disabled(node),
+        "disabled" => is_actually_disabled(node),
         "checked" => node.checked(),
         "empty" => node.child_nodes().into_iter().all(|child| match child.node_type() {
             NodeType::Element => false,
@@ -951,6 +951,42 @@ mod tests {
         assert!(!matches_selector(&text, &selector(":checked {}")));
         input.set_attribute("type", "text");
         assert!(!matches_selector(&input, &selector(":checked {}")));
+    }
+
+    #[test]
+    fn disabled_fieldset_state_honors_first_legend_and_nesting() {
+        let outer = NodeHandle::element("fieldset");
+        outer.set_attribute("disabled", "");
+        let direct = NodeHandle::element("input");
+        let first_legend = NodeHandle::element("legend");
+        let legend_input = NodeHandle::element("input");
+        let second_legend = NodeHandle::element("legend");
+        let second_legend_input = NodeHandle::element("input");
+        let nested = NodeHandle::element("fieldset");
+        let nested_input = NodeHandle::element("input");
+
+        outer.append_child(direct.clone());
+        outer.append_child(first_legend.clone());
+        first_legend.append_child(legend_input.clone());
+        outer.append_child(second_legend.clone());
+        second_legend.append_child(second_legend_input.clone());
+        outer.append_child(nested.clone());
+        nested.append_child(nested_input.clone());
+
+        assert!(matches_selector(&direct, &selector(":disabled {}")));
+        assert!(!matches_selector(&direct, &selector(":enabled {}")));
+        assert!(matches_selector(&legend_input, &selector(":enabled {}")));
+        assert!(!matches_selector(&legend_input, &selector(":disabled {}")));
+        assert!(matches_selector(
+            &second_legend_input,
+            &selector(":disabled {}")
+        ));
+        assert!(matches_selector(&nested, &selector(":disabled {}")));
+        assert!(matches_selector(
+            &nested_input,
+            &selector(":disabled {}")
+        ));
+        assert!(nested_input.get_attribute("disabled").is_none());
     }
 
     #[test]
