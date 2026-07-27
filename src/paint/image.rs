@@ -400,6 +400,106 @@ pub(crate) fn parse_background_image_value(value: &str) -> Option<Image> {
     })
 }
 
+/// Returns the rect a replaced element's content paints into, per CSS Images'
+/// `object-fit` and `object-position`.
+///
+/// The rect is the concrete object size placed inside `content_box`. For
+/// `cover`, and for `none` with an intrinsic size larger than the box, it
+/// deliberately extends outside `content_box`: callers clip to the content box,
+/// which is what turns the overflow into a crop. An image with no usable
+/// intrinsic size falls back to `fill`.
+pub(crate) fn object_fit_destination(
+    content_box: Rect,
+    image_w: f32,
+    image_h: f32,
+    style: &ComputedStyle,
+) -> Rect {
+    if image_w <= 0.0 || image_h <= 0.0 {
+        return content_box;
+    }
+    let scale_to_fit = content_box.width / image_w;
+    let scale_to_cover_height = content_box.height / image_h;
+    let (width, height) = match object_fit_keyword(style).as_str() {
+        "contain" => {
+            let scale = scale_to_fit.min(scale_to_cover_height);
+            (image_w * scale, image_h * scale)
+        }
+        "cover" => {
+            let scale = scale_to_fit.max(scale_to_cover_height);
+            (image_w * scale, image_h * scale)
+        }
+        "none" => (image_w, image_h),
+        // `scale-down` is the smaller of `none` and `contain`, so it only scales
+        // when the intrinsic size does not fit.
+        "scale-down" => {
+            if image_w <= content_box.width && image_h <= content_box.height {
+                (image_w, image_h)
+            } else {
+                let scale = scale_to_fit.min(scale_to_cover_height);
+                (image_w * scale, image_h * scale)
+            }
+        }
+        // `fill` and anything unexpected stretch to the content box.
+        _ => (content_box.width, content_box.height),
+    };
+    let (offset_x, offset_y) = object_position_offsets(
+        style,
+        content_box.width - width,
+        content_box.height - height,
+    );
+    Rect {
+        x: content_box.x + offset_x,
+        y: content_box.y + offset_y,
+        width,
+        height,
+    }
+}
+
+fn object_fit_keyword(style: &ComputedStyle) -> String {
+    match style.get("object-fit") {
+        Some(ComputedValue::Keyword(keyword)) => keyword.to_ascii_lowercase(),
+        _ => "fill".to_string(),
+    }
+}
+
+/// Resolves `object-position` into pixel offsets from the content box's origin.
+///
+/// `free_x` / `free_y` are the leftover space on each axis (content box minus
+/// object). They are negative when the object is larger than the box, which is
+/// how a percentage picks the slice `cover` keeps: `100%` then shifts the object
+/// left by exactly its overflow.
+fn object_position_offsets(style: &ComputedStyle, free_x: f32, free_y: f32) -> (f32, f32) {
+    let Some(ComputedValue::Keyword(value)) = style.get("object-position") else {
+        return (free_x * 0.5, free_y * 0.5);
+    };
+    let mut components = value.split_whitespace();
+    let x = components.next();
+    let y = components.next();
+    (
+        resolve_object_position_component(x, free_x),
+        resolve_object_position_component(y, free_y),
+    )
+}
+
+/// Resolves one computed `object-position` component. Computed values are always
+/// a percentage or a pixel length (see `render_object_position_value`); anything
+/// else falls back to centring so a partial value cannot push content off-box.
+fn resolve_object_position_component(component: Option<&str>, free_space: f32) -> f32 {
+    let Some(component) = component else {
+        return free_space * 0.5;
+    };
+    if let Some(percentage) = component.strip_suffix('%') {
+        return percentage
+            .parse::<f32>()
+            .map(|percentage| free_space * percentage / 100.0)
+            .unwrap_or(free_space * 0.5);
+    }
+    if let Some(px) = component.strip_suffix("px") {
+        return px.parse::<f32>().unwrap_or(free_space * 0.5);
+    }
+    free_space * 0.5
+}
+
 /// Computes the background-size dimensions given the style and the painting area.
 /// Returns `(tile_width, tile_height)`.
 pub(crate) fn background_size(style: &ComputedStyle, area: Rect, image_w: f32, image_h: f32) -> (f32, f32) {

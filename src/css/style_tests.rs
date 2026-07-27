@@ -5128,3 +5128,217 @@ fn canonicalizes_webkit_mask_properties_to_standard_names() {
         assert!(is_supported_property(webkit_name));
     }
 }
+
+// --- object-fit / object-position (issue #246) ---
+
+/// Computes `object-fit` / `object-position` for `<img style="...">`.
+fn object_style(declarations: &str) -> ComputedStyle {
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let image = NodeHandle::element("img");
+    document.append_child(body.clone());
+    body.append_child(image.clone());
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(&format!("img {{ {declarations} }}")).unwrap(),
+    );
+    resolver.computed_style(&image)
+}
+
+fn object_keyword(declarations: &str, property: &str) -> String {
+    match object_style(declarations).get(property) {
+        Some(ComputedValue::Keyword(keyword)) => keyword.clone(),
+        other => panic!("{property} computed to {other:?}"),
+    }
+}
+
+/// Both properties are exposed with their initial values even when nothing
+/// declares them, so getComputedStyle can serialize them (Firefox 152: `fill`
+/// and `50% 50%`).
+#[test]
+fn object_fit_and_position_expose_their_initial_values() {
+    assert_eq!(object_keyword("", "object-fit"), "fill");
+    assert_eq!(object_keyword("", "object-position"), "50% 50%");
+    assert!(is_supported_property("object-fit"));
+    assert!(is_supported_property("object-position"));
+}
+
+#[test]
+fn object_fit_accepts_the_css_images_keywords() {
+    for keyword in ["fill", "contain", "cover", "none", "scale-down"] {
+        assert_eq!(
+            object_keyword(&format!("object-fit: {keyword}"), "object-fit"),
+            keyword
+        );
+    }
+    // Keywords are ASCII case-insensitive.
+    assert_eq!(object_keyword("object-fit: SCALE-DOWN", "object-fit"), "scale-down");
+}
+
+/// An invalid declaration is dropped, so the initial value stays in effect and
+/// an earlier valid declaration still wins (Firefox 152 reports `fill` for all
+/// of these).
+#[test]
+fn invalid_object_fit_declarations_are_dropped() {
+    for value in ["bogus", "fill fill", "50%", "10px", "none cover"] {
+        assert_eq!(
+            object_keyword(&format!("object-fit: {value}"), "object-fit"),
+            "fill",
+            "object-fit: {value} must be dropped"
+        );
+    }
+    assert_eq!(
+        object_keyword("object-fit: cover; object-fit: bogus", "object-fit"),
+        "cover",
+        "a dropped declaration must not clobber the earlier valid one"
+    );
+    for keyword in ["initial", "unset"] {
+        assert_eq!(
+            object_keyword(&format!("object-fit: {keyword}"), "object-fit"),
+            "fill"
+        );
+    }
+}
+
+/// `object-position` computes to two components in `x y` order, with keywords
+/// turned into percentages and lengths into pixels. Every expectation below was
+/// read out of Firefox 152 over Marionette.
+#[test]
+fn object_position_computes_to_normalized_x_y_components() {
+    for (declared, expected) in [
+        ("left", "0% 50%"),
+        ("right", "100% 50%"),
+        ("top", "50% 0%"),
+        ("bottom", "50% 100%"),
+        ("center", "50% 50%"),
+        ("left top", "0% 0%"),
+        ("right bottom", "100% 100%"),
+        ("50%", "50% 50%"),
+        ("25% 75%", "25% 75%"),
+        ("10px", "10px 50%"),
+        ("10px 20px", "10px 20px"),
+        ("center top", "50% 0%"),
+        // A leading `top` names the vertical axis, so the components swap.
+        ("top center", "50% 0%"),
+        ("bottom right", "100% 100%"),
+        ("0 0", "0px 0px"),
+        ("0% 0%", "0% 0%"),
+        ("left 10px", "0% 10px"),
+        ("10px center", "10px 50%"),
+        ("-10% 110%", "-10% 110%"),
+        // Lengths resolve against the used font size (16px) and viewport.
+        ("2em", "32px 50%"),
+        ("calc(10px + 5px) 50%", "15px 50%"),
+    ] {
+        assert_eq!(
+            object_keyword(&format!("object-position: {declared}"), "object-position"),
+            expected,
+            "object-position: {declared}"
+        );
+    }
+}
+
+#[test]
+fn invalid_object_position_declarations_are_dropped() {
+    for value in [
+        "bogus",
+        "left right",
+        "top bottom",
+        "top 10px left",
+        "10px 20px 30px",
+        "center center center",
+    ] {
+        assert_eq!(
+            object_keyword(&format!("object-position: {value}"), "object-position"),
+            "50% 50%",
+            "object-position: {value} must be dropped"
+        );
+    }
+    assert_eq!(
+        object_keyword(
+            "object-position: 10px 20px; object-position: bogus",
+            "object-position"
+        ),
+        "10px 20px"
+    );
+    for keyword in ["initial", "unset"] {
+        assert_eq!(
+            object_keyword(&format!("object-position: {keyword}"), "object-position"),
+            "50% 50%"
+        );
+    }
+}
+
+/// A CSS-wide keyword must reach the cascade instead of being rejected by the
+/// property grammar. Firefox 152 with a parent at `10px 20px` / `cover`:
+/// `inherit` copies the parent, and `initial` / `unset` / `revert` fall back to
+/// the initial value.
+#[test]
+fn object_fit_and_position_resolve_css_wide_keywords() {
+    let inherited = |child_declarations: &str, property: &str| {
+        let document = NodeHandle::document();
+        let body = NodeHandle::element("body");
+        let parent = NodeHandle::element("div");
+        let image = NodeHandle::element("img");
+        document.append_child(body.clone());
+        body.append_child(parent.clone());
+        parent.append_child(image.clone());
+        let mut resolver = StyleResolver::new();
+        resolver.add_stylesheet(
+            Origin::Author,
+            parse_stylesheet(&format!(
+                "div {{ object-fit: cover; object-position: 10px 20px; }} \
+                 img {{ {child_declarations} }}"
+            ))
+            .unwrap(),
+        );
+        match resolver.computed_style(&image).get(property) {
+            Some(ComputedValue::Keyword(keyword)) => keyword.clone(),
+            other => panic!("{property} computed to {other:?}"),
+        }
+    };
+
+    assert_eq!(inherited("object-position: inherit", "object-position"), "10px 20px");
+    assert_eq!(inherited("object-fit: inherit", "object-fit"), "cover");
+    for keyword in ["initial", "unset", "revert"] {
+        assert_eq!(
+            inherited(&format!("object-position: {keyword}"), "object-position"),
+            "50% 50%"
+        );
+        assert_eq!(
+            inherited(&format!("object-fit: {keyword}"), "object-fit"),
+            "fill"
+        );
+    }
+    // Without a CSS-wide keyword neither property inherits.
+    assert_eq!(inherited("", "object-position"), "50% 50%");
+    assert_eq!(inherited("", "object-fit"), "fill");
+}
+
+/// `calc()` is only a valid position component when it carries a length or a
+/// percentage. Firefox 152 drops `calc(1)`, `calc(1 + 2)` and `calc(0)`.
+#[test]
+fn object_position_rejects_calc_without_a_length_or_percentage() {
+    for value in ["calc(1)", "calc(1 + 2)", "calc(0)", "calc(2 * 3) 50%"] {
+        assert_eq!(
+            object_keyword(&format!("object-position: {value}"), "object-position"),
+            "50% 50%",
+            "object-position: {value} must be dropped"
+        );
+    }
+    for (declared, expected) in [
+        ("calc(10px + 5px)", "15px 50%"),
+        ("calc(2em * 2)", "64px 50%"),
+        ("calc(10px) calc(20%)", "10px 20%"),
+        // A mixed-unit calc cannot collapse to one unit, so it survives as an
+        // expression — exactly what Firefox 152 serializes.
+        ("calc(50% - 10px)", "calc(50% - 10px) 50%"),
+    ] {
+        assert_eq!(
+            object_keyword(&format!("object-position: {declared}"), "object-position"),
+            expected,
+            "object-position: {declared}"
+        );
+    }
+}

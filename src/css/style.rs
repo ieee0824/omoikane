@@ -971,6 +971,39 @@ fn validate_declaration(name: &str, value: &Value) -> DeclarationValidation {
             None => DeclarationValidation::Invalid,
         };
     }
+    if name.eq_ignore_ascii_case("object-fit") {
+        return match value {
+            Value::Keyword(keyword) => {
+                let lower = keyword.to_ascii_lowercase();
+                if is_css_wide_keyword(&lower)
+                    || matches!(
+                        lower.as_str(),
+                        "fill" | "contain" | "cover" | "none" | "scale-down"
+                    )
+                {
+                    DeclarationValidation::Valid(ComputedValue::Keyword(lower))
+                } else {
+                    DeclarationValidation::Invalid
+                }
+            }
+            _ => DeclarationValidation::Invalid,
+        };
+    }
+    if name.eq_ignore_ascii_case("object-position") {
+        // The grammar is checked here, but normalizing keywords to percentages
+        // and lengths to pixels needs the resolution context, so the value goes
+        // through `compute_value` (see `render_object_position_value`). A
+        // CSS-wide keyword is handled by the cascade, not by this grammar.
+        let is_css_wide = matches!(
+            value,
+            Value::Keyword(keyword) if is_css_wide_keyword(&keyword.to_ascii_lowercase())
+        );
+        return if is_css_wide || object_position_components(value).is_some() {
+            DeclarationValidation::Unvalidated
+        } else {
+            DeclarationValidation::Invalid
+        };
+    }
     if is_non_negative_sizing_property(name) {
         return validate_sizing_value(name, value);
     }
@@ -2821,6 +2854,8 @@ pub(super) fn is_supported_property(name: &str) -> bool {
             | "list-style-type"
             | "list-style-position"
             | "list-style-image"
+            | "object-fit"
+            | "object-position"
             | "mask"
             | "mask-image"
             | "mask-position"
@@ -2967,6 +3002,9 @@ fn compute_value(value: &Value, property_name: &str, ctx: ResolutionContext) -> 
     }
     if property_name.eq_ignore_ascii_case("clip-path") {
         return ComputedValue::Keyword(render_clip_path_value(value, ctx));
+    }
+    if property_name.eq_ignore_ascii_case("object-position") {
+        return ComputedValue::Keyword(render_object_position_value(value, ctx));
     }
     if property_name.eq_ignore_ascii_case("grid-template-areas") {
         return ComputedValue::Keyword(render_grid_template_areas(value));
@@ -3205,6 +3243,139 @@ fn canonical_property_name(name: &str) -> &str {
         "mask-size"
     } else {
         name
+    }
+}
+
+/// One `object-position` component: a keyword naming an edge or the centre, or a
+/// `<length-percentage>` offset.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum PositionAxis {
+    /// The component may only name a horizontal edge.
+    Horizontal,
+    /// The component may only name a vertical edge.
+    Vertical,
+    /// `center` or a length-percentage, which fits either axis.
+    Either,
+}
+
+/// Splits an `object-position` value into its `(x, y)` components, or `None`
+/// when the value does not match `<position>`'s one- and two-value forms.
+///
+/// A single component centres the other axis. In the two-value form the axes are
+/// assigned by the keywords, so `top center` names y first and comes back as
+/// `(center, top)`; two components that name the same axis (`left right`) or
+/// three or more components are rejected. The three- and four-value forms with
+/// edge offsets (`left 10px top 20px`) are not supported yet.
+fn object_position_components(value: &Value) -> Option<(Value, Value)> {
+    let center = || Value::Keyword("center".to_string());
+    let components: Vec<&Value> = match value {
+        Value::List(values) => values.iter().collect(),
+        single => vec![single],
+    };
+    let axes: Vec<PositionAxis> = components
+        .iter()
+        .map(|component| object_position_axis(component))
+        .collect::<Option<Vec<_>>>()?;
+    match components.as_slice() {
+        [single] => {
+            // A lone vertical keyword sets y; everything else sets x.
+            if axes[0] == PositionAxis::Vertical {
+                Some((center(), (*single).clone()))
+            } else {
+                Some(((*single).clone(), center()))
+            }
+        }
+        [first, second] => match (axes[0], axes[1]) {
+            (PositionAxis::Vertical, PositionAxis::Vertical)
+            | (PositionAxis::Horizontal, PositionAxis::Horizontal) => None,
+            (PositionAxis::Vertical, _) => Some(((*second).clone(), (*first).clone())),
+            (_, PositionAxis::Horizontal) => Some(((*second).clone(), (*first).clone())),
+            _ => Some(((*first).clone(), (*second).clone())),
+        },
+        _ => None,
+    }
+}
+
+/// Returns which axis a single `object-position` component can name, or `None`
+/// when it is not a valid component.
+fn object_position_axis(value: &Value) -> Option<PositionAxis> {
+    match value {
+        Value::Keyword(keyword) => match keyword.to_ascii_lowercase().as_str() {
+            "left" | "right" => Some(PositionAxis::Horizontal),
+            "top" | "bottom" => Some(PositionAxis::Vertical),
+            "center" => Some(PositionAxis::Either),
+            _ => None,
+        },
+        Value::Percentage(_) | Value::Length(..) => Some(PositionAxis::Either),
+        // A bare `0` is a length; other bare numbers are not valid offsets.
+        Value::Number(number) if *number == 0.0 => Some(PositionAxis::Either),
+        // Only a `calc()` that carries a length or percentage is a valid offset:
+        // `calc(1)` and `calc(0)` are bare numbers, which Firefox 152 drops too.
+        Value::Function { name, arguments } if name.eq_ignore_ascii_case("calc") => {
+            calc_yields_length_or_percentage(arguments).then_some(PositionAxis::Either)
+        }
+        _ => None,
+    }
+}
+
+/// Whether a `calc()` argument list mentions a length or percentage anywhere, so
+/// its result is a `<length-percentage>` rather than a bare number.
+fn calc_yields_length_or_percentage(arguments: &[Value]) -> bool {
+    arguments.iter().any(|argument| match argument {
+        Value::Length(..) | Value::Percentage(_) => true,
+        Value::Function { arguments, .. } => calc_yields_length_or_percentage(arguments),
+        Value::List(values) => calc_yields_length_or_percentage(values),
+        _ => false,
+    })
+}
+
+/// Renders `object-position` as the two `<x> <y>` components getComputedStyle
+/// reports: edge keywords become percentages and lengths become pixels, matching
+/// Firefox 152 (`top center` → `50% 0%`, `2em` → `32px 50%`).
+fn render_object_position_value(value: &Value, ctx: ResolutionContext) -> String {
+    if let Value::Keyword(keyword) = value
+        && is_css_wide_keyword(&keyword.to_ascii_lowercase())
+    {
+        // Leave CSS-wide keywords for the cascade to resolve.
+        return keyword.clone();
+    }
+    let Some((x, y)) = object_position_components(value) else {
+        return render_value(value);
+    };
+    format!(
+        "{} {}",
+        render_object_position_component(&x, ctx),
+        render_object_position_component(&y, ctx),
+    )
+}
+
+/// Renders one already axis-assigned component, so an edge keyword maps to the
+/// start or end of its axis without needing to know which axis that is.
+fn render_object_position_component(value: &Value, ctx: ResolutionContext) -> String {
+    match value {
+        Value::Keyword(keyword) => match keyword.to_ascii_lowercase().as_str() {
+            "left" | "top" => "0%".to_string(),
+            "right" | "bottom" => "100%".to_string(),
+            "center" => "50%".to_string(),
+            other => other.to_string(),
+        },
+        Value::Percentage(percentage) => format!("{percentage}%"),
+        Value::Number(number) if *number == 0.0 => "0px".to_string(),
+        Value::Length(number, unit) => resolve_length_to_px(*number, unit, ctx)
+            .map(|px| format!("{px}px"))
+            .unwrap_or_else(|| format!("{number}{unit}")),
+        Value::Function { name, arguments } if name.eq_ignore_ascii_case("calc") => {
+            match evaluate_calc(arguments, ctx) {
+                Some(quantity) => match quantity.unit {
+                    CalcUnit::Px => format!("{}px", quantity.value),
+                    CalcUnit::Percentage => format!("{}%", quantity.value),
+                    CalcUnit::Unitless if quantity.value == 0.0 => "0px".to_string(),
+                    CalcUnit::Unitless => quantity.value.to_string(),
+                },
+                None => render_value(value),
+            }
+        }
+        other => render_value(other),
     }
 }
 
@@ -4091,6 +4262,15 @@ fn apply_initial_values(properties: &mut BTreeMap<String, ComputedValue>) {
     properties
         .entry("container-type".to_string())
         .or_insert_with(|| ComputedValue::Keyword("normal".to_string()));
+    // CSS Images: `object-fit` is `fill` and `object-position` is `50% 50%`.
+    // Keeping them present lets getComputedStyle serialize the initial value
+    // even when nothing declares them.
+    properties
+        .entry("object-fit".to_string())
+        .or_insert_with(|| ComputedValue::Keyword("fill".to_string()));
+    properties
+        .entry("object-position".to_string())
+        .or_insert_with(|| ComputedValue::Keyword("50% 50%".to_string()));
     properties
         .entry("transform".to_string())
         .or_insert_with(|| ComputedValue::Keyword("none".to_string()));
@@ -4115,6 +4295,8 @@ fn resolve_non_inherited_css_wide_keywords(properties: &mut BTreeMap<String, Com
     for name in [
         "container-name",
         "container-type",
+        "object-fit",
+        "object-position",
         "transform",
         "transform-origin",
         "transition-property",

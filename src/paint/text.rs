@@ -891,7 +891,21 @@ pub(crate) fn paint_inline_image_fragment(
     }
 
     let content_rect = inline_fragment_content_rect(rect, style, border);
-    canvas.draw_image_scaled_clipped(image, content_rect, clip);
+    let destination = super::image::object_fit_destination(
+        content_rect,
+        image.width as f32,
+        image.height as f32,
+        style,
+    );
+    // Clipping to the content box is what turns `cover`'s overflow into a crop.
+    let clip = match clip {
+        Some(clip) => match super::intersect(clip, content_rect) {
+            Some(intersection) => intersection,
+            None => return,
+        },
+        None => content_rect,
+    };
+    canvas.draw_image_scaled_clipped(image, destination, Some(clip));
 }
 
 pub(crate) fn inline_fragment_content_rect(
