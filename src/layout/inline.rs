@@ -991,6 +991,38 @@ fn html_image_dimension_attribute(node: &NodeHandle, name: &str) -> Option<f32> 
     }
 }
 
+/// Returns the preferred aspect ratio (width / height) a replaced element should
+/// size with, given its computed `aspect-ratio` and its intrinsic dimensions.
+///
+/// `aspect-ratio: auto` and the `auto <ratio>` form defer to the intrinsic ratio
+/// whenever there is one; a bare `<ratio>` overrides it. A degenerate ratio (a
+/// zero on either side) can size nothing, so it falls back to the intrinsic ratio
+/// as well.
+fn preferred_aspect_ratio(style: &ComputedStyle, intrinsic: Option<f32>) -> Option<f32> {
+    let Some(ComputedValue::Keyword(value)) = style.get("aspect-ratio") else {
+        return intrinsic;
+    };
+    let value = value.trim();
+    if value.eq_ignore_ascii_case("auto") {
+        return intrinsic;
+    }
+    let (prefers_intrinsic, ratio_text) = match value.strip_prefix("auto ") {
+        Some(rest) => (true, rest),
+        None => (false, value),
+    };
+    if prefers_intrinsic && intrinsic.is_some() {
+        return intrinsic;
+    }
+    let (width, height) = ratio_text.split_once('/')?;
+    let width = width.trim().parse::<f32>().ok()?;
+    let height = height.trim().parse::<f32>().ok()?;
+    if width > 0.0 && height > 0.0 {
+        Some(width / height)
+    } else {
+        intrinsic
+    }
+}
+
 pub(super) fn resolve_image_rendered_size(
     node: &NodeHandle,
     image: &Image,
@@ -998,36 +1030,60 @@ pub(super) fn resolve_image_rendered_size(
 ) -> (f32, f32) {
     let intrinsic_w = image.width() as f32;
     let intrinsic_h = image.height() as f32;
-    let css_w = explicit_length(style, "width");
-    let css_h = explicit_length(style, "height");
-    let attr_w = html_image_dimension_attribute(node, "width");
-    let attr_h = html_image_dimension_attribute(node, "height");
+    let intrinsic_ratio = (intrinsic_w > 0.0 && intrinsic_h > 0.0)
+        .then(|| intrinsic_w / intrinsic_h);
+    let ratio = preferred_aspect_ratio(style, intrinsic_ratio);
+    let specified_width = explicit_length(style, "width")
+        .or_else(|| html_image_dimension_attribute(node, "width"));
+    let specified_height = explicit_length(style, "height")
+        .or_else(|| html_image_dimension_attribute(node, "height"));
 
-    let (mut width, mut height) = match (css_w.or(attr_w), css_h.or(attr_h)) {
+    let from_height = |height: f32| ratio.map_or(intrinsic_w, |ratio| (height * ratio).max(0.0));
+    let from_width = |width: f32| {
+        ratio
+            .filter(|ratio| *ratio > 0.0)
+            .map_or(intrinsic_h, |ratio| (width / ratio).max(0.0))
+    };
+    let (mut width, mut height) = match (specified_width, specified_height) {
         (Some(w), Some(h)) => (w, h),
-        (Some(w), None) => (w, scale_with_aspect(intrinsic_h, intrinsic_w, w)),
-        (None, Some(h)) => (scale_with_aspect(intrinsic_w, intrinsic_h, h), h),
-        (None, None) => (intrinsic_w, intrinsic_h),
+        (Some(w), None) => (w, from_width(w)),
+        (None, Some(h)) => (from_height(h), h),
+        // Neither axis is specified: the intrinsic width anchors the box and the
+        // preferred ratio gives the height, so an author ratio still applies.
+        (None, None) => (intrinsic_w, from_width(intrinsic_w)),
     };
 
+    // Constraint violations (CSS 2.1 §10.4) re-derive the other axis only when
+    // that axis was not specified: a specified width keeps its value even when
+    // max-height clamps the height it produced.
+    let width_is_derived = specified_width.is_none();
+    let height_is_derived = specified_height.is_none();
     if let Some(max_width) = explicit_length(style, "max-width")
         && width > max_width {
-            height = scale_with_aspect(height, width, max_width);
+            if height_is_derived {
+                height = scale_with_aspect(height, width, max_width);
+            }
             width = max_width;
         }
     if let Some(max_height) = explicit_length(style, "max-height")
         && height > max_height {
-            width = scale_with_aspect(width, height, max_height);
+            if width_is_derived {
+                width = scale_with_aspect(width, height, max_height);
+            }
             height = max_height;
         }
     if let Some(min_width) = explicit_length(style, "min-width")
         && width < min_width {
-            height = scale_with_aspect(height, width, min_width);
+            if height_is_derived {
+                height = scale_with_aspect(height, width, min_width);
+            }
             width = min_width;
         }
     if let Some(min_height) = explicit_length(style, "min-height")
         && height < min_height {
-            width = scale_with_aspect(width, height, min_height);
+            if width_is_derived {
+                width = scale_with_aspect(width, height, min_height);
+            }
             height = min_height;
         }
 

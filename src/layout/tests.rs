@@ -7248,3 +7248,152 @@ fn scrollable_overflow_stops_at_nested_scroll_containers() {
     assert_eq!(nested_box.scrollable_overflow(), (500.0, 500.0));
     assert_eq!(nested_box.max_scroll_offset(), (440.0, 440.0));
 }
+
+// --- aspect-ratio used size (issue #247) ---
+
+/// Resolves the rendered content size of an `<img>` with a 4x2 intrinsic size,
+/// styled by `declarations` and carrying `attributes`.
+///
+/// Expectations come from Firefox 152 over Marionette, measured with
+/// `getBoundingClientRect()` on the same declarations. With no padding or border
+/// the content box and the border box are the same, so the numbers compare
+/// directly.
+fn image_size_with(declarations: &str, attributes: &[(&str, &str)]) -> (f32, f32) {
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let image_node = NodeHandle::element("img");
+    document.append_child(body.clone());
+    body.append_child(image_node.clone());
+    for (name, value) in attributes {
+        image_node.set_attribute(*name, *value);
+    }
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(&format!("img {{ {declarations} }}")).unwrap(),
+    );
+    let style = resolver.computed_style(&image_node);
+    let image = crate::paint::Image::new(4, 2, vec![0; 4 * 2 * 4]).unwrap();
+    super::inline::resolve_image_rendered_size(&image_node, &image, &style)
+}
+
+fn image_size(declarations: &str) -> (f32, f32) {
+    image_size_with(declarations, &[])
+}
+
+#[test]
+fn author_aspect_ratio_overrides_the_intrinsic_ratio() {
+    // One axis specified: the other comes from the author ratio, not from 4:2.
+    assert_eq!(image_size("width: 100px; aspect-ratio: 1/1"), (100.0, 100.0));
+    assert_eq!(image_size("height: 50px; aspect-ratio: 1/1"), (50.0, 50.0));
+    assert_eq!(image_size("width: 100px; aspect-ratio: 4/1"), (100.0, 25.0));
+    assert_eq!(image_size("height: 30px; aspect-ratio: 1/3"), (10.0, 30.0));
+    // HTML dimension attributes take part the same way.
+    assert_eq!(
+        image_size_with("aspect-ratio: 1/1", &[("width", "100")]),
+        (100.0, 100.0)
+    );
+}
+
+#[test]
+fn author_aspect_ratio_sizes_an_auto_height_from_the_intrinsic_width() {
+    // Both axes auto: the intrinsic width anchors the box and the ratio gives
+    // the height, so a 4x2 image with a 1:1 ratio renders 4x4.
+    assert_eq!(image_size("aspect-ratio: 1/1"), (4.0, 4.0));
+    assert_eq!(image_size("aspect-ratio: 4/1"), (4.0, 1.0));
+    assert_eq!(image_size("aspect-ratio: 1/3"), (4.0, 12.0));
+}
+
+#[test]
+fn specified_dimensions_and_degenerate_ratios_ignore_the_author_ratio() {
+    // Both axes specified: nothing left for the ratio to decide.
+    assert_eq!(
+        image_size("width: 100px; height: 30px; aspect-ratio: 1/1"),
+        (100.0, 30.0)
+    );
+    assert_eq!(
+        image_size_with("aspect-ratio: 1/1", &[("width", "100"), ("height", "30")]),
+        (100.0, 30.0)
+    );
+    // A ratio with a zero side cannot size anything, so the intrinsic ratio is
+    // used instead.
+    assert_eq!(image_size("width: 100px; aspect-ratio: 0/1"), (100.0, 50.0));
+    assert_eq!(image_size("height: 50px; aspect-ratio: 1/0"), (100.0, 50.0));
+    assert_eq!(image_size("width: 100px; aspect-ratio: 0/0"), (100.0, 50.0));
+}
+
+#[test]
+fn auto_aspect_ratio_prefers_the_intrinsic_ratio() {
+    // `auto <ratio>` only falls back to the ratio when there is no intrinsic
+    // one, and a replaced element with a decoded image always has one.
+    assert_eq!(
+        image_size("width: 100px; aspect-ratio: auto 1/1"),
+        (100.0, 50.0)
+    );
+    assert_eq!(image_size("aspect-ratio: auto 1/1"), (4.0, 2.0));
+    assert_eq!(
+        image_size("height: 50px; aspect-ratio: auto 1/1"),
+        (100.0, 50.0)
+    );
+}
+
+/// A min/max constraint only re-derives the *other* axis when that axis was
+/// auto. A specified width stays put when max-height clamps the height, which is
+/// the CSS 2.1 constraint-violation table and what Firefox 152 does.
+#[test]
+fn min_and_max_constraints_only_rescale_a_derived_axis() {
+    // Specified width, derived height: the width survives the clamp.
+    assert_eq!(image_size("width: 100px; max-height: 20px"), (100.0, 20.0));
+    assert_eq!(image_size("width: 100px; min-height: 200px"), (100.0, 200.0));
+    assert_eq!(image_size("height: 50px; max-width: 20px"), (20.0, 50.0));
+    assert_eq!(image_size("height: 50px; min-width: 400px"), (400.0, 50.0));
+    // With an author ratio the same rule applies.
+    assert_eq!(
+        image_size("width: 100px; aspect-ratio: 1/1; max-height: 20px"),
+        (100.0, 20.0)
+    );
+    assert_eq!(
+        image_size("height: 100px; aspect-ratio: 1/1; max-width: 20px"),
+        (20.0, 100.0)
+    );
+
+    // Both axes derived: the ratio is preserved through the clamp.
+    assert_eq!(image_size("max-width: 2px"), (2.0, 1.0));
+    assert_eq!(image_size("max-height: 1px"), (2.0, 1.0));
+    assert_eq!(image_size("min-width: 40px"), (40.0, 20.0));
+    assert_eq!(image_size("aspect-ratio: 1/1; max-width: 2px"), (2.0, 2.0));
+    assert_eq!(image_size("aspect-ratio: 1/1; min-width: 40px"), (40.0, 40.0));
+}
+
+#[test]
+fn intrinsic_sizing_without_an_author_ratio_is_unchanged() {
+    assert_eq!(image_size(""), (4.0, 2.0));
+    assert_eq!(image_size("width: 100px"), (100.0, 50.0));
+    assert_eq!(image_size("height: 50px"), (100.0, 50.0));
+    assert_eq!(image_size("width: 100px; height: 30px"), (100.0, 30.0));
+    assert_eq!(image_size("aspect-ratio: auto"), (4.0, 2.0));
+    assert_eq!(image_size_with("", &[("width", "8")]), (8.0, 4.0));
+}
+
+/// `box-sizing` is not applied to replaced element sizing yet: the specified
+/// width becomes the content width either way, so padding and border are added
+/// on top. Firefox 152 instead resolves the ratio against the box `box-sizing`
+/// names, giving a 100x100 border box here (content 80x80) and 100x60 for the
+/// intrinsic-ratio case. Tracked separately; pinned here so the change is
+/// visible when it lands.
+#[test]
+fn box_sizing_does_not_yet_affect_replaced_element_sizing() {
+    assert_eq!(
+        image_size("box-sizing: border-box; padding: 10px; width: 100px; aspect-ratio: 1/1"),
+        (100.0, 100.0)
+    );
+    assert_eq!(
+        image_size("box-sizing: content-box; padding: 10px; width: 100px; aspect-ratio: 1/1"),
+        (100.0, 100.0)
+    );
+    assert_eq!(
+        image_size("box-sizing: border-box; padding: 10px; width: 100px"),
+        (100.0, 50.0)
+    );
+}
+
