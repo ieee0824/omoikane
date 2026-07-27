@@ -2547,6 +2547,11 @@ fn register_host_bindings(
             NativeFunction::from_copy_closure(computed_style_native),
         ),
         (
+            js_string!("__omoikane_is_rendered_for_focus"),
+            1,
+            NativeFunction::from_copy_closure(is_rendered_for_focus_native),
+        ),
+        (
             js_string!("__omoikane_normalize_style_value"),
             2,
             NativeFunction::from_copy_closure(normalize_style_value_native),
@@ -3170,6 +3175,67 @@ fn computed_style_native(
             None => "{}".to_string(),
         };
         Ok(js_string!(json.as_str()).into())
+    })
+}
+
+/// `__omoikane_is_rendered_for_focus(nodeId)` reports the rendered-ness parts
+/// of focusability that cannot be determined from the DOM alone. `display:none`
+/// removes the whole subtree, while `visibility` is inherited and therefore is
+/// read from the target's computed style (allowing a descendant's `visible` to
+/// restore visibility).
+fn is_rendered_for_focus_native(
+    _: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let node_id = parse_node_id(args.first(), context)?;
+    with_host_state(|state| {
+        let node = state.borrow().get_node(node_id);
+        let Some(node) = node else { return Ok(JsValue::from(false)); };
+        if node.node_type() != NodeType::Element {
+            return Ok(JsValue::from(false));
+        }
+        let Some(document) = document_root_for_node(&node) else {
+            return Ok(JsValue::from(false));
+        };
+        let mut state = state.borrow_mut();
+        state.ensure_style_resolver(&document);
+        let document_id = document.identity();
+
+        let mut current = Some(node.clone());
+        while let Some(element) = current {
+            let style = state
+                .document_styles
+                .get_mut(&document_id)
+                .and_then(|entry| entry.resolver.as_mut())
+                .map(|resolver| resolver.computed_style(&element));
+            let Some(style) = style else { return Ok(JsValue::from(false)); };
+            if matches!(style.get("display"), Some(ComputedValue::Keyword(value)) if value.eq_ignore_ascii_case("none")) {
+                return Ok(JsValue::from(false));
+            }
+            current = element.parent_node().and_then(|parent| {
+                if parent.node_type() == NodeType::Element {
+                    Some(parent)
+                } else {
+                    parent.shadow_host()
+                }
+            });
+        }
+
+        let style = state
+            .document_styles
+            .get_mut(&document_id)
+            .and_then(|entry| entry.resolver.as_mut())
+            .map(|resolver| resolver.computed_style(&node));
+        let visible = style.is_none_or(|style| {
+            !matches!(
+                style.get("visibility"),
+                Some(ComputedValue::Keyword(value))
+                    if value.eq_ignore_ascii_case("hidden")
+                        || value.eq_ignore_ascii_case("collapse")
+            )
+        });
+        Ok(JsValue::from(visible))
     })
 }
 
