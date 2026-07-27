@@ -2068,6 +2068,8 @@
     // True when this form control is actually disabled, including inherited
     // disabledness from a fieldset (with its first-legend exception).
     __isDisabledControl() {
+      const DISABLEABLE_TAGS = ["input", "button", "select", "textarea", "option", "optgroup", "fieldset"];
+      if (!DISABLEABLE_TAGS.includes(this.nodeName.toLowerCase())) return false;
       return !!__omoikane_is_actually_disabled(this.__id);
     }
 

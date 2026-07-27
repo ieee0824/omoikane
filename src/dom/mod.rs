@@ -37,7 +37,7 @@ pub(crate) fn any_element_scrolled() -> bool {
 /// disables descendant controls except those inside its first direct `legend`
 /// child. The exception is evaluated independently for every ancestor
 /// fieldset, which also covers nested fieldsets.
-pub fn is_actually_disabled(node: &NodeHandle) -> bool {
+pub(crate) fn is_actually_disabled(node: &NodeHandle) -> bool {
     const DISABLEABLE_TAGS: &[&str] = &[
         "button", "input", "select", "textarea", "option", "optgroup", "fieldset",
     ];
