@@ -529,6 +529,14 @@
       "setup": "globalThis.__scrollEvents = 0; globalThis.__scrollBubbled = 0; __scrollHost.addEventListener('scroll', () => { __scrollEvents += 1; }); document.addEventListener('scroll', () => { __scrollBubbled += 1; }); __scrollHost.scroll(0, 0)",
       "probe": "(() => { const target = document.getElementById('scroll-target'); const before = target.getBoundingClientRect().top; const hostBefore = __scrollHost.getBoundingClientRect().top; const events = __scrollEvents; __scrollHost.scrollTop = 20; const moved = target.getBoundingClientRect().top === before - 20; const hostStayed = __scrollHost.getBoundingClientRect().top === hostBefore; return moved && hostStayed && __scrollEvents === events + 1 && __scrollBubbled === 0; })()",
       "baseline_supported": true
+    },
+    {
+      "id": "dom.focus-chain",
+      "area": "dom",
+      "description": "Focusing inside an iframe points the parent document at the frame and moves system focus into the sub-document",
+      "setup": "globalThis.__chainFrame = document.createElement('iframe'); document.body.appendChild(__chainFrame); globalThis.__chainDocument = __chainFrame.contentDocument; globalThis.__chainInput = __chainDocument.createElement('input'); __chainDocument.body.appendChild(__chainInput); globalThis.__chainEvents = []; __chainDocument.addEventListener('focus', event => { __chainEvents.push(event.target === __chainDocument ? 'document' : 'element'); }, true)",
+      "probe": "(() => { __chainInput.focus(); const inner = __chainDocument.activeElement === __chainInput; const parent = document.activeElement === __chainFrame; const focus = document.hasFocus() === true && __chainDocument.hasFocus() === true; const events = __chainEvents.join(',') === 'document,element'; __chainInput.blur(); const afterBlur = document.activeElement === __chainFrame && __chainDocument.activeElement === __chainDocument.body; return inner && parent && focus && events && afterBlur; })()",
+      "baseline_supported": true
     }
   ]
 }

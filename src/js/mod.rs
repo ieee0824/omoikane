@@ -19273,11 +19273,11 @@ mod tests {
                 out.push(document.hasFocus() === true && sub.hasFocus() === false);
 
                 // Focusing inside the iframe moves the focused browsing context.
-                // Each document keeps its own active element: propagating focus
-                // up the chain to the iframe element is out of scope (#254).
+                // The sub-document points at its own element while the parent
+                // points at the iframe hosting it.
                 subInput.focus();
                 out.push(sub.activeElement === subInput);
-                out.push(document.activeElement === a);
+                out.push(document.activeElement === document.getElementById("f"));
                 out.push(document.hasFocus() === true && sub.hasFocus() === true);
 
                 // Blurring inside the iframe keeps that document focused.
@@ -19695,5 +19695,317 @@ mod tests {
             })()"#,
         );
         assert_eq!(result, "300,0,300|100,100|100,0|1300,1300|120|125");
+    }
+
+    // --- iframe focus chain (issue #254) ---
+
+    /// Builds a three-level document chain: the top document, an iframe `f`
+    /// holding `x` and a nested iframe `g`, and `g`'s document holding `y`.
+    ///
+    /// The returned prelude leaves `a`, `f`, `sub`, `x`, `g`, `sub2` and `y` on
+    /// `globalThis` for the test body to use.
+    const FOCUS_CHAIN_SETUP: &str = r#"
+        globalThis.a = document.getElementById("a");
+        globalThis.b = document.getElementById("b");
+        globalThis.f = document.getElementById("f");
+        globalThis.sub = f.contentDocument;
+        globalThis.x = sub.createElement("input");
+        sub.body.appendChild(x);
+        globalThis.g = sub.createElement("iframe");
+        sub.body.appendChild(g);
+        globalThis.sub2 = g.contentDocument;
+        globalThis.y = sub2.createElement("input");
+        sub2.body.appendChild(y);
+        globalThis.label = node => {
+          if (node === a) return "a";
+          if (node === b) return "b";
+          if (node === f) return "f";
+          if (node === g) return "g";
+          if (node === x) return "x";
+          if (node === y) return "y";
+          if (node === document) return "doc";
+          if (node === sub) return "sub";
+          if (node === sub2) return "sub2";
+          if (node === globalThis) return "win";
+          if (node === f.contentWindow) return "subwin";
+          if (node === g.contentWindow) return "sub2win";
+          if (node === document.body) return "body";
+          if (node === sub.body) return "subbody";
+          if (node === sub2.body) return "sub2body";
+          return String(node && node.nodeName);
+        };
+        globalThis.state = () => [
+          label(document.activeElement),
+          label(sub.activeElement),
+          label(sub2.activeElement),
+          [document.hasFocus(), sub.hasFocus(), sub2.hasFocus()].join("/"),
+        ].join(" ");
+        globalThis.focusLog = [];
+        globalThis.watchFocus = targets => {
+          for (const [node, name] of targets) {
+            for (const type of ["focus", "blur", "focusin", "focusout"]) {
+              node.addEventListener(type, event => focusLog.push(
+                name + ":" + event.type + ":" + label(event.target) + ":" +
+                (event.relatedTarget === null ? "null" : label(event.relatedTarget))
+              ), true);
+            }
+          }
+        };
+    "#;
+
+    fn focus_chain_runtime() -> JsRuntime {
+        let mut runtime = runtime_from_html(
+            r#"<html><body><input id="a"><input id="b"><iframe id="f"></iframe></body></html>"#,
+        );
+        runtime.eval(FOCUS_CHAIN_SETUP).unwrap();
+        runtime
+    }
+
+    #[test]
+    fn focusing_inside_an_iframe_points_each_ancestor_at_its_frame() {
+        let mut runtime = focus_chain_runtime();
+        let result = eval_str(
+            &mut runtime,
+            r#"(() => {
+                const out = [state()];
+                a.focus();
+                out.push(state());
+                // The sub-document holds the element; the parent holds the frame.
+                x.focus();
+                out.push(state());
+                // Three levels deep, every ancestor points at the next frame.
+                y.focus();
+                out.push(state());
+                // Leaving the chain clears the sub-documents again.
+                a.focus();
+                out.push(state());
+                return out.join("|");
+            })()"#,
+        );
+        assert_eq!(
+            result,
+            concat!(
+                "body subbody sub2body true/false/false",
+                "|a subbody sub2body true/false/false",
+                "|f x sub2body true/true/false",
+                "|f g y true/true/true",
+                "|a subbody sub2body true/false/false",
+            )
+        );
+    }
+
+    /// The event sequence for a focus move that crosses documents, compared
+    /// entry for entry against Firefox 152 over Marionette. Listeners are
+    /// registered in the capture phase on every window, document and element
+    /// involved, so the log shows the full propagation path.
+    #[test]
+    fn crossing_documents_blurs_the_old_browsing_context_and_focuses_the_new_one() {
+        let mut runtime = focus_chain_runtime();
+        let result = eval_str(
+            &mut runtime,
+            r#"(() => {
+                watchFocus([
+                  [globalThis, "win"], [document, "doc"], [a, "a"],
+                  [f.contentWindow, "subwin"], [sub, "sub"], [x, "x"],
+                ]);
+                a.focus();
+                focusLog.length = 0;
+                x.focus();
+                return focusLog.join("|");
+            })()"#,
+        );
+        assert_eq!(
+            result,
+            concat!(
+                // The old element loses focus first, with no relatedTarget: the
+                // new element lives in another document.
+                "win:blur:a:null|doc:blur:a:null|a:blur:a:null",
+                "|win:focusout:a:null|doc:focusout:a:null|a:focusout:a:null",
+                // Then the browsing context it belonged to.
+                "|win:blur:doc:null|doc:blur:doc:null",
+                "|win:blur:win:null",
+                // Then the one being entered, outermost target first.
+                "|subwin:focus:sub:null|sub:focus:sub:null",
+                "|subwin:focus:subwin:null",
+                // And finally the new element.
+                "|subwin:focus:x:null|sub:focus:x:null|x:focus:x:null",
+                "|subwin:focusin:x:null|sub:focusin:x:null|x:focusin:x:null",
+            )
+        );
+    }
+
+    #[test]
+    fn returning_from_an_iframe_blurs_only_the_innermost_document() {
+        let mut runtime = focus_chain_runtime();
+        let result = eval_str(
+            &mut runtime,
+            r#"(() => {
+                watchFocus([
+                  [globalThis, "win"], [document, "doc"], [a, "a"],
+                  [f.contentWindow, "subwin"], [sub, "sub"], [x, "x"],
+                  [g.contentWindow, "sub2win"], [sub2, "sub2"], [y, "y"],
+                ]);
+                a.focus();
+                x.focus();
+                focusLog.length = 0;
+                // Going one level deeper blurs the document being left even
+                // though it stays in the chain, and leaves the top alone.
+                y.focus();
+                const deeper = focusLog.join("|");
+                focusLog.length = 0;
+                // Coming back out only blurs the innermost document.
+                a.focus();
+                return [deeper, focusLog.join("|")].join(";;");
+            })()"#,
+        );
+        assert_eq!(
+            result,
+            concat!(
+                "subwin:blur:x:null|sub:blur:x:null|x:blur:x:null",
+                "|subwin:focusout:x:null|sub:focusout:x:null|x:focusout:x:null",
+                "|subwin:blur:sub:null|sub:blur:sub:null",
+                "|subwin:blur:subwin:null",
+                "|sub2win:focus:sub2:null|sub2:focus:sub2:null",
+                "|sub2win:focus:sub2win:null",
+                "|sub2win:focus:y:null|sub2:focus:y:null|y:focus:y:null",
+                "|sub2win:focusin:y:null|sub2:focusin:y:null|y:focusin:y:null",
+                ";;",
+                "sub2win:blur:y:null|sub2:blur:y:null|y:blur:y:null",
+                "|sub2win:focusout:y:null|sub2:focusout:y:null|y:focusout:y:null",
+                "|sub2win:blur:sub2:null|sub2:blur:sub2:null",
+                "|sub2win:blur:sub2win:null",
+                "|win:focus:doc:null|doc:focus:doc:null",
+                "|win:focus:win:null",
+                "|win:focus:a:null|doc:focus:a:null|a:focus:a:null",
+                "|win:focusin:a:null|doc:focusin:a:null|a:focusin:a:null",
+            )
+        );
+    }
+
+    #[test]
+    fn same_document_focus_moves_do_not_touch_the_browsing_context() {
+        let mut runtime = focus_chain_runtime();
+        let result = eval_str(
+            &mut runtime,
+            r#"(() => {
+                watchFocus([[globalThis, "win"], [document, "doc"], [a, "a"], [b, "b"]]);
+                a.focus();
+                focusLog.length = 0;
+                b.focus();
+                // No document- or window-targeted event, and relatedTarget is
+                // exposed because both elements share a document.
+                return focusLog.join("|");
+            })()"#,
+        );
+        assert_eq!(
+            result,
+            concat!(
+                "win:blur:a:b|doc:blur:a:b|a:blur:a:b",
+                "|win:focusout:a:b|doc:focusout:a:b|a:focusout:a:b",
+                "|win:focus:b:a|doc:focus:b:a|b:focus:b:a",
+                "|win:focusin:b:a|doc:focusin:b:a|b:focusin:b:a",
+            )
+        );
+    }
+
+    #[test]
+    fn blurring_inside_an_iframe_keeps_the_frame_focused() {
+        let mut runtime = focus_chain_runtime();
+        let result = eval_str(
+            &mut runtime,
+            r#"(() => {
+                x.focus();
+                const before = state();
+                // The unfocusing steps hand focus to the sub-document's viewport,
+                // so the frame stays the parent's active element and the
+                // sub-document keeps system focus.
+                x.blur();
+                return [before, state()].join("|");
+            })()"#,
+        );
+        assert_eq!(
+            result,
+            "f x sub2body true/true/false|f subbody sub2body true/true/false"
+        );
+    }
+
+    #[test]
+    fn removing_a_focused_iframe_hands_focus_back_to_the_top_document() {
+        let mut runtime = focus_chain_runtime();
+        let result = eval_str(
+            &mut runtime,
+            r#"(() => {
+                y.focus();
+                const before = state();
+                f.remove();
+                // The frame and its documents are gone, so the top-level
+                // document is focused again with nothing focused inside it.
+                return [
+                  before,
+                  label(document.activeElement),
+                  document.hasFocus(),
+                ].join("|");
+            })()"#,
+        );
+        assert_eq!(result, "f g y true/true/true|body|true");
+    }
+
+    /// Every handler must see the state its own event announces. Snapshots taken
+    /// inside each handler of a cross-document move, compared against Firefox
+    /// 152: focus has left the old context by the time its `blur` pair runs, and
+    /// the new chain is already installed when its `focus` pair runs, while the
+    /// element itself is only focused for the element's own event.
+    #[test]
+    fn browsing_context_focus_events_observe_the_state_they_announce() {
+        let mut runtime = focus_chain_runtime();
+        let result = eval_str(
+            &mut runtime,
+            r#"(() => {
+                const snapshots = [];
+                const snap = tag => snapshots.push([
+                  tag,
+                  document.hasFocus(),
+                  sub.hasFocus(),
+                  label(document.activeElement),
+                  label(sub.activeElement),
+                ].join(":"));
+                a.focus();
+                a.addEventListener("blur", () => snap("element-blur"), true);
+                document.addEventListener("blur", event => {
+                  if (event.target === document) snap("doc-blur");
+                }, true);
+                globalThis.addEventListener("blur", event => {
+                  if (event.target === globalThis) snap("win-blur");
+                }, true);
+                sub.addEventListener("focus", event => {
+                  if (event.target === sub) snap("sub-focus");
+                }, true);
+                f.contentWindow.addEventListener("focus", event => {
+                  if (event.target === f.contentWindow) snap("subwin-focus");
+                }, true);
+                x.addEventListener("focus", () => snap("element-focus"), true);
+
+                x.focus();
+                snap("after");
+                return snapshots.join("|");
+            })()"#,
+        );
+        assert_eq!(
+            result,
+            concat!(
+                // The old context still holds focus while its element blurs.
+                "element-blur:true:false:body:subbody",
+                // In transit: no document reports focus.
+                "|doc-blur:false:false:body:subbody",
+                "|win-blur:false:false:body:subbody",
+                // The chain is in place — the parent already points at the frame —
+                // before the entered context is announced.
+                "|sub-focus:true:true:f:subbody",
+                "|subwin-focus:true:true:f:subbody",
+                // The element is focused only for its own event.
+                "|element-focus:true:true:f:x",
+                "|after:true:true:f:x",
+            )
+        );
     }
 }
