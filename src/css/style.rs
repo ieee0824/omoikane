@@ -971,6 +971,19 @@ fn validate_declaration(name: &str, value: &Value) -> DeclarationValidation {
             None => DeclarationValidation::Invalid,
         };
     }
+    if name.eq_ignore_ascii_case("aspect-ratio") {
+        // Normalizing needs the resolution context for `calc()`, so a valid
+        // value goes on to `compute_value` (see `render_aspect_ratio_value`).
+        let is_css_wide = matches!(
+            value,
+            Value::Keyword(keyword) if is_css_wide_keyword(&keyword.to_ascii_lowercase())
+        );
+        return if is_css_wide || aspect_ratio_parts(value).is_some() {
+            DeclarationValidation::Unvalidated
+        } else {
+            DeclarationValidation::Invalid
+        };
+    }
     if name.eq_ignore_ascii_case("object-fit") {
         return match value {
             Value::Keyword(keyword) => {
@@ -2853,6 +2866,7 @@ pub(super) fn is_supported_property(name: &str) -> bool {
             | "opacity"
             | "list-style-type"
             | "list-style-position"
+            | "aspect-ratio"
             | "list-style-image"
             | "object-fit"
             | "object-position"
@@ -3005,6 +3019,9 @@ fn compute_value(value: &Value, property_name: &str, ctx: ResolutionContext) -> 
     }
     if property_name.eq_ignore_ascii_case("object-position") {
         return ComputedValue::Keyword(render_object_position_value(value, ctx));
+    }
+    if property_name.eq_ignore_ascii_case("aspect-ratio") {
+        return ComputedValue::Keyword(render_aspect_ratio_value(value, ctx));
     }
     if property_name.eq_ignore_ascii_case("grid-template-areas") {
         return ComputedValue::Keyword(render_grid_template_areas(value));
@@ -3327,6 +3344,137 @@ fn calc_yields_length_or_percentage(arguments: &[Value]) -> bool {
         Value::List(values) => calc_yields_length_or_percentage(values),
         _ => false,
     })
+}
+
+/// One component of an `aspect-ratio` value.
+#[derive(Debug, Clone, PartialEq)]
+enum AspectRatioPart {
+    Auto,
+    Slash,
+    Number(Value),
+}
+
+/// Splits an `aspect-ratio` value into `auto` / `<ratio>` components, or `None`
+/// when it does not match `auto || <ratio>`.
+///
+/// The tokenizer glues `1/1` into one keyword but keeps `2 / 1` as three
+/// components, so both shapes are flattened into the same part list before the
+/// grammar is checked. Numbers must be non-negative; a degenerate ratio such as
+/// `0 / 1` is a valid value that layout then ignores.
+fn aspect_ratio_parts(value: &Value) -> Option<(bool, Option<(Value, Value)>)> {
+    let components: Vec<&Value> = match value {
+        Value::List(values) => values.iter().collect(),
+        single => vec![single],
+    };
+    let mut parts = Vec::new();
+    for component in components {
+        match component {
+            Value::Keyword(keyword) if keyword.eq_ignore_ascii_case("auto") => {
+                parts.push(AspectRatioPart::Auto)
+            }
+            Value::Keyword(keyword) if keyword == "/" => parts.push(AspectRatioPart::Slash),
+            // A glued `1/1`, or a number the tokenizer kept as a keyword.
+            Value::Keyword(keyword) => {
+                let mut pieces = keyword.split('/');
+                let first = pieces.next()?;
+                parts.push(AspectRatioPart::Number(Value::Number(
+                    non_negative_number(first)?,
+                )));
+                for piece in pieces {
+                    parts.push(AspectRatioPart::Slash);
+                    parts.push(AspectRatioPart::Number(Value::Number(non_negative_number(
+                        piece,
+                    )?)));
+                }
+            }
+            Value::Number(number) if *number >= 0.0 => {
+                parts.push(AspectRatioPart::Number(component.clone()))
+            }
+            // A `calc()` is only a ratio component when it evaluates to a bare
+            // number; the value itself is resolved later, with a context.
+            Value::Function { name, arguments }
+                if name.eq_ignore_ascii_case("calc")
+                    && !calc_yields_length_or_percentage(arguments) =>
+            {
+                parts.push(AspectRatioPart::Number(component.clone()))
+            }
+            _ => return None,
+        }
+    }
+
+    let ratio_from = |parts: &[AspectRatioPart]| -> Option<Option<(Value, Value)>> {
+        match parts {
+            [] => Some(None),
+            [AspectRatioPart::Number(width)] => {
+                Some(Some((width.clone(), Value::Number(1.0))))
+            }
+            [
+                AspectRatioPart::Number(width),
+                AspectRatioPart::Slash,
+                AspectRatioPart::Number(height),
+            ] => Some(Some((width.clone(), height.clone()))),
+            _ => None,
+        }
+    };
+    match parts.first() {
+        Some(AspectRatioPart::Auto) => Some((true, ratio_from(&parts[1..])?)),
+        _ => match parts.last() {
+            Some(AspectRatioPart::Auto) => {
+                Some((true, ratio_from(&parts[..parts.len() - 1])?))
+            }
+            _ => {
+                let ratio = ratio_from(&parts)?;
+                // A bare `auto` is the only value with neither part.
+                ratio.map(|ratio| (false, Some(ratio)))
+            }
+        },
+    }
+}
+
+fn non_negative_number(text: &str) -> Option<f32> {
+    let number = text.trim().parse::<f32>().ok()?;
+    (number.is_finite() && number >= 0.0).then_some(number)
+}
+
+/// Renders `aspect-ratio` the way getComputedStyle reports it: `auto`, a
+/// `W / H` ratio, or `auto W / H` with `auto` first whichever order it was
+/// written in (Firefox 152).
+fn render_aspect_ratio_value(value: &Value, ctx: ResolutionContext) -> String {
+    if let Value::Keyword(keyword) = value
+        && is_css_wide_keyword(&keyword.to_ascii_lowercase())
+    {
+        return keyword.clone();
+    }
+    let Some((auto, ratio)) = aspect_ratio_parts(value) else {
+        return render_value(value);
+    };
+    let ratio = ratio.and_then(|(width, height)| {
+        Some(format!(
+            "{} / {}",
+            aspect_ratio_number(&width, ctx)?,
+            aspect_ratio_number(&height, ctx)?
+        ))
+    });
+    match (auto, ratio) {
+        (true, Some(ratio)) => format!("auto {ratio}"),
+        (true, None) => "auto".to_string(),
+        (false, Some(ratio)) => ratio,
+        // Neither part is not a value the grammar accepts.
+        (false, None) => "auto".to_string(),
+    }
+}
+
+fn aspect_ratio_number(value: &Value, ctx: ResolutionContext) -> Option<f32> {
+    match value {
+        Value::Number(number) => Some(*number),
+        Value::Function { name, arguments } if name.eq_ignore_ascii_case("calc") => {
+            match evaluate_calc(arguments, ctx) {
+                Some(quantity) if quantity.unit == CalcUnit::Unitless => Some(quantity.value),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
 }
 
 /// Renders `object-position` as the two `<x> <y>` components getComputedStyle
@@ -4262,6 +4410,10 @@ fn apply_initial_values(properties: &mut BTreeMap<String, ComputedValue>) {
     properties
         .entry("container-type".to_string())
         .or_insert_with(|| ComputedValue::Keyword("normal".to_string()));
+    // CSS Sizing: `aspect-ratio` is `auto`, meaning "use the intrinsic ratio".
+    properties
+        .entry("aspect-ratio".to_string())
+        .or_insert_with(|| ComputedValue::Keyword("auto".to_string()));
     // CSS Images: `object-fit` is `fill` and `object-position` is `50% 50%`.
     // Keeping them present lets getComputedStyle serialize the initial value
     // even when nothing declares them.
@@ -4293,6 +4445,7 @@ fn apply_initial_values(properties: &mut BTreeMap<String, ComputedValue>) {
 
 fn resolve_non_inherited_css_wide_keywords(properties: &mut BTreeMap<String, ComputedValue>) {
     for name in [
+        "aspect-ratio",
         "container-name",
         "container-type",
         "object-fit",

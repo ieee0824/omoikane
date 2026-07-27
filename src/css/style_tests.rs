@@ -5131,8 +5131,8 @@ fn canonicalizes_webkit_mask_properties_to_standard_names() {
 
 // --- object-fit / object-position (issue #246) ---
 
-/// Computes `object-fit` / `object-position` for `<img style="...">`.
-fn object_style(declarations: &str) -> ComputedStyle {
+/// Computes the style of an `<img>` carrying `declarations`.
+fn image_computed_style(declarations: &str) -> ComputedStyle {
     let document = NodeHandle::document();
     let body = NodeHandle::element("body");
     let image = NodeHandle::element("img");
@@ -5146,8 +5146,8 @@ fn object_style(declarations: &str) -> ComputedStyle {
     resolver.computed_style(&image)
 }
 
-fn object_keyword(declarations: &str, property: &str) -> String {
-    match object_style(declarations).get(property) {
+fn image_computed_keyword(declarations: &str, property: &str) -> String {
+    match image_computed_style(declarations).get(property) {
         Some(ComputedValue::Keyword(keyword)) => keyword.clone(),
         other => panic!("{property} computed to {other:?}"),
     }
@@ -5158,8 +5158,8 @@ fn object_keyword(declarations: &str, property: &str) -> String {
 /// and `50% 50%`).
 #[test]
 fn object_fit_and_position_expose_their_initial_values() {
-    assert_eq!(object_keyword("", "object-fit"), "fill");
-    assert_eq!(object_keyword("", "object-position"), "50% 50%");
+    assert_eq!(image_computed_keyword("", "object-fit"), "fill");
+    assert_eq!(image_computed_keyword("", "object-position"), "50% 50%");
     assert!(is_supported_property("object-fit"));
     assert!(is_supported_property("object-position"));
 }
@@ -5168,12 +5168,12 @@ fn object_fit_and_position_expose_their_initial_values() {
 fn object_fit_accepts_the_css_images_keywords() {
     for keyword in ["fill", "contain", "cover", "none", "scale-down"] {
         assert_eq!(
-            object_keyword(&format!("object-fit: {keyword}"), "object-fit"),
+            image_computed_keyword(&format!("object-fit: {keyword}"), "object-fit"),
             keyword
         );
     }
     // Keywords are ASCII case-insensitive.
-    assert_eq!(object_keyword("object-fit: SCALE-DOWN", "object-fit"), "scale-down");
+    assert_eq!(image_computed_keyword("object-fit: SCALE-DOWN", "object-fit"), "scale-down");
 }
 
 /// An invalid declaration is dropped, so the initial value stays in effect and
@@ -5183,19 +5183,19 @@ fn object_fit_accepts_the_css_images_keywords() {
 fn invalid_object_fit_declarations_are_dropped() {
     for value in ["bogus", "fill fill", "50%", "10px", "none cover"] {
         assert_eq!(
-            object_keyword(&format!("object-fit: {value}"), "object-fit"),
+            image_computed_keyword(&format!("object-fit: {value}"), "object-fit"),
             "fill",
             "object-fit: {value} must be dropped"
         );
     }
     assert_eq!(
-        object_keyword("object-fit: cover; object-fit: bogus", "object-fit"),
+        image_computed_keyword("object-fit: cover; object-fit: bogus", "object-fit"),
         "cover",
         "a dropped declaration must not clobber the earlier valid one"
     );
     for keyword in ["initial", "unset"] {
         assert_eq!(
-            object_keyword(&format!("object-fit: {keyword}"), "object-fit"),
+            image_computed_keyword(&format!("object-fit: {keyword}"), "object-fit"),
             "fill"
         );
     }
@@ -5232,7 +5232,7 @@ fn object_position_computes_to_normalized_x_y_components() {
         ("calc(10px + 5px) 50%", "15px 50%"),
     ] {
         assert_eq!(
-            object_keyword(&format!("object-position: {declared}"), "object-position"),
+            image_computed_keyword(&format!("object-position: {declared}"), "object-position"),
             expected,
             "object-position: {declared}"
         );
@@ -5250,13 +5250,13 @@ fn invalid_object_position_declarations_are_dropped() {
         "center center center",
     ] {
         assert_eq!(
-            object_keyword(&format!("object-position: {value}"), "object-position"),
+            image_computed_keyword(&format!("object-position: {value}"), "object-position"),
             "50% 50%",
             "object-position: {value} must be dropped"
         );
     }
     assert_eq!(
-        object_keyword(
+        image_computed_keyword(
             "object-position: 10px 20px; object-position: bogus",
             "object-position"
         ),
@@ -5264,7 +5264,7 @@ fn invalid_object_position_declarations_are_dropped() {
     );
     for keyword in ["initial", "unset"] {
         assert_eq!(
-            object_keyword(&format!("object-position: {keyword}"), "object-position"),
+            image_computed_keyword(&format!("object-position: {keyword}"), "object-position"),
             "50% 50%"
         );
     }
@@ -5322,7 +5322,7 @@ fn object_fit_and_position_resolve_css_wide_keywords() {
 fn object_position_rejects_calc_without_a_length_or_percentage() {
     for value in ["calc(1)", "calc(1 + 2)", "calc(0)", "calc(2 * 3) 50%"] {
         assert_eq!(
-            object_keyword(&format!("object-position: {value}"), "object-position"),
+            image_computed_keyword(&format!("object-position: {value}"), "object-position"),
             "50% 50%",
             "object-position: {value} must be dropped"
         );
@@ -5336,9 +5336,109 @@ fn object_position_rejects_calc_without_a_length_or_percentage() {
         ("calc(50% - 10px)", "calc(50% - 10px) 50%"),
     ] {
         assert_eq!(
-            object_keyword(&format!("object-position: {declared}"), "object-position"),
+            image_computed_keyword(&format!("object-position: {declared}"), "object-position"),
             expected,
             "object-position: {declared}"
         );
     }
 }
+
+// --- aspect-ratio (issue #247) ---
+
+/// `aspect-ratio` computes to `auto`, a normalized `W / H` ratio, or both.
+/// Every expectation was read out of Firefox 152 over Marionette.
+#[test]
+fn aspect_ratio_computes_to_a_normalized_ratio() {
+    assert_eq!(image_computed_keyword("", "aspect-ratio"), "auto");
+    assert!(is_supported_property("aspect-ratio"));
+
+    for (declared, expected) in [
+        ("auto", "auto"),
+        ("1/1", "1 / 1"),
+        ("2 / 1", "2 / 1"),
+        // A lone number is a ratio against 1.
+        ("2", "2 / 1"),
+        ("0.5", "0.5 / 1"),
+        ("1/3", "1 / 3"),
+        // `auto` always serializes first, whichever order it was written in.
+        ("auto 2/1", "auto 2 / 1"),
+        ("2/1 auto", "auto 2 / 1"),
+        ("auto 2", "auto 2 / 1"),
+        // A degenerate ratio is still a valid computed value; layout is what
+        // ignores it.
+        ("0/1", "0 / 1"),
+        ("1/0", "1 / 0"),
+        ("0/0", "0 / 0"),
+        ("calc(1) / calc(2)", "1 / 2"),
+        ("calc(2 * 3)", "6 / 1"),
+    ] {
+        assert_eq!(
+            image_computed_keyword(&format!("aspect-ratio: {declared}"), "aspect-ratio"),
+            expected,
+            "aspect-ratio: {declared}"
+        );
+    }
+}
+
+#[test]
+fn invalid_aspect_ratio_declarations_are_dropped() {
+    for value in [
+        "-1/1",
+        "1/-1",
+        "1 1",
+        "a/b",
+        "1/",
+        "/1",
+        "1//2",
+        "auto auto",
+        "auto auto 1/1",
+        "1/1 1/1",
+        "1/1 auto 1/1",
+        "10px/1",
+        "calc(50%) / 1",
+    ] {
+        assert_eq!(
+            image_computed_keyword(&format!("aspect-ratio: {value}"), "aspect-ratio"),
+            "auto",
+            "aspect-ratio: {value} must be dropped"
+        );
+    }
+    assert_eq!(
+        image_computed_keyword("aspect-ratio: 3/2; aspect-ratio: bogus", "aspect-ratio"),
+        "3 / 2",
+        "a dropped declaration must not clobber the earlier valid one"
+    );
+}
+
+#[test]
+fn aspect_ratio_resolves_css_wide_keywords() {
+    let inherited = |child_declarations: &str| {
+        let document = NodeHandle::document();
+        let body = NodeHandle::element("body");
+        let parent = NodeHandle::element("div");
+        let image = NodeHandle::element("img");
+        document.append_child(body.clone());
+        body.append_child(parent.clone());
+        parent.append_child(image.clone());
+        let mut resolver = StyleResolver::new();
+        resolver.add_stylesheet(
+            Origin::Author,
+            parse_stylesheet(&format!(
+                "div {{ aspect-ratio: 3 / 2; }} img {{ {child_declarations} }}"
+            ))
+            .unwrap(),
+        );
+        match resolver.computed_style(&image).get("aspect-ratio") {
+            Some(ComputedValue::Keyword(keyword)) => keyword.clone(),
+            other => panic!("aspect-ratio computed to {other:?}"),
+        }
+    };
+
+    assert_eq!(inherited("aspect-ratio: inherit"), "3 / 2");
+    for keyword in ["initial", "unset", "revert"] {
+        assert_eq!(inherited(&format!("aspect-ratio: {keyword}")), "auto");
+    }
+    // It is not an inherited property.
+    assert_eq!(inherited(""), "auto");
+}
+
