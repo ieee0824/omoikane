@@ -400,8 +400,6 @@ pub(crate) fn parse_background_image_value(value: &str) -> Option<Image> {
     })
 }
 
-/// Computes the background-size dimensions given the style and the painting area.
-/// Returns `(tile_width, tile_height)`.
 /// Returns the rect a replaced element's content paints into, per CSS Images'
 /// `object-fit` and `object-position`.
 ///
@@ -502,6 +500,8 @@ fn resolve_object_position_component(component: Option<&str>, free_space: f32) -
     free_space * 0.5
 }
 
+/// Computes the background-size dimensions given the style and the painting area.
+/// Returns `(tile_width, tile_height)`.
 pub(crate) fn background_size(style: &ComputedStyle, area: Rect, image_w: f32, image_h: f32) -> (f32, f32) {
     image_size(style, "background-size", area, image_w, image_h)
 }

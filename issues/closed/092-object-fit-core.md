@@ -2,7 +2,7 @@
 number: 092
 slug: object-fit-core
 github: 246
-status: open
+status: closed
 priority: high
 ---
 
@@ -60,9 +60,21 @@ Marionette 経由で computed value 33 パターンと、full-page screenshot �
 
 唯一の差は 4x2 → 2x1 の縮小ケースで、Firefox は隣接 source pixel を平均した中間色、omoikane は最近傍で拾った原色になる。これは `draw_image_scaled_clipped` の再サンプリング品質の問題で object sizing とは独立なので #265 に切り出した。
 
+## Copilot レビュー対応
+
+指摘 5 件のうち 2 件は実際の挙動バグだった。Firefox 152 で正解を確認して修正した。
+
+| 指摘 | 内容 | 修正 |
+|---|---|---|
+| CSS-wide keyword | `object-position: inherit` が文法検証で破棄され、親の値を継承しなかった（`object-fit` 側は元から受け付けていたので不整合） | 単独の CSS-wide keyword は文法検証を通し cascade に委ねる。Firefox は親が `10px 20px` のとき `inherit` で `10px 20px` を返す |
+| 単位なし `calc()` | `calc(1)` / `calc(1 + 2)` / `calc(0)` が有効扱いされ、単位なし文字列として computed value に入っていた（描画時は中央寄せに退避） | `calc()` の引数に長さか百分率が含まれることを要求する。Firefox もこの 3 つを破棄する |
+| doc の取り違え | `background_size` の doc comment が挿入した関数の上に残っていた | 元の位置へ戻した |
+| test helper の doc | 100x100 固定と書いてあったが `box_size` を取る | 実際の挙動に合わせて書き直した |
+| 保証しない記述 | 「positioned な replaced box は inline fragment を持たない」と書いたが、実際は生成される（#264） | fallback である旨と #264 への参照に書き換えた |
+
 ## テスト
 
-- `src/css/style_tests.rs` 5 本: 初期値、`object-fit` キーワード、不正値の破棄と earlier-valid の保護、`object-position` の正規化 21 パターン（Firefox 実測値）、`object-position` の不正値
+- `src/css/style_tests.rs` 7 本: 初期値、`object-fit` キーワード、不正値の破棄と earlier-valid の保護、`object-position` の正規化 21 パターン（Firefox 実測値）、`object-position` の不正値、CSS-wide keyword の解決（`inherit` の継承と `initial` / `unset` / `revert`）、単位なし `calc()` の破棄と単位付き `calc()` の解決
 - `src/paint/tests.rs` 11 本: `fill` / `contain`（透明余白含む）/ `cover`（crop 方向と box 外非描画）/ `none` / `scale-down` 3 分岐 / `object-position` の各方向・百分率・px・1 値指定 / inline・block・positioned の 3 経路 / 無指定時の従来描画維持
 
 ## 対象外

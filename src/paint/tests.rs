@@ -7910,8 +7910,12 @@ fn scripted_element_scroll_reaches_the_rendered_document() {
 // --- object-fit / object-position (issue #246) ---
 
 /// Renders a 4x2 source image (four distinct colour columns, a bright top row
-/// and a dark bottom row) inside a 100x100 `<img>` content box, so the painted
-/// destination rect and any crop are readable from the pixels.
+/// and a dark bottom row) inside an `<img>` whose content box is `box_size`, so
+/// the painted destination rect and any crop are readable from the pixels.
+///
+/// The page kills the font strut, which keeps the image fragment at the line box
+/// origin even for boxes a pixel or two tall; the returned rect is that content
+/// box, so assertions can be written relative to it.
 ///
 /// Geometry expectations come from Firefox 152: the same cases were rendered
 /// there over Marionette and measured from a full-page screenshot.
@@ -7958,8 +7962,10 @@ fn image_fragment_rect(layout: &crate::layout::LayoutBox) -> Option<Rect> {
         }
     }
     if matches!(layout.node.tag_name().as_deref(), Some("img")) {
-        // A positioned replaced box paints through paint_replaced_image_box and
-        // has no inline fragment of its own.
+        // Fallback for an img with no inline fragment: a positioned box paints
+        // through paint_replaced_image_box. Such a box can still generate a
+        // fragment as well today, which is the double paint tracked in #264, so
+        // this is only reached when the inline search found nothing.
         return Some(layout.dimensions.content);
     }
     layout.children.iter().find_map(image_fragment_rect)

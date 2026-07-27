@@ -5270,3 +5270,75 @@ fn invalid_object_position_declarations_are_dropped() {
     }
 }
 
+/// A CSS-wide keyword must reach the cascade instead of being rejected by the
+/// property grammar. Firefox 152 with a parent at `10px 20px` / `cover`:
+/// `inherit` copies the parent, and `initial` / `unset` / `revert` fall back to
+/// the initial value.
+#[test]
+fn object_fit_and_position_resolve_css_wide_keywords() {
+    let inherited = |child_declarations: &str, property: &str| {
+        let document = NodeHandle::document();
+        let body = NodeHandle::element("body");
+        let parent = NodeHandle::element("div");
+        let image = NodeHandle::element("img");
+        document.append_child(body.clone());
+        body.append_child(parent.clone());
+        parent.append_child(image.clone());
+        let mut resolver = StyleResolver::new();
+        resolver.add_stylesheet(
+            Origin::Author,
+            parse_stylesheet(&format!(
+                "div {{ object-fit: cover; object-position: 10px 20px; }} \
+                 img {{ {child_declarations} }}"
+            ))
+            .unwrap(),
+        );
+        match resolver.computed_style(&image).get(property) {
+            Some(ComputedValue::Keyword(keyword)) => keyword.clone(),
+            other => panic!("{property} computed to {other:?}"),
+        }
+    };
+
+    assert_eq!(inherited("object-position: inherit", "object-position"), "10px 20px");
+    assert_eq!(inherited("object-fit: inherit", "object-fit"), "cover");
+    for keyword in ["initial", "unset", "revert"] {
+        assert_eq!(
+            inherited(&format!("object-position: {keyword}"), "object-position"),
+            "50% 50%"
+        );
+        assert_eq!(
+            inherited(&format!("object-fit: {keyword}"), "object-fit"),
+            "fill"
+        );
+    }
+    // Without a CSS-wide keyword neither property inherits.
+    assert_eq!(inherited("", "object-position"), "50% 50%");
+    assert_eq!(inherited("", "object-fit"), "fill");
+}
+
+/// `calc()` is only a valid position component when it carries a length or a
+/// percentage. Firefox 152 drops `calc(1)`, `calc(1 + 2)` and `calc(0)`.
+#[test]
+fn object_position_rejects_calc_without_a_length_or_percentage() {
+    for value in ["calc(1)", "calc(1 + 2)", "calc(0)", "calc(2 * 3) 50%"] {
+        assert_eq!(
+            object_keyword(&format!("object-position: {value}"), "object-position"),
+            "50% 50%",
+            "object-position: {value} must be dropped"
+        );
+    }
+    for (declared, expected) in [
+        ("calc(10px + 5px)", "15px 50%"),
+        ("calc(2em * 2)", "64px 50%"),
+        ("calc(10px) calc(20%)", "10px 20%"),
+        // A mixed-unit calc cannot collapse to one unit, so it survives as an
+        // expression — exactly what Firefox 152 serializes.
+        ("calc(50% - 10px)", "calc(50% - 10px) 50%"),
+    ] {
+        assert_eq!(
+            object_keyword(&format!("object-position: {declared}"), "object-position"),
+            expected,
+            "object-position: {declared}"
+        );
+    }
+}

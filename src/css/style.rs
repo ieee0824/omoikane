@@ -992,8 +992,13 @@ fn validate_declaration(name: &str, value: &Value) -> DeclarationValidation {
     if name.eq_ignore_ascii_case("object-position") {
         // The grammar is checked here, but normalizing keywords to percentages
         // and lengths to pixels needs the resolution context, so the value goes
-        // through `compute_value` (see `render_object_position_value`).
-        return if object_position_components(value).is_some() {
+        // through `compute_value` (see `render_object_position_value`). A
+        // CSS-wide keyword is handled by the cascade, not by this grammar.
+        let is_css_wide = matches!(
+            value,
+            Value::Keyword(keyword) if is_css_wide_keyword(&keyword.to_ascii_lowercase())
+        );
+        return if is_css_wide || object_position_components(value).is_some() {
             DeclarationValidation::Unvalidated
         } else {
             DeclarationValidation::Invalid
@@ -3304,11 +3309,24 @@ fn object_position_axis(value: &Value) -> Option<PositionAxis> {
         Value::Percentage(_) | Value::Length(..) => Some(PositionAxis::Either),
         // A bare `0` is a length; other bare numbers are not valid offsets.
         Value::Number(number) if *number == 0.0 => Some(PositionAxis::Either),
-        Value::Function { name, .. } if name.eq_ignore_ascii_case("calc") => {
-            Some(PositionAxis::Either)
+        // Only a `calc()` that carries a length or percentage is a valid offset:
+        // `calc(1)` and `calc(0)` are bare numbers, which Firefox 152 drops too.
+        Value::Function { name, arguments } if name.eq_ignore_ascii_case("calc") => {
+            calc_yields_length_or_percentage(arguments).then_some(PositionAxis::Either)
         }
         _ => None,
     }
+}
+
+/// Whether a `calc()` argument list mentions a length or percentage anywhere, so
+/// its result is a `<length-percentage>` rather than a bare number.
+fn calc_yields_length_or_percentage(arguments: &[Value]) -> bool {
+    arguments.iter().any(|argument| match argument {
+        Value::Length(..) | Value::Percentage(_) => true,
+        Value::Function { arguments, .. } => calc_yields_length_or_percentage(arguments),
+        Value::List(values) => calc_yields_length_or_percentage(values),
+        _ => false,
+    })
 }
 
 /// Renders `object-position` as the two `<x> <y>` components getComputedStyle
