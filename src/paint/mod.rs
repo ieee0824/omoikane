@@ -1918,7 +1918,23 @@ fn paint_replaced_image_box(
         return;
     };
 
-    canvas.draw_image_scaled_clipped(&image, layout.dimensions.content, clip);
+    let content_box = layout.dimensions.content;
+    let destination = image::object_fit_destination(
+        content_box,
+        image.width as f32,
+        image.height as f32,
+        style,
+    );
+    // The content box bounds the painted result, so `cover` (and an oversized
+    // `none`) crop instead of spilling out of the element.
+    let clip = match clip {
+        Some(clip) => match intersect(clip, content_box) {
+            Some(intersection) => intersection,
+            None => return,
+        },
+        None => content_box,
+    };
+    canvas.draw_image_scaled_clipped(&image, destination, Some(clip));
 }
 
 #[allow(clippy::too_many_arguments)]

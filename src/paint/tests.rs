@@ -7906,3 +7906,277 @@ fn scripted_element_scroll_reaches_the_rendered_document() {
     assert_eq!(canvas.pixel(5, 19), Some(Color::rgba(0, 255, 0, 255)));
     assert_eq!(canvas.pixel(5, 25).unwrap().a, 0);
 }
+
+// --- object-fit / object-position (issue #246) ---
+
+/// Renders a 4x2 source image (four distinct colour columns, a bright top row
+/// and a dark bottom row) inside a 100x100 `<img>` content box, so the painted
+/// destination rect and any crop are readable from the pixels.
+///
+/// Geometry expectations come from Firefox 152: the same cases were rendered
+/// there over Marionette and measured from a full-page screenshot.
+fn render_object_fit(declarations: &str, box_size: (f32, f32)) -> (Canvas, Rect) {
+    let mut source = Canvas::new(4, 2);
+    let columns = [
+        Color::rgb(255, 0, 0),
+        Color::rgb(0, 255, 0),
+        Color::rgb(0, 0, 255),
+        Color::rgb(255, 255, 0),
+    ];
+    for (index, color) in columns.iter().enumerate() {
+        let x = index as f32;
+        source.fill_rect(Rect { x, y: 0.0, width: 1.0, height: 1.0 }, *color);
+        source.fill_rect(
+            Rect { x, y: 1.0, width: 1.0, height: 1.0 },
+            Color::rgb(color.r / 2, color.g / 2, color.b / 2),
+        );
+    }
+    let encoded = base64::engine::general_purpose::STANDARD.encode(source.encode_png());
+    let (width, height) = box_size;
+    let html = format!(
+        r#"<html><head><style>body {{ margin: 0; font-size: 0; line-height: 0; }} img {{ width: {width}px; height: {height}px; {declarations} }}</style></head><body><img src="data:image/png;base64,{encoded}"></body></html>"#
+    );
+    let document = TreeBuilder::parse(&html).document();
+    let mut resolver = StyleResolver::new();
+    for stylesheet in extract_author_stylesheets(&document, None).unwrap() {
+        resolver.add_stylesheet(Origin::Author, parse_stylesheet_forgiving(&stylesheet));
+    }
+    let viewport = Rect { x: 0.0, y: 0.0, width: 140.0, height: 140.0 };
+    let layout = layout_tree(&document, &mut resolver, viewport).unwrap();
+    let content_box = image_fragment_rect(&layout).expect("the img must produce an image fragment");
+    (paint_layout(&layout, &mut resolver, viewport), content_box)
+}
+
+/// Returns the rect of the first inline image fragment in the tree, which for an
+/// `<img>` with no border or padding is its content box.
+fn image_fragment_rect(layout: &crate::layout::LayoutBox) -> Option<Rect> {
+    for line in &layout.lines {
+        for fragment in &line.fragments {
+            if matches!(fragment.content, crate::layout::InlineFragmentContent::Image(..)) {
+                return Some(fragment.rect);
+            }
+        }
+    }
+    if matches!(layout.node.tag_name().as_deref(), Some("img")) {
+        // A positioned replaced box paints through paint_replaced_image_box and
+        // has no inline fragment of its own.
+        return Some(layout.dimensions.content);
+    }
+    layout.children.iter().find_map(image_fragment_rect)
+}
+
+/// Returns the bounding box of the painted image relative to `content_box`, so
+/// expectations read the same way they were measured in Firefox: as offsets
+/// inside the replaced element's content box.
+fn painted_bounds_in_box(canvas: &Canvas, content_box: Rect) -> Option<(i32, i32, u32, u32)> {
+    painted_bounds(canvas).map(|(x, y, width, height)| {
+        (
+            x as i32 - content_box.x as i32,
+            y as i32 - content_box.y as i32,
+            width,
+            height,
+        )
+    })
+}
+
+/// Returns the bounding box `(x, y, width, height)` of the painted image inside
+/// the canvas, treating fully transparent pixels as empty.
+fn painted_bounds(canvas: &Canvas) -> Option<(u32, u32, u32, u32)> {
+    let mut bounds: Option<(u32, u32, u32, u32)> = None;
+    for y in 0..canvas.height() {
+        for x in 0..canvas.width() {
+            if canvas.pixel(x, y).map(|pixel| pixel.a) == Some(0) {
+                continue;
+            }
+            bounds = Some(match bounds {
+                None => (x, y, x, y),
+                Some((min_x, min_y, max_x, max_y)) => {
+                    (min_x.min(x), min_y.min(y), max_x.max(x), max_y.max(y))
+                }
+            });
+        }
+    }
+    bounds.map(|(min_x, min_y, max_x, max_y)| {
+        (min_x, min_y, max_x - min_x + 1, max_y - min_y + 1)
+    })
+}
+
+/// Samples the colour at the centre of each of the four source columns as they
+/// were painted, which shows both the paint order and any horizontal crop.
+fn painted_columns(canvas: &Canvas, bounds: (u32, u32, u32, u32)) -> Vec<(u8, u8, u8)> {
+    let (x, y, width, height) = bounds;
+    (0..4)
+        .map(|index| {
+            let sample_x = x + (width as f32 * (index as f32 + 0.5) / 4.0) as u32;
+            let sample_y = y + height / 4;
+            let pixel = canvas.pixel(sample_x, sample_y).unwrap();
+            (pixel.r, pixel.g, pixel.b)
+        })
+        .collect()
+}
+
+#[test]
+fn object_fit_fill_stretches_to_the_content_box() {
+    let (canvas, content_box) = render_object_fit("object-fit: fill", (100.0, 100.0));
+    assert_eq!(painted_bounds_in_box(&canvas, content_box), Some((0, 0, 100, 100)));
+    assert_eq!(
+        painted_columns(&canvas, (0, 0, 100, 100)),
+        vec![(255, 0, 0), (0, 255, 0), (0, 0, 255), (255, 255, 0)]
+    );
+}
+
+#[test]
+fn object_fit_contain_letterboxes_and_leaves_the_rest_transparent() {
+    let (canvas, content_box) = render_object_fit("object-fit: contain", (100.0, 100.0));
+    // scale = min(100/4, 100/2) = 25 -> 100x50, centred vertically.
+    assert_eq!(painted_bounds_in_box(&canvas, content_box), Some((0, 25, 100, 50)));
+    assert_eq!(
+        painted_columns(&canvas, (0, 25, 100, 50)),
+        vec![(255, 0, 0), (0, 255, 0), (0, 0, 255), (255, 255, 0)]
+    );
+    // The letterbox bands stay untouched.
+    assert_eq!(canvas.pixel(50, 10).unwrap().a, 0);
+    assert_eq!(canvas.pixel(50, 90).unwrap().a, 0);
+}
+
+#[test]
+fn object_fit_cover_fills_the_box_and_crops_the_overflow() {
+    let (canvas, content_box) = render_object_fit("object-fit: cover", (100.0, 100.0));
+    // scale = max(100/4, 100/2) = 50 -> 200x100 centred, cropped to the box.
+    assert_eq!(painted_bounds_in_box(&canvas, content_box), Some((0, 0, 100, 100)));
+    // Only the middle half of the source survives: green and blue, not red or
+    // yellow.
+    assert_eq!(
+        painted_columns(&canvas, (0, 0, 100, 100)),
+        vec![(0, 255, 0), (0, 255, 0), (0, 0, 255), (0, 0, 255)]
+    );
+    // Nothing paints outside the content box.
+    assert_eq!(canvas.pixel(120, 50).unwrap().a, 0);
+}
+
+#[test]
+fn object_fit_none_paints_the_intrinsic_size_centred() {
+    let (canvas, content_box) = render_object_fit("object-fit: none", (100.0, 100.0));
+    // Intrinsic 4x2 centred: (100-4)/2 = 48, (100-2)/2 = 49.
+    assert_eq!(painted_bounds_in_box(&canvas, content_box), Some((48, 49, 4, 2)));
+    assert_eq!(canvas.pixel(48, 49), Some(Color::rgba(255, 0, 0, 255)));
+    assert_eq!(canvas.pixel(51, 49), Some(Color::rgba(255, 255, 0, 255)));
+    assert_eq!(canvas.pixel(48, 50), Some(Color::rgba(127, 0, 0, 255)));
+    assert_eq!(canvas.pixel(10, 10).unwrap().a, 0);
+}
+
+#[test]
+fn object_fit_scale_down_picks_the_smaller_of_none_and_contain() {
+    // The image fits, so `scale-down` behaves like `none`.
+    let (large, large_box) = render_object_fit("object-fit: scale-down", (100.0, 100.0));
+    assert_eq!(painted_bounds_in_box(&large, large_box), Some((48, 49, 4, 2)));
+
+    // It does not fit, so `scale-down` behaves like `contain`:
+    // scale = min(2/4, 1/2) = 0.5 -> 2x1.
+    let (small, small_box) = render_object_fit("object-fit: scale-down", (2.0, 1.0));
+    assert_eq!(painted_bounds_in_box(&small, small_box), Some((0, 0, 2, 1)));
+
+    // A box the image exactly fills is still `none`, not a scale.
+    let (exact, exact_box) = render_object_fit("object-fit: scale-down", (4.0, 2.0));
+    assert_eq!(painted_bounds_in_box(&exact, exact_box), Some((0, 0, 4, 2)));
+}
+
+#[test]
+fn object_position_places_a_contained_object_inside_the_box() {
+    let (top_left, top_left_box) =
+        render_object_fit("object-fit: contain; object-position: left top", (100.0, 100.0));
+    assert_eq!(painted_bounds_in_box(&top_left, top_left_box), Some((0, 0, 100, 50)));
+
+    let (bottom_right, bottom_right_box) =
+        render_object_fit("object-fit: contain; object-position: right bottom", (100.0, 100.0));
+    assert_eq!(
+        painted_bounds_in_box(&bottom_right, bottom_right_box),
+        Some((0, 50, 100, 50))
+    );
+}
+
+#[test]
+fn object_position_places_an_intrinsic_object_by_percentage_and_length() {
+    // x = (100-4) * 0.25 = 24, y = (100-2) * 0.75 = 73.5.
+    let (percentage, percentage_box) =
+        render_object_fit("object-fit: none; object-position: 25% 75%", (100.0, 100.0));
+    let (x, y, width, height) = painted_bounds_in_box(&percentage, percentage_box).unwrap();
+    assert_eq!((x, width, height), (24, 4, 2));
+    assert!(
+        (73..=74).contains(&y),
+        "a 73.5px offset must land on row 73 or 74, got {y}"
+    );
+
+    let (length, length_box) =
+        render_object_fit("object-fit: none; object-position: 10px 20px", (100.0, 100.0));
+    assert_eq!(painted_bounds_in_box(&length, length_box), Some((10, 20, 4, 2)));
+
+    // A single component centres the other axis.
+    let (single, single_box) =
+        render_object_fit("object-fit: none; object-position: left", (100.0, 100.0));
+    assert_eq!(painted_bounds_in_box(&single, single_box), Some((0, 49, 4, 2)));
+}
+
+#[test]
+fn object_position_chooses_which_side_cover_crops() {
+    // The object is wider than the box, so the free space is negative and the
+    // position picks the visible slice.
+    let (left, _) = render_object_fit("object-fit: cover; object-position: 0% 50%", (100.0, 100.0));
+    assert_eq!(
+        painted_columns(&left, (0, 0, 100, 100)),
+        vec![(255, 0, 0), (255, 0, 0), (0, 255, 0), (0, 255, 0)],
+        "cover anchored left must show the first half of the source"
+    );
+
+    let (right, _) =
+        render_object_fit("object-fit: cover; object-position: 100% 50%", (100.0, 100.0));
+    assert_eq!(
+        painted_columns(&right, (0, 0, 100, 100)),
+        vec![(0, 0, 255), (0, 0, 255), (255, 255, 0), (255, 255, 0)],
+        "cover anchored right must show the last half of the source"
+    );
+}
+
+#[test]
+fn object_fit_applies_to_a_positioned_replaced_box() {
+    // The positioned path paints through paint_replaced_image_box rather than an
+    // inline fragment, and must apply the same sizing.
+    let mut source = Canvas::new(4, 2);
+    source.fill_rect(Rect { x: 0.0, y: 0.0, width: 4.0, height: 2.0 }, Color::rgb(255, 0, 0));
+    let encoded = base64::engine::general_purpose::STANDARD.encode(source.encode_png());
+    let html = format!(
+        r#"<html><head><style>body {{ margin: 0; }} img {{ position: absolute; left: 0; top: 0; width: 100px; height: 100px; object-fit: contain; }}</style></head><body><img src="data:image/png;base64,{encoded}"></body></html>"#
+    );
+    let document = TreeBuilder::parse(&html).document();
+    let mut resolver = StyleResolver::new();
+    for stylesheet in extract_author_stylesheets(&document, None).unwrap() {
+        resolver.add_stylesheet(Origin::Author, parse_stylesheet_forgiving(&stylesheet));
+    }
+    let viewport = Rect { x: 0.0, y: 0.0, width: 140.0, height: 140.0 };
+    let layout = layout_tree(&document, &mut resolver, viewport).unwrap();
+    let canvas = paint_layout(&layout, &mut resolver, viewport);
+
+    assert_eq!(painted_bounds(&canvas), Some((0, 25, 100, 50)));
+}
+
+#[test]
+fn default_object_fit_keeps_stretching_replaced_content() {
+    // No declaration at all must paint exactly like the pre-object-fit engine:
+    // the image stretched across the whole content box.
+    let (canvas, content_box) = render_object_fit("", (100.0, 100.0));
+    assert_eq!(painted_bounds_in_box(&canvas, content_box), Some((0, 0, 100, 100)));
+    assert_eq!(
+        painted_columns(&canvas, (0, 0, 100, 100)),
+        vec![(255, 0, 0), (0, 255, 0), (0, 0, 255), (255, 255, 0)]
+    );
+}
+
+#[test]
+fn object_fit_applies_to_a_block_level_replaced_box() {
+    // `img { display: block }` is a common reset, and it lays the replaced
+    // content out in its own line box rather than in the surrounding text flow.
+    let (canvas, content_box) =
+        render_object_fit("display: block; object-fit: contain", (100.0, 100.0));
+
+    assert_eq!(painted_bounds_in_box(&canvas, content_box), Some((0, 25, 100, 50)));
+}
