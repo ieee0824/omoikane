@@ -3189,13 +3189,15 @@ fn find_layout_box_with_transform<'a>(
     root: &'a LayoutBox,
     node: &NodeHandle,
     ancestor_transform: AffineTransform,
+    fragments: &mut Vec<InlineFragmentGeometry>,
 ) -> Option<(&'a LayoutBox, AffineTransform)> {
     let transform = ancestor_transform.multiply(root.transform);
     if &root.node == node {
         return Some((root, transform));
     }
+    collect_matching_image_fragments(root, node, transform, (0.0, 0.0), fragments);
     for child in &root.children {
-        if let Some(found) = find_layout_box_with_transform(child, node, transform) {
+        if let Some(found) = find_layout_box_with_transform(child, node, transform, fragments) {
             return Some(found);
         }
     }
@@ -3218,6 +3220,7 @@ fn find_layout_box_with_scroll<'a>(
     ancestor_transform: AffineTransform,
     scroll: (f32, f32),
     positioned_scroll: (f32, f32),
+    fragments: &mut Vec<InlineFragmentGeometry>,
 ) -> Option<(&'a LayoutBox, AffineTransform, (f32, f32))> {
     let transform = ancestor_transform.multiply(root.transform);
     let style = resolver.computed_style(&root.node);
@@ -3241,6 +3244,7 @@ fn find_layout_box_with_scroll<'a>(
     } else {
         positioned_scroll
     };
+    collect_matching_image_fragments(root, node, transform, child_scroll, fragments);
     for child in &root.children {
         if let Some(found) = find_layout_box_with_scroll(
             child,
@@ -3249,6 +3253,7 @@ fn find_layout_box_with_scroll<'a>(
             transform,
             child_scroll,
             positioned_scroll,
+            fragments,
         )
         {
             return Some(found);
@@ -3264,35 +3269,13 @@ struct InlineFragmentGeometry {
     scroll: (f32, f32),
 }
 
-fn collect_image_fragment_geometry(
+fn collect_matching_image_fragments(
     root: &LayoutBox,
     node: &NodeHandle,
-    resolver: &mut StyleResolver,
-    ancestor_transform: AffineTransform,
+    transform: AffineTransform,
     scroll: (f32, f32),
-    positioned_scroll: (f32, f32),
     output: &mut Vec<InlineFragmentGeometry>,
 ) {
-    let transform = ancestor_transform.multiply(root.transform);
-    let style = resolver.computed_style(&root.node);
-    let scroll = if is_absolute_position_style(&style) {
-        positioned_scroll
-    } else {
-        scroll
-    };
-    let scroll = if is_fixed_position_style(&style) {
-        (0.0, 0.0)
-    } else {
-        scroll
-    };
-    let (offset_x, offset_y) = root.scroll_offset();
-    let child_scroll = (scroll.0 + offset_x, scroll.1 + offset_y);
-    let positioned_scroll = if establishes_positioned_containing_block_style(&style) {
-        child_scroll
-    } else {
-        positioned_scroll
-    };
-
     for line in &root.lines {
         for fragment in &line.fragments {
             if &fragment.node == node
@@ -3302,21 +3285,10 @@ fn collect_image_fragment_geometry(
                     rect: fragment.rect,
                     style: style.clone(),
                     transform,
-                    scroll: child_scroll,
+                    scroll,
                 });
             }
         }
-    }
-    for child in &root.children {
-        collect_image_fragment_geometry(
-            child,
-            node,
-            resolver,
-            transform,
-            child_scroll,
-            positioned_scroll,
-            output,
-        );
     }
 }
 
@@ -3618,14 +3590,13 @@ fn compute_image_fragment_metrics(fragments: Vec<InlineFragmentGeometry>) -> Lay
         .iter()
         .map(|rect| rect.y + rect.height)
         .fold(f32::NEG_INFINITY, f32::max);
-    let first_rect = client_rects[0];
     LayoutMetrics {
         x: min_x,
         y: min_y,
         width: max_x - min_x,
         height: max_y - min_y,
-        content_x: first_rect.x + border.left + padding.left,
-        content_y: first_rect.y + border.top + padding.top,
+        content_x: min_x + border.left + padding.left,
+        content_y: min_y + border.top + padding.top,
         content_width,
         content_height,
         offset_width: layout_rect.width,
@@ -3824,6 +3795,7 @@ fn layout_metrics_native(
                 .get_mut(&main_document_id)
                 .and_then(|entry| entry.resolver.as_mut());
             if let Some(root) = state.layout_root.as_ref() {
+                let mut fragments = Vec::new();
                 let found = match (scroll_active, resolver.as_deref_mut()) {
                     (true, Some(resolver)) => find_layout_box_with_scroll(
                         root,
@@ -3832,29 +3804,20 @@ fn layout_metrics_native(
                         AffineTransform::identity(),
                         window_scroll,
                         window_scroll,
+                        &mut fragments,
                     ),
-                    _ => find_layout_box_with_transform(root, &node, AffineTransform::identity())
-                        .map(|(layout, transform)| (layout, transform, (0.0, 0.0))),
+                    _ => find_layout_box_with_transform(
+                        root,
+                        &node,
+                        AffineTransform::identity(),
+                        &mut fragments,
+                    )
+                    .map(|(layout, transform)| (layout, transform, (0.0, 0.0))),
                 };
                 if let Some((layout, transform, accumulated)) = found {
                     metrics = compute_transformed_layout_metrics(layout, transform);
                     scroll = accumulated;
-                } else if let Some(resolver) = resolver {
-                    let initial_scroll = if scroll_active {
-                        window_scroll
-                    } else {
-                        (0.0, 0.0)
-                    };
-                    let mut fragments = Vec::new();
-                    collect_image_fragment_geometry(
-                        root,
-                        &node,
-                        resolver,
-                        AffineTransform::identity(),
-                        initial_scroll,
-                        initial_scroll,
-                        &mut fragments,
-                    );
+                } else {
                     metrics = compute_image_fragment_metrics(fragments);
                 }
             }
