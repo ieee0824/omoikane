@@ -746,6 +746,196 @@ fn inline_replaced_element_with_padding_border_and_background_paints_in_order() 
     assert_eq!(canvas.pixel(3, 3), Some(Color::rgb(255, 0, 0)));
 }
 
+/// Base64 of a 1x1 red PNG, for scripts that need to build an image `Blob`.
+fn red_pixel_png_base64() -> String {
+    let mut canvas = Canvas::new(1, 1);
+    canvas.fill_rect(
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 1.0,
+            height: 1.0,
+        },
+        Color::rgb(255, 0, 0),
+    );
+    base64::engine::general_purpose::STANDARD.encode(canvas.encode_png())
+}
+
+#[test]
+fn paints_an_image_from_a_script_created_object_url() {
+    crate::data::clear_blob_urls();
+    let html = format!(
+        r#"<html><head><style>body {{ margin: 0; }} img {{ vertical-align: top; width: 2px; height: 2px; }}</style></head>
+        <body><img id="shot"><script>
+          const encoded = atob("{}");
+          const bytes = new Uint8Array(encoded.length);
+          for (let index = 0; index < encoded.length; index++) bytes[index] = encoded.charCodeAt(index);
+          const url = URL.createObjectURL(new Blob([bytes], {{ type: "image/png" }}));
+          document.getElementById("shot").setAttribute("src", url);
+        </script></body></html>"#,
+        red_pixel_png_base64()
+    );
+    let document = TreeBuilder::parse(&html).document();
+
+    let canvas = render_document(
+        &document,
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 4.0,
+            height: 4.0,
+        },
+    )
+    .unwrap();
+
+    assert_eq!(canvas.pixel(0, 0), Some(Color::rgb(255, 0, 0)));
+    assert_eq!(canvas.pixel(1, 1), Some(Color::rgb(255, 0, 0)));
+    // Outside the 2x2 image box nothing was painted.
+    assert_eq!(canvas.pixel(2, 2), Some(Color::rgba(0, 0, 0, 0)));
+    assert_eq!(crate::data::blob_url_count(), 1);
+}
+
+#[test]
+fn paints_nothing_for_a_revoked_object_url() {
+    crate::data::clear_blob_urls();
+    // The URL is revoked before it is ever loaded, so unlike an already-decoded
+    // image it cannot come back from the image cache.
+    let html = format!(
+        r#"<html><head><style>body {{ margin: 0; }} img {{ vertical-align: top; width: 2px; height: 2px; }}</style></head>
+        <body><img id="shot"><script>
+          const encoded = atob("{}");
+          const bytes = new Uint8Array(encoded.length);
+          for (let index = 0; index < encoded.length; index++) bytes[index] = encoded.charCodeAt(index);
+          const url = URL.createObjectURL(new Blob([bytes], {{ type: "image/png" }}));
+          document.getElementById("shot").setAttribute("src", url);
+          URL.revokeObjectURL(url);
+        </script></body></html>"#,
+        red_pixel_png_base64()
+    );
+    let document = TreeBuilder::parse(&html).document();
+
+    let canvas = render_document(
+        &document,
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 4.0,
+            height: 4.0,
+        },
+    )
+    .unwrap();
+
+    assert_eq!(canvas.pixel(0, 0), Some(Color::rgba(0, 0, 0, 0)));
+    assert_eq!(canvas.pixel(1, 1), Some(Color::rgba(0, 0, 0, 0)));
+    assert_eq!(crate::data::blob_url_count(), 0);
+}
+
+#[test]
+fn image_sources_shorter_than_a_scheme_or_starting_mid_character_resolve_to_nothing() {
+    crate::data::clear_blob_urls();
+    // Byte 5 of these lands inside a character, so scheme detection must not
+    // index the string by byte range.
+    for source in ["日本語です", "日本", "b", "", "   ", "blo"] {
+        assert!(
+            crate::layout::decode_or_fetch_image_asset(source).is_none(),
+            "unexpected image for {source:?}"
+        );
+    }
+}
+
+#[test]
+fn a_new_global_forgets_images_decoded_from_object_urls() {
+    crate::data::clear_blob_urls();
+    let mut canvas = Canvas::new(1, 1);
+    canvas.fill_rect(
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 1.0,
+            height: 1.0,
+        },
+        Color::rgb(0, 0, 255),
+    );
+    let url = "blob:http://example.test/cached";
+    crate::data::register_blob_url(
+        url.to_string(),
+        canvas.encode_png(),
+        "image/png".to_string(),
+    );
+    assert!(
+        crate::layout::decode_or_fetch_image_asset(url).is_some(),
+        "the blob URL should decode while it is registered"
+    );
+
+    // Creating a global is this engine's Document boundary: it clears the object
+    // URL store, and the image cache must not keep resolving the old URL.
+    let _runtime = crate::js::JsRuntime::new().expect("runtime");
+
+    assert_eq!(crate::data::blob_url_count(), 0);
+    assert!(
+        crate::layout::decode_or_fetch_image_asset(url).is_none(),
+        "a cached blob URL image must not outlive the Document that minted it"
+    );
+}
+
+#[test]
+fn blob_url_scheme_detection_is_case_insensitive() {
+    crate::data::clear_blob_urls();
+    let mut canvas = Canvas::new(1, 1);
+    canvas.fill_rect(
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 1.0,
+            height: 1.0,
+        },
+        Color::rgb(255, 0, 0),
+    );
+    crate::data::register_blob_url(
+        "BLOB:http://example.test/upper".to_string(),
+        canvas.encode_png(),
+        "image/png".to_string(),
+    );
+
+    let image = crate::layout::decode_or_fetch_image_asset("BLOB:http://example.test/upper")
+        .expect("blob URL image");
+
+    assert_eq!((image.width, image.height), (1, 1));
+}
+
+#[test]
+fn paints_a_background_image_from_an_object_url() {
+    crate::data::clear_blob_urls();
+    let html = format!(
+        r#"<html><body><div id="box"></div><script>
+          const encoded = atob("{}");
+          const bytes = new Uint8Array(encoded.length);
+          for (let index = 0; index < encoded.length; index++) bytes[index] = encoded.charCodeAt(index);
+          const url = URL.createObjectURL(new Blob([bytes], {{ type: "image/png" }}));
+          const style = document.createElement("style");
+          style.textContent = 'body {{ margin: 0; }} #box {{ width: 2px; height: 2px; background-image: url("' + url + '"); }}';
+          document.head.appendChild(style);
+        </script></body></html>"#,
+        red_pixel_png_base64()
+    );
+    let document = TreeBuilder::parse(&html).document();
+
+    let canvas = render_document(
+        &document,
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 4.0,
+            height: 4.0,
+        },
+    )
+    .unwrap();
+
+    assert_eq!(canvas.pixel(0, 0), Some(Color::rgb(255, 0, 0)));
+    assert_eq!(canvas.pixel(1, 1), Some(Color::rgb(255, 0, 0)));
+    assert_eq!(canvas.pixel(2, 2), Some(Color::rgba(0, 0, 0, 0)));
+}
+
 #[test]
 fn paints_background_image_with_position_offset() {
     let html = format!(

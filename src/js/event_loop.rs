@@ -21,6 +21,9 @@ pub(crate) enum TaskSource {
     Networking,
     Navigation,
     Rendering,
+    /// The file reading task source, used by `FileReader` to deliver its
+    /// `loadstart`/`progress`/`load`/`loadend` events.
+    FileReading,
 }
 
 #[derive(Debug, Clone)]
@@ -85,6 +88,15 @@ impl EventLoop {
 
     pub(crate) fn enqueue_navigation(&mut self, request: NavigationRequest) {
         self.enqueue(TaskSource::Navigation, Task::Navigation(request));
+    }
+
+    /// Queues `payload` on the file reading task source.
+    ///
+    /// Unlike [`schedule_timer`](Self::schedule_timer) this does not wait for
+    /// virtual time to advance: a read that has already produced its bytes owes
+    /// its events to the very next turn of the event loop, not to a delay.
+    pub(crate) fn enqueue_file_reading(&mut self, payload: TimerPayload) {
+        self.enqueue(TaskSource::FileReading, Task::Timer(payload));
     }
 
     pub(crate) fn pop_task(&mut self) -> Option<(TaskSource, Task)> {
@@ -197,5 +209,42 @@ mod tests {
             event_loop.pop_task(),
             Some((TaskSource::Timer, Task::Timer(_)))
         ));
+    }
+
+    #[test]
+    fn file_reading_tasks_run_in_enqueue_order_without_advancing_time() {
+        let mut event_loop = EventLoop::default();
+        event_loop.enqueue_file_reading(TimerPayload::Source("first".into()));
+        event_loop.enqueue_timer(TimerPayload::Source("timer".into()));
+        event_loop.enqueue_file_reading(TimerPayload::Source("second".into()));
+
+        let sources: Vec<_> = std::iter::from_fn(|| event_loop.pop_task())
+            .map(|(source, task)| {
+                let label = match task {
+                    Task::Timer(TimerPayload::Source(source)) => source,
+                    other => panic!("unexpected task: {other:?}"),
+                };
+                (source, label)
+            })
+            .collect();
+
+        assert_eq!(
+            sources,
+            vec![
+                (TaskSource::FileReading, "first".to_string()),
+                (TaskSource::Timer, "timer".to_string()),
+                (TaskSource::FileReading, "second".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn queued_file_reading_tasks_count_as_pending_work() {
+        let mut event_loop = EventLoop::default();
+        assert!(!event_loop.has_pending_timers());
+        event_loop.enqueue_file_reading(TimerPayload::Source("read".into()));
+        assert!(event_loop.has_pending_timers());
+        assert!(event_loop.pop_task().is_some());
+        assert!(!event_loop.has_pending_timers());
     }
 }

@@ -5,13 +5,17 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::Path;
 use std::rc::Rc;
 
+use base64::Engine as _;
 use boa_engine::JsString;
 use boa_engine::Module;
 use boa_engine::builtins::promise::{OperationType, PromiseState};
 use boa_engine::context::HostHooks;
 use boa_engine::module::{ModuleLoader, Referrer};
 use boa_engine::native_function::NativeFunction;
-use boa_engine::object::{JsObject, builtins::JsPromise};
+use boa_engine::object::{
+    JsObject,
+    builtins::{JsArrayBuffer, JsPromise, JsUint8Array},
+};
 use boa_engine::{Context, JsError, JsNativeError, JsResult, JsValue, Script, Source, js_string};
 
 use crate::css::{
@@ -1167,6 +1171,12 @@ impl JsRuntime {
         storage_manager: StorageManager,
         storage_session_id: u64,
     ) -> JsResult<Self> {
+        // Object URLs belong to the Document that created them. A fresh global
+        // means the previous Document is gone, so nothing can resolve its blob
+        // URLs any more and neither their bytes nor images decoded from them may
+        // outlive it.
+        crate::data::clear_blob_urls();
+        crate::layout::forget_blob_url_images();
         let host_state = Rc::new(RefCell::new(HostState::new(
             document.clone(),
             url.to_string(),
@@ -2560,6 +2570,21 @@ fn register_host_bindings(
             js_string!("__omoikane_fetch"),
             4,
             NativeFunction::from_copy_closure(fetch_native),
+        ),
+        (
+            js_string!("__omoikane_register_object_url"),
+            3,
+            NativeFunction::from_copy_closure(register_object_url_native),
+        ),
+        (
+            js_string!("__omoikane_revoke_object_url"),
+            1,
+            NativeFunction::from_copy_closure(revoke_object_url_native),
+        ),
+        (
+            js_string!("__omoikane_queue_file_reading_task"),
+            1,
+            NativeFunction::from_copy_closure(queue_file_reading_task_native),
         ),
         (
             js_string!("__omoikane_get_text_content"),
@@ -4764,6 +4789,114 @@ fn string_argument(
         .map(|value| value.to_std_string_escaped())
 }
 
+/// Reads a request/response payload argument as raw bytes.
+///
+/// A `Uint8Array` is taken byte for byte, which is how bodies that are not text
+/// reach the host: `Blob` bodies, and `multipart/form-data` carrying file parts.
+/// Anything else is stringified and encoded as UTF-8, preserving the plain-text
+/// path (`fetch(url, { body: "a=1" })`) exactly as before.
+///
+/// `null` and `undefined` mean "no body" and yield `None`.
+fn body_bytes_argument(value: Option<&JsValue>, context: &mut Context) -> JsResult<Option<Vec<u8>>> {
+    let Some(value) = value.filter(|value| !value.is_null_or_undefined()) else {
+        return Ok(None);
+    };
+    if let Some(object) = value.as_object()
+        && let Ok(view) = JsUint8Array::from_object(object.clone())
+    {
+        let offset = view.byte_offset(context)?;
+        let length = view.byte_length(context)?;
+        // Read the backing store in one copy. Going through element accessors
+        // instead would cost a JsValue conversion per byte, which is a real cost
+        // for a multi-megabyte body.
+        let buffer = view
+            .buffer(context)?
+            .as_object()
+            .and_then(|buffer| JsArrayBuffer::from_object(buffer.clone()).ok())
+            .ok_or_else(|| {
+                JsError::from(
+                    JsNativeError::typ().with_message("request body is not backed by an ArrayBuffer"),
+                )
+            })?;
+        let data = buffer.data().ok_or_else(|| {
+            JsError::from(JsNativeError::typ().with_message("request body buffer is detached"))
+        })?;
+        // Two `get`s rather than an `offset..offset + length` range: the sum
+        // cannot overflow, and each failure keeps its own diagnosis.
+        let bytes = data
+            .get(offset..)
+            .and_then(|tail| tail.get(..length))
+            .ok_or_else(|| {
+                JsError::from(
+                    JsNativeError::typ().with_message("request body view is out of bounds"),
+                )
+            })?
+            .to_vec();
+        return Ok(Some(bytes));
+    }
+    Ok(Some(
+        value
+            .clone()
+            .to_string(context)?
+            .to_std_string_escaped()
+            .into_bytes(),
+    ))
+}
+
+/// Backs `URL.createObjectURL()`: mirrors a blob's bytes into the host-side blob
+/// URL store so resource loads that happen after script has finished — `<img
+/// src>`, CSS `url(...)` — can still resolve the URL. See [`crate::data`].
+fn register_object_url_native(
+    _: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let url = string_argument(args.first(), "", context)?;
+    let bytes = body_bytes_argument(args.get(1), context)?.unwrap_or_default();
+    let media_type = string_argument(args.get(2), "", context)?;
+    crate::data::register_blob_url(url, bytes, media_type);
+    Ok(JsValue::undefined())
+}
+
+/// Backs `URL.revokeObjectURL()`. Returns whether the URL was registered;
+/// unknown URLs are ignored, as the File API requires.
+fn revoke_object_url_native(
+    _: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let url = string_argument(args.first(), "", context)?;
+    Ok(JsValue::from(crate::data::revoke_blob_url(&url)))
+}
+
+/// Queues `callback` on the file reading task source.
+///
+/// `FileReader` owes its events to a task rather than a microtask, so a read
+/// started during a script sees its `load` only after that script — and any
+/// other already-queued task — has finished.
+fn queue_file_reading_task_native(
+    _: &JsValue,
+    args: &[JsValue],
+    _: &mut Context,
+) -> JsResult<JsValue> {
+    let callback = args.first().cloned().unwrap_or_default();
+    if !callback.is_callable() {
+        return Err(JsNativeError::typ()
+            .with_message("file reading task callback must be callable")
+            .into());
+    }
+    with_host_state(|state| {
+        state
+            .borrow_mut()
+            .event_loop
+            .enqueue_file_reading(TimerPayload::Callback {
+                callback,
+                args: Vec::new(),
+            });
+        Ok(JsValue::undefined())
+    })
+}
+
 fn fetch_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
     let url = args
         .first()
@@ -4802,11 +4935,7 @@ fn fetch_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResul
             "invalid request headers: {error}"
         )))
     })?;
-    let body = args
-        .get(3)
-        .filter(|value| !value.is_null() && !value.is_undefined())
-        .map(|value| value.to_string(context).map(|text| text.to_std_string_escaped()))
-        .transpose()?;
+    let body = body_bytes_argument(args.get(3), context)?;
     let mode = match string_argument(args.get(4), "cors", context)?.as_str() {
         "same-origin" => RequestMode::SameOrigin,
         "cors" => RequestMode::Cors,
@@ -4854,7 +4983,7 @@ fn fetch_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResul
             request.set_header(name, value);
         }
         if let Some(body) = body {
-            request.set_body(body.into_bytes());
+            request.set_body(body);
         }
 
         let HostState {
@@ -4879,7 +5008,20 @@ fn fetch_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResul
             fetched.response_type,
             ResponseType::Opaque | ResponseType::OpaqueRedirect
         );
-        let body_text = (!opaque).then(|| String::from_utf8_lossy(response.body()).to_string());
+        // `bodyText` is the lossy UTF-8 decoding the Fetch and XHR text paths are
+        // defined in terms of, so it stays the primary representation. It cannot
+        // represent a payload that is not valid UTF-8 though (an image, a font),
+        // and `Response.blob()`/`arrayBuffer()` must hand back the original
+        // bytes. Carry those separately, and only when decoding actually lost
+        // information, so text responses pay nothing for it.
+        //
+        // `from_utf8_lossy` borrows when the input is already valid UTF-8 and
+        // only allocates to substitute replacement characters, so an owned `Cow`
+        // is the signal that bytes were lost — no second validation pass needed.
+        let decoded_body = (!opaque).then(|| String::from_utf8_lossy(response.body()));
+        let body_base64 = matches!(decoded_body, Some(std::borrow::Cow::Owned(_)))
+            .then(|| base64::engine::general_purpose::STANDARD.encode(response.body()));
+        let body_text = decoded_body.map(std::borrow::Cow::into_owned);
         let effective_url = (!opaque).then(|| {
             response
                 .effective_url()
@@ -4903,6 +5045,7 @@ fn fetch_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResul
             "type": response_type,
             "headers": exposed_headers,
             "bodyText": body_text.as_deref().unwrap_or(""),
+            "bodyBase64": body_base64,
         })
         .to_string();
         Ok(js_string!(payload.as_str()).into())
@@ -6189,11 +6332,7 @@ fn submit_form_native(
     };
     let url = string_arg(0, context)?;
     let method = string_arg(1, context)?;
-    let body = if args.get(2).is_none_or(JsValue::is_null_or_undefined) {
-        None
-    } else {
-        Some(string_arg(2, context)?.into_bytes())
-    };
+    let body = body_bytes_argument(args.get(2), context)?;
     let content_type = if args.get(3).is_none_or(JsValue::is_null_or_undefined) {
         None
     } else {
@@ -6955,6 +7094,844 @@ mod tests {
     }
 
     #[test]
+    fn blob_constructor_normalizes_type_and_concatenates_parts() {
+        let mut runtime = JsRuntime::new().unwrap();
+        runtime
+            .eval(
+                r#"globalThis.blobResult = {};
+                const backing = new Uint8Array([1, 2, 3, 4, 5, 6]);
+                const mixed = new Blob([
+                  "ab",
+                  new Uint8Array([99, 100]).buffer,
+                  new Uint8Array([101]),
+                  new Blob(["f"], { type: "text/plain" }),
+                  42,
+                ]);
+                blobResult.mixedSize = mixed.size;
+                // A nested blob contributes its bytes but never its type.
+                blobResult.mixedType = mixed.type;
+                // Buffer views contribute only the bytes they view.
+                blobResult.viewSizes = [
+                  new Blob([new Uint8Array(backing.buffer, 2, 2)]).size,
+                  new Blob([new DataView(backing.buffer, 4)]).size,
+                  new Blob([backing.buffer]).size,
+                ];
+                // A copy is taken, so later writes cannot change the blob.
+                blobResult.snapshot = (() => {
+                  const source = new Uint8Array([7, 8]);
+                  const blob = new Blob([source]);
+                  source[0] = 99;
+                  return blob.size;
+                })();
+                blobResult.empty = [new Blob().size, new Blob().type, new Blob([]).size];
+                blobResult.types = [
+                  new Blob([], { type: "TEXT/Plain" }).type,
+                  new Blob([], { type: "foo bar" }).type,
+                  new Blob([], { type: "text/pléin" }).type,
+                  new Blob([], { type: "text/plain\tx" }).type,
+                ];
+                blobResult.utf8Size = new Blob(["日本"]).size;
+                blobResult.toStringTags = [
+                  Object.prototype.toString.call(new Blob([])),
+                  Object.prototype.toString.call(new File([], "n")),
+                ];
+                blobResult.readOnly = (() => {
+                  const blob = new Blob(["a"], { type: "text/plain" });
+                  blob.size = 99;
+                  blob.type = "x/y";
+                  return [blob.size, blob.type];
+                })();
+                // `sequence<BlobPart>` needs an iterable object: a bare string, a
+                // primitive and a plain array-like are all rejected.
+                blobResult.rejected = ["abc", null, 42, { length: 1, 0: "a" }].map(parts => {
+                  try { new Blob(parts); return "accepted"; }
+                  catch (error) { return error instanceof TypeError; }
+                });
+                blobResult.iterable = new Blob(new Set(["a", "bc"])).size;
+                Promise.all([
+                  mixed.text(),
+                  new Blob(["\ud800"]).arrayBuffer(),
+                  new Blob(["hi"]).bytes(),
+                ]).then(([text, lone, bytes]) => {
+                  blobResult.mixedText = text;
+                  // An unpaired surrogate has no UTF-8 encoding and becomes U+FFFD.
+                  blobResult.loneSurrogate = Array.from(new Uint8Array(lone));
+                  blobResult.bytes = Array.from(bytes);
+                  blobResult.done = true;
+                });"#,
+            )
+            .unwrap();
+        runtime.run_jobs().unwrap();
+
+        assert!(
+            runtime
+                .eval(
+                    r#"blobResult.done === true &&
+                    blobResult.mixedSize === 8 &&
+                    blobResult.mixedType === "" &&
+                    blobResult.mixedText === "abcdef42" &&
+                    JSON.stringify(blobResult.viewSizes) === "[2,2,6]" &&
+                    blobResult.snapshot === 2 &&
+                    JSON.stringify(blobResult.empty) === '[0,"",0]' &&
+                    JSON.stringify(blobResult.types) === '["text/plain","foo bar","",""]' &&
+                    blobResult.utf8Size === 6 &&
+                    JSON.stringify(blobResult.toStringTags) === '["[object Blob]","[object File]"]' &&
+                    JSON.stringify(blobResult.readOnly) === '[1,"text/plain"]' &&
+                    JSON.stringify(blobResult.rejected) === "[true,true,true,true]" &&
+                    blobResult.iterable === 3 &&
+                    JSON.stringify(blobResult.loneSurrogate) === "[239,191,189]" &&
+                    JSON.stringify(blobResult.bytes) === "[104,105]""#,
+                )
+                .unwrap()
+                .as_boolean()
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn blob_slice_clamps_and_rounds_offsets() {
+        let mut runtime = JsRuntime::new().unwrap();
+        runtime
+            .eval(
+                r#"globalThis.sliceResult = {};
+                const blob = new Blob(["abcde"], { type: "text/plain" });
+                sliceResult.types = [
+                  blob.slice().type,
+                  blob.slice(1, 2, "TEXT/Html").type,
+                  blob.slice(1, 2, "bad type").type,
+                ];
+                sliceResult.sizes = [
+                  blob.slice(3, 1).size,
+                  blob.slice(1e21).size,
+                  blob.slice(-1e21).size,
+                ];
+                Promise.all([
+                  blob.slice().text(),
+                  blob.slice(1).text(),
+                  blob.slice(-2).text(),
+                  blob.slice(1, -1).text(),
+                  blob.slice(0, 100).text(),
+                  blob.slice(-100, 2).text(),
+                  blob.slice(undefined, undefined).text(),
+                  blob.slice(NaN).text(),
+                  // `[Clamp]` rounds to the nearest integer, ties to even.
+                  blob.slice(1.5).text(),
+                  blob.slice(2.5).text(),
+                  blob.slice(3.5).text(),
+                  blob.slice(1.7, 3.9).text(),
+                ]).then(texts => { sliceResult.texts = texts; sliceResult.done = true; });"#,
+            )
+            .unwrap();
+        runtime.run_jobs().unwrap();
+
+        assert!(
+            runtime
+                .eval(
+                    r#"sliceResult.done === true &&
+                    JSON.stringify(sliceResult.types) === '["","text/html","bad type"]' &&
+                    JSON.stringify(sliceResult.sizes) === "[0,0,5]" &&
+                    JSON.stringify(sliceResult.texts) === JSON.stringify([
+                      "abcde", "bcde", "de", "bcd", "abcde", "ab", "abcde", "abcde",
+                      "cde", "cde", "e", "cd",
+                    ])"#,
+                )
+                .unwrap()
+                .as_boolean()
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn file_exposes_name_type_and_last_modified() {
+        let mut runtime = JsRuntime::new().unwrap();
+        assert!(
+            runtime
+                .eval(
+                    r#"(() => {
+                    const before = Date.now();
+                    const file = new File(["hello"], "n.txt", { type: "Text/Plain", lastModified: 1234 });
+                    const defaulted = new File([], "a");
+                    let missingName = false;
+                    try { new File([]); } catch (error) { missingName = error instanceof TypeError; }
+                    return file.name === "n.txt" && file.type === "text/plain" && file.size === 5 &&
+                      file.lastModified === 1234 && file.webkitRelativePath === "" &&
+                      file instanceof Blob && file instanceof File &&
+                      // The name is not sanitized.
+                      new File([], "a/b\\c").name === "a/b\\c" &&
+                      new File([], 5).name === "5" && new File([], null).name === "null" &&
+                      defaulted.type === "" && defaulted.lastModified >= before &&
+                      // Slicing a File yields a plain Blob.
+                      !(file.slice(0, 2) instanceof File) && file.slice(0, 2) instanceof Blob &&
+                      file.slice(0, 2).size === 2 && missingName;
+                  })()"#,
+                )
+                .unwrap()
+                .as_boolean()
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn file_reader_fires_progress_events_from_a_task() {
+        let mut runtime = JsRuntime::new().unwrap();
+        runtime
+            .eval(
+                r#"globalThis.readerLog = [];
+                globalThis.reader = new FileReader();
+                for (const type of ["loadstart", "progress", "load", "loadend", "error", "abort"]) {
+                  reader.addEventListener(type, event => {
+                    readerLog.push([
+                      type,
+                      reader.readyState,
+                      reader.result === null ? "null" : typeof reader.result,
+                      event.lengthComputable,
+                      event.loaded,
+                      event.total,
+                      Object.prototype.toString.call(event),
+                    ].join(","));
+                  });
+                }
+                readerLog.push("before," + reader.readyState);
+                reader.readAsText(new Blob(["hello world"]));
+                // The read is queued on the file reading task source, so nothing has
+                // been delivered yet even though the bytes are already in memory.
+                readerLog.push("after," + reader.readyState + "," + (reader.result === null ? "null" : "set"));"#,
+            )
+            .unwrap();
+        runtime.run_jobs().unwrap();
+        assert_eq!(
+            runtime
+                .eval("readerLog.join(\" | \")")
+                .unwrap()
+                .as_string()
+                .unwrap()
+                .to_std_string_escaped(),
+            "before,0 | after,1,null",
+            "microtask checkpoints alone must not deliver a FileReader result"
+        );
+
+        runtime.run_until_idle().unwrap();
+
+        assert_eq!(
+            runtime
+                .eval("readerLog.join(\" | \")")
+                .unwrap()
+                .as_string()
+                .unwrap()
+                .to_std_string_escaped(),
+            "before,0 | after,1,null | \
+             loadstart,1,null,true,0,11,[object ProgressEvent] | \
+             progress,1,null,true,11,11,[object ProgressEvent] | \
+             load,2,string,true,11,11,[object ProgressEvent] | \
+             loadend,2,string,true,11,11,[object ProgressEvent]"
+        );
+        assert!(
+            runtime
+                .eval(
+                    r#"reader.result === "hello world" && reader.error === null &&
+                    FileReader.EMPTY === 0 && FileReader.LOADING === 1 && FileReader.DONE === 2 &&
+                    reader.DONE === 2"#,
+                )
+                .unwrap()
+                .as_boolean()
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn file_reader_reads_text_array_buffer_and_data_url() {
+        let mut runtime = JsRuntime::new().unwrap();
+        runtime
+            .eval(
+                r#"globalThis.readResult = {};
+                const read = (method, blob, ...rest) => new Promise(resolve => {
+                  const reader = new FileReader();
+                  reader.onloadend = () => resolve(reader.result);
+                  reader[method](blob, ...rest);
+                });
+                Promise.all([
+                  read("readAsText", new Blob(["日本"])),
+                  read("readAsArrayBuffer", new Blob([new Uint8Array([1, 2, 3])])),
+                  // With no type the data URL falls back to application/octet-stream.
+                  read("readAsDataURL", new Blob(["a"])),
+                  read("readAsDataURL", new Blob(["a"], { type: "text/plain" })),
+                  read("readAsDataURL", new Blob([])),
+                  read("readAsDataURL", new File(["ab"], "x.bin")),
+                  read("readAsBinaryString", new Blob([new Uint8Array([200, 10])])),
+                  read("readAsText", new File(["file body"], "n.txt")),
+                ]).then(([text, buffer, untyped, typed, empty, file, binary, fileText]) => {
+                  readResult.text = text;
+                  readResult.bufferTag = Object.prototype.toString.call(buffer);
+                  readResult.bufferBytes = Array.from(new Uint8Array(buffer));
+                  readResult.urls = [untyped, typed, empty, file];
+                  readResult.binary = binary;
+                  readResult.fileText = fileText;
+                  readResult.done = true;
+                });"#,
+            )
+            .unwrap();
+        runtime.run_until_idle().unwrap();
+
+        assert!(
+            runtime
+                .eval(
+                    r#"readResult.done === true &&
+                    readResult.text === "日本" &&
+                    readResult.bufferTag === "[object ArrayBuffer]" &&
+                    JSON.stringify(readResult.bufferBytes) === "[1,2,3]" &&
+                    JSON.stringify(readResult.urls) === JSON.stringify([
+                      "data:application/octet-stream;base64,YQ==",
+                      "data:text/plain;base64,YQ==",
+                      "data:application/octet-stream;base64,",
+                      "data:application/octet-stream;base64,YWI=",
+                    ]) &&
+                    readResult.binary === "È\n" &&
+                    readResult.fileText === "file body""#,
+                )
+                .unwrap()
+                .as_boolean()
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn file_reader_rejects_reentrant_reads_and_aborts() {
+        let mut runtime = JsRuntime::new().unwrap();
+        runtime
+            .eval(
+                r#"globalThis.abortResult = { log: [] };
+                const reentrant = new FileReader();
+                reentrant.readAsText(new Blob(["a"]));
+                try { reentrant.readAsText(new Blob(["b"])); abortResult.reentrant = "accepted"; }
+                catch (error) {
+                  abortResult.reentrant = error instanceof DOMException && error.name === "InvalidStateError";
+                }
+                let nonBlob = false;
+                try { new FileReader().readAsText("not a blob"); }
+                catch (error) { nonBlob = error instanceof TypeError; }
+                abortResult.nonBlob = nonBlob;
+
+                const aborted = new FileReader();
+                for (const type of ["loadstart", "progress", "load", "loadend", "abort", "error"]) {
+                  aborted.addEventListener(type, () => abortResult.log.push([
+                    type,
+                    aborted.readyState,
+                    aborted.result === null ? "null" : "set",
+                    aborted.error === null ? "null" : aborted.error.name,
+                  ].join(",")));
+                }
+                aborted.readAsText(new Blob(["abc"]));
+                aborted.abort();
+
+                const idle = new FileReader();
+                idle.abort();
+                abortResult.idle = [idle.readyState, idle.result];
+
+                // A reader can be reused after an abort.
+                globalThis.reused = new FileReader();
+                reused.readAsText(new Blob(["x"]));
+                reused.abort();
+                reused.readAsText(new Blob(["y"]));"#,
+            )
+            .unwrap();
+        runtime.run_until_idle().unwrap();
+
+        assert_eq!(
+            runtime
+                .eval("abortResult.log.join(\" | \")")
+                .unwrap()
+                .as_string()
+                .unwrap()
+                .to_std_string_escaped(),
+            "abort,2,null,AbortError | loadend,2,null,AbortError",
+            "aborting a read must dispatch only abort and loadend"
+        );
+        assert!(
+            runtime
+                .eval(
+                    r#"abortResult.reentrant === true && abortResult.nonBlob === true &&
+                    JSON.stringify(abortResult.idle) === "[0,null]" &&
+                    reused.result === "y" && reused.error === null && reused.readyState === 2"#,
+                )
+                .unwrap()
+                .as_boolean()
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn file_reader_chained_from_its_load_handler_still_reports_loadend() {
+        let mut runtime = JsRuntime::new().unwrap();
+        runtime
+            .eval(
+                r#"globalThis.chainLog = [];
+                const reader = new FileReader();
+                let chained = false;
+                for (const type of ["loadstart", "progress", "load", "loadend"]) {
+                  reader.addEventListener(type, () => chainLog.push(type + ":" + reader.result));
+                }
+                reader.addEventListener("load", () => {
+                  // Starting the next read from `load` must not cancel the
+                  // `loadend` that belongs to the read that just finished.
+                  if (chained) return;
+                  chained = true;
+                  reader.readAsText(new Blob(["second"]));
+                });
+                reader.readAsText(new Blob(["first"]));"#,
+            )
+            .unwrap();
+        runtime.run_until_idle().unwrap();
+
+        assert_eq!(
+            runtime
+                .eval("chainLog.join(\" | \")")
+                .unwrap()
+                .as_string()
+                .unwrap()
+                .to_std_string_escaped(),
+            "loadstart:null | progress:null | load:first | loadend:null | \
+             loadstart:null | progress:null | load:second | loadend:second"
+        );
+    }
+
+    #[test]
+    fn object_url_resolves_through_fetch_and_fails_after_revoke() {
+        let mut runtime = JsRuntime::new().unwrap();
+        runtime
+            .eval(
+                r#"globalThis.urlResult = {};
+                const blob = new Blob(["hello"], { type: "text/plain" });
+                globalThis.objectUrl = URL.createObjectURL(blob);
+                urlResult.shape = objectUrl.replace(
+                  /[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
+                  "<uuid>",
+                );
+                urlResult.unique = URL.createObjectURL(blob) !== objectUrl;
+                urlResult.rejects = ["x", null, undefined].map(value => {
+                  try { URL.createObjectURL(value); return "accepted"; }
+                  catch (error) { return error instanceof TypeError; }
+                });
+                // Revoking an unknown URL is defined to do nothing.
+                urlResult.revokeUnknown = URL.revokeObjectURL("blob:null/missing") === undefined &&
+                  URL.revokeObjectURL("garbage") === undefined;
+
+                fetch(objectUrl).then(async response => {
+                  urlResult.status = [response.status, response.statusText, response.type, response.ok];
+                  urlResult.url = response.url === objectUrl;
+                  urlResult.contentType = response.headers.get("content-type");
+                  urlResult.contentLength = response.headers.get("content-length");
+                  urlResult.body = await response.text();
+                  const roundTrip = await (await fetch(objectUrl)).blob();
+                  urlResult.roundTrip = [roundTrip.size, roundTrip.type, await roundTrip.text()];
+                  const untyped = await fetch(URL.createObjectURL(new Blob(["z"])));
+                  urlResult.untypedHeaders = [
+                    untyped.headers.get("content-type"),
+                    untyped.headers.get("content-length"),
+                  ];
+                  // Only GET is defined for a blob URL.
+                  try { await fetch(objectUrl, { method: "POST" }); urlResult.post = "resolved"; }
+                  catch (error) { urlResult.post = error instanceof TypeError; }
+
+                  URL.revokeObjectURL(objectUrl);
+                  try { await fetch(objectUrl); urlResult.revoked = "resolved"; }
+                  catch (error) { urlResult.revoked = error instanceof TypeError; }
+                  urlResult.done = true;
+                });"#,
+            )
+            .unwrap();
+        runtime.run_until_idle().unwrap();
+
+        assert!(
+            runtime
+                .eval(
+                    r#"urlResult.done === true &&
+                    urlResult.shape === "blob:http://localhost/<uuid>" &&
+                    urlResult.unique === true &&
+                    JSON.stringify(urlResult.rejects) === "[true,true,true]" &&
+                    urlResult.revokeUnknown === true &&
+                    JSON.stringify(urlResult.status) === '[200,"OK","basic",true]' &&
+                    urlResult.url === true &&
+                    urlResult.contentType === "text/plain" &&
+                    urlResult.contentLength === "5" &&
+                    urlResult.body === "hello" &&
+                    JSON.stringify(urlResult.roundTrip) === '[5,"text/plain","hello"]' &&
+                    JSON.stringify(urlResult.untypedHeaders) === '["","1"]' &&
+                    urlResult.post === true &&
+                    urlResult.revoked === true"#,
+                )
+                .unwrap()
+                .as_boolean()
+                .unwrap()
+        );
+
+        // The host store mirrors the live URLs: three were created, one revoked.
+        assert_eq!(crate::data::blob_url_count(), 2);
+    }
+
+    #[test]
+    fn object_url_serves_xml_http_request_until_revoked() {
+        let mut runtime = JsRuntime::new().unwrap();
+        runtime
+            .eval(
+                r#"globalThis.xhrBlobResult = {};
+                globalThis.blobUrl = URL.createObjectURL(new Blob(["xhrbody"], { type: "text/plain" }));
+                const live = new XMLHttpRequest();
+                live.open("GET", blobUrl);
+                live.onloadend = () => {
+                  xhrBlobResult.live = [
+                    live.status,
+                    live.statusText,
+                    live.responseText,
+                    live.getResponseHeader("content-type"),
+                    live.getResponseHeader("content-length"),
+                  ];
+                  URL.revokeObjectURL(blobUrl);
+                  const dead = new XMLHttpRequest();
+                  dead.open("GET", blobUrl);
+                  dead.onloadend = () => {
+                    xhrBlobResult.revoked = [dead.status, dead.responseText];
+                    xhrBlobResult.done = true;
+                  };
+                  dead.send();
+                };
+                live.send();"#,
+            )
+            .unwrap();
+        runtime.run_until_idle().unwrap();
+
+        assert!(
+            runtime
+                .eval(
+                    r#"xhrBlobResult.done === true &&
+                    JSON.stringify(xhrBlobResult.live) ===
+                      '[200,"OK","xhrbody","text/plain","7"]' &&
+                    JSON.stringify(xhrBlobResult.revoked) === '[0,""]'"#,
+                )
+                .unwrap()
+                .as_boolean()
+                .unwrap()
+        );
+        assert_eq!(crate::data::blob_url_count(), 0);
+    }
+
+    #[test]
+    fn form_data_accepts_blob_and_file_entries() {
+        let mut runtime = JsRuntime::new().unwrap();
+        assert!(
+            runtime
+                .eval(
+                    r#"(() => {
+                    const data = new FormData();
+                    // A bare Blob becomes a File named "blob".
+                    data.append("bare", new Blob(["A"], { type: "text/plain" }));
+                    data.append("named", new Blob(["B"]), "given.txt");
+                    data.append("file", new File(["C"], "orig.txt", { type: "text/csv" }));
+                    data.append("override", new File(["D"], "orig2.txt"), "override.txt");
+                    data.set("replaced", new Blob(["E"]));
+                    const bare = data.get("bare");
+                    let filenameOnString = false;
+                    try { data.append("text", "value", "nope.txt"); }
+                    catch (error) { filenameOnString = error instanceof TypeError; }
+                    return bare instanceof File && bare.name === "blob" &&
+                      bare.type === "text/plain" && bare.size === 1 && bare.lastModified > 0 &&
+                      data.get("named").name === "given.txt" && data.get("named").type === "" &&
+                      data.get("file").name === "orig.txt" && data.get("file").type === "text/csv" &&
+                      data.get("override").name === "override.txt" &&
+                      data.get("replaced").name === "blob" &&
+                      // A non-Blob value is still stringified.
+                      (data.append("plain", 42), data.get("plain") === "42") &&
+                      filenameOnString && data.has("text") === false;
+                  })()"#,
+                )
+                .unwrap()
+                .as_boolean()
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn multipart_form_data_encodes_file_parts_and_escapes_header_values() {
+        let mut runtime = JsRuntime::new().unwrap();
+        let encoded = runtime
+            .eval(
+                r#"(() => {
+                const data = new FormData();
+                data.append("text", "val");
+                data.append("nl", "line1\nline2\r\nline3\rline4");
+                data.append("f", new File(["FILEDATA"], "we\"ird\r\nna\\me.txt", { type: "text/csv" }));
+                data.append("noType", new Blob(["X"]), "nt.bin");
+                data.append("uni", new File(["U"], "日本語.txt"));
+                data.append("q\"uote\r\nname", "v2");
+                const multipart = data.__multipart("BND");
+                // A file entry makes the payload binary.
+                globalThis.multipartIsBytes = multipart.body instanceof Uint8Array;
+                globalThis.multipartContentType = multipart.contentType;
+                return new TextDecoder().decode(multipart.body);
+              })()"#,
+            )
+            .unwrap()
+            .as_string()
+            .unwrap()
+            .to_std_string_escaped();
+
+        assert_eq!(
+            encoded,
+            concat!(
+                "--BND\r\nContent-Disposition: form-data; name=\"text\"\r\n\r\nval\r\n",
+                "--BND\r\nContent-Disposition: form-data; name=\"nl\"\r\n\r\n",
+                "line1\r\nline2\r\nline3\r\nline4\r\n",
+                "--BND\r\nContent-Disposition: form-data; name=\"f\"; ",
+                "filename=\"we%22ird%0D%0Ana\\me.txt\"\r\nContent-Type: text/csv\r\n\r\nFILEDATA\r\n",
+                "--BND\r\nContent-Disposition: form-data; name=\"noType\"; filename=\"nt.bin\"\r\n",
+                "Content-Type: application/octet-stream\r\n\r\nX\r\n",
+                "--BND\r\nContent-Disposition: form-data; name=\"uni\"; filename=\"日本語.txt\"\r\n",
+                "Content-Type: application/octet-stream\r\n\r\nU\r\n",
+                "--BND\r\nContent-Disposition: form-data; name=\"q%22uote%0D%0Aname\"\r\n\r\nv2\r\n",
+                "--BND--\r\n",
+            )
+        );
+        assert!(
+            runtime
+                .eval(
+                    r#"multipartIsBytes === true &&
+                    multipartContentType === "multipart/form-data; boundary=BND""#,
+                )
+                .unwrap()
+                .as_boolean()
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn multipart_file_part_bytes_survive_binary_data() {
+        let mut runtime = JsRuntime::new().unwrap();
+        assert!(
+            runtime
+                .eval(
+                    r#"(() => {
+                    const data = new FormData();
+                    // 0xFF/0xFE are not valid UTF-8 and must reach the payload intact.
+                    data.append("bin", new File([new Uint8Array([0, 255, 254, 10])], "b.bin"));
+                    const body = data.__multipart("B").body;
+                    const marker = [0, 255, 254, 10];
+                    for (let index = 0; index + marker.length <= body.length; index++) {
+                      if (marker.every((byte, offset) => body[index + offset] === byte)) return true;
+                    }
+                    return false;
+                  })()"#,
+                )
+                .unwrap()
+                .as_boolean()
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn file_input_contributes_an_empty_file_entry() {
+        let mut runtime = runtime_from_html(
+            "<html><body><form id='target' action='/submit'>\
+             <input type='file' name='up'><input name='t' value='v'>\
+             </form></body></html>",
+        );
+        assert!(
+            runtime
+                .eval(
+                    r#"(() => {
+                    const form = document.getElementById("target");
+                    const input = form.querySelector("input[type=file]");
+                    const data = new FormData(form);
+                    const entry = data.get("up");
+                    return JSON.stringify([...data.keys()]) === '["up","t"]' &&
+                      entry instanceof File && entry.name === "" &&
+                      entry.type === "application/octet-stream" && entry.size === 0 &&
+                      // A file control exposes a stable, empty FileList.
+                      Object.prototype.toString.call(input.files) === "[object FileList]" &&
+                      input.files.length === 0 && input.files === input.files &&
+                      input.files.item(0) === null &&
+                      document.querySelector("input[name=t]").files === null;
+                  })()"#,
+                )
+                .unwrap()
+                .as_boolean()
+                .unwrap()
+        );
+
+        // multipart keeps the empty filename and the octet-stream part type.
+        assert_eq!(
+            runtime
+                .eval(
+                    r#"new TextDecoder().decode(
+                    new FormData(document.getElementById("target")).__multipart("B").body
+                  )"#,
+                )
+                .unwrap()
+                .as_string()
+                .unwrap()
+                .to_std_string_escaped(),
+            concat!(
+                "--B\r\nContent-Disposition: form-data; name=\"up\"; filename=\"\"\r\n",
+                "Content-Type: application/octet-stream\r\n\r\n\r\n",
+                "--B\r\nContent-Disposition: form-data; name=\"t\"\r\n\r\nv\r\n",
+                "--B--\r\n",
+            )
+        );
+
+        // urlencoded and text/plain submit a file entry as its filename.
+        runtime
+            .eval("document.getElementById(\"target\").submit()")
+            .unwrap();
+        runtime.run_until_idle().unwrap();
+        let requests = runtime.take_navigation_requests();
+        assert_eq!(
+            requests,
+            vec![NavigationRequest::FormSubmit {
+                url: "http://localhost/submit?up=&t=v".to_string(),
+                method: "GET".to_string(),
+                body: None,
+                content_type: None,
+            }]
+        );
+    }
+
+    #[test]
+    fn response_and_request_round_trip_blob_bodies() {
+        let mut runtime = JsRuntime::new().unwrap();
+        runtime
+            .eval(
+                r#"globalThis.bodyResult = {};
+                const blob = new Blob(["body"], { type: "text/csv" });
+                bodyResult.contentTypes = [
+                  new Response(blob).headers.get("content-type"),
+                  new Response(new Blob(["b"])).headers.get("content-type"),
+                  new Response("txt").headers.get("content-type"),
+                  new Request("https://x.test/", { method: "POST", body: blob })
+                    .headers.get("content-type"),
+                ];
+                let getWithBody = false;
+                try { new Request("https://x.test/", { body: blob }); }
+                catch (error) { getWithBody = error instanceof TypeError; }
+                bodyResult.getWithBody = getWithBody;
+
+                (async () => {
+                  const fromBlob = await new Response(blob).blob();
+                  bodyResult.fromBlob = [fromBlob.type, fromBlob.size, await fromBlob.text()];
+                  // A blob's type comes from the Content-Type header, so a text body
+                  // reports the charset the header carries.
+                  const fromText = await new Response("txt").blob();
+                  bodyResult.fromText = [fromText.type, fromText.size];
+                  const fromNull = await new Response(null).blob();
+                  bodyResult.fromNull = [fromNull.type, fromNull.size];
+                  const fromBuffer = await new Response(new Uint8Array([1, 2])).blob();
+                  bodyResult.fromBuffer = [fromBuffer.type, fromBuffer.size];
+                  bodyResult.arrayBuffer = Array.from(new Uint8Array(
+                    await new Response(new Blob([new Uint8Array([1, 2, 3])])).arrayBuffer(),
+                  ));
+                  const request = new Request("https://x.test/", { method: "POST", body: blob });
+                  const requestBlob = await request.blob();
+                  bodyResult.request = [requestBlob.type, await requestBlob.text(), await request.text()];
+                  const clone = new Response(blob, { headers: { "content-type": "text/html" } }).clone();
+                  bodyResult.clone = [(await clone.blob()).type, await clone.text()];
+                  bodyResult.done = true;
+                })();"#,
+            )
+            .unwrap();
+        runtime.run_jobs().unwrap();
+
+        assert!(
+            runtime
+                .eval(
+                    r#"bodyResult.done === true &&
+                    JSON.stringify(bodyResult.contentTypes) ===
+                      '["text/csv",null,"text/plain;charset=UTF-8","text/csv"]' &&
+                    bodyResult.getWithBody === true &&
+                    JSON.stringify(bodyResult.fromBlob) === '["text/csv",4,"body"]' &&
+                    JSON.stringify(bodyResult.fromText) === '["text/plain;charset=utf-8",3]' &&
+                    JSON.stringify(bodyResult.fromNull) === '["",0]' &&
+                    JSON.stringify(bodyResult.fromBuffer) === '["",2]' &&
+                    JSON.stringify(bodyResult.arrayBuffer) === "[1,2,3]" &&
+                    JSON.stringify(bodyResult.request) === '["text/csv","body","body"]' &&
+                    JSON.stringify(bodyResult.clone) === '["text/html","body"]'"#,
+                )
+                .unwrap()
+                .as_boolean()
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn fetch_preserves_binary_response_bytes() {
+        let payload: Vec<u8> = vec![0x89, 0x50, 0x4e, 0x47, 0x00, 0xff, 0xfe, 0x0a];
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let served = payload.clone();
+        let handle = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            read_http_request(&mut stream);
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: image/png\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                served.len()
+            )
+            .unwrap();
+            stream.write_all(&served).unwrap();
+        });
+
+        let mut runtime = JsRuntime::new().unwrap();
+        runtime.set_base_url(format!("http://{address}/").parse().unwrap());
+        runtime
+            .eval(
+                r#"globalThis.binaryResult = {};
+                fetch("/image.png").then(async response => {
+                  const copy = response.clone();
+                  const blob = await response.blob();
+                  binaryResult.blob = [blob.type, blob.size];
+                  binaryResult.bytes = Array.from(new Uint8Array(await blob.arrayBuffer()));
+                  binaryResult.buffer = Array.from(new Uint8Array(await copy.arrayBuffer()));
+                  // The text path still sees the lossy UTF-8 decoding it is defined
+                  // to return, with one replacement character per invalid byte.
+                  binaryResult.text = Array.from(await copy.text(), c => c.codePointAt(0));
+                  binaryResult.done = true;
+                });"#,
+            )
+            .unwrap();
+        runtime.run_jobs().unwrap();
+        handle.join().unwrap();
+
+        assert_eq!(
+            runtime
+                .eval("JSON.stringify(binaryResult.bytes)")
+                .unwrap()
+                .as_string()
+                .unwrap()
+                .to_std_string_escaped(),
+            serde_json::to_string(&payload).unwrap(),
+            "a non-UTF-8 response body must reach Response.blob() unchanged"
+        );
+        assert_eq!(
+            runtime
+                .eval("JSON.stringify(binaryResult.buffer)")
+                .unwrap()
+                .as_string()
+                .unwrap()
+                .to_std_string_escaped(),
+            serde_json::to_string(&payload).unwrap(),
+            "Response.arrayBuffer() must expose the same bytes"
+        );
+        assert!(
+            runtime
+                .eval(
+                    r#"binaryResult.done === true &&
+                    JSON.stringify(binaryResult.blob) === '["image/png",8]' &&
+                    JSON.stringify(binaryResult.text) ===
+                      JSON.stringify([65533, 80, 78, 71, 0, 65533, 65533, 10])"#,
+                )
+                .unwrap()
+                .as_boolean()
+                .unwrap()
+        );
+    }
+
+    #[test]
     fn url_and_search_params_parse_common_web_urls() {
         let mut runtime = JsRuntime::new().unwrap();
         assert!(runtime
@@ -7089,6 +8066,44 @@ b</textarea></form>"#);
             NavigationRequest::FormSubmit { url: "http://localhost/search?q=hello+world&symbol=a*b&source=button#result".to_string(), method: "GET".to_string(), body: None, content_type: None },
             NavigationRequest::FormSubmit { url: "http://localhost/save".to_string(), method: "POST".to_string(), body: Some(b"note=a\r\nb\r\n".to_vec()), content_type: Some("text/plain".to_string()) },
         ]);
+    }
+
+    #[test]
+    fn multipart_form_submission_carries_file_part_bytes() {
+        let mut runtime = runtime_from_html(
+            r#"<form id="upload" action="/upload" method="post" enctype="multipart/form-data">
+               <input name="note" value="hi"><input type="file" name="doc">
+               </form>"#,
+        );
+        runtime
+            .eval("document.getElementById(\"upload\").submit()")
+            .unwrap();
+        runtime.run_until_idle().unwrap();
+
+        let requests = runtime.take_navigation_requests();
+        let [NavigationRequest::FormSubmit {
+            url,
+            method,
+            body: Some(body),
+            content_type: Some(content_type),
+        }] = requests.as_slice()
+        else {
+            panic!("expected one multipart form submission, got {requests:?}");
+        };
+        assert_eq!(url, "http://localhost/upload");
+        assert_eq!(method, "POST");
+        let boundary = content_type
+            .strip_prefix("multipart/form-data; boundary=")
+            .expect("multipart content type with a boundary");
+        assert_eq!(
+            String::from_utf8(body.clone()).unwrap(),
+            format!(
+                "--{boundary}\r\nContent-Disposition: form-data; name=\"note\"\r\n\r\nhi\r\n\
+                 --{boundary}\r\nContent-Disposition: form-data; name=\"doc\"; filename=\"\"\r\n\
+                 Content-Type: application/octet-stream\r\n\r\n\r\n\
+                 --{boundary}--\r\n"
+            )
+        );
     }
 
     #[test]
