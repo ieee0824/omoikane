@@ -831,6 +831,44 @@ fn paints_nothing_for_a_revoked_object_url() {
 }
 
 #[test]
+fn image_sources_shorter_than_a_scheme_or_starting_mid_character_resolve_to_nothing() {
+    crate::data::clear_blob_urls();
+    // Byte 5 of these lands inside a character, so scheme detection must not
+    // index the string by byte range.
+    for source in ["日本語です", "日本", "b", "", "   ", "blo"] {
+        assert!(
+            crate::layout::decode_or_fetch_image_asset(source).is_none(),
+            "unexpected image for {source:?}"
+        );
+    }
+}
+
+#[test]
+fn blob_url_scheme_detection_is_case_insensitive() {
+    crate::data::clear_blob_urls();
+    let mut canvas = Canvas::new(1, 1);
+    canvas.fill_rect(
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 1.0,
+            height: 1.0,
+        },
+        Color::rgb(255, 0, 0),
+    );
+    crate::data::register_blob_url(
+        "BLOB:http://example.test/upper".to_string(),
+        canvas.encode_png(),
+        "image/png".to_string(),
+    );
+
+    let image = crate::layout::decode_or_fetch_image_asset("BLOB:http://example.test/upper")
+        .expect("blob URL image");
+
+    assert_eq!((image.width, image.height), (1, 1));
+}
+
+#[test]
 fn paints_a_background_image_from_an_object_url() {
     crate::data::clear_blob_urls();
     let html = format!(

@@ -7755,31 +7755,33 @@
   // return), and as bytes for blobs, buffer sources and file-bearing form data.
   // Keeping both forms available means `text()` never re-decodes a text body,
   // while `blob()` and `arrayBuffer()` never lose bytes.
-  // Shared by every bodyless request and response, so it must stay immutable.
+  // A body record is a snapshot shared by every request or response cloned from
+  // the one that extracted it, so it is frozen: nothing downstream may rewrite
+  // what was sent or received.
   const EMPTY_BODY = Object.freeze({ text: null, bytes: null, contentType: null });
+
+  function bodyRecord(text, bytes, contentType) {
+    return Object.freeze({ text, bytes, contentType });
+  }
 
   function extractBody(source) {
     if (source === null || source === undefined) return EMPTY_BODY;
     if (source instanceof Blob) {
-      return { text: null, bytes: source.__bytes, contentType: source.type || null };
+      return bodyRecord(null, source.__bytes, source.type || null);
     }
     if (source instanceof ArrayBuffer || ArrayBuffer.isView(source)) {
-      return { text: null, bytes: blobPartsToBytes([source]), contentType: null };
+      return bodyRecord(null, blobPartsToBytes([source]), null);
     }
     if (source instanceof FormData) {
       const encoded = source.__multipart();
       return typeof encoded.body === "string"
-        ? { text: encoded.body, bytes: null, contentType: encoded.contentType }
-        : { text: null, bytes: encoded.body, contentType: encoded.contentType };
+        ? bodyRecord(encoded.body, null, encoded.contentType)
+        : bodyRecord(null, encoded.body, encoded.contentType);
     }
     if (globalThis.URLSearchParams !== undefined && source instanceof URLSearchParams) {
-      return {
-        text: source.toString(),
-        bytes: null,
-        contentType: "application/x-www-form-urlencoded;charset=UTF-8",
-      };
+      return bodyRecord(source.toString(), null, "application/x-www-form-urlencoded;charset=UTF-8");
     }
-    return { text: String(source), bytes: null, contentType: "text/plain;charset=UTF-8" };
+    return bodyRecord(String(source), null, "text/plain;charset=UTF-8");
   }
 
   function bodyIsEmpty(body) {
@@ -7915,11 +7917,11 @@
     // Both forms are retained: `text()` must not re-decode, and for a payload
     // that is not valid UTF-8 the lossy decoding is still the defined text
     // result while the bytes remain available to `blob()`/`arrayBuffer()`.
-    response.__body = {
-      text: data.bodyText,
-      bytes: data.bodyBase64 == null ? null : bytesFromBase64(data.bodyBase64),
-      contentType: null,
-    };
+    response.__body = bodyRecord(
+      data.bodyText,
+      data.bodyBase64 == null ? null : bytesFromBase64(data.bodyBase64),
+      null,
+    );
     response.type = data.type;
     return response;
   }

@@ -964,10 +964,13 @@ fn decode_image_bytes(bytes: &[u8], content_type: &str, url: &str) -> Option<Ima
 /// layout runs after the JavaScript runtime that created the URL is gone (see
 /// [`crate::data`]).
 ///
-/// A decoded result is cached, but an unregistered URL is not: revoking an object
-/// URL must not leave a negative cache entry that would outlive a later
-/// registration. It does mean an image that has already been decoded keeps
-/// painting after its URL is revoked, which is what browsers do as well.
+/// Only a successful decode is cached. Nothing here is fetched, so a failure is
+/// cheap to retry, and caching one would key a negative result on a URL whose
+/// store entry can be replaced. Not caching failures also means revoking an
+/// object URL cannot leave an entry that outlives a later registration.
+///
+/// A decoded image does stay cached after its URL is revoked, so an `<img>` that
+/// already painted keeps painting — the same thing browsers do.
 fn decode_blob_url_image(url: &str) -> Option<Image> {
     if let Some(cached) = IMAGE_CACHE.with(|cache| cache.borrow().get(url).cloned()) {
         return cached;
@@ -976,11 +979,13 @@ fn decode_blob_url_image(url: &str) -> Option<Image> {
     if entry.bytes.len() > MAX_IMAGE_SIZE {
         return None;
     }
-    let image = decode_image_bytes(&entry.bytes, &entry.media_type.to_lowercase(), url);
+    let image = decode_image_bytes(&entry.bytes, &entry.media_type.to_lowercase(), url)?;
     IMAGE_CACHE.with(|cache| {
-        cache.borrow_mut().insert(url.to_string(), image.clone());
+        cache
+            .borrow_mut()
+            .insert(url.to_string(), Some(image.clone()));
     });
-    image
+    Some(image)
 }
 
 fn decode_or_fetch_image(url_like: &str) -> Option<Image> {
@@ -991,7 +996,12 @@ fn decode_or_fetch_image(url_like: &str) -> Option<Image> {
     if url_like.starts_with("data:") {
         return decode_data_uri_image(url_like);
     }
-    if url_like.len() >= 5 && url_like[..5].eq_ignore_ascii_case("blob:") {
+    // `get` rather than a range index: a source such as "日本語です" would make
+    // byte 5 land inside a character and panic.
+    if url_like
+        .get(..5)
+        .is_some_and(|scheme| scheme.eq_ignore_ascii_case("blob:"))
+    {
         return decode_blob_url_image(url_like);
     }
     let resolved = resolve_image_url(url_like)?;
