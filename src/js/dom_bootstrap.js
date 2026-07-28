@@ -7467,9 +7467,15 @@
   }
 
   // Flattens blob parts into one buffer. Strings are UTF-8 encoded (so a lone
-  // surrogate becomes U+FFFD), buffer sources are copied so later writes to
-  // them cannot change the blob, and nested blobs contribute their bytes
-  // without their type.
+  // surrogate becomes U+FFFD), buffer sources are copied so later writes to the
+  // caller's view cannot change the blob, and nested blobs contribute their
+  // bytes without their type.
+  //
+  // A nested blob's buffer is adopted rather than copied. Nothing in the engine
+  // writes to a blob's bytes after construction, and no public API hands the
+  // buffer out (`arrayBuffer()` and `bytes()` both copy), so the bytes behave as
+  // the immutable snapshot the File API defines while `new Blob([blob])` and a
+  // `Blob` request body stay allocation-free.
   function blobPartsToBytes(parts) {
     const chunks = [];
     let length = 0;
@@ -7514,8 +7520,8 @@
   class Blob {
     constructor(parts = undefined, options = undefined) {
       const bytes = blobPartsToBytes(blobPartSequence(parts));
-      // Non-enumerable and non-writable: a blob is an immutable snapshot, and
-      // its backing store is not part of its observable shape.
+      // Non-enumerable and non-writable: the backing store is not part of a
+      // blob's observable shape, and nothing rebinds it after construction.
       Object.defineProperty(this, "__bytes", { value: bytes });
       Object.defineProperty(this, "__type", {
         value: normalizeBlobType((options ?? {}).type ?? ""),
@@ -7757,9 +7763,10 @@
   // return), and as bytes for blobs, buffer sources and file-bearing form data.
   // Keeping both forms available means `text()` never re-decodes a text body,
   // while `blob()` and `arrayBuffer()` never lose bytes.
-  // A body record is a snapshot shared by every request or response cloned from
-  // the one that extracted it, so it is frozen: nothing downstream may rewrite
-  // what was sent or received.
+  // A body record is shared by every request or response cloned from the one
+  // that extracted it, so it is frozen: nothing downstream may repoint it at
+  // different text or bytes. The bytes themselves are a blob's buffer, which the
+  // engine never writes to after construction.
   const EMPTY_BODY = Object.freeze({ text: null, bytes: null, contentType: null });
 
   function bodyRecord(text, bytes, contentType) {

@@ -1173,8 +1173,10 @@ impl JsRuntime {
     ) -> JsResult<Self> {
         // Object URLs belong to the Document that created them. A fresh global
         // means the previous Document is gone, so nothing can resolve its blob
-        // URLs any more and their bytes must not outlive it.
+        // URLs any more and neither their bytes nor images decoded from them may
+        // outlive it.
         crate::data::clear_blob_urls();
+        crate::layout::forget_blob_url_images();
         let host_state = Rc::new(RefCell::new(HostState::new(
             document.clone(),
             url.to_string(),

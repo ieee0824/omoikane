@@ -214,6 +214,22 @@ fn persist_unsupported_html_to_sqlite(path: &str, tag: &str, parent_tag: Option<
     }
 }
 
+/// Drops every cached image that was decoded from a `blob:` URL.
+///
+/// Object URLs belong to the Document that minted them, so their decoded images
+/// must not survive into the next one: a cache hit would otherwise resolve a URL
+/// whose store entry is gone, and the pixels would be retained for the rest of
+/// the process. Called alongside [`crate::data::clear_blob_urls`] when a new
+/// global is created.
+pub(crate) fn forget_blob_url_images() {
+    IMAGE_CACHE.with(|cache| {
+        cache.borrow_mut().retain(|url, _| {
+            !url.get(..5)
+                .is_some_and(|scheme| scheme.eq_ignore_ascii_case("blob:"))
+        });
+    });
+}
+
 /// Runs layout/image resolution with a temporary base URL used for relative image sources.
 pub fn with_image_base_url<T>(base_url: Option<Url>, f: impl FnOnce() -> T) -> T {
     struct ImageBaseUrlGuard(Option<Url>);

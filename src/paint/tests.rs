@@ -844,6 +844,41 @@ fn image_sources_shorter_than_a_scheme_or_starting_mid_character_resolve_to_noth
 }
 
 #[test]
+fn a_new_global_forgets_images_decoded_from_object_urls() {
+    crate::data::clear_blob_urls();
+    let mut canvas = Canvas::new(1, 1);
+    canvas.fill_rect(
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 1.0,
+            height: 1.0,
+        },
+        Color::rgb(0, 0, 255),
+    );
+    let url = "blob:http://example.test/cached";
+    crate::data::register_blob_url(
+        url.to_string(),
+        canvas.encode_png(),
+        "image/png".to_string(),
+    );
+    assert!(
+        crate::layout::decode_or_fetch_image_asset(url).is_some(),
+        "the blob URL should decode while it is registered"
+    );
+
+    // Creating a global is this engine's Document boundary: it clears the object
+    // URL store, and the image cache must not keep resolving the old URL.
+    let _runtime = crate::js::JsRuntime::new().expect("runtime");
+
+    assert_eq!(crate::data::blob_url_count(), 0);
+    assert!(
+        crate::layout::decode_or_fetch_image_asset(url).is_none(),
+        "a cached blob URL image must not outlive the Document that minted it"
+    );
+}
+
+#[test]
 fn blob_url_scheme_detection_is_case_insensitive() {
     crate::data::clear_blob_urls();
     let mut canvas = Canvas::new(1, 1);
