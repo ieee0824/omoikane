@@ -1551,7 +1551,7 @@ fn resolve_content_height(
 // ── Width computation ───────────────────────────────────────────────────────
 
 /// Returns `true` when `box-sizing: border-box` is set on the element.
-fn is_border_box(style: &ComputedStyle) -> bool {
+pub(crate) fn is_border_box(style: &ComputedStyle) -> bool {
     matches!(
         style.get("box-sizing"),
         Some(ComputedValue::Keyword(kw)) if kw.eq_ignore_ascii_case("border-box")
@@ -1566,8 +1566,24 @@ pub(crate) fn border_box_adjust_height(
     padding: &EdgeSizes,
     border: &EdgeSizes,
 ) -> f32 {
+    border_box_adjust_length(
+        style,
+        specified,
+        padding.top + border.top,
+        padding.bottom + border.bottom,
+    )
+}
+
+/// Converts a length that applies to the box selected by `box-sizing` into a
+/// content-box length. Callers supply the decorations on the relevant axis.
+pub(crate) fn border_box_adjust_length(
+    style: &ComputedStyle,
+    specified: f32,
+    start_decoration: f32,
+    end_decoration: f32,
+) -> f32 {
     if is_border_box(style) {
-        (specified - padding.top - padding.bottom - border.top - border.bottom).max(0.0)
+        (specified - start_decoration - end_decoration).max(0.0)
     } else {
         specified
     }
@@ -1580,19 +1596,13 @@ fn compute_width(
     border: EdgeSizes,
     margin: &mut EdgeSizes,
 ) -> f32 {
-    let border_box = is_border_box(style);
     let pb_horizontal = padding.horizontal() + border.horizontal();
 
     // `specified_width` is the value given to the `width` property.
     // For border-box, that value already includes padding + border, so we
     // convert it to a content-box width immediately.
-    let specified_width = resolved_length(style, "width", containing_width).map(|w| {
-        if border_box {
-            (w - pb_horizontal).max(0.0)
-        } else {
-            w
-        }
-    });
+    let specified_width = resolved_length(style, "width", containing_width)
+        .map(|w| border_box_adjust_length(style, w, padding.left + border.left, padding.right + border.right));
     let margin_left_auto = margin_start_is_auto(style);
     let margin_right_auto = margin_end_is_auto(style);
 
@@ -1631,19 +1641,21 @@ fn compute_width(
     let (min_width, max_width) =
         normalized_min_max_lengths(style, "min-width", "max-width", containing_width);
     if let Some(min_width) = min_width {
-        let content_min = if border_box {
-            (min_width - pb_horizontal).max(0.0)
-        } else {
-            min_width
-        };
+        let content_min = border_box_adjust_length(
+            style,
+            min_width,
+            padding.left + border.left,
+            padding.right + border.right,
+        );
         width = width.max(content_min);
     }
     if let Some(max_width) = max_width {
-        let content_max = if border_box {
-            (max_width - pb_horizontal).max(0.0)
-        } else {
-            max_width
-        };
+        let content_max = border_box_adjust_length(
+            style,
+            max_width,
+            padding.left + border.left,
+            padding.right + border.right,
+        );
         width = width.min(content_max);
     }
 

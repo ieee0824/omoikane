@@ -11,7 +11,8 @@ use crate::paint::{DataUri, Image, parse_data_uri};
 use super::{
     FontMetrics, FragmentStyle, InlineFragment, InlineFragmentContent,
     LineBox, Rect, VerticalAlign,
-    edge_sizes, explicit_length, is_display_none, is_non_rendered_html_element,
+    border_box_adjust_length, edge_sizes, explicit_length, is_border_box, is_display_none,
+    is_non_rendered_html_element,
     IMAGE_BASE_URL, IMAGE_CACHE, HTTP_CLIENT, LAYOUT_FONTS,
 };
 
@@ -998,28 +999,52 @@ fn html_image_dimension_attribute(node: &NodeHandle, name: &str) -> Option<f32> 
 /// whenever there is one; a bare `<ratio>` overrides it. A degenerate ratio (a
 /// zero on either side) can size nothing, so it falls back to the intrinsic ratio
 /// as well.
-fn preferred_aspect_ratio(style: &ComputedStyle, intrinsic: Option<f32>) -> Option<f32> {
+#[derive(Clone, Copy)]
+struct PreferredAspectRatio {
+    value: f32,
+    uses_box_sizing: bool,
+}
+
+fn preferred_aspect_ratio(
+    style: &ComputedStyle,
+    intrinsic: Option<f32>,
+) -> Option<PreferredAspectRatio> {
     let Some(ComputedValue::Keyword(value)) = style.get("aspect-ratio") else {
-        return intrinsic;
+        return intrinsic.map(|value| PreferredAspectRatio {
+            value,
+            uses_box_sizing: false,
+        });
     };
     let value = value.trim();
     if value.eq_ignore_ascii_case("auto") {
-        return intrinsic;
+        return intrinsic.map(|value| PreferredAspectRatio {
+            value,
+            uses_box_sizing: false,
+        });
     }
     let (prefers_intrinsic, ratio_text) = match value.strip_prefix("auto ") {
         Some(rest) => (true, rest),
         None => (false, value),
     };
     if prefers_intrinsic && intrinsic.is_some() {
-        return intrinsic;
+        return intrinsic.map(|value| PreferredAspectRatio {
+            value,
+            uses_box_sizing: false,
+        });
     }
     let (width, height) = ratio_text.split_once('/')?;
     let width = width.trim().parse::<f32>().ok()?;
     let height = height.trim().parse::<f32>().ok()?;
     if width > 0.0 && height > 0.0 {
-        Some(width / height)
+        Some(PreferredAspectRatio {
+            value: width / height,
+            uses_box_sizing: true,
+        })
     } else {
-        intrinsic
+        intrinsic.map(|value| PreferredAspectRatio {
+            value,
+            uses_box_sizing: false,
+        })
     }
 }
 
@@ -1033,16 +1058,48 @@ pub(super) fn resolve_image_rendered_size(
     let intrinsic_ratio = (intrinsic_w > 0.0 && intrinsic_h > 0.0)
         .then(|| intrinsic_w / intrinsic_h);
     let ratio = preferred_aspect_ratio(style, intrinsic_ratio);
+    let padding = edge_sizes(style, "padding");
+    let border = edge_sizes(style, "border");
+    let horizontal_decoration = if is_border_box(style) {
+        padding.horizontal() + border.horizontal()
+    } else {
+        0.0
+    };
+    let vertical_decoration = if is_border_box(style) {
+        padding.vertical() + border.vertical()
+    } else {
+        0.0
+    };
+    let to_content_width = |value| {
+        border_box_adjust_length(style, value, padding.left + border.left, padding.right + border.right)
+    };
+    let to_content_height = |value| {
+        border_box_adjust_length(style, value, padding.top + border.top, padding.bottom + border.bottom)
+    };
     let specified_width = explicit_length(style, "width")
-        .or_else(|| html_image_dimension_attribute(node, "width"));
+        .or_else(|| html_image_dimension_attribute(node, "width"))
+        .map(to_content_width);
     let specified_height = explicit_length(style, "height")
-        .or_else(|| html_image_dimension_attribute(node, "height"));
+        .or_else(|| html_image_dimension_attribute(node, "height"))
+        .map(to_content_height);
 
-    let from_height = |height: f32| ratio.map_or(intrinsic_w, |ratio| (height * ratio).max(0.0));
+    let from_height = |height: f32| ratio.map_or(intrinsic_w, |ratio| {
+        if ratio.uses_box_sizing {
+            to_content_width((height + vertical_decoration) * ratio.value)
+        } else {
+            (height * ratio.value).max(0.0)
+        }
+    });
     let from_width = |width: f32| {
         ratio
-            .filter(|ratio| *ratio > 0.0)
-            .map_or(intrinsic_h, |ratio| (width / ratio).max(0.0))
+            .filter(|ratio| ratio.value > 0.0)
+            .map_or(intrinsic_h, |ratio| {
+                if ratio.uses_box_sizing {
+                    to_content_height((width + horizontal_decoration) / ratio.value)
+                } else {
+                    (width / ratio.value).max(0.0)
+                }
+            })
     };
     let (mut width, mut height) = match (specified_width, specified_height) {
         (Some(w), Some(h)) => (w, h),
@@ -1058,44 +1115,36 @@ pub(super) fn resolve_image_rendered_size(
     // max-height clamps the height it produced.
     let width_is_derived = specified_width.is_none();
     let height_is_derived = specified_height.is_none();
-    if let Some(max_width) = explicit_length(style, "max-width")
+    if let Some(max_width) = explicit_length(style, "max-width").map(to_content_width)
         && width > max_width {
             if height_is_derived {
-                height = scale_with_aspect(height, width, max_width);
+                height = from_width(max_width);
             }
             width = max_width;
         }
-    if let Some(max_height) = explicit_length(style, "max-height")
+    if let Some(max_height) = explicit_length(style, "max-height").map(to_content_height)
         && height > max_height {
             if width_is_derived {
-                width = scale_with_aspect(width, height, max_height);
+                width = from_height(max_height);
             }
             height = max_height;
         }
-    if let Some(min_width) = explicit_length(style, "min-width")
+    if let Some(min_width) = explicit_length(style, "min-width").map(to_content_width)
         && width < min_width {
             if height_is_derived {
-                height = scale_with_aspect(height, width, min_width);
+                height = from_width(min_width);
             }
             width = min_width;
         }
-    if let Some(min_height) = explicit_length(style, "min-height")
+    if let Some(min_height) = explicit_length(style, "min-height").map(to_content_height)
         && height < min_height {
             if width_is_derived {
-                width = scale_with_aspect(width, height, min_height);
+                width = from_height(min_height);
             }
             height = min_height;
         }
 
     (width, height)
-}
-
-fn scale_with_aspect(numerator: f32, denominator: f32, target: f32) -> f32 {
-    if denominator > 0.0 {
-        (numerator * target / denominator).max(0.0)
-    } else {
-        0.0
-    }
 }
 
 // ── Text processing ─────────────────────────────────────────────────────────
