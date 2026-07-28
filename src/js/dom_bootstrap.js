@@ -4329,6 +4329,81 @@
     "INPUT", "SELECT", "TEXTAREA", "BUTTON", "FIELDSET", "OBJECT", "OUTPUT", "KEYGEN",
   ]);
 
+  function normalizeFormLineBreaks(value) {
+    return String(value).replace(/\r(?!\n)|(?<!\r)\n/g, "\r\n");
+  }
+
+  function collectFormEntries(form, submitter = null) {
+    const entries = [];
+    for (const control of form.__controls()) {
+      const name = control.getAttribute("name") || "";
+      if (!name || control.__isDisabledControl()) continue;
+      const tag = control.tagName;
+      const type = String(control.type || "").toLowerCase();
+      if (tag === "INPUT" && (type === "checkbox" || type === "radio") && !control.checked) continue;
+      if ((tag === "INPUT" && ["submit", "image", "button", "reset", "file"].includes(type)) || tag === "BUTTON") {
+        if (control !== submitter || !["submit", "image", ""].includes(type)) continue;
+      }
+      if (tag === "SELECT") {
+        let selected = control.options.filter(option => option.selected && !option.__isDisabledControl());
+        if (!control.hasAttribute("multiple") && selected.length === 0 && control.options.length) selected = [control.options[0]];
+        else if (!control.hasAttribute("multiple") && selected.length > 1) selected = [selected[selected.length - 1]];
+        for (const option of selected) entries.push([name, String(option.value)]);
+      } else {
+        entries.push([name, String(control.value ?? control.getAttribute("value") ?? "")]);
+      }
+    }
+    return entries;
+  }
+
+  function formUrlEncode(entries) {
+    const encode = value => encodeURIComponent(normalizeFormLineBreaks(value))
+      .replace(/%20/g, "+").replace(/[!'()~]/g, c => "%" + c.charCodeAt(0).toString(16).toUpperCase());
+    return entries.map(([name, value]) => encode(name) + "=" + encode(value)).join("&");
+  }
+
+  function formTextEncode(entries) {
+    return entries.map(([name, value]) => normalizeFormLineBreaks(name) + "=" + normalizeFormLineBreaks(value)).join("\r\n") + (entries.length ? "\r\n" : "");
+  }
+
+  let formDataBoundaryCounter = 0;
+  function formMultipartEncode(entries, boundary) {
+    return entries.map(([name, value]) => {
+      const escapedName = String(name).replace(/\r|\n/g, "").replace(/"/g, "%22");
+      return "--" + boundary + "\r\nContent-Disposition: form-data; name=\"" + escapedName +
+        "\"\r\n\r\n" + normalizeFormLineBreaks(value) + "\r\n";
+    }).join("") + "--" + boundary + "--\r\n";
+  }
+
+  class FormData {
+    constructor(form = undefined) {
+      if (form !== undefined && !(form instanceof HTMLFormElement)) throw new TypeError("FormData argument must be a form");
+      this.__entries = form ? collectFormEntries(form) : [];
+    }
+    append(name, value) { this.__entries.push([String(name), String(value)]); }
+    delete(name) { name = String(name); this.__entries = this.__entries.filter(entry => entry[0] !== name); }
+    get(name) { name = String(name); return this.__entries.find(entry => entry[0] === name)?.[1] ?? null; }
+    getAll(name) { name = String(name); return this.__entries.filter(entry => entry[0] === name).map(entry => entry[1]); }
+    has(name) { name = String(name); return this.__entries.some(entry => entry[0] === name); }
+    set(name, value) {
+      name = String(name); value = String(value);
+      const index = this.__entries.findIndex(entry => entry[0] === name);
+      if (index < 0) this.__entries.push([name, value]);
+      else {
+        this.__entries[index] = [name, value];
+        this.__entries = this.__entries.filter((entry, i) => entry[0] !== name || i === index);
+      }
+    }
+    *entries() { yield* this.__entries.map(entry => entry.slice()); }
+    *keys() { for (const [name] of this.__entries) yield name; }
+    *values() { for (const [, value] of this.__entries) yield value; }
+    forEach(callback, thisArg) { for (const [name, value] of this.__entries) callback.call(thisArg, value, name, this); }
+    [Symbol.iterator]() { return this.entries(); }
+    __multipart(boundary = "----omoikane-formdata-" + (++formDataBoundaryCounter)) {
+      return { body: formMultipartEncode(this.__entries, boundary), contentType: "multipart/form-data; boundary=" + boundary };
+    }
+  }
+
   class HTMLFormElement extends HTMLElement {
     __controls() {
       const controls = [];
@@ -4363,13 +4438,47 @@
     get length() {
       return this.__controls().length;
     }
-    // Fires a cancelable `submit` event (the form-submission entry point used by
-    // a submit button's activation behavior). Actual navigation is out of scope;
-    // a handler calling preventDefault simply suppresses the (absent) default.
+    get action() { return this.getAttribute("action") || document.URL; }
+    set action(value) { this.setAttribute("action", String(value)); }
+    get method() { return (this.getAttribute("method") || "get").toLowerCase() === "post" ? "post" : "get"; }
+    set method(value) { this.setAttribute("method", String(value)); }
+    get enctype() {
+      const value = (this.getAttribute("enctype") || "application/x-www-form-urlencoded").toLowerCase();
+      return ["application/x-www-form-urlencoded", "multipart/form-data", "text/plain"].includes(value) ? value : "application/x-www-form-urlencoded";
+    }
+    set enctype(value) { this.setAttribute("enctype", String(value)); }
+    __navigate(submitter) {
+      const data = collectFormEntries(this, submitter);
+      let url = __omoikane_resolve_url(this.action);
+      if (this.method === "get") {
+        const hashIndex = url.indexOf("#");
+        const hash = hashIndex < 0 ? "" : url.slice(hashIndex);
+        url = (hashIndex < 0 ? url : url.slice(0, hashIndex)).replace(/\?.*$/, "") + "?" + formUrlEncode(data) + hash;
+        __omoikane_submit_form(url, "GET", null, null);
+        return;
+      }
+      let body;
+      let contentType = this.enctype;
+      if (contentType === "multipart/form-data") {
+        const encoded = new FormData(); encoded.__entries = data;
+        const multipart = encoded.__multipart(); body = multipart.body; contentType = multipart.contentType;
+      } else if (contentType === "text/plain") body = formTextEncode(data);
+      else body = formUrlEncode(data);
+      __omoikane_submit_form(url, "POST", body, contentType);
+    }
     __submit(submitter) {
       const event = new Event("submit", { bubbles: true, cancelable: true });
       event.submitter = submitter || null;
-      this.dispatchEvent(event);
+      if (this.dispatchEvent(event)) this.__navigate(submitter || null);
+    }
+    submit() { this.__navigate(null); }
+    requestSubmit(submitter = null) {
+      if (submitter !== null) {
+        if (submitter.__owningForm() !== this) throw new DOMException("Submitter is not owned by this form", "NotFoundError");
+        const type = String(submitter.type || "").toLowerCase();
+        if (!((submitter.tagName === "INPUT" && ["submit", "image"].includes(type)) || (submitter.tagName === "BUTTON" && type === "submit"))) throw new TypeError("Not a submit button");
+      }
+      this.__submit(submitter);
     }
     __reset() {
       this.dispatchEvent(new Event("reset", { bubbles: true, cancelable: true }));
@@ -4504,6 +4613,18 @@
     const start = control.selectionStart;
     const end = control.selectionEnd;
     const key = String(init.key || "");
+
+    if (key === "Enter" && control instanceof HTMLInputElement) {
+      const form = control.__owningForm();
+      if (form) {
+        const submitter = form.__controls().find(candidate => {
+          const type = String(candidate.type || "").toLowerCase();
+          return !candidate.__isDisabledControl() && ((candidate.tagName === "INPUT" && ["submit", "image"].includes(type)) || (candidate.tagName === "BUTTON" && type === "submit"));
+        }) || null;
+        form.requestSubmit(submitter);
+      }
+      return;
+    }
 
     if (key === "ArrowLeft") {
       const destination = !init.shiftKey && start !== end ? start : Math.max(start - 1, 0);
@@ -6756,7 +6877,12 @@
       if (this.readyState !== 1 || this._sendFlag) throw new Error("InvalidStateError");
       this._sendFlag = true;
       const requestId = this._requestId;
-      const requestBody = this._method === "GET" || this._method === "HEAD" ? null : body;
+      let requestBody = this._method === "GET" || this._method === "HEAD" ? null : body;
+      if (requestBody instanceof FormData) {
+        const multipart = requestBody.__multipart();
+        requestBody = multipart.body;
+        if (!("content-type" in this._headers)) this._headers["content-type"] = multipart.contentType;
+      }
       if (requestBody != null && !("content-type" in this._headers)) {
         this._headers["content-type"] = "text/plain;charset=UTF-8";
       }
@@ -7193,7 +7319,13 @@
       this.method = String(init.method || (source && source.method) || "GET").toUpperCase();
       this.headers = new Headers(init.headers || (source && source.headers));
       const selectedBody = init.body === undefined ? (source && source.body) : init.body;
-      this.body = selectedBody == null ? null : String(selectedBody);
+      if (selectedBody instanceof FormData) {
+        const multipart = selectedBody.__multipart();
+        this.body = multipart.body;
+        if (!this.headers.has("content-type")) this.headers.set("content-type", multipart.contentType);
+      } else {
+        this.body = selectedBody == null ? null : String(selectedBody);
+      }
       this.credentials = init.credentials ?? (source && source.credentials) ?? "same-origin";
       this.mode = init.mode ?? (source && source.mode) ?? "cors";
       this.redirect = init.redirect ?? (source && source.redirect) ?? "follow";
@@ -7242,6 +7374,7 @@
     static error() { const response = new Response(null, { status: 0 }); response.type = "error"; return response; }
   }
   globalThis.Headers = Headers;
+  globalThis.FormData = FormData;
   globalThis.Request = Request;
   globalThis.Response = Response;
 

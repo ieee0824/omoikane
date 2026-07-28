@@ -411,8 +411,8 @@
     {
       "id": "data.form-data",
       "area": "data",
-      "description": "FormData is exposed",
-      "probe": "typeof FormData === 'function'",
+      "description": "FormData exposes ordered string entry mutation and iteration",
+      "probe": "typeof FormData === 'function' && (() => { const data = new FormData(); data.append('a', 'one'); data.append('a', 'two'); data.set('b', 'three'); return data.get('a') === 'one' && data.getAll('a').length === 2 && data.has('b') && Array.from(data).length === 3; })()",
       "baseline_supported": false
     },
     {
