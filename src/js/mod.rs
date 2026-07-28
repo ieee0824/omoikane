@@ -6814,6 +6814,10 @@ mod tests {
                   backing.slice(8).every(value => value === 0) &&
                   backing.slice(4, 8).some(value => value !== 0);
                 cryptoResult.uuid = crypto.randomUUID();
+                try { new Crypto(); }
+                catch (error) { cryptoResult.cryptoConstructorError = error instanceof TypeError; }
+                try { new SubtleCrypto(); }
+                catch (error) { cryptoResult.subtleConstructorError = error instanceof TypeError; }
                 try { crypto.getRandomValues(new Float32Array(1)); }
                 catch (error) { cryptoResult.typeError = error instanceof TypeError; }
                 try { crypto.getRandomValues(new Uint8Array(65537)); }
@@ -6843,7 +6847,8 @@ mod tests {
                 .eval(
                 r#"cryptoResult.sameView && cryptoResult.length === 32 && cryptoResult.changed && cryptoResult.offsetPreserved &&
                 /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(cryptoResult.uuid) &&
-                cryptoResult.typeError && cryptoResult.quotaError && cryptoResult.done &&
+                cryptoResult.typeError && cryptoResult.quotaError && cryptoResult.cryptoConstructorError &&
+                cryptoResult.subtleConstructorError && cryptoResult.done &&
                 cryptoResult.digests["SHA-1"] === "da39a3ee5e6b4b0d3255bfef95601890afd80709" &&
                 cryptoResult.digests["SHA-256"] === "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855" &&
                 cryptoResult.snapshotDigest === "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad" &&

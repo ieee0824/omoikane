@@ -5101,7 +5101,11 @@
     throw new TypeError("The provided value is not an ArrayBuffer or view");
   }
 
+  const cryptoConstructionToken = {};
   class SubtleCrypto {
+    constructor(token) {
+      if (token !== cryptoConstructionToken) throw new TypeError("Illegal constructor");
+    }
     digest(algorithm, data) {
       let name;
       let bytes;
@@ -5124,7 +5128,10 @@
   }
 
   class Crypto {
-    constructor() { this.subtle = new SubtleCrypto(); }
+    constructor(token) {
+      if (token !== cryptoConstructionToken) throw new TypeError("Illegal constructor");
+      this.subtle = new SubtleCrypto(cryptoConstructionToken);
+    }
     getRandomValues(array) {
       if (!INTEGER_TYPED_ARRAY_TAGS.has(Object.prototype.toString.call(array))) {
         throw new TypeError("getRandomValues requires an integer TypedArray");
@@ -5150,7 +5157,7 @@
   globalThis.SubtleCrypto = SubtleCrypto;
   // Omoikane does not yet model mixed-content/security contexts, so realms are
   // currently treated as secure and expose the complete core API.
-  globalThis.crypto = new Crypto();
+  globalThis.crypto = new Crypto(cryptoConstructionToken);
   globalThis.CustomElementRegistry = CustomElementRegistry;
   globalThis.CSSStyleSheet = CSSStyleSheet;
   globalThis.CSSRuleList = CSSRuleList;
