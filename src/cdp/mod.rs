@@ -10,7 +10,7 @@ use sha1::{Digest, Sha1};
 
 use crate::dom::{Node, NodeHandle, NodeType};
 use crate::html::{TreeBuilder, decode_html_response};
-use crate::http::Client;
+use crate::http::{Client, HttpRequest, Method};
 use crate::js::{JsRuntime, NavigationRequest, StorageManager};
 
 const WEBSOCKET_GUID: &str = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
@@ -740,10 +740,21 @@ impl CdpSession {
         url: &str,
         commit: NavigationCommit,
     ) -> Result<Value, JsonRpcError> {
+        self.navigate_with_request(url, commit, Method::Get, None, None)
+    }
+
+    fn navigate_with_request(
+        &mut self,
+        url: &str,
+        commit: NavigationCommit,
+        method: Method,
+        body: Option<Vec<u8>>,
+        content_type: Option<String>,
+    ) -> Result<Value, JsonRpcError> {
         let loader_id = self.next_loader_id.to_string();
         self.next_loader_id += 1;
 
-        if commit != NavigationCommit::Reload
+        if method == Method::Get && commit != NavigationCommit::Reload
             && is_fragment_only_navigation(&self.current_url, url)
         {
             let previous_url = self.current_url.clone();
@@ -768,13 +779,13 @@ impl CdpSession {
             json!({
                 "requestId": loader_id,
                 "documentURL": url,
-                "request": { "url": url, "method": "GET" },
+                "request": { "url": url, "method": method.as_str() },
                 "type": "Document",
             }),
         );
 
         let (html, status, document_url) = self
-            .load_page_source(&url)
+            .load_page_request(url, method, body, content_type)
             .map_err(|message| JsonRpcError {
                 code: -32000,
                 message,
@@ -866,6 +877,29 @@ impl CdpSession {
                         } else {
                             NavigationCommit::Push
                         },
+                    ) {
+                        self.restore_active_location(&previous_url);
+                        return Err(error);
+                    }
+                }
+                NavigationRequest::FormSubmit {
+                    url,
+                    method,
+                    body,
+                    content_type,
+                } => {
+                    let previous_url = self.current_url.clone();
+                    let method = if method.eq_ignore_ascii_case("POST") {
+                        Method::Post
+                    } else {
+                        Method::Get
+                    };
+                    if let Err(error) = self.navigate_with_request(
+                        &url,
+                        NavigationCommit::Push,
+                        method,
+                        body,
+                        content_type,
                     ) {
                         self.restore_active_location(&previous_url);
                         return Err(error);
@@ -1262,22 +1296,38 @@ impl CdpSession {
         Ok(parsed)
     }
 
-    fn load_page_source(&mut self, url: &str) -> Result<(String, u16, String), String> {
-        if url == "about:blank" {
-            return Ok((
-                "<html><head></head><body></body></html>".to_string(),
-                200,
-                url.to_string(),
-            ));
+    fn load_page_request(
+        &mut self,
+        url: &str,
+        method: Method,
+        body: Option<Vec<u8>>,
+        content_type: Option<String>,
+    ) -> Result<(String, u16, String), String> {
+        if method == Method::Get {
+            if url == "about:blank" {
+                return Ok((
+                    "<html><head></head><body></body></html>".to_string(),
+                    200,
+                    url.to_string(),
+                ));
+            }
+            if let Some(data) = url.strip_prefix("data:text/html,") {
+                return Ok((percent_decode(data), 200, url.to_string()));
+            }
         }
-
-        if let Some(data) = url.strip_prefix("data:text/html,") {
-            return Ok((percent_decode(data), 200, url.to_string()));
+        let parsed: crate::http::url::Url = url
+            .parse()
+            .map_err(|error: crate::http::url::UrlParseError| error.to_string())?;
+        let mut request = HttpRequest::new(method, parsed);
+        if let Some(content_type) = content_type {
+            request.set_header("Content-Type", content_type);
         }
-
+        if let Some(body) = body {
+            request.set_body(body);
+        }
         let response = self
             .http_client
-            .get(url)
+            .send(request)
             .map_err(|error| error.to_string())?;
         let effective_url = response
             .effective_url()
@@ -1839,6 +1889,47 @@ mod tests {
                 .any(|event| event.method == "Page.loadEventFired")
         );
 
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn get_and_post_form_submissions_reach_http_server_and_install_documents() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let server = thread::spawn(move || {
+            for index in 0..3 {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut buffer = [0u8; 4096];
+                let size = stream.read(&mut buffer).unwrap();
+                let request = String::from_utf8_lossy(&buffer[..size]).into_owned();
+                if index > 0 {
+                    sender.send(request).unwrap();
+                }
+                let body = match index {
+                    0 => "<form id='f' action='/search?old=1' method='get'><input name='q' value='hello world'><button name='via' value='button'>Search</button></form>",
+                    1 => "<form id='f' action='/submit' method='post'><input name='q' value='hello world'><button name='via' value='button'>Send</button></form>",
+                    _ => "<html><body><main id='submitted'>Saved</main></body></html>",
+                };
+                let response = format!("HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body);
+                stream.write_all(response.as_bytes()).unwrap();
+            }
+        });
+        let origin = format!("http://127.0.0.1:{}", address.port());
+        let mut session = CdpSession::new().unwrap();
+        session.dispatch("Page.navigate", json!({ "url": format!("{origin}/form") })).unwrap();
+        session.dispatch("Runtime.evaluate", json!({ "expression": "document.getElementById('f').requestSubmit(document.querySelector('button'))" })).unwrap();
+        assert_eq!(session.current_url(), format!("{origin}/search?q=hello+world&via=button"));
+        session.dispatch("Runtime.evaluate", json!({ "expression": "document.getElementById('f').requestSubmit(document.querySelector('button'))" })).unwrap();
+        assert_eq!(session.current_url(), format!("{origin}/submit"));
+        let installed = session.dispatch("Runtime.evaluate", json!({ "expression": "document.getElementById('submitted').textContent" })).unwrap();
+        assert_eq!(installed["result"]["value"], "Saved");
+        let get_request = receiver.recv().unwrap();
+        assert!(get_request.starts_with("GET /search?q=hello+world&via=button HTTP/1.1\r\n"));
+        let post_request = receiver.recv().unwrap();
+        assert!(post_request.starts_with("POST /submit HTTP/1.1\r\n"));
+        assert!(post_request.contains("Content-Type: application/x-www-form-urlencoded\r\n"));
+        assert!(post_request.ends_with("q=hello+world&via=button"));
         server.join().unwrap();
     }
 

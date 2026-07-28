@@ -198,6 +198,13 @@ enum TimerPayload {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NavigationRequest {
     Navigate { url: String, replace: bool },
+    /// A form submission whose encoded payload must be fetched as a document.
+    FormSubmit {
+        url: String,
+        method: String,
+        body: Option<Vec<u8>>,
+        content_type: Option<String>,
+    },
     UpdateHistory {
         url: String,
         replace: bool,
@@ -2805,6 +2812,11 @@ fn register_host_bindings(
             js_string!("__omoikane_schedule_navigation"),
             3,
             NativeFunction::from_copy_closure(schedule_navigation_native),
+        ),
+        (
+            js_string!("__omoikane_submit_form"),
+            4,
+            NativeFunction::from_copy_closure(submit_form_native),
         ),
     ] {
         context.register_global_builtin_callable(name, length, function)?;
@@ -6162,6 +6174,43 @@ fn schedule_navigation_native(
     })
 }
 
+fn submit_form_native(
+    _: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let string_arg = |index: usize, context: &mut Context| -> JsResult<String> {
+        Ok(args
+            .get(index)
+            .cloned()
+            .unwrap_or_default()
+            .to_string(context)?
+            .to_std_string_escaped())
+    };
+    let url = string_arg(0, context)?;
+    let method = string_arg(1, context)?;
+    let body = if args.get(2).is_none_or(JsValue::is_null_or_undefined) {
+        None
+    } else {
+        Some(string_arg(2, context)?.into_bytes())
+    };
+    let content_type = if args.get(3).is_none_or(JsValue::is_null_or_undefined) {
+        None
+    } else {
+        Some(string_arg(3, context)?)
+    };
+    let request = NavigationRequest::FormSubmit {
+        url,
+        method,
+        body,
+        content_type,
+    };
+    with_host_state(|state| {
+        state.borrow_mut().event_loop.enqueue_navigation(request);
+        Ok(JsValue::undefined())
+    })
+}
+
 /// Backs `document.write` / `document.writeln`.
 ///
 /// The written text is parsed one of two ways depending on the target
@@ -7021,6 +7070,39 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn form_data_preserves_order_duplicates_and_mutation_semantics() {
+        let mut runtime = runtime_from_html(r#"<form id="f"><input name="a" value="one"><input name="a" value="two"><input name="off" value="x" disabled><input type="checkbox" name="unchecked"><input type="checkbox" name="checked" value="yes" checked><textarea name="note">line1
+line2</textarea><select name="choice"><option value="x">X</option><option value="y" selected>Y</option></select><select name="fallback"><option value="disabled" disabled>Disabled</option><option value="usable">Usable</option></select></form>"#);
+        assert!(runtime.eval(r#"(() => { const data = new FormData(document.getElementById("f")); const initial = JSON.stringify([...data]); data.set("a", "changed"); data.append("a", "last"); data.delete("checked"); return initial === JSON.stringify([["a","one"],["a","two"],["checked","yes"],["note","line1\nline2"],["choice","y"],["fallback","usable"]]) && data.get("a") === "changed" && data.getAll("a").join(",") === "changed,last" && !data.has("checked") && data.get("missing") === null; })()"#).unwrap().as_boolean().unwrap());
+    }
+
+    #[test]
+    fn form_submission_encodes_get_post_and_submitter() {
+        let mut runtime = runtime_from_html(r#"<form id="getForm" action="/search?old=1#result"><input name="q" value="hello world"><input name="symbol" value="a*b"><button id="go" name="source" value="button">Go</button></form><form id="postForm" action="/save" method="post" enctype="text/plain"><textarea name="note">a
+b</textarea></form>"#);
+        runtime.eval(r#"document.getElementById("go").click(); document.getElementById("postForm").submit()"#).unwrap();
+        runtime.run_until_idle().unwrap();
+        assert_eq!(runtime.take_navigation_requests(), vec![
+            NavigationRequest::FormSubmit { url: "http://localhost/search?q=hello+world&symbol=a*b&source=button#result".to_string(), method: "GET".to_string(), body: None, content_type: None },
+            NavigationRequest::FormSubmit { url: "http://localhost/save".to_string(), method: "POST".to_string(), body: Some(b"note=a\r\nb\r\n".to_vec()), content_type: Some("text/plain".to_string()) },
+        ]);
+    }
+
+    #[test]
+    fn request_submit_and_enter_dispatch_cancelable_submit_events() {
+        let mut runtime = runtime_from_html(r#"<form id="f" action="/send"><input id="text" name="q" value="ok"><button id="send" name="via" value="enter">Send</button></form>"#);
+        assert_eq!(eval_str(&mut runtime, r#"(() => { const seen = []; const f = document.getElementById("f"), send = document.getElementById("send"), text = document.getElementById("text"); f.addEventListener("submit", event => { seen.push(event.submitter && event.submitter.id); if (seen.length === 1) event.preventDefault(); }); f.requestSubmit(send); text.focus(); __omoikane_dispatch_keyboard_input("keydown", { key: "Enter" }); return seen.join(","); })()"#), "send,send");
+        runtime.run_until_idle().unwrap();
+        assert_eq!(runtime.take_navigation_requests(), vec![NavigationRequest::FormSubmit { url: "http://localhost/send?q=ok&via=enter".to_string(), method: "GET".to_string(), body: None, content_type: None }]);
+    }
+
+    #[test]
+    fn multipart_form_data_is_used_by_request_and_xhr() {
+        let mut runtime = JsRuntime::new().unwrap();
+        assert!(runtime.eval(r#"(() => { const data = new FormData(); data.append("a", "one"); data.append("a", "two"); const encoded = data.__multipart("fixed-boundary"); const request = new Request("/upload", { method: "POST", body: data }); const xhr = new XMLHttpRequest(); xhr.open("POST", "/upload"); xhr.send(data); return encoded.body === "--fixed-boundary\r\nContent-Disposition: form-data; name=\"a\"\r\n\r\none\r\n--fixed-boundary\r\nContent-Disposition: form-data; name=\"a\"\r\n\r\ntwo\r\n--fixed-boundary--\r\n" && request.headers.get("content-type").startsWith("multipart/form-data; boundary=") && request.body.includes("name=\"a\"") && xhr._headers["content-type"].startsWith("multipart/form-data; boundary="); })()"#).unwrap().as_boolean().unwrap());
     }
 
     #[test]
