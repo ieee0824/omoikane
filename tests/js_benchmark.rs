@@ -134,6 +134,7 @@ struct Report {
     baseline_profile: String,
     baseline_passes: u32,
     reference_engine: String,
+    measured_passes: u32,
     measured_profile: &'static str,
     total: usize,
     improvements: Vec<String>,
@@ -168,20 +169,42 @@ fn parse_measurements(output: &str) -> Vec<Measurement> {
         .collect()
 }
 
-fn run_benchmarks() -> Vec<Measurement> {
+/// What one execution of `shapes.js` produced, including the conditions it ran
+/// under so they can be checked against the recorded ones.
+struct BenchmarkRun {
+    passes: u32,
+    measurements: Vec<Measurement>,
+}
+
+fn run_benchmarks() -> BenchmarkRun {
     let source = fs::read_to_string(SHAPES_PATH).expect("read benchmark shapes");
     let mut runtime = JsRuntime::new().expect("create benchmark runtime");
     runtime.eval(&source).expect("load benchmark shapes");
+    let passes = runtime
+        .eval("BENCH_PASSES")
+        .expect("read the shapes' pass count")
+        .as_number()
+        .expect("pass count is a number") as u32;
     let output = runtime
         .eval("runBenchmarks()")
         .expect("run benchmarks")
         .as_string()
         .expect("benchmark output is a string")
         .to_std_string_escaped();
-    parse_measurements(&output)
+    BenchmarkRun {
+        passes,
+        measurements: parse_measurements(&output),
+    }
 }
 
-fn build_report(baseline: &Baseline, measurements: &[Measurement]) -> Report {
+fn build_report(baseline: &Baseline, run: &BenchmarkRun) -> Report {
+    assert_eq!(
+        run.passes, baseline.passes,
+        "shapes.js timed {} passes but the baseline and its reference numbers were \
+         recorded over {}; re-record them rather than comparing across pass counts",
+        run.passes, baseline.passes
+    );
+    let measurements = &run.measurements;
     let mut shapes = Vec::new();
     let mut improvements = Vec::new();
     let mut regressions = Vec::new();
@@ -228,6 +251,7 @@ fn build_report(baseline: &Baseline, measurements: &[Measurement]) -> Report {
         baseline_profile: baseline.profile.clone(),
         baseline_passes: baseline.passes,
         reference_engine: baseline.reference_engine.clone(),
+        measured_passes: run.passes,
         measured_profile: measured_profile(),
         total: shapes.len(),
         improvements,
@@ -238,12 +262,12 @@ fn build_report(baseline: &Baseline, measurements: &[Measurement]) -> Report {
 
 fn print_report(report: &Report) {
     println!(
-        "JS benchmark: shapes={} profile={} (baseline v{} recorded under {}, {} passes; reference: {})",
+        "JS benchmark: shapes={} profile={} passes={} (baseline v{} recorded under {}; reference: {})",
         report.total,
         report.measured_profile,
+        report.measured_passes,
         report.baseline_version,
         report.baseline_profile,
-        report.baseline_passes,
         report.reference_engine
     );
     println!(
@@ -370,14 +394,17 @@ fn report_classifies_drift_against_the_baseline() {
         elapsed_ms: ns_per_op / 1000.0,
         ns_per_op,
     };
-    let measurements = vec![
-        measurement("faster", 70.0),
-        measurement("slower", 130.0),
-        // 10% off the baseline is inside the tolerance band.
-        measurement("steady", 110.0),
-    ];
+    let run = BenchmarkRun {
+        passes: 4,
+        measurements: vec![
+            measurement("faster", 70.0),
+            measurement("slower", 130.0),
+            // 10% off the baseline is inside the tolerance band.
+            measurement("steady", 110.0),
+        ],
+    };
 
-    let report = build_report(&baseline, &measurements);
+    let report = build_report(&baseline, &run);
 
     assert_eq!(report.improvements, ["faster"]);
     assert_eq!(report.regressions, ["slower"]);
@@ -412,14 +439,49 @@ fn report_refuses_to_compare_across_iteration_counts() {
             },
         }],
     };
-    let measurements = vec![Measurement {
-        id: "arith".to_string(),
-        iterations: 200,
-        elapsed_ms: 0.02,
-        ns_per_op: 100.0,
-    }];
+    let run = BenchmarkRun {
+        passes: 4,
+        measurements: vec![Measurement {
+            id: "arith".to_string(),
+            iterations: 200,
+            elapsed_ms: 0.02,
+            ns_per_op: 100.0,
+        }],
+    };
 
-    build_report(&baseline, &measurements);
+    build_report(&baseline, &run);
+}
+
+#[test]
+#[should_panic(expected = "recorded over 2")]
+fn report_refuses_to_compare_across_pass_counts() {
+    let baseline = Baseline {
+        version: 3,
+        profile: "dev".to_string(),
+        passes: 2,
+        reference_engine: "test".to_string(),
+        shapes: vec![BaselineShape {
+            id: "arith".to_string(),
+            description: "recorded over fewer passes".to_string(),
+            iterations: 1000,
+            baseline_ns_per_op: 100.0,
+            reference: Reference {
+                spidermonkey_interpreter: 50.0,
+                spidermonkey_jit: 10.0,
+            },
+        }],
+    };
+    let run = BenchmarkRun {
+        passes: 4,
+        measurements: vec![Measurement {
+            id: "arith".to_string(),
+            iterations: 1000,
+            elapsed_ms: 0.1,
+            ns_per_op: 100.0,
+        }],
+    };
+
+    build_report(&baseline, &run);
 }
 
 #[test]
@@ -448,15 +510,15 @@ fn benchmark_output_lines_are_parsed_into_measurements() {
 #[test]
 fn js_execution_benchmark_reports_every_shape() {
     let baseline = load_baseline();
-    let measurements = run_benchmarks();
-    let report = build_report(&baseline, &measurements);
+    let run = run_benchmarks();
+    let report = build_report(&baseline, &run);
 
     print_report(&report);
     write_report_if_requested(&report);
 
     // Structural invariants only: timings are reported, not asserted.
-    assert_eq!(measurements.len(), baseline.shapes.len());
-    for measurement in &measurements {
+    assert_eq!(run.measurements.len(), baseline.shapes.len());
+    for measurement in &run.measurements {
         assert!(
             measurement.ns_per_op.is_finite() && measurement.ns_per_op > 0.0,
             "shape {} produced no usable timing: {:?}",

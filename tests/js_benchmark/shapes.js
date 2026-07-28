@@ -33,11 +33,14 @@ globalThis.__benchSink = 0;
 //   unimpeded pass is enough for the minimum to be sound. Four passes were
 //   chosen after a build competing for a 2-core container inflated every shape
 //   by 21-54% at two passes.
-var BENCH_PASSES = 4;
+//
+// Exposed on the global so the runner can check it against the pass count the
+// baseline was recorded with, rather than trusting them to stay in step.
+globalThis.BENCH_PASSES = 4;
 
 function bench(name, iterations, body) {
   var best = Infinity;
-  for (var pass = 0; pass < BENCH_PASSES; pass++) {
+  for (var pass = 0; pass < globalThis.BENCH_PASSES; pass++) {
     var start = performance.now();
     var result = body(iterations);
     var elapsed = performance.now() - start;
