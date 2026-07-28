@@ -1,15 +1,26 @@
 //! JavaScript execution benchmark, reported per workload shape.
 //!
 //! The point of splitting the measurement by shape is that "JS is slow" is not
-//! actionable, while "string building is 15x off and monomorphic property access
-//! is 1.7x off" is: it says which part of the engine to work on, and which gap
-//! cannot be closed without a JIT.
+//! actionable. Per shape, the report separates two different questions: how far
+//! the engine is from another engine's *interpreter*, which is the gap reachable
+//! by improving this one, and how much further that engine's *JIT* pulls ahead,
+//! which is the gap that needs a JIT of our own. Those two numbers point at
+//! different work, and they differ sharply between shapes.
+//!
+//! Current figures live in `baseline.json` and are not repeated here, so that
+//! improving the engine cannot leave this comment contradicting the data.
 //!
 //! Timings are **reported, never asserted**. A wall-clock assertion in CI either
 //! fails on noise or is set so loose it catches nothing, so this follows the same
 //! rule as `render_benchmark_fixture.rs`: the test checks structural invariants
 //! and the numbers are printed for a human (or archived via
 //! `OMOIKANE_JS_BENCH_REPORT`).
+//!
+//! Baselines are the median of five runs on an idle machine. Run-to-run spread
+//! was 2-10% for every shape except `string-concat`, which swings about 22%
+//! because its cost depends on when collection happens; that shape can therefore
+//! report drift on its own, and its noise floor is well below the scale of change
+//! the harness exists to track.
 
 use std::collections::HashSet;
 use std::fs;
@@ -24,9 +35,18 @@ const BASELINE_PATH: &str = "tests/js_benchmark/baseline.json";
 /// How far a measurement may drift from the baseline before it is called an
 /// improvement or a regression.
 ///
-/// Wide on purpose. Run-to-run spread on shared CI runners is easily tens of
-/// percent, and a band narrower than the noise would report movement on every
-/// run, which trains readers to ignore the report.
+/// Wide on purpose: a band narrower than the noise would report movement on
+/// every run, which trains readers to ignore the report. On an idle two-core
+/// container the run-to-run spread is under 5%, so this leaves room for a busier
+/// machine while still resolving the kind of change worth acting on.
+///
+/// Contention is not fully absorbed by any band, and it is not meant to be: when
+/// *every* shape drifts the same way by a similar amount, that is the signature
+/// of a loaded machine rather than a code change, and the per-shape table makes
+/// that obvious. A build competing for the same two cores inflated all nine
+/// shapes by 21-54% at once. `shapes.js` reports the fastest of several passes
+/// specifically so that a single unimpeded pass is enough to recover the real
+/// number.
 const DRIFT_TOLERANCE: f64 = 0.20;
 
 #[derive(Debug, Deserialize)]
@@ -37,6 +57,12 @@ struct Baseline {
     /// engine itself is optimized either way, but the field keeps the comparison
     /// honest if that ever changes.
     profile: String,
+    /// Pass count `shapes.js` used when the numbers were recorded. Reported so a
+    /// baseline captured under a different `BENCH_PASSES` is identifiable rather
+    /// than silently compared.
+    passes: u32,
+    /// Which engine and version the `reference` numbers came from.
+    reference_engine: String,
     shapes: Vec<BaselineShape>,
 }
 
@@ -44,6 +70,14 @@ struct Baseline {
 struct BaselineShape {
     id: String,
     description: String,
+    /// Iteration count the baseline and the reference numbers were measured at.
+    ///
+    /// Part of the measurement conditions, not an implementation detail: a
+    /// tiering JIT's cost per operation depends on reaching its optimizing tier,
+    /// so a reference captured at a different count is not comparable. Checked
+    /// against what `shapes.js` actually ran, because that mismatch is exactly
+    /// how the recorded ratios went wrong once already.
+    iterations: u64,
     /// Boa's measured cost, in nanoseconds per iteration.
     baseline_ns_per_op: f64,
     /// The same shape measured in another engine, for context on how much of the
@@ -98,6 +132,9 @@ struct ShapeResult {
 struct Report {
     baseline_version: u32,
     baseline_profile: String,
+    baseline_passes: u32,
+    reference_engine: String,
+    measured_passes: u32,
     measured_profile: &'static str,
     total: usize,
     improvements: Vec<String>,
@@ -132,20 +169,50 @@ fn parse_measurements(output: &str) -> Vec<Measurement> {
         .collect()
 }
 
-fn run_benchmarks() -> Vec<Measurement> {
+/// What one execution of `shapes.js` produced, including the conditions it ran
+/// under so they can be checked against the recorded ones.
+struct BenchmarkRun {
+    passes: u32,
+    measurements: Vec<Measurement>,
+}
+
+fn run_benchmarks() -> BenchmarkRun {
     let source = fs::read_to_string(SHAPES_PATH).expect("read benchmark shapes");
     let mut runtime = JsRuntime::new().expect("create benchmark runtime");
     runtime.eval(&source).expect("load benchmark shapes");
+    // Validated rather than cast: `as u32` would turn 4.5 into 4 and NaN into 0,
+    // and a zero pass count would surface as a baffling "timed 0 passes"
+    // mismatch instead of pointing at the edit that caused it.
+    let raw_passes = runtime
+        .eval("BENCH_PASSES")
+        .expect("read the shapes' pass count")
+        .as_number()
+        .expect("shapes.js must set BENCH_PASSES to a number");
+    assert!(
+        raw_passes.is_finite() && raw_passes >= 1.0 && raw_passes.fract() == 0.0,
+        "shapes.js set BENCH_PASSES to {raw_passes}; it must be a whole number of at least 1"
+    );
+    let passes = raw_passes as u32;
     let output = runtime
         .eval("runBenchmarks()")
         .expect("run benchmarks")
         .as_string()
         .expect("benchmark output is a string")
         .to_std_string_escaped();
-    parse_measurements(&output)
+    BenchmarkRun {
+        passes,
+        measurements: parse_measurements(&output),
+    }
 }
 
-fn build_report(baseline: &Baseline, measurements: &[Measurement]) -> Report {
+fn build_report(baseline: &Baseline, run: &BenchmarkRun) -> Report {
+    assert_eq!(
+        run.passes, baseline.passes,
+        "shapes.js timed {} passes but the baseline and its reference numbers were \
+         recorded over {}; re-record them rather than comparing across pass counts",
+        run.passes, baseline.passes
+    );
+    let measurements = &run.measurements;
     let mut shapes = Vec::new();
     let mut improvements = Vec::new();
     let mut regressions = Vec::new();
@@ -155,6 +222,13 @@ fn build_report(baseline: &Baseline, measurements: &[Measurement]) -> Report {
             .iter()
             .find(|measurement| measurement.id == expected.id)
             .unwrap_or_else(|| panic!("baseline shape {} was not measured", expected.id));
+        assert_eq!(
+            measured.iterations, expected.iterations,
+            "shape {} ran {} iterations but the baseline and its reference numbers \
+             were measured at {}; re-record the baseline (and the reference engine's \
+             numbers) rather than comparing across iteration counts",
+            expected.id, measured.iterations, expected.iterations
+        );
 
         let delta_ratio = measured.ns_per_op / expected.baseline_ns_per_op - 1.0;
         let drift = if delta_ratio > DRIFT_TOLERANCE {
@@ -183,6 +257,9 @@ fn build_report(baseline: &Baseline, measurements: &[Measurement]) -> Report {
     Report {
         baseline_version: baseline.version,
         baseline_profile: baseline.profile.clone(),
+        baseline_passes: baseline.passes,
+        reference_engine: baseline.reference_engine.clone(),
+        measured_passes: run.passes,
         measured_profile: measured_profile(),
         total: shapes.len(),
         improvements,
@@ -193,8 +270,13 @@ fn build_report(baseline: &Baseline, measurements: &[Measurement]) -> Report {
 
 fn print_report(report: &Report) {
     println!(
-        "JS benchmark: shapes={} profile={} (baseline recorded under {})",
-        report.total, report.measured_profile, report.baseline_profile
+        "JS benchmark: shapes={} profile={} passes={} (baseline v{} recorded under {}; reference: {})",
+        report.total,
+        report.measured_profile,
+        report.measured_passes,
+        report.baseline_version,
+        report.baseline_profile,
+        report.reference_engine
     );
     println!(
         "  {:<14} {:>10} {:>10} {:>8}  {:>9} {:>8}",
@@ -243,6 +325,8 @@ fn write_report_if_requested(report: &Report) {
 fn baseline_shapes_are_unique_and_well_formed() {
     let baseline = load_baseline();
     assert!(baseline.version > 0);
+    assert!(baseline.passes > 0);
+    assert!(!baseline.reference_engine.trim().is_empty());
     assert!(!baseline.shapes.is_empty());
 
     let mut ids = HashSet::new();
@@ -257,6 +341,7 @@ fn baseline_shapes_are_unique_and_well_formed() {
         );
         assert!(ids.insert(shape.id.clone()), "duplicate shape id: {}", shape.id);
         assert!(!shape.description.trim().is_empty());
+        assert!(shape.iterations > 0);
         assert!(shape.baseline_ns_per_op > 0.0);
         assert!(shape.reference.spidermonkey_interpreter > 0.0);
         assert!(shape.reference.spidermonkey_jit > 0.0);
@@ -276,10 +361,13 @@ fn report_classifies_drift_against_the_baseline() {
     let baseline = Baseline {
         version: 1,
         profile: "dev".to_string(),
+        passes: 4,
+        reference_engine: "test".to_string(),
         shapes: vec![
             BaselineShape {
                 id: "faster".to_string(),
                 description: "got faster".to_string(),
+                iterations: 1000,
                 baseline_ns_per_op: 100.0,
                 reference: Reference {
                     spidermonkey_interpreter: 50.0,
@@ -289,6 +377,7 @@ fn report_classifies_drift_against_the_baseline() {
             BaselineShape {
                 id: "slower".to_string(),
                 description: "got slower".to_string(),
+                iterations: 1000,
                 baseline_ns_per_op: 100.0,
                 reference: Reference {
                     spidermonkey_interpreter: 50.0,
@@ -298,6 +387,7 @@ fn report_classifies_drift_against_the_baseline() {
             BaselineShape {
                 id: "steady".to_string(),
                 description: "within tolerance".to_string(),
+                iterations: 1000,
                 baseline_ns_per_op: 100.0,
                 reference: Reference {
                     spidermonkey_interpreter: 50.0,
@@ -312,14 +402,17 @@ fn report_classifies_drift_against_the_baseline() {
         elapsed_ms: ns_per_op / 1000.0,
         ns_per_op,
     };
-    let measurements = vec![
-        measurement("faster", 70.0),
-        measurement("slower", 130.0),
-        // 10% off the baseline is inside the tolerance band.
-        measurement("steady", 110.0),
-    ];
+    let run = BenchmarkRun {
+        passes: 4,
+        measurements: vec![
+            measurement("faster", 70.0),
+            measurement("slower", 130.0),
+            // 10% off the baseline is inside the tolerance band.
+            measurement("steady", 110.0),
+        ],
+    };
 
-    let report = build_report(&baseline, &measurements);
+    let report = build_report(&baseline, &run);
 
     assert_eq!(report.improvements, ["faster"]);
     assert_eq!(report.regressions, ["slower"]);
@@ -331,6 +424,72 @@ fn report_classifies_drift_against_the_baseline() {
     let faster = &report.shapes[0];
     assert_eq!(faster.versus_interpreter, 1.4);
     assert_eq!(faster.versus_jit, 7.0);
+}
+
+/// The guard that makes the mismatch this schema field exists to prevent
+/// impossible rather than merely documented.
+#[test]
+#[should_panic(expected = "were measured at 1000")]
+fn report_refuses_to_compare_across_iteration_counts() {
+    let baseline = Baseline {
+        version: 3,
+        profile: "dev".to_string(),
+        passes: 4,
+        reference_engine: "test".to_string(),
+        shapes: vec![BaselineShape {
+            id: "arith".to_string(),
+            description: "recorded at a different count".to_string(),
+            iterations: 1000,
+            baseline_ns_per_op: 100.0,
+            reference: Reference {
+                spidermonkey_interpreter: 50.0,
+                spidermonkey_jit: 10.0,
+            },
+        }],
+    };
+    let run = BenchmarkRun {
+        passes: 4,
+        measurements: vec![Measurement {
+            id: "arith".to_string(),
+            iterations: 200,
+            elapsed_ms: 0.02,
+            ns_per_op: 100.0,
+        }],
+    };
+
+    build_report(&baseline, &run);
+}
+
+#[test]
+#[should_panic(expected = "recorded over 2")]
+fn report_refuses_to_compare_across_pass_counts() {
+    let baseline = Baseline {
+        version: 3,
+        profile: "dev".to_string(),
+        passes: 2,
+        reference_engine: "test".to_string(),
+        shapes: vec![BaselineShape {
+            id: "arith".to_string(),
+            description: "recorded over fewer passes".to_string(),
+            iterations: 1000,
+            baseline_ns_per_op: 100.0,
+            reference: Reference {
+                spidermonkey_interpreter: 50.0,
+                spidermonkey_jit: 10.0,
+            },
+        }],
+    };
+    let run = BenchmarkRun {
+        passes: 4,
+        measurements: vec![Measurement {
+            id: "arith".to_string(),
+            iterations: 1000,
+            elapsed_ms: 0.1,
+            ns_per_op: 100.0,
+        }],
+    };
+
+    build_report(&baseline, &run);
 }
 
 #[test]
@@ -359,15 +518,15 @@ fn benchmark_output_lines_are_parsed_into_measurements() {
 #[test]
 fn js_execution_benchmark_reports_every_shape() {
     let baseline = load_baseline();
-    let measurements = run_benchmarks();
-    let report = build_report(&baseline, &measurements);
+    let run = run_benchmarks();
+    let report = build_report(&baseline, &run);
 
     print_report(&report);
     write_report_if_requested(&report);
 
     // Structural invariants only: timings are reported, not asserted.
-    assert_eq!(measurements.len(), baseline.shapes.len());
-    for measurement in &measurements {
+    assert_eq!(run.measurements.len(), baseline.shapes.len());
+    for measurement in &run.measurements {
         assert!(
             measurement.ns_per_op.is_finite() && measurement.ns_per_op > 0.0,
             "shape {} produced no usable timing: {:?}",
