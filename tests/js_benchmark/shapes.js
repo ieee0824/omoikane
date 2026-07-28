@@ -1,10 +1,10 @@
 // Workload shapes for the JavaScript execution benchmark.
 //
 // Each shape isolates one cost centre of the engine, because the interesting
-// number is not "how fast is JS" but "which part of the engine is slow". The
-// shapes were chosen from a Boa/SpiderMonkey comparison (issue #305) where the
-// gap ranged from 1.7x on monomorphic property access to 15.4x on string
-// building against SpiderMonkey's interpreter.
+// number is not "how fast is JS" but "which part of the engine is slow". The set
+// was chosen from a Boa/SpiderMonkey comparison (issue #305) in which the gap
+// varied by almost an order of magnitude between shapes; the measured values
+// live in `baseline.json` rather than in this comment.
 //
 // This file is executed verbatim in other engines to produce the reference
 // numbers in `baseline.json`, so it must stay free of Omoikane-specific APIs

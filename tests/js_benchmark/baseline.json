@@ -1,5 +1,5 @@
 {
-  "version": 2,
+  "version": 3,
   "profile": "dev",
   "passes": 4,
   "reference_engine": "SpiderMonkey (Firefox 152.0.6)",
@@ -7,6 +7,7 @@
     {
       "id": "arith",
       "description": "Bytecode dispatch and integer arithmetic with no property access or allocation",
+      "iterations": 2000000,
       "baseline_ns_per_op": 136.7,
       "reference": {
         "spidermonkey_interpreter": 36.91,
@@ -16,6 +17,7 @@
     {
       "id": "prop-mono",
       "description": "Monomorphic property read/write through one call site (inline cache hit path)",
+      "iterations": 1000000,
       "baseline_ns_per_op": 269.2,
       "reference": {
         "spidermonkey_interpreter": 65.16,
@@ -25,6 +27,7 @@
     {
       "id": "prop-mega",
       "description": "Megamorphic property read across eight shapes (inline cache miss path)",
+      "iterations": 500000,
       "baseline_ns_per_op": 279.7,
       "reference": {
         "spidermonkey_interpreter": 35.92,
@@ -34,6 +37,7 @@
     {
       "id": "call",
       "description": "Function call overhead",
+      "iterations": 1000000,
       "baseline_ns_per_op": 307.1,
       "reference": {
         "spidermonkey_interpreter": 64.38,
@@ -43,6 +47,7 @@
     {
       "id": "closure-alloc",
       "description": "One closure allocated per iteration (allocator and GC pressure)",
+      "iterations": 300000,
       "baseline_ns_per_op": 844.4,
       "reference": {
         "spidermonkey_interpreter": 96.73,
@@ -52,6 +57,7 @@
     {
       "id": "object-alloc",
       "description": "One object literal allocated per iteration (allocator and GC pressure)",
+      "iterations": 300000,
       "baseline_ns_per_op": 664.9,
       "reference": {
         "spidermonkey_interpreter": 97.33,
@@ -61,6 +67,7 @@
     {
       "id": "string-concat",
       "description": "String building: string representation and reallocation",
+      "iterations": 200000,
       "baseline_ns_per_op": 496.8,
       "reference": {
         "spidermonkey_interpreter": 37.7,
@@ -70,6 +77,7 @@
     {
       "id": "array",
       "description": "Array index and push",
+      "iterations": 500000,
       "baseline_ns_per_op": 442.3,
       "reference": {
         "spidermonkey_interpreter": 111.52,
@@ -79,6 +87,7 @@
     {
       "id": "proto-method",
       "description": "Method call resolved through a prototype (the shape corrupted by issue #058)",
+      "iterations": 500000,
       "baseline_ns_per_op": 450.6,
       "reference": {
         "spidermonkey_interpreter": 41.8,

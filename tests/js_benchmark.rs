@@ -1,10 +1,14 @@
 //! JavaScript execution benchmark, reported per workload shape.
 //!
 //! The point of splitting the measurement by shape is that "JS is slow" is not
-//! actionable, while "string building is 13x off SpiderMonkey's interpreter but
-//! monomorphic property access is only 4x off, and the JIT accounts for a further
-//! 68x of the monomorphic gap" is: it says which part of the engine to work on,
-//! and which part cannot be reached without a JIT.
+//! actionable. Per shape, the report separates two different questions: how far
+//! the engine is from another engine's *interpreter*, which is the gap reachable
+//! by improving this one, and how much further that engine's *JIT* pulls ahead,
+//! which is the gap that needs a JIT of our own. Those two numbers point at
+//! different work, and they differ sharply between shapes.
+//!
+//! Current figures live in `baseline.json` and are not repeated here, so that
+//! improving the engine cannot leave this comment contradicting the data.
 //!
 //! Timings are **reported, never asserted**. A wall-clock assertion in CI either
 //! fails on noise or is set so loose it catches nothing, so this follows the same
@@ -66,6 +70,14 @@ struct Baseline {
 struct BaselineShape {
     id: String,
     description: String,
+    /// Iteration count the baseline and the reference numbers were measured at.
+    ///
+    /// Part of the measurement conditions, not an implementation detail: a
+    /// tiering JIT's cost per operation depends on reaching its optimizing tier,
+    /// so a reference captured at a different count is not comparable. Checked
+    /// against what `shapes.js` actually ran, because that mismatch is exactly
+    /// how the recorded ratios went wrong once already.
+    iterations: u64,
     /// Boa's measured cost, in nanoseconds per iteration.
     baseline_ns_per_op: f64,
     /// The same shape measured in another engine, for context on how much of the
@@ -179,6 +191,13 @@ fn build_report(baseline: &Baseline, measurements: &[Measurement]) -> Report {
             .iter()
             .find(|measurement| measurement.id == expected.id)
             .unwrap_or_else(|| panic!("baseline shape {} was not measured", expected.id));
+        assert_eq!(
+            measured.iterations, expected.iterations,
+            "shape {} ran {} iterations but the baseline and its reference numbers \
+             were measured at {}; re-record the baseline (and the reference engine's \
+             numbers) rather than comparing across iteration counts",
+            expected.id, measured.iterations, expected.iterations
+        );
 
         let delta_ratio = measured.ns_per_op / expected.baseline_ns_per_op - 1.0;
         let drift = if delta_ratio > DRIFT_TOLERANCE {
@@ -290,6 +309,7 @@ fn baseline_shapes_are_unique_and_well_formed() {
         );
         assert!(ids.insert(shape.id.clone()), "duplicate shape id: {}", shape.id);
         assert!(!shape.description.trim().is_empty());
+        assert!(shape.iterations > 0);
         assert!(shape.baseline_ns_per_op > 0.0);
         assert!(shape.reference.spidermonkey_interpreter > 0.0);
         assert!(shape.reference.spidermonkey_jit > 0.0);
@@ -315,6 +335,7 @@ fn report_classifies_drift_against_the_baseline() {
             BaselineShape {
                 id: "faster".to_string(),
                 description: "got faster".to_string(),
+                iterations: 1000,
                 baseline_ns_per_op: 100.0,
                 reference: Reference {
                     spidermonkey_interpreter: 50.0,
@@ -324,6 +345,7 @@ fn report_classifies_drift_against_the_baseline() {
             BaselineShape {
                 id: "slower".to_string(),
                 description: "got slower".to_string(),
+                iterations: 1000,
                 baseline_ns_per_op: 100.0,
                 reference: Reference {
                     spidermonkey_interpreter: 50.0,
@@ -333,6 +355,7 @@ fn report_classifies_drift_against_the_baseline() {
             BaselineShape {
                 id: "steady".to_string(),
                 description: "within tolerance".to_string(),
+                iterations: 1000,
                 baseline_ns_per_op: 100.0,
                 reference: Reference {
                     spidermonkey_interpreter: 50.0,
@@ -366,6 +389,37 @@ fn report_classifies_drift_against_the_baseline() {
     let faster = &report.shapes[0];
     assert_eq!(faster.versus_interpreter, 1.4);
     assert_eq!(faster.versus_jit, 7.0);
+}
+
+/// The guard that makes the mismatch this schema field exists to prevent
+/// impossible rather than merely documented.
+#[test]
+#[should_panic(expected = "were measured at 1000")]
+fn report_refuses_to_compare_across_iteration_counts() {
+    let baseline = Baseline {
+        version: 3,
+        profile: "dev".to_string(),
+        passes: 4,
+        reference_engine: "test".to_string(),
+        shapes: vec![BaselineShape {
+            id: "arith".to_string(),
+            description: "recorded at a different count".to_string(),
+            iterations: 1000,
+            baseline_ns_per_op: 100.0,
+            reference: Reference {
+                spidermonkey_interpreter: 50.0,
+                spidermonkey_jit: 10.0,
+            },
+        }],
+    };
+    let measurements = vec![Measurement {
+        id: "arith".to_string(),
+        iterations: 200,
+        elapsed_ms: 0.02,
+        ns_per_op: 100.0,
+    }];
+
+    build_report(&baseline, &measurements);
 }
 
 #[test]
