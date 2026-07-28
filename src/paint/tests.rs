@@ -8226,6 +8226,26 @@ fn object_fit_applies_to_a_positioned_replaced_box() {
 }
 
 #[test]
+fn tiny_absolute_image_is_painted_only_at_its_positioned_location() {
+    let mut source = Canvas::new(2, 1);
+    source.fill_rect(Rect { x: 0.0, y: 0.0, width: 2.0, height: 1.0 }, Color::rgb(255, 0, 0));
+    let encoded = base64::engine::general_purpose::STANDARD.encode(source.encode_png());
+    let html = format!(
+        r#"<html><head><style>body {{ margin: 0; }} img {{ position: absolute; left: 0; top: 0; width: 2px; height: 1px; }}</style></head><body><img src="data:image/png;base64,{encoded}"></body></html>"#
+    );
+    let document = TreeBuilder::parse(&html).document();
+    let mut resolver = StyleResolver::new();
+    for stylesheet in extract_author_stylesheets(&document, None).unwrap() {
+        resolver.add_stylesheet(Origin::Author, parse_stylesheet_forgiving(&stylesheet));
+    }
+    let viewport = Rect { x: 0.0, y: 0.0, width: 20.0, height: 20.0 };
+    let layout = layout_tree(&document, &mut resolver, viewport).unwrap();
+    let canvas = paint_layout(&layout, &mut resolver, viewport);
+
+    assert_eq!(painted_bounds(&canvas), Some((0, 0, 2, 1)));
+}
+
+#[test]
 fn default_object_fit_keeps_stretching_replaced_content() {
     // No declaration at all must paint exactly like the pre-object-fit engine:
     // the image stretched across the whole content box.
