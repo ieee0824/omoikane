@@ -180,11 +180,19 @@ fn run_benchmarks() -> BenchmarkRun {
     let source = fs::read_to_string(SHAPES_PATH).expect("read benchmark shapes");
     let mut runtime = JsRuntime::new().expect("create benchmark runtime");
     runtime.eval(&source).expect("load benchmark shapes");
-    let passes = runtime
+    // Validated rather than cast: `as u32` would turn 4.5 into 4 and NaN into 0,
+    // and a zero pass count would surface as a baffling "timed 0 passes"
+    // mismatch instead of pointing at the edit that caused it.
+    let raw_passes = runtime
         .eval("BENCH_PASSES")
         .expect("read the shapes' pass count")
         .as_number()
-        .expect("pass count is a number") as u32;
+        .expect("shapes.js must set BENCH_PASSES to a number");
+    assert!(
+        raw_passes.is_finite() && raw_passes >= 1.0 && raw_passes.fract() == 0.0,
+        "shapes.js set BENCH_PASSES to {raw_passes}; it must be a whole number of at least 1"
+    );
+    let passes = raw_passes as u32;
     let output = runtime
         .eval("runBenchmarks()")
         .expect("run benchmarks")
