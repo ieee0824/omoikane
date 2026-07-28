@@ -6431,6 +6431,9 @@
           this._method,
           JSON.stringify(Object.entries(this._headers)),
           requestBody,
+          "cors",
+          this.withCredentials ? "include" : "same-origin",
+          "follow",
         )
       ).then(raw => {
         if (requestId !== this._requestId) return;
@@ -6856,9 +6859,16 @@
       this.headers = new Headers(init.headers || (source && source.headers));
       const selectedBody = init.body === undefined ? (source && source.body) : init.body;
       this.body = selectedBody == null ? null : String(selectedBody);
-      this.credentials = init.credentials || (source && source.credentials) || "same-origin";
-      this.mode = init.mode || (source && source.mode) || "cors";
-      this.signal = init.signal || (source && source.signal) || null;
+      this.credentials = init.credentials ?? (source && source.credentials) ?? "same-origin";
+      this.mode = init.mode ?? (source && source.mode) ?? "cors";
+      this.redirect = init.redirect ?? (source && source.redirect) ?? "follow";
+      this.signal = init.signal ?? (source && source.signal) ?? null;
+      if (!["omit", "same-origin", "include"].includes(this.credentials)) throw new TypeError("Invalid credentials mode");
+      if (!["same-origin", "cors", "no-cors"].includes(this.mode)) throw new TypeError("Invalid request mode");
+      if (!["follow", "error", "manual"].includes(this.redirect)) throw new TypeError("Invalid redirect mode");
+      if (this.mode === "no-cors" && !["GET", "HEAD", "POST"].includes(this.method)) {
+        throw new TypeError("Method is not allowed in no-cors mode");
+      }
       if ((this.method === "GET" || this.method === "HEAD") && this.body != null) {
         throw new TypeError("Request with GET/HEAD method cannot have body");
       }
@@ -6883,7 +6893,11 @@
     text() { this.bodyUsed = true; return Promise.resolve(this._body); }
     json() { return this.text().then(JSON.parse); }
     arrayBuffer() { return Promise.resolve(new TextEncoder().encode(this._body).buffer); }
-    clone() { return new Response(this._body, { status: this.status, statusText: this.statusText, headers: this.headers, url: this.url, redirected: this.redirected }); }
+    clone() {
+      const response = new Response(this._body, { status: this.status, statusText: this.statusText, headers: this.headers, url: this.url, redirected: this.redirected });
+      response.type = this.type;
+      return response;
+    }
     static json(data, init = {}) {
       const headers = new Headers(init.headers);
       if (!headers.has("content-type")) headers.set("content-type", "application/json");
@@ -6906,17 +6920,22 @@
         request.method,
         JSON.stringify([...request.headers]),
         request.body,
+        request.mode,
+        request.credentials,
+        request.redirect,
       );
     }).then(raw => {
       if (request.signal && request.signal.aborted) throw request.signal.reason;
       const data = JSON.parse(String(raw));
-      return new Response(data.bodyText, {
+      const response = new Response(data.bodyText, {
         status: data.status,
         statusText: data.statusText,
         headers: data.headers,
         url: data.url,
         redirected: data.redirected,
       });
+      response.type = data.type;
+      return response;
     });
   };
 
