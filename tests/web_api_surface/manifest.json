@@ -541,9 +541,10 @@
     {
       "id": "css.element-scroll-geometry-and-event",
       "area": "cssom",
-      "description": "Scrolling an element moves descendant client rects and fires a non-bubbling scroll event",
-      "setup": "globalThis.__scrollEvents = 0; globalThis.__scrollBubbled = 0; __scrollHost.addEventListener('scroll', () => { __scrollEvents += 1; }); document.addEventListener('scroll', () => { __scrollBubbled += 1; }); __scrollHost.scroll(0, 0)",
-      "probe": "(() => { const target = document.getElementById('scroll-target'); const before = target.getBoundingClientRect().top; const hostBefore = __scrollHost.getBoundingClientRect().top; const events = __scrollEvents; __scrollHost.scrollTop = 20; const moved = target.getBoundingClientRect().top === before - 20; const hostStayed = __scrollHost.getBoundingClientRect().top === hostBefore; return moved && hostStayed && __scrollEvents === events + 1 && __scrollBubbled === 0; })()",
+      "description": "Element scroll events are deferred, coalesced per frame, and do not bubble",
+      "setup": "globalThis.__scrollEvents = 0; globalThis.__scrollBubbled = 0; const target = document.getElementById('scroll-target'); globalThis.__scrollTargetBefore = target.getBoundingClientRect().top + __scrollHost.scrollTop; globalThis.__scrollHostBefore = __scrollHost.getBoundingClientRect().top; __scrollHost.addEventListener('scroll', () => { __scrollEvents += 1; }); document.addEventListener('scroll', () => { __scrollBubbled += 1; }); __scrollHost.scrollTop = 10; __scrollHost.scrollTop = 20; globalThis.__scrollSynchronous = __scrollEvents",
+      "probe": "(() => { const target = document.getElementById('scroll-target'); const moved = target.getBoundingClientRect().top === __scrollTargetBefore - 20; const hostStayed = __scrollHost.getBoundingClientRect().top === __scrollHostBefore; return moved && hostStayed && __scrollSynchronous === 0 && __scrollEvents === 1 && __scrollBubbled === 0; })()",
+      "run_animation_frame": true,
       "baseline_supported": true
     },
     {

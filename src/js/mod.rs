@@ -333,6 +333,12 @@ struct HostState {
     viewport: Rect,
     /// Top-level Window scroll offset in document CSS pixels.
     window_scroll: (f32, f32),
+    /// Scroll targets waiting for the next rendering opportunity. This is an
+    /// ordered set: first-queue order is retained and duplicate ids are skipped.
+    pending_scroll_targets: Vec<usize>,
+    /// Effective element offsets captured before invalidating layout. Reflow
+    /// compares these with the rebuilt scrolling extents to detect clamps.
+    scroll_offsets_before_layout: HashMap<usize, (f32, f32)>,
     /// Per-document cached style resolvers, keyed by the identity of each
     /// document's root [`Document`] node (the top-level document and every
     /// `<iframe>` sub-browsing-context document). Each entry is rebuilt on
@@ -485,6 +491,8 @@ impl HostState {
                 height: DEFAULT_VIEWPORT_HEIGHT,
             },
             window_scroll: (0.0, 0.0),
+            pending_scroll_targets: Vec::new(),
+            scroll_offsets_before_layout: HashMap::new(),
             document_styles,
             layout_root: None,
             #[cfg(test)]
@@ -736,6 +744,7 @@ impl HostState {
         let document_id = document.identity();
         self.document_styles.entry(document_id).or_default().dirty = true;
         if document_id == self.document.identity() {
+            self.capture_scroll_offsets_before_layout();
             self.layout_root = None;
         }
     }
@@ -751,6 +760,7 @@ impl HostState {
             }
         }
         if document_id == self.document.identity() {
+            self.capture_scroll_offsets_before_layout();
             self.layout_root = None;
         }
     }
@@ -799,7 +809,33 @@ impl HostState {
         for entry in self.document_styles.values_mut() {
             entry.dirty = true;
         }
+        self.capture_scroll_offsets_before_layout();
         self.layout_root = None;
+    }
+
+    fn capture_scroll_offsets_before_layout(&mut self) {
+        let Some(layout_root) = self.layout_root.as_ref() else {
+            return;
+        };
+        fn capture(layout: &LayoutBox, offsets: &mut HashMap<usize, (f32, f32)>) {
+            let node_id = layout.node.identity();
+            if !offsets.contains_key(&node_id) && layout.node.scroll_offset() != (0.0, 0.0) {
+                let offset = layout.scroll_offset();
+                if offset != (0.0, 0.0) {
+                    offsets.insert(node_id, offset);
+                }
+            }
+            for child in &layout.children {
+                capture(child, offsets);
+            }
+        }
+        capture(layout_root, &mut self.scroll_offsets_before_layout);
+    }
+
+    fn queue_scroll_target(&mut self, node_id: usize) {
+        if !self.pending_scroll_targets.contains(&node_id) {
+            self.pending_scroll_targets.push(node_id);
+        }
     }
 
     /// Rebuilds `document`'s cached [`StyleResolver`] from its own inline
@@ -943,6 +979,28 @@ impl HostState {
             self.layout_generation = self.layout_generation.saturating_add(1);
         }
         self.layout_root = layout;
+        let mut clamped_targets = Vec::new();
+        if let Some(layout_root) = self.layout_root.as_ref() {
+            for (node_id, previous) in std::mem::take(&mut self.scroll_offsets_before_layout) {
+                let Some(node) = self.nodes.get(&node_id) else {
+                    continue;
+                };
+                let Some(layout) = find_layout_box(layout_root, node) else {
+                    continue;
+                };
+                if !layout.is_scroll_container() {
+                    continue;
+                }
+                let next = layout.scroll_offset();
+                if previous != next {
+                    node.set_scroll_offset(next.0, next.1);
+                    clamped_targets.push(node_id);
+                }
+            }
+        }
+        for node_id in clamped_targets {
+            self.queue_scroll_target(node_id);
+        }
     }
 
     fn window_scroll_extent(&mut self) -> (f32, f32) {
@@ -966,6 +1024,8 @@ impl HostState {
             return false;
         }
         self.window_scroll = next;
+        let document_id = self.document.identity();
+        self.queue_scroll_target(document_id);
         true
     }
 
@@ -1006,7 +1066,11 @@ impl HostState {
         let (max_x, max_y) = layout.max_scroll_offset();
         let next = (x.clamp(0.0, max_x), y.clamp(0.0, max_y));
         node.set_scroll_offset(next.0, next.1);
-        previous != next
+        let changed = previous != next;
+        if changed {
+            self.queue_scroll_target(node.identity());
+        }
+        changed
     }
 }
 
@@ -1192,7 +1256,7 @@ impl JsRuntime {
         // consistent and well-defined.
         let width = sanitize_viewport_dimension(width);
         let height = sanitize_viewport_dimension(height);
-        let scroll_changed = {
+        {
             let mut state = self.host_state.borrow_mut();
             state.viewport = Rect {
                 x: 0.0,
@@ -1204,12 +1268,10 @@ impl JsRuntime {
             // invalidate all cached resolvers (and the main layout tree).
             state.mark_all_document_styles_dirty();
             let (scroll_x, scroll_y) = state.window_scroll;
-            if (scroll_x, scroll_y) == (0.0, 0.0) {
-                false
-            } else {
-                state.set_window_scroll(scroll_x, scroll_y)
+            if (scroll_x, scroll_y) != (0.0, 0.0) {
+                state.set_window_scroll(scroll_x, scroll_y);
             }
-        };
+        }
         // `window.innerWidth`/`screen.width` are CSSOM integers, so round to the
         // nearest pixel. For integer viewports this exactly matches the `vw`/`vh`
         // resolution (which divides the same dimension by 100). `width`/`height`
@@ -1225,9 +1287,7 @@ impl JsRuntime {
              if (typeof globalThis.__omoikane_media_query_viewport_changed === 'function') \
              globalThis.__omoikane_media_query_viewport_changed(); \
              if (typeof globalThis.__omoikane_layout_observers_changed === 'function') \
-             globalThis.__omoikane_layout_observers_changed(); \
-             if ({scroll_changed} && typeof globalThis.dispatchEvent === 'function') \
-             globalThis.dispatchEvent(new Event('scroll'));"
+             globalThis.__omoikane_layout_observers_changed();"
         );
         // The bootstrap always defines these globals before any embedder call,
         // so this eval cannot fail in practice; ignore the result defensively.
@@ -1445,6 +1505,9 @@ impl JsRuntime {
     /// animation-frame callbacks.
     pub fn run_animation_frame(&mut self, elapsed_ms: u64) -> JsResult<usize> {
         self.run_until_idle()?;
+        if self.has_pending_scroll_steps() {
+            self.flush_pending_scroll_events()?;
+        }
 
         let (timestamp, callback_ids) = self
             .host_state
@@ -1504,12 +1567,42 @@ impl JsRuntime {
         Ok(callbacks_run)
     }
 
+    /// Runs CSSOM View's pending scroll steps for this rendering opportunity.
+    /// Taking the set before dispatch ensures a listener that scrolls again
+    /// queues work for the next frame instead of recursively dispatching.
+    fn flush_pending_scroll_events(&mut self) -> JsResult<usize> {
+        // Force layout so style/DOM changes can clamp existing offsets and add
+        // their elements to the same pending set as API-driven scrolling.
+        self.host_state.borrow_mut().ensure_layout();
+        let (document_id, targets) = {
+            let mut state = self.host_state.borrow_mut();
+            (
+                state.document.identity(),
+                std::mem::take(&mut state.pending_scroll_targets),
+            )
+        };
+        let count = targets.len();
+        for node_id in targets {
+            self.eval(&format!(
+                "__omoikane_dispatch_scroll_event({node_id}, {})",
+                node_id == document_id
+            ))?;
+        }
+        Ok(count)
+    }
+
     /// Returns whether a callback is waiting for the next rendering opportunity.
     pub fn has_pending_animation_frames(&self) -> bool {
         self.host_state
             .borrow()
             .event_loop
             .has_pending_animation_frames()
+    }
+
+    fn has_pending_scroll_steps(&self) -> bool {
+        let state = self.host_state.borrow();
+        !state.pending_scroll_targets.is_empty()
+            || !state.scroll_offsets_before_layout.is_empty()
     }
 
     /// Drives a bounded number of rendering opportunities until no callback is pending.
@@ -1524,7 +1617,7 @@ impl JsRuntime {
     ) -> usize {
         let mut callbacks_run = 0;
         for _ in 0..max_frames {
-            if !self.has_pending_animation_frames() {
+            if !self.has_pending_animation_frames() && !self.has_pending_scroll_steps() {
                 break;
             }
             match self.run_animation_frame(frame_interval_ms) {
@@ -3360,8 +3453,8 @@ fn element_scroll_offset_native(
     })
 }
 
-/// `__omoikane_set_element_scroll(nodeId, x, y)` -> `{"x":..,"y":..,"changed":bool}`.
-/// Non-finite coordinates scroll to zero, matching how browsers normalize them.
+/// Sets and clamps an element's scroll offset. Non-finite coordinates scroll to
+/// zero, matching how browsers normalize them.
 fn set_element_scroll_native(
     _: &JsValue,
     args: &[JsValue],
@@ -3377,17 +3470,10 @@ fn set_element_scroll_native(
     with_host_state(|state| {
         let node = state.borrow().get_node(node_id);
         let Some(node) = node else {
-            return Ok(js_string!("{\"x\":0,\"y\":0,\"changed\":false}").into());
+            return Ok(JsValue::undefined());
         };
-        let mut state = state.borrow_mut();
-        let changed = state.set_element_scroll(&node, x, y);
-        let (x, y) = state.element_scroll_offset(&node);
-        let json = format!(
-            "{{\"x\":{},\"y\":{},\"changed\":{changed}}}",
-            json_number(x),
-            json_number(y)
-        );
-        Ok(js_string!(json).into())
+        state.borrow_mut().set_element_scroll(&node, x, y);
+        Ok(JsValue::undefined())
     })
 }
 
@@ -3400,18 +3486,16 @@ fn window_scroll_offset_native(
     with_host_state(|state| {
         let mut state = state.borrow_mut();
         let current = state.window_scroll;
-        let changed = current != (0.0, 0.0) && state.set_window_scroll(current.0, current.1);
+        if current != (0.0, 0.0) {
+            state.set_window_scroll(current.0, current.1);
+        }
         let (x, y) = state.window_scroll;
-        let json = format!(
-            "{{\"x\":{},\"y\":{},\"changed\":{changed}}}",
-            json_number(x),
-            json_number(y)
-        );
+        let json = format!("{{\"x\":{},\"y\":{}}}", json_number(x), json_number(y));
         Ok(js_string!(json).into())
     })
 }
 
-/// Sets and clamps the top-level Window scroll offset, returning its new state.
+/// Sets and clamps the top-level Window scroll offset.
 fn set_window_scroll_native(
     _: &JsValue,
     args: &[JsValue],
@@ -3424,15 +3508,8 @@ fn set_window_scroll_native(
     let x = coordinate(args.first(), context)?;
     let y = coordinate(args.get(1), context)?;
     with_host_state(|state| {
-        let mut state = state.borrow_mut();
-        let changed = state.set_window_scroll(x, y);
-        let (x, y) = state.window_scroll;
-        let json = format!(
-            "{{\"x\":{},\"y\":{},\"changed\":{changed}}}",
-            json_number(x),
-            json_number(y)
-        );
-        Ok(js_string!(json).into())
+        state.borrow_mut().set_window_scroll(x, y);
+        Ok(JsValue::undefined())
     })
 }
 
@@ -14954,6 +15031,8 @@ mod tests {
             .unwrap();
 
         runtime.eval("scrollTo(50, 200)").unwrap();
+        assert_eq!(eval_num(&mut runtime, "scrollEvents"), 0.0);
+        runtime.run_animation_frame(16).unwrap();
         assert_eq!(
             eval_str(
                 &mut runtime,
@@ -14971,12 +15050,14 @@ mod tests {
 
         runtime.eval("scrollBy({ left: 25, top: 50 })").unwrap();
         runtime.eval("scroll({ top: 275 })").unwrap();
-        assert_eq!(eval_str(&mut runtime, "[scrollX,scrollY,scrollEvents].join('|')"), "75|275|3");
+        runtime.run_animation_frame(16).unwrap();
+        assert_eq!(eval_str(&mut runtime, "[scrollX,scrollY,scrollEvents].join('|')"), "75|275|2");
 
         // An unchanged request emits no event; non-finite coordinates normalize to zero.
         runtime.eval("scrollTo({ left: 75, top: 275 })").unwrap();
         runtime.eval("scrollTo(NaN, Infinity)").unwrap();
-        assert_eq!(eval_str(&mut runtime, "[scrollX,scrollY,scrollEvents].join('|')"), "0|0|4");
+        runtime.run_animation_frame(16).unwrap();
+        assert_eq!(eval_str(&mut runtime, "[scrollX,scrollY,scrollEvents].join('|')"), "0|0|3");
 
         runtime.eval("scrollTo(1e9, 1e9)").unwrap();
         assert!(runtime
@@ -14995,10 +15076,14 @@ mod tests {
             .eval("globalThis.scrollEvents = 0; addEventListener('scroll', () => scrollEvents++); scrollTo(0, 350)")
             .unwrap();
         runtime.set_viewport(100.0, 300.0);
-        assert_eq!(eval_str(&mut runtime, "[scrollY,scrollEvents].join('|')"), "200|2");
+        assert_eq!(eval_str(&mut runtime, "[scrollY,scrollEvents].join('|')"), "200|0");
+        runtime.run_animation_frame(16).unwrap();
+        assert_eq!(eval_num(&mut runtime, "scrollEvents"), 1.0);
 
         runtime.eval("document.body.style.height = '320px'").unwrap();
-        assert_eq!(eval_str(&mut runtime, "[scrollY,scrollEvents].join('|')"), "20|3");
+        assert_eq!(eval_str(&mut runtime, "[scrollY,scrollEvents].join('|')"), "20|1");
+        runtime.run_animation_frame(16).unwrap();
+        assert_eq!(eval_num(&mut runtime, "scrollEvents"), 2.0);
     }
 
     #[test]
@@ -19558,32 +19643,96 @@ mod tests {
     #[test]
     fn element_scroll_dispatches_a_non_bubbling_scroll_event_on_change() {
         let mut runtime = scroll_runtime();
-        let result = eval_str(
-            &mut runtime,
+        runtime
+            .eval(
             r#"(() => {
                 const box = document.getElementById("hidden");
-                const log = [];
-                box.addEventListener("scroll", event => log.push(
+                globalThis.scrollLog = [];
+                box.addEventListener("scroll", event => scrollLog.push(
                   "el:" + event.bubbles + ":" + event.cancelable + ":" + (event.target === box)
                 ));
-                document.addEventListener("scroll", () => log.push("doc"));
-                globalThis.addEventListener("scroll", () => log.push("win"));
-                box.onscroll = () => log.push("onscroll");
+                document.addEventListener("scroll", () => scrollLog.push("doc"));
+                globalThis.addEventListener("scroll", () => scrollLog.push("win"));
+                box.onscroll = () => scrollLog.push("onscroll");
 
                 box.scrollTop = 20;
-                const afterChange = log.length;
                 // Re-scrolling to the same offset, and clamped no-ops, change
                 // nothing and must stay silent.
                 box.scrollTop = 20;
                 box.scrollTop = 99999;
                 box.scrollTop = 99999;
                 box.scrollLeft = -1;
-                return [afterChange, log.join("/")].join("|");
+                return scrollLog.length;
             })()"#,
+        )
+            .unwrap();
+        assert_eq!(eval_num(&mut runtime, "scrollLog.length"), 0.0);
+        runtime.run_animation_frame(16).unwrap();
+        // Multiple changes in one frame coalesce; the event does not bubble.
+        assert_eq!(
+            eval_str(&mut runtime, "scrollLog.join('/')"),
+            "el:false:false:true/onscroll"
         );
-        // The element sees one event per real change; nothing bubbles to the
-        // document or the Window.
-        assert_eq!(result, "2|el:false:false:true/onscroll/el:false:false:true/onscroll");
+    }
+
+    #[test]
+    fn viewport_scroll_targets_document_and_bubbles_to_window() {
+        let mut runtime = runtime_from_html(
+            r#"<html><head><style>* { margin: 0 } body { height: 1000px }</style></head><body></body></html>"#,
+        );
+        runtime.set_viewport(200.0, 100.0);
+        runtime
+            .eval(
+                r#"globalThis.viewportScrollLog = [];
+                   document.addEventListener("scroll", event => viewportScrollLog.push(
+                     "doc:" + (event.target === document) + ":" + event.bubbles));
+                   addEventListener("scroll", event => viewportScrollLog.push(
+                     "win:" + (event.target === document))); scrollTo(0, 50);"#,
+            )
+            .unwrap();
+        assert_eq!(eval_num(&mut runtime, "viewportScrollLog.length"), 0.0);
+        runtime.run_animation_frame(16).unwrap();
+        assert_eq!(
+            eval_str(&mut runtime, "viewportScrollLog.join('/')"),
+            "doc:true:true/win:true"
+        );
+    }
+
+    #[test]
+    fn element_scroll_clamp_queues_event_and_listener_rescroll_is_not_recursive() {
+        let mut runtime = scroll_runtime();
+        runtime
+            .eval(
+                r#"globalThis.clampEvents = 0;
+                   const box = document.getElementById("hidden");
+                   box.addEventListener("scroll", () => { clampEvents++; });
+                   box.scrollTop = 150;"#,
+            )
+            .unwrap();
+        runtime.run_animation_frame(16).unwrap();
+        runtime.eval("clampEvents = 0; document.getElementById('hidden').firstElementChild.style.height = '60px'").unwrap();
+        runtime.run_animation_frame(16).unwrap();
+        assert_eq!(
+            eval_str(
+                &mut runtime,
+                "[document.getElementById('hidden').scrollTop, clampEvents].join('|')"
+            ),
+            "10|1"
+        );
+
+        let mut runtime = scroll_runtime();
+        runtime
+            .eval(
+                r#"globalThis.clampEvents = 0;
+                   const box = document.getElementById("hidden");
+                   box.onscroll = () => { clampEvents++; box.scrollTop += 1; };
+                   box.scrollTop = 1;"#,
+            )
+            .unwrap();
+        runtime.run_animation_frame(16).unwrap();
+        assert_eq!(eval_num(&mut runtime, "clampEvents"), 1.0);
+        runtime.run_animation_frame(16).unwrap();
+        assert_eq!(eval_num(&mut runtime, "clampEvents"), 2.0);
     }
 
     #[test]

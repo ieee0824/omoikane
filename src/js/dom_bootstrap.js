@@ -1932,17 +1932,16 @@
       }
     }
 
-    // Scrolls to (x, y), clamped natively, and fires `scroll` at this element
-    // when the offset in effect changed. An element with no scrolling box is
-    // left alone, so nothing is remembered that could not be applied.
+    // Scrolls to (x, y), clamped natively. A changed target is queued there for
+    // the next rendering opportunity. An element with no scrolling box is left
+    // alone, so nothing is remembered that could not be applied.
     __applyScroll(x, y) {
       if (this.__isViewportScrollingElement()) {
         applyWindowScroll(x, y);
         return;
       }
       try {
-        const result = JSON.parse(__omoikane_set_element_scroll(this.__id, Number(x), Number(y)));
-        if (result.changed) this.dispatchEvent(new Event("scroll"));
+        __omoikane_set_element_scroll(this.__id, Number(x), Number(y));
       } catch (error) {
         // An unresolvable node has no scrolling box; nothing to scroll.
       }
@@ -5740,17 +5739,18 @@
   globalThis.devicePixelRatio = 1;
   function windowScrollOffset() {
     try {
-      const result = JSON.parse(__omoikane_window_scroll_offset());
-      if (result.changed) globalThis.dispatchEvent(new Event("scroll"));
-      return result;
+      return JSON.parse(__omoikane_window_scroll_offset());
     } catch (_) {
       return { x: 0, y: 0 };
     }
   }
   function applyWindowScroll(x, y) {
-    const result = JSON.parse(__omoikane_set_window_scroll(Number(x), Number(y)));
-    if (result.changed) globalThis.dispatchEvent(new Event("scroll"));
+    __omoikane_set_window_scroll(Number(x), Number(y));
   }
+  globalThis.__omoikane_dispatch_scroll_event = function(nodeId, viewport) {
+    const target = viewport ? document : wrapNode(nodeId);
+    if (target) target.dispatchEvent(new Event("scroll", { bubbles: !!viewport }));
+  };
   function isScrollOptions(value) {
     return value !== null && (typeof value === "object" || typeof value === "function");
   }
