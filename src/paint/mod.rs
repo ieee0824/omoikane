@@ -1937,6 +1937,38 @@ fn paint_replaced_image_box(
     canvas.draw_image_scaled_clipped(&image, destination, Some(clip));
 }
 
+fn overflow_clip_rect(
+    overflow: crate::layout::Overflow,
+    padding_box: Rect,
+    inherited_clip: Option<Rect>,
+    viewport: Rect,
+) -> Option<Rect> {
+    let base = inherited_clip.unwrap_or(viewport);
+    let axis_clip = Rect {
+        x: if overflow.clips_x() {
+            padding_box.x
+        } else {
+            base.x
+        },
+        y: if overflow.clips_y() {
+            padding_box.y
+        } else {
+            base.y
+        },
+        width: if overflow.clips_x() {
+            padding_box.width
+        } else {
+            base.width
+        },
+        height: if overflow.clips_y() {
+            padding_box.height
+        } else {
+            base.height
+        },
+    };
+    intersect(base, axis_clip)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn paint_box_internal_to(
     canvas: &mut Canvas,
@@ -1963,14 +1995,11 @@ fn paint_box_internal_to(
         }
     }
     paint_background_image(canvas, style, border_box, inherited_clip, viewport);
-    if layout.overflow == crate::layout::Overflow::Hidden {
-        match inherited_clip {
-            Some(current) => {
-                if let Some(image_clip) = intersect(current, padding_box) {
-                    paint_replaced_image_box(canvas, layout, style, Some(image_clip));
-                }
-            }
-            None => paint_replaced_image_box(canvas, layout, style, Some(padding_box)),
+    if layout.overflow.clips_overflow() {
+        let overflow_clip =
+            overflow_clip_rect(layout.overflow, padding_box, inherited_clip, viewport);
+        if overflow_clip.is_some() {
+            paint_replaced_image_box(canvas, layout, style, overflow_clip);
         }
     } else {
         paint_replaced_image_box(canvas, layout, style, inherited_clip);
@@ -1986,16 +2015,13 @@ fn paint_box_internal_to(
 
     border::paint_borders(canvas, layout, style, inherited_clip);
 
-    let clip = if layout.overflow == crate::layout::Overflow::Hidden {
-        match inherited_clip {
-            Some(current) => {
-                let Some(combined) = intersect(current, padding_box) else {
-                    return;
-                };
-                Some(combined)
-            }
-            None => Some(padding_box),
-        }
+    let clip = if layout.overflow.clips_overflow() {
+        let Some(combined) =
+            overflow_clip_rect(layout.overflow, padding_box, inherited_clip, viewport)
+        else {
+            return;
+        };
+        Some(combined)
     } else {
         inherited_clip
     };

@@ -318,10 +318,30 @@ pub enum Visibility {
 pub enum Overflow {
     #[default]
     Visible,
+    /// Clips both axes without establishing a scroll container (`clip`).
+    Clip,
+    /// Clips only the horizontal axis (`overflow-x: clip; overflow-y: visible`).
+    ClipX,
+    /// Clips only the vertical axis (`overflow-x: visible; overflow-y: clip`).
+    ClipY,
     /// The box clips its overflow and establishes a scroll container, so it can
     /// be scrolled programmatically (`hidden`, `scroll` and `auto`). Only user
     /// scrolling distinguishes them, and there is no scrollbar UI yet.
     Hidden,
+}
+
+impl Overflow {
+    pub(crate) fn clips_x(self) -> bool {
+        matches!(self, Self::Clip | Self::ClipX | Self::Hidden)
+    }
+
+    pub(crate) fn clips_y(self) -> bool {
+        matches!(self, Self::Clip | Self::ClipY | Self::Hidden)
+    }
+
+    pub(crate) fn clips_overflow(self) -> bool {
+        self.clips_x() || self.clips_y()
+    }
 }
 
 /// Minimal style information carried by each inline fragment.
@@ -644,15 +664,33 @@ impl LayoutBox {
 /// Expands `max_right` / `max_bottom` to enclose the border boxes of `boxes` and
 /// their descendants, stopping at boxes that clip their own overflow.
 fn expand_scrollable_overflow(boxes: &[LayoutBox], max_right: &mut f32, max_bottom: &mut f32) {
+    expand_scrollable_overflow_axes(boxes, max_right, max_bottom, true, true);
+}
+
+fn expand_scrollable_overflow_axes(
+    boxes: &[LayoutBox],
+    max_right: &mut f32,
+    max_bottom: &mut f32,
+    include_x: bool,
+    include_y: bool,
+) {
     for child in boxes {
         let content = child.dimensions.content;
         let padding = child.dimensions.padding;
         let border = child.dimensions.border;
-        *max_right = max_right.max(content.x + content.width + padding.right + border.right);
-        *max_bottom = max_bottom.max(content.y + content.height + padding.bottom + border.bottom);
-        if child.overflow == Overflow::Visible {
-            expand_scrollable_overflow(&child.children, max_right, max_bottom);
+        if include_x {
+            *max_right = max_right.max(content.x + content.width + padding.right + border.right);
         }
+        if include_y {
+            *max_bottom = max_bottom.max(content.y + content.height + padding.bottom + border.bottom);
+        }
+        expand_scrollable_overflow_axes(
+            &child.children,
+            max_right,
+            max_bottom,
+            include_x && !child.overflow.clips_x(),
+            include_y && !child.overflow.clips_y(),
+        );
     }
 }
 
@@ -2410,15 +2448,44 @@ fn visibility(style: &ComputedStyle) -> Visibility {
 }
 
 fn overflow(style: &ComputedStyle) -> Overflow {
-    for property in ["overflow", "overflow-x", "overflow-y"] {
-        if matches!(
-            style.get(property),
-            Some(ComputedValue::Keyword(keyword)) if overflow_keyword_scrolls(keyword)
-        ) {
-            return Overflow::Hidden;
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum Axis {
+        Visible,
+        Clip,
+        Scroll,
+    }
+
+    fn axis(style: &ComputedStyle, property: &str) -> Axis {
+        match style.get(property) {
+            Some(ComputedValue::Keyword(keyword)) if keyword.eq_ignore_ascii_case("clip") => {
+                Axis::Clip
+            }
+            Some(ComputedValue::Keyword(keyword)) if overflow_keyword_scrolls(keyword) => {
+                Axis::Scroll
+            }
+            _ => Axis::Visible,
         }
     }
-    Overflow::Visible
+
+    let mut x = axis(style, "overflow-x");
+    let mut y = axis(style, "overflow-y");
+    // CSS Overflow computes visible to auto and clip to hidden when the other
+    // axis is neither visible nor clip. Thus any scrollable axis makes both
+    // axes part of the scroll container; clip/visible is the special pair that
+    // remains independently clipped.
+    if x == Axis::Scroll {
+        y = Axis::Scroll;
+    }
+    if y == Axis::Scroll {
+        x = Axis::Scroll;
+    }
+    match (x, y) {
+        (Axis::Visible, Axis::Visible) => Overflow::Visible,
+        (Axis::Clip, Axis::Visible) => Overflow::ClipX,
+        (Axis::Visible, Axis::Clip) => Overflow::ClipY,
+        (Axis::Clip, Axis::Clip) => Overflow::Clip,
+        _ => Overflow::Hidden,
+    }
 }
 
 /// Whether an `overflow` keyword makes the box clip and scroll its content.

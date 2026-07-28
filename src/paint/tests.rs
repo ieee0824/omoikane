@@ -7729,6 +7729,34 @@ fn overflow_visible_and_clip_do_not_scroll_their_content() {
             "overflow: {keyword} is not a scroll container"
         );
     }
+
+    let visible = render_with_scroll(
+        &STRIPED_SCROLLER.replace("overflow: hidden", "overflow: visible"),
+        40.0,
+        &[],
+        (0.0, 0.0),
+    );
+    let clipped = render_with_scroll(
+        &STRIPED_SCROLLER.replace("overflow: hidden", "overflow: clip"),
+        40.0,
+        &[],
+        (0.0, 0.0),
+    );
+    assert_eq!(visible.pixel(5, 25), Some(Color::rgba(0, 255, 0, 255)));
+    assert_eq!(clipped.pixel(5, 25).unwrap().a, 0);
+}
+
+#[test]
+fn overflow_clip_can_clip_only_one_axis() {
+    let html = "<html><head><style>\
+         body { margin: 0 } \
+         #clip-x { width: 20px; height: 20px; overflow: clip visible } \
+         #child { width: 40px; height: 40px; background-color: #ff0000 } \
+         </style></head><body><div id=\"clip-x\"><div id=\"child\"></div></div></body></html>";
+    let canvas = render_with_scroll(html, 50.0, &[], (0.0, 0.0));
+    let red = Some(Color::rgba(255, 0, 0, 255));
+    assert_eq!(canvas.pixel(10, 30), red, "visible y-axis must not clip");
+    assert_eq!(canvas.pixel(30, 10).unwrap().a, 0, "clip x-axis must clip");
 }
 
 #[test]
