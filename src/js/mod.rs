@@ -20,6 +20,10 @@ use crate::css::{
 };
 use crate::dom::{Node, NodeHandle, NodeType, ShadowRootMode, is_actually_disabled};
 use crate::http::{Client, HttpRequest, Method, default_user_agent};
+use crate::http::cors::{
+    CredentialsMode, Origin as CorsOrigin, PreflightCache, RedirectMode, RequestMode,
+    ResponseType, exposed_response_headers,
+};
 use crate::layout::{InlineFragmentContent, LayoutBox, Rect, edge_sizes};
 
 mod storage;
@@ -225,6 +229,8 @@ struct HostState {
     location_href: String,
     navigator_user_agent: String,
     http_client: Client,
+    /// Successful CORS preflight results for this environment settings object.
+    cors_preflight_cache: PreflightCache,
     /// Viewport used when resolving computed styles and running layout for the
     /// `getComputedStyle` / layout-metrics bindings (issues 016-8 and 044-2).
     viewport: Rect,
@@ -391,6 +397,7 @@ impl HostState {
             location_href,
             navigator_user_agent: default_user_agent(),
             http_client: Client::new(),
+            cors_preflight_cache: PreflightCache::default(),
             viewport: Rect {
                 x: 0.0,
                 y: 0.0,
@@ -4621,6 +4628,18 @@ fn console_log_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> J
     })
 }
 
+fn string_argument(
+    value: Option<&JsValue>,
+    default: &str,
+    context: &mut Context,
+) -> JsResult<String> {
+    value
+        .cloned()
+        .unwrap_or_else(|| JsValue::from(js_string!(default)))
+        .to_string(context)
+        .map(|value| value.to_std_string_escaped())
+}
+
 fn fetch_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
     let url = args
         .first()
@@ -4664,6 +4683,36 @@ fn fetch_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResul
         .filter(|value| !value.is_null() && !value.is_undefined())
         .map(|value| value.to_string(context).map(|text| text.to_std_string_escaped()))
         .transpose()?;
+    let mode = match string_argument(args.get(4), "cors", context)?.as_str() {
+        "same-origin" => RequestMode::SameOrigin,
+        "cors" => RequestMode::Cors,
+        "no-cors" => RequestMode::NoCors,
+        value => {
+            return Err(JsNativeError::typ()
+                .with_message(format!("unsupported request mode: {value}"))
+                .into());
+        }
+    };
+    let credentials = match string_argument(args.get(5), "same-origin", context)?.as_str() {
+        "omit" => CredentialsMode::Omit,
+        "same-origin" => CredentialsMode::SameOrigin,
+        "include" => CredentialsMode::Include,
+        value => {
+            return Err(JsNativeError::typ()
+                .with_message(format!("unsupported credentials mode: {value}"))
+                .into());
+        }
+    };
+    let redirect_mode = match string_argument(args.get(6), "follow", context)?.as_str() {
+        "follow" => RedirectMode::Follow,
+        "error" => RedirectMode::Error,
+        "manual" => RedirectMode::Manual,
+        value => {
+            return Err(JsNativeError::typ()
+                .with_message(format!("unsupported redirect mode: {value}"))
+                .into());
+        }
+    };
 
     with_host_state(|state| {
         let mut state = state.borrow_mut();
@@ -4671,6 +4720,11 @@ fn fetch_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResul
             JsError::from(JsNativeError::typ().with_message(error.to_string()))
         })?;
         let normalized_url = parsed_url.to_string();
+        let origin = state
+            .base_url
+            .as_ref()
+            .map(CorsOrigin::from_url)
+            .unwrap_or_else(CorsOrigin::opaque);
         let mut request = HttpRequest::new(method, parsed_url);
         for (name, value) in headers {
             request.set_header(name, value);
@@ -4679,32 +4733,50 @@ fn fetch_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResul
             request.set_body(body.into_bytes());
         }
 
-        let response = state.http_client.send(request).map_err(|error| {
+        let HostState {
+            http_client,
+            cors_preflight_cache,
+            ..
+        } = &mut *state;
+        let fetched = crate::http::cors::fetch(
+            http_client,
+            request,
+            &origin,
+            mode,
+            credentials,
+            redirect_mode,
+            cors_preflight_cache,
+        )
+        .map_err(|error| {
             JsError::from(JsNativeError::error().with_message(error.to_string()))
         })?;
+        let response = fetched.response;
+        let opaque = matches!(
+            fetched.response_type,
+            ResponseType::Opaque | ResponseType::OpaqueRedirect
+        );
         let body_text = String::from_utf8_lossy(response.body()).to_string();
         let effective_url = response
             .effective_url()
             .map(ToString::to_string)
             .unwrap_or_else(|| normalized_url.clone());
-        let redirected = effective_url != normalized_url;
-        let exposed_headers: Vec<_> = response
-            .headers()
-            .iter()
-            .filter(|(name, _)| {
-                !name.eq_ignore_ascii_case("set-cookie")
-                    && !name.eq_ignore_ascii_case("set-cookie2")
-            })
-            .cloned()
-            .collect();
+        let response_type = match fetched.response_type {
+            ResponseType::Basic => "basic",
+            ResponseType::Cors => "cors",
+            ResponseType::Opaque => "opaque",
+            ResponseType::OpaqueRedirect => "opaqueredirect",
+        };
+        let exposed_headers =
+            exposed_response_headers(&response, fetched.response_type, credentials);
         let payload = serde_json::json!({
-            "status": response.status_code(),
-            "statusText": response.reason(),
-            "ok": (200..300).contains(&response.status_code()),
-            "url": effective_url,
-            "redirected": redirected,
+            "status": if opaque { 0 } else { response.status_code() },
+            "statusText": if opaque { "" } else { response.reason() },
+            "ok": !opaque && (200..300).contains(&response.status_code()),
+            "url": if opaque { "" } else { effective_url.as_str() },
+            "redirected": !opaque && fetched.redirected,
+            "type": response_type,
             "headers": exposed_headers,
-            "bodyText": body_text,
+            "bodyText": if opaque { "" } else { body_text.as_str() },
         })
         .to_string();
         Ok(js_string!(payload.as_str()).into())
@@ -6889,6 +6961,7 @@ mod tests {
         });
 
         let mut runtime = JsRuntime::new().unwrap();
+        runtime.set_base_url(format!("http://{address}/").parse().unwrap());
         runtime
             .eval(&format!(
                 "globalThis.fetchResult = ''; fetch('http://127.0.0.1:{}/').then(r => r.text()).then(t => {{ globalThis.fetchResult = t; }});",
@@ -6930,6 +7003,7 @@ mod tests {
         });
 
         let mut runtime = JsRuntime::new().unwrap();
+        runtime.set_base_url(format!("http://{address}/").parse().unwrap());
         runtime
             .eval(&format!(
                 r#"globalThis.fetchMetadata = null;
@@ -6993,6 +7067,7 @@ mod tests {
         });
 
         let mut runtime = JsRuntime::new().unwrap();
+        runtime.set_base_url(format!("http://{address}/").parse().unwrap());
         runtime
             .eval(&format!(
                 r#"globalThis.redirectResult = null;
@@ -7031,6 +7106,7 @@ mod tests {
         });
 
         let mut runtime = JsRuntime::new().unwrap();
+        runtime.set_base_url(format!("http://{address}/").parse().unwrap());
         runtime
             .eval(&format!(
                 r#"globalThis.normalizedResponse = null; fetch("http://127.0.0.1:{}").then(response => normalizedResponse = response);"#,
@@ -7110,6 +7186,7 @@ mod tests {
         });
 
         let mut runtime = JsRuntime::new().unwrap();
+        runtime.set_base_url(format!("http://{address}/").parse().unwrap());
         runtime
             .eval(&format!(
                 r#"globalThis.cookieResponse = null; fetch("http://127.0.0.1:{}/session").then(response => cookieResponse = response);"#,
@@ -7132,6 +7209,214 @@ mod tests {
         handle.join().unwrap();
 
         assert_eq!(runtime.eval("cookieXhr.status").unwrap().as_number(), Some(200.0));
+    }
+
+    #[test]
+    fn cross_origin_fetch_checks_origin_and_filters_response_headers() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let handle = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let request = String::from_utf8(read_http_request(&mut stream)).unwrap();
+            assert!(request.contains("Origin: http://origin.test\r\n"));
+            stream
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nAccess-Control-Allow-Origin: http://origin.test\r\nAccess-Control-Expose-Headers: X-Public\r\nContent-Type: text/plain\r\nX-Public: visible\r\nX-Secret: hidden\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok",
+                )
+                .unwrap();
+        });
+
+        let mut runtime = JsRuntime::new().unwrap();
+        runtime.set_base_url("http://origin.test/page".parse().unwrap());
+        runtime
+            .eval(&format!(
+                r#"globalThis.corsResult = null;
+                    fetch("http://127.0.0.1:{}/data").then(async response => corsResult = {{
+                      type: response.type,
+                      body: await response.text(),
+                      contentType: response.headers.get("content-type"),
+                      public: response.headers.get("x-public"),
+                      secret: response.headers.get("x-secret")
+                    }});"#,
+                address.port()
+            ))
+            .unwrap();
+        runtime.run_jobs().unwrap();
+        handle.join().unwrap();
+
+        assert!(runtime
+            .eval(r#"corsResult.type === "cors" && corsResult.body === "ok" && corsResult.contentType === "text/plain" && corsResult.public === "visible" && corsResult.secret === null"#)
+            .unwrap()
+            .as_boolean()
+            .unwrap());
+    }
+
+    #[test]
+    fn no_cors_is_opaque_and_xhr_cors_failure_fires_error() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let handle = thread::spawn(move || {
+            for index in 0..2 {
+                let (mut stream, _) = listener.accept().unwrap();
+                let request = String::from_utf8(read_http_request(&mut stream)).unwrap();
+                if index == 0 {
+                    assert!(!request.contains("Origin:"));
+                } else {
+                    assert!(request.contains("Origin: http://origin.test\r\n"));
+                }
+                stream.write_all(b"HTTP/1.1 200 OK\r\nX-Secret: hidden\r\nContent-Length: 6\r\nConnection: close\r\n\r\nsecret").unwrap();
+            }
+        });
+
+        let mut runtime = JsRuntime::new().unwrap();
+        runtime.set_base_url("http://origin.test/page".parse().unwrap());
+        runtime
+            .eval(&format!(
+                r#"globalThis.opaqueResult = null;
+                    fetch("http://127.0.0.1:{0}/opaque", {{ mode: "no-cors" }}).then(async response => opaqueResult = [response.type, response.status, response.url, await response.text(), response.headers.get("x-secret")]);
+                    globalThis.corsFailureEvents = [];
+                    globalThis.corsFailureXhr = new XMLHttpRequest();
+                    corsFailureXhr.onerror = () => corsFailureEvents.push("error");
+                    corsFailureXhr.onload = () => corsFailureEvents.push("load");
+                    corsFailureXhr.onloadend = () => corsFailureEvents.push("loadend");
+                    corsFailureXhr.open("GET", "http://127.0.0.1:{0}/xhr");
+                    corsFailureXhr.send();"#,
+                address.port()
+            ))
+            .unwrap();
+        runtime.run_jobs().unwrap();
+        handle.join().unwrap();
+
+        assert!(runtime
+            .eval(r#"opaqueResult.join(",") === "opaque,0,,," && corsFailureXhr.status === 0 && corsFailureEvents.join(",") === "error,loadend""#)
+            .unwrap()
+            .as_boolean()
+            .unwrap());
+    }
+
+    #[test]
+    fn cors_preflight_is_validated_and_cached() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let handle = thread::spawn(move || {
+            for index in 0..3 {
+                let (mut stream, _) = listener.accept().unwrap();
+                let request = String::from_utf8(read_http_request(&mut stream)).unwrap();
+                if index == 0 {
+                    assert!(request.starts_with("OPTIONS /data HTTP/1.1\r\n"));
+                    assert!(request.contains("Access-Control-Request-Method: PUT\r\n"));
+                    assert!(request.contains("Access-Control-Request-Headers: x-token\r\n"));
+                    assert!(!request.contains("Cookie:"));
+                    stream.write_all(b"HTTP/1.1 204 No Content\r\nAccess-Control-Allow-Origin: http://origin.test\r\nAccess-Control-Allow-Methods: PUT\r\nAccess-Control-Allow-Headers: X-Token\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").unwrap();
+                } else {
+                    assert!(request.starts_with("PUT /data HTTP/1.1\r\n"));
+                    assert!(request.to_ascii_lowercase().contains("x-token: yes\r\n"));
+                    stream.write_all(b"HTTP/1.1 200 OK\r\nAccess-Control-Allow-Origin: http://origin.test\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok").unwrap();
+                }
+            }
+        });
+
+        let mut runtime = JsRuntime::new().unwrap();
+        runtime.set_base_url("http://origin.test/page".parse().unwrap());
+        runtime
+            .eval(&format!(
+                r#"globalThis.preflightBodies = [];
+                    fetch("http://127.0.0.1:{0}/data", {{ method: "PUT", headers: {{ "X-Token": "yes" }} }}).then(r => r.text()).then(body => preflightBodies.push(body));
+                    fetch("http://127.0.0.1:{0}/data", {{ method: "PUT", headers: {{ "X-Token": "yes" }} }}).then(r => r.text()).then(body => preflightBodies.push(body));"#,
+                address.port()
+            ))
+            .unwrap();
+        runtime.run_jobs().unwrap();
+        handle.join().unwrap();
+        assert_eq!(eval_str(&mut runtime, "preflightBodies.join(',')"), "ok,ok");
+    }
+
+    #[test]
+    fn credentials_mode_and_xhr_with_credentials_send_cookies() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let handle = thread::spawn(move || {
+            for index in 0..4 {
+                let (mut stream, _) = listener.accept().unwrap();
+                let request = String::from_utf8(read_http_request(&mut stream)).unwrap();
+                if index < 2 {
+                    assert!(!request.contains("Cookie:"));
+                    stream.write_all(b"HTTP/1.1 200 OK\r\nAccess-Control-Allow-Origin: http://origin.test\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok").unwrap();
+                } else {
+                    assert!(request.contains("Cookie: session=miku\r\n"));
+                    stream.write_all(b"HTTP/1.1 200 OK\r\nAccess-Control-Allow-Origin: http://origin.test\r\nAccess-Control-Allow-Credentials: true\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok").unwrap();
+                }
+            }
+        });
+
+        let mut runtime = JsRuntime::new().unwrap();
+        runtime.set_base_url("http://origin.test/page".parse().unwrap());
+        let target: crate::http::Url = format!("http://{address}/data").parse().unwrap();
+        runtime
+            .host_state
+            .borrow_mut()
+            .http_client
+            .cookie_jar_mut()
+            .add_from_header_for_url("session=miku; Path=/", &target);
+        runtime
+            .eval(&format!(
+                r#"globalThis.credentialFetch = null;
+                    globalThis.omitFetch = null;
+                    globalThis.sameOriginFetch = null;
+                    fetch("http://127.0.0.1:{0}/omit", {{ credentials: "omit" }}).then(r => omitFetch = r.status);
+                    fetch("http://127.0.0.1:{0}/same-origin").then(r => sameOriginFetch = r.status);
+                    fetch("http://127.0.0.1:{0}/fetch", {{ credentials: "include" }}).then(r => credentialFetch = r.status);
+                    globalThis.credentialXhr = new XMLHttpRequest();
+                    credentialXhr.open("GET", "http://127.0.0.1:{0}/xhr");
+                    credentialXhr.withCredentials = true;
+                    credentialXhr.send();"#,
+                address.port()
+            ))
+            .unwrap();
+        runtime.run_jobs().unwrap();
+        handle.join().unwrap();
+        assert!(runtime
+            .eval("omitFetch === 200 && sameOriginFetch === 200 && credentialFetch === 200 && credentialXhr.status === 200")
+            .unwrap()
+            .as_boolean()
+            .unwrap());
+    }
+
+    #[test]
+    fn fetch_redirect_modes_follow_error_and_manual() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let handle = thread::spawn(move || {
+            for index in 0..4 {
+                let (mut stream, _) = listener.accept().unwrap();
+                let request = String::from_utf8(read_http_request(&mut stream)).unwrap();
+                if index == 1 {
+                    assert!(request.starts_with("GET /final HTTP/1.1\r\n"));
+                    stream.write_all(b"HTTP/1.1 200 OK\r\nAccess-Control-Allow-Origin: http://origin.test\r\nContent-Length: 4\r\nConnection: close\r\n\r\ndone").unwrap();
+                } else {
+                    stream.write_all(b"HTTP/1.1 302 Found\r\nAccess-Control-Allow-Origin: http://origin.test\r\nLocation: /final\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").unwrap();
+                }
+            }
+        });
+
+        let mut runtime = JsRuntime::new().unwrap();
+        runtime.set_base_url("http://origin.test/page".parse().unwrap());
+        runtime
+            .eval(&format!(
+                r#"globalThis.redirectModes = {{}};
+                    fetch("http://127.0.0.1:{0}/follow").then(async r => redirectModes.follow = [r.redirected, await r.text()]);
+                    fetch("http://127.0.0.1:{0}/error", {{ redirect: "error" }}).catch(() => redirectModes.error = true);
+                    fetch("http://127.0.0.1:{0}/manual", {{ redirect: "manual" }}).then(r => redirectModes.manual = [r.type, r.status, r.url]);"#,
+                address.port()
+            ))
+            .unwrap();
+        runtime.run_jobs().unwrap();
+        handle.join().unwrap();
+        assert!(runtime
+            .eval(r#"redirectModes.follow[0] === true && redirectModes.follow[1] === "done" && redirectModes.error === true && redirectModes.manual.join(",") === "opaqueredirect,0,""#)
+            .unwrap()
+            .as_boolean()
+            .unwrap());
     }
 
     #[test]
@@ -7215,6 +7500,7 @@ mod tests {
         });
 
         let mut runtime = JsRuntime::new().unwrap();
+        runtime.set_base_url(format!("http://{address}/").parse().unwrap());
         runtime
             .eval(&format!(
                 r#"globalThis.xhrEvents = []; const xhr = new XMLHttpRequest(); xhr.onload = () => xhrEvents.push("load"); xhr.onloadend = () => xhrEvents.push("loadend"); xhr.open("GET", "http://127.0.0.1:{}/"); xhr.send(); globalThis.xhr = xhr;"#,
@@ -7275,6 +7561,7 @@ mod tests {
         });
 
         let mut runtime = JsRuntime::new().unwrap();
+        runtime.set_base_url(format!("http://{address}/").parse().unwrap());
         runtime
             .eval(&format!(
                 r#"globalThis.xhrStates = [];

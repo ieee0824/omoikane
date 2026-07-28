@@ -8,6 +8,7 @@
 mod client;
 mod connection;
 mod cookie;
+pub mod cors;
 mod data_uri;
 mod http2;
 mod request;

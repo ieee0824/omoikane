@@ -175,6 +175,42 @@ impl Client {
             request = new_request;
         }
     }
+
+    /// Sends exactly one HTTP request without following redirects.
+    ///
+    /// `credentials` controls both Cookie attachment and Set-Cookie storage.
+    /// Fetch/CORS uses this primitive so it can re-evaluate policy at every
+    /// redirect hop; ordinary callers should continue using [`send`](Self::send).
+    pub(crate) fn send_once(
+        &mut self,
+        mut request: HttpRequest,
+        credentials: bool,
+    ) -> Result<HttpResponse, HttpParseError> {
+        let built_in_user_agent = default_user_agent();
+        if request
+            .header("user-agent")
+            .is_none_or(|value| value == built_in_user_agent)
+        {
+            request.set_header("User-Agent", self.user_agent.clone());
+        }
+        request.remove_header("cookie");
+        if credentials
+            && let Some(cookie_header) = self.cookie_jar.cookie_header(request.url())
+        {
+            request.add_header("Cookie", cookie_header);
+        }
+
+        let response = self.connections.send(&request, self.insecure)?;
+        if credentials {
+            let origin = request.url().clone();
+            for (name, value) in response.headers() {
+                if name.eq_ignore_ascii_case("set-cookie") {
+                    self.cookie_jar.add_from_header_for_url(value, &origin);
+                }
+            }
+        }
+        Ok(response)
+    }
 }
 
 impl Default for Client {
@@ -184,17 +220,19 @@ impl Default for Client {
 }
 
 /// Returns `true` if the status code indicates a redirect.
-fn is_redirect(status: u16) -> bool {
+pub(crate) fn is_redirect(status: u16) -> bool {
     matches!(status, 301 | 302 | 303 | 307 | 308)
 }
 
 /// Determines the HTTP method to use after a redirect.
 ///
-/// - 301, 302, 303: change to GET (per common browser behavior)
+/// - 301/302: POST changes to GET; other methods are preserved
+/// - 303: methods other than GET/HEAD change to GET
 /// - 307, 308: preserve the original method
-fn redirect_method(status: u16, original: Method) -> Method {
+pub(crate) fn redirect_method(status: u16, original: Method) -> Method {
     match status {
-        301..=303 => Method::Get,
+        301 | 302 if original == Method::Post => Method::Get,
+        303 if !matches!(original, Method::Get | Method::Head) => Method::Get,
         307 | 308 => original,
         _ => original,
     }
@@ -203,7 +241,7 @@ fn redirect_method(status: u16, original: Method) -> Method {
 /// Resolves a `Location` header value against the current URL.
 ///
 /// Handles both absolute URLs and relative paths.
-fn resolve_redirect_url(base: &Url, location: &str) -> Result<Url, HttpParseError> {
+pub(crate) fn resolve_redirect_url(base: &Url, location: &str) -> Result<Url, HttpParseError> {
     // Try absolute URL first
     if location.starts_with("http://") || location.starts_with("https://") {
         return location.parse::<Url>().map_err(|e| {
@@ -263,6 +301,11 @@ mod tests {
     #[test]
     fn redirect_302_becomes_get() {
         assert_eq!(redirect_method(302, Method::Post), Method::Get);
+    }
+
+    #[test]
+    fn redirect_302_preserves_non_post_method() {
+        assert_eq!(redirect_method(302, Method::Put), Method::Put);
     }
 
     #[test]

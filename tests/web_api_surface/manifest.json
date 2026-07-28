@@ -273,6 +273,14 @@
       "baseline_supported": false
     },
     {
+      "id": "network.fetch-cors-policy",
+      "area": "network",
+      "description": "Request exposes CORS, credentials and redirect policy modes",
+      "setup": "globalThis.__corsRequest = new Request('/cors', { mode: 'cors', credentials: 'include', redirect: 'manual' }); globalThis.__noCorsRejected = false; try { new Request('/cors', { mode: 'no-cors', method: 'PUT' }); } catch (_) { __noCorsRejected = true; }",
+      "probe": "__corsRequest.mode === 'cors' && __corsRequest.credentials === 'include' && __corsRequest.redirect === 'manual' && __noCorsRejected",
+      "baseline_supported": false
+    },
+    {
       "id": "network.xhr",
       "area": "network",
       "description": "XMLHttpRequest is exposed",

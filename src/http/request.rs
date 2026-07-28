@@ -168,6 +168,12 @@ impl HttpRequest {
         self.headers.push((name, value.into()));
     }
 
+    /// Removes every header whose name matches `name`, ignoring ASCII case.
+    pub fn remove_header(&mut self, name: &str) {
+        self.headers
+            .retain(|(header_name, _)| !header_name.eq_ignore_ascii_case(name));
+    }
+
     /// Sets the request body and automatically sets the `Content-Length` header.
     pub fn set_body(&mut self, body: Vec<u8>) {
         // Remove any existing Content-Length
