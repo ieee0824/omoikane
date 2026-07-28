@@ -5274,6 +5274,22 @@
     const element = wrapNode(id);
     if (element) element.dispatchEvent(new Event("load", { bubbles: false }));
   };
+  globalThis.__omoikane_dispatch_mouse_input = function(id, type, init, focusTarget) {
+    const target = wrapNode(id) || document;
+    const notCanceled = target.dispatchEvent(new MouseEvent(type, {
+      ...init, bubbles: true, cancelable: true, composed: true,
+    }));
+    if (notCanceled && focusTarget && target && typeof target.focus === "function") {
+      target.focus();
+    }
+    return notCanceled;
+  };
+  globalThis.__omoikane_dispatch_keyboard_input = function(type, init) {
+    const target = document.activeElement || document.body || document.documentElement || document;
+    return target.dispatchEvent(new KeyboardEvent(type, {
+      ...init, bubbles: true, cancelable: true, composed: true,
+    }));
+  };
   const __documentCookies = new Map();
   Object.defineProperty(Document.prototype, "cookie", {
     configurable: true,

@@ -1002,6 +1002,25 @@ fn validate_declaration(name: &str, value: &Value) -> DeclarationValidation {
             _ => DeclarationValidation::Invalid,
         };
     }
+    if name.eq_ignore_ascii_case("pointer-events") {
+        return match value {
+            Value::Keyword(keyword) => {
+                let lower = keyword.to_ascii_lowercase();
+                if is_css_wide_keyword(&lower)
+                    || matches!(
+                        lower.as_str(),
+                        "auto" | "none" | "visiblepainted" | "visiblefill" | "visiblestroke"
+                            | "visible" | "painted" | "fill" | "stroke" | "bounding-box" | "all"
+                    )
+                {
+                    DeclarationValidation::Valid(ComputedValue::Keyword(lower))
+                } else {
+                    DeclarationValidation::Invalid
+                }
+            }
+            _ => DeclarationValidation::Invalid,
+        };
+    }
     if name.eq_ignore_ascii_case("object-position") {
         // The grammar is checked here, but normalizing keywords to percentages
         // and lengths to pixels needs the resolution context, so the value goes
@@ -2837,6 +2856,7 @@ pub(super) fn is_supported_property(name: &str) -> bool {
             | "padding-block-start"
             | "padding-block-end"
             | "position"
+            | "pointer-events"
             | "right"
             | "row-gap"
             | "transform"
@@ -4443,6 +4463,9 @@ fn apply_initial_values(properties: &mut BTreeMap<String, ComputedValue>) {
         .entry("cursor".to_string())
         .or_insert_with(|| ComputedValue::Keyword("auto".to_string()));
     properties
+        .entry("pointer-events".to_string())
+        .or_insert_with(|| ComputedValue::Keyword("auto".to_string()));
+    properties
         .entry("container-name".to_string())
         .or_insert_with(|| ComputedValue::Keyword("none".to_string()));
     properties
@@ -4609,6 +4632,7 @@ fn apply_inheritance(
         "list-style-position",
         "list-style-type",
         "overflow-wrap",
+        "pointer-events",
         "text-align",
         "text-decoration-color",
         "text-decoration-line",
