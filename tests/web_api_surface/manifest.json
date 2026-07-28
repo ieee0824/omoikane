@@ -397,15 +397,26 @@
     {
       "id": "data.blob",
       "area": "data",
-      "description": "Blob is exposed",
-      "probe": "typeof Blob === 'function'",
+      "description": "Blob normalizes its type, concatenates parts, and slices with clamped offsets",
+      "setup": "globalThis.__blobProbe = {}; const blob = new Blob(['ab', new Uint8Array([99]), new Blob(['d'])], { type: 'TEXT/Plain' }); Promise.all([blob.text(), blob.slice(-2).text(), blob.slice(1, 1e21).text(), new Response(blob).blob().then(round => round.type + ':' + round.size)]).then(([text, tail, rest, roundTrip]) => { __blobProbe.ok = blob.size === 4 && blob.type === 'text/plain' && text === 'abcd' && tail === 'cd' && rest === 'bcd' && roundTrip === 'text/plain:4'; })",
+      "probe": "typeof Blob === 'function' && __blobProbe.ok === true",
       "baseline_supported": false
     },
     {
       "id": "data.file-api",
       "area": "data",
-      "description": "File and FileReader are exposed",
-      "probe": "typeof File === 'function' && typeof FileReader === 'function'",
+      "description": "File carries name/lastModified and FileReader delivers results from a task",
+      "run_tasks": true,
+      "setup": "globalThis.__fileProbe = {}; const file = new File(['hi'], 'n.txt', { type: 'text/plain', lastModified: 7 }); const reader = new FileReader(); const events = []; for (const type of ['loadstart', 'progress', 'load', 'loadend']) reader.addEventListener(type, () => events.push(type)); reader.addEventListener('loadend', () => { __fileProbe.ok = file.name === 'n.txt' && file.lastModified === 7 && file instanceof Blob && events.join(',') === 'loadstart,progress,load,loadend' && reader.readyState === FileReader.DONE && reader.result === 'hi'; }); reader.readAsText(file)",
+      "probe": "typeof File === 'function' && typeof FileReader === 'function' && __fileProbe.ok === true",
+      "baseline_supported": false
+    },
+    {
+      "id": "data.object-url",
+      "area": "data",
+      "description": "URL.createObjectURL resolves through fetch and stops resolving after revoke",
+      "setup": "globalThis.__objectUrlProbe = {}; const url = URL.createObjectURL(new Blob(['payload'], { type: 'text/plain' })); fetch(url).then(async response => { __objectUrlProbe.served = response.status === 200 && response.headers.get('content-type') === 'text/plain' && response.headers.get('content-length') === '7' && await response.text() === 'payload'; URL.revokeObjectURL(url); return fetch(url); }).then(() => { __objectUrlProbe.revoked = false; }, error => { __objectUrlProbe.revoked = error instanceof TypeError; })",
+      "probe": "/^blob:/.test(URL.createObjectURL(new Blob())) && __objectUrlProbe.served === true && __objectUrlProbe.revoked === true",
       "baseline_supported": false
     },
     {

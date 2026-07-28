@@ -4333,6 +4333,12 @@
     return String(value).replace(/\r(?!\n)|(?<!\r)\n/g, "\r\n");
   }
 
+  // Encodings that cannot carry a file — `application/x-www-form-urlencoded` and
+  // `text/plain` — submit a File entry as its filename.
+  function formEntryValueAsText(value) {
+    return value instanceof File ? value.name : String(value);
+  }
+
   function collectFormEntries(form, submitter = null) {
     const entries = [];
     for (const control of form.__controls()) {
@@ -4341,7 +4347,19 @@
       const tag = control.tagName;
       const type = String(control.type || "").toLowerCase();
       if (tag === "INPUT" && (type === "checkbox" || type === "radio") && !control.checked) continue;
-      if ((tag === "INPUT" && ["submit", "image", "button", "reset", "file"].includes(type)) || tag === "BUTTON") {
+      if (tag === "INPUT" && type === "file") {
+        // A file control contributes one entry per selected file. Omoikane has
+        // no file picker, so the list is empty and the entry-list algorithm's
+        // fallback applies: a single empty File with an empty name.
+        const files = control.files ? Array.from(control.files) : [];
+        if (files.length === 0) {
+          entries.push([name, new File([], "", { type: "application/octet-stream" })]);
+        } else {
+          for (const file of files) entries.push([name, file]);
+        }
+        continue;
+      }
+      if ((tag === "INPUT" && ["submit", "image", "button", "reset"].includes(type)) || tag === "BUTTON") {
         if (control !== submitter || !["submit", "image", ""].includes(type)) continue;
       }
       if (tag === "SELECT") {
@@ -4362,20 +4380,59 @@
   function formUrlEncode(entries) {
     const encode = value => encodeURIComponent(normalizeFormLineBreaks(value))
       .replace(/%20/g, "+").replace(/[!'()~]/g, c => "%" + c.charCodeAt(0).toString(16).toUpperCase());
-    return entries.map(([name, value]) => encode(name) + "=" + encode(value)).join("&");
+    return entries.map(([name, value]) => encode(name) + "=" + encode(formEntryValueAsText(value))).join("&");
   }
 
   function formTextEncode(entries) {
-    return entries.map(([name, value]) => normalizeFormLineBreaks(name) + "=" + normalizeFormLineBreaks(value)).join("\r\n") + (entries.length ? "\r\n" : "");
+    return entries.map(([name, value]) => normalizeFormLineBreaks(name) + "=" + normalizeFormLineBreaks(formEntryValueAsText(value))).join("\r\n") + (entries.length ? "\r\n" : "");
+  }
+
+  // The multipart/form-data encoding algorithm escapes CR, LF and `"` in field
+  // names and filenames rather than dropping them, so a name can never break out
+  // of its Content-Disposition header.
+  function escapeMultipartHeaderValue(value) {
+    return String(value).replace(/\r/g, "%0D").replace(/\n/g, "%0A").replace(/"/g, "%22");
   }
 
   let formDataBoundaryCounter = 0;
-  function formMultipartEncode(entries, boundary) {
-    return entries.map(([name, value]) => {
-      const escapedName = String(name).replace(/\r|\n/g, "").replace(/"/g, "%22");
-      return "--" + boundary + "\r\nContent-Disposition: form-data; name=\"" + escapedName +
-        "\"\r\n\r\n" + normalizeFormLineBreaks(value) + "\r\n";
-    }).join("") + "--" + boundary + "--\r\n";
+
+  // Returns the body as a list of parts: strings for header lines and text
+  // values, and the File entries themselves so their bytes pass through
+  // untouched.
+  function formMultipartParts(entries, boundary) {
+    const parts = [];
+    for (const [name, value] of entries) {
+      const disposition = "--" + boundary + "\r\nContent-Disposition: form-data; name=\"" +
+        escapeMultipartHeaderValue(name) + "\"";
+      if (value instanceof Blob) {
+        const filename = value instanceof File ? value.name : "blob";
+        parts.push(
+          disposition + "; filename=\"" + escapeMultipartHeaderValue(filename) + "\"\r\n" +
+            "Content-Type: " + (value.type || "application/octet-stream") + "\r\n\r\n",
+          value,
+          "\r\n",
+        );
+      } else {
+        parts.push(disposition + "\r\n\r\n" + normalizeFormLineBreaks(value) + "\r\n");
+      }
+    }
+    parts.push("--" + boundary + "--\r\n");
+    return parts;
+  }
+
+  // Per the FormData spec a Blob value is stored as a File: an explicit filename
+  // wins, an existing File keeps its own name, and a bare Blob is named "blob".
+  // A filename may only accompany a Blob.
+  function formDataEntryValue(value, filename) {
+    if (value instanceof Blob) {
+      if (filename === undefined && value instanceof File) return value;
+      return new File([value], filename === undefined ? "blob" : String(filename), {
+        type: value.type,
+        lastModified: value instanceof File ? value.lastModified : undefined,
+      });
+    }
+    if (filename !== undefined) throw new TypeError("FormData filename requires a Blob value");
+    return String(value);
   }
 
   class FormData {
@@ -4383,13 +4440,15 @@
       if (form !== undefined && !(form instanceof HTMLFormElement)) throw new TypeError("FormData argument must be a form");
       this.__entries = form ? collectFormEntries(form) : [];
     }
-    append(name, value) { this.__entries.push([String(name), String(value)]); }
+    append(name, value, filename = undefined) {
+      this.__entries.push([String(name), formDataEntryValue(value, filename)]);
+    }
     delete(name) { name = String(name); this.__entries = this.__entries.filter(entry => entry[0] !== name); }
     get(name) { name = String(name); return this.__entries.find(entry => entry[0] === name)?.[1] ?? null; }
     getAll(name) { name = String(name); return this.__entries.filter(entry => entry[0] === name).map(entry => entry[1]); }
     has(name) { name = String(name); return this.__entries.some(entry => entry[0] === name); }
-    set(name, value) {
-      name = String(name); value = String(value);
+    set(name, value, filename = undefined) {
+      name = String(name); value = formDataEntryValue(value, filename);
       const index = this.__entries.findIndex(entry => entry[0] === name);
       if (index < 0) this.__entries.push([name, value]);
       else {
@@ -4402,8 +4461,15 @@
     *values() { for (const [, value] of this.__entries) yield value; }
     forEach(callback, thisArg) { for (const [name, value] of this.__entries) callback.call(thisArg, value, name, this); }
     [Symbol.iterator]() { return this.entries(); }
+    // `body` is a string while every part is text — which keeps the plain-text
+    // submission path allocation-free — and a `Uint8Array` once a file entry
+    // makes the payload binary. The host request binding accepts either.
     __multipart(boundary = "----omoikane-formdata-" + (++formDataBoundaryCounter)) {
-      return { body: formMultipartEncode(this.__entries, boundary), contentType: "multipart/form-data; boundary=" + boundary };
+      const parts = formMultipartParts(this.__entries, boundary);
+      const body = parts.every(part => typeof part === "string")
+        ? parts.join("")
+        : blobPartsToBytes(parts);
+      return { body, contentType: "multipart/form-data; boundary=" + boundary };
     }
   }
 
@@ -4687,6 +4753,14 @@
     }
     set type(v) {
       this.setAttribute("type", String(v));
+    }
+    // Only a file control has a selected files list. Omoikane cannot open a file
+    // picker, so the list stays empty; it is cached per element so repeated reads
+    // return the same object, as in browsers.
+    get files() {
+      if (this.type !== "file") return null;
+      if (this.__files === undefined) this.__files = new FileList();
+      return this.__files;
     }
     // The `value` IDL attribute is the control's "dirty value": it is held in
     // JS and is NOT reflected to the `value` content attribute. Storing it in
@@ -6063,7 +6137,10 @@
       encode(input = "") {
         const bytes = [];
         for (const char of String(input)) {
-          const code = char.codePointAt(0);
+          let code = char.codePointAt(0);
+          // An unpaired surrogate has no UTF-8 encoding; the Encoding standard
+          // replaces it with U+FFFD rather than emitting a surrogate sequence.
+          if (code >= 0xd800 && code <= 0xdfff) code = 0xfffd;
           if (code <= 0x7f) bytes.push(code);
           else if (code <= 0x7ff) {
             bytes.push(0xc0 | (code >> 6), 0x80 | (code & 0x3f));
@@ -6827,7 +6904,7 @@
       this._responseHeaders = [];
       this._sendFlag = false;
       this._method = String(method).toUpperCase();
-      this._url = resolveNetworkUrl(url);
+      this._url = isBlobUrl(url) ? String(url) : resolveNetworkUrl(url);
       this._async = async !== false;
       this.readyState = 1;
       this._notify("readystatechange");
@@ -6880,28 +6957,41 @@
       if (this.readyState !== 1 || this._sendFlag) throw new Error("InvalidStateError");
       this._sendFlag = true;
       const requestId = this._requestId;
-      let requestBody = this._method === "GET" || this._method === "HEAD" ? null : body;
-      if (requestBody instanceof FormData) {
-        const multipart = requestBody.__multipart();
-        requestBody = multipart.body;
-        if (!("content-type" in this._headers)) this._headers["content-type"] = multipart.contentType;
+      const requestBody = this._method === "GET" || this._method === "HEAD"
+        ? EMPTY_BODY
+        : extractBody(body);
+      if (requestBody.contentType !== null && !("content-type" in this._headers)) {
+        this._headers["content-type"] = requestBody.contentType;
       }
-      if (requestBody != null && !("content-type" in this._headers)) {
-        this._headers["content-type"] = "text/plain;charset=UTF-8";
-      }
-      Promise.resolve().then(() =>
-        __omoikane_fetch(
-          this._url,
-          this._method,
-          JSON.stringify(Object.entries(this._headers)),
-          requestBody,
-          "cors",
-          this.withCredentials ? "include" : "same-origin",
-          "follow",
-        )
-      ).then(raw => {
+      // A blob URL resolves from the object URL store; anything else goes to the
+      // host fetch binding. Both settle to the same payload shape.
+      const payload = isBlobUrl(this._url)
+        ? Promise.resolve().then(() => {
+            const blob = this._method === "GET" ? objectUrls.get(this._url) : undefined;
+            if (blob === undefined) throw new TypeError("Failed to fetch blob URL");
+            return {
+              status: 200,
+              statusText: "OK",
+              url: this._url,
+              redirected: false,
+              type: "basic",
+              headers: [["content-type", blob.type], ["content-length", String(blob.size)]],
+              bodyText: blob.__text(),
+            };
+          })
+        : Promise.resolve().then(() =>
+            __omoikane_fetch(
+              this._url,
+              this._method,
+              JSON.stringify(Object.entries(this._headers)),
+              bodyAsPayload(requestBody),
+              "cors",
+              this.withCredentials ? "include" : "same-origin",
+              "follow",
+            )
+          ).then(raw => JSON.parse(String(raw)));
+      payload.then(data => {
         if (requestId !== this._requestId) return;
-        const data = JSON.parse(String(raw));
         this.status = data.status;
         this.statusText = data.statusText;
         this.responseURL = data.url;
@@ -7293,6 +7383,349 @@
   globalThis.MediaQueryList = MediaQueryList;
   globalThis.MediaQueryListEvent = MediaQueryListEvent;
 
+  // ---------------------------------------------------------------------------
+  // File API data primitives.
+  //
+  // `Blob` owns a snapshot of its bytes as a `Uint8Array`, which makes it the
+  // single binary representation the rest of the platform builds on: `File`,
+  // `FileReader`, object URLs, `FormData` file entries and fetch bodies all read
+  // through it. Because the bytes are already in memory, everything here is
+  // synchronous internally; only the spec'd entry points return promises or
+  // dispatch events.
+  // ---------------------------------------------------------------------------
+
+  const blobTextEncoder = new TextEncoder();
+  const blobTextDecoder = new TextDecoder();
+
+  const BLOB_BASE64_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+  const BLOB_BASE64_VALUES = (() => {
+    const table = new Uint8Array(128);
+    for (let index = 0; index < BLOB_BASE64_ALPHABET.length; index++) {
+      table[BLOB_BASE64_ALPHABET.charCodeAt(index)] = index;
+    }
+    return table;
+  })();
+
+  function base64FromBytes(bytes) {
+    const output = [];
+    for (let index = 0; index < bytes.length; index += 3) {
+      const remaining = bytes.length - index;
+      const bits = (bytes[index] << 16) |
+        ((remaining > 1 ? bytes[index + 1] : 0) << 8) |
+        (remaining > 2 ? bytes[index + 2] : 0);
+      output.push(
+        BLOB_BASE64_ALPHABET[(bits >> 18) & 63],
+        BLOB_BASE64_ALPHABET[(bits >> 12) & 63],
+        remaining > 1 ? BLOB_BASE64_ALPHABET[(bits >> 6) & 63] : "=",
+        remaining > 2 ? BLOB_BASE64_ALPHABET[bits & 63] : "=",
+      );
+    }
+    return output.join("");
+  }
+
+  // Decodes into a preallocated buffer rather than through `atob`, so a binary
+  // response body never builds an intermediate string.
+  function bytesFromBase64(text) {
+    const source = String(text).replace(/[^A-Za-z0-9+/]/g, "");
+    const bytes = new Uint8Array((source.length * 3) >> 2);
+    let buffer = 0;
+    let bits = 0;
+    let offset = 0;
+    for (let index = 0; index < source.length; index++) {
+      buffer = (buffer << 6) | BLOB_BASE64_VALUES[source.charCodeAt(index)];
+      bits += 6;
+      if (bits >= 8) {
+        bits -= 8;
+        bytes[offset++] = (buffer >> bits) & 255;
+      }
+    }
+    return offset === bytes.length ? bytes : bytes.slice(0, offset);
+  }
+
+  // A blob's `type` is kept only when every character is printable ASCII
+  // (U+0020..U+007E), and is then ASCII-lowercased. This is not MIME
+  // validation: "foo bar" survives unchanged, while a tab or a non-ASCII
+  // character drops the type entirely.
+  function normalizeBlobType(value) {
+    const text = String(value);
+    for (let index = 0; index < text.length; index++) {
+      const code = text.charCodeAt(index);
+      if (code < 0x20 || code > 0x7e) return "";
+    }
+    return text.toLowerCase();
+  }
+
+  // `sequence<BlobPart>` accepts any iterable object. A bare string is iterable
+  // but is not an object, so `new Blob("abc")` is a TypeError rather than three
+  // one-character parts.
+  function blobPartSequence(parts) {
+    if (parts === undefined) return [];
+    if (parts === null || typeof parts !== "object" || typeof parts[Symbol.iterator] !== "function") {
+      throw new TypeError("Blob parts must be given as a sequence");
+    }
+    return Array.from(parts);
+  }
+
+  // Flattens blob parts into one buffer. Strings are UTF-8 encoded (so a lone
+  // surrogate becomes U+FFFD), buffer sources are copied so later writes to
+  // them cannot change the blob, and nested blobs contribute their bytes
+  // without their type.
+  function blobPartsToBytes(parts) {
+    const chunks = [];
+    let length = 0;
+    for (const part of parts) {
+      let chunk;
+      if (part instanceof Blob) chunk = part.__bytes;
+      else if (part instanceof ArrayBuffer) chunk = new Uint8Array(part).slice();
+      else if (ArrayBuffer.isView(part)) {
+        chunk = new Uint8Array(part.buffer, part.byteOffset, part.byteLength).slice();
+      } else chunk = blobTextEncoder.encode(String(part));
+      chunks.push(chunk);
+      length += chunk.length;
+    }
+    if (chunks.length === 1) return chunks[0];
+    const bytes = new Uint8Array(length);
+    let offset = 0;
+    for (const chunk of chunks) {
+      bytes.set(chunk, offset);
+      offset += chunk.length;
+    }
+    return bytes;
+  }
+
+  // `Blob.slice()` takes `[Clamp] long long` offsets: a fractional value rounds
+  // to the nearest integer with ties to even, so `slice(1.5)` and `slice(2.5)`
+  // both start at byte 2.
+  function clampToInteger(value) {
+    const number = Number(value);
+    if (Number.isNaN(number)) return 0;
+    if (!Number.isFinite(number)) return number > 0 ? Number.MAX_SAFE_INTEGER : -Number.MAX_SAFE_INTEGER;
+    const floor = Math.floor(number);
+    const fraction = number - floor;
+    if (fraction > 0.5) return floor + 1;
+    if (fraction < 0.5) return floor;
+    return floor % 2 === 0 ? floor : floor + 1;
+  }
+
+  function relativeBlobOffset(offset, size) {
+    return offset < 0 ? Math.max(size + offset, 0) : Math.min(offset, size);
+  }
+
+  class Blob {
+    constructor(parts = undefined, options = undefined) {
+      const bytes = blobPartsToBytes(blobPartSequence(parts));
+      // Non-enumerable and non-writable: a blob is an immutable snapshot, and
+      // its backing store is not part of its observable shape.
+      Object.defineProperty(this, "__bytes", { value: bytes });
+      Object.defineProperty(this, "__type", {
+        value: normalizeBlobType((options ?? {}).type ?? ""),
+      });
+    }
+    get size() { return this.__bytes.length; }
+    get type() { return this.__type; }
+    get [Symbol.toStringTag]() { return "Blob"; }
+    slice(start = undefined, end = undefined, contentType = undefined) {
+      const size = this.__bytes.length;
+      const from = relativeBlobOffset(start === undefined ? 0 : clampToInteger(start), size);
+      const to = relativeBlobOffset(end === undefined ? size : clampToInteger(end), size);
+      const span = Math.max(to - from, 0);
+      return new Blob([this.__bytes.subarray(from, from + span)], {
+        type: contentType === undefined ? "" : contentType,
+      });
+    }
+    text() { return Promise.resolve(this.__text()); }
+    arrayBuffer() { return Promise.resolve(this.__bytes.slice().buffer); }
+    bytes() { return Promise.resolve(this.__bytes.slice()); }
+    // Synchronous UTF-8 decode used by the platform internals that already hold
+    // the bytes (`XMLHttpRequest.responseText`, fetch body text).
+    __text() { return blobTextDecoder.decode(this.__bytes); }
+  }
+
+  class File extends Blob {
+    constructor(parts, name, options = undefined) {
+      if (arguments.length < 2) throw new TypeError("File requires fileBits and fileName");
+      super(parts, options);
+      const lastModified = (options ?? {}).lastModified;
+      Object.defineProperty(this, "__name", { value: String(name) });
+      Object.defineProperty(this, "__lastModified", {
+        value: lastModified === undefined ? Date.now() : Math.trunc(Number(lastModified)) || 0,
+      });
+    }
+    // The file name is not sanitized: a path-like name is preserved verbatim.
+    get name() { return this.__name; }
+    get lastModified() { return this.__lastModified; }
+    get webkitRelativePath() { return ""; }
+    get [Symbol.toStringTag]() { return "File"; }
+  }
+
+  // Read-only, index-accessible list of files. Omoikane has no file picker, so a
+  // file control's list is always empty; the type exists so pages that reach for
+  // `input.files.length` behave instead of throwing.
+  class FileList {
+    constructor(files = []) {
+      Object.defineProperty(this, "__files", { value: Array.from(files) });
+      for (let index = 0; index < this.__files.length; index++) {
+        Object.defineProperty(this, index, { value: this.__files[index], enumerable: true });
+      }
+    }
+    get length() { return this.__files.length; }
+    item(index) {
+      const position = Math.trunc(Number(index)) || 0;
+      return this.__files[position] ?? null;
+    }
+    [Symbol.iterator]() { return this.__files[Symbol.iterator](); }
+    get [Symbol.toStringTag]() { return "FileList"; }
+  }
+
+  class ProgressEvent extends Event {
+    constructor(type, init = {}) {
+      init = init ?? {};
+      super(type, init);
+      this.lengthComputable = !!init.lengthComputable;
+      this.loaded = Number(init.loaded) || 0;
+      this.total = Number(init.total) || 0;
+    }
+    get [Symbol.toStringTag]() { return "ProgressEvent"; }
+  }
+
+  const FILE_READER_EMPTY = 0;
+  const FILE_READER_LOADING = 1;
+  const FILE_READER_DONE = 2;
+
+  // The File API falls back to UTF-8 when the encoding label is absent or
+  // unsupported. Omoikane's TextDecoder implements UTF-8 only, so every other
+  // label takes the fallback path.
+  function decodeBlobText(bytes, encoding) {
+    if (encoding !== undefined && encoding !== null && String(encoding) !== "") {
+      try { return new TextDecoder(String(encoding)).decode(bytes); }
+      catch (_) { /* unsupported label: fall back to UTF-8 */ }
+    }
+    return blobTextDecoder.decode(bytes);
+  }
+
+  function fileReaderResult(blob, kind, encoding) {
+    if (kind === "arraybuffer") return blob.__bytes.slice().buffer;
+    if (kind === "dataurl") {
+      // A blob with no type is exposed as application/octet-stream.
+      return "data:" + (blob.type || "application/octet-stream") + ";base64," +
+        base64FromBytes(blob.__bytes);
+    }
+    if (kind === "binarystring") {
+      let result = "";
+      for (const byte of blob.__bytes) result += String.fromCharCode(byte);
+      return result;
+    }
+    return decodeBlobText(blob.__bytes, encoding);
+  }
+
+  class FileReader extends EventTarget {
+    constructor() {
+      super();
+      this.readyState = FILE_READER_EMPTY;
+      this.result = null;
+      this.error = null;
+      this.onloadstart = null;
+      this.onprogress = null;
+      this.onload = null;
+      this.onabort = null;
+      this.onerror = null;
+      this.onloadend = null;
+      // Bumped by every read and by `abort()`, so a superseded or aborted read
+      // stops dispatching as soon as control returns to it.
+      this.__readId = 0;
+    }
+    readAsText(blob, encoding = undefined) { this.__read(blob, "text", encoding); }
+    readAsArrayBuffer(blob) { this.__read(blob, "arraybuffer"); }
+    readAsDataURL(blob) { this.__read(blob, "dataurl"); }
+    readAsBinaryString(blob) { this.__read(blob, "binarystring"); }
+    abort() {
+      if (this.readyState !== FILE_READER_LOADING) {
+        this.result = null;
+        return;
+      }
+      this.__readId++;
+      this.readyState = FILE_READER_DONE;
+      this.result = null;
+      this.error = new DOMException("The read operation was aborted", "AbortError");
+      this.__fire("abort", 0, 0);
+      this.__fire("loadend", 0, 0);
+    }
+    __read(blob, kind, encoding = undefined) {
+      if (!(blob instanceof Blob)) throw new TypeError("FileReader requires a Blob");
+      if (this.readyState === FILE_READER_LOADING) {
+        throw new DOMException("A read is already in progress", "InvalidStateError");
+      }
+      this.readyState = FILE_READER_LOADING;
+      this.result = null;
+      this.error = null;
+      const readId = ++this.__readId;
+      const total = blob.size;
+      // The bytes are already in memory, but the File API delivers results from
+      // the file reading task source: a script that starts a read never sees its
+      // result before yielding to the event loop.
+      __omoikane_queue_file_reading_task(() => {
+        const alive = () => readId === this.__readId;
+        if (!alive()) return;
+        this.__fire("loadstart", 0, total);
+        if (!alive()) return;
+        this.__fire("progress", total, total);
+        if (!alive()) return;
+        this.result = fileReaderResult(blob, kind, encoding);
+        this.readyState = FILE_READER_DONE;
+        this.__fire("load", total, total);
+        if (!alive()) return;
+        this.__fire("loadend", total, total);
+      });
+    }
+    __fire(type, loaded, total) {
+      const event = new ProgressEvent(type, { lengthComputable: true, loaded, total });
+      const handler = this["on" + type];
+      if (typeof handler === "function") handler.call(this, event);
+      this.dispatchEvent(event);
+    }
+  }
+  FileReader.EMPTY = FILE_READER_EMPTY;
+  FileReader.LOADING = FILE_READER_LOADING;
+  FileReader.DONE = FILE_READER_DONE;
+  FileReader.prototype.EMPTY = FILE_READER_EMPTY;
+  FileReader.prototype.LOADING = FILE_READER_LOADING;
+  FileReader.prototype.DONE = FILE_READER_DONE;
+
+  // Object URLs are minted here and mirrored into the host store. The map keeps
+  // the `Blob` itself so `fetch()` and `XMLHttpRequest` read the original bytes;
+  // the host copy exists for loads that run after script has finished, such as
+  // `<img src>` and CSS `url(...)`, which layout resolves synchronously.
+  const objectUrls = new Map();
+
+  function isBlobUrl(url) {
+    return /^blob:/i.test(String(url));
+  }
+
+  function createObjectURL(object) {
+    if (!(object instanceof Blob)) {
+      throw new TypeError("createObjectURL requires a Blob");
+    }
+    const origin = (globalThis.location && globalThis.location.origin) || "null";
+    const url = "blob:" + origin + "/" + crypto.randomUUID();
+    objectUrls.set(url, object);
+    __omoikane_register_object_url(url, object.__bytes, object.type);
+    return url;
+  }
+
+  function revokeObjectURL(url) {
+    const key = String(url);
+    objectUrls.delete(key);
+    __omoikane_revoke_object_url(key);
+  }
+
+  globalThis.Blob = Blob;
+  globalThis.File = File;
+  globalThis.FileList = FileList;
+  globalThis.FileReader = FileReader;
+  globalThis.ProgressEvent = ProgressEvent;
+  globalThis.URL.createObjectURL = createObjectURL;
+  globalThis.URL.revokeObjectURL = revokeObjectURL;
+
   class Headers {
     constructor(init = undefined) {
       this._headers = new Map();
@@ -7315,19 +7748,86 @@
     *values() { yield* this._headers.values(); }
     [Symbol.iterator]() { return this.entries(); }
   }
+  // Fetch's "extract a body", reduced to the body types Omoikane models.
+  //
+  // A body is kept in the form it arrived in: as text for strings and network
+  // responses (whose UTF-8 decoding is exactly what `text()` is defined to
+  // return), and as bytes for blobs, buffer sources and file-bearing form data.
+  // Keeping both forms available means `text()` never re-decodes a text body,
+  // while `blob()` and `arrayBuffer()` never lose bytes.
+  // Shared by every bodyless request and response, so it must stay immutable.
+  const EMPTY_BODY = Object.freeze({ text: null, bytes: null, contentType: null });
+
+  function extractBody(source) {
+    if (source === null || source === undefined) return EMPTY_BODY;
+    if (source instanceof Blob) {
+      return { text: null, bytes: source.__bytes, contentType: source.type || null };
+    }
+    if (source instanceof ArrayBuffer || ArrayBuffer.isView(source)) {
+      return { text: null, bytes: blobPartsToBytes([source]), contentType: null };
+    }
+    if (source instanceof FormData) {
+      const encoded = source.__multipart();
+      return typeof encoded.body === "string"
+        ? { text: encoded.body, bytes: null, contentType: encoded.contentType }
+        : { text: null, bytes: encoded.body, contentType: encoded.contentType };
+    }
+    if (globalThis.URLSearchParams !== undefined && source instanceof URLSearchParams) {
+      return {
+        text: source.toString(),
+        bytes: null,
+        contentType: "application/x-www-form-urlencoded;charset=UTF-8",
+      };
+    }
+    return { text: String(source), bytes: null, contentType: "text/plain;charset=UTF-8" };
+  }
+
+  function bodyIsEmpty(body) {
+    return body.text === null && body.bytes === null;
+  }
+
+  function bodyAsText(body) {
+    if (body.text !== null) return body.text;
+    return body.bytes === null ? "" : blobTextDecoder.decode(body.bytes);
+  }
+
+  function bodyAsBytes(body) {
+    if (body.bytes !== null) return body.bytes;
+    return blobTextEncoder.encode(body.text ?? "");
+  }
+
+  // The payload handed to the host fetch binding: a string for text bodies (the
+  // common case, unchanged) and a `Uint8Array` when the bytes cannot be
+  // represented as text.
+  function bodyAsPayload(body) {
+    if (bodyIsEmpty(body)) return null;
+    return body.text !== null ? body.text : body.bytes;
+  }
+
+  // `Response.blob()` takes its type from the Content-Type header rather than
+  // from the body it was built with, so an overridden header wins.
+  function bodyAsBlob(body, headers) {
+    return new Blob([bodyAsBytes(body)], { type: headers.get("content-type") ?? "" });
+  }
+
   class Request {
     constructor(input, init = {}) {
       const source = input instanceof Request ? input : null;
-      this.url = source ? source.url : resolveNetworkUrl(input);
+      // A blob URL is already absolute; relative resolution only understands
+      // http(s) and would have to round-trip it through two parsers to get the
+      // same string back.
+      this.url = source ? source.url
+        : isBlobUrl(input) ? String(input)
+        : resolveNetworkUrl(input);
       this.method = String(init.method || (source && source.method) || "GET").toUpperCase();
       this.headers = new Headers(init.headers || (source && source.headers));
-      const selectedBody = init.body === undefined ? (source && source.body) : init.body;
-      if (selectedBody instanceof FormData) {
-        const multipart = selectedBody.__multipart();
-        this.body = multipart.body;
-        if (!this.headers.has("content-type")) this.headers.set("content-type", multipart.contentType);
-      } else {
-        this.body = selectedBody == null ? null : String(selectedBody);
+      const body = init.body === undefined
+        ? (source ? source.__body : EMPTY_BODY)
+        : extractBody(init.body);
+      this.__body = body;
+      this.bodyUsed = false;
+      if (body.contentType !== null && !this.headers.has("content-type")) {
+        this.headers.set("content-type", body.contentType);
       }
       this.credentials = init.credentials ?? (source && source.credentials) ?? "same-origin";
       this.mode = init.mode ?? (source && source.mode) ?? "cors";
@@ -7339,32 +7839,51 @@
       if (this.mode === "no-cors" && !["GET", "HEAD", "POST"].includes(this.method)) {
         throw new TypeError("Method is not allowed in no-cors mode");
       }
-      if ((this.method === "GET" || this.method === "HEAD") && this.body != null) {
+      if ((this.method === "GET" || this.method === "HEAD") && !bodyIsEmpty(body)) {
         throw new TypeError("Request with GET/HEAD method cannot have body");
       }
-      if (this.body != null && !this.headers.has("content-type")) {
-        this.headers.set("content-type", "text/plain;charset=UTF-8");
-      }
     }
+    // Non-standard: the spec exposes a `ReadableStream`. Omoikane exposes the
+    // payload itself — the text of a text body, otherwise a `Blob` over its
+    // bytes — because scripts only read it back to inspect what they sent.
+    get body() {
+      if (this.__body.text !== null) return this.__body.text;
+      return this.__body.bytes === null ? null : new Blob([this.__body.bytes]);
+    }
+    text() { this.bodyUsed = true; return Promise.resolve(bodyAsText(this.__body)); }
+    json() { return this.text().then(JSON.parse); }
+    arrayBuffer() { this.bodyUsed = true; return Promise.resolve(bodyAsBytes(this.__body).slice().buffer); }
+    blob() { this.bodyUsed = true; return Promise.resolve(bodyAsBlob(this.__body, this.headers)); }
     clone() { return new Request(this); }
   }
   class Response {
     constructor(body = null, init = {}) {
-      this._body = body === null ? "" : String(body);
+      const extracted = extractBody(body);
+      this.__body = extracted;
       this.status = init.status === undefined ? 200 : Number(init.status);
       this.statusText = init.statusText || "";
       this.headers = new Headers(init.headers);
+      if (extracted.contentType !== null && !this.headers.has("content-type")) {
+        this.headers.set("content-type", extracted.contentType);
+      }
       this.url = init.url || "";
       this.type = "basic";
       this.redirected = Boolean(init.redirected);
       this.bodyUsed = false;
     }
     get ok() { return this.status >= 200 && this.status <= 299; }
-    text() { this.bodyUsed = true; return Promise.resolve(this._body); }
+    get body() {
+      if (this.__body.text !== null) return this.__body.text;
+      return this.__body.bytes === null ? null : new Blob([this.__body.bytes]);
+    }
+    text() { this.bodyUsed = true; return Promise.resolve(bodyAsText(this.__body)); }
     json() { return this.text().then(JSON.parse); }
-    arrayBuffer() { return Promise.resolve(new TextEncoder().encode(this._body).buffer); }
+    arrayBuffer() { this.bodyUsed = true; return Promise.resolve(bodyAsBytes(this.__body).slice().buffer); }
+    blob() { this.bodyUsed = true; return Promise.resolve(bodyAsBlob(this.__body, this.headers)); }
     clone() {
-      const response = new Response(this._body, { status: this.status, statusText: this.statusText, headers: this.headers, url: this.url, redirected: this.redirected });
+      const response = new Response(null, { status: this.status, statusText: this.statusText, headers: this.headers, url: this.url, redirected: this.redirected });
+      // A body is an immutable snapshot, so both responses can share it.
+      response.__body = this.__body;
       response.type = this.type;
       return response;
     }
@@ -7381,32 +7900,66 @@
   globalThis.Request = Request;
   globalThis.Response = Response;
 
+  // Builds a Response from a host fetch payload. `bodyText` is the lossy UTF-8
+  // decoding the text path is defined in terms of; `bodyBase64` is present only
+  // when the payload was not valid UTF-8, and then carries the original bytes so
+  // `blob()` and `arrayBuffer()` stay exact.
+  function responseFromFetchPayload(data) {
+    const response = new Response(null, {
+      status: data.status,
+      statusText: data.statusText,
+      headers: data.headers,
+      url: data.url,
+      redirected: data.redirected,
+    });
+    // Both forms are retained: `text()` must not re-decode, and for a payload
+    // that is not valid UTF-8 the lossy decoding is still the defined text
+    // result while the bytes remain available to `blob()`/`arrayBuffer()`.
+    response.__body = {
+      text: data.bodyText,
+      bytes: data.bodyBase64 == null ? null : bytesFromBase64(data.bodyBase64),
+      contentType: null,
+    };
+    response.type = data.type;
+    return response;
+  }
+
+  // Fetching a blob URL is a store lookup rather than a network request. Only
+  // GET is defined for it, and an unknown or revoked URL is a network error.
+  function blobUrlResponse(url, method) {
+    const blob = objectUrls.get(String(url));
+    if (blob === undefined || String(method).toUpperCase() !== "GET") return null;
+    const headers = new Headers();
+    headers.set("content-type", blob.type);
+    headers.set("content-length", String(blob.size));
+    return new Response(blob, { status: 200, statusText: "OK", headers, url: String(url) });
+  }
+
   globalThis.fetch = function(input, init = {}) {
     const request = input instanceof Request ? new Request(input, init) : new Request(input, init);
     if (request.signal && request.signal.aborted) return Promise.reject(request.signal.reason);
+    if (isBlobUrl(request.url)) {
+      return Promise.resolve().then(() => {
+        if (request.signal && request.signal.aborted) throw request.signal.reason;
+        const response = blobUrlResponse(request.url, request.method);
+        if (response === null) throw new TypeError("Failed to fetch blob URL");
+        return response;
+      });
+    }
     return Promise.resolve().then(() => {
       if (request.signal && request.signal.aborted) throw request.signal.reason;
       return __omoikane_fetch(
         request.url,
         request.method,
         JSON.stringify([...request.headers]),
-        request.body,
+        bodyAsPayload(request.__body),
         request.mode,
         request.credentials,
         request.redirect,
       );
     }).then(raw => {
       if (request.signal && request.signal.aborted) throw request.signal.reason;
-      const data = JSON.parse(String(raw));
-      const response = new Response(data.bodyText, {
-        status: data.status,
-        statusText: data.statusText,
-        headers: data.headers,
-        url: data.url,
-        redirected: data.redirected,
-      });
-      response.type = data.type;
-      return response;
+      return responseFromFetchPayload(JSON.parse(String(raw)));
     });
   };
 

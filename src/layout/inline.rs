@@ -930,24 +930,57 @@ fn fetch_image_uncached(url: &str) -> Option<Image> {
         .map(str::to_lowercase)
         .unwrap_or_default();
 
-    // Determine image type from Content-Type header or try both decoders
+    decode_image_bytes(body, &content_type, url)
+}
+
+/// Decodes image bytes, picking the decoder from the media type and falling back
+/// to sniffing when it is absent or unrecognized.
+///
+/// `url` only contributes its file extension, which some servers make the only
+/// hint available for SVG and GIF.
+fn decode_image_bytes(bytes: &[u8], content_type: &str, url: &str) -> Option<Image> {
     if content_type.contains("image/svg+xml") || url.ends_with(".svg") {
-        return decode_svg_bytes(body);
+        return decode_svg_bytes(bytes);
     }
     if content_type.contains("image/gif") || url.ends_with(".gif") {
-        Image::decode_gif(body).ok()
+        Image::decode_gif(bytes).ok()
     } else if content_type.contains("image/png") {
-        Image::decode_png(body).ok()
+        Image::decode_png(bytes).ok()
     } else if content_type.contains("image/jpeg") || content_type.contains("image/jpg") {
-        Image::decode_jpeg(body).ok()
+        Image::decode_jpeg(bytes).ok()
     } else {
-        // Try PNG first, then JPEG, then SVG
-        Image::decode_png(body)
+        // Try PNG first, then JPEG, then GIF, then SVG
+        Image::decode_png(bytes)
             .ok()
-            .or_else(|| Image::decode_jpeg(body).ok())
-            .or_else(|| Image::decode_gif(body).ok())
-            .or_else(|| decode_svg_bytes(body))
+            .or_else(|| Image::decode_jpeg(bytes).ok())
+            .or_else(|| Image::decode_gif(bytes).ok())
+            .or_else(|| decode_svg_bytes(bytes))
     }
+}
+
+/// Resolves a `blob:` URL minted by `URL.createObjectURL()` into an image.
+///
+/// The bytes come from the host blob URL store rather than the network, because
+/// layout runs after the JavaScript runtime that created the URL is gone (see
+/// [`crate::data`]).
+///
+/// A decoded result is cached, but an unregistered URL is not: revoking an object
+/// URL must not leave a negative cache entry that would outlive a later
+/// registration. It does mean an image that has already been decoded keeps
+/// painting after its URL is revoked, which is what browsers do as well.
+fn decode_blob_url_image(url: &str) -> Option<Image> {
+    if let Some(cached) = IMAGE_CACHE.with(|cache| cache.borrow().get(url).cloned()) {
+        return cached;
+    }
+    let entry = crate::data::lookup_blob_url(url)?;
+    if entry.bytes.len() > MAX_IMAGE_SIZE {
+        return None;
+    }
+    let image = decode_image_bytes(&entry.bytes, &entry.media_type.to_lowercase(), url);
+    IMAGE_CACHE.with(|cache| {
+        cache.borrow_mut().insert(url.to_string(), image.clone());
+    });
+    image
 }
 
 fn decode_or_fetch_image(url_like: &str) -> Option<Image> {
@@ -957,6 +990,9 @@ fn decode_or_fetch_image(url_like: &str) -> Option<Image> {
     }
     if url_like.starts_with("data:") {
         return decode_data_uri_image(url_like);
+    }
+    if url_like.len() >= 5 && url_like[..5].eq_ignore_ascii_case("blob:") {
+        return decode_blob_url_image(url_like);
     }
     let resolved = resolve_image_url(url_like)?;
     fetch_image(&resolved)

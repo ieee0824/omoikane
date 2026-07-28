@@ -746,6 +746,123 @@ fn inline_replaced_element_with_padding_border_and_background_paints_in_order() 
     assert_eq!(canvas.pixel(3, 3), Some(Color::rgb(255, 0, 0)));
 }
 
+/// Base64 of a 1x1 red PNG, for scripts that need to build an image `Blob`.
+fn red_pixel_png_base64() -> String {
+    let mut canvas = Canvas::new(1, 1);
+    canvas.fill_rect(
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 1.0,
+            height: 1.0,
+        },
+        Color::rgb(255, 0, 0),
+    );
+    base64::engine::general_purpose::STANDARD.encode(canvas.encode_png())
+}
+
+#[test]
+fn paints_an_image_from_a_script_created_object_url() {
+    crate::data::clear_blob_urls();
+    let html = format!(
+        r#"<html><head><style>body {{ margin: 0; }} img {{ vertical-align: top; width: 2px; height: 2px; }}</style></head>
+        <body><img id="shot"><script>
+          const encoded = atob("{}");
+          const bytes = new Uint8Array(encoded.length);
+          for (let index = 0; index < encoded.length; index++) bytes[index] = encoded.charCodeAt(index);
+          const url = URL.createObjectURL(new Blob([bytes], {{ type: "image/png" }}));
+          document.getElementById("shot").setAttribute("src", url);
+        </script></body></html>"#,
+        red_pixel_png_base64()
+    );
+    let document = TreeBuilder::parse(&html).document();
+
+    let canvas = render_document(
+        &document,
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 4.0,
+            height: 4.0,
+        },
+    )
+    .unwrap();
+
+    assert_eq!(canvas.pixel(0, 0), Some(Color::rgb(255, 0, 0)));
+    assert_eq!(canvas.pixel(1, 1), Some(Color::rgb(255, 0, 0)));
+    // Outside the 2x2 image box nothing was painted.
+    assert_eq!(canvas.pixel(2, 2), Some(Color::rgba(0, 0, 0, 0)));
+    assert_eq!(crate::data::blob_url_count(), 1);
+}
+
+#[test]
+fn paints_nothing_for_a_revoked_object_url() {
+    crate::data::clear_blob_urls();
+    // The URL is revoked before it is ever loaded, so unlike an already-decoded
+    // image it cannot come back from the image cache.
+    let html = format!(
+        r#"<html><head><style>body {{ margin: 0; }} img {{ vertical-align: top; width: 2px; height: 2px; }}</style></head>
+        <body><img id="shot"><script>
+          const encoded = atob("{}");
+          const bytes = new Uint8Array(encoded.length);
+          for (let index = 0; index < encoded.length; index++) bytes[index] = encoded.charCodeAt(index);
+          const url = URL.createObjectURL(new Blob([bytes], {{ type: "image/png" }}));
+          document.getElementById("shot").setAttribute("src", url);
+          URL.revokeObjectURL(url);
+        </script></body></html>"#,
+        red_pixel_png_base64()
+    );
+    let document = TreeBuilder::parse(&html).document();
+
+    let canvas = render_document(
+        &document,
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 4.0,
+            height: 4.0,
+        },
+    )
+    .unwrap();
+
+    assert_eq!(canvas.pixel(0, 0), Some(Color::rgba(0, 0, 0, 0)));
+    assert_eq!(canvas.pixel(1, 1), Some(Color::rgba(0, 0, 0, 0)));
+    assert_eq!(crate::data::blob_url_count(), 0);
+}
+
+#[test]
+fn paints_a_background_image_from_an_object_url() {
+    crate::data::clear_blob_urls();
+    let html = format!(
+        r#"<html><body><div id="box"></div><script>
+          const encoded = atob("{}");
+          const bytes = new Uint8Array(encoded.length);
+          for (let index = 0; index < encoded.length; index++) bytes[index] = encoded.charCodeAt(index);
+          const url = URL.createObjectURL(new Blob([bytes], {{ type: "image/png" }}));
+          const style = document.createElement("style");
+          style.textContent = 'body {{ margin: 0; }} #box {{ width: 2px; height: 2px; background-image: url("' + url + '"); }}';
+          document.head.appendChild(style);
+        </script></body></html>"#,
+        red_pixel_png_base64()
+    );
+    let document = TreeBuilder::parse(&html).document();
+
+    let canvas = render_document(
+        &document,
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 4.0,
+            height: 4.0,
+        },
+    )
+    .unwrap();
+
+    assert_eq!(canvas.pixel(0, 0), Some(Color::rgb(255, 0, 0)));
+    assert_eq!(canvas.pixel(1, 1), Some(Color::rgb(255, 0, 0)));
+    assert_eq!(canvas.pixel(2, 2), Some(Color::rgba(0, 0, 0, 0)));
+}
+
 #[test]
 fn paints_background_image_with_position_offset() {
     let html = format!(

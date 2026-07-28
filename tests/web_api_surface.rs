@@ -24,6 +24,10 @@ struct Feature {
     setup: Option<String>,
     #[serde(default)]
     run_animation_frame: bool,
+    /// Drains queued tasks before probing. Needed for features whose results
+    /// arrive from a task source rather than a microtask, such as `FileReader`.
+    #[serde(default)]
+    run_tasks: bool,
     expected_navigation_requests: Option<usize>,
     probe: String,
     baseline_supported: bool,
@@ -95,6 +99,19 @@ fn run_probe(runtime: &mut JsRuntime, feature: &Feature) -> ProbeResult {
             baseline_supported: feature.baseline_supported,
             status: ProbeStatus::Error,
             error: Some(format!("jobs: {error}")),
+        };
+    }
+
+    if feature.run_tasks
+        && let Err(error) = runtime.run_until_idle()
+    {
+        return ProbeResult {
+            id: feature.id.clone(),
+            area: feature.area.clone(),
+            description: feature.description.clone(),
+            baseline_supported: feature.baseline_supported,
+            status: ProbeStatus::Error,
+            error: Some(format!("tasks: {error}")),
         };
     }
 
