@@ -4755,11 +4755,13 @@ fn fetch_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResul
             fetched.response_type,
             ResponseType::Opaque | ResponseType::OpaqueRedirect
         );
-        let body_text = String::from_utf8_lossy(response.body()).to_string();
-        let effective_url = response
-            .effective_url()
-            .map(ToString::to_string)
-            .unwrap_or_else(|| normalized_url.clone());
+        let body_text = (!opaque).then(|| String::from_utf8_lossy(response.body()).to_string());
+        let effective_url = (!opaque).then(|| {
+            response
+                .effective_url()
+                .map(ToString::to_string)
+                .unwrap_or_else(|| normalized_url.clone())
+        });
         let response_type = match fetched.response_type {
             ResponseType::Basic => "basic",
             ResponseType::Cors => "cors",
@@ -4772,11 +4774,11 @@ fn fetch_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResul
             "status": if opaque { 0 } else { response.status_code() },
             "statusText": if opaque { "" } else { response.reason() },
             "ok": !opaque && (200..300).contains(&response.status_code()),
-            "url": if opaque { "" } else { effective_url.as_str() },
+            "url": effective_url.as_deref().unwrap_or(""),
             "redirected": !opaque && fetched.redirected,
             "type": response_type,
             "headers": exposed_headers,
-            "bodyText": if opaque { "" } else { body_text.as_str() },
+            "bodyText": body_text.as_deref().unwrap_or(""),
         })
         .to_string();
         Ok(js_string!(payload.as_str()).into())
@@ -7246,6 +7248,31 @@ mod tests {
 
         assert!(runtime
             .eval(r#"corsResult.type === "cors" && corsResult.body === "ok" && corsResult.contentType === "text/plain" && corsResult.public === "visible" && corsResult.secret === null"#)
+            .unwrap()
+            .as_boolean()
+            .unwrap());
+    }
+
+    #[test]
+    fn fetch_policy_values_are_validated_and_response_type_is_internal() {
+        let mut runtime = JsRuntime::new().unwrap();
+        runtime
+            .eval(
+                r#"globalThis.policyChecks = [
+                    ["credentials", ""],
+                    ["mode", ""],
+                    ["redirect", ""],
+                  ].map(([name, value]) => {
+                    try { new Request("http://example.test/", { [name]: value }); return false; }
+                    catch (error) { return error instanceof TypeError; }
+                  });
+                  const constructed = new Response("visible", { type: "opaque" });
+                  const forgedClone = constructed.clone();"#,
+            )
+            .unwrap();
+
+        assert!(runtime
+            .eval(r#"policyChecks.every(Boolean) && constructed.type === "basic" && forgedClone.type === "basic""#)
             .unwrap()
             .as_boolean()
             .unwrap());

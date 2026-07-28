@@ -6859,10 +6859,10 @@
       this.headers = new Headers(init.headers || (source && source.headers));
       const selectedBody = init.body === undefined ? (source && source.body) : init.body;
       this.body = selectedBody == null ? null : String(selectedBody);
-      this.credentials = init.credentials || (source && source.credentials) || "same-origin";
-      this.mode = init.mode || (source && source.mode) || "cors";
-      this.redirect = init.redirect || (source && source.redirect) || "follow";
-      this.signal = init.signal || (source && source.signal) || null;
+      this.credentials = init.credentials ?? (source && source.credentials) ?? "same-origin";
+      this.mode = init.mode ?? (source && source.mode) ?? "cors";
+      this.redirect = init.redirect ?? (source && source.redirect) ?? "follow";
+      this.signal = init.signal ?? (source && source.signal) ?? null;
       if (!["omit", "same-origin", "include"].includes(this.credentials)) throw new TypeError("Invalid credentials mode");
       if (!["same-origin", "cors", "no-cors"].includes(this.mode)) throw new TypeError("Invalid request mode");
       if (!["follow", "error", "manual"].includes(this.redirect)) throw new TypeError("Invalid redirect mode");
@@ -6885,7 +6885,7 @@
       this.statusText = init.statusText || "";
       this.headers = new Headers(init.headers);
       this.url = init.url || "";
-      this.type = init.type || "basic";
+      this.type = "basic";
       this.redirected = Boolean(init.redirected);
       this.bodyUsed = false;
     }
@@ -6893,7 +6893,11 @@
     text() { this.bodyUsed = true; return Promise.resolve(this._body); }
     json() { return this.text().then(JSON.parse); }
     arrayBuffer() { return Promise.resolve(new TextEncoder().encode(this._body).buffer); }
-    clone() { return new Response(this._body, { status: this.status, statusText: this.statusText, headers: this.headers, url: this.url, redirected: this.redirected, type: this.type }); }
+    clone() {
+      const response = new Response(this._body, { status: this.status, statusText: this.statusText, headers: this.headers, url: this.url, redirected: this.redirected });
+      response.type = this.type;
+      return response;
+    }
     static json(data, init = {}) {
       const headers = new Headers(init.headers);
       if (!headers.has("content-type")) headers.set("content-type", "application/json");
@@ -6923,14 +6927,15 @@
     }).then(raw => {
       if (request.signal && request.signal.aborted) throw request.signal.reason;
       const data = JSON.parse(String(raw));
-      return new Response(data.bodyText, {
+      const response = new Response(data.bodyText, {
         status: data.status,
         statusText: data.statusText,
         headers: data.headers,
         url: data.url,
         redirected: data.redirected,
-        type: data.type,
       });
+      response.type = data.type;
+      return response;
     });
   };
 
