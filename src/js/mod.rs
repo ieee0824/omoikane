@@ -4995,16 +4995,20 @@ fn fetch_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResul
             fetched.response_type,
             ResponseType::Opaque | ResponseType::OpaqueRedirect
         );
-        let body_text = (!opaque).then(|| String::from_utf8_lossy(response.body()).to_string());
         // `bodyText` is the lossy UTF-8 decoding the Fetch and XHR text paths are
         // defined in terms of, so it stays the primary representation. It cannot
         // represent a payload that is not valid UTF-8 though (an image, a font),
         // and `Response.blob()`/`arrayBuffer()` must hand back the original
         // bytes. Carry those separately, and only when decoding actually lost
         // information, so text responses pay nothing for it.
-        let body_base64 = (!opaque && std::str::from_utf8(response.body()).is_err()).then(|| {
-            base64::engine::general_purpose::STANDARD.encode(response.body())
-        });
+        //
+        // `from_utf8_lossy` borrows when the input is already valid UTF-8 and
+        // only allocates to substitute replacement characters, so an owned `Cow`
+        // is the signal that bytes were lost — no second validation pass needed.
+        let decoded_body = (!opaque).then(|| String::from_utf8_lossy(response.body()));
+        let body_base64 = matches!(decoded_body, Some(std::borrow::Cow::Owned(_)))
+            .then(|| base64::engine::general_purpose::STANDARD.encode(response.body()));
+        let body_text = decoded_body.map(std::borrow::Cow::into_owned);
         let effective_url = (!opaque).then(|| {
             response
                 .effective_url()
@@ -7439,6 +7443,41 @@ mod tests {
                 .unwrap()
                 .as_boolean()
                 .unwrap()
+        );
+    }
+
+    #[test]
+    fn file_reader_chained_from_its_load_handler_still_reports_loadend() {
+        let mut runtime = JsRuntime::new().unwrap();
+        runtime
+            .eval(
+                r#"globalThis.chainLog = [];
+                const reader = new FileReader();
+                let chained = false;
+                for (const type of ["loadstart", "progress", "load", "loadend"]) {
+                  reader.addEventListener(type, () => chainLog.push(type + ":" + reader.result));
+                }
+                reader.addEventListener("load", () => {
+                  // Starting the next read from `load` must not cancel the
+                  // `loadend` that belongs to the read that just finished.
+                  if (chained) return;
+                  chained = true;
+                  reader.readAsText(new Blob(["second"]));
+                });
+                reader.readAsText(new Blob(["first"]));"#,
+            )
+            .unwrap();
+        runtime.run_until_idle().unwrap();
+
+        assert_eq!(
+            runtime
+                .eval("chainLog.join(\" | \")")
+                .unwrap()
+                .as_string()
+                .unwrap()
+                .to_std_string_escaped(),
+            "loadstart:null | progress:null | load:first | loadend:null | \
+             loadstart:null | progress:null | load:second | loadend:second"
         );
     }
 

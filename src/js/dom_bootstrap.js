@@ -7664,16 +7664,18 @@
       // the file reading task source: a script that starts a read never sees its
       // result before yielding to the event loop.
       __omoikane_queue_file_reading_task(() => {
-        const alive = () => readId === this.__readId;
-        if (!alive()) return;
+        // An `abort()` or a superseding read cancels whatever this one has not
+        // dispatched yet.
+        if (readId !== this.__readId) return;
         this.__fire("loadstart", 0, total);
-        if (!alive()) return;
+        if (readId !== this.__readId) return;
         this.__fire("progress", total, total);
-        if (!alive()) return;
+        if (readId !== this.__readId) return;
         this.result = fileReaderResult(blob, kind, encoding);
         this.readyState = FILE_READER_DONE;
+        // `load` and `loadend` are the same read operation, so a read started
+        // from the `load` handler must not swallow this read's `loadend`.
         this.__fire("load", total, total);
-        if (!alive()) return;
         this.__fire("loadend", total, total);
       });
     }

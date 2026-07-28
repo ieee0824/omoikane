@@ -416,7 +416,7 @@
       "area": "data",
       "description": "URL.createObjectURL resolves through fetch and stops resolving after revoke",
       "setup": "globalThis.__objectUrlProbe = {}; const url = URL.createObjectURL(new Blob(['payload'], { type: 'text/plain' })); fetch(url).then(async response => { __objectUrlProbe.served = response.status === 200 && response.headers.get('content-type') === 'text/plain' && response.headers.get('content-length') === '7' && await response.text() === 'payload'; URL.revokeObjectURL(url); return fetch(url); }).then(() => { __objectUrlProbe.revoked = false; }, error => { __objectUrlProbe.revoked = error instanceof TypeError; })",
-      "probe": "/^blob:/.test(URL.createObjectURL(new Blob())) && __objectUrlProbe.served === true && __objectUrlProbe.revoked === true",
+      "probe": "(() => { const minted = URL.createObjectURL(new Blob()); const shaped = /^blob:/.test(minted); URL.revokeObjectURL(minted); return shaped; })() && __objectUrlProbe.served === true && __objectUrlProbe.revoked === true",
       "baseline_supported": false
     },
     {
