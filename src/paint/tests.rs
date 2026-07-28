@@ -7683,6 +7683,38 @@ fn element_scroll_left_moves_content_horizontally() {
 }
 
 #[test]
+fn absolute_descendant_uses_its_containing_blocks_scroll_and_clip_chain() {
+    let html = "<html><head><style>\
+         body { margin: 0 } \
+         #outer { position: relative; width: 50px; height: 30px; overflow: hidden } \
+         #outer-flow { width: 100px; height: 1px } \
+         #inner { width: 20px; height: 20px; overflow: hidden } \
+         #inner-flow { width: 60px; height: 20px } \
+         #target { position: absolute; left: 30px; top: 5px; width: 10px; height: 10px; \
+                   background-color: #ff0000 } \
+         </style></head><body><div id=\"outer\"><div id=\"outer-flow\"></div>\
+         <div id=\"inner\"><div id=\"inner-flow\"></div><div id=\"target\"></div></div>\
+         </div></body></html>";
+    let red = Some(Color::rgba(255, 0, 0, 255));
+
+    let unscrolled = render_with_scroll(html, 70.0, &[], (0.0, 0.0));
+    assert_eq!(unscrolled.pixel(35, 10), red, "target must escape inner clip");
+
+    let inner = render_with_scroll(html, 70.0, &[("#inner", 10.0, 0.0)], (0.0, 0.0));
+    assert_eq!(inner.pixel(35, 10), red, "inner scroll must not move target");
+    assert_eq!(inner.pixel(25, 10).unwrap().a, 0);
+
+    let both = render_with_scroll(
+        html,
+        70.0,
+        &[("#outer", 10.0, 0.0), ("#inner", 10.0, 0.0)],
+        (0.0, 0.0),
+    );
+    assert_eq!(both.pixel(25, 10), red, "containing block scroll must move target");
+    assert_eq!(both.pixel(35, 10).unwrap().a, 0);
+}
+
+#[test]
 fn element_scroll_is_clamped_to_the_scrollable_extent_when_painting() {
     // A stored offset past the extent paints the extent, so a shrunk document
     // cannot scroll its content out of view.
