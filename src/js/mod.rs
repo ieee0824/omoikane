@@ -2375,6 +2375,16 @@ fn register_host_bindings(
             NativeFunction::from_copy_closure(performance_now_native),
         ),
         (
+            js_string!("__omoikane_crypto_random"),
+            1,
+            NativeFunction::from_copy_closure(crypto_random_native),
+        ),
+        (
+            js_string!("__omoikane_crypto_digest"),
+            2,
+            NativeFunction::from_copy_closure(crypto_digest_native),
+        ),
+        (
             js_string!("__omoikane_storage_origin"),
             1,
             NativeFunction::from_copy_closure(storage_origin_native),
@@ -2866,6 +2876,64 @@ fn performance_now_native(
             state.borrow().performance_start.elapsed().as_secs_f64() * 1_000.0,
         ))
     })
+}
+
+fn crypto_random_native(
+    _this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let length = args
+        .first()
+        .cloned()
+        .unwrap_or_default()
+        .to_number(context)?;
+    if !length.is_finite() || length < 0.0 || length.fract() != 0.0 || length > 65_536.0 {
+        return Err(JsError::from(
+            JsNativeError::range().with_message("invalid random byte length"),
+        ));
+    }
+    let mut bytes = vec![0; length as usize];
+    getrandom::fill(&mut bytes).map_err(|error| {
+        JsError::from(JsNativeError::error().with_message(format!(
+            "secure random generation failed: {error}"
+        )))
+    })?;
+    let json = serde_json::to_string(&bytes).map_err(|error| {
+        JsError::from(JsNativeError::error().with_message(error.to_string()))
+    })?;
+    Ok(js_string!(json).into())
+}
+
+fn crypto_digest_native(
+    _this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    use sha1::Digest;
+
+    let algorithm = string_argument(args.first(), "", context)?;
+    let encoded = string_argument(args.get(1), "[]", context)?;
+    let bytes: Vec<u8> = serde_json::from_str(&encoded).map_err(|error| {
+        JsError::from(
+            JsNativeError::typ().with_message(format!("invalid digest input: {error}")),
+        )
+    })?;
+    let digest = match algorithm.as_str() {
+        "SHA-1" => sha1::Sha1::digest(&bytes).to_vec(),
+        "SHA-256" => sha2::Sha256::digest(&bytes).to_vec(),
+        "SHA-384" => sha2::Sha384::digest(&bytes).to_vec(),
+        "SHA-512" => sha2::Sha512::digest(&bytes).to_vec(),
+        _ => {
+            return Err(JsError::from(
+                JsNativeError::error().with_message("unsupported digest algorithm"),
+            ));
+        }
+    };
+    let json = serde_json::to_string(&digest).map_err(|error| {
+        JsError::from(JsNativeError::error().with_message(error.to_string()))
+    })?;
+    Ok(js_string!(json).into())
 }
 
 fn storage_arguments(
@@ -6722,6 +6790,65 @@ mod tests {
                       new TextDecoder().decode(bytes) === "A日本" &&
                       btoa("hello") === "aGVsbG8=" && atob("aGVsbG8=") === "hello";
                 })()"#,
+                )
+                .unwrap()
+                .as_boolean()
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn web_crypto_random_values_uuid_and_digest_core() {
+        let mut runtime = JsRuntime::new().unwrap();
+        runtime
+            .eval(
+                r#"globalThis.cryptoResult = { digests: {} };
+                const random = new Uint8Array(32);
+                cryptoResult.sameView = crypto.getRandomValues(random) === random;
+                cryptoResult.length = random.byteLength;
+                cryptoResult.changed = random.some(value => value !== 0);
+                const backing = new Uint8Array(12);
+                const offsetView = new Uint16Array(backing.buffer, 4, 2);
+                crypto.getRandomValues(offsetView);
+                cryptoResult.offsetPreserved = backing.slice(0, 4).every(value => value === 0) &&
+                  backing.slice(8).every(value => value === 0) &&
+                  backing.slice(4, 8).some(value => value !== 0);
+                cryptoResult.uuid = crypto.randomUUID();
+                try { crypto.getRandomValues(new Float32Array(1)); }
+                catch (error) { cryptoResult.typeError = error instanceof TypeError; }
+                try { crypto.getRandomValues(new Uint8Array(65537)); }
+                catch (error) {
+                  cryptoResult.quotaError = error instanceof DOMException &&
+                    error.name === "QuotaExceededError";
+                }
+                const algorithms = ["SHA-1", "SHA-256", "SHA-384", "SHA-512"];
+                const snapshotInput = new Uint8Array([97, 98, 99]);
+                crypto.subtle.digest("SHA-256", snapshotInput).then(digest => {
+                  cryptoResult.snapshotDigest = Array.from(new Uint8Array(digest))
+                    .map(value => value.toString(16).padStart(2, "0")).join("");
+                });
+                snapshotInput.fill(0);
+                Promise.all(algorithms.map(async algorithm => {
+                  const identifier = algorithm === "SHA-256" ? { name: "sha-256" } : algorithm;
+                  const digest = await crypto.subtle.digest(identifier, new Uint8Array());
+                  cryptoResult.digests[algorithm] = Array.from(new Uint8Array(digest))
+                    .map(value => value.toString(16).padStart(2, "0")).join("");
+                })).then(() => { cryptoResult.done = true; });"#,
+            )
+            .unwrap();
+        runtime.run_jobs().unwrap();
+
+        assert!(
+            runtime
+                .eval(
+                r#"cryptoResult.sameView && cryptoResult.length === 32 && cryptoResult.changed && cryptoResult.offsetPreserved &&
+                /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(cryptoResult.uuid) &&
+                cryptoResult.typeError && cryptoResult.quotaError && cryptoResult.done &&
+                cryptoResult.digests["SHA-1"] === "da39a3ee5e6b4b0d3255bfef95601890afd80709" &&
+                cryptoResult.digests["SHA-256"] === "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855" &&
+                cryptoResult.snapshotDigest === "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad" &&
+                cryptoResult.digests["SHA-384"] === "38b060a751ac96384cd9327eb1b1e36a21fdb71114be07434c0cc7bf63f6e1da274edebfe76f65fbd51ad2f14898b95b" &&
+                cryptoResult.digests["SHA-512"] === "cf83e1357eefb8bdf1542850d66d8007d620e4050b5715dc83f4a921d36ce9ce47d0d13c5d85f2b0ff8318d2877eec2f63b931bd47417a81a538327af927da3e""#,
                 )
                 .unwrap()
                 .as_boolean()
