@@ -4216,6 +4216,36 @@ fn static_inline_image_still_generates_an_image_fragment() {
 }
 
 #[test]
+fn absolute_object_keeps_its_inline_image_fragment_paint_path() {
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let object = NodeHandle::element("object");
+    object.set_attribute(
+        "data",
+        "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAIAAAD91JpzAAAABnRSTlMAAAAAAABupgeRAAAABmJLR0QA/wD/AP+gvaeTAAAAEUlEQVR42mP4/58BCv7/ZwAAHfAD/abwPj4AAAAASUVORK5CYII=",
+    );
+    document.append_child(body.clone());
+    body.append_child(object.clone());
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet("object { position: absolute; left: 0; top: 0; }").unwrap(),
+    );
+    let layout = layout_tree(
+        &body,
+        &mut resolver,
+        Rect { x: 0.0, y: 0.0, width: 100.0, height: 100.0 },
+    )
+    .unwrap();
+    let object_box = find_layout_box(&layout, &object).unwrap();
+
+    assert!(object_box.lines.iter().flat_map(|line| &line.fragments).any(|fragment| {
+        matches!(fragment.content, InlineFragmentContent::Image(_, _))
+    }));
+}
+
+#[test]
 fn absolute_auto_width_relayouts_right_aligned_inline_content_after_expanding() {
     let document = NodeHandle::document();
     let body = NodeHandle::element("body");
