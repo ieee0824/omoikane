@@ -4346,7 +4346,10 @@
       }
       if (tag === "SELECT") {
         let selected = control.options.filter(option => option.selected && !option.__isDisabledControl());
-        if (!control.hasAttribute("multiple") && selected.length === 0 && control.options.length) selected = [control.options[0]];
+        if (!control.hasAttribute("multiple") && selected.length === 0) {
+          const fallback = control.options.find(option => !option.__isDisabledControl());
+          selected = fallback ? [fallback] : [];
+        }
         else if (!control.hasAttribute("multiple") && selected.length > 1) selected = [selected[selected.length - 1]];
         for (const option of selected) entries.push([name, String(option.value)]);
       } else {

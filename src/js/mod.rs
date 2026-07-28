@@ -7075,18 +7075,18 @@ mod tests {
     #[test]
     fn form_data_preserves_order_duplicates_and_mutation_semantics() {
         let mut runtime = runtime_from_html(r#"<form id="f"><input name="a" value="one"><input name="a" value="two"><input name="off" value="x" disabled><input type="checkbox" name="unchecked"><input type="checkbox" name="checked" value="yes" checked><textarea name="note">line1
-line2</textarea><select name="choice"><option value="x">X</option><option value="y" selected>Y</option></select></form>"#);
-        assert!(runtime.eval(r#"(() => { const data = new FormData(document.getElementById("f")); const initial = JSON.stringify([...data]); data.set("a", "changed"); data.append("a", "last"); data.delete("checked"); return initial === JSON.stringify([["a","one"],["a","two"],["checked","yes"],["note","line1\nline2"],["choice","y"]]) && data.get("a") === "changed" && data.getAll("a").join(",") === "changed,last" && !data.has("checked") && data.get("missing") === null; })()"#).unwrap().as_boolean().unwrap());
+line2</textarea><select name="choice"><option value="x">X</option><option value="y" selected>Y</option></select><select name="fallback"><option value="disabled" disabled>Disabled</option><option value="usable">Usable</option></select></form>"#);
+        assert!(runtime.eval(r#"(() => { const data = new FormData(document.getElementById("f")); const initial = JSON.stringify([...data]); data.set("a", "changed"); data.append("a", "last"); data.delete("checked"); return initial === JSON.stringify([["a","one"],["a","two"],["checked","yes"],["note","line1\nline2"],["choice","y"],["fallback","usable"]]) && data.get("a") === "changed" && data.getAll("a").join(",") === "changed,last" && !data.has("checked") && data.get("missing") === null; })()"#).unwrap().as_boolean().unwrap());
     }
 
     #[test]
     fn form_submission_encodes_get_post_and_submitter() {
-        let mut runtime = runtime_from_html(r#"<form id="getForm" action="/search?old=1#result"><input name="q" value="hello world"><button id="go" name="source" value="button">Go</button></form><form id="postForm" action="/save" method="post" enctype="text/plain"><textarea name="note">a
+        let mut runtime = runtime_from_html(r#"<form id="getForm" action="/search?old=1#result"><input name="q" value="hello world"><input name="symbol" value="a*b"><button id="go" name="source" value="button">Go</button></form><form id="postForm" action="/save" method="post" enctype="text/plain"><textarea name="note">a
 b</textarea></form>"#);
         runtime.eval(r#"document.getElementById("go").click(); document.getElementById("postForm").submit()"#).unwrap();
         runtime.run_until_idle().unwrap();
         assert_eq!(runtime.take_navigation_requests(), vec![
-            NavigationRequest::FormSubmit { url: "http://localhost/search?q=hello+world&source=button#result".to_string(), method: "GET".to_string(), body: None, content_type: None },
+            NavigationRequest::FormSubmit { url: "http://localhost/search?q=hello+world&symbol=a*b&source=button#result".to_string(), method: "GET".to_string(), body: None, content_type: None },
             NavigationRequest::FormSubmit { url: "http://localhost/save".to_string(), method: "POST".to_string(), body: Some(b"note=a\r\nb\r\n".to_vec()), content_type: Some("text/plain".to_string()) },
         ]);
     }
