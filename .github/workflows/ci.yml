@@ -30,6 +30,21 @@ jobs:
       - name: Run all tests (including ignored)
         run: cargo test -- --include-ignored
       - run: cargo build
+      # Re-run the JS benchmark with output shown: libtest swallows stdout for
+      # passing tests, so the per-shape table and the drift classification would
+      # otherwise never be visible. The build is already warm from the step
+      # above and the benchmark itself takes about a second.
+      - name: Report JS execution benchmark
+        env:
+          OMOIKANE_JS_BENCH_REPORT: .artifacts/js-benchmark/report.json
+        run: cargo test --test js_benchmark -- --nocapture
+      - name: Upload JS benchmark report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: js-benchmark-report
+          path: .artifacts/js-benchmark/
+          if-no-files-found: error
 
 
   wpt-smoke:

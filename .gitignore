@@ -7,6 +7,9 @@ Cargo.lock
 /dist/
 /build/
 /tests/output/
+# CI report destination for the WPT smoke and JS benchmark jobs, also written
+# when those are run locally.
+/.artifacts/
 
 # OS
 .DS_Store
