@@ -1449,6 +1449,157 @@ pub(crate) fn apply_scroll_offsets(
     translate_layout_for_scroll(layout, resolver, window_offset, window_offset);
 }
 
+/// Returns the topmost event target at viewport coordinates using the cached
+/// layout tree's paint order. Callers should apply current Window/element scroll
+/// offsets to a cloned tree before invoking this function.
+pub(crate) fn hit_test_layout(
+    layout: &LayoutBox,
+    resolver: &mut StyleResolver,
+    viewport: Rect,
+    x: f32,
+    y: f32,
+) -> Option<NodeHandle> {
+    hit_test_box(
+        layout,
+        resolver,
+        AffineTransform::identity(),
+        Some(viewport),
+        viewport,
+        x,
+        y,
+    )
+}
+
+fn hit_test_box(
+    layout: &LayoutBox,
+    resolver: &mut StyleResolver,
+    ancestor_transform: AffineTransform,
+    inherited_clip: Option<Rect>,
+    viewport: Rect,
+    x: f32,
+    y: f32,
+) -> Option<NodeHandle> {
+    if layout.visibility == Visibility::Hidden
+        || inherited_clip.is_some_and(|clip| !rect_contains_point(clip, x, y))
+    {
+        return None;
+    }
+    let transform = ancestor_transform.multiply(layout.transform);
+    let inverse = transform.inverse()?;
+    let local_point = inverse.transform_point(x, y);
+    let style = resolver.computed_style(&layout.node);
+    let border_box = border_box_rect(layout);
+    let padding_box = padding_box_rect(layout);
+    let mut clip = inherited_clip;
+    if let Some(inset) = clip_path_inset_rect(&style, border_box) {
+        let inset = inset?;
+        clip = intersect_optional_clip(clip, transformed_rect_bounds(inset, transform));
+        if clip.is_none() || clip.is_some_and(|area| !rect_contains_point(area, x, y)) {
+            return None;
+        }
+    }
+    if layout.overflow.clips_overflow() {
+        let transformed_padding = transformed_rect_bounds(padding_box, transform);
+        let base = clip.unwrap_or(viewport);
+        let overflow_clip = Rect {
+            x: if layout.overflow.clips_x() { transformed_padding.x } else { base.x },
+            y: if layout.overflow.clips_y() { transformed_padding.y } else { base.y },
+            width: if layout.overflow.clips_x() { transformed_padding.width } else { base.width },
+            height: if layout.overflow.clips_y() { transformed_padding.height } else { base.height },
+        };
+        clip = intersect_optional_clip(clip, overflow_clip);
+        if clip.is_none() {
+            return None;
+        }
+    }
+
+    let mut negative = Vec::new();
+    let mut normal = Vec::new();
+    let mut floats = Vec::new();
+    let mut inline = Vec::new();
+    let mut auto_positioned = Vec::new();
+    let mut positive = Vec::new();
+    for child in &layout.children {
+        let child_style = resolver.computed_style(&child.node);
+        if is_positioned_for_paint(&child_style) {
+            if child.z_index < 0 {
+                negative.push(child);
+            } else if child.z_index > 0 {
+                positive.push(child);
+            } else {
+                auto_positioned.push(child);
+            }
+        } else if is_float_for_paint(&child_style) {
+            floats.push(child);
+        } else if child.lines.is_empty() {
+            normal.push(child);
+        } else {
+            inline.push(child);
+        }
+    }
+
+    for group in [&positive, &auto_positioned, &inline] {
+        for child in group.iter().rev() {
+            if let Some(target) = hit_test_box(child, resolver, transform, clip, viewport, x, y) {
+                return Some(target);
+            }
+        }
+    }
+    for line in layout.lines.iter().rev() {
+        for fragment in line.fragments.iter().rev() {
+            if rect_contains_point(fragment.rect, local_point.0, local_point.1) {
+                let target = event_target_element(&fragment.node)?;
+                let target_style = resolver.computed_style(&target);
+                if accepts_pointer_events(&target_style) {
+                    return Some(target);
+                }
+            }
+        }
+    }
+    for group in [&floats, &normal, &negative] {
+        for child in group.iter().rev() {
+            if let Some(target) = hit_test_box(child, resolver, transform, clip, viewport, x, y) {
+                return Some(target);
+            }
+        }
+    }
+    if rect_contains_point(border_box, local_point.0, local_point.1)
+        && accepts_pointer_events(&style)
+    {
+        return event_target_element(&layout.node);
+    }
+    None
+}
+
+fn accepts_pointer_events(style: &ComputedStyle) -> bool {
+    !matches!(
+        style.get("pointer-events"),
+        Some(ComputedValue::Keyword(value)) if value.eq_ignore_ascii_case("none")
+    )
+}
+
+fn event_target_element(node: &NodeHandle) -> Option<NodeHandle> {
+    let mut current = Some(node.clone());
+    while let Some(node) = current {
+        if node.node_type() == crate::dom::NodeType::Element {
+            return Some(node);
+        }
+        current = node.parent_node().or_else(|| node.shadow_host());
+    }
+    None
+}
+
+fn rect_contains_point(rect: Rect, x: f32, y: f32) -> bool {
+    x >= rect.x && y >= rect.y && x < rect.x + rect.width && y < rect.y + rect.height
+}
+
+fn intersect_optional_clip(current: Option<Rect>, next: Rect) -> Option<Rect> {
+    match current {
+        Some(current) => intersect(current, next),
+        None => Some(next),
+    }
+}
+
 fn translate_layout_for_scroll(
     layout: &mut LayoutBox,
     resolver: &mut StyleResolver,

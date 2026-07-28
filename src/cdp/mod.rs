@@ -546,6 +546,7 @@ pub struct CdpSession {
     pending_events: Vec<CdpEvent>,
     last_key_event: Option<Value>,
     last_mouse_event: Option<Value>,
+    mouse_pressed_target: Option<usize>,
     history_entries: Vec<SessionHistoryEntry>,
     history_index: usize,
     document_generation: u64,
@@ -595,6 +596,7 @@ impl CdpSession {
             pending_events: Vec::new(),
             last_key_event: None,
             last_mouse_event: None,
+            mouse_pressed_target: None,
             history_entries: vec![SessionHistoryEntry {
                 url: "about:blank".to_string(),
                 state_json: "null".to_string(),
@@ -1105,26 +1107,120 @@ impl CdpSession {
     fn input_dispatch_key_event(&mut self, params: &Value) -> Result<Value, JsonRpcError> {
         let event_type = require_string(params, "type")?;
         self.last_key_event = Some(params.clone());
-        self.dispatch_document_event(&event_type)?;
-        Ok(json!({}))
+        let dom_type = match event_type.as_str() {
+            "keyDown" | "rawKeyDown" | "keydown" => "keydown",
+            "keyUp" | "keyup" => "keyup",
+            "char" | "keypress" => "keypress",
+            _ => {
+                return Err(invalid_params(format!(
+                    "Unsupported Input.dispatchKeyEvent type: {event_type}"
+                )));
+            }
+        };
+        let modifiers = params.get("modifiers").and_then(Value::as_u64).unwrap_or(0);
+        let text = params.get("text").and_then(Value::as_str).unwrap_or("");
+        let key = params
+            .get("key")
+            .and_then(Value::as_str)
+            .or_else(|| (!text.is_empty()).then_some(text))
+            .unwrap_or("");
+        let key_code = params
+            .get("windowsVirtualKeyCode")
+            .or_else(|| params.get("nativeVirtualKeyCode"))
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
+        let init = json!({
+            "key": key,
+            "code": params.get("code").and_then(Value::as_str).unwrap_or(""),
+            "keyCode": key_code,
+            "charCode": if dom_type == "keypress" {
+                text.chars().next().map(|character| character as u32).unwrap_or(0)
+            } else { 0 },
+            "repeat": params.get("autoRepeat").and_then(Value::as_bool).unwrap_or(false),
+            "altKey": modifiers & 1 != 0,
+            "ctrlKey": modifiers & 2 != 0,
+            "metaKey": modifiers & 4 != 0,
+            "shiftKey": modifiers & 8 != 0,
+        });
+        let not_canceled = self.eval_input_bool(&format!(
+            "__omoikane_dispatch_keyboard_input({dom_type:?}, {init})"
+        ))?;
+        Ok(json!({ "defaultPrevented": !not_canceled }))
     }
 
     fn input_dispatch_mouse_event(&mut self, params: &Value) -> Result<Value, JsonRpcError> {
         let event_type = require_string(params, "type")?;
         self.last_mouse_event = Some(params.clone());
-        self.dispatch_document_event(&event_type)?;
-        Ok(json!({}))
+        let dom_type = match event_type.as_str() {
+            "mouseMoved" | "mousemove" => "mousemove",
+            "mousePressed" | "mousedown" => "mousedown",
+            "mouseReleased" | "mouseup" => "mouseup",
+            "click" => "click",
+            _ => {
+                return Err(invalid_params(format!(
+                    "Unsupported Input.dispatchMouseEvent type: {event_type}"
+                )));
+            }
+        };
+        let x = optional_f64(params, "x", 0.0)?;
+        let y = optional_f64(params, "y", 0.0)?;
+        let target = self.runtime.hit_test(x as f32, y as f32);
+        let target_node = target.clone().unwrap_or_else(|| self.runtime.document());
+        let target_id = target_node.identity();
+        let target_node_id = self.ensure_node_id(&target_node);
+        let button = mouse_button(params.get("button").and_then(Value::as_str))?;
+        let modifiers = params.get("modifiers").and_then(Value::as_u64).unwrap_or(0);
+        let default_buttons = if dom_type == "mousedown" { button_mask(button) } else { 0 };
+        let buttons = params
+            .get("buttons")
+            .and_then(Value::as_u64)
+            .unwrap_or(default_buttons);
+        let (scroll_x, scroll_y) = self.runtime.window_scroll_offset();
+        let init = json!({
+            "clientX": x, "clientY": y,
+            "pageX": x + scroll_x as f64, "pageY": y + scroll_y as f64,
+            "screenX": x, "screenY": y,
+            "button": button, "buttons": buttons,
+            "altKey": modifiers & 1 != 0,
+            "ctrlKey": modifiers & 2 != 0,
+            "metaKey": modifiers & 4 != 0,
+            "shiftKey": modifiers & 8 != 0,
+            "detail": params.get("clickCount").and_then(Value::as_u64).unwrap_or(0),
+        });
+        let not_canceled = self.eval_input_bool(&format!(
+            "__omoikane_dispatch_mouse_input({target_id}, {dom_type:?}, {init}, {})",
+            dom_type == "mousedown"
+        ))?;
+        let mut click_default_prevented = false;
+        if dom_type == "mousedown" {
+            self.mouse_pressed_target = target.as_ref().map(NodeHandle::identity);
+        } else if dom_type == "mouseup" {
+            let pressed = self.mouse_pressed_target.take();
+            if pressed.is_some() && pressed == target.as_ref().map(NodeHandle::identity) {
+                let click_not_canceled = self.eval_input_bool(&format!(
+                    "__omoikane_dispatch_mouse_input({target_id}, \"click\", {init}, false)"
+                ))?;
+                click_default_prevented = !click_not_canceled;
+            }
+        }
+        Ok(json!({
+            "defaultPrevented": !not_canceled,
+            "clickDefaultPrevented": click_default_prevented,
+            "targetNodeId": target_node_id,
+        }))
     }
 
-    fn dispatch_document_event(&mut self, event_type: &str) -> Result<(), JsonRpcError> {
-        self.runtime
-            .eval(&format!(
-                "document.dispatchEvent(new Event({event_type:?}));"
-            ))
-            .and_then(|_| self.runtime.run_jobs())
-            .map_err(js_error)
-            .map(|_| ())?;
-        self.drive_navigation_requests()
+    fn eval_input_bool(&mut self, script: &str) -> Result<bool, JsonRpcError> {
+        let not_canceled = self
+            .runtime
+            .eval(script)
+            .and_then(|value| {
+                self.runtime.run_jobs()?;
+                Ok(value.as_boolean().unwrap_or(true))
+            })
+            .map_err(js_error)?;
+        self.drive_navigation_requests()?;
+        Ok(not_canceled)
     }
 
     fn evaluate_expression(
@@ -1237,6 +1333,7 @@ impl CdpSession {
         runtime.fire_load().map_err(js_error_message)?;
 
         self.runtime = runtime;
+        self.mouse_pressed_target = None;
         self.document_generation = self.document_generation.saturating_add(1);
         self.current_url = url.to_string();
         self.last_html = html.to_string();
@@ -1384,6 +1481,40 @@ fn require_u64(params: &Value, key: &'static str) -> Result<u64, JsonRpcError> {
         code: -32602,
         message: format!("Missing or invalid numeric parameter: {key}"),
     })
+}
+
+fn invalid_params(message: String) -> JsonRpcError {
+    JsonRpcError { code: -32602, message }
+}
+
+fn optional_f64(params: &Value, key: &'static str, default: f64) -> Result<f64, JsonRpcError> {
+    let value = params.get(key).map(Value::as_f64).unwrap_or(Some(default));
+    value.filter(|value| value.is_finite()).ok_or_else(|| {
+        invalid_params(format!("Missing or invalid numeric parameter: {key}"))
+    })
+}
+
+fn mouse_button(button: Option<&str>) -> Result<i32, JsonRpcError> {
+    match button.unwrap_or("none") {
+        "none" => Ok(-1),
+        "left" => Ok(0),
+        "middle" => Ok(1),
+        "right" => Ok(2),
+        "back" => Ok(3),
+        "forward" => Ok(4),
+        value => Err(invalid_params(format!("Unsupported mouse button: {value}"))),
+    }
+}
+
+fn button_mask(button: i32) -> u64 {
+    match button {
+        0 => 1,
+        1 => 4,
+        2 => 2,
+        3 => 8,
+        4 => 16,
+        _ => 0,
+    }
 }
 
 fn argument_to_js(argument: &Value) -> Result<String, JsonRpcError> {
@@ -2255,6 +2386,140 @@ mod tests {
         assert_eq!(
             remaining["browserContextIds"][0],
             second["browserContextId"].clone()
+        );
+    }
+
+    #[test]
+    fn mouse_input_hit_tests_paint_order_transforms_clips_and_scroll() {
+        let mut session = CdpSession::new().unwrap();
+        session
+            .install_document(
+                "https://example.test/",
+                r#"<html><head><style>
+                    * { margin: 0; padding: 0; } body { height: 1000px; }
+                    .box { position: absolute; width: 80px; height: 80px; }
+                    #back { left: 0; top: 0; z-index: 1; }
+                    #front { left: 0; top: 0; width: 50px; height: 50px; z-index: 2; }
+                    #none { left: 0; top: 0; z-index: 3; pointer-events: none; }
+                    #transformed { left: 0; top: 120px; width: 40px; height: 40px;
+                                   transform: translateX(100px); }
+                    #under { position: absolute; left: 0; top: 200px; width: 100px; height: 50px; }
+                    #clip { position: absolute; left: 0; top: 200px; width: 50px; height: 50px;
+                            overflow: hidden; z-index: 2; }
+                    #clipped { position: absolute; left: 60px; top: 0; width: 30px; height: 30px; }
+                    #scroller { position: absolute; left: 0; top: 300px; width: 100px; height: 50px;
+                                overflow: hidden; }
+                    #content { position: relative; height: 200px; }
+                    #scrolled { position: absolute; left: 0; top: 100px; width: 60px; height: 30px; }
+                    #windowScrolled { position: absolute; left: 0; top: 450px; width: 60px; height: 30px; }
+                </style></head><body>
+                  <div id="back" class="box"></div><div id="front" class="box"></div>
+                  <div id="none" class="box"></div><div id="transformed" class="box"></div>
+                  <div id="under"></div><div id="clip"><div id="clipped"></div></div>
+                  <div id="scroller"><div id="content"><button id="scrolled">s</button></div></div>
+                  <button id="windowScrolled">w</button>
+                  <script>globalThis.hits=[]; for (const id of ['back','front','none','transformed','under','clipped','scrolled','windowScrolled']) document.getElementById(id).addEventListener('mousemove',()=>hits.push(id)); scroller.scrollTop=80;</script>
+                </body></html>"#,
+                1,
+                "null",
+            )
+            .unwrap();
+
+        for (x, y) in [(10, 10), (110, 130), (70, 210), (10, 325)] {
+            session
+                .dispatch(
+                    "Input.dispatchMouseEvent",
+                    json!({ "type": "mouseMoved", "x": x, "y": y }),
+                )
+                .unwrap();
+        }
+        session
+            .dispatch(
+                "Runtime.evaluate",
+                json!({ "expression": "scrollTo(0,50)", "returnByValue": true }),
+            )
+            .unwrap();
+        session
+            .dispatch(
+                "Input.dispatchMouseEvent",
+                json!({ "type": "mouseMoved", "x": 10, "y": 410 }),
+            )
+            .unwrap();
+        let hits = session
+            .dispatch(
+                "Runtime.evaluate",
+                json!({ "expression": "hits.join(',')", "returnByValue": true }),
+            )
+            .unwrap();
+        assert_eq!(
+            hits["result"]["value"],
+            "front,transformed,under,scrolled,windowScrolled"
+        );
+    }
+
+    #[test]
+    fn mouse_input_sequences_clicks_focus_and_reports_prevent_default() {
+        let mut session = CdpSession::new().unwrap();
+        session
+            .install_document(
+                "https://example.test/",
+                r#"<html><head><style>*{margin:0} #ok,#blocked{position:absolute;width:80px;height:40px}#ok{left:0;top:0}#blocked{left:100px;top:0}</style></head><body>
+                    <button id="ok">ok</button><input id="blocked">
+                    <script>globalThis.events=[];globalThis.mouseFields='';globalThis.mouseBubble=''; for(const type of ['mousedown','mouseup','click']) { ok.addEventListener(type,e=>{events.push('ok:'+type);if(type==='mousedown')mouseFields=[e.clientX,e.clientY,e.pageX,e.pageY,e.button,e.buttons,e.altKey,e.shiftKey,e.bubbles,e.composed].join(':')}); blocked.addEventListener(type,e=>{events.push('blocked:'+type);if(type==='mousedown')e.preventDefault()}) } document.addEventListener('mousedown',e=>mouseBubble=e.target.id);</script>
+                </body></html>"#,
+                1,
+                "null",
+            )
+            .unwrap();
+
+        session.dispatch("Input.dispatchMouseEvent", json!({"type":"mousePressed","x":10,"y":10,"button":"left","buttons":1,"modifiers":9})).unwrap();
+        session.dispatch("Input.dispatchMouseEvent", json!({"type":"mouseReleased","x":10,"y":10,"button":"left","buttons":0})).unwrap();
+        session.dispatch("Input.dispatchMouseEvent", json!({"type":"mousePressed","x":10,"y":10,"button":"left","modifiers":9})).unwrap();
+        session.dispatch("Input.dispatchMouseEvent", json!({"type":"mouseReleased","x":110,"y":10,"button":"left"})).unwrap();
+        let prevented = session.dispatch("Input.dispatchMouseEvent", json!({"type":"mousePressed","x":110,"y":10,"button":"left"})).unwrap();
+        session.dispatch("Input.dispatchMouseEvent", json!({"type":"mouseReleased","x":110,"y":10,"button":"left"})).unwrap();
+
+        assert_eq!(prevented["defaultPrevented"], true);
+        let state = session.dispatch("Runtime.evaluate", json!({
+            "expression": "JSON.stringify({events,active:document.activeElement.id,mouseFields,mouseBubble})",
+            "returnByValue": true
+        })).unwrap();
+        assert_eq!(
+            state["result"]["value"],
+            r#"{"events":["ok:mousedown","ok:mouseup","ok:click","ok:mousedown","blocked:mouseup","blocked:mousedown","blocked:mouseup","blocked:click"],"active":"ok","mouseFields":"10:10:10:10:0:1:true:true:true:true","mouseBubble":"blocked"}"#
+        );
+    }
+
+    #[test]
+    fn keyboard_input_targets_the_focused_element_with_cdp_fields() {
+        let mut session = CdpSession::new().unwrap();
+        session
+            .install_document(
+                "https://example.test/",
+                r#"<html><body><input id="field"><script>
+                    globalThis.keys=[]; field.focus();
+                    field.addEventListener('keydown',e=>{keys.push(['field',e.type,e.key,e.code,e.keyCode,e.ctrlKey,e.shiftKey,e.bubbles,e.composed].join(':'));e.preventDefault()});
+                    field.addEventListener('keyup',e=>keys.push(['field',e.type,e.key].join(':')));
+                    field.addEventListener('keypress',e=>keys.push(['field',e.type,e.key,e.charCode].join(':')));
+                    document.addEventListener('keydown',e=>keys.push('document:'+e.target.id));
+                </script></body></html>"#,
+                1,
+                "null",
+            )
+            .unwrap();
+
+        let down = session.dispatch("Input.dispatchKeyEvent", json!({
+            "type":"keyDown","key":"A","code":"KeyA","windowsVirtualKeyCode":65,"modifiers":10
+        })).unwrap();
+        session.dispatch("Input.dispatchKeyEvent", json!({"type":"keyUp","key":"A","code":"KeyA"})).unwrap();
+        session.dispatch("Input.dispatchKeyEvent", json!({"type":"char","text":"a","key":"a"})).unwrap();
+        assert_eq!(down["defaultPrevented"], true);
+        let keys = session.dispatch("Runtime.evaluate", json!({
+            "expression":"keys.join('|')","returnByValue":true
+        })).unwrap();
+        assert_eq!(
+            keys["result"]["value"],
+            "field:keydown:A:KeyA:65:true:true:true:true|document:field|field:keyup:A|field:keypress:a:97"
         );
     }
 }

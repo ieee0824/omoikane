@@ -1294,6 +1294,27 @@ impl JsRuntime {
         self.host_state.borrow().window_scroll
     }
 
+    /// Returns the topmost event-target element at viewport coordinates.
+    /// Layout is cached across calls and cloned only so current scroll offsets
+    /// can be applied without changing CSSOM's document-coordinate geometry.
+    pub(crate) fn hit_test(&mut self, x: f32, y: f32) -> Option<NodeHandle> {
+        if !x.is_finite() || !y.is_finite() {
+            return None;
+        }
+        let mut state = self.host_state.borrow_mut();
+        state.ensure_layout();
+        let mut layout = state.layout_root.clone()?;
+        let viewport = state.viewport;
+        let scroll = state.window_scroll;
+        let document_id = state.document.identity();
+        let resolver = state
+            .document_styles
+            .get_mut(&document_id)
+            .and_then(|entry| entry.resolver.as_mut())?;
+        crate::paint::apply_scroll_offsets(&mut layout, resolver, scroll);
+        crate::paint::hit_test_layout(&layout, resolver, viewport, x, y)
+    }
+
     /// Sets the User-Agent exposed to scripts in this runtime.
     pub fn set_user_agent(&mut self, user_agent: impl Into<String>) {
         let user_agent = user_agent.into();
