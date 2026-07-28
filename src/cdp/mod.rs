@@ -662,7 +662,6 @@ impl CdpSession {
     /// animation frame, then any resulting Location/History request installs
     /// the next Document.
     pub fn drive_event_loop(&mut self, elapsed_ms: u64) -> Result<(), JsonRpcError> {
-        self.runtime.tick(elapsed_ms).map_err(js_error)?;
         self.runtime
             .run_animation_frame(elapsed_ms)
             .map_err(js_error)?;
@@ -853,6 +852,7 @@ impl CdpSession {
     fn drive_navigation_requests(&mut self) -> Result<(), JsonRpcError> {
         const MAX_SCRIPT_NAVIGATIONS: usize = 32;
         for _ in 0..MAX_SCRIPT_NAVIGATIONS {
+            self.runtime.run_until_idle().map_err(js_error)?;
             let Some(request) = self.runtime.take_navigation_requests().into_iter().next() else {
                 return Ok(());
             };
@@ -1250,6 +1250,10 @@ impl CdpSession {
                 message: "Runtime evaluation did not return a string payload".to_string(),
             })?
             .to_std_string_escaped();
+        // Runtime.evaluate is itself a user-agent task. Complete its
+        // microtask checkpoint and make any host tasks (such as navigation)
+        // ready before the protocol method commits them.
+        self.runtime.run_until_idle().map_err(js_error)?;
         let parsed: Value = serde_json::from_str(&payload).map_err(|error| JsonRpcError {
             code: -32000,
             message: error.to_string(),
