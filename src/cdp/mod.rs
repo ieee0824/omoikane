@@ -1180,7 +1180,9 @@ impl CdpSession {
             "clientX": x, "clientY": y,
             "pageX": x + scroll_x as f64, "pageY": y + scroll_y as f64,
             "screenX": x, "screenY": y,
-            "button": button, "buttons": buttons,
+            // CDP uses -1/"none" when no button changed, while MouseEvent.button
+            // is a non-negative button index and defaults to the primary button.
+            "button": button.max(0), "buttons": buttons,
             "altKey": modifiers & 1 != 0,
             "ctrlKey": modifiers & 2 != 0,
             "metaKey": modifiers & 4 != 0,
@@ -2465,7 +2467,7 @@ mod tests {
                 "https://example.test/",
                 r#"<html><head><style>*{margin:0} #ok,#blocked{position:absolute;width:80px;height:40px}#ok{left:0;top:0}#blocked{left:100px;top:0}</style></head><body>
                     <button id="ok">ok</button><input id="blocked">
-                    <script>globalThis.events=[];globalThis.mouseFields='';globalThis.mouseBubble=''; for(const type of ['mousedown','mouseup','click']) { ok.addEventListener(type,e=>{events.push('ok:'+type);if(type==='mousedown')mouseFields=[e.clientX,e.clientY,e.pageX,e.pageY,e.button,e.buttons,e.altKey,e.shiftKey,e.bubbles,e.composed].join(':')}); blocked.addEventListener(type,e=>{events.push('blocked:'+type);if(type==='mousedown')e.preventDefault()}) } document.addEventListener('mousedown',e=>mouseBubble=e.target.id);</script>
+                    <script>globalThis.events=[];globalThis.mouseFields='';globalThis.mouseBubble='';globalThis.moveFields=''; for(const type of ['mousedown','mouseup','click']) { ok.addEventListener(type,e=>{events.push('ok:'+type);if(type==='mousedown')mouseFields=[e.clientX,e.clientY,e.pageX,e.pageY,e.button,e.buttons,e.altKey,e.shiftKey,e.bubbles,e.composed].join(':')}); blocked.addEventListener(type,e=>{events.push('blocked:'+type);if(type==='mousedown')e.preventDefault()}) } ok.addEventListener('mousemove',e=>moveFields=[e.button,e.buttons,e.cancelable].join(':')); document.addEventListener('mousedown',e=>mouseBubble=e.target.id);</script>
                 </body></html>"#,
                 1,
                 "null",
@@ -2476,17 +2478,18 @@ mod tests {
         session.dispatch("Input.dispatchMouseEvent", json!({"type":"mouseReleased","x":10,"y":10,"button":"left","buttons":0})).unwrap();
         session.dispatch("Input.dispatchMouseEvent", json!({"type":"mousePressed","x":10,"y":10,"button":"left","modifiers":9})).unwrap();
         session.dispatch("Input.dispatchMouseEvent", json!({"type":"mouseReleased","x":110,"y":10,"button":"left"})).unwrap();
+        session.dispatch("Input.dispatchMouseEvent", json!({"type":"mouseMoved","x":10,"y":10})).unwrap();
         let prevented = session.dispatch("Input.dispatchMouseEvent", json!({"type":"mousePressed","x":110,"y":10,"button":"left"})).unwrap();
         session.dispatch("Input.dispatchMouseEvent", json!({"type":"mouseReleased","x":110,"y":10,"button":"left"})).unwrap();
 
         assert_eq!(prevented["defaultPrevented"], true);
         let state = session.dispatch("Runtime.evaluate", json!({
-            "expression": "JSON.stringify({events,active:document.activeElement.id,mouseFields,mouseBubble})",
+            "expression": "JSON.stringify({events,active:document.activeElement.id,mouseFields,moveFields,mouseBubble})",
             "returnByValue": true
         })).unwrap();
         assert_eq!(
             state["result"]["value"],
-            r#"{"events":["ok:mousedown","ok:mouseup","ok:click","ok:mousedown","blocked:mouseup","blocked:mousedown","blocked:mouseup","blocked:click"],"active":"ok","mouseFields":"10:10:10:10:0:1:true:true:true:true","mouseBubble":"blocked"}"#
+            r#"{"events":["ok:mousedown","ok:mouseup","ok:click","ok:mousedown","blocked:mouseup","blocked:mousedown","blocked:mouseup","blocked:click"],"active":"ok","mouseFields":"10:10:10:10:0:1:true:true:true:true","moveFields":"0:0:true","mouseBubble":"blocked"}"#
         );
     }
 
