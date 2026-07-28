@@ -817,19 +817,19 @@ impl HostState {
         let Some(layout_root) = self.layout_root.as_ref() else {
             return;
         };
-        for node in self.nodes.values() {
-            if self.scroll_offsets_before_layout.contains_key(&node.identity()) {
-                continue;
+        fn capture(layout: &LayoutBox, offsets: &mut HashMap<usize, (f32, f32)>) {
+            let node_id = layout.node.identity();
+            if !offsets.contains_key(&node_id) && layout.node.scroll_offset() != (0.0, 0.0) {
+                let offset = layout.scroll_offset();
+                if offset != (0.0, 0.0) {
+                    offsets.insert(node_id, offset);
+                }
             }
-            let Some(layout) = find_layout_box(layout_root, node) else {
-                continue;
-            };
-            let offset = layout.scroll_offset();
-            if offset != (0.0, 0.0) {
-                self.scroll_offsets_before_layout
-                    .insert(node.identity(), offset);
+            for child in &layout.children {
+                capture(child, offsets);
             }
         }
+        capture(layout_root, &mut self.scroll_offsets_before_layout);
     }
 
     fn queue_scroll_target(&mut self, node_id: usize) {
@@ -1505,7 +1505,9 @@ impl JsRuntime {
     /// animation-frame callbacks.
     pub fn run_animation_frame(&mut self, elapsed_ms: u64) -> JsResult<usize> {
         self.run_until_idle()?;
-        self.flush_pending_scroll_events()?;
+        if self.has_pending_scroll_steps() {
+            self.flush_pending_scroll_events()?;
+        }
 
         let (timestamp, callback_ids) = self
             .host_state
@@ -3451,8 +3453,8 @@ fn element_scroll_offset_native(
     })
 }
 
-/// `__omoikane_set_element_scroll(nodeId, x, y)` -> `{"x":..,"y":..,"changed":bool}`.
-/// Non-finite coordinates scroll to zero, matching how browsers normalize them.
+/// Sets and clamps an element's scroll offset. Non-finite coordinates scroll to
+/// zero, matching how browsers normalize them.
 fn set_element_scroll_native(
     _: &JsValue,
     args: &[JsValue],
@@ -3468,17 +3470,10 @@ fn set_element_scroll_native(
     with_host_state(|state| {
         let node = state.borrow().get_node(node_id);
         let Some(node) = node else {
-            return Ok(js_string!("{\"x\":0,\"y\":0,\"changed\":false}").into());
+            return Ok(JsValue::undefined());
         };
-        let mut state = state.borrow_mut();
-        let changed = state.set_element_scroll(&node, x, y);
-        let (x, y) = state.element_scroll_offset(&node);
-        let json = format!(
-            "{{\"x\":{},\"y\":{},\"changed\":{changed}}}",
-            json_number(x),
-            json_number(y)
-        );
-        Ok(js_string!(json).into())
+        state.borrow_mut().set_element_scroll(&node, x, y);
+        Ok(JsValue::undefined())
     })
 }
 
@@ -3491,18 +3486,16 @@ fn window_scroll_offset_native(
     with_host_state(|state| {
         let mut state = state.borrow_mut();
         let current = state.window_scroll;
-        let changed = current != (0.0, 0.0) && state.set_window_scroll(current.0, current.1);
+        if current != (0.0, 0.0) {
+            state.set_window_scroll(current.0, current.1);
+        }
         let (x, y) = state.window_scroll;
-        let json = format!(
-            "{{\"x\":{},\"y\":{},\"changed\":{changed}}}",
-            json_number(x),
-            json_number(y)
-        );
+        let json = format!("{{\"x\":{},\"y\":{}}}", json_number(x), json_number(y));
         Ok(js_string!(json).into())
     })
 }
 
-/// Sets and clamps the top-level Window scroll offset, returning its new state.
+/// Sets and clamps the top-level Window scroll offset.
 fn set_window_scroll_native(
     _: &JsValue,
     args: &[JsValue],
@@ -3515,15 +3508,8 @@ fn set_window_scroll_native(
     let x = coordinate(args.first(), context)?;
     let y = coordinate(args.get(1), context)?;
     with_host_state(|state| {
-        let mut state = state.borrow_mut();
-        let changed = state.set_window_scroll(x, y);
-        let (x, y) = state.window_scroll;
-        let json = format!(
-            "{{\"x\":{},\"y\":{},\"changed\":{changed}}}",
-            json_number(x),
-            json_number(y)
-        );
-        Ok(js_string!(json).into())
+        state.borrow_mut().set_window_scroll(x, y);
+        Ok(JsValue::undefined())
     })
 }
 
