@@ -650,8 +650,9 @@ impl HostState {
 
         let document = self.load_iframe_document(&src);
         let origin = if src.is_empty() || src.eq_ignore_ascii_case("about:blank") {
+            let owner_document = owner_document_for_node(iframe);
             self.document_origins
-                .get(&self.document.identity())
+                .get(&owner_document.as_ref().map_or(self.document.identity(), NodeHandle::identity))
                 .cloned()
                 .flatten()
         } else {
@@ -12261,6 +12262,27 @@ mod tests {
         let mut runtime = JsRuntime::with_document_and_url(default_document(), "about:blank").unwrap();
         assert!(runtime.eval(
             "(() => { try { return localStorage.length; } catch (error) { return error instanceof DOMException && error.name === 'SecurityError'; } })()",
+        ).unwrap().as_boolean().unwrap());
+    }
+
+    #[test]
+    fn nested_about_blank_iframe_inherits_its_owning_documents_opaque_origin() {
+        let document = crate::html::TreeBuilder::parse(
+            "<html><body><iframe id='outer' src='data:text/html,%3Chtml%3E%3Cbody%3E%3C/body%3E%3C/html%3E'></iframe></body></html>",
+        ).document();
+        let mut runtime = JsRuntime::with_document_and_url(document, "https://example.com/").unwrap();
+
+        assert!(runtime.eval(
+            r#"(() => {
+                const childDocument = document.querySelector('#outer').contentDocument;
+                const nested = childDocument.createElement('iframe');
+                childDocument.body.appendChild(nested);
+                try {
+                    return nested.contentWindow.localStorage.length;
+                } catch (error) {
+                    return error instanceof DOMException && error.name === 'SecurityError';
+                }
+            })()"#,
         ).unwrap().as_boolean().unwrap());
     }
 

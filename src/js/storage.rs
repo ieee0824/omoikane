@@ -77,16 +77,13 @@ impl StorageManager {
         session_id: u64,
         origin: &StorageOrigin,
         local: bool,
-        operation: impl FnOnce(&StorageArea) -> R,
+        operation: impl FnOnce(Option<&StorageArea>) -> R,
     ) -> R {
-        let mut state = self.0.lock().expect("storage manager mutex poisoned");
+        let state = self.0.lock().expect("storage manager mutex poisoned");
         let area = if local {
-            state.local.entry(origin.clone()).or_default()
+            state.local.get(origin)
         } else {
-            state
-                .session
-                .entry((session_id, origin.clone()))
-                .or_default()
+            state.session.get(&(session_id, origin.clone()))
         };
         operation(area)
     }
@@ -111,7 +108,9 @@ impl StorageManager {
     }
 
     pub(crate) fn length(&self, session: u64, origin: &StorageOrigin, local: bool) -> usize {
-        self.with_area(session, origin, local, |area| area.entries.len())
+        self.with_area(session, origin, local, |area| {
+            area.map_or(0, |area| area.entries.len())
+        })
     }
 
     pub(crate) fn key(
@@ -122,7 +121,7 @@ impl StorageManager {
         index: usize,
     ) -> Option<String> {
         self.with_area(session, origin, local, |area| {
-            area.entries.get(index).map(|(key, _)| key.clone())
+            area.and_then(|area| area.entries.get(index).map(|(key, _)| key.clone()))
         })
     }
 
@@ -133,7 +132,9 @@ impl StorageManager {
         local: bool,
         key: &str,
     ) -> Option<String> {
-        self.with_area(session, origin, local, |area| area.get(key))
+        self.with_area(session, origin, local, |area| {
+            area.and_then(|area| area.get(key))
+        })
     }
 
     pub(crate) fn set(
@@ -163,5 +164,25 @@ impl StorageManager {
             area.entries.clear();
             changed
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reading_an_absent_area_does_not_allocate_it() {
+        let manager = StorageManager::new();
+        let session = manager.create_session();
+        let origin = StorageOrigin::from_url("https://example.com/").unwrap();
+
+        assert_eq!(manager.length(session, &origin, true), 0);
+        assert_eq!(manager.key(session, &origin, false, 0), None);
+        assert_eq!(manager.get(session, &origin, true, "missing"), None);
+
+        let state = manager.0.lock().unwrap();
+        assert!(state.local.is_empty());
+        assert!(state.session.is_empty());
     }
 }

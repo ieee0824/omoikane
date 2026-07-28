@@ -25,7 +25,27 @@
   // the global object's prototype, which could disturb Boa's global property
   // lookup and built-in prototype chain.
   const windowObjects = new WeakSet([globalThis]);
-  const browsingWindows = [globalThis];
+  const hasWeakWindowRegistry = typeof WeakRef === "function";
+  const browsingWindowRefs = [];
+  const MAX_STRONG_WINDOW_ENTRIES = 1024;
+  function registerBrowsingWindow(window) {
+    if (hasWeakWindowRegistry) browsingWindowRefs.push(new WeakRef(window));
+    else {
+      if (browsingWindowRefs.length >= MAX_STRONG_WINDOW_ENTRIES) browsingWindowRefs.shift();
+      browsingWindowRefs.push(window);
+    }
+  }
+  function liveBrowsingWindows() {
+    const windows = [globalThis];
+    for (let index = browsingWindowRefs.length - 1; index >= 0; index--) {
+      const window = hasWeakWindowRegistry
+        ? browsingWindowRefs[index].deref()
+        : browsingWindowRefs[index];
+      if (window) windows.push(window);
+      else browsingWindowRefs.splice(index, 1);
+    }
+    return windows;
+  }
   class Window {
     constructor() {
       throw new TypeError("Illegal constructor");
@@ -4038,7 +4058,7 @@
           },
         };
         windowObjects.add(this.__contentWindowFacade);
-        browsingWindows.push(this.__contentWindowFacade);
+        registerBrowsingWindow(this.__contentWindowFacade);
       }
       return this.__contentWindowFacade;
     }
@@ -5816,7 +5836,7 @@
   }
   function dispatchStorageChange(kind, sourceDocument, sourceWindow, key, oldValue, newValue) {
     const origin = storageOrigin(sourceDocument);
-    for (const targetWindow of browsingWindows) {
+    for (const targetWindow of liveBrowsingWindows()) {
       if (targetWindow === sourceWindow) continue;
       const targetDocument = targetWindow.document;
       if (!targetDocument || __omoikane_storage_origin(targetDocument.__id) !== origin) continue;
