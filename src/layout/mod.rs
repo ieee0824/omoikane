@@ -662,7 +662,8 @@ impl LayoutBox {
 }
 
 /// Expands `max_right` / `max_bottom` to enclose the border boxes of `boxes` and
-/// their descendants, stopping at boxes that clip their own overflow.
+/// their descendants. A clipped axis stops contributing below that box while
+/// the other axis can continue through the same subtree.
 fn expand_scrollable_overflow(boxes: &[LayoutBox], max_right: &mut f32, max_bottom: &mut f32) {
     expand_scrollable_overflow_axes(boxes, max_right, max_bottom, true, true);
 }
@@ -674,6 +675,9 @@ fn expand_scrollable_overflow_axes(
     include_x: bool,
     include_y: bool,
 ) {
+    if !include_x && !include_y {
+        return;
+    }
     for child in boxes {
         let content = child.dimensions.content;
         let padding = child.dimensions.padding;
