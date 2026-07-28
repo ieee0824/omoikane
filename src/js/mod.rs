@@ -1643,12 +1643,12 @@ impl JsRuntime {
             advanced = advanced.saturating_add(step);
 
             loop {
-                let Some((_, task)) = self.host_state.borrow_mut().event_loop.pop_task() else {
-                    break;
-                };
                 if tasks_run >= max_tasks {
                     break;
                 }
+                let Some((_, task)) = self.host_state.borrow_mut().event_loop.pop_task() else {
+                    break;
+                };
                 let is_timer = matches!(task, Task::Timer(_));
                 {
                     // Swallow per-task JS errors: a single failing timer must
@@ -13331,6 +13331,23 @@ mod tests {
             eval_str(&mut runtime, "eventLoopOrder.join(',')"),
             "timer-1,microtask-1,timer-2"
         );
+    }
+
+    #[test]
+    fn timer_task_budget_does_not_discard_the_next_task() {
+        let mut runtime = JsRuntime::new().unwrap();
+        runtime
+            .eval(
+                r#"globalThis.timerOrder = [];
+                   setTimeout(() => timerOrder.push("first"), 0);
+                   setTimeout(() => timerOrder.push("second"), 0);"#,
+            )
+            .unwrap();
+
+        assert_eq!(runtime.run_timers(1, 1, 1), 1);
+        assert_eq!(eval_str(&mut runtime, "timerOrder.join(',')"), "first");
+        assert_eq!(runtime.run_timers(1, 1, 1), 1);
+        assert_eq!(eval_str(&mut runtime, "timerOrder.join(',')"), "first,second");
     }
 
     #[test]
