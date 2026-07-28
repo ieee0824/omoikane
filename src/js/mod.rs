@@ -2500,6 +2500,11 @@ fn register_host_bindings(
             NativeFunction::from_copy_closure(set_checked_native),
         ),
         (
+            js_string!("__omoikane_set_text_control_state"),
+            5,
+            NativeFunction::from_copy_closure(set_text_control_state_native),
+        ),
+        (
             js_string!("__omoikane_console_log"),
             1,
             NativeFunction::from_copy_closure(console_log_native),
@@ -4679,6 +4684,35 @@ fn set_checked_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> J
             .get_node(node_id)
             .ok_or_else(|| JsError::from(JsNativeError::error().with_message("node not found")))?;
         node.set_checked(checked);
+        state.borrow_mut().invalidate_style_cache_for_node(&node);
+        Ok(JsValue::undefined())
+    })
+}
+
+fn set_text_control_state_native(
+    _: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let node_id = parse_node_id(args.first(), context)?;
+    let value = string_argument(args.get(1), "", context)?;
+    let selection_start = args
+        .get(2)
+        .cloned()
+        .unwrap_or_default()
+        .to_number(context)? as usize;
+    let selection_end = args
+        .get(3)
+        .cloned()
+        .unwrap_or_default()
+        .to_number(context)? as usize;
+    let focused = args.get(4).is_some_and(JsValue::to_boolean);
+    with_host_state(|state| {
+        let node = state
+            .borrow()
+            .get_node(node_id)
+            .ok_or_else(|| JsError::from(JsNativeError::error().with_message("node not found")))?;
+        node.set_text_control_state(value, selection_start, selection_end, focused);
         state.borrow_mut().invalidate_style_cache_for_node(&node);
         Ok(JsValue::undefined())
     })
@@ -15034,6 +15068,111 @@ mod tests {
             })()
         "#,
         );
+    }
+
+    #[test]
+    fn text_control_editing_updates_selection_and_input_events() {
+        let mut runtime = runtime_from_html(
+            r#"<html><body><input id="field" value="abcd"><textarea id="area">hello</textarea></body></html>"#,
+        );
+        assert!(runtime
+            .eval(
+                r#"(() => {
+                    const field = document.getElementById("field");
+                    globalThis.editEvents = [];
+                    for (const type of ["beforeinput", "input", "change"]) {
+                      field.addEventListener(type, event => editEvents.push(
+                        [type, event.inputType || "", event.data === null ? "null" : event.data].join(":")));
+                    }
+                    field.focus();
+                    field.setSelectionRange(1, 3, "forward");
+                    __omoikane_dispatch_keyboard_input("keydown", { key: "X", text: "X" });
+                    const inserted = field.value === "aXd" && field.selectionStart === 2 &&
+                      field.selectionEnd === 2 && field.selectionDirection === "none";
+                    __omoikane_dispatch_keyboard_input("keydown", { key: "Backspace" });
+                    const deleted = field.value === "ad" && field.selectionStart === 1;
+                    field.blur();
+
+                    const area = document.getElementById("area");
+                    area.value = "hello";
+                    area.setSelectionRange(1, 4, "backward");
+                    const textareaSelection = area.selectionStart === 1 && area.selectionEnd === 4 &&
+                      area.selectionDirection === "backward";
+                    area.select();
+                    return inserted && deleted && textareaSelection && area.selectionStart === 0 &&
+                      area.selectionEnd === 5 && editEvents.join("|") ===
+                      "beforeinput:insertText:X|input:insertText:X|beforeinput:deleteContentBackward:null|input:deleteContentBackward:null|change::";
+                })()"#,
+            )
+            .unwrap()
+            .as_boolean()
+            .unwrap());
+    }
+
+    #[test]
+    fn text_control_editing_respects_cancelation_readonly_and_maxlength() {
+        let mut runtime = runtime_from_html(
+            r#"<html><body><input id="field" value="ab" maxlength="3"><input id="readonly" value="locked" readonly></body></html>"#,
+        );
+        assert!(runtime
+            .eval(
+                r#"(() => {
+                    const field = document.getElementById("field");
+                    field.focus();
+                    field.setSelectionRange(2, 2);
+                    __omoikane_dispatch_keyboard_input("keydown", { key: "c", text: "c" });
+                    __omoikane_dispatch_keyboard_input("keydown", { key: "d", text: "d" });
+                    const maxlengthHeld = field.value === "abc" && field.selectionStart === 3;
+                    field.addEventListener("beforeinput", event => event.preventDefault(), { once: true });
+                    __omoikane_dispatch_keyboard_input("keydown", { key: "Backspace" });
+                    const beforeInputCanceled = field.value === "abc";
+                    field.addEventListener("keydown", event => event.preventDefault(), { once: true });
+                    __omoikane_dispatch_keyboard_input("keydown", { key: "Backspace" });
+                    const keydownCanceled = field.value === "abc";
+                    field.disabled = true;
+                    __omoikane_dispatch_keyboard_input("keydown", { key: "x", text: "x" });
+                    const disabledHeld = field.value === "abc";
+                    const readonly = document.getElementById("readonly");
+                    readonly.focus();
+                    readonly.select();
+                    __omoikane_dispatch_keyboard_input("keydown", { key: "x", text: "x" });
+                    return maxlengthHeld && beforeInputCanceled && keydownCanceled && disabledHeld &&
+                      readonly.value === "locked" && readonly.selectionStart === 0 && readonly.selectionEnd === 6;
+                })()"#,
+            )
+            .unwrap()
+            .as_boolean()
+            .unwrap());
+    }
+
+    #[test]
+    fn text_control_navigation_and_forward_delete_move_the_caret() {
+        let mut runtime = runtime_from_html(r#"<html><body><input id="field" value="abcd"></body></html>"#);
+        assert!(runtime
+            .eval(
+                r#"(() => {
+                    const field = document.getElementById("field");
+                    field.focus();
+                    field.setSelectionRange(2, 2);
+                    __omoikane_dispatch_keyboard_input("keydown", { key: "Delete" });
+                    const deleted = field.value === "abd" && field.selectionStart === 2;
+                    __omoikane_dispatch_keyboard_input("keydown", { key: "Backspace" });
+                    const backspaced = field.value === "ad" && field.selectionStart === 1;
+                    __omoikane_dispatch_keyboard_input("keydown", { key: "Home" });
+                    const home = field.selectionStart === 0;
+                    __omoikane_dispatch_keyboard_input("keydown", { key: "ArrowRight" });
+                    const right = field.selectionStart === 1;
+                    __omoikane_dispatch_keyboard_input("keydown", { key: "End" });
+                    const end = field.selectionStart === 2;
+                    __omoikane_dispatch_keyboard_input("keydown", { key: "ArrowLeft", shiftKey: true });
+                    return deleted && backspaced && home && right && end &&
+                      field.selectionStart === 1 && field.selectionEnd === 2 &&
+                      field.selectionDirection === "backward";
+                })()"#,
+            )
+            .unwrap()
+            .as_boolean()
+            .unwrap());
     }
 
     #[test]

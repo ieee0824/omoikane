@@ -10,7 +10,7 @@ use crate::paint::{DataUri, Image, parse_data_uri};
 
 use super::{
     FontMetrics, FragmentStyle, InlineFragment, InlineFragmentContent,
-    LineBox, Rect, VerticalAlign,
+    LineBox, Rect, TextControlPaintState, VerticalAlign,
     border_box_adjust_length, edge_sizes, explicit_length, is_border_box, is_display_none,
     is_non_rendered_html_element,
     IMAGE_BASE_URL, IMAGE_CACHE, HTTP_CLIENT, LAYOUT_FONTS,
@@ -154,7 +154,7 @@ pub(super) enum InlineSegmentContent {
     Text(String),
     Image(Image, ComputedStyle, f32, f32),
     GeneratedBox(ComputedStyle),
-    FormControl(ComputedStyle, String, f32, f32),
+    FormControl(ComputedStyle, String, Option<TextControlPaintState>, f32, f32),
     IconFormControl(ComputedStyle, Image, f32, f32, f32, f32),
 }
 
@@ -305,11 +305,15 @@ fn collect_input_segment(
 
     let metrics = font_metrics(style);
     let button_like = matches!(input_type.as_str(), "submit" | "button" | "reset");
-    let value = attributes.get("value").cloned().unwrap_or_else(|| match input_type.as_str() {
-        "submit" => "Submit".to_string(),
-        "reset" => "Reset".to_string(),
-        _ => String::new(),
-    });
+    let value = node
+        .text_control_state()
+        .map(|state| state.value)
+        .or_else(|| attributes.get("value").cloned())
+        .unwrap_or_else(|| match input_type.as_str() {
+            "submit" => "Submit".to_string(),
+            "reset" => "Reset".to_string(),
+            _ => String::new(),
+        });
     let content_width = explicit_length(style, "width").unwrap_or_else(|| {
         if button_like {
             measure_text_width(&value, metrics)
@@ -416,7 +420,9 @@ fn collect_textarea_segment(
 ) {
     let attributes = node.attributes().unwrap_or_default();
     let metrics = font_metrics(style);
-    let value = strip_textarea_leading_newline(&collect_rendered_text(node, resolver)).to_string();
+    let value = node.text_control_state().map(|state| state.value).unwrap_or_else(|| {
+        strip_textarea_leading_newline(&collect_rendered_text(node, resolver)).to_string()
+    });
     let content_width = explicit_length(style, "width").unwrap_or_else(|| {
         let cols = attributes
             .get("cols")
@@ -531,12 +537,18 @@ fn push_form_control_segment(
     let border = edge_sizes(style, "border");
     let total_height =
         content_height + padding.top + padding.bottom + border.top + border.bottom;
+    let editing = node.text_control_state().map(|state| TextControlPaintState {
+        selection_start: state.selection_start,
+        selection_end: state.selection_end,
+        focused: state.focused,
+    });
 
     out.push(InlineSegment {
         node: node.clone(),
         content: InlineSegmentContent::FormControl(
             style.clone(),
             value,
+            editing,
             content_width,
             content_height,
         ),
@@ -1640,11 +1652,11 @@ fn split_segment(segment: &InlineSegment) -> Vec<InlinePiece> {
                     + border.bottom,
             }]
         }
-        InlineSegmentContent::FormControl(style, value, content_width, content_height) => {
+        InlineSegmentContent::FormControl(style, value, editing, content_width, content_height) => {
             let padding = edge_sizes(style, "padding");
             let border = edge_sizes(style, "border");
             vec![InlinePiece::Fragment {
-                content: InlineFragmentContent::FormControl(style.clone(), value.clone()),
+                content: InlineFragmentContent::FormControl(style.clone(), value.clone(), *editing),
                 width: *content_width + padding.left + padding.right + border.left + border.right,
                 height: *content_height + padding.top + padding.bottom + border.top + border.bottom,
             }]
@@ -1983,7 +1995,7 @@ fn push_line(
                 if matches!(
                     &fragment.content,
                     InlineFragmentContent::Image(_, _)
-                        | InlineFragmentContent::FormControl(_, _)
+                        | InlineFragmentContent::FormControl(_, _, _)
                 ) && fragment.rect.height >= height {
                     fragment.rect.height
                 } else {
@@ -2001,7 +2013,7 @@ fn push_line(
                 let ascent = if matches!(
                     &fragment.content,
                     InlineFragmentContent::Image(_, _)
-                        | InlineFragmentContent::FormControl(_, _)
+                        | InlineFragmentContent::FormControl(_, _, _)
                 ) && fragment.rect.height >= height {
                     fragment.rect.height
                 } else {
@@ -2013,7 +2025,7 @@ fn push_line(
                 let ascent = if matches!(
                     &fragment.content,
                     InlineFragmentContent::Image(_, _)
-                        | InlineFragmentContent::FormControl(_, _)
+                        | InlineFragmentContent::FormControl(_, _, _)
                 ) && fragment.rect.height >= height {
                     fragment.rect.height
                 } else {

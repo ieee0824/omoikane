@@ -523,6 +523,17 @@
       this.ctrlKey = init.ctrlKey ?? false;
       this.shiftKey = init.shiftKey ?? false;
       this.metaKey = init.metaKey ?? false;
+      this.text = init.text ?? "";
+    }
+  }
+
+  class InputEvent extends UIEvent {
+    constructor(type, init = {}) {
+      init = init ?? {};
+      super(type, init);
+      this.data = init.data === undefined ? null : init.data;
+      this.inputType = String(init.inputType ?? "");
+      this.isComposing = Boolean(init.isComposing);
     }
   }
 
@@ -2047,6 +2058,7 @@
       if (previous) {
         fireFocusEvent(previous, "blur", related, false);
         fireFocusEvent(previous, "focusout", related, true);
+        commitTextControlChange(previous);
       }
 
       if (crossesDocuments) {
@@ -2080,6 +2092,7 @@
 
       doc.__focusedElementId = this.__id;
       focusedDocumentId = doc.__id;
+      beginTextControlFocus(this);
       fireFocusEvent(this, "focus", crossesDocuments ? null : previous, false);
       fireFocusEvent(this, "focusin", crossesDocuments ? null : previous, true);
     }
@@ -2095,6 +2108,7 @@
       doc.__focusedElementId = null;
       fireFocusEvent(this, "blur", null, false);
       fireFocusEvent(this, "focusout", null, true);
+      commitTextControlChange(this);
     }
 
     // True when this form control is actually disabled, including inherited
@@ -4362,6 +4376,186 @@
     }
   }
 
+  const TEXT_INPUT_TYPES = new Set(["text", "search", "tel", "url", "email", "password"]);
+
+  function isTextControl(control) {
+    return control instanceof HTMLTextAreaElement ||
+      (control instanceof HTMLInputElement && TEXT_INPUT_TYPES.has(control.type));
+  }
+
+  function ensureTextControlSelection(control) {
+    if (control.__selectionStart === undefined) {
+      control.__selectionStart = 0;
+      control.__selectionEnd = 0;
+      control.__selectionDirection = "none";
+    }
+  }
+
+  function syncTextControlNativeState(control, focused = undefined) {
+    if (!isTextControl(control)) return;
+    ensureTextControlSelection(control);
+    const isFocused = focused === undefined
+      ? control.ownerDocument && focusedElementOf(control.ownerDocument) === control
+      : Boolean(focused);
+    __omoikane_set_text_control_state(
+      control.__id,
+      control.value,
+      control.__selectionStart,
+      control.__selectionEnd,
+      isFocused,
+    );
+  }
+
+  function setTextControlSelection(control, start, end, direction) {
+    const length = String(control.value).length;
+    let normalizedEnd = Math.min(Math.max(Number(end) || 0, 0), length);
+    let normalizedStart = Math.min(Math.max(Number(start) || 0, 0), normalizedEnd);
+    const normalizedDirection = direction === "forward" || direction === "backward"
+      ? direction : "none";
+    control.__selectionStart = normalizedStart;
+    control.__selectionEnd = normalizedEnd;
+    control.__selectionDirection = normalizedDirection;
+    syncTextControlNativeState(control);
+  }
+
+  function setTextControlSelectionRange(control, start, end, direction) {
+    if (!isTextControl(control)) throw new DOMException("The input type does not support selection", "InvalidStateError");
+    setTextControlSelection(control, start, end, direction);
+  }
+
+  function textControlSelectionStart(control) {
+    if (!isTextControl(control)) return null;
+    ensureTextControlSelection(control);
+    return control.__selectionStart;
+  }
+
+  function textControlSelectionEnd(control) {
+    if (!isTextControl(control)) return null;
+    ensureTextControlSelection(control);
+    return control.__selectionEnd;
+  }
+
+  function textControlSelectionDirection(control) {
+    if (!isTextControl(control)) return null;
+    ensureTextControlSelection(control);
+    return control.__selectionDirection;
+  }
+
+  function selectTextControl(control) {
+    if (!isTextControl(control)) return;
+    setTextControlSelection(control, 0, control.value.length, "none");
+    control.dispatchEvent(new Event("select", { bubbles: true }));
+  }
+
+  function beginTextControlFocus(control) {
+    if (!isTextControl(control)) return;
+    ensureTextControlSelection(control);
+    control.__focusValue = control.value;
+    control.__textEditChanged = false;
+    syncTextControlNativeState(control, true);
+  }
+
+  function commitTextControlChange(control) {
+    if (!isTextControl(control)) return;
+    if (control.__textEditChanged && control.value !== control.__focusValue) {
+      control.dispatchEvent(new Event("change", { bubbles: true }));
+    }
+    control.__focusValue = control.value;
+    control.__textEditChanged = false;
+    syncTextControlNativeState(control, false);
+  }
+
+  function dispatchTextControlInput(control, inputType, data, nextValue, caret) {
+    const beforeInput = new InputEvent("beforeinput", {
+      bubbles: true, cancelable: true, composed: true, inputType, data,
+    });
+    if (!control.dispatchEvent(beforeInput)) return false;
+    control.value = nextValue;
+    setTextControlSelection(control, caret, caret, "none");
+    control.__textEditChanged = true;
+    control.dispatchEvent(new InputEvent("input", {
+      bubbles: true, composed: true, inputType, data,
+    }));
+    return true;
+  }
+
+  function moveTextControlCaret(control, destination, extend) {
+    const start = control.selectionStart;
+    const end = control.selectionEnd;
+    const clamped = Math.min(Math.max(destination, 0), control.value.length);
+    if (!extend) {
+      setTextControlSelection(control, clamped, clamped, "none");
+      return;
+    }
+    const anchor = start === end ? start :
+      (control.selectionDirection === "backward" ? end : start);
+    setTextControlSelection(
+      control,
+      Math.min(anchor, clamped),
+      Math.max(anchor, clamped),
+      clamped < anchor ? "backward" : "forward",
+    );
+  }
+
+  function performTextControlKeyDefault(control, init) {
+    if (!isTextControl(control) || control.readOnly || control.__isDisabledControl()) return;
+    ensureTextControlSelection(control);
+    const value = control.value;
+    const start = control.selectionStart;
+    const end = control.selectionEnd;
+    const key = String(init.key || "");
+
+    if (key === "ArrowLeft") {
+      const destination = !init.shiftKey && start !== end ? start : Math.max(start - 1, 0);
+      moveTextControlCaret(control, destination, Boolean(init.shiftKey));
+      return;
+    }
+    if (key === "ArrowRight") {
+      const destination = !init.shiftKey && start !== end ? end : Math.min(end + 1, value.length);
+      moveTextControlCaret(control, destination, Boolean(init.shiftKey));
+      return;
+    }
+    if (key === "Home" || key === "End") {
+      moveTextControlCaret(control, key === "Home" ? 0 : value.length, Boolean(init.shiftKey));
+      return;
+    }
+
+    if (key === "Backspace" || key === "Delete") {
+      let deleteStart = start;
+      let deleteEnd = end;
+      const backward = key === "Backspace";
+      if (deleteStart === deleteEnd) {
+        if (backward && deleteStart > 0) deleteStart--;
+        else if (!backward && deleteEnd < value.length) deleteEnd++;
+        else return;
+      }
+      dispatchTextControlInput(
+        control,
+        backward ? "deleteContentBackward" : "deleteContentForward",
+        null,
+        value.slice(0, deleteStart) + value.slice(deleteEnd),
+        deleteStart,
+      );
+      return;
+    }
+
+    if (init.ctrlKey || init.metaKey || init.altKey) return;
+    let text = init.text ? String(init.text) : (Array.from(key).length === 1 ? key : "");
+    if (!text) return;
+    if (control.maxLength >= 0) {
+      const available = Math.max(control.maxLength - (value.length - (end - start)), 0);
+      text = text.slice(0, available);
+      if (!text) return;
+    }
+    dispatchTextControlInput(
+      control,
+      "insertText",
+      text,
+      value.slice(0, start) + text + value.slice(end),
+      start + text.length,
+    );
+  }
+
   class HTMLInputElement extends HTMLElement {
     get type() {
       const t = (this.getAttribute("type") || "").toLowerCase();
@@ -4380,6 +4574,7 @@
     }
     set value(v) {
       this.__value = v == null ? "" : String(v);
+      setTextControlSelection(this, this.__value.length, this.__value.length, "none");
     }
     get defaultValue() {
       return this.getAttribute("value") || "";
@@ -4387,6 +4582,71 @@
     set defaultValue(v) {
       this.setAttribute("value", String(v));
     }
+    get readOnly() { return this.hasAttribute("readonly"); }
+    set readOnly(value) {
+      if (value) this.setAttribute("readonly", "");
+      else this.removeAttribute("readonly");
+    }
+    get maxLength() {
+      const raw = this.getAttribute("maxlength");
+      if (raw === null || !/^\d+$/.test(raw)) return -1;
+      return Number(raw);
+    }
+    set maxLength(value) {
+      const length = Number(value);
+      if (!Number.isInteger(length) || length < 0) throw new DOMException("Invalid maxlength", "IndexSizeError");
+      this.setAttribute("maxlength", String(length));
+    }
+    get selectionStart() { return textControlSelectionStart(this); }
+    set selectionStart(value) { this.setSelectionRange(value, this.selectionEnd, this.selectionDirection); }
+    get selectionEnd() { return textControlSelectionEnd(this); }
+    set selectionEnd(value) { this.setSelectionRange(this.selectionStart, value, this.selectionDirection); }
+    get selectionDirection() { return textControlSelectionDirection(this); }
+    set selectionDirection(value) { this.setSelectionRange(this.selectionStart, this.selectionEnd, value); }
+    setSelectionRange(start, end, direction = "none") {
+      setTextControlSelectionRange(this, start, end, direction);
+    }
+    select() { selectTextControl(this); }
+  }
+
+  class HTMLTextAreaElement extends HTMLElement {
+    get value() {
+      if (this.__value !== undefined) return this.__value;
+      const initial = this.textContent || "";
+      return initial.startsWith("\r\n") ? initial.slice(2) :
+        (initial.startsWith("\n") || initial.startsWith("\r") ? initial.slice(1) : initial);
+    }
+    set value(value) {
+      this.__value = value == null ? "" : String(value);
+      setTextControlSelection(this, this.__value.length, this.__value.length, "none");
+    }
+    get defaultValue() { return this.textContent || ""; }
+    set defaultValue(value) { this.textContent = String(value); }
+    get readOnly() { return this.hasAttribute("readonly"); }
+    set readOnly(value) {
+      if (value) this.setAttribute("readonly", "");
+      else this.removeAttribute("readonly");
+    }
+    get maxLength() {
+      const raw = this.getAttribute("maxlength");
+      if (raw === null || !/^\d+$/.test(raw)) return -1;
+      return Number(raw);
+    }
+    set maxLength(value) {
+      const length = Number(value);
+      if (!Number.isInteger(length) || length < 0) throw new DOMException("Invalid maxlength", "IndexSizeError");
+      this.setAttribute("maxlength", String(length));
+    }
+    get selectionStart() { return textControlSelectionStart(this); }
+    set selectionStart(value) { this.setSelectionRange(value, this.selectionEnd, this.selectionDirection); }
+    get selectionEnd() { return textControlSelectionEnd(this); }
+    set selectionEnd(value) { this.setSelectionRange(this.selectionStart, value, this.selectionDirection); }
+    get selectionDirection() { return textControlSelectionDirection(this); }
+    set selectionDirection(value) { this.setSelectionRange(this.selectionStart, this.selectionEnd, value); }
+    setSelectionRange(start, end, direction = "none") {
+      setTextControlSelectionRange(this, start, end, direction);
+    }
+    select() { selectTextControl(this); }
   }
 
   class HTMLButtonElement extends HTMLElement {
@@ -4589,7 +4849,7 @@
   ]);
   distributePrototypeMembers(Node.prototype, [
     HTMLInputElement.prototype, HTMLButtonElement.prototype,
-    HTMLSelectElement.prototype, HTMLOptionElement.prototype,
+    HTMLSelectElement.prototype, HTMLOptionElement.prototype, HTMLTextAreaElement.prototype,
   ], ["disabled"]);
   distributePrototypeMembers(Node.prototype, [HTMLSelectElement.prototype, HTMLButtonElement.prototype], ["value"]);
   // DocumentType.name is the declared doctype name, unrelated to form-control
@@ -4602,7 +4862,7 @@
   );
   distributePrototypeMembers(Node.prototype, [
     HTMLFormElement.prototype, HTMLInputElement.prototype, HTMLButtonElement.prototype,
-    HTMLSelectElement.prototype, HTMLIFrameElement.prototype,
+    HTMLSelectElement.prototype, HTMLTextAreaElement.prototype, HTMLIFrameElement.prototype,
     HTMLObjectElement.prototype, HTMLImageElement.prototype,
   ], ["name"]);
   // Input and button provide their own type behavior; the generic fallback must
@@ -4631,6 +4891,7 @@
     tr: HTMLTableRowElement,
     form: HTMLFormElement,
     input: HTMLInputElement,
+    textarea: HTMLTextAreaElement,
     button: HTMLButtonElement,
     label: HTMLLabelElement,
     meta: HTMLMetaElement,
@@ -5176,6 +5437,7 @@
   globalThis.HTMLTableRowElement = HTMLTableRowElement;
   globalThis.HTMLFormElement = HTMLFormElement;
   globalThis.HTMLInputElement = HTMLInputElement;
+  globalThis.HTMLTextAreaElement = HTMLTextAreaElement;
   globalThis.HTMLButtonElement = HTMLButtonElement;
   globalThis.HTMLLabelElement = HTMLLabelElement;
   globalThis.HTMLMetaElement = HTMLMetaElement;
@@ -5205,7 +5467,7 @@
   globalThis.KeyboardEvent = KeyboardEvent;
   globalThis.FocusEvent = FocusEvent;
   globalThis.UIEvent = UIEvent;
-  globalThis.InputEvent = Event;
+  globalThis.InputEvent = InputEvent;
   globalThis.WheelEvent = MouseEvent;
   globalThis.PointerEvent = MouseEvent;
   globalThis.TouchEvent = Event;
@@ -5357,9 +5619,11 @@
   };
   globalThis.__omoikane_dispatch_keyboard_input = function(type, init) {
     const target = document.activeElement || document.body || document.documentElement || document;
-    return target.dispatchEvent(new KeyboardEvent(type, {
+    const notCanceled = target.dispatchEvent(new KeyboardEvent(type, {
       ...init, bubbles: true, cancelable: true, composed: true,
     }));
+    if (notCanceled && type === "keydown") performTextControlKeyDefault(target, init || {});
+    return notCanceled;
   };
   const __documentCookies = new Map();
   Object.defineProperty(Document.prototype, "cookie", {

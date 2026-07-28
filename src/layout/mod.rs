@@ -435,8 +435,16 @@ pub enum InlineFragmentContent {
     Text(String),
     Image(Image, ComputedStyle),
     GeneratedBox(ComputedStyle),
-    FormControl(ComputedStyle, String),
+    FormControl(ComputedStyle, String, Option<TextControlPaintState>),
     IconFormControl(ComputedStyle, Image, f32, f32),
+}
+
+/// Selection/caret state carried from a live text control into paint.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TextControlPaintState {
+    pub selection_start: usize,
+    pub selection_end: usize,
+    pub focused: bool,
 }
 
 /// A single line box inside a block formatting context.
@@ -2227,7 +2235,7 @@ fn intrinsic_width(node: &NodeHandle, resolver: &mut StyleResolver) -> f32 {
                                 + border.left
                                 + border.right
                         }
-                        InlineSegmentContent::FormControl(style, _, width, _) => {
+                        InlineSegmentContent::FormControl(style, _, _, width, _) => {
                             let padding = edge_sizes(&style, "padding");
                             let border = edge_sizes(&style, "border");
                             width + padding.left + padding.right + border.left + border.right
