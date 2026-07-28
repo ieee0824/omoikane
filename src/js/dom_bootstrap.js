@@ -5087,6 +5087,77 @@
   globalThis.ShadowRoot = ShadowRoot;
   globalThis.DocumentType = DocumentType;
   globalThis.DOMException = DOMException;
+  const INTEGER_TYPED_ARRAY_TAGS = new Set([
+    "[object Int8Array]", "[object Uint8Array]", "[object Uint8ClampedArray]",
+    "[object Int16Array]", "[object Uint16Array]", "[object Int32Array]",
+    "[object Uint32Array]", "[object BigInt64Array]", "[object BigUint64Array]",
+  ]);
+
+  function copyBufferSourceBytes(data) {
+    if (data instanceof ArrayBuffer) return Array.from(new Uint8Array(data));
+    if (ArrayBuffer.isView(data)) {
+      return Array.from(new Uint8Array(data.buffer, data.byteOffset, data.byteLength));
+    }
+    throw new TypeError("The provided value is not an ArrayBuffer or view");
+  }
+
+  const cryptoConstructionToken = {};
+  class SubtleCrypto {
+    constructor(token) {
+      if (token !== cryptoConstructionToken) throw new TypeError("Illegal constructor");
+    }
+    digest(algorithm, data) {
+      let name;
+      let bytes;
+      try {
+        const selected = typeof algorithm === "object" && algorithm !== null
+          ? algorithm.name : algorithm;
+        name = String(selected).toUpperCase();
+        if (!["SHA-1", "SHA-256", "SHA-384", "SHA-512"].includes(name)) {
+          throw new DOMException("Unrecognized digest algorithm", "NotSupportedError");
+        }
+        bytes = copyBufferSourceBytes(data);
+      } catch (error) {
+        return Promise.reject(error);
+      }
+      return Promise.resolve().then(() => {
+        const digest = JSON.parse(__omoikane_crypto_digest(name, JSON.stringify(bytes)));
+        return new Uint8Array(digest).buffer;
+      });
+    }
+  }
+
+  class Crypto {
+    constructor(token) {
+      if (token !== cryptoConstructionToken) throw new TypeError("Illegal constructor");
+      this.subtle = new SubtleCrypto(cryptoConstructionToken);
+    }
+    getRandomValues(array) {
+      if (!INTEGER_TYPED_ARRAY_TAGS.has(Object.prototype.toString.call(array))) {
+        throw new TypeError("getRandomValues requires an integer TypedArray");
+      }
+      if (array.byteLength > 65536) {
+        throw new DOMException("The requested length exceeds 65,536 bytes", "QuotaExceededError");
+      }
+      const bytes = JSON.parse(__omoikane_crypto_random(array.byteLength));
+      new Uint8Array(array.buffer, array.byteOffset, array.byteLength).set(bytes);
+      return array;
+    }
+    randomUUID() {
+      const bytes = this.getRandomValues(new Uint8Array(16));
+      bytes[6] = (bytes[6] & 0x0f) | 0x40;
+      bytes[8] = (bytes[8] & 0x3f) | 0x80;
+      const hex = Array.from(bytes, value => value.toString(16).padStart(2, "0"));
+      return hex.slice(0, 4).join("") + "-" + hex.slice(4, 6).join("") + "-" +
+        hex.slice(6, 8).join("") + "-" + hex.slice(8, 10).join("") + "-" +
+        hex.slice(10).join("");
+    }
+  }
+  globalThis.Crypto = Crypto;
+  globalThis.SubtleCrypto = SubtleCrypto;
+  // Omoikane does not yet model mixed-content/security contexts, so realms are
+  // currently treated as secure and expose the complete core API.
+  globalThis.crypto = new Crypto(cryptoConstructionToken);
   globalThis.CustomElementRegistry = CustomElementRegistry;
   globalThis.CSSStyleSheet = CSSStyleSheet;
   globalThis.CSSRuleList = CSSRuleList;

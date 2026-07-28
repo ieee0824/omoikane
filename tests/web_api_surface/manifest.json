@@ -411,7 +411,7 @@
       "id": "security.web-crypto",
       "area": "security",
       "description": "Web Crypto and random values are exposed",
-      "probe": "typeof crypto === 'object' && typeof crypto.getRandomValues === 'function' && crypto.subtle",
+      "probe": "typeof Crypto === 'function' && crypto instanceof Crypto && typeof crypto.getRandomValues === 'function' && typeof crypto.randomUUID === 'function' && crypto.subtle instanceof SubtleCrypto && typeof crypto.subtle.digest === 'function'",
       "baseline_supported": false
     },
     {
