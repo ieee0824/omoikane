@@ -165,6 +165,14 @@
       "baseline_supported": true
     },
     {
+      "id": "performance.observer-user-timing",
+      "area": "scheduling",
+      "description": "PerformanceObserver delivers buffered User Timing entries",
+      "setup": "globalThis.__performanceObserved = false; performance.mark('omoikane-observer-probe'); const observer = new PerformanceObserver(list => { __performanceObserved = list.getEntriesByType('mark').some(entry => entry.name === 'omoikane-observer-probe'); observer.disconnect(); }); observer.observe({ type: 'mark', buffered: true })",
+      "probe": "__performanceObserved && PerformanceObserver.supportedEntryTypes.includes('mark') && typeof PerformanceObserverEntryList === 'function'",
+      "baseline_supported": true
+    },
+    {
       "id": "css.computed-style",
       "area": "css",
       "description": "getComputedStyle returns cascaded author styles",

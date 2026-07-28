@@ -5902,8 +5902,8 @@
     return hours + ":" + minutes + ":" + seconds;
   };
 
-  // Performance Timeline and User Timing. Resource/Navigation Timing and
-  // PerformanceObserver intentionally remain outside this core implementation.
+  // Performance Timeline, User Timing, and observation of User Timing entries.
+  // Resource/Navigation/Paint Timing remain outside this core implementation.
   const performanceEntryToken = Symbol("PerformanceEntry internal constructor");
   function isDictionary(value) {
     return value !== null && (typeof value === "object" || typeof value === "function");
@@ -5956,15 +5956,120 @@
 
   const performanceEntries = [];
   let performanceEntrySequence = 0;
+  const performanceObservers = [];
+  let pendingPerformanceObservers = [];
+  let performanceObserverDeliveryScheduled = false;
 
   function sortedPerformanceEntries(entries) {
     return entries.slice().sort((a, b) =>
       a.startTime - b.startTime || a.__sequence - b.__sequence);
   }
 
+  const performanceObserverEntryListToken = Symbol("PerformanceObserverEntryList internal constructor");
+  class PerformanceObserverEntryList {
+    constructor(token, entries) {
+      if (token !== performanceObserverEntryListToken) throw new TypeError("Illegal constructor");
+      this._entries = sortedPerformanceEntries(entries);
+    }
+    getEntries() { return this._entries.slice(); }
+    getEntriesByType(type) {
+      const normalized = String(type);
+      return this._entries.filter(entry => entry.entryType === normalized);
+    }
+    getEntriesByName(name, type) {
+      const normalizedName = String(name);
+      const normalizedType = type === undefined ? null : String(type);
+      return this._entries.filter(entry =>
+        entry.name === normalizedName && (normalizedType === null || entry.entryType === normalizedType));
+    }
+  }
+
+  function schedulePerformanceObserver(observer) {
+    if (!pendingPerformanceObservers.includes(observer)) pendingPerformanceObservers.push(observer);
+    if (performanceObserverDeliveryScheduled) return;
+    performanceObserverDeliveryScheduled = true;
+    Promise.resolve().then(() => {
+      performanceObserverDeliveryScheduled = false;
+      const pending = pendingPerformanceObservers;
+      pendingPerformanceObservers = [];
+      for (const current of pending) {
+        const records = current.takeRecords();
+        if (!records.length) continue;
+        const list = new PerformanceObserverEntryList(performanceObserverEntryListToken, records);
+        // An exception from one callback must not prevent other observers, or a
+        // later delivery to the same observer, from running.
+        try { current._callback.call(undefined, list, current); } catch (_) {}
+      }
+    });
+  }
+
+  class PerformanceObserver {
+    constructor(callback) {
+      if (typeof callback !== "function") throw new TypeError("PerformanceObserver callback must be callable");
+      this._callback = callback;
+      this._queue = [];
+      this._entryTypes = new Set();
+      this._mode = undefined;
+      performanceObservers.push(this);
+    }
+    observe(options) {
+      if (arguments.length === 0 || !isDictionary(options)) {
+        throw new TypeError("PerformanceObserver options must be a dictionary");
+      }
+      const hasEntryTypes = options.entryTypes !== undefined;
+      const hasType = options.type !== undefined;
+      if (hasEntryTypes === hasType) {
+        throw new TypeError("Specify exactly one of entryTypes or type");
+      }
+      if (hasEntryTypes) {
+        if (this._mode === "single") {
+          throw new DOMException("Observer mode cannot be changed", "InvalidModificationError");
+        }
+        const requested = Array.from(options.entryTypes, type => String(type));
+        if (!requested.length) throw new TypeError("entryTypes must not be empty");
+        this._mode = "multiple";
+        this._entryTypes = new Set(requested.filter(type =>
+          PerformanceObserver.supportedEntryTypes.includes(type)));
+        return;
+      }
+      if (this._mode === "multiple") {
+        throw new DOMException("Observer mode cannot be changed", "InvalidModificationError");
+      }
+      const type = String(options.type);
+      if (!PerformanceObserver.supportedEntryTypes.includes(type)) return;
+      this._mode = "single";
+      this._entryTypes.add(type);
+      if (Boolean(options.buffered)) {
+        this._queue.push(...performanceEntries.filter(entry => entry.entryType === type));
+        if (this._queue.length) schedulePerformanceObserver(this);
+      }
+    }
+    disconnect() {
+      this._queue = [];
+      this._entryTypes.clear();
+      this._mode = undefined;
+      const pendingIndex = pendingPerformanceObservers.indexOf(this);
+      if (pendingIndex >= 0) pendingPerformanceObservers.splice(pendingIndex, 1);
+    }
+    takeRecords() {
+      const records = sortedPerformanceEntries(this._queue);
+      this._queue = [];
+      return records;
+    }
+  }
+  Object.defineProperty(PerformanceObserver, "supportedEntryTypes", {
+    get() { return Object.freeze(["mark", "measure"]); },
+    enumerable: true,
+  });
+
   function addPerformanceEntry(entry) {
     Object.defineProperty(entry, "__sequence", { value: performanceEntrySequence++ });
     performanceEntries.push(entry);
+    for (const observer of performanceObservers) {
+      if (!observer._entryTypes.has(entry.entryType)) continue;
+      observer._queue.push(entry);
+      schedulePerformanceObserver(observer);
+    }
     return entry;
   }
 
@@ -6060,6 +6165,8 @@
   globalThis.PerformanceEntry = PerformanceEntry;
   globalThis.PerformanceMark = PerformanceMark;
   globalThis.PerformanceMeasure = PerformanceMeasure;
+  globalThis.PerformanceObserver = PerformanceObserver;
+  globalThis.PerformanceObserverEntryList = PerformanceObserverEntryList;
   globalThis.performance = performance;
 
   globalThis.DOMParser = class DOMParser {
