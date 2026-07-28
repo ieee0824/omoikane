@@ -864,6 +864,12 @@ impl CdpSession {
         const MAX_SCRIPT_NAVIGATIONS: usize = 32;
         for _ in 0..MAX_SCRIPT_NAVIGATIONS {
             self.runtime.run_until_idle().map_err(js_error)?;
+            // Tasks record page-script failures rather than aborting the loop, so
+            // a navigation is not lost to one broken script. Surface them here,
+            // where document script errors are already reported.
+            for error in self.runtime.take_task_errors() {
+                eprintln!("[omoikane][js-error] {error}");
+            }
             let Some(request) = self.runtime.take_navigation_requests().into_iter().next() else {
                 return Ok(());
             };
@@ -1889,6 +1895,51 @@ mod tests {
                 .any(|event| event.method == "Page.loadEventFired")
         );
 
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn navigation_survives_a_dynamically_inserted_module_script_that_throws() {
+        // The shape blog.piapro.net failed on: a page script inserts a
+        // `type="module"` script, and that module throws. Neither the module's
+        // syntax nor its exception may cost the navigation (issue #303).
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            for index in 0..2 {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut buffer = [0u8; 4096];
+                let size = stream.read(&mut buffer).unwrap();
+                let _ = String::from_utf8_lossy(&buffer[..size]);
+                let body: &[u8] = match index {
+                    0 => b"<html><body><main id='content'>rendered</main><script>                           const s = document.createElement('script');                           s.type = 'module';                           s.src = '/module.js';                           document.head.appendChild(s);                           </script></body></html>",
+                    _ => b"export const answer = 42; throw new Error('module boom');",
+                };
+                let content_type = if index == 0 { "text/html" } else { "text/javascript" };
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                stream.write_all(response.as_bytes()).unwrap();
+                stream.write_all(body).unwrap();
+            }
+        });
+        let origin = format!("http://127.0.0.1:{}", address.port());
+        let mut session = CdpSession::new().unwrap();
+
+        session
+            .dispatch("Page.navigate", json!({ "url": format!("{origin}/page") }))
+            .expect("a throwing module script must not fail the navigation");
+
+        // The document is installed and usable, not discarded.
+        let content = session
+            .dispatch(
+                "Runtime.evaluate",
+                json!({ "expression": "document.getElementById('content').textContent" }),
+            )
+            .unwrap();
+        assert_eq!(content["result"]["value"], "rendered");
+        assert_eq!(session.current_url(), format!("{origin}/page"));
         server.join().unwrap();
     }
 

@@ -4949,6 +4949,15 @@
     set src(value) {
       this.setAttribute("src", String(value));
     }
+    // Reflected, because how the element is evaluated is decided from the
+    // attribute. Scripts that opt into modules by assigning the property
+    // (`script.type = "module"`) would otherwise be run as classic scripts.
+    get type() {
+      return this.getAttribute("type") || "";
+    }
+    set type(value) {
+      this.setAttribute("type", String(value));
+    }
     get async() {
       return this.hasAttribute("async");
     }
