@@ -7548,17 +7548,11 @@ fn intrinsic_sizing_without_an_author_ratio_is_unchanged() {
     assert_eq!(image_size_with("", &[("width", "8")]), (8.0, 4.0));
 }
 
-/// `box-sizing` is not applied to replaced element sizing yet: the specified
-/// width becomes the content width either way, so padding and border are added
-/// on top. Firefox 152 instead resolves the ratio against the box `box-sizing`
-/// names, giving a 100x100 border box here (content 80x80) and 100x60 for the
-/// intrinsic-ratio case. Tracked separately; pinned here so the change is
-/// visible when it lands.
 #[test]
-fn box_sizing_does_not_yet_affect_replaced_element_sizing() {
+fn replaced_element_sizing_respects_box_sizing() {
     assert_eq!(
         image_size("box-sizing: border-box; padding: 10px; width: 100px; aspect-ratio: 1/1"),
-        (100.0, 100.0)
+        (80.0, 80.0)
     );
     assert_eq!(
         image_size("box-sizing: content-box; padding: 10px; width: 100px; aspect-ratio: 1/1"),
@@ -7566,6 +7560,30 @@ fn box_sizing_does_not_yet_affect_replaced_element_sizing() {
     );
     assert_eq!(
         image_size("box-sizing: border-box; padding: 10px; width: 100px"),
-        (100.0, 50.0)
+        (80.0, 40.0)
+    );
+    assert_eq!(
+        image_size("box-sizing: border-box; padding: 10px; border: 5px solid; width: 100px; aspect-ratio: 1/1"),
+        (70.0, 70.0)
+    );
+}
+
+#[test]
+fn replaced_element_min_max_constraints_use_the_box_sizing_box() {
+    assert_eq!(
+        image_size("box-sizing: border-box; padding: 10px; width: 200px; max-width: 100px; aspect-ratio: 1/1"),
+        (80.0, 80.0)
+    );
+    assert_eq!(
+        image_size("box-sizing: border-box; padding: 10px; height: 200px; max-height: 100px; aspect-ratio: 1/1"),
+        (80.0, 80.0)
+    );
+    assert_eq!(
+        image_size("box-sizing: border-box; padding: 10px; min-width: 100px; aspect-ratio: 1/1"),
+        (80.0, 80.0)
+    );
+    assert_eq!(
+        image_size("box-sizing: border-box; padding: 10px; width: 200px; max-width: 100px"),
+        (80.0, 40.0)
     );
 }
