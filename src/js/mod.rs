@@ -7156,6 +7156,102 @@ mod tests {
     }
 
     #[test]
+    fn queue_microtask_shares_the_microtask_queue_with_promise_reactions() {
+        let mut runtime = JsRuntime::new().unwrap();
+        runtime
+            .eval(
+                r#"globalThis.microtaskResult = { order: [] };
+                microtaskResult.shape = [
+                  typeof queueMicrotask,
+                  queueMicrotask.length,
+                  queueMicrotask.name,
+                ];
+                microtaskResult.rejects = [42, null, undefined, "fn"].map(value => {
+                  try { queueMicrotask(value); return "accepted"; }
+                  catch (error) { return error instanceof TypeError; }
+                });
+                queueMicrotask(function () {
+                  // The callback takes no arguments, and is called as a plain
+                  // function rather than as a method.
+                  microtaskResult.argumentCount = arguments.length;
+                  microtaskResult.thisIsGlobal = this === globalThis;
+                });
+                // Interleaved registration must come out in registration order.
+                queueMicrotask(() => microtaskResult.order.push("qm1"));
+                Promise.resolve().then(() => microtaskResult.order.push("p1"));
+                queueMicrotask(() => microtaskResult.order.push("qm2"));
+                Promise.resolve().then(() => microtaskResult.order.push("p2"));
+                queueMicrotask(() => {
+                  microtaskResult.order.push("outer");
+                  queueMicrotask(() => microtaskResult.order.push("nested"));
+                });
+                Promise.resolve().then(() => microtaskResult.order.push("p3"));
+                // Nothing may run before the checkpoint.
+                microtaskResult.syncCount = microtaskResult.order.length;"#,
+            )
+            .unwrap();
+
+        assert_eq!(
+            runtime
+                .eval("microtaskResult.syncCount")
+                .unwrap()
+                .as_number(),
+            Some(0.0),
+            "queueMicrotask must not run its callback synchronously"
+        );
+
+        runtime.run_jobs().unwrap();
+
+        assert_eq!(
+            runtime
+                .eval("microtaskResult.order.join(\",\")")
+                .unwrap()
+                .as_string()
+                .unwrap()
+                .to_std_string_escaped(),
+            "qm1,p1,qm2,p2,outer,p3,nested",
+            "queueMicrotask and promise reactions share one FIFO queue"
+        );
+        assert!(
+            runtime
+                .eval(
+                    r#"JSON.stringify(microtaskResult.shape) === '["function",1,"queueMicrotask"]' &&
+                    JSON.stringify(microtaskResult.rejects) === "[true,true,true,true]" &&
+                    microtaskResult.argumentCount === 0 &&
+                    microtaskResult.thisIsGlobal === true"#,
+                )
+                .unwrap()
+                .as_boolean()
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn queue_microtask_runs_before_the_next_task() {
+        let mut runtime = JsRuntime::new().unwrap();
+        runtime
+            .eval(
+                r#"globalThis.taskOrder = [];
+                setTimeout(() => taskOrder.push("task"), 0);
+                queueMicrotask(() => taskOrder.push("microtask"));"#,
+            )
+            .unwrap();
+
+        runtime.tick(1).unwrap();
+
+        assert_eq!(
+            runtime
+                .eval("taskOrder.join(\",\")")
+                .unwrap()
+                .as_string()
+                .unwrap()
+                .to_std_string_escaped(),
+            "microtask,task",
+            "the microtask checkpoint precedes the next task"
+        );
+    }
+
+    #[test]
     fn text_encoder_and_decoder_round_trip_utf8() {
         let mut runtime = JsRuntime::new().unwrap();
         assert!(

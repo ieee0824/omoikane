@@ -147,6 +147,14 @@
       "baseline_supported": false
     },
     {
+      "id": "scheduling.queue-microtask",
+      "area": "scheduling",
+      "description": "queueMicrotask shares one FIFO microtask queue with promise reactions",
+      "setup": "globalThis.__microtaskOrder = []; queueMicrotask(() => __microtaskOrder.push('qm1')); Promise.resolve().then(() => __microtaskOrder.push('p1')); queueMicrotask(() => { __microtaskOrder.push('qm2'); queueMicrotask(() => __microtaskOrder.push('nested')); })",
+      "probe": "typeof queueMicrotask === 'function' && __microtaskOrder.join(',') === 'qm1,p1,qm2,nested'",
+      "baseline_supported": false
+    },
+    {
       "id": "scheduling.animation-frame-callback",
       "area": "scheduling",
       "description": "requestAnimationFrame invokes a queued callback",

@@ -6334,6 +6334,22 @@
     count: () => {},
     clear: () => {},
   };
+  // Enqueues `callback` on the microtask queue.
+  //
+  // Promise reactions already run on that queue, so resolving an
+  // already-resolved promise puts the callback exactly one checkpoint away —
+  // the same place `queueMicrotask` is defined to put it. Interleaving the two
+  // therefore preserves registration order, and a microtask queued from inside
+  // a microtask still runs before the next task.
+  //
+  // The wrapper matters: `then(callback)` would hand the callback the promise's
+  // resolution value, while this callback takes no arguments.
+  globalThis.queueMicrotask = function queueMicrotask(callback) {
+    if (typeof callback !== "function") {
+      throw new TypeError("queueMicrotask requires a callback function");
+    }
+    Promise.resolve().then(() => callback());
+  };
   globalThis.alert = function() {};
   globalThis.confirm = function() { return false; };
   globalThis.prompt = function() { return null; };
