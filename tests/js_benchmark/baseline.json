@@ -1,0 +1,60 @@
+{
+  "version": 1,
+  "profile": "dev",
+  "shapes": [
+    {
+      "id": "arith",
+      "description": "Bytecode dispatch and integer arithmetic with no property access or allocation",
+      "baseline_ns_per_op": 127.6,
+      "reference": { "spidermonkey_interpreter": 47.2, "spidermonkey_jit": 5.2 }
+    },
+    {
+      "id": "prop-mono",
+      "description": "Monomorphic property read/write through one call site (inline cache hit path)",
+      "baseline_ns_per_op": 247.8,
+      "reference": { "spidermonkey_interpreter": 131.4, "spidermonkey_jit": 0.9 }
+    },
+    {
+      "id": "prop-mega",
+      "description": "Megamorphic property read across eight shapes (inline cache miss path)",
+      "baseline_ns_per_op": 267.8,
+      "reference": { "spidermonkey_interpreter": 38.0, "spidermonkey_jit": 4.6 }
+    },
+    {
+      "id": "call",
+      "description": "Function call overhead",
+      "baseline_ns_per_op": 287.1,
+      "reference": { "spidermonkey_interpreter": 64.6, "spidermonkey_jit": 4.9 }
+    },
+    {
+      "id": "closure-alloc",
+      "description": "One closure allocated per iteration (allocator and GC pressure)",
+      "baseline_ns_per_op": 881.9,
+      "reference": { "spidermonkey_interpreter": 107.8, "spidermonkey_jit": 25.6 }
+    },
+    {
+      "id": "object-alloc",
+      "description": "One object literal allocated per iteration (allocator and GC pressure)",
+      "baseline_ns_per_op": 622.9,
+      "reference": { "spidermonkey_interpreter": 99.2, "spidermonkey_jit": 8.9 }
+    },
+    {
+      "id": "string-concat",
+      "description": "String building: string representation and reallocation",
+      "baseline_ns_per_op": 459.4,
+      "reference": { "spidermonkey_interpreter": 27.5, "spidermonkey_jit": 3.6 }
+    },
+    {
+      "id": "array",
+      "description": "Array index and push",
+      "baseline_ns_per_op": 410.8,
+      "reference": { "spidermonkey_interpreter": 106.7, "spidermonkey_jit": 14.4 }
+    },
+    {
+      "id": "proto-method",
+      "description": "Method call resolved through a prototype (the shape corrupted by issue #058)",
+      "baseline_ns_per_op": 413.0,
+      "reference": { "spidermonkey_interpreter": 41.2, "spidermonkey_jit": 7.3 }
+    }
+  ]
+}
