@@ -1,15 +1,22 @@
 //! JavaScript execution benchmark, reported per workload shape.
 //!
 //! The point of splitting the measurement by shape is that "JS is slow" is not
-//! actionable, while "string building is 15x off and monomorphic property access
-//! is 1.7x off" is: it says which part of the engine to work on, and which gap
-//! cannot be closed without a JIT.
+//! actionable, while "string building is 13x off SpiderMonkey's interpreter but
+//! monomorphic property access is only 4x off, and the JIT accounts for a further
+//! 68x of the monomorphic gap" is: it says which part of the engine to work on,
+//! and which part cannot be reached without a JIT.
 //!
 //! Timings are **reported, never asserted**. A wall-clock assertion in CI either
 //! fails on noise or is set so loose it catches nothing, so this follows the same
 //! rule as `render_benchmark_fixture.rs`: the test checks structural invariants
 //! and the numbers are printed for a human (or archived via
 //! `OMOIKANE_JS_BENCH_REPORT`).
+//!
+//! Baselines are the median of five runs on an idle machine. Run-to-run spread
+//! was 2-10% for every shape except `string-concat`, which swings about 22%
+//! because its cost depends on when collection happens; that shape can therefore
+//! report drift on its own, and its noise floor is well below the scale of change
+//! the harness exists to track.
 
 use std::collections::HashSet;
 use std::fs;
@@ -24,9 +31,18 @@ const BASELINE_PATH: &str = "tests/js_benchmark/baseline.json";
 /// How far a measurement may drift from the baseline before it is called an
 /// improvement or a regression.
 ///
-/// Wide on purpose. Run-to-run spread on shared CI runners is easily tens of
-/// percent, and a band narrower than the noise would report movement on every
-/// run, which trains readers to ignore the report.
+/// Wide on purpose: a band narrower than the noise would report movement on
+/// every run, which trains readers to ignore the report. On an idle two-core
+/// container the run-to-run spread is under 5%, so this leaves room for a busier
+/// machine while still resolving the kind of change worth acting on.
+///
+/// Contention is not fully absorbed by any band, and it is not meant to be: when
+/// *every* shape drifts the same way by a similar amount, that is the signature
+/// of a loaded machine rather than a code change, and the per-shape table makes
+/// that obvious. A build competing for the same two cores inflated all nine
+/// shapes by 21-54% at once. `shapes.js` reports the fastest of several passes
+/// specifically so that a single unimpeded pass is enough to recover the real
+/// number.
 const DRIFT_TOLERANCE: f64 = 0.20;
 
 #[derive(Debug, Deserialize)]
@@ -37,6 +53,12 @@ struct Baseline {
     /// engine itself is optimized either way, but the field keeps the comparison
     /// honest if that ever changes.
     profile: String,
+    /// Pass count `shapes.js` used when the numbers were recorded. Reported so a
+    /// baseline captured under a different `BENCH_PASSES` is identifiable rather
+    /// than silently compared.
+    passes: u32,
+    /// Which engine and version the `reference` numbers came from.
+    reference_engine: String,
     shapes: Vec<BaselineShape>,
 }
 
@@ -98,6 +120,8 @@ struct ShapeResult {
 struct Report {
     baseline_version: u32,
     baseline_profile: String,
+    baseline_passes: u32,
+    reference_engine: String,
     measured_profile: &'static str,
     total: usize,
     improvements: Vec<String>,
@@ -183,6 +207,8 @@ fn build_report(baseline: &Baseline, measurements: &[Measurement]) -> Report {
     Report {
         baseline_version: baseline.version,
         baseline_profile: baseline.profile.clone(),
+        baseline_passes: baseline.passes,
+        reference_engine: baseline.reference_engine.clone(),
         measured_profile: measured_profile(),
         total: shapes.len(),
         improvements,
@@ -193,8 +219,13 @@ fn build_report(baseline: &Baseline, measurements: &[Measurement]) -> Report {
 
 fn print_report(report: &Report) {
     println!(
-        "JS benchmark: shapes={} profile={} (baseline recorded under {})",
-        report.total, report.measured_profile, report.baseline_profile
+        "JS benchmark: shapes={} profile={} (baseline v{} recorded under {}, {} passes; reference: {})",
+        report.total,
+        report.measured_profile,
+        report.baseline_version,
+        report.baseline_profile,
+        report.baseline_passes,
+        report.reference_engine
     );
     println!(
         "  {:<14} {:>10} {:>10} {:>8}  {:>9} {:>8}",
@@ -243,6 +274,8 @@ fn write_report_if_requested(report: &Report) {
 fn baseline_shapes_are_unique_and_well_formed() {
     let baseline = load_baseline();
     assert!(baseline.version > 0);
+    assert!(baseline.passes > 0);
+    assert!(!baseline.reference_engine.trim().is_empty());
     assert!(!baseline.shapes.is_empty());
 
     let mut ids = HashSet::new();
@@ -276,6 +309,8 @@ fn report_classifies_drift_against_the_baseline() {
     let baseline = Baseline {
         version: 1,
         profile: "dev".to_string(),
+        passes: 4,
+        reference_engine: "test".to_string(),
         shapes: vec![
             BaselineShape {
                 id: "faster".to_string(),
