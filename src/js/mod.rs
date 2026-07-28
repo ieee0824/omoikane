@@ -3140,8 +3140,9 @@ fn json_number(value: f32) -> String {
 /// - `clientWidth` / `clientHeight` use the padding box (content + padding),
 ///   and `clientTop` / `clientLeft` are the top/left border widths.
 /// - `scrollWidth` / `scrollHeight` are the padding box extended to enclose the
-///   border boxes of every overflowing descendant (not just the direct
-///   children). Traversal stops at any descendant that clips its overflow
+///   border boxes of every overflowing descendant plus the container's
+///   end-edge padding (not just the direct children). Traversal stops at any
+///   descendant that clips its overflow
 ///   (`overflow` other than `visible`): such a box still contributes its own
 ///   border box, but its clipped content cannot overflow past it into this
 ///   element's scrollable area. See [`expand_scroll_bounds`].
@@ -15290,6 +15291,35 @@ mod tests {
             200.0,
             "scrollHeight must enclose the overflowing child"
         );
+    }
+
+    #[test]
+    fn scroll_size_and_clamp_include_end_padding_but_not_border() {
+        let html = r#"<html><head><style>
+            * { margin: 0; }
+            #box { width: 100px; height: 50px; padding: 7px;
+                   border: 3px solid black; overflow: hidden; }
+            #child { width: 300px; height: 200px; }
+        </style></head><body><div id="box"><div id="child"></div></div></body></html>"#;
+        let mut runtime = runtime_from_html(html);
+        let result = eval_str(
+            &mut runtime,
+            r#"(() => {
+                const box = document.getElementById("box");
+                const child = document.getElementById("child");
+                const overflowing = [box.clientWidth, box.clientHeight,
+                  box.scrollWidth, box.scrollHeight].join(",");
+                box.scrollLeft = 99999;
+                box.scrollTop = 99999;
+                const clamped = [box.scrollLeft, box.scrollTop].join(",");
+                child.style.width = "50px";
+                child.style.height = "20px";
+                const fitting = [box.scrollWidth, box.scrollHeight,
+                  box.scrollLeft, box.scrollTop].join(",");
+                return [overflowing, clamped, fitting].join("|");
+            })()"#,
+        );
+        assert_eq!(result, "114,64,314,214|200,150|114,64,0,0");
     }
 
     #[test]

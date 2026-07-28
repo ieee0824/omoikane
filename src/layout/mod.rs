@@ -603,7 +603,8 @@ impl LayoutBox {
 
     /// Returns the size of this box's scrolling area (`scrollWidth` /
     /// `scrollHeight`): its padding box grown to contain every descendant box,
-    /// and never smaller than the padding box itself.
+    /// including this box's end-edge padding after overflowing content, and
+    /// never smaller than the padding box itself.
     ///
     /// Layout coordinates are absolute (see `layout_document` / `layout_element`),
     /// so descendant border-box edges compare directly against this box's
@@ -615,9 +616,20 @@ impl LayoutBox {
         let padding = self.dimensions.padding;
         let client_width = content.width + padding.horizontal();
         let client_height = content.height + padding.vertical();
-        let mut max_right = content.x + content.width + padding.right;
-        let mut max_bottom = content.y + content.height + padding.bottom;
+        let padding_right_edge = content.x + content.width + padding.right;
+        let padding_bottom_edge = content.y + content.height + padding.bottom;
+        let mut max_right = padding_right_edge;
+        let mut max_bottom = padding_bottom_edge;
         expand_scrollable_overflow(&self.children, &mut max_right, &mut max_bottom);
+        // Once descendant content crosses the padding-box end edge, the
+        // scrollable overflow region includes the box's end padding after that
+        // content. Content which still fits leaves the padding box unchanged.
+        if max_right > padding_right_edge {
+            max_right += padding.right;
+        }
+        if max_bottom > padding_bottom_edge {
+            max_bottom += padding.bottom;
+        }
         (
             (max_right - (content.x - padding.left)).max(client_width),
             (max_bottom - (content.y - padding.top)).max(client_height),
