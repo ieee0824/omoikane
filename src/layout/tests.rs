@@ -7098,15 +7098,18 @@ fn container_query_does_not_query_the_styled_element_itself() {
 #[test]
 fn scrollable_overflow_keywords_establish_a_scroll_container() {
     // `hidden`, `scroll` and `auto` all clip and scroll their content;
-    // `visible` and `clip` do not scroll (verified against Firefox 152).
+    // `clip` clips without scrolling (verified against Firefox 152).
     for (value, expected) in [
         ("visible", Overflow::Visible),
         ("hidden", Overflow::Hidden),
         ("scroll", Overflow::Hidden),
         ("auto", Overflow::Hidden),
-        ("clip", Overflow::Visible),
+        ("clip", Overflow::Clip),
+        ("clip visible", Overflow::ClipX),
+        ("visible clip", Overflow::ClipY),
         ("hidden auto", Overflow::Hidden),
         ("visible auto", Overflow::Hidden),
+        ("clip auto", Overflow::Hidden),
     ] {
         let (document, _html, body, card) = sample_tree();
         let mut resolver = StyleResolver::new();
@@ -7130,6 +7133,42 @@ fn scrollable_overflow_keywords_establish_a_scroll_container() {
             "overflow: {value} must resolve to {expected:?}"
         );
     }
+}
+
+#[test]
+fn scrollable_overflow_stops_at_clip_on_each_clipped_axis() {
+    let (document, _html, body, card) = sample_tree();
+    let nested = NodeHandle::element("section");
+    let deep = NodeHandle::element("p");
+    card.append_child(nested.clone());
+    nested.append_child(deep);
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "body { margin: 0; } \
+             div { display: block; width: 100px; height: 100px; overflow: auto; } \
+             section { display: block; width: 60px; height: 60px; overflow: clip visible; } \
+             p { display: block; width: 500px; height: 500px; margin: 0; }",
+        )
+        .unwrap(),
+    );
+    let _ = body;
+    let layout = layout_tree(
+        &document,
+        &mut resolver,
+        Rect { x: 0.0, y: 0.0, width: 600.0, height: 0.0 },
+    )
+    .unwrap();
+    let card_box = find_layout_box(&layout, &card).unwrap();
+
+    // The clip-x boundary hides the wide grandchild from the outer scrolling
+    // area, while visible-y allows its height to keep contributing.
+    assert_eq!(card_box.scrollable_overflow(), (100.0, 500.0));
+    assert_eq!(card_box.max_scroll_offset(), (0.0, 400.0));
+    let nested_box = find_layout_box(&layout, &nested).unwrap();
+    assert_eq!(nested_box.overflow, Overflow::ClipX);
+    assert!(!nested_box.is_scroll_container());
 }
 
 /// Scrolling must not move any layout box: it is a paint-time and
@@ -7396,4 +7435,3 @@ fn box_sizing_does_not_yet_affect_replaced_element_sizing() {
         (100.0, 50.0)
     );
 }
-
