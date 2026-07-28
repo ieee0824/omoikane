@@ -20,7 +20,7 @@ use crate::css::{
 };
 use crate::dom::{Node, NodeHandle, NodeType, ShadowRootMode, is_actually_disabled};
 use crate::http::{Client, HttpRequest, Method, default_user_agent};
-use crate::layout::{LayoutBox, Rect};
+use crate::layout::{InlineFragmentContent, LayoutBox, Rect, edge_sizes};
 
 mod storage;
 pub use storage::StorageManager;
@@ -3189,13 +3189,15 @@ fn find_layout_box_with_transform<'a>(
     root: &'a LayoutBox,
     node: &NodeHandle,
     ancestor_transform: AffineTransform,
+    fragments: &mut Vec<InlineFragmentGeometry>,
 ) -> Option<(&'a LayoutBox, AffineTransform)> {
     let transform = ancestor_transform.multiply(root.transform);
     if &root.node == node {
         return Some((root, transform));
     }
+    collect_matching_image_fragments(root, node, transform, (0.0, 0.0), fragments);
     for child in &root.children {
-        if let Some(found) = find_layout_box_with_transform(child, node, transform) {
+        if let Some(found) = find_layout_box_with_transform(child, node, transform, fragments) {
             return Some(found);
         }
     }
@@ -3218,6 +3220,7 @@ fn find_layout_box_with_scroll<'a>(
     ancestor_transform: AffineTransform,
     scroll: (f32, f32),
     positioned_scroll: (f32, f32),
+    fragments: &mut Vec<InlineFragmentGeometry>,
 ) -> Option<(&'a LayoutBox, AffineTransform, (f32, f32))> {
     let transform = ancestor_transform.multiply(root.transform);
     let style = resolver.computed_style(&root.node);
@@ -3241,6 +3244,7 @@ fn find_layout_box_with_scroll<'a>(
     } else {
         positioned_scroll
     };
+    collect_matching_image_fragments(root, node, transform, child_scroll, fragments);
     for child in &root.children {
         if let Some(found) = find_layout_box_with_scroll(
             child,
@@ -3249,12 +3253,43 @@ fn find_layout_box_with_scroll<'a>(
             transform,
             child_scroll,
             positioned_scroll,
+            fragments,
         )
         {
             return Some(found);
         }
     }
     None
+}
+
+struct InlineFragmentGeometry {
+    rect: Rect,
+    style: ComputedStyle,
+    transform: AffineTransform,
+    scroll: (f32, f32),
+}
+
+fn collect_matching_image_fragments(
+    root: &LayoutBox,
+    node: &NodeHandle,
+    transform: AffineTransform,
+    scroll: (f32, f32),
+    output: &mut Vec<InlineFragmentGeometry>,
+) {
+    for line in &root.lines {
+        for fragment in &line.fragments {
+            if &fragment.node == node
+                && let InlineFragmentContent::Image(_, style) = &fragment.content
+            {
+                output.push(InlineFragmentGeometry {
+                    rect: fragment.rect,
+                    style: style.clone(),
+                    transform,
+                    scroll,
+                });
+            }
+        }
+    }
 }
 
 fn is_fixed_position_style(style: &ComputedStyle) -> bool {
@@ -3302,6 +3337,7 @@ struct LayoutMetrics {
     client_left: f32,
     scroll_width: f32,
     scroll_height: f32,
+    client_rects: Vec<Rect>,
     /// Whether the element produced a layout box at all. `false` for elements
     /// that generate no box (e.g. `display: none`, or a missing node), which
     /// lets `getClientRects()` distinguish "no rendered box" (empty list) from a
@@ -3330,6 +3366,7 @@ impl LayoutMetrics {
             client_left: 0.0,
             scroll_width: 0.0,
             scroll_height: 0.0,
+            client_rects: Vec::new(),
             has_box: false,
         }
     }
@@ -3346,7 +3383,7 @@ impl LayoutMetrics {
 \"offsetWidth\":{ow},\"offsetHeight\":{oh},\"offsetTop\":{ot},\"offsetLeft\":{ol},\
 \"clientWidth\":{cw},\"clientHeight\":{ch},\"clientTop\":{ct},\"clientLeft\":{cl},\
 \"scrollWidth\":{sw},\"scrollHeight\":{sh},\"scrollTop\":0,\"scrollLeft\":0,\
-\"hasBox\":{has_box}}}",
+\"hasBox\":{has_box},\"clientRects\":[{client_rects}]}}",
             x = json_number(self.x),
             y = json_number(self.y),
             w = json_number(self.width),
@@ -3368,8 +3405,27 @@ impl LayoutMetrics {
             sw = json_number(self.scroll_width),
             sh = json_number(self.scroll_height),
             has_box = self.has_box,
+            client_rects = self
+                .client_rects
+                .iter()
+                .map(rect_to_json)
+                .collect::<Vec<_>>()
+                .join(","),
         )
     }
+}
+
+fn rect_to_json(rect: &Rect) -> String {
+    format!(
+        "{{\"x\":{x},\"y\":{y},\"width\":{width},\"height\":{height},\
+\"top\":{y},\"left\":{x},\"right\":{right},\"bottom\":{bottom}}}",
+        x = json_number(rect.x),
+        y = json_number(rect.y),
+        width = json_number(rect.width),
+        height = json_number(rect.height),
+        right = json_number(rect.x + rect.width),
+        bottom = json_number(rect.y + rect.height),
+    )
 }
 
 /// Rounds a metric to a whole pixel when it is integer-valued (the common case
@@ -3437,6 +3493,12 @@ fn compute_layout_metrics(layout: &LayoutBox) -> LayoutMetrics {
         client_left: border.left,
         scroll_width,
         scroll_height,
+        client_rects: vec![Rect {
+            x: border_x,
+            y: border_y,
+            width: border_width,
+            height: border_height,
+        }],
         has_box: true,
     }
 }
@@ -3449,11 +3511,32 @@ fn compute_transformed_layout_metrics(
     if transform.is_identity() {
         return metrics;
     }
+    let transformed = transform_rect(
+        Rect {
+            x: metrics.x,
+            y: metrics.y,
+            width: metrics.width,
+            height: metrics.height,
+        },
+        transform,
+    );
+    metrics.x = transformed.x;
+    metrics.y = transformed.y;
+    metrics.width = transformed.width;
+    metrics.height = transformed.height;
+    metrics.client_rects = vec![transformed];
+    metrics
+}
+
+fn transform_rect(rect: Rect, transform: AffineTransform) -> Rect {
+    if transform.is_identity() {
+        return rect;
+    }
     let corners = [
-        transform.transform_point(metrics.x, metrics.y),
-        transform.transform_point(metrics.x + metrics.width, metrics.y),
-        transform.transform_point(metrics.x, metrics.y + metrics.height),
-        transform.transform_point(metrics.x + metrics.width, metrics.y + metrics.height),
+        transform.transform_point(rect.x, rect.y),
+        transform.transform_point(rect.x + rect.width, rect.y),
+        transform.transform_point(rect.x, rect.y + rect.height),
+        transform.transform_point(rect.x + rect.width, rect.y + rect.height),
     ];
     let min_x = corners
         .iter()
@@ -3471,11 +3554,64 @@ fn compute_transformed_layout_metrics(
         .iter()
         .map(|point| point.1)
         .fold(f32::NEG_INFINITY, f32::max);
-    metrics.x = min_x;
-    metrics.y = min_y;
-    metrics.width = max_x - min_x;
-    metrics.height = max_y - min_y;
-    metrics
+    Rect {
+        x: min_x,
+        y: min_y,
+        width: max_x - min_x,
+        height: max_y - min_y,
+    }
+}
+
+fn compute_image_fragment_metrics(fragments: Vec<InlineFragmentGeometry>) -> LayoutMetrics {
+    let Some(first) = fragments.first() else {
+        return LayoutMetrics::zero();
+    };
+    let layout_rect = first.rect;
+    let padding = edge_sizes(&first.style, "padding");
+    let border = edge_sizes(&first.style, "border");
+    let client_width = (first.rect.width - border.left - border.right).max(0.0);
+    let client_height = (first.rect.height - border.top - border.bottom).max(0.0);
+    let content_width = (client_width - padding.left - padding.right).max(0.0);
+    let content_height = (client_height - padding.top - padding.bottom).max(0.0);
+    let mut client_rects = Vec::with_capacity(fragments.len());
+    for fragment in fragments {
+        let mut rect = transform_rect(fragment.rect, fragment.transform);
+        rect.x -= fragment.scroll.0;
+        rect.y -= fragment.scroll.1;
+        client_rects.push(rect);
+    }
+    let min_x = client_rects.iter().map(|rect| rect.x).fold(f32::INFINITY, f32::min);
+    let min_y = client_rects.iter().map(|rect| rect.y).fold(f32::INFINITY, f32::min);
+    let max_x = client_rects
+        .iter()
+        .map(|rect| rect.x + rect.width)
+        .fold(f32::NEG_INFINITY, f32::max);
+    let max_y = client_rects
+        .iter()
+        .map(|rect| rect.y + rect.height)
+        .fold(f32::NEG_INFINITY, f32::max);
+    LayoutMetrics {
+        x: min_x,
+        y: min_y,
+        width: max_x - min_x,
+        height: max_y - min_y,
+        content_x: min_x + border.left + padding.left,
+        content_y: min_y + border.top + padding.top,
+        content_width,
+        content_height,
+        offset_width: layout_rect.width,
+        offset_height: layout_rect.height,
+        offset_top: layout_rect.y,
+        offset_left: layout_rect.x,
+        client_width,
+        client_height,
+        client_top: border.top,
+        client_left: border.left,
+        scroll_width: client_width,
+        scroll_height: client_height,
+        client_rects,
+        has_box: true,
+    }
 }
 
 /// `__omoikane_computed_style(nodeId)` -> JSON string of computed CSS
@@ -3654,12 +3790,13 @@ fn layout_metrics_native(
         let mut scroll = (0.0, 0.0);
         {
             let state = &mut *state;
-            let resolver = state
+            let mut resolver = state
                 .document_styles
                 .get_mut(&main_document_id)
                 .and_then(|entry| entry.resolver.as_mut());
             if let Some(root) = state.layout_root.as_ref() {
-                let found = match (scroll_active, resolver) {
+                let mut fragments = Vec::new();
+                let found = match (scroll_active, resolver.as_deref_mut()) {
                     (true, Some(resolver)) => find_layout_box_with_scroll(
                         root,
                         &node,
@@ -3667,19 +3804,31 @@ fn layout_metrics_native(
                         AffineTransform::identity(),
                         window_scroll,
                         window_scroll,
+                        &mut fragments,
                     ),
-                    _ => find_layout_box_with_transform(root, &node, AffineTransform::identity())
-                        .map(|(layout, transform)| (layout, transform, (0.0, 0.0))),
+                    _ => find_layout_box_with_transform(
+                        root,
+                        &node,
+                        AffineTransform::identity(),
+                        &mut fragments,
+                    )
+                    .map(|(layout, transform)| (layout, transform, (0.0, 0.0))),
                 };
                 if let Some((layout, transform, accumulated)) = found {
                     metrics = compute_transformed_layout_metrics(layout, transform);
                     scroll = accumulated;
+                } else {
+                    metrics = compute_image_fragment_metrics(fragments);
                 }
             }
         }
         if metrics.has_box {
             metrics.x -= scroll.0;
             metrics.y -= scroll.1;
+            for rect in &mut metrics.client_rects {
+                rect.x -= scroll.0;
+                rect.y -= scroll.1;
+            }
         }
         if is_root_element && let Some(viewport) = viewport {
             metrics.client_width = viewport.width;
@@ -15791,6 +15940,72 @@ mod tests {
             ),
             0.0
         );
+    }
+
+    #[test]
+    fn replaced_elements_expose_fragment_layout_metrics() {
+        let html = r#"<html><head><style>
+            * { margin: 0; }
+            img { width: 100px; height: 50px; }
+            #inline { padding: 10px; border: 5px solid black; }
+            #block { display: block; }
+            #absolute { position: absolute; left: 30px; top: 40px; }
+            #gone { display: none; }
+        </style></head><body>
+            <img id="inline" src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADElEQVR4AQEFAPr/AP8AAP9zftimAAAAAElFTkSuQmCC">
+            <img id="block" src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADElEQVR4AQEFAPr/AP8AAP9zftimAAAAAElFTkSuQmCC">
+            <img id="absolute" src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADElEQVR4AQEFAPr/AP8AAP9zftimAAAAAElFTkSuQmCC">
+            <img id="gone" src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADElEQVR4AQEFAPr/AP8AAP9zftimAAAAAElFTkSuQmCC">
+        </body></html>"#;
+        let mut runtime = runtime_from_html(html);
+        let result = eval_str(
+            &mut runtime,
+            r#"(() => {
+                const values = id => {
+                    const element = document.getElementById(id);
+                    const rect = element.getBoundingClientRect();
+                    return [rect.width, rect.height, element.offsetWidth,
+                      element.offsetHeight, element.clientWidth, element.clientHeight,
+                      element.clientLeft, element.clientTop,
+                      element.getClientRects().length].join(",");
+                };
+                const absolute = document.getElementById("absolute").getBoundingClientRect();
+                return [values("inline"), values("block"),
+                  [absolute.left, absolute.top, absolute.width, absolute.height].join(","),
+                  values("gone")].join("|");
+            })()"#,
+        );
+        assert_eq!(
+            result,
+            "130,80,130,80,120,70,5,5,1|100,50,100,50,100,50,0,0,1|30,40,100,50|0,0,0,0,0,0,0,0,0"
+        );
+    }
+
+    #[test]
+    fn replaced_fragment_client_rect_tracks_ancestor_scroll() {
+        let html = r#"<html><head><style>
+            * { margin: 0; padding: 0; }
+            #scroller { width: 200px; height: 40px; overflow: hidden; }
+            #content { height: 120px; }
+            #image { width: 100px; height: 50px; }
+        </style></head><body>
+            <div id="scroller"><div id="content"><img id="image" src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADElEQVR4AQEFAPr/AP8AAP9zftimAAAAAElFTkSuQmCC"></div></div>
+        </body></html>"#;
+        let mut runtime = runtime_from_html(html);
+        let result = eval_str(
+            &mut runtime,
+            r#"(() => {
+                const scroller = document.getElementById("scroller");
+                const image = document.getElementById("image");
+                const before = image.getBoundingClientRect();
+                scroller.scrollTop = 20;
+                const after = image.getBoundingClientRect();
+                const client = image.getClientRects()[0];
+                return [before.left, before.top, after.left, after.top,
+                  client.left, client.top, after.width, after.height].join(",");
+            })()"#,
+        );
+        assert_eq!(result, "0,0,0,-20,0,-20,100,50");
     }
 
     #[test]
