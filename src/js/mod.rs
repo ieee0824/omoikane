@@ -248,6 +248,8 @@ struct HostState {
     /// (see [`JsRuntime::take_task_errors`]); leaving them unreported is how the
     /// navigation-aborting bug in issue #303 stayed invisible.
     task_errors: Vec<String>,
+    /// How many task errors were dropped once `task_errors` hit its cap.
+    suppressed_task_errors: usize,
     location_href: String,
     navigator_user_agent: String,
     http_client: Client,
@@ -416,6 +418,7 @@ impl HostState {
             nodes: HashMap::new(),
             console_logs: Vec::new(),
             task_errors: Vec::new(),
+            suppressed_task_errors: 0,
             base_url: location_href.parse::<crate::http::Url>().ok(),
             location_href,
             navigator_user_agent: default_user_agent(),
@@ -1506,16 +1509,14 @@ impl JsRuntime {
     /// Records a page-script error raised while a task ran.
     ///
     /// Bounded so a broken `setInterval` cannot fill memory or bury the first,
-    /// most useful error under thousands of repeats; the overflow is counted so
-    /// the report never silently understates what happened.
+    /// most useful error under thousands of repeats. The overflow is counted, so
+    /// the drained report never understates how much went wrong.
     fn record_task_error(&mut self, error: String) {
         let mut state = self.host_state.borrow_mut();
         if state.task_errors.len() < MAX_TASK_ERRORS {
             state.task_errors.push(error);
-        } else if state.task_errors.len() == MAX_TASK_ERRORS {
-            state
-                .task_errors
-                .push(format!("further task errors suppressed after {MAX_TASK_ERRORS}"));
+        } else {
+            state.suppressed_task_errors = state.suppressed_task_errors.saturating_add(1);
         }
     }
 
@@ -1531,7 +1532,13 @@ impl JsRuntime {
     /// Embedders call this after pumping the event loop and report them the same
     /// way they report the errors `execute_document_scripts` returns.
     pub fn take_task_errors(&mut self) -> Vec<String> {
-        std::mem::take(&mut self.host_state.borrow_mut().task_errors)
+        let mut state = self.host_state.borrow_mut();
+        let mut errors = std::mem::take(&mut state.task_errors);
+        let suppressed = std::mem::take(&mut state.suppressed_task_errors);
+        if suppressed > 0 {
+            errors.push(format!("{suppressed} further task errors suppressed"));
+        }
+        errors
     }
 
     /// Returns true if any timers are still scheduled (pending or repeating).
@@ -1836,10 +1843,9 @@ impl JsRuntime {
                             .tag_name()
                             .is_some_and(|tag| tag.eq_ignore_ascii_case("script"))
                         {
-                            let attributes = node.attributes().unwrap_or_default();
-                            attributes.get("src").cloned().map(|src| {
+                            node.get_attribute("src").map(|src| {
                                 let kind = ScriptKind::from_type_attribute(
-                                    attributes.get("type").map(String::as_str),
+                                    node.get_attribute("type").as_deref(),
                                 );
                                 (src, kind, state.base_url.clone())
                             })
@@ -6221,15 +6227,30 @@ fn insert_or_append(parent: &NodeHandle, child: &NodeHandle, reference: Option<&
 /// match" ([`is_javascript_mime_type`]): only an **absent, empty,
 /// `text/javascript`, or `application/javascript`** type runs. `type="module"`
 /// and every other value — including other JavaScript MIME essences such as
-/// `text/ecmascript` — are treated as non-executable.
-///
-/// Note that `type="module"` being non-*classic* does not make it non-executable:
-/// [`ScriptKind::from_type_attribute`] routes it to module evaluation instead.
+/// `text/ecmascript` — are treated as non-classic. Non-classic is not the same as
+/// non-executable: [`ScriptKind::from_type_attribute`] routes `module` to module
+/// evaluation and only everything else to no execution at all.
 ///
 /// Both [`is_inline_classic_script`] (the `document.write` path) and
 /// `Runtime::execute_document_scripts` (the normal parse path) gate on this
 /// helper, so a `<script>` element runs identically no matter which path
 /// reached it.
+fn is_executable_classic_script_type(type_attr: Option<&str>) -> bool {
+    match type_attr {
+        None => true,
+        Some(t) => {
+            // Strip any MIME parameters (e.g. "text/javascript; charset=utf-8").
+            let mime = t
+                .split(';')
+                .next()
+                .unwrap_or("")
+                .trim()
+                .to_ascii_lowercase();
+            mime.is_empty() || mime == "text/javascript" || mime == "application/javascript"
+        }
+    }
+}
+
 /// How a `<script>` element's `type` attribute says it should be evaluated.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ScriptKind {
@@ -6249,22 +6270,6 @@ impl ScriptKind {
             Self::Classic
         } else {
             Self::NotExecutable
-        }
-    }
-}
-
-fn is_executable_classic_script_type(type_attr: Option<&str>) -> bool {
-    match type_attr {
-        None => true,
-        Some(t) => {
-            // Strip any MIME parameters (e.g. "text/javascript; charset=utf-8").
-            let mime = t
-                .split(';')
-                .next()
-                .unwrap_or("")
-                .trim()
-                .to_ascii_lowercase();
-            mime.is_empty() || mime == "text/javascript" || mime == "application/javascript"
         }
     }
 }
@@ -15424,10 +15429,14 @@ b</textarea></form>"#);
             MAX_TASK_ERRORS + 1,
             "the cap plus one suppression notice"
         );
+        assert_eq!(
+            errors[MAX_TASK_ERRORS],
+            format!("{} further task errors suppressed", 200 - MAX_TASK_ERRORS),
+            "the overflow must be counted, not just noted"
+        );
         assert!(
-            errors[MAX_TASK_ERRORS].contains("suppressed"),
-            "overflow must be counted rather than dropped silently: {:?}",
-            errors[MAX_TASK_ERRORS]
+            runtime.take_task_errors().is_empty(),
+            "draining must clear the suppressed count too"
         );
     }
 
