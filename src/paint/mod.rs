@@ -1085,6 +1085,13 @@ fn render_document_with_url_internal(
             if let Err(err) = runtime.eval("__omoikane_flush_stylesheets()") {
                 eprintln!("[omoikane][js-error] {err}");
             }
+            // Page script that failed inside an event-loop task (a timer callback,
+            // a dynamically inserted script) is reported the same way a failing
+            // document script is. The task itself deliberately swallowed the error
+            // so one broken callback could not abort the render.
+            for error in runtime.take_task_errors() {
+                eprintln!("[omoikane][js-error] {error}");
+            }
         } else {
             timings.javascript_runtime_init = runtime_init_start.elapsed();
             timings.javascript = javascript_start.elapsed();

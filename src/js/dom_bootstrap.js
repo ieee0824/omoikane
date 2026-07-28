@@ -4949,6 +4949,15 @@
     set src(value) {
       this.setAttribute("src", String(value));
     }
+    // Reflected, because how the element is evaluated is decided from the
+    // attribute. Scripts that opt into modules by assigning the property
+    // (`script.type = "module"`) would otherwise be run as classic scripts.
+    get type() {
+      return this.getAttribute("type") || "";
+    }
+    set type(value) {
+      this.setAttribute("type", String(value));
+    }
     get async() {
       return this.hasAttribute("async");
     }
@@ -5804,6 +5813,12 @@
   globalThis.__omoikane_dispatch_resource_load = function(id) {
     const element = wrapNode(id);
     if (element) element.dispatchEvent(new Event("load", { bubbles: false }));
+  };
+  // A resource that could not be fetched fires `error`, not `load`. Loaders that
+  // fall back when a script is unavailable listen for exactly this.
+  globalThis.__omoikane_dispatch_resource_error = function(id) {
+    const element = wrapNode(id);
+    if (element) element.dispatchEvent(new Event("error", { bubbles: false }));
   };
   globalThis.__omoikane_dispatch_mouse_input = function(id, type, init, focusTarget) {
     const target = wrapNode(id) || document;

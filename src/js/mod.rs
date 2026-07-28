@@ -36,6 +36,10 @@ pub use storage::StorageManager;
 use storage::StorageOrigin;
 use event_loop::{EventLoop, Task};
 
+/// Most page-script task errors retained per drain. See
+/// [`JsRuntime::record_task_error`].
+const MAX_TASK_ERRORS: usize = 32;
+
 thread_local! {
     static ACTIVE_HOST_STATE: RefCell<Option<Rc<RefCell<HostState>>>> = const { RefCell::new(None) };
 }
@@ -237,6 +241,15 @@ struct HostState {
     document: NodeHandle,
     nodes: HashMap<usize, NodeHandle>,
     console_logs: Vec<String>,
+    /// Errors raised by page script while an event-loop task ran.
+    ///
+    /// A task's failure belongs to the page, not to the embedder's request, so it
+    /// is collected here and the loop continues. Draining is the embedder's job
+    /// (see [`JsRuntime::take_task_errors`]); leaving them unreported is how the
+    /// navigation-aborting bug in issue #303 stayed invisible.
+    task_errors: Vec<String>,
+    /// How many task errors were dropped once `task_errors` hit its cap.
+    suppressed_task_errors: usize,
     location_href: String,
     navigator_user_agent: String,
     http_client: Client,
@@ -404,6 +417,8 @@ impl HostState {
             document: document.clone(),
             nodes: HashMap::new(),
             console_logs: Vec::new(),
+            task_errors: Vec::new(),
+            suppressed_task_errors: 0,
             base_url: location_href.parse::<crate::http::Url>().ok(),
             location_href,
             navigator_user_agent: default_user_agent(),
@@ -1491,6 +1506,41 @@ impl JsRuntime {
         Ok(())
     }
 
+    /// Records a page-script error raised while a task ran.
+    ///
+    /// Bounded so a broken `setInterval` cannot fill memory or bury the first,
+    /// most useful error under thousands of repeats. The overflow is counted, so
+    /// the drained report never understates how much went wrong.
+    fn record_task_error(&mut self, error: String) {
+        let mut state = self.host_state.borrow_mut();
+        if state.task_errors.len() < MAX_TASK_ERRORS {
+            state.task_errors.push(error);
+        } else {
+            state.suppressed_task_errors = state.suppressed_task_errors.saturating_add(1);
+        }
+    }
+
+    /// Records `result`'s error, if any, against `label`.
+    fn record_error_from<T>(&mut self, label: &str, result: JsResult<T>) {
+        if let Err(error) = result {
+            self.record_task_error(format!("[{label}] {error}"));
+        }
+    }
+
+    /// Drains the page-script errors collected while tasks ran.
+    ///
+    /// Embedders call this after pumping the event loop and report them the same
+    /// way they report the errors `execute_document_scripts` returns.
+    pub fn take_task_errors(&mut self) -> Vec<String> {
+        let mut state = self.host_state.borrow_mut();
+        let mut errors = std::mem::take(&mut state.task_errors);
+        let suppressed = std::mem::take(&mut state.suppressed_task_errors);
+        if suppressed > 0 {
+            errors.push(format!("{suppressed} further task errors suppressed"));
+        }
+        errors
+    }
+
     /// Returns true if any timers are still scheduled (pending or repeating).
     pub fn has_pending_timers(&self) -> bool {
         self.host_state.borrow().event_loop.has_pending_timers()
@@ -1756,16 +1806,25 @@ impl JsRuntime {
     /// retained function callback with its bound extra arguments.
     fn run_timer_payload(&mut self, payload: TimerPayload) -> JsResult<()> {
         match payload {
+            // A timer's code is the page's, so its failure is recorded and the
+            // loop continues. `run_timers` already worked this way; propagating
+            // here made the same page abort navigation when it was driven through
+            // `run_until_idle` instead (issue #303).
             TimerPayload::Source(source) => {
-                self.eval(&source)?;
+                let result = self.eval(&source);
+                self.record_error_from("timer", result);
                 Ok(())
             }
-            TimerPayload::Callback { callback, args } => self.with_active_host(|context| {
-                if let Some(callable) = callback.as_callable() {
-                    callable.call(&JsValue::undefined(), &args, context)?;
-                }
+            TimerPayload::Callback { callback, args } => {
+                let result = self.with_active_host(|context| {
+                    if let Some(callable) = callback.as_callable() {
+                        callable.call(&JsValue::undefined(), &args, context)?;
+                    }
+                    Ok(())
+                });
+                self.record_error_from("timer callback", result);
                 Ok(())
-            }),
+            }
             TimerPayload::ResourceLoad { node_id } => {
                 let (should_dispatch, xhtml_scripts, dynamic_script) = {
                     let mut state = self.host_state.borrow_mut();
@@ -1777,13 +1836,19 @@ impl JsRuntime {
                         (false, Vec::new(), None)
                     } else {
                         let mut xhtml_scripts = Vec::new();
+                        // A dynamically inserted external script is classified by
+                        // the same `type` gate the parsed-document path uses, so a
+                        // script runs the same way however it reached the tree.
                         let dynamic_script = if node
                             .tag_name()
                             .is_some_and(|tag| tag.eq_ignore_ascii_case("script"))
                         {
-                            node.attributes()
-                                .and_then(|attrs| attrs.get("src").cloned())
-                                .map(|src| (src, state.base_url.clone()))
+                            node.get_attribute("src").map(|src| {
+                                let kind = ScriptKind::from_type_attribute(
+                                    node.get_attribute("type").as_deref(),
+                                );
+                                (src, kind, state.base_url.clone())
+                            })
                         } else {
                             None
                         };
@@ -1833,36 +1898,87 @@ impl JsRuntime {
                     let _ = self.eval(&source);
                     let _ = self.run_jobs();
                 }
-                if let Some((src, base_url)) = dynamic_script {
-                    if std::env::var_os("OMOIKANE_LOG_SCRIPTS").is_some() {
-                        eprintln!("[omoikane][script] loading dynamic {src}");
-                    }
-                    let source = {
-                        let mut state = self.host_state.borrow_mut();
-                        fetch_script_source_with_client(
-                            &src,
-                            base_url.as_ref(),
-                            &mut state.http_client,
-                        )
-                    }
-                    .ok_or_else(|| {
-                        JsError::from(
-                            JsNativeError::error()
-                                .with_message(format!("failed to fetch dynamic script: {src}")),
-                        )
-                    })?;
-                    self.eval(&format!("__omoikane_set_current_script({node_id})"))?;
-                    let result = self.eval(&source);
-                    let _ = self.eval("__omoikane_set_current_script(null)");
-                    result?;
-                    self.run_jobs()?;
-                    if std::env::var_os("OMOIKANE_LOG_SCRIPTS").is_some() {
-                        eprintln!("[omoikane][script] completed dynamic {src}");
+                // A script whose type Omoikane does not execute is not fetched and
+                // does not load, so it must not go on to dispatch `load` either.
+                let mut dispatch_load = should_dispatch;
+                if let Some((src, kind, base_url)) = dynamic_script {
+                    let log_scripts = std::env::var_os("OMOIKANE_LOG_SCRIPTS").is_some();
+                    if kind == ScriptKind::NotExecutable {
+                        if log_scripts {
+                            eprintln!("[omoikane][script] skipped dynamic {src}");
+                        }
+                        dispatch_load = false;
+                    } else {
+                        if log_scripts {
+                            eprintln!("[omoikane][script] loading dynamic {src} kind={kind:?}");
+                        }
+                        let source = {
+                            let mut state = self.host_state.borrow_mut();
+                            fetch_script_source_with_client(
+                                &src,
+                                base_url.as_ref(),
+                                &mut state.http_client,
+                            )
+                        };
+                        match source {
+                            // Every failure below is the page's, not the engine's:
+                            // it is recorded and execution continues, exactly as
+                            // `execute_document_scripts` treats a parsed script.
+                            // Propagating instead would abort the event loop and,
+                            // through it, the whole navigation.
+                            None => {
+                                // A script that never arrived did not load: it
+                                // fires `error` instead, so a loader waiting on
+                                // one of the two is not left with neither.
+                                self.record_task_error(format!(
+                                    "[dynamic script: {src}] failed to fetch"
+                                ));
+                                dispatch_load = false;
+                                let dispatched = self.eval(&format!(
+                                    "__omoikane_dispatch_resource_error({node_id})"
+                                ));
+                                self.record_error_from(&src, dispatched);
+                                let jobs = self.run_jobs();
+                                self.record_error_from(&src, jobs);
+                            }
+                            Some(source) => {
+                                let marked = self
+                                    .eval(&format!("__omoikane_set_current_script({node_id})"));
+                                self.record_error_from(&src, marked);
+                                let result = match kind {
+                                    ScriptKind::Module => self
+                                        .eval_module_timed(
+                                            &source,
+                                            &module_script_url(&src, base_url.as_ref(), false),
+                                        )
+                                        .0,
+                                    _ => self
+                                        .eval(&source)
+                                        .map_err(|error| error.to_string())
+                                        .map(|_| JsValue::undefined()),
+                                };
+                                let _ = self.eval("__omoikane_set_current_script(null)");
+                                if let Err(error) = result {
+                                    let context = script_source_context(&source);
+                                    self.record_task_error(format!(
+                                        "[dynamic script: {src}; {context}] {error}"
+                                    ));
+                                }
+                                let jobs = self.run_jobs();
+                                self.record_error_from(&src, jobs);
+                                if log_scripts {
+                                    eprintln!("[omoikane][script] completed dynamic {src}");
+                                }
+                            }
+                        }
                     }
                 }
-                if should_dispatch {
-                    self.eval(&format!("__omoikane_dispatch_resource_load({node_id})"))?;
-                    self.run_jobs()?;
+                if dispatch_load {
+                    let dispatched =
+                        self.eval(&format!("__omoikane_dispatch_resource_load({node_id})"));
+                    self.record_error_from("resource load", dispatched);
+                    let jobs = self.run_jobs();
+                    self.record_error_from("resource load", jobs);
                 }
                 Ok(())
             }
@@ -1933,7 +2049,9 @@ impl JsRuntime {
     ///
     /// - Inline scripts: text content is executed directly.
     /// - External scripts (`src` attribute): fetched via HTTP and executed.
-    /// - `type` attribute must be absent, empty, or `text/javascript` / `module` (module is skipped).
+    /// - `type` selects how the element runs: absent, empty, `text/javascript` or
+    ///   `application/javascript` runs as a classic script, `module` runs as an ES
+    ///   module, and every other value is not executed at all.
     /// - `defer` scripts are collected and executed after all inline/sync scripts.
     /// - After all scripts, `DOMContentLoaded` is fired.
     ///
@@ -1960,10 +2078,12 @@ impl JsRuntime {
                 .get("type")
                 .is_some_and(|value| value.trim().eq_ignore_ascii_case("module"));
 
-            // Skip <script> types Omoikane does not run as classic scripts
-            // (`type="module"` and non-JavaScript types). Shares the type gate
-            // with `is_inline_classic_script` so a script executes identically
-            // whether it was parsed normally or inserted via `document.write`.
+            // Skip the types Omoikane does not execute at all. Modules are not
+            // among them — they run below through `eval_module_timed` — so this
+            // only filters values like `application/json` or an import map.
+            // Shares the type gate with `is_inline_classic_script` and with the
+            // dynamic-insertion path in `run_timer_payload`, so a script executes
+            // identically however it reached the tree.
             if !is_module
                 && !is_executable_classic_script_type(attrs.get("type").map(|s| s.as_str()))
             {
@@ -6107,7 +6227,9 @@ fn insert_or_append(parent: &NodeHandle, child: &NodeHandle, reference: Option<&
 /// match" ([`is_javascript_mime_type`]): only an **absent, empty,
 /// `text/javascript`, or `application/javascript`** type runs. `type="module"`
 /// and every other value — including other JavaScript MIME essences such as
-/// `text/ecmascript` — are treated as non-executable.
+/// `text/ecmascript` — are treated as non-classic. Non-classic is not the same as
+/// non-executable: [`ScriptKind::from_type_attribute`] routes `module` to module
+/// evaluation and only everything else to no execution at all.
 ///
 /// Both [`is_inline_classic_script`] (the `document.write` path) and
 /// `Runtime::execute_document_scripts` (the normal parse path) gate on this
@@ -6125,6 +6247,29 @@ fn is_executable_classic_script_type(type_attr: Option<&str>) -> bool {
                 .trim()
                 .to_ascii_lowercase();
             mime.is_empty() || mime == "text/javascript" || mime == "application/javascript"
+        }
+    }
+}
+
+/// How a `<script>` element's `type` attribute says it should be evaluated.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ScriptKind {
+    Classic,
+    Module,
+    /// A type Omoikane does not execute (`application/json`, an import map, a
+    /// template language, ...). The HTML script algorithm stops before fetching
+    /// such an element, so it neither runs nor fires `load`.
+    NotExecutable,
+}
+
+impl ScriptKind {
+    fn from_type_attribute(type_attr: Option<&str>) -> Self {
+        if type_attr.is_some_and(|value| value.trim().eq_ignore_ascii_case("module")) {
+            Self::Module
+        } else if is_executable_classic_script_type(type_attr) {
+            Self::Classic
+        } else {
+            Self::NotExecutable
         }
     }
 }
@@ -15079,6 +15224,219 @@ b</textarea></form>"#);
                 .unwrap()
                 .as_boolean()
                 .unwrap()
+        );
+    }
+
+    #[test]
+    fn script_type_property_reflects_to_the_attribute() {
+        let mut runtime = runtime_from_html("<html><head></head><body></body></html>");
+        assert!(
+            runtime
+                .eval(
+                    r#"(() => {
+                    const script = document.createElement("script");
+                    if (script.type !== "") return false;
+                    script.type = "module";
+                    // Evaluation is decided from the attribute, so assigning the
+                    // property has to reach it.
+                    if (script.getAttribute("type") !== "module") return false;
+                    script.setAttribute("type", "text/javascript");
+                    return script.type === "text/javascript" &&
+                      document.createElement("script") instanceof HTMLScriptElement;
+                  })()"#,
+                )
+                .unwrap()
+                .as_boolean()
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn dynamic_module_script_is_evaluated_as_a_module() {
+        let mut runtime = runtime_from_html("<html><head></head><body></body></html>");
+        // `export` is a syntax error in a classic script, so this only parses if
+        // the dynamic path honours `type="module"` the way the parsed-document
+        // path already does.
+        runtime
+            .eval(
+                r#"const script = document.createElement("script");
+                   script.type = "module";
+                   script.src = "data:text/javascript,globalThis.moduleRan%20%3D%20true%3B%20export%20const%20answer%20%3D%2042%3B";
+                   script.addEventListener("load", () => globalThis.moduleLoaded = true);
+                   document.head.appendChild(script);"#,
+            )
+            .unwrap();
+
+        runtime.run_until_idle().unwrap();
+
+        assert_eq!(
+            runtime.take_task_errors(),
+            Vec::<String>::new(),
+            "a module must not be evaluated as a classic script"
+        );
+        assert!(
+            runtime
+                .eval("globalThis.moduleRan === true && globalThis.moduleLoaded === true")
+                .unwrap()
+                .as_boolean()
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn dynamic_script_with_unsupported_type_is_neither_executed_nor_loaded() {
+        let mut runtime = runtime_from_html("<html><head></head><body></body></html>");
+        runtime
+            .eval(
+                r#"globalThis.ranAnyway = false;
+                   globalThis.loadFired = false;
+                   const script = document.createElement("script");
+                   script.type = "application/json";
+                   script.src = "data:text/javascript,globalThis.ranAnyway%20%3D%20true";
+                   script.addEventListener("load", () => globalThis.loadFired = true);
+                   document.head.appendChild(script);"#,
+            )
+            .unwrap();
+
+        runtime.run_until_idle().unwrap();
+
+        assert!(
+            runtime
+                .eval("globalThis.ranAnyway === false && globalThis.loadFired === false")
+                .unwrap()
+                .as_boolean()
+                .unwrap(),
+            "a script whose type is not executed must neither run nor fire load"
+        );
+        assert_eq!(runtime.take_task_errors(), Vec::<String>::new());
+    }
+
+    #[test]
+    fn throwing_dynamic_script_does_not_abort_the_event_loop() {
+        let mut runtime = runtime_from_html("<html><head></head><body></body></html>");
+        runtime
+            .eval(
+                r#"globalThis.afterRan = false;
+                   const script = document.createElement("script");
+                   script.src = "data:text/javascript,throw%20new%20Error('boom')";
+                   document.head.appendChild(script);
+                   setTimeout(() => globalThis.afterRan = true, 0);"#,
+            )
+            .unwrap();
+
+        // The failing script must not stop the loop, so the later timer still runs.
+        runtime.tick(1).unwrap();
+
+        assert!(
+            runtime
+                .eval("globalThis.afterRan === true")
+                .unwrap()
+                .as_boolean()
+                .unwrap(),
+            "a task queued after a failing script must still run"
+        );
+        let errors = runtime.take_task_errors();
+        assert_eq!(errors.len(), 1, "expected one recorded error, got {errors:?}");
+        assert!(
+            errors[0].contains("dynamic script") && errors[0].contains("boom"),
+            "the swallowed error must be reported: {errors:?}"
+        );
+        assert!(
+            runtime.take_task_errors().is_empty(),
+            "draining must clear the recorded errors"
+        );
+    }
+
+    #[test]
+    fn unfetchable_dynamic_script_fires_error_and_does_not_abort_the_event_loop() {
+        let mut runtime = runtime_from_html("<html><head></head><body></body></html>");
+        runtime
+            .eval(
+                r#"globalThis.loadFired = false;
+                   globalThis.errorFired = false;
+                   const script = document.createElement("script");
+                   script.src = "data:text/javascript;base64,!!!not-base64!!!";
+                   script.addEventListener("load", () => globalThis.loadFired = true);
+                   script.addEventListener("error", () => globalThis.errorFired = true);
+                   document.head.appendChild(script);"#,
+            )
+            .unwrap();
+
+        runtime.run_until_idle().unwrap();
+
+        assert!(
+            runtime
+                .eval("globalThis.errorFired === true && globalThis.loadFired === false")
+                .unwrap()
+                .as_boolean()
+                .unwrap(),
+            "a script that never arrived must fire error, not load"
+        );
+        let errors = runtime.take_task_errors();
+        assert_eq!(errors.len(), 1, "expected one recorded error, got {errors:?}");
+        assert!(
+            errors[0].contains("failed to fetch"),
+            "a fetch failure must be reported: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn throwing_timer_callback_does_not_abort_the_event_loop() {
+        let mut runtime = JsRuntime::new().unwrap();
+        runtime
+            .eval(
+                r#"globalThis.secondRan = false;
+                   setTimeout(() => { throw new Error("timer boom"); }, 0);
+                   setTimeout(() => globalThis.secondRan = true, 0);"#,
+            )
+            .unwrap();
+
+        // Driving the loop through `run_until_idle` must behave like `run_timers`:
+        // one failing callback cannot take the rest of the queue with it.
+        runtime.tick(1).unwrap();
+
+        assert!(
+            runtime
+                .eval("globalThis.secondRan === true")
+                .unwrap()
+                .as_boolean()
+                .unwrap()
+        );
+        let errors = runtime.take_task_errors();
+        assert_eq!(errors.len(), 1, "expected one recorded error, got {errors:?}");
+        assert!(
+            errors[0].contains("timer") && errors[0].contains("timer boom"),
+            "the swallowed error must be reported: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn recorded_task_errors_are_bounded() {
+        let mut runtime = JsRuntime::new().unwrap();
+        runtime
+            .eval(
+                r#"for (let index = 0; index < 200; index++) {
+                     setTimeout(() => { throw new Error("repeat " + index); }, 0);
+                   }"#,
+            )
+            .unwrap();
+
+        runtime.tick(1).unwrap();
+
+        let errors = runtime.take_task_errors();
+        assert_eq!(
+            errors.len(),
+            MAX_TASK_ERRORS + 1,
+            "the cap plus one suppression notice"
+        );
+        assert_eq!(
+            errors[MAX_TASK_ERRORS],
+            format!("{} further task errors suppressed", 200 - MAX_TASK_ERRORS),
+            "the overflow must be counted, not just noted"
+        );
+        assert!(
+            runtime.take_task_errors().is_empty(),
+            "draining must clear the suppressed count too"
         );
     }
 
