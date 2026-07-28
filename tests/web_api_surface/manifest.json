@@ -116,6 +116,14 @@
       "baseline_supported": false
     },
     {
+      "id": "editing.text-control-selection",
+      "area": "editing",
+      "description": "Text controls expose selection and input editing APIs",
+      "setup": "globalThis.__editingProbe = document.createElement('input'); __editingProbe.value = 'ab'; __editingProbe.setSelectionRange(1, 2)",
+      "probe": "typeof InputEvent === 'function' && __editingProbe.selectionStart === 1 && __editingProbe.selectionEnd === 2 && typeof __editingProbe.select === 'function'",
+      "baseline_supported": false
+    },
+    {
       "id": "html.iframe-content-document",
       "area": "html",
       "description": "Iframe elements expose an independent contentDocument",

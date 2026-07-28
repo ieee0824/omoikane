@@ -247,7 +247,7 @@ pub(crate) fn paint_text_with_registry(
                 InlineFragmentContent::GeneratedBox(style) => {
                     super::paint_generated_box(canvas, fragment.rect, style, clip, _viewport);
                 }
-                InlineFragmentContent::FormControl(style, value) => {
+                InlineFragmentContent::FormControl(style, value, editing) => {
                     if let Some(background) = background_color(style) {
                         canvas.fill_rect_clipped(fragment.rect, background, clip);
                     }
@@ -255,42 +255,67 @@ pub(crate) fn paint_text_with_registry(
                     if border.total_horizontal() > 0.0 || border.total_vertical() > 0.0 {
                         paint_rect_borders(canvas, fragment.rect, style, border, clip);
                     }
-                    if !value.is_empty() {
-                        let content_rect =
-                            inline_fragment_content_rect(fragment.rect, style, border);
-                        let color =
-                            fragment_text_color(&fragment.style).unwrap_or(fallback_color);
-                        // Same font policy as the Text branch: the fragment's
-                        // resolved web-font variant first, then the global fonts.
-                        let mut fragment_fonts: Vec<&Font> = Vec::new();
-                        if let Some(web_font) =
-                            select_fragment_web_font(web_fonts, &fragment.style)
-                        {
-                            fragment_fonts.push(web_font);
-                        }
-                        fragment_fonts.extend(fonts.iter().map(|font| font.as_ref()));
-                        // Center the value horizontally when `text-align: center`
-                        // (used by the `<button>` UA default); otherwise keep the
-                        // existing left-aligned rendering.
-                        let x_offset = if is_text_align_center(style) {
-                            let text_width = measure_form_control_text_width(
-                                value,
+                    let content_rect = inline_fragment_content_rect(fragment.rect, style, border);
+                    let color = fragment_text_color(&fragment.style).unwrap_or(fallback_color);
+                    // Same font policy as the Text branch: the fragment's
+                    // resolved web-font variant first, then the global fonts.
+                    let mut fragment_fonts: Vec<&Font> = Vec::new();
+                    if let Some(web_font) = select_fragment_web_font(web_fonts, &fragment.style) {
+                        fragment_fonts.push(web_font);
+                    }
+                    fragment_fonts.extend(fonts.iter().map(|font| font.as_ref()));
+                    let x_offset = if is_text_align_center(style) {
+                        let text_width = measure_form_control_text_width(
+                            value,
+                            fragment.metrics.font_size,
+                            &fragment_fonts,
+                            fragment.metrics.letter_spacing,
+                        );
+                        ((content_rect.width - text_width) / 2.0).max(0.0)
+                    } else {
+                        0.0
+                    };
+                    let text_rect = Rect {
+                        x: content_rect.x + x_offset,
+                        y: content_rect.y
+                            + ((content_rect.height - fragment.metrics.font_size) / 2.0).max(0.0),
+                        width: (content_rect.width - x_offset).max(0.0),
+                        height: fragment.metrics.font_size,
+                    };
+                    let mut caret_x = None;
+                    if let Some(editing) = editing.filter(|state| state.focused) {
+                        let before = text_prefix_by_utf16_offset(value, editing.selection_start);
+                        let selected = text_prefix_by_utf16_offset(value, editing.selection_end);
+                        let start_x = text_rect.x
+                            + measure_form_control_text_width(
+                                before,
                                 fragment.metrics.font_size,
                                 &fragment_fonts,
                                 fragment.metrics.letter_spacing,
                             );
-                            ((content_rect.width - text_width) / 2.0).max(0.0)
+                        let end_x = text_rect.x
+                            + measure_form_control_text_width(
+                                selected,
+                                fragment.metrics.font_size,
+                                &fragment_fonts,
+                                fragment.metrics.letter_spacing,
+                            );
+                        if editing.selection_start != editing.selection_end {
+                            canvas.fill_rect_clipped(
+                                Rect {
+                                    x: start_x,
+                                    y: text_rect.y,
+                                    width: (end_x - start_x).max(1.0),
+                                    height: text_rect.height,
+                                },
+                                Color::rgba(51, 153, 255, 120),
+                                clip,
+                            );
                         } else {
-                            0.0
-                        };
-                        let text_rect = Rect {
-                            x: content_rect.x + x_offset,
-                            y: content_rect.y
-                                + ((content_rect.height - fragment.metrics.font_size) / 2.0)
-                                    .max(0.0),
-                            width: (content_rect.width - x_offset).max(0.0),
-                            height: fragment.metrics.font_size,
-                        };
+                            caret_x = Some(start_x);
+                        }
+                    }
+                    if !value.is_empty() {
                         if fragment_fonts.is_empty() {
                             paint_text_placeholder(
                                 canvas,
@@ -314,6 +339,13 @@ pub(crate) fn paint_text_with_registry(
                                 fragment.metrics.letter_spacing,
                             );
                         }
+                    }
+                    if let Some(x) = caret_x {
+                        canvas.fill_rect_clipped(
+                            Rect { x, y: text_rect.y, width: 1.0, height: text_rect.height },
+                            color,
+                            clip,
+                        );
                     }
                 }
                 InlineFragmentContent::IconFormControl(style, image, width, height) => {
@@ -1001,4 +1033,18 @@ pub(crate) fn measure_form_control_text_width(
         width += letter_spacing * (char_count - 1) as f32;
     }
     width
+}
+
+fn text_prefix_by_utf16_offset(value: &str, offset: usize) -> &str {
+    if offset == 0 {
+        return "";
+    }
+    let mut utf16_offset = 0;
+    for (byte_offset, ch) in value.char_indices() {
+        if utf16_offset >= offset {
+            return &value[..byte_offset];
+        }
+        utf16_offset += ch.len_utf16();
+    }
+    value
 }

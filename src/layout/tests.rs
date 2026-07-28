@@ -1083,7 +1083,7 @@ fn google_style_form_controls_create_visible_replaced_fragments() {
         .iter()
         .flat_map(|line| &line.fragments)
         .filter_map(|fragment| match &fragment.content {
-            InlineFragmentContent::FormControl(_, value) => {
+            InlineFragmentContent::FormControl(_, value, _) => {
                 Some((fragment.rect, value.clone()))
             }
             _ => None,
@@ -1105,7 +1105,7 @@ fn form_control_fragments(container: &LayoutBox) -> Vec<(Rect, String)> {
         .iter()
         .flat_map(|line| &line.fragments)
         .filter_map(|fragment| match &fragment.content {
-            InlineFragmentContent::FormControl(_, value) => Some((fragment.rect, value.clone())),
+            InlineFragmentContent::FormControl(_, value, _) => Some((fragment.rect, value.clone())),
             _ => None,
         })
         .collect()

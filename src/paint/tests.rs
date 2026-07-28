@@ -6,7 +6,7 @@ use crate::dom::NodeHandle;
 use crate::html::TreeBuilder;
 use crate::layout::{
     BoxDimensions, FontMetrics, FragmentStyle, InlineFragment, LineBox, Rect, VerticalAlign,
-    layout_tree,
+    TextControlPaintState, layout_tree,
 };
 use crate::paint::*;
 
@@ -7560,6 +7560,7 @@ fn form_control_label_uses_web_font_variant() {
                 content: InlineFragmentContent::FormControl(
                     control_style.clone(),
                     "AB".to_string(),
+                    None,
                 ),
                 rect: viewport,
                 metrics: FontMetrics::from_font_size(16.0),
@@ -7620,6 +7621,65 @@ fn form_control_label_uses_web_font_variant() {
         glyph_pixels > 0,
         "the label must actually paint glyph pixels for the comparison to be meaningful"
     );
+}
+
+#[test]
+fn focused_text_control_paints_selection_and_caret() {
+    let input = NodeHandle::element("input");
+    let mut resolver = StyleResolver::new();
+    let control_style = resolver.computed_style(&input);
+    let viewport = Rect { x: 0.0, y: 0.0, width: 80.0, height: 24.0 };
+    let fragment = |value: &str, start, end| InlineFragment {
+        node: input.clone(),
+        content: InlineFragmentContent::FormControl(
+            control_style.clone(),
+            value.to_string(),
+            Some(TextControlPaintState {
+                selection_start: start,
+                selection_end: end,
+                focused: true,
+            }),
+        ),
+        rect: viewport,
+        metrics: FontMetrics::from_font_size(16.0),
+        vertical_align: VerticalAlign::Baseline,
+        style: FragmentStyle::default(),
+    };
+    let layout = |fragment| LayoutBox {
+        node: input.clone(),
+        dimensions: BoxDimensions { content: viewport, ..BoxDimensions::default() },
+        visibility: crate::layout::Visibility::Visible,
+        overflow: crate::layout::Overflow::Visible,
+        z_index: 0,
+        transform: crate::css::AffineTransform::identity(),
+        lines: vec![LineBox { rect: viewport, baseline: 12.8, fragments: vec![fragment] }],
+        children: Vec::new(),
+        marker: None,
+    };
+
+    let mut selected = Canvas::new(80, 24);
+    paint_text_with_registry(
+        &mut selected,
+        &layout(fragment("AB", 0, 1)),
+        &control_style,
+        None,
+        viewport,
+        &[],
+        None,
+    );
+    assert!(selected.pixels().chunks_exact(4).any(|pixel| pixel[2] > pixel[0]));
+
+    let mut caret = Canvas::new(80, 24);
+    paint_text_with_registry(
+        &mut caret,
+        &layout(fragment("", 0, 0)),
+        &control_style,
+        None,
+        viewport,
+        &[],
+        None,
+    );
+    assert!(caret.pixels().chunks_exact(4).any(|pixel| pixel == [0, 0, 0, 255]));
 }
 
 #[test]

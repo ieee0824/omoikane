@@ -175,6 +175,7 @@ pub struct Element {
     attributes: BTreeMap<String, String>,
     checked: bool,
     dirty_checkedness: bool,
+    text_control_state: Option<TextControlState>,
     /// Scroll offset of this element's scrolling box in CSS pixels, as set
     /// through `scrollTop` / `scrollLeft` and friends.
     ///
@@ -208,6 +209,7 @@ impl Element {
             attributes: BTreeMap::new(),
             checked: false,
             dirty_checkedness: false,
+            text_control_state: None,
             scroll_offset: (0.0, 0.0),
             template_content,
             shadow_root: None,
@@ -232,6 +234,7 @@ impl Element {
             attributes: BTreeMap::new(),
             checked: false,
             dirty_checkedness: false,
+            text_control_state: None,
             scroll_offset: (0.0, 0.0),
             template_content: None,
             shadow_root: None,
@@ -254,6 +257,15 @@ impl Element {
     pub fn attributes(&self) -> &BTreeMap<String, String> {
         &self.attributes
     }
+}
+
+/// Live value and selection state for a text form control.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct TextControlState {
+    pub value: String,
+    pub selection_start: usize,
+    pub selection_end: usize,
+    pub focused: bool,
 }
 
 /// A DOM text node.
@@ -785,6 +797,32 @@ impl NodeHandle {
         if let NodeData::Element(element) = &mut self.0.borrow_mut().data {
             element.checked = checked;
             element.dirty_checkedness = true;
+        }
+    }
+
+    /// Updates the live editing state used by layout and paint for text controls.
+    pub(crate) fn set_text_control_state(
+        &self,
+        value: String,
+        selection_start: usize,
+        selection_end: usize,
+        focused: bool,
+    ) {
+        if let NodeData::Element(element) = &mut self.0.borrow_mut().data {
+            element.text_control_state = Some(TextControlState {
+                value,
+                selection_start: selection_start.min(selection_end),
+                selection_end,
+                focused,
+            });
+        }
+    }
+
+    /// Returns the live editing state for a text control, when JavaScript has initialized it.
+    pub(crate) fn text_control_state(&self) -> Option<TextControlState> {
+        match &self.0.borrow().data {
+            NodeData::Element(element) => element.text_control_state.clone(),
+            _ => None,
         }
     }
 

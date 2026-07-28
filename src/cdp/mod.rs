@@ -1131,6 +1131,7 @@ impl CdpSession {
             .unwrap_or(0);
         let init = json!({
             "key": key,
+            "text": text,
             "code": params.get("code").and_then(Value::as_str).unwrap_or(""),
             "keyCode": key_code,
             "charCode": if dom_type == "keypress" {
@@ -2527,6 +2528,59 @@ mod tests {
         assert_eq!(
             keys["result"]["value"],
             "field:keydown:A:KeyA:65:true:true:true:true|document:field|field:keyup:A|field:keypress:a:97"
+        );
+    }
+
+    #[test]
+    fn keyboard_input_edits_focused_text_control_end_to_end() {
+        let mut session = CdpSession::new().unwrap();
+        session
+            .install_document(
+                "https://example.test/",
+                r#"<html><body><input id="login"><script>
+                    globalThis.editEvents=[];
+                    login.addEventListener('beforeinput',e=>editEvents.push(e.type+':'+e.inputType+':'+e.data));
+                    login.addEventListener('input',e=>editEvents.push(e.type+':'+e.inputType+':'+e.data));
+                    login.focus();
+                </script></body></html>"#,
+                1,
+                "null",
+            )
+            .unwrap();
+
+        for character in ["m", "i", "k", "u"] {
+            session
+                .dispatch(
+                    "Input.dispatchKeyEvent",
+                    json!({"type":"keyDown","key":character,"text":character}),
+                )
+                .unwrap();
+        }
+        session
+            .dispatch(
+                "Input.dispatchKeyEvent",
+                json!({"type":"keyDown","key":"ArrowLeft"}),
+            )
+            .unwrap();
+        session
+            .dispatch(
+                "Input.dispatchKeyEvent",
+                json!({"type":"keyDown","key":"Backspace"}),
+            )
+            .unwrap();
+
+        let state = session
+            .dispatch(
+                "Runtime.evaluate",
+                json!({
+                    "expression":"JSON.stringify({value:login.value,start:login.selectionStart,end:login.selectionEnd,events:editEvents})",
+                    "returnByValue":true
+                }),
+            )
+            .unwrap();
+        assert_eq!(
+            state["result"]["value"],
+            r#"{"value":"miu","start":2,"end":2,"events":["beforeinput:insertText:m","input:insertText:m","beforeinput:insertText:i","input:insertText:i","beforeinput:insertText:k","input:insertText:k","beforeinput:insertText:u","input:insertText:u","beforeinput:deleteContentBackward:null","input:deleteContentBackward:null"]}"#
         );
     }
 }
