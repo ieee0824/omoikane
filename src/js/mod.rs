@@ -12051,6 +12051,151 @@ mod tests {
     }
 
     #[test]
+    fn performance_observer_delivers_marks_and_measures_in_one_checkpoint() {
+        let mut runtime = JsRuntime::with_document(default_document()).unwrap();
+        runtime
+            .eval(
+                r#"(() => {
+                  globalThis.observerDeliveries = [];
+                  const observer = new PerformanceObserver((list, receivedObserver) => {
+                    observerDeliveries.push({
+                      observerMatches: receivedObserver === observer,
+                      all: list.getEntries().map(entry => entry.name + ":" + entry.entryType),
+                      marks: list.getEntriesByType("mark").map(entry => entry.name),
+                      named: list.getEntriesByName("middle", "measure").length,
+                      listType: list instanceof PerformanceObserverEntryList,
+                    });
+                  });
+                  observer.observe({ entryTypes: ["mark", "measure"] });
+                  performance.mark("late", { startTime: 20 });
+                  performance.mark("early", { startTime: 5 });
+                  performance.measure("middle", { start: 10, end: 15 });
+                })()"#,
+            )
+            .unwrap();
+        assert!(runtime
+            .eval("observerDeliveries.length === 0")
+            .unwrap()
+            .as_boolean()
+            .unwrap());
+
+        runtime.run_jobs().unwrap();
+        assert!(runtime
+            .eval(
+                r#"observerDeliveries.length === 1 &&
+                   observerDeliveries[0].observerMatches && observerDeliveries[0].listType &&
+                   observerDeliveries[0].all.join(",") === "early:mark,middle:measure,late:mark" &&
+                   observerDeliveries[0].marks.join(",") === "early,late" &&
+                   observerDeliveries[0].named === 1"#,
+            )
+            .unwrap()
+            .as_boolean()
+            .unwrap());
+    }
+
+    #[test]
+    fn performance_observer_supports_buffered_take_records_and_disconnect() {
+        let mut runtime = JsRuntime::with_document(default_document()).unwrap();
+        runtime
+            .eval(
+                r#"(() => {
+                  performance.mark("before", { startTime: 1 });
+                  globalThis.bufferedDeliveries = [];
+                  globalThis.bufferedObserver = new PerformanceObserver(list => {
+                    bufferedDeliveries.push(list.getEntries().map(entry => entry.name).join(","));
+                  });
+                  bufferedObserver.observe({ type: "mark", buffered: true });
+                  performance.mark("taken", { startTime: 2 });
+                  globalThis.takenRecords = bufferedObserver.takeRecords().map(entry => entry.name).join(",");
+                })()"#,
+            )
+            .unwrap();
+        assert_eq!(
+            runtime
+                .eval("takenRecords")
+                .unwrap()
+                .as_string()
+                .unwrap()
+                .to_std_string_escaped(),
+            "before,taken"
+        );
+        runtime.run_jobs().unwrap();
+        assert!(runtime
+            .eval("bufferedDeliveries.length === 0")
+            .unwrap()
+            .as_boolean()
+            .unwrap());
+
+        runtime
+            .eval(
+                r#"performance.mark("delivered", { startTime: 3 });
+                   bufferedObserver.disconnect();
+                   performance.mark("after-disconnect", { startTime: 4 });"#,
+            )
+            .unwrap();
+        runtime.run_jobs().unwrap();
+        assert!(runtime
+            .eval("bufferedDeliveries.length === 0 && bufferedObserver.takeRecords().length === 0")
+            .unwrap()
+            .as_boolean()
+            .unwrap());
+    }
+
+    #[test]
+    fn performance_observer_validates_options_and_survives_callback_errors() {
+        let mut runtime = JsRuntime::with_document(default_document()).unwrap();
+        assert!(runtime
+            .eval(
+                r#"(() => {
+                  const throwsTypeError = callback => {
+                    try { callback(); } catch (error) { return error instanceof TypeError; }
+                    return false;
+                  };
+                  const observer = new PerformanceObserver(() => {});
+                  const modes = new PerformanceObserver(() => {});
+                  modes.observe({ type: "mark" });
+                  let modeError = false;
+                  try { modes.observe({ entryTypes: ["mark"] }); }
+                  catch (error) { modeError = error instanceof DOMException && error.name === "InvalidModificationError"; }
+                  return throwsTypeError(() => new PerformanceObserver(null)) &&
+                    throwsTypeError(() => new PerformanceObserverEntryList()) &&
+                    throwsTypeError(() => observer.observe()) &&
+                    throwsTypeError(() => observer.observe(null)) &&
+                    throwsTypeError(() => observer.observe({})) &&
+                    throwsTypeError(() => observer.observe({ type: "mark", entryTypes: ["mark"] })) &&
+                    throwsTypeError(() => observer.observe({ entryTypes: [] })) && modeError &&
+                    Object.isFrozen(PerformanceObserver.supportedEntryTypes) &&
+                    PerformanceObserver.supportedEntryTypes.join(",") === "mark,measure";
+                })()"#,
+            )
+            .unwrap()
+            .as_boolean()
+            .unwrap());
+
+        runtime
+            .eval(
+                r#"globalThis.goodObserverCalls = 0;
+                   const throwing = new PerformanceObserver(() => { throw new Error("callback failure"); });
+                   const continuing = new PerformanceObserver(() => { goodObserverCalls++; });
+                   throwing.observe({ type: "mark" });
+                   continuing.observe({ type: "mark" });
+                   performance.mark("first");"#,
+            )
+            .unwrap();
+        runtime.run_jobs().unwrap();
+        runtime.eval("performance.mark('second')").unwrap();
+        runtime.run_jobs().unwrap();
+        assert_eq!(
+            runtime
+                .eval("goodObserverCalls")
+                .unwrap()
+                .as_number()
+                .unwrap(),
+            2.0
+        );
+    }
+
+    #[test]
     fn match_media_evaluates_current_viewport() {
         let doc = NodeHandle::document();
         let mut runtime = JsRuntime::with_document(doc).unwrap();
