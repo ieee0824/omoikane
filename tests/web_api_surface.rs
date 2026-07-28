@@ -112,6 +112,16 @@ fn run_probe(runtime: &mut JsRuntime, feature: &Feature) -> ProbeResult {
     }
 
     if let Some(expected) = feature.expected_navigation_requests {
+        if let Err(error) = runtime.run_until_idle() {
+            return ProbeResult {
+                id: feature.id.clone(),
+                area: feature.area.clone(),
+                description: feature.description.clone(),
+                baseline_supported: feature.baseline_supported,
+                status: ProbeStatus::Error,
+                error: Some(format!("event loop: {error}")),
+            };
+        }
         let actual = runtime.take_navigation_requests().len();
         if actual != expected {
             return ProbeResult {

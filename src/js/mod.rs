@@ -23,8 +23,10 @@ use crate::http::{Client, HttpRequest, Method, default_user_agent};
 use crate::layout::{InlineFragmentContent, LayoutBox, Rect, edge_sizes};
 
 mod storage;
+mod event_loop;
 pub use storage::StorageManager;
 use storage::StorageOrigin;
+use event_loop::{EventLoop, Task};
 
 thread_local! {
     static ACTIVE_HOST_STATE: RefCell<Option<Rc<RefCell<HostState>>>> = const { RefCell::new(None) };
@@ -211,121 +213,12 @@ impl TimerPayload {
     }
 }
 
-#[derive(Debug, Clone)]
-struct TimerTask {
-    id: u64,
-    payload: TimerPayload,
-    next_run_at: u64,
-    interval_ms: u64,
-    repeat: bool,
-}
-
-#[derive(Debug, Default)]
-struct EventLoopState {
-    next_timer_id: u64,
-    now_ms: u64,
-    macrotasks: VecDeque<TimerPayload>,
-    timers: Vec<TimerTask>,
-    next_animation_frame_id: u64,
-    animation_frame_order: Vec<u64>,
-    animation_frame_callbacks: HashMap<u64, JsValue>,
-}
-
-impl EventLoopState {
-    fn schedule_timer(&mut self, payload: TimerPayload, delay_ms: u64, repeat: bool) -> u64 {
-        let id = self.next_timer_id;
-        self.next_timer_id += 1;
-        self.timers.push(TimerTask {
-            id,
-            payload,
-            next_run_at: self.now_ms.saturating_add(delay_ms),
-            interval_ms: delay_ms,
-            repeat,
-        });
-        id
-    }
-
-    fn clear_timer(&mut self, id: u64) {
-        self.timers.retain(|timer| timer.id != id);
-    }
-
-    fn advance(&mut self, elapsed_ms: u64) {
-        self.now_ms = self.now_ms.saturating_add(elapsed_ms);
-
-        // Collect every timer that is now due, remembering its original fire
-        // time and id so we can enqueue them in fire-time order (ties broken by
-        // registration order, since ids increase monotonically).
-        let mut ready: Vec<(u64, u64, TimerPayload)> = Vec::new();
-        for timer in &mut self.timers {
-            if timer.next_run_at <= self.now_ms {
-                ready.push((timer.next_run_at, timer.id, timer.payload.clone()));
-                if timer.repeat {
-                    timer.next_run_at = self.now_ms.saturating_add(timer.interval_ms);
-                }
-            }
-        }
-
-        ready.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
-
-        self.timers
-            .retain(|timer| timer.repeat || timer.next_run_at > self.now_ms);
-
-        for (_, _, payload) in ready {
-            self.macrotasks.push_back(payload);
-        }
-    }
-
-    fn drain_macrotasks(&mut self) -> Vec<TimerPayload> {
-        self.macrotasks.drain(..).collect()
-    }
-
-    fn has_pending_timers(&self) -> bool {
-        !self.timers.is_empty() || !self.macrotasks.is_empty()
-    }
-
-    fn schedule_animation_frame(&mut self, callback: JsValue) -> u64 {
-        self.next_animation_frame_id = self.next_animation_frame_id.saturating_add(1);
-        let id = self.next_animation_frame_id;
-        self.animation_frame_order.push(id);
-        self.animation_frame_callbacks.insert(id, callback);
-        id
-    }
-
-    fn cancel_animation_frame(&mut self, id: u64) {
-        // Keep the registration-order vector compacting-free here. A frame
-        // snapshots that vector once, then skips ids whose callback was
-        // removed. This also lets an earlier callback cancel a later callback
-        // after the frame has already started.
-        self.animation_frame_callbacks.remove(&id);
-    }
-
-    fn begin_animation_frame(&mut self, elapsed_ms: u64) -> (f64, Vec<u64>) {
-        self.advance(elapsed_ms);
-        (
-            self.now_ms as f64,
-            std::mem::take(&mut self.animation_frame_order),
-        )
-    }
-
-    fn take_animation_frame_callback(&mut self, id: u64) -> Option<JsValue> {
-        self.animation_frame_callbacks.remove(&id)
-    }
-
-    fn has_pending_animation_frames(&self) -> bool {
-        !self.animation_frame_order.is_empty()
-    }
-
-    fn rendering_time_ms(&self) -> f64 {
-        self.now_ms as f64
-    }
-}
-
 struct HostState {
     /// Monotonic clock origin used by `performance.now()` for this global.
     performance_start: std::time::Instant,
     /// Unix epoch milliseconds corresponding to `performance_start`.
     performance_time_origin: f64,
-    event_loop: EventLoopState,
+    event_loop: EventLoop,
     document: NodeHandle,
     nodes: HashMap<usize, NodeHandle>,
     console_logs: Vec<String>,
@@ -490,7 +383,7 @@ impl HostState {
         let mut state = Self {
             performance_start,
             performance_time_origin,
-            event_loop: EventLoopState::default(),
+            event_loop: EventLoop::default(),
             document: document.clone(),
             nodes: HashMap::new(),
             console_logs: Vec::new(),
@@ -541,12 +434,9 @@ impl HostState {
                         .attributes()
                         .is_some_and(|attrs| attrs.contains_key("data")));
             if is_resource && state.pending_resource_loads.insert(node.identity()) {
-                state
-                    .event_loop
-                    .macrotasks
-                    .push_back(TimerPayload::ResourceLoad {
-                        node_id: node.identity(),
-                    });
+                state.event_loop.enqueue_timer(TimerPayload::ResourceLoad {
+                    node_id: node.identity(),
+                });
             }
             for child in node.child_nodes() {
                 visit(state, &child, include_scripts);
@@ -593,11 +483,9 @@ impl HostState {
             return;
         }
         if self.pending_resource_loads.insert(node.identity()) {
-            self.event_loop
-                .macrotasks
-                .push_back(TimerPayload::ResourceLoad {
-                    node_id: node.identity(),
-                });
+            self.event_loop.enqueue_timer(TimerPayload::ResourceLoad {
+                node_id: node.identity(),
+            });
         }
     }
 
@@ -1553,19 +1441,20 @@ impl JsRuntime {
     ///
     /// Propagates the first error thrown by a timer callback or source string.
     pub fn run_until_idle(&mut self) -> JsResult<()> {
+        // An embedder call may have completed a script task and left promise
+        // jobs pending. Its checkpoint can itself enqueue host tasks.
+        self.run_jobs()?;
         loop {
-            let tasks = self.host_state.borrow_mut().event_loop.drain_macrotasks();
-            if tasks.is_empty() {
+            let task = { self.host_state.borrow_mut().event_loop.pop_task() };
+            let Some((_, task)) = task else {
                 break;
-            }
-
-            for task in tasks {
-                self.run_timer_payload(task)?;
-                self.run_jobs()?;
-            }
+            };
+            self.run_task(task)?;
+            // HTML performs a microtask checkpoint after every task, including
+            // host-only navigation tasks that do not directly invoke script.
+            self.run_jobs()?;
         }
-
-        self.run_jobs()
+        Ok(())
     }
 
     /// Returns true if any timers are still scheduled (pending or repeating).
@@ -1593,6 +1482,7 @@ impl JsRuntime {
     /// next explicit call; [`run_jobs`](Self::run_jobs) alone never invokes
     /// animation-frame callbacks.
     pub fn run_animation_frame(&mut self, elapsed_ms: u64) -> JsResult<usize> {
+        self.host_state.borrow_mut().event_loop.advance(elapsed_ms);
         self.run_until_idle()?;
         if self.has_pending_scroll_steps() {
             self.flush_pending_scroll_events()?;
@@ -1602,7 +1492,7 @@ impl JsRuntime {
             .host_state
             .borrow_mut()
             .event_loop
-            .begin_animation_frame(elapsed_ms);
+            .begin_animation_frame();
         let mut callbacks_run = 0;
         let mut first_error = None;
 
@@ -1653,6 +1543,10 @@ impl JsRuntime {
         // callbacks and their microtask checkpoint. This also queues transition
         // events without requiring script to force a computed-style read.
         self.update_css_transitions()?;
+        // Continue the event-loop iteration for host tasks queued by rAF or
+        // rendering callbacks (notably navigation). A newly requested rAF is
+        // still retained for the next rendering opportunity.
+        self.run_until_idle()?;
         Ok(callbacks_run)
     }
 
@@ -1749,22 +1643,23 @@ impl JsRuntime {
             advanced = advanced.saturating_add(step);
 
             loop {
-                let tasks = self.host_state.borrow_mut().event_loop.drain_macrotasks();
-                if tasks.is_empty() {
+                let Some((_, task)) = self.host_state.borrow_mut().event_loop.pop_task() else {
+                    break;
+                };
+                if tasks_run >= max_tasks {
                     break;
                 }
-                let mut hit_cap = false;
-                for task in tasks {
-                    if tasks_run >= max_tasks {
-                        hit_cap = true;
-                        break;
-                    }
+                let is_timer = matches!(task, Task::Timer(_));
+                {
                     // Swallow per-task JS errors: a single failing timer must
                     // not abort the whole pump during rendering. Diagnostics
                     // remain available on demand for complex app bootstraps.
-                    let task_kind = task.kind();
+                    let task_kind = match &task {
+                        Task::Timer(payload) => payload.kind(),
+                        Task::Navigation(_) => "navigation",
+                    };
                     let callback_start = std::time::Instant::now();
-                    let callback_result = self.run_timer_payload(task);
+                    let callback_result = self.run_task(task);
                     let callback_elapsed = callback_start.elapsed();
                     if let Err(error) = callback_result
                         && std::env::var_os("OMOIKANE_LOG_SCRIPTS").is_some()
@@ -1788,10 +1683,9 @@ impl JsRuntime {
                             jobs_elapsed.as_secs_f64() * 1_000.0,
                         );
                     }
-                    tasks_run += 1;
-                }
-                if hit_cap {
-                    break;
+                    if is_timer {
+                        tasks_run += 1;
+                    }
                 }
             }
 
@@ -1812,6 +1706,16 @@ impl JsRuntime {
     fn update_css_transitions(&mut self) -> JsResult<()> {
         self.eval("__omoikane_sample_css_transitions()")?;
         self.run_jobs()
+    }
+
+    fn run_task(&mut self, task: Task) -> JsResult<()> {
+        match task {
+            Task::Timer(payload) => self.run_timer_payload(payload),
+            Task::Navigation(request) => {
+                self.host_state.borrow_mut().navigation_requests.push_back(request);
+                Ok(())
+            }
+        }
     }
 
     /// Executes a single timer payload: evaluates a source string, or invokes a
@@ -6067,7 +5971,7 @@ fn schedule_navigation_native(
         }
     };
     with_host_state(|state| {
-        state.borrow_mut().navigation_requests.push_back(request);
+        state.borrow_mut().event_loop.enqueue_navigation(request);
         Ok(JsValue::undefined())
     })
 }
@@ -6852,6 +6756,7 @@ mod tests {
             .unwrap()
             .as_boolean()
             .unwrap());
+        runtime.run_until_idle().unwrap();
         assert_eq!(
             runtime.take_navigation_requests(),
             vec![
@@ -6897,6 +6802,7 @@ mod tests {
                    document.location = "/document";"#,
             )
             .unwrap();
+        runtime.run_until_idle().unwrap();
 
         assert_eq!(
             runtime.take_navigation_requests(),
@@ -13403,6 +13309,70 @@ mod tests {
                 .unwrap()
                 .to_std_string_escaped(),
             "timer,microtask,animation-frame"
+        );
+    }
+
+    #[test]
+    fn every_timer_task_gets_a_microtask_checkpoint() {
+        let mut runtime = JsRuntime::new().unwrap();
+        runtime
+            .eval(
+                r#"globalThis.eventLoopOrder = [];
+                   setTimeout(() => {
+                     eventLoopOrder.push("timer-1");
+                     Promise.resolve().then(() => eventLoopOrder.push("microtask-1"));
+                   }, 0);
+                   setTimeout(() => eventLoopOrder.push("timer-2"), 0);"#,
+            )
+            .unwrap();
+
+        runtime.tick(0).unwrap();
+        assert_eq!(
+            eval_str(&mut runtime, "eventLoopOrder.join(',')"),
+            "timer-1,microtask-1,timer-2"
+        );
+    }
+
+    #[test]
+    fn navigation_becomes_ready_after_earlier_task_microtasks() {
+        let mut runtime = JsRuntime::new().unwrap();
+        runtime
+            .eval(
+                r#"globalThis.eventLoopOrder = [];
+                   setTimeout(() => {
+                     eventLoopOrder.push("timer");
+                     Promise.resolve().then(() => eventLoopOrder.push("microtask"));
+                     location.assign("/next");
+                   }, 0);"#,
+            )
+            .unwrap();
+
+        assert!(runtime.take_navigation_requests().is_empty());
+        runtime.tick(0).unwrap();
+        assert_eq!(eval_str(&mut runtime, "eventLoopOrder.join(',')"), "timer,microtask");
+        assert_eq!(
+            runtime.take_navigation_requests(),
+            vec![NavigationRequest::Navigate {
+                url: "http://localhost/next".into(),
+                replace: false,
+            }]
+        );
+    }
+
+    #[test]
+    fn microtask_can_enqueue_a_navigation_task_in_the_same_pump() {
+        let mut runtime = JsRuntime::new().unwrap();
+        runtime
+            .eval("Promise.resolve().then(() => location.assign('/from-microtask'))")
+            .unwrap();
+
+        runtime.run_until_idle().unwrap();
+        assert_eq!(
+            runtime.take_navigation_requests(),
+            vec![NavigationRequest::Navigate {
+                url: "http://localhost/from-microtask".into(),
+                replace: false,
+            }]
         );
     }
 
