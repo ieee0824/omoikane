@@ -4811,15 +4811,26 @@ fn body_bytes_argument(value: Option<&JsValue>, context: &mut Context) -> JsResu
             .buffer(context)?
             .as_object()
             .and_then(|buffer| JsArrayBuffer::from_object(buffer.clone()).ok())
-            .and_then(|buffer| {
-                buffer
-                    .data()
-                    .and_then(|data| data.get(offset..offset + length).map(<[u8]>::to_vec))
-            })
             .ok_or_else(|| {
-                JsError::from(JsNativeError::typ().with_message("request body buffer is detached"))
+                JsError::from(
+                    JsNativeError::typ().with_message("request body is not backed by an ArrayBuffer"),
+                )
             })?;
-        return Ok(Some(buffer));
+        let data = buffer.data().ok_or_else(|| {
+            JsError::from(JsNativeError::typ().with_message("request body buffer is detached"))
+        })?;
+        // Two `get`s rather than an `offset..offset + length` range: the sum
+        // cannot overflow, and each failure keeps its own diagnosis.
+        let bytes = data
+            .get(offset..)
+            .and_then(|tail| tail.get(..length))
+            .ok_or_else(|| {
+                JsError::from(
+                    JsNativeError::typ().with_message("request body view is out of bounds"),
+                )
+            })?
+            .to_vec();
+        return Ok(Some(bytes));
     }
     Ok(Some(
         value
