@@ -1190,7 +1190,7 @@ fn layout_element(
     // paint their image payload. Previously only inline formatting collected
     // image fragments, so `display: block` SVGs (a common Tailwind reset) had
     // a box but rendered none of their graphics.
-    if matches!(
+    if !is_out_of_flow_positioned(&style) && matches!(
         node.tag_name().as_deref(),
         Some("img" | "picture" | "video" | "svg" | "object")
     ) {
