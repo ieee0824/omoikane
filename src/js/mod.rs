@@ -705,6 +705,16 @@ impl HostState {
         }
     }
 
+    /// Drops cached layout for a live main-document node without touching style caches.
+    fn invalidate_layout_for_node(&mut self, node: &NodeHandle) {
+        if document_root_for_node(node)
+            .is_some_and(|document| document.identity() == self.document.identity())
+        {
+            self.capture_scroll_offsets_before_layout();
+            self.layout_root = None;
+        }
+    }
+
     /// Marks the document that `node` currently lives in as stale.
     ///
     /// A detached node cannot affect a live document's style or layout. Its
@@ -4713,7 +4723,7 @@ fn set_text_control_state_native(
             .get_node(node_id)
             .ok_or_else(|| JsError::from(JsNativeError::error().with_message("node not found")))?;
         node.set_text_control_state(value, selection_start, selection_end, focused);
-        state.borrow_mut().invalidate_style_cache_for_node(&node);
+        state.borrow_mut().invalidate_layout_for_node(&node);
         Ok(JsValue::undefined())
     })
 }
@@ -15173,6 +15183,29 @@ mod tests {
             .unwrap()
             .as_boolean()
             .unwrap());
+    }
+
+    #[test]
+    fn text_control_selection_invalidates_layout_without_resampling_styles() {
+        let mut runtime = runtime_from_html(
+            r#"<html><head><style>input { width: 120px; }</style></head><body><input id="field" value="abc"></body></html>"#,
+        );
+        runtime
+            .eval("globalThis.field = document.getElementById('field'); document.body.offsetWidth")
+            .unwrap();
+        let layout_generation = runtime.host_state.borrow().layout_generation;
+        let resolver_generation = runtime.host_state.borrow().style_resolver_generation;
+
+        runtime
+            .eval("field.focus(); field.setSelectionRange(1, 2); document.body.offsetWidth")
+            .unwrap();
+
+        assert!(runtime.host_state.borrow().layout_generation > layout_generation);
+        assert_eq!(
+            runtime.host_state.borrow().style_resolver_generation,
+            resolver_generation,
+            "caret and selection changes must reuse the existing style resolver"
+        );
     }
 
     #[test]

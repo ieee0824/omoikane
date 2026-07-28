@@ -282,6 +282,7 @@ pub(crate) fn paint_text_with_registry(
                         width: (content_rect.width - x_offset).max(0.0),
                         height: fragment.metrics.font_size,
                     };
+                    let mut caret_x = None;
                     if let Some(editing) = editing.filter(|state| state.focused) {
                         let before = text_prefix_by_utf16_offset(value, editing.selection_start);
                         let selected = text_prefix_by_utf16_offset(value, editing.selection_end);
@@ -311,11 +312,7 @@ pub(crate) fn paint_text_with_registry(
                                 clip,
                             );
                         } else {
-                            canvas.fill_rect_clipped(
-                                Rect { x: start_x, y: text_rect.y, width: 1.0, height: text_rect.height },
-                                color,
-                                clip,
-                            );
+                            caret_x = Some(start_x);
                         }
                     }
                     if !value.is_empty() {
@@ -342,6 +339,13 @@ pub(crate) fn paint_text_with_registry(
                                 fragment.metrics.letter_spacing,
                             );
                         }
+                    }
+                    if let Some(x) = caret_x {
+                        canvas.fill_rect_clipped(
+                            Rect { x, y: text_rect.y, width: 1.0, height: text_rect.height },
+                            color,
+                            clip,
+                        );
                     }
                 }
                 InlineFragmentContent::IconFormControl(style, image, width, height) => {
