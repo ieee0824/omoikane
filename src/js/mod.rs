@@ -22,6 +22,10 @@ use crate::dom::{Node, NodeHandle, NodeType, ShadowRootMode, is_actually_disable
 use crate::http::{Client, HttpRequest, Method, default_user_agent};
 use crate::layout::{LayoutBox, Rect};
 
+mod storage;
+pub use storage::StorageManager;
+use storage::StorageOrigin;
+
 thread_local! {
     static ACTIVE_HOST_STATE: RefCell<Option<Rc<RefCell<HostState>>>> = const { RefCell::new(None) };
 }
@@ -383,6 +387,9 @@ struct HostState {
     /// move within one connected document from producing duplicate events.
     pending_resource_loads: HashSet<usize>,
     navigation_requests: VecDeque<NavigationRequest>,
+    storage_manager: StorageManager,
+    storage_session_id: u64,
+    document_origins: HashMap<usize, Option<StorageOrigin>>,
 }
 
 /// A loaded sub-browsing-context document owned by an `<iframe>` element.
@@ -454,7 +461,12 @@ fn sanitize_viewport_dimension(dim: f32) -> f32 {
 }
 
 impl HostState {
-    fn new(document: NodeHandle, location_href: String) -> Self {
+    fn new(
+        document: NodeHandle,
+        location_href: String,
+        storage_manager: StorageManager,
+        storage_session_id: u64,
+    ) -> Self {
         // Seed the main document's style entry immediately so its identity is a
         // known key from the start; iframe sub-document entries are created when
         // their content document is first loaded (see `iframe_content_document`).
@@ -473,6 +485,8 @@ impl HostState {
             .unwrap_or_default()
             .as_secs_f64()
             * 1_000.0;
+        let mut document_origins = HashMap::new();
+        document_origins.insert(document.identity(), StorageOrigin::from_url(&location_href));
         let mut state = Self {
             performance_start,
             performance_time_origin,
@@ -503,6 +517,9 @@ impl HostState {
             iframe_documents: HashMap::new(),
             pending_resource_loads: HashSet::new(),
             navigation_requests: VecDeque::new(),
+            storage_manager,
+            storage_session_id,
+            document_origins,
         };
         state.register_tree(&document);
         state
@@ -627,11 +644,25 @@ impl HostState {
         // `document_styles` entries (tracked in issue 049).
         if let Some(previous) = self.iframe_documents.remove(&iframe_id) {
             self.document_styles.remove(&previous.document.identity());
+            self.document_origins.remove(&previous.document.identity());
             self.unregister_tree(&previous.document);
         }
 
         let document = self.load_iframe_document(&src);
+        let origin = if src.is_empty() || src.eq_ignore_ascii_case("about:blank") {
+            let owner_document = owner_document_for_node(iframe);
+            self.document_origins
+                .get(&owner_document.as_ref().map_or(self.document.identity(), NodeHandle::identity))
+                .cloned()
+                .flatten()
+        } else {
+            match resolve_resource_ref(&src, self.base_url.as_ref()) {
+                Some(ResolvedResource::Url(url)) => StorageOrigin::from_url(&url),
+                _ => None,
+            }
+        };
         self.register_tree(&document);
+        self.document_origins.insert(document.identity(), origin);
         // Seed a dirty style cache entry for the freshly loaded sub-document so
         // its resolver is built from its own `<style>` rules on first query.
         self.document_styles.insert(
@@ -1173,7 +1204,30 @@ impl JsRuntime {
     /// `location.href`, `document.URL`, and relative resource reflection never
     /// temporarily expose the default localhost URL for a navigated Document.
     pub fn with_document_and_url(document: NodeHandle, url: &str) -> JsResult<Self> {
-        Self::with_document_sandbox_and_url(document, SandboxConfig::default(), url)
+        let storage = StorageManager::new();
+        let session_id = storage.create_session();
+        Self::with_document_sandbox_url_and_storage(
+            document,
+            SandboxConfig::default(),
+            url,
+            storage,
+            session_id,
+        )
+    }
+
+    pub fn with_document_url_and_storage(
+        document: NodeHandle,
+        url: &str,
+        storage: StorageManager,
+        session_id: u64,
+    ) -> JsResult<Self> {
+        Self::with_document_sandbox_url_and_storage(
+            document,
+            SandboxConfig::default(),
+            url,
+            storage,
+            session_id,
+        )
     }
 
     /// Creates a JavaScript runtime with custom sandbox configuration.
@@ -1189,9 +1243,23 @@ impl JsRuntime {
         sandbox: SandboxConfig,
         url: &str,
     ) -> JsResult<Self> {
+        let storage = StorageManager::new();
+        let session_id = storage.create_session();
+        Self::with_document_sandbox_url_and_storage(document, sandbox, url, storage, session_id)
+    }
+
+    fn with_document_sandbox_url_and_storage(
+        document: NodeHandle,
+        sandbox: SandboxConfig,
+        url: &str,
+        storage_manager: StorageManager,
+        storage_session_id: u64,
+    ) -> JsResult<Self> {
         let host_state = Rc::new(RefCell::new(HostState::new(
             document.clone(),
             url.to_string(),
+            storage_manager,
+            storage_session_id,
         )));
         let mut context = Context::builder()
             .module_loader(Rc::new(HttpModuleLoader::default()))
@@ -2375,6 +2443,41 @@ fn register_host_bindings(
             NativeFunction::from_copy_closure(performance_now_native),
         ),
         (
+            js_string!("__omoikane_storage_origin"),
+            1,
+            NativeFunction::from_copy_closure(storage_origin_native),
+        ),
+        (
+            js_string!("__omoikane_storage_length"),
+            2,
+            NativeFunction::from_copy_closure(storage_length_native),
+        ),
+        (
+            js_string!("__omoikane_storage_key"),
+            3,
+            NativeFunction::from_copy_closure(storage_key_native),
+        ),
+        (
+            js_string!("__omoikane_storage_get"),
+            3,
+            NativeFunction::from_copy_closure(storage_get_native),
+        ),
+        (
+            js_string!("__omoikane_storage_set"),
+            4,
+            NativeFunction::from_copy_closure(storage_set_native),
+        ),
+        (
+            js_string!("__omoikane_storage_remove"),
+            3,
+            NativeFunction::from_copy_closure(storage_remove_native),
+        ),
+        (
+            js_string!("__omoikane_storage_clear"),
+            2,
+            NativeFunction::from_copy_closure(storage_clear_native),
+        ),
+        (
             js_string!("__omoikane_query_selector"),
             2,
             NativeFunction::from_copy_closure(query_selector_native),
@@ -2831,6 +2934,125 @@ fn performance_now_native(
             state.borrow().performance_start.elapsed().as_secs_f64() * 1_000.0,
         ))
     })
+}
+
+fn storage_arguments(
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<(bool, usize, StorageManager, u64, StorageOrigin)> {
+    let local = args
+        .first()
+        .cloned()
+        .unwrap_or_default()
+        .to_string(context)?
+        .to_std_string_escaped()
+        == "local";
+    let document_id = parse_node_id(args.get(1), context)?;
+    with_host_state(|state| {
+        let state = state.borrow();
+        let origin = state
+            .document_origins
+            .get(&document_id)
+            .cloned()
+            .flatten()
+            .ok_or_else(|| JsError::from(JsNativeError::error().with_message("opaque origin")))?;
+        Ok((
+            local,
+            document_id,
+            state.storage_manager.clone(),
+            state.storage_session_id,
+            origin,
+        ))
+    })
+}
+
+fn storage_origin_native(
+    _this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let document_id = parse_node_id(args.first(), context)?;
+    with_host_state(|state| {
+        Ok(state
+            .borrow()
+            .document_origins
+            .get(&document_id)
+            .cloned()
+            .flatten()
+            .map(|origin| JsValue::from(js_string!(origin.serialize())))
+            .unwrap_or_else(JsValue::null))
+    })
+}
+
+fn storage_length_native(
+    _this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let (local, _, manager, session, origin) = storage_arguments(args, context)?;
+    Ok(JsValue::from(manager.length(session, &origin, local) as f64))
+}
+
+fn storage_key_native(
+    _this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let (local, _, manager, session, origin) = storage_arguments(args, context)?;
+    let index = args.get(2).cloned().unwrap_or_default().to_u32(context)? as usize;
+    Ok(manager
+        .key(session, &origin, local, index)
+        .map(|key| JsValue::from(js_string!(key)))
+        .unwrap_or_else(JsValue::null))
+}
+
+fn storage_get_native(
+    _this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let (local, _, manager, session, origin) = storage_arguments(args, context)?;
+    let key = args.get(2).cloned().unwrap_or_default().to_string(context)?.to_std_string_escaped();
+    Ok(manager
+        .get(session, &origin, local, &key)
+        .map(|value| JsValue::from(js_string!(value)))
+        .unwrap_or_else(JsValue::null))
+}
+
+fn storage_set_native(
+    _this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let (local, _, manager, session, origin) = storage_arguments(args, context)?;
+    let key = args.get(2).cloned().unwrap_or_default().to_string(context)?.to_std_string_escaped();
+    let value = args.get(3).cloned().unwrap_or_default().to_string(context)?.to_std_string_escaped();
+    Ok(manager
+        .set(session, &origin, local, key, value)
+        .map(|old| JsValue::from(js_string!(old)))
+        .unwrap_or_else(JsValue::null))
+}
+
+fn storage_remove_native(
+    _this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let (local, _, manager, session, origin) = storage_arguments(args, context)?;
+    let key = args.get(2).cloned().unwrap_or_default().to_string(context)?.to_std_string_escaped();
+    Ok(manager
+        .remove(session, &origin, local, &key)
+        .map(|old| JsValue::from(js_string!(old)))
+        .unwrap_or_else(JsValue::null))
+}
+
+fn storage_clear_native(
+    _this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let (local, _, manager, session, origin) = storage_arguments(args, context)?;
+    Ok(JsValue::from(manager.clear(session, &origin, local)))
 }
 
 // ---------------------------------------------------------------------------
@@ -11954,28 +12176,114 @@ mod tests {
     }
 
     #[test]
-    fn local_storage_stub() {
+    fn storage_methods_follow_webidl_string_conversion_and_ordering() {
         let doc = NodeHandle::document();
         let mut runtime = JsRuntime::with_document(doc).unwrap();
-        runtime
+        assert!(runtime
             .eval(
-                r#"
-            localStorage.setItem("key", "value");
-        "#,
+                r#"(() => {
+                    localStorage.clear();
+                    localStorage.setItem(1, null);
+                    localStorage.setItem(undefined, 42);
+                    localStorage.setItem("last", "value");
+                    const ordered = localStorage.length === 3 &&
+                        localStorage.key(0) === "1" &&
+                        localStorage.key(1) === "undefined" &&
+                        localStorage.key(2) === "last" &&
+                        localStorage.key(3) === null &&
+                        localStorage.getItem(1) === "null" &&
+                        localStorage.getItem() === "42";
+                    localStorage.setItem("1", "updated");
+                    const stable = localStorage.key(0) === "1";
+                    localStorage.removeItem(1);
+                    const removed = localStorage.getItem("1") === null &&
+                        localStorage.key(0) === "undefined";
+                    localStorage.clear();
+                    return ordered && stable && removed && localStorage.length === 0;
+                })()"#,
             )
-            .unwrap();
-
-        let result = runtime
-            .eval("localStorage.getItem('key')")
             .unwrap()
-            .as_string()
-            .unwrap()
-            .to_std_string_escaped();
-        assert_eq!(result, "value");
+            .as_boolean()
+            .unwrap());
+    }
 
-        runtime.eval("localStorage.removeItem('key')").unwrap();
-        let removed = runtime.eval("localStorage.getItem('key')").unwrap();
-        assert!(removed.is_null(), "removed item should return null");
+    #[test]
+    fn storage_is_scoped_by_origin_and_top_level_session() {
+        let storage = StorageManager::new();
+        let first_session = storage.create_session();
+        let second_session = storage.create_session();
+        let mut first = JsRuntime::with_document_url_and_storage(
+            default_document(), "https://example.com/first", storage.clone(), first_session,
+        ).unwrap();
+        first.eval("localStorage.setItem('shared', 'local'); sessionStorage.setItem('shared', 'session-a')").unwrap();
+
+        let mut same_origin = JsRuntime::with_document_url_and_storage(
+            default_document(), "https://example.com:443/second", storage.clone(), first_session,
+        ).unwrap();
+        assert!(same_origin.eval("localStorage.getItem('shared') === 'local' && sessionStorage.getItem('shared') === 'session-a'").unwrap().as_boolean().unwrap());
+
+        let mut other_session = JsRuntime::with_document_url_and_storage(
+            default_document(), "https://example.com/third", storage.clone(), second_session,
+        ).unwrap();
+        assert!(other_session.eval("localStorage.getItem('shared') === 'local' && sessionStorage.getItem('shared') === null").unwrap().as_boolean().unwrap());
+
+        let mut other_origin = JsRuntime::with_document_url_and_storage(
+            default_document(), "https://other.example/", storage, first_session,
+        ).unwrap();
+        assert!(other_origin.eval("localStorage.getItem('shared') === null && sessionStorage.getItem('shared') === null").unwrap().as_boolean().unwrap());
+    }
+
+    #[test]
+    fn same_origin_iframe_shares_storage_and_receives_storage_event() {
+        let document = crate::html::TreeBuilder::parse(
+            "<html><body><iframe id='frame'></iframe></body></html>",
+        ).document();
+        let mut runtime = JsRuntime::with_document_and_url(document, "https://example.com/").unwrap();
+
+        assert!(runtime.eval(
+            r#"(() => {
+                const frame = document.querySelector('#frame');
+                const child = frame.contentWindow;
+                let observed = null;
+                child.addEventListener('storage', event => {
+                    observed = [event.key, event.oldValue, event.newValue,
+                        event.url, event.storageArea === child.localStorage].join('|');
+                });
+                localStorage.clear();
+                localStorage.setItem('shared', 'yes');
+                return child.localStorage.getItem('shared') === 'yes' &&
+                    observed === 'shared||yes|https://example.com/|true';
+            })()"#,
+        ).unwrap().as_boolean().unwrap());
+    }
+
+    #[test]
+    fn opaque_origin_storage_access_throws_security_error() {
+        let mut runtime = JsRuntime::with_document_and_url(default_document(), "about:blank").unwrap();
+        assert!(runtime.eval(
+            "(() => { try { return localStorage.length; } catch (error) { return error instanceof DOMException && error.name === 'SecurityError'; } })()",
+        ).unwrap().as_boolean().unwrap());
+    }
+
+    #[test]
+    fn nested_about_blank_iframe_inherits_its_owning_documents_opaque_origin() {
+        let document = crate::html::TreeBuilder::parse(
+            "<html><body><iframe id='outer' src='data:text/html,%3Chtml%3E%3Cbody%3E%3C/body%3E%3C/html%3E'></iframe></body></html>",
+        ).document();
+        let mut runtime = JsRuntime::with_document_and_url(document, "https://example.com/").unwrap();
+
+        assert!(runtime.eval(
+            r#"(() => {
+                const childDocument = document.querySelector('#outer').contentDocument;
+                const nested = childDocument.createElement('iframe');
+                childDocument.body.appendChild(nested);
+                try {
+                    return nested.contentWindow.localStorage.length;
+                } catch (error) {
+                    return error instanceof DOMException && error.name === 'SecurityError';
+                }
+            })()"#,
+        ).unwrap().as_boolean().unwrap());
     }
 
     #[test]
