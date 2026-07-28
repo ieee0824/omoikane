@@ -25,6 +25,7 @@
   // the global object's prototype, which could disturb Boa's global property
   // lookup and built-in prototype chain.
   const windowObjects = new WeakSet([globalThis]);
+  const browsingWindows = [globalThis];
   class Window {
     constructor() {
       throw new TypeError("Illegal constructor");
@@ -454,6 +455,18 @@
       this.lastEventId = init.lastEventId ?? "";
       this.source = init.source ?? null;
       this.ports = init.ports ?? [];
+    }
+  }
+
+  class StorageEvent extends Event {
+    constructor(type, init = {}) {
+      init = init ?? {};
+      super(type, init);
+      this.key = init.key === undefined ? null : init.key;
+      this.oldValue = init.oldValue === undefined ? null : init.oldValue;
+      this.newValue = init.newValue === undefined ? null : init.newValue;
+      this.url = String(init.url ?? "");
+      this.storageArea = init.storageArea ?? null;
     }
   }
 
@@ -4006,6 +4019,12 @@
           get customElements() {
             return registryForDocument(iframe.contentDocument);
           },
+          get localStorage() {
+            return storageForDocument("local", iframe.contentDocument, this);
+          },
+          get sessionStorage() {
+            return storageForDocument("session", iframe.contentDocument, this);
+          },
           frameElement: iframe,
           getComputedStyle: globalThis.getComputedStyle,
           addEventListener(type, listener, options) {
@@ -4019,6 +4038,7 @@
           },
         };
         windowObjects.add(this.__contentWindowFacade);
+        browsingWindows.push(this.__contentWindowFacade);
       }
       return this.__contentWindowFacade;
     }
@@ -5783,20 +5803,93 @@
   });
   globalThis.screen = { width: 1280, height: 720, availWidth: 1280, availHeight: 720, colorDepth: 24, pixelDepth: 24 };
 
-  // In-memory storage stubs
-  function createStorage() {
-    const store = new Map();
-    return {
-      getItem(key) { return store.has(key) ? store.get(key) : null; },
-      setItem(key, value) { store.set(key, String(value)); },
-      removeItem(key) { store.delete(key); },
-      clear() { store.clear(); },
-      key(index) { return [...store.keys()][index] ?? null; },
-      get length() { return store.size; },
-    };
+  // Origin-scoped Web Storage. The backing areas live in the browser host so
+  // localStorage survives Runtime replacement and sessionStorage follows the
+  // top-level browsing session. Wrappers remain document/window specific.
+  const documentStorage = new WeakMap();
+  function storageOrigin(doc) {
+    const origin = __omoikane_storage_origin(doc.__id);
+    if (origin === null) {
+      throw new DOMException("Storage is unavailable for an opaque origin.", "SecurityError");
+    }
+    return origin;
   }
-  globalThis.localStorage = createStorage();
-  globalThis.sessionStorage = createStorage();
+  function dispatchStorageChange(kind, sourceDocument, sourceWindow, key, oldValue, newValue) {
+    const origin = storageOrigin(sourceDocument);
+    for (const targetWindow of browsingWindows) {
+      if (targetWindow === sourceWindow) continue;
+      const targetDocument = targetWindow.document;
+      if (!targetDocument || __omoikane_storage_origin(targetDocument.__id) !== origin) continue;
+      const storageArea = storageForDocument(kind, targetDocument, targetWindow);
+      targetWindow.dispatchEvent(new StorageEvent("storage", {
+        key,
+        oldValue,
+        newValue,
+        url: sourceDocument.URL,
+        storageArea,
+      }));
+    }
+  }
+  class Storage {
+    constructor(kind, doc, ownerWindow) {
+      this.__kind = kind;
+      this.__document = doc;
+      this.__ownerWindow = ownerWindow;
+    }
+    get length() {
+      storageOrigin(this.__document);
+      return __omoikane_storage_length(this.__kind, this.__document.__id);
+    }
+    key(index) {
+      storageOrigin(this.__document);
+      return __omoikane_storage_key(this.__kind, this.__document.__id, Number(index) >>> 0);
+    }
+    getItem(key) {
+      storageOrigin(this.__document);
+      return __omoikane_storage_get(this.__kind, this.__document.__id, String(key));
+    }
+    setItem(key, value) {
+      storageOrigin(this.__document);
+      key = String(key);
+      value = String(value);
+      const oldValue = __omoikane_storage_set(this.__kind, this.__document.__id, key, value);
+      if (oldValue !== value) {
+        dispatchStorageChange(
+          this.__kind, this.__document, this.__ownerWindow, key, oldValue, value
+        );
+      }
+    }
+    removeItem(key) {
+      storageOrigin(this.__document);
+      key = String(key);
+      const oldValue = __omoikane_storage_remove(this.__kind, this.__document.__id, key);
+      if (oldValue !== null) {
+        dispatchStorageChange(
+          this.__kind, this.__document, this.__ownerWindow, key, oldValue, null
+        );
+      }
+    }
+    clear() {
+      storageOrigin(this.__document);
+      if (__omoikane_storage_clear(this.__kind, this.__document.__id)) {
+        dispatchStorageChange(
+          this.__kind, this.__document, this.__ownerWindow, null, null, null
+        );
+      }
+    }
+  }
+  function storageForDocument(kind, doc, ownerWindow) {
+    let areas = documentStorage.get(doc);
+    if (!areas) {
+      areas = {};
+      documentStorage.set(doc, areas);
+    }
+    return areas[kind] || (areas[kind] = new Storage(kind, doc, ownerWindow));
+  }
+  globalThis.Storage = Storage;
+  globalThis.StorageEvent = StorageEvent;
+  globalThis.localStorage = storageForDocument("local", document, globalThis);
+  globalThis.sessionStorage = storageForDocument("session", document, globalThis);
 
   const mutationObservers = [];
 

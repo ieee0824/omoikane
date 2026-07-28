@@ -11,7 +11,7 @@ use sha1::{Digest, Sha1};
 use crate::dom::{Node, NodeHandle, NodeType};
 use crate::html::{TreeBuilder, decode_html_response};
 use crate::http::Client;
-use crate::js::{JsRuntime, NavigationRequest};
+use crate::js::{JsRuntime, NavigationRequest, StorageManager};
 
 const WEBSOCKET_GUID: &str = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
 
@@ -530,6 +530,8 @@ pub(crate) struct SessionSettleTimings {
 #[derive(Debug)]
 pub struct CdpSession {
     runtime: JsRuntime,
+    storage_manager: StorageManager,
+    storage_session_id: u64,
     http_client: Client,
     current_url: String,
     last_html: String,
@@ -566,13 +568,19 @@ struct SessionHistoryEntry {
 impl CdpSession {
     /// Creates a new session with an empty `about:blank` document.
     pub fn new() -> Result<Self, String> {
-        let runtime = JsRuntime::with_document_and_url(
+        let storage_manager = StorageManager::new();
+        let storage_session_id = storage_manager.create_session();
+        let runtime = JsRuntime::with_document_url_and_storage(
             TreeBuilder::parse("<html><head></head><body></body></html>").document(),
             "about:blank",
+            storage_manager.clone(),
+            storage_session_id,
         )
         .map_err(|error| error.to_string())?;
         let mut session = Self {
             runtime,
+            storage_manager,
+            storage_session_id,
             http_client: Client::new(),
             current_url: "about:blank".to_string(),
             last_html: String::new(),
@@ -1187,8 +1195,13 @@ impl CdpSession {
         history_state_json: &str,
     ) -> Result<(), String> {
         let document = TreeBuilder::parse(html).document();
-        let mut runtime = JsRuntime::with_document_and_url(document, url)
-            .map_err(|error| error.to_string())?;
+        let mut runtime = JsRuntime::with_document_url_and_storage(
+            document,
+            url,
+            self.storage_manager.clone(),
+            self.storage_session_id,
+        )
+        .map_err(|error| error.to_string())?;
         runtime.set_user_agent(self.http_client.user_agent().to_string());
         Self::install_runtime_helpers_on(&mut runtime).map_err(js_error_message)?;
         runtime
@@ -1687,6 +1700,49 @@ mod tests {
                 .iter()
                 .any(|event| event.method == "Page.loadEventFired")
         );
+
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn web_storage_survives_same_origin_document_navigation() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            for _ in 0..2 {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut buffer = [0u8; 1024];
+                let _ = stream.read(&mut buffer).unwrap();
+                let body = "<html><body></body></html>";
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(), body
+                );
+                stream.write_all(response.as_bytes()).unwrap();
+            }
+        });
+
+        let origin = format!("http://127.0.0.1:{}", address.port());
+        let mut session = CdpSession::new().unwrap();
+        session
+            .dispatch("Page.navigate", json!({ "url": format!("{origin}/first") }))
+            .unwrap();
+        session
+            .dispatch(
+                "Runtime.evaluate",
+                json!({ "expression": "localStorage.setItem('local', 'kept'); sessionStorage.setItem('session', 'kept')" }),
+            )
+            .unwrap();
+        session
+            .dispatch("Page.navigate", json!({ "url": format!("{origin}/second") }))
+            .unwrap();
+        let result = session
+            .dispatch(
+                "Runtime.evaluate",
+                json!({ "expression": "localStorage.getItem('local') === 'kept' && sessionStorage.getItem('session') === 'kept'" }),
+            )
+            .unwrap();
+        assert_eq!(result["result"]["value"], true);
 
         server.join().unwrap();
     }
