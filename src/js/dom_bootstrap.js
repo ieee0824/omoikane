@@ -1908,7 +1908,7 @@
           offsetWidth: 0, offsetHeight: 0, offsetTop: 0, offsetLeft: 0,
           clientWidth: 0, clientHeight: 0, clientTop: 0, clientLeft: 0,
           scrollWidth: 0, scrollHeight: 0, scrollTop: 0, scrollLeft: 0,
-          hasBox: false,
+          hasBox: false, clientRects: [],
         };
       }
     }
@@ -1928,7 +1928,7 @@
       // which a zero-sized rect alone cannot.
       const m = this.__layoutMetrics();
       if (!m.hasBox) return [];
-      return [{
+      return m.clientRects || [{
         x: m.x, y: m.y, width: m.width, height: m.height,
         top: m.top, left: m.left, bottom: m.bottom, right: m.right,
       }];

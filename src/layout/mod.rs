@@ -1751,7 +1751,7 @@ fn clear_cursor_y_for_side(
 
 // ── Edge sizes / length resolution ──────────────────────────────────────────
 
-fn edge_sizes(style: &ComputedStyle, prefix: &str) -> EdgeSizes {
+pub(crate) fn edge_sizes(style: &ComputedStyle, prefix: &str) -> EdgeSizes {
     let shorthand_property = match prefix {
         "border" => "border-width",
         _ => prefix,
