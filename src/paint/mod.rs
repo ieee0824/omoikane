@@ -1366,6 +1366,11 @@ fn translate_layout_for_scroll(
     positioned_offset: (f32, f32),
 ) {
     let style = resolver.computed_style(&layout.node);
+    let offset = if is_absolute_for_paint(&style) {
+        positioned_offset
+    } else {
+        offset
+    };
     let (dx, dy) = if is_fixed_for_paint(&style) {
         (0.0, 0.0)
     } else {
@@ -1404,13 +1409,12 @@ fn translate_layout_for_scroll(
         positioned_offset
     };
     for child in &mut layout.children {
-        let child_style = resolver.computed_style(&child.node);
-        let child_offset = if is_absolute_for_paint(&child_style) {
-            positioned_offset
-        } else {
-            (content_dx, content_dy)
-        };
-        translate_layout_for_scroll(child, resolver, child_offset, positioned_offset);
+        translate_layout_for_scroll(
+            child,
+            resolver,
+            (content_dx, content_dy),
+            positioned_offset,
+        );
     }
 }
 

@@ -2999,6 +2999,11 @@ fn find_layout_box_with_scroll<'a>(
 ) -> Option<(&'a LayoutBox, AffineTransform, (f32, f32))> {
     let transform = ancestor_transform.multiply(root.transform);
     let style = resolver.computed_style(&root.node);
+    let scroll = if is_absolute_position_style(&style) {
+        positioned_scroll
+    } else {
+        scroll
+    };
     let scroll = if is_fixed_position_style(&style) {
         (0.0, 0.0)
     } else {
@@ -3015,12 +3020,6 @@ fn find_layout_box_with_scroll<'a>(
         positioned_scroll
     };
     for child in &root.children {
-        let child_style = resolver.computed_style(&child.node);
-        let child_scroll = if is_absolute_position_style(&child_style) {
-            positioned_scroll
-        } else {
-            child_scroll
-        };
         if let Some(found) = find_layout_box_with_scroll(
             child,
             node,
