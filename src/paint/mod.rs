@@ -224,6 +224,57 @@ impl Image {
     }
 }
 
+fn box_filter_sample(
+    image: &Image,
+    source_left: f32,
+    source_top: f32,
+    source_right: f32,
+    source_bottom: f32,
+) -> Color {
+    let x0 = source_left.floor().max(0.0) as u32;
+    let y0 = source_top.floor().max(0.0) as u32;
+    let x1 = source_right.ceil().min(image.width as f32) as u32;
+    let y1 = source_bottom.ceil().min(image.height as f32) as u32;
+    let mut total_weight = 0.0f64;
+    let mut alpha_sum = 0.0f64;
+    let mut red_sum = 0.0f64;
+    let mut green_sum = 0.0f64;
+    let mut blue_sum = 0.0f64;
+
+    for source_y in y0..y1 {
+        let y_weight = (source_bottom.min(source_y as f32 + 1.0)
+            - source_top.max(source_y as f32))
+        .max(0.0) as f64;
+        for source_x in x0..x1 {
+            let x_weight = (source_right.min(source_x as f32 + 1.0)
+                - source_left.max(source_x as f32))
+            .max(0.0) as f64;
+            let weight = x_weight * y_weight;
+            if weight == 0.0 {
+                continue;
+            }
+            let index = ((source_y * image.width + source_x) * 4) as usize;
+            let alpha = image.pixels[index + 3] as f64;
+            total_weight += weight;
+            alpha_sum += alpha * weight;
+            red_sum += image.pixels[index] as f64 * alpha * weight;
+            green_sum += image.pixels[index + 1] as f64 * alpha * weight;
+            blue_sum += image.pixels[index + 2] as f64 * alpha * weight;
+        }
+    }
+
+    if total_weight == 0.0 || alpha_sum == 0.0 {
+        return Color::rgba(0, 0, 0, 0);
+    }
+    let channel = |sum: f64| (sum / alpha_sum).round().clamp(0.0, 255.0) as u8;
+    Color::rgba(
+        channel(red_sum),
+        channel(green_sum),
+        channel(blue_sum),
+        (alpha_sum / total_weight).round().clamp(0.0, 255.0) as u8,
+    )
+}
+
 /// Errors returned by the paint module.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PaintError {
@@ -737,6 +788,10 @@ impl Canvas {
         let y0 = area.y.floor().max(0.0) as i32;
         let x1 = (area.x + area.width).ceil().min(self.width as f32) as i32;
         let y1 = (area.y + area.height).ceil().min(self.height as f32) as i32;
+        let shrink_x = destination.width < image.width as f32;
+        let shrink_y = destination.height < image.height as f32;
+        let source_per_dest_x = image.width as f32 / destination.width;
+        let source_per_dest_y = image.height as f32 / destination.height;
 
         for dest_y in y0..y1 {
             for dest_x in x0..x1 {
@@ -752,12 +807,47 @@ impl Canvas {
                     continue;
                 }
 
-                let source_index = ((source_y as u32 * image.width + source_x as u32) * 4) as usize;
-                let color = Color {
-                    r: image.pixels[source_index],
-                    g: image.pixels[source_index + 1],
-                    b: image.pixels[source_index + 2],
-                    a: image.pixels[source_index + 3],
+                let color = if shrink_x || shrink_y {
+                    let source_left = if shrink_x {
+                        ((dest_x as f32 - destination.x) * source_per_dest_x)
+                            .clamp(0.0, image.width as f32)
+                    } else {
+                        source_x as f32
+                    };
+                    let source_right = if shrink_x {
+                        (((dest_x + 1) as f32 - destination.x) * source_per_dest_x)
+                            .clamp(0.0, image.width as f32)
+                    } else {
+                        source_x as f32 + 1.0
+                    };
+                    let source_top = if shrink_y {
+                        ((dest_y as f32 - destination.y) * source_per_dest_y)
+                            .clamp(0.0, image.height as f32)
+                    } else {
+                        source_y as f32
+                    };
+                    let source_bottom = if shrink_y {
+                        (((dest_y + 1) as f32 - destination.y) * source_per_dest_y)
+                            .clamp(0.0, image.height as f32)
+                    } else {
+                        source_y as f32 + 1.0
+                    };
+                    box_filter_sample(
+                        image,
+                        source_left,
+                        source_top,
+                        source_right,
+                        source_bottom,
+                    )
+                } else {
+                    let source_index =
+                        ((source_y as u32 * image.width + source_x as u32) * 4) as usize;
+                    Color {
+                        r: image.pixels[source_index],
+                        g: image.pixels[source_index + 1],
+                        b: image.pixels[source_index + 2],
+                        a: image.pixels[source_index + 3],
+                    }
                 };
                 let dest_index = ((dest_y as u32 * self.width + dest_x as u32) * 4) as usize;
                 blend_pixel(&mut self.pixels[dest_index..dest_index + 4], color);

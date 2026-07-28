@@ -1393,6 +1393,89 @@ fn draws_images_with_alpha_compositing() {
 }
 
 #[test]
+fn shrinking_images_averages_the_covered_source_pixels() {
+    let image = Image::new(
+        2,
+        2,
+        vec![
+            255, 0, 0, 255, 0, 255, 0, 255,
+            0, 0, 255, 255, 255, 255, 255, 255,
+        ],
+    )
+    .unwrap();
+    let mut canvas = Canvas::new(1, 1);
+    canvas.draw_image_scaled_clipped(
+        &image,
+        Rect { x: 0.0, y: 0.0, width: 1.0, height: 1.0 },
+        None,
+    );
+
+    assert_eq!(canvas.pixel(0, 0), Some(Color::rgb(128, 128, 128)));
+}
+
+#[test]
+fn shrinking_images_weights_fractionally_covered_source_pixels() {
+    let image = Image::new(
+        3,
+        1,
+        vec![255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255],
+    )
+    .unwrap();
+    let mut canvas = Canvas::new(2, 1);
+    canvas.draw_image_scaled_clipped(
+        &image,
+        Rect { x: 0.0, y: 0.0, width: 2.0, height: 1.0 },
+        None,
+    );
+
+    assert_eq!(canvas.pixel(0, 0), Some(Color::rgb(170, 85, 0)));
+    assert_eq!(canvas.pixel(1, 0), Some(Color::rgb(0, 85, 170)));
+}
+
+#[test]
+fn shrinking_images_averages_in_premultiplied_alpha_space() {
+    let image = Image::new(2, 1, vec![255, 0, 0, 255, 0, 0, 255, 0]).unwrap();
+    let mut canvas = Canvas::new(1, 1);
+    canvas.draw_image_scaled_clipped(
+        &image,
+        Rect { x: 0.0, y: 0.0, width: 1.0, height: 1.0 },
+        None,
+    );
+
+    assert_eq!(canvas.pixel(0, 0), Some(Color::rgba(255, 0, 0, 128)));
+}
+
+#[test]
+fn expanding_images_keeps_nearest_neighbor_sampling() {
+    let image = Image::new(2, 1, vec![255, 0, 0, 255, 0, 0, 255, 255]).unwrap();
+    let mut canvas = Canvas::new(4, 1);
+    canvas.draw_image_scaled_clipped(
+        &image,
+        Rect { x: 0.0, y: 0.0, width: 4.0, height: 1.0 },
+        None,
+    );
+
+    assert_eq!(canvas.pixel(0, 0), Some(Color::rgb(255, 0, 0)));
+    assert_eq!(canvas.pixel(1, 0), Some(Color::rgb(255, 0, 0)));
+    assert_eq!(canvas.pixel(2, 0), Some(Color::rgb(0, 0, 255)));
+    assert_eq!(canvas.pixel(3, 0), Some(Color::rgb(0, 0, 255)));
+}
+
+#[test]
+fn one_to_one_image_drawing_is_bit_exact() {
+    let pixels = vec![1, 2, 3, 4, 250, 240, 230, 220];
+    let image = Image::new(2, 1, pixels.clone()).unwrap();
+    let mut canvas = Canvas::new(2, 1);
+    canvas.draw_image_scaled_clipped(
+        &image,
+        Rect { x: 0.0, y: 0.0, width: 2.0, height: 1.0 },
+        None,
+    );
+
+    assert_eq!(canvas.pixels(), pixels.as_slice());
+}
+
+#[test]
 fn parses_text_and_png_data_uris() {
     let text = parse_data_uri("data:,hello%20world").unwrap();
     assert_eq!(
