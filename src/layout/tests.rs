@@ -7208,6 +7208,50 @@ fn scroll_offset_does_not_change_layout_geometry() {
 }
 
 #[test]
+fn scrollable_overflow_includes_end_padding_after_overflowing_content() {
+    let (document, _html, body, card) = sample_tree();
+    let inner = NodeHandle::element("p");
+    card.append_child(inner.clone());
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "body { margin: 0; } \
+             div { display: block; width: 100px; height: 50px; padding: 7px; \
+                   border: 3px solid black; overflow: hidden; } \
+             p { display: block; width: 300px; height: 200px; margin: 0; }",
+        )
+        .unwrap(),
+    );
+    let _ = body;
+    let layout = layout_tree(
+        &document,
+        &mut resolver,
+        Rect { x: 0.0, y: 0.0, width: 500.0, height: 0.0 },
+    )
+    .unwrap();
+    let card_box = find_layout_box(&layout, &card).unwrap();
+
+    // start padding + child border box + end padding; the container border is
+    // deliberately excluded from the scrolling area.
+    assert_eq!(card_box.scrollable_overflow(), (314.0, 214.0));
+    assert_eq!(card_box.max_scroll_offset(), (200.0, 150.0));
+
+    // When descendants fit, the scrolling area remains exactly the padding box.
+    inner.set_attribute("style", "width: 50px; height: 20px; margin: 0;");
+    resolver.invalidate_style_cache_for_test();
+    let fitting = layout_tree(
+        &document,
+        &mut resolver,
+        Rect { x: 0.0, y: 0.0, width: 500.0, height: 0.0 },
+    )
+    .unwrap();
+    let fitting_card = find_layout_box(&fitting, &card).unwrap();
+    assert_eq!(fitting_card.scrollable_overflow(), (114.0, 64.0));
+    assert_eq!(fitting_card.max_scroll_offset(), (0.0, 0.0));
+}
+
+#[test]
 fn scroll_offset_is_clamped_to_the_scrollable_extent() {
     let (document, _html, body, card) = sample_tree();
     let inner = NodeHandle::element("p");
