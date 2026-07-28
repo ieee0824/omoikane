@@ -2983,20 +2983,28 @@ fn find_layout_box_with_transform<'a>(
 /// Finds `node`'s layout box together with the transform and the scroll offset
 /// that apply to it, for turning layout coordinates into client coordinates.
 ///
-/// `scroll` starts as the Window scroll offset and grows by the offset in effect
-/// for every scroll container on the way down. A `position: fixed` box drops the
-/// accumulated offset because it is anchored to the viewport; a scroll container
-/// inside such a box still scrolls its own content. This mirrors what
-/// [`crate::paint::apply_scroll_offsets`] does when painting.
+/// `scroll` starts as the Window scroll offset and grows through in-flow
+/// ancestors. Absolutely positioned boxes instead use `positioned_scroll`, the
+/// chain affecting their nearest positioned containing block. A `position:
+/// fixed` box drops the accumulated offset because it is anchored to the
+/// viewport; a scroll container inside it still scrolls its own content. This
+/// mirrors what [`crate::paint::apply_scroll_offsets`] does when painting.
 fn find_layout_box_with_scroll<'a>(
     root: &'a LayoutBox,
     node: &NodeHandle,
     resolver: &mut StyleResolver,
     ancestor_transform: AffineTransform,
     scroll: (f32, f32),
+    positioned_scroll: (f32, f32),
 ) -> Option<(&'a LayoutBox, AffineTransform, (f32, f32))> {
     let transform = ancestor_transform.multiply(root.transform);
-    let scroll = if is_fixed_position(resolver, &root.node) {
+    let style = resolver.computed_style(&root.node);
+    let scroll = if is_absolute_position_style(&style) {
+        positioned_scroll
+    } else {
+        scroll
+    };
+    let scroll = if is_fixed_position_style(&style) {
         (0.0, 0.0)
     } else {
         scroll
@@ -3006,9 +3014,20 @@ fn find_layout_box_with_scroll<'a>(
     }
     let (offset_x, offset_y) = root.scroll_offset();
     let child_scroll = (scroll.0 + offset_x, scroll.1 + offset_y);
+    let positioned_scroll = if establishes_positioned_containing_block_style(&style) {
+        child_scroll
+    } else {
+        positioned_scroll
+    };
     for child in &root.children {
-        if let Some(found) =
-            find_layout_box_with_scroll(child, node, resolver, transform, child_scroll)
+        if let Some(found) = find_layout_box_with_scroll(
+            child,
+            node,
+            resolver,
+            transform,
+            child_scroll,
+            positioned_scroll,
+        )
         {
             return Some(found);
         }
@@ -3016,11 +3035,27 @@ fn find_layout_box_with_scroll<'a>(
     None
 }
 
-/// Whether `node` is anchored to the viewport instead of to scrolled content.
-fn is_fixed_position(resolver: &mut StyleResolver, node: &NodeHandle) -> bool {
+fn is_fixed_position_style(style: &ComputedStyle) -> bool {
     matches!(
-        resolver.computed_style(node).get("position"),
+        style.get("position"),
         Some(ComputedValue::Keyword(keyword)) if keyword.eq_ignore_ascii_case("fixed")
+    )
+}
+
+fn is_absolute_position_style(style: &ComputedStyle) -> bool {
+    matches!(
+        style.get("position"),
+        Some(ComputedValue::Keyword(keyword)) if keyword.eq_ignore_ascii_case("absolute")
+    )
+}
+
+fn establishes_positioned_containing_block_style(style: &ComputedStyle) -> bool {
+    matches!(
+        style.get("position"),
+        Some(ComputedValue::Keyword(keyword))
+            if keyword.eq_ignore_ascii_case("relative")
+                || keyword.eq_ignore_ascii_case("absolute")
+                || keyword.eq_ignore_ascii_case("fixed")
     )
 }
 
@@ -3408,6 +3443,7 @@ fn layout_metrics_native(
                         &node,
                         resolver,
                         AffineTransform::identity(),
+                        window_scroll,
                         window_scroll,
                     ),
                     _ => find_layout_box_with_transform(root, &node, AffineTransform::identity())
@@ -19962,6 +19998,39 @@ mod tests {
                 "|0,0,0",
             )
         );
+    }
+
+    #[test]
+    fn absolute_client_rect_uses_positioned_containing_block_scroll_chain() {
+        let mut runtime = runtime_from_html(
+            r#"<html><head><style>
+                 * { margin: 0; padding: 0 }
+                 #outer { position: relative; width: 50px; height: 30px; overflow: hidden }
+                 #outer-flow { width: 100px; height: 1px }
+                 #inner { width: 20px; height: 20px; overflow: hidden }
+                 #inner-flow { width: 60px; height: 20px }
+                 #target { position: absolute; left: 30px; top: 5px; width: 10px; height: 10px }
+               </style></head><body><div id="outer"><div id="outer-flow"></div>
+                 <div id="inner"><div id="inner-flow"></div><div id="target"></div></div>
+               </div></body></html>"#,
+        );
+        runtime.set_viewport(100.0, 100.0);
+        let result = eval_str(
+            &mut runtime,
+            r#"(() => {
+                const outer = document.getElementById("outer");
+                const inner = document.getElementById("inner");
+                const target = document.getElementById("target");
+                const left = () => target.getBoundingClientRect().left;
+                const out = [left()];
+                inner.scrollLeft = 10;
+                out.push(left());
+                outer.scrollLeft = 10;
+                out.push(left());
+                return out.join(",");
+            })()"#,
+        );
+        assert_eq!(result, "30,30,20");
     }
 
     #[test]

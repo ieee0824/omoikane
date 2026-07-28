@@ -1340,10 +1340,11 @@ fn translate_layout_for_paint(layout: &mut LayoutBox, dx: f32, dy: f32) {
 /// and every element scroll offset, leaving the layout geometry the CSSOM
 /// reports untouched (callers pass a tree they own).
 ///
-/// Each box moves by the scroll offsets accumulated from its ancestors, while a
-/// scroll container's own inline content and children move by that plus the
-/// container's offset — so the container's border box stays put and its content
-/// slides underneath the clip its `overflow` already installs. A
+/// Each in-flow box moves by the scroll offsets accumulated from its ancestors,
+/// while an absolutely positioned box uses the chain that applies to its
+/// positioned containing block. A scroll container's own inline content and
+/// in-flow children move by its offset, so the border box stays put and its
+/// content slides underneath the clip its `overflow` already installs. A
 /// `position: fixed` box drops the accumulated offset, because it is anchored to
 /// the viewport; a scroll container inside it still scrolls its own content.
 pub(crate) fn apply_scroll_offsets(
@@ -1354,19 +1355,26 @@ pub(crate) fn apply_scroll_offsets(
     if window_scroll == (0.0, 0.0) && !crate::dom::any_element_scrolled() {
         return;
     }
-    translate_layout_for_scroll(layout, resolver, -window_scroll.0, -window_scroll.1);
+    let window_offset = (-window_scroll.0, -window_scroll.1);
+    translate_layout_for_scroll(layout, resolver, window_offset, window_offset);
 }
 
 fn translate_layout_for_scroll(
     layout: &mut LayoutBox,
     resolver: &mut StyleResolver,
-    dx: f32,
-    dy: f32,
+    offset: (f32, f32),
+    positioned_offset: (f32, f32),
 ) {
-    let (dx, dy) = if is_fixed_for_paint(&resolver.computed_style(&layout.node)) {
+    let style = resolver.computed_style(&layout.node);
+    let offset = if is_absolute_for_paint(&style) {
+        positioned_offset
+    } else {
+        offset
+    };
+    let (dx, dy) = if is_fixed_for_paint(&style) {
         (0.0, 0.0)
     } else {
-        (dx, dy)
+        offset
     };
     if (dx, dy) != (0.0, 0.0) {
         layout.dimensions.content.x += dx;
@@ -1395,9 +1403,36 @@ fn translate_layout_for_scroll(
             marker.y += content_dy;
         }
     }
+    let positioned_offset = if establishes_containing_block_for_paint(&style) {
+        (content_dx, content_dy)
+    } else {
+        positioned_offset
+    };
     for child in &mut layout.children {
-        translate_layout_for_scroll(child, resolver, content_dx, content_dy);
+        translate_layout_for_scroll(
+            child,
+            resolver,
+            (content_dx, content_dy),
+            positioned_offset,
+        );
     }
+}
+
+fn is_absolute_for_paint(style: &ComputedStyle) -> bool {
+    matches!(
+        style.get("position"),
+        Some(ComputedValue::Keyword(keyword)) if keyword.eq_ignore_ascii_case("absolute")
+    )
+}
+
+fn establishes_containing_block_for_paint(style: &ComputedStyle) -> bool {
+    matches!(
+        style.get("position"),
+        Some(ComputedValue::Keyword(keyword))
+            if keyword.eq_ignore_ascii_case("relative")
+                || keyword.eq_ignore_ascii_case("absolute")
+                || keyword.eq_ignore_ascii_case("fixed")
+    )
 }
 
 /// Whether a box is anchored to the viewport rather than to scrolled content.
