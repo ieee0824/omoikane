@@ -5814,6 +5814,12 @@
     const element = wrapNode(id);
     if (element) element.dispatchEvent(new Event("load", { bubbles: false }));
   };
+  // A resource that could not be fetched fires `error`, not `load`. Loaders that
+  // fall back when a script is unavailable listen for exactly this.
+  globalThis.__omoikane_dispatch_resource_error = function(id) {
+    const element = wrapNode(id);
+    if (element) element.dispatchEvent(new Event("error", { bubbles: false }));
+  };
   globalThis.__omoikane_dispatch_mouse_input = function(id, type, init, focusTarget) {
     const target = wrapNode(id) || document;
     const notCanceled = target.dispatchEvent(new MouseEvent(type, {

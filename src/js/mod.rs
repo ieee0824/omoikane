@@ -1920,9 +1920,21 @@ impl JsRuntime {
                             // `execute_document_scripts` treats a parsed script.
                             // Propagating instead would abort the event loop and,
                             // through it, the whole navigation.
-                            None => self.record_task_error(format!(
-                                "[dynamic script: {src}] failed to fetch"
-                            )),
+                            None => {
+                                // A script that never arrived did not load: it
+                                // fires `error` instead, so a loader waiting on
+                                // one of the two is not left with neither.
+                                self.record_task_error(format!(
+                                    "[dynamic script: {src}] failed to fetch"
+                                ));
+                                dispatch_load = false;
+                                let dispatched = self.eval(&format!(
+                                    "__omoikane_dispatch_resource_error({node_id})"
+                                ));
+                                self.record_error_from(&src, dispatched);
+                                let jobs = self.run_jobs();
+                                self.record_error_from(&src, jobs);
+                            }
                             Some(source) => {
                                 let marked = self
                                     .eval(&format!("__omoikane_set_current_script({node_id})"));
@@ -15331,18 +15343,30 @@ b</textarea></form>"#);
     }
 
     #[test]
-    fn unfetchable_dynamic_script_does_not_abort_the_event_loop() {
+    fn unfetchable_dynamic_script_fires_error_and_does_not_abort_the_event_loop() {
         let mut runtime = runtime_from_html("<html><head></head><body></body></html>");
         runtime
             .eval(
-                r#"const script = document.createElement("script");
+                r#"globalThis.loadFired = false;
+                   globalThis.errorFired = false;
+                   const script = document.createElement("script");
                    script.src = "data:text/javascript;base64,!!!not-base64!!!";
+                   script.addEventListener("load", () => globalThis.loadFired = true);
+                   script.addEventListener("error", () => globalThis.errorFired = true);
                    document.head.appendChild(script);"#,
             )
             .unwrap();
 
         runtime.run_until_idle().unwrap();
 
+        assert!(
+            runtime
+                .eval("globalThis.errorFired === true && globalThis.loadFired === false")
+                .unwrap()
+                .as_boolean()
+                .unwrap(),
+            "a script that never arrived must fire error, not load"
+        );
         let errors = runtime.take_task_errors();
         assert_eq!(errors.len(), 1, "expected one recorded error, got {errors:?}");
         assert!(
