@@ -6169,8 +6169,8 @@
       if (token !== navigatorConstructionToken) throw new TypeError("Illegal constructor");
     }
     get length() { return 0; }
-    item() { return null; }
-    namedItem() { return null; }
+    item(index) { void index; return null; }
+    namedItem(name) { void name; return null; }
     refresh() {}
     *[Symbol.iterator]() {}
     get [Symbol.toStringTag]() { return "PluginArray"; }
@@ -6180,8 +6180,8 @@
       if (token !== navigatorConstructionToken) throw new TypeError("Illegal constructor");
     }
     get length() { return 0; }
-    item() { return null; }
-    namedItem() { return null; }
+    item(index) { void index; return null; }
+    namedItem(name) { void name; return null; }
     *[Symbol.iterator]() {}
     get [Symbol.toStringTag]() { return "MimeTypeArray"; }
   }
