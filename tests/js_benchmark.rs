@@ -571,7 +571,7 @@ fn js_execution_benchmark_reports_every_shape() {
 /// copying the prefix on every append makes that ratio grow with the length; writing
 /// into the string's own spare capacity keeps it flat (issues #314, #318-#320).
 /// Before the append path this shape cost 4.0x more per operation at 65,536 chars
-/// than at 256; after it, 1.04x.
+/// than at 256; after it, 1.04x, and six consecutive runs gave 0.96x to 1.00x.
 ///
 /// The band is wide because the two lengths differ in cache behaviour as well —
 /// 65,536 UTF-16 chars do not sit in L2 the way 256 do — so a flat implementation
@@ -579,17 +579,46 @@ fn js_execution_benchmark_reports_every_shape() {
 /// reintroducing the copy would produce, which is what this is here to catch.
 const APPEND_SCALING_TOLERANCE: f64 = 2.0;
 
+/// How many ticks of the clock each timed pass must span.
+///
+/// A ratio of two durations is only meaningful if neither is near the resolution
+/// floor, so rather than picking an iteration count large enough today, the
+/// measurement reports what the clock's granularity actually is and this asserts
+/// against it. If `+=` becomes fast enough for the passes to shrink toward the floor,
+/// or the clock coarsens, the test says so instead of quietly going flaky.
+///
+/// The current margin is four orders of magnitude past this: `performance.now()`
+/// resolves to 334 ns here and a pass spans 6.5 ms, about 19,400 ticks.
+const MIN_TICKS_PER_PASS: f64 = 1000.0;
+
 #[test]
 fn appending_cost_does_not_grow_with_the_string_being_built() {
     let source = r#"
-        function build(limit, iterations) {
+        var PASSES = 4;
+        var ITERATIONS = 50000;
+
+        // The smallest step this clock can report, so the assertions can be made
+        // against the real granularity rather than an assumed one.
+        function clockResolution() {
+          var smallest = Infinity;
+          for (var i = 0; i < 200000; i++) {
+            var a = performance.now();
+            var step = performance.now() - a;
+            if (step > 0 && step < smallest) smallest = step;
+          }
+          return smallest;
+        }
+
+        // Resets on a counter rather than by reading `s.length`, so that the
+        // primitive property read is not folded into the measurement.
+        function build(limit) {
           var period = limit >> 1;
           var best = Infinity;
-          for (var pass = 0; pass < 4; pass++) {
+          for (var pass = 0; pass < PASSES; pass++) {
             var start = performance.now();
             var s = "";
             var c = 0;
-            for (var i = 0; i < iterations; i++) {
+            for (var i = 0; i < ITERATIONS; i++) {
               s += "ab";
               c++;
               if (c > period) { s = ""; c = 0; }
@@ -598,11 +627,13 @@ fn appending_cost_does_not_grow_with_the_string_being_built() {
             globalThis.__benchSink = s.length;
             if (elapsed < best) best = elapsed;
           }
-          return (best * 1e6) / iterations;
+          return best;
         }
-        var short = build(256, 50000);
-        var long = build(65536, 50000);
-        short + "|" + long
+
+        var resolution = clockResolution();
+        var shortMs = build(256);
+        var longMs = build(65536);
+        [resolution, shortMs, longMs, ITERATIONS].join("|")
     "#;
 
     let mut runtime = JsRuntime::new().expect("runtime should start");
@@ -613,19 +644,35 @@ fn appending_cost_does_not_grow_with_the_string_being_built() {
         .expect("the measurement returns a string")
         .to_std_string_escaped();
 
-    let (short, long) = measured
-        .split_once('|')
-        .expect("the measurement returns two values");
-    let short: f64 = short.parse().expect("a number");
-    let long: f64 = long.parse().expect("a number");
+    let fields: Vec<f64> = measured
+        .split('|')
+        .map(|field| field.parse().expect("the measurement returns numbers"))
+        .collect();
+    let [resolution, short_ms, long_ms, iterations] = fields[..]
+        .try_into()
+        .expect("the measurement returns four values");
 
     assert!(
-        short > 0.0 && long > 0.0,
-        "both lengths must produce a usable timing: {short} and {long} ns/op"
+        resolution > 0.0 && resolution.is_finite(),
+        "could not determine the clock's resolution: {resolution}"
     );
+    for (label, elapsed) in [("256", short_ms), ("65536", long_ms)] {
+        assert!(
+            elapsed / resolution >= MIN_TICKS_PER_PASS,
+            "a pass at {label} chars spanned {elapsed:.3} ms against a clock resolving to \
+             {resolution:.6} ms, only {:.0} ticks. Below {MIN_TICKS_PER_PASS:.0} the ratio below \
+             is quantization noise: raise ITERATIONS in the measurement",
+            elapsed / resolution
+        );
+    }
+
+    let short = short_ms * 1e6 / iterations;
+    let long = long_ms * 1e6 / iterations;
     let ratio = long / short;
     println!(
-        "append scaling: 256 chars {short:.1} ns/op, 65536 chars {long:.1} ns/op, ratio {ratio:.2}x"
+        "append scaling: 256 chars {short:.1} ns/op, 65536 chars {long:.1} ns/op, ratio {ratio:.2}x \
+         ({:.0} clock ticks per pass)",
+        short_ms / resolution
     );
     assert!(
         ratio < APPEND_SCALING_TOLERANCE,
