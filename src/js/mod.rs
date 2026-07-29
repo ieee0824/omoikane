@@ -4,6 +4,8 @@ use std::cell::RefCell;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::Path;
 use std::rc::Rc;
+use std::sync::mpsc::{Receiver, channel};
+use std::thread;
 
 use base64::Engine as _;
 use boa_engine::JsString;
@@ -253,6 +255,8 @@ struct HostState {
     location_href: String,
     navigator_user_agent: String,
     http_client: Client,
+    websocket_clients: HashMap<u64, WebSocketConnection>,
+    next_websocket_id: u64,
     /// Successful CORS preflight results for this environment settings object.
     cors_preflight_cache: PreflightCache,
     /// Viewport used when resolving computed styles and running layout for the
@@ -313,6 +317,18 @@ struct HostState {
     storage_manager: StorageManager,
     storage_session_id: u64,
     document_origins: HashMap<usize, Option<StorageOrigin>>,
+}
+
+#[derive(Debug)]
+enum WebSocketReadResult {
+    Message(crate::realtime::WebSocketMessage),
+    Error(String),
+}
+
+#[derive(Debug)]
+struct WebSocketConnection {
+    client: crate::realtime::WebSocketClient,
+    incoming: Receiver<WebSocketReadResult>,
 }
 
 /// A loaded sub-browsing-context document owned by an `<iframe>` element.
@@ -423,6 +439,8 @@ impl HostState {
             location_href,
             navigator_user_agent: default_user_agent(),
             http_client: Client::new(),
+            websocket_clients: HashMap::new(),
+            next_websocket_id: 1,
             cors_preflight_cache: PreflightCache::default(),
             viewport: Rect {
                 x: 0.0,
@@ -2710,6 +2728,36 @@ fn register_host_bindings(
             js_string!("__omoikane_queue_file_reading_task"),
             1,
             NativeFunction::from_copy_closure(queue_file_reading_task_native),
+        ),
+        (
+            js_string!("__omoikane_queue_networking_task"),
+            1,
+            NativeFunction::from_copy_closure(queue_networking_task_native),
+        ),
+        (
+            js_string!("__omoikane_websocket_connect"),
+            2,
+            NativeFunction::from_copy_closure(websocket_connect_native),
+        ),
+        (
+            js_string!("__omoikane_websocket_send"),
+            3,
+            NativeFunction::from_copy_closure(websocket_send_native),
+        ),
+        (
+            js_string!("__omoikane_websocket_poll"),
+            1,
+            NativeFunction::from_copy_closure(websocket_poll_native),
+        ),
+        (
+            js_string!("__omoikane_websocket_close"),
+            3,
+            NativeFunction::from_copy_closure(websocket_close_native),
+        ),
+        (
+            js_string!("__omoikane_event_source_fetch"),
+            3,
+            NativeFunction::from_copy_closure(event_source_fetch_native),
         ),
         (
             js_string!("__omoikane_get_text_content"),
@@ -5022,6 +5070,152 @@ fn queue_file_reading_task_native(
     })
 }
 
+/// Queues a callback on HTML's networking task source.
+fn queue_networking_task_native(
+    _: &JsValue,
+    args: &[JsValue],
+    _: &mut Context,
+) -> JsResult<JsValue> {
+    let callback = args.first().cloned().unwrap_or_default();
+    if !callback.is_callable() {
+        return Err(JsNativeError::typ()
+            .with_message("networking task callback must be callable")
+            .into());
+    }
+    with_host_state(|state| {
+        state.borrow_mut().event_loop.enqueue_networking(
+            TimerPayload::Callback { callback, args: Vec::new() },
+        );
+        Ok(JsValue::undefined())
+    })
+}
+
+fn websocket_connect_native(
+    _: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let url = string_argument(args.first(), "", context)?;
+    let protocols_json = string_argument(args.get(1), "[]", context)?;
+    let protocols: Vec<String> = serde_json::from_str(&protocols_json).map_err(|_| {
+        JsError::from(JsNativeError::typ().with_message("invalid WebSocket protocols"))
+    })?;
+    with_host_state(|state| {
+        let mut state = state.borrow_mut();
+        let origin = state.base_url.as_ref().map(|url| format!("{}://{}", url.scheme(), url.authority()));
+        let client = crate::realtime::WebSocketClient::connect(&url, &protocols, origin.as_deref())
+            .map_err(|error| JsError::from(JsNativeError::error().with_message(error)))?;
+        let protocol = client.protocol().to_string();
+        let mut reader = client.try_clone()
+            .map_err(|error| JsError::from(JsNativeError::error().with_message(error)))?;
+        let (sender, incoming) = channel();
+        thread::spawn(move || loop {
+            match reader.read_message() {
+                Ok(message) => {
+                    let closed = matches!(message, crate::realtime::WebSocketMessage::Close { .. });
+                    if sender.send(WebSocketReadResult::Message(message)).is_err() || closed { break; }
+                }
+                Err(error) => { let _ = sender.send(WebSocketReadResult::Error(error)); break; }
+            }
+        });
+        let id = state.next_websocket_id;
+        state.next_websocket_id = state.next_websocket_id.saturating_add(1);
+        state.websocket_clients.insert(id, WebSocketConnection { client, incoming });
+        Ok(js_string!(serde_json::json!({"id": id, "protocol": protocol}).to_string()).into())
+    })
+}
+
+fn websocket_send_native(
+    _: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let id = args.first().cloned().unwrap_or_default().to_number(context)? as u64;
+    let encoded = string_argument(args.get(1), "", context)?;
+    let binary = args.get(2).is_some_and(JsValue::to_boolean);
+    let payload = base64::engine::general_purpose::STANDARD.decode(encoded)
+        .map_err(|_| JsError::from(JsNativeError::typ().with_message("invalid WebSocket payload")))?;
+    with_host_state(|state| {
+        let mut state = state.borrow_mut();
+        let connection = state.websocket_clients.get_mut(&id).ok_or_else(|| {
+            JsError::from(JsNativeError::error().with_message("WebSocket is not connected"))
+        })?;
+        connection.client.send(payload, binary).map_err(|e| JsError::from(JsNativeError::error().with_message(e)))?;
+        Ok(JsValue::undefined())
+    })
+}
+
+fn websocket_poll_native(
+    _: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let id = args.first().cloned().unwrap_or_default().to_number(context)? as u64;
+    with_host_state(|state| {
+        let state = state.borrow();
+        let connection = state.websocket_clients.get(&id).ok_or_else(|| {
+            JsError::from(JsNativeError::error().with_message("WebSocket is not connected"))
+        })?;
+        let values: Vec<_> = connection.incoming.try_iter().map(|result| match result {
+            WebSocketReadResult::Message(crate::realtime::WebSocketMessage::Text(data)) => serde_json::json!({"kind":"text", "data":data}),
+            WebSocketReadResult::Message(crate::realtime::WebSocketMessage::Binary(data)) => serde_json::json!({"kind":"binary", "data":base64::engine::general_purpose::STANDARD.encode(data)}),
+            WebSocketReadResult::Message(crate::realtime::WebSocketMessage::Close { code, reason }) => serde_json::json!({"kind":"close", "code":code, "reason":reason}),
+            WebSocketReadResult::Error(error) => serde_json::json!({"kind":"error", "message":error}),
+        }).collect();
+        Ok(js_string!(serde_json::to_string(&values).unwrap()).into())
+    })
+}
+
+fn websocket_close_native(
+    _: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let id = args.first().cloned().unwrap_or_default().to_number(context)? as u64;
+    let code = args.get(1).cloned().unwrap_or_else(|| JsValue::from(1000)).to_number(context)? as u16;
+    let reason = string_argument(args.get(2), "", context)?;
+    with_host_state(|state| {
+        let mut connection = state.borrow_mut().websocket_clients.remove(&id).ok_or_else(|| {
+            JsError::from(JsNativeError::error().with_message("WebSocket is not connected"))
+        })?;
+        connection.client.close(code, &reason).map_err(|e| JsError::from(JsNativeError::error().with_message(e)))?;
+        Ok(JsValue::undefined())
+    })
+}
+
+fn event_source_fetch_native(
+    _: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let url = string_argument(args.first(), "", context)?;
+    let last_event_id = string_argument(args.get(1), "", context)?;
+    let with_credentials = args.get(2).is_some_and(JsValue::to_boolean);
+    with_host_state(|state| {
+        let mut state = state.borrow_mut();
+        let parsed = url.parse::<crate::http::Url>()
+            .map_err(|error| JsError::from(JsNativeError::typ().with_message(error.to_string())))?;
+        let origin = state.base_url.as_ref().map(CorsOrigin::from_url).unwrap_or_else(CorsOrigin::opaque);
+        let mut request = HttpRequest::new(Method::Get, parsed);
+        request.set_header("Accept", "text/event-stream");
+        if !last_event_id.is_empty() { request.set_header("Last-Event-ID", last_event_id); }
+        let HostState { http_client, cors_preflight_cache, .. } = &mut *state;
+        let fetched = crate::http::cors::fetch(
+            http_client, request, &origin, RequestMode::Cors,
+            if with_credentials { CredentialsMode::Include } else { CredentialsMode::SameOrigin },
+            RedirectMode::Follow, cors_preflight_cache,
+        ).map_err(|error| JsError::from(JsNativeError::error().with_message(error.to_string())))?;
+        if fetched.response.status_code() != 200 {
+            return Err(JsNativeError::error().with_message("EventSource response must be HTTP 200").into());
+        }
+        let content_type = fetched.response.header("content-type").unwrap_or_default();
+        if !content_type.to_ascii_lowercase().starts_with("text/event-stream") {
+            return Err(JsNativeError::error().with_message("EventSource response must be text/event-stream").into());
+        }
+        Ok(js_string!(String::from_utf8_lossy(fetched.response.body()).as_ref()).into())
+    })
+}
+
 fn fetch_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
     let url = args
         .first()
@@ -6788,6 +6982,89 @@ mod tests {
         let value = runtime.eval("1 + 2 + 3").unwrap();
 
         assert_eq!(value.as_number(), Some(6.0));
+    }
+
+    #[test]
+    fn websocket_api_echo_close_and_networking_task_order() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let request = String::from_utf8(read_http_request(&mut stream)).unwrap();
+            let key = request.lines().find_map(|line| line.strip_prefix("Sec-WebSocket-Key: ")).unwrap();
+            write!(stream, "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: {}\r\n\r\n", crate::cdp::websocket_accept_key(key)).unwrap();
+            let mut bytes = Vec::new();
+            let message = loop {
+                let mut byte = [0u8; 1];
+                stream.read_exact(&mut byte).unwrap();
+                bytes.push(byte[0]);
+                if let Ok((frame, consumed)) = crate::cdp::WebSocketFrame::decode(&bytes)
+                    && consumed == bytes.len() { break frame; }
+            };
+            assert_eq!(message.payload, b"hello");
+            stream.write_all(&crate::cdp::WebSocketFrame::text("hello").encode(false)).unwrap();
+            let mut close = Vec::new();
+            loop {
+                let mut byte = [0u8; 1];
+                stream.read_exact(&mut byte).unwrap();
+                close.push(byte[0]);
+                if crate::cdp::WebSocketFrame::decode(&close).is_ok() { break; }
+            }
+        });
+        let mut runtime = JsRuntime::new().unwrap();
+        runtime.eval(&format!(r#"
+            globalThis.realtimeLog = [];
+            const socket = new WebSocket("ws://{address}/echo");
+            socket.onopen = () => {{ realtimeLog.push("open"); socket.send("hello"); }};
+            socket.onmessage = event => {{ globalThis.messageOrigin = event.origin; realtimeLog.push("message:" + event.data); socket.close(1000, "done"); }};
+            socket.onclose = event => realtimeLog.push("close:" + event.code);
+            setTimeout(() => realtimeLog.push("timer"), 0);
+        "#)).unwrap();
+        runtime.tick(0).unwrap();
+        runtime.run_timers(1_000, 1, 2_000);
+        assert_eq!(eval_str(&mut runtime, "realtimeLog.join('|')"), "open|timer|message:hello|close:1000");
+        assert_eq!(eval_str(&mut runtime, "messageOrigin"), format!("ws://{address}"));
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn event_source_parses_events_and_reconnects_with_last_event_id() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            for attempt in 0..2 {
+                let (mut stream, _) = listener.accept().unwrap();
+                let request = String::from_utf8(read_http_request(&mut stream)).unwrap();
+                let request_lower = request.to_ascii_lowercase();
+                assert!(request_lower.contains("accept: text/event-stream"));
+                if attempt == 1 { assert!(request_lower.contains("last-event-id: 7")); }
+                let body = if attempt == 0 {
+                    "id: 7\nevent: update\ndata: one\ndata: two\nretry: 1\n\n"
+                } else {
+                    "id: 8\nevent: update\ndata: done\n\n"
+                };
+                write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body).unwrap();
+            }
+        });
+        let mut runtime = JsRuntime::new().unwrap();
+        runtime.set_base_url(format!("http://{address}/page").parse().unwrap());
+        runtime.eval(&format!(r#"
+            globalThis.sseLog = [];
+            const source = new EventSource("http://{address}/events");
+            source.onerror = () => sseLog.push("error");
+            source.addEventListener("update", event => {{
+              globalThis.sseOrigin = event.origin;
+              sseLog.push(event.data + ":" + event.lastEventId);
+              if (sseLog.length === 2) source.close();
+            }});
+        "#)).unwrap();
+        runtime.run_jobs().unwrap();
+        runtime.run_until_idle().unwrap();
+        runtime.run_timers(20, 1, 100);
+        assert_eq!(eval_str(&mut runtime, "sseLog.join('|')"), "one\ntwo:7|done:8");
+        assert_eq!(eval_str(&mut runtime, "String(source.readyState)"), "2");
+        assert_eq!(eval_str(&mut runtime, "sseOrigin"), format!("http://{address}"));
+        server.join().unwrap();
     }
 
     #[test]

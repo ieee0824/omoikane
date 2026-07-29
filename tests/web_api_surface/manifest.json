@@ -315,14 +315,14 @@
       "area": "realtime",
       "description": "Page JavaScript can create WebSocket connections",
       "probe": "typeof WebSocket === 'function'",
-      "baseline_supported": false
+      "baseline_supported": true
     },
     {
       "id": "network.event-source",
       "area": "realtime",
       "description": "Server-sent events are exposed",
       "probe": "typeof EventSource === 'function'",
-      "baseline_supported": false
+      "baseline_supported": true
     },
     {
       "id": "network.web-transport",
