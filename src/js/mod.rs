@@ -5114,7 +5114,12 @@ fn canvas_commit_native(
     let width = args.get(1).cloned().unwrap_or_default().to_number(context)? as u32;
     let height = args.get(2).cloned().unwrap_or_default().to_number(context)? as u32;
     let pixels = body_bytes_argument(args.get(3), context)?.unwrap_or_default();
-    Ok(JsValue::from(crate::canvas::commit(id, width, height, pixels)))
+    with_host_state(|state| {
+        let Some(node) = state.borrow().get_node(id) else {
+            return Ok(JsValue::from(false));
+        };
+        Ok(JsValue::from(crate::canvas::commit(&node, width, height, pixels)))
+    })
 }
 
 fn canvas_data_url_native(
@@ -7080,6 +7085,16 @@ mod tests {
           return Array.from(target.getContext('2d').getImageData(0,0,1,1).data).join(',');
         }})()"#);
         assert_eq!(eval_str(&mut runtime, &script), "12,34,56,255");
+        assert_eq!(eval_str(&mut runtime, r#"(() => {
+          const target=document.createElement('canvas'); target.width=5; target.height=5;
+          const context=target.getContext('2d');
+          context.beginPath(); context.rect(0,0,5,5); context.rect(1,1,3,3); context.clip('evenodd');
+          context.fillStyle='red'; context.fillRect(0,0,5,5);
+          const outer=context.getImageData(0,0,1,1).data;
+          const hole=context.getImageData(2,2,1,1).data;
+          let error=''; try { context.getImageData(0,0,0,1); } catch (value) { error=value.name; }
+          return [outer[0],outer[3],hole[3],error].join(',');
+        })()"#), "255,255,0,IndexSizeError");
     }
 
     #[test]

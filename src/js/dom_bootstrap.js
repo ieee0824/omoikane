@@ -5043,7 +5043,7 @@
   }
   function blendCanvasPixel(state,x,y,color,clear=false) {
     x=Math.floor(x); y=Math.floor(y); if(x<0||y<0||x>=state.width||y>=state.height)return;
-    if(state.style.clip && !pointInCanvasPaths(x+.5,y+.5,state.style.clip,"nonzero"))return;
+    if(state.style.clip && !pointInCanvasPaths(x+.5,y+.5,state.style.clip.paths,state.style.clip.rule))return;
     const i=(y*state.width+x)*4; if(clear){state.pixels.fill(0,i,i+4);return;}
     const sa=color[3]/255, da=state.pixels[i+3]/255, oa=sa+da*(1-sa);
     if(!oa){state.pixels.fill(0,i,i+4);return;}
@@ -5057,7 +5057,7 @@
   class CanvasRenderingContext2D {
     constructor(canvas){this.canvas=canvas;}
     get __s(){return canvasState(this.canvas);}
-    save(){const s=this.__s;s.stack.push({...s.style,transform:s.style.transform.slice(),clip:s.style.clip&&s.style.clip.map(p=>p.map(q=>q.slice()))});}
+    save(){const s=this.__s;s.stack.push({...s.style,transform:s.style.transform.slice(),clip:s.style.clip&&{rule:s.style.clip.rule,paths:s.style.clip.paths.map(p=>p.map(q=>q.slice()))}});}
     restore(){const s=this.__s;if(s.stack.length)s.style=s.stack.pop();}
     translate(x,y){this.transform(1,0,0,1,x,y);} rotate(a){this.transform(Math.cos(a),Math.sin(a),-Math.sin(a),Math.cos(a),0,0);} scale(x,y){this.transform(x,0,0,y,0,0);}
     transform(a,b,c,d,e,f){const s=this.__s,m=s.style.transform;s.style.transform=[m[0]*a+m[2]*b,m[1]*a+m[3]*b,m[0]*c+m[2]*d,m[1]*c+m[3]*d,m[0]*e+m[2]*f+m[4],m[1]*e+m[3]*f+m[5]];}
@@ -5071,16 +5071,16 @@
     lineTo(x,y){const s=this.__s,p=transformCanvasPoint(s.style.transform,+x,+y);if(!s.current)this.moveTo(x,y);else s.current.push(p);}
     closePath(){const s=this.__s;if(s.current&&s.current.length)s.current.push(s.current[0].slice());}
     rect(x,y,w,h){this.moveTo(x,y);this.lineTo(x+w,y);this.lineTo(x+w,y+h);this.lineTo(x,y+h);this.closePath();}
-    quadraticCurveTo(cx,cy,x,y){const s=this.__s;if(!s.current||!s.current.length)this.moveTo(0,0);const p0=s.current[s.current.length-1];for(let i=1;i<=20;i++){const t=i/20,u=1-t,p=transformCanvasPoint(s.style.transform,+cx,+cy),e=transformCanvasPoint(s.style.transform,+x,+y);s.current.push([u*u*p0[0]+2*u*t*p[0]+t*t*e[0],u*u*p0[1]+2*u*t*p[1]+t*t*e[1]]);}}
+    quadraticCurveTo(cx,cy,x,y){const s=this.__s;if(!s.current||!s.current.length)this.moveTo(0,0);const p0=s.current[s.current.length-1],p=transformCanvasPoint(s.style.transform,+cx,+cy),e=transformCanvasPoint(s.style.transform,+x,+y);for(let i=1;i<=20;i++){const t=i/20,u=1-t;s.current.push([u*u*p0[0]+2*u*t*p[0]+t*t*e[0],u*u*p0[1]+2*u*t*p[1]+t*t*e[1]]);}}
     bezierCurveTo(c1x,c1y,c2x,c2y,x,y){const s=this.__s;if(!s.current||!s.current.length)this.moveTo(0,0);const p0=s.current[s.current.length-1],p1=transformCanvasPoint(s.style.transform,c1x,c1y),p2=transformCanvasPoint(s.style.transform,c2x,c2y),p3=transformCanvasPoint(s.style.transform,x,y);for(let i=1;i<=24;i++){const t=i/24,u=1-t;s.current.push([u*u*u*p0[0]+3*u*u*t*p1[0]+3*u*t*t*p2[0]+t*t*t*p3[0],u*u*u*p0[1]+3*u*u*t*p1[1]+3*u*t*t*p2[1]+t*t*t*p3[1]]);}}
     arc(x,y,r,start,end,ccw=false){const span=ccw?start-end:end-start,steps=Math.max(8,Math.ceil(Math.abs(span)*12));for(let i=0;i<=steps;i++){const a=ccw?start-span*i/steps:start+span*i/steps;i?this.lineTo(x+r*Math.cos(a),y+r*Math.sin(a)):this.moveTo(x+r*Math.cos(a),y+r*Math.sin(a));}}
     ellipse(x,y,rx,ry,rotation,start,end,ccw=false){const span=ccw?start-end:end-start,steps=Math.max(8,Math.ceil(Math.abs(span)*12));for(let i=0;i<=steps;i++){const a=ccw?start-span*i/steps:start+span*i/steps,px=rx*Math.cos(a),py=ry*Math.sin(a),xx=x+px*Math.cos(rotation)-py*Math.sin(rotation),yy=y+px*Math.sin(rotation)+py*Math.cos(rotation);i?this.lineTo(xx,yy):this.moveTo(xx,yy);}}
     arcTo(x1,y1,x2,y2){this.lineTo(x1,y1);this.lineTo(x2,y2);}
     fill(rule="nonzero"){const s=this.__s,c=canvasColor(s.style.fillStyle,s.style.globalAlpha);for(let y=0;y<s.height;y++)for(let x=0;x<s.width;x++)if(pointInCanvasPaths(x+.5,y+.5,s.paths,rule))blendCanvasPixel(s,x,y,c);commitCanvas(this.canvas,s);}
     stroke(){const s=this.__s,c=canvasColor(s.style.strokeStyle,s.style.globalAlpha),radius=Math.max(.5,s.style.lineWidth/2);for(const path of s.paths)for(let i=1;i<path.length;i++){const a=path[i-1],b=path[i],minx=Math.floor(Math.min(a[0],b[0])-radius),maxx=Math.ceil(Math.max(a[0],b[0])+radius),miny=Math.floor(Math.min(a[1],b[1])-radius),maxy=Math.ceil(Math.max(a[1],b[1])+radius),dx=b[0]-a[0],dy=b[1]-a[1],l=dx*dx+dy*dy;for(let y=miny;y<=maxy;y++)for(let x=minx;x<=maxx;x++){const t=l?Math.max(0,Math.min(1,((x+.5-a[0])*dx+(y+.5-a[1])*dy)/l)):0,qx=a[0]+t*dx,qy=a[1]+t*dy;if(Math.hypot(x+.5-qx,y+.5-qy)<=radius)blendCanvasPixel(s,x,y,c);}}commitCanvas(this.canvas,s);}
-    clip(rule="nonzero"){const s=this.__s;s.style.clip=s.paths.map(p=>p.map(q=>q.slice()));}
+    clip(rule="nonzero"){const s=this.__s;s.style.clip={rule:rule==="evenodd"?"evenodd":"nonzero",paths:s.paths.map(p=>p.map(q=>q.slice()))};}
     createImageData(a,b){return a instanceof ImageData?new ImageData(a.width,a.height):new ImageData(a,b);}
-    getImageData(sx,sy,sw,sh){const s=this.__s,out=new ImageData(Math.abs(sw),Math.abs(sh));for(let y=0;y<out.height;y++)for(let x=0;x<out.width;x++){const si=((sy+y)*s.width+(sx+x))*4,di=(y*out.width+x)*4;if(sx+x>=0&&sy+y>=0&&sx+x<s.width&&sy+y<s.height)out.data.set(s.pixels.slice(si,si+4),di);}return out;}
+    getImageData(sx,sy,sw,sh){sw=Number(sw);sh=Number(sh);if(sw<=0||sh<=0)throw new DOMException("ImageData dimensions must be positive","IndexSizeError");const s=this.__s,out=new ImageData(sw,sh);for(let y=0;y<out.height;y++)for(let x=0;x<out.width;x++){const si=((sy+y)*s.width+(sx+x))*4,di=(y*out.width+x)*4;if(sx+x>=0&&sy+y>=0&&sx+x<s.width&&sy+y<s.height)out.data.set(s.pixels.slice(si,si+4),di);}return out;}
     putImageData(image,dx,dy){const s=this.__s;for(let y=0;y<image.height;y++)for(let x=0;x<image.width;x++){const tx=dx+x,ty=dy+y;if(tx>=0&&ty>=0&&tx<s.width&&ty<s.height)s.pixels.set(image.data.slice((y*image.width+x)*4,(y*image.width+x+1)*4),(ty*s.width+tx)*4);}commitCanvas(this.canvas,s);}
     drawImage(source,...args){let src;if(source instanceof HTMLCanvasElement)src=canvasState(source);else{const raw=source&&source.__id!=null?__omoikane_canvas_image_source(source.__id):null;if(raw===null)throw new DOMException("Image source is unavailable","InvalidStateError");const decoded=JSON.parse(raw);src={width:decoded.width,height:decoded.height,pixels:bytesFromBase64(decoded.pixels)};}const s=this.__s;let sx=0,sy=0,sw=src.width,sh=src.height,dx,dy,dw,dh;if(args.length===2){[dx,dy]=args;dw=sw;dh=sh;}else if(args.length===4){[dx,dy,dw,dh]=args;}else{[sx,sy,sw,sh,dx,dy,dw,dh]=args;}for(let y=0;y<dh;y++)for(let x=0;x<dw;x++){const xx=Math.floor(sx+x*sw/dw),yy=Math.floor(sy+y*sh/dh),i=(yy*src.width+xx)*4;blendCanvasPixel(s,dx+x,dy+y,[src.pixels[i],src.pixels[i+1],src.pixels[i+2],Math.round(src.pixels[i+3]*s.style.globalAlpha)]);}commitCanvas(this.canvas,s);}
     measureText(text){const size=parseFloat(this.__s.style.font)||10;return {width:String(text).length*size*.6,actualBoundingBoxAscent:size*.8,actualBoundingBoxDescent:size*.2};}
