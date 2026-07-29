@@ -138,12 +138,34 @@ globalThis.runBenchmarks = function () {
     return s;
   }));
 
-  // Method call resolved through a prototype. This is the shape that Boa's
-  // inline cache poisoning bug corrupted (issues #057/#058), so a regression
-  // here is worth noticing.
-  lines.push(bench("proto-method", 500000, function (n) {
+  // Property read on a string primitive, with no call involved. A wrapper object
+  // per access shows up here first, so this is the cheapest place to see that
+  // cost appear or disappear.
+  lines.push(bench("primitive-string-property", 500000, function (n) {
+    var s = 0;
+    for (var i = 0; i < n; i++) s = (s + "abc".length) % 1000003;
+    return s;
+  }));
+
+  // Method call on a string primitive: the read above plus the call. This is the
+  // shape that Boa's inline cache poisoning bug corrupted (issues #057/#058), so
+  // a regression here is worth noticing.
+  lines.push(bench("primitive-string-method", 500000, function (n) {
     var s = 0;
     for (var i = 0; i < n; i++) s = (s + "abc".charCodeAt(i & 2)) % 1000003;
+    return s;
+  }));
+
+  // Method resolved one step up a prototype chain, with a plain object receiver.
+  // Kept separate from the two above because the earlier `proto-method` shape
+  // used a string primitive and so measured receiver coercion rather than
+  // prototype resolution — the two turned out to differ by 3x.
+  lines.push(bench("proto-method", 500000, function (n) {
+    function Base() {}
+    Base.prototype.at = function (i) { return i & 3; };
+    var o = new Base();
+    var s = 0;
+    for (var i = 0; i < n; i++) s = (s + o.at(i)) % 1000003;
     return s;
   }));
 
