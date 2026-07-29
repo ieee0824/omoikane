@@ -148,8 +148,9 @@ pub(crate) use color::{
 };
 #[allow(unused_imports)]
 pub(crate) use image::{
-    decode_jpeg, decode_png, decode_png_fallback, hex_value, paeth_predictor,
-    parse_background_image_value, parse_size_token, percent_decode, unfilter_png_scanline,
+    decode_gif_animation, decode_jpeg, decode_png, decode_png_fallback, decode_webp, hex_value,
+    paeth_predictor, parse_background_image_value, parse_size_token, percent_decode,
+    unfilter_png_scanline,
 };
 #[allow(unused_imports)]
 pub(crate) use stylesheet::{
@@ -179,6 +180,71 @@ pub struct Image {
     pixels: Vec<u8>,
 }
 
+/// GIF disposal operation applied after a frame's display interval.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GifDisposal {
+    Keep,
+    Background,
+    Previous,
+}
+
+/// One fully composited animation frame and its timing metadata.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImageFrame {
+    image: Image,
+    delay_ms: u32,
+    disposal: GifDisposal,
+}
+
+impl ImageFrame {
+    /// Returns the fully composited RGBA image for this frame.
+    pub fn image(&self) -> &Image {
+        &self.image
+    }
+    /// Returns the frame display duration in milliseconds.
+    pub fn delay_ms(&self) -> u32 {
+        self.delay_ms
+    }
+    /// Returns the disposal operation applied after this frame.
+    pub fn disposal(&self) -> GifDisposal {
+        self.disposal
+    }
+}
+
+/// A decoded image animation driven by elapsed frame-scheduler time.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImageAnimation {
+    frames: Vec<ImageFrame>,
+    duration_ms: u64,
+}
+
+impl ImageAnimation {
+    /// Returns the decoded frames in display order.
+    pub fn frames(&self) -> &[ImageFrame] {
+        &self.frames
+    }
+    /// Returns one complete animation-loop duration in milliseconds.
+    pub fn duration_ms(&self) -> u64 {
+        self.duration_ms
+    }
+    /// Selects the frame visible at an elapsed frame-scheduler timestamp.
+    pub fn frame_at(&self, elapsed_ms: u64) -> &ImageFrame {
+        let mut position = if self.duration_ms == 0 {
+            0
+        } else {
+            elapsed_ms % self.duration_ms
+        };
+        for frame in &self.frames {
+            let delay = u64::from(frame.delay_ms.max(1));
+            if position < delay {
+                return frame;
+            }
+            position = position.saturating_sub(delay);
+        }
+        &self.frames[self.frames.len() - 1]
+    }
+}
+
 impl Image {
     /// Creates an image from raw RGBA pixels.
     pub fn new(width: u32, height: u32, pixels: Vec<u8>) -> Result<Self, PaintError> {
@@ -206,6 +272,16 @@ impl Image {
     /// Decodes the first frame of a GIF image into RGBA pixels.
     pub fn decode_gif(bytes: &[u8]) -> Result<Self, PaintError> {
         image::decode_gif(bytes)
+    }
+
+    /// Decodes a WebP image (lossy or lossless, including alpha) into RGBA pixels.
+    pub fn decode_webp(bytes: &[u8]) -> Result<Self, PaintError> {
+        image::decode_webp(bytes)
+    }
+
+    /// Decodes every GIF frame with delay and disposal metadata.
+    pub fn decode_gif_animation(bytes: &[u8]) -> Result<ImageAnimation, PaintError> {
+        image::decode_gif_animation(bytes)
     }
 
     /// Returns the image width in pixels.
@@ -1014,6 +1090,7 @@ fn render_document_with_url_internal(
     scroll: (f32, f32),
 ) -> Result<Canvas, PaintError> {
     let mut timings = RenderTimings::default();
+    let mut image_animation_time_ms = 0;
     let effective_base = stylesheet::extract_document_base_url(document, base_url);
     let mut resolver = StyleResolver::new();
     resolver.set_viewport(viewport.width, viewport.height);
@@ -1068,6 +1145,7 @@ fn render_document_with_url_internal(
                 ANIMATION_FRAME_PUMP_MAX_FRAMES,
                 ANIMATION_FRAME_INTERVAL_MS,
             );
+            image_animation_time_ms = runtime.rendering_time_ms();
             timings.animation_frames = animation_frames_start.elapsed();
             if std::env::var_os("OMOIKANE_LOG_SCRIPTS").is_some() {
                 eprintln!(
@@ -1152,20 +1230,22 @@ fn render_document_with_url_internal(
 
     let result = crate::layout::with_layout_fonts(layout_fonts, layout_web_fonts, || {
         crate::layout::with_image_base_url(effective_base, || {
-            let layout_start = Instant::now();
-            let mut layout = crate::layout::layout_tree(document, &mut resolver, viewport)?;
-            timings.layout = layout_start.elapsed();
-            apply_scroll_offsets(&mut layout, &mut resolver, scroll);
-            let paint_start = Instant::now();
-            let canvas = paint_layout_with_web_fonts(
-                &layout,
-                &mut resolver,
-                viewport,
-                all_fonts,
-                web_font_registry_opt,
-            );
-            timings.paint = paint_start.elapsed();
-            Some(canvas)
+            crate::layout::with_image_animation_time(image_animation_time_ms, || {
+                let layout_start = Instant::now();
+                let mut layout = crate::layout::layout_tree(document, &mut resolver, viewport)?;
+                timings.layout = layout_start.elapsed();
+                apply_scroll_offsets(&mut layout, &mut resolver, scroll);
+                let paint_start = Instant::now();
+                let canvas = paint_layout_with_web_fonts(
+                    &layout,
+                    &mut resolver,
+                    viewport,
+                    all_fonts,
+                    web_font_registry_opt,
+                );
+                timings.paint = paint_start.elapsed();
+                Some(canvas)
+            })
         })
     });
     record_render_timings(&timings);

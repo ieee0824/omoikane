@@ -1743,6 +1743,188 @@ fn decodes_first_gif_frame_into_rgba_pixels() {
 }
 
 #[test]
+fn decodes_lossy_lossless_and_alpha_webp_pixels() {
+    let lossy = base64::engine::general_purpose::STANDARD
+        .decode("UklGRigAAABXRUJQVlA4IBwAAABwAQCdASoBAAEAAgA0JZwCdAFAAAD+80rrUbQA")
+        .unwrap();
+    let image = Image::decode_webp(&lossy).unwrap();
+    assert_eq!((image.width(), image.height()), (1, 1));
+    assert_eq!(image.pixels()[3], 255);
+    assert_eq!(image.pixels(), &[200, 194, 190, 255]);
+
+    let expected = [255, 0, 0, 255, 0, 255, 0, 96];
+    let mut encoded = Vec::new();
+    image_webp::WebPEncoder::new(&mut encoded)
+        .encode(&expected, 2, 1, image_webp::ColorType::Rgba8)
+        .unwrap();
+    let decoded = Image::decode_webp(&encoded).unwrap();
+    assert_eq!(decoded.pixels(), &expected);
+}
+
+#[test]
+fn animated_gif_preserves_delay_disposal_and_composited_timeline() {
+    let mut bytes = Vec::new();
+    {
+        let mut encoder = gif::Encoder::new(&mut bytes, 2, 1, &[]).unwrap();
+        encoder.set_repeat(gif::Repeat::Infinite).unwrap();
+        let mut first_pixels = vec![255, 0, 0, 255, 255, 0, 0, 255];
+        let mut first = gif::Frame::from_rgba_speed(2, 1, &mut first_pixels, 10);
+        first.delay = 2;
+        first.dispose = gif::DisposalMethod::Keep;
+        encoder.write_frame(&first).unwrap();
+        let mut second_pixels = vec![0, 0, 255, 255];
+        let mut second = gif::Frame::from_rgba_speed(1, 1, &mut second_pixels, 10);
+        second.delay = 3;
+        second.dispose = gif::DisposalMethod::Previous;
+        encoder.write_frame(&second).unwrap();
+        let mut third_pixels = vec![0, 255, 0, 255];
+        let mut third = gif::Frame::from_rgba_speed(1, 1, &mut third_pixels, 10);
+        third.left = 1;
+        third.delay = 4;
+        third.dispose = gif::DisposalMethod::Background;
+        encoder.write_frame(&third).unwrap();
+    }
+    let animation = Image::decode_gif_animation(&bytes).unwrap();
+    assert_eq!(animation.frames().len(), 3);
+    assert_eq!(
+        animation
+            .frames()
+            .iter()
+            .map(ImageFrame::delay_ms)
+            .collect::<Vec<_>>(),
+        [20, 30, 40]
+    );
+    assert_eq!(animation.frames()[1].disposal(), GifDisposal::Previous);
+    assert_eq!(animation.frames()[2].disposal(), GifDisposal::Background);
+    assert_eq!(
+        animation.frame_at(20).image().pixels(),
+        &[0, 0, 255, 255, 255, 0, 0, 255]
+    );
+    assert_eq!(
+        animation.frame_at(50).image().pixels(),
+        &[255, 0, 0, 255, 0, 255, 0, 255]
+    );
+    assert_eq!(
+        animation.frame_at(90).image().pixels(),
+        animation.frames()[0].image().pixels()
+    );
+}
+
+#[test]
+fn animated_gif_render_uses_frame_scheduler_time() {
+    let mut bytes = Vec::new();
+    {
+        let mut encoder = gif::Encoder::new(&mut bytes, 1, 1, &[]).unwrap();
+        encoder.set_repeat(gif::Repeat::Infinite).unwrap();
+        for (rgba, delay) in [([255, 0, 0, 255], 1), ([0, 255, 0, 255], 50)] {
+            let mut pixels = rgba.to_vec();
+            let mut frame = gif::Frame::from_rgba_speed(1, 1, &mut pixels, 10);
+            frame.delay = delay;
+            encoder.write_frame(&frame).unwrap();
+        }
+    }
+    let source = base64::engine::general_purpose::STANDARD.encode(bytes);
+    let html = format!(
+        r#"<style>html,body {{ margin:0 }}</style><img src="data:image/gif;base64,{source}"><script>requestAnimationFrame(() => {{}})</script>"#
+    );
+    let document = TreeBuilder::parse(&html).document();
+    let canvas = render_document(
+        &document,
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 20.0,
+            height: 20.0,
+        },
+    )
+    .unwrap();
+    assert!(
+        canvas
+            .pixels()
+            .chunks_exact(4)
+            .any(|pixel| pixel == [0, 255, 0, 255])
+    );
+}
+
+#[test]
+fn corrupt_webp_and_gif_fail_without_panicking() {
+    assert!(Image::decode_webp(b"RIFF broken WEBP").is_err());
+    assert!(Image::decode_gif_animation(b"GIF89a broken").is_err());
+}
+
+#[test]
+fn webp_data_uri_fixture_renders_expected_pixels() {
+    let expected = [240, 20, 10, 255, 10, 30, 220, 128];
+    let mut encoded = Vec::new();
+    image_webp::WebPEncoder::new(&mut encoded)
+        .encode(&expected, 2, 1, image_webp::ColorType::Rgba8)
+        .unwrap();
+    let source = base64::engine::general_purpose::STANDARD.encode(encoded);
+    let html = format!(
+        r#"<style>html,body {{ margin:0 }}</style><img src="data:image/webp;base64,{source}">"#
+    );
+    let document = TreeBuilder::parse(&html).document();
+    let canvas = render_document(
+        &document,
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 20.0,
+            height: 20.0,
+        },
+    )
+    .unwrap();
+    assert!(
+        canvas
+            .pixels()
+            .chunks_exact(4)
+            .any(|pixel| pixel == &expected[0..4])
+    );
+    assert!(
+        canvas
+            .pixels()
+            .chunks_exact(4)
+            .any(|pixel| pixel[2] > 100 && pixel[3] > 0)
+    );
+}
+
+#[test]
+fn image_request_accept_header_only_advertises_supported_formats() {
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::sync::mpsc;
+    let mut encoded = Vec::new();
+    image_webp::WebPEncoder::new(&mut encoded)
+        .encode(&[1, 2, 3, 255], 1, 1, image_webp::ColorType::Rgba8)
+        .unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let (sender, receiver) = mpsc::channel();
+    std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut request = [0; 2048];
+        let size = stream.read(&mut request).unwrap();
+        sender
+            .send(String::from_utf8_lossy(&request[..size]).into_owned())
+            .unwrap();
+        let header = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            encoded.len()
+        );
+        stream.write_all(header.as_bytes()).unwrap();
+        stream.write_all(&encoded).unwrap();
+    });
+    let url = format!("http://{address}/asset");
+    let image = crate::layout::decode_or_fetch_image_asset(&url).unwrap();
+    assert_eq!(image.pixels(), &[1, 2, 3, 255]);
+    let request = receiver.recv().unwrap().to_ascii_lowercase();
+    assert!(request.contains(
+        "accept: image/webp,image/png,image/jpeg,image/gif,image/svg+xml;q=0.9,*/*;q=0.1\r\n"
+    ));
+    assert!(!request.contains("image/avif"));
+}
+
+#[test]
 fn decodes_jpeg_data_uri() {
     // Minimal valid JPEG: 1x1 red pixel
     let jpeg_base64 = "/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAgGBgcGBQgHBwcJCQgKDBQNDAsLDBkSEw8UHRofHh0aHBwgJC4nICIsIxwcKDcpLDAxNDQ0Hyc5PTgyPC4zNDL/wAALCAABAAEBAREA/8QAFAABAAAAAAAAAAAAAAAAAAAACf/EABQQAQAAAAAAAAAAAAAAAAAAAAD/2gAIAQEAAD8AVN//2Q==";

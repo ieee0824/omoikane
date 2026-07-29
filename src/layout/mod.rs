@@ -3,7 +3,7 @@
 //! The layout phase consumes DOM nodes together with computed styles and
 //! produces a tree of rectangular block boxes.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, OnceLock};
 
@@ -51,10 +51,36 @@ pub(crate) use inline::split_words_no_cjk_break;
 // Thread-local cache for fetched images and fonts to avoid redundant loads
 thread_local! {
     static IMAGE_CACHE: RefCell<HashMap<String, Option<Image>>> = RefCell::new(HashMap::new());
+    static IMAGE_ANIMATION_CACHE: RefCell<HashMap<String, crate::paint::ImageAnimation>> = RefCell::new(HashMap::new());
+    static IMAGE_ANIMATION_TIME_MS: Cell<u64> = const { Cell::new(0) };
     static HTTP_CLIENT: RefCell<Client> = RefCell::new(Client::new());
     static LAYOUT_FONTS: RefCell<Option<LayoutFontContext>> = const { RefCell::new(None) };
     static IMAGE_BASE_URL: RefCell<Option<Url>> = const { RefCell::new(None) };
     static HTML_TAG_SQLITE_CONNECTIONS: RefCell<HashMap<String, Connection>> = RefCell::new(HashMap::new());
+}
+
+/// Runs image resolution at a deterministic frame-scheduler timestamp.
+pub(crate) fn with_image_animation_time<T>(time_ms: u64, f: impl FnOnce() -> T) -> T {
+    IMAGE_ANIMATION_TIME_MS.with(|cell| {
+        struct Restore<'a> {
+            cell: &'a Cell<u64>,
+            previous: u64,
+        }
+
+        impl Drop for Restore<'_> {
+            fn drop(&mut self) {
+                self.cell.set(self.previous);
+            }
+        }
+
+        let restore = Restore {
+            cell,
+            previous: cell.replace(time_ms),
+        };
+        let result = f();
+        drop(restore);
+        result
+    })
 }
 
 struct LayoutFontContext {

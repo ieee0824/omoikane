@@ -1,4 +1,4 @@
-//! Image decoding (PNG, JPEG, GIF) and data URI parsing.
+//! Image decoding (PNG, JPEG, GIF, WebP) and data URI parsing.
 
 use std::io::Cursor;
 use std::io::Read;
@@ -6,7 +6,7 @@ use std::io::Read;
 use base64::Engine;
 use flate2::read::ZlibDecoder;
 
-use super::{DataUri, Image, PaintError};
+use super::{DataUri, GifDisposal, Image, ImageAnimation, ImageFrame, PaintError};
 
 use crate::layout::Rect;
 use crate::css::ComputedStyle;
@@ -38,6 +38,76 @@ pub(crate) fn decode_gif(bytes: &[u8]) -> Result<Image, PaintError> {
             .copy_from_slice(&frame.buffer[source_start..source_start + length]);
     }
     Image::new(canvas_width, canvas_height, pixels)
+}
+
+pub(crate) fn decode_gif_animation(bytes: &[u8]) -> Result<ImageAnimation, PaintError> {
+    let mut options = gif::DecodeOptions::new();
+    options.set_color_output(gif::ColorOutput::RGBA);
+    let mut decoder = options
+        .read_info(Cursor::new(bytes))
+        .map_err(|_| PaintError::InvalidImageBuffer)?;
+    let canvas_width = u32::from(decoder.width());
+    let canvas_height = u32::from(decoder.height());
+    let mut canvas = vec![0; canvas_width as usize * canvas_height as usize * 4];
+    let mut frames = Vec::new();
+    while let Some(frame) = decoder.read_next_frame().map_err(|_| PaintError::InvalidImageBuffer)? {
+        let before = canvas.clone();
+        let frame_width = usize::from(frame.width);
+        for y in 0..usize::from(frame.height) {
+            for x in 0..frame_width {
+                let source = (y * frame_width + x) * 4;
+                let target = ((y + usize::from(frame.top)) * canvas_width as usize
+                    + x + usize::from(frame.left)) * 4;
+                if target + 4 > canvas.len() || source + 4 > frame.buffer.len() {
+                    return Err(PaintError::InvalidImageBuffer);
+                }
+                if frame.buffer[source + 3] != 0 {
+                    canvas[target..target + 4].copy_from_slice(&frame.buffer[source..source + 4]);
+                }
+            }
+        }
+        let disposal = match frame.dispose {
+            gif::DisposalMethod::Background => GifDisposal::Background,
+            gif::DisposalMethod::Previous => GifDisposal::Previous,
+            _ => GifDisposal::Keep,
+        };
+        frames.push(ImageFrame {
+            image: Image::new(canvas_width, canvas_height, canvas.clone())?,
+            delay_ms: u32::from(frame.delay) * 10,
+            disposal,
+        });
+        match disposal {
+            GifDisposal::Keep => {}
+            GifDisposal::Previous => canvas = before,
+            GifDisposal::Background => {
+                for y in 0..usize::from(frame.height) {
+                    let start = ((y + usize::from(frame.top)) * canvas_width as usize
+                        + usize::from(frame.left)) * 4;
+                    let end = start + frame_width * 4;
+                    if end > canvas.len() { return Err(PaintError::InvalidImageBuffer); }
+                    canvas[start..end].fill(0);
+                }
+            }
+        }
+    }
+    if frames.is_empty() { return Err(PaintError::InvalidImageBuffer); }
+    let duration_ms = frames.iter().map(|frame| u64::from(frame.delay_ms.max(1))).sum();
+    Ok(ImageAnimation { frames, duration_ms })
+}
+
+pub(crate) fn decode_webp(bytes: &[u8]) -> Result<Image, PaintError> {
+    let mut decoder = image_webp::WebPDecoder::new(Cursor::new(bytes))
+        .map_err(|_| PaintError::InvalidImageBuffer)?;
+    let (width, height) = decoder.dimensions();
+    let size = decoder.output_buffer_size().ok_or(PaintError::InvalidImageBuffer)?;
+    let mut pixels = vec![0; size];
+    decoder.read_image(&mut pixels).map_err(|_| PaintError::InvalidImageBuffer)?;
+    if !decoder.has_alpha() {
+        let mut rgba = Vec::with_capacity(width as usize * height as usize * 4);
+        for rgb in pixels.chunks_exact(3) { rgba.extend_from_slice(&[rgb[0], rgb[1], rgb[2], 255]); }
+        pixels = rgba;
+    }
+    Image::new(width, height, pixels)
 }
 
 pub(crate) fn decode_png(bytes: &[u8]) -> Result<Image, PaintError> {
@@ -394,6 +464,9 @@ pub(crate) fn parse_background_image_value(value: &str) -> Option<Image> {
                     || mime_type.eq_ignore_ascii_case("image/jpg") =>
             {
                 Image::decode_jpeg(&data).ok()
+            }
+            DataUri::Binary { mime_type, data } if mime_type.eq_ignore_ascii_case("image/webp") => {
+                Image::decode_webp(&data).ok()
             }
             _ => None,
         }

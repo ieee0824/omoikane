@@ -1231,6 +1231,11 @@ impl JsRuntime {
         self.host_state.borrow().window_scroll
     }
 
+    /// Returns the virtual frame-scheduler timestamp used for rendering.
+    pub(crate) fn rendering_time_ms(&self) -> u64 {
+        self.host_state.borrow().event_loop.rendering_time_ms() as u64
+    }
+
     /// Returns the topmost event-target element at viewport coordinates.
     /// Layout is cached across calls and cloned only so current scroll offsets
     /// can be applied without changing CSSOM's document-coordinate geometry.
