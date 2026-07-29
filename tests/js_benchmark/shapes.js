@@ -141,6 +141,16 @@ globalThis.runBenchmarks = function () {
   // Property read on a string primitive, with no call involved. A wrapper object
   // per access shows up here first, so this is the cheapest place to see that
   // cost appear or disappear.
+  //
+  // The receiver is deliberately a literal even though an optimizing compiler may
+  // fold or hoist the read out of the loop. Measured rather than assumed: with
+  // SpiderMonkey's JITs disabled the read costs about 24 ns/op whether the
+  // receiver is a literal, an invariant variable, or varies per iteration, so no
+  // folding happens in the engines this harness actually compares. With its JITs
+  // enabled the loop costs the same 3.7 ns/op with the read as without it, so
+  // **the `vs SM-jit` column for this shape measures loop overhead, not the
+  // access** — and making the receiver vary would not change that while adding
+  // 42% of branch cost to the interpreter column that does carry signal.
   lines.push(bench("primitive-string-property", 500000, function (n) {
     var s = 0;
     for (var i = 0; i < n; i++) s = (s + "abc".length) % 1000003;

@@ -86,7 +86,7 @@
     },
     {
       "id": "primitive-string-property",
-      "description": "Property read on a string primitive, with no call (wrapper allocation shows here first)",
+      "description": "Property read on a string primitive, with no call (wrapper allocation shows here first; its spidermonkey_jit figure is loop-overhead-bound, see shapes.js)",
       "iterations": 500000,
       "baseline_ns_per_op": 144.4,
       "reference": {
