@@ -1,7 +1,7 @@
 use std::fs;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::css::{PseudoElement, parse_stylesheet};
+use crate::css::{PseudoElement, parse_style_attribute, parse_stylesheet};
 use crate::dom::{NodeHandle, ShadowRootMode};
 
 use super::*;
@@ -1383,6 +1383,48 @@ fn sqlite_top_n_query_orders_by_occurrences() {
 }
 
 #[test]
+fn sqlite_audit_separates_vendor_prefixed_properties() {
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let db_path = std::env::temp_dir().join(format!("omoikane-css-category-{unique}.db"));
+    let db_path_str = db_path.to_string_lossy().to_string();
+    persist_css_audit_to_sqlite(
+        &db_path_str,
+        CssAuditCategory::VendorPrefixed,
+        "-moz-user-select",
+        "none",
+    );
+    persist_css_audit_to_sqlite(
+        &db_path_str,
+        CssAuditCategory::Unsupported,
+        "future-layout",
+        "enabled",
+    );
+    let conn = Connection::open(&db_path_str).unwrap();
+    let mut stmt = conn
+        .prepare("SELECT property, category FROM unsupported_css_log ORDER BY property")
+        .unwrap();
+    let rows = stmt
+        .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert_eq!(
+        rows,
+        vec![
+            ("-moz-user-select".to_string(), "vendor-prefixed".to_string()),
+            ("future-layout".to_string(), "unsupported".to_string()),
+        ]
+    );
+    drop(stmt);
+    drop(conn);
+    close_sqlite_connection_for_path(&db_path_str);
+    fs::remove_file(db_path).unwrap();
+}
+
+#[test]
 fn sanitizes_url_like_values_in_unsupported_css_logging() {
     let value = "url(\"https://example.com/a?x=1\") blur(4px) data:image/png;base64,AAAABBBB";
     let sanitized = sanitize_unsupported_css_log_value(value);
@@ -1396,6 +1438,29 @@ fn sanitizes_url_like_values_in_unsupported_css_logging() {
 fn ignores_custom_properties_for_unsupported_logging() {
     assert!(should_ignore_unsupported_css_logging("--brand-color"));
     assert!(!should_ignore_unsupported_css_logging("transform"));
+}
+
+#[test]
+fn audit_classifies_expanded_border_shorthands_and_vendor_prefixes() {
+    for property in ["border-width", "border-style", "border-color"] {
+        assert!(is_supported_property(property), "{property} should be supported");
+        assert_eq!(css_audit_category(property), None);
+    }
+    let declarations = parse_style_attribute("border: 1px solid red");
+    assert!(!declarations.is_empty());
+    assert!(
+        declarations
+            .iter()
+            .all(|declaration| is_supported_property(&declaration.name))
+    );
+    assert_eq!(
+        css_audit_category("-moz-user-select"),
+        Some(CssAuditCategory::VendorPrefixed)
+    );
+    assert_eq!(
+        css_audit_category("future-layout"),
+        Some(CssAuditCategory::Unsupported)
+    );
 }
 
 #[test]

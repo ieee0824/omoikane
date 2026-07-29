@@ -23,7 +23,7 @@ struct WptCase {
     #[serde(default)]
     known_failure: Option<KnownFailure>,
 }
-#[derive(Clone, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 struct KnownFailure {
     status: ActualStatus,
@@ -42,7 +42,7 @@ enum ActualStatus {
     Error,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "kebab-case")]
 enum Classification {
     Pass,
@@ -51,13 +51,13 @@ enum Classification {
     Improvement,
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 struct WptReport {
     revision: String,
     summary: WptSummary,
     results: Vec<WptResult>,
 }
-#[derive(Default, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
 struct WptSummary {
     total: usize,
     pass: usize,
@@ -66,7 +66,7 @@ struct WptSummary {
     improvement: usize,
     by_area: BTreeMap<String, AreaSummary>,
 }
-#[derive(Default, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
 struct AreaSummary {
     total: usize,
     pass: usize,
@@ -74,7 +74,7 @@ struct AreaSummary {
     regression: usize,
     improvement: usize,
 }
-#[derive(Serialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 struct WptResult {
     path: String,
     area: String,
@@ -84,6 +84,31 @@ struct WptResult {
     known_failure: Option<KnownFailure>,
     script_errors: Vec<String>,
     subtests: serde_json::Value,
+}
+
+#[derive(Debug, Deserialize, PartialEq, Serialize)]
+struct WptAreaReport {
+    revision: String,
+    area: String,
+    summary: AreaSummary,
+    results: Vec<WptResult>,
+}
+
+#[derive(Debug, PartialEq, Serialize)]
+struct WptRevisionDiff {
+    previous_revision: String,
+    current_revision: String,
+    known_failure_delta: i64,
+    regression_delta: i64,
+    improvement_delta: i64,
+    changed: Vec<WptResultChange>,
+}
+
+#[derive(Debug, PartialEq, Serialize)]
+struct WptResultChange {
+    path: String,
+    previous: Option<Classification>,
+    current: Option<Classification>,
 }
 
 struct StaticServer {
@@ -347,6 +372,165 @@ fn junit_xml(report: &WptReport) -> String {
     xml
 }
 
+fn write_revision_reports(root: &Path, report: &WptReport) -> std::io::Result<()> {
+    let revision_dir = root.join(&report.revision);
+    fs::create_dir_all(&revision_dir)?;
+    fs::write(
+        revision_dir.join("report.json"),
+        serde_json::to_vec_pretty(report).map_err(std::io::Error::other)?,
+    )?;
+    for (area, summary) in &report.summary.by_area {
+        let area_report = WptAreaReport {
+            revision: report.revision.clone(),
+            area: area.clone(),
+            summary: summary.clone(),
+            results: report
+                .results
+                .iter()
+                .filter(|result| result.area == *area)
+                .cloned()
+                .collect(),
+        };
+        let filename = area
+            .chars()
+            .map(|character| {
+                if character.is_ascii_alphanumeric() || matches!(character, '-' | '_') {
+                    character
+                } else {
+                    '_'
+                }
+            })
+            .collect::<String>();
+        fs::write(
+            revision_dir.join(format!("{filename}.json")),
+            serde_json::to_vec_pretty(&area_report).map_err(std::io::Error::other)?,
+        )?;
+    }
+    Ok(())
+}
+
+fn read_revision_report(root: &Path, revision: &str) -> std::io::Result<WptReport> {
+    let bytes = fs::read(root.join(revision).join("report.json"))?;
+    serde_json::from_slice(&bytes).map_err(std::io::Error::other)
+}
+
+fn diff_revision_reports(previous: &WptReport, current: &WptReport) -> WptRevisionDiff {
+    let previous_results = previous
+        .results
+        .iter()
+        .map(|result| (result.path.as_str(), result.classification))
+        .collect::<BTreeMap<_, _>>();
+    let current_results = current
+        .results
+        .iter()
+        .map(|result| (result.path.as_str(), result.classification))
+        .collect::<BTreeMap<_, _>>();
+    let mut paths = previous_results.keys().chain(current_results.keys()).copied().collect::<Vec<_>>();
+    paths.sort_unstable();
+    paths.dedup();
+    let changed = paths
+        .into_iter()
+        .filter_map(|path| {
+            let previous = previous_results.get(path).copied();
+            let current = current_results.get(path).copied();
+            (previous != current).then(|| WptResultChange {
+                path: path.to_string(),
+                previous,
+                current,
+            })
+        })
+        .collect();
+    WptRevisionDiff {
+        previous_revision: previous.revision.clone(),
+        current_revision: current.revision.clone(),
+        known_failure_delta: current.summary.known_failure as i64
+            - previous.summary.known_failure as i64,
+        regression_delta: current.summary.regression as i64 - previous.summary.regression as i64,
+        improvement_delta: current.summary.improvement as i64 - previous.summary.improvement as i64,
+        changed,
+    }
+}
+
+#[test]
+fn revision_reports_round_trip_and_split_by_area() {
+    let unique = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("system clock must be after Unix epoch")
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!(
+        "omoikane-wpt-results-{}-{unique}",
+        std::process::id(),
+    ));
+    let results = vec![
+        WptResult {
+            path: "dom/a.html".to_string(),
+            area: "dom".to_string(),
+            actual: ActualStatus::Pass,
+            classification: Classification::Pass,
+            known_failure: None,
+            script_errors: vec![],
+            subtests: serde_json::json!([]),
+        },
+        WptResult {
+            path: "css/b.html".to_string(),
+            area: "css".to_string(),
+            actual: ActualStatus::Timeout,
+            classification: Classification::KnownFailure,
+            known_failure: Some(known_failure(ActualStatus::Timeout)),
+            script_errors: vec![],
+            subtests: serde_json::json!([]),
+        },
+    ];
+    let report = WptReport {
+        revision: "abc123".to_string(),
+        summary: summarize(&results),
+        results,
+    };
+
+    write_revision_reports(&root, &report).unwrap();
+    assert_eq!(read_revision_report(&root, "abc123").unwrap(), report);
+    let area: WptAreaReport = serde_json::from_slice(
+        &fs::read(root.join("abc123/css.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(area.area, "css");
+    assert_eq!(area.summary.known_failure, 1);
+    assert_eq!(area.results.len(), 1);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn revision_diff_reports_known_failure_changes() {
+    let result = |classification| WptResult {
+        path: "dom/a.html".to_string(),
+        area: "dom".to_string(),
+        actual: ActualStatus::Pass,
+        classification,
+        known_failure: None,
+        script_errors: vec![],
+        subtests: serde_json::json!([]),
+    };
+    let previous_results = vec![result(Classification::KnownFailure)];
+    let current_results = vec![result(Classification::Pass)];
+    let previous = WptReport {
+        revision: "old".to_string(),
+        summary: summarize(&previous_results),
+        results: previous_results,
+    };
+    let current = WptReport {
+        revision: "new".to_string(),
+        summary: summarize(&current_results),
+        results: current_results,
+    };
+
+    let diff = diff_revision_reports(&previous, &current);
+    assert_eq!(diff.known_failure_delta, -1);
+    assert_eq!(diff.regression_delta, 0);
+    assert_eq!(diff.changed.len(), 1);
+    assert_eq!(diff.changed[0].previous, Some(Classification::KnownFailure));
+    assert_eq!(diff.changed[0].current, Some(Classification::Pass));
+}
+
 #[test]
 fn junit_report_escapes_xml_and_reports_mismatches() {
     let results = vec![WptResult {
@@ -582,6 +766,26 @@ fn selected_wpt_testharness_cases_match_expectations() {
         summary,
         results,
     };
+    let results_root = std::env::var("WPT_RESULTS_DIR")
+        .ok()
+        .map(PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("GITHUB_ACTIONS")
+                .is_some()
+                .then(|| PathBuf::from(".artifacts/wpt/results"))
+        });
+    if let Some(root) = results_root {
+        write_revision_reports(&root, &report).expect("write revision-scoped WPT reports");
+        if let Ok(previous_revision) = std::env::var("WPT_COMPARE_REVISION") {
+            let previous = read_revision_report(&root, &previous_revision)
+                .expect("read previous WPT revision report");
+            println!(
+                "WPT revision diff: {}",
+                serde_json::to_string_pretty(&diff_revision_reports(&previous, &report))
+                    .expect("serialize WPT revision diff")
+            );
+        }
+    }
     if let Ok(path) = std::env::var("WPT_REPORT") {
         let path = PathBuf::from(path);
         if let Some(parent) = path.parent() {

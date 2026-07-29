@@ -150,7 +150,7 @@ fn is_supported_html_tag(tag: &str) -> bool {
             | "ul" | "ol" | "li"
             | "table" | "thead" | "tbody" | "tfoot" | "tr" | "td" | "th"
             | "img" | "object" | "svg" | "form" | "input"
-            | "button" | "textarea" | "select" | "option"
+            | "button" | "textarea" | "select" | "option" | "iframe" | "label"
             | "style" | "link" | "meta" | "title" | "script" | "noscript"
             | "font" | "blockquote" | "hr" | "address"
             | "dl" | "dt" | "dd" | "figure" | "figcaption"

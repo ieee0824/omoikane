@@ -6557,11 +6557,10 @@ fn supported_html_tags_are_not_logged() {
     assert!(super::is_supported_html_tag("img"));
     for tag in [
         "canvas", "video", "audio", "source", "picture", "details", "summary", "dialog",
-        "time", "progress", "meter",
+        "time", "progress", "meter", "iframe", "label",
     ] {
         assert!(super::is_supported_html_tag(tag), "{tag} should be supported");
     }
-    assert!(!super::is_supported_html_tag("iframe"));
     assert!(super::is_supported_html_tag("form"));
     assert!(super::is_supported_html_tag("input"));
     assert!(super::is_supported_html_tag("button"));
