@@ -5,7 +5,7 @@ use std::sync::Arc;
 use crate::css::{ComputedStyle, ComputedValue, PseudoElement, StyleResolver};
 use crate::dom::{Node, NodeHandle, NodeType};
 use crate::font::{Font, FontFamilyKey, FontStyle, FontWeight, load_default_text_fonts};
-use crate::http::url::resolve_url;
+use crate::http::{HttpRequest, url::resolve_url};
 use crate::paint::{DataUri, Image, parse_data_uri};
 
 use super::{
@@ -13,7 +13,8 @@ use super::{
     LineBox, Rect, TextControlPaintState, VerticalAlign,
     border_box_adjust_length, edge_sizes, explicit_length, is_border_box, is_display_none,
     is_non_rendered_html_element,
-    IMAGE_BASE_URL, IMAGE_CACHE, HTTP_CLIENT, LAYOUT_FONTS,
+    HTTP_CLIENT, IMAGE_ANIMATION_CACHE, IMAGE_ANIMATION_TIME_MS, IMAGE_BASE_URL, IMAGE_CACHE,
+    LAYOUT_FONTS,
 };
 
 // ── Text align ──────────────────────────────────────────────────────────────
@@ -831,7 +832,7 @@ fn element_inline_image_with_current_color(
     }
 }
 
-/// Decode an image from a data: URI (PNG, JPEG, GIF, or SVG).
+/// Decode an image from a data: URI (PNG, JPEG, GIF, WebP, or SVG).
 fn decode_data_uri_image(uri: &str) -> Option<Image> {
     let data_uri = parse_data_uri(uri).ok()?;
     match data_uri {
@@ -843,7 +844,11 @@ fn decode_data_uri_image(uri: &str) -> Option<Image> {
             {
                 Image::decode_jpeg(&data).ok()
             } else if mime_type.eq_ignore_ascii_case("image/gif") {
-                Image::decode_gif(&data).ok()
+                let animation = Image::decode_gif_animation(&data).ok()?;
+                let time = IMAGE_ANIMATION_TIME_MS.with(|cell| cell.get());
+                Some(animation.frame_at(time).image().clone())
+            } else if mime_type.eq_ignore_ascii_case("image/webp") {
+                Image::decode_webp(&data).ok()
             } else if mime_type.eq_ignore_ascii_case("image/svg+xml") {
                 decode_svg_bytes(&data)
             } else {
@@ -892,6 +897,10 @@ const MAX_IMAGE_SIZE: usize = 10 * 1024 * 1024;
 
 /// Fetch an image from an HTTP/HTTPS URL with caching.
 fn fetch_image(url: &str) -> Option<Image> {
+    if let Some(animation) = IMAGE_ANIMATION_CACHE.with(|cache| cache.borrow().get(url).cloned()) {
+        let time = IMAGE_ANIMATION_TIME_MS.with(|cell| cell.get());
+        return Some(animation.frame_at(time).image().clone());
+    }
     // Check cache first
     let cached = IMAGE_CACHE.with(|cache| cache.borrow().get(url).cloned());
     if let Some(result) = cached {
@@ -912,7 +921,12 @@ fn fetch_image(url: &str) -> Option<Image> {
 /// Fetch an image without caching (internal helper).
 fn fetch_image_uncached(url: &str) -> Option<Image> {
     // Use shared HTTP client for connection reuse and cookie sharing
-    let response = HTTP_CLIENT.with(|client| client.borrow_mut().get(url).ok())?;
+    let mut request = HttpRequest::get(url).ok()?;
+    request.set_header(
+        "Accept",
+        "image/webp,image/png,image/jpeg,image/gif,image/svg+xml;q=0.9,*/*;q=0.1",
+    );
+    let response = HTTP_CLIENT.with(|client| client.borrow_mut().send(request).ok())?;
 
     if response.status_code() != 200 {
         return None;
@@ -930,6 +944,15 @@ fn fetch_image_uncached(url: &str) -> Option<Image> {
         .map(str::to_lowercase)
         .unwrap_or_default();
 
+    if content_type.contains("image/gif") || url.ends_with(".gif") || body.starts_with(b"GIF8") {
+        let animation = Image::decode_gif_animation(body).ok()?;
+        let time = IMAGE_ANIMATION_TIME_MS.with(|cell| cell.get());
+        let image = animation.frame_at(time).image().clone();
+        IMAGE_ANIMATION_CACHE.with(|cache| {
+            cache.borrow_mut().insert(url.to_string(), animation);
+        });
+        return Some(image);
+    }
     decode_image_bytes(body, &content_type, url)
 }
 
@@ -942,16 +965,19 @@ fn decode_image_bytes(bytes: &[u8], content_type: &str, url: &str) -> Option<Ima
     if content_type.contains("image/svg+xml") || url.ends_with(".svg") {
         return decode_svg_bytes(bytes);
     }
-    if content_type.contains("image/gif") || url.ends_with(".gif") {
+    if content_type.contains("image/webp") || url.ends_with(".webp") {
+        Image::decode_webp(bytes).ok()
+    } else if content_type.contains("image/gif") || url.ends_with(".gif") {
         Image::decode_gif(bytes).ok()
     } else if content_type.contains("image/png") {
         Image::decode_png(bytes).ok()
     } else if content_type.contains("image/jpeg") || content_type.contains("image/jpg") {
         Image::decode_jpeg(bytes).ok()
     } else {
-        // Try PNG first, then JPEG, then GIF, then SVG
-        Image::decode_png(bytes)
+        // Sniff supported raster formats by their decoder before SVG text.
+        Image::decode_webp(bytes)
             .ok()
+            .or_else(|| Image::decode_png(bytes).ok())
             .or_else(|| Image::decode_jpeg(bytes).ok())
             .or_else(|| Image::decode_gif(bytes).ok())
             .or_else(|| decode_svg_bytes(bytes))
