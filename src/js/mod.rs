@@ -7525,6 +7525,10 @@ mod tests {
                     r#"navigator.plugins instanceof PluginArray &&
                        navigator.mimeTypes instanceof MimeTypeArray &&
                        navigator.plugins.length === 0 && navigator.mimeTypes.length === 0 &&
+                       navigator.plugins === navigator.plugins &&
+                       navigator.mimeTypes === navigator.mimeTypes &&
+                       Object.prototype.toString.call(navigator.plugins) === "[object PluginArray]" &&
+                       Object.prototype.toString.call(navigator.mimeTypes) === "[object MimeTypeArray]" &&
                        navigator.plugins.item(0) === null &&
                        navigator.plugins.namedItem("missing") === null &&
                        navigator.mimeTypes.item(0) === null &&

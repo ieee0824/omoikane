@@ -6173,6 +6173,7 @@
     namedItem() { return null; }
     refresh() {}
     *[Symbol.iterator]() {}
+    get [Symbol.toStringTag]() { return "PluginArray"; }
   }
   class MimeTypeArray {
     constructor(token) {
@@ -6182,6 +6183,7 @@
     item() { return null; }
     namedItem() { return null; }
     *[Symbol.iterator]() {}
+    get [Symbol.toStringTag]() { return "MimeTypeArray"; }
   }
   class Navigator {
     constructor(token) {
@@ -6195,6 +6197,7 @@
       this.plugins = new PluginArray(navigatorConstructionToken);
       this.mimeTypes = new MimeTypeArray(navigatorConstructionToken);
     }
+    get [Symbol.toStringTag]() { return "Navigator"; }
   }
   globalThis.PluginArray = PluginArray;
   globalThis.MimeTypeArray = MimeTypeArray;
