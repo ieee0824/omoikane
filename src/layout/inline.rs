@@ -795,6 +795,7 @@ fn element_inline_image_with_current_color(
     let tag_name = node.tag_name()?;
     let attributes = node.attributes().unwrap_or_default();
     match tag_name.as_str() {
+        "canvas" => crate::canvas::image(node.identity()).map(|image| (node.clone(), image)),
         "img" => {
             let src = attributes.get("src")?;
             decode_or_fetch_image(src).map(|image| (node.clone(), image))

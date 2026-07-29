@@ -4997,6 +4997,105 @@
     set width(value) { this.setAttribute("width", String(Math.max(0, Number(value) || 0))); }
   }
 
+  class ImageData {
+    constructor(dataOrWidth, widthOrHeight, height) {
+      if (typeof dataOrWidth === "number") {
+        this.width = Math.max(0, Math.trunc(dataOrWidth));
+        this.height = Math.max(0, Math.trunc(widthOrHeight));
+        this.data = new Uint8ClampedArray(this.width * this.height * 4);
+      } else {
+        this.data = new Uint8ClampedArray(dataOrWidth);
+        this.width = Math.max(0, Math.trunc(widthOrHeight));
+        this.height = height === undefined ? this.data.length / 4 / this.width : Math.max(0, Math.trunc(height));
+        if (this.data.length !== this.width * this.height * 4) throw new DOMException("Invalid ImageData dimensions", "IndexSizeError");
+      }
+    }
+  }
+
+  const canvasStates = new WeakMap();
+  function canvasDimensions(canvas) {
+    const integer = (name, fallback) => {
+      const value = canvas.getAttribute(name);
+      return value === null ? fallback : Math.max(0, Math.min(32768, Math.trunc(Number(value)) || 0));
+    };
+    return [integer("width", 300), integer("height", 150)];
+  }
+  function canvasColor(value, alpha) {
+    const text = String(value).trim().toLowerCase();
+    const named = { black:[0,0,0,255], white:[255,255,255,255], red:[255,0,0,255], green:[0,128,0,255], blue:[0,0,255,255], transparent:[0,0,0,0] };
+    let color = named[text];
+    if (!color && /^#[0-9a-f]{6}$/.test(text)) color = [parseInt(text.slice(1,3),16),parseInt(text.slice(3,5),16),parseInt(text.slice(5,7),16),255];
+    if (!color && /^#[0-9a-f]{3}$/.test(text)) color = [...text.slice(1)].map(ch=>parseInt(ch+ch,16)).concat(255);
+    const rgb = text.match(/^rgba?\(([^)]+)\)$/);
+    if (!color && rgb) { const p=rgb[1].split(",").map(Number); color=[p[0]||0,p[1]||0,p[2]||0,p.length>3?Math.round(Math.max(0,Math.min(1,p[3]))*255):255]; }
+    color = color || [0,0,0,255];
+    return [color[0],color[1],color[2],Math.round(color[3]*alpha)];
+  }
+  function initialCanvasState(canvas) {
+    const [width,height]=canvasDimensions(canvas);
+    return { width,height,pixels:new Uint8ClampedArray(width*height*4), context:null,
+      style:{fillStyle:"#000000",strokeStyle:"#000000",globalAlpha:1,lineWidth:1,lineCap:"butt",lineJoin:"miter",miterLimit:10,font:"10px sans-serif",transform:[1,0,0,1,0,0],clip:null}, stack:[], paths:[], current:null };
+  }
+  function canvasState(canvas) {
+    let state=canvasStates.get(canvas); const [width,height]=canvasDimensions(canvas);
+    if (!state || state.width!==width || state.height!==height) { state=initialCanvasState(canvas); canvasStates.set(canvas,state); __omoikane_canvas_commit(canvas.__id,width,height,new Uint8Array(state.pixels.buffer)); }
+    return state;
+  }
+  function blendCanvasPixel(state,x,y,color,clear=false) {
+    x=Math.floor(x); y=Math.floor(y); if(x<0||y<0||x>=state.width||y>=state.height)return;
+    if(state.style.clip && !pointInCanvasPaths(x+.5,y+.5,state.style.clip,"nonzero"))return;
+    const i=(y*state.width+x)*4; if(clear){state.pixels.fill(0,i,i+4);return;}
+    const sa=color[3]/255, da=state.pixels[i+3]/255, oa=sa+da*(1-sa);
+    if(!oa){state.pixels.fill(0,i,i+4);return;}
+    for(let c=0;c<3;c++)state.pixels[i+c]=Math.round((color[c]*sa+state.pixels[i+c]*da*(1-sa))/oa);
+    state.pixels[i+3]=Math.round(oa*255);
+  }
+  function transformCanvasPoint(m,x,y){return [m[0]*x+m[2]*y+m[4],m[1]*x+m[3]*y+m[5]];}
+  function pointInCanvasPaths(x,y,paths,rule){let winding=0,crossings=0;for(const path of paths){for(let i=0;i<path.length;i++){const a=path[i],b=path[(i+1)%path.length];if((a[1]>y)!==(b[1]>y)){const ix=a[0]+(y-a[1])*(b[0]-a[0])/(b[1]-a[1]);if(ix>x){crossings++;winding+=b[1]>a[1]?1:-1;}}}}return rule==="evenodd"?crossings%2===1:winding!==0;}
+  function commitCanvas(canvas,state){__omoikane_canvas_commit(canvas.__id,state.width,state.height,new Uint8Array(state.pixels.buffer));}
+
+  class CanvasRenderingContext2D {
+    constructor(canvas){this.canvas=canvas;}
+    get __s(){return canvasState(this.canvas);}
+    save(){const s=this.__s;s.stack.push({...s.style,transform:s.style.transform.slice(),clip:s.style.clip&&s.style.clip.map(p=>p.map(q=>q.slice()))});}
+    restore(){const s=this.__s;if(s.stack.length)s.style=s.stack.pop();}
+    translate(x,y){this.transform(1,0,0,1,x,y);} rotate(a){this.transform(Math.cos(a),Math.sin(a),-Math.sin(a),Math.cos(a),0,0);} scale(x,y){this.transform(x,0,0,y,0,0);}
+    transform(a,b,c,d,e,f){const s=this.__s,m=s.style.transform;s.style.transform=[m[0]*a+m[2]*b,m[1]*a+m[3]*b,m[0]*c+m[2]*d,m[1]*c+m[3]*d,m[0]*e+m[2]*f+m[4],m[1]*e+m[3]*f+m[5]];}
+    setTransform(a,b,c,d,e,f){if(typeof a==="object"){({a,b,c,d,e,f}=a);}this.__s.style.transform=[Number(a),Number(b),Number(c),Number(d),Number(e),Number(f)];}
+    resetTransform(){this.__s.style.transform=[1,0,0,1,0,0];}
+    clearRect(x,y,w,h){const s=this.__s;for(let py=Math.floor(y);py<Math.ceil(y+h);py++)for(let px=Math.floor(x);px<Math.ceil(x+w);px++){const p=transformCanvasPoint(s.style.transform,px,py);blendCanvasPixel(s,p[0],p[1],[0,0,0,0],true);}commitCanvas(this.canvas,s);}
+    fillRect(x,y,w,h){this.beginPath();this.rect(x,y,w,h);this.fill();}
+    strokeRect(x,y,w,h){this.beginPath();this.rect(x,y,w,h);this.stroke();}
+    beginPath(){const s=this.__s;s.paths=[];s.current=null;}
+    moveTo(x,y){const s=this.__s,p=transformCanvasPoint(s.style.transform,+x,+y);s.current=[p];s.paths.push(s.current);}
+    lineTo(x,y){const s=this.__s,p=transformCanvasPoint(s.style.transform,+x,+y);if(!s.current)this.moveTo(x,y);else s.current.push(p);}
+    closePath(){const s=this.__s;if(s.current&&s.current.length)s.current.push(s.current[0].slice());}
+    rect(x,y,w,h){this.moveTo(x,y);this.lineTo(x+w,y);this.lineTo(x+w,y+h);this.lineTo(x,y+h);this.closePath();}
+    quadraticCurveTo(cx,cy,x,y){const s=this.__s;if(!s.current||!s.current.length)this.moveTo(0,0);const p0=s.current[s.current.length-1];for(let i=1;i<=20;i++){const t=i/20,u=1-t,p=transformCanvasPoint(s.style.transform,+cx,+cy),e=transformCanvasPoint(s.style.transform,+x,+y);s.current.push([u*u*p0[0]+2*u*t*p[0]+t*t*e[0],u*u*p0[1]+2*u*t*p[1]+t*t*e[1]]);}}
+    bezierCurveTo(c1x,c1y,c2x,c2y,x,y){const s=this.__s;if(!s.current||!s.current.length)this.moveTo(0,0);const p0=s.current[s.current.length-1],p1=transformCanvasPoint(s.style.transform,c1x,c1y),p2=transformCanvasPoint(s.style.transform,c2x,c2y),p3=transformCanvasPoint(s.style.transform,x,y);for(let i=1;i<=24;i++){const t=i/24,u=1-t;s.current.push([u*u*u*p0[0]+3*u*u*t*p1[0]+3*u*t*t*p2[0]+t*t*t*p3[0],u*u*u*p0[1]+3*u*u*t*p1[1]+3*u*t*t*p2[1]+t*t*t*p3[1]]);}}
+    arc(x,y,r,start,end,ccw=false){const span=ccw?start-end:end-start,steps=Math.max(8,Math.ceil(Math.abs(span)*12));for(let i=0;i<=steps;i++){const a=ccw?start-span*i/steps:start+span*i/steps;i?this.lineTo(x+r*Math.cos(a),y+r*Math.sin(a)):this.moveTo(x+r*Math.cos(a),y+r*Math.sin(a));}}
+    ellipse(x,y,rx,ry,rotation,start,end,ccw=false){const span=ccw?start-end:end-start,steps=Math.max(8,Math.ceil(Math.abs(span)*12));for(let i=0;i<=steps;i++){const a=ccw?start-span*i/steps:start+span*i/steps,px=rx*Math.cos(a),py=ry*Math.sin(a),xx=x+px*Math.cos(rotation)-py*Math.sin(rotation),yy=y+px*Math.sin(rotation)+py*Math.cos(rotation);i?this.lineTo(xx,yy):this.moveTo(xx,yy);}}
+    arcTo(x1,y1,x2,y2){this.lineTo(x1,y1);this.lineTo(x2,y2);}
+    fill(rule="nonzero"){const s=this.__s,c=canvasColor(s.style.fillStyle,s.style.globalAlpha);for(let y=0;y<s.height;y++)for(let x=0;x<s.width;x++)if(pointInCanvasPaths(x+.5,y+.5,s.paths,rule))blendCanvasPixel(s,x,y,c);commitCanvas(this.canvas,s);}
+    stroke(){const s=this.__s,c=canvasColor(s.style.strokeStyle,s.style.globalAlpha),radius=Math.max(.5,s.style.lineWidth/2);for(const path of s.paths)for(let i=1;i<path.length;i++){const a=path[i-1],b=path[i],minx=Math.floor(Math.min(a[0],b[0])-radius),maxx=Math.ceil(Math.max(a[0],b[0])+radius),miny=Math.floor(Math.min(a[1],b[1])-radius),maxy=Math.ceil(Math.max(a[1],b[1])+radius),dx=b[0]-a[0],dy=b[1]-a[1],l=dx*dx+dy*dy;for(let y=miny;y<=maxy;y++)for(let x=minx;x<=maxx;x++){const t=l?Math.max(0,Math.min(1,((x+.5-a[0])*dx+(y+.5-a[1])*dy)/l)):0,qx=a[0]+t*dx,qy=a[1]+t*dy;if(Math.hypot(x+.5-qx,y+.5-qy)<=radius)blendCanvasPixel(s,x,y,c);}}commitCanvas(this.canvas,s);}
+    clip(rule="nonzero"){const s=this.__s;s.style.clip=s.paths.map(p=>p.map(q=>q.slice()));}
+    createImageData(a,b){return a instanceof ImageData?new ImageData(a.width,a.height):new ImageData(a,b);}
+    getImageData(sx,sy,sw,sh){const s=this.__s,out=new ImageData(Math.abs(sw),Math.abs(sh));for(let y=0;y<out.height;y++)for(let x=0;x<out.width;x++){const si=((sy+y)*s.width+(sx+x))*4,di=(y*out.width+x)*4;if(sx+x>=0&&sy+y>=0&&sx+x<s.width&&sy+y<s.height)out.data.set(s.pixels.slice(si,si+4),di);}return out;}
+    putImageData(image,dx,dy){const s=this.__s;for(let y=0;y<image.height;y++)for(let x=0;x<image.width;x++){const tx=dx+x,ty=dy+y;if(tx>=0&&ty>=0&&tx<s.width&&ty<s.height)s.pixels.set(image.data.slice((y*image.width+x)*4,(y*image.width+x+1)*4),(ty*s.width+tx)*4);}commitCanvas(this.canvas,s);}
+    drawImage(source,...args){let src;if(source instanceof HTMLCanvasElement)src=canvasState(source);else{const raw=source&&source.__id!=null?__omoikane_canvas_image_source(source.__id):null;if(raw===null)throw new DOMException("Image source is unavailable","InvalidStateError");const decoded=JSON.parse(raw);src={width:decoded.width,height:decoded.height,pixels:bytesFromBase64(decoded.pixels)};}const s=this.__s;let sx=0,sy=0,sw=src.width,sh=src.height,dx,dy,dw,dh;if(args.length===2){[dx,dy]=args;dw=sw;dh=sh;}else if(args.length===4){[dx,dy,dw,dh]=args;}else{[sx,sy,sw,sh,dx,dy,dw,dh]=args;}for(let y=0;y<dh;y++)for(let x=0;x<dw;x++){const xx=Math.floor(sx+x*sw/dw),yy=Math.floor(sy+y*sh/dh),i=(yy*src.width+xx)*4;blendCanvasPixel(s,dx+x,dy+y,[src.pixels[i],src.pixels[i+1],src.pixels[i+2],Math.round(src.pixels[i+3]*s.style.globalAlpha)]);}commitCanvas(this.canvas,s);}
+    measureText(text){const size=parseFloat(this.__s.style.font)||10;return {width:String(text).length*size*.6,actualBoundingBoxAscent:size*.8,actualBoundingBoxDescent:size*.2};}
+    fillText(text,x,y){const s=this.__s,size=parseFloat(s.style.font)||10,w=this.measureText(text).width;this.fillRect(x,y-size*.8,w,size);}
+    strokeText(text,x,y){const s=this.__s,size=parseFloat(s.style.font)||10,w=this.measureText(text).width;this.strokeRect(x,y-size*.8,w,size);}
+  }
+  for(const name of ["fillStyle","strokeStyle","globalAlpha","lineWidth","lineCap","lineJoin","miterLimit","font"]){Object.defineProperty(CanvasRenderingContext2D.prototype,name,{get(){return this.__s.style[name];},set(value){this.__s.style[name]=name==="globalAlpha"?Math.max(0,Math.min(1,Number(value))):name==="lineWidth"?Math.max(0,Number(value)):String(value);}});}
+
+  class HTMLCanvasElement extends HTMLElement {
+    get width(){return canvasDimensions(this)[0];} set width(value){this.setAttribute("width",String(Math.max(0,Math.trunc(Number(value))||0)));canvasStates.delete(this);canvasState(this);}
+    get height(){return canvasDimensions(this)[1];} set height(value){this.setAttribute("height",String(Math.max(0,Math.trunc(Number(value))||0)));canvasStates.delete(this);canvasState(this);}
+    getContext(type){if(String(type).toLowerCase()!=="2d")return null;const s=canvasState(this);return s.context||(s.context=new CanvasRenderingContext2D(this));}
+    toDataURL(type="image/png"){canvasState(this);return String(type).toLowerCase()==="image/png"?__omoikane_canvas_data_url(this.__id):__omoikane_canvas_data_url(this.__id);}
+  }
+
   class HTMLLinkElement extends HTMLElement {
     get rel() {
       return this.getAttribute("rel") || "";
@@ -5107,6 +5206,7 @@
     iframe: HTMLIFrameElement,
     object: HTMLObjectElement,
     img: HTMLImageElement,
+    canvas: HTMLCanvasElement,
     link: HTMLLinkElement,
     script: HTMLScriptElement,
     style: HTMLStyleElement,
@@ -5651,6 +5751,9 @@
   globalThis.HTMLSelectElement = HTMLSelectElement;
   globalThis.HTMLOptionElement = HTMLOptionElement;
   globalThis.HTMLImageElement = HTMLImageElement;
+  globalThis.HTMLCanvasElement = HTMLCanvasElement;
+  globalThis.CanvasRenderingContext2D = CanvasRenderingContext2D;
+  globalThis.ImageData = ImageData;
   globalThis.Image = function(width, height) {
     const image = document.createElement("img");
     if (width !== undefined) image.width = Number(width);

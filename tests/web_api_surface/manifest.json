@@ -453,7 +453,7 @@
       "area": "graphics",
       "description": "Canvas elements expose a 2D drawing context",
       "probe": "typeof HTMLCanvasElement === 'function' && typeof document.createElement('canvas').getContext === 'function' && document.createElement('canvas').getContext('2d') !== null",
-      "baseline_supported": false
+      "baseline_supported": true
     },
     {
       "id": "graphics.webgl",

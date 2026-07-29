@@ -2735,6 +2735,21 @@ fn register_host_bindings(
             NativeFunction::from_copy_closure(queue_networking_task_native),
         ),
         (
+            js_string!("__omoikane_canvas_commit"),
+            4,
+            NativeFunction::from_copy_closure(canvas_commit_native),
+        ),
+        (
+            js_string!("__omoikane_canvas_data_url"),
+            1,
+            NativeFunction::from_copy_closure(canvas_data_url_native),
+        ),
+        (
+            js_string!("__omoikane_canvas_image_source"),
+            1,
+            NativeFunction::from_copy_closure(canvas_image_source_native),
+        ),
+        (
             js_string!("__omoikane_websocket_connect"),
             2,
             NativeFunction::from_copy_closure(websocket_connect_native),
@@ -5090,6 +5105,49 @@ fn queue_networking_task_native(
     })
 }
 
+fn canvas_commit_native(
+    _: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let id = args.first().cloned().unwrap_or_default().to_number(context)? as usize;
+    let width = args.get(1).cloned().unwrap_or_default().to_number(context)? as u32;
+    let height = args.get(2).cloned().unwrap_or_default().to_number(context)? as u32;
+    let pixels = body_bytes_argument(args.get(3), context)?.unwrap_or_default();
+    Ok(JsValue::from(crate::canvas::commit(id, width, height, pixels)))
+}
+
+fn canvas_data_url_native(
+    _: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let id = args.first().cloned().unwrap_or_default().to_number(context)? as usize;
+    Ok(js_string!(crate::canvas::png_data_url(id).unwrap_or_else(|| "data:,".into())).into())
+}
+
+fn canvas_image_source_native(
+    _: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let id = args.first().cloned().unwrap_or_default().to_number(context)? as usize;
+    with_host_state(|state| {
+        let Some(node) = state.borrow().get_node(id) else {
+            return Ok(JsValue::null());
+        };
+        let Some((_, image)) = crate::layout::element_inline_image(&node) else {
+            return Ok(JsValue::null());
+        };
+        let payload = serde_json::json!({
+            "width": image.width(),
+            "height": image.height(),
+            "pixels": base64::engine::general_purpose::STANDARD.encode(image.pixels()),
+        });
+        Ok(js_string!(payload.to_string()).into())
+    })
+}
+
 fn websocket_connect_native(
     _: &JsValue,
     args: &[JsValue],
@@ -6982,6 +7040,46 @@ mod tests {
         let value = runtime.eval("1 + 2 + 3").unwrap();
 
         assert_eq!(value.as_number(), Some(6.0));
+    }
+
+    #[test]
+    fn canvas_2d_pixels_transform_clip_image_data_draw_image_and_png() {
+        let mut runtime = JsRuntime::new().unwrap();
+        let result = eval_str(&mut runtime, r#"(() => {
+          const canvas=document.createElement('canvas'); canvas.width=6; canvas.height=4;
+          const ctx=canvas.getContext('2d');
+          ctx.fillStyle='#ff0000'; ctx.fillRect(0,0,2,2);
+          ctx.save(); ctx.translate(2,0); ctx.fillStyle='#0000ff'; ctx.fillRect(0,0,2,2); ctx.restore();
+          ctx.beginPath(); ctx.rect(0,2,3,2); ctx.clip(); ctx.fillStyle='#00ff00'; ctx.fillRect(0,2,6,2);
+          const patch=ctx.createImageData(1,1); patch.data.set([9,8,7,255]); ctx.putImageData(patch,5,3);
+          const copy=document.createElement('canvas'); copy.width=2; copy.height=2; copy.getContext('2d').drawImage(canvas,0,0,2,2,0,0,2,2);
+          const p=ctx.getImageData(0,0,6,4).data;
+          globalThis.canvasUrl=canvas.toDataURL('image/png');
+          globalThis.canvasWidth=ctx.measureText('abcd').width;
+          globalThis.copyPixel=Array.from(copy.getContext('2d').getImageData(0,0,1,1).data).join(',');
+          return [p.slice(0,4),p.slice(8,12),p.slice(48,52),p.slice(92,96)].map(x=>Array.from(x).join(',')).join('|');
+        })()"#);
+        assert_eq!(result, "255,0,0,255|0,0,255,255|0,255,0,255|9,8,7,255");
+        assert_eq!(eval_str(&mut runtime, "copyPixel"), "255,0,0,255");
+        assert_eq!(eval_str(&mut runtime, "String(canvasWidth)"), "24");
+        let data_url = eval_str(&mut runtime, "canvasUrl");
+        let png = base64::engine::general_purpose::STANDARD.decode(data_url.split_once(',').unwrap().1).unwrap();
+        let image = crate::paint::Image::decode_png(&png).unwrap();
+        assert_eq!((image.width(), image.height()), (6, 4));
+        runtime.eval("globalThis.canvas = document.createElement('canvas'); canvas.width=2; globalThis.c=canvas.getContext('2d'); c.fillRect(0,0,1,1); canvas.width=2;").unwrap();
+        assert_eq!(eval_str(&mut runtime, "Array.from(c.getImageData(0,0,1,1).data).join(',')"), "0,0,0,0");
+
+        let mut source = crate::paint::Canvas::new(1, 1);
+        source.set_pixel(0, 0, crate::paint::Color::rgb(12, 34, 56));
+        let encoded = base64::engine::general_purpose::STANDARD.encode(source.encode_png());
+        let script = format!(r#"(() => {{
+          const image=document.createElement('img');
+          image.src='data:image/png;base64,{encoded}';
+          const target=document.createElement('canvas'); target.width=1; target.height=1;
+          target.getContext('2d').drawImage(image,0,0);
+          return Array.from(target.getContext('2d').getImageData(0,0,1,1).data).join(',');
+        }})()"#);
+        assert_eq!(eval_str(&mut runtime, &script), "12,34,56,255");
     }
 
     #[test]

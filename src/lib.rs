@@ -4,6 +4,7 @@
 #![allow(clippy::too_many_arguments)]
 
 pub mod cdp;
+pub mod canvas;
 pub mod css;
 pub mod data;
 pub mod dom;
