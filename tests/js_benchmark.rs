@@ -592,10 +592,11 @@ const APPEND_SCALING_TOLERANCE: f64 = 2.0;
 /// against it. If `+=` becomes fast enough for the passes to shrink toward the floor,
 /// or the clock coarsens, the test says so instead of quietly going flaky.
 ///
-/// Measured here, `performance.now()` resolves to 334 ns and a pass spans 6.5 ms —
-/// about 19,400 ticks, so roughly 19x this floor. The floor itself is what leaves
-/// four orders of magnitude of headroom over the resolution, which is why quantization
-/// contributes about 0.005% to the ratio rather than anything that could move it.
+/// A measurement spanning `n` ticks carries up to one tick of error, so the floor of
+/// a thousand bounds each duration's error at about 0.1%. Measured here the passes are
+/// far above it — `performance.now()` resolves to 334 ns and a pass spans 6.5 ms, about
+/// 19,400 ticks, or 19x the floor, putting the error near 0.005%. Either figure is
+/// orders of magnitude below what could move a ratio read against 2.0.
 const MIN_TICKS_PER_PASS: f64 = 1000.0;
 
 #[test]
