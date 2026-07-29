@@ -897,9 +897,14 @@ const MAX_IMAGE_SIZE: usize = 10 * 1024 * 1024;
 
 /// Fetch an image from an HTTP/HTTPS URL with caching.
 fn fetch_image(url: &str) -> Option<Image> {
-    if let Some(animation) = IMAGE_ANIMATION_CACHE.with(|cache| cache.borrow().get(url).cloned()) {
-        let time = IMAGE_ANIMATION_TIME_MS.with(|cell| cell.get());
-        return Some(animation.frame_at(time).image().clone());
+    let time = IMAGE_ANIMATION_TIME_MS.with(|cell| cell.get());
+    if let Some(image) = IMAGE_ANIMATION_CACHE.with(|cache| {
+        cache
+            .borrow()
+            .get(url)
+            .map(|animation| animation.frame_at(time).image().clone())
+    }) {
+        return Some(image);
     }
     // Check cache first
     let cached = IMAGE_CACHE.with(|cache| cache.borrow().get(url).cloned());

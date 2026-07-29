@@ -13,12 +13,31 @@ use crate::css::ComputedStyle;
 use crate::css::ComputedValue;
 
 pub(crate) fn decode_gif(bytes: &[u8]) -> Result<Image, PaintError> {
-    Ok(decode_gif_animation(bytes)?
-        .frames()
-        .first()
-        .ok_or(PaintError::InvalidImageBuffer)?
-        .image()
-        .clone())
+    let mut options = gif::DecodeOptions::new();
+    options.set_color_output(gif::ColorOutput::RGBA);
+    let mut decoder = options
+        .read_info(Cursor::new(bytes))
+        .map_err(|_| PaintError::InvalidImageBuffer)?;
+    let canvas_width = u32::from(decoder.width());
+    let canvas_height = u32::from(decoder.height());
+    let frame = decoder
+        .read_next_frame()
+        .map_err(|_| PaintError::InvalidImageBuffer)?
+        .ok_or(PaintError::InvalidImageBuffer)?;
+    let mut pixels = vec![0; canvas_width as usize * canvas_height as usize * 4];
+    let frame_width = usize::from(frame.width);
+    for y in 0..usize::from(frame.height) {
+        let source_start = y * frame_width * 4;
+        let target_start = ((y + usize::from(frame.top)) * canvas_width as usize
+            + usize::from(frame.left)) * 4;
+        let length = frame_width * 4;
+        if target_start + length > pixels.len() || source_start + length > frame.buffer.len() {
+            return Err(PaintError::InvalidImageBuffer);
+        }
+        pixels[target_start..target_start + length]
+            .copy_from_slice(&frame.buffer[source_start..source_start + length]);
+    }
+    Image::new(canvas_width, canvas_height, pixels)
 }
 
 pub(crate) fn decode_gif_animation(bytes: &[u8]) -> Result<ImageAnimation, PaintError> {
