@@ -405,6 +405,15 @@ impl Canvas {
         }
     }
 
+    /// Creates a canvas from a validated RGBA buffer.
+    pub(crate) fn from_rgba(width: u32, height: u32, pixels: Vec<u8>) -> Option<Self> {
+        (pixels.len() == width as usize * height as usize * 4).then_some(Self {
+            width,
+            height,
+            pixels,
+        })
+    }
+
     /// Returns the canvas width in pixels.
     pub fn width(&self) -> u32 {
         self.width

@@ -87,6 +87,16 @@ pub(crate) fn is_actually_disabled(node: &NodeHandle) -> bool {
 #[derive(Clone, Debug)]
 pub struct NodeHandle(Rc<RefCell<NodeInner>>);
 
+/// A non-owning handle used by caches that must not extend a DOM node's lifetime.
+#[derive(Clone)]
+pub(crate) struct WeakNodeHandle(Weak<RefCell<NodeInner>>);
+
+impl WeakNodeHandle {
+    pub(crate) fn is_alive(&self) -> bool {
+        self.0.strong_count() != 0
+    }
+}
+
 impl PartialEq for NodeHandle {
     fn eq(&self, other: &Self) -> bool {
         Rc::ptr_eq(&self.0, &other.0)
@@ -449,6 +459,10 @@ impl NodeHandle {
     /// identity.
     pub(crate) fn identity(&self) -> usize {
         self.0.borrow().id
+    }
+
+    pub(crate) fn downgrade(&self) -> WeakNodeHandle {
+        WeakNodeHandle(Rc::downgrade(&self.0))
     }
 
     /// Returns the inert contents fragment owned by an HTML `<template>`.

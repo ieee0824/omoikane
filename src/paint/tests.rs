@@ -160,6 +160,19 @@ fn fills_rectangles_on_canvas() {
 }
 
 #[test]
+fn html_canvas_script_is_painted_as_replaced_image_fixture() {
+    let html = r#"<html><head><style>body{margin:0}</style></head><body><canvas width="4" height="3"></canvas><script>
+      const context=document.querySelector('canvas').getContext('2d');
+      context.fillStyle='#ff0000'; context.fillRect(0,0,2,3);
+      context.fillStyle='#0000ff'; context.fillRect(2,0,2,3);
+      </script></body></html>"#;
+    let document = TreeBuilder::parse(html).document();
+    let canvas = render_document(&document, Rect { x:0.0, y:0.0, width:10.0, height:10.0 }).unwrap();
+    assert_eq!(count_pixels(&canvas, Color::rgb(255, 0, 0)), 6);
+    assert_eq!(count_pixels(&canvas, Color::rgb(0, 0, 255)), 6);
+}
+
+#[test]
 fn paints_backgrounds_and_borders_from_layout_boxes() {
     let document = NodeHandle::document();
     let body = NodeHandle::element("body");

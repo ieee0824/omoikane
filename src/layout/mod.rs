@@ -1244,7 +1244,7 @@ fn layout_element(
         && is_out_of_flow_positioned(&style);
     if !is_positioned_img && matches!(
         node.tag_name().as_deref(),
-        Some("img" | "picture" | "video" | "svg" | "object")
+        Some("img" | "picture" | "video" | "canvas" | "svg" | "object")
     ) {
         let mut lines = layout_inline_nodes(
             std::slice::from_ref(node),
