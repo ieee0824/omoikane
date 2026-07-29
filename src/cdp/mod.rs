@@ -79,7 +79,7 @@ impl WebSocketOpcode {
         }
     }
 
-    fn as_u8(self) -> u8 {
+    pub(crate) fn as_u8(self) -> u8 {
         match self {
             Self::Continuation => 0x0,
             Self::Text => 0x1,

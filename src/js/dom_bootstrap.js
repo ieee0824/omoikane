@@ -7771,6 +7771,11 @@
     target.dispatchEvent(event);
   }
 
+  function realtimeOrigin(url) {
+    const match = String(url).match(/^([a-z][a-z0-9+.-]*:\/\/[^/?#]+)/i);
+    return match ? match[1] : "";
+  }
+
   class CloseEvent extends Event {
     constructor(type, init = {}) {
       super(type, init);
@@ -7800,6 +7805,7 @@
           if (this.readyState !== WebSocket.CONNECTING) return;
           this.readyState = WebSocket.OPEN;
           fireRealtimeEvent(this, new Event("open"));
+          this.__pollTimer = setInterval(() => this.__poll(), 1);
         });
       } catch (error) {
         __omoikane_queue_networking_task(() => {
@@ -7819,8 +7825,7 @@
       else if (data instanceof Blob) { bytes = data.__bytes; binary = true; }
       else bytes = new TextEncoder().encode(String(data));
       try {
-        const result = JSON.parse(__omoikane_websocket_send(this.__id, base64FromBytes(bytes), binary));
-        __omoikane_queue_networking_task(() => this.__deliver(result));
+        __omoikane_websocket_send(this.__id, base64FromBytes(bytes), binary);
       } catch (_) {
         __omoikane_queue_networking_task(() => fireRealtimeEvent(this, new Event("error")));
       }
@@ -7832,14 +7837,28 @@
       if (new TextEncoder().encode(reason).length > 123) throw new DOMException("Close reason is too long", "SyntaxError");
       if (this.readyState >= WebSocket.CLOSING) return;
       this.readyState = WebSocket.CLOSING;
+      if (this.__pollTimer !== undefined) clearInterval(this.__pollTimer);
       try { __omoikane_websocket_close(this.__id, code, reason); } catch (_) {}
       __omoikane_queue_networking_task(() => {
         this.readyState = WebSocket.CLOSED;
         fireRealtimeEvent(this, new CloseEvent("close", { code, reason, wasClean: true }));
       });
     }
+    __poll() {
+      let results;
+      try { results = JSON.parse(__omoikane_websocket_poll(this.__id)); }
+      catch (_) { results = [{ kind: "error" }]; }
+      for (const result of results) {
+        __omoikane_queue_networking_task(() => this.__deliver(result));
+      }
+    }
     __deliver(result) {
+      if (result.kind === "error") {
+        fireRealtimeEvent(this, new Event("error"));
+        return;
+      }
       if (result.kind === "close") {
+        if (this.__pollTimer !== undefined) clearInterval(this.__pollTimer);
         this.readyState = WebSocket.CLOSED;
         fireRealtimeEvent(this, new CloseEvent("close", { code: result.code, reason: result.reason, wasClean: true }));
         return;
@@ -7849,7 +7868,7 @@
         const bytes = bytesFromBase64(data);
         data = this.binaryType === "arraybuffer" ? bytes.buffer : new Blob([bytes]);
       }
-      fireRealtimeEvent(this, new MessageEvent("message", { data, origin: this.url.replace(/^ws/, "http") }));
+      fireRealtimeEvent(this, new MessageEvent("message", { data, origin: realtimeOrigin(this.url) }));
     }
   }
   WebSocket.CONNECTING = WebSocket.prototype.CONNECTING = 0;
@@ -7881,7 +7900,7 @@
           let data = [], type = "", retry = null;
           const dispatch = () => {
             if (!data.length) return;
-            fireRealtimeEvent(this, new MessageEvent(type || "message", { data: data.join("\n"), origin: this.url, lastEventId: this.__lastEventId }));
+            fireRealtimeEvent(this, new MessageEvent(type || "message", { data: data.join("\n"), origin: realtimeOrigin(this.url), lastEventId: this.__lastEventId }));
             data = []; type = "";
           };
           for (const line of text.replace(/\r\n|\r/g, "\n").split("\n")) {

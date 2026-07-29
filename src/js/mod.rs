@@ -4,6 +4,8 @@ use std::cell::RefCell;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::Path;
 use std::rc::Rc;
+use std::sync::mpsc::{Receiver, channel};
+use std::thread;
 
 use base64::Engine as _;
 use boa_engine::JsString;
@@ -253,7 +255,7 @@ struct HostState {
     location_href: String,
     navigator_user_agent: String,
     http_client: Client,
-    websocket_clients: HashMap<u64, crate::realtime::WebSocketClient>,
+    websocket_clients: HashMap<u64, WebSocketConnection>,
     next_websocket_id: u64,
     /// Successful CORS preflight results for this environment settings object.
     cors_preflight_cache: PreflightCache,
@@ -315,6 +317,18 @@ struct HostState {
     storage_manager: StorageManager,
     storage_session_id: u64,
     document_origins: HashMap<usize, Option<StorageOrigin>>,
+}
+
+#[derive(Debug)]
+enum WebSocketReadResult {
+    Message(crate::realtime::WebSocketMessage),
+    Error(String),
+}
+
+#[derive(Debug)]
+struct WebSocketConnection {
+    client: crate::realtime::WebSocketClient,
+    incoming: Receiver<WebSocketReadResult>,
 }
 
 /// A loaded sub-browsing-context document owned by an `<iframe>` element.
@@ -2731,6 +2745,11 @@ fn register_host_bindings(
             NativeFunction::from_copy_closure(websocket_send_native),
         ),
         (
+            js_string!("__omoikane_websocket_poll"),
+            1,
+            NativeFunction::from_copy_closure(websocket_poll_native),
+        ),
+        (
             js_string!("__omoikane_websocket_close"),
             3,
             NativeFunction::from_copy_closure(websocket_close_native),
@@ -5083,12 +5102,25 @@ fn websocket_connect_native(
     })?;
     with_host_state(|state| {
         let mut state = state.borrow_mut();
-        let client = crate::realtime::WebSocketClient::connect(&url, &protocols)
+        let origin = state.base_url.as_ref().map(|url| format!("{}://{}", url.scheme(), url.authority()));
+        let client = crate::realtime::WebSocketClient::connect(&url, &protocols, origin.as_deref())
             .map_err(|error| JsError::from(JsNativeError::error().with_message(error)))?;
         let protocol = client.protocol().to_string();
+        let mut reader = client.try_clone()
+            .map_err(|error| JsError::from(JsNativeError::error().with_message(error)))?;
+        let (sender, incoming) = channel();
+        thread::spawn(move || loop {
+            match reader.read_message() {
+                Ok(message) => {
+                    let closed = matches!(message, crate::realtime::WebSocketMessage::Close { .. });
+                    if sender.send(WebSocketReadResult::Message(message)).is_err() || closed { break; }
+                }
+                Err(error) => { let _ = sender.send(WebSocketReadResult::Error(error)); break; }
+            }
+        });
         let id = state.next_websocket_id;
         state.next_websocket_id = state.next_websocket_id.saturating_add(1);
-        state.websocket_clients.insert(id, client);
+        state.websocket_clients.insert(id, WebSocketConnection { client, incoming });
         Ok(js_string!(serde_json::json!({"id": id, "protocol": protocol}).to_string()).into())
     })
 }
@@ -5105,17 +5137,32 @@ fn websocket_send_native(
         .map_err(|_| JsError::from(JsNativeError::typ().with_message("invalid WebSocket payload")))?;
     with_host_state(|state| {
         let mut state = state.borrow_mut();
-        let client = state.websocket_clients.get_mut(&id).ok_or_else(|| {
+        let connection = state.websocket_clients.get_mut(&id).ok_or_else(|| {
             JsError::from(JsNativeError::error().with_message("WebSocket is not connected"))
         })?;
-        client.send(payload, binary).map_err(|e| JsError::from(JsNativeError::error().with_message(e)))?;
-        let message = client.read_message().map_err(|e| JsError::from(JsNativeError::error().with_message(e)))?;
-        let value = match message {
-            crate::realtime::WebSocketMessage::Text(data) => serde_json::json!({"kind":"text", "data":data}),
-            crate::realtime::WebSocketMessage::Binary(data) => serde_json::json!({"kind":"binary", "data":base64::engine::general_purpose::STANDARD.encode(data)}),
-            crate::realtime::WebSocketMessage::Close { code, reason } => serde_json::json!({"kind":"close", "code":code, "reason":reason}),
-        };
-        Ok(js_string!(value.to_string()).into())
+        connection.client.send(payload, binary).map_err(|e| JsError::from(JsNativeError::error().with_message(e)))?;
+        Ok(JsValue::undefined())
+    })
+}
+
+fn websocket_poll_native(
+    _: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let id = args.first().cloned().unwrap_or_default().to_number(context)? as u64;
+    with_host_state(|state| {
+        let state = state.borrow();
+        let connection = state.websocket_clients.get(&id).ok_or_else(|| {
+            JsError::from(JsNativeError::error().with_message("WebSocket is not connected"))
+        })?;
+        let values: Vec<_> = connection.incoming.try_iter().map(|result| match result {
+            WebSocketReadResult::Message(crate::realtime::WebSocketMessage::Text(data)) => serde_json::json!({"kind":"text", "data":data}),
+            WebSocketReadResult::Message(crate::realtime::WebSocketMessage::Binary(data)) => serde_json::json!({"kind":"binary", "data":base64::engine::general_purpose::STANDARD.encode(data)}),
+            WebSocketReadResult::Message(crate::realtime::WebSocketMessage::Close { code, reason }) => serde_json::json!({"kind":"close", "code":code, "reason":reason}),
+            WebSocketReadResult::Error(error) => serde_json::json!({"kind":"error", "message":error}),
+        }).collect();
+        Ok(js_string!(serde_json::to_string(&values).unwrap()).into())
     })
 }
 
@@ -5128,10 +5175,10 @@ fn websocket_close_native(
     let code = args.get(1).cloned().unwrap_or_else(|| JsValue::from(1000)).to_number(context)? as u16;
     let reason = string_argument(args.get(2), "", context)?;
     with_host_state(|state| {
-        let mut client = state.borrow_mut().websocket_clients.remove(&id).ok_or_else(|| {
+        let mut connection = state.borrow_mut().websocket_clients.remove(&id).ok_or_else(|| {
             JsError::from(JsNativeError::error().with_message("WebSocket is not connected"))
         })?;
-        client.close(code, &reason).map_err(|e| JsError::from(JsNativeError::error().with_message(e)))?;
+        connection.client.close(code, &reason).map_err(|e| JsError::from(JsNativeError::error().with_message(e)))?;
         Ok(JsValue::undefined())
     })
 }
@@ -6969,12 +7016,14 @@ mod tests {
             globalThis.realtimeLog = [];
             const socket = new WebSocket("ws://{address}/echo");
             socket.onopen = () => {{ realtimeLog.push("open"); socket.send("hello"); }};
-            socket.onmessage = event => {{ realtimeLog.push("message:" + event.data); socket.close(1000, "done"); }};
+            socket.onmessage = event => {{ globalThis.messageOrigin = event.origin; realtimeLog.push("message:" + event.data); socket.close(1000, "done"); }};
             socket.onclose = event => realtimeLog.push("close:" + event.code);
             setTimeout(() => realtimeLog.push("timer"), 0);
         "#)).unwrap();
         runtime.tick(0).unwrap();
+        runtime.run_timers(1_000, 1, 2_000);
         assert_eq!(eval_str(&mut runtime, "realtimeLog.join('|')"), "open|timer|message:hello|close:1000");
+        assert_eq!(eval_str(&mut runtime, "messageOrigin"), format!("ws://{address}"));
         server.join().unwrap();
     }
 
@@ -7004,6 +7053,7 @@ mod tests {
             const source = new EventSource("http://{address}/events");
             source.onerror = () => sseLog.push("error");
             source.addEventListener("update", event => {{
+              globalThis.sseOrigin = event.origin;
               sseLog.push(event.data + ":" + event.lastEventId);
               if (sseLog.length === 2) source.close();
             }});
@@ -7013,6 +7063,7 @@ mod tests {
         runtime.run_timers(20, 1, 100);
         assert_eq!(eval_str(&mut runtime, "sseLog.join('|')"), "one\ntwo:7|done:8");
         assert_eq!(eval_str(&mut runtime, "String(source.readyState)"), "2");
+        assert_eq!(eval_str(&mut runtime, "sseOrigin"), format!("http://{address}"));
         server.join().unwrap();
     }
 

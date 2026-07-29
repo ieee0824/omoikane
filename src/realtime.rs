@@ -6,14 +6,11 @@
 
 use std::io::{Read, Write};
 use std::net::TcpStream;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use base64::Engine as _;
 
 use crate::cdp::{WebSocketFrame, WebSocketOpcode, websocket_accept_key};
-
-static NEXT_KEY: AtomicU64 = AtomicU64::new(1);
 
 /// A message read from a WebSocket connection.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -33,7 +30,7 @@ pub struct WebSocketClient {
 
 impl WebSocketClient {
     /// Connects to a `ws:` URL and validates the server handshake.
-    pub fn connect(url: &str, protocols: &[String]) -> Result<Self, String> {
+    pub fn connect(url: &str, protocols: &[String], origin: Option<&str>) -> Result<Self, String> {
         let http_url = url
             .strip_prefix("ws://")
             .map(|rest| format!("http://{rest}"))
@@ -46,7 +43,8 @@ impl WebSocketClient {
         stream
             .set_read_timeout(Some(Duration::from_secs(5)))
             .map_err(|e| e.to_string())?;
-        let nonce = NEXT_KEY.fetch_add(1, Ordering::Relaxed).to_be_bytes();
+        let mut nonce = [0u8; 16];
+        getrandom::fill(&mut nonce).map_err(|error| error.to_string())?;
         let key = base64::engine::general_purpose::STANDARD.encode(nonce);
         let mut request = format!(
             "GET {} HTTP/1.1\r\nHost: {}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: {}\r\nSec-WebSocket-Version: 13\r\n",
@@ -59,6 +57,9 @@ impl WebSocketClient {
                 "Sec-WebSocket-Protocol: {}\r\n",
                 protocols.join(", ")
             ));
+        }
+        if let Some(origin) = origin {
+            request.push_str(&format!("Origin: {origin}\r\n"));
         }
         request.push_str("\r\n");
         stream
@@ -124,9 +125,7 @@ impl WebSocketClient {
             },
             payload,
         };
-        self.stream
-            .write_all(&frame.encode(true))
-            .map_err(|e| e.to_string())
+        self.write_client_frame(&frame)
     }
 
     /// Reads one complete message, joining continuation frames and answering ping.
@@ -142,9 +141,7 @@ impl WebSocketClient {
                         opcode: WebSocketOpcode::Pong,
                         payload: frame.payload,
                     };
-                    self.stream
-                        .write_all(&pong.encode(true))
-                        .map_err(|e| e.to_string())?;
+                    self.write_client_frame(&pong)?;
                 }
                 WebSocketOpcode::Pong => {}
                 WebSocketOpcode::Close => {
@@ -194,29 +191,111 @@ impl WebSocketClient {
             opcode: WebSocketOpcode::Close,
             payload,
         };
+        self.write_client_frame(&frame)
+    }
+
+    /// Clones the underlying socket for an independent background reader.
+    pub fn try_clone(&self) -> Result<Self, String> {
+        Ok(Self {
+            stream: self.stream.try_clone().map_err(|error| error.to_string())?,
+            protocol: self.protocol.clone(),
+            read_buffer: Vec::new(),
+        })
+    }
+
+    fn write_client_frame(&mut self, frame: &WebSocketFrame) -> Result<(), String> {
+        let mut mask = [0u8; 4];
+        getrandom::fill(&mut mask).map_err(|error| error.to_string())?;
+        let payload_len = frame.payload.len();
+        let mut bytes = vec![if frame.fin { 0x80 } else { 0 } | frame.opcode.as_u8()];
+        match payload_len {
+            0..=125 => bytes.push(0x80 | payload_len as u8),
+            126..=65535 => {
+                bytes.push(0x80 | 126);
+                bytes.extend_from_slice(&(payload_len as u16).to_be_bytes());
+            }
+            _ => {
+                bytes.push(0x80 | 127);
+                bytes.extend_from_slice(&(payload_len as u64).to_be_bytes());
+            }
+        }
+        bytes.extend_from_slice(&mask);
+        bytes.extend(
+            frame
+                .payload
+                .iter()
+                .enumerate()
+                .map(|(index, byte)| byte ^ mask[index % 4]),
+        );
         self.stream
-            .write_all(&frame.encode(true))
-            .map_err(|e| e.to_string())
+            .write_all(&bytes)
+            .map_err(|error| error.to_string())
     }
 
     fn read_frame(&mut self) -> Result<WebSocketFrame, String> {
         loop {
-            match WebSocketFrame::decode(&self.read_buffer) {
-                Ok((frame, consumed)) => {
-                    self.read_buffer.drain(..consumed);
-                    return Ok(frame);
-                }
-                Err(_) => {
-                    let mut chunk = [0u8; 4096];
-                    let count = self.stream.read(&mut chunk).map_err(|e| e.to_string())?;
-                    if count == 0 {
-                        return Err("WebSocket connection closed".into());
+            if let Some(expected) = server_frame_length(&self.read_buffer)?
+                && self.read_buffer.len() >= expected
+            {
+                match WebSocketFrame::decode(&self.read_buffer) {
+                    Ok((frame, consumed)) => {
+                        self.read_buffer.drain(..consumed);
+                        return Ok(frame);
                     }
-                    self.read_buffer.extend_from_slice(&chunk[..count]);
+                    Err(error) => return Err(error.to_string()),
                 }
             }
+            let mut chunk = [0u8; 4096];
+            let count = self.stream.read(&mut chunk).map_err(|e| e.to_string())?;
+            if count == 0 {
+                return Err("WebSocket connection closed".into());
+            }
+            self.read_buffer.extend_from_slice(&chunk[..count]);
         }
     }
+}
+
+fn server_frame_length(bytes: &[u8]) -> Result<Option<usize>, String> {
+    if bytes.len() < 2 {
+        return Ok(None);
+    }
+    if bytes[0] & 0x70 != 0 {
+        return Err("WebSocket RSV bits require an extension".into());
+    }
+    let opcode = bytes[0] & 0x0f;
+    if !matches!(opcode, 0 | 1 | 2 | 8 | 9 | 10) {
+        return Err("unsupported WebSocket opcode".into());
+    }
+    if bytes[1] & 0x80 != 0 {
+        return Err("server WebSocket frames must not be masked".into());
+    }
+    let mut cursor = 2;
+    let length = match bytes[1] & 0x7f {
+        value @ 0..=125 => value as usize,
+        126 => {
+            if bytes.len() < 4 {
+                return Ok(None);
+            }
+            cursor = 4;
+            u16::from_be_bytes([bytes[2], bytes[3]]) as usize
+        }
+        127 => {
+            if bytes.len() < 10 {
+                return Ok(None);
+            }
+            cursor = 10;
+            let mut raw = [0; 8];
+            raw.copy_from_slice(&bytes[2..10]);
+            u64::from_be_bytes(raw)
+                .try_into()
+                .map_err(|_| "WebSocket frame is too large")?
+        }
+        _ => unreachable!(),
+    };
+    if opcode >= 8 && (bytes[0] & 0x80 == 0 || length > 125) {
+        return Err("invalid fragmented control frame".into());
+    }
+    Ok(Some(cursor + length))
 }
 
 /// Parses one complete Server-Sent Events response body.
@@ -282,6 +361,18 @@ mod tests {
         );
     }
 
+    #[test]
+    fn malformed_websocket_frame_is_rejected_without_waiting_for_more_bytes() {
+        assert_eq!(
+            server_frame_length(&[0x83, 0]).unwrap_err(),
+            "unsupported WebSocket opcode"
+        );
+        assert_eq!(
+            server_frame_length(&[0x89, 126, 0, 126]).unwrap_err(),
+            "invalid fragmented control frame"
+        );
+    }
+
     fn read_frame(stream: &mut TcpStream) -> (WebSocketFrame, Vec<u8>) {
         let mut bytes = Vec::new();
         loop {
@@ -313,11 +404,19 @@ mod tests {
                 .lines()
                 .find_map(|line| line.strip_prefix("Sec-WebSocket-Key: "))
                 .unwrap();
+            assert_eq!(
+                base64::engine::general_purpose::STANDARD
+                    .decode(key)
+                    .unwrap()
+                    .len(),
+                16
+            );
             assert!(request.contains("Sec-WebSocket-Protocol: chat"));
+            assert!(request.contains("Origin: http://example.test"));
             write!(stream, "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: {}\r\nSec-WebSocket-Protocol: chat\r\n\r\n", websocket_accept_key(key)).unwrap();
 
-            let (sent, wire) = read_frame(&mut stream);
-            assert_ne!(wire[1] & 0x80, 0, "client frames must be masked");
+            let (sent, sent_wire) = read_frame(&mut stream);
+            assert_ne!(sent_wire[1] & 0x80, 0, "client frames must be masked");
             assert_eq!(sent, WebSocketFrame::text("hello"));
             stream
                 .write_all(
@@ -353,14 +452,23 @@ mod tests {
             assert_ne!(wire[1] & 0x80, 0);
             assert_eq!(pong.opcode, WebSocketOpcode::Pong);
             assert_eq!(pong.payload, b"?");
+            assert_ne!(
+                &sent_wire[2..6],
+                &wire[2..6],
+                "every frame needs a fresh mask"
+            );
             let (close, _) = read_frame(&mut stream);
             assert_eq!(close.opcode, WebSocketOpcode::Close);
             assert_eq!(&close.payload[..2], &1000u16.to_be_bytes());
             stream.write_all(&close.encode(false)).unwrap();
         });
 
-        let mut client =
-            WebSocketClient::connect(&format!("ws://{address}/echo"), &["chat".into()]).unwrap();
+        let mut client = WebSocketClient::connect(
+            &format!("ws://{address}/echo"),
+            &["chat".into()],
+            Some("http://example.test"),
+        )
+        .unwrap();
         assert_eq!(client.protocol(), "chat");
         client.send(b"hello".to_vec(), false).unwrap();
         assert_eq!(
