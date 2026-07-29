@@ -1,5 +1,5 @@
 {
-  "version": 5,
+  "version": 6,
   "profile": "dev",
   "passes": 4,
   "reference_engine": "SpiderMonkey (Firefox 152.0.6)",
@@ -66,9 +66,9 @@
     },
     {
       "id": "string-concat",
-      "description": "String building: string representation and reallocation",
+      "description": "String building by repeated appending, which now extends the string in place rather than reallocating and copying it (issues #318-#320)",
       "iterations": 200000,
-      "baseline_ns_per_op": 238.3,
+      "baseline_ns_per_op": 159.7,
       "reference": {
         "spidermonkey_interpreter": 26.4,
         "spidermonkey_jit": 4.1

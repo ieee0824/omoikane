@@ -13,10 +13,11 @@ ab_glyph = "0.2"
 base64 = "0.22"
 brotli = { version = "7", default-features = false, features = ["std"] }
 crc32fast = "1.5"
-# Pinned to a fork revision so both fixes it carries are reproducible and
-# cannot silently change under us: the inline-cache guard (issues 057-059) and
-# the primitive property fast path (#313).
-boa_engine = { git = "https://github.com/ieee0824/boa", rev = "cf01874e", features = ["annex-b"] }
+# Pinned to a fork revision so every fix it carries is reproducible and cannot
+# silently change under us: the inline-cache guard (issues 057-059), the
+# primitive property fast path (#313), and appending to a string in place when a
+# compound assignment owns it (#318, #319, #320).
+boa_engine = { git = "https://github.com/ieee0824/boa", rev = "3ab9777d", features = ["annex-b"] }
 flate2 = "1.1"
 gif = "0.13"
 getrandom = "0.3"
@@ -32,7 +33,7 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 webpki-roots = "1.0"
 
 [dev-dependencies]
-boa_gc = { git = "https://github.com/ieee0824/boa", rev = "cf01874e" }
+boa_gc = { git = "https://github.com/ieee0824/boa", rev = "3ab9777d" }
 rcgen = "0.13"
 
 [build-dependencies]
