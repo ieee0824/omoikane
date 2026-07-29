@@ -377,7 +377,7 @@ fn write_revision_reports(root: &Path, report: &WptReport) -> std::io::Result<()
     fs::create_dir_all(&revision_dir)?;
     fs::write(
         revision_dir.join("report.json"),
-        serde_json::to_vec_pretty(report).expect("serialize WPT revision report"),
+        serde_json::to_vec_pretty(report).map_err(std::io::Error::other)?,
     )?;
     for (area, summary) in &report.summary.by_area {
         let area_report = WptAreaReport {
@@ -403,7 +403,7 @@ fn write_revision_reports(root: &Path, report: &WptReport) -> std::io::Result<()
             .collect::<String>();
         fs::write(
             revision_dir.join(format!("{filename}.json")),
-            serde_json::to_vec_pretty(&area_report).expect("serialize WPT area report"),
+            serde_json::to_vec_pretty(&area_report).map_err(std::io::Error::other)?,
         )?;
     }
     Ok(())
@@ -453,9 +453,13 @@ fn diff_revision_reports(previous: &WptReport, current: &WptReport) -> WptRevisi
 
 #[test]
 fn revision_reports_round_trip_and_split_by_area() {
+    let unique = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("system clock must be after Unix epoch")
+        .as_nanos();
     let root = std::env::temp_dir().join(format!(
-        "omoikane-wpt-results-{}",
-        std::process::id()
+        "omoikane-wpt-results-{}-{unique}",
+        std::process::id(),
     ));
     let results = vec![
         WptResult {
