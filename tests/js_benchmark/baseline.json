@@ -1,5 +1,5 @@
 {
-  "version": 4,
+  "version": 5,
   "profile": "dev",
   "passes": 4,
   "reference_engine": "SpiderMonkey (Firefox 152.0.6)",
@@ -106,12 +106,12 @@
     },
     {
       "id": "proto-method",
-      "description": "Method resolved one step up a prototype chain, with a plain object receiver",
+      "description": "Method resolved one step up a prototype chain, with a plain object receiver built outside the timed body",
       "iterations": 500000,
-      "baseline_ns_per_op": 334.5,
+      "baseline_ns_per_op": 336.4,
       "reference": {
-        "spidermonkey_interpreter": 75.48,
-        "spidermonkey_jit": 13.4
+        "spidermonkey_interpreter": 80.2,
+        "spidermonkey_jit": 4.36
       }
     }
   ]

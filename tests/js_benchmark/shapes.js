@@ -64,6 +64,29 @@ function makeShapes() {
   return shapes;
 }
 
+// Receiver for the `proto-method` shape, with a method one step up its prototype
+// chain.
+//
+// Defined here rather than inside the timed body on purpose. The fixed setup cost
+// is irrelevant either way — building it and nothing else measures 0.00 ns/op
+// over 500,000 iterations — but *where* it is defined changes what the shape
+// measures. Built inside the timed body, the constructor and the method are fresh
+// objects on every pass, which stops SpiderMonkey's JIT from treating the call
+// target as a stable singleton: 5.76 ns/op against 3.80 for this form, with a
+// visibly wider spread on both tiers (5.32-6.48 against 3.72-4.00 under the JIT,
+// 82.8-130.5 against 81.0-91.0 with it off). Boa is indifferent (337 against
+// 345), so the placement was only ever costing reference fidelity.
+//
+// The timed body aliases this to a local instead of reading the global each
+// iteration: a global lookup per iteration costs SpiderMonkey's interpreter about
+// 20% (102.1 against 83.1) and Boa about 6%, which would be attributed to
+// prototype resolution.
+function ProtoBase() {}
+ProtoBase.prototype.at = function (i) {
+  return i & 3;
+};
+var protoReceiver = new ProtoBase();
+
 globalThis.runBenchmarks = function () {
   var lines = [];
 
@@ -169,11 +192,10 @@ globalThis.runBenchmarks = function () {
   // Method resolved one step up a prototype chain, with a plain object receiver.
   // Kept separate from the two above because the earlier `proto-method` shape
   // used a string primitive and so measured receiver coercion rather than
-  // prototype resolution — the two turned out to differ by 3x.
+  // prototype resolution — the two turned out to differ by 3x. See
+  // `protoReceiver` for why the receiver is built outside this body.
   lines.push(bench("proto-method", 500000, function (n) {
-    function Base() {}
-    Base.prototype.at = function (i) { return i & 3; };
-    var o = new Base();
+    var o = protoReceiver;
     var s = 0;
     for (var i = 0; i < n; i++) s = (s + o.at(i)) % 1000003;
     return s;
