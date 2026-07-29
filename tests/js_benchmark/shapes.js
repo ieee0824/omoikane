@@ -64,6 +64,29 @@ function makeShapes() {
   return shapes;
 }
 
+// Receiver for the `proto-method` shape, with a method one step up its prototype
+// chain.
+//
+// Defined here rather than inside the timed body on purpose. The fixed setup cost
+// is irrelevant either way — building it and nothing else measures 0.00 ns/op
+// over 500,000 iterations — but *where* it is defined changes what the shape
+// measures. Built inside the timed body, the constructor and the method are fresh
+// objects on every pass, which stops SpiderMonkey's JIT from treating the call
+// target as a stable singleton: 5.76 ns/op against 3.80 for this form, with a
+// visibly wider spread on both tiers (5.32-6.48 against 3.72-4.00 under the JIT,
+// 82.8-130.5 against 81.0-91.0 with it off). Boa is indifferent (337 against
+// 345), so the placement was only ever costing reference fidelity.
+//
+// The timed body aliases this to a local instead of reading the global each
+// iteration: a global lookup per iteration costs SpiderMonkey's interpreter about
+// 20% (102.1 against 83.1) and Boa about 6%, which would be attributed to
+// prototype resolution.
+function ProtoBase() {}
+ProtoBase.prototype.at = function (i) {
+  return i & 3;
+};
+var protoReceiver = new ProtoBase();
+
 globalThis.runBenchmarks = function () {
   var lines = [];
 
@@ -138,12 +161,43 @@ globalThis.runBenchmarks = function () {
     return s;
   }));
 
-  // Method call resolved through a prototype. This is the shape that Boa's
-  // inline cache poisoning bug corrupted (issues #057/#058), so a regression
-  // here is worth noticing.
-  lines.push(bench("proto-method", 500000, function (n) {
+  // Property read on a string primitive, with no call involved. A wrapper object
+  // per access shows up here first, so this is the cheapest place to see that
+  // cost appear or disappear.
+  //
+  // The receiver is deliberately a literal even though an optimizing compiler may
+  // fold or hoist the read out of the loop. Measured rather than assumed: with
+  // SpiderMonkey's JITs disabled the read costs about 24 ns/op whether the
+  // receiver is a literal, an invariant variable, or varies per iteration, so no
+  // folding happens in the engines this harness actually compares. With its JITs
+  // enabled the loop costs the same 3.7 ns/op with the read as without it, so
+  // **the `vs SM-jit` column for this shape measures loop overhead, not the
+  // access** — and making the receiver vary would not change that while adding
+  // 42% of branch cost to the interpreter column that does carry signal.
+  lines.push(bench("primitive-string-property", 500000, function (n) {
+    var s = 0;
+    for (var i = 0; i < n; i++) s = (s + "abc".length) % 1000003;
+    return s;
+  }));
+
+  // Method call on a string primitive: the read above plus the call. This is the
+  // shape that Boa's inline cache poisoning bug corrupted (issues #057/#058), so
+  // a regression here is worth noticing.
+  lines.push(bench("primitive-string-method", 500000, function (n) {
     var s = 0;
     for (var i = 0; i < n; i++) s = (s + "abc".charCodeAt(i & 2)) % 1000003;
+    return s;
+  }));
+
+  // Method resolved one step up a prototype chain, with a plain object receiver.
+  // Kept separate from the two above because the earlier `proto-method` shape
+  // used a string primitive and so measured receiver coercion rather than
+  // prototype resolution — the two turned out to differ by 3x. See
+  // `protoReceiver` for why the receiver is built outside this body.
+  lines.push(bench("proto-method", 500000, function (n) {
+    var o = protoReceiver;
+    var s = 0;
+    for (var i = 0; i < n; i++) s = (s + o.at(i)) % 1000003;
     return s;
   }));
 
