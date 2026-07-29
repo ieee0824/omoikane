@@ -2470,9 +2470,9 @@ fn tree_scope_order(stylesheets: &[StylesheetScope], node: &NodeHandle) -> usize
 }
 
 fn log_unsupported_css_if_enabled(property: &str, value: &Value) {
-    if should_ignore_unsupported_css_logging(property) || is_supported_property(property) {
+    let Some(category) = css_audit_category(property) else {
         return;
-    }
+    };
 
     let config = unsupported_css_config();
     if !config.logging_enabled && config.sqlite_path.is_none() {
@@ -2481,9 +2481,9 @@ fn log_unsupported_css_if_enabled(property: &str, value: &Value) {
 
     let rendered_value = sanitize_unsupported_css_log_value(&render_value(value));
     if let Some(path) = config.sqlite_path.as_deref() {
-        persist_unsupported_css_to_sqlite(path, property, &rendered_value);
+        persist_css_audit_to_sqlite(path, category, property, &rendered_value);
         if let Some(top_n) = config.top_n {
-            emit_unsupported_css_top_n_summary_if_updated(path, top_n);
+            emit_css_audit_top_n_summary_if_updated(path, top_n, category);
         }
     }
 
@@ -2496,7 +2496,7 @@ fn log_unsupported_css_if_enabled(property: &str, value: &Value) {
         }
         if logged.insert(key) {
             let value = truncate_log_value(&rendered_value, MAX_UNSUPPORTED_LOG_VALUE_LEN);
-            eprintln!("[omoikane][unsupported-css] {property}={value}");
+            eprintln!("[omoikane][{}] {property}={value}", category.log_label());
         }
     }
 }
@@ -2536,6 +2536,7 @@ fn ensure_unsupported_css_sqlite_schema(conn: &Connection) -> Result<(), rusqlit
         "CREATE TABLE IF NOT EXISTS unsupported_css_log (
             property TEXT NOT NULL,
             value TEXT NOT NULL,
+            category TEXT NOT NULL DEFAULT 'unsupported',
             first_seen_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
             last_seen_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
             occurrences INTEGER NOT NULL DEFAULT 0,
@@ -2544,10 +2545,37 @@ fn ensure_unsupported_css_sqlite_schema(conn: &Connection) -> Result<(), rusqlit
         CREATE INDEX IF NOT EXISTS idx_unsupported_css_log_occurrences
         ON unsupported_css_log (occurrences DESC);",
     )?;
+    let has_category = conn
+        .prepare("PRAGMA table_info(unsupported_css_log)")?
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<Result<Vec<_>, _>>()?
+        .iter()
+        .any(|column| column == "category");
+    if !has_category {
+        conn.execute(
+            "ALTER TABLE unsupported_css_log ADD COLUMN category TEXT NOT NULL DEFAULT 'unsupported'",
+            [],
+        )?;
+    }
     Ok(())
 }
 
+#[cfg(test)]
 fn persist_unsupported_css_to_sqlite(path: &str, property: &str, value: &str) {
+    persist_css_audit_to_sqlite(
+        path,
+        CssAuditCategory::Unsupported,
+        property,
+        value,
+    );
+}
+
+fn persist_css_audit_to_sqlite(
+    path: &str,
+    category: CssAuditCategory,
+    property: &str,
+    value: &str,
+) {
     let result: Result<(), rusqlite::Error> = SQLITE_CONNECTIONS.with(|connections| {
         let mut connections = connections.borrow_mut();
         if !connections.contains_key(path) {
@@ -2561,12 +2589,13 @@ fn persist_unsupported_css_to_sqlite(path: &str, property: &str, value: &str) {
             .get_mut(path)
             .expect("sqlite connection must exist after initialization");
         conn.execute(
-            "INSERT INTO unsupported_css_log (property, value, occurrences)
-             VALUES (?1, ?2, 1)
+            "INSERT INTO unsupported_css_log (property, value, category, occurrences)
+             VALUES (?1, ?2, ?3, 1)
              ON CONFLICT(property, value) DO UPDATE SET
+               category = excluded.category,
                occurrences = unsupported_css_log.occurrences + 1,
                last_seen_at = CURRENT_TIMESTAMP",
-            params![property, value],
+            params![property, value, category.as_str()],
         )?;
         Ok(())
     });
@@ -2576,13 +2605,17 @@ fn persist_unsupported_css_to_sqlite(path: &str, property: &str, value: &str) {
     }
 }
 
-fn emit_unsupported_css_top_n_summary_if_updated(path: &str, top_n: usize) {
+fn emit_css_audit_top_n_summary_if_updated(
+    path: &str,
+    top_n: usize,
+    category: CssAuditCategory,
+) {
     let rows = SQLITE_CONNECTIONS.with(|connections| {
         let mut connections = connections.borrow_mut();
         let Some(conn) = connections.get_mut(path) else {
             return Ok(Vec::new());
         };
-        query_unsupported_css_top_n(conn, top_n)
+        query_css_audit_top_n(conn, top_n, category)
     });
     let Ok(rows) = rows else {
         if let Err(error) = rows {
@@ -2597,13 +2630,14 @@ fn emit_unsupported_css_top_n_summary_if_updated(path: &str, top_n: usize) {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     path.hash(&mut hasher);
     top_n.hash(&mut hasher);
+    category.as_str().hash(&mut hasher);
     for (property, value, occurrences) in &rows {
         property.hash(&mut hasher);
         value.hash(&mut hasher);
         occurrences.hash(&mut hasher);
     }
     let digest = hasher.finish();
-    let key = format!("{path}#{top_n}");
+    let key = format!("{path}#{top_n}#{}", category.as_str());
     let map = UNSUPPORTED_CSS_TOP_N_LAST_DIGEST.get_or_init(|| Mutex::new(HashMap::new()));
     let mut map = map
         .lock()
@@ -2613,11 +2647,12 @@ fn emit_unsupported_css_top_n_summary_if_updated(path: &str, top_n: usize) {
     }
     map.insert(key, digest);
 
-    eprintln!("[omoikane][unsupported-css][top-n] top {top_n} candidates (site/url anonymized)");
+    let label = category.log_label();
+    eprintln!("[omoikane][{label}][top-n] top {top_n} candidates (site/url anonymized)");
     for (index, (property, value, occurrences)) in rows.iter().enumerate() {
         let value = truncate_log_value(value, MAX_UNSUPPORTED_LOG_VALUE_LEN);
         eprintln!(
-            "[omoikane][unsupported-css][top-n] {}. {}={} (count={})",
+            "[omoikane][{label}][top-n] {}. {}={} (count={})",
             index + 1,
             property,
             value,
@@ -2626,18 +2661,28 @@ fn emit_unsupported_css_top_n_summary_if_updated(path: &str, top_n: usize) {
     }
 }
 
+#[cfg(test)]
 fn query_unsupported_css_top_n(
     conn: &Connection,
     top_n: usize,
+) -> Result<Vec<(String, String, i64)>, rusqlite::Error> {
+    query_css_audit_top_n(conn, top_n, CssAuditCategory::Unsupported)
+}
+
+fn query_css_audit_top_n(
+    conn: &Connection,
+    top_n: usize,
+    category: CssAuditCategory,
 ) -> Result<Vec<(String, String, i64)>, rusqlite::Error> {
     let limit = i64::try_from(top_n).unwrap_or(i64::MAX);
     let mut stmt = conn.prepare(
         "SELECT property, value, occurrences
          FROM unsupported_css_log
+         WHERE category = ?1
          ORDER BY occurrences DESC, property ASC, value ASC
-         LIMIT ?1",
+         LIMIT ?2",
     )?;
-    stmt.query_map(params![limit], |row| {
+    stmt.query_map(params![category.as_str(), limit], |row| {
         Ok((
             row.get::<_, String>(0)?,
             row.get::<_, String>(1)?,
@@ -2679,6 +2724,38 @@ fn log_sqlite_error(error: &rusqlite::Error) {
 
 fn should_ignore_unsupported_css_logging(property: &str) -> bool {
     property.starts_with("--")
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CssAuditCategory {
+    Unsupported,
+    VendorPrefixed,
+}
+
+impl CssAuditCategory {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Unsupported => "unsupported",
+            Self::VendorPrefixed => "vendor-prefixed",
+        }
+    }
+
+    fn log_label(self) -> &'static str {
+        match self {
+            Self::Unsupported => "unsupported-css",
+            Self::VendorPrefixed => "vendor-prefixed-css",
+        }
+    }
+}
+
+fn css_audit_category(property: &str) -> Option<CssAuditCategory> {
+    if should_ignore_unsupported_css_logging(property) || is_supported_property(property) {
+        None
+    } else if property.starts_with('-') {
+        Some(CssAuditCategory::VendorPrefixed)
+    } else {
+        Some(CssAuditCategory::Unsupported)
+    }
 }
 
 fn unsupported_css_dedup_key(property: &str, value: &str) -> String {
@@ -2769,6 +2846,7 @@ pub(super) fn is_supported_property(name: &str) -> bool {
             | "border-top-left-radius"
             | "border-top-right-radius"
             | "border-collapse"
+            | "border-color"
             | "border-left-color"
             | "border-left-style"
             | "border-left-width"
@@ -2777,6 +2855,7 @@ pub(super) fn is_supported_property(name: &str) -> bool {
             | "border-right-width"
             | "border-spacing"
             | "border-style"
+            | "border-width"
             | "border-top-color"
             | "border-top-style"
             | "border-top-width"

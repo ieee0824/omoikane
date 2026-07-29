@@ -52,6 +52,15 @@ cargo test --test wpt_smoke -- --nocapture
 
 Set `WPT_ROOT` to store the checkout elsewhere. Add cases to `tests/wpt/manifest.json` and add their paths to the sparse-checkout list in `scripts/fetch-wpt.sh`. Expectations may be `PASS`, `FAIL`, or `TIMEOUT`; both regressions and unexpected passes fail the runner so expectation changes stay explicit. Set `WPT_REPORT=path/to/report.json` to write the pinned revision, case outcomes, script errors, and individual subtest results as JSON. Set `WPT_JUNIT=path/to/junit.xml` to emit a JUnit XML testsuite for CI test-report consumers; expectation mismatches are represented as failures and subtest details are XML-escaped in `system-out`.
 
+Set `WPT_RESULTS_DIR=path/to/results` to additionally store revision-scoped reports as
+`<revision>/report.json` plus one JSON file per area (`css.json`, `dom.json`,
+`shadow-dom.json`, and so on). If that directory already contains an older revision,
+set `WPT_COMPARE_REVISION=<old-revision>` while running the new revision to print a
+machine-readable diff of known failures, regressions, improvements, and changed cases.
+CI automatically writes to `.artifacts/wpt/results` and uploads both these
+revision-scoped files and the flat `WPT_REPORT`, matching the
+`report.json` convention used by the Web API surface probe.
+
 The initial job is intentionally a small PR smoke gate. Expansion toward the full WPT suite and official `wpt run` integration is tracked in GitHub issue #150.
 
 # Web API surface probe
