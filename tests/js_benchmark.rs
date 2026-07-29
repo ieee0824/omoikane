@@ -10,11 +10,16 @@
 //! Current figures live in `baseline.json` and are not repeated here, so that
 //! improving the engine cannot leave this comment contradicting the data.
 //!
-//! Timings are **reported, never asserted**. A wall-clock assertion in CI either
-//! fails on noise or is set so loose it catches nothing, so this follows the same
-//! rule as `render_benchmark_fixture.rs`: the test checks structural invariants
+//! Per-shape timings are **reported, never asserted**. A wall-clock assertion in CI
+//! either fails on noise or is set so loose it catches nothing, so this follows the
+//! same rule as `render_benchmark_fixture.rs`: the test checks structural invariants
 //! and the numbers are printed for a human (or archived via
 //! `OMOIKANE_JS_BENCH_REPORT`).
+//!
+//! One timing *is* asserted, and only because it is not a wall-clock number:
+//! `appending_cost_does_not_grow_with_the_string_being_built` compares the cost per
+//! operation at two string lengths within a single run, which the machine's speed
+//! divides out of. Anything else added here belongs under the reported rule.
 //!
 //! Baselines are the median of five runs on an idle machine, where run-to-run
 //! spread was 1-10% per shape (`string-concat` and `primitive-string-method` are
@@ -587,8 +592,11 @@ const APPEND_SCALING_TOLERANCE: f64 = 2.0;
 /// against it. If `+=` becomes fast enough for the passes to shrink toward the floor,
 /// or the clock coarsens, the test says so instead of quietly going flaky.
 ///
-/// The current margin is four orders of magnitude past this: `performance.now()`
-/// resolves to 334 ns here and a pass spans 6.5 ms, about 19,400 ticks.
+/// A measurement spanning `n` ticks carries up to one tick of error, so the floor of
+/// a thousand bounds each duration's error at about 0.1%. Measured here the passes are
+/// far above it — `performance.now()` resolves to 334 ns and a pass spans 6.5 ms, about
+/// 19,400 ticks, or 19x the floor, putting the error near 0.005%. Either figure is
+/// orders of magnitude below what could move a ratio read against 2.0.
 const MIN_TICKS_PER_PASS: f64 = 1000.0;
 
 #[test]
