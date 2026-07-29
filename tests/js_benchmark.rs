@@ -562,3 +562,76 @@ fn js_execution_benchmark_reports_every_shape() {
         );
     }
 }
+
+/// How the cost of `s += x` scales with the length being built.
+///
+/// This is the one timing in the suite that is *asserted* rather than reported,
+/// because it is not a wall-clock threshold: it compares the cost per operation at
+/// two lengths in the same run, on the same machine, moments apart. Reallocating and
+/// copying the prefix on every append makes that ratio grow with the length; writing
+/// into the string's own spare capacity keeps it flat (issues #314, #318-#320).
+/// Before the append path this shape cost 4.0x more per operation at 65,536 chars
+/// than at 256; after it, 1.04x.
+///
+/// The band is wide because the two lengths differ in cache behaviour as well —
+/// 65,536 UTF-16 chars do not sit in L2 the way 256 do — so a flat implementation
+/// still measures somewhat worse at the top. It is nowhere near the 4x that
+/// reintroducing the copy would produce, which is what this is here to catch.
+const APPEND_SCALING_TOLERANCE: f64 = 2.0;
+
+#[test]
+fn appending_cost_does_not_grow_with_the_string_being_built() {
+    let source = r#"
+        function build(limit, iterations) {
+          var period = limit >> 1;
+          var best = Infinity;
+          for (var pass = 0; pass < 4; pass++) {
+            var start = performance.now();
+            var s = "";
+            var c = 0;
+            for (var i = 0; i < iterations; i++) {
+              s += "ab";
+              c++;
+              if (c > period) { s = ""; c = 0; }
+            }
+            var elapsed = performance.now() - start;
+            globalThis.__benchSink = s.length;
+            if (elapsed < best) best = elapsed;
+          }
+          return (best * 1e6) / iterations;
+        }
+        var short = build(256, 50000);
+        var long = build(65536, 50000);
+        short + "|" + long
+    "#;
+
+    let mut runtime = JsRuntime::new().expect("runtime should start");
+    let measured = runtime
+        .eval_safe(source)
+        .expect("the scaling measurement should evaluate")
+        .as_string()
+        .expect("the measurement returns a string")
+        .to_std_string_escaped();
+
+    let (short, long) = measured
+        .split_once('|')
+        .expect("the measurement returns two values");
+    let short: f64 = short.parse().expect("a number");
+    let long: f64 = long.parse().expect("a number");
+
+    assert!(
+        short > 0.0 && long > 0.0,
+        "both lengths must produce a usable timing: {short} and {long} ns/op"
+    );
+    let ratio = long / short;
+    println!(
+        "append scaling: 256 chars {short:.1} ns/op, 65536 chars {long:.1} ns/op, ratio {ratio:.2}x"
+    );
+    assert!(
+        ratio < APPEND_SCALING_TOLERANCE,
+        "appending cost {long:.1} ns/op at 65,536 chars against {short:.1} at 256, a ratio of \
+         {ratio:.2}x. Above {APPEND_SCALING_TOLERANCE:.1}x the cost is growing with the length \
+         being built, which is what copying the prefix on every append does — the in-place \
+         append path is no longer being taken"
+    );
+}
