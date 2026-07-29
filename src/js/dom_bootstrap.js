@@ -6163,7 +6163,43 @@
     }
     return __makeComputedStyle({});
   };
-  globalThis.navigator = { userAgent: __omoikane_navigator_user_agent, language: "en", languages: ["en"], platform: "", cookieEnabled: true, onLine: true };
+  const navigatorConstructionToken = {};
+  class PluginArray {
+    constructor(token) {
+      if (token !== navigatorConstructionToken) throw new TypeError("Illegal constructor");
+    }
+    get length() { return 0; }
+    item() { return null; }
+    namedItem() { return null; }
+    refresh() {}
+    *[Symbol.iterator]() {}
+  }
+  class MimeTypeArray {
+    constructor(token) {
+      if (token !== navigatorConstructionToken) throw new TypeError("Illegal constructor");
+    }
+    get length() { return 0; }
+    item() { return null; }
+    namedItem() { return null; }
+    *[Symbol.iterator]() {}
+  }
+  class Navigator {
+    constructor(token) {
+      if (token !== navigatorConstructionToken) throw new TypeError("Illegal constructor");
+      this.userAgent = __omoikane_navigator_user_agent;
+      this.language = "en";
+      this.languages = ["en"];
+      this.platform = "";
+      this.cookieEnabled = true;
+      this.onLine = true;
+      this.plugins = new PluginArray(navigatorConstructionToken);
+      this.mimeTypes = new MimeTypeArray(navigatorConstructionToken);
+    }
+  }
+  globalThis.PluginArray = PluginArray;
+  globalThis.MimeTypeArray = MimeTypeArray;
+  globalThis.Navigator = Navigator;
+  globalThis.navigator = new Navigator(navigatorConstructionToken);
   if (globalThis.Intl === undefined) {
     class IntlFormatter {
       constructor(locales, options) {

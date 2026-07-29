@@ -7517,6 +7517,28 @@ mod tests {
     }
 
     #[test]
+    fn navigator_exposes_empty_plugin_and_mime_type_collections() {
+        let mut runtime = JsRuntime::new().unwrap();
+        assert!(
+            runtime
+                .eval(
+                    r#"navigator.plugins instanceof PluginArray &&
+                       navigator.mimeTypes instanceof MimeTypeArray &&
+                       navigator.plugins.length === 0 && navigator.mimeTypes.length === 0 &&
+                       navigator.plugins.item(0) === null &&
+                       navigator.plugins.namedItem("missing") === null &&
+                       navigator.mimeTypes.item(0) === null &&
+                       navigator.mimeTypes.namedItem("missing") === null &&
+                       Array.from(navigator.plugins).length === 0 &&
+                       Array.from(navigator.mimeTypes).length === 0"#,
+                )
+                .unwrap()
+                .as_boolean()
+                .unwrap()
+        );
+    }
+
+    #[test]
     fn intl_formatters_expose_common_bootstrap_surface() {
         let mut runtime = JsRuntime::new().unwrap();
         assert!(
