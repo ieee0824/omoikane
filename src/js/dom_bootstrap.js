@@ -7765,6 +7765,158 @@
   globalThis.URL.createObjectURL = createObjectURL;
   globalThis.URL.revokeObjectURL = revokeObjectURL;
 
+  function fireRealtimeEvent(target, event) {
+    const handler = target["on" + event.type];
+    if (typeof handler === "function") handler.call(target, event);
+    target.dispatchEvent(event);
+  }
+
+  class CloseEvent extends Event {
+    constructor(type, init = {}) {
+      super(type, init);
+      this.wasClean = !!init.wasClean;
+      this.code = Number(init.code) || 0;
+      this.reason = String(init.reason || "");
+    }
+  }
+
+  class WebSocket extends EventTarget {
+    constructor(url, protocols = []) {
+      super();
+      this.url = String(url);
+      const list = protocols === undefined ? [] : (Array.isArray(protocols) ? protocols.map(String) : [String(protocols)]);
+      if (new Set(list).size !== list.length) throw new DOMException("Duplicate subprotocol", "SyntaxError");
+      this.readyState = WebSocket.CONNECTING;
+      this.bufferedAmount = 0;
+      this.extensions = "";
+      this.protocol = "";
+      this.binaryType = "blob";
+      this.onopen = this.onmessage = this.onerror = this.onclose = null;
+      try {
+        const result = JSON.parse(__omoikane_websocket_connect(this.url, JSON.stringify(list)));
+        this.__id = result.id;
+        this.protocol = result.protocol;
+        __omoikane_queue_networking_task(() => {
+          if (this.readyState !== WebSocket.CONNECTING) return;
+          this.readyState = WebSocket.OPEN;
+          fireRealtimeEvent(this, new Event("open"));
+        });
+      } catch (error) {
+        __omoikane_queue_networking_task(() => {
+          this.readyState = WebSocket.CLOSED;
+          fireRealtimeEvent(this, new Event("error"));
+          fireRealtimeEvent(this, new CloseEvent("close", { code: 1006, wasClean: false }));
+        });
+      }
+    }
+    send(data) {
+      if (this.readyState === WebSocket.CONNECTING) throw new DOMException("WebSocket is connecting", "InvalidStateError");
+      if (this.readyState !== WebSocket.OPEN) return;
+      let bytes, binary = false;
+      if (typeof data === "string") bytes = new TextEncoder().encode(data);
+      else if (data instanceof ArrayBuffer) { bytes = new Uint8Array(data); binary = true; }
+      else if (ArrayBuffer.isView(data)) { bytes = new Uint8Array(data.buffer, data.byteOffset, data.byteLength); binary = true; }
+      else if (data instanceof Blob) { bytes = data.__bytes; binary = true; }
+      else bytes = new TextEncoder().encode(String(data));
+      try {
+        const result = JSON.parse(__omoikane_websocket_send(this.__id, base64FromBytes(bytes), binary));
+        __omoikane_queue_networking_task(() => this.__deliver(result));
+      } catch (_) {
+        __omoikane_queue_networking_task(() => fireRealtimeEvent(this, new Event("error")));
+      }
+    }
+    close(code = 1000, reason = "") {
+      code = Number(code);
+      reason = String(reason);
+      if (code !== 1000 && (code < 3000 || code > 4999)) throw new DOMException("Invalid close code", "InvalidAccessError");
+      if (new TextEncoder().encode(reason).length > 123) throw new DOMException("Close reason is too long", "SyntaxError");
+      if (this.readyState >= WebSocket.CLOSING) return;
+      this.readyState = WebSocket.CLOSING;
+      try { __omoikane_websocket_close(this.__id, code, reason); } catch (_) {}
+      __omoikane_queue_networking_task(() => {
+        this.readyState = WebSocket.CLOSED;
+        fireRealtimeEvent(this, new CloseEvent("close", { code, reason, wasClean: true }));
+      });
+    }
+    __deliver(result) {
+      if (result.kind === "close") {
+        this.readyState = WebSocket.CLOSED;
+        fireRealtimeEvent(this, new CloseEvent("close", { code: result.code, reason: result.reason, wasClean: true }));
+        return;
+      }
+      let data = result.data;
+      if (result.kind === "binary") {
+        const bytes = bytesFromBase64(data);
+        data = this.binaryType === "arraybuffer" ? bytes.buffer : new Blob([bytes]);
+      }
+      fireRealtimeEvent(this, new MessageEvent("message", { data, origin: this.url.replace(/^ws/, "http") }));
+    }
+  }
+  WebSocket.CONNECTING = WebSocket.prototype.CONNECTING = 0;
+  WebSocket.OPEN = WebSocket.prototype.OPEN = 1;
+  WebSocket.CLOSING = WebSocket.prototype.CLOSING = 2;
+  WebSocket.CLOSED = WebSocket.prototype.CLOSED = 3;
+
+  class EventSource extends EventTarget {
+    constructor(url, init = {}) {
+      super();
+      this.url = String(url);
+      this.withCredentials = !!(init && init.withCredentials);
+      this.readyState = EventSource.CONNECTING;
+      this.onopen = this.onmessage = this.onerror = null;
+      this.__closed = false;
+      this.__lastEventId = "";
+      this.__retry = 3000;
+      this.__connect();
+    }
+    close() { this.__closed = true; this.readyState = EventSource.CLOSED; }
+    __connect() {
+      if (this.__closed) return;
+      try {
+        const text = __omoikane_event_source_fetch(this.url, this.__lastEventId, this.withCredentials);
+        __omoikane_queue_networking_task(() => {
+          if (this.__closed) return;
+          this.readyState = EventSource.OPEN;
+          fireRealtimeEvent(this, new Event("open"));
+          let data = [], type = "", retry = null;
+          const dispatch = () => {
+            if (!data.length) return;
+            fireRealtimeEvent(this, new MessageEvent(type || "message", { data: data.join("\n"), origin: this.url, lastEventId: this.__lastEventId }));
+            data = []; type = "";
+          };
+          for (const line of text.replace(/\r\n|\r/g, "\n").split("\n")) {
+            if (line === "") { dispatch(); continue; }
+            if (line[0] === ":") continue;
+            const colon = line.indexOf(":");
+            const field = colon < 0 ? line : line.slice(0, colon);
+            let value = colon < 0 ? "" : line.slice(colon + 1);
+            if (value[0] === " ") value = value.slice(1);
+            if (field === "data") data.push(value);
+            else if (field === "event") type = value;
+            else if (field === "id" && !value.includes("\0")) this.__lastEventId = value;
+            else if (field === "retry" && /^\d+$/.test(value)) retry = Number(value);
+          }
+          dispatch();
+          if (retry !== null) this.__retry = retry;
+          if (!this.__closed) { this.readyState = EventSource.CONNECTING; setTimeout(() => this.__connect(), this.__retry); }
+        });
+      } catch (_) {
+        __omoikane_queue_networking_task(() => {
+          if (this.__closed) return;
+          this.readyState = EventSource.CONNECTING;
+          fireRealtimeEvent(this, new Event("error"));
+          setTimeout(() => this.__connect(), this.__retry);
+        });
+      }
+    }
+  }
+  EventSource.CONNECTING = EventSource.prototype.CONNECTING = 0;
+  EventSource.OPEN = EventSource.prototype.OPEN = 1;
+  EventSource.CLOSED = EventSource.prototype.CLOSED = 2;
+  globalThis.WebSocket = WebSocket;
+  globalThis.EventSource = EventSource;
+  globalThis.CloseEvent = CloseEvent;
+
   class Headers {
     constructor(init = undefined) {
       this._headers = new Map();

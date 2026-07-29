@@ -99,6 +99,11 @@ impl EventLoop {
         self.enqueue(TaskSource::FileReading, Task::Timer(payload));
     }
 
+    /// Queues a callback on the networking task source.
+    pub(crate) fn enqueue_networking(&mut self, payload: TimerPayload) {
+        self.enqueue(TaskSource::Networking, Task::Timer(payload));
+    }
+
     pub(crate) fn pop_task(&mut self) -> Option<(TaskSource, Task)> {
         while let Some((expected_id, source)) = self.order.pop_front() {
             let queue = self.queues.get_mut(&source)?;
@@ -246,5 +251,17 @@ mod tests {
         assert!(event_loop.has_pending_timers());
         assert!(event_loop.pop_task().is_some());
         assert!(!event_loop.has_pending_timers());
+    }
+
+    #[test]
+    fn networking_callbacks_keep_global_task_enqueue_order() {
+        let mut event_loop = EventLoop::default();
+        event_loop.enqueue_networking(TimerPayload::Source("open".into()));
+        event_loop.enqueue_timer(TimerPayload::Source("timer".into()));
+        event_loop.enqueue_networking(TimerPayload::Source("message".into()));
+        let labels: Vec<_> = std::iter::from_fn(|| event_loop.pop_task())
+            .map(|(_, task)| match task { Task::Timer(TimerPayload::Source(value)) => value, _ => panic!("unexpected task") })
+            .collect();
+        assert_eq!(labels, ["open", "timer", "message"]);
     }
 }
