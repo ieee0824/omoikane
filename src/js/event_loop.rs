@@ -21,6 +21,8 @@ pub(crate) enum TaskSource {
     Networking,
     Navigation,
     Rendering,
+    /// The posted message task source, used by `MessagePort` delivery.
+    PostedMessage,
     /// The file reading task source, used by `FileReader` to deliver its
     /// `loadstart`/`progress`/`load`/`loadend` events.
     FileReading,
@@ -30,6 +32,7 @@ pub(crate) enum TaskSource {
 pub(crate) enum Task {
     Timer(TimerPayload),
     Navigation(NavigationRequest),
+    PostedMessage(JsValue),
 }
 
 #[derive(Debug, Clone)]
@@ -102,6 +105,13 @@ impl EventLoop {
     /// Queues a callback on the networking task source.
     pub(crate) fn enqueue_networking(&mut self, payload: TimerPayload) {
         self.enqueue(TaskSource::Networking, Task::Timer(payload));
+    }
+
+    /// Queues a `MessagePort` delivery callback on the posted message task
+    /// source. The callback is retained as a live JavaScript value until its
+    /// event-loop turn runs.
+    pub(crate) fn enqueue_posted_message(&mut self, callback: JsValue) {
+        self.enqueue(TaskSource::PostedMessage, Task::PostedMessage(callback));
     }
 
     pub(crate) fn pop_task(&mut self) -> Option<(TaskSource, Task)> {
@@ -263,5 +273,42 @@ mod tests {
             .map(|(_, task)| match task { Task::Timer(TimerPayload::Source(value)) => value, _ => panic!("unexpected task") })
             .collect();
         assert_eq!(labels, ["open", "timer", "message"]);
+    }
+
+    #[test]
+    fn posted_message_callbacks_keep_fifo_order() {
+        let mut event_loop = EventLoop::default();
+        event_loop.enqueue_posted_message(JsValue::from(1));
+        event_loop.enqueue_posted_message(JsValue::from(2));
+
+        for expected in [1.0, 2.0] {
+            let Some((source, Task::PostedMessage(callback))) = event_loop.pop_task() else {
+                panic!("expected a posted message task");
+            };
+            assert_eq!(source, TaskSource::PostedMessage);
+            assert_eq!(callback.as_number(), Some(expected));
+        }
+        assert!(event_loop.pop_task().is_none());
+    }
+
+    #[test]
+    fn posted_messages_preserve_global_enqueue_order() {
+        let mut event_loop = EventLoop::default();
+        event_loop.enqueue_timer(TimerPayload::Source("timer".into()));
+        event_loop.enqueue_posted_message(JsValue::from(7));
+        event_loop.enqueue_navigation(NavigationRequest::Reload);
+
+        assert!(matches!(
+            event_loop.pop_task(),
+            Some((TaskSource::Timer, Task::Timer(_)))
+        ));
+        assert!(matches!(
+            event_loop.pop_task(),
+            Some((TaskSource::PostedMessage, Task::PostedMessage(_)))
+        ));
+        assert!(matches!(
+            event_loop.pop_task(),
+            Some((TaskSource::Navigation, Task::Navigation(_)))
+        ));
     }
 }
