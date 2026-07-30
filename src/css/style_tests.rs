@@ -578,6 +578,20 @@ fn inline_property_names_are_ascii_case_insensitive() {
 }
 
 #[test]
+fn position_accepts_sticky_and_discards_invalid_keywords() {
+    let element = NodeHandle::element("div");
+    element.set_attribute("style", "position: sticky; position: sideways");
+    let style = StyleResolver::new().computed_style(&element);
+    assert_eq!(style.get("position"), Some(&ComputedValue::Keyword("sticky".to_string())));
+
+    let plain = NodeHandle::element("div");
+    assert_eq!(
+        StyleResolver::new().computed_style(&plain).get("position"),
+        Some(&ComputedValue::Keyword("static".to_string()))
+    );
+}
+
+#[test]
 fn identifies_supported_property_names() {
     assert!(is_supported_property("background-color"));
     assert!(is_supported_property("position"));

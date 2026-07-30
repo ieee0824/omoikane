@@ -286,6 +286,7 @@ pub(super) fn layout_flex_container(
         overflow: overflow(&style),
         z_index: z_index(&style),
         transform: AffineTransform::identity(),
+        needs_scroll_translation: false,
         lines: Vec::new(),
         children,
         marker: None,

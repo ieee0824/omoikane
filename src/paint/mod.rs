@@ -1243,7 +1243,7 @@ fn render_document_with_url_internal(
                 let layout_start = Instant::now();
                 let mut layout = crate::layout::layout_tree(document, &mut resolver, viewport)?;
                 timings.layout = layout_start.elapsed();
-                apply_scroll_offsets(&mut layout, &mut resolver, scroll);
+                apply_scroll_offsets(&mut layout, &mut resolver, viewport, scroll);
                 let paint_start = Instant::now();
                 let canvas = paint_layout_with_web_fonts(
                     &layout,
@@ -1536,13 +1536,17 @@ fn translate_layout_for_paint(layout: &mut LayoutBox, dx: f32, dy: f32) {
 pub(crate) fn apply_scroll_offsets(
     layout: &mut LayoutBox,
     resolver: &mut StyleResolver,
+    viewport: Rect,
     window_scroll: (f32, f32),
 ) {
-    if window_scroll == (0.0, 0.0) && !crate::dom::any_element_scrolled() {
+    if window_scroll == (0.0, 0.0)
+        && !crate::dom::any_element_scrolled()
+        && !layout.needs_scroll_translation
+    {
         return;
     }
     let window_offset = (-window_scroll.0, -window_scroll.1);
-    translate_layout_for_scroll(layout, resolver, window_offset, window_offset);
+    translate_layout_for_scroll(layout, resolver, window_offset, window_offset, viewport, None);
 }
 
 /// Returns the topmost event target at viewport coordinates using the cached
@@ -1701,6 +1705,8 @@ fn translate_layout_for_scroll(
     resolver: &mut StyleResolver,
     offset: (f32, f32),
     positioned_offset: (f32, f32),
+    sticky_scrollport: Rect,
+    containing_block: Option<Rect>,
 ) {
     let style = resolver.computed_style(&layout.node);
     let offset = if is_absolute_for_paint(&style) {
@@ -1708,11 +1714,25 @@ fn translate_layout_for_scroll(
     } else {
         offset
     };
-    let (dx, dy) = if is_fixed_for_paint(&style) {
+    let (mut dx, mut dy) = if is_fixed_for_paint(&style) {
         (0.0, 0.0)
     } else {
         offset
     };
+    if is_sticky_for_paint(&style) {
+        let border_box = border_box_rect(layout);
+        let margin = layout.dimensions.margin;
+        let margin_box = Rect {
+            x: border_box.x - margin.left + dx,
+            y: border_box.y - margin.top + dy,
+            width: border_box.width + margin.left + margin.right,
+            height: border_box.height + margin.top + margin.bottom,
+        };
+        let (sticky_dx, sticky_dy) =
+            sticky_translation(margin_box, sticky_scrollport, containing_block, &style);
+        dx += sticky_dx;
+        dy += sticky_dy;
+    }
     if (dx, dy) != (0.0, 0.0) {
         layout.dimensions.content.x += dx;
         layout.dimensions.content.y += dy;
@@ -1745,13 +1765,108 @@ fn translate_layout_for_scroll(
     } else {
         positioned_offset
     };
+    let child_containing_block = Rect {
+        x: layout.dimensions.content.x - scroll_x,
+        y: layout.dimensions.content.y - scroll_y,
+        width: layout.dimensions.content.width,
+        height: layout.dimensions.content.height,
+    };
+    let child_sticky_scrollport = if layout.is_scroll_container() {
+        padding_box_rect(layout)
+    } else {
+        sticky_scrollport
+    };
     for child in &mut layout.children {
         translate_layout_for_scroll(
             child,
             resolver,
             (content_dx, content_dy),
             positioned_offset,
+            child_sticky_scrollport,
+            Some(child_containing_block),
         );
+    }
+}
+
+fn is_sticky_for_paint(style: &ComputedStyle) -> bool {
+    matches!(
+        style.get("position"),
+        Some(ComputedValue::Keyword(keyword)) if keyword.eq_ignore_ascii_case("sticky")
+    )
+}
+
+fn sticky_inset(style: &ComputedStyle, side: &str, reference: f32) -> Option<f32> {
+    match style.get(side) {
+        Some(ComputedValue::Px(value)) => Some(*value),
+        Some(ComputedValue::Percentage(value)) => Some(reference * *value / 100.0),
+        Some(ComputedValue::CalcPxPercent(px, percentage)) => Some(*px + reference * *percentage / 100.0),
+        Some(ComputedValue::Number(value)) if *value == 0.0 => Some(0.0),
+        _ => None,
+    }
+}
+
+fn sticky_translation(
+    margin_box: Rect,
+    scrollport: Rect,
+    containing_block: Option<Rect>,
+    style: &ComputedStyle,
+) -> (f32, f32) {
+    let containing_block = containing_block.unwrap_or(scrollport);
+    // Inset percentages resolve against the corresponding dimension of the
+    // containing block, even though sticky positioning constrains the result
+    // against the nearest scrollport.
+    let left = sticky_inset(style, "left", containing_block.width);
+    let right = sticky_inset(style, "right", containing_block.width);
+    let top = sticky_inset(style, "top", containing_block.height);
+    let bottom = sticky_inset(style, "bottom", containing_block.height);
+    (
+        sticky_axis_translation(
+            margin_box.x, margin_box.width, scrollport.x, scrollport.width,
+            containing_block.x, containing_block.width, left, right,
+        ),
+        sticky_axis_translation(
+            margin_box.y, margin_box.height, scrollport.y, scrollport.height,
+            containing_block.y, containing_block.height, top, bottom,
+        ),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn sticky_axis_translation(
+    box_start: f32,
+    box_size: f32,
+    scrollport_start: f32,
+    scrollport_size: f32,
+    containing_start: f32,
+    containing_size: f32,
+    start_inset: Option<f32>,
+    end_inset: Option<f32>,
+) -> f32 {
+    if start_inset.is_none() && end_inset.is_none() {
+        return 0.0;
+    }
+    let start_inset = start_inset.unwrap_or(0.0);
+    let mut end_inset = end_inset.unwrap_or(0.0);
+    let view_size = scrollport_size - start_inset - end_inset;
+    if view_size < box_size {
+        // CSS Positioned Layout reduces the end-edge inset (possibly below
+        // zero) so an oversized sticky box still has a usable view rectangle.
+        end_inset -= box_size - view_size;
+    }
+    let view_start = scrollport_start + start_inset;
+    let view_end = scrollport_start + scrollport_size - end_inset;
+    let lower = view_start - box_start;
+    let upper = view_end - (box_start + box_size);
+    let desired = 0.0_f32.clamp(lower.min(upper), lower.max(upper));
+
+    // The sticky position box may never escape its containing block. If the
+    // containing block itself is smaller, pin to its start edge deterministically.
+    let containing_lower = containing_start - box_start;
+    let containing_upper = containing_start + containing_size - (box_start + box_size);
+    if containing_lower <= containing_upper {
+        desired.clamp(containing_lower, containing_upper)
+    } else {
+        containing_lower
     }
 }
 
@@ -1769,6 +1884,7 @@ fn establishes_containing_block_for_paint(style: &ComputedStyle) -> bool {
             if keyword.eq_ignore_ascii_case("relative")
                 || keyword.eq_ignore_ascii_case("absolute")
                 || keyword.eq_ignore_ascii_case("fixed")
+                || keyword.eq_ignore_ascii_case("sticky")
     )
 }
 
@@ -2545,6 +2661,7 @@ fn is_positioned_for_paint(style: &ComputedStyle) -> bool {
             if keyword.eq_ignore_ascii_case("absolute")
                 || keyword.eq_ignore_ascii_case("fixed")
                 || keyword.eq_ignore_ascii_case("relative")
+                || keyword.eq_ignore_ascii_case("sticky")
     )
 }
 

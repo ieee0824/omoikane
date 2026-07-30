@@ -7263,6 +7263,20 @@ fn scrollable_overflow_stops_at_clip_on_each_clipped_axis() {
 /// Scrolling must not move any layout box: it is a paint-time and
 /// client-rect-time translation only.
 #[test]
+fn layout_root_records_whether_sticky_requires_zero_scroll_translation() {
+    let (document, _html, _body, card) = sample_tree();
+    let viewport = Rect { x: 0.0, y: 0.0, width: 200.0, height: 100.0 };
+    let mut resolver = StyleResolver::new();
+    let normal = layout_tree(&document, &mut resolver, viewport).unwrap();
+    assert!(!normal.needs_scroll_translation);
+
+    card.set_attribute("style", "position: sticky; bottom: 0");
+    resolver.invalidate_style_cache_for_test();
+    let sticky = layout_tree(&document, &mut resolver, viewport).unwrap();
+    assert!(sticky.needs_scroll_translation);
+}
+
+#[test]
 fn scroll_offset_does_not_change_layout_geometry() {
     let (document, _html, body, card) = sample_tree();
     let inner = NodeHandle::element("p");

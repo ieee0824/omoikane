@@ -576,6 +576,7 @@ pub enum AlignItems {
 enum PositionScheme {
     Static,
     Relative,
+    Sticky,
     Absolute,
     Fixed,
 }
@@ -634,6 +635,9 @@ pub struct LayoutBox {
     /// Paint-time CSS transform in the document's absolute coordinate space.
     /// It does not participate in normal-flow layout sizing or placement.
     pub transform: AffineTransform,
+    /// Whether this subtree can need paint-time scroll/sticky translation even
+    /// when all currently stored scroll offsets are zero.
+    pub(crate) needs_scroll_translation: bool,
     pub lines: Vec<LineBox>,
     pub children: Vec<LayoutBox>,
     /// List marker for `display: list-item` elements.
@@ -823,6 +827,10 @@ fn populate_layout_transforms(
     for child in &mut layout.children {
         populate_layout_transforms(child, resolver, root_font_size);
     }
+    layout.needs_scroll_translation = matches!(
+        style.get("position"),
+        Some(ComputedValue::Keyword(value)) if value.eq_ignore_ascii_case("sticky")
+    ) || layout.children.iter().any(|child| child.needs_scroll_translation);
 }
 
 fn computed_keyword<'a>(style: &'a ComputedStyle, property: &str) -> Option<&'a str> {
@@ -976,6 +984,7 @@ fn layout_document(
         overflow: Overflow::Visible,
         z_index: 0,
         transform: AffineTransform::identity(),
+        needs_scroll_translation: false,
         lines: Vec::new(),
         children,
         marker: None,
@@ -1317,6 +1326,7 @@ fn layout_element(
                 overflow: overflow(&style),
                 z_index: z_index(&style),
                 transform: AffineTransform::identity(),
+                needs_scroll_translation: false,
                 lines,
                 children: Vec::new(),
                 marker: None,
@@ -1396,6 +1406,7 @@ fn layout_element(
         overflow: overflow(&style),
         z_index: z_index(&style),
         transform: AffineTransform::identity(),
+        needs_scroll_translation: false,
         lines,
         children,
         marker,
@@ -1977,7 +1988,7 @@ fn is_out_of_flow_positioned(style: &ComputedStyle) -> bool {
 fn establishes_positioned_containing_block(style: &ComputedStyle) -> bool {
     matches!(
         position_scheme(style),
-        PositionScheme::Relative | PositionScheme::Absolute | PositionScheme::Fixed
+        PositionScheme::Relative | PositionScheme::Sticky | PositionScheme::Absolute | PositionScheme::Fixed
     )
 }
 
@@ -1985,6 +1996,9 @@ fn position_scheme(style: &ComputedStyle) -> PositionScheme {
     match style.get("position") {
         Some(ComputedValue::Keyword(keyword)) if keyword.eq_ignore_ascii_case("relative") => {
             PositionScheme::Relative
+        }
+        Some(ComputedValue::Keyword(keyword)) if keyword.eq_ignore_ascii_case("sticky") => {
+            PositionScheme::Sticky
         }
         Some(ComputedValue::Keyword(keyword)) if keyword.eq_ignore_ascii_case("absolute") => {
             PositionScheme::Absolute
@@ -2347,6 +2361,7 @@ fn layout_positioned_child(
         PositionScheme::Absolute => parent_box.content,
         PositionScheme::Static => containing_block,
         PositionScheme::Relative => containing_block,
+        PositionScheme::Sticky => containing_block,
     };
 
     // `inset-inline-end` is the right edge in LTR and the left edge in RTL.

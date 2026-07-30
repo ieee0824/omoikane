@@ -441,6 +441,12 @@ struct PendingJavaScriptDialog {
     suspension: NativeCallSuspension,
 }
 
+struct AdjustedLayoutCache {
+    layout_generation: u64,
+    scroll_generation: u64,
+    root: LayoutBox,
+}
+
 impl TimerPayload {
     fn kind(&self) -> &'static str {
         match self {
@@ -502,8 +508,11 @@ struct HostState {
     /// participate in layout (layout metrics for sub-document nodes report
     /// zero); only computed styles are document-scoped here.
     layout_root: Option<LayoutBox>,
-    #[cfg(test)]
     layout_generation: u64,
+    scroll_generation: u64,
+    adjusted_layout_cache: Option<AdjustedLayoutCache>,
+    #[cfg(test)]
+    adjusted_layout_builds: u64,
     #[cfg(test)]
     style_resolver_generation: u64,
     /// Insertion reference for `document.write`.
@@ -674,8 +683,11 @@ impl HostState {
             scroll_offsets_before_layout: HashMap::new(),
             document_styles,
             layout_root: None,
-            #[cfg(test)]
             layout_generation: 0,
+            scroll_generation: 0,
+            adjusted_layout_cache: None,
+            #[cfg(test)]
+            adjusted_layout_builds: 0,
             #[cfg(test)]
             style_resolver_generation: 0,
             write_insertion_ref: None,
@@ -1177,10 +1189,9 @@ impl HostState {
             .get_mut(&document_id)
             .and_then(|entry| entry.resolver.as_mut())
             .and_then(|resolver| crate::layout::layout_tree(&document, resolver, viewport));
-        #[cfg(test)]
-        if layout.is_some() {
-            self.layout_generation = self.layout_generation.saturating_add(1);
-        }
+        // This is a generation of rebuild attempts, not only successful trees:
+        // a failed rebuild must not leave an older adjusted tree reusable.
+        self.layout_generation = self.layout_generation.saturating_add(1);
         self.layout_root = layout;
         let mut clamped_targets = Vec::new();
         if let Some(layout_root) = self.layout_root.as_ref() {
@@ -1197,12 +1208,48 @@ impl HostState {
                 let next = layout.scroll_offset();
                 if previous != next {
                     node.set_scroll_offset(next.0, next.1);
+                    self.scroll_generation = self.scroll_generation.saturating_add(1);
                     clamped_targets.push(node_id);
                 }
             }
         }
         for node_id in clamped_targets {
             self.queue_scroll_target(node_id);
+        }
+    }
+
+    /// Builds the paint-time geometry once per layout/scroll state and reuses
+    /// it across CSSOM geometry queries and hit tests.
+    fn ensure_adjusted_layout(&mut self) {
+        self.ensure_layout();
+        let current = (self.layout_generation, self.scroll_generation);
+        if self.adjusted_layout_cache.as_ref().is_some_and(|cache| {
+            (cache.layout_generation, cache.scroll_generation) == current
+        }) {
+            return;
+        }
+        let Some(mut root) = self.layout_root.clone() else {
+            self.adjusted_layout_cache = None;
+            return;
+        };
+        let document_id = self.document.identity();
+        let Some(resolver) = self
+            .document_styles
+            .get_mut(&document_id)
+            .and_then(|entry| entry.resolver.as_mut())
+        else {
+            self.adjusted_layout_cache = None;
+            return;
+        };
+        crate::paint::apply_scroll_offsets(&mut root, resolver, self.viewport, self.window_scroll);
+        self.adjusted_layout_cache = Some(AdjustedLayoutCache {
+            layout_generation: current.0,
+            scroll_generation: current.1,
+            root,
+        });
+        #[cfg(test)]
+        {
+            self.adjusted_layout_builds = self.adjusted_layout_builds.saturating_add(1);
         }
     }
 
@@ -1227,6 +1274,7 @@ impl HostState {
             return false;
         }
         self.window_scroll = next;
+        self.scroll_generation = self.scroll_generation.saturating_add(1);
         let document_id = self.document.identity();
         self.queue_scroll_target(document_id);
         true
@@ -1271,6 +1319,7 @@ impl HostState {
         node.set_scroll_offset(next.0, next.1);
         let changed = previous != next;
         if changed {
+            self.scroll_generation = self.scroll_generation.saturating_add(1);
             self.queue_scroll_target(node.identity());
         }
         changed
@@ -1478,24 +1527,22 @@ impl JsRuntime {
     }
 
     /// Returns the topmost event-target element at viewport coordinates.
-    /// Layout is cached across calls and cloned only so current scroll offsets
-    /// can be applied without changing CSSOM's document-coordinate geometry.
+    /// The adjusted layout is shared with CSSOM geometry queries and rebuilt
+    /// only when layout or scroll state changes.
     pub(crate) fn hit_test(&mut self, x: f32, y: f32) -> Option<NodeHandle> {
         if !x.is_finite() || !y.is_finite() {
             return None;
         }
         let mut state = self.host_state.borrow_mut();
-        state.ensure_layout();
-        let mut layout = state.layout_root.clone()?;
+        state.ensure_adjusted_layout();
         let viewport = state.viewport;
-        let scroll = state.window_scroll;
         let document_id = state.document.identity();
-        let resolver = state
-            .document_styles
+        let state = &mut *state;
+        let layout = &state.adjusted_layout_cache.as_ref()?.root;
+        let resolver = state.document_styles
             .get_mut(&document_id)
             .and_then(|entry| entry.resolver.as_mut())?;
-        crate::paint::apply_scroll_offsets(&mut layout, resolver, scroll);
-        crate::paint::hit_test_layout(&layout, resolver, viewport, x, y)
+        crate::paint::hit_test_layout(layout, resolver, viewport, x, y)
     }
 
     /// Sets the User-Agent exposed to scripts in this runtime.
@@ -3793,64 +3840,6 @@ fn find_layout_box_with_transform<'a>(
     None
 }
 
-/// Finds `node`'s layout box together with the transform and the scroll offset
-/// that apply to it, for turning layout coordinates into client coordinates.
-///
-/// `scroll` starts as the Window scroll offset and grows through in-flow
-/// ancestors. Absolutely positioned boxes instead use `positioned_scroll`, the
-/// chain affecting their nearest positioned containing block. A `position:
-/// fixed` box drops the accumulated offset because it is anchored to the
-/// viewport; a scroll container inside it still scrolls its own content. This
-/// mirrors what [`crate::paint::apply_scroll_offsets`] does when painting.
-fn find_layout_box_with_scroll<'a>(
-    root: &'a LayoutBox,
-    node: &NodeHandle,
-    resolver: &mut StyleResolver,
-    ancestor_transform: AffineTransform,
-    scroll: (f32, f32),
-    positioned_scroll: (f32, f32),
-    fragments: &mut Vec<InlineFragmentGeometry>,
-) -> Option<(&'a LayoutBox, AffineTransform, (f32, f32))> {
-    let transform = ancestor_transform.multiply(root.transform);
-    let style = resolver.computed_style(&root.node);
-    let scroll = if is_absolute_position_style(&style) {
-        positioned_scroll
-    } else {
-        scroll
-    };
-    let scroll = if is_fixed_position_style(&style) {
-        (0.0, 0.0)
-    } else {
-        scroll
-    };
-    if &root.node == node {
-        return Some((root, transform, scroll));
-    }
-    let (offset_x, offset_y) = root.scroll_offset();
-    let child_scroll = (scroll.0 + offset_x, scroll.1 + offset_y);
-    let positioned_scroll = if establishes_positioned_containing_block_style(&style) {
-        child_scroll
-    } else {
-        positioned_scroll
-    };
-    collect_matching_image_fragments(root, node, transform, child_scroll, fragments);
-    for child in &root.children {
-        if let Some(found) = find_layout_box_with_scroll(
-            child,
-            node,
-            resolver,
-            transform,
-            child_scroll,
-            positioned_scroll,
-            fragments,
-        )
-        {
-            return Some(found);
-        }
-    }
-    None
-}
-
 struct InlineFragmentGeometry {
     rect: Rect,
     style: ComputedStyle,
@@ -3879,30 +3868,6 @@ fn collect_matching_image_fragments(
             }
         }
     }
-}
-
-fn is_fixed_position_style(style: &ComputedStyle) -> bool {
-    matches!(
-        style.get("position"),
-        Some(ComputedValue::Keyword(keyword)) if keyword.eq_ignore_ascii_case("fixed")
-    )
-}
-
-fn is_absolute_position_style(style: &ComputedStyle) -> bool {
-    matches!(
-        style.get("position"),
-        Some(ComputedValue::Keyword(keyword)) if keyword.eq_ignore_ascii_case("absolute")
-    )
-}
-
-fn establishes_positioned_containing_block_style(style: &ComputedStyle) -> bool {
-    matches!(
-        style.get("position"),
-        Some(ComputedValue::Keyword(keyword))
-            if keyword.eq_ignore_ascii_case("relative")
-                || keyword.eq_ignore_ascii_case("absolute")
-                || keyword.eq_ignore_ascii_case("fixed")
-    )
 }
 
 /// The eight geometry values `getBoundingClientRect()` exposes plus the derived
@@ -4369,54 +4334,45 @@ fn layout_metrics_native(
         let is_main_document = document
             .as_ref()
             .is_some_and(|document| document.identity() == main_document_id);
-        // Client coordinates subtract the Window scroll and the offset of every
-        // scroll container above the element. Documents that never scrolled skip
-        // the walk that needs the style resolver.
-        let window_scroll = state.window_scroll;
-        let scroll_active = is_main_document
-            && (window_scroll != (0.0, 0.0) || crate::dom::any_element_scrolled());
+        // Client geometry comes from the same paint-time clone used by hit
+        // testing and rendering. Besides ordinary scroll offsets this applies
+        // `position: sticky` without changing document-coordinate layout.
+        if is_main_document {
+            state.ensure_adjusted_layout();
+        }
         let mut metrics = LayoutMetrics::zero();
-        let mut scroll = (0.0, 0.0);
         {
-            let state = &mut *state;
-            let mut resolver = state
-                .document_styles
-                .get_mut(&main_document_id)
-                .and_then(|entry| entry.resolver.as_mut());
             if let Some(root) = state.layout_root.as_ref() {
                 let mut fragments = Vec::new();
-                let found = match (scroll_active, resolver.as_deref_mut()) {
-                    (true, Some(resolver)) => find_layout_box_with_scroll(
-                        root,
-                        &node,
-                        resolver,
-                        AffineTransform::identity(),
-                        window_scroll,
-                        window_scroll,
-                        &mut fragments,
-                    ),
-                    _ => find_layout_box_with_transform(
-                        root,
-                        &node,
-                        AffineTransform::identity(),
-                        &mut fragments,
-                    )
-                    .map(|(layout, transform)| (layout, transform, (0.0, 0.0))),
-                };
-                if let Some((layout, transform, accumulated)) = found {
+                if let Some((layout, transform)) = find_layout_box_with_transform(
+                    root, &node, AffineTransform::identity(), &mut fragments,
+                ) {
                     metrics = compute_transformed_layout_metrics(layout, transform);
-                    scroll = accumulated;
                 } else {
                     metrics = compute_image_fragment_metrics(fragments);
                 }
-            }
-        }
-        if metrics.has_box {
-            metrics.x -= scroll.0;
-            metrics.y -= scroll.1;
-            for rect in &mut metrics.client_rects {
-                rect.x -= scroll.0;
-                rect.y -= scroll.1;
+
+                if is_main_document && let Some(painted_root) = state
+                    .adjusted_layout_cache
+                    .as_ref()
+                    .map(|cache| &cache.root)
+                {
+                    let mut painted_fragments = Vec::new();
+                    let painted = if let Some((layout, transform)) = find_layout_box_with_transform(
+                        &painted_root, &node, AffineTransform::identity(), &mut painted_fragments,
+                    ) {
+                        compute_transformed_layout_metrics(layout, transform)
+                    } else {
+                        compute_image_fragment_metrics(painted_fragments)
+                    };
+                    if painted.has_box {
+                        metrics.x = painted.x;
+                        metrics.y = painted.y;
+                        metrics.width = painted.width;
+                        metrics.height = painted.height;
+                        metrics.client_rects = painted.client_rects;
+                    }
+                }
             }
         }
         if is_root_element && let Some(viewport) = viewport {
@@ -23853,6 +23809,139 @@ b</textarea></form>"#);
                 "|0,0",
                 "|0,0,0",
             )
+        );
+    }
+
+    #[test]
+    fn sticky_client_rect_and_hit_test_share_window_scroll_geometry() {
+        let mut runtime = runtime_from_html(
+            r#"<html><head><style>
+                 * { margin: 0; padding: 0 }
+                 body { width: 80px; height: 300px }
+                 #before { height: 30px }
+                 #sticky { position: sticky; top: 5px; width: 20px; height: 10px }
+                 #after { height: 260px }
+               </style></head><body><div id="before"></div><div id="sticky"></div>
+                 <div id="after"></div></body></html>"#,
+        );
+        runtime.set_viewport(80.0, 60.0);
+        let result = eval_str(
+            &mut runtime,
+            r#"(() => {
+                const target = document.getElementById("sticky");
+                const before = target.getBoundingClientRect().top;
+                window.scrollTo(0, 40);
+                const rect = target.getBoundingClientRect();
+                return [getComputedStyle(target).position, before, rect.top,
+                        rect.bottom, target.offsetTop].join(",");
+            })()"#,
+        );
+        assert_eq!(result, "sticky,30,5,15,30");
+        let hit = runtime.hit_test(5.0, 6.0).expect("sticky box must be hit");
+        assert_eq!(hit.get_attribute("id").as_deref(), Some("sticky"));
+    }
+
+    #[test]
+    fn sticky_uses_nearest_nested_scrollport_and_combines_window_scroll() {
+        let mut runtime = runtime_from_html(
+            r#"<html><head><style>
+                 * { margin: 0; padding: 0 }
+                 body { width: 100px; height: 300px }
+                 #lead { height: 50px }
+                 #outer { width: 50px; height: 50px; overflow: hidden }
+                 #content { width: 150px; height: 150px }
+                 #before { width: 30px; height: 30px }
+                 #sticky { position: sticky; top: 4px; left: 3px; width: 10px; height: 10px }
+               </style></head><body><div id="lead"></div><div id="outer"><div id="content">
+                 <div id="before"></div><div id="sticky"></div></div></div></body></html>"#,
+        );
+        runtime.set_viewport(100.0, 80.0);
+        let result = eval_str(
+            &mut runtime,
+            r#"(() => {
+                const outer = document.getElementById("outer");
+                const sticky = document.getElementById("sticky");
+                outer.scrollTo(20, 40);
+                const first = sticky.getBoundingClientRect();
+                window.scrollTo(0, 30);
+                const second = sticky.getBoundingClientRect();
+                return [first.left, first.top, second.left, second.top,
+                        outer.getBoundingClientRect().top].join(",");
+            })()"#,
+        );
+        assert_eq!(result, "3,54,3,24,20");
+        let hit = runtime.hit_test(5.0, 25.0).expect("nested sticky box must be hit");
+        assert_eq!(hit.get_attribute("id").as_deref(), Some("sticky"));
+    }
+
+    #[test]
+    fn sticky_preserves_transformed_scrollport_clip_for_rects_and_hit_test() {
+        let mut runtime = runtime_from_html(
+            r#"<html><head><style>
+                 * { margin: 0; padding: 0 }
+                 #outer { width: 40px; height: 40px; overflow: hidden;
+                          transform: translate(10px, 6px) }
+                 #content { width: 40px; height: 100px }
+                 #before { height: 20px }
+                 #sticky { position: sticky; top: 2px; width: 10px; height: 10px }
+               </style></head><body><div id="outer"><div id="content">
+                 <div id="before"></div><div id="sticky"></div></div></div></body></html>"#,
+        );
+        runtime.set_viewport(80.0, 80.0);
+        assert_eq!(
+            eval_str(
+                &mut runtime,
+                r#"(() => {
+                    const outer = document.getElementById("outer");
+                    outer.scrollTop = 30;
+                    const rect = document.getElementById("sticky").getBoundingClientRect();
+                    return [rect.left, rect.top, rect.right, rect.bottom].join(",");
+                })()"#,
+            ),
+            "10,8,20,18"
+        );
+        let hit = runtime.hit_test(11.0, 9.0).expect("transformed sticky box must be hit");
+        assert_eq!(hit.get_attribute("id").as_deref(), Some("sticky"));
+        assert!(runtime.hit_test(11.0, 47.0).is_none(), "overflow clip must remain active");
+    }
+
+    #[test]
+    fn adjusted_layout_cache_reuses_geometry_and_invalidates_on_scroll_and_layout() {
+        let mut runtime = runtime_from_html(
+            r#"<html><head><style>
+                 * { margin: 0; padding: 0 }
+                 #outer { width: 40px; height: 40px; overflow: hidden }
+                 #content { width: 40px; height: 120px }
+                 #sticky { position: sticky; top: 2px; width: 10px; height: 10px }
+               </style></head><body><div id="outer"><div id="content">
+                 <div id="sticky"></div></div></div></body></html>"#,
+        );
+        runtime.set_viewport(80.0, 80.0);
+
+        assert_eq!(eval_num(&mut runtime, "document.getElementById('sticky').getBoundingClientRect().top"), 2.0);
+        assert_eq!(runtime.host_state.borrow().adjusted_layout_builds, 1);
+        assert_eq!(eval_num(&mut runtime, "document.getElementById('sticky').getBoundingClientRect().bottom"), 12.0);
+        let _ = runtime.hit_test(1.0, 3.0);
+        assert_eq!(
+            runtime.host_state.borrow().adjusted_layout_builds,
+            1,
+            "repeated geometry and hit testing must share the adjusted tree"
+        );
+
+        runtime.eval("document.getElementById('outer').scrollTop = 20").unwrap();
+        assert_eq!(eval_num(&mut runtime, "document.getElementById('sticky').getBoundingClientRect().top"), 2.0);
+        assert_eq!(
+            runtime.host_state.borrow().adjusted_layout_builds,
+            2,
+            "element scrolling must invalidate adjusted geometry"
+        );
+
+        runtime.eval("document.getElementById('sticky').style.top = '6px'").unwrap();
+        assert_eq!(eval_num(&mut runtime, "document.getElementById('sticky').getBoundingClientRect().top"), 6.0);
+        assert_eq!(
+            runtime.host_state.borrow().adjusted_layout_builds,
+            3,
+            "layout/style changes must invalidate adjusted geometry"
         );
     }
 

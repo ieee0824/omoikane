@@ -961,10 +961,26 @@ enum DeclarationValidation {
 /// Validates a resolved declaration value against the property's grammar.
 ///
 /// This is the single extension point for per-property value validation. Only
-/// `cursor` is validated today; other properties fall through unchanged. To add
-/// a property, match its name here and return [`DeclarationValidation::Valid`] /
+/// Properties with syntax or normalization requirements are validated here;
+/// properties without a dedicated branch fall through unchanged. To add a
+/// property, match its name and return [`DeclarationValidation::Valid`] /
 /// [`DeclarationValidation::Invalid`].
 fn validate_declaration(name: &str, value: &Value) -> DeclarationValidation {
+    if name.eq_ignore_ascii_case("position") {
+        return match value {
+            Value::Keyword(keyword) => {
+                let lower = keyword.to_ascii_lowercase();
+                if is_css_wide_keyword(&lower)
+                    || matches!(lower.as_str(), "static" | "relative" | "absolute" | "fixed" | "sticky")
+                {
+                    DeclarationValidation::Valid(ComputedValue::Keyword(lower))
+                } else {
+                    DeclarationValidation::Invalid
+                }
+            }
+            _ => DeclarationValidation::Invalid,
+        };
+    }
     if name.eq_ignore_ascii_case("cursor") {
         return match compute_cursor_value(value) {
             Some(computed) => DeclarationValidation::Valid(computed),
@@ -4545,6 +4561,9 @@ fn apply_initial_values(properties: &mut BTreeMap<String, ComputedValue>) {
         .entry("pointer-events".to_string())
         .or_insert_with(|| ComputedValue::Keyword("auto".to_string()));
     properties
+        .entry("position".to_string())
+        .or_insert_with(|| ComputedValue::Keyword("static".to_string()));
+    properties
         .entry("container-name".to_string())
         .or_insert_with(|| ComputedValue::Keyword("none".to_string()));
     properties
@@ -4590,6 +4609,7 @@ fn resolve_non_inherited_css_wide_keywords(properties: &mut BTreeMap<String, Com
         "container-type",
         "object-fit",
         "object-position",
+        "position",
         "transform",
         "transform-origin",
         "transition-property",

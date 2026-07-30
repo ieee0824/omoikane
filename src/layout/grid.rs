@@ -220,7 +220,7 @@ pub(super) fn layout_grid_container(
         }
     }
     sort_children_by_z_index(&mut children);
-    Some(LayoutBox { node: node.clone(), dimensions, visibility: visibility(&style), overflow: overflow(&style), z_index: z_index(&style), transform: AffineTransform::identity(), lines: Vec::new(), children, marker: None })
+    Some(LayoutBox { node: node.clone(), dimensions, visibility: visibility(&style), overflow: overflow(&style), z_index: z_index(&style), transform: AffineTransform::identity(), needs_scroll_translation: false, lines: Vec::new(), children, marker: None })
 }
 
 fn alignment(style: &ComputedStyle, property: &str, default: Alignment) -> Alignment {
