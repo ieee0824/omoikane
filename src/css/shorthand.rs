@@ -1701,19 +1701,7 @@ fn expand_flex_flow_shorthand(value: Value, important: bool) -> Vec<Declaration>
 }
 
 fn is_background_color_keyword(keyword: &str) -> bool {
-    matches!(
-        keyword,
-        "transparent"
-            | "black"
-            | "white"
-            | "red"
-            | "green"
-            | "blue"
-            | "gray"
-            | "grey"
-            | "navy"
-            | "yellow"
-    )
+    crate::paint::color::parse_color(keyword).is_some()
 }
 
 /// Expand `animation` shorthand into longhands.

@@ -5381,6 +5381,18 @@ fn layered_background_box_keywords_are_normalized_to_lowercase() {
 }
 
 #[test]
+fn background_shorthand_accepts_all_named_colors_case_insensitively() {
+    assert_eq!(
+        image_computed_style("background: PiNk").get("background-color"),
+        Some(&ComputedValue::Color("PiNk".to_string()))
+    );
+    assert_eq!(
+        image_computed_style("background: REBECCAPURPLE").get("background-color"),
+        Some(&ComputedValue::Color("REBECCAPURPLE".to_string()))
+    );
+}
+
+#[test]
 fn background_layer_computed_values_resolve_each_layers_relative_units() {
     let style = image_computed_style(
         "background-image: none, none; \
