@@ -5294,6 +5294,61 @@ fn invalid_conic_angle_syntax_drops_the_whole_declaration() {
     }
 }
 
+#[test]
+fn background_layer_computed_values_preserve_commas_and_repeat_to_image_count() {
+    let style = image_computed_style(
+        "background-image: linear-gradient(rgb(255, 0, 0), blue), url(a.png), none; \
+         background-repeat: no-repeat, repeat; \
+         background-position: 1px 2px, 50% 75%; \
+         background-size: 2px 3px; \
+         background-clip: content-box, padding-box;",
+    );
+    assert_eq!(
+        style.get("background-image"),
+        Some(&ComputedValue::Keyword(
+            "linear-gradient(rgb(255, 0, 0), blue), url(a.png), none".to_string()
+        ))
+    );
+    assert_eq!(
+        style.get("background-repeat"),
+        Some(&ComputedValue::Keyword(
+            "no-repeat, repeat, no-repeat".to_string()
+        ))
+    );
+    assert_eq!(
+        style.get("background-position-x"),
+        Some(&ComputedValue::Keyword("1px, 50%, 1px".to_string()))
+    );
+    assert_eq!(
+        style.get("background-position-y"),
+        Some(&ComputedValue::Keyword("2px, 75%, 2px".to_string()))
+    );
+    assert_eq!(
+        style.get("background-size"),
+        Some(&ComputedValue::Keyword(
+            "2px 3px, 2px 3px, 2px 3px".to_string()
+        ))
+    );
+    assert_eq!(
+        style.get("background-clip"),
+        Some(&ComputedValue::Keyword(
+            "content-box, padding-box, content-box".to_string()
+        ))
+    );
+}
+
+#[test]
+fn malformed_background_image_layer_drops_the_whole_declaration() {
+    let style = image_computed_style(
+        "background-image: url(valid.png); \
+         background-image: radial-gradient(circle at, red, blue), url(other.png);",
+    );
+    assert_eq!(
+        style.get("background-image"),
+        Some(&ComputedValue::Keyword("url(valid.png)".to_string()))
+    );
+}
+
 /// Both properties are exposed with their initial values even when nothing
 /// declares them, so getComputedStyle can serialize them (Firefox 152: `fill`
 /// and `50% 50%`).

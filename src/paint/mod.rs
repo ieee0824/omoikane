@@ -2482,8 +2482,15 @@ fn paint_box_internal_to(
     // box-shadow を背景より前（下）に描画する
     border::paint_box_shadow(canvas, style, border_box, inherited_clip);
 
+    let image_count = background_list(style, "background-image", "none").len();
+    let clip_values = background_list(style, "background-clip", "border-box");
+    let mut color_style = style.clone();
+    color_style.set_paint_keyword(
+        "background-clip",
+        clip_values[(image_count - 1) % clip_values.len()].clone(),
+    );
     let (background_clip_rect, background_radii) =
-        background_clip_geometry(layout, style, border_box, padding_box);
+        background_clip_geometry(layout, &color_style, border_box, padding_box);
     let background_clip = match inherited_clip {
         Some(inherited_clip) => intersect(background_clip_rect, inherited_clip),
         None => Some(background_clip_rect),
@@ -2509,16 +2516,16 @@ fn paint_box_internal_to(
                 );
             }
         }
-        paint_background_image_rounded(
-            canvas,
-            style,
-            border_box,
-            Some(background_clip),
-            viewport,
-            background_clip_rect,
-            background_radii,
-        );
     }
+    paint_background_images_for_box(
+        canvas,
+        style,
+        layout,
+        border_box,
+        padding_box,
+        inherited_clip,
+        viewport,
+    );
     if layout.overflow.clips_overflow() {
         let overflow_clip =
             overflow_clip_rect(layout.overflow, padding_box, inherited_clip, viewport);
@@ -4037,10 +4044,161 @@ fn paint_background_image(
     clip: Option<Rect>,
     viewport: Rect,
 ) {
-    let Some(background) = prepare_background_image(style) else {
-        return;
+    let images = background_list(style, "background-image", "none");
+    for index in (0..images.len()).rev() {
+        let mut layer_style = style.clone();
+        layer_style.set_paint_keyword("background-image", images[index].clone());
+        for (property, default) in [
+            ("background-position-x", "0%"),
+            ("background-position-y", "0%"),
+            ("background-size", "auto"),
+            ("background-repeat", "repeat"),
+            ("background-attachment", "scroll"),
+        ] {
+            let values = background_list(style, property, default);
+            layer_style.set_paint_keyword(property, values[index % values.len()].clone());
+        }
+        let Some(background) = prepare_background_image(&layer_style) else {
+            continue;
+        };
+        paint_prepared_background_image(
+            canvas,
+            &layer_style,
+            rect,
+            clip,
+            viewport,
+            &background,
+        );
+    }
+}
+
+fn paint_background_images_for_box(
+    canvas: &mut Canvas,
+    style: &ComputedStyle,
+    layout: &LayoutBox,
+    border_box: Rect,
+    padding_box: Rect,
+    inherited_clip: Option<Rect>,
+    viewport: Rect,
+) {
+    let images = background_list(style, "background-image", "none");
+    let origins = background_list(style, "background-origin", "padding-box");
+    let clips = background_list(style, "background-clip", "border-box");
+    for index in (0..images.len()).rev() {
+        let origin = background_box_rect(
+            &origins[index % origins.len()],
+            border_box,
+            padding_box,
+            layout.dimensions.content,
+        );
+        let mut layer_style = style.clone();
+        layer_style.set_paint_keyword("background-clip", clips[index % clips.len()].clone());
+        let (clip_rect, radii) =
+            background_clip_geometry(layout, &layer_style, border_box, padding_box);
+        let clip = match inherited_clip {
+            Some(inherited_clip) => intersect(clip_rect, inherited_clip),
+            None => Some(clip_rect),
+        };
+        let Some(clip) = clip else {
+            continue;
+        };
+        layer_style.set_paint_keyword("background-image", images[index].clone());
+        for (property, default) in [
+            ("background-position-x", "0%"),
+            ("background-position-y", "0%"),
+            ("background-size", "auto"),
+            ("background-repeat", "repeat"),
+            ("background-attachment", "scroll"),
+        ] {
+            let values = background_list(style, property, default);
+            layer_style.set_paint_keyword(property, values[index % values.len()].clone());
+        }
+        paint_background_image_rounded(
+            canvas,
+            &layer_style,
+            origin,
+            Some(clip),
+            viewport,
+            clip_rect,
+            radii,
+        );
+    }
+}
+
+fn background_box_rect(
+    keyword: &str,
+    border_box: Rect,
+    padding_box: Rect,
+    content_box: Rect,
+) -> Rect {
+    if keyword.eq_ignore_ascii_case("content-box") {
+        content_box
+    } else if keyword.eq_ignore_ascii_case("padding-box") {
+        padding_box
+    } else {
+        border_box
+    }
+}
+
+fn background_list(style: &ComputedStyle, property: &str, default: &str) -> Vec<String> {
+    let raw = match style.get(property) {
+        Some(ComputedValue::Keyword(value)) | Some(ComputedValue::String(value)) => value.as_str(),
+        Some(ComputedValue::Px(value)) => return vec![format!("{value}px")],
+        Some(ComputedValue::Percentage(value)) => return vec![format!("{value}%")],
+        Some(ComputedValue::Number(value)) => return vec![value.to_string()],
+        _ => return vec![default.to_string()],
     };
-    paint_prepared_background_image(canvas, style, rect, clip, viewport, &background);
+    let values = split_top_level_commas(raw)
+        .into_iter()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    if values.is_empty() {
+        vec![default.to_string()]
+    } else {
+        values
+    }
+}
+
+fn split_top_level_commas(value: &str) -> Vec<&str> {
+    let mut values = Vec::new();
+    let mut start = 0usize;
+    let mut depth = 0usize;
+    let mut quote = None;
+    let mut escaped = false;
+    for (index, ch) in value.char_indices() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        if ch == '\\' && quote.is_some() {
+            escaped = true;
+            continue;
+        }
+        if matches!(ch, '\'' | '"') {
+            if quote == Some(ch) {
+                quote = None;
+            } else if quote.is_none() {
+                quote = Some(ch);
+            }
+            continue;
+        }
+        if quote.is_some() {
+            continue;
+        }
+        match ch {
+            '(' => depth += 1,
+            ')' => depth = depth.saturating_sub(1),
+            ',' if depth == 0 => {
+                values.push(&value[start..index]);
+                start = index + ch.len_utf8();
+            }
+            _ => {}
+        }
+    }
+    values.push(&value[start..]);
+    values
 }
 
 fn paint_prepared_background_image(
@@ -4159,8 +4317,15 @@ fn paint_prepared_background_image(
                 ty += tile_h;
             }
         } else {
-            // Default: gradient fills the entire area
-            color::paint_gradient(canvas, &gradient, area, clip.or(Some(area)));
+            // The initial repeat extends an image from its positioning area
+            // throughout a larger clipping box (for example padding-box origin
+            // beneath a border-box clip).
+            let paint_area = if background_repeat(style) {
+                clip.unwrap_or(area)
+            } else {
+                area
+            };
+            color::paint_gradient(canvas, &gradient, paint_area, clip.or(Some(area)));
         }
         return;
     }

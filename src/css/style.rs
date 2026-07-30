@@ -56,6 +56,26 @@ impl ComputedStyle {
     pub fn properties(&self) -> &BTreeMap<String, ComputedValue> {
         &self.properties
     }
+
+    pub(crate) fn set_paint_keyword(&mut self, name: &str, value: String) {
+        let trimmed = value.trim();
+        let computed = if let Some(number) = trimmed.strip_suffix("px") {
+            number
+                .parse::<f32>()
+                .ok()
+                .map(ComputedValue::Px)
+                .unwrap_or_else(|| ComputedValue::Keyword(value.clone()))
+        } else if let Some(number) = trimmed.strip_suffix('%') {
+            number
+                .parse::<f32>()
+                .ok()
+                .map(ComputedValue::Percentage)
+                .unwrap_or_else(|| ComputedValue::Keyword(value.clone()))
+        } else {
+            ComputedValue::Keyword(value)
+        };
+        self.properties.insert(name.to_string(), computed);
+    }
 }
 
 /// A stylesheet together with its cascade origin.
@@ -704,6 +724,7 @@ impl StyleResolver {
         resolve_non_inherited_css_wide_keywords(&mut properties);
         apply_inheritance(&mut properties, parent_style);
         apply_initial_values(&mut properties);
+        normalize_background_layer_lists(&mut properties);
         properties.insert(
             "transition".to_string(),
             ComputedValue::Keyword(super::computed_transition_shorthand(&properties)),
@@ -966,6 +987,17 @@ enum DeclarationValidation {
 /// property, match its name and return [`DeclarationValidation::Valid`] /
 /// [`DeclarationValidation::Invalid`].
 fn validate_declaration(name: &str, value: &Value) -> DeclarationValidation {
+    if let Value::CommaList(values) = value {
+        if values.is_empty() {
+            return DeclarationValidation::Invalid;
+        }
+        for item in values {
+            if matches!(validate_declaration(name, item), DeclarationValidation::Invalid) {
+                return DeclarationValidation::Invalid;
+            }
+        }
+        return DeclarationValidation::Valid(ComputedValue::Keyword(render_value(value)));
+    }
     if name.eq_ignore_ascii_case("position") {
         return match value {
             Value::Keyword(keyword) => {
@@ -2886,6 +2918,7 @@ pub(super) fn is_supported_property(name: &str) -> bool {
             | "background-clip"
             | "background-color"
             | "background-image"
+            | "background-origin"
             | "background-position-x"
             | "background-position-y"
             | "background-repeat"
@@ -3291,6 +3324,7 @@ fn compute_value(value: &Value, property_name: &str, ctx: ResolutionContext) -> 
                 ComputedValue::Keyword(String::new())
             }
         }
+        Value::CommaList(_) => ComputedValue::Keyword(render_value(value)),
     }
 }
 
@@ -3749,6 +3783,11 @@ fn render_clip_path_value(value: &Value, ctx: ResolutionContext) -> String {
             .map(|value| render_clip_path_value(value, ctx))
             .collect::<Vec<_>>()
             .join(" "),
+        Value::CommaList(values) => values
+            .iter()
+            .map(render_value)
+            .collect::<Vec<_>>()
+            .join(", "),
         _ => render_value(value),
     }
 }
@@ -4583,6 +4622,9 @@ fn apply_initial_values(properties: &mut BTreeMap<String, ComputedValue>) {
         .entry("background-color".to_string())
         .or_insert_with(|| ComputedValue::Color("transparent".to_string()));
     properties
+        .entry("background-origin".to_string())
+        .or_insert_with(|| ComputedValue::Keyword("padding-box".to_string()));
+    properties
         .entry("color".to_string())
         .or_insert_with(|| ComputedValue::Color("black".to_string()));
     properties
@@ -4642,10 +4684,96 @@ fn apply_initial_values(properties: &mut BTreeMap<String, ComputedValue>) {
         .or_insert_with(|| ComputedValue::Keyword("0s".to_string()));
 }
 
+fn normalize_background_layer_lists(properties: &mut BTreeMap<String, ComputedValue>) {
+    let Some(image_value) = properties.get("background-image") else {
+        return;
+    };
+    let image_text = computed_value_css_text(image_value);
+    let image_count = split_css_top_level_commas(&image_text).len();
+    if image_count <= 1 {
+        return;
+    }
+    for (name, default) in [
+        ("background-position-x", "0%"),
+        ("background-position-y", "0%"),
+        ("background-size", "auto"),
+        ("background-repeat", "repeat"),
+        ("background-attachment", "scroll"),
+        ("background-origin", "padding-box"),
+        ("background-clip", "border-box"),
+    ] {
+        let raw = properties
+            .get(name)
+            .map(computed_value_css_text)
+            .unwrap_or_else(|| default.to_string());
+        let values = split_css_top_level_commas(&raw);
+        let normalized = (0..image_count)
+            .map(|index| values[index % values.len()].trim())
+            .collect::<Vec<_>>()
+            .join(", ");
+        properties.insert(name.to_string(), ComputedValue::Keyword(normalized));
+    }
+}
+
+fn computed_value_css_text(value: &ComputedValue) -> String {
+    match value {
+        ComputedValue::Keyword(value) | ComputedValue::String(value) | ComputedValue::Color(value) => {
+            value.clone()
+        }
+        ComputedValue::Px(value) => format!("{value}px"),
+        ComputedValue::Percentage(value) => format!("{value}%"),
+        ComputedValue::Number(value) => value.to_string(),
+        ComputedValue::CalcPxPercent(px, percentage) => {
+            format!("calc({px}px + {percentage}%)")
+        }
+    }
+}
+
+fn split_css_top_level_commas(value: &str) -> Vec<&str> {
+    let mut values = Vec::new();
+    let mut start = 0usize;
+    let mut depth = 0usize;
+    let mut quote = None;
+    let mut escaped = false;
+    for (index, ch) in value.char_indices() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        if ch == '\\' && quote.is_some() {
+            escaped = true;
+            continue;
+        }
+        if matches!(ch, '\'' | '"') {
+            if quote == Some(ch) {
+                quote = None;
+            } else if quote.is_none() {
+                quote = Some(ch);
+            }
+            continue;
+        }
+        if quote.is_some() {
+            continue;
+        }
+        match ch {
+            '(' => depth += 1,
+            ')' => depth = depth.saturating_sub(1),
+            ',' if depth == 0 => {
+                values.push(&value[start..index]);
+                start = index + 1;
+            }
+            _ => {}
+        }
+    }
+    values.push(&value[start..]);
+    values
+}
+
 fn resolve_non_inherited_css_wide_keywords(properties: &mut BTreeMap<String, ComputedValue>) {
     for name in [
         "aspect-ratio",
         "background-clip",
+        "background-origin",
         "container-name",
         "container-type",
         "object-fit",
@@ -5152,6 +5280,11 @@ fn render_value(value: &Value) -> String {
             .map(render_value)
             .collect::<Vec<_>>()
             .join(" "),
+        Value::CommaList(values) => values
+            .iter()
+            .map(render_value)
+            .collect::<Vec<_>>()
+            .join(", "),
         Value::String(value) => value.clone(),
         Value::Number(value) => value.to_string(),
         Value::Percentage(value) => format!("{value}%"),

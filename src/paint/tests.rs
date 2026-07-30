@@ -7119,6 +7119,91 @@ fn render_gradient_box(background: &str, width: u32, height: u32) -> Canvas {
 }
 
 #[test]
+fn multiple_background_none_url_and_all_gradient_kinds_paint_front_layer_first() {
+    let canvas = render_gradient_box(
+        &format!(
+            "background-color: green; \
+             background-image: none, url(\"{}\"), linear-gradient(green, green), \
+                 radial-gradient(circle, yellow, yellow), conic-gradient(blue, blue); \
+             background-size: 1px 1px, 1px 1px, 1px 1px, 1px 1px, auto; \
+             background-position-x: 0px, 0px, 1px, 2px, 0%; \
+             background-position-y: 0px; \
+             background-repeat: no-repeat;",
+            red_pixel_data_uri()
+        ),
+        4,
+        4,
+    );
+    assert_eq!(canvas.pixel(0, 0), Some(Color::rgb(255, 0, 0)));
+    assert_eq!(canvas.pixel(1, 0), Some(Color::rgb(0, 128, 0)));
+    assert_eq!(canvas.pixel(2, 0), Some(Color::rgb(255, 255, 0)));
+    assert_eq!(canvas.pixel(3, 3), Some(Color::rgb(0, 0, 255)));
+}
+
+#[test]
+fn multiple_background_layers_apply_attachment_independently() {
+    let html = format!(
+        "<html><head><style>body {{ margin: 0; }} div {{ \
+         width: 4px; height: 2px; margin-left: 2px; \
+         background-image: url(\"{}\"), linear-gradient(blue, blue); \
+         background-size: 1px 1px; background-repeat: no-repeat; \
+         background-position-x: 3px, 0px; background-position-y: 0px; \
+         background-attachment: fixed, scroll; \
+         }}</style></head><body><div></div></body></html>",
+        red_pixel_data_uri()
+    );
+    let document = TreeBuilder::parse(&html).document();
+    let canvas = render_document(
+        &document,
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 8.0,
+            height: 2.0,
+        },
+    )
+    .unwrap();
+    assert_eq!(canvas.pixel(2, 0), Some(Color::rgb(0, 0, 255)));
+    assert_eq!(canvas.pixel(3, 0), Some(Color::rgb(255, 0, 0)));
+}
+
+#[test]
+fn three_gradient_layers_repeat_longhand_lists_and_keep_layer_geometry() {
+    let canvas = render_gradient_box(
+        "background-image: \
+             linear-gradient(red, red), \
+             radial-gradient(circle, green, green), \
+             conic-gradient(blue, blue); \
+         background-size: 1px 1px, 1px 1px, auto; \
+         background-position-x: 0px, 1px; \
+         background-position-y: 0px; \
+         background-repeat: no-repeat;",
+        4,
+        2,
+    );
+    assert_eq!(canvas.pixel(0, 0), Some(Color::rgb(255, 0, 0)));
+    assert_eq!(canvas.pixel(1, 0), Some(Color::rgb(0, 128, 0)));
+    assert_eq!(canvas.pixel(2, 0), Some(Color::rgb(0, 0, 255)));
+}
+
+#[test]
+fn background_layers_apply_independent_origin_clip_and_color_is_at_the_back() {
+    let canvas = render_gradient_box(
+        "box-sizing: border-box; border: 2px solid transparent; padding: 2px; \
+         background-color: yellow; \
+         background-image: linear-gradient(red, red), linear-gradient(blue, blue); \
+         background-origin: content-box, padding-box; \
+         background-clip: content-box, padding-box; \
+         background-repeat: no-repeat;",
+        12,
+        12,
+    );
+    assert_eq!(canvas.pixel(0, 6).unwrap().a, 0);
+    assert_eq!(canvas.pixel(2, 6), Some(Color::rgb(0, 0, 255)));
+    assert_eq!(canvas.pixel(4, 6), Some(Color::rgb(255, 0, 0)));
+}
+
+#[test]
 fn radial_gradient_circle_position_and_keyword_extent_are_painted() {
     let canvas = render_gradient_box(
         "background-image: radial-gradient(circle closest-side at 25% 50%, red 0%, blue 100%);",

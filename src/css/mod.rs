@@ -246,6 +246,9 @@ pub enum Value {
     Color(String),
     Function { name: String, arguments: Vec<Value> },
     List(Vec<Value>),
+    /// A top-level comma-separated list. Unlike `List`, separators are
+    /// semantically significant (for example, between background layers).
+    CommaList(Vec<Value>),
     String(String),
     Number(f32),
     Percentage(f32),
@@ -937,8 +940,72 @@ mod tests {
 
         assert!(rule.declarations.iter().any(|decl| decl.name == "background-image"),
             "linear-gradient() should expand to background-image; got: {:?}", rule.declarations);
-        assert!(!rule.declarations.iter().any(|decl| decl.name == "background-color"),
-            "linear-gradient() should NOT expand to background-color");
+        assert!(rule.declarations.iter().any(|decl| decl.name == "background-color"
+            && matches!(&decl.value, Value::Keyword(value) if value == "transparent")),
+            "background shorthand should reset background-color to transparent");
+    }
+
+    #[test]
+    fn preserves_background_layer_commas_without_splitting_function_arguments() {
+        let stylesheet = parse_stylesheet(
+            "div { background-image: linear-gradient(rgb(1, 2, 3), blue), url(a.png), none; }",
+        )
+        .unwrap();
+        let Rule::Style(rule) = &stylesheet.rules[0] else {
+            panic!("expected style rule");
+        };
+        let declaration = rule
+            .declarations
+            .iter()
+            .find(|declaration| declaration.name == "background-image")
+            .unwrap();
+        let Value::CommaList(layers) = &declaration.value else {
+            panic!("expected comma-separated layers: {:?}", declaration.value);
+        };
+        assert_eq!(layers.len(), 3);
+        assert!(matches!(&layers[0], Value::Function { name, .. } if name == "linear-gradient"));
+    }
+
+    #[test]
+    fn background_shorthand_expands_each_layer_and_rejects_non_final_color() {
+        let stylesheet = parse_stylesheet(
+            "div { background: linear-gradient(red, blue) left top / 2px 3px no-repeat content-box, url(a.png) center / 4px padding-box red; }",
+        )
+        .unwrap();
+        let Rule::Style(rule) = &stylesheet.rules[0] else {
+            panic!("expected style rule");
+        };
+        for name in [
+            "background-image",
+            "background-position-x",
+            "background-position-y",
+            "background-size",
+            "background-repeat",
+            "background-attachment",
+            "background-origin",
+            "background-clip",
+        ] {
+            assert!(rule.declarations.iter().any(|declaration| {
+                declaration.name == name
+                    && matches!(&declaration.value, Value::CommaList(layers) if layers.len() == 2)
+            }), "missing layered {name}: {:?}", rule.declarations);
+        }
+        assert!(rule.declarations.iter().any(|declaration| {
+            declaration.name == "background-color"
+                && matches!(&declaration.value, Value::Keyword(value) if value == "red")
+        }));
+
+        let invalid = parse_stylesheet(
+            "div { background: red, linear-gradient(blue, green); color: black; }",
+        )
+        .unwrap();
+        let Rule::Style(rule) = &invalid.rules[0] else {
+            panic!("expected style rule");
+        };
+        assert!(!rule.declarations.iter().any(|declaration| {
+            declaration.name.starts_with("background-")
+        }));
+        assert!(rule.declarations.iter().any(|declaration| declaration.name == "color"));
     }
 
     #[test]
