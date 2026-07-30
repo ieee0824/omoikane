@@ -6715,7 +6715,7 @@
   globalThis.alert = function alert(message) {
     return __omoikane_open_javascript_dialog(
       "alert",
-      message === undefined ? "" : String(message),
+      arguments.length === 0 ? "" : String(message),
       "",
     );
   };

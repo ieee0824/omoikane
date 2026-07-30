@@ -7440,6 +7440,49 @@ mod tests {
     }
 
     #[test]
+    fn dialog_arguments_follow_alert_overload_and_web_idl_defaults() {
+        let mut runtime = JsRuntime::new().unwrap();
+        let controller = runtime.javascript_dialog_controller();
+        let mut evaluation = Box::pin(runtime.eval_async(
+            "alert(); alert(undefined); confirm(undefined); prompt(undefined, undefined); 'done'",
+        ));
+        let waker: &'static Waker = Waker::noop();
+        let mut cx = FutureContext::from_waker(waker);
+
+        let alert_omitted = poll_until_dialog(evaluation.as_mut(), &controller, &mut cx);
+        assert_eq!(alert_omitted.message, "");
+        controller.handle(alert_omitted.id, true, None).unwrap();
+
+        let alert_undefined = poll_until_dialog(evaluation.as_mut(), &controller, &mut cx);
+        assert_eq!(alert_undefined.message, "undefined");
+        controller.handle(alert_undefined.id, true, None).unwrap();
+
+        let confirm_undefined = poll_until_dialog(evaluation.as_mut(), &controller, &mut cx);
+        assert_eq!(confirm_undefined.kind, JavaScriptDialogKind::Confirm);
+        assert_eq!(confirm_undefined.message, "");
+        controller
+            .handle(confirm_undefined.id, true, None)
+            .unwrap();
+
+        let prompt_undefined = poll_until_dialog(evaluation.as_mut(), &controller, &mut cx);
+        assert_eq!(prompt_undefined.kind, JavaScriptDialogKind::Prompt);
+        assert_eq!(prompt_undefined.message, "");
+        assert_eq!(prompt_undefined.default_prompt.as_deref(), Some(""));
+        controller
+            .handle(prompt_undefined.id, true, None)
+            .unwrap();
+
+        assert_eq!(
+            poll_until_ready(evaluation.as_mut(), &mut cx)
+                .unwrap()
+                .as_string()
+                .unwrap()
+                .to_std_string_escaped(),
+            "done"
+        );
+    }
+
+    #[test]
     fn async_eval_suspends_and_resumes_a_native_host_call() {
         let mut runtime = JsRuntime::new().unwrap();
         let slot = Gc::new(GcRefCell::new(None::<NativeCallSuspension>));
