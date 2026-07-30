@@ -23367,7 +23367,7 @@ b</textarea></form>"#);
     #[test]
     fn dialog_show_modal_close_moves_and_restores_focus() {
         let mut runtime = runtime_from_html(
-            r#"<html><body><button id="before">before</button><dialog id="dialog"><button id="inside" autofocus>inside</button></dialog></body></html>"#,
+            r#"<html><body><button id="before">before</button><dialog id="dialog"><button id="inside" tabindex="-1" autofocus>inside</button></dialog></body></html>"#,
         );
         let result = eval_str(
             &mut runtime,
@@ -23443,16 +23443,20 @@ b</textarea></form>"#);
                 const dialog = document.createElement("dialog");
                 const before = document.createElement("button");
                 const outside = document.createElement("button");
+                const detachedNonModal = document.createElement("dialog");
                 outside.id = "outside";
                 document.body.appendChild(before);
                 document.body.appendChild(outside);
                 const out = [dialog.returnValue, dialog.open];
+                detachedNonModal.show();
+                out.push(detachedNonModal.open);
+                detachedNonModal.close();
                 try { dialog.showModal(); } catch (error) { out.push(error.name); }
                 document.body.appendChild(dialog);
                 before.focus();
                 dialog.show();
                 dialog.show();
-                out.push(dialog.open);
+                out.push(dialog.open, document.activeElement === dialog);
                 try { dialog.showModal(); } catch (error) { out.push(error.name); }
                 outside.focus();
                 dialog.close();
@@ -23463,7 +23467,7 @@ b</textarea></form>"#);
         );
         assert_eq!(
             result,
-            ":false:InvalidStateError:true:InvalidStateError:false:outside"
+            ":false:true:InvalidStateError:true:true:InvalidStateError:false:outside"
         );
     }
 

@@ -793,7 +793,8 @@
     if (!node.isConnected) return false;
     if (node.__isDisabledControl && node.__isDisabledControl()) return false;
     if (!isRenderedForFocus(node)) return false;
-    return hasIntegerTabindex(node) || isInherentlyFocusable(node) || isEditingHost(node);
+    return Boolean(node.__dialogFocusFallback) || hasIntegerTabindex(node) ||
+      isInherentlyFocusable(node) || isEditingHost(node);
   }
 
   // Returns the focusable areas participating in sequential focus navigation.
@@ -2444,11 +2445,26 @@
   }
 
   function focusDialog(dialog) {
-    const candidates = sequentialFocusCandidates(dialog.ownerDocument)
-      .filter(candidate => dialog.contains(candidate));
-    const target = candidates.find(candidate => candidate.hasAttribute("autofocus")) ||
-      candidates[0] || null;
-    if (target) target.focus();
+    let first = null;
+    let autofocus = null;
+    function visit(node) {
+      for (const child of node.childNodes || []) {
+        if (child instanceof Element && canBeFocused(child)) {
+          if (!first) first = child;
+          if (!autofocus && child.hasAttribute("autofocus")) autofocus = child;
+        }
+        visit(child);
+      }
+    }
+    visit(dialog);
+    const target = dialog.hasAttribute("autofocus") ? dialog : (autofocus || first || dialog);
+    if (target === dialog && !canBeFocused(dialog)) {
+      dialog.__dialogFocusFallback = true;
+      try { dialog.focus(); }
+      finally { dialog.__dialogFocusFallback = false; }
+    } else {
+      target.focus();
+    }
   }
 
   function performDialogEscapeDefault(doc) {
