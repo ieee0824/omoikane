@@ -3257,9 +3257,8 @@
       // parent and child ids from being confused.
       //
       // Tolerate an unbound call (`var g = document.getElementById; g('x')`)
-      // where `this` is not a Document and `this.__id` would be undefined (a
-      // NaN id that resolves to null): fall back to the top-level document so
-      // the lookup still resolves against the main tree.
+      // by falling back to the top-level document when `this` is not a
+      // Document instance.
       const scope = this instanceof Document ? this : globalThis.document;
       // Plain tree walk with an id equality check: getElementById needs no
       // selector parsing/matching and no full-document snapshot.
