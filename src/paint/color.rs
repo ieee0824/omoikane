@@ -623,9 +623,7 @@ fn parse_color_stop(value: &str, conic: bool) -> Option<Vec<GradientStop>> {
     }
     let parse_pos = |word: &str| -> Option<GradientLength> {
         if conic {
-            parse_angle(word)
-                .map(|v| GradientLength::Fraction(v / 360.0))
-                .or_else(|| parse_number_with_unit(word))
+            parse_conic_position(word)
         } else {
             parse_number_with_unit(word)
         }
@@ -664,9 +662,7 @@ fn parse_stops(parts: &[&str], conic: bool) -> Option<Vec<GradientStop>> {
             stops.extend(parsed);
         } else {
             let hint = if conic {
-                parse_angle(part)
-                    .map(|v| GradientLength::Fraction(v / 360.0))
-                    .or_else(|| parse_number_with_unit(part))
+                parse_conic_position(part)
             } else {
                 parse_number_with_unit(part)
             }?;
@@ -680,6 +676,20 @@ fn parse_stops(parts: &[&str], conic: bool) -> Option<Vec<GradientStop>> {
     } else {
         Some(stops)
     }
+}
+
+fn parse_conic_position(value: &str) -> Option<GradientLength> {
+    parse_angle(value)
+        .map(|degrees| GradientLength::Fraction(degrees / 360.0))
+        .or_else(|| {
+            value
+                .strip_suffix('%')?
+                .trim()
+                .parse::<f32>()
+                .ok()
+                .filter(|number| number.is_finite())
+                .map(|percentage| GradientLength::Fraction(percentage / 100.0))
+        })
 }
 
 pub(crate) fn parse_gradient(value: &str) -> Option<Gradient> {
@@ -1350,6 +1360,23 @@ mod gradient_tests {
             "conic-gradient(at right 10px left 20px, red, blue)",
         ] {
             assert!(parse_gradient(value).is_none(), "accepted {value}");
+        }
+    }
+
+    #[test]
+    fn conic_stops_and_hints_accept_only_angle_percentages() {
+        for value in [
+            "conic-gradient(red 10px, blue)",
+            "conic-gradient(red, 10px, blue)",
+        ] {
+            assert!(parse_gradient(value).is_none(), "accepted {value}");
+        }
+        for value in [
+            "conic-gradient(red 25%, blue 1turn)",
+            "conic-gradient(red, 90deg, blue)",
+            "conic-gradient(red, 25%, blue)",
+        ] {
+            assert!(parse_gradient(value).is_some(), "rejected {value}");
         }
     }
 

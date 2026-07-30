@@ -7217,6 +7217,45 @@ fn rounded_background_color_still_respects_content_box_clip() {
 }
 
 #[test]
+fn rounded_padding_and_content_background_clips_reduce_the_corner_radii() {
+    for (clip, corner, edge) in [
+        ("padding-box", (2, 2), (8, 2)),
+        ("content-box", (4, 4), (8, 4)),
+    ] {
+        let common = format!(
+            "box-sizing: border-box; border: 2px solid transparent; padding: 2px; \
+             border-radius: 8px; background-clip: {clip};"
+        );
+        let color = render_gradient_box(
+            &format!("{common} background-color: red;"),
+            20,
+            20,
+        );
+        let gradient = render_gradient_box(
+            &format!(
+                "{common} background-image: linear-gradient(red, red);"
+            ),
+            20,
+            20,
+        );
+
+        assert_eq!(color.pixel(corner.0, corner.1).unwrap().a, 0, "{clip}");
+        assert_eq!(gradient.pixel(corner.0, corner.1).unwrap().a, 0, "{clip}");
+        assert!(color.pixel(edge.0, edge.1).unwrap().a > 0, "{clip}");
+        assert!(gradient.pixel(edge.0, edge.1).unwrap().a > 0, "{clip}");
+        for y in 0..20 {
+            for x in 0..20 {
+                assert_eq!(
+                    color.pixel(x, y).unwrap().a,
+                    gradient.pixel(x, y).unwrap().a,
+                    "color and gradient rounded masks differ for {clip} at ({x}, {y})"
+                );
+            }
+        }
+    }
+}
+
+#[test]
 fn malformed_gradients_do_not_paint_or_panic() {
     for value in [
         "radial-gradient(circle at, red, blue)",

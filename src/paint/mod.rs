@@ -2474,25 +2474,18 @@ fn paint_box_internal_to(
     // box-shadow を背景より前（下）に描画する
     border::paint_box_shadow(canvas, style, border_box, inherited_clip);
 
-    let background_clip_rect = match style.get("background-clip") {
-        Some(ComputedValue::Keyword(value)) if value.eq_ignore_ascii_case("content-box") => {
-            layout.dimensions.content
-        }
-        Some(ComputedValue::Keyword(value)) if value.eq_ignore_ascii_case("padding-box") => {
-            padding_box
-        }
-        _ => border_box,
-    };
+    let (background_clip_rect, background_radii) =
+        background_clip_geometry(layout, style, border_box, padding_box);
     let background_clip = match inherited_clip {
         Some(inherited_clip) => intersect(background_clip_rect, inherited_clip),
         None => Some(background_clip_rect),
     };
     if let Some(background_clip) = background_clip {
         if let Some(background) = background_color(style) {
-            if has_border_radius(style) {
-                let (tl, tr, br, bl) = border_radius_corners(style);
+            if background_radii != (0.0, 0.0, 0.0, 0.0) {
+                let (tl, tr, br, bl) = background_radii;
                 canvas.fill_rounded_rect(
-                    border_box,
+                    background_clip_rect,
                     background,
                     tl,
                     tr,
@@ -2501,15 +2494,21 @@ fn paint_box_internal_to(
                     Some(background_clip),
                 );
             } else {
-                canvas.fill_rect_clipped(border_box, background, Some(background_clip));
+                canvas.fill_rect_clipped(
+                    background_clip_rect,
+                    background,
+                    Some(background_clip),
+                );
             }
         }
-        paint_background_image(
+        paint_background_image_rounded(
             canvas,
             style,
             border_box,
             Some(background_clip),
             viewport,
+            background_clip_rect,
+            background_radii,
         );
     }
     if layout.overflow.clips_overflow() {
@@ -2840,6 +2839,96 @@ fn padding_box_rect(layout: &LayoutBox) -> Rect {
 
 fn background_color(style: &ComputedStyle) -> Option<Color> {
     color_property(style.get("background-color"))
+}
+
+fn background_clip_geometry(
+    layout: &LayoutBox,
+    style: &ComputedStyle,
+    border_box: Rect,
+    padding_box: Rect,
+) -> (Rect, (f32, f32, f32, f32)) {
+    let radii = border_radius_corners(style);
+    let border = layout.dimensions.border;
+    let padding = layout.dimensions.padding;
+    let (rect, top, right, bottom, left) = match style.get("background-clip") {
+        Some(ComputedValue::Keyword(value)) if value.eq_ignore_ascii_case("content-box") => (
+            layout.dimensions.content,
+            border.top + padding.top,
+            border.right + padding.right,
+            border.bottom + padding.bottom,
+            border.left + padding.left,
+        ),
+        Some(ComputedValue::Keyword(value)) if value.eq_ignore_ascii_case("padding-box") => (
+            padding_box,
+            border.top,
+            border.right,
+            border.bottom,
+            border.left,
+        ),
+        _ => return (border_box, radii),
+    };
+    let (tl, tr, br, bl) = radii;
+    (
+        rect,
+        (
+            (tl - top.max(left)).max(0.0),
+            (tr - top.max(right)).max(0.0),
+            (br - bottom.max(right)).max(0.0),
+            (bl - bottom.max(left)).max(0.0),
+        ),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn paint_background_image_rounded(
+    canvas: &mut Canvas,
+    style: &ComputedStyle,
+    rect: Rect,
+    clip: Option<Rect>,
+    viewport: Rect,
+    rounded_rect: Rect,
+    radii: (f32, f32, f32, f32),
+) {
+    if radii == (0.0, 0.0, 0.0, 0.0) {
+        paint_background_image(canvas, style, rect, clip, viewport);
+        return;
+    }
+    let mut layer = Canvas::new(canvas.width, canvas.height);
+    paint_background_image(&mut layer, style, rect, clip, viewport);
+    let Some(area) = normalize_rect(rounded_rect) else {
+        return;
+    };
+    let (tl, tr, br, bl) = radii;
+    let x0 = area.x.floor().max(0.0) as u32;
+    let y0 = area.y.floor().max(0.0) as u32;
+    let x1 = (area.x + area.width).ceil().min(canvas.width as f32) as u32;
+    let y1 = (area.y + area.height).ceil().min(canvas.height as f32) as u32;
+    for y in y0..y1 {
+        for x in x0..x1 {
+            if !point_in_rounded_rect(
+                x as f32 + 0.5,
+                y as f32 + 0.5,
+                area.x,
+                area.y,
+                area.width,
+                area.height,
+                tl,
+                tr,
+                br,
+                bl,
+            ) {
+                continue;
+            }
+            let index = ((y * canvas.width + x) * 4) as usize;
+            let color = Color {
+                r: layer.pixels[index],
+                g: layer.pixels[index + 1],
+                b: layer.pixels[index + 2],
+                a: layer.pixels[index + 3],
+            };
+            blend_pixel(&mut canvas.pixels[index..index + 4], color);
+        }
+    }
 }
 
 fn background_image(style: &ComputedStyle) -> Option<Image> {
