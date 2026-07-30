@@ -8146,7 +8146,11 @@ mod tests {
         let mut frame = Box::pin(runtime.run_animation_frame_async(0));
         let waker: &'static std::task::Waker = std::task::Waker::noop();
         let mut context = FutureContext::from_waker(waker);
-        let error = poll_until_ready(frame.as_mut(), &mut context).unwrap_err();
+        let error = loop {
+            if let Poll::Ready(result) = frame.as_mut().poll(&mut context) {
+                break result.unwrap_err();
+            }
+        };
 
         assert!(error.to_string().contains("callback failure"));
     }
