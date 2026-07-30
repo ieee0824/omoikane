@@ -5640,6 +5640,28 @@ fn paint_border_radius_clips_background_corners() {
 }
 
 #[test]
+fn rounded_box_without_paintable_background_image_skips_surface_allocation() {
+    for background_image in [
+        None,
+        Some("none"),
+        Some("radial-gradient(circle at, red, blue)"),
+        Some("url(data:image/png;base64,broken)"),
+    ] {
+        take_background_image_surface_pixels();
+        let declaration = background_image
+            .map(|value| format!("background-image: {value};"))
+            .unwrap_or_default();
+        let css = format!(
+            "html, body {{ margin: 0; }} div {{ width: 20px; height: 20px; border-radius: 5px; {declaration} }}"
+        );
+
+        paint_clip_path_document(&css, "<div></div>", 64.0, 64.0);
+
+        assert_eq!(take_background_image_surface_pixels(), 0, "{background_image:?}");
+    }
+}
+
+#[test]
 fn uniform_pill_border_paints_rounded_corner_arc() {
     let canvas = paint_clip_path_document(
         ".target { width: 40px; height: 20px; border: 1px solid red; \
