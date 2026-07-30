@@ -2164,6 +2164,10 @@ impl JsRuntime {
             let task = { self.host_state.borrow_mut().event_loop.pop_task() };
             let Some((_, task)) = task else { break };
             match task {
+                Task::Timer(TimerPayload::Source(source)) => {
+                    let result = self.eval_async(&source).await;
+                    self.record_error_from("timer", result);
+                }
                 Task::Timer(TimerPayload::Callback { callback, args }) => {
                     if let Some(callable) = callback.as_callable() {
                         let result = {
@@ -8080,6 +8084,41 @@ mod tests {
         assert_eq!(completed.runtime.eval("asyncCallbackLog.join(',')").unwrap()
             .as_string().unwrap().to_std_string_escaped(),
             "event-before,event-after,event-second,returned:false,throw:listener failure:true,timer-before,timer-after,frame-before,frame-after");
+    }
+
+    #[test]
+    fn owned_page_task_resumes_string_timer_dialogs() {
+        let runtime = JsRuntime::new().unwrap();
+        let mut task = Box::pin(runtime.into_page_task(21, vec![PageTaskSource::Classic {
+            source: r#"globalThis.stringTimerState = 'scheduled'; setTimeout("stringTimerState = 'before'; alert('string timer'); stringTimerState = 'after'", 0)"#.to_string(),
+            label: "string timer".to_string(),
+            script_node_id: None,
+        }]));
+        let controller = task.dialog_controller();
+        let waker: &'static std::task::Waker = std::task::Waker::noop();
+        let mut context = FutureContext::from_waker(waker);
+        while controller.pending().is_none() {
+            assert!(matches!(task.as_mut().poll(&mut context), Poll::Pending));
+        }
+        let dialog = controller.pending().unwrap();
+        assert_eq!(dialog.message, "string timer");
+        controller.handle(dialog.id, true, None).unwrap();
+        let mut completed = loop {
+            if let Poll::Ready(completed) = task.as_mut().poll(&mut context) {
+                break completed;
+            }
+        };
+        assert_eq!(completed.result, Ok(Vec::new()));
+        assert_eq!(
+            completed
+                .runtime
+                .eval("stringTimerState")
+                .unwrap()
+                .as_string()
+                .unwrap()
+                .to_std_string_escaped(),
+            "after"
+        );
     }
 
     #[test]
