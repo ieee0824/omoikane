@@ -1536,17 +1536,23 @@ struct StylesheetRuleIndex {
 impl StylesheetRuleIndex {
     fn build(stylesheet: &Stylesheet) -> Self {
         let mut index = Self::default();
-        index.has_part_selector = rules_contain_part_selector(&stylesheet.rules);
         let mut offset = 0;
         for (rule_index, rule) in stylesheet.rules.iter().enumerate() {
             index.declaration_offsets.push(offset);
             offset += match rule {
-                Rule::Style(rule) => rule.declarations.len(),
-                Rule::At(rule) => rule
-                    .block
-                    .as_deref()
-                    .map(count_declarations)
-                    .unwrap_or(rule.declarations.len()),
+                Rule::Style(rule) => {
+                    index.has_part_selector |=
+                        rule.selectors.iter().any(selector_uses_part_pseudo);
+                    rule.declarations.len()
+                }
+                Rule::At(rule) => {
+                    if let Some(block) = rule.block.as_deref() {
+                        index.has_part_selector |= rules_contain_part_selector(block);
+                        count_declarations(block)
+                    } else {
+                        rule.declarations.len()
+                    }
+                }
                 Rule::FontFace(_) => 0,
             };
             let Rule::Style(style_rule) = rule else {
