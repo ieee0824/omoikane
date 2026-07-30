@@ -5357,6 +5357,19 @@ fn background_layer_lists_truncate_to_a_single_image() {
         style.get("background-origin"),
         Some(&ComputedValue::Keyword("content-box".to_string()))
     );
+
+    let style = image_computed_style(
+        "background-position-x: 3px, 4px; \
+         background-repeat: no-repeat, repeat;",
+    );
+    assert_eq!(
+        style.get("background-position-x"),
+        Some(&ComputedValue::Keyword("3px".to_string()))
+    );
+    assert_eq!(
+        style.get("background-repeat"),
+        Some(&ComputedValue::Keyword("no-repeat".to_string()))
+    );
 }
 
 #[test]
@@ -5571,7 +5584,7 @@ fn background_position_rejects_two_keywords_from_the_same_axis() {
 #[test]
 fn background_position_keyword_and_length_pairs_obey_axis_slots() {
     for declarations in [
-        "background-position: 10px top, left 20px;",
+        "background-image: none, none; background-position: 10px top, left 20px;",
         "background: none 10px top, none left 20px;",
     ] {
         let style = image_computed_style(declarations);

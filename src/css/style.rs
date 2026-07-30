@@ -4776,11 +4776,11 @@ fn apply_initial_values(properties: &mut BTreeMap<String, ComputedValue>) {
 }
 
 fn normalize_background_layer_lists(properties: &mut BTreeMap<String, ComputedValue>) {
-    let Some(image_value) = properties.get("background-image") else {
-        return;
-    };
-    let image_text = computed_value_css_text(image_value);
-    let image_count = split_css_top_level_commas(&image_text).len();
+    let image_count = properties
+        .get("background-image")
+        .map(computed_value_css_text)
+        .map(|value| split_css_top_level_commas(&value).len())
+        .unwrap_or(1);
     for (name, default) in [
         ("background-position-x", "0%"),
         ("background-position-y", "0%"),
