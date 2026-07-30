@@ -23,8 +23,54 @@ fn calc_background_positions_resolve_to_pixel_offsets_on_both_axes() {
         .unwrap(),
     );
     let style = resolver.computed_style(&node);
+    let positions_x = background_list(&style, "background-position-x", "0%");
+    let positions_y = background_list(&style, "background-position-y", "0%");
+    let layer_style = background_layer_style(
+        "none",
+        &positions_x[0],
+        &positions_y[0],
+        "auto",
+        "repeat",
+        "scroll",
+    );
 
-    assert_eq!(background_position(&style, 100.0, 80.0, 20.0, 20.0), (50.0, 20.0));
+    assert_eq!(
+        background_position(&layer_style, 100.0, 80.0, 20.0, 20.0),
+        (50.0, 20.0)
+    );
+}
+
+#[test]
+fn layered_calc_background_positions_preserve_pixel_offsets_on_both_axes() {
+    let node = NodeHandle::element("div");
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "div { background-image: none, none; \
+                   background-position-x: calc(10px + 50%), calc(3px + 25%); \
+                   background-position-y: calc(5px + 25%), calc(7px + 50%); }",
+        )
+        .unwrap(),
+    );
+    let style = resolver.computed_style(&node);
+    let positions_x = background_list(&style, "background-position-x", "0%");
+    let positions_y = background_list(&style, "background-position-y", "0%");
+
+    for (index, expected) in [(0, (50.0, 20.0)), (1, (23.0, 37.0))] {
+        let layer_style = background_layer_style(
+            "none",
+            &positions_x[index],
+            &positions_y[index],
+            "auto",
+            "repeat",
+            "scroll",
+        );
+        assert_eq!(
+            background_position(&layer_style, 100.0, 80.0, 20.0, 20.0),
+            expected
+        );
+    }
 }
 
 #[test]

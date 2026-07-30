@@ -4255,7 +4255,7 @@ fn background_layer_style(
         ("background-repeat", repeat),
         ("background-attachment", attachment),
     ] {
-        style.set_paint_keyword(property, value.to_string());
+        style.set_paint_value(property, value.to_string());
     }
     style
 }
@@ -4281,6 +4281,9 @@ fn background_list(style: &ComputedStyle, property: &str, default: &str) -> Vec<
         Some(ComputedValue::Px(value)) => return vec![format!("{value}px")],
         Some(ComputedValue::Percentage(value)) => return vec![format!("{value}%")],
         Some(ComputedValue::Number(value)) => return vec![value.to_string()],
+        Some(ComputedValue::CalcPxPercent(px, percentage)) => {
+            return vec![format!("calc({px}px + {percentage}%)")];
+        }
         _ => return vec![default.to_string()],
     };
     let values = crate::css::split_top_level_commas(raw)

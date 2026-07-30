@@ -57,7 +57,19 @@ impl ComputedStyle {
         &self.properties
     }
 
-    pub(crate) fn set_paint_keyword(&mut self, name: &str, value: String) {
+    pub(crate) fn set_paint_value(&mut self, name: &str, value: String) {
+        if name.starts_with("background-position-") {
+            let computed = super::parse_style_attribute(&format!("{name}: {value}"))
+                .into_iter()
+                .find(|declaration| declaration.name.eq_ignore_ascii_case(name))
+                .map(|declaration| {
+                    compute_value(&declaration.value, name, ResolutionContext::default())
+                });
+            if let Some(computed @ ComputedValue::CalcPxPercent(_, _)) = computed {
+                self.properties.insert(name.to_string(), computed);
+                return;
+            }
+        }
         let trimmed = value.trim();
         let computed = if let Some(number) = trimmed.strip_suffix("px") {
             number
