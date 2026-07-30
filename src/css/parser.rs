@@ -765,7 +765,9 @@ impl Parser {
         } else {
             value_tokens
         };
-        let value = if name == "transition" || name.starts_with("transition-") {
+        let value = if is_layered_background_property(&name) && has_top_level_comma(&value_tokens) {
+            parse_comma_separated_value(&value_tokens)?
+        } else if name == "transition" || name.starts_with("transition-") {
             // Transition lists need their top-level commas. The generic Value
             // parser intentionally discards commas, so retain the declaration
             // text for the dedicated transition grammar instead.
@@ -845,6 +847,65 @@ impl Parser {
         self.index += 1;
         Some(token)
     }
+}
+
+fn is_layered_background_property(name: &str) -> bool {
+    matches!(
+        name,
+        "background"
+            | "background-image"
+            | "background-position"
+            | "background-position-x"
+            | "background-position-y"
+            | "background-size"
+            | "background-repeat"
+            | "background-attachment"
+            | "background-origin"
+            | "background-clip"
+    )
+}
+
+fn has_top_level_comma(tokens: &[CssToken]) -> bool {
+    let mut depth = 0usize;
+    tokens.iter().any(|token| match token {
+        CssToken::ParenOpen | CssToken::BracketOpen => {
+            depth += 1;
+            false
+        }
+        CssToken::ParenClose | CssToken::BracketClose => {
+            depth = depth.saturating_sub(1);
+            false
+        }
+        CssToken::Comma => depth == 0,
+        _ => false,
+    })
+}
+
+fn parse_comma_separated_value(tokens: &[CssToken]) -> Result<Value, CssParseError> {
+    let mut layers = Vec::new();
+    let mut layer = Vec::new();
+    let mut depth = 0usize;
+    for token in tokens {
+        match token {
+            CssToken::ParenOpen | CssToken::BracketOpen => depth += 1,
+            CssToken::ParenClose | CssToken::BracketClose => depth = depth.saturating_sub(1),
+            CssToken::Comma if depth == 0 => {
+                if layer.iter().all(|token| matches!(token, CssToken::Whitespace)) {
+                    return Err(CssParseError::InvalidDeclaration);
+                }
+                layers.push(parse_value_tokens(&layer)?);
+                layer.clear();
+                continue;
+            }
+            _ => {}
+        }
+        layer.push(token.clone());
+    }
+    if layer.iter().all(|token| matches!(token, CssToken::Whitespace)) {
+        return Err(CssParseError::InvalidDeclaration);
+    }
+    layers.push(parse_value_tokens(&layer)?);
+    Ok(Value::CommaList(layers))
 }
 
 fn first_mask_layer(tokens: &[CssToken]) -> Vec<CssToken> {

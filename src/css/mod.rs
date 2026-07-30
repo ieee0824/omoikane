@@ -39,6 +39,46 @@ pub(crate) use transition::{
     computed_transition_longhand, computed_transition_shorthand, expand_transition_shorthand,
     normalize_transition_longhand, normalize_transition_shorthand,
 };
+
+pub(crate) fn split_top_level_commas(value: &str) -> Vec<&str> {
+    let mut values = Vec::new();
+    let mut start = 0usize;
+    let mut depth = 0usize;
+    let mut quote = None;
+    let mut escaped = false;
+    for (index, ch) in value.char_indices() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        if ch == '\\' && quote.is_some() {
+            escaped = true;
+            continue;
+        }
+        if matches!(ch, '\'' | '"') {
+            if quote == Some(ch) {
+                quote = None;
+            } else if quote.is_none() {
+                quote = Some(ch);
+            }
+            continue;
+        }
+        if quote.is_some() {
+            continue;
+        }
+        match ch {
+            '(' => depth += 1,
+            ')' => depth = depth.saturating_sub(1),
+            ',' if depth == 0 => {
+                values.push(&value[start..index]);
+                start = index + ch.len_utf8();
+            }
+            _ => {}
+        }
+    }
+    values.push(&value[start..]);
+    values
+}
 pub use transform::AffineTransform;
 pub(crate) use transform::{
     TransformReferenceBox, interpolate_transform_lists, parse_transform_list,
@@ -246,6 +286,9 @@ pub enum Value {
     Color(String),
     Function { name: String, arguments: Vec<Value> },
     List(Vec<Value>),
+    /// A top-level comma-separated list. Unlike `List`, separators are
+    /// semantically significant (for example, between background layers).
+    CommaList(Vec<Value>),
     String(String),
     Number(f32),
     Percentage(f32),
@@ -937,8 +980,120 @@ mod tests {
 
         assert!(rule.declarations.iter().any(|decl| decl.name == "background-image"),
             "linear-gradient() should expand to background-image; got: {:?}", rule.declarations);
-        assert!(!rule.declarations.iter().any(|decl| decl.name == "background-color"),
-            "linear-gradient() should NOT expand to background-color");
+        assert!(rule.declarations.iter().any(|decl| decl.name == "background-color"
+            && matches!(&decl.value, Value::Keyword(value) if value == "transparent")),
+            "background shorthand should reset background-color to transparent");
+    }
+
+    #[test]
+    fn preserves_background_layer_commas_without_splitting_function_arguments() {
+        let stylesheet = parse_stylesheet(
+            "div { background-image: linear-gradient(rgb(1, 2, 3), blue), url(a.png), none; }",
+        )
+        .unwrap();
+        let Rule::Style(rule) = &stylesheet.rules[0] else {
+            panic!("expected style rule");
+        };
+        let declaration = rule
+            .declarations
+            .iter()
+            .find(|declaration| declaration.name == "background-image")
+            .unwrap();
+        let Value::CommaList(layers) = &declaration.value else {
+            panic!("expected comma-separated layers: {:?}", declaration.value);
+        };
+        assert_eq!(layers.len(), 3);
+        assert!(matches!(&layers[0], Value::Function { name, .. } if name == "linear-gradient"));
+    }
+
+    #[test]
+    fn background_shorthand_expands_each_layer_and_rejects_non_final_color() {
+        let stylesheet = parse_stylesheet(
+            "div { background: linear-gradient(red, blue) left top / 2px 3px no-repeat content-box, url(a.png) center / 4px padding-box red; }",
+        )
+        .unwrap();
+        let Rule::Style(rule) = &stylesheet.rules[0] else {
+            panic!("expected style rule");
+        };
+        for name in [
+            "background-image",
+            "background-position-x",
+            "background-position-y",
+            "background-size",
+            "background-repeat",
+            "background-attachment",
+            "background-origin",
+            "background-clip",
+        ] {
+            assert!(rule.declarations.iter().any(|declaration| {
+                declaration.name == name
+                    && matches!(&declaration.value, Value::CommaList(layers) if layers.len() == 2)
+            }), "missing layered {name}: {:?}", rule.declarations);
+        }
+        assert!(rule.declarations.iter().any(|declaration| {
+            declaration.name == "background-color"
+                && matches!(&declaration.value, Value::Keyword(value) if value == "red")
+        }));
+
+        let invalid = parse_stylesheet(
+            "div { background: red, linear-gradient(blue, green); color: black; }",
+        )
+        .unwrap();
+        let Rule::Style(rule) = &invalid.rules[0] else {
+            panic!("expected style rule");
+        };
+        assert!(!rule.declarations.iter().any(|declaration| {
+            declaration.name.starts_with("background-")
+        }));
+        assert!(rule.declarations.iter().any(|declaration| declaration.name == "color"));
+    }
+
+    #[test]
+    fn background_shorthand_rejects_multiple_images_and_nonzero_unitless_positions() {
+        for declaration in [
+            "background: none linear-gradient(red, blue)",
+            "background: linear-gradient(red, blue) none",
+            "background: url(a.png) url(b.png)",
+            "background: linear-gradient(red, blue) 1 0",
+            "background-position: 1, 0",
+        ] {
+            let stylesheet = parse_stylesheet(&format!(
+                "div {{ background-color: red; {declaration}; color: black; }}"
+            ))
+            .unwrap();
+            let Rule::Style(rule) = &stylesheet.rules[0] else {
+                panic!("expected style rule");
+            };
+            assert!(
+                !rule.declarations.iter().any(|declaration| {
+                    matches!(
+                        declaration.name.as_str(),
+                        "background-image"
+                            | "background-position-x"
+                            | "background-position-y"
+                            | "background-size"
+                            | "background-repeat"
+                            | "background-attachment"
+                            | "background-origin"
+                            | "background-clip"
+                    )
+                }),
+                "accepted invalid declaration {declaration}: {:?}",
+                rule.declarations
+            );
+        }
+
+        let stylesheet = parse_stylesheet(
+            "div { background: linear-gradient(red, blue) +0 -0; background-position: 0 0.0; }",
+        )
+        .unwrap();
+        let Rule::Style(rule) = &stylesheet.rules[0] else {
+            panic!("expected style rule");
+        };
+        assert!(rule.declarations.iter().any(|declaration| {
+            declaration.name == "background-position-x"
+                && matches!(declaration.value, Value::Number(number) if number == 0.0)
+        }));
     }
 
     #[test]

@@ -5294,6 +5294,360 @@ fn invalid_conic_angle_syntax_drops_the_whole_declaration() {
     }
 }
 
+#[test]
+fn background_layer_computed_values_preserve_commas_and_repeat_to_image_count() {
+    let style = image_computed_style(
+        "background-image: linear-gradient(rgb(255, 0, 0), blue), url(a.png), none; \
+         background-repeat: no-repeat, repeat; \
+         background-position: 1px 2px, 50% 75%; \
+         background-size: 2px 3px; \
+         background-clip: content-box, padding-box;",
+    );
+    assert_eq!(
+        style.get("background-image"),
+        Some(&ComputedValue::Keyword(
+            "linear-gradient(rgb(255, 0, 0), blue), url(a.png), none".to_string()
+        ))
+    );
+    assert_eq!(
+        style.get("background-repeat"),
+        Some(&ComputedValue::Keyword(
+            "no-repeat, repeat, no-repeat".to_string()
+        ))
+    );
+    assert_eq!(
+        style.get("background-position-x"),
+        Some(&ComputedValue::Keyword("1px, 50%, 1px".to_string()))
+    );
+    assert_eq!(
+        style.get("background-position-y"),
+        Some(&ComputedValue::Keyword("2px, 75%, 2px".to_string()))
+    );
+    assert_eq!(
+        style.get("background-size"),
+        Some(&ComputedValue::Keyword(
+            "2px 3px, 2px 3px, 2px 3px".to_string()
+        ))
+    );
+    assert_eq!(
+        style.get("background-clip"),
+        Some(&ComputedValue::Keyword(
+            "content-box, padding-box, content-box".to_string()
+        ))
+    );
+}
+
+#[test]
+fn background_layer_lists_truncate_to_a_single_image() {
+    let style = image_computed_style(
+        "background-image: none; \
+         background-position-x: 1px, 2px; \
+         background-repeat: no-repeat, repeat; \
+         background-origin: content-box, border-box;",
+    );
+    assert_eq!(
+        style.get("background-position-x"),
+        Some(&ComputedValue::Keyword("1px".to_string()))
+    );
+    assert_eq!(
+        style.get("background-repeat"),
+        Some(&ComputedValue::Keyword("no-repeat".to_string()))
+    );
+    assert_eq!(
+        style.get("background-origin"),
+        Some(&ComputedValue::Keyword("content-box".to_string()))
+    );
+
+    let style = image_computed_style(
+        "background-position-x: 3px, 4px; \
+         background-repeat: no-repeat, repeat;",
+    );
+    assert_eq!(
+        style.get("background-position-x"),
+        Some(&ComputedValue::Keyword("3px".to_string()))
+    );
+    assert_eq!(
+        style.get("background-repeat"),
+        Some(&ComputedValue::Keyword("no-repeat".to_string()))
+    );
+}
+
+#[test]
+fn layered_background_box_keywords_are_normalized_to_lowercase() {
+    let style = image_computed_style(
+        "background-image: none, none; \
+         background-origin: CONTENT-BOX, Padding-Box; \
+         background-clip: PADDING-BOX, Border-Box;",
+    );
+    assert_eq!(
+        style.get("background-origin"),
+        Some(&ComputedValue::Keyword(
+            "content-box, padding-box".to_string()
+        ))
+    );
+    assert_eq!(
+        style.get("background-clip"),
+        Some(&ComputedValue::Keyword(
+            "padding-box, border-box".to_string()
+        ))
+    );
+}
+
+#[test]
+fn background_shorthand_accepts_all_named_colors_case_insensitively() {
+    assert_eq!(
+        image_computed_style("background: PiNk").get("background-color"),
+        Some(&ComputedValue::Color("PiNk".to_string()))
+    );
+    assert_eq!(
+        image_computed_style("background: REBECCAPURPLE").get("background-color"),
+        Some(&ComputedValue::Color("REBECCAPURPLE".to_string()))
+    );
+}
+
+#[test]
+fn background_layer_computed_values_resolve_each_layers_relative_units() {
+    let style = image_computed_style(
+        "background-image: none, none; \
+         background-position-x: 1em, calc(1em + 2px); \
+         background-size: 2em 3em, calc(1em + 4px) 50%;",
+    );
+    assert_eq!(
+        style.get("background-position-x"),
+        Some(&ComputedValue::Keyword("16px, 18px".to_string()))
+    );
+    assert_eq!(
+        style.get("background-size"),
+        Some(&ComputedValue::Keyword(
+            "32px 48px, 20px 50%".to_string()
+        ))
+    );
+}
+
+#[test]
+fn single_layer_two_axis_background_repeat_keeps_both_values() {
+    let style = image_computed_style(
+        "background-image: none; background-repeat: repeat no-repeat;",
+    );
+    assert_eq!(
+        style.get("background-repeat"),
+        Some(&ComputedValue::Keyword("repeat no-repeat".to_string()))
+    );
+}
+
+#[test]
+fn background_shorthand_size_accepts_computed_math_functions_per_layer() {
+    let style = image_computed_style(
+        "background: none 0 0 / calc(1em + 2px) auto, \
+         none 0 0 / clamp(1px, 2px, 3px) auto;",
+    );
+    assert_eq!(
+        style.get("background-size"),
+        Some(&ComputedValue::Keyword(
+            "18px auto, 2px auto".to_string()
+        ))
+    );
+}
+
+#[test]
+fn malformed_background_image_layer_drops_the_whole_declaration() {
+    let style = image_computed_style(
+        "background-image: url(valid.png); \
+         background-image: radial-gradient(circle at, red, blue), url(other.png);",
+    );
+    assert_eq!(
+        style.get("background-image"),
+        Some(&ComputedValue::Keyword("url(valid.png)".to_string()))
+    );
+}
+
+#[test]
+fn malformed_background_longhand_layer_drops_the_whole_declaration() {
+    let style = image_computed_style(
+        "background-image: url(valid.png); background-image: url(other.png), bogus; \
+         background-repeat: no-repeat; background-repeat: repeat-x, bogus; \
+         background-attachment: fixed; background-attachment: scroll, sideways; \
+         background-origin: content-box; background-origin: padding-box, margin-box; \
+         background-clip: padding-box; background-clip: border-box, margin-box;",
+    );
+    assert_eq!(
+        style.get("background-image"),
+        Some(&ComputedValue::Keyword("url(valid.png)".to_string()))
+    );
+    assert_eq!(
+        style.get("background-repeat"),
+        Some(&ComputedValue::Keyword("no-repeat".to_string()))
+    );
+    assert_eq!(
+        style.get("background-attachment"),
+        Some(&ComputedValue::Keyword("fixed".to_string()))
+    );
+    assert_eq!(
+        style.get("background-origin"),
+        Some(&ComputedValue::Keyword("content-box".to_string()))
+    );
+    assert_eq!(
+        style.get("background-clip"),
+        Some(&ComputedValue::Keyword("padding-box".to_string()))
+    );
+}
+
+#[test]
+fn single_axis_background_position_keywords_center_the_other_axis() {
+    let style = image_computed_style(
+        "background-image: none, none; background-position: top, left;",
+    );
+    assert_eq!(
+        style.get("background-position-x"),
+        Some(&ComputedValue::Keyword("center, left".to_string()))
+    );
+    assert_eq!(
+        style.get("background-position-y"),
+        Some(&ComputedValue::Keyword("top, center".to_string()))
+    );
+}
+
+#[test]
+fn background_position_keyword_pairs_normalize_axis_order() {
+    let positions = "left top, top left, right bottom, bottom right, \
+                     left center, center left, right center, center right, \
+                     top center, center top, bottom center, center bottom, center center";
+    let images = std::iter::repeat("none")
+        .take(13)
+        .collect::<Vec<_>>()
+        .join(", ");
+
+    for declarations in [
+        format!("background-image: {images}; background-position: {positions};"),
+        format!("background: {positions}; background-image: {images};"),
+    ] {
+        let style = image_computed_style(&declarations);
+        assert_eq!(
+            style.get("background-position-x"),
+            Some(&ComputedValue::Keyword(
+                "left, left, right, right, left, left, right, right, center, center, center, center, center".to_string()
+            )),
+            "{declarations}",
+        );
+        assert_eq!(
+            style.get("background-position-y"),
+            Some(&ComputedValue::Keyword(
+                "top, top, bottom, bottom, center, center, center, center, top, top, bottom, bottom, center".to_string()
+            )),
+            "{declarations}",
+        );
+    }
+}
+
+#[test]
+fn background_position_rejects_two_keywords_from_the_same_axis() {
+    for invalid in [
+        "left right",
+        "right left",
+        "left left",
+        "right right",
+        "top bottom",
+        "bottom top",
+        "top top",
+        "bottom bottom",
+    ] {
+        let style = image_computed_style(&format!(
+            "background-position: 3px 4px; background-position: {invalid};"
+        ));
+        assert_eq!(
+            style.get("background-position-x"),
+            Some(&ComputedValue::Px(3.0)),
+            "accepted background-position: {invalid}",
+        );
+        assert_eq!(
+            style.get("background-position-y"),
+            Some(&ComputedValue::Px(4.0)),
+            "accepted background-position: {invalid}",
+        );
+
+        let style = image_computed_style(&format!(
+            "background: none 3px 4px; background: none {invalid};"
+        ));
+        assert_eq!(
+            style.get("background-position-x"),
+            Some(&ComputedValue::Px(3.0)),
+            "accepted background layer position: {invalid}",
+        );
+        assert_eq!(
+            style.get("background-position-y"),
+            Some(&ComputedValue::Px(4.0)),
+            "accepted background layer position: {invalid}",
+        );
+    }
+}
+
+#[test]
+fn background_position_keyword_and_length_pairs_obey_axis_slots() {
+    for declarations in [
+        "background-image: none, none; background-position: 10px top, left 20px;",
+        "background: none 10px top, none left 20px;",
+    ] {
+        let style = image_computed_style(declarations);
+        assert_eq!(
+            style.get("background-position-x"),
+            Some(&ComputedValue::Keyword("10px, left".to_string())),
+            "{declarations}",
+        );
+        assert_eq!(
+            style.get("background-position-y"),
+            Some(&ComputedValue::Keyword("top, 20px".to_string())),
+            "{declarations}",
+        );
+    }
+
+    for invalid in ["top 10px", "10px left"] {
+        for declarations in [
+            format!("background-position: 3px 4px; background-position: {invalid};"),
+            format!("background: none 3px 4px; background: none {invalid};"),
+        ] {
+            let style = image_computed_style(&declarations);
+            assert_eq!(
+                style.get("background-position-x"),
+                Some(&ComputedValue::Px(3.0)),
+                "accepted {declarations}",
+            );
+            assert_eq!(
+                style.get("background-position-y"),
+                Some(&ComputedValue::Px(4.0)),
+                "accepted {declarations}",
+            );
+        }
+    }
+}
+
+#[test]
+fn background_size_slash_requires_a_preceding_position_and_rejects_later_positions() {
+    for invalid in [
+        "none / 2px 2px",
+        "none / 2px 2px left top",
+        "none left / 2px 2px top",
+    ] {
+        let style = image_computed_style(&format!(
+            "background: none 3px 4px / 5px 6px no-repeat; background: {invalid};"
+        ));
+        assert_eq!(
+            style.get("background-position-x"),
+            Some(&ComputedValue::Px(3.0)),
+            "accepted background: {invalid}",
+        );
+        assert_eq!(
+            style.get("background-position-y"),
+            Some(&ComputedValue::Px(4.0)),
+            "accepted background: {invalid}",
+        );
+        assert_eq!(
+            style.get("background-size"),
+            Some(&ComputedValue::Keyword("5px 6px".to_string())),
+            "accepted background: {invalid}",
+        );
+    }
+}
+
 /// Both properties are exposed with their initial values even when nothing
 /// declares them, so getComputedStyle can serialize them (Firefox 152: `fill`
 /// and `50% 50%`).

@@ -56,6 +56,44 @@ impl ComputedStyle {
     pub fn properties(&self) -> &BTreeMap<String, ComputedValue> {
         &self.properties
     }
+
+    pub(crate) fn set_paint_value(&mut self, name: &str, value: String) {
+        if name.starts_with("background-position-") {
+            let computed = super::parse_style_attribute(&format!("{name}: {value}"))
+                .into_iter()
+                .find(|declaration| declaration.name.eq_ignore_ascii_case(name))
+                .map(|declaration| {
+                    compute_value(&declaration.value, name, ResolutionContext::default())
+                });
+            if let Some(computed @ ComputedValue::CalcPxPercent(_, _)) = computed {
+                self.properties.insert(name.to_string(), computed);
+                return;
+            }
+        }
+        let trimmed = value.trim();
+        let computed = if let Some(number) = trimmed.strip_suffix("px") {
+            number
+                .parse::<f32>()
+                .ok()
+                .map(ComputedValue::Px)
+                .unwrap_or_else(|| ComputedValue::Keyword(value.clone()))
+        } else if let Some(number) = trimmed.strip_suffix('%') {
+            number
+                .parse::<f32>()
+                .ok()
+                .map(ComputedValue::Percentage)
+                .unwrap_or_else(|| ComputedValue::Keyword(value.clone()))
+        } else if trimmed
+            .parse::<f32>()
+            .ok()
+            .is_some_and(|number| number.is_finite() && number == 0.0)
+        {
+            ComputedValue::Px(0.0)
+        } else {
+            ComputedValue::Keyword(value)
+        };
+        self.properties.insert(name.to_string(), computed);
+    }
 }
 
 /// A stylesheet together with its cascade origin.
@@ -704,6 +742,7 @@ impl StyleResolver {
         resolve_non_inherited_css_wide_keywords(&mut properties);
         apply_inheritance(&mut properties, parent_style);
         apply_initial_values(&mut properties);
+        normalize_background_layer_lists(&mut properties);
         properties.insert(
             "transition".to_string(),
             ComputedValue::Keyword(super::computed_transition_shorthand(&properties)),
@@ -966,6 +1005,29 @@ enum DeclarationValidation {
 /// property, match its name and return [`DeclarationValidation::Valid`] /
 /// [`DeclarationValidation::Invalid`].
 fn validate_declaration(name: &str, value: &Value) -> DeclarationValidation {
+    if let Value::CommaList(values) = value {
+        if values.is_empty() {
+            return DeclarationValidation::Invalid;
+        }
+        let mut normalized = Vec::with_capacity(values.len());
+        let mut has_unvalidated = false;
+        for item in values {
+            match validate_declaration(name, item) {
+                DeclarationValidation::Valid(value) => {
+                    normalized.push(computed_value_css_text(&value));
+                }
+                DeclarationValidation::Invalid => return DeclarationValidation::Invalid,
+                DeclarationValidation::Unvalidated => has_unvalidated = true,
+            }
+        }
+        // Validation is per layer, but computation still needs the resolution
+        // context so relative units and calc() are normalized in every layer.
+        return if has_unvalidated {
+            DeclarationValidation::Unvalidated
+        } else {
+            DeclarationValidation::Valid(ComputedValue::Keyword(normalized.join(", ")))
+        };
+    }
     if name.eq_ignore_ascii_case("position") {
         return match value {
             Value::Keyword(keyword) => {
@@ -981,7 +1043,10 @@ fn validate_declaration(name: &str, value: &Value) -> DeclarationValidation {
             _ => DeclarationValidation::Invalid,
         };
     }
-    if name.eq_ignore_ascii_case("background-clip") {
+    if matches!(
+        name.to_ascii_lowercase().as_str(),
+        "background-origin" | "background-clip"
+    ) {
         return match value {
             Value::Keyword(keyword) => {
                 let lower = keyword.to_ascii_lowercase();
@@ -1016,6 +1081,52 @@ fn validate_declaration(name: &str, value: &Value) -> DeclarationValidation {
                 };
             }
         }
+        return match value {
+            Value::Keyword(keyword)
+                if is_css_wide_keyword(&keyword.to_ascii_lowercase())
+                    || keyword.eq_ignore_ascii_case("none")
+                    || keyword.to_ascii_lowercase().starts_with("url(") =>
+            {
+                DeclarationValidation::Unvalidated
+            }
+            _ => DeclarationValidation::Invalid,
+        };
+    }
+    if name.eq_ignore_ascii_case("background-repeat") {
+        let valid_axis = |value: &Value| {
+            matches!(value, Value::Keyword(keyword) if matches!(keyword.to_ascii_lowercase().as_str(), "repeat" | "no-repeat"))
+        };
+        return match value {
+            Value::Keyword(keyword)
+                if is_css_wide_keyword(&keyword.to_ascii_lowercase())
+                    || matches!(
+                        keyword.to_ascii_lowercase().as_str(),
+                        "repeat" | "no-repeat" | "repeat-x" | "repeat-y"
+                    ) =>
+            {
+                DeclarationValidation::Unvalidated
+            }
+            Value::List(values)
+                if (1..=2).contains(&values.len()) && values.iter().all(valid_axis) =>
+            {
+                DeclarationValidation::Unvalidated
+            }
+            _ => DeclarationValidation::Invalid,
+        };
+    }
+    if name.eq_ignore_ascii_case("background-attachment") {
+        return match value {
+            Value::Keyword(keyword)
+                if is_css_wide_keyword(&keyword.to_ascii_lowercase())
+                    || matches!(
+                        keyword.to_ascii_lowercase().as_str(),
+                        "scroll" | "fixed" | "local"
+                    ) =>
+            {
+                DeclarationValidation::Unvalidated
+            }
+            _ => DeclarationValidation::Invalid,
+        };
     }
     if name.eq_ignore_ascii_case("cursor") {
         return match compute_cursor_value(value) {
@@ -2886,6 +2997,7 @@ pub(super) fn is_supported_property(name: &str) -> bool {
             | "background-clip"
             | "background-color"
             | "background-image"
+            | "background-origin"
             | "background-position-x"
             | "background-position-y"
             | "background-repeat"
@@ -3277,6 +3389,7 @@ fn compute_value(value: &Value, property_name: &str, ctx: ResolutionContext) -> 
                 || property_name.eq_ignore_ascii_case("overflow")
                 || property_name.eq_ignore_ascii_case("box-shadow")
                 || property_name.eq_ignore_ascii_case("background-size")
+                || property_name.eq_ignore_ascii_case("background-repeat")
                 || property_name.eq_ignore_ascii_case("mask-size")
                 || property_name.eq_ignore_ascii_case("border-spacing")
             {
@@ -3291,7 +3404,31 @@ fn compute_value(value: &Value, property_name: &str, ctx: ResolutionContext) -> 
                 ComputedValue::Keyword(String::new())
             }
         }
+        Value::CommaList(values) if property_name.starts_with("background-") => {
+            let rendered = values
+                .iter()
+                .map(|value| compute_background_layer_value(value, property_name, ctx))
+                .collect::<Vec<_>>()
+                .join(", ");
+            ComputedValue::Keyword(rendered)
+        }
+        Value::CommaList(_) => ComputedValue::Keyword(render_value(value)),
     }
+}
+
+fn compute_background_layer_value(
+    value: &Value,
+    property_name: &str,
+    ctx: ResolutionContext,
+) -> String {
+    if let Value::List(values) = value {
+        return values
+            .iter()
+            .map(|value| computed_value_css_text(&compute_value(value, property_name, ctx)))
+            .collect::<Vec<_>>()
+            .join(" ");
+    }
+    computed_value_css_text(&compute_value(value, property_name, ctx))
 }
 
 fn clamp_sizing_computed_value(property_name: &str, value: ComputedValue) -> ComputedValue {
@@ -3749,6 +3886,11 @@ fn render_clip_path_value(value: &Value, ctx: ResolutionContext) -> String {
             .map(|value| render_clip_path_value(value, ctx))
             .collect::<Vec<_>>()
             .join(" "),
+        Value::CommaList(values) => values
+            .iter()
+            .map(render_value)
+            .collect::<Vec<_>>()
+            .join(", "),
         _ => render_value(value),
     }
 }
@@ -4583,6 +4725,9 @@ fn apply_initial_values(properties: &mut BTreeMap<String, ComputedValue>) {
         .entry("background-color".to_string())
         .or_insert_with(|| ComputedValue::Color("transparent".to_string()));
     properties
+        .entry("background-origin".to_string())
+        .or_insert_with(|| ComputedValue::Keyword("padding-box".to_string()));
+    properties
         .entry("color".to_string())
         .or_insert_with(|| ComputedValue::Color("black".to_string()));
     properties
@@ -4642,10 +4787,56 @@ fn apply_initial_values(properties: &mut BTreeMap<String, ComputedValue>) {
         .or_insert_with(|| ComputedValue::Keyword("0s".to_string()));
 }
 
+fn normalize_background_layer_lists(properties: &mut BTreeMap<String, ComputedValue>) {
+    let image_count = properties
+        .get("background-image")
+        .map(computed_value_css_text)
+        .map(|value| super::split_top_level_commas(&value).len())
+        .unwrap_or(1);
+    for (name, default) in [
+        ("background-position-x", "0%"),
+        ("background-position-y", "0%"),
+        ("background-size", "auto"),
+        ("background-repeat", "repeat"),
+        ("background-attachment", "scroll"),
+        ("background-origin", "padding-box"),
+        ("background-clip", "border-box"),
+    ] {
+        let raw = properties
+            .get(name)
+            .map(computed_value_css_text)
+            .unwrap_or_else(|| default.to_string());
+        let values = super::split_top_level_commas(&raw);
+        if image_count == 1 && values.len() == 1 {
+            continue;
+        }
+        let normalized = (0..image_count)
+            .map(|index| values[index % values.len()].trim())
+            .collect::<Vec<_>>()
+            .join(", ");
+        properties.insert(name.to_string(), ComputedValue::Keyword(normalized));
+    }
+}
+
+fn computed_value_css_text(value: &ComputedValue) -> String {
+    match value {
+        ComputedValue::Keyword(value) | ComputedValue::String(value) | ComputedValue::Color(value) => {
+            value.clone()
+        }
+        ComputedValue::Px(value) => format!("{value}px"),
+        ComputedValue::Percentage(value) => format!("{value}%"),
+        ComputedValue::Number(value) => value.to_string(),
+        ComputedValue::CalcPxPercent(px, percentage) => {
+            format!("calc({px}px + {percentage}%)")
+        }
+    }
+}
+
 fn resolve_non_inherited_css_wide_keywords(properties: &mut BTreeMap<String, ComputedValue>) {
     for name in [
         "aspect-ratio",
         "background-clip",
+        "background-origin",
         "container-name",
         "container-type",
         "object-fit",
@@ -5152,6 +5343,11 @@ fn render_value(value: &Value) -> String {
             .map(render_value)
             .collect::<Vec<_>>()
             .join(" "),
+        Value::CommaList(values) => values
+            .iter()
+            .map(render_value)
+            .collect::<Vec<_>>()
+            .join(", "),
         Value::String(value) => value.clone(),
         Value::Number(value) => value.to_string(),
         Value::Percentage(value) => format!("{value}%"),

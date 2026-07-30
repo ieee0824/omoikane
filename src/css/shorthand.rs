@@ -16,6 +16,7 @@ pub(super) fn expand_shorthand(name: &str, value: Value, important: bool) -> Vec
             expand_border_side_shorthand(name, value, important)
         }
         "background" => expand_background_shorthand(value, important),
+        "background-position" => expand_background_position_shorthand(value, important),
         "mask" | "-webkit-mask" => expand_mask_shorthand(value, important),
         "mask-position" | "-webkit-mask-position" => {
             expand_mask_position_shorthand(value, important)
@@ -48,6 +49,120 @@ pub(super) fn expand_shorthand(name: &str, value: Value, important: bool) -> Vec
             value,
             important,
         }],
+    }
+}
+
+fn expand_background_position_shorthand(value: Value, important: bool) -> Vec<Declaration> {
+    let original = value.clone();
+    let layers = match value {
+        Value::CommaList(layers) => layers,
+        single => vec![single],
+    };
+    let mut x_values = Vec::new();
+    let mut y_values = Vec::new();
+    for layer in layers {
+        let components = match layer {
+            Value::List(values) if (1..=2).contains(&values.len()) => values,
+            single @ (Value::Keyword(_)
+            | Value::Length(_, _)
+            | Value::Percentage(_)) => vec![single],
+            Value::Number(number) if number == 0.0 => vec![Value::Number(number)],
+            _ => {
+                return vec![Declaration {
+                    name: "background-position".to_string(),
+                    value: original,
+                    important,
+                }];
+            }
+        };
+        let Some((x, y)) = normalize_background_position(&components) else {
+            return vec![Declaration {
+                name: "background-position".to_string(),
+                value: original,
+                important,
+            }];
+        };
+        x_values.push(x);
+        y_values.push(y);
+    }
+    let layered = |values: Vec<Value>| {
+        if values.len() == 1 {
+            values.into_iter().next().expect("one background layer")
+        } else {
+            Value::CommaList(values)
+        }
+    };
+    vec![
+        Declaration {
+            name: "background-position-x".to_string(),
+            value: layered(x_values),
+            important,
+        },
+        Declaration {
+            name: "background-position-y".to_string(),
+            value: layered(y_values),
+            important,
+        },
+    ]
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum BackgroundPositionAxis {
+    Horizontal,
+    Vertical,
+    Center,
+    Unspecified,
+}
+
+fn background_position_axis(value: &Value) -> BackgroundPositionAxis {
+    let Value::Keyword(keyword) = value else {
+        return BackgroundPositionAxis::Unspecified;
+    };
+    match keyword.to_ascii_lowercase().as_str() {
+        "left" | "right" => BackgroundPositionAxis::Horizontal,
+        "top" | "bottom" => BackgroundPositionAxis::Vertical,
+        "center" => BackgroundPositionAxis::Center,
+        _ => BackgroundPositionAxis::Unspecified,
+    }
+}
+
+fn normalize_background_position(values: &[Value]) -> Option<(Value, Value)> {
+    let center = || Value::Keyword("center".to_string());
+    match values {
+        [value] if background_position_axis(value) == BackgroundPositionAxis::Vertical => {
+            Some((center(), value.clone()))
+        }
+        [value] => Some((value.clone(), center())),
+        [first, second] => {
+            let first_axis = background_position_axis(first);
+            let second_axis = background_position_axis(second);
+            match (first_axis, second_axis) {
+                (BackgroundPositionAxis::Horizontal, BackgroundPositionAxis::Horizontal)
+                | (BackgroundPositionAxis::Vertical, BackgroundPositionAxis::Vertical) => None,
+                (BackgroundPositionAxis::Horizontal, BackgroundPositionAxis::Vertical)
+                | (BackgroundPositionAxis::Horizontal, BackgroundPositionAxis::Center)
+                | (BackgroundPositionAxis::Center, BackgroundPositionAxis::Vertical) => {
+                    Some((first.clone(), second.clone()))
+                }
+                (BackgroundPositionAxis::Vertical, BackgroundPositionAxis::Horizontal)
+                | (BackgroundPositionAxis::Center, BackgroundPositionAxis::Horizontal) => {
+                    Some((second.clone(), first.clone()))
+                }
+                (BackgroundPositionAxis::Vertical, BackgroundPositionAxis::Center) => {
+                    Some((second.clone(), first.clone()))
+                }
+                (BackgroundPositionAxis::Horizontal, BackgroundPositionAxis::Unspecified) => {
+                    Some((first.clone(), second.clone()))
+                }
+                (BackgroundPositionAxis::Vertical, BackgroundPositionAxis::Unspecified)
+                | (BackgroundPositionAxis::Unspecified, BackgroundPositionAxis::Horizontal) => None,
+                (BackgroundPositionAxis::Unspecified, BackgroundPositionAxis::Vertical) => {
+                    Some((first.clone(), second.clone()))
+                }
+                _ => Some((first.clone(), second.clone())),
+            }
+        }
+        _ => None,
     }
 }
 
@@ -574,146 +689,281 @@ fn expand_border_side_shorthand(name: &str, value: Value, important: bool) -> Ve
 }
 
 fn expand_background_shorthand(value: Value, important: bool) -> Vec<Declaration> {
-    let values = match value {
-        Value::List(values) => values,
+    let original = value.clone();
+    let layers = match value {
+        Value::CommaList(layers) => layers,
         single => vec![single],
     };
+    let mut images = Vec::new();
+    let mut positions_x = Vec::new();
+    let mut positions_y = Vec::new();
+    let mut sizes = Vec::new();
+    let mut repeats = Vec::new();
+    let mut attachments = Vec::new();
+    let mut origins = Vec::new();
+    let mut clips = Vec::new();
+    let mut color = Value::Keyword("transparent".to_string());
 
-    let mut declarations = Vec::new();
-    let mut position_values = Vec::new();
-    for item in &values {
+    for (index, layer) in layers.iter().enumerate() {
+        let is_last = index + 1 == layers.len();
+        let Some(parsed) = parse_background_layer(layer, is_last) else {
+            return vec![Declaration {
+                name: "background".to_string(),
+                value: original,
+                important,
+            }];
+        };
+        images.push(parsed.image);
+        positions_x.push(parsed.position_x);
+        positions_y.push(parsed.position_y);
+        sizes.push(parsed.size);
+        repeats.push(parsed.repeat);
+        attachments.push(parsed.attachment);
+        origins.push(parsed.origin);
+        clips.push(parsed.clip);
+        if let Some(layer_color) = parsed.color {
+            color = layer_color;
+        }
+    }
+
+    let layered = |values: Vec<Value>| {
+        if values.len() == 1 {
+            values.into_iter().next().expect("one background layer")
+        } else {
+            Value::CommaList(values)
+        }
+    };
+    [
+        ("background-image", layered(images)),
+        ("background-position-x", layered(positions_x)),
+        ("background-position-y", layered(positions_y)),
+        ("background-size", layered(sizes)),
+        ("background-repeat", layered(repeats)),
+        ("background-attachment", layered(attachments)),
+        ("background-origin", layered(origins)),
+        ("background-clip", layered(clips)),
+        ("background-color", color),
+    ]
+    .into_iter()
+    .map(|(name, value)| Declaration {
+        name: name.to_string(),
+        value,
+        important,
+    })
+    .collect()
+}
+
+struct BackgroundLayer {
+    image: Value,
+    position_x: Value,
+    position_y: Value,
+    size: Value,
+    repeat: Value,
+    attachment: Value,
+    origin: Value,
+    clip: Value,
+    color: Option<Value>,
+}
+
+fn parse_background_layer(value: &Value, allow_color: bool) -> Option<BackgroundLayer> {
+    let values = match value {
+        Value::List(values) => values.as_slice(),
+        single => std::slice::from_ref(single),
+    };
+    let slash = values
+        .iter()
+        .position(|value| matches!(value, Value::Keyword(keyword) if keyword == "/"));
+    if values
+        .iter()
+        .filter(|value| matches!(value, Value::Keyword(keyword) if keyword == "/"))
+        .count()
+        > 1
+    {
+        return None;
+    }
+    let mut layer = BackgroundLayer {
+        image: Value::Keyword("none".to_string()),
+        position_x: Value::Percentage(0.0),
+        position_y: Value::Percentage(0.0),
+        size: Value::Keyword("auto".to_string()),
+        repeat: Value::Keyword("repeat".to_string()),
+        attachment: Value::Keyword("scroll".to_string()),
+        origin: Value::Keyword("padding-box".to_string()),
+        clip: Value::Keyword("border-box".to_string()),
+        color: None,
+    };
+    let mut position = Vec::new();
+    let mut boxes = Vec::new();
+    let mut saw_image = false;
+    let mut repeat_values = Vec::new();
+    let mut saw_attachment = false;
+    let size_range = if let Some(slash) = slash {
+        let mut end = slash + 1;
+        while end < values.len() && end <= slash + 2 && is_background_size_value(&values[end]) {
+            end += 1;
+        }
+        if end == slash + 1 {
+            return None;
+        }
+        let size_values = &values[slash + 1..end];
+        layer.size = if size_values.len() == 1 {
+            size_values[0].clone()
+        } else {
+            Value::List(size_values.to_vec())
+        };
+        Some(slash + 1..end)
+    } else {
+        None
+    };
+
+    for (index, item) in values.iter().enumerate() {
+        if Some(index) == slash {
+            continue;
+        }
+        if size_range.as_ref().is_some_and(|range| range.contains(&index)) {
+            continue;
+        }
         match item {
-            Value::Function { name, .. } if name.eq_ignore_ascii_case("url") => {
-                declarations.push(Declaration {
-                    name: "background-image".to_string(),
-                    value: item.clone(),
-                    important,
-                })
+            Value::Function { name, .. } if is_background_image_function(name) && !saw_image => {
+                layer.image = item.clone();
+                saw_image = true;
             }
             Value::Keyword(keyword)
-                if keyword.eq_ignore_ascii_case("repeat")
-                    || keyword.eq_ignore_ascii_case("no-repeat") =>
+                if !saw_image
+                    && (keyword.eq_ignore_ascii_case("none")
+                        || keyword.to_ascii_lowercase().starts_with("url(")) =>
             {
-                declarations.push(Declaration {
-                    name: "background-repeat".to_string(),
-                    value: Value::Keyword(keyword.to_string()),
-                    important,
-                });
+                layer.image = item.clone();
+                saw_image = true;
             }
-            Value::Keyword(keyword) if keyword.eq_ignore_ascii_case("fixed") => {
-                declarations.push(Declaration {
-                    name: "background-attachment".to_string(),
-                    value: Value::Keyword(keyword.to_string()),
-                    important,
-                });
-            }
-            Value::Function { name, .. }
-                if name.eq_ignore_ascii_case("linear-gradient")
-                    || name.eq_ignore_ascii_case("radial-gradient")
-                    || name.eq_ignore_ascii_case("conic-gradient")
-                    || name.eq_ignore_ascii_case("repeating-linear-gradient")
-                    || name.eq_ignore_ascii_case("repeating-radial-gradient")
-                    || name.eq_ignore_ascii_case("repeating-conic-gradient") =>
+            Value::Keyword(keyword)
+                if matches!(
+                    keyword.to_ascii_lowercase().as_str(),
+                    "repeat" | "no-repeat" | "repeat-x" | "repeat-y"
+                ) =>
             {
-                declarations.push(Declaration {
-                    name: "background-image".to_string(),
-                    value: item.clone(),
-                    important,
-                })
+                if !repeat_values.is_empty()
+                    && (matches!(keyword.to_ascii_lowercase().as_str(), "repeat-x" | "repeat-y")
+                        || repeat_values.iter().any(|value| {
+                            matches!(value, Value::Keyword(previous) if matches!(previous.to_ascii_lowercase().as_str(), "repeat-x" | "repeat-y"))
+                        }))
+                {
+                    return None;
+                }
+                repeat_values.push(item.clone());
+                if repeat_values.len() > 2 {
+                    return None;
+                }
             }
-            Value::Color(_) | Value::Function { .. } => declarations.push(Declaration {
-                name: "background-color".to_string(),
-                value: item.clone(),
-                important,
-            }),
+            Value::Keyword(keyword)
+                if matches!(keyword.to_ascii_lowercase().as_str(), "scroll" | "fixed" | "local")
+                    && !saw_attachment =>
+            {
+                layer.attachment = item.clone();
+                saw_attachment = true;
+            }
+            Value::Keyword(keyword)
+                if matches!(
+                    keyword.to_ascii_lowercase().as_str(),
+                    "border-box" | "padding-box" | "content-box"
+                ) => boxes.push(item.clone()),
+            Value::Color(_) => {
+                if !allow_color || layer.color.is_some() {
+                    return None;
+                }
+                layer.color = Some(item.clone());
+            }
+            Value::Function { name, .. } if is_color_function(name) => {
+                if !allow_color || layer.color.is_some() {
+                    return None;
+                }
+                layer.color = Some(item.clone());
+            }
             Value::Keyword(keyword) if is_background_color_keyword(keyword) => {
-                declarations.push(Declaration {
-                    name: "background-color".to_string(),
-                    value: Value::Keyword(keyword.to_string()),
-                    important,
-                });
-            }
-            Value::Keyword(keyword) if keyword.starts_with("url(") => {
-                declarations.push(Declaration {
-                    name: "background-image".to_string(),
-                    value: Value::Keyword(keyword.to_string()),
-                    important,
-                });
-            }
-            Value::Keyword(keyword) if keyword.eq_ignore_ascii_case("none") => {
-                declarations.push(Declaration {
-                    name: "background-image".to_string(),
-                    value: Value::Keyword(keyword.to_string()),
-                    important,
-                });
-                declarations.push(Declaration {
-                    name: "background-color".to_string(),
-                    value: Value::Keyword("transparent".to_string()),
-                    important,
-                });
+                if !allow_color || layer.color.is_some() {
+                    return None;
+                }
+                layer.color = Some(item.clone());
             }
             Value::Keyword(keyword)
                 if matches!(
                     keyword.to_ascii_lowercase().as_str(),
                     "left" | "right" | "top" | "bottom" | "center"
-                ) =>
-            {
-                position_values.push(item.clone());
+                ) => {
+                    if slash.is_some_and(|slash| index > slash) {
+                        return None;
+                    }
+                    position.push(item.clone());
+                }
+            Value::Length(_, _) | Value::Percentage(_) => {
+                if slash.is_some_and(|slash| index > slash) {
+                    return None;
+                }
+                position.push(item.clone());
             }
-            Value::Length(_, unit) if unit == "px" || unit == "em" => {
-                position_values.push(item.clone());
+            Value::Number(number) if *number == 0.0 => {
+                if slash.is_some_and(|slash| index > slash) {
+                    return None;
+                }
+                position.push(item.clone());
             }
-            Value::Number(_) => {
-                position_values.push(item.clone());
-            }
-            _ => {
-                // Unknown value in background shorthand → reject the entire shorthand
-                return vec![Declaration {
-                    name: "background".to_string(),
-                    value: Value::List(values),
-                    important,
-                }];
-            }
+            _ => return None,
         }
     }
+    if position.len() > 2 || boxes.len() > 2 {
+        return None;
+    }
+    if slash.is_some() && position.is_empty() {
+        return None;
+    }
+    if repeat_values.len() == 1 {
+        layer.repeat = repeat_values.remove(0);
+    } else if repeat_values.len() == 2 {
+        layer.repeat = Value::List(repeat_values);
+    }
+    if !position.is_empty() {
+        let (x, y) = normalize_background_position(&position)?;
+        layer.position_x = x;
+        layer.position_y = y;
+    }
+    if let Some(origin) = boxes.first() {
+        layer.origin = origin.clone();
+        layer.clip = origin.clone();
+    }
+    if let Some(clip) = boxes.get(1) {
+        layer.clip = clip.clone();
+    }
+    Some(layer)
+}
 
-    if let Some(first) = position_values.first() {
-        declarations.push(Declaration {
-            name: "background-position-x".to_string(),
-            value: first.clone(),
-            important,
-        });
+fn is_background_size_value(value: &Value) -> bool {
+    match value {
+        Value::Length(_, _) | Value::Percentage(_) => true,
+        Value::Number(number) => *number == 0.0,
+        Value::Function { name, .. } => {
+            matches!(name.to_ascii_lowercase().as_str(), "calc" | "clamp")
+        }
+        Value::Keyword(keyword) => {
+            matches!(keyword.to_ascii_lowercase().as_str(), "auto" | "cover" | "contain")
+        }
+        _ => false,
     }
-    if let Some(second) = position_values.get(1) {
-        declarations.push(Declaration {
-            name: "background-position-y".to_string(),
-            value: second.clone(),
-            important,
-        });
-    }
+}
 
-    // Reject shorthand if multiple background-color values were found (e.g. "red pink")
-    let color_count = declarations
-        .iter()
-        .filter(|d| d.name == "background-color")
-        .count();
-    if color_count > 1 {
-        return vec![Declaration {
-            name: "background".to_string(),
-            value: Value::List(values),
-            important,
-        }];
-    }
+fn is_background_image_function(name: &str) -> bool {
+    matches!(
+        name.to_ascii_lowercase().as_str(),
+        "linear-gradient"
+            | "radial-gradient"
+            | "conic-gradient"
+            | "repeating-linear-gradient"
+            | "repeating-radial-gradient"
+            | "repeating-conic-gradient"
+    )
+}
 
-    if declarations.is_empty() {
-        vec![Declaration {
-            name: "background".to_string(),
-            value: Value::List(values),
-            important,
-        }]
-    } else {
-        declarations
-    }
+fn is_color_function(name: &str) -> bool {
+    matches!(name.to_ascii_lowercase().as_str(), "rgb" | "rgba" | "hsl" | "hsla")
 }
 
 fn expand_mask_shorthand(value: Value, important: bool) -> Vec<Declaration> {
@@ -1451,19 +1701,7 @@ fn expand_flex_flow_shorthand(value: Value, important: bool) -> Vec<Declaration>
 }
 
 fn is_background_color_keyword(keyword: &str) -> bool {
-    matches!(
-        keyword,
-        "transparent"
-            | "black"
-            | "white"
-            | "red"
-            | "green"
-            | "blue"
-            | "gray"
-            | "grey"
-            | "navy"
-            | "yellow"
-    )
+    crate::paint::color::parse_color(keyword).is_some()
 }
 
 /// Expand `animation` shorthand into longhands.

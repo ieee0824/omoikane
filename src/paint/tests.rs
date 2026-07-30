@@ -11,6 +11,69 @@ use crate::layout::{
 use crate::paint::*;
 
 #[test]
+fn calc_background_positions_resolve_to_pixel_offsets_on_both_axes() {
+    let node = NodeHandle::element("div");
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "div { background-position-x: calc(10px + 50%); \
+                   background-position-y: calc(5px + 25%); }",
+        )
+        .unwrap(),
+    );
+    let style = resolver.computed_style(&node);
+    let positions_x = background_list(&style, "background-position-x", "0%");
+    let positions_y = background_list(&style, "background-position-y", "0%");
+    let layer_style = background_layer_style(
+        "none",
+        &positions_x[0],
+        &positions_y[0],
+        "auto",
+        "repeat",
+        "scroll",
+    );
+
+    assert_eq!(
+        background_position(&layer_style, 100.0, 80.0, 20.0, 20.0),
+        (50.0, 20.0)
+    );
+}
+
+#[test]
+fn layered_calc_background_positions_preserve_pixel_offsets_on_both_axes() {
+    let node = NodeHandle::element("div");
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "div { background-image: none, none; \
+                   background-position-x: calc(10px + 50%), calc(3px + 25%); \
+                   background-position-y: calc(5px + 25%), calc(7px + 50%); }",
+        )
+        .unwrap(),
+    );
+    let style = resolver.computed_style(&node);
+    let positions_x = background_list(&style, "background-position-x", "0%");
+    let positions_y = background_list(&style, "background-position-y", "0%");
+
+    for (index, expected) in [(0, (50.0, 20.0)), (1, (23.0, 37.0))] {
+        let layer_style = background_layer_style(
+            "none",
+            &positions_x[index],
+            &positions_y[index],
+            "auto",
+            "repeat",
+            "scroll",
+        );
+        assert_eq!(
+            background_position(&layer_style, 100.0, 80.0, 20.0, 20.0),
+            expected
+        );
+    }
+}
+
+#[test]
 fn png_checksums_match_standard_vectors() {
     let input = b"123456789";
 
@@ -7116,6 +7179,244 @@ fn render_gradient_box(background: &str, width: u32, height: u32) -> Canvas {
     let viewport = Rect { x: 0.0, y: 0.0, width: width as f32, height: height as f32 };
     let layout = layout_tree(&document, &mut resolver, viewport).unwrap();
     paint_layout(&layout, &mut resolver, viewport)
+}
+
+#[test]
+fn multiple_background_none_url_and_all_gradient_kinds_paint_front_layer_first() {
+    let canvas = render_gradient_box(
+        &format!(
+            "background-color: green; \
+             background-image: none, url(\"{}\"), linear-gradient(green, green), \
+                 radial-gradient(circle, yellow, yellow), conic-gradient(blue, blue); \
+             background-size: 1px 1px, 1px 1px, 1px 1px, 1px 1px, auto; \
+             background-position-x: 0px, 0px, 1px, 2px, 0%; \
+             background-position-y: 0px; \
+             background-repeat: no-repeat;",
+            red_pixel_data_uri()
+        ),
+        4,
+        4,
+    );
+    assert_eq!(canvas.pixel(0, 0), Some(Color::rgb(255, 0, 0)));
+    assert_eq!(canvas.pixel(1, 0), Some(Color::rgb(0, 128, 0)));
+    assert_eq!(canvas.pixel(2, 0), Some(Color::rgb(255, 255, 0)));
+    assert_eq!(canvas.pixel(3, 3), Some(Color::rgb(0, 0, 255)));
+}
+
+#[test]
+fn background_layers_paint_reversed_position_keywords_on_the_correct_axes() {
+    let canvas = render_gradient_box(
+        "background: linear-gradient(red, red) no-repeat top right / 1px 1px, \
+                     linear-gradient(blue, blue) no-repeat bottom left / 1px 1px;",
+        4,
+        4,
+    );
+    assert_eq!(canvas.pixel(3, 0), Some(Color::rgb(255, 0, 0)));
+    assert_eq!(canvas.pixel(0, 3), Some(Color::rgb(0, 0, 255)));
+    assert_eq!(canvas.pixel(0, 0).unwrap().a, 0);
+    assert_eq!(canvas.pixel(3, 3).unwrap().a, 0);
+}
+
+#[test]
+fn multiple_background_layers_apply_attachment_independently() {
+    for non_fixed in ["scroll", "local"] {
+        let html = format!(
+            "<html><head><style>body {{ margin: 0; }} div {{ \
+             width: 4px; height: 2px; margin-left: 2px; \
+             background-image: url(\"{}\"), linear-gradient(blue, blue); \
+             background-size: 1px 1px; background-repeat: no-repeat; \
+             background-position-x: 3px, 0px; background-position-y: 0px; \
+             background-attachment: fixed, {non_fixed}; \
+             }}</style></head><body><div></div></body></html>",
+            red_pixel_data_uri()
+        );
+        let document = TreeBuilder::parse(&html).document();
+        let canvas = render_document(
+            &document,
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 8.0,
+                height: 2.0,
+            },
+        )
+        .unwrap();
+        assert_eq!(canvas.pixel(2, 0), Some(Color::rgb(0, 0, 255)));
+        assert_eq!(canvas.pixel(3, 0), Some(Color::rgb(255, 0, 0)));
+    }
+}
+
+#[test]
+fn multiple_background_layers_support_axis_specific_repeat_modes() {
+    for repeats in ["repeat-x, repeat-y", "repeat no-repeat, no-repeat repeat"] {
+        let canvas = render_gradient_box(
+            &format!(
+                "background-image: linear-gradient(red, red), linear-gradient(blue, blue); \
+                 background-size: 1px 1px; \
+                 background-position: 0px 0px, 1px 0px; \
+                 background-repeat: {repeats};"
+            ),
+            4,
+            4,
+        );
+        assert_eq!(canvas.pixel(0, 0), Some(Color::rgb(255, 0, 0)));
+        assert_eq!(canvas.pixel(3, 0), Some(Color::rgb(255, 0, 0)));
+        assert_eq!(canvas.pixel(1, 3), Some(Color::rgb(0, 0, 255)));
+        assert_eq!(canvas.pixel(3, 3).unwrap().a, 0);
+    }
+}
+
+#[test]
+fn single_background_layer_preserves_two_axis_repeat_mode() {
+    let canvas = render_gradient_box(
+        "background-image: linear-gradient(red, red); \
+         background-size: 1px 1px; background-position: 0 0; \
+         background-repeat: repeat no-repeat;",
+        4,
+        4,
+    );
+    assert_eq!(canvas.pixel(0, 0), Some(Color::rgb(255, 0, 0)));
+    assert_eq!(canvas.pixel(3, 0), Some(Color::rgb(255, 0, 0)));
+    assert_eq!(canvas.pixel(0, 1).unwrap().a, 0);
+}
+
+#[test]
+fn zero_background_size_does_not_fall_back_to_intrinsic_size_or_tile() {
+    for zero in ["0", "+0", "-0", "0.0"] {
+        let single = render_gradient_box(
+            &format!(
+                "background-color: blue; background-image: linear-gradient(red, red); \
+                 background-size: {zero}; background-repeat: repeat;"
+            ),
+            4,
+            4,
+        );
+        assert_eq!(
+            single.pixel(0, 0),
+            Some(Color::rgb(0, 0, 255)),
+            "single-layer size {zero}"
+        );
+
+        let layered = render_gradient_box(
+            &format!(
+                "background-image: linear-gradient(red, red), linear-gradient(green, green); \
+                 background-size: {zero}, auto; background-repeat: repeat;"
+            ),
+            4,
+            4,
+        );
+        assert_eq!(
+            layered.pixel(0, 0),
+            Some(Color::rgb(0, 128, 0)),
+            "layered size {zero}"
+        );
+    }
+}
+
+#[test]
+fn three_gradient_layers_repeat_longhand_lists_and_keep_layer_geometry() {
+    let canvas = render_gradient_box(
+        "background-image: \
+             linear-gradient(red, red), \
+             radial-gradient(circle, green, green), \
+             conic-gradient(blue, blue); \
+         background-size: 1px 1px, 1px 1px, auto; \
+         background-position-x: 0px, 1px; \
+         background-position-y: 0px; \
+         background-repeat: no-repeat;",
+        4,
+        2,
+    );
+    assert_eq!(canvas.pixel(0, 0), Some(Color::rgb(255, 0, 0)));
+    assert_eq!(canvas.pixel(1, 0), Some(Color::rgb(0, 128, 0)));
+    assert_eq!(canvas.pixel(2, 0), Some(Color::rgb(0, 0, 255)));
+}
+
+#[test]
+fn background_layers_apply_independent_origin_clip_and_color_is_at_the_back() {
+    let canvas = render_gradient_box(
+        "box-sizing: border-box; border: 2px solid transparent; padding: 2px; \
+         background-color: yellow; \
+         background-image: linear-gradient(red, red), linear-gradient(blue, blue); \
+         background-origin: content-box, padding-box; \
+         background-clip: content-box, padding-box; \
+         background-repeat: no-repeat;",
+        12,
+        12,
+    );
+    assert_eq!(canvas.pixel(0, 6).unwrap().a, 0);
+    assert_eq!(canvas.pixel(2, 6), Some(Color::rgb(0, 0, 255)));
+    assert_eq!(canvas.pixel(4, 6), Some(Color::rgb(255, 0, 0)));
+}
+
+#[test]
+fn auto_sized_gradient_repeats_the_positioning_area_tile_into_a_larger_clip() {
+    let canvas = render_gradient_box(
+        "box-sizing: border-box; border: 2px solid transparent; \
+         background-image: linear-gradient(to right, red, blue); \
+         background-origin: content-box; background-clip: border-box;",
+        8,
+        8,
+    );
+    assert_eq!(canvas.pixel(0, 4), canvas.pixel(4, 4));
+    assert_ne!(canvas.pixel(0, 4), canvas.pixel(1, 4));
+}
+
+#[test]
+fn generated_box_background_layers_apply_origin_clip_and_radius() {
+    let html = r#"<html><head><style>
+        body { margin: 0; }
+        div::before { display: block; content: ''; width: 4px; height: 4px;
+            padding: 2px; border: 2px solid transparent; border-radius: 4px;
+            background-image: linear-gradient(red, red), linear-gradient(blue, blue);
+            background-origin: content-box, padding-box;
+            background-clip: content-box, padding-box;
+            background-repeat: no-repeat; }
+        </style></head><body><div></div></body></html>"#;
+    let document = TreeBuilder::parse(html).document();
+    let canvas = render_document(
+        &document,
+        Rect { x: 0.0, y: 0.0, width: 16.0, height: 16.0 },
+    )
+    .unwrap();
+    assert_eq!(canvas.pixel(0, 6).unwrap().a, 0);
+    assert_eq!(canvas.pixel(2, 6), Some(Color::rgb(0, 0, 255)));
+    assert_eq!(canvas.pixel(4, 6), Some(Color::rgb(255, 0, 0)));
+    assert_eq!(canvas.pixel(2, 2).unwrap().a, 0, "padding clip must keep its rounded corner");
+}
+
+#[test]
+fn inline_image_fragment_background_layers_apply_origin_and_clip() {
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let image_node = NodeHandle::element("img");
+    document.append_child(body.clone());
+    body.append_child(image_node.clone());
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "img { padding: 2px; border: 2px solid transparent; border-radius: 4px; \
+             background-image: linear-gradient(red, red), linear-gradient(blue, blue); \
+             background-origin: content-box, padding-box; \
+             background-clip: content-box, padding-box; background-repeat: no-repeat; }",
+        )
+        .unwrap(),
+    );
+    let style = resolver.computed_style(&image_node);
+    let transparent = Image::new(1, 1, vec![0, 0, 0, 0]).unwrap();
+    let mut canvas = Canvas::new(12, 12);
+    text::paint_inline_image_fragment(
+        &mut canvas,
+        Rect { x: 0.0, y: 0.0, width: 12.0, height: 12.0 },
+        &transparent,
+        &style,
+        None,
+        Rect { x: 0.0, y: 0.0, width: 12.0, height: 12.0 },
+    );
+    assert_eq!(canvas.pixel(0, 6).unwrap().a, 0);
+    assert_eq!(canvas.pixel(2, 6), Some(Color::rgb(0, 0, 255)));
+    assert_eq!(canvas.pixel(4, 6), Some(Color::rgb(255, 0, 0)));
 }
 
 #[test]
