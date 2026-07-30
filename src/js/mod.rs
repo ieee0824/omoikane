@@ -1613,23 +1613,19 @@ impl JsRuntime {
             .handle(dialog_id, accept, prompt_text)
     }
 
-    pub(crate) fn value_to_json(
+    pub(crate) fn call_function_with_value(
         &mut self,
-        value: &JsValue,
-    ) -> JsResult<Option<serde_json::Value>> {
-        self.with_active_host_value(|context| value.to_json(context))
-    }
-
-    pub(crate) fn store_global_value(
-        &mut self,
-        name: &str,
+        function_source: &str,
         value: JsValue,
-    ) -> JsResult<()> {
+    ) -> JsResult<JsValue> {
         self.with_active_host_value(|context| {
-            context
-                .global_object()
-                .set(js_string!(name), value, true, context)
-                .map(|_| ())
+            let function = context.eval(Source::from_bytes(function_source))?;
+            let callable = function.as_callable().ok_or_else(|| {
+                JsError::from(
+                    JsNativeError::typ().with_message("CDP serializer is not callable"),
+                )
+            })?;
+            callable.call(&JsValue::undefined(), &[value], context)
         })
     }
 

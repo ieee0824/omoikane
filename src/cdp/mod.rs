@@ -10,7 +10,6 @@ use std::time::{Duration, Instant};
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
-use boa_engine::JsValue;
 use serde_json::{Value, json};
 use sha1::{Digest, Sha1};
 
@@ -1459,17 +1458,30 @@ impl CdpSession {
         // path and reject a native-call suspension.
         let value = self.runtime.eval_async(expression).await.map_err(js_error)?;
         self.runtime.run_until_idle().map_err(js_error)?;
-        let remote = if return_by_value {
-            cdp_value_by_value(&mut self.runtime, &value)?
+        let serialization_function = if return_by_value {
+            "value => JSON.stringify({ result: __cdpSerializeValue(value) })".to_string()
         } else {
             let object_id = format!("__cdp_object_{}", self.next_object_id);
             self.next_object_id += 1;
-            self.runtime
-                .store_global_value(&object_id, value.clone())
-                .map_err(js_error)?;
-            cdp_value_by_reference(&value, object_id)
+            format!(
+                "value => {{ globalThis[{object_id:?}] = value; return JSON.stringify({{ result: __cdpRemoteObject(value, {object_id:?}) }}); }}"
+            )
         };
-        Ok(json!({ "result": remote }))
+        let raw = self
+            .runtime
+            .call_function_with_value(&serialization_function, value)
+            .map_err(js_error)?;
+        let payload = raw
+            .as_string()
+            .ok_or(JsonRpcError {
+                code: -32000,
+                message: "Runtime evaluation did not return a string payload".to_string(),
+            })?
+            .to_std_string_escaped();
+        serde_json::from_str(&payload).map_err(|error| JsonRpcError {
+            code: -32000,
+            message: error.to_string(),
+        })
     }
 
     fn load_page_request(
@@ -1848,6 +1860,7 @@ impl BrowserSessionState {
             "Page.javascriptDialogClosed",
             json!({ "result": accept, "userInput": user_input }),
         ));
+        pending.opened = None;
         self.poll_evaluation();
         Ok(json!({}))
     }
@@ -2012,55 +2025,6 @@ fn dialog_opening_params(dialog: &JavaScriptDialog, page_url: &str) -> Value {
         "message": dialog.message,
         "hasBrowserHandler": true,
         "defaultPrompt": dialog.default_prompt.clone().unwrap_or_default(),
-    })
-}
-
-fn cdp_value_by_value(
-    runtime: &mut JsRuntime,
-    value: &JsValue,
-) -> Result<Value, JsonRpcError> {
-    if value.is_undefined() {
-        return Ok(json!({ "type": "undefined" }));
-    }
-    if value.is_null() {
-        return Ok(json!({ "type": "object", "subtype": "null", "value": null }));
-    }
-    if let Some(value) = value.as_boolean() {
-        return Ok(json!({ "type": "boolean", "value": value }));
-    }
-    if let Some(value) = value.as_number() {
-        return Ok(json!({ "type": "number", "value": value }));
-    }
-    if let Some(value) = value.as_string() {
-        return Ok(json!({
-            "type": "string",
-            "value": value.to_std_string_escaped(),
-        }));
-    }
-    let serialized = runtime.value_to_json(value).map_err(js_error)?;
-    Ok(json!({ "type": "object", "value": serialized }))
-}
-
-fn cdp_value_by_reference(value: &JsValue, object_id: String) -> Value {
-    let value_type = if value.as_object().is_some_and(|object| object.is_callable()) {
-        "function"
-    } else if value.as_object().is_some() {
-        "object"
-    } else if value.as_string().is_some() {
-        "string"
-    } else if value.as_number().is_some() {
-        "number"
-    } else if value.as_boolean().is_some() {
-        "boolean"
-    } else if value.is_undefined() {
-        "undefined"
-    } else {
-        "object"
-    };
-    json!({
-        "type": value_type,
-        "objectId": object_id,
-        "description": value_type,
     })
 }
 
@@ -2497,6 +2461,104 @@ mod tests {
         assert_eq!(completed[2]["id"], "eval");
         assert_eq!(completed[2]["result"]["result"]["value"], false);
         assert_eq!(session.pending_response_count(), 0);
+    }
+
+    #[test]
+    fn browser_session_emits_each_sequential_dialog_opening() {
+        let mut session = BrowserSession::new().unwrap();
+        let client = session.accept_upgrade(sample_upgrade_request()).unwrap();
+        browser_request(
+            &mut session,
+            client.client_id,
+            r#"{"jsonrpc":"2.0","id":"eval","method":"Runtime.evaluate","params":{"expression":"alert('First'); confirm('Second')"}}"#,
+        );
+        let first = browser_payloads(&mut session, client.client_id);
+        assert_eq!(first[0]["method"], "Page.javascriptDialogOpening");
+        assert_eq!(first[0]["params"]["type"], "alert");
+        assert_eq!(first[0]["params"]["message"], "First");
+
+        browser_request(
+            &mut session,
+            client.client_id,
+            r#"{"jsonrpc":"2.0","id":"first-handle","method":"Page.handleJavaScriptDialog","params":{"accept":true}}"#,
+        );
+        let between = browser_payloads(&mut session, client.client_id);
+        assert!(between.iter().any(|value| {
+            value["method"] == "Page.javascriptDialogClosed"
+                && value["params"]["result"] == true
+        }));
+        assert!(between.iter().any(|value| {
+            value["method"] == "Page.javascriptDialogOpening"
+                && value["params"]["type"] == "confirm"
+                && value["params"]["message"] == "Second"
+        }));
+        assert_eq!(session.pending_response_count(), 1);
+
+        browser_request(
+            &mut session,
+            client.client_id,
+            r#"{"jsonrpc":"2.0","id":"second-handle","method":"Page.handleJavaScriptDialog","params":{"accept":false}}"#,
+        );
+        let completed = browser_payloads(&mut session, client.client_id);
+        assert!(completed.iter().any(|value| {
+            value["method"] == "Page.javascriptDialogClosed"
+                && value["params"]["result"] == false
+        }));
+        assert!(completed.iter().any(|value| {
+            value["id"] == "eval" && value["result"]["result"]["value"] == false
+        }));
+        assert_eq!(session.pending_response_count(), 0);
+    }
+
+    #[test]
+    fn async_remote_objects_match_sync_serialization_for_functions_and_edge_objects() {
+        for (index, (expression, return_by_value)) in [
+            ("(function namedEdge(value) { return value; })", true),
+            ("({ kept: 1, omitted: undefined, nested: [NaN, null] })", true),
+            ("(function referenced(value) { return value; })", false),
+            ("null", false),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let params = json!({
+                "expression": expression,
+                "returnByValue": return_by_value,
+            });
+            let mut direct = CdpSession::new().unwrap();
+            let expected = direct.dispatch("Runtime.evaluate", params.clone()).unwrap();
+
+            let mut browser = BrowserSession::new().unwrap();
+            let client = browser.accept_upgrade(sample_upgrade_request()).unwrap();
+            browser_request(
+                &mut browser,
+                client.client_id,
+                &json!({
+                    "jsonrpc": "2.0",
+                    "id": index,
+                    "method": "Runtime.evaluate",
+                    "params": params,
+                })
+                .to_string(),
+            );
+            let response = browser_payloads(&mut browser, client.client_id);
+            assert_eq!(response.len(), 1);
+            assert_eq!(response[0]["result"], expected, "expression: {expression}");
+        }
+
+        let mut browser = BrowserSession::new().unwrap();
+        let client = browser.accept_upgrade(sample_upgrade_request()).unwrap();
+        browser_request(
+            &mut browser,
+            client.client_id,
+            r#"{"jsonrpc":"2.0","id":"null","method":"Runtime.evaluate","params":{"expression":"null","returnByValue":false}}"#,
+        );
+        let response = browser_payloads(&mut browser, client.client_id);
+        let remote = &response[0]["result"]["result"];
+        assert_eq!(remote["type"], "object");
+        assert_eq!(remote["subtype"], "null");
+        assert_eq!(remote["value"], Value::Null);
+        assert!(remote.get("objectId").is_none());
     }
 
     #[test]
