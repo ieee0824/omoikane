@@ -16,7 +16,7 @@ use boa_engine::Module;
 use boa_engine::builtins::promise::{OperationType, PromiseState};
 use boa_engine::context::HostHooks;
 use boa_engine::module::{ModuleLoader, Referrer};
-use boa_engine::native_function::NativeFunction;
+use boa_engine::native_function::{NativeCallSuspension, NativeFunction};
 use boa_engine::object::{
     JsObject,
     builtins::{JsArrayBuffer, JsPromise, JsUint8Array},
@@ -67,6 +67,12 @@ fn activate_host_state(host_state: Rc<RefCell<HostState>>) -> ActiveHostGuard {
 struct ActiveHostFuture<F> {
     future: Pin<Box<F>>,
     host_state: Rc<RefCell<HostState>>,
+}
+
+impl<F> Drop for ActiveHostFuture<F> {
+    fn drop(&mut self) {
+        self.host_state.borrow_mut().pending_javascript_dialog = None;
+    }
 }
 
 impl<F: Future> Future for ActiveHostFuture<F> {
@@ -256,6 +262,103 @@ pub enum NavigationRequest {
     Traverse { delta: i32 },
 }
 
+/// Kind of blocking Window modal dialog requested by page script.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JavaScriptDialogKind {
+    Alert,
+    Confirm,
+    Prompt,
+}
+
+/// Script-visible metadata for the currently pending Window modal dialog.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JavaScriptDialog {
+    pub id: u64,
+    pub kind: JavaScriptDialogKind,
+    pub message: String,
+    pub default_prompt: Option<String>,
+}
+
+/// Failure while resolving a pending Window modal dialog.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum JavaScriptDialogError {
+    NoPendingDialog,
+    StaleDialog { expected: u64, actual: u64 },
+    EvaluationCancelled,
+}
+
+impl std::fmt::Display for JavaScriptDialogError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NoPendingDialog => write!(f, "no JavaScript dialog is pending"),
+            Self::StaleDialog { expected, actual } => {
+                write!(f, "stale JavaScript dialog id {actual}; expected {expected}")
+            }
+            Self::EvaluationCancelled => write!(f, "JavaScript dialog evaluation was cancelled"),
+        }
+    }
+}
+
+impl std::error::Error for JavaScriptDialogError {}
+
+/// Cloneable control-plane handle for observing and resolving Window dialogs
+/// while [`JsRuntime::eval_async`] exclusively borrows the JavaScript runtime.
+#[derive(Clone)]
+pub struct JavaScriptDialogController {
+    host_state: Rc<RefCell<HostState>>,
+}
+
+impl JavaScriptDialogController {
+    pub fn pending(&self) -> Option<JavaScriptDialog> {
+        self.host_state
+            .borrow()
+            .pending_javascript_dialog
+            .as_ref()
+            .map(|pending| pending.dialog.clone())
+    }
+
+    pub fn handle(
+        &self,
+        dialog_id: u64,
+        accept: bool,
+        prompt_text: Option<String>,
+    ) -> Result<(), JavaScriptDialogError> {
+        let pending = {
+            let mut state = self.host_state.borrow_mut();
+            let Some(pending) = state.pending_javascript_dialog.take() else {
+                return Err(JavaScriptDialogError::NoPendingDialog);
+            };
+            if pending.dialog.id != dialog_id {
+                let expected = pending.dialog.id;
+                state.pending_javascript_dialog = Some(pending);
+                return Err(JavaScriptDialogError::StaleDialog {
+                    expected,
+                    actual: dialog_id,
+                });
+            }
+            pending
+        };
+
+        let value = match pending.dialog.kind {
+            JavaScriptDialogKind::Alert => JsValue::undefined(),
+            JavaScriptDialogKind::Confirm => JsValue::from(accept),
+            JavaScriptDialogKind::Prompt if !accept => JsValue::null(),
+            JavaScriptDialogKind::Prompt => JsValue::from(js_string!(
+                prompt_text.unwrap_or_else(|| pending.dialog.default_prompt.unwrap_or_default())
+            )),
+        };
+        pending
+            .suspension
+            .resume(Ok(value))
+            .map_err(|_| JavaScriptDialogError::EvaluationCancelled)
+    }
+}
+
+struct PendingJavaScriptDialog {
+    dialog: JavaScriptDialog,
+    suspension: NativeCallSuspension,
+}
+
 impl TimerPayload {
     fn kind(&self) -> &'static str {
         match self {
@@ -346,6 +449,8 @@ struct HostState {
     /// move within one connected document from producing duplicate events.
     pending_resource_loads: HashSet<usize>,
     navigation_requests: VecDeque<NavigationRequest>,
+    pending_javascript_dialog: Option<PendingJavaScriptDialog>,
+    next_javascript_dialog_id: u64,
     storage_manager: StorageManager,
     storage_session_id: u64,
     document_origins: HashMap<usize, Option<StorageOrigin>>,
@@ -493,6 +598,8 @@ impl HostState {
             iframe_documents: HashMap::new(),
             pending_resource_loads: HashSet::new(),
             navigation_requests: VecDeque::new(),
+            pending_javascript_dialog: None,
+            next_javascript_dialog_id: 1,
             storage_manager,
             storage_session_id,
             document_origins,
@@ -1394,6 +1501,34 @@ impl JsRuntime {
             .collect()
     }
 
+    /// Returns metadata for the Window modal dialog currently blocking script.
+    pub fn pending_javascript_dialog(&self) -> Option<JavaScriptDialog> {
+        self.javascript_dialog_controller().pending()
+    }
+
+    /// Returns a cloneable handle that remains usable while async evaluation
+    /// holds the runtime's mutable borrow.
+    pub fn javascript_dialog_controller(&self) -> JavaScriptDialogController {
+        JavaScriptDialogController {
+            host_state: Rc::clone(&self.host_state),
+        }
+    }
+
+    /// Resolves the currently pending Window modal dialog exactly once.
+    ///
+    /// `prompt_text` is used only for an accepted prompt. If it is omitted, the
+    /// prompt's default value is returned. Dismissing a prompt produces `null`;
+    /// dismissing a confirm produces `false`; alert always produces `undefined`.
+    pub fn handle_javascript_dialog(
+        &mut self,
+        dialog_id: u64,
+        accept: bool,
+        prompt_text: Option<String>,
+    ) -> Result<(), JavaScriptDialogError> {
+        self.javascript_dialog_controller()
+            .handle(dialog_id, accept, prompt_text)
+    }
+
     /// Returns the console log buffer captured from `console.log`.
     pub fn console_logs(&self) -> Vec<String> {
         self.host_state.borrow().console_logs.clone()
@@ -1405,7 +1540,12 @@ impl JsRuntime {
     /// Note: `SandboxConfig.timeout` is stored but not yet enforced due to
     /// boa 0.21 lacking a runtime interrupt API.
     pub fn eval(&mut self, source: &str) -> JsResult<JsValue> {
-        self.with_active_host(|context| context.eval(Source::from_bytes(source)))
+        let result = self.with_active_host(|context| context.eval(Source::from_bytes(source)));
+        // A synchronous evaluator cannot hand control to an embedder while a
+        // modal dialog is pending. Boa cancels that suspension; discard the
+        // matching host metadata as soon as evaluation returns.
+        self.host_state.borrow_mut().pending_javascript_dialog = None;
+        result
     }
 
     /// Evaluates JavaScript while allowing native host calls to suspend until
@@ -2579,6 +2719,11 @@ fn register_host_bindings(
 
     for (name, length, function) in [
         (
+            js_string!("__omoikane_open_javascript_dialog"),
+            3,
+            NativeFunction::from_copy_closure(open_javascript_dialog_native),
+        ),
+        (
             js_string!("__omoikane_performance_now"),
             0,
             NativeFunction::from_copy_closure(performance_now_native),
@@ -3142,6 +3287,57 @@ fn with_host_state<T>(f: impl FnOnce(&Rc<RefCell<HostState>>) -> JsResult<T>) ->
             JsError::from(JsNativeError::error().with_message("host state is not active"))
         })?;
         f(&state)
+    })
+}
+
+fn open_javascript_dialog_native(
+    _this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let kind = string_argument(args.first(), "", context)?;
+    let kind = match kind.as_str() {
+        "alert" => JavaScriptDialogKind::Alert,
+        "confirm" => JavaScriptDialogKind::Confirm,
+        "prompt" => JavaScriptDialogKind::Prompt,
+        _ => {
+            return Err(JsNativeError::typ()
+                .with_message("unknown JavaScript dialog kind")
+                .into());
+        }
+    };
+    let message = string_argument(args.get(1), "", context)?;
+    let default_prompt = (kind == JavaScriptDialogKind::Prompt)
+        .then(|| string_argument(args.get(2), "", context))
+        .transpose()?;
+
+    with_host_state(|state| {
+        let dialog = {
+            let mut state = state.borrow_mut();
+            if state.pending_javascript_dialog.is_some() {
+                return Err(JsNativeError::error()
+                    .with_message("a JavaScript dialog is already pending")
+                    .into());
+            }
+            let id = state.next_javascript_dialog_id;
+            state.next_javascript_dialog_id = id.checked_add(1).ok_or_else(|| {
+                JsError::from(
+                    JsNativeError::error().with_message("JavaScript dialog id space exhausted"),
+                )
+            })?;
+            JavaScriptDialog {
+                id,
+                kind,
+                message,
+                default_prompt,
+            }
+        };
+        let suspension = context.suspend_native_call()?;
+        state.borrow_mut().pending_javascript_dialog = Some(PendingJavaScriptDialog {
+            dialog,
+            suspension,
+        });
+        Ok(JsValue::undefined())
     })
 }
 
@@ -7087,6 +7283,160 @@ mod tests {
         let value = runtime.eval("1 + 2 + 3").unwrap();
 
         assert_eq!(value.as_number(), Some(6.0));
+    }
+
+    fn poll_until_dialog<F>(
+        mut evaluation: Pin<&mut F>,
+        controller: &JavaScriptDialogController,
+        cx: &mut FutureContext<'_>,
+    ) -> JavaScriptDialog
+    where
+        F: Future<Output = JsResult<JsValue>>,
+    {
+        for _ in 0..64 {
+            if let Some(dialog) = controller.pending() {
+                return dialog;
+            }
+            if let Poll::Ready(result) = evaluation.as_mut().poll(cx) {
+                panic!("evaluation completed before opening a dialog: {result:?}");
+            }
+        }
+        panic!("evaluation did not open a dialog within the poll budget");
+    }
+
+    fn poll_until_ready<F>(
+        mut evaluation: Pin<&mut F>,
+        cx: &mut FutureContext<'_>,
+    ) -> JsResult<JsValue>
+    where
+        F: Future<Output = JsResult<JsValue>>,
+    {
+        for _ in 0..64 {
+            if let Poll::Ready(result) = evaluation.as_mut().poll(cx) {
+                return result;
+            }
+        }
+        panic!("evaluation did not complete within the poll budget");
+    }
+
+    #[test]
+    fn alert_blocks_script_until_exactly_once_resolution() {
+        let mut runtime = JsRuntime::new().unwrap();
+        let controller = runtime.javascript_dialog_controller();
+        let mut evaluation = Box::pin(runtime.eval_async(
+            "globalThis.afterAlert = false; alert('Stop'); afterAlert = true; afterAlert",
+        ));
+        let waker: &'static Waker = Waker::noop();
+        let mut cx = FutureContext::from_waker(waker);
+
+        let dialog = poll_until_dialog(evaluation.as_mut(), &controller, &mut cx);
+        assert_eq!(
+            dialog,
+            JavaScriptDialog {
+                id: 1,
+                kind: JavaScriptDialogKind::Alert,
+                message: "Stop".to_string(),
+                default_prompt: None,
+            }
+        );
+        assert_eq!(
+            controller.handle(dialog.id + 1, true, None),
+            Err(JavaScriptDialogError::StaleDialog {
+                expected: dialog.id,
+                actual: dialog.id + 1,
+            })
+        );
+        assert_eq!(controller.pending(), Some(dialog.clone()));
+
+        controller.handle(dialog.id, true, None).unwrap();
+        assert_eq!(
+            controller.handle(dialog.id, true, None),
+            Err(JavaScriptDialogError::NoPendingDialog)
+        );
+        assert_eq!(
+            poll_until_ready(evaluation.as_mut(), &mut cx)
+                .unwrap()
+                .as_boolean(),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn confirm_and_prompt_resume_with_typed_results() {
+        let mut runtime = JsRuntime::new().unwrap();
+        let controller = runtime.javascript_dialog_controller();
+        let mut evaluation = Box::pin(runtime.eval_async(
+            "const confirmed = confirm('Continue?');\n             const name = prompt('Name', 'Ada');\n             `${confirmed}:${name}`",
+        ));
+        let waker: &'static Waker = Waker::noop();
+        let mut cx = FutureContext::from_waker(waker);
+
+        let confirm = poll_until_dialog(evaluation.as_mut(), &controller, &mut cx);
+        assert_eq!(confirm.kind, JavaScriptDialogKind::Confirm);
+        assert_eq!(confirm.message, "Continue?");
+        assert_eq!(confirm.default_prompt, None);
+        controller.handle(confirm.id, false, None).unwrap();
+
+        let prompt = poll_until_dialog(evaluation.as_mut(), &controller, &mut cx);
+        assert_eq!(prompt.kind, JavaScriptDialogKind::Prompt);
+        assert_eq!(prompt.message, "Name");
+        assert_eq!(prompt.default_prompt.as_deref(), Some("Ada"));
+        controller
+            .handle(prompt.id, true, Some("Grace".to_string()))
+            .unwrap();
+
+        let result = poll_until_ready(evaluation.as_mut(), &mut cx).unwrap();
+        assert_eq!(
+            result.as_string().unwrap().to_std_string_escaped(),
+            "false:Grace"
+        );
+    }
+
+    #[test]
+    fn dismissed_prompt_returns_null_and_dropped_eval_clears_dialog() {
+        let mut runtime = JsRuntime::new().unwrap();
+        let controller = runtime.javascript_dialog_controller();
+        let mut evaluation = Box::pin(runtime.eval_async("prompt('Name', 'Ada') === null"));
+        let waker: &'static Waker = Waker::noop();
+        let mut cx = FutureContext::from_waker(waker);
+
+        let prompt = poll_until_dialog(evaluation.as_mut(), &controller, &mut cx);
+        controller.handle(prompt.id, false, None).unwrap();
+        assert_eq!(
+            poll_until_ready(evaluation.as_mut(), &mut cx)
+                .unwrap()
+                .as_boolean(),
+            Some(true)
+        );
+        drop(evaluation);
+
+        let mut cancelled = Box::pin(runtime.eval_async("alert('Cancelled')"));
+        let dialog = poll_until_dialog(cancelled.as_mut(), &controller, &mut cx);
+        drop(cancelled);
+        assert_eq!(controller.pending(), None);
+        assert_eq!(
+            controller.handle(dialog.id, true, None),
+            Err(JavaScriptDialogError::NoPendingDialog)
+        );
+        assert_eq!(runtime.eval("1 + 1").unwrap().as_number(), Some(2.0));
+    }
+
+    #[test]
+    fn synchronous_dialog_attempt_is_rejected_without_leaking_state() {
+        let mut runtime = JsRuntime::new().unwrap();
+        assert_eq!(
+            runtime
+                .eval("[alert.length, confirm.length, prompt.length].join(',')")
+                .unwrap()
+                .as_string()
+                .unwrap()
+                .to_std_string_escaped(),
+            "1,1,2"
+        );
+
+        assert!(runtime.eval("alert('cannot block sync eval')").is_err());
+        assert_eq!(runtime.pending_javascript_dialog(), None);
+        assert_eq!(runtime.eval("6 * 7").unwrap().as_number(), Some(42.0));
     }
 
     #[test]

@@ -6712,9 +6712,27 @@
     }
     Promise.resolve().then(() => callback());
   };
-  globalThis.alert = function() {};
-  globalThis.confirm = function() { return false; };
-  globalThis.prompt = function() { return null; };
+  globalThis.alert = function alert(message) {
+    return __omoikane_open_javascript_dialog(
+      "alert",
+      message === undefined ? "" : String(message),
+      "",
+    );
+  };
+  globalThis.confirm = function confirm(message) {
+    return __omoikane_open_javascript_dialog(
+      "confirm",
+      message === undefined ? "" : String(message),
+      "",
+    );
+  };
+  globalThis.prompt = function prompt(message, defaultValue) {
+    return __omoikane_open_javascript_dialog(
+      "prompt",
+      message === undefined ? "" : String(message),
+      defaultValue === undefined ? "" : String(defaultValue),
+    );
+  };
   globalThis.innerWidth = 1280;
   globalThis.innerHeight = 720;
   globalThis.outerWidth = 1280;
