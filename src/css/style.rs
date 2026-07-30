@@ -961,8 +961,9 @@ enum DeclarationValidation {
 /// Validates a resolved declaration value against the property's grammar.
 ///
 /// This is the single extension point for per-property value validation. Only
-/// `cursor` is validated today; other properties fall through unchanged. To add
-/// a property, match its name here and return [`DeclarationValidation::Valid`] /
+/// Properties with syntax or normalization requirements are validated here;
+/// properties without a dedicated branch fall through unchanged. To add a
+/// property, match its name and return [`DeclarationValidation::Valid`] /
 /// [`DeclarationValidation::Invalid`].
 fn validate_declaration(name: &str, value: &Value) -> DeclarationValidation {
     if name.eq_ignore_ascii_case("position") {
