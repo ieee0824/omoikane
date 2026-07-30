@@ -1717,25 +1717,8 @@ fn translate_layout_for_scroll(
     containing_block: Option<Rect>,
 ) {
     let (scroll_offset, scroll_geometry) = if layout.is_scroll_container() {
-        let overflow_size = layout.scrollable_overflow();
-        let (stored_x, stored_y) = layout.node.scroll_offset();
-        let content = layout.dimensions.content;
-        let padding = layout.dimensions.padding;
-        let max_x =
-            (overflow_size.0 - (content.width + padding.left + padding.right)).max(0.0);
-        let max_y =
-            (overflow_size.1 - (content.height + padding.top + padding.bottom)).max(0.0);
-        let offset = (
-            stored_x.clamp(0.0, max_x),
-            stored_y.clamp(0.0, max_y),
-        );
-        (
-            offset,
-            Some(crate::layout::PaintScrollGeometry {
-                offset,
-                overflow_size,
-            }),
-        )
+        let geometry = layout.paint_scroll_geometry();
+        (geometry.offset, Some(geometry))
     } else {
         ((0.0, 0.0), None)
     };
@@ -4265,12 +4248,9 @@ fn paint_background_images_for_box(
         if background_attachment(&layer_style) == BackgroundAttachment::Local
             && layout.is_scroll_container()
         {
-            let geometry = layout.paint_scroll.unwrap_or_else(|| {
-                crate::layout::PaintScrollGeometry {
-                    offset: layout.scroll_offset(),
-                    overflow_size: layout.scrollable_overflow(),
-                }
-            });
+            let geometry = layout
+                .paint_scroll
+                .unwrap_or_else(|| layout.paint_scroll_geometry());
             let extra_width = (geometry.overflow_size.0 - padding_box.width).max(0.0);
             let extra_height = (geometry.overflow_size.1 - padding_box.height).max(0.0);
             origin.x -= geometry.offset.0;

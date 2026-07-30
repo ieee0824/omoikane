@@ -734,6 +734,25 @@ impl LayoutBox {
         let (max_x, max_y) = self.max_scroll_offset();
         (x.clamp(0.0, max_x), y.clamp(0.0, max_y))
     }
+
+    /// Computes the paint-time scroll snapshot with a single overflow walk.
+    pub(crate) fn paint_scroll_geometry(&self) -> PaintScrollGeometry {
+        let overflow_size = self.scrollable_overflow();
+        let (stored_x, stored_y) = self.node.scroll_offset();
+        let content = self.dimensions.content;
+        let padding = self.dimensions.padding;
+        let max_x =
+            (overflow_size.0 - (content.width + padding.left + padding.right)).max(0.0);
+        let max_y =
+            (overflow_size.1 - (content.height + padding.top + padding.bottom)).max(0.0);
+        PaintScrollGeometry {
+            offset: (
+                stored_x.clamp(0.0, max_x),
+                stored_y.clamp(0.0, max_y),
+            ),
+            overflow_size,
+        }
+    }
 }
 
 /// Expands `max_right` / `max_bottom` to enclose the border boxes of `boxes` and
