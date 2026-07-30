@@ -5266,6 +5266,26 @@ fn background_clip_resolves_initial_unset_and_inherit() {
     );
 }
 
+#[test]
+fn invalid_conic_angle_syntax_drops_the_whole_declaration() {
+    for invalid in [
+        "conic-gradient(from to right, red, blue)",
+        "conic-gradient(red to right, blue)",
+        "conic-gradient(red, to right, blue)",
+    ] {
+        assert_eq!(
+            image_computed_keyword(
+                &format!(
+                    "background-image: linear-gradient(red, red); background-image: {invalid};"
+                ),
+                "background-image",
+            ),
+            "linear-gradient(red, red)",
+            "accepted {invalid}",
+        );
+    }
+}
+
 /// Both properties are exposed with their initial values even when nothing
 /// declares them, so getComputedStyle can serialize them (Firefox 152: `fill`
 /// and `50% 50%`).

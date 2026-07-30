@@ -515,10 +515,29 @@ fn parse_number_with_unit(value: &str) -> Option<GradientLength> {
 
 fn parse_angle(value: &str) -> Option<f32> {
     let value = value.trim().to_ascii_lowercase();
-    parse_gradient_direction(&value).or_else(|| {
-        let value = value.as_str();
-        (value == "0").then_some(0.0)
-    })
+    let finite = |number: &str| number.parse::<f32>().ok().filter(|value| value.is_finite());
+    if value == "0" {
+        return Some(0.0);
+    }
+    if let Some(number) = value.strip_suffix("deg") {
+        return finite(number);
+    }
+    if let Some(number) = value.strip_suffix("turn") {
+        return finite(number)
+            .map(|turns| turns * 360.0)
+            .filter(|value| value.is_finite());
+    }
+    if let Some(number) = value.strip_suffix("grad") {
+        return finite(number)
+            .map(|gradians| gradians * 0.9)
+            .filter(|value| value.is_finite());
+    }
+    if let Some(number) = value.strip_suffix("rad") {
+        return finite(number)
+            .map(f32::to_degrees)
+            .filter(|value| value.is_finite());
+    }
+    None
 }
 
 fn top_level_words(value: &str) -> Vec<&str> {
@@ -1368,6 +1387,9 @@ mod gradient_tests {
         for value in [
             "conic-gradient(red 10px, blue)",
             "conic-gradient(red, 10px, blue)",
+            "conic-gradient(from to right, red, blue)",
+            "conic-gradient(red to right, blue)",
+            "conic-gradient(red, to right, blue)",
         ] {
             assert!(parse_gradient(value).is_none(), "accepted {value}");
         }
@@ -1375,6 +1397,8 @@ mod gradient_tests {
             "conic-gradient(red 25%, blue 1turn)",
             "conic-gradient(red, 90deg, blue)",
             "conic-gradient(red, 25%, blue)",
+            "conic-gradient(from 1rad, red 100grad, 150grad, blue 0.5turn)",
+            "conic-gradient(from 0, red 0, blue 1turn)",
         ] {
             assert!(parse_gradient(value).is_some(), "rejected {value}");
         }

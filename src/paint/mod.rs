@@ -2904,20 +2904,63 @@ fn paint_background_image_rounded(
         paint_prepared_background_image(canvas, style, rect, clip, viewport, &background);
         return;
     }
+    let Some(mut surface_bounds) = normalize_rect(rounded_rect) else {
+        return;
+    };
+    if let Some(clip) = clip {
+        let Some(clipped) = intersect(surface_bounds, clip) else {
+            return;
+        };
+        surface_bounds = clipped;
+    }
+    let canvas_bounds = Rect {
+        x: 0.0,
+        y: 0.0,
+        width: canvas.width as f32,
+        height: canvas.height as f32,
+    };
+    let Some(surface_bounds) = intersect(surface_bounds, canvas_bounds) else {
+        return;
+    };
+    let x0 = surface_bounds.x.floor().max(0.0) as u32;
+    let y0 = surface_bounds.y.floor().max(0.0) as u32;
+    let x1 = (surface_bounds.x + surface_bounds.width)
+        .ceil()
+        .min(canvas.width as f32) as u32;
+    let y1 = (surface_bounds.y + surface_bounds.height)
+        .ceil()
+        .min(canvas.height as f32) as u32;
+    let surface_width = x1.saturating_sub(x0);
+    let surface_height = y1.saturating_sub(y0);
+    if surface_width == 0 || surface_height == 0 {
+        return;
+    }
     #[cfg(test)]
     BACKGROUND_IMAGE_SURFACE_PIXELS.with(|pixels| {
-        pixels.set(pixels.get() + u64::from(canvas.width) * u64::from(canvas.height));
+        pixels.set(
+            pixels.get() + u64::from(surface_width) * u64::from(surface_height),
+        );
     });
-    let mut layer = Canvas::new(canvas.width, canvas.height);
-    paint_prepared_background_image(&mut layer, style, rect, clip, viewport, &background);
+    let offset_x = x0 as f32;
+    let offset_y = y0 as f32;
+    let translate = |rect: Rect| Rect {
+        x: rect.x - offset_x,
+        y: rect.y - offset_y,
+        ..rect
+    };
+    let mut layer = Canvas::new(surface_width, surface_height);
+    paint_prepared_background_image(
+        &mut layer,
+        style,
+        translate(rect),
+        clip.map(translate),
+        translate(viewport),
+        &background,
+    );
     let Some(area) = normalize_rect(rounded_rect) else {
         return;
     };
     let (tl, tr, br, bl) = radii;
-    let x0 = area.x.floor().max(0.0) as u32;
-    let y0 = area.y.floor().max(0.0) as u32;
-    let x1 = (area.x + area.width).ceil().min(canvas.width as f32) as u32;
-    let y1 = (area.y + area.height).ceil().min(canvas.height as f32) as u32;
     for y in y0..y1 {
         for x in x0..x1 {
             if !point_in_rounded_rect(
@@ -2934,14 +2977,20 @@ fn paint_background_image_rounded(
             ) {
                 continue;
             }
-            let index = ((y * canvas.width + x) * 4) as usize;
+            let source_x = x - x0;
+            let source_y = y - y0;
+            let source_index = ((source_y * surface_width + source_x) * 4) as usize;
+            let destination_index = ((y * canvas.width + x) * 4) as usize;
             let color = Color {
-                r: layer.pixels[index],
-                g: layer.pixels[index + 1],
-                b: layer.pixels[index + 2],
-                a: layer.pixels[index + 3],
+                r: layer.pixels[source_index],
+                g: layer.pixels[source_index + 1],
+                b: layer.pixels[source_index + 2],
+                a: layer.pixels[source_index + 3],
             };
-            blend_pixel(&mut canvas.pixels[index..index + 4], color);
+            blend_pixel(
+                &mut canvas.pixels[destination_index..destination_index + 4],
+                color,
+            );
         }
     }
 }

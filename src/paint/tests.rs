@@ -5662,6 +5662,77 @@ fn rounded_box_without_paintable_background_image_skips_surface_allocation() {
 }
 
 #[test]
+fn rounded_background_surface_is_local_to_the_visible_clip() {
+    let element = NodeHandle::element("div");
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(&format!(
+            "div {{ background-image: url(\"{}\"); background-repeat: no-repeat; \
+             background-attachment: fixed; background-position-x: 8px; \
+             background-position-y: 7px; }}",
+            red_pixel_data_uri()
+        ))
+        .unwrap(),
+    );
+    let style = resolver.computed_style(&element);
+    let mut canvas = Canvas::new(40, 40);
+    let rounded_rect = Rect {
+        x: 10.0,
+        y: 12.0,
+        width: 8.0,
+        height: 6.0,
+    };
+    let clip = Rect {
+        x: 12.0,
+        y: 13.0,
+        width: 4.0,
+        height: 3.0,
+    };
+    let viewport = Rect {
+        x: 5.0,
+        y: 7.0,
+        width: 30.0,
+        height: 30.0,
+    };
+
+    take_background_image_surface_pixels();
+    paint_background_image_rounded(
+        &mut canvas,
+        &style,
+        rounded_rect,
+        Some(clip),
+        viewport,
+        rounded_rect,
+        (2.0, 2.0, 2.0, 2.0),
+    );
+
+    assert_eq!(take_background_image_surface_pixels(), 12);
+    assert_eq!(canvas.pixel(13, 14), Some(Color::rgb(255, 0, 0)));
+    assert_eq!(canvas.pixel(11, 14).unwrap().a, 0, "left of clip");
+    assert_eq!(canvas.pixel(16, 14).unwrap().a, 0, "right of clip");
+    assert_eq!(canvas.pixel(12, 12).unwrap().a, 0, "above clip");
+}
+
+#[test]
+fn rounded_background_surface_uses_small_box_area_not_viewport_area() {
+    take_background_image_surface_pixels();
+    let canvas = paint_clip_path_document(
+        "html, body { margin: 0; } .target { margin-left: 7px; margin-top: 5px; \
+         width: 10px; height: 8px; border-radius: 3px; \
+         background-image: linear-gradient(red, red); }",
+        "<div class='target'></div>",
+        128.0,
+        96.0,
+    );
+    assert_eq!(take_background_image_surface_pixels(), 80);
+    assert!((0..96).any(|y| {
+        (7..17).any(|x| canvas.pixel(x, y) == Some(Color::rgb(255, 0, 0)))
+    }));
+    assert_eq!(canvas.pixel(0, 0).unwrap().a, 0);
+}
+
+#[test]
 fn uniform_pill_border_paints_rounded_corner_arc() {
     let canvas = paint_clip_path_document(
         ".target { width: 40px; height: 20px; border: 1px solid red; \
