@@ -166,6 +166,183 @@ fn shadow_host_encapsulation_order_reverses_for_important_rules() {
 }
 
 #[test]
+fn document_part_rules_match_only_exposed_names_on_the_selected_host() {
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    document.append_child(body.clone());
+
+    let selected_host = NodeHandle::element("x-card");
+    selected_host.set_attribute("class", "selected");
+    body.append_child(selected_host.clone());
+    let selected_root = selected_host.attach_shadow(ShadowRootMode::Closed).unwrap();
+    let exposed = NodeHandle::element("span");
+    exposed.set_attribute("part", "label accent");
+    exposed.set_attribute("class", "private-class");
+    let private = NodeHandle::element("span");
+    private.set_attribute("class", "private-class");
+    selected_root.append_child(exposed.clone());
+    selected_root.append_child(private.clone());
+
+    let other_host = NodeHandle::element("x-card");
+    body.append_child(other_host.clone());
+    let other_root = other_host.attach_shadow(ShadowRootMode::Open).unwrap();
+    let other = NodeHandle::element("span");
+    other.set_attribute("part", "label");
+    other_root.append_child(other.clone());
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            ".private-class { width: 99px; } \
+             x-card.selected::part(label) { width: 11px; } \
+             x-card.selected::part(accent) { height: 12px; }",
+        )
+        .unwrap(),
+    );
+    resolver.add_scoped_stylesheet(
+        Origin::Author,
+        parse_stylesheet(":host::part(label) { min-height: 13px; }").unwrap(),
+        selected_root,
+    );
+
+    assert_eq!(
+        resolver.computed_style(&exposed).get("width"),
+        Some(&ComputedValue::Px(11.0))
+    );
+    assert_eq!(
+        resolver.computed_style(&exposed).get("height"),
+        Some(&ComputedValue::Px(12.0)),
+        "every token in the part attribute exposes the element"
+    );
+    assert_eq!(
+        resolver.computed_style(&exposed).get("min-height"),
+        Some(&ComputedValue::Px(13.0)),
+        ":host::part() exposes parts to rules in the owning shadow root"
+    );
+    assert_eq!(resolver.computed_style(&private).get("width"), None);
+    assert_eq!(
+        resolver.computed_style(&other).get("width"),
+        None,
+        "the selector prefix must match the element's own host"
+    );
+}
+
+#[test]
+fn nested_exportparts_forwards_same_name_renames_and_ignores_invalid_entries() {
+    let document = NodeHandle::document();
+    let outer_host = NodeHandle::element("x-outer");
+    document.append_child(outer_host.clone());
+    let outer_root = outer_host.attach_shadow(ShadowRootMode::Open).unwrap();
+    let middle_host = NodeHandle::element("x-middle");
+    middle_host.set_attribute(
+        "exportparts",
+        "direct, inner: renamed, broken:, :also-broken, extra words, inner: second",
+    );
+    outer_root.append_child(middle_host.clone());
+    let middle_root = middle_host.attach_shadow(ShadowRootMode::Closed).unwrap();
+    let inner_host = NodeHandle::element("x-inner");
+    inner_host.set_attribute("exportparts", "seed: direct, seed: inner, hidden");
+    middle_root.append_child(inner_host.clone());
+    let inner_root = inner_host.attach_shadow(ShadowRootMode::Open).unwrap();
+    let leaf = NodeHandle::element("span");
+    leaf.set_attribute("part", "seed hidden");
+    inner_root.append_child(leaf.clone());
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "x-outer::part(direct) { width: 1px; } \
+             x-outer::part(renamed) { height: 2px; } \
+             x-outer::part(second) { min-width: 3px; } \
+             x-outer::part(inner) { max-width: 4px; } \
+             x-outer::part(hidden) { margin-left: 5px; }",
+        )
+        .unwrap(),
+    );
+    let style = resolver.computed_style(&leaf);
+    assert_eq!(style.get("width"), Some(&ComputedValue::Px(1.0)));
+    assert_eq!(style.get("height"), Some(&ComputedValue::Px(2.0)));
+    assert_eq!(style.get("min-width"), Some(&ComputedValue::Px(3.0)));
+    assert_eq!(style.get("max-width"), None, "renaming does not retain the inner name");
+    assert_eq!(style.get("margin-left"), None, "unexported names do not cross the nested root");
+}
+
+#[test]
+fn part_cascade_uses_shadow_encapsulation_order() {
+    let document = NodeHandle::document();
+    let host = NodeHandle::element("x-card");
+    document.append_child(host.clone());
+    let root = host.attach_shadow(ShadowRootMode::Open).unwrap();
+    let label = NodeHandle::element("span");
+    label.set_attribute("class", "label");
+    label.set_attribute("part", "label");
+    label.set_attribute(
+        "style",
+        "width: 15px; height: 15px !important; min-width: 15px !important",
+    );
+    root.append_child(label.clone());
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "x-card::part(label) { width: 20px; height: 20px !important; min-width: 20px !important; }",
+        )
+        .unwrap(),
+    );
+    resolver.add_scoped_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            ".label { width: 10px; height: 10px; min-width: 10px !important; }",
+        )
+        .unwrap(),
+        root,
+    );
+    let style = resolver.computed_style(&label);
+    assert_eq!(
+        style.get("width"),
+        Some(&ComputedValue::Px(20.0)),
+        "outer normal rules win over shadow and inline normal declarations"
+    );
+    assert_eq!(
+        style.get("height"),
+        Some(&ComputedValue::Px(15.0)),
+        "inner inline important declarations win over outer important rules"
+    );
+    assert_eq!(
+        style.get("min-width"),
+        Some(&ComputedValue::Px(15.0)),
+        "inline wins within the same inner tree scope"
+    );
+
+    let bare_document = NodeHandle::document();
+    let bare_host = NodeHandle::element("x-bare");
+    bare_document.append_child(bare_host.clone());
+    let bare_root = bare_host.attach_shadow(ShadowRootMode::Closed).unwrap();
+    let bare_part = NodeHandle::element("span");
+    bare_part.set_attribute("part", "label");
+    bare_part.set_attribute("style", "width: 5px; height: 5px !important");
+    bare_root.append_child(bare_part.clone());
+    let mut bare_resolver = StyleResolver::new();
+    bare_resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "x-bare::part(label) { width: 6px; height: 6px !important; }",
+        )
+        .unwrap(),
+    );
+    let bare_style = bare_resolver.computed_style(&bare_part);
+    assert_eq!(bare_style.get("width"), Some(&ComputedValue::Px(6.0)));
+    assert_eq!(
+        bare_style.get("height"),
+        Some(&ComputedValue::Px(5.0)),
+        "inline declarations retain their inner context without a shadow stylesheet"
+    );
+}
+
+#[test]
 fn applies_origin_importance_specificity_and_source_order() {
     let (_document, _body, title, _html) = sample_tree();
     let mut resolver = StyleResolver::new();

@@ -13,7 +13,7 @@ use super::matcher::{
 };
 
 use super::{
-    Combinator, Declaration, MediaQuery, PseudoElement, Rule, Selector, SelectorPart,
+    Combinator, CssToken, Declaration, MediaQuery, PseudoElement, Rule, Selector, SelectorPart,
     SimpleSelector, Specificity, Stylesheet, Value, evaluate_media_query, parse_media_query_list,
     specificity,
 };
@@ -541,6 +541,7 @@ impl StyleResolver {
             if input.origin == Origin::Author
                 && stylesheet_scope.root.is_none()
                 && node.containing_shadow_root().is_some()
+                && !index.has_part_selector
             {
                 continue;
             }
@@ -1529,11 +1530,13 @@ struct StylesheetRuleIndex {
     fallback: Vec<usize>,
     declaration_offsets: Vec<usize>,
     total_declarations: usize,
+    has_part_selector: bool,
 }
 
 impl StylesheetRuleIndex {
     fn build(stylesheet: &Stylesheet) -> Self {
         let mut index = Self::default();
+        index.has_part_selector = rules_contain_part_selector(&stylesheet.rules);
         let mut offset = 0;
         for (rule_index, rule) in stylesheet.rules.iter().enumerate() {
             index.declaration_offsets.push(offset);
@@ -1661,9 +1664,32 @@ fn selector_uses_shadow_pseudo(selector: &super::Selector) -> bool {
                     || functional_selector(name)
                         .is_some_and(|(function, _)| function.eq_ignore_ascii_case("host"))
             }
-            SimpleSelector::PseudoElement(name) => functional_selector(name)
-                .is_some_and(|(function, _)| function.eq_ignore_ascii_case("slotted")),
+            SimpleSelector::PseudoElement(name) => functional_selector(name).is_some_and(
+                |(function, _)| {
+                    function.eq_ignore_ascii_case("slotted")
+                        || function.eq_ignore_ascii_case("part")
+                },
+            ),
             _ => false,
+        })
+    })
+}
+
+fn rules_contain_part_selector(rules: &[Rule]) -> bool {
+    rules.iter().any(|rule| match rule {
+        Rule::Style(rule) => rule.selectors.iter().any(selector_uses_part_pseudo),
+        Rule::At(rule) => rule
+            .block
+            .as_deref()
+            .is_some_and(rules_contain_part_selector),
+        Rule::FontFace(_) => false,
+    })
+}
+
+fn selector_uses_part_pseudo(selector: &Selector) -> bool {
+    selector.parts.iter().any(|part| {
+        part.simples.iter().any(|simple| {
+            matches!(simple, SimpleSelector::PseudoElement(name) if functional_selector(name).is_some_and(|(function, _)| function.eq_ignore_ascii_case("part")))
         })
     })
 }
@@ -1680,6 +1706,10 @@ fn matches_shadow_scoped_selector(
     pseudo: Option<PseudoElement>,
     cache: &mut SelectorMatchCache,
 ) -> bool {
+    if selector_uses_part_pseudo(selector) {
+        return pseudo.is_none()
+            && matches_part_selector(node, selector, Some(scope), cache);
+    }
     if selector.parts.iter().any(|part| {
         part.simples.iter().any(|simple| {
             matches!(simple, SimpleSelector::PseudoClass(name) if name.eq_ignore_ascii_case("host") || functional_selector(name).is_some_and(|(function, _)| function.eq_ignore_ascii_case("host")))
@@ -2099,7 +2129,12 @@ fn collect_rule_candidates(
                             }
                         }
                     } else {
-                        let matches = if let Some(scope) = shadow_scope {
+                        let matches = if origin == Origin::Author
+                            && shadow_scope.is_none()
+                            && node.containing_shadow_root().is_some()
+                        {
+                            matches_part_selector(node, selector, None, selector_cache)
+                        } else if let Some(scope) = shadow_scope {
                             matches_shadow_scoped_selector(
                                 node,
                                 selector,
@@ -2248,6 +2283,127 @@ fn collect_rule_candidates(
             // @font-face rules are handled by the font loading layer, not style resolution.
             Rule::FontFace(_) => {}
         }
+    }
+}
+
+/// Matches an outer-tree `::part()` selector against a shadow-tree element.
+///
+/// Each entry in the exposure chain pairs the host visible in a tree scope
+/// with the names exported into that scope. A nested host only forwards names
+/// listed by its own `exportparts` attribute, so ordinary document selectors
+/// can never pierce an unexported shadow boundary.
+fn matches_part_selector(
+    node: &NodeHandle,
+    selector: &Selector,
+    stylesheet_scope: Option<&NodeHandle>,
+    cache: &mut SelectorMatchCache,
+) -> bool {
+    let Some((part_name, host_selector)) = part_selector_components(selector) else {
+        return false;
+    };
+    let Some(mut root) = node.containing_shadow_root() else {
+        return false;
+    };
+    let mut exposed_names: HashSet<String> = node
+        .get_attribute("part")
+        .into_iter()
+        .flat_map(|value| {
+            value
+                .split_ascii_whitespace()
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    if exposed_names.is_empty() {
+        return false;
+    }
+
+    loop {
+        let Some(host) = root.shadow_host() else {
+            return false;
+        };
+        let visible_in_stylesheet_scope = match stylesheet_scope {
+            Some(scope) => &root == scope || host.containing_shadow_root().as_ref() == Some(scope),
+            None => host.containing_shadow_root().is_none(),
+        };
+        if visible_in_stylesheet_scope && exposed_names.contains(&part_name) {
+            let host_matches = if let Some(scope) = stylesheet_scope {
+                matches_shadow_scoped_selector(&host, &host_selector, scope, None, cache)
+            } else {
+                matches_selector_with_pseudo_cached(
+                    &host,
+                    &host_selector,
+                    None,
+                    cache,
+                )
+            };
+            if host_matches {
+                return true;
+            }
+        }
+
+        let Some(outer_root) = host.containing_shadow_root() else {
+            return false;
+        };
+        exposed_names = forwarded_part_names(&host, &exposed_names);
+        if exposed_names.is_empty() {
+            return false;
+        }
+        root = outer_root;
+    }
+}
+
+fn part_selector_components(selector: &Selector) -> Option<(String, Selector)> {
+    let mut host_selector = selector.clone();
+    let mut part_name = None;
+    for (part_index, part) in host_selector.parts.iter_mut().enumerate() {
+        part.simples.retain(|simple| {
+            let SimpleSelector::PseudoElement(name) = simple else {
+                return true;
+            };
+            let Some((function, argument)) = functional_selector(name) else {
+                return true;
+            };
+            if !function.eq_ignore_ascii_case("part") {
+                return true;
+            }
+            if part_index + 1 != selector.parts.len() || part_name.is_some() {
+                return true;
+            }
+            part_name = Some(argument.to_string());
+            false
+        });
+    }
+    let part_name = part_name?;
+    if host_selector.parts.last()?.simples.is_empty() {
+        host_selector.parts.last_mut()?.simples.push(SimpleSelector::Universal);
+    }
+    Some((part_name, host_selector))
+}
+
+fn forwarded_part_names(host: &NodeHandle, inner_names: &HashSet<String>) -> HashSet<String> {
+    let Some(mapping) = host.get_attribute("exportparts") else {
+        return HashSet::new();
+    };
+    mapping
+        .split(',')
+        .filter_map(parse_exportparts_entry)
+        .filter_map(|(inner, outer)| inner_names.contains(&inner).then_some(outer))
+        .collect()
+}
+
+fn parse_exportparts_entry(entry: &str) -> Option<(String, String)> {
+    let tokens: Vec<CssToken> = super::tokenize(entry)
+        .ok()?
+        .into_iter()
+        .filter(|token| *token != CssToken::Whitespace)
+        .collect();
+    match tokens.as_slice() {
+        [CssToken::Ident(name)] => Some((name.clone(), name.clone())),
+        [CssToken::Ident(inner), CssToken::Colon, CssToken::Ident(outer)] => {
+            Some((inner.clone(), outer.clone()))
+        }
+        _ => None,
     }
 }
 
@@ -2622,14 +2778,30 @@ fn encapsulation_rank(candidate: &Candidate) -> usize {
 }
 
 fn tree_scope_order(stylesheets: &[StylesheetScope], node: &NodeHandle) -> usize {
-    let Some(scope) = node.containing_shadow_root() else {
+    let Some(mut scope) = node.containing_shadow_root() else {
         return 0;
     };
-    stylesheets
-        .iter()
-        .find(|input| input.root.as_ref() == Some(&scope))
-        .map(|input| input.encapsulation_order)
-        .unwrap_or(0)
+    let mut unregistered_inner_scopes = 0usize;
+    loop {
+        if let Some(order) = stylesheets
+            .iter()
+            .find(|input| input.root.as_ref() == Some(&scope))
+            .map(|input| input.encapsulation_order)
+        {
+            return order.saturating_add(unregistered_inner_scopes);
+        }
+        // A ShadowRoot without a <style> element has no StylesheetScope entry,
+        // but inline declarations in it still occupy an inner tree context.
+        // Anchor at the nearest registered ancestor and move inward from it.
+        unregistered_inner_scopes += 1;
+        let Some(outer_scope) = scope
+            .shadow_host()
+            .and_then(|host| host.containing_shadow_root())
+        else {
+            return unregistered_inner_scopes;
+        };
+        scope = outer_scope;
+    }
 }
 
 fn log_unsupported_css_if_enabled(property: &str, value: &Value) {
