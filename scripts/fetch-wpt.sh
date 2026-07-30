@@ -13,8 +13,8 @@ git_wpt sparse-checkout set "/resources/" "/html/resources/common.js" "/shadow-d
 git_wpt sparse-checkout add "/css/css-shadow/shadow-cascade-order-001.html"
 git_wpt sparse-checkout add \
   "/webmessaging/Channel_postMessage_event_properties.any.js" \
-  "/webmessaging/MessagePort_initial_disabled.any.js" \
-  "/webmessaging/MessagePort_onmessage_start.any.js"
+  "/webmessaging/Channel_postMessage_DataCloneErr.any.js" \
+  "/webmessaging/MessageEvent.any.js"
 git_wpt sparse-checkout add "/css/selectors/is-where-error-recovery.html"
 git_wpt sparse-checkout add "/css/selectors/has-matches-to-uninserted-elements.html"
 git_wpt sparse-checkout add "/css/css-conditional/js/CSS-supports-L3.html"
