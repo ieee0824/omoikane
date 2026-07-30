@@ -18,8 +18,9 @@ use crate::dom::{Node, NodeHandle, NodeType};
 use crate::html::{TreeBuilder, decode_html_response};
 use crate::http::{Client, HttpRequest, Method};
 use crate::js::{
-    JavaScriptDialog, JavaScriptDialogController, JavaScriptDialogError, JavaScriptDialogKind,
-    JsRuntime, NavigationRequest, StorageManager,
+    CompletedPageTask, JavaScriptDialog, JavaScriptDialogController, JavaScriptDialogError,
+    JavaScriptDialogKind, JsRuntime, NavigationRequest, OwnedPageTask, PageTaskError,
+    StorageManager,
 };
 
 const WEBSOCKET_GUID: &str = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
@@ -694,6 +695,26 @@ struct SessionHistoryEntry {
     state_json: String,
 }
 
+/// Document metadata held by the CDP host while its new runtime is owned by a
+/// suspendable page-startup task.
+pub(crate) struct PendingDocumentCommit {
+    url: String,
+    html: String,
+    generation: u64,
+    history_commit: NavigationCommit,
+    loader_id: String,
+    status: u16,
+}
+
+pub(crate) enum PreparedPageNavigation {
+    Complete(Value),
+    Pending {
+        task: OwnedPageTask,
+        commit: PendingDocumentCommit,
+        response: Value,
+    },
+}
+
 impl CdpSession {
     /// Creates a new session with an empty `about:blank` document.
     pub fn new() -> Result<Self, String> {
@@ -866,6 +887,77 @@ impl CdpSession {
         let result = self.navigate_to(&url, commit)?;
         self.drive_navigation_requests()?;
         Ok(result)
+    }
+
+    pub(crate) fn prepare_page_navigate(
+        &mut self,
+        params: &Value,
+    ) -> Result<PreparedPageNavigation, JsonRpcError> {
+        let url = require_string(params, "url")?;
+        let commit = if self.current_url == "about:blank"
+            && self.history_entries.len() == 1
+            && self.history_index == 0
+        {
+            NavigationCommit::Replace
+        } else {
+            NavigationCommit::Push
+        };
+        if is_fragment_only_navigation(&self.current_url, &url) {
+            return self
+                .navigate_to(&url, commit)
+                .map(PreparedPageNavigation::Complete);
+        }
+        self.prepare_page_navigation_request(&url, commit)
+    }
+
+    pub(crate) fn prepare_page_reload(
+        &mut self,
+    ) -> Result<PreparedPageNavigation, JsonRpcError> {
+        self.prepare_page_navigation_request(&self.current_url.clone(), NavigationCommit::Reload)
+    }
+
+    fn prepare_page_navigation_request(
+        &mut self,
+        url: &str,
+        history_commit: NavigationCommit,
+    ) -> Result<PreparedPageNavigation, JsonRpcError> {
+        let loader_id = self.next_loader_id.to_string();
+        self.next_loader_id += 1;
+        self.emit(
+            "Network.requestWillBeSent",
+            json!({
+                "requestId": loader_id,
+                "documentURL": url,
+                "request": { "url": url, "method": "GET" },
+                "type": "Document",
+            }),
+        );
+        let (html, status, document_url) = self
+            .load_page_request(url, Method::Get, None, None)
+            .map_err(|message| JsonRpcError {
+                code: -32000,
+                message,
+            })?;
+        let (history_length, history_state) = self.prospective_history_state(history_commit);
+        let (task, mut commit) = self
+            .prepare_document_page_task(
+                &document_url,
+                &html,
+                history_length,
+                &history_state,
+            )
+            .map_err(|message| JsonRpcError {
+                code: -32000,
+                message,
+            })?;
+        commit.history_commit = history_commit;
+        commit.loader_id = loader_id.clone();
+        commit.status = status;
+        Ok(PreparedPageNavigation::Pending {
+            task,
+            commit,
+            response: json!({ "frameId": self.frame_id, "loaderId": loader_id }),
+        })
     }
 
     fn navigate_to(
@@ -1579,6 +1671,107 @@ impl CdpSession {
         Ok(())
     }
 
+    /// Builds a replacement document and moves its runtime into a suspendable
+    /// startup task without disturbing the currently committed page.
+    pub(crate) fn prepare_document_page_task(
+        &mut self,
+        url: &str,
+        html: &str,
+        history_length: usize,
+        history_state_json: &str,
+    ) -> Result<(OwnedPageTask, PendingDocumentCommit), String> {
+        let document = TreeBuilder::parse(html).document();
+        let mut runtime = JsRuntime::with_document_url_and_storage(
+            document,
+            url,
+            self.storage_manager.clone(),
+            self.storage_session_id,
+        )
+        .map_err(|error| error.to_string())?;
+        runtime.set_user_agent(self.http_client.user_agent().to_string());
+        Self::install_runtime_helpers_on(&mut runtime).map_err(js_error_message)?;
+        runtime
+            .eval(&format!(
+                "__omoikane_sync_history({history_length}, {history_state_json:?})"
+            ))
+            .and_then(|_| runtime.run_jobs())
+            .map_err(js_error_message)?;
+
+        let generation = self.document_generation.saturating_add(1);
+        let base_url = url.parse::<crate::http::Url>().ok();
+        let task = runtime.into_document_page_task(generation, base_url);
+        Ok((
+            task,
+            PendingDocumentCommit {
+                url: url.to_string(),
+                html: html.to_string(),
+                generation,
+                history_commit: NavigationCommit::Replace,
+                loader_id: String::new(),
+                status: 0,
+            },
+        ))
+    }
+
+    /// Installs a runtime returned by a completed page-startup task.
+    ///
+    /// Cancelled and stale tasks leave the currently committed page unchanged.
+    pub(crate) fn commit_document_page_task(
+        &mut self,
+        completed: CompletedPageTask,
+        pending: PendingDocumentCommit,
+    ) -> Result<(), String> {
+        if completed.generation != pending.generation
+            || pending.generation != self.document_generation.saturating_add(1)
+        {
+            return Err("stale page startup task completion".to_string());
+        }
+        if completed.result == Err(PageTaskError::Cancelled) {
+            return Err("page startup task was cancelled".to_string());
+        }
+
+        let runtime = completed.runtime;
+
+        // Teardown is delayed until the replacement runtime has completed its
+        // startup work, so cancellation or startup setup failure keeps the old
+        // document intact.
+        let _ = self.runtime.eval(
+            "window.dispatchEvent(new Event('beforeunload')); \
+             window.dispatchEvent(new Event('pagehide')); \
+             window.dispatchEvent(new Event('unload'));",
+        );
+        let _ = self.runtime.run_jobs();
+
+        self.runtime = runtime;
+        self.mouse_pressed_target = None;
+        self.document_generation = pending.generation;
+        self.current_url = pending.url;
+        self.last_html = pending.html;
+        self.rebuild_node_index();
+        self.commit_history_url(&self.current_url.clone(), pending.history_commit, None);
+        self.emit(
+            "Network.responseReceived",
+            json!({
+                "requestId": pending.loader_id,
+                "type": "Document",
+                "response": {
+                    "url": self.current_url,
+                    "status": pending.status,
+                    "mimeType": "text/html",
+                },
+            }),
+        );
+        self.emit(
+            "Page.frameNavigated",
+            json!({ "frame": { "id": self.frame_id, "url": self.current_url, "mimeType": "text/html" } }),
+        );
+        self.emit(
+            "Page.loadEventFired",
+            json!({ "timestamp": self.next_loader_id }),
+        );
+        Ok(())
+    }
+
     fn install_runtime_helpers(&mut self) -> Result<(), boa_engine::JsError> {
         Self::install_runtime_helpers_on(&mut self.runtime)
     }
@@ -1716,6 +1909,16 @@ struct PendingSessionEvaluation {
     future: SessionEvaluation,
 }
 
+struct PendingPageNavigation {
+    token: DeferredResponseToken,
+    controller: JavaScriptDialogController,
+    page_url: String,
+    opened: Option<JavaScriptDialog>,
+    task: Pin<Box<OwnedPageTask>>,
+    commit: PendingDocumentCommit,
+    response: Value,
+}
+
 enum BrowserSessionAction {
     Notify(&'static str, Value),
     Complete(DeferredResponseToken, Result<Value, JsonRpcError>),
@@ -1724,6 +1927,7 @@ enum BrowserSessionAction {
 struct BrowserSessionState {
     session: Option<CdpSession>,
     pending: Option<PendingSessionEvaluation>,
+    pending_page: Option<PendingPageNavigation>,
     actions: Vec<BrowserSessionAction>,
 }
 
@@ -1733,7 +1937,7 @@ impl BrowserSessionState {
         token: DeferredResponseToken,
         params: &Value,
     ) -> Result<CdpMethodResult, JsonRpcError> {
-        if self.pending.is_some() {
+        if self.pending.is_some() || self.pending_page.is_some() {
             return Err(JsonRpcError {
                 code: -32000,
                 message: "A Runtime.evaluate request is already pending".to_string(),
@@ -1788,6 +1992,98 @@ impl BrowserSessionState {
         Ok(CdpMethodResult::Deferred)
     }
 
+    fn begin_page_navigation(
+        &mut self,
+        token: DeferredResponseToken,
+        method: &str,
+        params: &Value,
+    ) -> Result<CdpMethodResult, JsonRpcError> {
+        self.cancel_pending_dialog();
+        if self.pending.is_some() || self.pending_page.is_some() {
+            return Err(JsonRpcError {
+                code: -32000,
+                message: "Browser session is busy".to_string(),
+            });
+        }
+        let session = self.session.as_mut().ok_or(JsonRpcError {
+            code: -32000,
+            message: "Browser session is busy".to_string(),
+        })?;
+        let prepared = if method == "Page.reload" {
+            session.prepare_page_reload()?
+        } else {
+            session.prepare_page_navigate(params)?
+        };
+        let (task, commit, response) = match prepared {
+            PreparedPageNavigation::Complete(response) => {
+                return Ok(CdpMethodResult::Complete(response));
+            }
+            PreparedPageNavigation::Pending {
+                task,
+                commit,
+                response,
+            } => (task, commit, response),
+        };
+        let controller = task.dialog_controller();
+        let page_url = commit.url.clone();
+        self.pending_page = Some(PendingPageNavigation {
+            token,
+            controller,
+            page_url,
+            opened: None,
+            task: Box::pin(task),
+            commit,
+            response,
+        });
+        self.poll_page_navigation();
+        Ok(CdpMethodResult::Deferred)
+    }
+
+    fn poll_page_navigation(&mut self) {
+        for _ in 0..64 {
+            let Some(mut pending) = self.pending_page.take() else {
+                return;
+            };
+            if pending.opened.is_some() {
+                self.pending_page = Some(pending);
+                return;
+            }
+            let waker: &'static Waker = Waker::noop();
+            let mut context = TaskContext::from_waker(waker);
+            match pending.task.as_mut().poll(&mut context) {
+                Poll::Ready(completed) => {
+                    let result = self
+                        .session
+                        .as_mut()
+                        .ok_or_else(|| "Browser session is unavailable".to_string())
+                        .and_then(|session| {
+                            session.commit_document_page_task(completed, pending.commit)
+                        })
+                        .map(|()| pending.response)
+                        .map_err(|message| JsonRpcError {
+                            code: -32000,
+                            message,
+                        });
+                    self.actions
+                        .push(BrowserSessionAction::Complete(pending.token, result));
+                    return;
+                }
+                Poll::Pending => {
+                    if let Some(dialog) = pending.controller.pending() {
+                        self.actions.push(BrowserSessionAction::Notify(
+                            "Page.javascriptDialogOpening",
+                            dialog_opening_params(&dialog, &pending.page_url),
+                        ));
+                        pending.opened = Some(dialog);
+                        self.pending_page = Some(pending);
+                        return;
+                    }
+                    self.pending_page = Some(pending);
+                }
+            }
+        }
+    }
+
     fn poll_evaluation(&mut self) {
         let Some(mut pending) = self.pending.take() else {
             return;
@@ -1830,16 +2126,24 @@ impl BrowserSessionState {
                 })
             })
             .transpose()?;
-        let pending = self.pending.as_mut().ok_or(JsonRpcError {
+        let controller = self
+            .pending
+            .as_ref()
+            .map(|pending| pending.controller.clone())
+            .or_else(|| {
+                self.pending_page
+                    .as_ref()
+                    .map(|pending| pending.controller.clone())
+            })
+            .ok_or(JsonRpcError {
+                code: -32000,
+                message: "No JavaScript dialog is open".to_string(),
+            })?;
+        let dialog = controller.pending().ok_or(JsonRpcError {
             code: -32000,
             message: "No JavaScript dialog is open".to_string(),
         })?;
-        let dialog = pending.controller.pending().ok_or(JsonRpcError {
-            code: -32000,
-            message: "No JavaScript dialog is open".to_string(),
-        })?;
-        pending
-            .controller
+        controller
             .handle(dialog.id, accept, prompt_text.clone())
             .map_err(dialog_error)?;
         let user_input = if dialog.kind == JavaScriptDialogKind::Prompt && accept {
@@ -1853,12 +2157,33 @@ impl BrowserSessionState {
             "Page.javascriptDialogClosed",
             json!({ "result": accept, "userInput": user_input }),
         ));
-        pending.opened = None;
-        self.poll_evaluation();
+        if let Some(pending) = self.pending.as_mut() {
+            pending.opened = None;
+            self.poll_evaluation();
+        } else if let Some(pending) = self.pending_page.as_mut() {
+            pending.opened = None;
+            self.poll_page_navigation();
+        }
         Ok(json!({}))
     }
 
+    fn cancel_pending_page(&mut self) {
+        let Some(pending) = self.pending_page.as_mut() else {
+            return;
+        };
+        if pending.controller.pending().is_some() {
+            self.actions.push(BrowserSessionAction::Notify(
+                "Page.javascriptDialogClosed",
+                json!({ "result": false, "userInput": "" }),
+            ));
+        }
+        pending.opened = None;
+        pending.task.cancel();
+        self.poll_page_navigation();
+    }
+
     fn cancel_pending_dialog(&mut self) {
+        self.cancel_pending_page();
         let Some(pending) = self.pending.as_mut() else {
             return;
         };
@@ -1872,18 +2197,6 @@ impl BrowserSessionState {
         self.poll_evaluation();
     }
 
-    fn dispatch_after_cancel(
-        &mut self,
-        method: &str,
-        params: &Value,
-    ) -> Result<Value, JsonRpcError> {
-        self.cancel_pending_dialog();
-        let session = self.session.as_mut().ok_or(JsonRpcError {
-            code: -32000,
-            message: "Could not cancel pending JavaScript evaluation".to_string(),
-        })?;
-        session.dispatch(method, params.clone())
-    }
 }
 
 /// CDP transport and page-session coordinator with deferred modal-dialog support.
@@ -1902,6 +2215,7 @@ impl BrowserSession {
         let state = Rc::new(RefCell::new(BrowserSessionState {
             session: Some(CdpSession::new()?),
             pending: None,
+            pending_page: None,
             actions: Vec::new(),
         }));
         let mut server = CdpServer::new();
@@ -1916,8 +2230,10 @@ impl BrowserSession {
         });
         for method in ["Page.navigate", "Page.reload"] {
             let method_state = Rc::clone(&state);
-            server.register_method(method, move |params| {
-                method_state.borrow_mut().dispatch_after_cancel(method, params)
+            server.register_deferred_method(method, move |token, params| {
+                method_state
+                    .borrow_mut()
+                    .begin_page_navigation(token, method, params)
             });
         }
         for method in [
@@ -1959,9 +2275,14 @@ impl BrowserSession {
             .ok()
             .is_some_and(|(frame, _)| {
                 frame.opcode == WebSocketOpcode::Close
-                    && self.state.borrow().pending.as_ref().is_some_and(|pending| {
-                        self.server.deferred_response_client(pending.token) == Some(client_id)
-                    })
+                    && {
+                        let state = self.state.borrow();
+                        state.pending.as_ref().is_some_and(|pending| {
+                            self.server.deferred_response_client(pending.token) == Some(client_id)
+                        }) || state.pending_page.as_ref().is_some_and(|pending| {
+                            self.server.deferred_response_client(pending.token) == Some(client_id)
+                        })
+                    }
             });
         if owner_disconnect {
             self.state.borrow_mut().cancel_pending_dialog();
@@ -1983,6 +2304,7 @@ impl BrowserSession {
     }
 
     fn flush_actions(&mut self) -> Result<(), CdpError> {
+        self.state.borrow_mut().poll_page_navigation();
         let actions = std::mem::take(&mut self.state.borrow_mut().actions);
         for action in actions {
             match action {
@@ -2727,6 +3049,134 @@ mod tests {
         assert_eq!(completed[1]["params"]["userInput"], "Grace");
         assert_eq!(completed[2]["id"], 7);
         assert_eq!(completed[2]["result"]["result"]["value"], "Grace");
+    }
+
+    #[test]
+    fn navigation_pumps_startup_and_load_dialogs_before_responding() {
+        let mut session = BrowserSession::new().unwrap();
+        let client = session.accept_upgrade(sample_upgrade_request()).unwrap();
+        browser_request(
+            &mut session,
+            client.client_id,
+            r#"{"jsonrpc":"2.0","id":"nav","method":"Page.navigate","params":{"url":"data:text/html,%3Cscript%3EglobalThis.startupOrder%3D%5B'script-before'%5D%3Balert('startup')%3BstartupOrder.push('script-after')%3BaddEventListener('load'%2C()%3D%3E%7BstartupOrder.push('load-before')%3Balert('load')%3BstartupOrder.push('load-after')%7D)%3C%2Fscript%3E"}}"#,
+        );
+        let opening = browser_payloads(&mut session, client.client_id);
+        assert!(opening.iter().any(|value| {
+            value["method"] == "Page.javascriptDialogOpening"
+                && value["params"]["message"] == "startup"
+        }));
+        assert!(!opening.iter().any(|value| value["id"] == "nav"));
+
+        for expected in ["startup", "load"] {
+            browser_request(
+                &mut session,
+                client.client_id,
+                &json!({
+                    "jsonrpc": "2.0",
+                    "id": format!("handle-{expected}"),
+                    "method": "Page.handleJavaScriptDialog",
+                    "params": { "accept": true },
+                })
+                .to_string(),
+            );
+            let payloads = browser_payloads(&mut session, client.client_id);
+            if expected == "startup" {
+                assert!(payloads.iter().any(|value| {
+                    value["method"] == "Page.javascriptDialogOpening"
+                        && value["params"]["message"] == "load"
+                }), "{payloads:#?}");
+                assert!(!payloads.iter().any(|value| value["id"] == "nav"));
+            } else {
+                assert!(payloads.iter().any(|value| value["id"] == "nav"));
+            }
+        }
+
+        browser_request(
+            &mut session,
+            client.client_id,
+            r#"{"jsonrpc":"2.0","id":"state","method":"Runtime.evaluate","params":{"expression":"startupOrder.join(',')","returnByValue":true}}"#,
+        );
+        let state = browser_payloads(&mut session, client.client_id);
+        assert!(state.iter().any(|value| {
+            value["id"] == "state"
+                && value["result"]["result"]["value"]
+                    == "script-before,script-after,load-before,load-after"
+        }));
+    }
+
+    #[test]
+    fn replacement_navigation_cancels_a_suspended_startup_task() {
+        let mut session = BrowserSession::new().unwrap();
+        let client = session.accept_upgrade(sample_upgrade_request()).unwrap();
+        browser_request(
+            &mut session,
+            client.client_id,
+            r#"{"jsonrpc":"2.0","id":"old-nav","method":"Page.navigate","params":{"url":"data:text/html,%3Cscript%3EglobalThis.oldStartupBefore%3Dtrue%3Balert('old-startup')%3BglobalThis.oldStartupAfter%3Dtrue%3C%2Fscript%3E"}}"#,
+        );
+        browser_payloads(&mut session, client.client_id);
+        browser_request(
+            &mut session,
+            client.client_id,
+            r#"{"jsonrpc":"2.0","id":"new-nav","method":"Page.navigate","params":{"url":"data:text/html,%3Ctitle%3Enew%3C%2Ftitle%3E"}}"#,
+        );
+        let payloads = browser_payloads(&mut session, client.client_id);
+        assert!(payloads.iter().any(|value| {
+            value["method"] == "Page.javascriptDialogClosed"
+                && value["params"]["result"] == false
+        }));
+        assert!(payloads.iter().any(|value| value["id"] == "old-nav" && value["error"].is_object()), "{payloads:#?}");
+        assert!(payloads.iter().any(|value| value["id"] == "new-nav" && value["result"].is_object()));
+
+        browser_request(
+            &mut session,
+            client.client_id,
+            r#"{"jsonrpc":"2.0","id":"state","method":"Runtime.evaluate","params":{"expression":"document.title + ':' + typeof oldStartupAfter","returnByValue":true}}"#,
+        );
+        let state = browser_payloads(&mut session, client.client_id);
+        assert!(state.iter().any(|value| {
+            value["id"] == "state" && value["result"]["result"]["value"] == "new:undefined"
+        }));
+    }
+
+    #[test]
+    fn startup_navigation_owner_disconnect_clears_task_and_token() {
+        let mut session = BrowserSession::new().unwrap();
+        let owner = session.accept_upgrade(sample_upgrade_request()).unwrap();
+        let observer = session.accept_upgrade(sample_upgrade_request()).unwrap();
+        browser_request(
+            &mut session,
+            owner.client_id,
+            r#"{"jsonrpc":"2.0","id":"nav","method":"Page.navigate","params":{"url":"data:text/html,%3Cscript%3Ealert('disconnect-startup')%3BglobalThis.afterStartupDisconnect%3Dtrue%3C%2Fscript%3E"}}"#,
+        );
+        browser_payloads(&mut session, owner.client_id);
+        browser_payloads(&mut session, observer.client_id);
+        session
+            .receive(
+                owner.client_id,
+                &WebSocketFrame {
+                    fin: true,
+                    opcode: WebSocketOpcode::Close,
+                    payload: Vec::new(),
+                }
+                .encode(true),
+            )
+            .unwrap();
+        assert_eq!(session.pending_response_count(), 0);
+        let events = browser_payloads(&mut session, observer.client_id);
+        assert!(events.iter().any(|value| {
+            value["method"] == "Page.javascriptDialogClosed"
+                && value["params"]["result"] == false
+        }));
+        browser_request(
+            &mut session,
+            observer.client_id,
+            r#"{"jsonrpc":"2.0","id":"state","method":"Runtime.evaluate","params":{"expression":"location.href + ':' + typeof afterStartupDisconnect","returnByValue":true}}"#,
+        );
+        let state = browser_payloads(&mut session, observer.client_id);
+        assert!(state.iter().any(|value| {
+            value["id"] == "state"
+                && value["result"]["result"]["value"] == "about:blank:undefined"
+        }));
     }
 
     #[test]

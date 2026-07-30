@@ -1813,6 +1813,7 @@ impl JsRuntime {
         }
         let _ = self.eval("__omoikane_install_window_named_properties()");
         let _ = self.eval("document.__readyState = 'loading'");
+        let _ = self.wire_inline_event_handlers();
         let scripts = collect_script_elements(&self.document());
         let mut immediate = Vec::new();
         let mut deferred = Vec::new();
@@ -1876,6 +1877,12 @@ impl JsRuntime {
         immediate.push(PageTaskSource::Classic {
             source: "document.__readyState = 'interactive'; document.dispatchEvent(new Event('DOMContentLoaded'))".to_string(),
             label: "DOMContentLoaded".to_string(),
+            script_node_id: None,
+        });
+        immediate.push(PageTaskSource::Classic {
+            source: "document.__readyState = 'complete'; window.dispatchEvent(new Event('load'))"
+                .to_string(),
+            label: "load".to_string(),
             script_node_id: None,
         });
         self.into_page_task(generation, immediate)
