@@ -306,6 +306,103 @@ mod tests {
     }
 
     #[test]
+    fn tab_key_navigates_focus_order_and_honors_cancelation() {
+        let mut session = CdpSession::new().unwrap();
+        navigate(
+            &mut session,
+            "<button id='ordinary'>ordinary</button>\
+             <button id='late' tabindex='2'>late</button>\
+             <button id='early' tabindex='1'>early</button>\
+             <button id='negative' tabindex='-1'>negative</button>\
+             <button id='disabled' disabled>disabled</button>\
+             <button id='hidden' style='display:none'>hidden</button>\
+             <a id='link' href='#'>link</a>\
+             <iframe id='frame' tabindex='-1'></iframe>\
+             <script>globalThis.focusLog=[];document.addEventListener('focusin',e=>focusLog.push(e.target.id));\
+             ordinary.addEventListener('keydown',e=>{if(e.key==='Tab'&&globalThis.cancelTab)e.preventDefault()})</script>",
+        );
+        let mut input = PlatformInput::new();
+        let tab = |pressed| PlatformKeyEvent {
+            pressed,
+            key: "Tab".into(),
+            code: "Tab".into(),
+            text: None,
+            repeat: false,
+        };
+
+        input.key_event(&mut session, tab(true)).unwrap();
+        assert_eq!(
+            evaluate(&mut session, "document.activeElement.id"),
+            json!("early")
+        );
+        input.key_event(&mut session, tab(false)).unwrap();
+        input.key_event(&mut session, tab(true)).unwrap();
+        assert_eq!(
+            evaluate(&mut session, "document.activeElement.id"),
+            json!("late")
+        );
+        input.key_event(&mut session, tab(false)).unwrap();
+        input.key_event(&mut session, tab(true)).unwrap();
+        assert_eq!(
+            evaluate(&mut session, "document.activeElement.id"),
+            json!("ordinary")
+        );
+        input.key_event(&mut session, tab(false)).unwrap();
+
+        evaluate(&mut session, "globalThis.cancelTab=true");
+        input.key_event(&mut session, tab(true)).unwrap();
+        assert_eq!(
+            evaluate(&mut session, "document.activeElement.id"),
+            json!("ordinary")
+        );
+        input.key_event(&mut session, tab(false)).unwrap();
+        evaluate(&mut session, "globalThis.cancelTab=false");
+        input.key_event(&mut session, tab(true)).unwrap();
+        assert_eq!(
+            evaluate(&mut session, "document.activeElement.id"),
+            json!("link")
+        );
+        input.key_event(&mut session, tab(false)).unwrap();
+        input.key_event(&mut session, tab(true)).unwrap();
+        assert_eq!(
+            evaluate(&mut session, "document.activeElement.id"),
+            json!("early")
+        );
+        input.key_event(&mut session, tab(false)).unwrap();
+
+        input.set_modifiers(InputModifiers {
+            shift: true,
+            ..InputModifiers::default()
+        });
+        input.key_event(&mut session, tab(true)).unwrap();
+        assert_eq!(
+            evaluate(&mut session, "document.activeElement.id"),
+            json!("link")
+        );
+        assert_eq!(
+            evaluate(&mut session, "focusLog.join(',')"),
+            json!("early,late,ordinary,link,early,link")
+        );
+
+        input.set_modifiers(InputModifiers::default());
+        evaluate(
+            &mut session,
+            "globalThis.sub=frame.contentDocument;globalThis.subFirst=sub.createElement('button');\
+             globalThis.subSecond=sub.createElement('button');subFirst.id='sub-first';subSecond.id='sub-second';\
+             sub.body.appendChild(subFirst);sub.body.appendChild(subSecond);\
+             globalThis.subKeyTarget='';subFirst.addEventListener('keydown',e=>subKeyTarget=e.target.id);subFirst.focus()",
+        );
+        input.key_event(&mut session, tab(true)).unwrap();
+        assert_eq!(
+            evaluate(
+                &mut session,
+                "[document.activeElement===frame,sub.activeElement.id,subKeyTarget].join(':')"
+            ),
+            json!("true:sub-second:sub-first")
+        );
+    }
+
+    #[test]
     fn wheel_dispatches_fractional_delta_and_scrolls_nearest_container() {
         let mut session = CdpSession::new().unwrap();
         navigate(
