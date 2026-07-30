@@ -16,6 +16,7 @@ pub mod http;
 pub mod js;
 pub mod layout;
 pub mod paint;
+pub mod platform_dialog;
 pub mod platform_input;
 pub mod realtime;
 mod screenshot;

@@ -279,6 +279,28 @@ pub struct JavaScriptDialog {
     pub default_prompt: Option<String>,
 }
 
+/// Opaque identity of the JavaScript runtime that owns a modal dialog.
+/// Dialog ids are monotonic only within one runtime, so frontends serving
+/// several runtimes must compare both values.
+#[derive(Clone)]
+pub struct JavaScriptRuntimeIdentity(Rc<()>);
+
+impl std::fmt::Debug for JavaScriptRuntimeIdentity {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("JavaScriptRuntimeIdentity")
+            .field(&Rc::as_ptr(&self.0))
+            .finish()
+    }
+}
+
+impl PartialEq for JavaScriptRuntimeIdentity {
+    fn eq(&self, other: &Self) -> bool {
+        Rc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+impl Eq for JavaScriptRuntimeIdentity {}
+
 /// Failure while resolving a pending Window modal dialog.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum JavaScriptDialogError {
@@ -308,13 +330,73 @@ pub struct JavaScriptDialogController {
     host_state: Rc<RefCell<HostState>>,
 }
 
+/// A dialog request bound to the runtime that created it.
+/// Clones share the same exactly-once resolution state.
+#[derive(Clone)]
+pub struct JavaScriptDialogRequest {
+    dialog: JavaScriptDialog,
+    controller: JavaScriptDialogController,
+}
+
+impl std::fmt::Debug for JavaScriptDialogRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("JavaScriptDialogRequest")
+            .field("runtime", &self.runtime_identity())
+            .field("dialog", &self.dialog)
+            .finish()
+    }
+}
+
+impl JavaScriptDialogRequest {
+    pub fn dialog(&self) -> &JavaScriptDialog {
+        &self.dialog
+    }
+
+    pub fn runtime_identity(&self) -> JavaScriptRuntimeIdentity {
+        self.controller.runtime_identity()
+    }
+
+    pub fn resolve(
+        &self,
+        accept: bool,
+        prompt_text: Option<String>,
+    ) -> Result<(), JavaScriptDialogError> {
+        self.controller.handle(self.dialog.id, accept, prompt_text)
+    }
+
+    pub fn dismiss(&self) -> Result<(), JavaScriptDialogError> {
+        self.resolve(false, None)
+    }
+
+    pub fn is_pending(&self) -> bool {
+        self.controller
+            .pending()
+            .is_some_and(|pending| pending.id == self.dialog.id)
+    }
+
+    pub(crate) fn same_request(&self, other: &Self) -> bool {
+        self.runtime_identity() == other.runtime_identity() && self.dialog.id == other.dialog.id
+    }
+}
+
 impl JavaScriptDialogController {
+    pub fn runtime_identity(&self) -> JavaScriptRuntimeIdentity {
+        JavaScriptRuntimeIdentity(Rc::clone(&self.host_state.borrow().runtime_identity))
+    }
+
     pub fn pending(&self) -> Option<JavaScriptDialog> {
         self.host_state
             .borrow()
             .pending_javascript_dialog
             .as_ref()
             .map(|pending| pending.dialog.clone())
+    }
+
+    pub fn pending_request(&self) -> Option<JavaScriptDialogRequest> {
+        self.pending().map(|dialog| JavaScriptDialogRequest {
+            dialog,
+            controller: self.clone(),
+        })
     }
 
     pub fn handle(
@@ -370,6 +452,7 @@ impl TimerPayload {
 }
 
 struct HostState {
+    runtime_identity: Rc<()>,
     /// Monotonic clock origin used by `performance.now()` for this global.
     performance_start: std::time::Instant,
     /// Unix epoch milliseconds corresponding to `performance_start`.
@@ -564,6 +647,7 @@ impl HostState {
         let mut document_origins = HashMap::new();
         document_origins.insert(document.identity(), StorageOrigin::from_url(&location_href));
         let mut state = Self {
+            runtime_identity: Rc::new(()),
             performance_start,
             performance_time_origin,
             event_loop: EventLoop::default(),
