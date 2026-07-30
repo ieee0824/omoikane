@@ -22,6 +22,8 @@ pub enum CdpError {
     InvalidWebSocketFrame(&'static str),
     InvalidJsonRpc(&'static str),
     UnknownClient(u64),
+    UnknownDeferredRequest(u64),
+    DeferredTokenExhausted,
     MethodNotFound(String),
 }
 
@@ -34,6 +36,8 @@ impl std::fmt::Display for CdpError {
             }
             Self::InvalidJsonRpc(message) => write!(f, "invalid JSON-RPC message: {message}"),
             Self::UnknownClient(id) => write!(f, "unknown client: {id}"),
+            Self::UnknownDeferredRequest(id) => write!(f, "unknown deferred request: {id}"),
+            Self::DeferredTokenExhausted => write!(f, "deferred response token space exhausted"),
             Self::MethodNotFound(method) => write!(f, "method not found: {method}"),
         }
     }
@@ -303,6 +307,24 @@ impl JsonRpcResponse {
 }
 
 type RpcHandler = Box<dyn Fn(&Value) -> Result<Value, JsonRpcError>>;
+type DeferredRpcHandler =
+    Box<dyn Fn(DeferredResponseToken, &Value) -> Result<CdpMethodResult, JsonRpcError>>;
+
+/// Opaque identifier for a JSON-RPC request whose response will be completed later.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct DeferredResponseToken(u64);
+
+/// Result of a deferred-capable method handler.
+#[derive(Debug, Clone, PartialEq)]
+pub enum CdpMethodResult {
+    Complete(Value),
+    Deferred,
+}
+
+struct PendingResponse {
+    client_id: u64,
+    request_id: Value,
+}
 
 #[derive(Default)]
 struct ClientState {
@@ -315,6 +337,9 @@ pub struct CdpServer {
     next_client_id: u64,
     clients: HashMap<u64, ClientState>,
     handlers: HashMap<String, RpcHandler>,
+    deferred_handlers: HashMap<String, DeferredRpcHandler>,
+    next_deferred_token: u64,
+    pending_responses: HashMap<DeferredResponseToken, PendingResponse>,
 }
 
 impl CdpServer {
@@ -328,7 +353,45 @@ impl CdpServer {
     where
         F: Fn(&Value) -> Result<Value, JsonRpcError> + 'static,
     {
-        self.handlers.insert(method.into(), Box::new(handler));
+        let method = method.into();
+        self.deferred_handlers.remove(&method);
+        self.handlers.insert(method, Box::new(handler));
+    }
+
+    /// Registers a handler that may defer its JSON-RPC response.
+    pub fn register_deferred_method<F>(&mut self, method: impl Into<String>, handler: F)
+    where
+        F: Fn(DeferredResponseToken, &Value) -> Result<CdpMethodResult, JsonRpcError> + 'static,
+    {
+        let method = method.into();
+        self.handlers.remove(&method);
+        self.deferred_handlers.insert(method, Box::new(handler));
+    }
+
+    /// Completes a previously deferred request on its original client and JSON-RPC id.
+    pub fn complete_deferred_response(
+        &mut self,
+        token: DeferredResponseToken,
+        result: Result<Value, JsonRpcError>,
+    ) -> Result<(), CdpError> {
+        let pending = self
+            .pending_responses
+            .remove(&token)
+            .ok_or(CdpError::UnknownDeferredRequest(token.0))?;
+        let response = match result {
+            Ok(value) => JsonRpcResponse::success(pending.request_id, value),
+            Err(error) => JsonRpcResponse {
+                id: pending.request_id,
+                result: None,
+                error: Some(error),
+            },
+        };
+        self.enqueue_response(pending.client_id, response)
+    }
+
+    /// Number of requests currently waiting for an out-of-band completion.
+    pub fn pending_response_count(&self) -> usize {
+        self.pending_responses.len()
     }
 
     /// Accepts a WebSocket upgrade request and allocates a client id.
@@ -370,6 +433,8 @@ impl CdpServer {
             }
             WebSocketOpcode::Close => {
                 self.clients.remove(&client_id);
+                self.pending_responses
+                    .retain(|_, pending| pending.client_id != client_id);
                 Ok(())
             }
             _ => Err(CdpError::InvalidWebSocketFrame(
@@ -412,9 +477,24 @@ impl CdpServer {
         Ok(())
     }
 
+    fn enqueue_response(
+        &mut self,
+        client_id: u64,
+        response: JsonRpcResponse,
+    ) -> Result<(), CdpError> {
+        let payload = serde_json::to_string(&response.to_json())
+            .map_err(|_| CdpError::InvalidJsonRpc("failed to serialize response"))?;
+        self.enqueue(client_id, WebSocketFrame::text(payload))
+    }
+
     fn handle_text_frame(&mut self, client_id: u64, payload: &[u8]) -> Result<(), CdpError> {
         let request = parse_json_rpc_request(payload)?;
         let Some(id) = request.id.clone() else {
+            if self.deferred_handlers.contains_key(&request.method) {
+                return Err(CdpError::InvalidJsonRpc(
+                    "deferred methods require a JSON-RPC id",
+                ));
+            }
             if let Some(handler) = self.handlers.get(&request.method) {
                 handler(&request.params)
                     .map(|_| ())
@@ -425,6 +505,40 @@ impl CdpServer {
             return Ok(());
         };
 
+        if self.deferred_handlers.contains_key(&request.method) {
+            let token = DeferredResponseToken(self.next_deferred_token);
+            self.next_deferred_token = self
+                .next_deferred_token
+                .checked_add(1)
+                .ok_or(CdpError::DeferredTokenExhausted)?;
+            let outcome = self.deferred_handlers[&request.method](token, &request.params);
+            match outcome {
+                Ok(CdpMethodResult::Complete(value)) => {
+                    return self.enqueue_response(client_id, JsonRpcResponse::success(id, value));
+                }
+                Ok(CdpMethodResult::Deferred) => {
+                    self.pending_responses.insert(
+                        token,
+                        PendingResponse {
+                            client_id,
+                            request_id: id,
+                        },
+                    );
+                    return Ok(());
+                }
+                Err(error) => {
+                    return self.enqueue_response(
+                        client_id,
+                        JsonRpcResponse {
+                            id,
+                            result: None,
+                            error: Some(error),
+                        },
+                    );
+                }
+            }
+        }
+
         let response = if let Some(handler) = self.handlers.get(&request.method) {
             match handler(&request.params) {
                 Ok(result) => JsonRpcResponse::success(id, result),
@@ -434,9 +548,7 @@ impl CdpServer {
             JsonRpcResponse::method_not_found(id, request.method)
         };
 
-        let payload = serde_json::to_string(&response.to_json())
-            .map_err(|_| CdpError::InvalidJsonRpc("failed to serialize response"))?;
-        self.enqueue(client_id, WebSocketFrame::text(payload))
+        self.enqueue_response(client_id, response)
     }
 }
 
@@ -1736,8 +1848,10 @@ fn js_error_message(error: boa_engine::JsError) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::RefCell;
     use std::io::{Read, Write};
     use std::net::TcpListener;
+    use std::rc::Rc;
     use std::thread;
 
     fn sample_upgrade_request() -> &'static str {
@@ -1804,6 +1918,210 @@ mod tests {
         let payload: Value = serde_json::from_str(&decode_text(&outgoing[0])).unwrap();
         assert_eq!(payload["id"], 1);
         assert_eq!(payload["result"]["product"], "Omoikane/0.1");
+    }
+
+    #[test]
+    fn deferred_response_keeps_processing_commands_and_preserves_client_and_id() {
+        let mut server = CdpServer::new();
+        let captured = Rc::new(RefCell::new(Vec::new()));
+        let handler_tokens = captured.clone();
+        server.register_deferred_method("Runtime.evaluate", move |token, _| {
+            handler_tokens.borrow_mut().push(token);
+            Ok(CdpMethodResult::Deferred)
+        });
+        server.register_method("Page.handleJavaScriptDialog", |_| {
+            Ok(json!({ "handled": true }))
+        });
+        let first = server.accept_upgrade(sample_upgrade_request()).unwrap();
+        let second = server.accept_upgrade(sample_upgrade_request()).unwrap();
+
+        let evaluate = WebSocketFrame::text(
+            r#"{"jsonrpc":"2.0","id":"eval-1","method":"Runtime.evaluate","params":{}}"#,
+        )
+        .encode(true);
+        server.receive(first.client_id, &evaluate).unwrap();
+        assert_eq!(server.pending_response_count(), 1);
+        assert!(server.drain_outgoing(first.client_id).unwrap().is_empty());
+
+        server
+            .notify(
+                "Page.javascriptDialogOpening",
+                json!({ "message": "Continue?", "type": "confirm" }),
+            )
+            .unwrap();
+        for client_id in [first.client_id, second.client_id] {
+            let event = server.drain_outgoing(client_id).unwrap();
+            assert_eq!(event.len(), 1);
+            let payload: Value = serde_json::from_str(&decode_text(&event[0])).unwrap();
+            assert_eq!(payload["method"], "Page.javascriptDialogOpening");
+        }
+
+        let handle = WebSocketFrame::text(
+            r#"{"jsonrpc":"2.0","id":42,"method":"Page.handleJavaScriptDialog","params":{"accept":true}}"#,
+        )
+        .encode(true);
+        server.receive(first.client_id, &handle).unwrap();
+        let immediate = server.drain_outgoing(first.client_id).unwrap();
+        let payload: Value = serde_json::from_str(&decode_text(&immediate[0])).unwrap();
+        assert_eq!(payload["id"], 42);
+        assert_eq!(payload["result"]["handled"], true);
+        assert_eq!(server.pending_response_count(), 1);
+
+        let token = captured.borrow()[0];
+        server
+            .complete_deferred_response(token, Ok(json!({ "result": { "value": true } })))
+            .unwrap();
+        let completed = server.drain_outgoing(first.client_id).unwrap();
+        let payload: Value = serde_json::from_str(&decode_text(&completed[0])).unwrap();
+        assert_eq!(payload["id"], "eval-1");
+        assert_eq!(payload["result"]["result"]["value"], true);
+        assert_eq!(server.pending_response_count(), 0);
+        assert_eq!(
+            server.complete_deferred_response(token, Ok(Value::Null)),
+            Err(CdpError::UnknownDeferredRequest(token.0))
+        );
+    }
+
+    #[test]
+    fn disconnect_drops_only_that_clients_deferred_responses() {
+        let mut server = CdpServer::new();
+        let captured = Rc::new(RefCell::new(Vec::new()));
+        let handler_tokens = captured.clone();
+        server.register_deferred_method("Runtime.evaluate", move |token, _| {
+            handler_tokens.borrow_mut().push(token);
+            Ok(CdpMethodResult::Deferred)
+        });
+        let first = server.accept_upgrade(sample_upgrade_request()).unwrap();
+        let second = server.accept_upgrade(sample_upgrade_request()).unwrap();
+
+        for (client_id, id) in [(first.client_id, 1), (second.client_id, 2)] {
+            let request = WebSocketFrame::text(format!(
+                r#"{{"jsonrpc":"2.0","id":{id},"method":"Runtime.evaluate","params":{{}}}}"#
+            ))
+            .encode(true);
+            server.receive(client_id, &request).unwrap();
+        }
+        assert_eq!(server.pending_response_count(), 2);
+
+        let close = WebSocketFrame {
+            fin: true,
+            opcode: WebSocketOpcode::Close,
+            payload: Vec::new(),
+        }
+        .encode(true);
+        server.receive(first.client_id, &close).unwrap();
+        assert_eq!(server.pending_response_count(), 1);
+
+        let tokens = captured.borrow();
+        assert_eq!(
+            server.complete_deferred_response(tokens[0], Ok(Value::Null)),
+            Err(CdpError::UnknownDeferredRequest(tokens[0].0))
+        );
+        server
+            .complete_deferred_response(
+                tokens[1],
+                Err(JsonRpcError {
+                    code: -32001,
+                    message: "dialog dismissed".to_string(),
+                }),
+            )
+            .unwrap();
+        let completed = server.drain_outgoing(second.client_id).unwrap();
+        let payload: Value = serde_json::from_str(&decode_text(&completed[0])).unwrap();
+        assert_eq!(payload["id"], 2);
+        assert_eq!(payload["error"]["code"], -32001);
+    }
+
+    #[test]
+    fn deferred_capable_method_can_complete_immediately() {
+        let mut server = CdpServer::new();
+        server.register_deferred_method("Runtime.evaluate", |_, params| {
+            Ok(CdpMethodResult::Complete(
+                json!({ "echo": params["expression"] }),
+            ))
+        });
+        let client = server.accept_upgrade(sample_upgrade_request()).unwrap();
+        let request = WebSocketFrame::text(
+            r#"{"jsonrpc":"2.0","id":7,"method":"Runtime.evaluate","params":{"expression":"1 + 1"}}"#,
+        )
+        .encode(true);
+
+        server.receive(client.client_id, &request).unwrap();
+
+        let outgoing = server.drain_outgoing(client.client_id).unwrap();
+        assert_eq!(outgoing.len(), 1);
+        let payload: Value = serde_json::from_str(&decode_text(&outgoing[0])).unwrap();
+        assert_eq!(payload["id"], 7);
+        assert_eq!(payload["result"]["echo"], "1 + 1");
+        assert_eq!(server.pending_response_count(), 0);
+    }
+
+    #[test]
+    fn deferred_capable_method_preserves_an_immediate_error_code() {
+        let mut server = CdpServer::new();
+        server.register_deferred_method("Runtime.evaluate", |_, _| {
+            Err(JsonRpcError {
+                code: -32001,
+                message: "dialog dismissed".to_string(),
+            })
+        });
+        let client = server.accept_upgrade(sample_upgrade_request()).unwrap();
+        let request = WebSocketFrame::text(
+            r#"{"jsonrpc":"2.0","id":9,"method":"Runtime.evaluate","params":{}}"#,
+        )
+        .encode(true);
+
+        server.receive(client.client_id, &request).unwrap();
+
+        let outgoing = server.drain_outgoing(client.client_id).unwrap();
+        assert_eq!(outgoing.len(), 1);
+        let payload: Value = serde_json::from_str(&decode_text(&outgoing[0])).unwrap();
+        assert_eq!(payload["id"], 9);
+        assert_eq!(payload["error"]["code"], -32001);
+        assert_eq!(payload["error"]["message"], "dialog dismissed");
+        assert_eq!(server.pending_response_count(), 0);
+    }
+
+    #[test]
+    fn deferred_token_exhaustion_does_not_reuse_a_token() {
+        let mut server = CdpServer::new();
+        server.next_deferred_token = u64::MAX;
+        server.register_deferred_method("Runtime.evaluate", |_, _| {
+            Ok(CdpMethodResult::Deferred)
+        });
+        let client = server.accept_upgrade(sample_upgrade_request()).unwrap();
+        let request = WebSocketFrame::text(
+            r#"{"jsonrpc":"2.0","id":10,"method":"Runtime.evaluate","params":{}}"#,
+        )
+        .encode(true);
+
+        assert_eq!(
+            server.receive(client.client_id, &request),
+            Err(CdpError::DeferredTokenExhausted)
+        );
+        assert_eq!(server.next_deferred_token, u64::MAX);
+        assert_eq!(server.pending_response_count(), 0);
+        assert!(server.drain_outgoing(client.client_id).unwrap().is_empty());
+    }
+
+    #[test]
+    fn later_registration_replaces_the_previous_handler_kind() {
+        let mut server = CdpServer::new();
+        server.register_deferred_method("Runtime.evaluate", |_, _| Ok(CdpMethodResult::Deferred));
+        server.register_method("Runtime.evaluate", |_| Ok(json!({ "kind": "synchronous" })));
+        let client = server.accept_upgrade(sample_upgrade_request()).unwrap();
+        let request = WebSocketFrame::text(
+            r#"{"jsonrpc":"2.0","id":8,"method":"Runtime.evaluate","params":{}}"#,
+        )
+        .encode(true);
+
+        server.receive(client.client_id, &request).unwrap();
+
+        let outgoing = server.drain_outgoing(client.client_id).unwrap();
+        assert_eq!(outgoing.len(), 1);
+        let payload: Value = serde_json::from_str(&decode_text(&outgoing[0])).unwrap();
+        assert_eq!(payload["result"]["kind"], "synchronous");
+        assert_eq!(server.pending_response_count(), 0);
     }
 
     #[test]
