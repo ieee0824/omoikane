@@ -2474,14 +2474,6 @@ fn paint_box_internal_to(
     // box-shadow を背景より前（下）に描画する
     border::paint_box_shadow(canvas, style, border_box, inherited_clip);
 
-    if let Some(background) = background_color(style) {
-        if has_border_radius(style) {
-            let (tl, tr, br, bl) = border_radius_corners(style);
-            canvas.fill_rounded_rect(border_box, background, tl, tr, br, bl, inherited_clip);
-        } else {
-            canvas.fill_rect_clipped(border_box, background, inherited_clip);
-        }
-    }
     let background_clip = match style.get("background-clip") {
         Some(ComputedValue::Keyword(value)) if value.eq_ignore_ascii_case("content-box") => {
             Some(layout.dimensions.content)
@@ -2496,6 +2488,14 @@ fn paint_box_internal_to(
         (clip, None) => clip,
         _ => None,
     };
+    if let Some(background) = background_color(style) {
+        if has_border_radius(style) {
+            let (tl, tr, br, bl) = border_radius_corners(style);
+            canvas.fill_rounded_rect(border_box, background, tl, tr, br, bl, background_clip);
+        } else {
+            canvas.fill_rect_clipped(border_box, background, background_clip);
+        }
+    }
     paint_background_image(canvas, style, border_box, background_clip, viewport);
     if layout.overflow.clips_overflow() {
         let overflow_clip =

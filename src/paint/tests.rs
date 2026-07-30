@@ -7134,6 +7134,53 @@ fn radial_gradient_uses_background_size_position_repeat_and_clip() {
 }
 
 #[test]
+fn background_clip_applies_the_same_box_to_color_and_gradient() {
+    for (clip, inset) in [("border-box", 0), ("padding-box", 2), ("content-box", 4)] {
+        let common = format!(
+            "box-sizing: border-box; border: 2px solid transparent; padding: 2px; background-clip: {clip};"
+        );
+        let color = render_gradient_box(
+            &format!("{common} background-color: red;"),
+            12,
+            12,
+        );
+        let gradient = render_gradient_box(
+            &format!("{common} background-image: radial-gradient(circle, red, blue);"),
+            12,
+            12,
+        );
+
+        for y in 0..12 {
+            for x in 0..12 {
+                let color_alpha = color.pixel(x, y).unwrap().a;
+                let gradient_alpha = gradient.pixel(x, y).unwrap().a;
+                assert_eq!(
+                    color_alpha, gradient_alpha,
+                    "color and gradient alpha masks differ for {clip} at ({x}, {y})"
+                );
+                let inside = x >= inset && x < 12 - inset && y >= inset && y < 12 - inset;
+                assert_eq!(
+                    color_alpha > 0,
+                    inside,
+                    "unexpected {clip} clip at ({x}, {y})"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn rounded_background_color_still_respects_content_box_clip() {
+    let canvas = render_gradient_box(
+        "box-sizing: border-box; border: 2px solid transparent; padding: 2px; border-radius: 6px; background-clip: content-box; background-color: red;",
+        12,
+        12,
+    );
+    assert_eq!(canvas.pixel(3, 6).unwrap().a, 0);
+    assert_eq!(canvas.pixel(6, 6), Some(Color::rgb(255, 0, 0)));
+}
+
+#[test]
 fn malformed_gradients_do_not_paint_or_panic() {
     for value in [
         "radial-gradient(circle at, red, blue)",
