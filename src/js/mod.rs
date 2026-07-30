@@ -16,7 +16,7 @@ use boa_engine::Module;
 use boa_engine::builtins::promise::{OperationType, PromiseState};
 use boa_engine::context::HostHooks;
 use boa_engine::module::{ModuleLoader, Referrer};
-use boa_engine::native_function::{NativeCallSuspension, NativeFunction};
+use boa_engine::native_function::{NativeCallContinuation, NativeCallSuspension, NativeFunction};
 use boa_engine::object::{
     JsObject,
     builtins::{JsArrayBuffer, JsPromise, JsUint8Array},
@@ -1935,6 +1935,24 @@ impl JsRuntime {
                     errors.push(format!("[script jobs: {label}] {error}"));
                 }
             }
+            let page_work_result = {
+                let mut page_work = Box::pin(async {
+                    self.run_until_idle_async().await?;
+                    self.run_animation_frame_async(0).await.map(|_| ())
+                });
+                std::future::poll_fn(|context| if task_cancelled.get() {
+                    Poll::Ready(None)
+                } else {
+                    page_work.as_mut().poll(context).map(Some)
+                }).await
+            };
+            let Some(page_work_result) = page_work_result else {
+                self.host_state.borrow_mut().pending_javascript_dialog = None;
+                return CompletedPageTask { runtime: self, generation, result: Err(PageTaskError::Cancelled) };
+            };
+            if let Err(error) = page_work_result {
+                errors.push(format!("[page callbacks] {error}"));
+            }
             CompletedPageTask {
                 runtime: self,
                 generation,
@@ -2111,6 +2129,28 @@ impl JsRuntime {
         Ok(())
     }
 
+    async fn run_until_idle_async(&mut self) -> JsResult<()> {
+        self.run_jobs()?;
+        loop {
+            let task = { self.host_state.borrow_mut().event_loop.pop_task() };
+            let Some((_, task)) = task else { break };
+            match task {
+                Task::Timer(TimerPayload::Callback { callback, args }) => {
+                    if let Some(callable) = callback.as_callable() {
+                        let result = {
+                            let _guard = activate_host_state(Rc::clone(&self.host_state));
+                            callable.call_async(&JsValue::undefined(), &args, &mut self.context).await
+                        };
+                        self.record_error_from("timer callback", result);
+                    }
+                }
+                task => self.run_task(task)?,
+            }
+            self.run_jobs()?;
+        }
+        Ok(())
+    }
+
     /// Records a page-script error raised while a task ran.
     ///
     /// Bounded so a broken `setInterval` cannot fill memory or bury the first,
@@ -2236,6 +2276,30 @@ impl JsRuntime {
         // rendering callbacks (notably navigation). A newly requested rAF is
         // still retained for the next rendering opportunity.
         self.run_until_idle()?;
+        Ok(callbacks_run)
+    }
+
+    async fn run_animation_frame_async(&mut self, elapsed_ms: u64) -> JsResult<usize> {
+        self.host_state.borrow_mut().event_loop.advance(elapsed_ms);
+        self.run_until_idle_async().await?;
+        let (timestamp, callback_ids) = self.host_state.borrow_mut().event_loop.begin_animation_frame();
+        let mut callbacks_run = 0;
+        let mut first_error = None;
+        for id in callback_ids {
+            let callback = self.host_state.borrow_mut().event_loop.take_animation_frame_callback(id);
+            let Some(callback) = callback else { continue };
+            let result = if let Some(callable) = callback.as_callable() {
+                let _guard = activate_host_state(Rc::clone(&self.host_state));
+                callable.call_async(&JsValue::undefined(), &[JsValue::from(timestamp)], &mut self.context).await.map(|_| ())
+            } else {
+                Err(JsNativeError::typ().with_message("animation frame callback is not callable").into())
+            };
+            callbacks_run += 1;
+            if let Err(error) = result && first_error.is_none() { first_error = Some(error); }
+        }
+        self.run_jobs()?;
+        self.run_until_idle_async().await?;
+        if let Some(error) = first_error { return Err(error); }
         Ok(callbacks_run)
     }
 
@@ -3264,6 +3328,11 @@ fn register_host_bindings(
             js_string!("__omoikane_console_log"),
             1,
             NativeFunction::from_copy_closure(console_log_native),
+        ),
+        (
+            js_string!("__omoikane_call_event_listener"),
+            3,
+            NativeFunction::from_copy_closure(call_event_listener_native),
         ),
         (
             js_string!("setTimeout"),
@@ -4714,6 +4783,26 @@ fn set_window_scroll_native(
 
 fn set_timeout_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
     schedule_timer_from_js(args, context, false)
+}
+
+fn call_event_listener_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let listener = args.first().cloned().unwrap_or_default();
+    let this = args.get(1).cloned().unwrap_or_default();
+    let event = args.get(2).cloned().unwrap_or_default();
+    let callback = if let Some(callback) = listener.as_callable() {
+        callback.clone()
+    } else {
+        listener.as_object()
+            .ok_or_else(|| JsNativeError::typ().with_message("event listener is not callable"))?
+            .get(js_string!("handleEvent"), context)?
+            .as_callable()
+            .ok_or_else(|| JsNativeError::typ().with_message("event listener is not callable"))?
+            .clone()
+    };
+    context.call_with_native_continuation(
+        &callback, &this, &[event],
+        NativeCallContinuation::from_copy_closure_with_captures(|result, (), _| result, ()),
+    )
 }
 
 fn set_interval_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
@@ -7830,6 +7919,81 @@ mod tests {
                 .to_std_string_escaped(),
             "after"
         );
+    }
+
+    #[test]
+    fn owned_page_task_resumes_event_timer_and_frame_callbacks() {
+        let runtime = JsRuntime::new().unwrap();
+        let source = r#"
+            globalThis.asyncCallbackLog = [];
+            const target = document.createElement('div');
+            target.addEventListener('probe', event => {
+                asyncCallbackLog.push('event-before'); alert('event');
+                asyncCallbackLog.push('event-after'); event.preventDefault();
+            });
+            target.addEventListener('probe', () => asyncCallbackLog.push('event-second'));
+            const event = new Event('probe', { cancelable: true });
+            asyncCallbackLog.push('returned:' + target.dispatchEvent(event));
+            const throwingTarget = document.createElement('div');
+            const throwingEvent = new Event('throwing');
+            throwingTarget.addEventListener('throwing', () => {
+                alert('throw'); throw new Error('listener failure');
+            });
+            try { throwingTarget.dispatchEvent(throwingEvent); } catch (error) {
+                asyncCallbackLog.push('throw:' + error.message + ':' + !throwingEvent.__dispatching);
+            }
+            setTimeout(() => {
+                asyncCallbackLog.push('timer-before'); alert('timer'); asyncCallbackLog.push('timer-after');
+            }, 0);
+            requestAnimationFrame(() => {
+                asyncCallbackLog.push('frame-before'); alert('frame'); asyncCallbackLog.push('frame-after');
+            });
+        "#;
+        let mut task = Box::pin(runtime.into_page_task(14, vec![PageTaskSource::Classic {
+            source: source.to_string(), label: "callbacks".to_string(), script_node_id: None,
+        }]));
+        let controller = task.dialog_controller();
+        let waker: &'static std::task::Waker = std::task::Waker::noop();
+        let mut context = FutureContext::from_waker(waker);
+        for expected in ["event", "throw", "timer", "frame"] {
+            while controller.pending().is_none() {
+                assert!(matches!(task.as_mut().poll(&mut context), Poll::Pending));
+            }
+            let dialog = controller.pending().unwrap();
+            assert_eq!(dialog.message, expected);
+            controller.handle(dialog.id, true, None).unwrap();
+        }
+        let mut completed = loop {
+            if let Poll::Ready(completed) = task.as_mut().poll(&mut context) { break completed; }
+        };
+        assert_eq!(completed.result, Ok(Vec::new()));
+        assert_eq!(completed.runtime.eval("asyncCallbackLog.join(',')").unwrap()
+            .as_string().unwrap().to_std_string_escaped(),
+            "event-before,event-after,event-second,returned:false,throw:listener failure:true,timer-before,timer-after,frame-before,frame-after");
+    }
+
+    #[test]
+    fn cancelling_owned_task_drops_a_suspended_timer_callback() {
+        let runtime = JsRuntime::new().unwrap();
+        let mut task = Box::pin(runtime.into_page_task(15, vec![PageTaskSource::Classic {
+            source: "setTimeout(() => { timerBefore = true; alert('cancel timer'); timerAfter = true; }, 0)".to_string(),
+            label: "cancel timer".to_string(), script_node_id: None,
+        }]));
+        let controller = task.dialog_controller();
+        let waker: &'static std::task::Waker = std::task::Waker::noop();
+        let mut context = FutureContext::from_waker(waker);
+        while controller.pending().is_none() {
+            assert!(matches!(task.as_mut().poll(&mut context), Poll::Pending));
+        }
+        task.cancel();
+        let mut completed = match task.as_mut().poll(&mut context) {
+            Poll::Ready(completed) => completed,
+            Poll::Pending => panic!("cancelled timer task did not return its runtime"),
+        };
+        assert_eq!(completed.result, Err(PageTaskError::Cancelled));
+        assert_eq!(controller.pending(), None);
+        assert!(completed.runtime.eval("timerBefore === true && typeof timerAfter === 'undefined'")
+            .unwrap().as_boolean().unwrap());
     }
 
     #[test]

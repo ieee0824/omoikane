@@ -219,11 +219,11 @@
         }
         event.currentTarget = node;
         event.eventPhase = phase;
-        if (typeof entry.listener === "function") {
-          entry.listener.call(node, event);
-        } else if (entry.listener && typeof entry.listener.handleEvent === "function") {
-          entry.listener.handleEvent.call(entry.listener, event);
-        }
+        __omoikane_call_event_listener(
+          entry.listener,
+          typeof entry.listener === "function" ? node : entry.listener,
+          event
+        );
         if (event.__stoppedImmediate) {
           return true;
         }
