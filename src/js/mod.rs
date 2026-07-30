@@ -1588,7 +1588,7 @@ impl JsRuntime {
         std::time::Duration,
         std::time::Duration,
     ) {
-        self.with_active_host_value(|context| {
+        let result = self.with_active_host_value(|context| {
             let parse_start = std::time::Instant::now();
             let script = match Script::parse(Source::from_bytes(source), None, context) {
                 Ok(script) => script,
@@ -1622,7 +1622,12 @@ impl JsRuntime {
                 compile_elapsed,
                 execute_start.elapsed(),
             )
-        })
+        });
+        // Like `eval`, this synchronous document-script path cannot yield to
+        // an embedder to resolve a modal dialog. Boa cancels the suspension;
+        // discard the corresponding host metadata when execution returns.
+        self.host_state.borrow_mut().pending_javascript_dialog = None;
+        result
     }
 
     fn eval_module_timed(
@@ -1660,6 +1665,10 @@ impl JsRuntime {
                     PromiseState::Rejected(error) => Err(error.display().to_string()),
                     PromiseState::Pending => Err("module evaluation remained pending".to_string()),
                 });
+        // Module evaluation is also driven synchronously here. A modal-dialog
+        // suspension therefore cannot outlive this call, even when evaluation
+        // exits through the pending/error cases above.
+        self.host_state.borrow_mut().pending_javascript_dialog = None;
         (result, parse_elapsed, execute_start.elapsed())
     }
 
@@ -7436,6 +7445,22 @@ mod tests {
 
         assert!(runtime.eval("alert('cannot block sync eval')").is_err());
         assert_eq!(runtime.pending_javascript_dialog(), None);
+        assert_eq!(runtime.eval("6 * 7").unwrap().as_number(), Some(42.0));
+    }
+
+    #[test]
+    fn synchronous_document_and_module_dialog_attempts_do_not_leak_state() {
+        let mut runtime = JsRuntime::new().unwrap();
+
+        let (script_result, ..) = runtime.eval_safe_timed("alert('document script')");
+        assert!(script_result.is_err());
+        assert_eq!(runtime.pending_javascript_dialog(), None);
+
+        let (module_result, ..) =
+            runtime.eval_module_timed("alert('module script')", "https://example.test/a.js");
+        assert!(module_result.is_err());
+        assert_eq!(runtime.pending_javascript_dialog(), None);
+
         assert_eq!(runtime.eval("6 * 7").unwrap().as_number(), Some(42.0));
     }
 
