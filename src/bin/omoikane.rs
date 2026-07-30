@@ -18,6 +18,7 @@ use winit::keyboard::{Key, NamedKey, PhysicalKey};
 use winit::window::{Window, WindowId};
 
 const FRAME_INTERVAL: Duration = Duration::from_millis(16);
+const DEFAULT_WINDOW_TITLE: &str = "Omoikane";
 
 struct BrowserApp {
     session: CdpSession,
@@ -26,6 +27,7 @@ struct BrowserApp {
     surface: Option<Surface<Arc<Window>, Arc<Window>>>,
     started_at: Instant,
     input: PlatformInput,
+    window_title: String,
 }
 
 impl BrowserApp {
@@ -39,6 +41,7 @@ impl BrowserApp {
             surface: None,
             started_at: Instant::now(),
             input: PlatformInput::new(),
+            window_title: DEFAULT_WINDOW_TITLE.to_string(),
         })
     }
 
@@ -58,6 +61,12 @@ impl BrowserApp {
             .as_millis()
             .min(u128::from(u64::MAX)) as u64;
         let frame = render_browser_frame(&mut self.session, size.width, size.height, elapsed_ms)?;
+        if let Some(title) = changed_window_title(
+            &mut self.window_title,
+            document_window_title(&mut self.session)?,
+        ) {
+            window.set_title(&title);
+        }
 
         surface.resize(width, height)?;
         let mut target = surface.buffer_mut()?;
@@ -134,6 +143,26 @@ fn platform_mouse_button(button: MouseButton) -> Option<PlatformMouseButton> {
         MouseButton::Forward => Some(PlatformMouseButton::Forward),
         MouseButton::Other(_) => None,
     }
+}
+
+fn document_window_title(session: &mut CdpSession) -> Result<String, omoikane::cdp::JsonRpcError> {
+    let result = session.dispatch(
+        "Runtime.evaluate",
+        json!({ "expression": "document.title", "returnByValue": true }),
+    )?;
+    Ok(result["result"]["value"]
+        .as_str()
+        .filter(|title| !title.is_empty())
+        .unwrap_or(DEFAULT_WINDOW_TITLE)
+        .to_string())
+}
+
+fn changed_window_title(current: &mut String, next: String) -> Option<String> {
+    if *current == next {
+        return None;
+    }
+    *current = next.clone();
+    Some(next)
 }
 
 fn logical_key_name(key: &Key) -> String {
@@ -304,6 +333,48 @@ mod tests {
                 2.0
             ),
             (1.25, -3.5)
+        );
+    }
+
+    #[test]
+    fn synchronizes_initial_script_and_timer_document_titles_without_redundant_updates() {
+        let mut session = CdpSession::new().unwrap();
+        session
+            .dispatch(
+                "Page.navigate",
+                json!({ "url": "data:text/html,<title>Initial</title><body></body>" }),
+            )
+            .unwrap();
+        let mut current = DEFAULT_WINDOW_TITLE.to_string();
+
+        assert_eq!(
+            changed_window_title(&mut current, document_window_title(&mut session).unwrap()),
+            Some("Initial".to_string())
+        );
+        assert_eq!(
+            changed_window_title(&mut current, document_window_title(&mut session).unwrap()),
+            None
+        );
+
+        session
+            .dispatch(
+                "Runtime.evaluate",
+                json!({ "expression": "document.title='Script';setTimeout(()=>document.title='Timer',0)" }),
+            )
+            .unwrap();
+        assert_eq!(document_window_title(&mut session).unwrap(), "Script");
+        render_browser_frame(&mut session, 100, 100, 1).unwrap();
+        assert_eq!(document_window_title(&mut session).unwrap(), "Timer");
+
+        session
+            .dispatch(
+                "Runtime.evaluate",
+                json!({ "expression": "document.title=''" }),
+            )
+            .unwrap();
+        assert_eq!(
+            document_window_title(&mut session).unwrap(),
+            DEFAULT_WINDOW_TITLE
         );
     }
 }

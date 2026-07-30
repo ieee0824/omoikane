@@ -16507,6 +16507,24 @@ b</textarea></form>"#);
     }
 
     #[test]
+    fn document_title_setter_creates_a_missing_title_element() {
+        let mut runtime = runtime_from_html("<html><body><p>content</p></body></html>");
+        let result = eval_str(
+            &mut runtime,
+            r#"(() => {
+                document.title = "Created";
+                return [
+                  document.title,
+                  document.head.firstChild.tagName,
+                  document.head.firstChild.textContent,
+                  document.body.firstChild.tagName,
+                ].join(":");
+            })()"#,
+        );
+        assert_eq!(result, "Created:TITLE:Created:P");
+    }
+
+    #[test]
     fn implementation_create_document_validates_qualified_name() {
         let mut runtime = JsRuntime::new().unwrap();
         assert_js_ok(

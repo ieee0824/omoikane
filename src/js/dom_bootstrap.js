@@ -3491,8 +3491,19 @@
     }
 
     set title(value) {
-      const title = this.getElementsByTagName("title")[0];
-      if (title) title.textContent = String(value);
+      let title = this.getElementsByTagName("title")[0];
+      if (!title) {
+        let head = this.head;
+        if (!head) {
+          head = this.createElement("head");
+          const root = this.documentElement;
+          if (!root) return;
+          root.insertBefore(head, root.firstChild);
+        }
+        title = this.createElement("title");
+        head.appendChild(title);
+      }
+      title.textContent = String(value);
     }
 
     // Live HTMLCollection of every <form> in this document, in tree order, with
