@@ -2170,10 +2170,15 @@ impl JsRuntime {
                 }
                 Task::Timer(TimerPayload::Callback { callback, args }) => {
                     if let Some(callable) = callback.as_callable() {
-                        let result = {
-                            let _guard = activate_host_state(Rc::clone(&self.host_state));
-                            callable.call_async(&JsValue::undefined(), &args, &mut self.context).await
-                        };
+                        let result = ActiveHostFuture {
+                            future: Box::pin(callable.call_async(
+                                &JsValue::undefined(),
+                                &args,
+                                &mut self.context,
+                            )),
+                            host_state: Rc::clone(&self.host_state),
+                        }
+                        .await;
                         self.record_error_from("timer callback", result);
                     }
                 }
@@ -2399,8 +2404,17 @@ impl JsRuntime {
             let callback = self.host_state.borrow_mut().event_loop.take_animation_frame_callback(id);
             let Some(callback) = callback else { continue };
             let result = if let Some(callable) = callback.as_callable() {
-                let _guard = activate_host_state(Rc::clone(&self.host_state));
-                callable.call_async(&JsValue::undefined(), &[JsValue::from(timestamp)], &mut self.context).await.map(|_| ())
+                let args = [JsValue::from(timestamp)];
+                ActiveHostFuture {
+                    future: Box::pin(callable.call_async(
+                        &JsValue::undefined(),
+                        &args,
+                        &mut self.context,
+                    )),
+                    host_state: Rc::clone(&self.host_state),
+                }
+                .await
+                .map(|_| ())
             } else {
                 Err(JsNativeError::typ().with_message("animation frame callback is not callable").into())
             };
@@ -8192,6 +8206,32 @@ mod tests {
         };
 
         assert!(error.to_string().contains("callback failure"));
+    }
+
+    #[test]
+    fn suspended_animation_frame_does_not_leak_active_host_state_between_polls() {
+        let mut runtime = JsRuntime::new().unwrap();
+        let controller = runtime.javascript_dialog_controller();
+        runtime
+            .eval("requestAnimationFrame(() => alert('frame suspension'))")
+            .unwrap();
+        let mut frame = Box::pin(runtime.run_animation_frame_async(0));
+        let waker: &'static std::task::Waker = std::task::Waker::noop();
+        let mut context = FutureContext::from_waker(waker);
+        while controller.pending().is_none() {
+            assert!(matches!(frame.as_mut().poll(&mut context), Poll::Pending));
+            ACTIVE_HOST_STATE.with(|slot| assert!(slot.borrow().is_none()));
+        }
+        ACTIVE_HOST_STATE.with(|slot| assert!(slot.borrow().is_none()));
+        let dialog = controller.pending().unwrap();
+        controller.handle(dialog.id, true, None).unwrap();
+        loop {
+            if let Poll::Ready(result) = frame.as_mut().poll(&mut context) {
+                assert_eq!(result.unwrap(), 1);
+                break;
+            }
+        }
+        ACTIVE_HOST_STATE.with(|slot| assert!(slot.borrow().is_none()));
     }
 
     #[test]
