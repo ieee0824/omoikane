@@ -612,7 +612,8 @@ fn expand_background_shorthand(value: Value, important: bool) -> Vec<Declaration
                     || name.eq_ignore_ascii_case("radial-gradient")
                     || name.eq_ignore_ascii_case("conic-gradient")
                     || name.eq_ignore_ascii_case("repeating-linear-gradient")
-                    || name.eq_ignore_ascii_case("repeating-radial-gradient") =>
+                    || name.eq_ignore_ascii_case("repeating-radial-gradient")
+                    || name.eq_ignore_ascii_case("repeating-conic-gradient") =>
             {
                 declarations.push(Declaration {
                     name: "background-image".to_string(),

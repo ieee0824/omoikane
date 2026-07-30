@@ -5640,6 +5640,99 @@ fn paint_border_radius_clips_background_corners() {
 }
 
 #[test]
+fn rounded_box_without_paintable_background_image_skips_surface_allocation() {
+    for background_image in [
+        None,
+        Some("none"),
+        Some("radial-gradient(circle at, red, blue)"),
+        Some("url(data:image/png;base64,broken)"),
+    ] {
+        take_background_image_surface_pixels();
+        let declaration = background_image
+            .map(|value| format!("background-image: {value};"))
+            .unwrap_or_default();
+        let css = format!(
+            "html, body {{ margin: 0; }} div {{ width: 20px; height: 20px; border-radius: 5px; {declaration} }}"
+        );
+
+        paint_clip_path_document(&css, "<div></div>", 64.0, 64.0);
+
+        assert_eq!(take_background_image_surface_pixels(), 0, "{background_image:?}");
+    }
+}
+
+#[test]
+fn rounded_background_surface_is_local_to_the_visible_clip() {
+    let element = NodeHandle::element("div");
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(&format!(
+            "div {{ background-image: url(\"{}\"); background-repeat: no-repeat; \
+             background-attachment: fixed; background-position-x: 8px; \
+             background-position-y: 7px; }}",
+            red_pixel_data_uri()
+        ))
+        .unwrap(),
+    );
+    let style = resolver.computed_style(&element);
+    let mut canvas = Canvas::new(40, 40);
+    let rounded_rect = Rect {
+        x: 10.0,
+        y: 12.0,
+        width: 8.0,
+        height: 6.0,
+    };
+    let clip = Rect {
+        x: 12.0,
+        y: 13.0,
+        width: 4.0,
+        height: 3.0,
+    };
+    let viewport = Rect {
+        x: 5.0,
+        y: 7.0,
+        width: 30.0,
+        height: 30.0,
+    };
+
+    take_background_image_surface_pixels();
+    paint_background_image_rounded(
+        &mut canvas,
+        &style,
+        rounded_rect,
+        Some(clip),
+        viewport,
+        rounded_rect,
+        (2.0, 2.0, 2.0, 2.0),
+    );
+
+    assert_eq!(take_background_image_surface_pixels(), 12);
+    assert_eq!(canvas.pixel(13, 14), Some(Color::rgb(255, 0, 0)));
+    assert_eq!(canvas.pixel(11, 14).unwrap().a, 0, "left of clip");
+    assert_eq!(canvas.pixel(16, 14).unwrap().a, 0, "right of clip");
+    assert_eq!(canvas.pixel(12, 12).unwrap().a, 0, "above clip");
+}
+
+#[test]
+fn rounded_background_surface_uses_small_box_area_not_viewport_area() {
+    take_background_image_surface_pixels();
+    let canvas = paint_clip_path_document(
+        "html, body { margin: 0; } .target { margin-left: 7px; margin-top: 5px; \
+         width: 10px; height: 8px; border-radius: 3px; \
+         background-image: linear-gradient(red, red); }",
+        "<div class='target'></div>",
+        128.0,
+        96.0,
+    );
+    assert_eq!(take_background_image_surface_pixels(), 80);
+    assert!((0..96).any(|y| {
+        (7..17).any(|x| canvas.pixel(x, y) == Some(Color::rgb(255, 0, 0)))
+    }));
+    assert_eq!(canvas.pixel(0, 0).unwrap().a, 0);
+}
+
+#[test]
 fn uniform_pill_border_paints_rounded_corner_arc() {
     let canvas = paint_clip_path_document(
         ".target { width: 40px; height: 20px; border: 1px solid red; \
@@ -7007,6 +7100,266 @@ fn tiled_linear_gradient_no_repeat_paints_once() {
         "outside tile area should be transparent with no-repeat, got {:?}",
         outside
     );
+}
+
+fn render_gradient_box(background: &str, width: u32, height: u32) -> Canvas {
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let div = NodeHandle::element("div");
+    document.append_child(body.clone());
+    body.append_child(div);
+    let css = format!(
+        "body {{ margin: 0; }} div {{ width: {width}px; height: {height}px; {background} }}"
+    );
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(Origin::Author, parse_stylesheet(&css).unwrap());
+    let viewport = Rect { x: 0.0, y: 0.0, width: width as f32, height: height as f32 };
+    let layout = layout_tree(&document, &mut resolver, viewport).unwrap();
+    paint_layout(&layout, &mut resolver, viewport)
+}
+
+#[test]
+fn radial_gradient_circle_position_and_keyword_extent_are_painted() {
+    let canvas = render_gradient_box(
+        "background-image: radial-gradient(circle closest-side at 25% 50%, red 0%, blue 100%);",
+        40,
+        20,
+    );
+    let center = canvas.pixel(10, 10).unwrap();
+    let edge = canvas.pixel(20, 10).unwrap();
+    assert!(center.r > 220 && center.b < 35, "center: {center:?}");
+    assert!(edge.b > 220 && edge.r < 35, "closest side: {edge:?}");
+}
+
+#[test]
+fn radial_gradient_ellipse_and_explicit_radii_are_painted() {
+    let ellipse = render_gradient_box(
+        "background-image: radial-gradient(ellipse farthest-side at center, red, blue);",
+        40,
+        20,
+    );
+    assert!(ellipse.pixel(20, 10).unwrap().r > 220);
+    assert!(ellipse.pixel(39, 10).unwrap().b > 180);
+
+    let explicit = render_gradient_box(
+        "background-image: radial-gradient(ellipse 10px 5px at 10px 5px, red 0%, blue 100%);",
+        30,
+        15,
+    );
+    assert!(explicit.pixel(10, 5).unwrap().r > 220);
+    assert!(explicit.pixel(20, 5).unwrap().b > 220);
+}
+
+#[test]
+fn conic_gradient_from_position_and_wrap_around_are_painted() {
+    let canvas = render_gradient_box(
+        "background-image: conic-gradient(from 0.25turn at 50% 50%, red 0rad, blue 0.5turn, red 6.283185rad);",
+        21,
+        21,
+    );
+    let right = canvas.pixel(20, 10).unwrap();
+    let left = canvas.pixel(0, 10).unwrap();
+    let top = canvas.pixel(10, 0).unwrap();
+    assert!(right.r > 220, "from-angle origin: {right:?}");
+    assert!(left.b > 220, "opposite angle: {left:?}");
+    assert!(top.r > 100 && top.b > 100, "wrapped quarter: {top:?}");
+}
+
+#[test]
+fn radial_gradient_color_hint_moves_the_interpolation_midpoint() {
+    let canvas = render_gradient_box(
+        "background-image: radial-gradient(circle 20px, red 0%, 25%, blue 100%);",
+        41,
+        41,
+    );
+    let hinted_midpoint = canvas.pixel(25, 20).unwrap();
+    assert!(
+        (hinted_midpoint.r as i16 - hinted_midpoint.b as i16).abs() < 35,
+        "25% hint should move the red/blue midpoint near radius 5px: {hinted_midpoint:?}"
+    );
+}
+
+#[test]
+fn repeating_gradients_hard_stops_and_zero_period_are_deterministic() {
+    let radial = render_gradient_box(
+        "background-image: repeating-radial-gradient(circle, red 0px 2px, blue 2px 4px);",
+        20,
+        20,
+    );
+    assert_ne!(radial.pixel(10, 10), radial.pixel(12, 10));
+
+    let conic = render_gradient_box(
+        "background-image: repeating-conic-gradient(red 0deg 45deg, blue 45deg 90deg);",
+        21,
+        21,
+    );
+    assert_ne!(conic.pixel(10, 0), conic.pixel(20, 0));
+
+    let zero = render_gradient_box(
+        "background-image: repeating-conic-gradient(red 20deg, blue 20deg);",
+        5,
+        5,
+    );
+    assert_eq!(zero.pixel(0, 0), Some(Color::rgb(128, 0, 128)));
+}
+
+#[test]
+fn degenerate_radial_gradients_follow_css_images_rules() {
+    let circle = render_gradient_box(
+        "background-image: radial-gradient(circle 0px at center, red, blue);",
+        21,
+        21,
+    );
+    assert_eq!(circle.pixel(10, 10), Some(Color::rgb(255, 0, 0)));
+    assert_eq!(circle.pixel(11, 10), Some(Color::rgb(0, 0, 255)));
+
+    let zero_width = render_gradient_box(
+        "background-image: radial-gradient(ellipse 0px 5px at center, red 0px, blue 5px);",
+        21,
+        21,
+    );
+    assert_eq!(zero_width.pixel(10, 0), Some(Color::rgb(255, 0, 0)));
+    assert_eq!(zero_width.pixel(5, 10), zero_width.pixel(15, 10));
+    assert!(zero_width.pixel(5, 10).unwrap().b > 220);
+
+    let zero_height = render_gradient_box(
+        "background-image: radial-gradient(ellipse 5px 0px, red, blue);",
+        9,
+        9,
+    );
+    assert!((0..9).all(|x| zero_height.pixel(x, 4) == Some(Color::rgb(0, 0, 255))));
+
+    let repeating_zero_height = render_gradient_box(
+        "background-image: repeating-radial-gradient(ellipse 5px 0px, red 0px, blue 10px);",
+        9,
+        9,
+    );
+    assert!((0..9).all(|x| {
+        repeating_zero_height.pixel(x, 4) == Some(Color::rgb(128, 0, 128))
+    }));
+}
+
+#[test]
+fn gradient_transparent_interpolation_is_premultiplied() {
+    let canvas = render_gradient_box(
+        "background-image: radial-gradient(circle 20px, #ff000000 0%, #0000ffff 100%);",
+        41,
+        41,
+    );
+    let middle = canvas.pixel(30, 20).unwrap();
+    assert!(middle.b > 200 && middle.r < 20 && middle.a > 100 && middle.a < 160, "{middle:?}");
+}
+
+#[test]
+fn radial_gradient_uses_background_size_position_repeat_and_clip() {
+    let canvas = render_gradient_box(
+        "box-sizing: border-box; padding: 2px; background-clip: content-box; background-image: radial-gradient(circle, red, blue); background-size: 5px 5px; background-position-x: 2px; background-position-y: 1px; background-repeat: no-repeat;",
+        12,
+        10,
+    );
+    assert!(canvas.pixel(4, 3).unwrap().a > 0);
+    assert_eq!(canvas.pixel(0, 3).unwrap().a, 0);
+    assert_eq!(canvas.pixel(8, 3).unwrap().a, 0);
+}
+
+#[test]
+fn background_clip_applies_the_same_box_to_color_and_gradient() {
+    for (clip, inset) in [("border-box", 0), ("padding-box", 2), ("content-box", 4)] {
+        let common = format!(
+            "box-sizing: border-box; border: 2px solid transparent; padding: 2px; background-clip: {clip};"
+        );
+        let color = render_gradient_box(
+            &format!("{common} background-color: red;"),
+            12,
+            12,
+        );
+        let gradient = render_gradient_box(
+            &format!("{common} background-image: radial-gradient(circle, red, blue);"),
+            12,
+            12,
+        );
+
+        for y in 0..12 {
+            for x in 0..12 {
+                let color_alpha = color.pixel(x, y).unwrap().a;
+                let gradient_alpha = gradient.pixel(x, y).unwrap().a;
+                assert_eq!(
+                    color_alpha, gradient_alpha,
+                    "color and gradient alpha masks differ for {clip} at ({x}, {y})"
+                );
+                let inside = x >= inset && x < 12 - inset && y >= inset && y < 12 - inset;
+                assert_eq!(
+                    color_alpha > 0,
+                    inside,
+                    "unexpected {clip} clip at ({x}, {y})"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn rounded_background_color_still_respects_content_box_clip() {
+    let canvas = render_gradient_box(
+        "box-sizing: border-box; border: 2px solid transparent; padding: 2px; border-radius: 6px; background-clip: content-box; background-color: red;",
+        12,
+        12,
+    );
+    assert_eq!(canvas.pixel(3, 6).unwrap().a, 0);
+    assert_eq!(canvas.pixel(6, 6), Some(Color::rgb(255, 0, 0)));
+}
+
+#[test]
+fn rounded_padding_and_content_background_clips_reduce_the_corner_radii() {
+    for (clip, corner, edge) in [
+        ("padding-box", (2, 2), (8, 2)),
+        ("content-box", (4, 4), (8, 4)),
+    ] {
+        let common = format!(
+            "box-sizing: border-box; border: 2px solid transparent; padding: 2px; \
+             border-radius: 8px; background-clip: {clip};"
+        );
+        let color = render_gradient_box(
+            &format!("{common} background-color: red;"),
+            20,
+            20,
+        );
+        let gradient = render_gradient_box(
+            &format!(
+                "{common} background-image: linear-gradient(red, red);"
+            ),
+            20,
+            20,
+        );
+
+        assert_eq!(color.pixel(corner.0, corner.1).unwrap().a, 0, "{clip}");
+        assert_eq!(gradient.pixel(corner.0, corner.1).unwrap().a, 0, "{clip}");
+        assert!(color.pixel(edge.0, edge.1).unwrap().a > 0, "{clip}");
+        assert!(gradient.pixel(edge.0, edge.1).unwrap().a > 0, "{clip}");
+        for y in 0..20 {
+            for x in 0..20 {
+                assert_eq!(
+                    color.pixel(x, y).unwrap().a,
+                    gradient.pixel(x, y).unwrap().a,
+                    "color and gradient rounded masks differ for {clip} at ({x}, {y})"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn malformed_gradients_do_not_paint_or_panic() {
+    for value in [
+        "radial-gradient(circle at, red, blue)",
+        "radial-gradient(circle -2px, red, blue)",
+        "conic-gradient(from nope, red, blue)",
+        "repeating-conic-gradient(red)",
+    ] {
+        assert!(parse_gradient(value).is_none(), "accepted malformed {value}");
+        let canvas = render_gradient_box(&format!("background-image: {value};"), 4, 4);
+        assert_eq!(canvas.pixel(2, 2).unwrap().a, 0, "painted malformed {value}");
+    }
 }
 
 // --- box_blur_alpha カーネルサイズ修正テスト ---

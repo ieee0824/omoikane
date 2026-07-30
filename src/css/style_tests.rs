@@ -5232,6 +5232,68 @@ fn image_computed_keyword(declarations: &str, property: &str) -> String {
     }
 }
 
+#[test]
+fn background_clip_resolves_initial_unset_and_inherit() {
+    assert_eq!(image_computed_keyword("", "background-clip"), "border-box");
+    assert_eq!(
+        image_computed_keyword("background-clip: CONTENT-BOX", "background-clip"),
+        "content-box"
+    );
+    assert_eq!(
+        image_computed_keyword("background-clip: bogus", "background-clip"),
+        "border-box"
+    );
+    for keyword in ["initial", "unset", "revert"] {
+        assert_eq!(
+            image_computed_keyword(
+                &format!("background-clip: {keyword}"),
+                "background-clip"
+            ),
+            "border-box"
+        );
+    }
+
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let parent = NodeHandle::element("div");
+    let child = NodeHandle::element("span");
+    document.append_child(body.clone());
+    body.append_child(parent.clone());
+    parent.append_child(child.clone());
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "div { background-clip: content-box; } span { background-clip: inherit; }",
+        )
+        .unwrap(),
+    );
+    assert_eq!(
+        resolver.computed_style(&child).get("background-clip"),
+        Some(&ComputedValue::Keyword("content-box".to_string()))
+    );
+}
+
+#[test]
+fn invalid_conic_angle_syntax_drops_the_whole_declaration() {
+    for invalid in [
+        "conic-gradient(from to right, red, blue)",
+        "conic-gradient(red to right, blue)",
+        "conic-gradient(red, to right, blue)",
+    ] {
+        assert_eq!(
+            image_computed_keyword(
+                &format!(
+                    "background-image: linear-gradient(red, red); background-image: {invalid};"
+                ),
+                "background-image",
+            ),
+            "linear-gradient(red, red)",
+            "accepted {invalid}",
+        );
+    }
+}
+
 /// Both properties are exposed with their initial values even when nothing
 /// declares them, so getComputedStyle can serialize them (Firefox 152: `fill`
 /// and `50% 50%`).

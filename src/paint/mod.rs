@@ -33,6 +33,8 @@ thread_local! {
     static EFFECT_SURFACE_PIXELS: Cell<u64> = const { Cell::new(0) };
     #[cfg(test)]
     static BACKDROP_SURFACE_PIXELS: Cell<u64> = const { Cell::new(0) };
+    #[cfg(test)]
+    static BACKGROUND_IMAGE_SURFACE_PIXELS: Cell<u64> = const { Cell::new(0) };
 }
 
 #[cfg(test)]
@@ -45,6 +47,12 @@ pub(crate) fn take_effect_surface_pixels() -> u64 {
 #[cfg(test)]
 pub(crate) fn take_backdrop_surface_pixels() -> u64 {
     BACKDROP_SURFACE_PIXELS.with(|pixels| pixels.replace(0))
+}
+
+/// Takes the number of pixels allocated for rounded background-image surfaces.
+#[cfg(test)]
+pub(crate) fn take_background_image_surface_pixels() -> u64 {
+    BACKGROUND_IMAGE_SURFACE_PIXELS.with(|pixels| pixels.replace(0))
 }
 
 /// Processing time spent in each stage of the most recent screenshot render.
@@ -143,8 +151,8 @@ pub(crate) use border::{
 pub(crate) use border::{EdgeSizesForPaint, border_color_side, has_solid_border_side};
 #[allow(unused_imports)]
 pub(crate) use color::{
-    ColorStop, LinearGradient, interpolate_gradient_color, named_color, paint_linear_gradient,
-    parse_color, parse_gradient_direction, parse_linear_gradient, split_gradient_args,
+    Gradient, named_color, paint_gradient, parse_color, parse_gradient, parse_gradient_direction,
+    split_gradient_args,
 };
 #[allow(unused_imports)]
 pub(crate) use image::{
@@ -2474,15 +2482,43 @@ fn paint_box_internal_to(
     // box-shadow を背景より前（下）に描画する
     border::paint_box_shadow(canvas, style, border_box, inherited_clip);
 
-    if let Some(background) = background_color(style) {
-        if has_border_radius(style) {
-            let (tl, tr, br, bl) = border_radius_corners(style);
-            canvas.fill_rounded_rect(border_box, background, tl, tr, br, bl, inherited_clip);
-        } else {
-            canvas.fill_rect_clipped(border_box, background, inherited_clip);
+    let (background_clip_rect, background_radii) =
+        background_clip_geometry(layout, style, border_box, padding_box);
+    let background_clip = match inherited_clip {
+        Some(inherited_clip) => intersect(background_clip_rect, inherited_clip),
+        None => Some(background_clip_rect),
+    };
+    if let Some(background_clip) = background_clip {
+        if let Some(background) = background_color(style) {
+            if background_radii != (0.0, 0.0, 0.0, 0.0) {
+                let (tl, tr, br, bl) = background_radii;
+                canvas.fill_rounded_rect(
+                    background_clip_rect,
+                    background,
+                    tl,
+                    tr,
+                    br,
+                    bl,
+                    Some(background_clip),
+                );
+            } else {
+                canvas.fill_rect_clipped(
+                    background_clip_rect,
+                    background,
+                    Some(background_clip),
+                );
+            }
         }
+        paint_background_image_rounded(
+            canvas,
+            style,
+            border_box,
+            Some(background_clip),
+            viewport,
+            background_clip_rect,
+            background_radii,
+        );
     }
-    paint_background_image(canvas, style, border_box, inherited_clip, viewport);
     if layout.overflow.clips_overflow() {
         let overflow_clip =
             overflow_clip_rect(layout.overflow, padding_box, inherited_clip, viewport);
@@ -2811,6 +2847,168 @@ fn padding_box_rect(layout: &LayoutBox) -> Rect {
 
 fn background_color(style: &ComputedStyle) -> Option<Color> {
     color_property(style.get("background-color"))
+}
+
+fn background_clip_geometry(
+    layout: &LayoutBox,
+    style: &ComputedStyle,
+    border_box: Rect,
+    padding_box: Rect,
+) -> (Rect, (f32, f32, f32, f32)) {
+    let radii = border_radius_corners(style);
+    let border = layout.dimensions.border;
+    let padding = layout.dimensions.padding;
+    let (rect, top, right, bottom, left) = match style.get("background-clip") {
+        Some(ComputedValue::Keyword(value)) if value.eq_ignore_ascii_case("content-box") => (
+            layout.dimensions.content,
+            border.top + padding.top,
+            border.right + padding.right,
+            border.bottom + padding.bottom,
+            border.left + padding.left,
+        ),
+        Some(ComputedValue::Keyword(value)) if value.eq_ignore_ascii_case("padding-box") => (
+            padding_box,
+            border.top,
+            border.right,
+            border.bottom,
+            border.left,
+        ),
+        _ => return (border_box, radii),
+    };
+    let (tl, tr, br, bl) = radii;
+    (
+        rect,
+        (
+            (tl - top.max(left)).max(0.0),
+            (tr - top.max(right)).max(0.0),
+            (br - bottom.max(right)).max(0.0),
+            (bl - bottom.max(left)).max(0.0),
+        ),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn paint_background_image_rounded(
+    canvas: &mut Canvas,
+    style: &ComputedStyle,
+    rect: Rect,
+    clip: Option<Rect>,
+    viewport: Rect,
+    rounded_rect: Rect,
+    radii: (f32, f32, f32, f32),
+) {
+    let Some(background) = prepare_background_image(style) else {
+        return;
+    };
+    if radii == (0.0, 0.0, 0.0, 0.0) {
+        paint_prepared_background_image(canvas, style, rect, clip, viewport, &background);
+        return;
+    }
+    let Some(mut surface_bounds) = normalize_rect(rounded_rect) else {
+        return;
+    };
+    if let Some(clip) = clip {
+        let Some(clipped) = intersect(surface_bounds, clip) else {
+            return;
+        };
+        surface_bounds = clipped;
+    }
+    let canvas_bounds = Rect {
+        x: 0.0,
+        y: 0.0,
+        width: canvas.width as f32,
+        height: canvas.height as f32,
+    };
+    let Some(surface_bounds) = intersect(surface_bounds, canvas_bounds) else {
+        return;
+    };
+    let x0 = surface_bounds.x.floor().max(0.0) as u32;
+    let y0 = surface_bounds.y.floor().max(0.0) as u32;
+    let x1 = (surface_bounds.x + surface_bounds.width)
+        .ceil()
+        .min(canvas.width as f32) as u32;
+    let y1 = (surface_bounds.y + surface_bounds.height)
+        .ceil()
+        .min(canvas.height as f32) as u32;
+    let surface_width = x1.saturating_sub(x0);
+    let surface_height = y1.saturating_sub(y0);
+    if surface_width == 0 || surface_height == 0 {
+        return;
+    }
+    #[cfg(test)]
+    BACKGROUND_IMAGE_SURFACE_PIXELS.with(|pixels| {
+        pixels.set(
+            pixels.get() + u64::from(surface_width) * u64::from(surface_height),
+        );
+    });
+    let offset_x = x0 as f32;
+    let offset_y = y0 as f32;
+    let translate = |rect: Rect| Rect {
+        x: rect.x - offset_x,
+        y: rect.y - offset_y,
+        ..rect
+    };
+    let mut layer = Canvas::new(surface_width, surface_height);
+    paint_prepared_background_image(
+        &mut layer,
+        style,
+        translate(rect),
+        clip.map(translate),
+        translate(viewport),
+        &background,
+    );
+    let Some(area) = normalize_rect(rounded_rect) else {
+        return;
+    };
+    let (tl, tr, br, bl) = radii;
+    for y in y0..y1 {
+        for x in x0..x1 {
+            if !point_in_rounded_rect(
+                x as f32 + 0.5,
+                y as f32 + 0.5,
+                area.x,
+                area.y,
+                area.width,
+                area.height,
+                tl,
+                tr,
+                br,
+                bl,
+            ) {
+                continue;
+            }
+            let source_x = x - x0;
+            let source_y = y - y0;
+            let source_index = ((source_y * surface_width + source_x) * 4) as usize;
+            let destination_index = ((y * canvas.width + x) * 4) as usize;
+            let color = Color {
+                r: layer.pixels[source_index],
+                g: layer.pixels[source_index + 1],
+                b: layer.pixels[source_index + 2],
+                a: layer.pixels[source_index + 3],
+            };
+            blend_pixel(
+                &mut canvas.pixels[destination_index..destination_index + 4],
+                color,
+            );
+        }
+    }
+}
+
+enum PreparedBackgroundImage {
+    Gradient(color::Gradient),
+    Image(Image),
+}
+
+fn prepare_background_image(style: &ComputedStyle) -> Option<PreparedBackgroundImage> {
+    let value = match style.get("background-image") {
+        Some(ComputedValue::Keyword(value)) | Some(ComputedValue::String(value)) => value,
+        _ => return None,
+    };
+    if let Some(gradient) = color::parse_gradient(value.trim_start()) {
+        return Some(PreparedBackgroundImage::Gradient(gradient));
+    }
+    background_image(style).map(PreparedBackgroundImage::Image)
 }
 
 fn background_image(style: &ComputedStyle) -> Option<Image> {
@@ -3839,141 +4037,136 @@ fn paint_background_image(
     clip: Option<Rect>,
     viewport: Rect,
 ) {
+    let Some(background) = prepare_background_image(style) else {
+        return;
+    };
+    paint_prepared_background_image(canvas, style, rect, clip, viewport, &background);
+}
+
+fn paint_prepared_background_image(
+    canvas: &mut Canvas,
+    style: &ComputedStyle,
+    rect: Rect,
+    clip: Option<Rect>,
+    viewport: Rect,
+    background: &PreparedBackgroundImage,
+) {
     let Some(area) = normalize_rect(rect) else {
         return;
     };
 
-    // Check if the background-image is a linear-gradient
-    let bg_image_value = style.get("background-image");
-    let raw_bg_str: Option<String> = match bg_image_value {
-        Some(ComputedValue::Keyword(kw)) => Some(kw.clone()),
-        Some(ComputedValue::String(s)) => Some(s.clone()),
-        _ => None,
-    };
-    let gradient_str = raw_bg_str.as_deref().and_then(|s| {
-        let lower = s.trim_start().to_ascii_lowercase();
-        if lower.starts_with("linear-gradient(") {
-            Some(s.trim_start())
-        } else {
-            None
-        }
-    });
-
-    if let Some(gradient_str) = gradient_str {
-        // Normalise to lowercase for parsing (function names are case-insensitive in CSS)
-        let normalised = gradient_str.to_ascii_lowercase();
-        if let Some(gradient) = color::parse_linear_gradient(&normalised) {
-            // Check if a background-size is set to tile the gradient
-            let has_explicit_size = match style.get("background-size") {
-                None => false,
-                Some(ComputedValue::Keyword(kw)) => !kw.eq_ignore_ascii_case("auto"),
-                _ => true,
+    // CSS gradients share the same background tiling, positioning and clipping path.
+    if let PreparedBackgroundImage::Gradient(gradient) = background {
+        // Check if a background-size is set to tile the gradient
+        let has_explicit_size = match style.get("background-size") {
+            None => false,
+            Some(ComputedValue::Keyword(kw)) => !kw.eq_ignore_ascii_case("auto"),
+            _ => true,
+        };
+        if has_explicit_size {
+            // Gradient with explicit tile size — render into an offscreen tile buffer once,
+            // then blit (draw_image_scaled_clipped) for each repeated position.
+            // This avoids per-pixel gradient computation for every tile copy.
+            let (tile_w, tile_h) = background_size(style, area, area.width, area.height);
+            let tile_w = tile_w.max(1.0);
+            let tile_h = tile_h.max(1.0);
+            let repeat = background_repeat(style);
+            let fixed = background_attachment_fixed(style);
+            let (pos_cw, pos_ch) = if fixed {
+                (viewport.width, viewport.height)
+            } else {
+                (area.width, area.height)
             };
-            if has_explicit_size {
-                // Gradient with explicit tile size — render into an offscreen tile buffer once,
-                // then blit (draw_image_scaled_clipped) for each repeated position.
-                // This avoids per-pixel gradient computation for every tile copy.
-                let (tile_w, tile_h) = background_size(style, area, area.width, area.height);
-                let tile_w = tile_w.max(1.0);
-                let tile_h = tile_h.max(1.0);
-                let repeat = background_repeat(style);
-                let fixed = background_attachment_fixed(style);
-                let (pos_cw, pos_ch) = if fixed {
-                    (viewport.width, viewport.height)
-                } else {
-                    (area.width, area.height)
-                };
-                let (position_x, position_y) =
-                    background_position(style, pos_cw, pos_ch, tile_w, tile_h);
-                let anchor_x = if fixed {
-                    viewport.x + position_x
-                } else {
-                    area.x + position_x
-                };
-                let anchor_y = if fixed {
-                    viewport.y + position_y
-                } else {
-                    area.y + position_y
-                };
-                let x_end = area.x + area.width;
-                let y_end = area.y + area.height;
+            let (position_x, position_y) =
+                background_position(style, pos_cw, pos_ch, tile_w, tile_h);
+            let anchor_x = if fixed {
+                viewport.x + position_x
+            } else {
+                area.x + position_x
+            };
+            let anchor_y = if fixed {
+                viewport.y + position_y
+            } else {
+                area.y + position_y
+            };
+            let x_end = area.x + area.width;
+            let y_end = area.y + area.height;
 
-                // Render one tile at origin (0,0) into an offscreen canvas.
-                // Guard with a maximum pixel budget to avoid OOM on huge background-size.
-                const MAX_TILE_PIXELS: u64 = 16_777_216; // 4096 x 4096
-                let tile_image = if repeat {
-                    let tw = tile_w.ceil().max(1.0) as u32;
-                    let th = tile_h.ceil().max(1.0) as u32;
-                    let pixels = tw as u64 * th as u64;
-                    if pixels <= MAX_TILE_PIXELS && tw > 0 && th > 0 {
-                        let mut tile_canvas = Canvas::new(tw, th);
-                        let origin_rect = Rect {
-                            x: 0.0,
-                            y: 0.0,
-                            width: tile_w,
-                            height: tile_h,
-                        };
-                        color::paint_linear_gradient(
-                            &mut tile_canvas,
-                            &gradient,
-                            origin_rect,
-                            None,
-                        );
-                        Image::new(tw, th, tile_canvas.pixels).ok()
-                    } else {
-                        None // tile too large, fall back to per-tile rendering
-                    }
-                } else {
-                    None
-                };
-
-                let mut ty = if repeat {
-                    anchor_y + ((area.y - anchor_y) / tile_h).floor() * tile_h
-                } else {
-                    anchor_y
-                };
-                while ty < y_end {
-                    let mut tx = if repeat {
-                        anchor_x + ((area.x - anchor_x) / tile_w).floor() * tile_w
-                    } else {
-                        anchor_x
+            // Render one tile at origin (0,0) into an offscreen canvas.
+            // Guard with a maximum pixel budget to avoid OOM on huge background-size.
+            const MAX_TILE_PIXELS: u64 = 16_777_216; // 4096 x 4096
+            let tile_image = if repeat {
+                let tw = tile_w.ceil().max(1.0) as u32;
+                let th = tile_h.ceil().max(1.0) as u32;
+                let pixels = tw as u64 * th as u64;
+                if pixels <= MAX_TILE_PIXELS && tw > 0 && th > 0 {
+                    let mut tile_canvas = Canvas::new(tw, th);
+                    let origin_rect = Rect {
+                        x: 0.0,
+                        y: 0.0,
+                        width: tile_w,
+                        height: tile_h,
                     };
-                    while tx < x_end {
-                        let tile_rect = Rect {
-                            x: tx,
-                            y: ty,
-                            width: tile_w,
-                            height: tile_h,
-                        };
-                        if let Some(ref img) = tile_image {
-                            // Fast path: blit pre-rendered tile buffer
-                            canvas.draw_image_scaled_clipped(img, tile_rect, clip.or(Some(area)));
-                        } else {
-                            // Fallback (no-repeat, tile too large, or image validation failed): render directly
-                            color::paint_linear_gradient(
-                                canvas,
-                                &gradient,
-                                tile_rect,
-                                clip.or(Some(area)),
-                            );
-                        }
-                        if !repeat {
-                            return;
-                        }
-                        tx += tile_w;
-                    }
-                    ty += tile_h;
+                    color::paint_gradient(
+                        &mut tile_canvas,
+                        &gradient,
+                        origin_rect,
+                        None,
+                    );
+                    Image::new(tw, th, tile_canvas.pixels).ok()
+                } else {
+                    None // tile too large, fall back to per-tile rendering
                 }
             } else {
-                // Default: gradient fills the entire area
-                color::paint_linear_gradient(canvas, &gradient, area, clip.or(Some(area)));
+                None
+            };
+
+            let mut ty = if repeat {
+                anchor_y + ((area.y - anchor_y) / tile_h).floor() * tile_h
+            } else {
+                anchor_y
+            };
+            while ty < y_end {
+                let mut tx = if repeat {
+                    anchor_x + ((area.x - anchor_x) / tile_w).floor() * tile_w
+                } else {
+                    anchor_x
+                };
+                while tx < x_end {
+                    let tile_rect = Rect {
+                        x: tx,
+                        y: ty,
+                        width: tile_w,
+                        height: tile_h,
+                    };
+                    if let Some(ref img) = tile_image {
+                        // Fast path: blit pre-rendered tile buffer
+                        canvas.draw_image_scaled_clipped(img, tile_rect, clip.or(Some(area)));
+                    } else {
+                        // Fallback (no-repeat, tile too large, or image validation failed): render directly
+                        color::paint_gradient(
+                            canvas,
+                            &gradient,
+                            tile_rect,
+                            clip.or(Some(area)),
+                        );
+                    }
+                    if !repeat {
+                        return;
+                    }
+                    tx += tile_w;
+                }
+                ty += tile_h;
             }
-            return;
+        } else {
+            // Default: gradient fills the entire area
+            color::paint_gradient(canvas, &gradient, area, clip.or(Some(area)));
         }
+        return;
     }
 
     // Regular image
-    let Some(image) = background_image(style) else {
+    let PreparedBackgroundImage::Image(image) = background else {
         return;
     };
 
