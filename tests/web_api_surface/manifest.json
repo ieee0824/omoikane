@@ -144,7 +144,7 @@
       "area": "html",
       "description": "Dialog elements implement showModal and close",
       "probe": "typeof HTMLDialogElement === 'function' && typeof document.createElement('dialog').showModal === 'function'",
-      "baseline_supported": false
+      "baseline_supported": true
     },
     {
       "id": "scheduling.queue-microtask",

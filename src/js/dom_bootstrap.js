@@ -793,7 +793,8 @@
     if (!node.isConnected) return false;
     if (node.__isDisabledControl && node.__isDisabledControl()) return false;
     if (!isRenderedForFocus(node)) return false;
-    return hasIntegerTabindex(node) || isInherentlyFocusable(node) || isEditingHost(node);
+    return Boolean(node.__dialogFocusFallback) || hasIntegerTabindex(node) ||
+      isInherentlyFocusable(node) || isEditingHost(node);
   }
 
   // Returns the focusable areas participating in sequential focus navigation.
@@ -2426,6 +2427,114 @@
   class HTMLSpanElement extends HTMLElement {}
   class HTMLParagraphElement extends HTMLElement {}
   class HTMLAnchorElement extends HTMLElement {}
+  const modalDialogsByDocument = new WeakMap();
+
+  function modalDialogStack(doc) {
+    let stack = modalDialogsByDocument.get(doc);
+    if (!stack) {
+      stack = [];
+      modalDialogsByDocument.set(doc, stack);
+    }
+    for (let index = stack.length - 1; index >= 0; index--) {
+      const dialog = stack[index];
+      if (!dialog.isConnected || !dialog.open || !dialog.__dialogModal) {
+        stack.splice(index, 1);
+      }
+    }
+    return stack;
+  }
+
+  function focusDialog(dialog) {
+    let first = null;
+    let autofocus = null;
+    function visit(node) {
+      for (const child of node.childNodes || []) {
+        if (child instanceof Element && canBeFocused(child)) {
+          if (!first) first = child;
+          if (!autofocus && child.hasAttribute("autofocus")) autofocus = child;
+        }
+        visit(child);
+      }
+    }
+    visit(dialog);
+    const target = dialog.hasAttribute("autofocus") ? dialog : (autofocus || first || dialog);
+    if (target === dialog && !canBeFocused(dialog)) {
+      dialog.__dialogFocusFallback = true;
+      try { dialog.focus(); }
+      finally { dialog.__dialogFocusFallback = false; }
+    } else {
+      target.focus();
+    }
+  }
+
+  function performDialogEscapeDefault(doc) {
+    const stack = modalDialogStack(doc);
+    const dialog = stack[stack.length - 1];
+    if (!dialog) return false;
+    const notCanceled = dialog.dispatchEvent(new Event("cancel", { cancelable: true }));
+    if (notCanceled) dialog.close();
+    return true;
+  }
+
+  class HTMLDialogElement extends HTMLElement {
+    get open() { return this.hasAttribute("open"); }
+    set open(value) {
+      if (value) this.setAttribute("open", "");
+      else this.removeAttribute("open");
+    }
+    get returnValue() {
+      return Object.prototype.hasOwnProperty.call(this, "__dialogReturnValue")
+        ? this.__dialogReturnValue : "";
+    }
+    set returnValue(value) { this.__dialogReturnValue = String(value); }
+    show() {
+      if (this.open) {
+        if (this.__dialogModal) {
+          throw new DOMException("A modal dialog cannot be shown non-modally", "InvalidStateError");
+        }
+        return;
+      }
+      this.__dialogModal = false;
+      this.__dialogPreviouslyFocused = focusedElementOf(this.ownerDocument);
+      this.open = true;
+      focusDialog(this);
+    }
+    showModal() {
+      if (!this.isConnected) {
+        throw new DOMException("A modal dialog must be connected", "InvalidStateError");
+      }
+      if (this.open) {
+        if (!this.__dialogModal) {
+          throw new DOMException("A non-modal dialog is already open", "InvalidStateError");
+        }
+        return;
+      }
+      this.__dialogPreviouslyFocused = focusedElementOf(this.ownerDocument);
+      this.__dialogModal = true;
+      this.open = true;
+      modalDialogStack(this.ownerDocument).push(this);
+      focusDialog(this);
+    }
+    close(result) {
+      if (!this.open) return;
+      if (arguments.length > 0) this.returnValue = result;
+      const doc = this.ownerDocument;
+      const stack = modalDialogStack(doc);
+      const index = stack.indexOf(this);
+      if (index >= 0) stack.splice(index, 1);
+      const wasModal = Boolean(this.__dialogModal);
+      const focused = focusedElementOf(doc);
+      this.open = false;
+      this.__dialogModal = false;
+      const previous = this.__dialogPreviouslyFocused;
+      this.__dialogPreviouslyFocused = null;
+      if (previous && canBeFocused(previous) &&
+          (wasModal || (focused && this.contains(focused)))) {
+        previous.focus();
+      }
+      this.dispatchEvent(new Event("close"));
+    }
+  }
   class HTMLStyleElement extends HTMLElement {
     get sheet() { return sheetFor(this); }
   }
@@ -5268,6 +5377,7 @@
     style: HTMLStyleElement,
     template: HTMLTemplateElement,
     slot: HTMLSlotElement,
+    dialog: HTMLDialogElement,
   };
 
   const CUSTOM_ELEMENT_REGISTRY_CONSTRUCTION = {};
@@ -5669,6 +5779,7 @@
     "mouseout", "mouseenter", "mouseleave", "submit", "reset", "change",
     "input", "focus", "blur", "keydown", "keyup", "keypress", "select",
     "contextmenu", "wheel", "error", "abort", "slotchange", "scroll",
+    "cancel", "close",
   ];
   for (const type of EVENT_HANDLER_TYPES) {
     const key = "__on_" + type;
@@ -5698,6 +5809,7 @@
   globalThis.HTMLSpanElement = HTMLSpanElement;
   globalThis.HTMLParagraphElement = HTMLParagraphElement;
   globalThis.HTMLAnchorElement = HTMLAnchorElement;
+  globalThis.HTMLDialogElement = HTMLDialogElement;
   globalThis.HTMLStyleElement = HTMLStyleElement;
   globalThis.HTMLTemplateElement = HTMLTemplateElement;
   globalThis.HTMLSlotElement = HTMLSlotElement;
@@ -6024,7 +6136,10 @@
       ...init, bubbles: true, cancelable: true, composed: true,
     }));
     if (notCanceled && type === "keydown") {
-      if (String(init && init.key || "") === "Tab") {
+      if (String(init && init.key || "") === "Escape" &&
+          performDialogEscapeDefault(focusedDocument)) {
+        // The top-most modal dialog consumes Escape as its cancel action.
+      } else if (String(init && init.key || "") === "Tab") {
         performSequentialFocusNavigation(focusedDocument, Boolean(init && init.shiftKey));
       } else {
         performTextControlKeyDefault(target, init || {});
