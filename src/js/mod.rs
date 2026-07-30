@@ -2299,6 +2299,9 @@ impl JsRuntime {
     async fn run_animation_frame_async(&mut self, elapsed_ms: u64) -> JsResult<usize> {
         self.host_state.borrow_mut().event_loop.advance(elapsed_ms);
         self.run_until_idle_async().await?;
+        if self.has_pending_scroll_steps() {
+            self.flush_pending_scroll_events()?;
+        }
         let (timestamp, callback_ids) = self.host_state.borrow_mut().event_loop.begin_animation_frame();
         let mut callbacks_run = 0;
         let mut first_error = None;
@@ -2315,8 +2318,9 @@ impl JsRuntime {
             if let Err(error) = result && first_error.is_none() { first_error = Some(error); }
         }
         self.run_jobs()?;
-        self.run_until_idle_async().await?;
         if let Some(error) = first_error { return Err(error); }
+        self.update_css_transitions()?;
+        self.run_until_idle_async().await?;
         Ok(callbacks_run)
     }
 
@@ -7987,6 +7991,56 @@ mod tests {
         assert_eq!(completed.runtime.eval("asyncCallbackLog.join(',')").unwrap()
             .as_string().unwrap().to_std_string_escaped(),
             "event-before,event-after,event-second,returned:false,throw:listener failure:true,timer-before,timer-after,frame-before,frame-after");
+    }
+
+    #[test]
+    fn owned_page_task_flushes_scroll_steps_before_animation_frames() {
+        let mut runtime = runtime_from_html(
+            r#"<html><head><style>* { margin: 0 } body { height: 1000px }</style></head><body></body></html>"#,
+        );
+        runtime.set_viewport(200.0, 100.0);
+        let mut task = Box::pin(runtime.into_page_task(
+            18,
+            vec![PageTaskSource::Classic {
+                source: r#"
+                    globalThis.frameOrder = [];
+                    addEventListener('scroll', () => frameOrder.push('scroll'));
+                    scrollTo(0, 50);
+                    requestAnimationFrame(() => {
+                        frameOrder.push('frame');
+                        alert('frame');
+                    });
+                "#
+                .to_string(),
+                label: "scroll and frame".to_string(),
+                script_node_id: None,
+            }],
+        ));
+        let controller = task.dialog_controller();
+        let waker: &'static std::task::Waker = std::task::Waker::noop();
+        let mut context = FutureContext::from_waker(waker);
+        while controller.pending().is_none() {
+            assert!(matches!(task.as_mut().poll(&mut context), Poll::Pending));
+        }
+        let dialog = controller.pending().unwrap();
+        assert_eq!(dialog.message, "frame");
+        controller.handle(dialog.id, true, None).unwrap();
+        let mut completed = loop {
+            if let Poll::Ready(completed) = task.as_mut().poll(&mut context) {
+                break completed;
+            }
+        };
+        assert_eq!(completed.result, Ok(Vec::new()));
+        assert_eq!(
+            completed
+                .runtime
+                .eval("frameOrder.join(',')")
+                .unwrap()
+                .as_string()
+                .unwrap()
+                .to_std_string_escaped(),
+            "scroll,frame"
+        );
     }
 
     #[test]
