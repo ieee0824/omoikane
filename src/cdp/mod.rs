@@ -10,6 +10,7 @@ use std::time::{Duration, Instant};
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
+use boa_engine::JsValue;
 use serde_json::{Value, json};
 use sha1::{Digest, Sha1};
 
@@ -1417,35 +1418,12 @@ impl CdpSession {
         expression: &str,
         return_by_value: bool,
     ) -> Result<Value, JsonRpcError> {
-        let script = if return_by_value {
-            format!(
-                "(() => {{ const __value = eval({expression:?}); return JSON.stringify({{ result: __cdpSerializeValue(__value) }}); }})()"
-            )
-        } else {
-            let object_id = format!("__cdp_object_{}", self.next_object_id);
-            self.next_object_id += 1;
-            format!(
-                "(() => {{ globalThis[{object_id:?}] = eval({expression:?}); return JSON.stringify({{ result: __cdpRemoteObject(globalThis[{object_id:?}], {object_id:?}) }}); }})()"
-            )
-        };
-
-        let raw = self.runtime.eval(&script).map_err(js_error)?;
-        let payload = raw
-            .as_string()
-            .ok_or(JsonRpcError {
-                code: -32000,
-                message: "Runtime evaluation did not return a string payload".to_string(),
-            })?
-            .to_std_string_escaped();
+        let value = self.runtime.eval(expression).map_err(js_error)?;
         // Runtime.evaluate is itself a user-agent task. Complete its
         // microtask checkpoint and make any host tasks (such as navigation)
         // ready before the protocol method commits them.
         self.runtime.run_until_idle().map_err(js_error)?;
-        let parsed: Value = serde_json::from_str(&payload).map_err(|error| JsonRpcError {
-            code: -32000,
-            message: error.to_string(),
-        })?;
-        Ok(parsed)
+        self.serialize_evaluation_value(value, return_by_value)
     }
 
     async fn evaluate_expression_async(
@@ -1458,6 +1436,16 @@ impl CdpSession {
         // path and reject a native-call suspension.
         let value = self.runtime.eval_async(expression).await.map_err(js_error)?;
         self.runtime.run_until_idle().map_err(js_error)?;
+        let result = self.serialize_evaluation_value(value, return_by_value)?;
+        self.drive_navigation_requests()?;
+        Ok(result)
+    }
+
+    fn serialize_evaluation_value(
+        &mut self,
+        value: JsValue,
+        return_by_value: bool,
+    ) -> Result<Value, JsonRpcError> {
         let serialization_function = if return_by_value {
             "value => JSON.stringify({ result: __cdpSerializeValue(value) })".to_string()
         } else {
@@ -1486,7 +1474,6 @@ impl CdpSession {
             code: -32000,
             message: error.to_string(),
         })?;
-        self.drive_navigation_requests()?;
         Ok(result)
     }
 
@@ -2664,6 +2651,58 @@ mod tests {
         assert_eq!(observed.len(), 1);
         assert_eq!(observed[0]["id"], "observe");
         assert_eq!(observed[0]["result"]["result"]["value"], "done");
+    }
+
+    #[test]
+    fn sync_and_async_raw_source_execution_share_scope_completion_and_serialization() {
+        let mut direct = CdpSession::new().unwrap();
+        let mut browser = BrowserSession::new().unwrap();
+        let client = browser.accept_upgrade(sample_upgrade_request()).unwrap();
+        let cases = [
+            ("var sharedVar = 7; sharedVar", true),
+            ("sharedVar", true),
+            ("function sharedFunction(value) { return value * 2; }", true),
+            ("sharedFunction(4)", true),
+            ("1; 2; 3", true),
+            (
+                "({ toJSON() { queueMicrotask(() => globalThis.sharedSerializerOrder = 'settled'); return { ok: true }; } })",
+                true,
+            ),
+            ("sharedSerializerOrder", true),
+            ("(function referenced(value) { return value; })", false),
+        ];
+
+        for (index, (expression, return_by_value)) in cases.into_iter().enumerate() {
+            let params = json!({
+                "expression": expression,
+                "returnByValue": return_by_value,
+            });
+            let expected = direct.dispatch("Runtime.evaluate", params.clone()).unwrap();
+            browser_request(
+                &mut browser,
+                client.client_id,
+                &json!({
+                    "jsonrpc": "2.0",
+                    "id": index,
+                    "method": "Runtime.evaluate",
+                    "params": params,
+                })
+                .to_string(),
+            );
+            let response = browser_payloads(&mut browser, client.client_id);
+            assert_eq!(response.len(), 1);
+            assert_eq!(response[0]["result"], expected, "expression: {expression}");
+        }
+
+        assert_eq!(
+            direct
+                .dispatch(
+                    "Runtime.evaluate",
+                    json!({ "expression": "typeof sharedFunction", "returnByValue": true }),
+                )
+                .unwrap()["result"]["value"],
+            "function"
+        );
     }
 
     #[test]
