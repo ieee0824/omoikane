@@ -697,7 +697,17 @@ fn selected_wpt_testharness_cases_match_expectations() {
             "WPT resource missing: {}",
             case.path
         );
-        let document = TreeBuilder::parse(&String::from_utf8_lossy(response.body())).document();
+        let document_source = if case.path.ends_with(".any.js") {
+            format!(
+                "<!doctype html><script src=\"/resources/testharness.js\"></script>\
+                 <script src=\"/resources/testharnessreport.js\"></script>\
+                 <script src=\"/{0}\"></script>",
+                case.path
+            )
+        } else {
+            String::from_utf8_lossy(response.body()).into_owned()
+        };
+        let document = TreeBuilder::parse(&document_source).document();
         let base: Url = url.parse().expect("parse WPT URL");
         let mut runtime = JsRuntime::with_document(document).expect("create WPT runtime");
         let errors = runtime.execute_document_scripts(Some(&base));

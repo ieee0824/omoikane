@@ -2084,8 +2084,8 @@ impl JsRuntime {
     /// callbacks as they come due, and stops as soon as no timers remain. Two
     /// caps guard against runaway pages: `max_virtual_ms` bounds total virtual
     /// time (so a plain `setInterval` cannot spin forever), and `max_tasks`
-    /// bounds the total number of timer tasks executed (so a callback that
-    /// re-schedules many zero-delay timers cannot explode).
+    /// bounds the total number of tasks executed (so a callback that
+    /// continuously schedules timers or posted messages cannot explode).
     ///
     /// Unlike [`tick`](Self::tick), individual callback errors are swallowed so
     /// that one throwing timer does not halt the remaining pipeline work.
@@ -2095,8 +2095,9 @@ impl JsRuntime {
         let step = step_ms.max(1);
         let mut advanced: u64 = 0;
         let mut tasks_run: usize = 0;
+        let mut tasks_processed: usize = 0;
 
-        while advanced < max_virtual_ms && tasks_run < max_tasks {
+        while advanced < max_virtual_ms && tasks_processed < max_tasks {
             if !self.has_pending_timers() && !self.has_pending_css_transition_work() {
                 break;
             }
@@ -2104,12 +2105,13 @@ impl JsRuntime {
             advanced = advanced.saturating_add(step);
 
             loop {
-                if tasks_run >= max_tasks {
+                if tasks_processed >= max_tasks {
                     break;
                 }
                 let Some((_, task)) = self.host_state.borrow_mut().event_loop.pop_task() else {
                     break;
                 };
+                tasks_processed += 1;
                 let is_timer = matches!(task, Task::Timer(_));
                 {
                     // Swallow per-task JS errors: a single failing timer must
@@ -2118,6 +2120,7 @@ impl JsRuntime {
                     let task_kind = match &task {
                         Task::Timer(payload) => payload.kind(),
                         Task::Navigation(_) => "navigation",
+                        Task::PostedMessage(_) => "posted-message",
                     };
                     let callback_start = std::time::Instant::now();
                     let callback_result = self.run_task(task);
@@ -2138,7 +2141,7 @@ impl JsRuntime {
                     if std::env::var_os("OMOIKANE_LOG_TIMERS").is_some() {
                         eprintln!(
                             "[omoikane][timer] task={} kind={} callback_ms={:.3} jobs_ms={:.3}",
-                            tasks_run,
+                            tasks_processed,
                             task_kind,
                             callback_elapsed.as_secs_f64() * 1_000.0,
                             jobs_elapsed.as_secs_f64() * 1_000.0,
@@ -2174,6 +2177,16 @@ impl JsRuntime {
             Task::Timer(payload) => self.run_timer_payload(payload),
             Task::Navigation(request) => {
                 self.host_state.borrow_mut().navigation_requests.push_back(request);
+                Ok(())
+            }
+            Task::PostedMessage(callback) => {
+                let result = self.with_active_host(|context| {
+                    if let Some(callable) = callback.as_callable() {
+                        callable.call(&JsValue::undefined(), &[], context)?;
+                    }
+                    Ok(())
+                });
+                self.record_error_from("posted message", result);
                 Ok(())
             }
         }
@@ -3078,6 +3091,11 @@ fn register_host_bindings(
             js_string!("__omoikane_queue_networking_task"),
             1,
             NativeFunction::from_copy_closure(queue_networking_task_native),
+        ),
+        (
+            js_string!("__omoikane_enqueue_posted_message"),
+            1,
+            NativeFunction::from_copy_closure(enqueue_posted_message_native),
         ),
         (
             js_string!("__omoikane_canvas_commit"),
@@ -5406,6 +5424,27 @@ fn queue_networking_task_native(
         state.borrow_mut().event_loop.enqueue_networking(
             TimerPayload::Callback { callback, args: Vec::new() },
         );
+        Ok(JsValue::undefined())
+    })
+}
+
+/// Queues a callback on HTML's posted message task source.
+fn enqueue_posted_message_native(
+    _: &JsValue,
+    args: &[JsValue],
+    _: &mut Context,
+) -> JsResult<JsValue> {
+    let callback = args.first().cloned().unwrap_or_default();
+    if !callback.is_callable() {
+        return Err(JsNativeError::typ()
+            .with_message("posted message task callback must be callable")
+            .into());
+    }
+    with_host_state(|state| {
+        state
+            .borrow_mut()
+            .event_loop
+            .enqueue_posted_message(callback);
         Ok(JsValue::undefined())
     })
 }
@@ -24587,5 +24626,131 @@ b</textarea></form>"#);
                 "|after:true:true:f:x",
             )
         );
+    }
+
+    #[test]
+    fn message_ports_deliver_fifo_tasks_with_microtask_checkpoints() {
+        let mut runtime = JsRuntime::new().unwrap();
+        assert_eq!(
+            eval_str(
+                &mut runtime,
+                r#"(() => { globalThis.log = [];
+                   globalThis.channel = new MessageChannel();
+                   channel.port2.onmessage = event => {
+                     const label = typeof event.data === "object" ? event.data.value : event.data;
+                     log.push("message:" + label + ":" + event.origin + ":" +
+                       (event.source === null) + ":" + event.ports.length);
+                     Promise.resolve().then(() => log.push("micro:" + label));
+                   };
+                   channel.port1.postMessage(1);
+                   channel.port1.postMessage(2);
+                   const payload = { value: 3 };
+                   channel.port1.postMessage(payload);
+                   payload.value = 9;
+                   return log.join("|"); })()"#,
+            ),
+            ""
+        );
+        assert_eq!(
+            eval_str(
+                &mut runtime,
+                "channel.port1 !== channel.port2 && channel.port1 instanceof MessagePort && channel.port2 instanceof MessagePort",
+            ),
+            "true"
+        );
+        runtime.run_until_idle().unwrap();
+        assert_eq!(
+            eval_str(&mut runtime, "log.join('|')"),
+            "message:1::true:0|micro:1|message:2::true:0|micro:2|message:3::true:0|micro:3"
+        );
+    }
+
+    #[test]
+    fn message_port_start_close_and_listener_errors_follow_task_semantics() {
+        let mut runtime = JsRuntime::new().unwrap();
+        eval_str(
+            &mut runtime,
+            r#"(() => { globalThis.log = [];
+               globalThis.channel = new MessageChannel();
+               channel.port2.addEventListener("message", event => {
+                 log.push(event.data);
+                 if (event.data === "first") throw new Error("listener failed");
+               });
+               channel.port1.postMessage("first");
+               channel.port1.postMessage("second");
+               channel.port2.start();
+               channel.port1.postMessage("third"); return ""; })()"#,
+        );
+        runtime.run_until_idle().unwrap();
+        assert_eq!(eval_str(&mut runtime, "log.join('|')"), "first|second|third");
+        assert_eq!(runtime.take_task_errors().len(), 1);
+        eval_str(
+            &mut runtime,
+            "(() => { channel.port2.close(); channel.port1.postMessage('third'); })()",
+        );
+        runtime.run_until_idle().unwrap();
+        assert_eq!(eval_str(&mut runtime, "log.join('|')"), "first|second|third");
+    }
+
+    #[test]
+    fn structured_clone_snapshots_cycles_builtins_and_rejects_unsupported_values() {
+        let mut runtime = JsRuntime::new().unwrap();
+        let result = eval_str(
+            &mut runtime,
+            r#"(() => {
+              const source = { nested: { value: 1 } };
+              source.self = source;
+              source.date = new Date(1234);
+              source.regexp = /ab/gi;
+              source.map = new Map([["key", { value: 2 }]]);
+              source.set = new Set([3]);
+              source.bytes = new Uint8Array([4, 5]);
+              const clone = structuredClone(source);
+              source.nested.value = 9;
+              source.map.get("key").value = 8;
+              source.bytes[0] = 7;
+              const sparse = structuredClone(new Array(3));
+              let errors = [];
+              for (const value of [() => {}, Symbol("x"), document.body]) {
+                try { structuredClone(value); } catch (error) { errors.push(error.name); }
+              }
+              return [
+                clone !== source,
+                clone.self === clone,
+                clone.nested.value,
+                clone.date.getTime(),
+                clone.regexp.source + clone.regexp.flags,
+                clone.map.get("key").value,
+                clone.set.has(3),
+                Array.from(clone.bytes).join(","),
+                sparse.length + ":" + Object.keys(sparse).length,
+                errors.join(","),
+              ].join("|");
+            })()"#,
+        );
+        assert_eq!(
+            result,
+            "true|true|1|1234|abgi|2|true|4,5|3:0|DataCloneError,DataCloneError,DataCloneError"
+        );
+    }
+
+    #[test]
+    fn run_timers_caps_self_scheduling_posted_messages() {
+        let mut runtime = JsRuntime::new().unwrap();
+        eval_str(
+            &mut runtime,
+            r#"(() => {
+              globalThis.messageCount = 0;
+              globalThis.channel = new MessageChannel();
+              channel.port2.onmessage = () => {
+                messageCount++;
+                channel.port1.postMessage(null);
+              };
+              channel.port1.postMessage(null);
+              setTimeout(() => {}, 0);
+            })()"#,
+        );
+        assert_eq!(runtime.run_timers(100, 1, 5), 1);
+        assert_eq!(eval_str(&mut runtime, "messageCount"), "4");
     }
 }
