@@ -2,7 +2,7 @@
 
 use crate::layout::Rect;
 
-use super::{blend_pixel, normalize_rect, intersect, Canvas};
+use super::{Canvas, blend_pixel, intersect, normalize_rect};
 
 /// An RGBA color.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -25,20 +25,61 @@ impl Color {
     }
 }
 
-/// A color stop in a CSS gradient.
-#[derive(Debug, Clone, PartialEq)]
-pub(crate) struct ColorStop {
-    pub(crate) color: Color,
-    /// Position in the range [0.0, 1.0].
-    pub(crate) position: f32,
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum GradientLength {
+    Fraction(f32),
+    Px(f32),
 }
 
-/// A parsed CSS `linear-gradient()`.
 #[derive(Debug, Clone, PartialEq)]
-pub(crate) struct LinearGradient {
-    /// Gradient angle in degrees (0° = to top, 90° = to right, 180° = to bottom, 270° = to left).
-    pub(crate) angle_deg: f32,
-    pub(crate) stops: Vec<ColorStop>,
+struct GradientStop {
+    color: Color,
+    position: Option<GradientLength>,
+    hint_before: Option<GradientLength>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum PositionComponent {
+    Fraction(f32),
+    Px(f32),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct GradientPosition {
+    x: PositionComponent,
+    y: PositionComponent,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum RadialExtent {
+    ClosestSide,
+    FarthestSide,
+    ClosestCorner,
+    FarthestCorner,
+    Explicit(GradientLength, Option<GradientLength>),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+enum GradientKind {
+    Linear {
+        angle_deg: f32,
+    },
+    Radial {
+        circle: bool,
+        extent: RadialExtent,
+        center: GradientPosition,
+    },
+    Conic {
+        from_deg: f32,
+        center: GradientPosition,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct Gradient {
+    kind: GradientKind,
+    stops: Vec<GradientStop>,
+    repeating: bool,
 }
 
 pub(crate) fn parse_color(value: &str) -> Option<Color> {
@@ -136,7 +177,11 @@ fn parse_rgb_args(args: &str) -> Option<Color> {
     let b = parse_rgb_channel(parts[2].trim())?;
 
     if parts.len() == 3 {
-        return Some(Color::rgb(clamp_channel(r), clamp_channel(g), clamp_channel(b)));
+        return Some(Color::rgb(
+            clamp_channel(r),
+            clamp_channel(g),
+            clamp_channel(b),
+        ));
     }
 
     // 4th part is alpha (0-1 or percentage)
@@ -398,63 +443,6 @@ pub(crate) fn split_gradient_args(args: &str) -> Vec<&str> {
     parts
 }
 
-/// Parses a `linear-gradient(...)` string value into a [`LinearGradient`], or returns `None`
-/// if the string is not a valid linear-gradient.
-///
-/// Supported direction forms:
-/// - `to right`, `to left`, `to top`, `to bottom`
-/// - `to top right`, `to top left`, `to bottom right`, `to bottom left`
-/// - `<angle>deg` (e.g. `45deg`, `180deg`)
-///
-/// If no direction is given the default is `to bottom` (180°).
-pub(crate) fn parse_linear_gradient(value: &str) -> Option<LinearGradient> {
-    let value = value.trim();
-    let args_str = value
-        .strip_prefix("linear-gradient(")
-        .and_then(|s| s.strip_suffix(')'))?;
-
-    let parts = split_gradient_args(args_str);
-    if parts.is_empty() {
-        return None;
-    }
-
-    // Determine angle and where color stops start
-    let (angle_deg, stop_start) = parse_gradient_direction(parts[0])
-        .map(|a| (a, 1usize))
-        .unwrap_or((180.0, 0usize));
-
-    let stop_parts = &parts[stop_start..];
-    if stop_parts.is_empty() {
-        return None;
-    }
-
-    // Parse color stops; explicit positions (like `red 50%`) not yet supported — auto-space them.
-    // If any stop can't be parsed as a color, treat the whole gradient as invalid.
-    let mut colors = Vec::new();
-    for s in stop_parts {
-        {
-            let c = parse_color(s.trim())?;
-            colors.push(c)
-        }
-    }
-
-    if colors.len() < 2 {
-        return None;
-    }
-
-    let n = colors.len();
-    let stops = colors
-        .into_iter()
-        .enumerate()
-        .map(|(i, color)| {
-            let position = i as f32 / (n - 1) as f32;
-            ColorStop { color, position }
-        })
-        .collect::<Vec<_>>();
-
-    Some(LinearGradient { angle_deg, stops })
-}
-
 /// Parses the direction part of a linear-gradient (e.g. `"to right"`, `"45deg"`).
 /// Returns the angle in degrees (CSS convention: 0° = to top, 90° = to right).
 pub(crate) fn parse_gradient_direction(part: &str) -> Option<f32> {
@@ -468,11 +456,7 @@ pub(crate) fn parse_gradient_direction(part: &str) -> Option<f32> {
         return turn_str.trim().parse::<f32>().ok().map(|t| t * 360.0);
     }
     if let Some(rad_str) = part.strip_suffix("rad") {
-        return rad_str
-            .trim()
-            .parse::<f32>()
-            .ok()
-            .map(|r| r.to_degrees());
+        return rad_str.trim().parse::<f32>().ok().map(|r| r.to_degrees());
     }
     if let Some(grad_str) = part.strip_suffix("grad") {
         return grad_str.trim().parse::<f32>().ok().map(|g| g * 0.9);
@@ -493,123 +477,584 @@ pub(crate) fn parse_gradient_direction(part: &str) -> Option<f32> {
     }
 }
 
-/// Linearly interpolates a color from gradient stops at position `t` ∈ [0, 1].
-pub(crate) fn interpolate_gradient_color(stops: &[ColorStop], t: f32) -> Color {
-    if stops.is_empty() {
-        return Color::rgba(0, 0, 0, 0);
+fn default_center() -> GradientPosition {
+    GradientPosition {
+        x: PositionComponent::Fraction(0.5),
+        y: PositionComponent::Fraction(0.5),
     }
-    if stops.len() == 1 || t <= stops[0].position {
-        return stops[0].color;
-    }
-    let last = stops.last().unwrap();
-    if t >= last.position {
-        return last.color;
-    }
+}
 
-    // Find the two surrounding stops
-    let mut a = &stops[0];
-    let mut b = &stops[1];
-    for i in 0..stops.len() - 1 {
-        if t >= stops[i].position && t <= stops[i + 1].position {
-            a = &stops[i];
-            b = &stops[i + 1];
-            break;
+fn parse_number_with_unit(value: &str) -> Option<GradientLength> {
+    let value = value.trim().to_ascii_lowercase();
+    if let Some(number) = value.strip_suffix('%') {
+        return number
+            .parse::<f32>()
+            .ok()
+            .map(|v| GradientLength::Fraction(v / 100.0));
+    }
+    if let Some(number) = value.strip_suffix("px") {
+        return number.parse::<f32>().ok().map(GradientLength::Px);
+    }
+    if value == "0" {
+        return Some(GradientLength::Px(0.0));
+    }
+    None
+}
+
+fn parse_angle(value: &str) -> Option<f32> {
+    let value = value.trim().to_ascii_lowercase();
+    parse_gradient_direction(&value).or_else(|| {
+        let value = value.as_str();
+        (value == "0").then_some(0.0)
+    })
+}
+
+fn top_level_words(value: &str) -> Vec<&str> {
+    let mut words = Vec::new();
+    let mut depth = 0usize;
+    let mut start = None;
+    for (index, ch) in value.char_indices() {
+        match ch {
+            '(' => depth += 1,
+            ')' => depth = depth.saturating_sub(1),
+            c if c.is_whitespace() && depth == 0 => {
+                if let Some(begin) = start.take() {
+                    words.push(value[begin..index].trim());
+                }
+            }
+            _ if start.is_none() => start = Some(index),
+            _ => {}
         }
     }
+    if let Some(begin) = start {
+        words.push(value[begin..].trim());
+    }
+    words
+}
 
-    let range = b.position - a.position;
-    let f = if range > 0.0 {
-        (t - a.position) / range
-    } else {
-        0.0
+fn parse_position(value: &str) -> Option<GradientPosition> {
+    let words = top_level_words(value);
+    if words.is_empty() || words.len() > 2 {
+        return None;
+    }
+    let component = |word: &str, horizontal: bool| -> Option<PositionComponent> {
+        match word.to_ascii_lowercase().as_str() {
+            "center" => Some(PositionComponent::Fraction(0.5)),
+            "left" if horizontal => Some(PositionComponent::Fraction(0.0)),
+            "right" if horizontal => Some(PositionComponent::Fraction(1.0)),
+            "top" if !horizontal => Some(PositionComponent::Fraction(0.0)),
+            "bottom" if !horizontal => Some(PositionComponent::Fraction(1.0)),
+            _ => match parse_number_with_unit(word)? {
+                GradientLength::Fraction(v) => Some(PositionComponent::Fraction(v)),
+                GradientLength::Px(v) => Some(PositionComponent::Px(v)),
+            },
+        }
     };
+    if words.len() == 1 {
+        return match words[0].to_ascii_lowercase().as_str() {
+            "top" | "bottom" => Some(GradientPosition {
+                x: PositionComponent::Fraction(0.5),
+                y: component(words[0], false)?,
+            }),
+            _ => Some(GradientPosition {
+                x: component(words[0], true)?,
+                y: PositionComponent::Fraction(0.5),
+            }),
+        };
+    }
+    let first_vertical = matches!(words[0].to_ascii_lowercase().as_str(), "top" | "bottom");
+    if first_vertical {
+        Some(GradientPosition {
+            x: component(words[1], true)?,
+            y: component(words[0], false)?,
+        })
+    } else {
+        Some(GradientPosition {
+            x: component(words[0], true)?,
+            y: component(words[1], false)?,
+        })
+    }
+}
 
+fn parse_color_stop(value: &str, conic: bool) -> Option<Vec<GradientStop>> {
+    let words = top_level_words(value);
+    if words.is_empty() {
+        return None;
+    }
+    let color = parse_color(words[0])?;
+    if words.len() > 3 {
+        return None;
+    }
+    let parse_pos = |word: &str| -> Option<GradientLength> {
+        if conic {
+            parse_angle(word)
+                .map(|v| GradientLength::Fraction(v / 360.0))
+                .or_else(|| parse_number_with_unit(word))
+        } else {
+            parse_number_with_unit(word)
+        }
+    };
+    let first = match words.get(1) {
+        Some(word) => Some(parse_pos(word)?),
+        None => None,
+    };
+    let second = match words.get(2) {
+        Some(word) => Some(parse_pos(word)?),
+        None => None,
+    };
+    let mut result = vec![GradientStop {
+        color,
+        position: first,
+        hint_before: None,
+    }];
+    if let Some(position) = second {
+        result.push(GradientStop {
+            color,
+            position: Some(position),
+            hint_before: None,
+        });
+    }
+    Some(result)
+}
+
+fn parse_stops(parts: &[&str], conic: bool) -> Option<Vec<GradientStop>> {
+    let mut stops = Vec::new();
+    let mut pending_hint = None;
+    for part in parts {
+        if let Some(mut parsed) = parse_color_stop(part, conic) {
+            if let Some(hint) = pending_hint.take() {
+                parsed[0].hint_before = Some(hint);
+            }
+            stops.extend(parsed);
+        } else {
+            let hint = if conic {
+                parse_angle(part)
+                    .map(|v| GradientLength::Fraction(v / 360.0))
+                    .or_else(|| parse_number_with_unit(part))
+            } else {
+                parse_number_with_unit(part)
+            }?;
+            if stops.is_empty() || pending_hint.replace(hint).is_some() {
+                return None;
+            }
+        }
+    }
+    if pending_hint.is_some() || stops.len() < 2 {
+        None
+    } else {
+        Some(stops)
+    }
+}
+
+pub(crate) fn parse_gradient(value: &str) -> Option<Gradient> {
+    let value = value.trim();
+    let open = value.find('(')?;
+    if !value.ends_with(')') {
+        return None;
+    }
+    let name = value[..open].trim().to_ascii_lowercase();
+    let repeating = name.starts_with("repeating-");
+    let base = name.strip_prefix("repeating-").unwrap_or(&name);
+    if !matches!(
+        base,
+        "linear-gradient" | "radial-gradient" | "conic-gradient"
+    ) {
+        return None;
+    }
+    let parts = split_gradient_args(&value[open + 1..value.len() - 1]);
+    if parts.iter().any(|part| part.is_empty()) {
+        return None;
+    }
+
+    if base == "linear-gradient" {
+        let (angle_deg, start) = parse_gradient_direction(parts[0])
+            .map(|v| (v, 1))
+            .unwrap_or((180.0, 0));
+        return Some(Gradient {
+            kind: GradientKind::Linear { angle_deg },
+            stops: parse_stops(&parts[start..], false)?,
+            repeating,
+        });
+    }
+
+    if base == "conic-gradient" {
+        let words = top_level_words(parts[0]);
+        let mut from_deg = 0.0;
+        let mut center = default_center();
+        let mut index = 0usize;
+        let mut has_prelude = false;
+        while index < words.len() {
+            match words[index].to_ascii_lowercase().as_str() {
+                "from" if index + 1 < words.len() => {
+                    from_deg = parse_angle(words[index + 1])?;
+                    index += 2;
+                    has_prelude = true;
+                }
+                "at" if index + 1 < words.len() => {
+                    center = parse_position(&words[index + 1..].join(" "))?;
+                    index = words.len();
+                    has_prelude = true;
+                }
+                _ => break,
+            }
+        }
+        if has_prelude && index != words.len() {
+            return None;
+        }
+        let start = usize::from(has_prelude);
+        return Some(Gradient {
+            kind: GradientKind::Conic { from_deg, center },
+            stops: parse_stops(&parts[start..], true)?,
+            repeating,
+        });
+    }
+
+    let words = top_level_words(parts[0]);
+    let looks_like_prelude = words.iter().any(|word| {
+        matches!(
+            word.to_ascii_lowercase().as_str(),
+            "circle"
+                | "ellipse"
+                | "closest-side"
+                | "farthest-side"
+                | "closest-corner"
+                | "farthest-corner"
+                | "at"
+        )
+    }) || words
+        .first()
+        .and_then(|word| parse_number_with_unit(word))
+        .is_some();
+    let mut circle = false;
+    let mut shape_set = false;
+    let mut extent = RadialExtent::FarthestCorner;
+    let mut center = default_center();
+    if looks_like_prelude {
+        let at = words
+            .iter()
+            .position(|word| word.eq_ignore_ascii_case("at"));
+        let geometry = &words[..at.unwrap_or(words.len())];
+        if let Some(at) = at {
+            center = parse_position(&words[at + 1..].join(" "))?;
+        }
+        let mut lengths = Vec::new();
+        let mut extent_set = false;
+        for word in geometry {
+            match word.to_ascii_lowercase().as_str() {
+                "circle" => {
+                    if shape_set {
+                        return None;
+                    }
+                    circle = true;
+                    shape_set = true;
+                }
+                "ellipse" => {
+                    if shape_set {
+                        return None;
+                    }
+                    circle = false;
+                    shape_set = true;
+                }
+                "closest-side" if !extent_set => {
+                    extent = RadialExtent::ClosestSide;
+                    extent_set = true;
+                }
+                "farthest-side" if !extent_set => {
+                    extent = RadialExtent::FarthestSide;
+                    extent_set = true;
+                }
+                "closest-corner" if !extent_set => {
+                    extent = RadialExtent::ClosestCorner;
+                    extent_set = true;
+                }
+                "farthest-corner" if !extent_set => {
+                    extent = RadialExtent::FarthestCorner;
+                    extent_set = true;
+                }
+                _ => lengths.push(parse_number_with_unit(word)?),
+            }
+        }
+        if !lengths.is_empty() {
+            if extent_set
+                || lengths.len() > 2
+                || lengths.iter().any(|length| matches!(length, GradientLength::Px(v) | GradientLength::Fraction(v) if *v < 0.0))
+            {
+                return None;
+            }
+            if circle && lengths.len() != 1 {
+                return None;
+            }
+            if !shape_set && lengths.len() == 1 {
+                circle = true;
+            }
+            if circle
+                && lengths
+                    .iter()
+                    .any(|length| matches!(length, GradientLength::Fraction(_)))
+            {
+                return None;
+            }
+            extent = RadialExtent::Explicit(lengths[0], lengths.get(1).copied());
+        }
+    }
+    Some(Gradient {
+        kind: GradientKind::Radial {
+            circle,
+            extent,
+            center,
+        },
+        stops: parse_stops(&parts[usize::from(looks_like_prelude)..], false)?,
+        repeating,
+    })
+}
+
+fn resolve_component(component: PositionComponent, origin: f32, size: f32) -> f32 {
+    origin
+        + match component {
+            PositionComponent::Fraction(v) => v * size,
+            PositionComponent::Px(v) => v,
+        }
+}
+
+fn resolve_length(length: GradientLength, basis: f32) -> f32 {
+    match length {
+        GradientLength::Fraction(v) => v * basis,
+        GradientLength::Px(v) => v,
+    }
+}
+
+fn resolved_stops(stops: &[GradientStop], basis: f32) -> Vec<(Color, f32, Option<f32>)> {
+    let mut positions: Vec<Option<f32>> = stops
+        .iter()
+        .map(|stop| stop.position.map(|v| resolve_length(v, basis)))
+        .collect();
+    if positions[0].is_none() {
+        positions[0] = Some(0.0);
+    }
+    if positions.last().is_some_and(Option::is_none) {
+        *positions.last_mut().unwrap() = Some(basis);
+    }
+    let mut last = positions[0].unwrap();
+    for position in positions.iter_mut().skip(1) {
+        if let Some(value) = position {
+            *value = value.max(last);
+            last = *value;
+        }
+    }
+    let mut index = 1;
+    while index + 1 < positions.len() {
+        if positions[index].is_some() {
+            index += 1;
+            continue;
+        }
+        let start = index - 1;
+        let mut end = index + 1;
+        while positions[end].is_none() {
+            end += 1;
+        }
+        let a = positions[start].unwrap();
+        let b = positions[end].unwrap();
+        for current in index..end {
+            positions[current] =
+                Some(a + (b - a) * (current - start) as f32 / (end - start) as f32);
+        }
+        index = end;
+    }
+    stops
+        .iter()
+        .zip(positions)
+        .map(|(stop, position)| {
+            (
+                stop.color,
+                position.unwrap(),
+                stop.hint_before.map(|v| resolve_length(v, basis)),
+            )
+        })
+        .collect()
+}
+
+fn sample_stops(stops: &[(Color, f32, Option<f32>)], mut value: f32, repeating: bool) -> Color {
+    let first = stops[0].1;
+    let last = stops.last().unwrap().1;
+    if repeating {
+        let period = last - first;
+        if period <= f32::EPSILON {
+            return stops.last().unwrap().0;
+        }
+        value = (value - first).rem_euclid(period) + first;
+    }
+    if value <= first {
+        return stops[0].0;
+    }
+    if value >= last {
+        return stops.last().unwrap().0;
+    }
+    let upper = stops
+        .partition_point(|(_, position, _)| *position <= value)
+        .min(stops.len() - 1);
+    let (a_color, a_pos, _) = stops[upper - 1];
+    let (b_color, b_pos, hint) = stops[upper];
+    if b_pos <= a_pos {
+        return b_color;
+    }
+    let mut t = (value - a_pos) / (b_pos - a_pos);
+    if let Some(hint) = hint.filter(|hint| *hint > a_pos && *hint < b_pos) {
+        let midpoint = (hint - a_pos) / (b_pos - a_pos);
+        t = if t <= midpoint {
+            0.5 * t / midpoint
+        } else {
+            0.5 + 0.5 * (t - midpoint) / (1.0 - midpoint)
+        };
+    }
+    // CSS gradients interpolate in premultiplied-alpha space.
+    let aa = a_color.a as f32 / 255.0;
+    let ba = b_color.a as f32 / 255.0;
+    let alpha = aa + (ba - aa) * t;
+    let channel = |a: u8, b: u8| {
+        if alpha <= f32::EPSILON {
+            0
+        } else {
+            (((a as f32 * aa) + (b as f32 * ba - a as f32 * aa) * t) / alpha)
+                .round()
+                .clamp(0.0, 255.0) as u8
+        }
+    };
     Color::rgba(
-        lerp_u8(a.color.r, b.color.r, f),
-        lerp_u8(a.color.g, b.color.g, f),
-        lerp_u8(a.color.b, b.color.b, f),
-        lerp_u8(a.color.a, b.color.a, f),
+        channel(a_color.r, b_color.r),
+        channel(a_color.g, b_color.g),
+        channel(a_color.b, b_color.b),
+        (alpha * 255.0).round() as u8,
     )
 }
 
-fn lerp_u8(a: u8, b: u8, t: f32) -> u8 {
-    (a as f32 + (b as f32 - a as f32) * t).round().clamp(0.0, 255.0) as u8
-}
-
-/// Draws a `LinearGradient` into the canvas over the given `area`, clipped to `clip`.
-pub(crate) fn paint_linear_gradient(
+pub(crate) fn paint_gradient(
     canvas: &mut Canvas,
-    gradient: &LinearGradient,
+    gradient: &Gradient,
     area: Rect,
     clip: Option<Rect>,
 ) {
     let Some(area) = normalize_rect(area) else {
         return;
     };
-
-    // Effective clip region
-    let draw_area = if let Some(clip_rect) = clip.and_then(normalize_rect) {
-        match intersect(area, clip_rect) {
-            Some(r) => r,
-            None => return,
-        }
-    } else {
-        area
+    let draw_area = clip
+        .and_then(normalize_rect)
+        .map(|clip| intersect(area, clip))
+        .unwrap_or(Some(area));
+    let Some(draw_area) = draw_area else {
+        return;
     };
-
-    // Convert CSS angle convention to math angle:
-    // CSS 0° = "to top" (gradient goes upward, so color flows from bottom to top)
-    // CSS 90° = "to right"
-    // Math: angle measured counter-clockwise from positive X-axis
-    //
-    // For a gradient direction of angle_deg (CSS):
-    //   unit vector pointing *toward* the end color:
-    //   dx = sin(angle_deg), dy = -cos(angle_deg)
-    //   (dy is negative because CSS Y axis is downward)
-    let angle_rad = gradient.angle_deg.to_radians();
-    let dir_x = angle_rad.sin();
-    let dir_y = -angle_rad.cos();
-
-    // Center of the box
-    let cx = area.x + area.width * 0.5;
-    let cy = area.y + area.height * 0.5;
-
-    // Gradient length: distance from center to the "end" corner of the box
-    // (CSS spec: the gradient line goes through the center and touches the side
-    //  perpendicular to the gradient direction at the ending-point corner)
-    // Simplified: half-length = |dx| * W/2 + |dy| * H/2
-    let half_len = dir_x.abs() * area.width * 0.5 + dir_y.abs() * area.height * 0.5;
-    let grad_len = half_len * 2.0;
-
-    let x0 = area.x.floor().max(0.0) as i32;
-    let y0 = area.y.floor().max(0.0) as i32;
+    let (center_x, center_y, radius_x, radius_y, basis) = match gradient.kind {
+        GradientKind::Linear { angle_deg } => {
+            let angle = angle_deg.to_radians();
+            let dx = angle.sin();
+            let dy = -angle.cos();
+            let length = dx.abs() * area.width + dy.abs() * area.height;
+            (
+                area.x + area.width / 2.0,
+                area.y + area.height / 2.0,
+                dx,
+                dy,
+                length,
+            )
+        }
+        GradientKind::Radial {
+            circle,
+            extent,
+            center,
+        } => {
+            let cx = resolve_component(center.x, area.x, area.width);
+            let cy = resolve_component(center.y, area.y, area.height);
+            let left = (cx - area.x).abs();
+            let right = (area.x + area.width - cx).abs();
+            let top = (cy - area.y).abs();
+            let bottom = (area.y + area.height - cy).abs();
+            let (mut rx, mut ry) = match extent {
+                RadialExtent::ClosestSide => (left.min(right), top.min(bottom)),
+                RadialExtent::FarthestSide => (left.max(right), top.max(bottom)),
+                RadialExtent::ClosestCorner | RadialExtent::FarthestCorner => {
+                    let choose = if matches!(extent, RadialExtent::ClosestCorner) {
+                        f32::min
+                    } else {
+                        f32::max
+                    };
+                    let x = choose(left, right);
+                    let y = choose(top, bottom);
+                    (x, y)
+                }
+                RadialExtent::Explicit(x, y) => (
+                    resolve_length(x, area.width),
+                    resolve_length(y.unwrap_or(x), area.height),
+                ),
+            };
+            if circle {
+                let radius = match extent {
+                    RadialExtent::ClosestSide => left.min(right).min(top.min(bottom)),
+                    RadialExtent::FarthestSide => left.max(right).max(top.max(bottom)),
+                    RadialExtent::ClosestCorner => {
+                        [(left, top), (left, bottom), (right, top), (right, bottom)]
+                            .into_iter()
+                            .map(|(x, y)| x.hypot(y))
+                            .fold(f32::INFINITY, f32::min)
+                    }
+                    RadialExtent::FarthestCorner => {
+                        [(left, top), (left, bottom), (right, top), (right, bottom)]
+                            .into_iter()
+                            .map(|(x, y)| x.hypot(y))
+                            .fold(0.0, f32::max)
+                    }
+                    RadialExtent::Explicit(x, _) => resolve_length(x, area.width.min(area.height)),
+                };
+                rx = radius;
+                ry = radius;
+            } else if matches!(
+                extent,
+                RadialExtent::ClosestCorner | RadialExtent::FarthestCorner
+            ) {
+                // Scale the side-based ellipse so the selected corner lies on it.
+                let scale = 2.0_f32.sqrt();
+                rx *= scale;
+                ry *= scale;
+            }
+            (cx, cy, rx, ry, rx.max(f32::EPSILON))
+        }
+        GradientKind::Conic { center, .. } => (
+            resolve_component(center.x, area.x, area.width),
+            resolve_component(center.y, area.y, area.height),
+            0.0,
+            0.0,
+            1.0,
+        ),
+    };
+    let stops = resolved_stops(&gradient.stops, basis);
+    let x0 = draw_area.x.floor().max(0.0) as i32;
+    let y0 = draw_area.y.floor().max(0.0) as i32;
     let x1 = (draw_area.x + draw_area.width)
         .ceil()
         .min(canvas.width as f32) as i32;
     let y1 = (draw_area.y + draw_area.height)
         .ceil()
         .min(canvas.height as f32) as i32;
-    let x0 = x0.max(draw_area.x.floor() as i32);
-    let y0 = y0.max(draw_area.y.floor() as i32);
-
     for py in y0..y1 {
         for px in x0..x1 {
-            // Project pixel center onto gradient line
-            let rel_x = px as f32 + 0.5 - cx;
-            let rel_y = py as f32 + 0.5 - cy;
-            let proj = rel_x * dir_x + rel_y * dir_y;
-
-            // Normalize to [0, 1] along the gradient
-            let t = if grad_len > 0.0 {
-                (proj / grad_len + 0.5).clamp(0.0, 1.0)
-            } else {
-                0.0
+            let x = px as f32 + 0.5 - center_x;
+            let y = py as f32 + 0.5 - center_y;
+            let value = match gradient.kind {
+                GradientKind::Linear { .. } => x * radius_x + y * radius_y + basis / 2.0,
+                GradientKind::Radial { .. } => {
+                    if radius_x <= 0.0 || radius_y <= 0.0 {
+                        basis
+                    } else {
+                        ((x / radius_x).powi(2) + (y / radius_y).powi(2)).sqrt() * basis
+                    }
+                }
+                GradientKind::Conic { from_deg, .. } => {
+                    ((x.atan2(-y).to_degrees() - from_deg).rem_euclid(360.0)) / 360.0
+                }
             };
-
-            let color = interpolate_gradient_color(&gradient.stops, t);
-            let dest_index = ((py as u32 * canvas.width + px as u32) * 4) as usize;
-            if dest_index + 3 < canvas.pixels.len() {
-                blend_pixel(&mut canvas.pixels[dest_index..dest_index + 4], color);
+            let color = sample_stops(&stops, value, gradient.repeating);
+            let index = ((py as u32 * canvas.width + px as u32) * 4) as usize;
+            if index + 3 < canvas.pixels.len() {
+                blend_pixel(&mut canvas.pixels[index..index + 4], color);
             }
         }
     }

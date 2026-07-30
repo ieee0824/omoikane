@@ -7009,6 +7009,144 @@ fn tiled_linear_gradient_no_repeat_paints_once() {
     );
 }
 
+fn render_gradient_box(background: &str, width: u32, height: u32) -> Canvas {
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let div = NodeHandle::element("div");
+    document.append_child(body.clone());
+    body.append_child(div);
+    let css = format!(
+        "body {{ margin: 0; }} div {{ width: {width}px; height: {height}px; {background} }}"
+    );
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(Origin::Author, parse_stylesheet(&css).unwrap());
+    let viewport = Rect { x: 0.0, y: 0.0, width: width as f32, height: height as f32 };
+    let layout = layout_tree(&document, &mut resolver, viewport).unwrap();
+    paint_layout(&layout, &mut resolver, viewport)
+}
+
+#[test]
+fn radial_gradient_circle_position_and_keyword_extent_are_painted() {
+    let canvas = render_gradient_box(
+        "background-image: radial-gradient(circle closest-side at 25% 50%, red 0%, blue 100%);",
+        40,
+        20,
+    );
+    let center = canvas.pixel(10, 10).unwrap();
+    let edge = canvas.pixel(20, 10).unwrap();
+    assert!(center.r > 220 && center.b < 35, "center: {center:?}");
+    assert!(edge.b > 220 && edge.r < 35, "closest side: {edge:?}");
+}
+
+#[test]
+fn radial_gradient_ellipse_and_explicit_radii_are_painted() {
+    let ellipse = render_gradient_box(
+        "background-image: radial-gradient(ellipse farthest-side at center, red, blue);",
+        40,
+        20,
+    );
+    assert!(ellipse.pixel(20, 10).unwrap().r > 220);
+    assert!(ellipse.pixel(39, 10).unwrap().b > 180);
+
+    let explicit = render_gradient_box(
+        "background-image: radial-gradient(ellipse 10px 5px at 10px 5px, red 0%, blue 100%);",
+        30,
+        15,
+    );
+    assert!(explicit.pixel(10, 5).unwrap().r > 220);
+    assert!(explicit.pixel(20, 5).unwrap().b > 220);
+}
+
+#[test]
+fn conic_gradient_from_position_and_wrap_around_are_painted() {
+    let canvas = render_gradient_box(
+        "background-image: conic-gradient(from 0.25turn at 50% 50%, red 0rad, blue 0.5turn, red 6.283185rad);",
+        21,
+        21,
+    );
+    let right = canvas.pixel(20, 10).unwrap();
+    let left = canvas.pixel(0, 10).unwrap();
+    let top = canvas.pixel(10, 0).unwrap();
+    assert!(right.r > 220, "from-angle origin: {right:?}");
+    assert!(left.b > 220, "opposite angle: {left:?}");
+    assert!(top.r > 100 && top.b > 100, "wrapped quarter: {top:?}");
+}
+
+#[test]
+fn radial_gradient_color_hint_moves_the_interpolation_midpoint() {
+    let canvas = render_gradient_box(
+        "background-image: radial-gradient(circle 20px, red 0%, 25%, blue 100%);",
+        41,
+        41,
+    );
+    let hinted_midpoint = canvas.pixel(25, 20).unwrap();
+    assert!(
+        (hinted_midpoint.r as i16 - hinted_midpoint.b as i16).abs() < 35,
+        "25% hint should move the red/blue midpoint near radius 5px: {hinted_midpoint:?}"
+    );
+}
+
+#[test]
+fn repeating_gradients_hard_stops_and_zero_period_are_deterministic() {
+    let radial = render_gradient_box(
+        "background-image: repeating-radial-gradient(circle, red 0px 2px, blue 2px 4px);",
+        20,
+        20,
+    );
+    assert_ne!(radial.pixel(10, 10), radial.pixel(12, 10));
+
+    let conic = render_gradient_box(
+        "background-image: repeating-conic-gradient(red 0deg 45deg, blue 45deg 90deg);",
+        21,
+        21,
+    );
+    assert_ne!(conic.pixel(10, 0), conic.pixel(20, 0));
+
+    let zero = render_gradient_box(
+        "background-image: repeating-conic-gradient(red 20deg, blue 20deg);",
+        5,
+        5,
+    );
+    assert_eq!(zero.pixel(0, 0), Some(Color::rgb(0, 0, 255)));
+}
+
+#[test]
+fn gradient_transparent_interpolation_is_premultiplied() {
+    let canvas = render_gradient_box(
+        "background-image: radial-gradient(circle 20px, #ff000000 0%, #0000ffff 100%);",
+        41,
+        41,
+    );
+    let middle = canvas.pixel(30, 20).unwrap();
+    assert!(middle.b > 200 && middle.r < 20 && middle.a > 100 && middle.a < 160, "{middle:?}");
+}
+
+#[test]
+fn radial_gradient_uses_background_size_position_repeat_and_clip() {
+    let canvas = render_gradient_box(
+        "box-sizing: border-box; padding: 2px; background-clip: content-box; background-image: radial-gradient(circle, red, blue); background-size: 5px 5px; background-position-x: 2px; background-position-y: 1px; background-repeat: no-repeat;",
+        12,
+        10,
+    );
+    assert!(canvas.pixel(4, 3).unwrap().a > 0);
+    assert_eq!(canvas.pixel(0, 3).unwrap().a, 0);
+    assert_eq!(canvas.pixel(8, 3).unwrap().a, 0);
+}
+
+#[test]
+fn malformed_gradients_do_not_paint_or_panic() {
+    for value in [
+        "radial-gradient(circle at, red, blue)",
+        "radial-gradient(circle -2px, red, blue)",
+        "conic-gradient(from nope, red, blue)",
+        "repeating-conic-gradient(red)",
+    ] {
+        assert!(parse_gradient(value).is_none(), "accepted malformed {value}");
+        let canvas = render_gradient_box(&format!("background-image: {value};"), 4, 4);
+        assert_eq!(canvas.pixel(2, 2).unwrap().a, 0, "painted malformed {value}");
+    }
+}
+
 // --- box_blur_alpha カーネルサイズ修正テスト ---
 
 #[test]

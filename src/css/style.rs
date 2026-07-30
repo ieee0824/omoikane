@@ -960,7 +960,7 @@ enum DeclarationValidation {
 
 /// Validates a resolved declaration value against the property's grammar.
 ///
-/// This is the single extension point for per-property value validation. Only
+/// This is the single extension point for per-property value validation.
 /// Properties with syntax or normalization requirements are validated here;
 /// properties without a dedicated branch fall through unchanged. To add a
 /// property, match its name and return [`DeclarationValidation::Valid`] /
@@ -980,6 +980,43 @@ fn validate_declaration(name: &str, value: &Value) -> DeclarationValidation {
             }
             _ => DeclarationValidation::Invalid,
         };
+    }
+    if name.eq_ignore_ascii_case("background-clip") {
+        return match value {
+            Value::Keyword(keyword)
+                if is_css_wide_keyword(&keyword.to_ascii_lowercase())
+                    || matches!(
+                        keyword.to_ascii_lowercase().as_str(),
+                        "border-box" | "padding-box" | "content-box"
+                    ) =>
+            {
+                DeclarationValidation::Valid(ComputedValue::Keyword(
+                    keyword.to_ascii_lowercase(),
+                ))
+            }
+            _ => DeclarationValidation::Invalid,
+        };
+    }
+    if name.eq_ignore_ascii_case("background-image") {
+        if let Value::Function { name: function, .. } = value {
+            let lower = function.to_ascii_lowercase();
+            if matches!(
+                lower.as_str(),
+                "linear-gradient"
+                    | "repeating-linear-gradient"
+                    | "radial-gradient"
+                    | "repeating-radial-gradient"
+                    | "conic-gradient"
+                    | "repeating-conic-gradient"
+            ) {
+                let rendered = render_value(value);
+                return if crate::paint::parse_gradient(&rendered).is_some() {
+                    DeclarationValidation::Valid(ComputedValue::Keyword(rendered))
+                } else {
+                    DeclarationValidation::Invalid
+                };
+            }
+        }
     }
     if name.eq_ignore_ascii_case("cursor") {
         return match compute_cursor_value(value) {
@@ -2847,6 +2884,7 @@ pub(super) fn is_supported_property(name: &str) -> bool {
             | "animation-play-state"
             | "animation-timing-function"
             | "background-attachment"
+            | "background-clip"
             | "background-color"
             | "background-image"
             | "background-position-x"

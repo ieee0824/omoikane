@@ -143,8 +143,8 @@ pub(crate) use border::{
 pub(crate) use border::{EdgeSizesForPaint, border_color_side, has_solid_border_side};
 #[allow(unused_imports)]
 pub(crate) use color::{
-    ColorStop, LinearGradient, interpolate_gradient_color, named_color, paint_linear_gradient,
-    parse_color, parse_gradient_direction, parse_linear_gradient, split_gradient_args,
+    Gradient, named_color, paint_gradient, parse_color, parse_gradient, parse_gradient_direction,
+    split_gradient_args,
 };
 #[allow(unused_imports)]
 pub(crate) use image::{
@@ -2482,7 +2482,21 @@ fn paint_box_internal_to(
             canvas.fill_rect_clipped(border_box, background, inherited_clip);
         }
     }
-    paint_background_image(canvas, style, border_box, inherited_clip, viewport);
+    let background_clip = match style.get("background-clip") {
+        Some(ComputedValue::Keyword(value)) if value.eq_ignore_ascii_case("content-box") => {
+            Some(layout.dimensions.content)
+        }
+        Some(ComputedValue::Keyword(value)) if value.eq_ignore_ascii_case("padding-box") => {
+            Some(padding_box)
+        }
+        _ => Some(border_box),
+    };
+    let background_clip = match (background_clip, inherited_clip) {
+        (Some(background_clip), Some(inherited_clip)) => intersect(background_clip, inherited_clip),
+        (clip, None) => clip,
+        _ => None,
+    };
+    paint_background_image(canvas, style, border_box, background_clip, viewport);
     if layout.overflow.clips_overflow() {
         let overflow_clip =
             overflow_clip_rect(layout.overflow, padding_box, inherited_clip, viewport);
@@ -3843,26 +3857,17 @@ fn paint_background_image(
         return;
     };
 
-    // Check if the background-image is a linear-gradient
+    // CSS gradients share the same background tiling, positioning and clipping path.
     let bg_image_value = style.get("background-image");
     let raw_bg_str: Option<String> = match bg_image_value {
         Some(ComputedValue::Keyword(kw)) => Some(kw.clone()),
         Some(ComputedValue::String(s)) => Some(s.clone()),
         _ => None,
     };
-    let gradient_str = raw_bg_str.as_deref().and_then(|s| {
-        let lower = s.trim_start().to_ascii_lowercase();
-        if lower.starts_with("linear-gradient(") {
-            Some(s.trim_start())
-        } else {
-            None
-        }
-    });
+    let gradient_str = raw_bg_str.as_deref().map(str::trim_start);
 
     if let Some(gradient_str) = gradient_str {
-        // Normalise to lowercase for parsing (function names are case-insensitive in CSS)
-        let normalised = gradient_str.to_ascii_lowercase();
-        if let Some(gradient) = color::parse_linear_gradient(&normalised) {
+        if let Some(gradient) = color::parse_gradient(gradient_str) {
             // Check if a background-size is set to tile the gradient
             let has_explicit_size = match style.get("background-size") {
                 None => false,
@@ -3913,7 +3918,7 @@ fn paint_background_image(
                             width: tile_w,
                             height: tile_h,
                         };
-                        color::paint_linear_gradient(
+                        color::paint_gradient(
                             &mut tile_canvas,
                             &gradient,
                             origin_rect,
@@ -3950,7 +3955,7 @@ fn paint_background_image(
                             canvas.draw_image_scaled_clipped(img, tile_rect, clip.or(Some(area)));
                         } else {
                             // Fallback (no-repeat, tile too large, or image validation failed): render directly
-                            color::paint_linear_gradient(
+                            color::paint_gradient(
                                 canvas,
                                 &gradient,
                                 tile_rect,
@@ -3966,7 +3971,7 @@ fn paint_background_image(
                 }
             } else {
                 // Default: gradient fills the entire area
-                color::paint_linear_gradient(canvas, &gradient, area, clip.or(Some(area)));
+                color::paint_gradient(canvas, &gradient, area, clip.or(Some(area)));
             }
             return;
         }
