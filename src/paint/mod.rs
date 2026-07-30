@@ -2474,29 +2474,44 @@ fn paint_box_internal_to(
     // box-shadow を背景より前（下）に描画する
     border::paint_box_shadow(canvas, style, border_box, inherited_clip);
 
-    let background_clip = match style.get("background-clip") {
+    let background_clip_rect = match style.get("background-clip") {
         Some(ComputedValue::Keyword(value)) if value.eq_ignore_ascii_case("content-box") => {
-            Some(layout.dimensions.content)
+            layout.dimensions.content
         }
         Some(ComputedValue::Keyword(value)) if value.eq_ignore_ascii_case("padding-box") => {
-            Some(padding_box)
+            padding_box
         }
-        _ => Some(border_box),
+        _ => border_box,
     };
-    let background_clip = match (background_clip, inherited_clip) {
-        (Some(background_clip), Some(inherited_clip)) => intersect(background_clip, inherited_clip),
-        (clip, None) => clip,
-        _ => None,
+    let background_clip = match inherited_clip {
+        Some(inherited_clip) => intersect(background_clip_rect, inherited_clip),
+        None => Some(background_clip_rect),
     };
-    if let Some(background) = background_color(style) {
-        if has_border_radius(style) {
-            let (tl, tr, br, bl) = border_radius_corners(style);
-            canvas.fill_rounded_rect(border_box, background, tl, tr, br, bl, background_clip);
-        } else {
-            canvas.fill_rect_clipped(border_box, background, background_clip);
+    if let Some(background_clip) = background_clip {
+        if let Some(background) = background_color(style) {
+            if has_border_radius(style) {
+                let (tl, tr, br, bl) = border_radius_corners(style);
+                canvas.fill_rounded_rect(
+                    border_box,
+                    background,
+                    tl,
+                    tr,
+                    br,
+                    bl,
+                    Some(background_clip),
+                );
+            } else {
+                canvas.fill_rect_clipped(border_box, background, Some(background_clip));
+            }
         }
+        paint_background_image(
+            canvas,
+            style,
+            border_box,
+            Some(background_clip),
+            viewport,
+        );
     }
-    paint_background_image(canvas, style, border_box, background_clip, viewport);
     if layout.overflow.clips_overflow() {
         let overflow_clip =
             overflow_clip_rect(layout.overflow, padding_box, inherited_clip, viewport);
