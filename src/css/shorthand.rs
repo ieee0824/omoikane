@@ -65,8 +65,8 @@ fn expand_background_position_shorthand(value: Value, important: bool) -> Vec<De
             Value::List(values) if (1..=2).contains(&values.len()) => values,
             single @ (Value::Keyword(_)
             | Value::Length(_, _)
-            | Value::Percentage(_)
-            | Value::Number(_)) => vec![single],
+            | Value::Percentage(_)) => vec![single],
+            Value::Number(number) if number == 0.0 => vec![Value::Number(number)],
             _ => {
                 return vec![Declaration {
                     name: "background-position".to_string(),
@@ -835,9 +835,8 @@ fn parse_background_layer(value: &Value, allow_color: bool) -> Option<Background
                     keyword.to_ascii_lowercase().as_str(),
                     "left" | "right" | "top" | "bottom" | "center"
                 ) => position.push(item.clone()),
-            Value::Length(_, _) | Value::Percentage(_) | Value::Number(_) => {
-                position.push(item.clone())
-            }
+            Value::Length(_, _) | Value::Percentage(_) => position.push(item.clone()),
+            Value::Number(number) if *number == 0.0 => position.push(item.clone()),
             _ => return None,
         }
     }

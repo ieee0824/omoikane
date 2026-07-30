@@ -5338,6 +5338,25 @@ fn background_layer_computed_values_preserve_commas_and_repeat_to_image_count() 
 }
 
 #[test]
+fn background_layer_computed_values_resolve_each_layers_relative_units() {
+    let style = image_computed_style(
+        "background-image: none, none; \
+         background-position-x: 1em, calc(1em + 2px); \
+         background-size: 2em 3em, calc(1em + 4px) 50%;",
+    );
+    assert_eq!(
+        style.get("background-position-x"),
+        Some(&ComputedValue::Keyword("16px, 18px".to_string()))
+    );
+    assert_eq!(
+        style.get("background-size"),
+        Some(&ComputedValue::Keyword(
+            "32px 48px, 20px 50%".to_string()
+        ))
+    );
+}
+
+#[test]
 fn malformed_background_image_layer_drops_the_whole_declaration() {
     let style = image_computed_style(
         "background-image: url(valid.png); \
@@ -5346,6 +5365,37 @@ fn malformed_background_image_layer_drops_the_whole_declaration() {
     assert_eq!(
         style.get("background-image"),
         Some(&ComputedValue::Keyword("url(valid.png)".to_string()))
+    );
+}
+
+#[test]
+fn malformed_background_longhand_layer_drops_the_whole_declaration() {
+    let style = image_computed_style(
+        "background-image: url(valid.png); background-image: url(other.png), bogus; \
+         background-repeat: no-repeat; background-repeat: repeat-x, bogus; \
+         background-attachment: fixed; background-attachment: scroll, sideways; \
+         background-origin: content-box; background-origin: padding-box, margin-box; \
+         background-clip: padding-box; background-clip: border-box, margin-box;",
+    );
+    assert_eq!(
+        style.get("background-image"),
+        Some(&ComputedValue::Keyword("url(valid.png)".to_string()))
+    );
+    assert_eq!(
+        style.get("background-repeat"),
+        Some(&ComputedValue::Keyword("no-repeat".to_string()))
+    );
+    assert_eq!(
+        style.get("background-attachment"),
+        Some(&ComputedValue::Keyword("fixed".to_string()))
+    );
+    assert_eq!(
+        style.get("background-origin"),
+        Some(&ComputedValue::Keyword("content-box".to_string()))
+    );
+    assert_eq!(
+        style.get("background-clip"),
+        Some(&ComputedValue::Keyword("padding-box".to_string()))
     );
 }
 

@@ -7142,29 +7142,31 @@ fn multiple_background_none_url_and_all_gradient_kinds_paint_front_layer_first()
 
 #[test]
 fn multiple_background_layers_apply_attachment_independently() {
-    let html = format!(
-        "<html><head><style>body {{ margin: 0; }} div {{ \
-         width: 4px; height: 2px; margin-left: 2px; \
-         background-image: url(\"{}\"), linear-gradient(blue, blue); \
-         background-size: 1px 1px; background-repeat: no-repeat; \
-         background-position-x: 3px, 0px; background-position-y: 0px; \
-         background-attachment: fixed, scroll; \
-         }}</style></head><body><div></div></body></html>",
-        red_pixel_data_uri()
-    );
-    let document = TreeBuilder::parse(&html).document();
-    let canvas = render_document(
-        &document,
-        Rect {
-            x: 0.0,
-            y: 0.0,
-            width: 8.0,
-            height: 2.0,
-        },
-    )
-    .unwrap();
-    assert_eq!(canvas.pixel(2, 0), Some(Color::rgb(0, 0, 255)));
-    assert_eq!(canvas.pixel(3, 0), Some(Color::rgb(255, 0, 0)));
+    for non_fixed in ["scroll", "local"] {
+        let html = format!(
+            "<html><head><style>body {{ margin: 0; }} div {{ \
+             width: 4px; height: 2px; margin-left: 2px; \
+             background-image: url(\"{}\"), linear-gradient(blue, blue); \
+             background-size: 1px 1px; background-repeat: no-repeat; \
+             background-position-x: 3px, 0px; background-position-y: 0px; \
+             background-attachment: fixed, {non_fixed}; \
+             }}</style></head><body><div></div></body></html>",
+            red_pixel_data_uri()
+        );
+        let document = TreeBuilder::parse(&html).document();
+        let canvas = render_document(
+            &document,
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 8.0,
+                height: 2.0,
+            },
+        )
+        .unwrap();
+        assert_eq!(canvas.pixel(2, 0), Some(Color::rgb(0, 0, 255)));
+        assert_eq!(canvas.pixel(3, 0), Some(Color::rgb(255, 0, 0)));
+    }
 }
 
 #[test]

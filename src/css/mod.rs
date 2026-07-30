@@ -1009,6 +1009,53 @@ mod tests {
     }
 
     #[test]
+    fn background_shorthand_rejects_multiple_images_and_nonzero_unitless_positions() {
+        for declaration in [
+            "background: none linear-gradient(red, blue)",
+            "background: url(a.png) url(b.png)",
+            "background: linear-gradient(red, blue) 1 0",
+            "background-position: 1, 0",
+        ] {
+            let stylesheet = parse_stylesheet(&format!(
+                "div {{ background-color: red; {declaration}; color: black; }}"
+            ))
+            .unwrap();
+            let Rule::Style(rule) = &stylesheet.rules[0] else {
+                panic!("expected style rule");
+            };
+            assert!(
+                !rule.declarations.iter().any(|declaration| {
+                    matches!(
+                        declaration.name.as_str(),
+                        "background-image"
+                            | "background-position-x"
+                            | "background-position-y"
+                            | "background-size"
+                            | "background-repeat"
+                            | "background-attachment"
+                            | "background-origin"
+                            | "background-clip"
+                    )
+                }),
+                "accepted invalid declaration {declaration}: {:?}",
+                rule.declarations
+            );
+        }
+
+        let stylesheet = parse_stylesheet(
+            "div { background: linear-gradient(red, blue) +0 -0; background-position: 0 0.0; }",
+        )
+        .unwrap();
+        let Rule::Style(rule) = &stylesheet.rules[0] else {
+            panic!("expected style rule");
+        };
+        assert!(rule.declarations.iter().any(|declaration| {
+            declaration.name == "background-position-x"
+                && matches!(declaration.value, Value::Number(number) if number == 0.0)
+        }));
+    }
+
+    #[test]
     fn background_size_standalone_property() {
         let stylesheet = parse_stylesheet("div { background-size: cover; }").unwrap();
         let Rule::Style(rule) = &stylesheet.rules[0] else {

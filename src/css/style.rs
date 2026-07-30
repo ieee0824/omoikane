@@ -996,7 +996,9 @@ fn validate_declaration(name: &str, value: &Value) -> DeclarationValidation {
                 return DeclarationValidation::Invalid;
             }
         }
-        return DeclarationValidation::Valid(ComputedValue::Keyword(render_value(value)));
+        // Validation is per layer, but computation still needs the resolution
+        // context so relative units and calc() are normalized in every layer.
+        return DeclarationValidation::Unvalidated;
     }
     if name.eq_ignore_ascii_case("position") {
         return match value {
@@ -1048,6 +1050,63 @@ fn validate_declaration(name: &str, value: &Value) -> DeclarationValidation {
                 };
             }
         }
+        return match value {
+            Value::Keyword(keyword)
+                if is_css_wide_keyword(&keyword.to_ascii_lowercase())
+                    || keyword.eq_ignore_ascii_case("none")
+                    || keyword.to_ascii_lowercase().starts_with("url(") =>
+            {
+                DeclarationValidation::Unvalidated
+            }
+            _ => DeclarationValidation::Invalid,
+        };
+    }
+    if name.eq_ignore_ascii_case("background-repeat") {
+        let valid_axis = |value: &Value| {
+            matches!(value, Value::Keyword(keyword) if matches!(keyword.to_ascii_lowercase().as_str(), "repeat" | "no-repeat"))
+        };
+        return match value {
+            Value::Keyword(keyword)
+                if is_css_wide_keyword(&keyword.to_ascii_lowercase())
+                    || matches!(
+                        keyword.to_ascii_lowercase().as_str(),
+                        "repeat" | "no-repeat" | "repeat-x" | "repeat-y"
+                    ) =>
+            {
+                DeclarationValidation::Unvalidated
+            }
+            Value::List(values)
+                if (1..=2).contains(&values.len()) && values.iter().all(valid_axis) =>
+            {
+                DeclarationValidation::Unvalidated
+            }
+            _ => DeclarationValidation::Invalid,
+        };
+    }
+    if name.eq_ignore_ascii_case("background-attachment") {
+        return match value {
+            Value::Keyword(keyword)
+                if is_css_wide_keyword(&keyword.to_ascii_lowercase())
+                    || matches!(
+                        keyword.to_ascii_lowercase().as_str(),
+                        "scroll" | "fixed" | "local"
+                    ) =>
+            {
+                DeclarationValidation::Unvalidated
+            }
+            _ => DeclarationValidation::Invalid,
+        };
+    }
+    if matches!(name.to_ascii_lowercase().as_str(), "background-origin" | "background-clip") {
+        return match value {
+            Value::Keyword(keyword)
+                if is_css_wide_keyword(&keyword.to_ascii_lowercase())
+                    || matches!(
+                        keyword.to_ascii_lowercase().as_str(),
+                        "border-box" | "padding-box" | "content-box"
+                    ) => DeclarationValidation::Unvalidated,
+            _ => DeclarationValidation::Invalid,
+        };
     }
     if name.eq_ignore_ascii_case("cursor") {
         return match compute_cursor_value(value) {
@@ -3324,8 +3383,31 @@ fn compute_value(value: &Value, property_name: &str, ctx: ResolutionContext) -> 
                 ComputedValue::Keyword(String::new())
             }
         }
+        Value::CommaList(values) if property_name.starts_with("background-") => {
+            let rendered = values
+                .iter()
+                .map(|value| compute_background_layer_value(value, property_name, ctx))
+                .collect::<Vec<_>>()
+                .join(", ");
+            ComputedValue::Keyword(rendered)
+        }
         Value::CommaList(_) => ComputedValue::Keyword(render_value(value)),
     }
+}
+
+fn compute_background_layer_value(
+    value: &Value,
+    property_name: &str,
+    ctx: ResolutionContext,
+) -> String {
+    if let Value::List(values) = value {
+        return values
+            .iter()
+            .map(|value| computed_value_css_text(&compute_value(value, property_name, ctx)))
+            .collect::<Vec<_>>()
+            .join(" ");
+    }
+    computed_value_css_text(&compute_value(value, property_name, ctx))
 }
 
 fn clamp_sizing_computed_value(property_name: &str, value: ComputedValue) -> ComputedValue {
