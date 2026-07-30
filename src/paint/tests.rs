@@ -7273,6 +7273,76 @@ fn background_layers_apply_independent_origin_clip_and_color_is_at_the_back() {
 }
 
 #[test]
+fn auto_sized_gradient_repeats_the_positioning_area_tile_into_a_larger_clip() {
+    let canvas = render_gradient_box(
+        "box-sizing: border-box; border: 2px solid transparent; \
+         background-image: linear-gradient(to right, red, blue); \
+         background-origin: content-box; background-clip: border-box;",
+        8,
+        8,
+    );
+    assert_eq!(canvas.pixel(0, 4), canvas.pixel(4, 4));
+    assert_ne!(canvas.pixel(0, 4), canvas.pixel(1, 4));
+}
+
+#[test]
+fn generated_box_background_layers_apply_origin_clip_and_radius() {
+    let html = r#"<html><head><style>
+        body { margin: 0; }
+        div::before { display: block; content: ''; width: 4px; height: 4px;
+            padding: 2px; border: 2px solid transparent; border-radius: 4px;
+            background-image: linear-gradient(red, red), linear-gradient(blue, blue);
+            background-origin: content-box, padding-box;
+            background-clip: content-box, padding-box;
+            background-repeat: no-repeat; }
+        </style></head><body><div></div></body></html>"#;
+    let document = TreeBuilder::parse(html).document();
+    let canvas = render_document(
+        &document,
+        Rect { x: 0.0, y: 0.0, width: 16.0, height: 16.0 },
+    )
+    .unwrap();
+    assert_eq!(canvas.pixel(0, 6).unwrap().a, 0);
+    assert_eq!(canvas.pixel(2, 6), Some(Color::rgb(0, 0, 255)));
+    assert_eq!(canvas.pixel(4, 6), Some(Color::rgb(255, 0, 0)));
+    assert_eq!(canvas.pixel(2, 2).unwrap().a, 0, "padding clip must keep its rounded corner");
+}
+
+#[test]
+fn inline_image_fragment_background_layers_apply_origin_and_clip() {
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let image_node = NodeHandle::element("img");
+    document.append_child(body.clone());
+    body.append_child(image_node.clone());
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "img { padding: 2px; border: 2px solid transparent; border-radius: 4px; \
+             background-image: linear-gradient(red, red), linear-gradient(blue, blue); \
+             background-origin: content-box, padding-box; \
+             background-clip: content-box, padding-box; background-repeat: no-repeat; }",
+        )
+        .unwrap(),
+    );
+    let style = resolver.computed_style(&image_node);
+    let transparent = Image::new(1, 1, vec![0, 0, 0, 0]).unwrap();
+    let mut canvas = Canvas::new(12, 12);
+    text::paint_inline_image_fragment(
+        &mut canvas,
+        Rect { x: 0.0, y: 0.0, width: 12.0, height: 12.0 },
+        &transparent,
+        &style,
+        None,
+        Rect { x: 0.0, y: 0.0, width: 12.0, height: 12.0 },
+    );
+    assert_eq!(canvas.pixel(0, 6).unwrap().a, 0);
+    assert_eq!(canvas.pixel(2, 6), Some(Color::rgb(0, 0, 255)));
+    assert_eq!(canvas.pixel(4, 6), Some(Color::rgb(255, 0, 0)));
+}
+
+#[test]
 fn radial_gradient_circle_position_and_keyword_extent_are_painted() {
     let canvas = render_gradient_box(
         "background-image: radial-gradient(circle closest-side at 25% 50%, red 0%, blue 100%);",

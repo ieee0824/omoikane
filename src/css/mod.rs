@@ -1012,6 +1012,7 @@ mod tests {
     fn background_shorthand_rejects_multiple_images_and_nonzero_unitless_positions() {
         for declaration in [
             "background: none linear-gradient(red, blue)",
+            "background: linear-gradient(red, blue) none",
             "background: url(a.png) url(b.png)",
             "background: linear-gradient(red, blue) 1 0",
             "background-position: 1, 0",

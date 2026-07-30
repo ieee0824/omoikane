@@ -774,9 +774,9 @@ fn parse_background_layer(value: &Value, allow_color: bool) -> Option<Background
                 saw_image = true;
             }
             Value::Keyword(keyword)
-                if (keyword.eq_ignore_ascii_case("none")
-                    || keyword.to_ascii_lowercase().starts_with("url("))
-                    && !saw_image =>
+                if !saw_image
+                    && (keyword.eq_ignore_ascii_case("none")
+                        || keyword.to_ascii_lowercase().starts_with("url(")) =>
             {
                 layer.image = item.clone();
                 saw_image = true;

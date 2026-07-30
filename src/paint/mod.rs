@@ -4060,8 +4060,57 @@ fn paint_background_image(
     viewport: Rect,
 ) {
     let images = background_list(style, "background-image", "none");
+    let border = border::EdgeSizesForPaint::from_style(style);
+    let padding_left = length_property(style, "padding-left")
+        .or_else(|| length_property(style, "padding"))
+        .unwrap_or(0.0);
+    let padding_right = length_property(style, "padding-right")
+        .or_else(|| length_property(style, "padding"))
+        .unwrap_or(0.0);
+    let padding_top = length_property(style, "padding-top")
+        .or_else(|| length_property(style, "padding"))
+        .unwrap_or(0.0);
+    let padding_bottom = length_property(style, "padding-bottom")
+        .or_else(|| length_property(style, "padding"))
+        .unwrap_or(0.0);
+    let padding_box = Rect {
+        x: rect.x + border.left,
+        y: rect.y + border.top,
+        width: (rect.width - border.left - border.right).max(0.0),
+        height: (rect.height - border.top - border.bottom).max(0.0),
+    };
+    let content_box = Rect {
+        x: padding_box.x + padding_left,
+        y: padding_box.y + padding_top,
+        width: (padding_box.width - padding_left - padding_right).max(0.0),
+        height: (padding_box.height - padding_top - padding_bottom).max(0.0),
+    };
+    let origins = background_list(style, "background-origin", "padding-box");
+    let clips = background_list(style, "background-clip", "border-box");
     for index in (0..images.len()).rev() {
         let mut layer_style = style.clone();
+        let origin = background_box_rect(
+            &origins[index % origins.len()],
+            rect,
+            padding_box,
+            content_box,
+        );
+        layer_style.set_paint_keyword("background-clip", clips[index % clips.len()].clone());
+        let (clip_rect, radii) = background_clip_geometry_for_rect(
+            &layer_style,
+            rect,
+            padding_box,
+            content_box,
+            border,
+            (padding_top, padding_right, padding_bottom, padding_left),
+        );
+        let layer_clip = match clip {
+            Some(clip) => intersect(clip_rect, clip),
+            None => Some(clip_rect),
+        };
+        let Some(layer_clip) = layer_clip else {
+            continue;
+        };
         layer_style.set_paint_keyword("background-image", images[index].clone());
         for (property, default) in [
             ("background-position-x", "0%"),
@@ -4073,18 +4122,56 @@ fn paint_background_image(
             let values = background_list(style, property, default);
             layer_style.set_paint_keyword(property, values[index % values.len()].clone());
         }
-        let Some(background) = prepare_background_image(&layer_style) else {
-            continue;
-        };
-        paint_prepared_background_image(
+        paint_background_image_rounded(
             canvas,
             &layer_style,
-            rect,
-            clip,
+            origin,
+            Some(layer_clip),
             viewport,
-            &background,
+            clip_rect,
+            radii,
         );
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn background_clip_geometry_for_rect(
+    style: &ComputedStyle,
+    border_box: Rect,
+    padding_box: Rect,
+    content_box: Rect,
+    border: border::EdgeSizesForPaint,
+    padding: (f32, f32, f32, f32),
+) -> (Rect, (f32, f32, f32, f32)) {
+    let radii = border_radius_corners(style);
+    let (padding_top, padding_right, padding_bottom, padding_left) = padding;
+    let (rect, top, right, bottom, left) = match style.get("background-clip") {
+        Some(ComputedValue::Keyword(value)) if value.eq_ignore_ascii_case("content-box") => (
+            content_box,
+            border.top + padding_top,
+            border.right + padding_right,
+            border.bottom + padding_bottom,
+            border.left + padding_left,
+        ),
+        Some(ComputedValue::Keyword(value)) if value.eq_ignore_ascii_case("padding-box") => (
+            padding_box,
+            border.top,
+            border.right,
+            border.bottom,
+            border.left,
+        ),
+        _ => return (border_box, radii),
+    };
+    let (tl, tr, br, bl) = radii;
+    (
+        rect,
+        (
+            (tl - top.max(left)).max(0.0),
+            (tr - top.max(right)).max(0.0),
+            (br - bottom.max(right)).max(0.0),
+            (bl - bottom.max(left)).max(0.0),
+        ),
+    )
 }
 
 fn paint_background_images_for_box(
@@ -4305,14 +4392,64 @@ fn paint_prepared_background_image(
                 ty += tile_h;
             }
         } else {
-            let clip_area = clip.unwrap_or(area);
-            let paint_area = Rect {
-                x: if repeat_x { clip_area.x } else { area.x },
-                y: if repeat_y { clip_area.y } else { area.y },
-                width: if repeat_x { clip_area.width } else { area.width },
-                height: if repeat_y { clip_area.height } else { area.height },
+            if !repeat_x && !repeat_y {
+                color::paint_gradient(canvas, gradient, area, clip.or(Some(area)));
+                return;
+            }
+            let tile_width = area.width.max(1.0);
+            let tile_height = area.height.max(1.0);
+            let tw = tile_width.ceil() as u32;
+            let th = tile_height.ceil() as u32;
+            const MAX_TILE_PIXELS: u64 = 16_777_216;
+            let tile_image = if u64::from(tw) * u64::from(th) <= MAX_TILE_PIXELS {
+                let mut tile_canvas = Canvas::new(tw, th);
+                color::paint_gradient(
+                    &mut tile_canvas,
+                    gradient,
+                    Rect { x: 0.0, y: 0.0, width: tile_width, height: tile_height },
+                    None,
+                );
+                Image::new(tw, th, tile_canvas.pixels).ok()
+            } else {
+                None
             };
-            color::paint_gradient(canvas, gradient, paint_area, clip.or(Some(area)));
+            let clip_area = clip.unwrap_or(area);
+            let x_start = if repeat_x {
+                area.x + ((clip_area.x - area.x) / tile_width).floor() * tile_width
+            } else {
+                area.x
+            };
+            let y_start = if repeat_y {
+                area.y + ((clip_area.y - area.y) / tile_height).floor() * tile_height
+            } else {
+                area.y
+            };
+            let x_end = if repeat_x { clip_area.x + clip_area.width } else { area.x + area.width };
+            let y_end = if repeat_y { clip_area.y + clip_area.height } else { area.y + area.height };
+            let mut y = y_start;
+            while y < y_end {
+                let mut x = x_start;
+                while x < x_end {
+                    let tile_rect = Rect { x, y, width: tile_width, height: tile_height };
+                    if let Some(ref tile_image) = tile_image {
+                        canvas.draw_image_scaled_clipped(
+                            tile_image,
+                            tile_rect,
+                            clip.or(Some(area)),
+                        );
+                    } else {
+                        color::paint_gradient(canvas, gradient, tile_rect, clip.or(Some(area)));
+                    }
+                    if !repeat_x {
+                        break;
+                    }
+                    x += tile_width;
+                }
+                if !repeat_y {
+                    break;
+                }
+                y += tile_height;
+            }
         }
         return;
     }
