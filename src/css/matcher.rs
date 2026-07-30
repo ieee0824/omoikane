@@ -167,6 +167,14 @@ fn add_simple_specificity(value: &mut Specificity, simple: &SimpleSelector) {
             value.elements += 1;
             add_function_argument_specificity(value, name);
         }
+        SimpleSelector::PseudoElement(name)
+            if functional_pseudo(name)
+                .is_some_and(|(function, _)| function.eq_ignore_ascii_case("part")) =>
+        {
+            // The part name is not a selector and does not contribute. The
+            // pseudo-element itself contributes one type-selector unit.
+            value.elements += 1;
+        }
         SimpleSelector::PseudoClass(_) => value.classes += 1,
         SimpleSelector::Type(_) | SimpleSelector::PseudoElement(_) => value.elements += 1,
         SimpleSelector::Universal => {}
@@ -1033,6 +1041,18 @@ mod tests {
             Specificity {
                 ids: 1,
                 classes: 3,
+                elements: 2,
+            }
+        );
+    }
+
+    #[test]
+    fn part_name_does_not_contribute_specificity() {
+        assert_eq!(
+            specificity(&selector("x-card.active::part(label) {}")),
+            Specificity {
+                ids: 0,
+                classes: 1,
                 elements: 2,
             }
         );

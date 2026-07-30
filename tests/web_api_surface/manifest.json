@@ -95,6 +95,14 @@
       "baseline_supported": false
     },
     {
+      "id": "css.shadow-parts",
+      "area": "web-components",
+      "description": "Document author styles target explicitly exposed shadow parts",
+      "setup": "globalThis.__partStyle = document.createElement('style'); __partStyle.textContent = 'x-part-surface::part(label) { width: 20px }'; document.body.appendChild(__partStyle); globalThis.__partHost = document.createElement('x-part-surface'); document.body.appendChild(__partHost); globalThis.__partRoot = __partHost.attachShadow({mode:'closed'}); globalThis.__partTarget = document.createElement('span'); __partTarget.setAttribute('part', 'label'); __partRoot.appendChild(__partTarget)",
+      "probe": "getComputedStyle(__partTarget).width === '20px'",
+      "baseline_supported": false
+    },
+    {
       "id": "dom.custom-elements",
       "area": "web-components",
       "description": "Custom element registry is available",

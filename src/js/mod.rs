@@ -13808,6 +13808,83 @@ b</textarea></form>"#);
     }
 
     #[test]
+    fn shadow_parts_work_in_open_and_closed_roots_and_recompute_after_mutation() {
+        for mode in ["open", "closed"] {
+            let mut runtime = JsRuntime::new().unwrap();
+            let result = runtime
+                .eval(&format!(
+                    r#"(() => {{
+                      const style = document.createElement("style");
+                      style.textContent =
+                        'x-outer.active::part(public) {{ width: 21px; }} ' +
+                        'x-outer::part(other) {{ height: 22px; }}';
+                      document.body.appendChild(style);
+                      const outer = document.createElement("x-outer");
+                      outer.className = "active";
+                      document.body.appendChild(outer);
+                      const outerRoot = outer.attachShadow({{ mode: "{mode}" }});
+                      const inner = document.createElement("x-inner");
+                      inner.setAttribute("exportparts", "inner: public");
+                      outerRoot.appendChild(inner);
+                      const innerRoot = inner.attachShadow({{ mode: "{mode}" }});
+                      const leaf = document.createElement("span");
+                      leaf.setAttribute("part", "inner");
+                      innerRoot.appendChild(leaf);
+
+                      const values = [getComputedStyle(leaf).width];
+                      leaf.setAttribute("part", "missing");
+                      values.push(getComputedStyle(leaf).width);
+                      leaf.setAttribute("part", "inner");
+                      outer.className = "inactive";
+                      values.push(getComputedStyle(leaf).width);
+                      outer.className = "active";
+                      inner.setAttribute("exportparts", "inner: other, broken:");
+                      values.push(getComputedStyle(leaf).width, getComputedStyle(leaf).height);
+                      leaf.style.height = "23px";
+                      values.push(getComputedStyle(leaf).height);
+                      leaf.style.setProperty("height", "23px", "important");
+                      values.push(getComputedStyle(leaf).height);
+                      return values.join("|");
+                    }})()"#,
+                ))
+                .unwrap()
+                .to_string(&mut runtime.context)
+                .unwrap()
+                .to_std_string_escaped();
+            assert_eq!(
+                result,
+                "21px||||22px|22px|23px",
+                "shadow mode: {mode}"
+            );
+        }
+    }
+
+    #[test]
+    fn cssom_preserves_and_validates_part_selector_text() {
+        let mut runtime = JsRuntime::new().unwrap();
+        assert!(
+            runtime
+                .eval(
+                    r#"(() => {
+                      const style = document.createElement("style");
+                      style.textContent = "x-card::part(label) { color: red; }";
+                      document.body.appendChild(style);
+                      const rule = style.sheet.cssRules[0];
+                      const initial = rule.selectorText === "x-card::part(label)";
+                      rule.selectorText = "x-card.featured::part(accent)";
+                      const changed = rule.selectorText === "x-card.featured::part(accent)";
+                      rule.selectorText = "x-card::part(one two)";
+                      return initial && changed &&
+                        rule.selectorText === "x-card.featured::part(accent)";
+                    })()"#,
+                )
+                .unwrap()
+                .as_boolean()
+                .unwrap()
+        );
+    }
+
+    #[test]
     fn html_slot_element_assigns_named_default_and_fallback_nodes_dynamically() {
         let mut runtime = JsRuntime::new().unwrap();
         assert!(runtime
@@ -14553,6 +14630,32 @@ b</textarea></form>"#);
             children > 0.0,
             "target should have children after appending fragment"
         );
+    }
+
+    #[test]
+    fn document_fragment_and_shadow_root_get_element_by_id_are_tree_scoped() {
+        use crate::html::TreeBuilder;
+        let doc = TreeBuilder::parse("<div id='outside'></div><div id='host'></div>").document();
+        let mut runtime = JsRuntime::with_document(doc).unwrap();
+        let actual = eval_str(
+            &mut runtime,
+            r#"(() => {
+                const fragment = document.createDocumentFragment();
+                const nested = document.createElement("section");
+                nested.innerHTML = '<span id="inside"></span>';
+                fragment.appendChild(nested);
+
+                const shadow = document.getElementById("host").attachShadow({ mode: "open" });
+                shadow.innerHTML = '<span id="shadow-inside"></span>';
+                return [
+                    fragment.getElementById("inside").tagName,
+                    fragment.getElementById("outside") === null,
+                    shadow.getElementById("shadow-inside").tagName,
+                    shadow.getElementById("outside") === null
+                ].join("|");
+            })()"#,
+        );
+        assert_eq!(actual, "SPAN|true|SPAN|true");
     }
 
     #[test]

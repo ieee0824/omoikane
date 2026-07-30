@@ -14,7 +14,16 @@ git_wpt sparse-checkout add "/css/css-shadow/shadow-cascade-order-001.html"
 git_wpt sparse-checkout add \
   "/webmessaging/Channel_postMessage_event_properties.any.js" \
   "/webmessaging/Channel_postMessage_DataCloneErr.any.js" \
-  "/webmessaging/MessageEvent.any.js"
+  "/webmessaging/MessageEvent.any.js" \
+  "/css/css-shadow/part/support/shadow-helper.js" \
+  "/css/css-shadow/part/host-part-001.html" \
+  "/css/css-shadow/part/exportparts-multiple.html" \
+  "/css/css-shadow/part/both-part-and-exportparts.html" \
+  "/css/css-shadow/part/simple-inline.html" \
+  "/css/css-shadow/part/simple-important-inline.html" \
+  "/css/css-shadow/part/simple-important-important.html" \
+  "/css/css-shadow/part/invalidation-change-part-name.html" \
+  "/css/css-shadow/part/invalidation-change-exportparts-forward.html"
 git_wpt sparse-checkout add "/css/selectors/is-where-error-recovery.html"
 git_wpt sparse-checkout add "/css/selectors/has-matches-to-uninserted-elements.html"
 git_wpt sparse-checkout add "/css/css-conditional/js/CSS-supports-L3.html"

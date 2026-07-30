@@ -3224,6 +3224,20 @@
     });
   }
 
+  function findElementById(root, id) {
+    const expected = String(id);
+    const visit = (node) => {
+      for (const child of node.childNodes) {
+        if (child.nodeType !== 1) continue;
+        if (child.getAttribute("id") === expected) return child;
+        const found = visit(child);
+        if (found) return found;
+      }
+      return null;
+    };
+    return visit(root);
+  }
+
   class Document extends Node {
     // Stamps a freshly created node with this document as its owner so
     // `node.ownerDocument` resolves to this document even while the node is
@@ -3243,23 +3257,12 @@
       // parent and child ids from being confused.
       //
       // Tolerate an unbound call (`var g = document.getElementById; g('x')`)
-      // where `this` is not a Document and `this.__id` would be undefined (a
-      // NaN id that resolves to null): fall back to the top-level document so
-      // the lookup still resolves against the main tree.
+      // by falling back to the top-level document when `this` is not a
+      // Document instance.
       const scope = this instanceof Document ? this : globalThis.document;
-      const expected = String(id);
       // Plain tree walk with an id equality check: getElementById needs no
       // selector parsing/matching and no full-document snapshot.
-      const findById = (node) => {
-        for (const child of node.childNodes) {
-          if (child.nodeType !== 1) continue;
-          if (child.getAttribute("id") === expected) return child;
-          const found = findById(child);
-          if (found) return found;
-        }
-        return null;
-      };
-      return findById(scope);
+      return findElementById(scope, id);
     }
 
     createElement(tag) {
@@ -3698,7 +3701,9 @@
     close() {}
   }
 
-  class DocumentFragment extends Node {}
+  class DocumentFragment extends Node {
+    getElementById(id) { return findElementById(this, id); }
+  }
 
   class ShadowRoot extends DocumentFragment {
     constructor(id, construction) {

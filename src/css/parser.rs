@@ -450,6 +450,39 @@ impl Parser {
             return Err(CssParseError::InvalidSelector);
         }
 
+        let mut pseudo_element_count = 0;
+        let mut part_location = None;
+        for (part_index, part) in parts.iter().enumerate() {
+            for (simple_index, simple) in part.simples.iter().enumerate() {
+                match simple {
+                    SimpleSelector::PseudoElement(name) => {
+                        pseudo_element_count += 1;
+                        if name
+                            .split_once('(')
+                            .is_some_and(|(function, _)| function.eq_ignore_ascii_case("part"))
+                            && part_location.is_none()
+                        {
+                            part_location = Some((part_index, simple_index));
+                        }
+                    }
+                    SimpleSelector::PseudoClass(name)
+                        if name.eq_ignore_ascii_case("before")
+                            || name.eq_ignore_ascii_case("after") =>
+                    {
+                        pseudo_element_count += 1;
+                    }
+                    _ => {}
+                }
+            }
+        }
+        if let Some((part_index, simple_index)) = part_location
+            && (part_index + 1 != parts.len()
+                || simple_index + 1 != parts[part_index].simples.len()
+                || pseudo_element_count != 1)
+        {
+            return Err(CssParseError::InvalidSelector);
+        }
+
         Ok(Selector { parts })
     }
 
@@ -572,15 +605,25 @@ impl Parser {
             if !matches!(self.peek(), Some(CssToken::ParenOpen)) {
                 return Ok(SimpleSelector::PseudoElement(name));
             }
-            if !name.eq_ignore_ascii_case("slotted") {
+            if !name.eq_ignore_ascii_case("slotted")
+                && !name.eq_ignore_ascii_case("part")
+            {
                 return Err(CssParseError::InvalidSelector);
             }
             self.next(); // consume ParenOpen
-            let argument = render_tokens(&self.collect_parenthesized_tokens()?)
-                .trim()
-                .to_string();
+            let argument_tokens = self.collect_parenthesized_tokens()?;
+            let argument = render_tokens(&argument_tokens).trim().to_string();
             if argument.is_empty() {
                 return Err(CssParseError::InvalidSelector);
+            }
+            if name.eq_ignore_ascii_case("part") {
+                let significant: Vec<&CssToken> = argument_tokens
+                    .iter()
+                    .filter(|token| **token != CssToken::Whitespace)
+                    .collect();
+                if !matches!(significant.as_slice(), [CssToken::Ident(_)]) {
+                    return Err(CssParseError::InvalidSelector);
+                }
             }
             return Ok(SimpleSelector::PseudoElement(format!("{name}({argument})")));
         }
@@ -1534,12 +1577,30 @@ mod selector_list_tests {
     }
 
     #[test]
-    fn stylesheet_only_accepts_slotted_as_functional_pseudo_element() {
-        for valid in ["::slotted(.item)", "::SLOTTED(*)"] {
+    fn stylesheet_accepts_supported_functional_pseudo_elements() {
+        for valid in [
+            "::slotted(.item)",
+            "::SLOTTED(*)",
+            "x-card::part(label)",
+            "x-card::part( label )",
+            "x-card::PART(accent)",
+        ] {
             let stylesheet = parse_stylesheet(&format!("{valid} {{ color: red; }}")).unwrap();
             assert_eq!(stylesheet.rules.len(), 1, "rejected {valid:?}");
         }
-        for invalid in ["::before(foo)", "::after(.item)", "::part(name)"] {
+        for invalid in [
+            "::before(foo)",
+            "::after(.item)",
+            "::part()",
+            "::part(one two)",
+            "::part(.label)",
+            "::part(label, other)",
+            "x-card::part(label).active",
+            "x-card::part(label) span",
+            "x-card::before::part(label)",
+            "x-card:before::part(label)",
+            "x-card:AFTER::part(label)",
+        ] {
             assert!(
                 parse_stylesheet(&format!("{invalid} {{ color: red; }}")).is_err(),
                 "accepted {invalid:?}"
