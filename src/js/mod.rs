@@ -7126,7 +7126,7 @@ mod tests {
         let mut evaluation = Box::pin(runtime.eval_async(
             "const answer = suspendHostCall(); markAfterHostCall(); answer + 1",
         ));
-        let waker = Waker::noop();
+        let waker: &'static Waker = Waker::noop();
         let mut cx = FutureContext::from_waker(waker);
 
         assert!(matches!(evaluation.as_mut().poll(&mut cx), Poll::Pending));
@@ -7164,7 +7164,7 @@ mod tests {
             .unwrap();
 
         let mut evaluation = Box::pin(runtime.eval_async("suspendHostCall()"));
-        let waker = Waker::noop();
+        let waker: &'static Waker = Waker::noop();
         let mut cx = FutureContext::from_waker(waker);
         assert!(matches!(evaluation.as_mut().poll(&mut cx), Poll::Pending));
         drop(evaluation);
