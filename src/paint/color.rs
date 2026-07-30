@@ -42,6 +42,8 @@ struct GradientStop {
 enum PositionComponent {
     Fraction(f32),
     Px(f32),
+    EndFraction(f32),
+    EndPx(f32),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -446,25 +448,30 @@ pub(crate) fn split_gradient_args(args: &str) -> Vec<&str> {
 /// Parses the direction part of a linear-gradient (e.g. `"to right"`, `"45deg"`).
 /// Returns the angle in degrees (CSS convention: 0° = to top, 90° = to right).
 pub(crate) fn parse_gradient_direction(part: &str) -> Option<f32> {
-    let part = part.trim();
+    let lower = part.trim().to_ascii_lowercase();
+    let part = lower.as_str();
+    let finite = |value: &str| value.trim().parse::<f32>().ok().filter(|v| v.is_finite());
 
     // Angle: "<number>deg" (or grad/turn/rad — only deg is common)
     if let Some(deg_str) = part.strip_suffix("deg") {
-        return deg_str.trim().parse::<f32>().ok();
+        return finite(deg_str);
     }
     if let Some(turn_str) = part.strip_suffix("turn") {
-        return turn_str.trim().parse::<f32>().ok().map(|t| t * 360.0);
+        return finite(turn_str)
+            .map(|t| t * 360.0)
+            .filter(|v| v.is_finite());
     }
     if let Some(rad_str) = part.strip_suffix("rad") {
-        return rad_str.trim().parse::<f32>().ok().map(|r| r.to_degrees());
+        return finite(rad_str)
+            .map(|r| r.to_degrees())
+            .filter(|v| v.is_finite());
     }
     if let Some(grad_str) = part.strip_suffix("grad") {
-        return grad_str.trim().parse::<f32>().ok().map(|g| g * 0.9);
+        return finite(grad_str).map(|g| g * 0.9).filter(|v| v.is_finite());
     }
 
     // Keyword: "to <side>" or "to <side> <side>"
-    let lower = part.to_ascii_lowercase();
-    match lower.as_str() {
+    match part {
         "to top" => Some(0.0),
         "to right" => Some(90.0),
         "to bottom" => Some(180.0),
@@ -490,10 +497,15 @@ fn parse_number_with_unit(value: &str) -> Option<GradientLength> {
         return number
             .parse::<f32>()
             .ok()
+            .filter(|v| v.is_finite())
             .map(|v| GradientLength::Fraction(v / 100.0));
     }
     if let Some(number) = value.strip_suffix("px") {
-        return number.parse::<f32>().ok().map(GradientLength::Px);
+        return number
+            .parse::<f32>()
+            .ok()
+            .filter(|v| v.is_finite())
+            .map(GradientLength::Px);
     }
     if value == "0" {
         return Some(GradientLength::Px(0.0));
@@ -534,46 +546,70 @@ fn top_level_words(value: &str) -> Vec<&str> {
 
 fn parse_position(value: &str) -> Option<GradientPosition> {
     let words = top_level_words(value);
-    if words.is_empty() || words.len() > 2 {
+    if words.is_empty() || words.len() > 4 {
         return None;
     }
-    let component = |word: &str, horizontal: bool| -> Option<PositionComponent> {
-        match word.to_ascii_lowercase().as_str() {
-            "center" => Some(PositionComponent::Fraction(0.5)),
-            "left" if horizontal => Some(PositionComponent::Fraction(0.0)),
-            "right" if horizontal => Some(PositionComponent::Fraction(1.0)),
-            "top" if !horizontal => Some(PositionComponent::Fraction(0.0)),
-            "bottom" if !horizontal => Some(PositionComponent::Fraction(1.0)),
-            _ => match parse_number_with_unit(word)? {
-                GradientLength::Fraction(v) => Some(PositionComponent::Fraction(v)),
-                GradientLength::Px(v) => Some(PositionComponent::Px(v)),
-            },
+
+    let plain = |word: &str, horizontal: bool| match word.to_ascii_lowercase().as_str() {
+        "center" => Some(PositionComponent::Fraction(0.5)),
+        "left" if horizontal => Some(PositionComponent::Fraction(0.0)),
+        "right" if horizontal => Some(PositionComponent::Fraction(1.0)),
+        "top" if !horizontal => Some(PositionComponent::Fraction(0.0)),
+        "bottom" if !horizontal => Some(PositionComponent::Fraction(1.0)),
+        _ => match parse_number_with_unit(word)? {
+            GradientLength::Fraction(v) => Some(PositionComponent::Fraction(v)),
+            GradientLength::Px(v) => Some(PositionComponent::Px(v)),
+        },
+    };
+    let axis = |component: &[&str], horizontal: bool| -> Option<PositionComponent> {
+        match component {
+            [word] => plain(word, horizontal),
+            [edge, offset] => {
+                let from_end = match (edge.to_ascii_lowercase().as_str(), horizontal) {
+                    ("left", true) | ("top", false) => false,
+                    ("right", true) | ("bottom", false) => true,
+                    _ => return None,
+                };
+                match (parse_number_with_unit(offset)?, from_end) {
+                    (GradientLength::Fraction(value), false) => {
+                        Some(PositionComponent::Fraction(value))
+                    }
+                    (GradientLength::Px(value), false) => Some(PositionComponent::Px(value)),
+                    (GradientLength::Fraction(value), true) => {
+                        Some(PositionComponent::EndFraction(value))
+                    }
+                    (GradientLength::Px(value), true) => Some(PositionComponent::EndPx(value)),
+                }
+            }
+            _ => None,
         }
     };
     if words.len() == 1 {
         return match words[0].to_ascii_lowercase().as_str() {
             "top" | "bottom" => Some(GradientPosition {
                 x: PositionComponent::Fraction(0.5),
-                y: component(words[0], false)?,
+                y: plain(words[0], false)?,
             }),
             _ => Some(GradientPosition {
-                x: component(words[0], true)?,
+                x: plain(words[0], true)?,
                 y: PositionComponent::Fraction(0.5),
             }),
         };
     }
-    let first_vertical = matches!(words[0].to_ascii_lowercase().as_str(), "top" | "bottom");
-    if first_vertical {
-        Some(GradientPosition {
-            x: component(words[1], true)?,
-            y: component(words[0], false)?,
-        })
-    } else {
-        Some(GradientPosition {
-            x: component(words[0], true)?,
-            y: component(words[1], false)?,
-        })
+
+    // A position consists of one horizontal and one vertical component. Each
+    // component is either one token or an edge keyword plus its offset.
+    for split in 1..words.len() {
+        let first = &words[..split];
+        let second = &words[split..];
+        if let (Some(x), Some(y)) = (axis(first, true), axis(second, false)) {
+            return Some(GradientPosition { x, y });
+        }
+        if let (Some(y), Some(x)) = (axis(first, false), axis(second, true)) {
+            return Some(GradientPosition { x, y });
+        }
     }
+    None
 }
 
 fn parse_color_stop(value: &str, conic: bool) -> Option<Vec<GradientStop>> {
@@ -683,12 +719,14 @@ pub(crate) fn parse_gradient(value: &str) -> Option<Gradient> {
         let mut center = default_center();
         let mut index = 0usize;
         let mut has_prelude = false;
+        let mut has_from = false;
         while index < words.len() {
             match words[index].to_ascii_lowercase().as_str() {
-                "from" if index + 1 < words.len() => {
+                "from" if index + 1 < words.len() && !has_from => {
                     from_deg = parse_angle(words[index + 1])?;
                     index += 2;
                     has_prelude = true;
+                    has_from = true;
                 }
                 "at" if index + 1 < words.len() => {
                     center = parse_position(&words[index + 1..].join(" "))?;
@@ -813,6 +851,8 @@ fn resolve_component(component: PositionComponent, origin: f32, size: f32) -> f3
         + match component {
             PositionComponent::Fraction(v) => v * size,
             PositionComponent::Px(v) => v,
+            PositionComponent::EndFraction(v) => (1.0 - v) * size,
+            PositionComponent::EndPx(v) => size - v,
         }
 }
 
@@ -898,12 +938,17 @@ fn sample_stops(stops: &[(Color, f32, Option<f32>)], mut value: f32, repeating: 
         return b_color;
     }
     let mut t = (value - a_pos) / (b_pos - a_pos);
-    if let Some(hint) = hint.filter(|hint| *hint > a_pos && *hint < b_pos) {
-        let midpoint = (hint - a_pos) / (b_pos - a_pos);
-        t = if t <= midpoint {
-            0.5 * t / midpoint
+    if let Some(hint) = hint {
+        let midpoint = ((hint - a_pos) / (b_pos - a_pos)).clamp(0.0, 1.0);
+        t = if (midpoint - 0.5).abs() <= f32::EPSILON {
+            t
+        } else if midpoint <= f32::EPSILON {
+            if t <= 0.0 { 0.0 } else { 1.0 }
+        } else if midpoint >= 1.0 - f32::EPSILON {
+            if t >= 1.0 { 1.0 } else { 0.0 }
         } else {
-            0.5 + 0.5 * (t - midpoint) / (1.0 - midpoint)
+            let exponent = 0.5_f32.ln() / midpoint.ln();
+            t.clamp(0.0, 1.0).powf(exponent)
         };
     }
     // CSS gradients interpolate in premultiplied-alpha space.
@@ -1057,5 +1102,84 @@ pub(crate) fn paint_gradient(
                 blend_pixel(&mut canvas.pixels[index..index + 4], color);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod gradient_tests {
+    use super::*;
+
+    #[test]
+    fn color_hint_uses_the_css_exponential_midpoint_curve() {
+        let stops = [
+            (Color::rgb(255, 0, 0), 0.0, None),
+            (Color::rgb(0, 0, 255), 1.0, Some(0.25)),
+        ];
+        let eighth = sample_stops(&stops, 0.125, false);
+        let hint = sample_stops(&stops, 0.25, false);
+        let half = sample_stops(&stops, 0.5, false);
+
+        assert_eq!(eighth, Color::rgb(165, 0, 90));
+        assert_eq!(hint, Color::rgb(128, 0, 128));
+        assert_eq!(half, Color::rgb(75, 0, 180));
+
+        let linear = [stops[0], (stops[1].0, stops[1].1, Some(0.5))];
+        assert_eq!(sample_stops(&linear, 0.125, false), Color::rgb(223, 0, 32));
+        let at_start = [stops[0], (stops[1].0, stops[1].1, Some(0.0))];
+        assert_eq!(sample_stops(&at_start, 0.125, false), Color::rgb(0, 0, 255));
+        let at_end = [stops[0], (stops[1].0, stops[1].1, Some(1.0))];
+        assert_eq!(sample_stops(&at_end, 0.5, false), Color::rgb(255, 0, 0));
+    }
+
+    #[test]
+    fn radial_and_conic_positions_accept_edge_offsets() {
+        let radial =
+            parse_gradient("radial-gradient(circle 5px at right 10px bottom 20px, red, blue)")
+                .unwrap();
+        let GradientKind::Radial { center, .. } = radial.kind else {
+            panic!("expected radial gradient");
+        };
+        assert_eq!(resolve_component(center.x, 0.0, 100.0), 90.0);
+        assert_eq!(resolve_component(center.y, 0.0, 80.0), 60.0);
+
+        let conic = parse_gradient("conic-gradient(at bottom 25% right 10%, red, blue)").unwrap();
+        let GradientKind::Conic { center, .. } = conic.kind else {
+            panic!("expected conic gradient");
+        };
+        assert_eq!(resolve_component(center.x, 0.0, 100.0), 90.0);
+        assert_eq!(resolve_component(center.y, 0.0, 80.0), 60.0);
+
+        assert!(parse_gradient("conic-gradient(at center right 10px, red, blue)").is_some());
+        assert!(parse_gradient("radial-gradient(at right 10px center, red, blue)").is_some());
+    }
+
+    #[test]
+    fn malformed_positions_and_duplicate_conic_preludes_are_rejected() {
+        for value in [
+            "radial-gradient(at left right, red, blue)",
+            "radial-gradient(at top 1px bottom 2px, red, blue)",
+            "conic-gradient(from 10deg from 20deg, red, blue)",
+            "conic-gradient(at left at top, red, blue)",
+            "conic-gradient(at right 10px left 20px, red, blue)",
+        ] {
+            assert!(parse_gradient(value).is_none(), "accepted {value}");
+        }
+    }
+
+    #[test]
+    fn non_finite_numbers_and_negative_radii_are_rejected_but_zero_is_valid() {
+        for value in [
+            "linear-gradient(NaNdeg, red, blue)",
+            "conic-gradient(from infdeg, red, blue)",
+            "radial-gradient(circle NaNpx, red, blue)",
+            "radial-gradient(ellipse infpx 2px, red, blue)",
+            "radial-gradient(circle -1px, red, blue)",
+            "radial-gradient(ellipse 1px -1px, red, blue)",
+            "radial-gradient(at NaNpx center, red, blue)",
+        ] {
+            assert!(parse_gradient(value).is_none(), "accepted {value}");
+        }
+        assert!(parse_gradient("radial-gradient(circle 0px, red, blue)").is_some());
+        assert!(parse_gradient("radial-gradient(ellipse 0px 0px, red, blue)").is_some());
     }
 }
