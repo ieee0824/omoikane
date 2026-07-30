@@ -1716,6 +1716,15 @@ fn translate_layout_for_scroll(
     sticky_scrollport: Rect,
     containing_block: Option<Rect>,
 ) {
+    let scroll_geometry = if layout.is_scroll_container() {
+        Some(crate::layout::PaintScrollGeometry {
+            offset: layout.scroll_offset(),
+            overflow_size: layout.scrollable_overflow(),
+        })
+    } else {
+        None
+    };
+    layout.paint_scroll = scroll_geometry;
     let style = resolver.computed_style(&layout.node);
     let offset = if is_absolute_for_paint(&style) {
         positioned_offset
@@ -3068,11 +3077,23 @@ fn image_repeat(style: &ComputedStyle, property: &str) -> bool {
     )
 }
 
-fn background_attachment_fixed(style: &ComputedStyle) -> bool {
-    matches!(
-        style.get("background-attachment"),
-        Some(ComputedValue::Keyword(keyword)) if keyword.eq_ignore_ascii_case("fixed")
-    )
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum BackgroundAttachment {
+    Scroll,
+    Fixed,
+    Local,
+}
+
+fn background_attachment(style: &ComputedStyle) -> BackgroundAttachment {
+    match style.get("background-attachment") {
+        Some(ComputedValue::Keyword(keyword)) if keyword.eq_ignore_ascii_case("fixed") => {
+            BackgroundAttachment::Fixed
+        }
+        Some(ComputedValue::Keyword(keyword)) if keyword.eq_ignore_ascii_case("local") => {
+            BackgroundAttachment::Local
+        }
+        _ => BackgroundAttachment::Scroll,
+    }
 }
 
 /// Returns background-position as `(x, y)` pixel offsets.
@@ -4198,7 +4219,7 @@ fn paint_background_images_for_box(
     let repeats = background_list(style, "background-repeat", "repeat");
     let attachments = background_list(style, "background-attachment", "scroll");
     for index in (0..images.len()).rev() {
-        let origin = background_box_rect(
+        let mut origin = background_box_rect(
             &origins[index % origins.len()],
             border_box,
             padding_box,
@@ -4226,6 +4247,22 @@ fn paint_background_images_for_box(
             &repeats[index % repeats.len()],
             &attachments[index % attachments.len()],
         );
+        if background_attachment(&layer_style) == BackgroundAttachment::Local
+            && layout.is_scroll_container()
+        {
+            let geometry = layout.paint_scroll.unwrap_or_else(|| {
+                crate::layout::PaintScrollGeometry {
+                    offset: layout.scroll_offset(),
+                    overflow_size: layout.scrollable_overflow(),
+                }
+            });
+            let extra_width = (geometry.overflow_size.0 - padding_box.width).max(0.0);
+            let extra_height = (geometry.overflow_size.1 - padding_box.height).max(0.0);
+            origin.x -= geometry.offset.0;
+            origin.y -= geometry.offset.1;
+            origin.width += extra_width;
+            origin.height += extra_height;
+        }
         paint_background_image_rounded(
             canvas,
             &layer_style,
@@ -4326,7 +4363,7 @@ fn paint_prepared_background_image(
             }
             let tile_w = tile_w.max(1.0);
             let tile_h = tile_h.max(1.0);
-            let fixed = background_attachment_fixed(style);
+            let fixed = background_attachment(style) == BackgroundAttachment::Fixed;
             let (pos_cw, pos_ch) = if fixed {
                 (viewport.width, viewport.height)
             } else {
@@ -4469,7 +4506,7 @@ fn paint_prepared_background_image(
     let x_end = area.x + area.width;
     let y_end = area.y + area.height;
     let (repeat_x, repeat_y) = background_repeat(style);
-    let fixed = background_attachment_fixed(style);
+    let fixed = background_attachment(style) == BackgroundAttachment::Fixed;
     let (pos_container_w, pos_container_h) = if fixed {
         (viewport.width, viewport.height)
     } else {
