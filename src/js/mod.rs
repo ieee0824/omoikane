@@ -15,6 +15,7 @@ use boa_engine::JsString;
 use boa_engine::Module;
 use boa_engine::builtins::promise::{OperationType, PromiseState};
 use boa_engine::context::HostHooks;
+use boa_engine::job::AsyncContext;
 use boa_engine::module::{ModuleLoader, Referrer};
 use boa_engine::native_function::{NativeCallContinuation, NativeCallSuspension, NativeFunction};
 use boa_engine::object::{
@@ -135,7 +136,7 @@ impl ModuleLoader for HttpModuleLoader {
         self: Rc<Self>,
         referrer: Referrer,
         specifier: JsString,
-        context: &RefCell<&mut Context>,
+        context: &AsyncContext<'_>,
     ) -> impl Future<Output = JsResult<Module>> {
         let result = (|| {
             let specifier = specifier.to_std_string_escaped();
@@ -349,7 +350,6 @@ pub enum PageTaskSource {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PageTaskError {
     Cancelled,
-    AsyncModuleEvaluationUnavailable { url: String },
 }
 
 /// Result returned when an owned page task gives its runtime back to the host.
@@ -1787,8 +1787,22 @@ impl JsRuntime {
         }
     }
 
+    /// Evaluates one module with asynchronous jobs and suspendable host calls.
+    async fn eval_module_async(&mut self, source: &str, url: &str) -> JsResult<JsValue> {
+        let module = Module::parse(
+            Source::from_reader(source.as_bytes(), Some(Path::new(url))),
+            None,
+            &mut self.context,
+        )?;
+        ActiveHostFuture {
+            future: Box::pin(module.load_link_evaluate_async(&mut self.context)),
+            host_state: Rc::clone(&self.host_state),
+        }
+        .await
+    }
+
     /// Collects document scripts in parser/defer order and moves the runtime
-    /// into an owned page task. Modules remain an explicit #366 boundary.
+    /// into an owned page task.
     pub fn into_document_page_task(
         mut self,
         generation: u64,
@@ -1887,19 +1901,17 @@ impl JsRuntime {
                         result: Err(PageTaskError::Cancelled),
                     };
                 }
-                let (source, label, script_node_id) = match source {
+                let (source, label, script_node_id, module_url) = match source {
                     PageTaskSource::Classic {
                         source,
                         label,
                         script_node_id,
-                    } => (source, label, script_node_id),
-                    PageTaskSource::Module { url, .. } => {
-                        return CompletedPageTask {
-                            runtime: self,
-                            generation,
-                            result: Err(PageTaskError::AsyncModuleEvaluationUnavailable { url }),
-                        };
-                    }
+                    } => (source, label, script_node_id, None),
+                    PageTaskSource::Module {
+                        source,
+                        url,
+                        script_node_id,
+                    } => (source, url.clone(), script_node_id, Some(url)),
                 };
                 if let Some(node_id) = script_node_id {
                     let node = self.host_state.borrow().get_node(node_id);
@@ -1907,7 +1919,12 @@ impl JsRuntime {
                     let _ = self.eval(&format!("__omoikane_set_current_script({node_id})"));
                 }
                 let evaluation_result = {
-                    let mut evaluation = Box::pin(self.eval_async(&source));
+                    let mut evaluation: Pin<Box<dyn Future<Output = JsResult<JsValue>> + '_>> =
+                        if let Some(url) = module_url.as_deref() {
+                            Box::pin(self.eval_module_async(&source, url))
+                        } else {
+                            Box::pin(self.eval_async(&source))
+                        };
                     std::future::poll_fn(|context| {
                         if task_cancelled.get() {
                             Poll::Ready(None)
@@ -7997,37 +8014,86 @@ mod tests {
     }
 
     #[test]
-    fn owned_page_task_keeps_modules_at_an_explicit_async_api_boundary() {
+    fn owned_page_task_resumes_module_dialogs() {
         let runtime = JsRuntime::new().unwrap();
         let mut task = Box::pin(runtime.into_page_task(
             13,
             vec![PageTaskSource::Module {
-                source: "globalThis.mustNotRun = true".to_string(),
+                source: "globalThis.moduleState = 'before'; alert('module'); globalThis.moduleState = 'after'".to_string(),
                 url: "https://example.test/module.js".to_string(),
                 script_node_id: None,
             }],
         ));
+        let controller = task.dialog_controller();
         let waker: &'static std::task::Waker = std::task::Waker::noop();
         let mut context = FutureContext::from_waker(waker);
-        let mut completed = match task.as_mut().poll(&mut context) {
-            Poll::Ready(completed) => completed,
-            Poll::Pending => panic!("unsupported module boundary unexpectedly suspended"),
+        while controller.pending().is_none() {
+            assert!(matches!(task.as_mut().poll(&mut context), Poll::Pending));
+        }
+        let dialog = controller.pending().unwrap();
+        assert_eq!(dialog.message, "module");
+        controller.handle(dialog.id, true, None).unwrap();
+        let mut completed = loop {
+            if let Poll::Ready(completed) = task.as_mut().poll(&mut context) {
+                break completed;
+            }
         };
-        assert_eq!(
-            completed.result,
-            Err(PageTaskError::AsyncModuleEvaluationUnavailable {
-                url: "https://example.test/module.js".to_string(),
-            })
-        );
+        assert_eq!(completed.result, Ok(Vec::new()));
         assert_eq!(
             completed
                 .runtime
-                .eval("typeof mustNotRun")
+                .eval("moduleState")
                 .unwrap()
                 .as_string()
                 .unwrap()
                 .to_std_string_escaped(),
-            "undefined"
+            "after"
+        );
+    }
+
+    #[test]
+    fn owned_page_task_reports_module_rejection_and_continues_in_source_order() {
+        let runtime = JsRuntime::new().unwrap();
+        let mut task = Box::pin(runtime.into_page_task(
+            16,
+            vec![
+                PageTaskSource::Classic {
+                    source: "globalThis.moduleOrder = ['classic']; Promise.resolve().then(() => moduleOrder.push('classic-job'))".to_string(),
+                    label: "classic".to_string(),
+                    script_node_id: None,
+                },
+                PageTaskSource::Module {
+                    source: "await Promise.resolve(); moduleOrder.push('module-job'); throw new Error('module failure')".to_string(),
+                    url: "https://example.test/rejected.js".to_string(),
+                    script_node_id: None,
+                },
+                PageTaskSource::Classic {
+                    source: "moduleOrder.push('after')".to_string(),
+                    label: "after".to_string(),
+                    script_node_id: None,
+                },
+            ],
+        ));
+        let waker: &'static std::task::Waker = std::task::Waker::noop();
+        let mut context = FutureContext::from_waker(waker);
+        let mut completed = loop {
+            if let Poll::Ready(completed) = task.as_mut().poll(&mut context) {
+                break completed;
+            }
+        };
+
+        let errors = completed.result.unwrap();
+        assert_eq!(errors.len(), 1);
+        assert!(errors[0].contains("module failure"));
+        assert_eq!(
+            completed
+                .runtime
+                .eval("moduleOrder.join(',')")
+                .unwrap()
+                .as_string()
+                .unwrap()
+                .to_std_string_escaped(),
+            "classic,classic-job,module-job,after"
         );
     }
 
