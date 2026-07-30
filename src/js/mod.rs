@@ -7129,7 +7129,13 @@ mod tests {
         let waker: &'static Waker = Waker::noop();
         let mut cx = FutureContext::from_waker(waker);
 
-        assert!(matches!(evaluation.as_mut().poll(&mut cx), Poll::Pending));
+        let reached_suspension = (0..8).any(|_| match evaluation.as_mut().poll(&mut cx) {
+            Poll::Pending => slot.borrow().is_some(),
+            Poll::Ready(result) => {
+                panic!("evaluation completed before the host call suspended: {result:?}")
+            }
+        });
+        assert!(reached_suspension, "evaluation did not reach the host call");
         assert!(!*after_host_call.borrow());
         slot.borrow()
             .as_ref()
@@ -7169,7 +7175,13 @@ mod tests {
         let mut evaluation = Box::pin(runtime.eval_async("suspendHostCall()"));
         let waker: &'static Waker = Waker::noop();
         let mut cx = FutureContext::from_waker(waker);
-        assert!(matches!(evaluation.as_mut().poll(&mut cx), Poll::Pending));
+        let reached_suspension = (0..8).any(|_| match evaluation.as_mut().poll(&mut cx) {
+            Poll::Pending => slot.borrow().is_some(),
+            Poll::Ready(result) => {
+                panic!("evaluation completed before the host call suspended: {result:?}")
+            }
+        });
+        assert!(reached_suspension, "evaluation did not reach the host call");
         drop(evaluation);
 
         assert!(
