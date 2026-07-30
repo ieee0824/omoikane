@@ -1840,7 +1840,10 @@ impl JsRuntime {
                 };
                 (
                     fetched.unwrap_or_else(|| {
-                        format!("throw new Error('failed to fetch script: {src}')")
+                        let message = format!("failed to fetch script: {src}");
+                        let quoted = serde_json::to_string(&message)
+                            .expect("JavaScript error messages must serialize as JSON strings");
+                        format!("throw new Error({quoted})")
                     }),
                     src,
                 )
@@ -8373,6 +8376,36 @@ mod tests {
             completed
                 .runtime
                 .eval("document.currentScript === null")
+                .unwrap()
+                .as_boolean()
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn owned_document_task_quotes_failed_script_src_without_code_injection() {
+        let malicious_src = "missing'; globalThis.fetchErrorInjected = true; //\\\nscript.js";
+        let document = crate::html::TreeBuilder::parse(&format!(
+            r#"<html><body><script src="{malicious_src}"></script></body></html>"#
+        ))
+        .document();
+        let runtime = JsRuntime::with_document(document).unwrap();
+        let mut task = Box::pin(runtime.into_document_page_task(20, None));
+        let waker: &'static std::task::Waker = std::task::Waker::noop();
+        let mut context = FutureContext::from_waker(waker);
+        let mut completed = loop {
+            if let Poll::Ready(completed) = task.as_mut().poll(&mut context) {
+                break completed;
+            }
+        };
+
+        let errors = completed.result.unwrap();
+        assert_eq!(errors.len(), 1);
+        assert!(errors[0].contains("failed to fetch script: missing'"));
+        assert!(
+            completed
+                .runtime
+                .eval("typeof fetchErrorInjected === 'undefined'")
                 .unwrap()
                 .as_boolean()
                 .unwrap()
