@@ -576,6 +576,7 @@ pub enum AlignItems {
 enum PositionScheme {
     Static,
     Relative,
+    Sticky,
     Absolute,
     Fixed,
 }
@@ -1977,7 +1978,7 @@ fn is_out_of_flow_positioned(style: &ComputedStyle) -> bool {
 fn establishes_positioned_containing_block(style: &ComputedStyle) -> bool {
     matches!(
         position_scheme(style),
-        PositionScheme::Relative | PositionScheme::Absolute | PositionScheme::Fixed
+        PositionScheme::Relative | PositionScheme::Sticky | PositionScheme::Absolute | PositionScheme::Fixed
     )
 }
 
@@ -1985,6 +1986,9 @@ fn position_scheme(style: &ComputedStyle) -> PositionScheme {
     match style.get("position") {
         Some(ComputedValue::Keyword(keyword)) if keyword.eq_ignore_ascii_case("relative") => {
             PositionScheme::Relative
+        }
+        Some(ComputedValue::Keyword(keyword)) if keyword.eq_ignore_ascii_case("sticky") => {
+            PositionScheme::Sticky
         }
         Some(ComputedValue::Keyword(keyword)) if keyword.eq_ignore_ascii_case("absolute") => {
             PositionScheme::Absolute
@@ -2347,6 +2351,7 @@ fn layout_positioned_child(
         PositionScheme::Absolute => parent_box.content,
         PositionScheme::Static => containing_block,
         PositionScheme::Relative => containing_block,
+        PositionScheme::Sticky => containing_block,
     };
 
     // `inset-inline-end` is the right edge in LTR and the left edge in RTL.

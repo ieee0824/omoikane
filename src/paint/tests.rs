@@ -8154,7 +8154,7 @@ fn render_with_scroll(
     }
     let viewport = Rect { x: 0.0, y: 0.0, width: viewport_size, height: viewport_size };
     let mut layout = layout_tree(&document, &mut resolver, viewport).unwrap();
-    super::apply_scroll_offsets(&mut layout, &mut resolver, window_scroll);
+    super::apply_scroll_offsets(&mut layout, &mut resolver, viewport, window_scroll);
     paint_layout(&layout, &mut resolver, viewport)
 }
 
@@ -8401,6 +8401,76 @@ fn window_and_element_scroll_offsets_combine_when_painting() {
     assert_eq!(canvas.pixel(5, 15).unwrap().a, 0);
 }
 
+#[test]
+fn vertical_sticky_paints_at_scrollport_inset_and_stops_at_containing_block() {
+    let html = "<html><head><style>\
+         * { margin: 0; padding: 0 } \
+         body { height: 140px } \
+         #before { height: 30px } \
+         #sticky { position: sticky; top: 5px; width: 20px; height: 10px; \
+                   background-color: #ff0000 } \
+         #after { height: 100px } \
+         </style></head><body><div id=\"before\"></div><div id=\"sticky\"></div>\
+         <div id=\"after\"></div></body></html>";
+    let red = Some(Color::rgba(255, 0, 0, 255));
+    let stuck = render_with_scroll(html, 50.0, &[], (0.0, 40.0));
+    assert_eq!(stuck.pixel(5, 5), red);
+    assert_eq!(stuck.pixel(5, 14), red);
+    assert_eq!(stuck.pixel(5, 15).unwrap().a, 0);
+
+    let at_end = render_with_scroll(html, 50.0, &[], (0.0, 130.0));
+    assert_eq!(at_end.pixel(5, 0), red);
+}
+
+#[test]
+fn nested_scroll_container_sticky_supports_both_axes() {
+    let html = "<html><head><style>\
+         * { margin: 0; padding: 0 } \
+         #sc { width: 40px; height: 40px; overflow: hidden } \
+         #content { width: 120px; height: 120px } \
+         #sticky { position: sticky; left: 3px; top: 4px; margin-left: 20px; \
+                   margin-top: 20px; width: 10px; height: 10px; background-color: #00ff00 } \
+         </style></head><body><div id=\"sc\"><div id=\"content\"><div id=\"sticky\"></div>\
+         </div></div></body></html>";
+    let green = Some(Color::rgba(0, 255, 0, 255));
+    let canvas = render_with_scroll(html, 60.0, &[("#sc", 30.0, 30.0)], (0.0, 0.0));
+    // Insets constrain the margin box. With 20px start margins the painted
+    // border box therefore begins at (23, 24).
+    assert_eq!(canvas.pixel(23, 24), green);
+    assert_eq!(canvas.pixel(32, 33), green);
+    assert_eq!(canvas.pixel(22, 24).unwrap().a, 0);
+}
+
+#[test]
+fn oversized_sticky_box_reduces_end_inset_without_overflowing_start() {
+    let html = "<html><head><style>\
+         * { margin: 0; padding: 0 } \
+         #sc { width: 30px; height: 20px; overflow: hidden } \
+         #content { width: 30px; height: 100px } \
+         #sticky { position: sticky; top: 2px; bottom: 3px; width: 10px; height: 30px; \
+                   background-color: #0000ff } \
+         </style></head><body><div id=\"sc\"><div id=\"content\"><div id=\"sticky\"></div>\
+         </div></div></body></html>";
+    let blue = Some(Color::rgba(0, 0, 255, 255));
+    let canvas = render_with_scroll(html, 40.0, &[("#sc", 0.0, 10.0)], (0.0, 0.0));
+    assert_eq!(canvas.pixel(5, 2), blue);
+    assert_eq!(canvas.pixel(5, 19), blue);
+}
+
+#[test]
+fn sticky_end_inset_clamps_and_two_auto_insets_disable_the_axis() {
+    assert_eq!(
+        super::sticky_axis_translation(80.0, 10.0, 0.0, 60.0, 0.0, 200.0, None, Some(5.0)),
+        -35.0,
+        "right/bottom-only sticky must clamp its end margin edge"
+    );
+    assert_eq!(
+        super::sticky_axis_translation(20.0, 10.0, 0.0, 60.0, 0.0, 200.0, None, None),
+        0.0,
+        "an axis with two auto insets behaves as position: relative"
+    );
+}
+
 /// The container's border box must stay where layout put it while its own line
 /// boxes, marker and children move — this is what keeps the clip and the
 /// element's own client rect stable while its content scrolls.
@@ -8433,7 +8503,7 @@ fn apply_scroll_offsets_moves_content_but_not_the_scroll_container_box() {
 
     scroller.set_scroll_offset(0.0, 15.0);
     let mut scrolled = layout_tree(&document, &mut resolver, viewport).unwrap();
-    super::apply_scroll_offsets(&mut scrolled, &mut resolver, (0.0, 0.0));
+    super::apply_scroll_offsets(&mut scrolled, &mut resolver, viewport, (0.0, 0.0));
     let scrolled_scroller = find_layout_box_by_node(&scrolled, &scroller).unwrap();
 
     assert_eq!(
