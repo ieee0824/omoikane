@@ -7107,7 +7107,43 @@ fn repeating_gradients_hard_stops_and_zero_period_are_deterministic() {
         5,
         5,
     );
-    assert_eq!(zero.pixel(0, 0), Some(Color::rgb(0, 0, 255)));
+    assert_eq!(zero.pixel(0, 0), Some(Color::rgb(128, 0, 128)));
+}
+
+#[test]
+fn degenerate_radial_gradients_follow_css_images_rules() {
+    let circle = render_gradient_box(
+        "background-image: radial-gradient(circle 0px at center, red, blue);",
+        21,
+        21,
+    );
+    assert_eq!(circle.pixel(10, 10), Some(Color::rgb(255, 0, 0)));
+    assert_eq!(circle.pixel(11, 10), Some(Color::rgb(0, 0, 255)));
+
+    let zero_width = render_gradient_box(
+        "background-image: radial-gradient(ellipse 0px 5px at center, red 0px, blue 5px);",
+        21,
+        21,
+    );
+    assert_eq!(zero_width.pixel(10, 0), Some(Color::rgb(255, 0, 0)));
+    assert_eq!(zero_width.pixel(5, 10), zero_width.pixel(15, 10));
+    assert!(zero_width.pixel(5, 10).unwrap().b > 220);
+
+    let zero_height = render_gradient_box(
+        "background-image: radial-gradient(ellipse 5px 0px, red, blue);",
+        9,
+        9,
+    );
+    assert!((0..9).all(|x| zero_height.pixel(x, 4) == Some(Color::rgb(0, 0, 255))));
+
+    let repeating_zero_height = render_gradient_box(
+        "background-image: repeating-radial-gradient(ellipse 5px 0px, red 0px, blue 10px);",
+        9,
+        9,
+    );
+    assert!((0..9).all(|x| {
+        repeating_zero_height.pixel(x, 4) == Some(Color::rgb(128, 0, 128))
+    }));
 }
 
 #[test]

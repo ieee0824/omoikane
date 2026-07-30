@@ -896,41 +896,49 @@ fn resolved_stops(stops: &[GradientStop], basis: f32) -> Vec<(Color, f32, Option
         }
     }
 
-    // Distribute unspecified stops between the nearest positioned items in
-    // the same combined sequence, so a preceding hint remains an ordering
-    // boundary for an otherwise automatic stop.
+    let mut fixed_stop_positions = vec![None; stops.len()];
+    let mut fixed_hints = vec![None; stops.len()];
+    for &(stop_index, is_hint, position) in &sequence {
+        if is_hint {
+            fixed_hints[stop_index] = position;
+        } else {
+            fixed_stop_positions[stop_index] = position;
+        }
+    }
+
+    // Step 3 distributes only color stops. Transition hints participate in
+    // step 2 ordering but are not boundaries for automatic stop placement.
     let mut index = 1;
-    while index + 1 < sequence.len() {
-        if sequence[index].2.is_some() {
+    while index + 1 < fixed_stop_positions.len() {
+        if fixed_stop_positions[index].is_some() {
             index += 1;
             continue;
         }
         let start = index - 1;
         let mut end = index + 1;
-        while sequence[end].2.is_none() {
+        while fixed_stop_positions[end].is_none() {
             end += 1;
         }
-        let a = sequence[start].2.unwrap();
-        let b = sequence[end].2.unwrap();
+        let a = fixed_stop_positions[start].unwrap();
+        let b = fixed_stop_positions[end].unwrap();
         for current in index..end {
-            sequence[current].2 =
+            fixed_stop_positions[current] =
                 Some(a + (b - a) * (current - start) as f32 / (end - start) as f32);
         }
         index = end;
     }
 
-    let mut resolved = stops
+    stops
         .iter()
-        .map(|stop| (stop.color, 0.0, None))
-        .collect::<Vec<_>>();
-    for (stop_index, is_hint, position) in sequence {
-        if is_hint {
-            resolved[stop_index].2 = position;
-        } else {
-            resolved[stop_index].1 = position.unwrap();
-        }
-    }
-    resolved
+        .enumerate()
+        .map(|(index, stop)| {
+            (
+                stop.color,
+                fixed_stop_positions[index].unwrap(),
+                fixed_hints[index],
+            )
+        })
+        .collect()
 }
 
 fn sample_stops(stops: &[(Color, f32, Option<f32>)], mut value: f32, repeating: bool) -> Color {
@@ -939,7 +947,7 @@ fn sample_stops(stops: &[(Color, f32, Option<f32>)], mut value: f32, repeating: 
     if repeating {
         let period = last - first;
         if period <= f32::EPSILON {
-            return stops.last().unwrap().0;
+            return average_gradient_color(stops);
         }
         value = (value - first).rem_euclid(period) + first;
     }
@@ -992,6 +1000,74 @@ fn sample_stops(stops: &[(Color, f32, Option<f32>)], mut value: f32, repeating: 
     )
 }
 
+fn average_gradient_color(stops: &[(Color, f32, Option<f32>)]) -> Color {
+    let period = stops.last().unwrap().1 - stops[0].1;
+    let mut alpha_integral = 0.0;
+    let mut channel_integrals = [0.0; 3];
+    if period > f32::EPSILON {
+        for pair in stops.windows(2) {
+            let (a, start, _) = pair[0];
+            let (b, end, hint) = pair[1];
+            let width = end - start;
+            if width <= f32::EPSILON {
+                continue;
+            }
+            let midpoint = hint
+                .map(|hint| ((hint - start) / width).clamp(0.0, 1.0))
+                .unwrap_or(0.5);
+            let end_weight = if midpoint <= f32::EPSILON {
+                1.0
+            } else if midpoint >= 1.0 - f32::EPSILON {
+                0.0
+            } else if (midpoint - 0.5).abs() <= f32::EPSILON {
+                0.5
+            } else {
+                let exponent = 0.5_f32.ln() / midpoint.ln();
+                1.0 / (exponent + 1.0)
+            };
+            let a_alpha = a.a as f32 / 255.0;
+            let b_alpha = b.a as f32 / 255.0;
+            alpha_integral += width * (a_alpha * (1.0 - end_weight) + b_alpha * end_weight);
+            for (integral, (a_channel, b_channel)) in
+                channel_integrals
+                    .iter_mut()
+                    .zip([(a.r, b.r), (a.g, b.g), (a.b, b.b)])
+            {
+                *integral += width
+                    * (a_channel as f32 * a_alpha * (1.0 - end_weight)
+                        + b_channel as f32 * b_alpha * end_weight);
+            }
+        }
+    } else {
+        for (color, _, _) in stops {
+            let alpha = color.a as f32 / 255.0;
+            alpha_integral += alpha;
+            channel_integrals[0] += color.r as f32 * alpha;
+            channel_integrals[1] += color.g as f32 * alpha;
+            channel_integrals[2] += color.b as f32 * alpha;
+        }
+    }
+    let divisor = if period > f32::EPSILON {
+        period
+    } else {
+        stops.len() as f32
+    };
+    let alpha = alpha_integral / divisor;
+    let channel = |integral: f32| {
+        if alpha_integral <= f32::EPSILON {
+            0
+        } else {
+            (integral / alpha_integral).round().clamp(0.0, 255.0) as u8
+        }
+    };
+    Color::rgba(
+        channel(channel_integrals[0]),
+        channel(channel_integrals[1]),
+        channel(channel_integrals[2]),
+        (alpha * 255.0).round().clamp(0.0, 255.0) as u8,
+    )
+}
+
 pub(crate) fn paint_gradient(
     canvas: &mut Canvas,
     gradient: &Gradient,
@@ -1008,7 +1084,9 @@ pub(crate) fn paint_gradient(
     let Some(draw_area) = draw_area else {
         return;
     };
-    let (center_x, center_y, radius_x, radius_y, basis) = match gradient.kind {
+    let (center_x, center_y, radius_x, radius_y, basis, radial_scale, zero_height) = match gradient
+        .kind
+    {
         GradientKind::Linear { angle_deg } => {
             let angle = angle_deg.to_radians();
             let dx = angle.sin();
@@ -1020,6 +1098,8 @@ pub(crate) fn paint_gradient(
                 dx,
                 dy,
                 length,
+                length,
+                false,
             )
         }
         GradientKind::Radial {
@@ -1080,7 +1160,24 @@ pub(crate) fn paint_gradient(
                 rx *= scale;
                 ry *= scale;
             }
-            (cx, cy, rx, ry, rx.max(f32::EPSILON))
+            const DEGENERATE_RADIUS: f32 = 1.0e-6;
+            let mut stop_basis = rx;
+            let mut radial_scale = rx;
+            let mut zero_height = false;
+            if circle && rx <= 0.0 {
+                rx = DEGENERATE_RADIUS;
+                ry = DEGENERATE_RADIUS;
+                stop_basis = 0.0;
+                radial_scale = DEGENERATE_RADIUS;
+            } else if !circle && rx <= 0.0 {
+                rx = DEGENERATE_RADIUS;
+                ry = 1.0 / DEGENERATE_RADIUS;
+                stop_basis = 0.0;
+                radial_scale = DEGENERATE_RADIUS;
+            } else if !circle && ry <= 0.0 {
+                zero_height = true;
+            }
+            (cx, cy, rx, ry, stop_basis, radial_scale, zero_height)
         }
         GradientKind::Conic { center, .. } => (
             resolve_component(center.x, area.x, area.width),
@@ -1088,9 +1185,18 @@ pub(crate) fn paint_gradient(
             0.0,
             0.0,
             1.0,
+            1.0,
+            false,
         ),
     };
     let stops = resolved_stops(&gradient.stops, basis);
+    let degenerate_color = zero_height.then(|| {
+        if gradient.repeating {
+            average_gradient_color(&stops)
+        } else {
+            stops.last().unwrap().0
+        }
+    });
     let x0 = draw_area.x.floor().max(0.0) as i32;
     let y0 = draw_area.y.floor().max(0.0) as i32;
     let x1 = (draw_area.x + draw_area.width)
@@ -1103,20 +1209,20 @@ pub(crate) fn paint_gradient(
         for px in x0..x1 {
             let x = px as f32 + 0.5 - center_x;
             let y = py as f32 + 0.5 - center_y;
-            let value = match gradient.kind {
-                GradientKind::Linear { .. } => x * radius_x + y * radius_y + basis / 2.0,
-                GradientKind::Radial { .. } => {
-                    if radius_x <= 0.0 || radius_y <= 0.0 {
-                        basis
-                    } else {
-                        ((x / radius_x).powi(2) + (y / radius_y).powi(2)).sqrt() * basis
+            let color = if let Some(color) = degenerate_color {
+                color
+            } else {
+                let value = match gradient.kind {
+                    GradientKind::Linear { .. } => x * radius_x + y * radius_y + basis / 2.0,
+                    GradientKind::Radial { .. } => {
+                        ((x / radius_x).powi(2) + (y / radius_y).powi(2)).sqrt() * radial_scale
                     }
-                }
-                GradientKind::Conic { from_deg, .. } => {
-                    ((x.atan2(-y).to_degrees() - from_deg).rem_euclid(360.0)) / 360.0
-                }
+                    GradientKind::Conic { from_deg, .. } => {
+                        ((x.atan2(-y).to_degrees() - from_deg).rem_euclid(360.0)) / 360.0
+                    }
+                };
+                sample_stops(&stops, value, gradient.repeating)
             };
-            let color = sample_stops(&stops, value, gradient.repeating);
             let index = ((py as u32 * canvas.width + px as u32) * 4) as usize;
             if index + 3 < canvas.pixels.len() {
                 blend_pixel(&mut canvas.pixels[index..index + 4], color);
@@ -1172,6 +1278,26 @@ mod gradient_tests {
         assert_eq!(normal[0].1, 0.0);
         assert_eq!(normal[1].2, Some(0.25));
         assert_eq!(normal[1].1, 1.0);
+
+        let automatic = resolve("linear-gradient(red 0%, 25%, green, blue 100%)");
+        assert_eq!(automatic[1].1, 0.5);
+        assert_eq!(automatic[1].2, Some(0.25));
+    }
+
+    #[test]
+    fn zero_period_repeating_gradient_uses_premultiplied_average_color() {
+        let opaque = [
+            (Color::rgb(255, 0, 0), 1.0, None),
+            (Color::rgb(0, 255, 0), 1.0, None),
+            (Color::rgb(0, 0, 255), 1.0, None),
+        ];
+        assert_eq!(average_gradient_color(&opaque), Color::rgb(85, 85, 85));
+
+        let alpha = [
+            (Color::rgba(255, 0, 0, 255), 1.0, None),
+            (Color::rgba(0, 0, 255, 0), 1.0, None),
+        ];
+        assert_eq!(average_gradient_color(&alpha), Color::rgba(255, 0, 0, 128));
     }
 
     #[test]
