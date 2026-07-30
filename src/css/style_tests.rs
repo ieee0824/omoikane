@@ -5235,6 +5235,14 @@ fn image_computed_keyword(declarations: &str, property: &str) -> String {
 #[test]
 fn background_clip_resolves_initial_unset_and_inherit() {
     assert_eq!(image_computed_keyword("", "background-clip"), "border-box");
+    assert_eq!(
+        image_computed_keyword("background-clip: CONTENT-BOX", "background-clip"),
+        "content-box"
+    );
+    assert_eq!(
+        image_computed_keyword("background-clip: bogus", "background-clip"),
+        "border-box"
+    );
     for keyword in ["initial", "unset", "revert"] {
         assert_eq!(
             image_computed_keyword(
