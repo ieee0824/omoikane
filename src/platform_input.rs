@@ -306,7 +306,7 @@ mod tests {
     }
 
     #[test]
-    fn tab_key_navigates_focus_order_and_honors_cancelation() {
+    fn tab_key_navigates_focus_order_and_honors_cancellation() {
         let mut session = CdpSession::new().unwrap();
         navigate(
             &mut session,
