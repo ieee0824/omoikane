@@ -1210,6 +1210,7 @@ impl CdpSession {
             "mousePressed" | "mousedown" => "mousedown",
             "mouseReleased" | "mouseup" => "mouseup",
             "click" => "click",
+            "mouseWheel" | "wheel" => "wheel",
             _ => {
                 return Err(invalid_params(format!(
                     "Unsupported Input.dispatchMouseEvent type: {event_type}"
@@ -1230,7 +1231,7 @@ impl CdpSession {
             .and_then(Value::as_u64)
             .unwrap_or(default_buttons);
         let (scroll_x, scroll_y) = self.runtime.window_scroll_offset();
-        let init = json!({
+        let mut init = json!({
             "clientX": x, "clientY": y,
             "pageX": x + scroll_x as f64, "pageY": y + scroll_y as f64,
             "screenX": x, "screenY": y,
@@ -1243,6 +1244,19 @@ impl CdpSession {
             "shiftKey": modifiers & 8 != 0,
             "detail": params.get("clickCount").and_then(Value::as_u64).unwrap_or(0),
         });
+        if dom_type == "wheel" {
+            init["deltaX"] = json!(optional_f64(params, "deltaX", 0.0)?);
+            init["deltaY"] = json!(optional_f64(params, "deltaY", 0.0)?);
+            init["deltaZ"] = json!(0);
+            init["deltaMode"] = json!(0);
+            let not_canceled = self.eval_input_bool(&format!(
+                "__omoikane_dispatch_wheel_input({target_id}, {init})"
+            ))?;
+            return Ok(json!({
+                "defaultPrevented": !not_canceled,
+                "targetNodeId": target_node_id,
+            }));
+        }
         let not_canceled = self.eval_input_bool(&format!(
             "__omoikane_dispatch_mouse_input({target_id}, {dom_type:?}, {init}, {})",
             dom_type == "mousedown"
