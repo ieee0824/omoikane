@@ -2133,7 +2133,9 @@ fn collect_rule_candidates(
                             && shadow_scope.is_none()
                             && node.containing_shadow_root().is_some()
                         {
-                            matches_part_selector(node, selector, None, selector_cache)
+                            pseudo.is_none()
+                                && selector_uses_part_pseudo(selector)
+                                && matches_part_selector(node, selector, None, selector_cache)
                         } else if let Some(scope) = shadow_scope {
                             matches_shadow_scoped_selector(
                                 node,
