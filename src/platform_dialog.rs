@@ -5,13 +5,13 @@ use crate::js::JavaScriptDialogRequest;
 /// Why a frontend should stop presenting a dialog.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum JavaScriptDialogCloseReason {
-    /// Another frontend (for example CDP) already resolved the shared request.
-    ResolvedExternally,
+    /// The request completed or was superseded for any non-detach reason.
+    Completed,
     /// The frontend was detached or its owning window was closed.
     HostDetached,
 }
 
-/// Platform-neutral callbacks implemented by a GUI frontend.
+/// Platform-neutral callbacks implemented by a dialog frontend.
 pub trait JavaScriptDialogAdapter {
     fn open_dialog(&mut self, request: JavaScriptDialogRequest);
 
@@ -22,7 +22,7 @@ pub trait JavaScriptDialogAdapter {
     );
 }
 
-/// Synchronizes one runtime's dialog state with an optional GUI adapter.
+/// Synchronizes one runtime's dialog state with an optional frontend adapter.
 ///
 /// Constructing this host is opt-in. Headless users can use dialog requests
 /// directly without installing an adapter or implicitly requesting UI. The
@@ -52,7 +52,7 @@ impl<A: JavaScriptDialogAdapter> JavaScriptDialogAdapterHost<A> {
         &mut self.adapter
     }
 
-    /// Propagates newly opened dialogs and externally completed requests.
+    /// Propagates newly opened dialogs and any non-detach completion.
     /// Frontend event loops should call this after driving page script or CDP.
     pub fn synchronize(&mut self, pending: Option<JavaScriptDialogRequest>) {
         if !self.attached {
@@ -66,7 +66,7 @@ impl<A: JavaScriptDialogAdapter> JavaScriptDialogAdapterHost<A> {
             if !remains_pending {
                 let active = self.active.take().expect("active request exists");
                 self.adapter
-                    .close_dialog(&active, JavaScriptDialogCloseReason::ResolvedExternally);
+                    .close_dialog(&active, JavaScriptDialogCloseReason::Completed);
             }
         }
 
@@ -83,7 +83,7 @@ impl<A: JavaScriptDialogAdapter> JavaScriptDialogAdapterHost<A> {
                 {
                     let active = self.active.take().expect("active request exists");
                     self.adapter
-                        .close_dialog(&active, JavaScriptDialogCloseReason::ResolvedExternally);
+                        .close_dialog(&active, JavaScriptDialogCloseReason::Completed);
                 }
             }
         }
@@ -196,7 +196,7 @@ mod tests {
             host.adapter().closed,
             vec![(
                 request.dialog().id,
-                JavaScriptDialogCloseReason::ResolvedExternally
+                JavaScriptDialogCloseReason::Completed
             )]
         );
     }
@@ -267,7 +267,7 @@ mod tests {
         assert_eq!(host.adapter().opened[1].dialog().message, "Second");
         assert_eq!(
             host.adapter().closed,
-            vec![(1, JavaScriptDialogCloseReason::ResolvedExternally)]
+            vec![(1, JavaScriptDialogCloseReason::Completed)]
         );
 
         second_request.resolve(true, None).unwrap();
