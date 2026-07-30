@@ -1255,6 +1255,7 @@ fn absolute_inline_content_paints_above_float_siblings() {
         z_index: 0,
         transform: crate::css::AffineTransform::identity(),
         needs_scroll_translation: false,
+        paint_scroll: None,
         lines: Vec::new(),
         children: vec![
             LayoutBox {
@@ -1273,6 +1274,7 @@ fn absolute_inline_content_paints_above_float_siblings() {
                 z_index: 0,
                 transform: crate::css::AffineTransform::identity(),
                 needs_scroll_translation: false,
+                paint_scroll: None,
                 lines: Vec::new(),
                 children: Vec::new(),
                 marker: None,
@@ -1293,6 +1295,7 @@ fn absolute_inline_content_paints_above_float_siblings() {
                 z_index: 0,
                 transform: crate::css::AffineTransform::identity(),
                 needs_scroll_translation: false,
+                paint_scroll: None,
                 lines: vec![LineBox {
                     rect: Rect {
                         x: 0.0,
@@ -1418,6 +1421,7 @@ fn float_grandchild_paints_above_block_uncle() {
         z_index: 0,
         transform: crate::css::AffineTransform::identity(),
         needs_scroll_translation: false,
+        paint_scroll: None,
         lines: Vec::new(),
         children: vec![
             LayoutBox {
@@ -1436,6 +1440,7 @@ fn float_grandchild_paints_above_block_uncle() {
                 z_index: 0,
                 transform: crate::css::AffineTransform::identity(),
                 needs_scroll_translation: false,
+                paint_scroll: None,
                 lines: Vec::new(),
                 children: vec![LayoutBox {
                     node: floated,
@@ -1453,6 +1458,7 @@ fn float_grandchild_paints_above_block_uncle() {
                     z_index: 0,
                     transform: crate::css::AffineTransform::identity(),
                     needs_scroll_translation: false,
+                    paint_scroll: None,
                     lines: Vec::new(),
                     children: Vec::new(),
                     marker: None,
@@ -1475,6 +1481,7 @@ fn float_grandchild_paints_above_block_uncle() {
                 z_index: 0,
                 transform: crate::css::AffineTransform::identity(),
                 needs_scroll_translation: false,
+                paint_scroll: None,
                 lines: Vec::new(),
                 children: Vec::new(),
                 marker: None,
@@ -8599,6 +8606,7 @@ fn form_control_label_uses_web_font_variant() {
         z_index: 0,
         transform: crate::css::AffineTransform::identity(),
         needs_scroll_translation: false,
+        paint_scroll: None,
         lines: vec![LineBox {
             rect: viewport,
             baseline: 12.8,
@@ -8700,6 +8708,7 @@ fn focused_text_control_paints_selection_and_caret() {
         z_index: 0,
         transform: crate::css::AffineTransform::identity(),
         needs_scroll_translation: false,
+        paint_scroll: None,
         lines: vec![LineBox { rect: viewport, baseline: 12.8, fragments: vec![fragment] }],
         children: Vec::new(),
         marker: None,
@@ -8828,6 +8837,138 @@ const STRIPED_SCROLLER: &str = "<html><head><style>\
      #top { width: 20px; height: 20px; background-color: #ff0000 } \
      #bottom { width: 20px; height: 20px; background-color: #00ff00 } \
      </style></head><body><div id=\"sc\"><div id=\"top\"></div><div id=\"bottom\"></div></div></body></html>";
+
+#[test]
+fn local_background_layer_moves_with_scroll_content_independently() {
+    let html = "<html><head><style>\
+         body { margin: 0 } \
+         #sc { width: 8px; height: 4px; overflow: hidden; \
+               background-image: linear-gradient(red, red), linear-gradient(blue, blue), linear-gradient(green, green); \
+               background-size: 1px 1px; background-repeat: no-repeat; \
+               background-position-x: 4px, 6px, 2px; background-position-y: 2px, 0px, 0px; \
+               background-attachment: local, fixed, scroll } \
+         #content { width: 16px; height: 8px } \
+         </style></head><body><div id=\"sc\"><div id=\"content\"></div></div></body></html>";
+    let red = Some(Color::rgb(255, 0, 0));
+    let blue = Some(Color::rgb(0, 0, 255));
+    let green = Some(Color::rgb(0, 128, 0));
+
+    let before = render_with_scroll(html, 12.0, &[], (0.0, 0.0));
+    assert_eq!(before.pixel(4, 2), red);
+    assert_eq!(before.pixel(6, 0), blue);
+    assert_eq!(before.pixel(2, 0), green);
+
+    let after = render_with_scroll(html, 12.0, &[("#sc", 4.0, 2.0)], (0.0, 0.0));
+    assert_eq!(after.pixel(0, 0), red);
+    assert_eq!(after.pixel(6, 0), blue);
+    assert_eq!(after.pixel(2, 0), green);
+    assert_eq!(after.pixel(4, 2).unwrap().a, 0);
+}
+
+#[test]
+fn local_background_repeat_origin_clip_and_radius_stay_in_physical_scrollport() {
+    let html = "<html><head><style>\
+         body { margin: 0 } \
+         #outer { width: 6px; height: 6px; overflow: hidden } \
+         #sc { width: 8px; height: 8px; overflow: hidden; border-radius: 4px; padding: 1px; \
+               background-image: linear-gradient(to right, red 50%, blue 50%); background-size: 2px 2px; \
+               background-repeat: repeat; background-origin: content-box; \
+               background-clip: padding-box; background-attachment: local } \
+         #content { width: 16px; height: 16px } \
+         </style></head><body><div id=\"outer\"><div id=\"sc\"><div id=\"content\"></div></div></div></body></html>";
+    let canvas = render_with_scroll(
+        html,
+        12.0,
+        &[("#outer", 0.0, 0.0), ("#sc", 3.0, 3.0)],
+        (0.0, 0.0),
+    );
+    assert_eq!(canvas.pixel(3, 3), Some(Color::rgb(0, 0, 255)));
+    assert_eq!(canvas.pixel(0, 0).unwrap().a, 0, "rounded local corner");
+    assert_eq!(canvas.pixel(7, 3).unwrap().a, 0, "outer partial clip");
+
+    let nested_scrolled = render_with_scroll(
+        html,
+        12.0,
+        &[("#outer", 2.0, 2.0), ("#sc", 3.0, 3.0)],
+        (0.0, 0.0),
+    );
+    assert_eq!(
+        nested_scrolled.pixel(1, 1),
+        Some(Color::rgb(0, 0, 255)),
+        "local tile stays aligned at a known point inside both scrollports"
+    );
+    assert_eq!(
+        nested_scrolled.pixel(2, 1),
+        Some(Color::rgb(255, 0, 0)),
+        "the adjacent repeated stripe keeps its scroll-relative phase"
+    );
+    assert_eq!(
+        nested_scrolled.pixel(7, 3).unwrap().a,
+        0,
+        "known point outside the ancestor scrollport stays clipped"
+    );
+}
+
+#[test]
+fn local_background_handles_nonzero_viewport_origin_without_stale_scroll_geometry() {
+    let html = "<html><head><style>body { margin: 0 } \
+        #sc { width: 6px; height: 4px; overflow: hidden; \
+              background: linear-gradient(red, red) 4px 2px / 1px 1px no-repeat local } \
+        #content { width: 12px; height: 8px } \
+        </style></head><body><div id=\"sc\"><div id=\"content\"></div></div></body></html>";
+    let document = TreeBuilder::parse(html).document();
+    let mut resolver = StyleResolver::new();
+    for stylesheet in extract_author_stylesheets(&document, None).unwrap() {
+        resolver.add_stylesheet(Origin::Author, parse_stylesheet_forgiving(&stylesheet));
+    }
+    let viewport = Rect { x: 2.0, y: 1.0, width: 10.0, height: 8.0 };
+    let cached = layout_tree(&document, &mut resolver, viewport).unwrap();
+    let scroller = document.query_selector("#sc").unwrap();
+
+    scroller.set_scroll_offset(0.0, 0.0);
+    let mut before_layout = cached.clone();
+    super::apply_scroll_offsets(&mut before_layout, &mut resolver, viewport, (0.0, 0.0));
+    let before = paint_layout(&before_layout, &mut resolver, viewport);
+
+    scroller.set_scroll_offset(4.0, 2.0);
+    let mut after_layout = cached.clone();
+    super::apply_scroll_offsets(&mut after_layout, &mut resolver, viewport, (0.0, 0.0));
+    let after = paint_layout(&after_layout, &mut resolver, viewport);
+
+    assert_eq!(before.pixel(6, 3), Some(Color::rgb(255, 0, 0)));
+    assert_eq!(after.pixel(2, 1), Some(Color::rgb(255, 0, 0)));
+    assert_eq!(after.pixel(6, 3).unwrap().a, 0);
+}
+
+#[test]
+fn auto_sized_local_gradient_uses_scrollable_overflow_as_its_coordinate_space() {
+    let html = "<html><head><style>body { margin: 0 } \
+        #sc { width: 4px; height: 2px; overflow: hidden; \
+              background-image: linear-gradient(to right, red, blue); \
+              background-attachment: local } \
+        #content { width: 8px; height: 2px } \
+        </style></head><body><div id=\"sc\"><div id=\"content\"></div></div></body></html>";
+    let before = render_with_scroll(html, 8.0, &[], (0.0, 0.0));
+    let after = render_with_scroll(html, 8.0, &[("#sc", 4.0, 0.0)], (0.0, 0.0));
+    assert_ne!(before.pixel(1, 0), after.pixel(1, 0));
+    assert_eq!(before.pixel(1, 0).unwrap().a, 255);
+    assert_eq!(after.pixel(1, 0).unwrap().a, 255);
+}
+
+#[test]
+fn local_repeating_background_tiles_only_within_visible_clip() {
+    let html = "<html><head><style>body { margin: 0 } \
+        #sc { width: 4px; height: 4px; overflow: hidden; \
+              background-image: linear-gradient(red, red); \
+              background-size: 1px 1px; background-repeat: repeat; \
+              background-attachment: local } \
+        #content { width: 2000px; height: 2000px } \
+        </style></head><body><div id=\"sc\"><div id=\"content\"></div></div></body></html>";
+    let canvas = render_with_scroll(html, 12.0, &[("#sc", 1500.0, 1500.0)], (0.0, 0.0));
+    assert_eq!(canvas.pixel(0, 0), Some(Color::rgb(255, 0, 0)));
+    assert_eq!(canvas.pixel(3, 3), Some(Color::rgb(255, 0, 0)));
+    assert_eq!(canvas.pixel(4, 4).unwrap().a, 0);
+}
 
 #[test]
 fn element_scroll_translates_content_and_keeps_the_clip() {

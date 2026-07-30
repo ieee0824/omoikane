@@ -1716,6 +1716,13 @@ fn translate_layout_for_scroll(
     sticky_scrollport: Rect,
     containing_block: Option<Rect>,
 ) {
+    let (scroll_offset, scroll_geometry) = if layout.is_scroll_container() {
+        let geometry = layout.paint_scroll_geometry();
+        (geometry.offset, Some(geometry))
+    } else {
+        ((0.0, 0.0), None)
+    };
+    layout.paint_scroll = scroll_geometry;
     let style = resolver.computed_style(&layout.node);
     let offset = if is_absolute_for_paint(&style) {
         positioned_offset
@@ -1751,7 +1758,7 @@ fn translate_layout_for_scroll(
 
     // The box's own line boxes and list marker are scrollable content, so they
     // move with the children rather than with the border box.
-    let (scroll_x, scroll_y) = layout.scroll_offset();
+    let (scroll_x, scroll_y) = scroll_offset;
     let (content_dx, content_dy) = (dx - scroll_x, dy - scroll_y);
     if (content_dx, content_dy) != (0.0, 0.0) {
         for line in &mut layout.lines {
@@ -3068,11 +3075,23 @@ fn image_repeat(style: &ComputedStyle, property: &str) -> bool {
     )
 }
 
-fn background_attachment_fixed(style: &ComputedStyle) -> bool {
-    matches!(
-        style.get("background-attachment"),
-        Some(ComputedValue::Keyword(keyword)) if keyword.eq_ignore_ascii_case("fixed")
-    )
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum BackgroundAttachment {
+    Scroll,
+    Fixed,
+    Local,
+}
+
+fn background_attachment(style: &ComputedStyle) -> BackgroundAttachment {
+    match style.get("background-attachment") {
+        Some(ComputedValue::Keyword(keyword)) if keyword.eq_ignore_ascii_case("fixed") => {
+            BackgroundAttachment::Fixed
+        }
+        Some(ComputedValue::Keyword(keyword)) if keyword.eq_ignore_ascii_case("local") => {
+            BackgroundAttachment::Local
+        }
+        _ => BackgroundAttachment::Scroll,
+    }
 }
 
 /// Returns background-position as `(x, y)` pixel offsets.
@@ -4198,7 +4217,7 @@ fn paint_background_images_for_box(
     let repeats = background_list(style, "background-repeat", "repeat");
     let attachments = background_list(style, "background-attachment", "scroll");
     for index in (0..images.len()).rev() {
-        let origin = background_box_rect(
+        let mut origin = background_box_rect(
             &origins[index % origins.len()],
             border_box,
             padding_box,
@@ -4226,6 +4245,19 @@ fn paint_background_images_for_box(
             &repeats[index % repeats.len()],
             &attachments[index % attachments.len()],
         );
+        if background_attachment(&layer_style) == BackgroundAttachment::Local
+            && layout.is_scroll_container()
+        {
+            let geometry = layout
+                .paint_scroll
+                .unwrap_or_else(|| layout.paint_scroll_geometry());
+            let extra_width = (geometry.overflow_size.0 - padding_box.width).max(0.0);
+            let extra_height = (geometry.overflow_size.1 - padding_box.height).max(0.0);
+            origin.x -= geometry.offset.0;
+            origin.y -= geometry.offset.1;
+            origin.width += extra_width;
+            origin.height += extra_height;
+        }
         paint_background_image_rounded(
             canvas,
             &layer_style,
@@ -4326,7 +4358,7 @@ fn paint_prepared_background_image(
             }
             let tile_w = tile_w.max(1.0);
             let tile_h = tile_h.max(1.0);
-            let fixed = background_attachment_fixed(style);
+            let fixed = background_attachment(style) == BackgroundAttachment::Fixed;
             let (pos_cw, pos_ch) = if fixed {
                 (viewport.width, viewport.height)
             } else {
@@ -4336,8 +4368,27 @@ fn paint_prepared_background_image(
                 background_position(style, pos_cw, pos_ch, tile_w, tile_h);
             let anchor_x = if fixed { viewport.x + position_x } else { area.x + position_x };
             let anchor_y = if fixed { viewport.y + position_y } else { area.y + position_y };
-            let x_end = area.x + area.width;
-            let y_end = area.y + area.height;
+            let clip_area = clip.unwrap_or(area);
+            let x_start = if repeat_x {
+                anchor_x + ((clip_area.x - anchor_x) / tile_w).floor() * tile_w
+            } else {
+                anchor_x
+            };
+            let y_start = if repeat_y {
+                anchor_y + ((clip_area.y - anchor_y) / tile_h).floor() * tile_h
+            } else {
+                anchor_y
+            };
+            let x_end = if repeat_x {
+                clip_area.x + clip_area.width
+            } else {
+                area.x + area.width
+            };
+            let y_end = if repeat_y {
+                clip_area.y + clip_area.height
+            } else {
+                area.y + area.height
+            };
 
             const MAX_TILE_PIXELS: u64 = 16_777_216;
             let tile_image = if repeat_x || repeat_y {
@@ -4359,17 +4410,9 @@ fn paint_prepared_background_image(
                 None
             };
 
-            let mut ty = if repeat_y {
-                anchor_y + ((area.y - anchor_y) / tile_h).floor() * tile_h
-            } else {
-                anchor_y
-            };
+            let mut ty = y_start;
             while ty < y_end {
-                let mut tx = if repeat_x {
-                    anchor_x + ((area.x - anchor_x) / tile_w).floor() * tile_w
-                } else {
-                    anchor_x
-                };
+                let mut tx = x_start;
                 while tx < x_end {
                     let tile_rect = Rect { x: tx, y: ty, width: tile_w, height: tile_h };
                     if let Some(ref image) = tile_image {
@@ -4466,10 +4509,8 @@ fn paint_prepared_background_image(
     }
     let tile_width = tile_width.max(1.0);
     let tile_height = tile_height.max(1.0);
-    let x_end = area.x + area.width;
-    let y_end = area.y + area.height;
     let (repeat_x, repeat_y) = background_repeat(style);
-    let fixed = background_attachment_fixed(style);
+    let fixed = background_attachment(style) == BackgroundAttachment::Fixed;
     let (pos_container_w, pos_container_h) = if fixed {
         (viewport.width, viewport.height)
     } else {
@@ -4492,17 +4533,30 @@ fn paint_prepared_background_image(
     } else {
         area.y + position_y
     };
-    let mut y = if repeat_y {
-        anchor_y + ((area.y - anchor_y) / tile_height).floor() * tile_height
+    let clip_area = clip.unwrap_or(area);
+    let x_start = if repeat_x {
+        anchor_x + ((clip_area.x - anchor_x) / tile_width).floor() * tile_width
+    } else {
+        anchor_x
+    };
+    let y_start = if repeat_y {
+        anchor_y + ((clip_area.y - anchor_y) / tile_height).floor() * tile_height
     } else {
         anchor_y
     };
+    let x_end = if repeat_x {
+        clip_area.x + clip_area.width
+    } else {
+        area.x + area.width
+    };
+    let y_end = if repeat_y {
+        clip_area.y + clip_area.height
+    } else {
+        area.y + area.height
+    };
+    let mut y = y_start;
     while y < y_end {
-        let mut x = if repeat_x {
-            anchor_x + ((area.x - anchor_x) / tile_width).floor() * tile_width
-        } else {
-            anchor_x
-        };
+        let mut x = x_start;
         while x < x_end {
             let dest = Rect {
                 x,

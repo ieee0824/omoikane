@@ -638,10 +638,19 @@ pub struct LayoutBox {
     /// Whether this subtree can need paint-time scroll/sticky translation even
     /// when all currently stored scroll offsets are zero.
     pub(crate) needs_scroll_translation: bool,
+    /// Pre-translation scroll geometry consumed by paint-only features such as
+    /// `background-attachment: local`. Kept separate from CSSOM layout data.
+    pub(crate) paint_scroll: Option<PaintScrollGeometry>,
     pub lines: Vec<LineBox>,
     pub children: Vec<LayoutBox>,
     /// List marker for `display: list-item` elements.
     pub marker: Option<ListMarker>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct PaintScrollGeometry {
+    pub offset: (f32, f32),
+    pub overflow_size: (f32, f32),
 }
 
 impl LayoutBox {
@@ -724,6 +733,25 @@ impl LayoutBox {
         }
         let (max_x, max_y) = self.max_scroll_offset();
         (x.clamp(0.0, max_x), y.clamp(0.0, max_y))
+    }
+
+    /// Computes the paint-time scroll snapshot with a single overflow walk.
+    pub(crate) fn paint_scroll_geometry(&self) -> PaintScrollGeometry {
+        let overflow_size = self.scrollable_overflow();
+        let (stored_x, stored_y) = self.node.scroll_offset();
+        let content = self.dimensions.content;
+        let padding = self.dimensions.padding;
+        let max_x =
+            (overflow_size.0 - (content.width + padding.left + padding.right)).max(0.0);
+        let max_y =
+            (overflow_size.1 - (content.height + padding.top + padding.bottom)).max(0.0);
+        PaintScrollGeometry {
+            offset: (
+                stored_x.clamp(0.0, max_x),
+                stored_y.clamp(0.0, max_y),
+            ),
+            overflow_size,
+        }
     }
 }
 
@@ -985,6 +1013,7 @@ fn layout_document(
         z_index: 0,
         transform: AffineTransform::identity(),
         needs_scroll_translation: false,
+        paint_scroll: None,
         lines: Vec::new(),
         children,
         marker: None,
@@ -1327,6 +1356,7 @@ fn layout_element(
                 z_index: z_index(&style),
                 transform: AffineTransform::identity(),
                 needs_scroll_translation: false,
+                paint_scroll: None,
                 lines,
                 children: Vec::new(),
                 marker: None,
@@ -1407,6 +1437,7 @@ fn layout_element(
         z_index: z_index(&style),
         transform: AffineTransform::identity(),
         needs_scroll_translation: false,
+        paint_scroll: None,
         lines,
         children,
         marker,
