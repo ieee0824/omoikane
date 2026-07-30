@@ -1021,7 +1021,10 @@ fn validate_declaration(name: &str, value: &Value) -> DeclarationValidation {
             _ => DeclarationValidation::Invalid,
         };
     }
-    if name.eq_ignore_ascii_case("background-clip") {
+    if matches!(
+        name.to_ascii_lowercase().as_str(),
+        "background-origin" | "background-clip"
+    ) {
         return match value {
             Value::Keyword(keyword) => {
                 let lower = keyword.to_ascii_lowercase();
@@ -1100,17 +1103,6 @@ fn validate_declaration(name: &str, value: &Value) -> DeclarationValidation {
             {
                 DeclarationValidation::Unvalidated
             }
-            _ => DeclarationValidation::Invalid,
-        };
-    }
-    if matches!(name.to_ascii_lowercase().as_str(), "background-origin" | "background-clip") {
-        return match value {
-            Value::Keyword(keyword)
-                if is_css_wide_keyword(&keyword.to_ascii_lowercase())
-                    || matches!(
-                        keyword.to_ascii_lowercase().as_str(),
-                        "border-box" | "padding-box" | "content-box"
-                    ) => DeclarationValidation::Unvalidated,
             _ => DeclarationValidation::Invalid,
         };
     }

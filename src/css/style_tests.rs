@@ -5368,6 +5368,20 @@ fn single_layer_two_axis_background_repeat_keeps_both_values() {
 }
 
 #[test]
+fn background_shorthand_size_accepts_computed_math_functions_per_layer() {
+    let style = image_computed_style(
+        "background: none 0 0 / calc(1em + 2px) auto, \
+         none 0 0 / clamp(1px, 2px, 3px) auto;",
+    );
+    assert_eq!(
+        style.get("background-size"),
+        Some(&ComputedValue::Keyword(
+            "18px auto, 2px auto".to_string()
+        ))
+    );
+}
+
+#[test]
 fn malformed_background_image_layer_drops_the_whole_declaration() {
     let style = image_computed_style(
         "background-image: url(valid.png); \

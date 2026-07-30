@@ -877,6 +877,9 @@ fn is_background_size_value(value: &Value) -> bool {
     match value {
         Value::Length(_, _) | Value::Percentage(_) => true,
         Value::Number(number) => *number == 0.0,
+        Value::Function { name, .. } => {
+            matches!(name.to_ascii_lowercase().as_str(), "calc" | "clamp")
+        }
         Value::Keyword(keyword) => {
             matches!(keyword.to_ascii_lowercase().as_str(), "auto" | "cover" | "contain")
         }
