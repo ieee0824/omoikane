@@ -23,6 +23,7 @@ pub enum CdpError {
     InvalidJsonRpc(&'static str),
     UnknownClient(u64),
     UnknownDeferredRequest(u64),
+    DeferredTokenExhausted,
     MethodNotFound(String),
 }
 
@@ -36,6 +37,7 @@ impl std::fmt::Display for CdpError {
             Self::InvalidJsonRpc(message) => write!(f, "invalid JSON-RPC message: {message}"),
             Self::UnknownClient(id) => write!(f, "unknown client: {id}"),
             Self::UnknownDeferredRequest(id) => write!(f, "unknown deferred request: {id}"),
+            Self::DeferredTokenExhausted => write!(f, "deferred response token space exhausted"),
             Self::MethodNotFound(method) => write!(f, "method not found: {method}"),
         }
     }
@@ -505,7 +507,10 @@ impl CdpServer {
 
         if self.deferred_handlers.contains_key(&request.method) {
             let token = DeferredResponseToken(self.next_deferred_token);
-            self.next_deferred_token += 1;
+            self.next_deferred_token = self
+                .next_deferred_token
+                .checked_add(1)
+                .ok_or(CdpError::DeferredTokenExhausted)?;
             let outcome = self.deferred_handlers[&request.method](token, &request.params);
             match outcome {
                 Ok(CdpMethodResult::Complete(value)) => {
@@ -2075,6 +2080,28 @@ mod tests {
         assert_eq!(payload["error"]["code"], -32001);
         assert_eq!(payload["error"]["message"], "dialog dismissed");
         assert_eq!(server.pending_response_count(), 0);
+    }
+
+    #[test]
+    fn deferred_token_exhaustion_does_not_reuse_a_token() {
+        let mut server = CdpServer::new();
+        server.next_deferred_token = u64::MAX;
+        server.register_deferred_method("Runtime.evaluate", |_, _| {
+            Ok(CdpMethodResult::Deferred)
+        });
+        let client = server.accept_upgrade(sample_upgrade_request()).unwrap();
+        let request = WebSocketFrame::text(
+            r#"{"jsonrpc":"2.0","id":10,"method":"Runtime.evaluate","params":{}}"#,
+        )
+        .encode(true);
+
+        assert_eq!(
+            server.receive(client.client_id, &request),
+            Err(CdpError::DeferredTokenExhausted)
+        );
+        assert_eq!(server.next_deferred_token, u64::MAX);
+        assert_eq!(server.pending_response_count(), 0);
+        assert!(server.drain_outgoing(client.client_id).unwrap().is_empty());
     }
 
     #[test]
