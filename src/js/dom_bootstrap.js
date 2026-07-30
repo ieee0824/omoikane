@@ -7599,8 +7599,11 @@
       event.currentTarget = this;
       for (const entry of (this._listeners.get(event.type) || []).slice()) {
         if (entry.once) this.removeEventListener(event.type, entry.callback, entry.capture);
-        if (typeof entry.callback === "function") entry.callback.call(this, event);
-        else if (typeof entry.callback.handleEvent === "function") entry.callback.handleEvent(event);
+        __omoikane_call_event_listener(
+          entry.callback,
+          typeof entry.callback === "function" ? this : entry.callback,
+          event
+        );
         if (event.__stoppedImmediate) break;
       }
       event.currentTarget = null;
@@ -7836,7 +7839,7 @@
       if (this._closed || this._started) return;
       this._started = true;
       for (const data of this._pendingMessages.splice(0)) {
-        __omoikane_enqueue_posted_message(() => this._acceptMessage(data));
+        __omoikane_enqueue_posted_message(this, data);
       }
     }
     close() {
@@ -7846,7 +7849,7 @@
     _queueMessage(data) {
       if (this._closed) return;
       if (!this._started) { this._pendingMessages.push(data); return; }
-      __omoikane_enqueue_posted_message(() => this._acceptMessage(data));
+      __omoikane_enqueue_posted_message(this, data);
     }
     _acceptMessage(data) {
       if (this._closed) return;

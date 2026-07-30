@@ -2187,6 +2187,10 @@ impl JsRuntime {
                 {
                     self.run_dynamic_script_resource_async(node_id).await?;
                 }
+                Task::PostedMessage { port, data } => {
+                    let result = self.run_posted_message_async(port, data).await;
+                    self.record_error_from("posted message", result);
+                }
                 task => self.run_task(task)?,
             }
             self.run_jobs()?;
@@ -2203,6 +2207,59 @@ impl JsRuntime {
                     .is_some_and(|tag| tag.eq_ignore_ascii_case("script"))
                     && node.get_attribute("src").is_some()
             })
+    }
+
+    async fn run_posted_message_async(
+        &mut self,
+        port: JsValue,
+        data: JsValue,
+    ) -> JsResult<()> {
+        self.install_posted_message_values(port, data)?;
+        let result = self
+            .eval_async(
+                "if (!__omoikane_posted_message_port._closed) { \
+                 __omoikane_posted_message_port.dispatchEvent(new MessageEvent('message', { \
+                   data: __omoikane_posted_message_data, origin: '', source: null, ports: [] \
+                 })); \
+                 }",
+            )
+            .await
+            .map(|_| ());
+        self.clear_posted_message_values();
+        result
+    }
+
+    fn install_posted_message_values(&mut self, port: JsValue, data: JsValue) -> JsResult<()> {
+        let global = self.context.global_object();
+        global.set(
+            js_string!("__omoikane_posted_message_port"),
+            port,
+            false,
+            &mut self.context,
+        )?;
+        global.set(
+            js_string!("__omoikane_posted_message_data"),
+            data,
+            false,
+            &mut self.context,
+        )?;
+        Ok(())
+    }
+
+    fn clear_posted_message_values(&mut self) {
+        let global = self.context.global_object();
+        let _ = global.set(
+            js_string!("__omoikane_posted_message_port"),
+            JsValue::undefined(),
+            false,
+            &mut self.context,
+        );
+        let _ = global.set(
+            js_string!("__omoikane_posted_message_data"),
+            JsValue::undefined(),
+            false,
+            &mut self.context,
+        );
     }
 
     async fn run_dynamic_script_resource_async(&mut self, node_id: usize) -> JsResult<()> {
@@ -2538,7 +2595,7 @@ impl JsRuntime {
                     let task_kind = match &task {
                         Task::Timer(payload) => payload.kind(),
                         Task::Navigation(_) => "navigation",
-                        Task::PostedMessage(_) => "posted-message",
+                        Task::PostedMessage { .. } => "posted-message",
                     };
                     let callback_start = std::time::Instant::now();
                     let callback_result = self.run_task(task);
@@ -2597,13 +2654,16 @@ impl JsRuntime {
                 self.host_state.borrow_mut().navigation_requests.push_back(request);
                 Ok(())
             }
-            Task::PostedMessage(callback) => {
-                let result = self.with_active_host(|context| {
-                    if let Some(callable) = callback.as_callable() {
-                        callable.call(&JsValue::undefined(), &[], context)?;
-                    }
-                    Ok(())
-                });
+            Task::PostedMessage { port, data } => {
+                self.install_posted_message_values(port, data)?;
+                let result = self.eval(
+                    "if (!__omoikane_posted_message_port._closed) { \
+                     __omoikane_posted_message_port.dispatchEvent(new MessageEvent('message', { \
+                       data: __omoikane_posted_message_data, origin: '', source: null, ports: [] \
+                     })); \
+                     }",
+                );
+                self.clear_posted_message_values();
                 self.record_error_from("posted message", result);
                 Ok(())
             }
@@ -5879,17 +5939,13 @@ fn enqueue_posted_message_native(
     args: &[JsValue],
     _: &mut Context,
 ) -> JsResult<JsValue> {
-    let callback = args.first().cloned().unwrap_or_default();
-    if !callback.is_callable() {
-        return Err(JsNativeError::typ()
-            .with_message("posted message task callback must be callable")
-            .into());
-    }
+    let port = args.first().cloned().unwrap_or_default();
+    let data = args.get(1).cloned().unwrap_or_default();
     with_host_state(|state| {
         state
             .borrow_mut()
             .event_loop
-            .enqueue_posted_message(callback);
+            .enqueue_posted_message(port, data);
         Ok(JsValue::undefined())
     })
 }
@@ -8132,6 +8188,56 @@ mod tests {
                 .unwrap()
                 .to_std_string_escaped(),
             "after"
+        );
+    }
+
+    #[test]
+    fn owned_page_task_resumes_posted_message_dialogs() {
+        let runtime = JsRuntime::new().unwrap();
+        let source = r#"
+            globalThis.postedMessageLog = [];
+            const channel = new MessageChannel();
+            channel.port2.onmessage = event => {
+                postedMessageLog.push(event.data + '-before');
+                if (event.data === 'first') alert('posted message');
+                postedMessageLog.push(event.data + '-after');
+                Promise.resolve().then(() => postedMessageLog.push(event.data + '-microtask'));
+            };
+            channel.port1.postMessage('first');
+            channel.port1.postMessage('second');
+        "#;
+        let mut task = Box::pin(runtime.into_page_task(
+            22,
+            vec![PageTaskSource::Classic {
+                source: source.to_string(),
+                label: "posted message".to_string(),
+                script_node_id: None,
+            }],
+        ));
+        let controller = task.dialog_controller();
+        let waker: &'static std::task::Waker = std::task::Waker::noop();
+        let mut context = FutureContext::from_waker(waker);
+        while controller.pending().is_none() {
+            assert!(matches!(task.as_mut().poll(&mut context), Poll::Pending));
+        }
+        let dialog = controller.pending().unwrap();
+        assert_eq!(dialog.message, "posted message");
+        controller.handle(dialog.id, true, None).unwrap();
+        let mut completed = loop {
+            if let Poll::Ready(completed) = task.as_mut().poll(&mut context) {
+                break completed;
+            }
+        };
+        assert_eq!(completed.result, Ok(Vec::new()));
+        assert_eq!(
+            completed
+                .runtime
+                .eval("postedMessageLog.join(',')")
+                .unwrap()
+                .as_string()
+                .unwrap()
+                .to_std_string_escaped(),
+            "first-before,first-after,first-microtask,second-before,second-after,second-microtask"
         );
     }
 

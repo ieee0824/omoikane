@@ -17,6 +17,8 @@ use sha1::{Digest, Sha1};
 use crate::dom::{Node, NodeHandle, NodeType};
 use crate::html::{TreeBuilder, decode_html_response};
 use crate::http::{Client, HttpRequest, Method};
+#[cfg(test)]
+use crate::js::PageTaskSource;
 use crate::js::{
     CompletedPageTask, JavaScriptDialog, JavaScriptDialogController, JavaScriptDialogError,
     JavaScriptDialogKind, JsRuntime, NavigationRequest, OwnedPageTask, PageTaskError,
@@ -1719,7 +1721,7 @@ impl CdpSession {
     /// Cancelled and stale tasks leave the currently committed page unchanged.
     pub(crate) fn commit_document_page_task(
         &mut self,
-        completed: CompletedPageTask,
+        mut completed: CompletedPageTask,
         pending: PendingDocumentCommit,
     ) -> Result<(), String> {
         if completed.generation != pending.generation
@@ -1731,8 +1733,9 @@ impl CdpSession {
             return Err("page startup task was cancelled".to_string());
         }
 
+        let script_error_lines = take_page_task_script_error_lines(&mut completed);
         if std::env::var_os("OMOIKANE_LOG_SCRIPTS").is_some() {
-            for line in page_task_script_error_lines(&completed.result) {
+            for line in script_error_lines {
                 eprintln!("{line}");
             }
         }
@@ -1952,6 +1955,18 @@ fn page_task_script_error_lines(
         .unwrap_or_default()
 }
 
+fn take_page_task_script_error_lines(completed: &mut CompletedPageTask) -> Vec<String> {
+    let mut lines = page_task_script_error_lines(&completed.result);
+    lines.extend(
+        completed
+            .runtime
+            .take_task_errors()
+            .into_iter()
+            .map(|error| format!("[omoikane][js-error] {error}")),
+    );
+    lines
+}
+
 fn pending_evaluation_busy_message(
     has_pending_evaluation: bool,
     has_pending_page: bool,
@@ -2044,7 +2059,7 @@ impl BrowserSessionState {
         }
         let session = self.session.as_mut().ok_or(JsonRpcError {
             code: -32000,
-            message: "Browser session is busy".to_string(),
+            message: "Browser session is unavailable".to_string(),
         })?;
         let prepared = if method == "Page.reload" {
             session.prepare_page_reload()?
@@ -2593,6 +2608,49 @@ mod tests {
             ["[omoikane][js-error] startup failed"]
         );
         assert!(page_task_script_error_lines(&Err(PageTaskError::Cancelled)).is_empty());
+    }
+
+    #[test]
+    fn completed_page_task_drains_startup_timer_errors_once() {
+        let runtime = JsRuntime::new().unwrap();
+        let mut task = Box::pin(runtime.into_page_task(
+            1,
+            vec![PageTaskSource::Classic {
+                source: "setTimeout(() => { throw new Error('startup timer failed') }, 0)"
+                    .to_string(),
+                label: "startup".to_string(),
+                script_node_id: None,
+            }],
+        ));
+        let waker = Waker::noop();
+        let mut context = TaskContext::from_waker(waker);
+        let mut completed = loop {
+            if let Poll::Ready(completed) = task.as_mut().poll(&mut context) {
+                break completed;
+            }
+        };
+
+        let lines = take_page_task_script_error_lines(&mut completed);
+        assert_eq!(lines.len(), 1);
+        assert!(lines[0].starts_with("[omoikane][js-error] "));
+        assert!(lines[0].contains("startup timer failed"));
+        assert!(take_page_task_script_error_lines(&mut completed).is_empty());
+    }
+
+    #[test]
+    fn page_navigation_reports_an_unavailable_session_distinctly_from_busy() {
+        let mut state = BrowserSessionState {
+            session: None,
+            pending: None,
+            pending_page: None,
+            actions: Vec::new(),
+        };
+
+        let error = state
+            .begin_page_navigation(DeferredResponseToken(1), "Page.reload", &json!({}))
+            .unwrap_err();
+        assert_eq!(error.code, -32000);
+        assert_eq!(error.message, "Browser session is unavailable");
     }
 
     fn sample_upgrade_request() -> &'static str {
