@@ -14633,6 +14633,32 @@ b</textarea></form>"#);
     }
 
     #[test]
+    fn document_fragment_and_shadow_root_get_element_by_id_are_tree_scoped() {
+        use crate::html::TreeBuilder;
+        let doc = TreeBuilder::parse("<div id='outside'></div><div id='host'></div>").document();
+        let mut runtime = JsRuntime::with_document(doc).unwrap();
+        let actual = eval_str(
+            &mut runtime,
+            r#"(() => {
+                const fragment = document.createDocumentFragment();
+                const nested = document.createElement("section");
+                nested.innerHTML = '<span id="inside"></span>';
+                fragment.appendChild(nested);
+
+                const shadow = document.getElementById("host").attachShadow({ mode: "open" });
+                shadow.innerHTML = '<span id="shadow-inside"></span>';
+                return [
+                    fragment.getElementById("inside").tagName,
+                    fragment.getElementById("outside") === null,
+                    shadow.getElementById("shadow-inside").tagName,
+                    shadow.getElementById("outside") === null
+                ].join("|");
+            })()"#,
+        );
+        assert_eq!(actual, "SPAN|true|SPAN|true");
+    }
+
+    #[test]
     fn inner_html_round_trip() {
         use crate::html::TreeBuilder;
         let html = "<html><body><div id='box'><span class=\"a\">Hello</span></div></body></html>";
