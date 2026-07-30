@@ -864,53 +864,73 @@ fn resolve_length(length: GradientLength, basis: f32) -> f32 {
 }
 
 fn resolved_stops(stops: &[GradientStop], basis: f32) -> Vec<(Color, f32, Option<f32>)> {
-    let mut positions: Vec<Option<f32>> = stops
+    let mut stop_positions: Vec<Option<f32>> = stops
         .iter()
         .map(|stop| stop.position.map(|v| resolve_length(v, basis)))
         .collect();
-    if positions[0].is_none() {
-        positions[0] = Some(0.0);
+    if stop_positions[0].is_none() {
+        stop_positions[0] = Some(0.0);
     }
-    if positions.last().is_some_and(Option::is_none) {
-        *positions.last_mut().unwrap() = Some(basis);
+    if stop_positions.last().is_some_and(Option::is_none) {
+        *stop_positions.last_mut().unwrap() = Some(basis);
     }
-    let mut last = positions[0].unwrap();
-    for position in positions.iter_mut().skip(1) {
+
+    // CSS Images 3 §3.4.3 fixes color stops and transition hints in their
+    // specified order. A hint therefore participates in monotonic fixup and
+    // can push the following color stop forward.
+    let mut sequence = Vec::with_capacity(stops.len() * 2 - 1);
+    for (index, stop) in stops.iter().enumerate() {
+        if index > 0
+            && let Some(hint) = stop.hint_before
+        {
+            sequence.push((index, true, Some(resolve_length(hint, basis))));
+        }
+        sequence.push((index, false, stop_positions[index]));
+    }
+
+    let mut last = sequence[0].2.unwrap();
+    for (_, _, position) in sequence.iter_mut().skip(1) {
         if let Some(value) = position {
             *value = value.max(last);
             last = *value;
         }
     }
+
+    // Distribute unspecified stops between the nearest positioned items in
+    // the same combined sequence, so a preceding hint remains an ordering
+    // boundary for an otherwise automatic stop.
     let mut index = 1;
-    while index + 1 < positions.len() {
-        if positions[index].is_some() {
+    while index + 1 < sequence.len() {
+        if sequence[index].2.is_some() {
             index += 1;
             continue;
         }
         let start = index - 1;
         let mut end = index + 1;
-        while positions[end].is_none() {
+        while sequence[end].2.is_none() {
             end += 1;
         }
-        let a = positions[start].unwrap();
-        let b = positions[end].unwrap();
+        let a = sequence[start].2.unwrap();
+        let b = sequence[end].2.unwrap();
         for current in index..end {
-            positions[current] =
+            sequence[current].2 =
                 Some(a + (b - a) * (current - start) as f32 / (end - start) as f32);
         }
         index = end;
     }
-    stops
+
+    let mut resolved = stops
         .iter()
-        .zip(positions)
-        .map(|(stop, position)| {
-            (
-                stop.color,
-                position.unwrap(),
-                stop.hint_before.map(|v| resolve_length(v, basis)),
-            )
-        })
-        .collect()
+        .map(|stop| (stop.color, 0.0, None))
+        .collect::<Vec<_>>();
+    for (stop_index, is_hint, position) in sequence {
+        if is_hint {
+            resolved[stop_index].2 = position;
+        } else {
+            resolved[stop_index].1 = position.unwrap();
+        }
+    }
+    resolved
 }
 
 fn sample_stops(stops: &[(Color, f32, Option<f32>)], mut value: f32, repeating: bool) -> Color {
@@ -1129,6 +1149,29 @@ mod gradient_tests {
         assert_eq!(sample_stops(&at_start, 0.125, false), Color::rgb(0, 0, 255));
         let at_end = [stops[0], (stops[1].0, stops[1].1, Some(1.0))];
         assert_eq!(sample_stops(&at_end, 0.5, false), Color::rgb(255, 0, 0));
+    }
+
+    #[test]
+    fn color_stop_fixup_orders_hints_with_their_surrounding_stops() {
+        let resolve = |value: &str| {
+            let gradient = parse_gradient(value).unwrap();
+            resolved_stops(&gradient.stops, 1.0)
+        };
+
+        let before_prior = resolve("linear-gradient(red 50%, 20%, blue 100%)");
+        assert_eq!(before_prior[0].1, 0.5);
+        assert_eq!(before_prior[1].2, Some(0.5));
+        assert_eq!(before_prior[1].1, 1.0);
+
+        let beyond_following = resolve("linear-gradient(red 0%, 120%, blue 100%)");
+        assert_eq!(beyond_following[0].1, 0.0);
+        assert_eq!(beyond_following[1].2, Some(1.2));
+        assert_eq!(beyond_following[1].1, 1.2);
+
+        let normal = resolve("linear-gradient(red 0%, 25%, blue 100%)");
+        assert_eq!(normal[0].1, 0.0);
+        assert_eq!(normal[1].2, Some(0.25));
+        assert_eq!(normal[1].1, 1.0);
     }
 
     #[test]
