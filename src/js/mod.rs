@@ -1964,6 +1964,8 @@ impl JsRuntime {
                 }).await
             };
             let Some(page_work_result) = page_work_result else {
+                let _ = self.eval("__omoikane_set_current_script(null)");
+                self.host_state.borrow_mut().write_insertion_ref = None;
                 self.host_state.borrow_mut().pending_javascript_dialog = None;
                 return CompletedPageTask { runtime: self, generation, result: Err(PageTaskError::Cancelled) };
             };
@@ -8273,6 +8275,48 @@ mod tests {
                 .unwrap()
                 .to_std_string_escaped(),
             "module-before,module-after,load-before,load-after"
+        );
+    }
+
+    #[test]
+    fn cancelling_dynamic_module_task_clears_current_script() {
+        let runtime = runtime_from_html("<html><head></head><body></body></html>");
+        let mut task = Box::pin(runtime.into_page_task(
+            20,
+            vec![PageTaskSource::Classic {
+                source: r#"
+                    const script = document.createElement('script');
+                    script.type = 'module';
+                    script.src = 'data:text/javascript,globalThis.dynamicBeforeCancel%20%3D%20true%3B%20alert(%22cancel-dynamic%22)%3B%20globalThis.dynamicAfterCancel%20%3D%20true%3B';
+                    document.head.appendChild(script);
+                "#
+                .to_string(),
+                label: "cancel dynamic module".to_string(),
+                script_node_id: None,
+            }],
+        ));
+        let controller = task.dialog_controller();
+        let waker: &'static std::task::Waker = std::task::Waker::noop();
+        let mut context = FutureContext::from_waker(waker);
+        while controller.pending().is_none() {
+            assert!(matches!(task.as_mut().poll(&mut context), Poll::Pending));
+        }
+        task.cancel();
+        let mut completed = match task.as_mut().poll(&mut context) {
+            Poll::Ready(completed) => completed,
+            Poll::Pending => panic!("cancelled dynamic module task did not return its runtime"),
+        };
+        assert_eq!(completed.result, Err(PageTaskError::Cancelled));
+        assert_eq!(controller.pending(), None);
+        assert!(
+            completed
+                .runtime
+                .eval(
+                    "dynamicBeforeCancel === true && typeof dynamicAfterCancel === 'undefined' && document.currentScript === null"
+                )
+                .unwrap()
+                .as_boolean()
+                .unwrap()
         );
     }
 
