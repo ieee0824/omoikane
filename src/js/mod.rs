@@ -2161,10 +2161,84 @@ impl JsRuntime {
                         self.record_error_from("timer callback", result);
                     }
                 }
+                Task::Timer(TimerPayload::ResourceLoad { node_id })
+                    if self.is_dynamic_script_resource(node_id) =>
+                {
+                    self.run_dynamic_script_resource_async(node_id).await?;
+                }
                 task => self.run_task(task)?,
             }
             self.run_jobs()?;
         }
+        Ok(())
+    }
+
+    fn is_dynamic_script_resource(&self, node_id: usize) -> bool {
+        self.host_state
+            .borrow()
+            .get_node(node_id)
+            .is_some_and(|node| {
+                node.tag_name()
+                    .is_some_and(|tag| tag.eq_ignore_ascii_case("script"))
+                    && node.get_attribute("src").is_some()
+            })
+    }
+
+    async fn run_dynamic_script_resource_async(&mut self, node_id: usize) -> JsResult<()> {
+        let Some((src, kind, base_url)) = ({
+            let mut state = self.host_state.borrow_mut();
+            state.pending_resource_loads.remove(&node_id);
+            state.get_node(node_id).and_then(|node| {
+                document_root_for_node(&node)?;
+                let src = node.get_attribute("src")?;
+                Some((
+                    src,
+                    ScriptKind::from_type_attribute(node.get_attribute("type").as_deref()),
+                    state.base_url.clone(),
+                ))
+            })
+        }) else {
+            return Ok(());
+        };
+
+        if kind == ScriptKind::NotExecutable {
+            return Ok(());
+        }
+        let source = {
+            let mut state = self.host_state.borrow_mut();
+            fetch_script_source_with_client(&src, base_url.as_ref(), &mut state.http_client)
+        };
+        let Some(source) = source else {
+            self.record_task_error(format!("[dynamic script: {src}] failed to fetch"));
+            let result = self
+                .eval_async(&format!("__omoikane_dispatch_resource_error({node_id})"))
+                .await;
+            self.record_error_from(&src, result);
+            return Ok(());
+        };
+
+        let marked = self
+            .eval_async(&format!("__omoikane_set_current_script({node_id})"))
+            .await;
+        self.record_error_from(&src, marked);
+        let result = match kind {
+            ScriptKind::Module => self
+                .eval_module_async(
+                    &source,
+                    &module_script_url(&src, base_url.as_ref(), false),
+                )
+                .await,
+            _ => self.eval_async(&source).await,
+        };
+        let _ = self.eval("__omoikane_set_current_script(null)");
+        if let Err(error) = result {
+            let context = script_source_context(&source);
+            self.record_task_error(format!("[dynamic script: {src}; {context}] {error}"));
+        }
+        let dispatched = self
+            .eval_async(&format!("__omoikane_dispatch_resource_load({node_id})"))
+            .await;
+        self.record_error_from("resource load", dispatched);
         Ok(())
     }
 
@@ -8148,6 +8222,57 @@ mod tests {
                 .unwrap()
                 .to_std_string_escaped(),
             "classic,classic-job,module-job,after"
+        );
+    }
+
+    #[test]
+    fn owned_page_task_resumes_dynamic_module_and_load_listener_dialogs() {
+        let runtime = runtime_from_html("<html><head></head><body></body></html>");
+        let mut task = Box::pin(runtime.into_page_task(
+            19,
+            vec![PageTaskSource::Classic {
+                source: r#"
+                    const script = document.createElement('script');
+                    script.type = 'module';
+                    script.src = 'data:text/javascript,globalThis.dynamicOrder%20%3D%20%5B%22module-before%22%5D%3B%20alert(%22dynamic-module%22)%3B%20dynamicOrder.push(%22module-after%22)%3B%20export%20const%20answer%20%3D%2042%3B';
+                    script.addEventListener('load', () => {
+                        dynamicOrder.push('load-before');
+                        alert('dynamic-load');
+                        dynamicOrder.push('load-after');
+                    });
+                    document.head.appendChild(script);
+                "#
+                .to_string(),
+                label: "insert dynamic module".to_string(),
+                script_node_id: None,
+            }],
+        ));
+        let controller = task.dialog_controller();
+        let waker: &'static std::task::Waker = std::task::Waker::noop();
+        let mut context = FutureContext::from_waker(waker);
+        for expected in ["dynamic-module", "dynamic-load"] {
+            while controller.pending().is_none() {
+                assert!(matches!(task.as_mut().poll(&mut context), Poll::Pending));
+            }
+            let dialog = controller.pending().unwrap();
+            assert_eq!(dialog.message, expected);
+            controller.handle(dialog.id, true, None).unwrap();
+        }
+        let mut completed = loop {
+            if let Poll::Ready(completed) = task.as_mut().poll(&mut context) {
+                break completed;
+            }
+        };
+        assert_eq!(completed.result, Ok(Vec::new()));
+        assert_eq!(
+            completed
+                .runtime
+                .eval("dynamicOrder.join(',')")
+                .unwrap()
+                .as_string()
+                .unwrap()
+                .to_std_string_escaped(),
+            "module-before,module-after,load-before,load-after"
         );
     }
 
