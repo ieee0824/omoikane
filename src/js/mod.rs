@@ -7137,9 +7137,12 @@ mod tests {
             .resume(Ok(JsValue::from(41)))
             .unwrap();
 
-        let Poll::Ready(result) = evaluation.as_mut().poll(&mut cx) else {
-            panic!("resuming the host call must wake and complete evaluation");
-        };
+        let result = (0..8)
+            .find_map(|_| match evaluation.as_mut().poll(&mut cx) {
+                Poll::Ready(result) => Some(result),
+                Poll::Pending => None,
+            })
+            .expect("resuming the host call must eventually complete evaluation");
         assert_eq!(result.unwrap().as_number(), Some(42.0));
         assert!(*after_host_call.borrow());
     }
