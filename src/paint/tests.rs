@@ -1191,6 +1191,7 @@ fn absolute_inline_content_paints_above_float_siblings() {
         overflow: crate::layout::Overflow::Visible,
         z_index: 0,
         transform: crate::css::AffineTransform::identity(),
+        needs_scroll_translation: false,
         lines: Vec::new(),
         children: vec![
             LayoutBox {
@@ -1208,6 +1209,7 @@ fn absolute_inline_content_paints_above_float_siblings() {
                 overflow: crate::layout::Overflow::Visible,
                 z_index: 0,
                 transform: crate::css::AffineTransform::identity(),
+                needs_scroll_translation: false,
                 lines: Vec::new(),
                 children: Vec::new(),
                 marker: None,
@@ -1227,6 +1229,7 @@ fn absolute_inline_content_paints_above_float_siblings() {
                 overflow: crate::layout::Overflow::Visible,
                 z_index: 0,
                 transform: crate::css::AffineTransform::identity(),
+                needs_scroll_translation: false,
                 lines: vec![LineBox {
                     rect: Rect {
                         x: 0.0,
@@ -1351,6 +1354,7 @@ fn float_grandchild_paints_above_block_uncle() {
         overflow: crate::layout::Overflow::Visible,
         z_index: 0,
         transform: crate::css::AffineTransform::identity(),
+        needs_scroll_translation: false,
         lines: Vec::new(),
         children: vec![
             LayoutBox {
@@ -1368,6 +1372,7 @@ fn float_grandchild_paints_above_block_uncle() {
                 overflow: crate::layout::Overflow::Visible,
                 z_index: 0,
                 transform: crate::css::AffineTransform::identity(),
+                needs_scroll_translation: false,
                 lines: Vec::new(),
                 children: vec![LayoutBox {
                     node: floated,
@@ -1384,6 +1389,7 @@ fn float_grandchild_paints_above_block_uncle() {
                     overflow: crate::layout::Overflow::Visible,
                     z_index: 0,
                     transform: crate::css::AffineTransform::identity(),
+                    needs_scroll_translation: false,
                     lines: Vec::new(),
                     children: Vec::new(),
                     marker: None,
@@ -1405,6 +1411,7 @@ fn float_grandchild_paints_above_block_uncle() {
                 overflow: crate::layout::Overflow::Visible,
                 z_index: 0,
                 transform: crate::css::AffineTransform::identity(),
+                needs_scroll_translation: false,
                 lines: Vec::new(),
                 children: Vec::new(),
                 marker: None,
@@ -7937,6 +7944,7 @@ fn form_control_label_uses_web_font_variant() {
         overflow: crate::layout::Overflow::Visible,
         z_index: 0,
         transform: crate::css::AffineTransform::identity(),
+        needs_scroll_translation: false,
         lines: vec![LineBox {
             rect: viewport,
             baseline: 12.8,
@@ -8037,6 +8045,7 @@ fn focused_text_control_paints_selection_and_caret() {
         overflow: crate::layout::Overflow::Visible,
         z_index: 0,
         transform: crate::css::AffineTransform::identity(),
+        needs_scroll_translation: false,
         lines: vec![LineBox { rect: viewport, baseline: 12.8, fragments: vec![fragment] }],
         children: Vec::new(),
         marker: None,

@@ -1539,6 +1539,12 @@ pub(crate) fn apply_scroll_offsets(
     viewport: Rect,
     window_scroll: (f32, f32),
 ) {
+    if window_scroll == (0.0, 0.0)
+        && !crate::dom::any_element_scrolled()
+        && !layout.needs_scroll_translation
+    {
+        return;
+    }
     let window_offset = (-window_scroll.0, -window_scroll.1);
     translate_layout_for_scroll(layout, resolver, window_offset, window_offset, viewport, None);
 }

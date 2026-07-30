@@ -635,6 +635,9 @@ pub struct LayoutBox {
     /// Paint-time CSS transform in the document's absolute coordinate space.
     /// It does not participate in normal-flow layout sizing or placement.
     pub transform: AffineTransform,
+    /// Whether this subtree can need paint-time scroll/sticky translation even
+    /// when all currently stored scroll offsets are zero.
+    pub(crate) needs_scroll_translation: bool,
     pub lines: Vec<LineBox>,
     pub children: Vec<LayoutBox>,
     /// List marker for `display: list-item` elements.
@@ -824,6 +827,10 @@ fn populate_layout_transforms(
     for child in &mut layout.children {
         populate_layout_transforms(child, resolver, root_font_size);
     }
+    layout.needs_scroll_translation = matches!(
+        style.get("position"),
+        Some(ComputedValue::Keyword(value)) if value.eq_ignore_ascii_case("sticky")
+    ) || layout.children.iter().any(|child| child.needs_scroll_translation);
 }
 
 fn computed_keyword<'a>(style: &'a ComputedStyle, property: &str) -> Option<&'a str> {
@@ -977,6 +984,7 @@ fn layout_document(
         overflow: Overflow::Visible,
         z_index: 0,
         transform: AffineTransform::identity(),
+        needs_scroll_translation: false,
         lines: Vec::new(),
         children,
         marker: None,
@@ -1318,6 +1326,7 @@ fn layout_element(
                 overflow: overflow(&style),
                 z_index: z_index(&style),
                 transform: AffineTransform::identity(),
+                needs_scroll_translation: false,
                 lines,
                 children: Vec::new(),
                 marker: None,
@@ -1397,6 +1406,7 @@ fn layout_element(
         overflow: overflow(&style),
         z_index: z_index(&style),
         transform: AffineTransform::identity(),
+        needs_scroll_translation: false,
         lines,
         children,
         marker,
