@@ -174,8 +174,8 @@ cargo run --example screenshot -- --insecure "https://expired.example.com/" out.
 cargo run --features gui --bin omoikane -- "https://example.com/"
 ```
 
-ウィンドウサイズはそのままページの viewport に反映されます。現時点の GUI は描画面と
-フレームスケジューラのみで、入力やブラウザ UI は未実装です。
+ウィンドウサイズはそのままページの viewport に反映され、基本的な keyboard/mouse
+入力は active document に届きます。wheel/touch scroll、IME、ブラウザ UI は未実装です。
 
 レンダリング性能のbaseline取得（外部通信なし）:
 
