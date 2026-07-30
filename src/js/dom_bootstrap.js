@@ -796,6 +796,45 @@
     return hasIntegerTabindex(node) || isInherentlyFocusable(node) || isEditingHost(node);
   }
 
+  // Returns the focusable areas participating in sequential focus navigation.
+  // Positive tabindex values precede the ordinary (zero/implicit) group; tree
+  // order breaks ties. A negative tabindex remains programmatically focusable
+  // but is deliberately absent from this list.
+  function sequentialFocusCandidates(doc) {
+    const positive = [];
+    const ordinary = [];
+    let treeIndex = 0;
+    function visit(node) {
+      if (node instanceof Element) {
+        const index = treeIndex++;
+        if (canBeFocused(node)) {
+          const explicit = hasIntegerTabindex(node);
+          const tabIndex = explicit ? parseInt(node.getAttribute("tabindex"), 10) : 0;
+          if (tabIndex > 0) positive.push({ node, tabIndex, index });
+          else if (tabIndex === 0) ordinary.push(node);
+        }
+      }
+      for (const child of node.childNodes || []) visit(child);
+    }
+    visit(doc);
+    positive.sort((left, right) =>
+      left.tabIndex - right.tabIndex || left.index - right.index
+    );
+    return positive.map(entry => entry.node).concat(ordinary);
+  }
+
+  function performSequentialFocusNavigation(doc, backward) {
+    const candidates = sequentialFocusCandidates(doc);
+    if (candidates.length === 0) return false;
+    const focused = focusedElementOf(doc);
+    const current = candidates.indexOf(focused);
+    let next;
+    if (current < 0) next = backward ? candidates.length - 1 : 0;
+    else next = (current + (backward ? -1 : 1) + candidates.length) % candidates.length;
+    candidates[next].focus();
+    return true;
+  }
+
   function isRenderedForFocus(node) {
     return !!__omoikane_is_rendered_for_focus(node.__id);
   }
@@ -5978,11 +6017,19 @@
     return true;
   };
   globalThis.__omoikane_dispatch_keyboard_input = function(type, init) {
-    const target = document.activeElement || document.body || document.documentElement || document;
+    const focusedDocument = focusChainDocuments()[0] || document;
+    const target = focusedElementOf(focusedDocument) || focusedDocument.body ||
+      focusedDocument.documentElement || focusedDocument;
     const notCanceled = target.dispatchEvent(new KeyboardEvent(type, {
       ...init, bubbles: true, cancelable: true, composed: true,
     }));
-    if (notCanceled && type === "keydown") performTextControlKeyDefault(target, init || {});
+    if (notCanceled && type === "keydown") {
+      if (String(init && init.key || "") === "Tab") {
+        performSequentialFocusNavigation(focusedDocument, Boolean(init && init.shiftKey));
+      } else {
+        performTextControlKeyDefault(target, init || {});
+      }
+    }
     return notCanceled;
   };
   const __documentCookies = new Map();
