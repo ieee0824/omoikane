@@ -2084,8 +2084,8 @@ impl JsRuntime {
     /// callbacks as they come due, and stops as soon as no timers remain. Two
     /// caps guard against runaway pages: `max_virtual_ms` bounds total virtual
     /// time (so a plain `setInterval` cannot spin forever), and `max_tasks`
-    /// bounds the total number of timer tasks executed (so a callback that
-    /// re-schedules many zero-delay timers cannot explode).
+    /// bounds the total number of tasks executed (so a callback that
+    /// continuously schedules timers or posted messages cannot explode).
     ///
     /// Unlike [`tick`](Self::tick), individual callback errors are swallowed so
     /// that one throwing timer does not halt the remaining pipeline work.
@@ -2095,8 +2095,9 @@ impl JsRuntime {
         let step = step_ms.max(1);
         let mut advanced: u64 = 0;
         let mut tasks_run: usize = 0;
+        let mut tasks_processed: usize = 0;
 
-        while advanced < max_virtual_ms && tasks_run < max_tasks {
+        while advanced < max_virtual_ms && tasks_processed < max_tasks {
             if !self.has_pending_timers() && !self.has_pending_css_transition_work() {
                 break;
             }
@@ -2104,12 +2105,13 @@ impl JsRuntime {
             advanced = advanced.saturating_add(step);
 
             loop {
-                if tasks_run >= max_tasks {
+                if tasks_processed >= max_tasks {
                     break;
                 }
                 let Some((_, task)) = self.host_state.borrow_mut().event_loop.pop_task() else {
                     break;
                 };
+                tasks_processed += 1;
                 let is_timer = matches!(task, Task::Timer(_));
                 {
                     // Swallow per-task JS errors: a single failing timer must
@@ -2139,7 +2141,7 @@ impl JsRuntime {
                     if std::env::var_os("OMOIKANE_LOG_TIMERS").is_some() {
                         eprintln!(
                             "[omoikane][timer] task={} kind={} callback_ms={:.3} jobs_ms={:.3}",
-                            tasks_run,
+                            tasks_processed,
                             task_kind,
                             callback_elapsed.as_secs_f64() * 1_000.0,
                             jobs_elapsed.as_secs_f64() * 1_000.0,
@@ -24675,20 +24677,19 @@ b</textarea></form>"#);
                  if (event.data === "first") throw new Error("listener failed");
                });
                channel.port1.postMessage("first");
-               channel.port1.postMessage("second"); return ""; })()"#,
+               channel.port1.postMessage("second");
+               channel.port2.start();
+               channel.port1.postMessage("third"); return ""; })()"#,
         );
         runtime.run_until_idle().unwrap();
-        assert_eq!(eval_str(&mut runtime, "log.join('|')"), "");
-        eval_str(&mut runtime, "channel.port2.start()");
-        runtime.run_until_idle().unwrap();
-        assert_eq!(eval_str(&mut runtime, "log.join('|')"), "first|second");
+        assert_eq!(eval_str(&mut runtime, "log.join('|')"), "first|second|third");
         assert_eq!(runtime.take_task_errors().len(), 1);
         eval_str(
             &mut runtime,
             "(() => { channel.port2.close(); channel.port1.postMessage('third'); })()",
         );
         runtime.run_until_idle().unwrap();
-        assert_eq!(eval_str(&mut runtime, "log.join('|')"), "first|second");
+        assert_eq!(eval_str(&mut runtime, "log.join('|')"), "first|second|third");
     }
 
     #[test]
@@ -24708,6 +24709,7 @@ b</textarea></form>"#);
               source.nested.value = 9;
               source.map.get("key").value = 8;
               source.bytes[0] = 7;
+              const sparse = structuredClone(new Array(3));
               let errors = [];
               for (const value of [() => {}, Symbol("x"), document.body]) {
                 try { structuredClone(value); } catch (error) { errors.push(error.name); }
@@ -24721,13 +24723,34 @@ b</textarea></form>"#);
                 clone.map.get("key").value,
                 clone.set.has(3),
                 Array.from(clone.bytes).join(","),
+                sparse.length + ":" + Object.keys(sparse).length,
                 errors.join(","),
               ].join("|");
             })()"#,
         );
         assert_eq!(
             result,
-            "true|true|1|1234|abgi|2|true|4,5|DataCloneError,DataCloneError,DataCloneError"
+            "true|true|1|1234|abgi|2|true|4,5|3:0|DataCloneError,DataCloneError,DataCloneError"
         );
+    }
+
+    #[test]
+    fn run_timers_caps_self_scheduling_posted_messages() {
+        let mut runtime = JsRuntime::new().unwrap();
+        eval_str(
+            &mut runtime,
+            r#"(() => {
+              globalThis.messageCount = 0;
+              globalThis.channel = new MessageChannel();
+              channel.port2.onmessage = () => {
+                messageCount++;
+                channel.port1.postMessage(null);
+              };
+              channel.port1.postMessage(null);
+              setTimeout(() => {}, 0);
+            })()"#,
+        );
+        assert_eq!(runtime.run_timers(100, 1, 5), 1);
+        assert_eq!(eval_str(&mut runtime, "messageCount"), "4");
     }
 }

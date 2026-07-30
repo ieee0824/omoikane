@@ -7785,7 +7785,7 @@
       return result;
     }
     if (Array.isArray(value)) {
-      const result = []; memory.set(value, result);
+      const result = new Array(value.length); memory.set(value, result);
       for (let index = 0; index < value.length; index++) {
         if (Object.prototype.hasOwnProperty.call(value, index)) {
           result[index] = cloneStructuredValue(value[index], memory);
@@ -7825,7 +7825,7 @@
       const data = globalThis.structuredClone(message, options);
       const destination = this._entangled;
       if (this._closed || !destination || destination._closed) return;
-      __omoikane_enqueue_posted_message(() => destination._acceptMessage(data));
+      destination._queueMessage(data);
     }
     start() {
       if (this._closed || this._started) return;
@@ -7838,9 +7838,13 @@
       this._closed = true;
       this._pendingMessages.length = 0;
     }
-    _acceptMessage(data) {
+    _queueMessage(data) {
       if (this._closed) return;
       if (!this._started) { this._pendingMessages.push(data); return; }
+      __omoikane_enqueue_posted_message(() => this._acceptMessage(data));
+    }
+    _acceptMessage(data) {
+      if (this._closed) return;
       this.dispatchEvent(new MessageEvent("message", {
         data,
         origin: "",
