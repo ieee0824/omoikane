@@ -5338,6 +5338,28 @@ fn background_layer_computed_values_preserve_commas_and_repeat_to_image_count() 
 }
 
 #[test]
+fn background_layer_lists_truncate_to_a_single_image() {
+    let style = image_computed_style(
+        "background-image: none; \
+         background-position-x: 1px, 2px; \
+         background-repeat: no-repeat, repeat; \
+         background-origin: content-box, border-box;",
+    );
+    assert_eq!(
+        style.get("background-position-x"),
+        Some(&ComputedValue::Keyword("1px".to_string()))
+    );
+    assert_eq!(
+        style.get("background-repeat"),
+        Some(&ComputedValue::Keyword("no-repeat".to_string()))
+    );
+    assert_eq!(
+        style.get("background-origin"),
+        Some(&ComputedValue::Keyword("content-box".to_string()))
+    );
+}
+
+#[test]
 fn background_layer_computed_values_resolve_each_layers_relative_units() {
     let style = image_computed_style(
         "background-image: none, none; \
@@ -5549,6 +5571,34 @@ fn background_position_keyword_and_length_pairs_obey_axis_slots() {
                 "accepted {declarations}",
             );
         }
+    }
+}
+
+#[test]
+fn background_size_slash_requires_a_preceding_position_and_rejects_later_positions() {
+    for invalid in [
+        "none / 2px 2px",
+        "none / 2px 2px left top",
+        "none left / 2px 2px top",
+    ] {
+        let style = image_computed_style(&format!(
+            "background: none 3px 4px / 5px 6px no-repeat; background: {invalid};"
+        ));
+        assert_eq!(
+            style.get("background-position-x"),
+            Some(&ComputedValue::Px(3.0)),
+            "accepted background: {invalid}",
+        );
+        assert_eq!(
+            style.get("background-position-y"),
+            Some(&ComputedValue::Px(4.0)),
+            "accepted background: {invalid}",
+        );
+        assert_eq!(
+            style.get("background-size"),
+            Some(&ComputedValue::Keyword("5px 6px".to_string())),
+            "accepted background: {invalid}",
+        );
     }
 }
 

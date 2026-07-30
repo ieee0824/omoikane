@@ -4771,9 +4771,6 @@ fn normalize_background_layer_lists(properties: &mut BTreeMap<String, ComputedVa
     };
     let image_text = computed_value_css_text(image_value);
     let image_count = split_css_top_level_commas(&image_text).len();
-    if image_count <= 1 {
-        return;
-    }
     for (name, default) in [
         ("background-position-x", "0%"),
         ("background-position-y", "0%"),
@@ -4788,6 +4785,9 @@ fn normalize_background_layer_lists(properties: &mut BTreeMap<String, ComputedVa
             .map(computed_value_css_text)
             .unwrap_or_else(|| default.to_string());
         let values = split_css_top_level_commas(&raw);
+        if image_count == 1 && values.len() == 1 {
+            continue;
+        }
         let normalized = (0..image_count)
             .map(|index| values[index % values.len()].trim())
             .collect::<Vec<_>>()

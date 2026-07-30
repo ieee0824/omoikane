@@ -2486,13 +2486,9 @@ fn paint_box_internal_to(
     // arithmetic robust if its parsing contract changes.
     let image_count = background_list(style, "background-image", "none").len().max(1);
     let clip_values = background_list(style, "background-clip", "border-box");
-    let mut color_style = style.clone();
-    color_style.set_paint_keyword(
-        "background-clip",
-        clip_values[(image_count - 1) % clip_values.len()].clone(),
-    );
+    let color_clip = &clip_values[(image_count - 1) % clip_values.len()];
     let (background_clip_rect, background_radii) =
-        background_clip_geometry(layout, &color_style, border_box, padding_box);
+        background_clip_geometry(layout, style, color_clip, border_box, padding_box);
     let background_clip = match inherited_clip {
         Some(inherited_clip) => intersect(background_clip_rect, inherited_clip),
         None => Some(background_clip_rect),
@@ -2861,28 +2857,31 @@ fn background_color(style: &ComputedStyle) -> Option<Color> {
 fn background_clip_geometry(
     layout: &LayoutBox,
     style: &ComputedStyle,
+    clip: &str,
     border_box: Rect,
     padding_box: Rect,
 ) -> (Rect, (f32, f32, f32, f32)) {
     let radii = border_radius_corners(style);
     let border = layout.dimensions.border;
     let padding = layout.dimensions.padding;
-    let (rect, top, right, bottom, left) = match style.get("background-clip") {
-        Some(ComputedValue::Keyword(value)) if value.eq_ignore_ascii_case("content-box") => (
+    let (rect, top, right, bottom, left) = if clip.eq_ignore_ascii_case("content-box") {
+        (
             layout.dimensions.content,
             border.top + padding.top,
             border.right + padding.right,
             border.bottom + padding.bottom,
             border.left + padding.left,
-        ),
-        Some(ComputedValue::Keyword(value)) if value.eq_ignore_ascii_case("padding-box") => (
+        )
+    } else if clip.eq_ignore_ascii_case("padding-box") {
+        (
             padding_box,
             border.top,
             border.right,
             border.bottom,
             border.left,
-        ),
-        _ => return (border_box, radii),
+        )
+    } else {
+        return (border_box, radii);
     };
     let (tl, tr, br, bl) = radii;
     (
@@ -4087,17 +4086,21 @@ fn paint_background_image(
     };
     let origins = background_list(style, "background-origin", "padding-box");
     let clips = background_list(style, "background-clip", "border-box");
+    let positions_x = background_list(style, "background-position-x", "0%");
+    let positions_y = background_list(style, "background-position-y", "0%");
+    let sizes = background_list(style, "background-size", "auto");
+    let repeats = background_list(style, "background-repeat", "repeat");
+    let attachments = background_list(style, "background-attachment", "scroll");
     for index in (0..images.len()).rev() {
-        let mut layer_style = style.clone();
         let origin = background_box_rect(
             &origins[index % origins.len()],
             rect,
             padding_box,
             content_box,
         );
-        layer_style.set_paint_keyword("background-clip", clips[index % clips.len()].clone());
         let (clip_rect, radii) = background_clip_geometry_for_rect(
-            &layer_style,
+            style,
+            &clips[index % clips.len()],
             rect,
             padding_box,
             content_box,
@@ -4111,17 +4114,14 @@ fn paint_background_image(
         let Some(layer_clip) = layer_clip else {
             continue;
         };
-        layer_style.set_paint_keyword("background-image", images[index].clone());
-        for (property, default) in [
-            ("background-position-x", "0%"),
-            ("background-position-y", "0%"),
-            ("background-size", "auto"),
-            ("background-repeat", "repeat"),
-            ("background-attachment", "scroll"),
-        ] {
-            let values = background_list(style, property, default);
-            layer_style.set_paint_keyword(property, values[index % values.len()].clone());
-        }
+        let layer_style = background_layer_style(
+            &images[index],
+            &positions_x[index % positions_x.len()],
+            &positions_y[index % positions_y.len()],
+            &sizes[index % sizes.len()],
+            &repeats[index % repeats.len()],
+            &attachments[index % attachments.len()],
+        );
         paint_background_image_rounded(
             canvas,
             &layer_style,
@@ -4137,6 +4137,7 @@ fn paint_background_image(
 #[allow(clippy::too_many_arguments)]
 fn background_clip_geometry_for_rect(
     style: &ComputedStyle,
+    clip: &str,
     border_box: Rect,
     padding_box: Rect,
     content_box: Rect,
@@ -4145,22 +4146,24 @@ fn background_clip_geometry_for_rect(
 ) -> (Rect, (f32, f32, f32, f32)) {
     let radii = border_radius_corners(style);
     let (padding_top, padding_right, padding_bottom, padding_left) = padding;
-    let (rect, top, right, bottom, left) = match style.get("background-clip") {
-        Some(ComputedValue::Keyword(value)) if value.eq_ignore_ascii_case("content-box") => (
+    let (rect, top, right, bottom, left) = if clip.eq_ignore_ascii_case("content-box") {
+        (
             content_box,
             border.top + padding_top,
             border.right + padding_right,
             border.bottom + padding_bottom,
             border.left + padding_left,
-        ),
-        Some(ComputedValue::Keyword(value)) if value.eq_ignore_ascii_case("padding-box") => (
+        )
+    } else if clip.eq_ignore_ascii_case("padding-box") {
+        (
             padding_box,
             border.top,
             border.right,
             border.bottom,
             border.left,
-        ),
-        _ => return (border_box, radii),
+        )
+    } else {
+        return (border_box, radii);
     };
     let (tl, tr, br, bl) = radii;
     (
@@ -4186,6 +4189,11 @@ fn paint_background_images_for_box(
     let images = background_list(style, "background-image", "none");
     let origins = background_list(style, "background-origin", "padding-box");
     let clips = background_list(style, "background-clip", "border-box");
+    let positions_x = background_list(style, "background-position-x", "0%");
+    let positions_y = background_list(style, "background-position-y", "0%");
+    let sizes = background_list(style, "background-size", "auto");
+    let repeats = background_list(style, "background-repeat", "repeat");
+    let attachments = background_list(style, "background-attachment", "scroll");
     for index in (0..images.len()).rev() {
         let origin = background_box_rect(
             &origins[index % origins.len()],
@@ -4193,10 +4201,13 @@ fn paint_background_images_for_box(
             padding_box,
             layout.dimensions.content,
         );
-        let mut layer_style = style.clone();
-        layer_style.set_paint_keyword("background-clip", clips[index % clips.len()].clone());
-        let (clip_rect, radii) =
-            background_clip_geometry(layout, &layer_style, border_box, padding_box);
+        let (clip_rect, radii) = background_clip_geometry(
+            layout,
+            style,
+            &clips[index % clips.len()],
+            border_box,
+            padding_box,
+        );
         let clip = match inherited_clip {
             Some(inherited_clip) => intersect(clip_rect, inherited_clip),
             None => Some(clip_rect),
@@ -4204,17 +4215,14 @@ fn paint_background_images_for_box(
         let Some(clip) = clip else {
             continue;
         };
-        layer_style.set_paint_keyword("background-image", images[index].clone());
-        for (property, default) in [
-            ("background-position-x", "0%"),
-            ("background-position-y", "0%"),
-            ("background-size", "auto"),
-            ("background-repeat", "repeat"),
-            ("background-attachment", "scroll"),
-        ] {
-            let values = background_list(style, property, default);
-            layer_style.set_paint_keyword(property, values[index % values.len()].clone());
-        }
+        let layer_style = background_layer_style(
+            &images[index],
+            &positions_x[index % positions_x.len()],
+            &positions_y[index % positions_y.len()],
+            &sizes[index % sizes.len()],
+            &repeats[index % repeats.len()],
+            &attachments[index % attachments.len()],
+        );
         paint_background_image_rounded(
             canvas,
             &layer_style,
@@ -4225,6 +4233,28 @@ fn paint_background_images_for_box(
             radii,
         );
     }
+}
+
+fn background_layer_style(
+    image: &str,
+    position_x: &str,
+    position_y: &str,
+    size: &str,
+    repeat: &str,
+    attachment: &str,
+) -> ComputedStyle {
+    let mut style = ComputedStyle::default();
+    for (property, value) in [
+        ("background-image", image),
+        ("background-position-x", position_x),
+        ("background-position-y", position_y),
+        ("background-size", size),
+        ("background-repeat", repeat),
+        ("background-attachment", attachment),
+    ] {
+        style.set_paint_keyword(property, value.to_string());
+    }
+    style
 }
 
 fn background_box_rect(

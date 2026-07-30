@@ -889,13 +889,31 @@ fn parse_background_layer(value: &Value, allow_color: bool) -> Option<Background
                 if matches!(
                     keyword.to_ascii_lowercase().as_str(),
                     "left" | "right" | "top" | "bottom" | "center"
-                ) => position.push(item.clone()),
-            Value::Length(_, _) | Value::Percentage(_) => position.push(item.clone()),
-            Value::Number(number) if *number == 0.0 => position.push(item.clone()),
+                ) => {
+                    if slash.is_some_and(|slash| index > slash) {
+                        return None;
+                    }
+                    position.push(item.clone());
+                }
+            Value::Length(_, _) | Value::Percentage(_) => {
+                if slash.is_some_and(|slash| index > slash) {
+                    return None;
+                }
+                position.push(item.clone());
+            }
+            Value::Number(number) if *number == 0.0 => {
+                if slash.is_some_and(|slash| index > slash) {
+                    return None;
+                }
+                position.push(item.clone());
+            }
             _ => return None,
         }
     }
     if position.len() > 2 || boxes.len() > 2 {
+        return None;
+    }
+    if slash.is_some() && position.is_empty() {
         return None;
     }
     if repeat_values.len() == 1 {
