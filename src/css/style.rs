@@ -997,14 +997,24 @@ fn validate_declaration(name: &str, value: &Value) -> DeclarationValidation {
         if values.is_empty() {
             return DeclarationValidation::Invalid;
         }
+        let mut normalized = Vec::with_capacity(values.len());
+        let mut has_unvalidated = false;
         for item in values {
-            if matches!(validate_declaration(name, item), DeclarationValidation::Invalid) {
-                return DeclarationValidation::Invalid;
+            match validate_declaration(name, item) {
+                DeclarationValidation::Valid(value) => {
+                    normalized.push(computed_value_css_text(&value));
+                }
+                DeclarationValidation::Invalid => return DeclarationValidation::Invalid,
+                DeclarationValidation::Unvalidated => has_unvalidated = true,
             }
         }
         // Validation is per layer, but computation still needs the resolution
         // context so relative units and calc() are normalized in every layer.
-        return DeclarationValidation::Unvalidated;
+        return if has_unvalidated {
+            DeclarationValidation::Unvalidated
+        } else {
+            DeclarationValidation::Valid(ComputedValue::Keyword(normalized.join(", ")))
+        };
     }
     if name.eq_ignore_ascii_case("position") {
         return match value {

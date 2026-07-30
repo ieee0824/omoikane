@@ -5360,6 +5360,27 @@ fn background_layer_lists_truncate_to_a_single_image() {
 }
 
 #[test]
+fn layered_background_box_keywords_are_normalized_to_lowercase() {
+    let style = image_computed_style(
+        "background-image: none, none; \
+         background-origin: CONTENT-BOX, Padding-Box; \
+         background-clip: PADDING-BOX, Border-Box;",
+    );
+    assert_eq!(
+        style.get("background-origin"),
+        Some(&ComputedValue::Keyword(
+            "content-box, padding-box".to_string()
+        ))
+    );
+    assert_eq!(
+        style.get("background-clip"),
+        Some(&ComputedValue::Keyword(
+            "padding-box, border-box".to_string()
+        ))
+    );
+}
+
+#[test]
 fn background_layer_computed_values_resolve_each_layers_relative_units() {
     let style = image_computed_style(
         "background-image: none, none; \
