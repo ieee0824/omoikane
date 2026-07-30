@@ -5357,6 +5357,17 @@ fn background_layer_computed_values_resolve_each_layers_relative_units() {
 }
 
 #[test]
+fn single_layer_two_axis_background_repeat_keeps_both_values() {
+    let style = image_computed_style(
+        "background-image: none; background-repeat: repeat no-repeat;",
+    );
+    assert_eq!(
+        style.get("background-repeat"),
+        Some(&ComputedValue::Keyword("repeat no-repeat".to_string()))
+    );
+}
+
+#[test]
 fn malformed_background_image_layer_drops_the_whole_declaration() {
     let style = image_computed_style(
         "background-image: url(valid.png); \

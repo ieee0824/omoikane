@@ -4238,6 +4238,9 @@ fn paint_prepared_background_image(
         let (repeat_x, repeat_y) = background_repeat(style);
         if has_explicit_size {
             let (tile_w, tile_h) = background_size(style, area, area.width, area.height);
+            if tile_w <= 0.0 || tile_h <= 0.0 {
+                return;
+            }
             let tile_w = tile_w.max(1.0);
             let tile_h = tile_h.max(1.0);
             let fixed = background_attachment_fixed(style);
@@ -4325,6 +4328,9 @@ fn paint_prepared_background_image(
         image.width().max(1) as f32,
         image.height().max(1) as f32,
     );
+    if tile_width <= 0.0 || tile_height <= 0.0 {
+        return;
+    }
     let tile_width = tile_width.max(1.0);
     let tile_height = tile_height.max(1.0);
     let x_end = area.x + area.width;

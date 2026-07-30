@@ -71,6 +71,12 @@ impl ComputedStyle {
                 .ok()
                 .map(ComputedValue::Percentage)
                 .unwrap_or_else(|| ComputedValue::Keyword(value.clone()))
+        } else if trimmed
+            .parse::<f32>()
+            .ok()
+            .is_some_and(|number| number.is_finite() && number == 0.0)
+        {
+            ComputedValue::Px(0.0)
         } else {
             ComputedValue::Keyword(value)
         };
@@ -3369,6 +3375,7 @@ fn compute_value(value: &Value, property_name: &str, ctx: ResolutionContext) -> 
                 || property_name.eq_ignore_ascii_case("overflow")
                 || property_name.eq_ignore_ascii_case("box-shadow")
                 || property_name.eq_ignore_ascii_case("background-size")
+                || property_name.eq_ignore_ascii_case("background-repeat")
                 || property_name.eq_ignore_ascii_case("mask-size")
                 || property_name.eq_ignore_ascii_case("border-spacing")
             {

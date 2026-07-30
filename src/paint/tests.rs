@@ -7190,6 +7190,53 @@ fn multiple_background_layers_support_axis_specific_repeat_modes() {
 }
 
 #[test]
+fn single_background_layer_preserves_two_axis_repeat_mode() {
+    let canvas = render_gradient_box(
+        "background-image: linear-gradient(red, red); \
+         background-size: 1px 1px; background-position: 0 0; \
+         background-repeat: repeat no-repeat;",
+        4,
+        4,
+    );
+    assert_eq!(canvas.pixel(0, 0), Some(Color::rgb(255, 0, 0)));
+    assert_eq!(canvas.pixel(3, 0), Some(Color::rgb(255, 0, 0)));
+    assert_eq!(canvas.pixel(0, 1).unwrap().a, 0);
+}
+
+#[test]
+fn zero_background_size_does_not_fall_back_to_intrinsic_size_or_tile() {
+    for zero in ["0", "+0", "-0", "0.0"] {
+        let single = render_gradient_box(
+            &format!(
+                "background-color: blue; background-image: linear-gradient(red, red); \
+                 background-size: {zero}; background-repeat: repeat;"
+            ),
+            4,
+            4,
+        );
+        assert_eq!(
+            single.pixel(0, 0),
+            Some(Color::rgb(0, 0, 255)),
+            "single-layer size {zero}"
+        );
+
+        let layered = render_gradient_box(
+            &format!(
+                "background-image: linear-gradient(red, red), linear-gradient(green, green); \
+                 background-size: {zero}, auto; background-repeat: repeat;"
+            ),
+            4,
+            4,
+        );
+        assert_eq!(
+            layered.pixel(0, 0),
+            Some(Color::rgb(0, 128, 0)),
+            "layered size {zero}"
+        );
+    }
+}
+
+#[test]
 fn three_gradient_layers_repeat_longhand_lists_and_keep_layer_geometry() {
     let canvas = render_gradient_box(
         "background-image: \
