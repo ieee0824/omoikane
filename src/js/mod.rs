@@ -23462,12 +23462,17 @@ b</textarea></form>"#);
                 dialog.close();
                 dialog.close();
                 out.push(dialog.open, document.activeElement.id);
+                dialog.returnValue = "preserved";
+                dialog.showModal();
+                dialog.showModal();
+                dialog.close();
+                out.push(dialog.returnValue);
                 return out.join(":");
             })()"#,
         );
         assert_eq!(
             result,
-            ":false:true:InvalidStateError:true:true:InvalidStateError:false:outside"
+            ":false:true:InvalidStateError:true:true:InvalidStateError:false:outside:preserved"
         );
     }
 
