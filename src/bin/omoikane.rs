@@ -148,7 +148,7 @@ fn physical_key_code(key: PhysicalKey) -> String {
         PhysicalKey::Code(winit::keyboard::KeyCode::SuperLeft) => "MetaLeft".to_string(),
         PhysicalKey::Code(winit::keyboard::KeyCode::SuperRight) => "MetaRight".to_string(),
         PhysicalKey::Code(code) => format!("{code:?}"),
-        PhysicalKey::Unidentified(_) => String::new(),
+        PhysicalKey::Unidentified(_) => "Unidentified".to_string(),
     }
 }
 
@@ -240,7 +240,7 @@ impl ApplicationHandler for BrowserApp {
 
 #[cfg(test)]
 mod tests {
-    use winit::keyboard::KeyCode;
+    use winit::keyboard::{KeyCode, NativeKeyCode};
 
     use super::*;
 
@@ -257,6 +257,10 @@ mod tests {
         assert_eq!(
             physical_key_code(PhysicalKey::Code(KeyCode::SuperLeft)),
             "MetaLeft"
+        );
+        assert_eq!(
+            physical_key_code(PhysicalKey::Unidentified(NativeKeyCode::Xkb(0))),
+            "Unidentified"
         );
     }
 
