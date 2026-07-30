@@ -5349,6 +5349,21 @@ fn malformed_background_image_layer_drops_the_whole_declaration() {
     );
 }
 
+#[test]
+fn single_axis_background_position_keywords_center_the_other_axis() {
+    let style = image_computed_style(
+        "background-image: none, none; background-position: top, left;",
+    );
+    assert_eq!(
+        style.get("background-position-x"),
+        Some(&ComputedValue::Keyword("center, left".to_string()))
+    );
+    assert_eq!(
+        style.get("background-position-y"),
+        Some(&ComputedValue::Keyword("top, center".to_string()))
+    );
+}
+
 /// Both properties are exposed with their initial values even when nothing
 /// declares them, so getComputedStyle can serialize them (Firefox 152: `fill`
 /// and `50% 50%`).

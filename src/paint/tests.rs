@@ -7168,6 +7168,26 @@ fn multiple_background_layers_apply_attachment_independently() {
 }
 
 #[test]
+fn multiple_background_layers_support_axis_specific_repeat_modes() {
+    for repeats in ["repeat-x, repeat-y", "repeat no-repeat, no-repeat repeat"] {
+        let canvas = render_gradient_box(
+            &format!(
+                "background-image: linear-gradient(red, red), linear-gradient(blue, blue); \
+                 background-size: 1px 1px; \
+                 background-position: 0px 0px, 1px 0px; \
+                 background-repeat: {repeats};"
+            ),
+            4,
+            4,
+        );
+        assert_eq!(canvas.pixel(0, 0), Some(Color::rgb(255, 0, 0)));
+        assert_eq!(canvas.pixel(3, 0), Some(Color::rgb(255, 0, 0)));
+        assert_eq!(canvas.pixel(1, 3), Some(Color::rgb(0, 0, 255)));
+        assert_eq!(canvas.pixel(3, 3).unwrap().a, 0);
+    }
+}
+
+#[test]
 fn three_gradient_layers_repeat_longhand_lists_and_keep_layer_geometry() {
     let canvas = render_gradient_box(
         "background-image: \

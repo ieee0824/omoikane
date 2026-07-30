@@ -75,13 +75,20 @@ fn expand_background_position_shorthand(value: Value, important: bool) -> Vec<De
                 }];
             }
         };
-        x_values.push(components[0].clone());
-        y_values.push(
-            components
-                .get(1)
-                .cloned()
-                .unwrap_or_else(|| Value::Keyword("center".to_string())),
-        );
+        if components.len() == 1
+            && matches!(&components[0], Value::Keyword(keyword) if matches!(keyword.to_ascii_lowercase().as_str(), "top" | "bottom"))
+        {
+            x_values.push(Value::Keyword("center".to_string()));
+            y_values.push(components[0].clone());
+        } else {
+            x_values.push(components[0].clone());
+            y_values.push(
+                components
+                    .get(1)
+                    .cloned()
+                    .unwrap_or_else(|| Value::Keyword("center".to_string())),
+            );
+        }
     }
     let layered = |values: Vec<Value>| {
         if values.len() == 1 {
@@ -733,7 +740,7 @@ fn parse_background_layer(value: &Value, allow_color: bool) -> Option<Background
     let mut position = Vec::new();
     let mut boxes = Vec::new();
     let mut saw_image = false;
-    let mut saw_repeat = false;
+    let mut repeat_values = Vec::new();
     let mut saw_attachment = false;
     let size_range = if let Some(slash) = slash {
         let mut end = slash + 1;
@@ -775,11 +782,23 @@ fn parse_background_layer(value: &Value, allow_color: bool) -> Option<Background
                 saw_image = true;
             }
             Value::Keyword(keyword)
-                if matches!(keyword.to_ascii_lowercase().as_str(), "repeat" | "no-repeat")
-                    && !saw_repeat =>
+                if matches!(
+                    keyword.to_ascii_lowercase().as_str(),
+                    "repeat" | "no-repeat" | "repeat-x" | "repeat-y"
+                ) =>
             {
-                layer.repeat = item.clone();
-                saw_repeat = true;
+                if !repeat_values.is_empty()
+                    && (matches!(keyword.to_ascii_lowercase().as_str(), "repeat-x" | "repeat-y")
+                        || repeat_values.iter().any(|value| {
+                            matches!(value, Value::Keyword(previous) if matches!(previous.to_ascii_lowercase().as_str(), "repeat-x" | "repeat-y"))
+                        }))
+                {
+                    return None;
+                }
+                repeat_values.push(item.clone());
+                if repeat_values.len() > 2 {
+                    return None;
+                }
             }
             Value::Keyword(keyword)
                 if matches!(keyword.to_ascii_lowercase().as_str(), "scroll" | "fixed" | "local")
@@ -825,11 +844,25 @@ fn parse_background_layer(value: &Value, allow_color: bool) -> Option<Background
     if position.len() > 2 || boxes.len() > 2 {
         return None;
     }
-    if let Some(x) = position.first() {
-        layer.position_x = x.clone();
+    if repeat_values.len() == 1 {
+        layer.repeat = repeat_values.remove(0);
+    } else if repeat_values.len() == 2 {
+        layer.repeat = Value::List(repeat_values);
     }
-    if let Some(y) = position.get(1) {
-        layer.position_y = y.clone();
+    if position.len() == 1
+        && matches!(&position[0], Value::Keyword(keyword) if matches!(keyword.to_ascii_lowercase().as_str(), "top" | "bottom"))
+    {
+        layer.position_x = Value::Keyword("center".to_string());
+        layer.position_y = position[0].clone();
+    } else {
+        if let Some(x) = position.first() {
+            layer.position_x = x.clone();
+        }
+        if let Some(y) = position.get(1) {
+            layer.position_y = y.clone();
+        } else if !position.is_empty() {
+            layer.position_y = Value::Keyword("center".to_string());
+        }
     }
     if let Some(origin) = boxes.first() {
         layer.origin = origin.clone();
