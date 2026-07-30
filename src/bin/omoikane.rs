@@ -11,7 +11,7 @@ use omoikane::platform_input::{
 use serde_json::json;
 use softbuffer::{Context, Surface};
 use winit::application::ApplicationHandler;
-use winit::dpi::LogicalSize;
+use winit::dpi::{LogicalSize, PhysicalPosition};
 use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{Key, NamedKey, PhysicalKey};
@@ -70,10 +70,14 @@ impl BrowserApp {
     }
 
     fn dispatch_input(&mut self, event: &WindowEvent) {
+        let scale_factor = self
+            .window
+            .as_ref()
+            .map_or(1.0, |window| window.scale_factor());
         let result = match event {
             WindowEvent::CursorMoved { position, .. } => {
-                self.input
-                    .cursor_moved(&mut self.session, position.x, position.y)
+                let (x, y) = physical_position_css_pixels(*position, scale_factor);
+                self.input.cursor_moved(&mut self.session, x, y)
             }
             WindowEvent::MouseInput { state, button, .. } => {
                 let Some(button) = platform_mouse_button(*button) else {
@@ -83,7 +87,7 @@ impl BrowserApp {
                     .mouse_button(&mut self.session, button, *state == ElementState::Pressed)
             }
             WindowEvent::MouseWheel { delta, .. } => {
-                let (delta_x, delta_y) = wheel_delta_pixels(*delta);
+                let (delta_x, delta_y) = wheel_delta_css_pixels(*delta, scale_factor);
                 self.input.wheel(&mut self.session, delta_x, delta_y)
             }
             WindowEvent::ModifiersChanged(modifiers) => {
@@ -152,14 +156,21 @@ fn physical_key_code(key: PhysicalKey) -> String {
     }
 }
 
-fn wheel_delta_pixels(delta: MouseScrollDelta) -> (f64, f64) {
+fn physical_position_css_pixels(position: PhysicalPosition<f64>, scale_factor: f64) -> (f64, f64) {
+    let logical = position.to_logical::<f64>(scale_factor);
+    (logical.x, logical.y)
+}
+
+fn wheel_delta_css_pixels(delta: MouseScrollDelta, scale_factor: f64) -> (f64, f64) {
     const CSS_PIXELS_PER_LINE: f64 = 40.0;
     match delta {
         MouseScrollDelta::LineDelta(x, y) => (
             f64::from(x) * CSS_PIXELS_PER_LINE,
             f64::from(y) * CSS_PIXELS_PER_LINE,
         ),
-        MouseScrollDelta::PixelDelta(position) => (position.x, position.y),
+        MouseScrollDelta::PixelDelta(position) => {
+            physical_position_css_pixels(position, scale_factor)
+        }
     }
 }
 
@@ -274,15 +285,24 @@ mod tests {
     }
 
     #[test]
-    fn translates_line_and_fractional_pixel_wheel_deltas() {
+    fn translates_cursor_and_wheel_positions_to_css_pixels() {
         assert_eq!(
-            wheel_delta_pixels(MouseScrollDelta::LineDelta(0.5, -2.0)),
+            physical_position_css_pixels(PhysicalPosition::new(12.5, -7.0), 1.0),
+            (12.5, -7.0)
+        );
+        assert_eq!(
+            physical_position_css_pixels(PhysicalPosition::new(25.0, -14.0), 2.0),
+            (12.5, -7.0)
+        );
+        assert_eq!(
+            wheel_delta_css_pixels(MouseScrollDelta::LineDelta(0.5, -2.0), 2.0),
             (20.0, -80.0)
         );
         assert_eq!(
-            wheel_delta_pixels(MouseScrollDelta::PixelDelta(
-                winit::dpi::PhysicalPosition::new(1.25, -3.5)
-            )),
+            wheel_delta_css_pixels(
+                MouseScrollDelta::PixelDelta(PhysicalPosition::new(2.5, -7.0)),
+                2.0
+            ),
             (1.25, -3.5)
         );
     }
