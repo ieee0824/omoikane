@@ -1039,19 +1039,27 @@ fn average_gradient_color(stops: &[(Color, f32, Option<f32>)]) -> Color {
             }
         }
     } else {
-        for (color, _, _) in stops {
-            let alpha = color.a as f32 / 255.0;
-            alpha_integral += alpha;
-            channel_integrals[0] += color.r as f32 * alpha;
-            channel_integrals[1] += color.g as f32 * alpha;
-            channel_integrals[2] += color.b as f32 * alpha;
+        // CSS Images 3 §3.3 places the remaining stops equally over an
+        // arbitrary non-zero distance, then averages that virtual gradient.
+        // Interior stops therefore have twice the weight of the endpoints.
+        let width = 1.0 / (stops.len() - 1) as f32;
+        for pair in stops.windows(2) {
+            let a = pair[0].0;
+            let b = pair[1].0;
+            let a_alpha = a.a as f32 / 255.0;
+            let b_alpha = b.a as f32 / 255.0;
+            alpha_integral += width * (a_alpha + b_alpha) * 0.5;
+            for (integral, (a_channel, b_channel)) in
+                channel_integrals
+                    .iter_mut()
+                    .zip([(a.r, b.r), (a.g, b.g), (a.b, b.b)])
+            {
+                *integral +=
+                    width * (a_channel as f32 * a_alpha + b_channel as f32 * b_alpha) * 0.5;
+            }
         }
     }
-    let divisor = if period > f32::EPSILON {
-        period
-    } else {
-        stops.len() as f32
-    };
+    let divisor = if period > f32::EPSILON { period } else { 1.0 };
     let alpha = alpha_integral / divisor;
     let channel = |integral: f32| {
         if alpha_integral <= f32::EPSILON {
@@ -1291,13 +1299,23 @@ mod gradient_tests {
             (Color::rgb(0, 255, 0), 1.0, None),
             (Color::rgb(0, 0, 255), 1.0, None),
         ];
-        assert_eq!(average_gradient_color(&opaque), Color::rgb(85, 85, 85));
+        assert_eq!(average_gradient_color(&opaque), Color::rgb(64, 128, 64));
 
         let alpha = [
             (Color::rgba(255, 0, 0, 255), 1.0, None),
             (Color::rgba(0, 0, 255, 0), 1.0, None),
         ];
         assert_eq!(average_gradient_color(&alpha), Color::rgba(255, 0, 0, 128));
+
+        let three_alpha = [
+            (Color::rgba(255, 0, 0, 0), 1.0, None),
+            (Color::rgba(0, 255, 0, 255), 1.0, None),
+            (Color::rgba(0, 0, 255, 0), 1.0, None),
+        ];
+        assert_eq!(
+            average_gradient_color(&three_alpha),
+            Color::rgba(0, 255, 0, 128)
+        );
     }
 
     #[test]
