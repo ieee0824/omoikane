@@ -4899,12 +4899,14 @@ fn call_event_listener_native(_: &JsValue, args: &[JsValue], context: &mut Conte
     let callback = if let Some(callback) = listener.as_callable() {
         callback.clone()
     } else {
-        listener.as_object()
-            .ok_or_else(|| JsNativeError::typ().with_message("event listener is not callable"))?
-            .get(js_string!("handleEvent"), context)?
-            .as_callable()
-            .ok_or_else(|| JsNativeError::typ().with_message("event listener is not callable"))?
-            .clone()
+        let Some(listener) = listener.as_object() else {
+            return Ok(JsValue::undefined());
+        };
+        let handle_event = listener.get(js_string!("handleEvent"), context)?;
+        let Some(callback) = handle_event.as_callable() else {
+            return Ok(JsValue::undefined());
+        };
+        callback.clone()
     };
     context.call_with_native_continuation(
         &callback, &this, &[event],
@@ -10485,6 +10487,33 @@ b</textarea></form>"#);
         let mut runtime = JsRuntime::new().unwrap();
         assert!(runtime
             .eval(r#"(() => { const target = document.createElement("div"); const listener = { calls: 0, handleEvent(event) { this.calls++; this.type = event.type; } }; target.addEventListener("ready", listener); target.dispatchEvent(new Event("ready")); return listener.calls === 1 && listener.type === "ready"; })()"#)
+            .unwrap()
+            .as_boolean()
+            .unwrap());
+    }
+
+    #[test]
+    fn mutated_event_listener_objects_are_skipped_without_stopping_dispatch() {
+        let mut runtime = JsRuntime::new().unwrap();
+        assert!(runtime
+            .eval(
+                r#"(() => {
+                    const target = document.createElement("div");
+                    const missing = { handleEvent() {} };
+                    const nonCallable = { handleEvent() {} };
+                    const calls = [];
+                    target.addEventListener("ready", missing);
+                    target.addEventListener("ready", () => calls.push("after-missing"));
+                    delete missing.handleEvent;
+                    target.dispatchEvent(new Event("ready"));
+                    const second = document.createElement("div");
+                    second.addEventListener("ready", nonCallable);
+                    second.addEventListener("ready", () => calls.push("after-non-callable"));
+                    nonCallable.handleEvent = 42;
+                    second.dispatchEvent(new Event("ready"));
+                    return calls.join(",") === "after-missing,after-non-callable";
+                })()"#,
+            )
             .unwrap()
             .as_boolean()
             .unwrap());
