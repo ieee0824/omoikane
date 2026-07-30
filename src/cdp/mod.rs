@@ -244,6 +244,14 @@ pub struct JsonRpcError {
     pub message: String,
 }
 
+impl std::fmt::Display for JsonRpcError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "JSON-RPC error {}: {}", self.code, self.message)
+    }
+}
+
+impl std::error::Error for JsonRpcError {}
+
 impl JsonRpcResponse {
     fn success(id: Value, result: Value) -> Self {
         Self {
@@ -653,6 +661,11 @@ impl CdpSession {
     /// Returns the URL of the currently loaded document.
     pub fn current_url(&self) -> &str {
         &self.current_url
+    }
+
+    /// Updates the active page's layout and script-visible viewport dimensions.
+    pub fn set_viewport(&mut self, width: u32, height: u32) {
+        self.runtime.set_viewport(width as f32, height as f32);
     }
 
     /// Advances the active page event loop and commits script navigation.

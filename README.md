@@ -168,6 +168,15 @@ cargo run --example screenshot -- "https://example.com/" tests/output/example.pn
 cargo run --example screenshot -- --insecure "https://expired.example.com/" out.png
 ```
 
+実験的なネイティブウィンドウでページを継続描画する例:
+
+```bash
+cargo run --features gui --bin omoikane -- "https://example.com/"
+```
+
+ウィンドウサイズはそのままページの viewport に反映されます。現時点の GUI は描画面と
+フレームスケジューラのみで、入力やブラウザ UI は未実装です。
+
 レンダリング性能のbaseline取得（外部通信なし）:
 
 ```bash
