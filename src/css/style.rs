@@ -2306,16 +2306,10 @@ fn matches_part_selector(
     let Some(mut root) = node.containing_shadow_root() else {
         return false;
     };
-    let mut exposed_names: HashSet<String> = node
-        .get_attribute("part")
-        .into_iter()
-        .flat_map(|value| {
-            value
-                .split_ascii_whitespace()
-                .map(str::to_string)
-                .collect::<Vec<_>>()
-        })
-        .collect();
+    let mut exposed_names = HashSet::new();
+    if let Some(value) = node.get_attribute("part") {
+        exposed_names.extend(value.split_ascii_whitespace().map(str::to_string));
+    }
     if exposed_names.is_empty() {
         return false;
     }

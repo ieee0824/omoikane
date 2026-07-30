@@ -453,7 +453,10 @@ impl Parser {
         let pseudo_element_count = parts
             .iter()
             .flat_map(|part| &part.simples)
-            .filter(|simple| matches!(simple, SimpleSelector::PseudoElement(_)))
+            .filter(|simple| {
+                matches!(simple, SimpleSelector::PseudoElement(_))
+                    || matches!(simple, SimpleSelector::PseudoClass(name) if name.eq_ignore_ascii_case("before") || name.eq_ignore_ascii_case("after"))
+            })
             .count();
         for (part_index, part) in parts.iter().enumerate() {
             for (simple_index, simple) in part.simples.iter().enumerate() {
@@ -1587,6 +1590,8 @@ mod selector_list_tests {
             "x-card::part(label).active",
             "x-card::part(label) span",
             "x-card::before::part(label)",
+            "x-card:before::part(label)",
+            "x-card:AFTER::part(label)",
         ] {
             assert!(
                 parse_stylesheet(&format!("{invalid} {{ color: red; }}")).is_err(),
