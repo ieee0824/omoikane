@@ -39,6 +39,46 @@ pub(crate) use transition::{
     computed_transition_longhand, computed_transition_shorthand, expand_transition_shorthand,
     normalize_transition_longhand, normalize_transition_shorthand,
 };
+
+pub(crate) fn split_top_level_commas(value: &str) -> Vec<&str> {
+    let mut values = Vec::new();
+    let mut start = 0usize;
+    let mut depth = 0usize;
+    let mut quote = None;
+    let mut escaped = false;
+    for (index, ch) in value.char_indices() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        if ch == '\\' && quote.is_some() {
+            escaped = true;
+            continue;
+        }
+        if matches!(ch, '\'' | '"') {
+            if quote == Some(ch) {
+                quote = None;
+            } else if quote.is_none() {
+                quote = Some(ch);
+            }
+            continue;
+        }
+        if quote.is_some() {
+            continue;
+        }
+        match ch {
+            '(' => depth += 1,
+            ')' => depth = depth.saturating_sub(1),
+            ',' if depth == 0 => {
+                values.push(&value[start..index]);
+                start = index + ch.len_utf8();
+            }
+            _ => {}
+        }
+    }
+    values.push(&value[start..]);
+    values
+}
 pub use transform::AffineTransform;
 pub(crate) use transform::{
     TransformReferenceBox, interpolate_transform_lists, parse_transform_list,

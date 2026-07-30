@@ -3139,6 +3139,9 @@ fn resolve_image_position(
         Some(ComputedValue::Px(v)) => *v,
         Some(ComputedValue::Number(v)) if *v == 0.0 => 0.0,
         Some(ComputedValue::Percentage(p)) => (container_size - image_size) * p / 100.0,
+        Some(ComputedValue::CalcPxPercent(px, percentage)) => {
+            px + (container_size - image_size) * percentage / 100.0
+        }
         Some(ComputedValue::Keyword(k)) => match k.to_ascii_lowercase().as_str() {
             "center" => (container_size - image_size) * 0.5,
             "right" if is_x => container_size - image_size,
@@ -4280,7 +4283,7 @@ fn background_list(style: &ComputedStyle, property: &str, default: &str) -> Vec<
         Some(ComputedValue::Number(value)) => return vec![value.to_string()],
         _ => return vec![default.to_string()],
     };
-    let values = split_top_level_commas(raw)
+    let values = crate::css::split_top_level_commas(raw)
         .into_iter()
         .map(str::trim)
         .filter(|value| !value.is_empty())
@@ -4291,46 +4294,6 @@ fn background_list(style: &ComputedStyle, property: &str, default: &str) -> Vec<
     } else {
         values
     }
-}
-
-fn split_top_level_commas(value: &str) -> Vec<&str> {
-    let mut values = Vec::new();
-    let mut start = 0usize;
-    let mut depth = 0usize;
-    let mut quote = None;
-    let mut escaped = false;
-    for (index, ch) in value.char_indices() {
-        if escaped {
-            escaped = false;
-            continue;
-        }
-        if ch == '\\' && quote.is_some() {
-            escaped = true;
-            continue;
-        }
-        if matches!(ch, '\'' | '"') {
-            if quote == Some(ch) {
-                quote = None;
-            } else if quote.is_none() {
-                quote = Some(ch);
-            }
-            continue;
-        }
-        if quote.is_some() {
-            continue;
-        }
-        match ch {
-            '(' => depth += 1,
-            ')' => depth = depth.saturating_sub(1),
-            ',' if depth == 0 => {
-                values.push(&value[start..index]);
-                start = index + ch.len_utf8();
-            }
-            _ => {}
-        }
-    }
-    values.push(&value[start..]);
-    values
 }
 
 fn paint_prepared_background_image(

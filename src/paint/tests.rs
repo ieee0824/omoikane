@@ -11,6 +11,23 @@ use crate::layout::{
 use crate::paint::*;
 
 #[test]
+fn calc_background_positions_resolve_to_pixel_offsets_on_both_axes() {
+    let node = NodeHandle::element("div");
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "div { background-position-x: calc(10px + 50%); \
+                   background-position-y: calc(5px + 25%); }",
+        )
+        .unwrap(),
+    );
+    let style = resolver.computed_style(&node);
+
+    assert_eq!(background_position(&style, 100.0, 80.0, 20.0, 20.0), (50.0, 20.0));
+}
+
+#[test]
 fn png_checksums_match_standard_vectors() {
     let input = b"123456789";
 

@@ -4779,7 +4779,7 @@ fn normalize_background_layer_lists(properties: &mut BTreeMap<String, ComputedVa
     let image_count = properties
         .get("background-image")
         .map(computed_value_css_text)
-        .map(|value| split_css_top_level_commas(&value).len())
+        .map(|value| super::split_top_level_commas(&value).len())
         .unwrap_or(1);
     for (name, default) in [
         ("background-position-x", "0%"),
@@ -4794,7 +4794,7 @@ fn normalize_background_layer_lists(properties: &mut BTreeMap<String, ComputedVa
             .get(name)
             .map(computed_value_css_text)
             .unwrap_or_else(|| default.to_string());
-        let values = split_css_top_level_commas(&raw);
+        let values = super::split_top_level_commas(&raw);
         if image_count == 1 && values.len() == 1 {
             continue;
         }
@@ -4818,46 +4818,6 @@ fn computed_value_css_text(value: &ComputedValue) -> String {
             format!("calc({px}px + {percentage}%)")
         }
     }
-}
-
-fn split_css_top_level_commas(value: &str) -> Vec<&str> {
-    let mut values = Vec::new();
-    let mut start = 0usize;
-    let mut depth = 0usize;
-    let mut quote = None;
-    let mut escaped = false;
-    for (index, ch) in value.char_indices() {
-        if escaped {
-            escaped = false;
-            continue;
-        }
-        if ch == '\\' && quote.is_some() {
-            escaped = true;
-            continue;
-        }
-        if matches!(ch, '\'' | '"') {
-            if quote == Some(ch) {
-                quote = None;
-            } else if quote.is_none() {
-                quote = Some(ch);
-            }
-            continue;
-        }
-        if quote.is_some() {
-            continue;
-        }
-        match ch {
-            '(' => depth += 1,
-            ')' => depth = depth.saturating_sub(1),
-            ',' if depth == 0 => {
-                values.push(&value[start..index]);
-                start = index + 1;
-            }
-            _ => {}
-        }
-    }
-    values.push(&value[start..]);
-    values
 }
 
 fn resolve_non_inherited_css_wide_keywords(properties: &mut BTreeMap<String, ComputedValue>) {
