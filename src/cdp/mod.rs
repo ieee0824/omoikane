@@ -3105,6 +3105,57 @@ mod tests {
     }
 
     #[test]
+    fn navigation_pumps_module_timer_and_animation_frame_dialogs() {
+        let mut session = BrowserSession::new().unwrap();
+        let client = session.accept_upgrade(sample_upgrade_request()).unwrap();
+        browser_request(
+            &mut session,
+            client.client_id,
+            r#"{"jsonrpc":"2.0","id":"nav","method":"Page.navigate","params":{"url":"data:text/html,%3Cscript%20type%3D%22module%22%3EglobalThis.pageOrder%3D%5B'module-before'%5D%3Balert('module')%3BpageOrder.push('module-after')%3BsetTimeout(()%3D%3E%7BpageOrder.push('timer-before')%3Balert('timer')%3BpageOrder.push('timer-after')%7D%2C0)%3BrequestAnimationFrame(()%3D%3E%7BpageOrder.push('frame-before')%3Balert('frame')%3BpageOrder.push('frame-after')%7D)%3C%2Fscript%3E"}}"#,
+        );
+        let opening = browser_payloads(&mut session, client.client_id);
+        assert!(opening.iter().any(|value| {
+            value["method"] == "Page.javascriptDialogOpening"
+                && value["params"]["message"] == "module"
+        }));
+
+        for (index, expected) in ["module", "timer", "frame"].into_iter().enumerate() {
+            browser_request(
+                &mut session,
+                client.client_id,
+                &json!({
+                    "jsonrpc": "2.0",
+                    "id": format!("handle-{expected}"),
+                    "method": "Page.handleJavaScriptDialog",
+                    "params": { "accept": true },
+                })
+                .to_string(),
+            );
+            let payloads = browser_payloads(&mut session, client.client_id);
+            if let Some(next) = ["timer", "frame"].get(index) {
+                assert!(payloads.iter().any(|value| {
+                    value["method"] == "Page.javascriptDialogOpening"
+                        && value["params"]["message"] == *next
+                }));
+            } else {
+                assert!(payloads.iter().any(|value| value["id"] == "nav"));
+            }
+        }
+
+        browser_request(
+            &mut session,
+            client.client_id,
+            r#"{"jsonrpc":"2.0","id":"state","method":"Runtime.evaluate","params":{"expression":"pageOrder.join(',')","returnByValue":true}}"#,
+        );
+        let state = browser_payloads(&mut session, client.client_id);
+        assert!(state.iter().any(|value| {
+            value["id"] == "state"
+                && value["result"]["result"]["value"]
+                    == "module-before,module-after,timer-before,timer-after,frame-before,frame-after"
+        }));
+    }
+
+    #[test]
     fn replacement_navigation_cancels_a_suspended_startup_task() {
         let mut session = BrowserSession::new().unwrap();
         let client = session.accept_upgrade(sample_upgrade_request()).unwrap();
