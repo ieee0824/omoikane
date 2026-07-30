@@ -4578,6 +4578,9 @@ fn apply_ua_defaults(
 
 fn apply_initial_values(properties: &mut BTreeMap<String, ComputedValue>) {
     properties
+        .entry("background-clip".to_string())
+        .or_insert_with(|| ComputedValue::Keyword("border-box".to_string()));
+    properties
         .entry("background-color".to_string())
         .or_insert_with(|| ComputedValue::Color("transparent".to_string()));
     properties
@@ -4643,6 +4646,7 @@ fn apply_initial_values(properties: &mut BTreeMap<String, ComputedValue>) {
 fn resolve_non_inherited_css_wide_keywords(properties: &mut BTreeMap<String, ComputedValue>) {
     for name in [
         "aspect-ratio",
+        "background-clip",
         "container-name",
         "container-type",
         "object-fit",
