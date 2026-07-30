@@ -8871,7 +8871,7 @@ fn local_background_repeat_origin_clip_and_radius_stay_in_physical_scrollport() 
          body { margin: 0 } \
          #outer { width: 6px; height: 6px; overflow: hidden } \
          #sc { width: 8px; height: 8px; overflow: hidden; border-radius: 4px; padding: 1px; \
-               background-image: linear-gradient(red, red); background-size: 2px 2px; \
+               background-image: linear-gradient(to right, red 50%, blue 50%); background-size: 2px 2px; \
                background-repeat: repeat; background-origin: content-box; \
                background-clip: padding-box; background-attachment: local } \
          #content { width: 16px; height: 16px } \
@@ -8882,7 +8882,7 @@ fn local_background_repeat_origin_clip_and_radius_stay_in_physical_scrollport() 
         &[("#outer", 0.0, 0.0), ("#sc", 3.0, 3.0)],
         (0.0, 0.0),
     );
-    assert_eq!(canvas.pixel(3, 3), Some(Color::rgb(255, 0, 0)));
+    assert_eq!(canvas.pixel(3, 3), Some(Color::rgb(0, 0, 255)));
     assert_eq!(canvas.pixel(0, 0).unwrap().a, 0, "rounded local corner");
     assert_eq!(canvas.pixel(7, 3).unwrap().a, 0, "outer partial clip");
 
@@ -8892,10 +8892,21 @@ fn local_background_repeat_origin_clip_and_radius_stay_in_physical_scrollport() 
         &[("#outer", 2.0, 2.0), ("#sc", 3.0, 3.0)],
         (0.0, 0.0),
     );
-    assert!(
-        (0..6).any(|y| (0..6).any(|x| nested_scrolled.pixel(x, y) == Some(Color::rgb(255, 0, 0))))
+    assert_eq!(
+        nested_scrolled.pixel(1, 1),
+        Some(Color::rgb(0, 0, 255)),
+        "local tile stays aligned at a known point inside both scrollports"
     );
-    assert_eq!(nested_scrolled.pixel(7, 3).unwrap().a, 0, "nested partial clip");
+    assert_eq!(
+        nested_scrolled.pixel(2, 1),
+        Some(Color::rgb(255, 0, 0)),
+        "the adjacent repeated stripe keeps its scroll-relative phase"
+    );
+    assert_eq!(
+        nested_scrolled.pixel(7, 3).unwrap().a,
+        0,
+        "known point outside the ancestor scrollport stays clipped"
+    );
 }
 
 #[test]

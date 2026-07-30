@@ -1716,13 +1716,28 @@ fn translate_layout_for_scroll(
     sticky_scrollport: Rect,
     containing_block: Option<Rect>,
 ) {
-    let scroll_geometry = if layout.is_scroll_container() {
-        Some(crate::layout::PaintScrollGeometry {
-            offset: layout.scroll_offset(),
-            overflow_size: layout.scrollable_overflow(),
-        })
+    let (scroll_offset, scroll_geometry) = if layout.is_scroll_container() {
+        let overflow_size = layout.scrollable_overflow();
+        let (stored_x, stored_y) = layout.node.scroll_offset();
+        let content = layout.dimensions.content;
+        let padding = layout.dimensions.padding;
+        let max_x =
+            (overflow_size.0 - (content.width + padding.left + padding.right)).max(0.0);
+        let max_y =
+            (overflow_size.1 - (content.height + padding.top + padding.bottom)).max(0.0);
+        let offset = (
+            stored_x.clamp(0.0, max_x),
+            stored_y.clamp(0.0, max_y),
+        );
+        (
+            offset,
+            Some(crate::layout::PaintScrollGeometry {
+                offset,
+                overflow_size,
+            }),
+        )
     } else {
-        None
+        ((0.0, 0.0), None)
     };
     layout.paint_scroll = scroll_geometry;
     let style = resolver.computed_style(&layout.node);
@@ -1760,7 +1775,7 @@ fn translate_layout_for_scroll(
 
     // The box's own line boxes and list marker are scrollable content, so they
     // move with the children rather than with the border box.
-    let (scroll_x, scroll_y) = layout.scroll_offset();
+    let (scroll_x, scroll_y) = scroll_offset;
     let (content_dx, content_dy) = (dx - scroll_x, dy - scroll_y);
     if (content_dx, content_dy) != (0.0, 0.0) {
         for line in &mut layout.lines {
