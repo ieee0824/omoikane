@@ -524,7 +524,11 @@ impl CdpServer {
                 Err(error) => {
                     return self.enqueue_response(
                         client_id,
-                        JsonRpcResponse::invalid_params(id, error.message),
+                        JsonRpcResponse {
+                            id,
+                            result: None,
+                            error: Some(error),
+                        },
                     );
                 }
             }
@@ -2044,6 +2048,32 @@ mod tests {
         let payload: Value = serde_json::from_str(&decode_text(&outgoing[0])).unwrap();
         assert_eq!(payload["id"], 7);
         assert_eq!(payload["result"]["echo"], "1 + 1");
+        assert_eq!(server.pending_response_count(), 0);
+    }
+
+    #[test]
+    fn deferred_capable_method_preserves_an_immediate_error_code() {
+        let mut server = CdpServer::new();
+        server.register_deferred_method("Runtime.evaluate", |_, _| {
+            Err(JsonRpcError {
+                code: -32001,
+                message: "dialog dismissed".to_string(),
+            })
+        });
+        let client = server.accept_upgrade(sample_upgrade_request()).unwrap();
+        let request = WebSocketFrame::text(
+            r#"{"jsonrpc":"2.0","id":9,"method":"Runtime.evaluate","params":{}}"#,
+        )
+        .encode(true);
+
+        server.receive(client.client_id, &request).unwrap();
+
+        let outgoing = server.drain_outgoing(client.client_id).unwrap();
+        assert_eq!(outgoing.len(), 1);
+        let payload: Value = serde_json::from_str(&decode_text(&outgoing[0])).unwrap();
+        assert_eq!(payload["id"], 9);
+        assert_eq!(payload["error"]["code"], -32001);
+        assert_eq!(payload["error"]["message"], "dialog dismissed");
         assert_eq!(server.pending_response_count(), 0);
     }
 
