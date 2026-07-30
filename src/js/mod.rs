@@ -16512,16 +16512,22 @@ b</textarea></form>"#);
         let result = eval_str(
             &mut runtime,
             r#"(() => {
+                const stray = document.createElement("title");
+                stray.textContent = "Stray";
+                document.body.appendChild(stray);
+                const before = document.title;
                 document.title = "Created";
                 return [
+                  before,
                   document.title,
                   document.head.firstChild.tagName,
                   document.head.firstChild.textContent,
                   document.body.firstChild.tagName,
+                  stray.textContent,
                 ].join(":");
             })()"#,
         );
-        assert_eq!(result, "Created:TITLE:Created:P");
+        assert_eq!(result, ":Created:TITLE:Created:P:Stray");
     }
 
     #[test]

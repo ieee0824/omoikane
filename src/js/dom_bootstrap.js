@@ -3486,14 +3486,17 @@
     }
 
     get title() {
-      const title = this.getElementsByTagName("title")[0];
+      const head = this.head;
+      const title = head ? head.childNodes.find(node =>
+        node.nodeType === 1 && (node.localName || "").toLowerCase() === "title") : null;
       return title ? title.textContent : "";
     }
 
     set title(value) {
-      let title = this.getElementsByTagName("title")[0];
+      let head = this.head;
+      let title = head ? head.childNodes.find(node =>
+        node.nodeType === 1 && (node.localName || "").toLowerCase() === "title") : null;
       if (!title) {
-        let head = this.head;
         if (!head) {
           head = this.createElement("head");
           const root = this.documentElement;
