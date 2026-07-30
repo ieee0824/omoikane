@@ -5439,6 +5439,119 @@ fn single_axis_background_position_keywords_center_the_other_axis() {
     );
 }
 
+#[test]
+fn background_position_keyword_pairs_normalize_axis_order() {
+    let positions = "left top, top left, right bottom, bottom right, \
+                     left center, center left, right center, center right, \
+                     top center, center top, bottom center, center bottom, center center";
+    let images = std::iter::repeat("none")
+        .take(13)
+        .collect::<Vec<_>>()
+        .join(", ");
+
+    for declarations in [
+        format!("background-image: {images}; background-position: {positions};"),
+        format!("background: {positions}; background-image: {images};"),
+    ] {
+        let style = image_computed_style(&declarations);
+        assert_eq!(
+            style.get("background-position-x"),
+            Some(&ComputedValue::Keyword(
+                "left, left, right, right, left, left, right, right, center, center, center, center, center".to_string()
+            )),
+            "{declarations}",
+        );
+        assert_eq!(
+            style.get("background-position-y"),
+            Some(&ComputedValue::Keyword(
+                "top, top, bottom, bottom, center, center, center, center, top, top, bottom, bottom, center".to_string()
+            )),
+            "{declarations}",
+        );
+    }
+}
+
+#[test]
+fn background_position_rejects_two_keywords_from_the_same_axis() {
+    for invalid in [
+        "left right",
+        "right left",
+        "left left",
+        "right right",
+        "top bottom",
+        "bottom top",
+        "top top",
+        "bottom bottom",
+    ] {
+        let style = image_computed_style(&format!(
+            "background-position: 3px 4px; background-position: {invalid};"
+        ));
+        assert_eq!(
+            style.get("background-position-x"),
+            Some(&ComputedValue::Px(3.0)),
+            "accepted background-position: {invalid}",
+        );
+        assert_eq!(
+            style.get("background-position-y"),
+            Some(&ComputedValue::Px(4.0)),
+            "accepted background-position: {invalid}",
+        );
+
+        let style = image_computed_style(&format!(
+            "background: none 3px 4px; background: none {invalid};"
+        ));
+        assert_eq!(
+            style.get("background-position-x"),
+            Some(&ComputedValue::Px(3.0)),
+            "accepted background layer position: {invalid}",
+        );
+        assert_eq!(
+            style.get("background-position-y"),
+            Some(&ComputedValue::Px(4.0)),
+            "accepted background layer position: {invalid}",
+        );
+    }
+}
+
+#[test]
+fn background_position_keyword_and_length_pairs_obey_axis_slots() {
+    for declarations in [
+        "background-position: 10px top, left 20px;",
+        "background: none 10px top, none left 20px;",
+    ] {
+        let style = image_computed_style(declarations);
+        assert_eq!(
+            style.get("background-position-x"),
+            Some(&ComputedValue::Keyword("10px, left".to_string())),
+            "{declarations}",
+        );
+        assert_eq!(
+            style.get("background-position-y"),
+            Some(&ComputedValue::Keyword("top, 20px".to_string())),
+            "{declarations}",
+        );
+    }
+
+    for invalid in ["top 10px", "10px left"] {
+        for declarations in [
+            format!("background-position: 3px 4px; background-position: {invalid};"),
+            format!("background: none 3px 4px; background: none {invalid};"),
+        ] {
+            let style = image_computed_style(&declarations);
+            assert_eq!(
+                style.get("background-position-x"),
+                Some(&ComputedValue::Px(3.0)),
+                "accepted {declarations}",
+            );
+            assert_eq!(
+                style.get("background-position-y"),
+                Some(&ComputedValue::Px(4.0)),
+                "accepted {declarations}",
+            );
+        }
+    }
+}
+
 /// Both properties are exposed with their initial values even when nothing
 /// declares them, so getComputedStyle can serialize them (Firefox 152: `fill`
 /// and `50% 50%`).

@@ -75,20 +75,15 @@ fn expand_background_position_shorthand(value: Value, important: bool) -> Vec<De
                 }];
             }
         };
-        if components.len() == 1
-            && matches!(&components[0], Value::Keyword(keyword) if matches!(keyword.to_ascii_lowercase().as_str(), "top" | "bottom"))
-        {
-            x_values.push(Value::Keyword("center".to_string()));
-            y_values.push(components[0].clone());
-        } else {
-            x_values.push(components[0].clone());
-            y_values.push(
-                components
-                    .get(1)
-                    .cloned()
-                    .unwrap_or_else(|| Value::Keyword("center".to_string())),
-            );
-        }
+        let Some((x, y)) = normalize_background_position(&components) else {
+            return vec![Declaration {
+                name: "background-position".to_string(),
+                value: original,
+                important,
+            }];
+        };
+        x_values.push(x);
+        y_values.push(y);
     }
     let layered = |values: Vec<Value>| {
         if values.len() == 1 {
@@ -109,6 +104,66 @@ fn expand_background_position_shorthand(value: Value, important: bool) -> Vec<De
             important,
         },
     ]
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum BackgroundPositionAxis {
+    Horizontal,
+    Vertical,
+    Center,
+    Unspecified,
+}
+
+fn background_position_axis(value: &Value) -> BackgroundPositionAxis {
+    let Value::Keyword(keyword) = value else {
+        return BackgroundPositionAxis::Unspecified;
+    };
+    match keyword.to_ascii_lowercase().as_str() {
+        "left" | "right" => BackgroundPositionAxis::Horizontal,
+        "top" | "bottom" => BackgroundPositionAxis::Vertical,
+        "center" => BackgroundPositionAxis::Center,
+        _ => BackgroundPositionAxis::Unspecified,
+    }
+}
+
+fn normalize_background_position(values: &[Value]) -> Option<(Value, Value)> {
+    let center = || Value::Keyword("center".to_string());
+    match values {
+        [value] if background_position_axis(value) == BackgroundPositionAxis::Vertical => {
+            Some((center(), value.clone()))
+        }
+        [value] => Some((value.clone(), center())),
+        [first, second] => {
+            let first_axis = background_position_axis(first);
+            let second_axis = background_position_axis(second);
+            match (first_axis, second_axis) {
+                (BackgroundPositionAxis::Horizontal, BackgroundPositionAxis::Horizontal)
+                | (BackgroundPositionAxis::Vertical, BackgroundPositionAxis::Vertical) => None,
+                (BackgroundPositionAxis::Horizontal, BackgroundPositionAxis::Vertical)
+                | (BackgroundPositionAxis::Horizontal, BackgroundPositionAxis::Center)
+                | (BackgroundPositionAxis::Center, BackgroundPositionAxis::Vertical) => {
+                    Some((first.clone(), second.clone()))
+                }
+                (BackgroundPositionAxis::Vertical, BackgroundPositionAxis::Horizontal)
+                | (BackgroundPositionAxis::Center, BackgroundPositionAxis::Horizontal) => {
+                    Some((second.clone(), first.clone()))
+                }
+                (BackgroundPositionAxis::Vertical, BackgroundPositionAxis::Center) => {
+                    Some((second.clone(), first.clone()))
+                }
+                (BackgroundPositionAxis::Horizontal, BackgroundPositionAxis::Unspecified) => {
+                    Some((first.clone(), second.clone()))
+                }
+                (BackgroundPositionAxis::Vertical, BackgroundPositionAxis::Unspecified)
+                | (BackgroundPositionAxis::Unspecified, BackgroundPositionAxis::Horizontal) => None,
+                (BackgroundPositionAxis::Unspecified, BackgroundPositionAxis::Vertical) => {
+                    Some((first.clone(), second.clone()))
+                }
+                _ => Some((first.clone(), second.clone())),
+            }
+        }
+        _ => None,
+    }
 }
 
 fn expand_logical_axis_shorthand(
@@ -848,20 +903,10 @@ fn parse_background_layer(value: &Value, allow_color: bool) -> Option<Background
     } else if repeat_values.len() == 2 {
         layer.repeat = Value::List(repeat_values);
     }
-    if position.len() == 1
-        && matches!(&position[0], Value::Keyword(keyword) if matches!(keyword.to_ascii_lowercase().as_str(), "top" | "bottom"))
-    {
-        layer.position_x = Value::Keyword("center".to_string());
-        layer.position_y = position[0].clone();
-    } else {
-        if let Some(x) = position.first() {
-            layer.position_x = x.clone();
-        }
-        if let Some(y) = position.get(1) {
-            layer.position_y = y.clone();
-        } else if !position.is_empty() {
-            layer.position_y = Value::Keyword("center".to_string());
-        }
+    if !position.is_empty() {
+        let (x, y) = normalize_background_position(&position)?;
+        layer.position_x = x;
+        layer.position_y = y;
     }
     if let Some(origin) = boxes.first() {
         layer.origin = origin.clone();

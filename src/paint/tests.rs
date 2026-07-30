@@ -7141,6 +7141,20 @@ fn multiple_background_none_url_and_all_gradient_kinds_paint_front_layer_first()
 }
 
 #[test]
+fn background_layers_paint_reversed_position_keywords_on_the_correct_axes() {
+    let canvas = render_gradient_box(
+        "background: linear-gradient(red, red) no-repeat top right / 1px 1px, \
+                     linear-gradient(blue, blue) no-repeat bottom left / 1px 1px;",
+        4,
+        4,
+    );
+    assert_eq!(canvas.pixel(3, 0), Some(Color::rgb(255, 0, 0)));
+    assert_eq!(canvas.pixel(0, 3), Some(Color::rgb(0, 0, 255)));
+    assert_eq!(canvas.pixel(0, 0).unwrap().a, 0);
+    assert_eq!(canvas.pixel(3, 3).unwrap().a, 0);
+}
+
+#[test]
 fn multiple_background_layers_apply_attachment_independently() {
     for non_fixed in ["scroll", "local"] {
         let html = format!(
