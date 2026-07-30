@@ -491,6 +491,13 @@ fn default_center() -> GradientPosition {
     }
 }
 
+fn parse_unitless_zero(value: &str) -> Option<f32> {
+    value
+        .parse::<f32>()
+        .ok()
+        .filter(|number| number.is_finite() && *number == 0.0)
+}
+
 fn parse_number_with_unit(value: &str) -> Option<GradientLength> {
     let value = value.trim().to_ascii_lowercase();
     if let Some(number) = value.strip_suffix('%') {
@@ -507,17 +514,14 @@ fn parse_number_with_unit(value: &str) -> Option<GradientLength> {
             .filter(|v| v.is_finite())
             .map(GradientLength::Px);
     }
-    if value == "0" {
-        return Some(GradientLength::Px(0.0));
-    }
-    None
+    parse_unitless_zero(&value).map(GradientLength::Px)
 }
 
 fn parse_angle(value: &str) -> Option<f32> {
     let value = value.trim().to_ascii_lowercase();
     let finite = |number: &str| number.parse::<f32>().ok().filter(|value| value.is_finite());
-    if value == "0" {
-        return Some(0.0);
+    if let Some(zero) = parse_unitless_zero(&value) {
+        return Some(zero);
     }
     if let Some(number) = value.strip_suffix("deg") {
         return finite(number);
@@ -1390,6 +1394,11 @@ mod gradient_tests {
             "conic-gradient(from to right, red, blue)",
             "conic-gradient(red to right, blue)",
             "conic-gradient(red, to right, blue)",
+            "conic-gradient(from 1, red, blue)",
+            "conic-gradient(red 1, blue)",
+            "conic-gradient(red, 1, blue)",
+            "conic-gradient(from NaN, red, blue)",
+            "conic-gradient(red inf, blue)",
         ] {
             assert!(parse_gradient(value).is_none(), "accepted {value}");
         }
@@ -1399,6 +1408,7 @@ mod gradient_tests {
             "conic-gradient(red, 25%, blue)",
             "conic-gradient(from 1rad, red 100grad, 150grad, blue 0.5turn)",
             "conic-gradient(from 0, red 0, blue 1turn)",
+            "conic-gradient(from -0, red +0, 0.0, blue 1turn)",
         ] {
             assert!(parse_gradient(value).is_some(), "rejected {value}");
         }
@@ -1414,10 +1424,21 @@ mod gradient_tests {
             "radial-gradient(circle -1px, red, blue)",
             "radial-gradient(ellipse 1px -1px, red, blue)",
             "radial-gradient(at NaNpx center, red, blue)",
+            "radial-gradient(circle 1, red, blue)",
+            "linear-gradient(red 1, blue)",
+            "linear-gradient(red NaN, blue)",
+            "linear-gradient(red inf, blue)",
         ] {
             assert!(parse_gradient(value).is_none(), "accepted {value}");
         }
         assert!(parse_gradient("radial-gradient(circle 0px, red, blue)").is_some());
         assert!(parse_gradient("radial-gradient(ellipse 0px 0px, red, blue)").is_some());
+        for value in [
+            "radial-gradient(circle -0, red, blue)",
+            "radial-gradient(ellipse +0 0.0, red, blue)",
+            "linear-gradient(red -0, blue +0.0)",
+        ] {
+            assert!(parse_gradient(value).is_some(), "rejected {value}");
+        }
     }
 }
