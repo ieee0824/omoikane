@@ -1478,10 +1478,12 @@ impl CdpSession {
                 message: "Runtime evaluation did not return a string payload".to_string(),
             })?
             .to_std_string_escaped();
-        serde_json::from_str(&payload).map_err(|error| JsonRpcError {
+        let result = serde_json::from_str(&payload).map_err(|error| JsonRpcError {
             code: -32000,
             message: error.to_string(),
-        })
+        })?;
+        self.drive_navigation_requests()?;
+        Ok(result)
     }
 
     fn load_page_request(
@@ -2508,6 +2510,80 @@ mod tests {
             value["id"] == "eval" && value["result"]["result"]["value"] == false
         }));
         assert_eq!(session.pending_response_count(), 0);
+    }
+
+    #[test]
+    fn resumed_async_evaluation_commits_queued_location_navigation() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            for body in ["<title>Start</title>", "<title>Async next</title>"] {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut buffer = [0u8; 1024];
+                let _ = stream.read(&mut buffer).unwrap();
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                stream.write_all(response.as_bytes()).unwrap();
+            }
+        });
+        let mut session = BrowserSession::new().unwrap();
+        let client = session.accept_upgrade(sample_upgrade_request()).unwrap();
+        let start_url = format!("http://127.0.0.1:{}/start", address.port());
+        let next_url = format!("http://127.0.0.1:{}/next", address.port());
+        browser_request(
+            &mut session,
+            client.client_id,
+            &json!({
+                "jsonrpc": "2.0",
+                "id": "navigate",
+                "method": "Page.navigate",
+                "params": { "url": start_url },
+            })
+            .to_string(),
+        );
+        browser_payloads(&mut session, client.client_id);
+        browser_request(
+            &mut session,
+            client.client_id,
+            &json!({
+                "jsonrpc": "2.0",
+                "id": "eval",
+                "method": "Runtime.evaluate",
+                "params": {
+                    "expression": format!(
+                        "confirm('Leave?'); location.href = {next_url:?}; 'navigating'"
+                    ),
+                },
+            })
+            .to_string(),
+        );
+        browser_payloads(&mut session, client.client_id);
+        browser_request(
+            &mut session,
+            client.client_id,
+            r#"{"jsonrpc":"2.0","id":"handle","method":"Page.handleJavaScriptDialog","params":{"accept":true}}"#,
+        );
+        let completed = browser_payloads(&mut session, client.client_id);
+        assert!(completed.iter().any(|value| {
+            value["id"] == "eval"
+                && value["result"]["result"]["value"] == "navigating"
+        }), "{completed:?}");
+        assert!(completed.iter().any(|value| {
+            value["method"] == "Page.frameNavigated"
+                && value["params"]["frame"]["url"] == next_url
+        }), "{completed:?}");
+
+        browser_request(
+            &mut session,
+            client.client_id,
+            r#"{"jsonrpc":"2.0","id":"tree","method":"Page.getFrameTree","params":{}}"#,
+        );
+        let tree = browser_payloads(&mut session, client.client_id);
+        assert_eq!(tree[0]["result"]["frameTree"]["frame"]["url"], next_url);
+        server.join().unwrap();
     }
 
     #[test]
