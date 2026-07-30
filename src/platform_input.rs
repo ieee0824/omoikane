@@ -403,6 +403,47 @@ mod tests {
     }
 
     #[test]
+    fn escape_key_requests_modal_dialog_cancellation_end_to_end() {
+        let mut session = CdpSession::new().unwrap();
+        navigate(
+            &mut session,
+            "<button id='before'>before</button><dialog id='dialog'><button id='inside'>inside</button></dialog>\
+             <script>globalThis.dialogLog=[];dialog.addEventListener('cancel',e=>{dialogLog.push('cancel');if(globalThis.blockCancel)e.preventDefault()});\
+             dialog.addEventListener('close',()=>dialogLog.push('close'));before.focus();dialog.showModal()</script>",
+        );
+        let mut input = PlatformInput::new();
+        let escape = PlatformKeyEvent {
+            pressed: true,
+            key: "Escape".into(),
+            code: "Escape".into(),
+            text: None,
+            repeat: false,
+        };
+
+        input.key_event(&mut session, escape.clone()).unwrap();
+        assert_eq!(
+            evaluate(
+                &mut session,
+                "[dialog.open,document.activeElement.id,dialogLog.join(',')].join(':')"
+            ),
+            json!("false:before:cancel,close")
+        );
+
+        evaluate(
+            &mut session,
+            "globalThis.blockCancel=true;dialog.showModal()",
+        );
+        input.key_event(&mut session, escape).unwrap();
+        assert_eq!(
+            evaluate(
+                &mut session,
+                "[dialog.open,document.activeElement.id,dialogLog.join(',')].join(':')"
+            ),
+            json!("true:inside:cancel,close,cancel")
+        );
+    }
+
+    #[test]
     fn wheel_dispatches_fractional_delta_and_scrolls_nearest_container() {
         let mut session = CdpSession::new().unwrap();
         navigate(

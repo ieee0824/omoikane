@@ -23364,6 +23364,109 @@ b</textarea></form>"#);
         assert_eq!(result, "300,0,300|100,100|100,0|1300,1300|120|125");
     }
 
+    #[test]
+    fn dialog_show_modal_close_moves_and_restores_focus() {
+        let mut runtime = runtime_from_html(
+            r#"<html><body><button id="before">before</button><dialog id="dialog"><button id="inside" autofocus>inside</button></dialog></body></html>"#,
+        );
+        let result = eval_str(
+            &mut runtime,
+            r#"(() => {
+                const before = document.getElementById("before");
+                const dialog = document.getElementById("dialog");
+                const log = [];
+                before.focus();
+                dialog.addEventListener("close", event => log.push([
+                  event.type, event.bubbles, event.cancelable, dialog.returnValue,
+                  document.activeElement.id,
+                ].join(":")));
+                dialog.showModal();
+                const opened = [
+                  dialog instanceof HTMLDialogElement,
+                  dialog.open,
+                  document.activeElement.id,
+                ].join(":");
+                dialog.close("accepted");
+                return opened + "|" + log.join("|") + "|" + dialog.open;
+            })()"#,
+        );
+        assert_eq!(result, "true:true:inside|close:false:false:accepted:before|false");
+    }
+
+    #[test]
+    fn dialog_escape_cancels_only_the_top_modal_and_honors_prevent_default() {
+        let mut runtime = runtime_from_html(
+            r#"<html><body><button id="before">before</button><dialog id="outer"><button id="outerButton">outer</button></dialog><dialog id="inner"><button id="innerButton">inner</button></dialog></body></html>"#,
+        );
+        let result = eval_str(
+            &mut runtime,
+            r#"(() => {
+                const before = document.getElementById("before");
+                const outer = document.getElementById("outer");
+                const inner = document.getElementById("inner");
+                const log = [];
+                before.focus();
+                outer.addEventListener("cancel", () => log.push("outer-cancel"));
+                outer.addEventListener("close", () => log.push("outer-close"));
+                inner.addEventListener("cancel", event => {
+                  log.push("inner-cancel");
+                  if (!inner.dataset.allowed) event.preventDefault();
+                });
+                inner.addEventListener("close", () => log.push("inner-close"));
+                outer.showModal();
+                inner.showModal();
+                __omoikane_dispatch_keyboard_input("keydown", { key: "Escape", code: "Escape" });
+                log.push("blocked=" + inner.open + ":" + document.activeElement.id);
+                inner.dataset.allowed = "yes";
+                __omoikane_dispatch_keyboard_input("keydown", { key: "Escape", code: "Escape" });
+                log.push("inner=" + inner.open + ":" + document.activeElement.id);
+                __omoikane_dispatch_keyboard_input("keydown", { key: "Escape", code: "Escape" });
+                log.push("outer=" + outer.open + ":" + document.activeElement.id);
+                return log.join("|");
+            })()"#,
+        );
+        assert_eq!(
+            result,
+            concat!(
+                "inner-cancel|blocked=true:innerButton|inner-cancel|inner-close|",
+                "inner=false:outerButton|outer-cancel|outer-close|outer=false:before",
+            )
+        );
+    }
+
+    #[test]
+    fn dialog_rejects_invalid_modal_state_and_non_modal_show_is_idempotent() {
+        let mut runtime = runtime_from_html("<html><body></body></html>");
+        let result = eval_str(
+            &mut runtime,
+            r#"(() => {
+                const dialog = document.createElement("dialog");
+                const before = document.createElement("button");
+                const outside = document.createElement("button");
+                outside.id = "outside";
+                document.body.appendChild(before);
+                document.body.appendChild(outside);
+                const out = [dialog.returnValue, dialog.open];
+                try { dialog.showModal(); } catch (error) { out.push(error.name); }
+                document.body.appendChild(dialog);
+                before.focus();
+                dialog.show();
+                dialog.show();
+                out.push(dialog.open);
+                try { dialog.showModal(); } catch (error) { out.push(error.name); }
+                outside.focus();
+                dialog.close();
+                dialog.close();
+                out.push(dialog.open, document.activeElement.id);
+                return out.join(":");
+            })()"#,
+        );
+        assert_eq!(
+            result,
+            ":false:InvalidStateError:true:InvalidStateError:false:outside"
+        );
+    }
+
     // --- iframe focus chain (issue #254) ---
 
     /// Builds a three-level document chain: the top document, an iframe `f`
