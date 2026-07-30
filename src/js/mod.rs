@@ -2,9 +2,12 @@
 
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::future::Future;
 use std::path::Path;
+use std::pin::Pin;
 use std::rc::Rc;
 use std::sync::mpsc::{Receiver, channel};
+use std::task::{Context as TaskContext, Poll};
 use std::thread;
 
 use base64::Engine as _;
@@ -44,6 +47,35 @@ const MAX_TASK_ERRORS: usize = 32;
 
 thread_local! {
     static ACTIVE_HOST_STATE: RefCell<Option<Rc<RefCell<HostState>>>> = const { RefCell::new(None) };
+}
+
+struct ActiveHostGuard(Option<Rc<RefCell<HostState>>>);
+
+impl Drop for ActiveHostGuard {
+    fn drop(&mut self) {
+        ACTIVE_HOST_STATE.with(|slot| {
+            slot.replace(self.0.take());
+        });
+    }
+}
+
+fn activate_host_state(host_state: Rc<RefCell<HostState>>) -> ActiveHostGuard {
+    let previous = ACTIVE_HOST_STATE.with(|slot| slot.replace(Some(host_state)));
+    ActiveHostGuard(previous)
+}
+
+struct ActiveHostFuture<F> {
+    future: Pin<Box<F>>,
+    host_state: Rc<RefCell<HostState>>,
+}
+
+impl<F: Future> Future for ActiveHostFuture<F> {
+    type Output = F::Output;
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<Self::Output> {
+        let _guard = activate_host_state(Rc::clone(&self.host_state));
+        self.future.as_mut().poll(cx)
+    }
 }
 
 const DOM_BOOTSTRAP: &str = include_str!("dom_bootstrap.js");
@@ -1376,6 +1408,27 @@ impl JsRuntime {
         self.with_active_host(|context| context.eval(Source::from_bytes(source)))
     }
 
+    /// Evaluates JavaScript while allowing native host calls to suspend until
+    /// their [`boa_engine::native_function::NativeCallSuspension`] is resumed.
+    ///
+    /// The returned future is local to this runtime because its DOM host state
+    /// is single-threaded. Native bindings remain associated with this runtime
+    /// on every poll, including after a suspended call wakes the evaluation.
+    pub fn eval_async<'a>(
+        &'a mut self,
+        source: &str,
+    ) -> impl Future<Output = JsResult<JsValue>> + 'a {
+        let source = source.to_owned();
+        let host_state = Rc::clone(&self.host_state);
+        ActiveHostFuture {
+            future: Box::pin(async move {
+                let script = Script::parse(Source::from_bytes(&source), None, &mut self.context)?;
+                script.evaluate_async(&mut self.context).await
+            }),
+            host_state,
+        }
+    }
+
     /// Evaluates JavaScript source code, converting `JsError` into `Err(String)`.
     ///
     /// This does not catch Rust panics; it only converts JS-level errors.
@@ -2282,22 +2335,8 @@ impl JsRuntime {
     }
 
     fn with_active_host_value<T>(&mut self, f: impl FnOnce(&mut Context) -> T) -> T {
-        struct ActiveHostGuard(Option<Rc<RefCell<HostState>>>);
-
-        impl Drop for ActiveHostGuard {
-            fn drop(&mut self) {
-                ACTIVE_HOST_STATE.with(|slot| {
-                    slot.replace(self.0.take());
-                });
-            }
-        }
-
-        let host_state = Rc::clone(&self.host_state);
-        ACTIVE_HOST_STATE.with(|slot| {
-            let previous = slot.replace(Some(host_state));
-            let _guard = ActiveHostGuard(previous);
-            f(&mut self.context)
-        })
+        let _guard = activate_host_state(Rc::clone(&self.host_state));
+        f(&mut self.context)
     }
 }
 
@@ -6989,9 +7028,12 @@ fn iframe_content_document_native(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use boa_engine::native_function::NativeCallSuspension;
+    use boa_gc::{Gc, GcRefCell};
     use std::io::{Read, Write};
     use std::net::TcpListener;
     use std::net::TcpStream;
+    use std::task::{Context as FutureContext, Poll, Waker};
     use std::thread;
 
     fn read_http_request(stream: &mut TcpStream) -> Vec<u8> {
@@ -7045,6 +7087,111 @@ mod tests {
         let value = runtime.eval("1 + 2 + 3").unwrap();
 
         assert_eq!(value.as_number(), Some(6.0));
+    }
+
+    #[test]
+    fn async_eval_suspends_and_resumes_a_native_host_call() {
+        let mut runtime = JsRuntime::new().unwrap();
+        let slot = Gc::new(GcRefCell::new(None::<NativeCallSuspension>));
+        let after_host_call = Gc::new(GcRefCell::new(false));
+        runtime
+            .context
+            .register_global_builtin_callable(
+                js_string!("suspendHostCall"),
+                0,
+                NativeFunction::from_copy_closure_with_captures(
+                    |_, _, slot, context| {
+                        *slot.borrow_mut() = Some(context.suspend_native_call()?);
+                        Ok(JsValue::undefined())
+                    },
+                    slot.clone(),
+                ),
+            )
+            .unwrap();
+        runtime
+            .context
+            .register_global_builtin_callable(
+                js_string!("markAfterHostCall"),
+                0,
+                NativeFunction::from_copy_closure_with_captures(
+                    |_, _, after_host_call, _| {
+                        *after_host_call.borrow_mut() = true;
+                        Ok(JsValue::undefined())
+                    },
+                    after_host_call.clone(),
+                ),
+            )
+            .unwrap();
+
+        let mut evaluation = Box::pin(runtime.eval_async(
+            "const answer = suspendHostCall(); markAfterHostCall(); answer + 1",
+        ));
+        let waker: &'static Waker = Waker::noop();
+        let mut cx = FutureContext::from_waker(waker);
+
+        let reached_suspension = (0..8).any(|_| match evaluation.as_mut().poll(&mut cx) {
+            Poll::Pending => slot.borrow().is_some(),
+            Poll::Ready(result) => {
+                panic!("evaluation completed before the host call suspended: {result:?}")
+            }
+        });
+        assert!(reached_suspension, "evaluation did not reach the host call");
+        assert!(!*after_host_call.borrow());
+        slot.borrow()
+            .as_ref()
+            .unwrap()
+            .resume(Ok(JsValue::from(41)))
+            .unwrap();
+
+        let result = (0..8)
+            .find_map(|_| match evaluation.as_mut().poll(&mut cx) {
+                Poll::Ready(result) => Some(result),
+                Poll::Pending => None,
+            })
+            .expect("resuming the host call must eventually complete evaluation");
+        assert_eq!(result.unwrap().as_number(), Some(42.0));
+        assert!(*after_host_call.borrow());
+    }
+
+    #[test]
+    fn dropping_async_eval_cancels_its_suspended_host_call() {
+        let mut runtime = JsRuntime::new().unwrap();
+        let slot = Gc::new(GcRefCell::new(None::<NativeCallSuspension>));
+        runtime
+            .context
+            .register_global_builtin_callable(
+                js_string!("suspendHostCall"),
+                0,
+                NativeFunction::from_copy_closure_with_captures(
+                    |_, _, slot, context| {
+                        *slot.borrow_mut() = Some(context.suspend_native_call()?);
+                        Ok(JsValue::undefined())
+                    },
+                    slot.clone(),
+                ),
+            )
+            .unwrap();
+
+        let mut evaluation = Box::pin(runtime.eval_async("suspendHostCall()"));
+        let waker: &'static Waker = Waker::noop();
+        let mut cx = FutureContext::from_waker(waker);
+        let reached_suspension = (0..8).any(|_| match evaluation.as_mut().poll(&mut cx) {
+            Poll::Pending => slot.borrow().is_some(),
+            Poll::Ready(result) => {
+                panic!("evaluation completed before the host call suspended: {result:?}")
+            }
+        });
+        assert!(reached_suspension, "evaluation did not reach the host call");
+        drop(evaluation);
+
+        assert!(
+            slot.borrow()
+                .as_ref()
+                .unwrap()
+                .resume(Ok(JsValue::undefined()))
+                .is_err()
+        );
+        assert_eq!(runtime.eval("1 + 1").unwrap().as_number(), Some(2.0));
     }
 
     #[test]
