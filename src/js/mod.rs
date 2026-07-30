@@ -2403,8 +2403,9 @@ impl JsRuntime {
             callbacks_run += 1;
             if let Err(error) = result && first_error.is_none() { first_error = Some(error); }
         }
-        self.run_jobs()?;
+        let jobs_result = self.run_jobs();
         if let Some(error) = first_error { return Err(error); }
+        jobs_result?;
         self.update_css_transitions()?;
         self.run_until_idle_async().await?;
         Ok(callbacks_run)
@@ -8129,6 +8130,25 @@ mod tests {
                 .to_std_string_escaped(),
             "scroll,frame"
         );
+    }
+
+    #[test]
+    fn async_animation_frame_prioritizes_callback_error_over_checkpoint_error() {
+        let mut runtime = JsRuntime::new().unwrap();
+        runtime
+            .eval(
+                r#"requestAnimationFrame(() => {
+                    Promise.resolve().then(() => { throw new Error('checkpoint failure'); });
+                    throw new Error('callback failure');
+                })"#,
+            )
+            .unwrap();
+        let mut frame = Box::pin(runtime.run_animation_frame_async(0));
+        let waker: &'static std::task::Waker = std::task::Waker::noop();
+        let mut context = FutureContext::from_waker(waker);
+        let error = poll_until_ready(frame.as_mut(), &mut context).unwrap_err();
+
+        assert!(error.to_string().contains("callback failure"));
     }
 
     #[test]

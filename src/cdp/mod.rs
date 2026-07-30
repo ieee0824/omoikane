@@ -1730,6 +1730,11 @@ impl CdpSession {
             return Err("page startup task was cancelled".to_string());
         }
 
+        if std::env::var_os("OMOIKANE_LOG_SCRIPTS").is_some() {
+            for line in page_task_script_error_lines(&completed.result) {
+                eprintln!("{line}");
+            }
+        }
         let runtime = completed.runtime;
 
         // Teardown is delayed until the replacement runtime has completed its
@@ -1931,16 +1936,46 @@ struct BrowserSessionState {
     actions: Vec<BrowserSessionAction>,
 }
 
+fn page_task_script_error_lines(
+    result: &Result<Vec<String>, PageTaskError>,
+) -> Vec<String> {
+    result
+        .as_ref()
+        .map(|errors| {
+            errors
+                .iter()
+                .map(|error| format!("[omoikane][js-error] {error}"))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn pending_evaluation_busy_message(
+    has_pending_evaluation: bool,
+    has_pending_page: bool,
+) -> Option<&'static str> {
+    if has_pending_evaluation {
+        Some("A Runtime.evaluate request is already pending")
+    } else if has_pending_page {
+        Some("Browser session is busy with a page navigation")
+    } else {
+        None
+    }
+}
+
 impl BrowserSessionState {
     fn begin_evaluation(
         &mut self,
         token: DeferredResponseToken,
         params: &Value,
     ) -> Result<CdpMethodResult, JsonRpcError> {
-        if self.pending.is_some() || self.pending_page.is_some() {
+        if let Some(message) = pending_evaluation_busy_message(
+            self.pending.is_some(),
+            self.pending_page.is_some(),
+        ) {
             return Err(JsonRpcError {
                 code: -32000,
-                message: "A Runtime.evaluate request is already pending".to_string(),
+                message: message.to_string(),
             });
         }
         let expression = require_string(params, "expression")?;
@@ -2536,6 +2571,27 @@ mod tests {
     use std::net::TcpListener;
     use std::rc::Rc;
     use std::thread;
+
+    #[test]
+    fn evaluation_busy_message_distinguishes_navigation_from_evaluation() {
+        assert_eq!(
+            pending_evaluation_busy_message(true, false),
+            Some("A Runtime.evaluate request is already pending")
+        );
+        assert_eq!(
+            pending_evaluation_busy_message(false, true),
+            Some("Browser session is busy with a page navigation")
+        );
+    }
+
+    #[test]
+    fn completed_page_task_errors_are_formatted_for_script_logging() {
+        assert_eq!(
+            page_task_script_error_lines(&Ok(vec!["startup failed".to_string()])),
+            ["[omoikane][js-error] startup failed"]
+        );
+        assert!(page_task_script_error_lines(&Err(PageTaskError::Cancelled)).is_empty());
+    }
 
     fn sample_upgrade_request() -> &'static str {
         "GET /devtools/browser HTTP/1.1\r\n\
