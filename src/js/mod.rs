@@ -24635,20 +24635,31 @@ b</textarea></form>"#);
                 r#"(() => { globalThis.log = [];
                    globalThis.channel = new MessageChannel();
                    channel.port2.onmessage = event => {
-                     log.push("message:" + event.data + ":" + event.origin + ":" +
+                     const label = typeof event.data === "object" ? event.data.value : event.data;
+                     log.push("message:" + label + ":" + event.origin + ":" +
                        (event.source === null) + ":" + event.ports.length);
-                     Promise.resolve().then(() => log.push("micro:" + event.data));
+                     Promise.resolve().then(() => log.push("micro:" + label));
                    };
                    channel.port1.postMessage(1);
                    channel.port1.postMessage(2);
+                   const payload = { value: 3 };
+                   channel.port1.postMessage(payload);
+                   payload.value = 9;
                    return log.join("|"); })()"#,
             ),
             ""
         );
+        assert_eq!(
+            eval_str(
+                &mut runtime,
+                "channel.port1 !== channel.port2 && channel.port1 instanceof MessagePort && channel.port2 instanceof MessagePort",
+            ),
+            "true"
+        );
         runtime.run_until_idle().unwrap();
         assert_eq!(
             eval_str(&mut runtime, "log.join('|')"),
-            "message:1::true:0|micro:1|message:2::true:0|micro:2"
+            "message:1::true:0|micro:1|message:2::true:0|micro:2|message:3::true:0|micro:3"
         );
     }
 
