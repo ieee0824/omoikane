@@ -1471,6 +1471,10 @@ impl CdpSession {
             .runtime
             .call_function_with_value(&serialization_function, value)
             .map_err(js_error)?;
+        // Match the synchronous Runtime.evaluate task boundary: serializer
+        // getters/toJSON may enqueue microtasks that must settle before the
+        // protocol response and any resulting navigation are committed.
+        self.runtime.run_until_idle().map_err(js_error)?;
         let payload = raw
             .as_string()
             .ok_or(JsonRpcError {
@@ -2635,6 +2639,31 @@ mod tests {
         assert_eq!(remote["subtype"], "null");
         assert_eq!(remote["value"], Value::Null);
         assert!(remote.get("objectId").is_none());
+    }
+
+    #[test]
+    fn async_serializer_microtasks_settle_before_the_evaluate_response() {
+        let mut browser = BrowserSession::new().unwrap();
+        let client = browser.accept_upgrade(sample_upgrade_request()).unwrap();
+        browser_request(
+            &mut browser,
+            client.client_id,
+            r#"{"jsonrpc":"2.0","id":"serialize","method":"Runtime.evaluate","params":{"expression":"({ toJSON() { queueMicrotask(() => globalThis.serializerMicrotask = 'done'); return { ok: true }; } })","returnByValue":true}}"#,
+        );
+        let serialized = browser_payloads(&mut browser, client.client_id);
+        assert_eq!(serialized.len(), 1);
+        assert_eq!(serialized[0]["id"], "serialize");
+        assert_eq!(serialized[0]["result"]["result"]["value"]["ok"], true);
+
+        browser_request(
+            &mut browser,
+            client.client_id,
+            r#"{"jsonrpc":"2.0","id":"observe","method":"Runtime.evaluate","params":{"expression":"globalThis.serializerMicrotask","returnByValue":true}}"#,
+        );
+        let observed = browser_payloads(&mut browser, client.client_id);
+        assert_eq!(observed.len(), 1);
+        assert_eq!(observed[0]["id"], "observe");
+        assert_eq!(observed[0]["result"]["result"]["value"], "done");
     }
 
     #[test]
