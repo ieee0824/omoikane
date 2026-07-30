@@ -7048,6 +7048,25 @@ mod tests {
     }
 
     #[test]
+    fn promise_executor_runtime_limit_returns_an_error_without_panicking() {
+        let mut runtime = JsRuntime::new().unwrap();
+        runtime
+            .context
+            .runtime_limits_mut()
+            .set_loop_iteration_limit(10);
+
+        let error = runtime
+            .eval("new Promise(() => { for (let i = 0; i < 1_000; ++i) {} })")
+            .expect_err("the runtime limit must escape Promise construction");
+
+        assert!(
+            error
+                .as_native()
+                .is_some_and(JsNativeError::is_runtime_limit)
+        );
+    }
+
+    #[test]
     fn canvas_2d_pixels_transform_clip_image_data_draw_image_and_png() {
         let mut runtime = JsRuntime::new().unwrap();
         let result = eval_str(&mut runtime, r#"(() => {
