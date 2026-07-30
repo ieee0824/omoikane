@@ -913,7 +913,8 @@ impl CdpSession {
     pub(crate) fn prepare_page_reload(
         &mut self,
     ) -> Result<PreparedPageNavigation, JsonRpcError> {
-        self.prepare_page_navigation_request(&self.current_url.clone(), NavigationCommit::Reload)
+        let url = self.current_url.clone();
+        self.prepare_page_navigation_request(&url, NavigationCommit::Reload)
     }
 
     fn prepare_page_navigation_request(
@@ -1753,7 +1754,8 @@ impl CdpSession {
         self.current_url = pending.url;
         self.last_html = pending.html;
         self.rebuild_node_index();
-        self.commit_history_url(&self.current_url.clone(), pending.history_commit, None);
+        let current_url = self.current_url.clone();
+        self.commit_history_url(&current_url, pending.history_commit, None);
         self.emit(
             "Network.responseReceived",
             json!({
