@@ -1,6 +1,6 @@
 //! JavaScript engine embedding and DOM/Web API bindings.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::future::Future;
 use std::path::Path;
@@ -328,6 +328,72 @@ impl std::error::Error for JavaScriptDialogError {}
 #[derive(Clone)]
 pub struct JavaScriptDialogController {
     host_state: Rc<RefCell<HostState>>,
+}
+
+/// Source unit executed by an owned page task in FIFO order.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PageTaskSource {
+    Classic {
+        source: String,
+        label: String,
+        script_node_id: Option<usize>,
+    },
+    Module {
+        source: String,
+        url: String,
+        script_node_id: Option<usize>,
+    },
+}
+
+/// Terminal failure of an owned page task.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PageTaskError {
+    Cancelled,
+    AsyncModuleEvaluationUnavailable { url: String },
+}
+
+/// Result returned when an owned page task gives its runtime back to the host.
+pub struct CompletedPageTask {
+    pub runtime: JsRuntime,
+    pub generation: u64,
+    pub result: Result<Vec<String>, PageTaskError>,
+}
+
+type OwnedPageTaskFuture = Pin<Box<dyn Future<Output = CompletedPageTask>>>;
+
+/// Pollable page-script task that owns its runtime while JavaScript is suspended.
+///
+/// Keeping the runtime inside the future avoids a self-reference between
+/// `JsRuntime` and Boa's `&mut Context` evaluation future. Cancellation is
+/// cooperative: set the flag and poll once to drop the active evaluation and
+/// recover the unchanged runtime.
+pub struct OwnedPageTask {
+    future: OwnedPageTaskFuture,
+    controller: JavaScriptDialogController,
+    cancelled: Rc<Cell<bool>>,
+    generation: u64,
+}
+
+impl OwnedPageTask {
+    pub fn dialog_controller(&self) -> JavaScriptDialogController {
+        self.controller.clone()
+    }
+
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    pub fn cancel(&self) {
+        self.cancelled.set(true);
+    }
+}
+
+impl Future for OwnedPageTask {
+    type Output = CompletedPageTask;
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<Self::Output> {
+        self.future.as_mut().poll(cx)
+    }
 }
 
 /// A dialog request bound to the runtime that created it.
@@ -1718,6 +1784,168 @@ impl JsRuntime {
                 script.evaluate_async(&mut self.context).await
             }),
             host_state,
+        }
+    }
+
+    /// Collects document scripts in parser/defer order and moves the runtime
+    /// into an owned page task. Modules remain an explicit #366 boundary.
+    pub fn into_document_page_task(
+        mut self,
+        generation: u64,
+        base_url: Option<crate::http::Url>,
+    ) -> OwnedPageTask {
+        if let Some(base) = &base_url {
+            self.host_state.borrow_mut().base_url = Some(base.clone());
+        }
+        let _ = self.eval("__omoikane_install_window_named_properties()");
+        let _ = self.eval("document.__readyState = 'loading'");
+        let scripts = collect_script_elements(&self.document());
+        let mut immediate = Vec::new();
+        let mut deferred = Vec::new();
+        for (script_index, script) in scripts.iter().enumerate() {
+            let attrs = script.attributes().unwrap_or_default();
+            let is_module = attrs
+                .get("type")
+                .is_some_and(|value| value.trim().eq_ignore_ascii_case("module"));
+            if !is_module
+                && !is_executable_classic_script_type(attrs.get("type").map(String::as_str))
+            {
+                continue;
+            }
+            let src = attrs.get("src").cloned();
+            let has_src = src.is_some();
+            let (source, label) = if let Some(src) = src {
+                let fetched = {
+                    let mut state = self.host_state.borrow_mut();
+                    fetch_script_source_with_client(
+                        &src,
+                        base_url.as_ref(),
+                        &mut state.http_client,
+                    )
+                };
+                (
+                    fetched.unwrap_or_else(|| {
+                        format!("throw new Error('failed to fetch script: {src}')")
+                    }),
+                    src,
+                )
+            } else {
+                (
+                    collect_text_content(script),
+                    format!("inline-script-{}", script_index + 1),
+                )
+            };
+            if source.trim().is_empty() {
+                continue;
+            }
+            let script_node_id = Some(script.identity());
+            let task_source = if is_module {
+                PageTaskSource::Module {
+                    source,
+                    url: module_script_url(&label, base_url.as_ref(), !has_src),
+                    script_node_id,
+                }
+            } else {
+                PageTaskSource::Classic {
+                    source,
+                    label,
+                    script_node_id,
+                }
+            };
+            if is_module || (attrs.contains_key("defer") && has_src) {
+                deferred.push(task_source);
+            } else {
+                immediate.push(task_source);
+            }
+        }
+        immediate.extend(deferred);
+        immediate.push(PageTaskSource::Classic {
+            source: "document.__readyState = 'interactive'; document.dispatchEvent(new Event('DOMContentLoaded'))".to_string(),
+            label: "DOMContentLoaded".to_string(),
+            script_node_id: None,
+        });
+        self.into_page_task(generation, immediate)
+    }
+
+    /// Moves this runtime into a FIFO page-script task that can outlive a
+    /// single host pump iteration without storing a future that borrows `self`.
+    pub fn into_page_task(
+        mut self,
+        generation: u64,
+        sources: Vec<PageTaskSource>,
+    ) -> OwnedPageTask {
+        let controller = self.javascript_dialog_controller();
+        let cancelled = Rc::new(Cell::new(false));
+        let task_cancelled = Rc::clone(&cancelled);
+        let future = Box::pin(async move {
+            let mut errors = Vec::new();
+            for source in sources {
+                if task_cancelled.get() {
+                    return CompletedPageTask {
+                        runtime: self,
+                        generation,
+                        result: Err(PageTaskError::Cancelled),
+                    };
+                }
+                let (source, label, script_node_id) = match source {
+                    PageTaskSource::Classic {
+                        source,
+                        label,
+                        script_node_id,
+                    } => (source, label, script_node_id),
+                    PageTaskSource::Module { url, .. } => {
+                        return CompletedPageTask {
+                            runtime: self,
+                            generation,
+                            result: Err(PageTaskError::AsyncModuleEvaluationUnavailable { url }),
+                        };
+                    }
+                };
+                if let Some(node_id) = script_node_id {
+                    let node = self.host_state.borrow().get_node(node_id);
+                    self.host_state.borrow_mut().write_insertion_ref = node;
+                    let _ = self.eval(&format!("__omoikane_set_current_script({node_id})"));
+                }
+                let evaluation_result = {
+                    let mut evaluation = Box::pin(self.eval_async(&source));
+                    std::future::poll_fn(|context| {
+                        if task_cancelled.get() {
+                            Poll::Ready(None)
+                        } else {
+                            evaluation.as_mut().poll(context).map(Some)
+                        }
+                    })
+                    .await
+                };
+                if script_node_id.is_some() {
+                    let _ = self.eval("__omoikane_set_current_script(null)");
+                    self.host_state.borrow_mut().write_insertion_ref = None;
+                }
+                let Some(evaluation_result) = evaluation_result else {
+                    return CompletedPageTask {
+                        runtime: self,
+                        generation,
+                        result: Err(PageTaskError::Cancelled),
+                    };
+                };
+                if let Err(error) = evaluation_result {
+                    errors.push(format!("[script: {label}] {error}"));
+                }
+                if let Err(error) = self.run_jobs() {
+                    errors.push(format!("[script jobs: {label}] {error}"));
+                }
+            }
+            CompletedPageTask {
+                runtime: self,
+                generation,
+                result: Ok(errors),
+            }
+        });
+        OwnedPageTask {
+            future,
+            controller,
+            cancelled,
+            generation,
         }
     }
 
@@ -7467,6 +7695,227 @@ mod tests {
                 .unwrap()
                 .as_boolean(),
             Some(true)
+        );
+    }
+
+    #[test]
+    fn owned_page_task_preserves_fifo_order_across_a_dialog_suspension() {
+        let runtime = JsRuntime::new().unwrap();
+        let mut task = Box::pin(runtime.into_page_task(
+            7,
+            vec![
+                PageTaskSource::Classic {
+                    source: "globalThis.pageTaskOrder = ['first']".to_string(),
+                    label: "first".to_string(),
+                    script_node_id: None,
+                },
+                PageTaskSource::Classic {
+                    source: "pageTaskOrder.push('before-dialog'); alert('Pause'); pageTaskOrder.push('after-dialog')".to_string(),
+                    label: "dialog".to_string(),
+                    script_node_id: None,
+                },
+                PageTaskSource::Classic {
+                    source: "pageTaskOrder.push('last')".to_string(),
+                    label: "last".to_string(),
+                    script_node_id: None,
+                },
+            ],
+        ));
+        let controller = task.dialog_controller();
+        let waker: &'static std::task::Waker = std::task::Waker::noop();
+        let mut context = FutureContext::from_waker(waker);
+        let dialog = loop {
+            assert!(matches!(task.as_mut().poll(&mut context), Poll::Pending));
+            if let Some(dialog) = controller.pending() {
+                break dialog;
+            }
+        };
+        assert_eq!(dialog.message, "Pause");
+        controller.handle(dialog.id, true, None).unwrap();
+        let mut completed = loop {
+            if let Poll::Ready(completed) = task.as_mut().poll(&mut context) {
+                break completed;
+            }
+        };
+        assert_eq!(completed.generation, 7);
+        assert_eq!(completed.result, Ok(Vec::new()));
+        assert_eq!(
+            completed
+                .runtime
+                .eval("pageTaskOrder.join(',')")
+                .unwrap()
+                .as_string()
+                .unwrap()
+                .to_std_string_escaped(),
+            "first,before-dialog,after-dialog,last"
+        );
+    }
+
+    #[test]
+    fn owned_page_task_cancellation_recovers_runtime_without_running_continuation() {
+        let runtime = JsRuntime::new().unwrap();
+        let mut task = Box::pin(runtime.into_page_task(
+            11,
+            vec![PageTaskSource::Classic {
+                source: "globalThis.beforeCancel = true; alert('Cancel'); globalThis.afterCancel = true"
+                    .to_string(),
+                label: "cancelled".to_string(),
+                script_node_id: None,
+            }],
+        ));
+        let controller = task.dialog_controller();
+        let waker: &'static std::task::Waker = std::task::Waker::noop();
+        let mut context = FutureContext::from_waker(waker);
+        while controller.pending().is_none() {
+            assert!(matches!(task.as_mut().poll(&mut context), Poll::Pending));
+        }
+        task.cancel();
+        let mut completed = match task.as_mut().poll(&mut context) {
+            Poll::Ready(completed) => completed,
+            Poll::Pending => panic!("cancelled page task did not return its runtime"),
+        };
+        assert_eq!(completed.generation, 11);
+        assert_eq!(completed.result, Err(PageTaskError::Cancelled));
+        assert_eq!(controller.pending(), None);
+        assert_eq!(
+            completed
+                .runtime
+                .eval("beforeCancel === true && typeof afterCancel === 'undefined'")
+                .unwrap()
+                .as_boolean(),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn owned_page_task_suspends_a_direct_callback_invocation() {
+        let runtime = JsRuntime::new().unwrap();
+        let mut task = Box::pin(runtime.into_page_task(
+            12,
+            vec![
+                PageTaskSource::Classic {
+                    source: "globalThis.directCallback = () => { globalThis.callbackState = 'before'; alert('callback'); globalThis.callbackState = 'after'; }".to_string(),
+                    label: "register callback".to_string(),
+                    script_node_id: None,
+                },
+                PageTaskSource::Classic {
+                    source: "directCallback()".to_string(),
+                    label: "invoke callback".to_string(),
+                    script_node_id: None,
+                },
+            ],
+        ));
+        let controller = task.dialog_controller();
+        let waker: &'static std::task::Waker = std::task::Waker::noop();
+        let mut context = FutureContext::from_waker(waker);
+        while controller.pending().is_none() {
+            assert!(matches!(task.as_mut().poll(&mut context), Poll::Pending));
+        }
+        let dialog = controller.pending().unwrap();
+        assert_eq!(dialog.message, "callback");
+        controller.handle(dialog.id, true, None).unwrap();
+        let mut completed = loop {
+            if let Poll::Ready(completed) = task.as_mut().poll(&mut context) {
+                break completed;
+            }
+        };
+        assert_eq!(completed.result, Ok(Vec::new()));
+        assert_eq!(
+            completed
+                .runtime
+                .eval("callbackState")
+                .unwrap()
+                .as_string()
+                .unwrap()
+                .to_std_string_escaped(),
+            "after"
+        );
+    }
+
+    #[test]
+    fn owned_page_task_keeps_modules_at_an_explicit_async_api_boundary() {
+        let runtime = JsRuntime::new().unwrap();
+        let mut task = Box::pin(runtime.into_page_task(
+            13,
+            vec![PageTaskSource::Module {
+                source: "globalThis.mustNotRun = true".to_string(),
+                url: "https://example.test/module.js".to_string(),
+                script_node_id: None,
+            }],
+        ));
+        let waker: &'static std::task::Waker = std::task::Waker::noop();
+        let mut context = FutureContext::from_waker(waker);
+        let mut completed = match task.as_mut().poll(&mut context) {
+            Poll::Ready(completed) => completed,
+            Poll::Pending => panic!("unsupported module boundary unexpectedly suspended"),
+        };
+        assert_eq!(
+            completed.result,
+            Err(PageTaskError::AsyncModuleEvaluationUnavailable {
+                url: "https://example.test/module.js".to_string(),
+            })
+        );
+        assert_eq!(
+            completed
+                .runtime
+                .eval("typeof mustNotRun")
+                .unwrap()
+                .as_string()
+                .unwrap()
+                .to_std_string_escaped(),
+            "undefined"
+        );
+    }
+
+    #[test]
+    fn owned_document_task_preserves_script_order_and_current_script_while_suspended() {
+        let document = crate::html::TreeBuilder::parse(
+            r#"<html><body>
+            <script id="first">
+              globalThis.documentTaskOrder = ['first:' + document.currentScript.id];
+            </script>
+            <script defer>
+              documentTaskOrder.push('inline-defer-before');
+              alert('inline script');
+              documentTaskOrder.push('inline-defer-after');
+            </script>
+            </body></html>"#,
+        )
+        .document();
+        let runtime = JsRuntime::with_document(document).unwrap();
+        let mut task = Box::pin(runtime.into_document_page_task(17, None));
+        let controller = task.dialog_controller();
+        let waker: &'static std::task::Waker = std::task::Waker::noop();
+        let mut context = FutureContext::from_waker(waker);
+        while controller.pending().is_none() {
+            assert!(matches!(task.as_mut().poll(&mut context), Poll::Pending));
+        }
+        let dialog = controller.pending().unwrap();
+        assert_eq!(dialog.message, "inline script");
+        controller.handle(dialog.id, true, None).unwrap();
+        let mut completed = loop {
+            if let Poll::Ready(completed) = task.as_mut().poll(&mut context) {
+                break completed;
+            }
+        };
+        assert_eq!(completed.result, Ok(Vec::new()));
+        assert_eq!(
+            completed
+                .runtime
+                .eval("documentTaskOrder.join(',')")
+                .unwrap()
+                .as_string()
+                .unwrap()
+                .to_std_string_escaped(),
+            "first:first,inline-defer-before,inline-defer-after"
+        );
+        assert!(
+            completed
+                .runtime
+                .eval("document.currentScript === null")
+                .unwrap()
+                .as_boolean()
+                .unwrap()
         );
     }
 
