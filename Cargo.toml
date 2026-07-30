@@ -8,6 +8,9 @@ build = "build.rs"
 [lib]
 crate-type = ["rlib", "cdylib"]
 
+[features]
+gui = ["dep:softbuffer", "dep:winit"]
+
 [dependencies]
 ab_glyph = "0.2"
 base64 = "0.22"
@@ -33,6 +36,13 @@ sha2 = "0.10"
 rusqlite = { version = "0.32", features = ["bundled"] }
 webpki-roots = "1.0"
 image-webp = "0.2.4"
+softbuffer = { version = "0.4.8", optional = true }
+winit = { version = "0.30.12", optional = true }
+
+[[bin]]
+name = "omoikane"
+path = "src/bin/omoikane.rs"
+required-features = ["gui"]
 
 [dev-dependencies]
 boa_gc = { git = "https://github.com/ieee0824/boa", rev = "1d728ccc" }
