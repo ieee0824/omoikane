@@ -3486,13 +3486,27 @@
     }
 
     get title() {
-      const title = this.getElementsByTagName("title")[0];
+      const head = this.head;
+      const title = head ? head.childNodes.find(node =>
+        node.nodeType === 1 && (node.localName || "").toLowerCase() === "title") : null;
       return title ? title.textContent : "";
     }
 
     set title(value) {
-      const title = this.getElementsByTagName("title")[0];
-      if (title) title.textContent = String(value);
+      let head = this.head;
+      let title = head ? head.childNodes.find(node =>
+        node.nodeType === 1 && (node.localName || "").toLowerCase() === "title") : null;
+      if (!title) {
+        if (!head) {
+          head = this.createElement("head");
+          const root = this.documentElement;
+          if (!root) return;
+          root.insertBefore(head, root.firstChild);
+        }
+        title = this.createElement("title");
+        head.appendChild(title);
+      }
+      title.textContent = String(value);
     }
 
     // Live HTMLCollection of every <form> in this document, in tree order, with
