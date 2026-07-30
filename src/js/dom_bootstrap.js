@@ -510,6 +510,23 @@
     }
   }
 
+  class WheelEvent extends MouseEvent {
+    constructor(type, init = {}) {
+      init = init ?? {};
+      super(type, init);
+      this.deltaX = Number(init.deltaX ?? 0);
+      this.deltaY = Number(init.deltaY ?? 0);
+      this.deltaZ = Number(init.deltaZ ?? 0);
+      this.deltaMode = Number(init.deltaMode ?? 0);
+    }
+  }
+  WheelEvent.DOM_DELTA_PIXEL = 0;
+  WheelEvent.DOM_DELTA_LINE = 1;
+  WheelEvent.DOM_DELTA_PAGE = 2;
+  WheelEvent.prototype.DOM_DELTA_PIXEL = 0;
+  WheelEvent.prototype.DOM_DELTA_LINE = 1;
+  WheelEvent.prototype.DOM_DELTA_PAGE = 2;
+
   class KeyboardEvent extends Event {
     constructor(type, init = {}) {
       init = init ?? {};
@@ -5774,11 +5791,11 @@
   globalThis.CustomEvent = CustomEvent;
   globalThis.MessageEvent = MessageEvent;
   globalThis.MouseEvent = MouseEvent;
+  globalThis.WheelEvent = WheelEvent;
   globalThis.KeyboardEvent = KeyboardEvent;
   globalThis.FocusEvent = FocusEvent;
   globalThis.UIEvent = UIEvent;
   globalThis.InputEvent = InputEvent;
-  globalThis.WheelEvent = MouseEvent;
   globalThis.PointerEvent = MouseEvent;
   globalThis.TouchEvent = Event;
   globalThis.AnimationEvent = Event;
@@ -5932,6 +5949,33 @@
       target.focus();
     }
     return notCanceled;
+  };
+  globalThis.__omoikane_dispatch_wheel_input = function(id, init) {
+    const target = wrapNode(id) || document;
+    const notCanceled = target.dispatchEvent(new WheelEvent("wheel", {
+      ...init, bubbles: true, cancelable: true, composed: true, deltaMode: 0,
+    }));
+    if (!notCanceled) return false;
+
+    let element = target && target.nodeType === 1 ? target : target.parentNode;
+    while (element && element.nodeType === 1) {
+      const style = getComputedStyle(element);
+      const canScrollX = init.deltaX !== 0 &&
+        (style.overflowX === "auto" || style.overflowX === "scroll") &&
+        element.scrollWidth > element.clientWidth;
+      const canScrollY = init.deltaY !== 0 &&
+        (style.overflowY === "auto" || style.overflowY === "scroll") &&
+        element.scrollHeight > element.clientHeight;
+      if (canScrollX || canScrollY) {
+        const beforeX = element.scrollLeft;
+        const beforeY = element.scrollTop;
+        element.scrollBy(init.deltaX, init.deltaY);
+        if (element.scrollLeft !== beforeX || element.scrollTop !== beforeY) return true;
+      }
+      element = element.parentNode;
+    }
+    globalThis.scrollBy(init.deltaX, init.deltaY);
+    return true;
   };
   globalThis.__omoikane_dispatch_keyboard_input = function(type, init) {
     const target = document.activeElement || document.body || document.documentElement || document;

@@ -130,6 +130,29 @@ impl PlatformInput {
         Ok(())
     }
 
+    /// Dispatches a pixel-denominated wheel/touchpad delta at the cursor.
+    pub fn wheel(
+        &mut self,
+        session: &mut CdpSession,
+        delta_x: f64,
+        delta_y: f64,
+    ) -> Result<(), JsonRpcError> {
+        session.dispatch(
+            "Input.dispatchMouseEvent",
+            json!({
+                "type": "mouseWheel",
+                "x": self.cursor.0,
+                "y": self.cursor.1,
+                "deltaX": delta_x,
+                "deltaY": delta_y,
+                "button": "none",
+                "buttons": self.buttons,
+                "modifiers": self.modifiers.cdp_bits(),
+            }),
+        )?;
+        Ok(())
+    }
+
     /// Dispatches a key transition, including text for the editing default action.
     pub fn key_event(
         &mut self,
@@ -280,5 +303,61 @@ mod tests {
                 "keydown:A:KeyA:true:true|keyup:A:KeyA:true:true|keydown:b:KeyB:false:false|keyup:b:KeyB:false:false"
             )
         );
+    }
+
+    #[test]
+    fn wheel_dispatches_fractional_delta_and_scrolls_nearest_container() {
+        let mut session = CdpSession::new().unwrap();
+        navigate(
+            &mut session,
+            "<style>body{margin:0}#scroller{width:100px;height:50px;overflow:auto}#content{height:200px}</style>\
+             <div id='scroller'><div id='content'></div></div><script>globalThis.wheelLog='';\
+             scroller.addEventListener('wheel',e=>wheelLog=[e.deltaX,e.deltaY,e.deltaMode,e.altKey,e.clientX,e.clientY].join(':'))</script>",
+        );
+        let mut input = PlatformInput::new();
+        input.set_modifiers(InputModifiers {
+            alt: true,
+            ..InputModifiers::default()
+        });
+        input.cursor_moved(&mut session, 10.0, 10.0).unwrap();
+
+        input.wheel(&mut session, 1.25, 12.5).unwrap();
+
+        assert_eq!(evaluate(&mut session, "scroller.scrollTop"), json!(12.5));
+        assert_eq!(evaluate(&mut session, "scrollY"), json!(0));
+        assert_eq!(
+            evaluate(&mut session, "wheelLog"),
+            json!("1.25:12.5:0:true:10:10")
+        );
+    }
+
+    #[test]
+    fn canceled_wheel_event_prevents_default_window_scroll() {
+        let mut session = CdpSession::new().unwrap();
+        navigate(
+            &mut session,
+            "<style>body{margin:0;height:1000px}</style><script>document.addEventListener('wheel',e=>e.preventDefault())</script>",
+        );
+        let mut input = PlatformInput::new();
+        input.cursor_moved(&mut session, 10.0, 10.0).unwrap();
+
+        input.wheel(&mut session, 0.0, 80.0).unwrap();
+
+        assert_eq!(evaluate(&mut session, "scrollY"), json!(0));
+    }
+
+    #[test]
+    fn wheel_falls_back_to_the_top_level_window() {
+        let mut session = CdpSession::new().unwrap();
+        navigate(
+            &mut session,
+            "<style>body{margin:0;height:1000px}</style><div>page</div>",
+        );
+        let mut input = PlatformInput::new();
+        input.cursor_moved(&mut session, 10.0, 10.0).unwrap();
+
+        input.wheel(&mut session, 0.0, 80.0).unwrap();
+
+        assert_eq!(evaluate(&mut session, "scrollY"), json!(80));
     }
 }

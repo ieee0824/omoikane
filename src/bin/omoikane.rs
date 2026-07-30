@@ -12,7 +12,7 @@ use serde_json::json;
 use softbuffer::{Context, Surface};
 use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
-use winit::event::{ElementState, MouseButton, WindowEvent};
+use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{Key, NamedKey, PhysicalKey};
 use winit::window::{Window, WindowId};
@@ -82,6 +82,10 @@ impl BrowserApp {
                 self.input
                     .mouse_button(&mut self.session, button, *state == ElementState::Pressed)
             }
+            WindowEvent::MouseWheel { delta, .. } => {
+                let (delta_x, delta_y) = wheel_delta_pixels(*delta);
+                self.input.wheel(&mut self.session, delta_x, delta_y)
+            }
             WindowEvent::ModifiersChanged(modifiers) => {
                 let state = modifiers.state();
                 self.input.set_modifiers(InputModifiers {
@@ -145,6 +149,17 @@ fn physical_key_code(key: PhysicalKey) -> String {
         PhysicalKey::Code(winit::keyboard::KeyCode::SuperRight) => "MetaRight".to_string(),
         PhysicalKey::Code(code) => format!("{code:?}"),
         PhysicalKey::Unidentified(_) => String::new(),
+    }
+}
+
+fn wheel_delta_pixels(delta: MouseScrollDelta) -> (f64, f64) {
+    const CSS_PIXELS_PER_LINE: f64 = 40.0;
+    match delta {
+        MouseScrollDelta::LineDelta(x, y) => (
+            f64::from(x) * CSS_PIXELS_PER_LINE,
+            f64::from(y) * CSS_PIXELS_PER_LINE,
+        ),
+        MouseScrollDelta::PixelDelta(position) => (position.x, position.y),
     }
 }
 
@@ -252,6 +267,20 @@ mod tests {
             Some(PlatformMouseButton::Left)
         );
         assert_eq!(platform_mouse_button(MouseButton::Other(8)), None);
+    }
+
+    #[test]
+    fn translates_line_and_fractional_pixel_wheel_deltas() {
+        assert_eq!(
+            wheel_delta_pixels(MouseScrollDelta::LineDelta(0.5, -2.0)),
+            (20.0, -80.0)
+        );
+        assert_eq!(
+            wheel_delta_pixels(MouseScrollDelta::PixelDelta(
+                winit::dpi::PhysicalPosition::new(1.25, -3.5)
+            )),
+            (1.25, -3.5)
+        );
     }
 }
 
