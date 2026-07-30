@@ -1613,6 +1613,26 @@ impl JsRuntime {
             .handle(dialog_id, accept, prompt_text)
     }
 
+    pub(crate) fn value_to_json(
+        &mut self,
+        value: &JsValue,
+    ) -> JsResult<Option<serde_json::Value>> {
+        self.with_active_host_value(|context| value.to_json(context))
+    }
+
+    pub(crate) fn store_global_value(
+        &mut self,
+        name: &str,
+        value: JsValue,
+    ) -> JsResult<()> {
+        self.with_active_host_value(|context| {
+            context
+                .global_object()
+                .set(js_string!(name), value, true, context)
+                .map(|_| ())
+        })
+    }
+
     /// Returns the console log buffer captured from `console.log`.
     pub fn console_logs(&self) -> Vec<String> {
         self.host_state.borrow().console_logs.clone()
