@@ -5,12 +5,16 @@ use std::time::{Duration, Instant};
 
 use omoikane::cdp::CdpSession;
 use omoikane::frame::render_browser_frame;
+use omoikane::platform_input::{
+    InputModifiers, PlatformInput, PlatformKeyEvent, PlatformMouseButton,
+};
 use serde_json::json;
 use softbuffer::{Context, Surface};
 use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
-use winit::event::WindowEvent;
+use winit::event::{ElementState, MouseButton, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
+use winit::keyboard::{Key, NamedKey, PhysicalKey};
 use winit::window::{Window, WindowId};
 
 const FRAME_INTERVAL: Duration = Duration::from_millis(16);
@@ -21,6 +25,7 @@ struct BrowserApp {
     context: Option<Context<Arc<Window>>>,
     surface: Option<Surface<Arc<Window>, Arc<Window>>>,
     started_at: Instant,
+    input: PlatformInput,
 }
 
 impl BrowserApp {
@@ -33,6 +38,7 @@ impl BrowserApp {
             context: None,
             surface: None,
             started_at: Instant::now(),
+            input: PlatformInput::new(),
         })
     }
 
@@ -61,6 +67,84 @@ impl BrowserApp {
         }
         target.present()?;
         Ok(())
+    }
+
+    fn dispatch_input(&mut self, event: &WindowEvent) {
+        let result = match event {
+            WindowEvent::CursorMoved { position, .. } => {
+                self.input
+                    .cursor_moved(&mut self.session, position.x, position.y)
+            }
+            WindowEvent::MouseInput { state, button, .. } => {
+                let Some(button) = platform_mouse_button(*button) else {
+                    return;
+                };
+                self.input
+                    .mouse_button(&mut self.session, button, *state == ElementState::Pressed)
+            }
+            WindowEvent::ModifiersChanged(modifiers) => {
+                let state = modifiers.state();
+                self.input.set_modifiers(InputModifiers {
+                    alt: state.alt_key(),
+                    control: state.control_key(),
+                    meta: state.super_key(),
+                    shift: state.shift_key(),
+                });
+                return;
+            }
+            WindowEvent::KeyboardInput { event, .. } => {
+                let text = event
+                    .text
+                    .as_deref()
+                    .filter(|text| text.chars().all(|character| !character.is_control()))
+                    .map(ToOwned::to_owned);
+                self.input.key_event(
+                    &mut self.session,
+                    PlatformKeyEvent {
+                        pressed: event.state == ElementState::Pressed,
+                        key: logical_key_name(&event.logical_key),
+                        code: physical_key_code(event.physical_key),
+                        text,
+                        repeat: event.repeat,
+                    },
+                )
+            }
+            _ => return,
+        };
+        if let Err(error) = result {
+            eprintln!("input event failed: {error}");
+        }
+    }
+}
+
+fn platform_mouse_button(button: MouseButton) -> Option<PlatformMouseButton> {
+    match button {
+        MouseButton::Left => Some(PlatformMouseButton::Left),
+        MouseButton::Middle => Some(PlatformMouseButton::Middle),
+        MouseButton::Right => Some(PlatformMouseButton::Right),
+        MouseButton::Back => Some(PlatformMouseButton::Back),
+        MouseButton::Forward => Some(PlatformMouseButton::Forward),
+        MouseButton::Other(_) => None,
+    }
+}
+
+fn logical_key_name(key: &Key) -> String {
+    match key.as_ref() {
+        Key::Character(character) => character.to_string(),
+        Key::Named(NamedKey::Space) => " ".to_string(),
+        Key::Named(NamedKey::Super) => "Meta".to_string(),
+        Key::Named(named) => format!("{named:?}"),
+        Key::Dead(_) => "Dead".to_string(),
+        Key::Unidentified(_) => "Unidentified".to_string(),
+    }
+}
+
+fn physical_key_code(key: PhysicalKey) -> String {
+    match key {
+        PhysicalKey::Code(winit::keyboard::KeyCode::SuperLeft) => "MetaLeft".to_string(),
+        PhysicalKey::Code(winit::keyboard::KeyCode::SuperRight) => "MetaRight".to_string(),
+        PhysicalKey::Code(code) => format!("{code:?}"),
+        PhysicalKey::Unidentified(_) => String::new(),
     }
 }
 
@@ -127,7 +211,7 @@ impl ApplicationHandler for BrowserApp {
                     eprintln!("frame failed: {error}");
                 }
             }
-            _ => {}
+            event => self.dispatch_input(&event),
         }
     }
 
@@ -136,6 +220,38 @@ impl ApplicationHandler for BrowserApp {
             window.request_redraw();
             event_loop.set_control_flow(ControlFlow::WaitUntil(Instant::now() + FRAME_INTERVAL));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use winit::keyboard::KeyCode;
+
+    use super::*;
+
+    #[test]
+    fn translates_winit_keys_to_dom_key_and_code_names() {
+        assert_eq!(logical_key_name(&Key::Character("é".into())), "é");
+        assert_eq!(
+            logical_key_name(&Key::Named(NamedKey::ArrowLeft)),
+            "ArrowLeft"
+        );
+        assert_eq!(logical_key_name(&Key::Named(NamedKey::Space)), " ");
+        assert_eq!(logical_key_name(&Key::Named(NamedKey::Super)), "Meta");
+        assert_eq!(physical_key_code(PhysicalKey::Code(KeyCode::KeyA)), "KeyA");
+        assert_eq!(
+            physical_key_code(PhysicalKey::Code(KeyCode::SuperLeft)),
+            "MetaLeft"
+        );
+    }
+
+    #[test]
+    fn translates_supported_mouse_buttons_and_ignores_other_buttons() {
+        assert_eq!(
+            platform_mouse_button(MouseButton::Left),
+            Some(PlatformMouseButton::Left)
+        );
+        assert_eq!(platform_mouse_button(MouseButton::Other(8)), None);
     }
 }
 
