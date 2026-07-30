@@ -8471,6 +8471,28 @@ fn sticky_end_inset_clamps_and_two_auto_insets_disable_the_axis() {
     );
 }
 
+#[test]
+fn sticky_percentage_insets_resolve_against_containing_block_not_scrollport() {
+    let html = "<html><head><style>\
+         * { margin: 0; padding: 0 } \
+         #sc { width: 40px; height: 40px; overflow: hidden } \
+         #content { width: 120px; height: 120px } \
+         #before { height: 30px } \
+         #sticky { position: sticky; left: 10%; top: 10%; margin-left: 5px; \
+                   width: 10px; height: 10px; background-color: #00ff00 } \
+         </style></head><body><div id=\"sc\"><div id=\"content\"><div id=\"before\"></div>\
+         <div id=\"sticky\"></div></div></div></body></html>";
+    let green = Some(Color::rgba(0, 255, 0, 255));
+    let canvas = render_with_scroll(html, 60.0, &[("#sc", 30.0, 30.0)], (0.0, 0.0));
+
+    // 10% resolves against the 120x120 containing block, so the margin box is
+    // clamped to (12,12). Its 5px left margin places the border box at x=17.
+    // Resolving against the 40x40 scrollport would incorrectly paint at (9,4).
+    assert_eq!(canvas.pixel(17, 12), green);
+    assert_eq!(canvas.pixel(26, 21), green);
+    assert_eq!(canvas.pixel(9, 4).unwrap().a, 0);
+}
+
 /// The container's border box must stay where layout put it while its own line
 /// boxes, marker and children move — this is what keeps the clip and the
 /// element's own client rect stable while its content scrolls.

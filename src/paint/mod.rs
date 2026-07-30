@@ -1805,11 +1805,14 @@ fn sticky_translation(
     containing_block: Option<Rect>,
     style: &ComputedStyle,
 ) -> (f32, f32) {
-    let left = sticky_inset(style, "left", scrollport.width);
-    let right = sticky_inset(style, "right", scrollport.width);
-    let top = sticky_inset(style, "top", scrollport.height);
-    let bottom = sticky_inset(style, "bottom", scrollport.height);
     let containing_block = containing_block.unwrap_or(scrollport);
+    // Inset percentages resolve against the corresponding dimension of the
+    // containing block, even though sticky positioning constrains the result
+    // against the nearest scrollport.
+    let left = sticky_inset(style, "left", containing_block.width);
+    let right = sticky_inset(style, "right", containing_block.width);
+    let top = sticky_inset(style, "top", containing_block.height);
+    let bottom = sticky_inset(style, "bottom", containing_block.height);
     (
         sticky_axis_translation(
             margin_box.x, margin_box.width, scrollport.x, scrollport.width,
