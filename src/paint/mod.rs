@@ -4388,8 +4388,27 @@ fn paint_prepared_background_image(
                 background_position(style, pos_cw, pos_ch, tile_w, tile_h);
             let anchor_x = if fixed { viewport.x + position_x } else { area.x + position_x };
             let anchor_y = if fixed { viewport.y + position_y } else { area.y + position_y };
-            let x_end = area.x + area.width;
-            let y_end = area.y + area.height;
+            let clip_area = clip.unwrap_or(area);
+            let x_start = if repeat_x {
+                anchor_x + ((clip_area.x - anchor_x) / tile_w).floor() * tile_w
+            } else {
+                anchor_x
+            };
+            let y_start = if repeat_y {
+                anchor_y + ((clip_area.y - anchor_y) / tile_h).floor() * tile_h
+            } else {
+                anchor_y
+            };
+            let x_end = if repeat_x {
+                clip_area.x + clip_area.width
+            } else {
+                area.x + area.width
+            };
+            let y_end = if repeat_y {
+                clip_area.y + clip_area.height
+            } else {
+                area.y + area.height
+            };
 
             const MAX_TILE_PIXELS: u64 = 16_777_216;
             let tile_image = if repeat_x || repeat_y {
@@ -4411,17 +4430,9 @@ fn paint_prepared_background_image(
                 None
             };
 
-            let mut ty = if repeat_y {
-                anchor_y + ((area.y - anchor_y) / tile_h).floor() * tile_h
-            } else {
-                anchor_y
-            };
+            let mut ty = y_start;
             while ty < y_end {
-                let mut tx = if repeat_x {
-                    anchor_x + ((area.x - anchor_x) / tile_w).floor() * tile_w
-                } else {
-                    anchor_x
-                };
+                let mut tx = x_start;
                 while tx < x_end {
                     let tile_rect = Rect { x: tx, y: ty, width: tile_w, height: tile_h };
                     if let Some(ref image) = tile_image {
@@ -4518,8 +4529,6 @@ fn paint_prepared_background_image(
     }
     let tile_width = tile_width.max(1.0);
     let tile_height = tile_height.max(1.0);
-    let x_end = area.x + area.width;
-    let y_end = area.y + area.height;
     let (repeat_x, repeat_y) = background_repeat(style);
     let fixed = background_attachment(style) == BackgroundAttachment::Fixed;
     let (pos_container_w, pos_container_h) = if fixed {
@@ -4544,17 +4553,30 @@ fn paint_prepared_background_image(
     } else {
         area.y + position_y
     };
-    let mut y = if repeat_y {
-        anchor_y + ((area.y - anchor_y) / tile_height).floor() * tile_height
+    let clip_area = clip.unwrap_or(area);
+    let x_start = if repeat_x {
+        anchor_x + ((clip_area.x - anchor_x) / tile_width).floor() * tile_width
+    } else {
+        anchor_x
+    };
+    let y_start = if repeat_y {
+        anchor_y + ((clip_area.y - anchor_y) / tile_height).floor() * tile_height
     } else {
         anchor_y
     };
+    let x_end = if repeat_x {
+        clip_area.x + clip_area.width
+    } else {
+        area.x + area.width
+    };
+    let y_end = if repeat_y {
+        clip_area.y + clip_area.height
+    } else {
+        area.y + area.height
+    };
+    let mut y = y_start;
     while y < y_end {
-        let mut x = if repeat_x {
-            anchor_x + ((area.x - anchor_x) / tile_width).floor() * tile_width
-        } else {
-            anchor_x
-        };
+        let mut x = x_start;
         while x < x_end {
             let dest = Rect {
                 x,

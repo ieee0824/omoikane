@@ -8956,6 +8956,21 @@ fn auto_sized_local_gradient_uses_scrollable_overflow_as_its_coordinate_space() 
 }
 
 #[test]
+fn local_repeating_background_tiles_only_within_visible_clip() {
+    let html = "<html><head><style>body { margin: 0 } \
+        #sc { width: 4px; height: 4px; overflow: hidden; \
+              background-image: linear-gradient(red, red); \
+              background-size: 1px 1px; background-repeat: repeat; \
+              background-attachment: local } \
+        #content { width: 2000px; height: 2000px } \
+        </style></head><body><div id=\"sc\"><div id=\"content\"></div></div></body></html>";
+    let canvas = render_with_scroll(html, 12.0, &[("#sc", 1500.0, 1500.0)], (0.0, 0.0));
+    assert_eq!(canvas.pixel(0, 0), Some(Color::rgb(255, 0, 0)));
+    assert_eq!(canvas.pixel(3, 3), Some(Color::rgb(255, 0, 0)));
+    assert_eq!(canvas.pixel(4, 4).unwrap().a, 0);
+}
+
+#[test]
 fn element_scroll_translates_content_and_keeps_the_clip() {
     let red = Some(Color::rgba(255, 0, 0, 255));
     let green = Some(Color::rgba(0, 255, 0, 255));
