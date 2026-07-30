@@ -7744,6 +7744,132 @@
   globalThis.AbortSignal = AbortSignal;
   globalThis.AbortController = AbortController;
 
+  function dataCloneError(message = "The value could not be cloned.") {
+    return new DOMException(message, "DataCloneError");
+  }
+
+  function cloneStructuredValue(value, memory) {
+    if (value === null || typeof value === "undefined" ||
+        typeof value === "boolean" || typeof value === "number" ||
+        typeof value === "string" || typeof value === "bigint") return value;
+    if (typeof value === "symbol" || typeof value === "function") throw dataCloneError();
+    if (value instanceof Node || value instanceof EventTarget) throw dataCloneError();
+    if (memory.has(value)) return memory.get(value);
+
+    if (value instanceof Date) {
+      const result = new Date(value.getTime()); memory.set(value, result); return result;
+    }
+    if (value instanceof RegExp) {
+      const result = new RegExp(value.source, value.flags); memory.set(value, result); return result;
+    }
+    if (value instanceof ArrayBuffer) {
+      const result = value.slice(0); memory.set(value, result); return result;
+    }
+    if (ArrayBuffer.isView(value)) {
+      const buffer = cloneStructuredValue(value.buffer, memory);
+      const result = value instanceof DataView
+        ? new DataView(buffer, value.byteOffset, value.byteLength)
+        : new value.constructor(buffer, value.byteOffset, value.length);
+      memory.set(value, result); return result;
+    }
+    if (value instanceof Map) {
+      const result = new Map(); memory.set(value, result);
+      for (const [key, item] of value) {
+        result.set(cloneStructuredValue(key, memory), cloneStructuredValue(item, memory));
+      }
+      return result;
+    }
+    if (value instanceof Set) {
+      const result = new Set(); memory.set(value, result);
+      for (const item of value) result.add(cloneStructuredValue(item, memory));
+      return result;
+    }
+    if (Array.isArray(value)) {
+      const result = []; memory.set(value, result);
+      for (let index = 0; index < value.length; index++) {
+        if (Object.prototype.hasOwnProperty.call(value, index)) {
+          result[index] = cloneStructuredValue(value[index], memory);
+        }
+      }
+      return result;
+    }
+    const prototype = Object.getPrototypeOf(value);
+    if (prototype !== Object.prototype && prototype !== null) throw dataCloneError();
+    if (Object.getOwnPropertySymbols(value).length) throw dataCloneError();
+    const result = Object.create(prototype); memory.set(value, result);
+    for (const key of Object.keys(value)) {
+      result[key] = cloneStructuredValue(value[key], memory);
+    }
+    return result;
+  }
+
+  globalThis.structuredClone = function(value, options = undefined) {
+    if (options != null && options.transfer != null && Array.from(options.transfer).length) {
+      throw dataCloneError("Transfer lists are not supported yet.");
+    }
+    return cloneStructuredValue(value, new Map());
+  };
+
+  const messagePortConstructionToken = {};
+  class MessagePort extends EventTarget {
+    constructor(token) {
+      super();
+      if (token !== messagePortConstructionToken) throw new TypeError("Illegal constructor");
+      this._entangled = null;
+      this._started = false;
+      this._closed = false;
+      this._pendingMessages = [];
+      this._onmessage = null;
+    }
+    postMessage(message, options = undefined) {
+      const data = globalThis.structuredClone(message, options);
+      const destination = this._entangled;
+      if (this._closed || !destination || destination._closed) return;
+      __omoikane_enqueue_posted_message(() => destination._acceptMessage(data));
+    }
+    start() {
+      if (this._closed || this._started) return;
+      this._started = true;
+      for (const data of this._pendingMessages.splice(0)) {
+        __omoikane_enqueue_posted_message(() => this._acceptMessage(data));
+      }
+    }
+    close() {
+      this._closed = true;
+      this._pendingMessages.length = 0;
+    }
+    _acceptMessage(data) {
+      if (this._closed) return;
+      if (!this._started) { this._pendingMessages.push(data); return; }
+      this.dispatchEvent(new MessageEvent("message", {
+        data,
+        origin: "",
+        source: null,
+        ports: [],
+      }));
+    }
+    get onmessage() { return this._onmessage; }
+    set onmessage(callback) {
+      if (this._onmessage) this.removeEventListener("message", this._onmessage);
+      this._onmessage = typeof callback === "function" ? callback : null;
+      if (this._onmessage) {
+        this.addEventListener("message", this._onmessage);
+        this.start();
+      }
+    }
+  }
+
+  class MessageChannel {
+    constructor() {
+      this.port1 = new MessagePort(messagePortConstructionToken);
+      this.port2 = new MessagePort(messagePortConstructionToken);
+      this.port1._entangled = this.port2;
+      this.port2._entangled = this.port1;
+    }
+  }
+  globalThis.MessagePort = MessagePort;
+  globalThis.MessageChannel = MessageChannel;
+
   const mediaQueryListRefs = [];
 
   class MediaQueryListEvent extends Event {

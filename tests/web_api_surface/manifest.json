@@ -379,7 +379,14 @@
       "area": "messaging",
       "description": "MessageChannel is exposed",
       "probe": "typeof MessageChannel === 'function' && typeof MessagePort === 'function'",
-      "baseline_supported": false
+      "baseline_supported": true
+    },
+    {
+      "id": "messaging.structured-clone",
+      "area": "messaging",
+      "description": "structuredClone snapshots cyclic object graphs",
+      "probe": "typeof structuredClone === 'function' && (() => { const value = { nested: { n: 1 } }; value.self = value; const copy = structuredClone(value); return copy !== value && copy.self === copy && copy.nested.n === 1; })()",
+      "baseline_supported": true
     },
     {
       "id": "messaging.broadcast-channel",

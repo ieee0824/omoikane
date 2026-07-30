@@ -2118,6 +2118,7 @@ impl JsRuntime {
                     let task_kind = match &task {
                         Task::Timer(payload) => payload.kind(),
                         Task::Navigation(_) => "navigation",
+                        Task::PostedMessage(_) => "posted-message",
                     };
                     let callback_start = std::time::Instant::now();
                     let callback_result = self.run_task(task);
@@ -2174,6 +2175,16 @@ impl JsRuntime {
             Task::Timer(payload) => self.run_timer_payload(payload),
             Task::Navigation(request) => {
                 self.host_state.borrow_mut().navigation_requests.push_back(request);
+                Ok(())
+            }
+            Task::PostedMessage(callback) => {
+                let result = self.with_active_host(|context| {
+                    if let Some(callable) = callback.as_callable() {
+                        callable.call(&JsValue::undefined(), &[], context)?;
+                    }
+                    Ok(())
+                });
+                self.record_error_from("posted message", result);
                 Ok(())
             }
         }
@@ -3078,6 +3089,11 @@ fn register_host_bindings(
             js_string!("__omoikane_queue_networking_task"),
             1,
             NativeFunction::from_copy_closure(queue_networking_task_native),
+        ),
+        (
+            js_string!("__omoikane_enqueue_posted_message"),
+            1,
+            NativeFunction::from_copy_closure(enqueue_posted_message_native),
         ),
         (
             js_string!("__omoikane_canvas_commit"),
@@ -5406,6 +5422,27 @@ fn queue_networking_task_native(
         state.borrow_mut().event_loop.enqueue_networking(
             TimerPayload::Callback { callback, args: Vec::new() },
         );
+        Ok(JsValue::undefined())
+    })
+}
+
+/// Queues a callback on HTML's posted message task source.
+fn enqueue_posted_message_native(
+    _: &JsValue,
+    args: &[JsValue],
+    _: &mut Context,
+) -> JsResult<JsValue> {
+    let callback = args.first().cloned().unwrap_or_default();
+    if !callback.is_callable() {
+        return Err(JsNativeError::typ()
+            .with_message("posted message task callback must be callable")
+            .into());
+    }
+    with_host_state(|state| {
+        state
+            .borrow_mut()
+            .event_loop
+            .enqueue_posted_message(callback);
         Ok(JsValue::undefined())
     })
 }
@@ -24586,6 +24623,100 @@ b</textarea></form>"#);
                 "|element-focus:true:true:f:x",
                 "|after:true:true:f:x",
             )
+        );
+    }
+
+    #[test]
+    fn message_ports_deliver_fifo_tasks_with_microtask_checkpoints() {
+        let mut runtime = JsRuntime::new().unwrap();
+        assert_eq!(
+            eval_str(
+                &mut runtime,
+                r#"(() => { globalThis.log = [];
+                   globalThis.channel = new MessageChannel();
+                   channel.port2.onmessage = event => {
+                     log.push("message:" + event.data + ":" + event.origin + ":" +
+                       (event.source === null) + ":" + event.ports.length);
+                     Promise.resolve().then(() => log.push("micro:" + event.data));
+                   };
+                   channel.port1.postMessage(1);
+                   channel.port1.postMessage(2);
+                   return log.join("|"); })()"#,
+            ),
+            ""
+        );
+        runtime.run_until_idle().unwrap();
+        assert_eq!(
+            eval_str(&mut runtime, "log.join('|')"),
+            "message:1::true:0|micro:1|message:2::true:0|micro:2"
+        );
+    }
+
+    #[test]
+    fn message_port_start_close_and_listener_errors_follow_task_semantics() {
+        let mut runtime = JsRuntime::new().unwrap();
+        eval_str(
+            &mut runtime,
+            r#"(() => { globalThis.log = [];
+               globalThis.channel = new MessageChannel();
+               channel.port2.addEventListener("message", event => {
+                 log.push(event.data);
+                 if (event.data === "first") throw new Error("listener failed");
+               });
+               channel.port1.postMessage("first");
+               channel.port1.postMessage("second"); return ""; })()"#,
+        );
+        runtime.run_until_idle().unwrap();
+        assert_eq!(eval_str(&mut runtime, "log.join('|')"), "");
+        eval_str(&mut runtime, "channel.port2.start()");
+        runtime.run_until_idle().unwrap();
+        assert_eq!(eval_str(&mut runtime, "log.join('|')"), "first|second");
+        assert_eq!(runtime.take_task_errors().len(), 1);
+        eval_str(
+            &mut runtime,
+            "(() => { channel.port2.close(); channel.port1.postMessage('third'); })()",
+        );
+        runtime.run_until_idle().unwrap();
+        assert_eq!(eval_str(&mut runtime, "log.join('|')"), "first|second");
+    }
+
+    #[test]
+    fn structured_clone_snapshots_cycles_builtins_and_rejects_unsupported_values() {
+        let mut runtime = JsRuntime::new().unwrap();
+        let result = eval_str(
+            &mut runtime,
+            r#"(() => {
+              const source = { nested: { value: 1 } };
+              source.self = source;
+              source.date = new Date(1234);
+              source.regexp = /ab/gi;
+              source.map = new Map([["key", { value: 2 }]]);
+              source.set = new Set([3]);
+              source.bytes = new Uint8Array([4, 5]);
+              const clone = structuredClone(source);
+              source.nested.value = 9;
+              source.map.get("key").value = 8;
+              source.bytes[0] = 7;
+              let errors = [];
+              for (const value of [() => {}, Symbol("x"), document.body]) {
+                try { structuredClone(value); } catch (error) { errors.push(error.name); }
+              }
+              return [
+                clone !== source,
+                clone.self === clone,
+                clone.nested.value,
+                clone.date.getTime(),
+                clone.regexp.source + clone.regexp.flags,
+                clone.map.get("key").value,
+                clone.set.has(3),
+                Array.from(clone.bytes).join(","),
+                errors.join(","),
+              ].join("|");
+            })()"#,
+        );
+        assert_eq!(
+            result,
+            "true|true|1|1234|abgi|2|true|4,5|DataCloneError,DataCloneError,DataCloneError"
         );
     }
 }
