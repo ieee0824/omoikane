@@ -1613,6 +1613,27 @@ impl JsRuntime {
             .handle(dialog_id, accept, prompt_text)
     }
 
+    pub(crate) fn call_function_with_value(
+        &mut self,
+        function_source: &str,
+        value: JsValue,
+    ) -> JsResult<JsValue> {
+        let result = self.with_active_host_value(|context| {
+            let function = context.eval(Source::from_bytes(function_source))?;
+            let callable = function.as_callable().ok_or_else(|| {
+                JsError::from(
+                    JsNativeError::typ().with_message("CDP serializer is not callable"),
+                )
+            })?;
+            callable.call(&JsValue::undefined(), &[value], context)
+        });
+        // This helper is a synchronous execution boundary. If a serializer
+        // getter/toJSON attempts to open a modal dialog, Boa rejects the
+        // suspension; discard the corresponding host metadata on every exit.
+        self.host_state.borrow_mut().pending_javascript_dialog = None;
+        result
+    }
+
     /// Returns the console log buffer captured from `console.log`.
     pub fn console_logs(&self) -> Vec<String> {
         self.host_state.borrow().console_logs.clone()
@@ -7545,6 +7566,24 @@ mod tests {
         assert!(module_result.is_err());
         assert_eq!(runtime.pending_javascript_dialog(), None);
 
+        assert_eq!(runtime.eval("6 * 7").unwrap().as_number(), Some(42.0));
+    }
+
+    #[test]
+    fn synchronous_serializer_callbacks_do_not_leak_dialog_state() {
+        let mut runtime = JsRuntime::new().unwrap();
+        for source in [
+            "({ toJSON() { alert('serializer toJSON'); return 1; } })",
+            "({ get value() { alert('serializer getter'); return 1; } })",
+        ] {
+            let value = runtime.eval(source).unwrap();
+            assert!(
+                runtime
+                    .call_function_with_value("value => JSON.stringify(value)", value)
+                    .is_err()
+            );
+            assert_eq!(runtime.pending_javascript_dialog(), None);
+        }
         assert_eq!(runtime.eval("6 * 7").unwrap().as_number(), Some(42.0));
     }
 

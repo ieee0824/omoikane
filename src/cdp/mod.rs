@@ -1,17 +1,26 @@
 //! CDP transport primitives: WebSocket upgrade, frame handling, and JSON-RPC routing.
 
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
+use std::future::Future;
+use std::pin::Pin;
+use std::rc::Rc;
+use std::task::{Context as TaskContext, Poll, Waker};
 use std::time::{Duration, Instant};
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
+use boa_engine::JsValue;
 use serde_json::{Value, json};
 use sha1::{Digest, Sha1};
 
 use crate::dom::{Node, NodeHandle, NodeType};
 use crate::html::{TreeBuilder, decode_html_response};
 use crate::http::{Client, HttpRequest, Method};
-use crate::js::{JsRuntime, NavigationRequest, StorageManager};
+use crate::js::{
+    JavaScriptDialog, JavaScriptDialogController, JavaScriptDialogError, JavaScriptDialogKind,
+    JsRuntime, NavigationRequest, StorageManager,
+};
 
 const WEBSOCKET_GUID: &str = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
 
@@ -276,17 +285,6 @@ impl JsonRpcResponse {
         }
     }
 
-    fn invalid_params(id: Value, message: impl Into<String>) -> Self {
-        Self {
-            id,
-            result: None,
-            error: Some(JsonRpcError {
-                code: -32602,
-                message: message.into(),
-            }),
-        }
-    }
-
     fn to_json(&self) -> Value {
         match &self.error {
             Some(error) => json!({
@@ -392,6 +390,12 @@ impl CdpServer {
     /// Number of requests currently waiting for an out-of-band completion.
     pub fn pending_response_count(&self) -> usize {
         self.pending_responses.len()
+    }
+
+    fn deferred_response_client(&self, token: DeferredResponseToken) -> Option<u64> {
+        self.pending_responses
+            .get(&token)
+            .map(|pending| pending.client_id)
     }
 
     /// Accepts a WebSocket upgrade request and allocates a client id.
@@ -542,7 +546,11 @@ impl CdpServer {
         let response = if let Some(handler) = self.handlers.get(&request.method) {
             match handler(&request.params) {
                 Ok(result) => JsonRpcResponse::success(id, result),
-                Err(error) => JsonRpcResponse::invalid_params(id, error.message),
+                Err(error) => JsonRpcResponse {
+                    id,
+                    result: None,
+                    error: Some(error),
+                },
             }
         } else {
             JsonRpcResponse::method_not_found(id, request.method)
@@ -1410,19 +1418,51 @@ impl CdpSession {
         expression: &str,
         return_by_value: bool,
     ) -> Result<Value, JsonRpcError> {
-        let script = if return_by_value {
-            format!(
-                "(() => {{ const __value = eval({expression:?}); return JSON.stringify({{ result: __cdpSerializeValue(__value) }}); }})()"
-            )
+        let value = self.runtime.eval(expression).map_err(js_error)?;
+        // Runtime.evaluate is itself a user-agent task. Complete its
+        // microtask checkpoint and make any host tasks (such as navigation)
+        // ready before the protocol method commits them.
+        self.runtime.run_until_idle().map_err(js_error)?;
+        self.serialize_evaluation_value(value, return_by_value)
+    }
+
+    async fn evaluate_expression_async(
+        &mut self,
+        expression: &str,
+        return_by_value: bool,
+    ) -> Result<Value, JsonRpcError> {
+        // Evaluate the requested source directly. Calling JavaScript `eval()`
+        // from an async outer script would use Boa's synchronous nested-eval
+        // path and reject a native-call suspension.
+        let value = self.runtime.eval_async(expression).await.map_err(js_error)?;
+        self.runtime.run_until_idle().map_err(js_error)?;
+        let result = self.serialize_evaluation_value(value, return_by_value)?;
+        self.drive_navigation_requests()?;
+        Ok(result)
+    }
+
+    fn serialize_evaluation_value(
+        &mut self,
+        value: JsValue,
+        return_by_value: bool,
+    ) -> Result<Value, JsonRpcError> {
+        let serialization_function = if return_by_value {
+            "value => JSON.stringify({ result: __cdpSerializeValue(value) })".to_string()
         } else {
             let object_id = format!("__cdp_object_{}", self.next_object_id);
             self.next_object_id += 1;
             format!(
-                "(() => {{ globalThis[{object_id:?}] = eval({expression:?}); return JSON.stringify({{ result: __cdpRemoteObject(globalThis[{object_id:?}], {object_id:?}) }}); }})()"
+                "value => {{ globalThis[{object_id:?}] = value; return JSON.stringify({{ result: __cdpRemoteObject(value, {object_id:?}) }}); }}"
             )
         };
-
-        let raw = self.runtime.eval(&script).map_err(js_error)?;
+        let raw = self
+            .runtime
+            .call_function_with_value(&serialization_function, value)
+            .map_err(js_error)?;
+        // Match the synchronous Runtime.evaluate task boundary: serializer
+        // getters/toJSON may enqueue microtasks that must settle before the
+        // protocol response and any resulting navigation are committed.
+        self.runtime.run_until_idle().map_err(js_error)?;
         let payload = raw
             .as_string()
             .ok_or(JsonRpcError {
@@ -1430,15 +1470,11 @@ impl CdpSession {
                 message: "Runtime evaluation did not return a string payload".to_string(),
             })?
             .to_std_string_escaped();
-        // Runtime.evaluate is itself a user-agent task. Complete its
-        // microtask checkpoint and make any host tasks (such as navigation)
-        // ready before the protocol method commits them.
-        self.runtime.run_until_idle().map_err(js_error)?;
-        let parsed: Value = serde_json::from_str(&payload).map_err(|error| JsonRpcError {
+        let result = serde_json::from_str(&payload).map_err(|error| JsonRpcError {
             code: -32000,
             message: error.to_string(),
         })?;
-        Ok(parsed)
+        Ok(result)
     }
 
     fn load_page_request(
@@ -1664,6 +1700,331 @@ impl CdpSession {
         }
 
         payload
+    }
+}
+
+type SessionEvaluation = Pin<
+    Box<dyn Future<Output = (CdpSession, Result<Value, JsonRpcError>)>>,
+>;
+
+struct PendingSessionEvaluation {
+    token: DeferredResponseToken,
+    controller: JavaScriptDialogController,
+    cancelled: Rc<Cell<bool>>,
+    page_url: String,
+    opened: Option<JavaScriptDialog>,
+    future: SessionEvaluation,
+}
+
+enum BrowserSessionAction {
+    Notify(&'static str, Value),
+    Complete(DeferredResponseToken, Result<Value, JsonRpcError>),
+}
+
+struct BrowserSessionState {
+    session: Option<CdpSession>,
+    pending: Option<PendingSessionEvaluation>,
+    actions: Vec<BrowserSessionAction>,
+}
+
+impl BrowserSessionState {
+    fn begin_evaluation(
+        &mut self,
+        token: DeferredResponseToken,
+        params: &Value,
+    ) -> Result<CdpMethodResult, JsonRpcError> {
+        if self.pending.is_some() {
+            return Err(JsonRpcError {
+                code: -32000,
+                message: "A Runtime.evaluate request is already pending".to_string(),
+            });
+        }
+        let expression = require_string(params, "expression")?;
+        let return_by_value = params
+            .get("returnByValue")
+            .and_then(Value::as_bool)
+            .unwrap_or(true);
+        let mut session = self.session.take().ok_or(JsonRpcError {
+            code: -32000,
+            message: "Browser session is busy".to_string(),
+        })?;
+        // The controller belongs only to this in-flight evaluation. It is
+        // discarded together with the evaluation before a replacement Runtime
+        // is installed, so dialog ids reused after navigation cannot resolve an
+        // older suspension.
+        let controller = session.runtime.javascript_dialog_controller();
+        let page_url = session.current_url.clone();
+        let cancelled = Rc::new(Cell::new(false));
+        let evaluation_cancelled = Rc::clone(&cancelled);
+        let future = Box::pin(async move {
+            let result = {
+                let mut evaluation = Box::pin(
+                    session.evaluate_expression_async(&expression, return_by_value),
+                );
+                std::future::poll_fn(|context| {
+                    if evaluation_cancelled.get() {
+                        return Poll::Ready(Err(JsonRpcError {
+                            code: -32000,
+                            message: "JavaScript evaluation cancelled by page teardown".to_string(),
+                        }));
+                    }
+                    evaluation.as_mut().poll(context)
+                })
+                .await
+            };
+            (session, result)
+        });
+        self.pending = Some(PendingSessionEvaluation {
+            token,
+            controller,
+            cancelled,
+            page_url,
+            opened: None,
+            future,
+        });
+        self.poll_evaluation();
+        // Even immediate completion is flushed out-of-band so CdpServer can
+        // first record the original client and request id for this token.
+        Ok(CdpMethodResult::Deferred)
+    }
+
+    fn poll_evaluation(&mut self) {
+        let Some(mut pending) = self.pending.take() else {
+            return;
+        };
+        let waker: &'static Waker = Waker::noop();
+        let mut context = TaskContext::from_waker(waker);
+        match pending.future.as_mut().poll(&mut context) {
+            Poll::Ready((session, result)) => {
+                self.session = Some(session);
+                self.actions
+                    .push(BrowserSessionAction::Complete(pending.token, result));
+            }
+            Poll::Pending => {
+                if pending.opened.is_none()
+                    && let Some(dialog) = pending.controller.pending()
+                {
+                    self.actions.push(BrowserSessionAction::Notify(
+                        "Page.javascriptDialogOpening",
+                        dialog_opening_params(&dialog, &pending.page_url),
+                    ));
+                    pending.opened = Some(dialog);
+                }
+                self.pending = Some(pending);
+            }
+        }
+    }
+
+    fn handle_dialog(&mut self, params: &Value) -> Result<Value, JsonRpcError> {
+        let accept = params
+            .get("accept")
+            .and_then(Value::as_bool)
+            .ok_or_else(|| {
+                invalid_params("Missing or invalid boolean parameter: accept".to_string())
+            })?;
+        let prompt_text = params
+            .get("promptText")
+            .map(|value| {
+                value.as_str().map(ToString::to_string).ok_or_else(|| {
+                    invalid_params("Invalid string parameter: promptText".to_string())
+                })
+            })
+            .transpose()?;
+        let pending = self.pending.as_mut().ok_or(JsonRpcError {
+            code: -32000,
+            message: "No JavaScript dialog is open".to_string(),
+        })?;
+        let dialog = pending.controller.pending().ok_or(JsonRpcError {
+            code: -32000,
+            message: "No JavaScript dialog is open".to_string(),
+        })?;
+        pending
+            .controller
+            .handle(dialog.id, accept, prompt_text.clone())
+            .map_err(dialog_error)?;
+        let user_input = if dialog.kind == JavaScriptDialogKind::Prompt && accept {
+            prompt_text
+                .or(dialog.default_prompt.clone())
+                .unwrap_or_default()
+        } else {
+            String::new()
+        };
+        self.actions.push(BrowserSessionAction::Notify(
+            "Page.javascriptDialogClosed",
+            json!({ "result": accept, "userInput": user_input }),
+        ));
+        pending.opened = None;
+        self.poll_evaluation();
+        Ok(json!({}))
+    }
+
+    fn cancel_pending_dialog(&mut self) {
+        let Some(pending) = self.pending.as_mut() else {
+            return;
+        };
+        if pending.controller.pending().is_some() {
+            self.actions.push(BrowserSessionAction::Notify(
+                "Page.javascriptDialogClosed",
+                json!({ "result": false, "userInput": "" }),
+            ));
+        }
+        pending.cancelled.set(true);
+        self.poll_evaluation();
+    }
+
+    fn dispatch_after_cancel(
+        &mut self,
+        method: &str,
+        params: &Value,
+    ) -> Result<Value, JsonRpcError> {
+        self.cancel_pending_dialog();
+        let session = self.session.as_mut().ok_or(JsonRpcError {
+            code: -32000,
+            message: "Could not cancel pending JavaScript evaluation".to_string(),
+        })?;
+        session.dispatch(method, params.clone())
+    }
+}
+
+/// CDP transport and page-session coordinator with deferred modal-dialog support.
+///
+/// `Runtime.evaluate` remains pending while `alert`, `confirm`, or `prompt`
+/// blocks JavaScript. Other transport commands continue to be routed, and
+/// navigation, reload, or owner-client disconnect dismisses the active dialog
+/// before the old evaluation state is discarded.
+pub struct BrowserSession {
+    server: CdpServer,
+    state: Rc<RefCell<BrowserSessionState>>,
+}
+
+impl BrowserSession {
+    pub fn new() -> Result<Self, String> {
+        let state = Rc::new(RefCell::new(BrowserSessionState {
+            session: Some(CdpSession::new()?),
+            pending: None,
+            actions: Vec::new(),
+        }));
+        let mut server = CdpServer::new();
+
+        let evaluation_state = Rc::clone(&state);
+        server.register_deferred_method("Runtime.evaluate", move |token, params| {
+            evaluation_state.borrow_mut().begin_evaluation(token, params)
+        });
+        let dialog_state = Rc::clone(&state);
+        server.register_method("Page.handleJavaScriptDialog", move |params| {
+            dialog_state.borrow_mut().handle_dialog(params)
+        });
+        for method in ["Page.navigate", "Page.reload"] {
+            let method_state = Rc::clone(&state);
+            server.register_method(method, move |params| {
+                method_state.borrow_mut().dispatch_after_cancel(method, params)
+            });
+        }
+        for method in [
+            "Page.getFrameTree",
+            "DOM.getDocument",
+            "DOM.getAttributes",
+            "DOM.querySelector",
+            "DOM.getOuterHTML",
+            "Runtime.callFunctionOn",
+            "Target.createBrowserContext",
+            "Target.getBrowserContexts",
+            "Target.disposeBrowserContext",
+            "Input.dispatchKeyEvent",
+            "Input.dispatchMouseEvent",
+        ] {
+            let method_state = Rc::clone(&state);
+            server.register_method(method, move |params| {
+                let mut state = method_state.borrow_mut();
+                let session = state.session.as_mut().ok_or(JsonRpcError {
+                    code: -32000,
+                    message: "Page state is suspended by a JavaScript dialog".to_string(),
+                })?;
+                session.dispatch(method, params.clone())
+            });
+        }
+        server.register_method("Browser.getVersion", |_| {
+            Ok(json!({ "product": "Omoikane/0.1", "protocolVersion": "1.3" }))
+        });
+
+        Ok(Self { server, state })
+    }
+
+    pub fn accept_upgrade(&mut self, request: &str) -> Result<WebSocketUpgrade, CdpError> {
+        self.server.accept_upgrade(request)
+    }
+
+    pub fn receive(&mut self, client_id: u64, bytes: &[u8]) -> Result<(), CdpError> {
+        let owner_disconnect = WebSocketFrame::decode(bytes)
+            .ok()
+            .is_some_and(|(frame, _)| {
+                frame.opcode == WebSocketOpcode::Close
+                    && self.state.borrow().pending.as_ref().is_some_and(|pending| {
+                        self.server.deferred_response_client(pending.token) == Some(client_id)
+                    })
+            });
+        if owner_disconnect {
+            self.state.borrow_mut().cancel_pending_dialog();
+        }
+        self.server.receive(client_id, bytes)?;
+        self.flush_actions()
+    }
+
+    pub fn drain_outgoing(
+        &mut self,
+        client_id: u64,
+    ) -> Result<Vec<WebSocketFrame>, CdpError> {
+        self.flush_actions()?;
+        self.server.drain_outgoing(client_id)
+    }
+
+    pub fn pending_response_count(&self) -> usize {
+        self.server.pending_response_count()
+    }
+
+    fn flush_actions(&mut self) -> Result<(), CdpError> {
+        let actions = std::mem::take(&mut self.state.borrow_mut().actions);
+        for action in actions {
+            match action {
+                BrowserSessionAction::Notify(method, params) => {
+                    self.server.notify(method, params)?;
+                }
+                BrowserSessionAction::Complete(token, result) => {
+                    // Disconnect already removed the response routing record.
+                    if self.server.deferred_response_client(token).is_some() {
+                        self.server.complete_deferred_response(token, result)?;
+                    }
+                }
+            }
+        }
+        if let Some(session) = self.state.borrow_mut().session.as_mut() {
+            for event in session.drain_events() {
+                self.server.notify(&event.method, event.params)?;
+            }
+        }
+        Ok(())
+    }
+}
+
+fn dialog_opening_params(dialog: &JavaScriptDialog, page_url: &str) -> Value {
+    let kind = match dialog.kind {
+        JavaScriptDialogKind::Alert => "alert",
+        JavaScriptDialogKind::Confirm => "confirm",
+        JavaScriptDialogKind::Prompt => "prompt",
+    };
+    json!({
+        "url": page_url,
+        "type": kind,
+        "message": dialog.message,
+        "hasBrowserHandler": true,
+        "defaultPrompt": dialog.default_prompt.clone().unwrap_or_default(),
+    })
+}
+
+fn dialog_error(error: JavaScriptDialogError) -> JsonRpcError {
+    JsonRpcError {
+        code: -32000,
+        message: error.to_string(),
     }
 }
 
@@ -1980,6 +2341,518 @@ mod tests {
             server.complete_deferred_response(token, Ok(Value::Null)),
             Err(CdpError::UnknownDeferredRequest(token.0))
         );
+    }
+
+    fn browser_request(session: &mut BrowserSession, client_id: u64, payload: &str) {
+        session
+            .receive(client_id, &WebSocketFrame::text(payload).encode(true))
+            .unwrap();
+    }
+
+    fn browser_payloads(session: &mut BrowserSession, client_id: u64) -> Vec<Value> {
+        session
+            .drain_outgoing(client_id)
+            .unwrap()
+            .iter()
+            .map(|frame| serde_json::from_str(&decode_text(frame)).unwrap())
+            .collect()
+    }
+
+    #[test]
+    fn browser_session_forwards_existing_dom_commands() {
+        let mut session = BrowserSession::new().unwrap();
+        let client = session.accept_upgrade(sample_upgrade_request()).unwrap();
+
+        browser_request(
+            &mut session,
+            client.client_id,
+            r#"{"jsonrpc":"2.0","id":"document","method":"DOM.getDocument","params":{"depth":1}}"#,
+        );
+        let response = browser_payloads(&mut session, client.client_id);
+        assert_eq!(response.len(), 1);
+        assert_eq!(response[0]["id"], "document");
+        assert_eq!(response[0]["result"]["root"]["nodeName"], "#document");
+        assert!(response[0].get("error").is_none());
+    }
+
+    #[test]
+    fn busy_forwarded_command_does_not_cancel_the_pending_dialog() {
+        let mut session = BrowserSession::new().unwrap();
+        let client = session.accept_upgrade(sample_upgrade_request()).unwrap();
+        browser_request(
+            &mut session,
+            client.client_id,
+            r#"{"jsonrpc":"2.0","id":"eval","method":"Runtime.evaluate","params":{"expression":"confirm('Still pending?')"}}"#,
+        );
+        browser_payloads(&mut session, client.client_id);
+
+        browser_request(
+            &mut session,
+            client.client_id,
+            r#"{"jsonrpc":"2.0","id":"dom","method":"DOM.getDocument","params":{}}"#,
+        );
+        let busy = browser_payloads(&mut session, client.client_id);
+        assert_eq!(busy.len(), 1);
+        assert_eq!(busy[0]["id"], "dom");
+        assert_eq!(busy[0]["error"]["code"], -32000);
+        assert_eq!(session.pending_response_count(), 1);
+
+        browser_request(
+            &mut session,
+            client.client_id,
+            r#"{"jsonrpc":"2.0","id":"handle","method":"Page.handleJavaScriptDialog","params":{"accept":true}}"#,
+        );
+        let completed = browser_payloads(&mut session, client.client_id);
+        assert!(completed.iter().any(|value| {
+            value["method"] == "Page.javascriptDialogClosed"
+                && value["params"]["result"] == true
+        }));
+        assert!(completed.iter().any(|value| {
+            value["id"] == "eval" && value["result"]["result"]["value"] == true
+        }));
+        assert_eq!(session.pending_response_count(), 0);
+    }
+
+    #[test]
+    fn browser_session_round_trips_confirm_while_serving_another_command() {
+        let mut session = BrowserSession::new().unwrap();
+        let client = session.accept_upgrade(sample_upgrade_request()).unwrap();
+
+        browser_request(
+            &mut session,
+            client.client_id,
+            r#"{"jsonrpc":"2.0","id":"eval","method":"Runtime.evaluate","params":{"expression":"confirm('Continue?')","returnByValue":true}}"#,
+        );
+        let opening = browser_payloads(&mut session, client.client_id);
+        assert_eq!(session.pending_response_count(), 1, "{opening:?}");
+        assert_eq!(opening.len(), 1);
+        assert_eq!(opening[0]["method"], "Page.javascriptDialogOpening");
+        assert_eq!(opening[0]["params"]["type"], "confirm");
+        assert_eq!(opening[0]["params"]["message"], "Continue?");
+        assert_eq!(opening[0]["params"]["defaultPrompt"], "");
+        assert_eq!(opening[0]["params"]["url"], "about:blank");
+
+        browser_request(
+            &mut session,
+            client.client_id,
+            r#"{"jsonrpc":"2.0","id":"version","method":"Browser.getVersion","params":{}}"#,
+        );
+        let version = browser_payloads(&mut session, client.client_id);
+        assert_eq!(version[0]["id"], "version");
+        assert_eq!(version[0]["result"]["product"], "Omoikane/0.1");
+        assert_eq!(session.pending_response_count(), 1);
+
+        browser_request(
+            &mut session,
+            client.client_id,
+            r#"{"jsonrpc":"2.0","id":"handle","method":"Page.handleJavaScriptDialog","params":{"accept":false}}"#,
+        );
+        let completed = browser_payloads(&mut session, client.client_id);
+        assert_eq!(completed[0]["id"], "handle");
+        assert_eq!(completed[1]["method"], "Page.javascriptDialogClosed");
+        assert_eq!(completed[1]["params"]["result"], false);
+        assert_eq!(completed[2]["id"], "eval");
+        assert_eq!(completed[2]["result"]["result"]["value"], false);
+        assert_eq!(session.pending_response_count(), 0);
+    }
+
+    #[test]
+    fn browser_session_emits_each_sequential_dialog_opening() {
+        let mut session = BrowserSession::new().unwrap();
+        let client = session.accept_upgrade(sample_upgrade_request()).unwrap();
+        browser_request(
+            &mut session,
+            client.client_id,
+            r#"{"jsonrpc":"2.0","id":"eval","method":"Runtime.evaluate","params":{"expression":"alert('First'); confirm('Second')"}}"#,
+        );
+        let first = browser_payloads(&mut session, client.client_id);
+        assert_eq!(first[0]["method"], "Page.javascriptDialogOpening");
+        assert_eq!(first[0]["params"]["type"], "alert");
+        assert_eq!(first[0]["params"]["message"], "First");
+
+        browser_request(
+            &mut session,
+            client.client_id,
+            r#"{"jsonrpc":"2.0","id":"first-handle","method":"Page.handleJavaScriptDialog","params":{"accept":true}}"#,
+        );
+        let between = browser_payloads(&mut session, client.client_id);
+        assert!(between.iter().any(|value| {
+            value["method"] == "Page.javascriptDialogClosed"
+                && value["params"]["result"] == true
+        }));
+        assert!(between.iter().any(|value| {
+            value["method"] == "Page.javascriptDialogOpening"
+                && value["params"]["type"] == "confirm"
+                && value["params"]["message"] == "Second"
+        }));
+        assert_eq!(session.pending_response_count(), 1);
+
+        browser_request(
+            &mut session,
+            client.client_id,
+            r#"{"jsonrpc":"2.0","id":"second-handle","method":"Page.handleJavaScriptDialog","params":{"accept":false}}"#,
+        );
+        let completed = browser_payloads(&mut session, client.client_id);
+        assert!(completed.iter().any(|value| {
+            value["method"] == "Page.javascriptDialogClosed"
+                && value["params"]["result"] == false
+        }));
+        assert!(completed.iter().any(|value| {
+            value["id"] == "eval" && value["result"]["result"]["value"] == false
+        }));
+        assert_eq!(session.pending_response_count(), 0);
+    }
+
+    #[test]
+    fn resumed_async_evaluation_commits_queued_location_navigation() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            for body in ["<title>Start</title>", "<title>Async next</title>"] {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut buffer = [0u8; 1024];
+                let _ = stream.read(&mut buffer).unwrap();
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                stream.write_all(response.as_bytes()).unwrap();
+            }
+        });
+        let mut session = BrowserSession::new().unwrap();
+        let client = session.accept_upgrade(sample_upgrade_request()).unwrap();
+        let start_url = format!("http://127.0.0.1:{}/start", address.port());
+        let next_url = format!("http://127.0.0.1:{}/next", address.port());
+        browser_request(
+            &mut session,
+            client.client_id,
+            &json!({
+                "jsonrpc": "2.0",
+                "id": "navigate",
+                "method": "Page.navigate",
+                "params": { "url": start_url },
+            })
+            .to_string(),
+        );
+        browser_payloads(&mut session, client.client_id);
+        browser_request(
+            &mut session,
+            client.client_id,
+            &json!({
+                "jsonrpc": "2.0",
+                "id": "eval",
+                "method": "Runtime.evaluate",
+                "params": {
+                    "expression": format!(
+                        "confirm('Leave?'); location.href = {next_url:?}; 'navigating'"
+                    ),
+                },
+            })
+            .to_string(),
+        );
+        browser_payloads(&mut session, client.client_id);
+        browser_request(
+            &mut session,
+            client.client_id,
+            r#"{"jsonrpc":"2.0","id":"handle","method":"Page.handleJavaScriptDialog","params":{"accept":true}}"#,
+        );
+        let completed = browser_payloads(&mut session, client.client_id);
+        assert!(completed.iter().any(|value| {
+            value["id"] == "eval"
+                && value["result"]["result"]["value"] == "navigating"
+        }), "{completed:?}");
+        assert!(completed.iter().any(|value| {
+            value["method"] == "Page.frameNavigated"
+                && value["params"]["frame"]["url"] == next_url
+        }), "{completed:?}");
+
+        browser_request(
+            &mut session,
+            client.client_id,
+            r#"{"jsonrpc":"2.0","id":"tree","method":"Page.getFrameTree","params":{}}"#,
+        );
+        let tree = browser_payloads(&mut session, client.client_id);
+        assert_eq!(tree[0]["result"]["frameTree"]["frame"]["url"], next_url);
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn async_remote_objects_match_sync_serialization_for_functions_and_edge_objects() {
+        for (index, (expression, return_by_value)) in [
+            ("(function namedEdge(value) { return value; })", true),
+            ("({ kept: 1, omitted: undefined, nested: [NaN, null] })", true),
+            ("(function referenced(value) { return value; })", false),
+            ("null", false),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let params = json!({
+                "expression": expression,
+                "returnByValue": return_by_value,
+            });
+            let mut direct = CdpSession::new().unwrap();
+            let expected = direct.dispatch("Runtime.evaluate", params.clone()).unwrap();
+
+            let mut browser = BrowserSession::new().unwrap();
+            let client = browser.accept_upgrade(sample_upgrade_request()).unwrap();
+            browser_request(
+                &mut browser,
+                client.client_id,
+                &json!({
+                    "jsonrpc": "2.0",
+                    "id": index,
+                    "method": "Runtime.evaluate",
+                    "params": params,
+                })
+                .to_string(),
+            );
+            let response = browser_payloads(&mut browser, client.client_id);
+            assert_eq!(response.len(), 1);
+            assert_eq!(response[0]["result"], expected, "expression: {expression}");
+        }
+
+        let mut browser = BrowserSession::new().unwrap();
+        let client = browser.accept_upgrade(sample_upgrade_request()).unwrap();
+        browser_request(
+            &mut browser,
+            client.client_id,
+            r#"{"jsonrpc":"2.0","id":"null","method":"Runtime.evaluate","params":{"expression":"null","returnByValue":false}}"#,
+        );
+        let response = browser_payloads(&mut browser, client.client_id);
+        let remote = &response[0]["result"]["result"];
+        assert_eq!(remote["type"], "object");
+        assert_eq!(remote["subtype"], "null");
+        assert_eq!(remote["value"], Value::Null);
+        assert!(remote.get("objectId").is_none());
+    }
+
+    #[test]
+    fn async_serializer_microtasks_settle_before_the_evaluate_response() {
+        let mut browser = BrowserSession::new().unwrap();
+        let client = browser.accept_upgrade(sample_upgrade_request()).unwrap();
+        browser_request(
+            &mut browser,
+            client.client_id,
+            r#"{"jsonrpc":"2.0","id":"serialize","method":"Runtime.evaluate","params":{"expression":"({ toJSON() { queueMicrotask(() => globalThis.serializerMicrotask = 'done'); return { ok: true }; } })","returnByValue":true}}"#,
+        );
+        let serialized = browser_payloads(&mut browser, client.client_id);
+        assert_eq!(serialized.len(), 1);
+        assert_eq!(serialized[0]["id"], "serialize");
+        assert_eq!(serialized[0]["result"]["result"]["value"]["ok"], true);
+
+        browser_request(
+            &mut browser,
+            client.client_id,
+            r#"{"jsonrpc":"2.0","id":"observe","method":"Runtime.evaluate","params":{"expression":"globalThis.serializerMicrotask","returnByValue":true}}"#,
+        );
+        let observed = browser_payloads(&mut browser, client.client_id);
+        assert_eq!(observed.len(), 1);
+        assert_eq!(observed[0]["id"], "observe");
+        assert_eq!(observed[0]["result"]["result"]["value"], "done");
+    }
+
+    #[test]
+    fn sync_and_async_raw_source_execution_share_scope_completion_and_serialization() {
+        let mut direct = CdpSession::new().unwrap();
+        let mut browser = BrowserSession::new().unwrap();
+        let client = browser.accept_upgrade(sample_upgrade_request()).unwrap();
+        let cases = [
+            ("var sharedVar = 7; sharedVar", true),
+            ("sharedVar", true),
+            ("function sharedFunction(value) { return value * 2; }", true),
+            ("sharedFunction(4)", true),
+            ("1; 2; 3", true),
+            (
+                "({ toJSON() { queueMicrotask(() => globalThis.sharedSerializerOrder = 'settled'); return { ok: true }; } })",
+                true,
+            ),
+            ("sharedSerializerOrder", true),
+            ("(function referenced(value) { return value; })", false),
+        ];
+
+        for (index, (expression, return_by_value)) in cases.into_iter().enumerate() {
+            let params = json!({
+                "expression": expression,
+                "returnByValue": return_by_value,
+            });
+            let expected = direct.dispatch("Runtime.evaluate", params.clone()).unwrap();
+            browser_request(
+                &mut browser,
+                client.client_id,
+                &json!({
+                    "jsonrpc": "2.0",
+                    "id": index,
+                    "method": "Runtime.evaluate",
+                    "params": params,
+                })
+                .to_string(),
+            );
+            let response = browser_payloads(&mut browser, client.client_id);
+            assert_eq!(response.len(), 1);
+            assert_eq!(response[0]["result"], expected, "expression: {expression}");
+        }
+
+        assert_eq!(
+            direct
+                .dispatch(
+                    "Runtime.evaluate",
+                    json!({ "expression": "typeof sharedFunction", "returnByValue": true }),
+                )
+                .unwrap()["result"]["value"],
+            "function"
+        );
+    }
+
+    #[test]
+    fn browser_session_passes_prompt_text_to_the_suspended_evaluation() {
+        let mut session = BrowserSession::new().unwrap();
+        let client = session.accept_upgrade(sample_upgrade_request()).unwrap();
+        browser_request(
+            &mut session,
+            client.client_id,
+            r#"{"jsonrpc":"2.0","id":7,"method":"Runtime.evaluate","params":{"expression":"prompt('Name', 'Ada')","returnByValue":true}}"#,
+        );
+        let opening = browser_payloads(&mut session, client.client_id);
+        assert_eq!(opening[0]["params"]["type"], "prompt");
+        assert_eq!(opening[0]["params"]["defaultPrompt"], "Ada");
+
+        browser_request(
+            &mut session,
+            client.client_id,
+            r#"{"jsonrpc":"2.0","id":8,"method":"Page.handleJavaScriptDialog","params":{"accept":true,"promptText":"Grace"}}"#,
+        );
+        let completed = browser_payloads(&mut session, client.client_id);
+        assert_eq!(completed[1]["params"]["userInput"], "Grace");
+        assert_eq!(completed[2]["id"], 7);
+        assert_eq!(completed[2]["result"]["result"]["value"], "Grace");
+    }
+
+    #[test]
+    fn navigation_dismisses_a_dialog_and_new_runtime_dialog_ids_are_isolated() {
+        let mut session = BrowserSession::new().unwrap();
+        let client = session.accept_upgrade(sample_upgrade_request()).unwrap();
+        browser_request(
+            &mut session,
+            client.client_id,
+            r#"{"jsonrpc":"2.0","id":"old","method":"Runtime.evaluate","params":{"expression":"confirm('Old runtime')"}}"#,
+        );
+        browser_payloads(&mut session, client.client_id);
+
+        browser_request(
+            &mut session,
+            client.client_id,
+            r#"{"jsonrpc":"2.0","id":"nav","method":"Page.navigate","params":{"url":"data:text/html,<title>next</title>"}}"#,
+        );
+        let navigation = browser_payloads(&mut session, client.client_id);
+        assert!(navigation.iter().any(|value| {
+            value["method"] == "Page.javascriptDialogClosed"
+                && value["params"]["result"] == false
+        }));
+        assert!(navigation.iter().any(|value| value["id"] == "old"));
+        assert!(navigation.iter().any(|value| value["id"] == "nav"));
+
+        browser_request(
+            &mut session,
+            client.client_id,
+            r#"{"jsonrpc":"2.0","id":"new","method":"Runtime.evaluate","params":{"expression":"prompt('New runtime', 'fresh')"}}"#,
+        );
+        let opening = browser_payloads(&mut session, client.client_id);
+        assert!(opening.iter().any(|value| {
+            value["method"] == "Page.javascriptDialogOpening"
+                && value["params"]["message"] == "New runtime"
+        }));
+        browser_request(
+            &mut session,
+            client.client_id,
+            r#"{"jsonrpc":"2.0","id":"new-handle","method":"Page.handleJavaScriptDialog","params":{"accept":true}}"#,
+        );
+        let completed = browser_payloads(&mut session, client.client_id);
+        assert!(completed.iter().any(|value| {
+            value["id"] == "new" && value["result"]["result"]["value"] == "fresh"
+        }));
+    }
+
+    #[test]
+    fn reload_dismisses_a_dialog_and_replaces_the_script_state() {
+        let mut session = BrowserSession::new().unwrap();
+        let client = session.accept_upgrade(sample_upgrade_request()).unwrap();
+        browser_request(
+            &mut session,
+            client.client_id,
+            r#"{"jsonrpc":"2.0","id":"initial-nav","method":"Page.navigate","params":{"url":"data:text/html,<title>reload</title>"}}"#,
+        );
+        browser_payloads(&mut session, client.client_id);
+        browser_request(
+            &mut session,
+            client.client_id,
+            r#"{"jsonrpc":"2.0","id":"old-eval","method":"Runtime.evaluate","params":{"expression":"globalThis.beforeReload = 1; confirm('Reload?')"}}"#,
+        );
+        browser_payloads(&mut session, client.client_id);
+
+        browser_request(
+            &mut session,
+            client.client_id,
+            r#"{"jsonrpc":"2.0","id":"reload","method":"Page.reload","params":{}}"#,
+        );
+        let reload = browser_payloads(&mut session, client.client_id);
+        assert!(reload.iter().any(|value| {
+            value["method"] == "Page.javascriptDialogClosed"
+                && value["params"]["result"] == false
+        }));
+        assert!(reload.iter().any(|value| value["id"] == "old-eval"));
+        assert!(reload.iter().any(|value| value["id"] == "reload"));
+
+        browser_request(
+            &mut session,
+            client.client_id,
+            r#"{"jsonrpc":"2.0","id":"check","method":"Runtime.evaluate","params":{"expression":"typeof beforeReload"}}"#,
+        );
+        let checked = browser_payloads(&mut session, client.client_id);
+        assert!(checked.iter().any(|value| {
+            value["id"] == "check"
+                && value["result"]["result"]["value"] == "undefined"
+        }));
+    }
+
+    #[test]
+    fn owner_disconnect_dismisses_dialog_without_leaking_deferred_state() {
+        let mut session = BrowserSession::new().unwrap();
+        let owner = session.accept_upgrade(sample_upgrade_request()).unwrap();
+        let observer = session.accept_upgrade(sample_upgrade_request()).unwrap();
+        browser_request(
+            &mut session,
+            owner.client_id,
+            r#"{"jsonrpc":"2.0","id":1,"method":"Runtime.evaluate","params":{"expression":"alert('bye'); globalThis.afterDisconnect = true"}}"#,
+        );
+        browser_payloads(&mut session, owner.client_id);
+        browser_payloads(&mut session, observer.client_id);
+
+        session
+            .receive(owner.client_id, &WebSocketFrame {
+                fin: true,
+                opcode: WebSocketOpcode::Close,
+                payload: Vec::new(),
+            }.encode(true))
+            .unwrap();
+        assert_eq!(session.pending_response_count(), 0);
+        let observer_events = browser_payloads(&mut session, observer.client_id);
+        assert!(observer_events.iter().any(|value| {
+            value["method"] == "Page.javascriptDialogClosed"
+                && value["params"]["result"] == false
+        }));
+
+        browser_request(
+            &mut session,
+            observer.client_id,
+            r#"{"jsonrpc":"2.0","id":2,"method":"Runtime.evaluate","params":{"expression":"typeof afterDisconnect"}}"#,
+        );
+        let response = browser_payloads(&mut session, observer.client_id);
+        assert!(response.iter().any(|value| {
+            value["id"] == 2
+                && value["result"]["result"]["value"] == "undefined"
+        }));
     }
 
     #[test]
