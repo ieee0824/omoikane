@@ -646,7 +646,6 @@ struct WorkerRuntime {
     outgoing: VecDeque<String>,
     startup_error: Option<String>,
     terminated: bool,
-    generation: u64,
 }
 
 /// A loaded sub-browsing-context document owned by an `<iframe>` element.
@@ -1620,6 +1619,16 @@ impl JsRuntime {
         let workers = std::mem::take(&mut self.host_state.borrow_mut().workers);
         for entry in workers.values() {
             let mut worker = entry.borrow_mut();
+            if let Some(owner_object) = worker.owner_object.as_ref()
+                && let Some(owner_object) = owner_object.as_object()
+            {
+                let _ = owner_object.set(
+                    js_string!("__terminated"),
+                    JsValue::from(true),
+                    true,
+                    &mut self.context,
+                );
+            }
             worker.terminated = true;
             worker.outgoing.clear();
             worker.runtime.host_state.borrow_mut().worker_terminated = true;
@@ -6356,7 +6365,7 @@ fn create_worker_for_owner_state(
     owner_state: Rc<RefCell<HostState>>,
     requested_url: &str,
 ) -> JsResult<u64> {
-    let (owner_url, base_url, storage, session_id, user_agent, generation, worker_id) = {
+    let (owner_url, base_url, storage, session_id, user_agent, worker_id) = {
         let mut state = owner_state.borrow_mut();
         let id = state.next_worker_id;
         state.next_worker_id = state.next_worker_id.saturating_add(1);
@@ -6370,13 +6379,6 @@ fn create_worker_for_owner_state(
             state.storage_manager.clone(),
             state.storage_session_id,
             state.navigator_user_agent.clone(),
-            state
-                .workers
-                .values()
-                .map(|worker| worker.borrow().generation)
-                .max()
-                .unwrap_or(0)
-                .saturating_add(1),
             id,
         )
     };
@@ -6410,7 +6412,6 @@ fn create_worker_for_owner_state(
         outgoing: VecDeque::new(),
         startup_error: None,
         terminated: false,
-        generation,
     }));
     owner_state.borrow_mut().workers.insert(worker_id, Rc::clone(&entry));
     let startup_error = match source {
@@ -8748,6 +8749,40 @@ mod tests {
             .unwrap()
             .as_boolean()
             .unwrap_or(false));
+    }
+
+    #[test]
+    fn dedicated_worker_post_message_rejects_array_transfer_lists() {
+        let mut runtime = JsRuntime::new().unwrap();
+        runtime
+            .eval(
+                r#"globalThis.workerValues = []; globalThis.ownerTransferError = "";
+                   const source = encodeURIComponent('onmessage = event => { let name = ""; try { postMessage("worker", [new ArrayBuffer(1)]); } catch (error) { name = error.name; } postMessage(name); };');
+                   const worker = new Worker('data:text/javascript,' + source);
+                   worker.onmessage = event => workerValues.push(event.data);
+                   try { worker.postMessage("owner", [new ArrayBuffer(1)]); } catch (error) { ownerTransferError = error.name; }
+                   worker.postMessage("go");"#,
+            )
+            .unwrap();
+        runtime.run_until_idle().unwrap();
+        assert_eq!(runtime.eval("ownerTransferError").unwrap().as_string().unwrap().to_std_string_escaped(), "DataCloneError");
+        assert_eq!(runtime.eval("JSON.stringify(workerValues)").unwrap().as_string().unwrap().to_std_string_escaped(), "[\"DataCloneError\"]");
+    }
+
+    #[test]
+    fn dedicated_worker_queued_owner_messages_drop_on_global_termination() {
+        let mut runtime = JsRuntime::new().unwrap();
+        runtime
+            .eval(
+                r#"globalThis.workerValues = [];
+                   const source = encodeURIComponent('postMessage("queued");');
+                   const worker = new Worker('data:text/javascript,' + source);
+                   worker.onmessage = event => workerValues.push(event.data);"#,
+            )
+            .unwrap();
+        runtime.terminate_workers();
+        runtime.run_until_idle().unwrap();
+        assert_eq!(runtime.eval("workerValues.length").unwrap().as_number(), Some(0.0));
     }
 
     fn poll_until_dialog<F>(
