@@ -6655,6 +6655,35 @@
     *[Symbol.iterator]() {}
     get [Symbol.toStringTag]() { return "MimeTypeArray"; }
   }
+  const clipboardConstructionToken = {};
+  class Clipboard {
+    constructor(token) {
+      if (token !== clipboardConstructionToken) throw new TypeError("Illegal constructor");
+    }
+    readText() {
+      return Promise.resolve().then(() => {
+        if (!__omoikane_is_secure_context()) {
+          throw new DOMException("Clipboard access requires a secure context.", "NotAllowedError");
+        }
+        const text = __omoikane_clipboard_read_text();
+        if (text === null) {
+          throw new DOMException("Clipboard permission was denied.", "NotAllowedError");
+        }
+        return String(text);
+      });
+    }
+    writeText(value) {
+      return Promise.resolve().then(() => {
+        if (!__omoikane_is_secure_context()) {
+          throw new DOMException("Clipboard access requires a secure context.", "NotAllowedError");
+        }
+        if (!__omoikane_clipboard_write_text(String(value))) {
+          throw new DOMException("Clipboard permission was denied.", "NotAllowedError");
+        }
+      });
+    }
+    get [Symbol.toStringTag]() { return "Clipboard"; }
+  }
   class Navigator {
     constructor(token) {
       if (token !== navigatorConstructionToken) throw new TypeError("Illegal constructor");
@@ -6666,13 +6695,20 @@
       this.onLine = true;
       this.plugins = new PluginArray(navigatorConstructionToken);
       this.mimeTypes = new MimeTypeArray(navigatorConstructionToken);
+      this.clipboard = new Clipboard(clipboardConstructionToken);
     }
     get [Symbol.toStringTag]() { return "Navigator"; }
   }
   globalThis.PluginArray = PluginArray;
   globalThis.MimeTypeArray = MimeTypeArray;
   globalThis.Navigator = Navigator;
+  globalThis.Clipboard = Clipboard;
   globalThis.navigator = new Navigator(navigatorConstructionToken);
+  Object.defineProperty(globalThis, "isSecureContext", {
+    configurable: true,
+    enumerable: true,
+    get() { return __omoikane_is_secure_context(); },
+  });
   if (globalThis.Intl === undefined) {
     class IntlFormatter {
       constructor(locales, options) {

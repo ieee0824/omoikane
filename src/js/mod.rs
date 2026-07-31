@@ -7,6 +7,7 @@ use std::path::Path;
 use std::pin::Pin;
 use std::rc::{Rc, Weak};
 use std::sync::mpsc::{Receiver, channel};
+use std::sync::{Arc, Mutex};
 use std::task::{Context as TaskContext, Poll};
 use std::thread;
 
@@ -61,6 +62,10 @@ thread_local! {
     /// posted-message path).
     static BROADCAST_CHANNEL_REGISTRY: RefCell<Vec<BroadcastChannelRegistration>> =
         const { RefCell::new(Vec::new()) };
+    /// Host clipboard state shared by page runtimes on the same thread. Like
+    /// the BroadcastChannel registry, this models one embedding host while
+    /// keeping Boa values and synchronization thread-local.
+    static HOST_CLIPBOARD: RefCell<Option<HostClipboard>> = const { RefCell::new(None) };
 }
 
 struct ActiveHostGuard(Option<Rc<RefCell<HostState>>>);
@@ -688,6 +693,8 @@ struct HostState {
     suppressed_task_errors: usize,
     location_href: String,
     navigator_user_agent: String,
+    clipboard: HostClipboard,
+    clipboard_permission_granted: bool,
     http_client: Client,
     websocket_clients: HashMap<u64, WebSocketConnection>,
     next_websocket_id: u64,
@@ -781,6 +788,27 @@ struct HostState {
     broadcast_channels: HashMap<u64, JsValue>,
     broadcast_channel_metadata: HashMap<u64, BroadcastChannelMetadata>,
     next_broadcast_channel_id: u64,
+}
+
+#[derive(Clone, Debug, Default)]
+struct HostClipboard(Arc<Mutex<String>>);
+
+impl HostClipboard {
+    fn read_text(&self) -> String {
+        self.0.lock().expect("clipboard mutex poisoned").clone()
+    }
+
+    fn write_text(&self, text: String) {
+        *self.0.lock().expect("clipboard mutex poisoned") = text;
+    }
+}
+
+fn host_clipboard() -> HostClipboard {
+    HOST_CLIPBOARD.with(|slot| {
+        slot.borrow_mut()
+            .get_or_insert_with(HostClipboard::default)
+            .clone()
+    })
 }
 
 #[derive(Debug, Clone)]
@@ -933,6 +961,8 @@ impl HostState {
             base_url: location_href.parse::<crate::http::Url>().ok(),
             location_href,
             navigator_user_agent: default_user_agent(),
+            clipboard: host_clipboard(),
+            clipboard_permission_granted: true,
             http_client: Client::new(),
             websocket_clients: HashMap::new(),
             next_websocket_id: 1,
@@ -4568,6 +4598,21 @@ fn register_host_bindings(
             NativeFunction::from_copy_closure(crypto_digest_native),
         ),
         (
+            js_string!("__omoikane_is_secure_context"),
+            0,
+            NativeFunction::from_copy_closure(is_secure_context_native),
+        ),
+        (
+            js_string!("__omoikane_clipboard_read_text"),
+            0,
+            NativeFunction::from_copy_closure(clipboard_read_text_native),
+        ),
+        (
+            js_string!("__omoikane_clipboard_write_text"),
+            1,
+            NativeFunction::from_copy_closure(clipboard_write_text_native),
+        ),
+        (
             js_string!("__omoikane_storage_origin"),
             1,
             NativeFunction::from_copy_closure(storage_origin_native),
@@ -5244,6 +5289,66 @@ fn performance_now_native(
         Ok(JsValue::from(
             state.borrow().performance_start.elapsed().as_secs_f64() * 1_000.0,
         ))
+    })
+}
+
+fn is_secure_context_url(url: &str) -> bool {
+    let Ok(url) = url.parse::<crate::http::Url>() else {
+        return false;
+    };
+    if url.scheme().eq_ignore_ascii_case("https") {
+        return true;
+    }
+    url.scheme().eq_ignore_ascii_case("http")
+        && matches!(
+            url.host().to_ascii_lowercase().as_str(),
+            "localhost" | "127.0.0.1"
+        )
+}
+
+fn is_secure_context_native(
+    _: &JsValue,
+    _: &[JsValue],
+    _: &mut Context,
+) -> JsResult<JsValue> {
+    with_host_state(|state| {
+        let state = state.borrow();
+        let url = state
+            .base_url
+            .as_ref()
+            .map(ToString::to_string)
+            .unwrap_or_else(|| state.location_href.clone());
+        Ok(JsValue::from(is_secure_context_url(&url)))
+    })
+}
+
+fn clipboard_read_text_native(
+    _: &JsValue,
+    _: &[JsValue],
+    _: &mut Context,
+) -> JsResult<JsValue> {
+    with_host_state(|state| {
+        let state = state.borrow();
+        if !state.clipboard_permission_granted {
+            return Ok(JsValue::null());
+        }
+        Ok(JsValue::from(js_string!(state.clipboard.read_text())))
+    })
+}
+
+fn clipboard_write_text_native(
+    _: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let text = string_argument(args.first(), "", context)?;
+    with_host_state(|state| {
+        let state = state.borrow_mut();
+        if !state.clipboard_permission_granted {
+            return Ok(JsValue::from(false));
+        }
+        state.clipboard.write_text(text);
+        Ok(JsValue::from(true))
     })
 }
 
@@ -11646,6 +11751,98 @@ mod tests {
         assert_eq!(logs.len(), 1);
         assert!(logs[0].contains("http://localhost/"));
         assert!(logs[0].contains(&default_user_agent()));
+    }
+
+    #[test]
+    fn navigator_clipboard_shares_utf8_text_and_enforces_permissions() {
+        let mut writer = JsRuntime::with_document_and_url(
+            default_document(),
+            "https://clipboard.example.test/page",
+        )
+        .unwrap();
+        writer.eval("navigator.clipboard.writeText('')").unwrap();
+        writer.run_jobs().unwrap();
+        writer
+            .eval(
+                r#"globalThis.emptyResult = 'pending';
+                   navigator.clipboard.readText().then(value => { emptyResult = value; });"#,
+            )
+            .unwrap();
+        writer.run_jobs().unwrap();
+        assert_eq!(eval_str(&mut writer, "emptyResult"), "");
+        writer
+            .eval(
+                r#"globalThis.writeResult = 'pending';
+                   navigator.clipboard.writeText('first\nsecond').then(() => { writeResult = 'done'; });"#,
+            )
+            .unwrap();
+        writer.run_jobs().unwrap();
+        assert_eq!(
+            eval_str(&mut writer, "[isSecureContext, writeResult].join('|')"),
+            "true|done"
+        );
+
+        // A separate runtime sees the same host clipboard, and a dropped
+        // writer does not clear the host-owned snapshot.
+        drop(writer);
+        let mut reader = JsRuntime::with_document_and_url(
+            default_document(),
+            "https://clipboard.example.test/reader",
+        )
+        .unwrap();
+        reader
+            .eval(
+                r#"globalThis.readResult = 'pending';
+                   navigator.clipboard.readText().then(value => { readResult = value; });"#,
+            )
+            .unwrap();
+        reader.run_jobs().unwrap();
+        assert_eq!(eval_str(&mut reader, "readResult"), "first\nsecond");
+
+        reader
+            .eval(
+                r#"globalThis.order = [];
+                   Promise.all([
+                     navigator.clipboard.writeText('A').then(() => order.push('A')),
+                     navigator.clipboard.writeText('B').then(() => order.push('B'))
+                   ]).then(() => navigator.clipboard.readText())
+                     .then(value => order.push(value));"#,
+            )
+            .unwrap();
+        reader.run_jobs().unwrap();
+        assert_eq!(eval_str(&mut reader, "order.join('|')"), "A|B|B");
+
+        reader.host_state.borrow_mut().clipboard_permission_granted = false;
+        reader
+            .eval(
+                r#"globalThis.denied = '';
+                   navigator.clipboard.readText().catch(error => { denied = error.name; });"#,
+            )
+            .unwrap();
+        reader.run_jobs().unwrap();
+        assert_eq!(eval_str(&mut reader, "denied"), "NotAllowedError");
+
+        let mut insecure = JsRuntime::with_document_and_url(
+            default_document(),
+            "http://clipboard.example.test/insecure",
+        )
+        .unwrap();
+        insecure
+            .eval(
+                r#"globalThis.denied = '';
+                   navigator.clipboard.writeText('blocked').catch(error => { denied = error.name; });"#,
+            )
+            .unwrap();
+        insecure.run_jobs().unwrap();
+        assert_eq!(
+            eval_str(&mut insecure, "[isSecureContext, denied].join('|')"),
+            "false|NotAllowedError"
+        );
+
+        // Keep the thread-local host clipboard empty for subsequent tests.
+        reader.host_state.borrow_mut().clipboard_permission_granted = true;
+        reader.eval("navigator.clipboard.writeText('')").unwrap();
+        reader.run_jobs().unwrap();
     }
 
     #[test]
