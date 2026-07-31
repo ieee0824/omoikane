@@ -4,6 +4,13 @@
   // cannot use it to inspect closed shadow trees.
   const internalAssignedSlot = globalThis.__omoikane_internal_assigned_slot;
   delete globalThis.__omoikane_internal_assigned_slot;
+  // Keep the host clipboard bindings private to this bootstrap closure. Page
+  // code must go through the Promise-based Clipboard API, where secure-context
+  // and permission checks are applied consistently.
+  const nativeClipboardReadText = globalThis.__omoikane_clipboard_read_text;
+  const nativeClipboardWriteText = globalThis.__omoikane_clipboard_write_text;
+  delete globalThis.__omoikane_clipboard_read_text;
+  delete globalThis.__omoikane_clipboard_write_text;
 
   // The top-level browsing context is its own parent and top-level context.
   globalThis.parent = globalThis;
@@ -6665,7 +6672,7 @@
         if (!__omoikane_is_secure_context()) {
           throw new DOMException("Clipboard access requires a secure context.", "NotAllowedError");
         }
-        const text = __omoikane_clipboard_read_text();
+        const text = nativeClipboardReadText();
         if (text === null) {
           throw new DOMException("Clipboard permission was denied.", "NotAllowedError");
         }
@@ -6677,7 +6684,7 @@
         if (!__omoikane_is_secure_context()) {
           throw new DOMException("Clipboard access requires a secure context.", "NotAllowedError");
         }
-        if (!__omoikane_clipboard_write_text(String(value))) {
+        if (!nativeClipboardWriteText(String(value))) {
           throw new DOMException("Clipboard permission was denied.", "NotAllowedError");
         }
       });

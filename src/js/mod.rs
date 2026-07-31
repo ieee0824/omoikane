@@ -11782,11 +11782,27 @@ mod tests {
 
     #[test]
     fn navigator_clipboard_shares_utf8_text_and_enforces_permissions() {
+        struct ClipboardResetGuard;
+        impl Drop for ClipboardResetGuard {
+            fn drop(&mut self) {
+                host_clipboard().write_text(String::new());
+            }
+        }
+        let _clipboard_reset_guard = ClipboardResetGuard;
+
         let mut writer = JsRuntime::with_document_and_url(
             default_document(),
             "https://clipboard.example.test/page",
         )
         .unwrap();
+        assert_eq!(
+            eval_str(&mut writer, "typeof __omoikane_clipboard_read_text"),
+            "undefined"
+        );
+        assert_eq!(
+            eval_str(&mut writer, "typeof __omoikane_clipboard_write_text"),
+            "undefined"
+        );
         writer.eval("navigator.clipboard.writeText('')").unwrap();
         writer.run_jobs().unwrap();
         writer
