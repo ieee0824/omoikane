@@ -68,6 +68,14 @@ fn activate_host_state(host_state: Rc<RefCell<HostState>>) -> ActiveHostGuard {
     ActiveHostGuard(previous)
 }
 
+fn active_document_id() -> Option<usize> {
+    ACTIVE_HOST_STATE.with(|slot| {
+        slot.borrow()
+            .as_ref()
+            .map(|host_state| host_state.borrow().document.identity())
+    })
+}
+
 struct ActiveHostFuture<F> {
     future: Pin<Box<F>>,
     host_state: Rc<RefCell<HostState>>,
@@ -130,13 +138,16 @@ impl HostHooks for BrowserHostHooks {
 
 #[derive(Debug, Default)]
 struct HttpModuleLoader {
-    modules: RefCell<HashMap<String, Module>>,
+    /// Module records are scoped to the owning Document.  Boa can reuse a
+    /// loader while iframe Documents execute in the same JS runtime, and a
+    /// URL alone is not enough to identify the CSP context for an import.
+    modules: RefCell<HashMap<(usize, String), Module>>,
     client: RefCell<Client>,
     /// CSP context propagated from a module graph's root URL to every module
     /// it imports.  The same runtime can host iframe Documents with different
     /// policies, so a single global policy would be incorrect for nested
     /// module graphs.
-    csp_contexts: RefCell<HashMap<String, (usize, CspPolicy)>>,
+    csp_contexts: RefCell<HashMap<(usize, String), CspPolicy>>,
     csp_violations: RefCell<Vec<(usize, String, String)>>,
 }
 
@@ -168,9 +179,18 @@ impl ModuleLoader for HttpModuleLoader {
             };
             let resolved_string = resolved.to_string();
 
-            let csp_context = referrer_url
-                .as_ref()
-                .and_then(|url| self.csp_contexts.borrow().get(&url.to_string()).cloned());
+            let active_document_id = active_document_id();
+            let csp_context = referrer_url.as_ref().and_then(|url| {
+                let document_id = active_document_id?;
+                self.csp_contexts
+                    .borrow()
+                    .get(&(document_id, url.to_string()))
+                    .cloned()
+                    .map(|policy| (document_id, policy))
+            });
+            let module_document_id = active_document_id
+                .or_else(|| csp_context.as_ref().map(|(document_id, _)| *document_id))
+                .unwrap_or(0);
 
             if let Some((document_id, policy)) = csp_context.as_ref()
                 && !policy.allows_url(ResourceType::Script, &resolved)
@@ -185,11 +205,15 @@ impl ModuleLoader for HttpModuleLoader {
                     .into());
             }
 
-            if let Some(module) = self.modules.borrow().get(&resolved_string) {
-                if let Some(context) = csp_context.as_ref() {
+            if let Some(module) = self
+                .modules
+                .borrow()
+                .get(&(module_document_id, resolved_string.clone()))
+            {
+                if let Some((document_id, policy)) = csp_context.as_ref() {
                     self.csp_contexts
                         .borrow_mut()
-                        .insert(resolved_string.clone(), context.clone());
+                        .insert((*document_id, resolved_string.clone()), policy.clone());
                 }
                 if std::env::var_os("OMOIKANE_LOG_SCRIPTS").is_some() {
                     eprintln!("[omoikane][module] cache-hit {resolved_string}");
@@ -244,14 +268,14 @@ impl ModuleLoader for HttpModuleLoader {
                     parse_elapsed.as_secs_f64() * 1_000.0,
                 );
             }
-            self.modules
-                .borrow_mut()
-                .insert(resolved_string.clone(), module.clone());
-            if let Some(context) = csp_context {
+            if let Some((document_id, policy)) = csp_context {
                 self.csp_contexts
                     .borrow_mut()
-                    .insert(resolved_string, context);
+                    .insert((document_id, resolved_string.clone()), policy);
             }
+            self.modules
+                .borrow_mut()
+                .insert((module_document_id, resolved_string), module.clone());
             Ok(module)
         })();
         async { result }
@@ -278,7 +302,16 @@ impl HttpModuleLoader {
     ) {
         self.csp_contexts
             .borrow_mut()
-            .insert(root_url.to_string(), (document_id, policy));
+            .insert((document_id, root_url.to_string()), policy);
+    }
+
+    fn clear_csp_context_for_document(&self, document_id: usize) {
+        self.csp_contexts
+            .borrow_mut()
+            .retain(|(context_document_id, _), _| *context_document_id != document_id);
+        self.modules
+            .borrow_mut()
+            .retain(|(module_document_id, _), _| *module_document_id != document_id);
     }
 
     fn take_csp_violations(&self) -> Vec<(usize, String, String)> {
@@ -1014,11 +1047,21 @@ impl HostState {
         };
         self.register_tree(&document);
         self.document_origins.insert(document.identity(), origin);
-        let policy_base = child_url
-            .as_deref()
-            .map(str::to_owned)
-            .or_else(|| self.base_url.as_ref().map(ToString::to_string))
-            .unwrap_or_default();
+        // `data:` documents have an opaque origin.  They must not inherit the
+        // embedding document's URL as the CSP base, otherwise `'self'` in a
+        // meta policy would incorrectly match the parent origin.
+        let policy_base = if src
+            .get(..5)
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case("data:"))
+        {
+            String::new()
+        } else {
+            child_url
+                .as_deref()
+                .map(str::to_owned)
+                .or_else(|| self.base_url.as_ref().map(ToString::to_string))
+                .unwrap_or_default()
+        };
         let policy = CspPolicy::from_headers_and_document(
             &csp_headers,
             &document,
@@ -2491,7 +2534,7 @@ impl JsRuntime {
         };
         let parse_elapsed = parse_start.elapsed();
         let execute_start = std::time::Instant::now();
-        let promise = module.load_link_evaluate(&mut self.context);
+        let promise = self.with_active_host_value(|context| module.load_link_evaluate(context));
         let result =
             self.run_jobs()
                 .map_err(|error| error.to_string())
@@ -3401,6 +3444,8 @@ impl JsRuntime {
                                     *document_id != previous.document.identity()
                                 });
                                 state.unregister_tree(&previous.document);
+                                self.module_loader
+                                    .clear_csp_context_for_document(previous.document.identity());
                             }
                             let document = state.iframe_content_document(&node);
                             let is_xhtml = document
@@ -14370,6 +14415,39 @@ b</textarea></form>"#);
         assert_eq!(
             eval_str(&mut runtime, "document.cspViolations[0].effectiveDirective"),
             "script-src"
+        );
+    }
+
+    #[test]
+    fn csp_data_iframe_meta_policy_keeps_an_opaque_origin() {
+        let mut runtime = runtime_from_html("<html><head></head><body></body></html>");
+        runtime.set_base_url("https://example.test/index.html".parse().unwrap());
+        let encoded = base64::engine::general_purpose::STANDARD.encode(
+            br#"<html><head><meta http-equiv="Content-Security-Policy" content="script-src 'self'"></head><body></body></html>"#,
+        );
+        runtime
+            .eval(&format!(
+                r#"globalThis.frame = document.createElement('iframe');
+                   frame.src = 'data:text/html;base64,{encoded}';
+                   document.body.appendChild(frame);"#
+            ))
+            .unwrap();
+        runtime.run_until_idle().unwrap();
+        runtime
+            .eval(
+                r#"const script = frame.contentDocument.createElement('script');
+                   script.src = 'https://example.test/app.js';
+                   frame.contentDocument.head.appendChild(script);"#,
+            )
+            .unwrap();
+        runtime.run_until_idle().unwrap();
+
+        assert_eq!(
+            eval_str(
+                &mut runtime,
+                "frame.contentDocument.cspViolations[0].blockedURI",
+            ),
+            "https://example.test/app.js"
         );
     }
 
