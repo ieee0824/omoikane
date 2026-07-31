@@ -8454,6 +8454,11 @@
     }
     try { delete globalThis.getComputedStyle; } catch (_) { globalThis.getComputedStyle = undefined; }
     try { delete globalThis.history; } catch (_) { globalThis.history = undefined; }
+    // Async Clipboard is a Window-only surface in this runtime. Keep the
+    // worker navigator object, but do not expose a page clipboard handle from
+    // a DedicatedWorkerGlobalScope.
+    try { if (globalThis.navigator) delete globalThis.navigator.clipboard; } catch (_) {}
+    try { delete globalThis.Clipboard; } catch (_) { globalThis.Clipboard = undefined; }
     try { delete globalThis.__omoikane_install_window_named_properties; } catch (_) {}
     Object.defineProperty(globalThis, "isSecureContext", {
       configurable: true,

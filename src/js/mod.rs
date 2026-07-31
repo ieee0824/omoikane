@@ -9796,6 +9796,29 @@ mod tests {
     }
 
     #[test]
+    fn dedicated_worker_does_not_expose_async_clipboard() {
+        let mut runtime = JsRuntime::new().unwrap();
+        runtime
+            .eval(
+                r#"globalThis.workerValues = [];
+                   const source = encodeURIComponent('postMessage([typeof Clipboard, typeof navigator.clipboard]);');
+                   const worker = new Worker('data:text/javascript,' + source);
+                   worker.onmessage = event => workerValues.push(event.data);"#,
+            )
+            .unwrap();
+        runtime.run_until_idle().unwrap();
+        assert_eq!(
+            runtime
+                .eval("JSON.stringify(workerValues[0])")
+                .unwrap()
+                .as_string()
+                .unwrap()
+                .to_std_string_escaped(),
+            "[\"undefined\",\"undefined\"]"
+        );
+    }
+
+    #[test]
     fn dedicated_worker_messages_are_fifo_cloned_and_microtask_checkpointed() {
         let mut runtime = JsRuntime::new().unwrap();
         runtime
