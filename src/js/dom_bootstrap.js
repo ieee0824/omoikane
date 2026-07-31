@@ -5024,6 +5024,8 @@
     __mediaQueueEvent(type, loadId = this.__mediaLoadId) {
       queueMediaTask(() => {
         if (loadId !== this.__mediaLoadId) return;
+        // HTML media events do not bubble; the default Event flags are
+        // intentional here (including play/playing/timeupdate/ended below).
         fireRealtimeEvent(this, new Event(type));
       });
     }
@@ -5239,9 +5241,9 @@
 
   class HTMLAudioElement extends HTMLMediaElement {}
   class HTMLVideoElement extends HTMLMediaElement {
-    get width() { return Number(this.getAttribute("width")) || 0; }
+    get width() { return Math.max(0, Number(this.getAttribute("width")) || 0); }
     set width(value) { this.setAttribute("width", String(Math.max(0, Number(value) || 0))); }
-    get height() { return Number(this.getAttribute("height")) || 0; }
+    get height() { return Math.max(0, Number(this.getAttribute("height")) || 0); }
     set height(value) { this.setAttribute("height", String(Math.max(0, Number(value) || 0))); }
   }
 

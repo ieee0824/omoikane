@@ -19566,6 +19566,10 @@ b</textarea></form>"#);
         runtime.run_until_idle().unwrap();
         assert_eq!(eval_str(&mut runtime, "String(attributeProbe.muted)"), "true");
         assert_eq!(eval_num(&mut runtime, "attributeProbe.readyState"), 4.0);
+        runtime
+            .eval("video.setAttribute('width', '-5'); video.setAttribute('height', '-2');")
+            .unwrap();
+        assert_eq!(eval_str(&mut runtime, "[video.width, video.height].join('|')"), "0|0");
 
         runtime
             .eval(
