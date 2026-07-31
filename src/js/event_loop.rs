@@ -121,6 +121,11 @@ impl EventLoop {
         self.enqueue(TaskSource::Networking, Task::Timer(payload));
     }
 
+    /// Queues a callback on the DOM manipulation task source.
+    pub(crate) fn enqueue_dom_manipulation(&mut self, payload: TimerPayload) {
+        self.enqueue(TaskSource::DomManipulation, Task::Timer(payload));
+    }
+
     /// Queues a port and cloned data on the posted message task source.
     /// Both values stay live until their event-loop turn runs.
     pub(crate) fn enqueue_posted_message(&mut self, port: JsValue, data: JsValue) {

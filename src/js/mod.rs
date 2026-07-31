@@ -4488,6 +4488,11 @@ fn register_host_bindings(
             NativeFunction::from_copy_closure(queue_networking_task_native),
         ),
         (
+            js_string!("__omoikane_queue_dom_manipulation_task"),
+            1,
+            NativeFunction::from_copy_closure(queue_dom_manipulation_task_native),
+        ),
+        (
             js_string!("__omoikane_enqueue_posted_message"),
             2,
             NativeFunction::from_copy_closure(enqueue_posted_message_native),
@@ -6885,6 +6890,30 @@ fn queue_networking_task_native(
         state.borrow_mut().event_loop.enqueue_networking(
             TimerPayload::Callback { callback, args: Vec::new() },
         );
+        Ok(JsValue::undefined())
+    })
+}
+
+/// Queues a callback on HTML's DOM manipulation task source.
+fn queue_dom_manipulation_task_native(
+    _: &JsValue,
+    args: &[JsValue],
+    _: &mut Context,
+) -> JsResult<JsValue> {
+    let callback = args.first().cloned().unwrap_or_default();
+    if !callback.is_callable() {
+        return Err(JsNativeError::typ()
+            .with_message("DOM manipulation task callback must be callable")
+            .into());
+    }
+    with_host_state(|state| {
+        state
+            .borrow_mut()
+            .event_loop
+            .enqueue_dom_manipulation(TimerPayload::Callback {
+                callback,
+                args: Vec::new(),
+            });
         Ok(JsValue::undefined())
     })
 }
@@ -11053,6 +11082,97 @@ mod tests {
             .to_std_string_escaped();
 
         assert_eq!(result, "true,true,true,true,|true,true,true,true,");
+    }
+
+    #[test]
+    fn window_selection_tracks_ranges_and_is_scoped_per_document() {
+        let mut runtime = JsRuntime::with_document(sample_document()).unwrap();
+        let result = eval_str(
+            &mut runtime,
+            r#"(() => {
+                const paragraph = document.createElement("p");
+                const text = paragraph.appendChild(document.createTextNode("abcdef"));
+                document.body.appendChild(paragraph);
+                const selection = getSelection();
+                const range = document.createRange();
+                range.setStart(text, 1);
+                range.setEnd(text, 4);
+                selection.addRange(range);
+                const forward = [
+                    selection instanceof Selection,
+                    selection === document.getSelection(),
+                    selection.rangeCount,
+                    selection.anchorNode === text,
+                    selection.anchorOffset,
+                    selection.focusOffset,
+                    selection.toString(),
+                    selection.type,
+                    selection.containsNode(paragraph, true),
+                    selection.containsNode(text, false)
+                ].join(",");
+
+                selection.extend(text, 2);
+                const collapsed = [selection.isCollapsed, selection.toString(), selection.focusOffset].join(",");
+                selection.setBaseAndExtent(text, 5, text, 2);
+                const backward = [
+                    selection.anchorOffset, selection.focusOffset,
+                    selection.toString(), selection.type
+                ].join(",");
+
+                const frame = document.createElement("iframe");
+                document.body.appendChild(frame);
+                const childDocument = frame.contentDocument;
+                const childText = childDocument.createTextNode("child");
+                childDocument.body.appendChild(childText);
+                let crossDocumentError = "";
+                try { range.setEnd(childText, 1); } catch (error) { crossDocumentError = error.name; }
+                const childSelection = childDocument.getSelection();
+                const childRange = childDocument.createRange();
+                childRange.selectNodeContents(childText);
+                childSelection.addRange(childRange);
+                return [forward, collapsed, backward,
+                    childSelection.toString(), getSelection().toString(),
+                    childSelection !== selection, childSelection.rangeCount,
+                    crossDocumentError].join("|");
+            })()"#,
+        );
+        assert_eq!(
+            result,
+            "true,true,1,true,1,4,bcd,Range,true,false|false,b,2|5,2,cde,Range|child|cde|true|1|WrongDocumentError"
+        );
+    }
+
+    #[test]
+    fn selectionchange_is_queued_and_follows_live_range_mutation() {
+        let mut runtime = JsRuntime::with_document(sample_document()).unwrap();
+        runtime
+            .eval(
+                r#"(() => {
+                    const text = document.body.appendChild(document.createTextNode("hello"));
+                    const range = document.createRange();
+                    range.setStart(text, 1);
+                    range.setEnd(text, 3);
+                    globalThis.selectionEvents = 0;
+                    globalThis.selectionBubbles = 0;
+                    document.addEventListener("selectionchange", event => {
+                        if (event.target === document) selectionEvents++;
+                    });
+                    globalThis.addEventListener("selectionchange", event => {
+                        if (event.target === document) selectionBubbles++;
+                    });
+                    getSelection().addRange(range);
+                    text.replaceData(0, 1, "H");
+                })()"#,
+            )
+            .unwrap();
+        assert_eq!(eval_str(&mut runtime, "selectionEvents"), "0");
+        runtime.run_until_idle().unwrap();
+        assert_eq!(eval_str(&mut runtime, "selectionEvents"), "1");
+        assert_eq!(eval_str(&mut runtime, "selectionBubbles"), "1");
+        assert_eq!(
+            eval_str(&mut runtime, "getSelection().toString()"),
+            "Hel"
+        );
     }
 
     #[test]
