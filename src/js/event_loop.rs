@@ -305,9 +305,6 @@ impl EventLoop {
         self.now_ms as f64
     }
 
-    pub(crate) fn now_ms(&self) -> u64 {
-        self.now_ms
-    }
 }
 
 #[cfg(test)]
