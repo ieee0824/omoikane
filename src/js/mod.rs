@@ -3577,7 +3577,7 @@ fn register_host_bindings(
         ),
         (
             js_string!("__omoikane_enqueue_posted_message"),
-            1,
+            2,
             NativeFunction::from_copy_closure(enqueue_posted_message_native),
         ),
         (
@@ -5933,7 +5933,7 @@ fn queue_networking_task_native(
     })
 }
 
-/// Queues a callback on HTML's posted message task source.
+/// Queues a target port and cloned data on HTML's posted message task source.
 fn enqueue_posted_message_native(
     _: &JsValue,
     args: &[JsValue],
@@ -8238,6 +8238,18 @@ mod tests {
                 .unwrap()
                 .to_std_string_escaped(),
             "first-before,first-after,first-microtask,second-before,second-after,second-microtask"
+        );
+    }
+
+    #[test]
+    fn posted_message_host_binding_reports_two_arguments() {
+        let mut runtime = JsRuntime::new().unwrap();
+        assert_eq!(
+            runtime
+                .eval("__omoikane_enqueue_posted_message.length")
+                .unwrap()
+                .as_number(),
+            Some(2.0)
         );
     }
 
