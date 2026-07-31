@@ -4840,8 +4840,10 @@
     "video/mp4", "video/ogg", "video/webm", "video/mpeg",
   ]);
 
+  const mediaErrorConstructionToken = {};
   class MediaError {
-    constructor(code, message = "") {
+    constructor(token, code, message = "") {
+      if (token !== mediaErrorConstructionToken) throw new TypeError("Illegal constructor");
       this.code = Number(code);
       this.message = String(message);
     }
@@ -5058,7 +5060,7 @@
       if (loadId !== this.__mediaLoadId) return;
       this.__mediaReadyState = MEDIA_HAVE_NOTHING;
       this.__mediaNetworkState = MEDIA_NETWORK_NO_SOURCE;
-      this.__mediaError = new MediaError(code, message);
+      this.__mediaError = new MediaError(mediaErrorConstructionToken, code, message);
       const error = new DOMException(message, name);
       const waiters = this.__mediaPlayWaiters.splice(0);
       this.__mediaQueueEvent("error", loadId);
