@@ -6390,10 +6390,22 @@
       const type = requested === "image/png" ? requested : "image/png";
       const snapshot = canvasSnapshot(this);
       if (snapshot.width === 0 || snapshot.height === 0) return Promise.resolve(new Blob([], { type }));
-      const encoded = nativeCanvasPng(snapshot.width, snapshot.height, new Uint8Array(snapshot.pixels.buffer));
-      if (encoded === null) return Promise.reject(new DOMException("Unable to encode canvas", "EncodingError"));
-      const comma = String(encoded).indexOf(",");
-      return Promise.resolve(new Blob([bytesFromBase64(String(encoded).slice(comma + 1))], { type }));
+      const encodingError = () => Promise.reject(new DOMException("Unable to encode canvas", "EncodingError"));
+      if (typeof nativeCanvasPng !== "function") return encodingError();
+      let encoded;
+      try {
+        encoded = nativeCanvasPng(snapshot.width, snapshot.height, new Uint8Array(snapshot.pixels.buffer));
+      } catch (_) {
+        return encodingError();
+      }
+      if (typeof encoded !== "string") return encodingError();
+      const comma = encoded.indexOf(",");
+      if (comma < 0) return encodingError();
+      try {
+        return Promise.resolve(new Blob([bytesFromBase64(encoded.slice(comma + 1))], { type }));
+      } catch (_) {
+        return encodingError();
+      }
     }
     get [Symbol.toStringTag]() { return "OffscreenCanvas"; }
   }
