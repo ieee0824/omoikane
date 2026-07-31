@@ -497,7 +497,7 @@
       "area": "media",
       "description": "Audio/video elements implement media playback controls",
       "probe": "typeof HTMLMediaElement === 'function' && typeof document.createElement('video').play === 'function'",
-      "baseline_supported": false
+      "baseline_supported": true
     },
     {
       "id": "media.web-audio",

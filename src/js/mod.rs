@@ -19810,6 +19810,214 @@ b</textarea></form>"#);
     }
 
     #[test]
+    fn html_media_element_models_playback_state_and_errors() {
+        let mut runtime = runtime_from_html("<html><body></body></html>");
+        runtime
+            .eval(
+                r#"globalThis.mediaEvents = [];
+                   const video = document.createElement('video');
+                   document.body.appendChild(video);
+                   for (const type of ['loadstart', 'durationchange', 'loadedmetadata',
+                                       'loadeddata', 'canplay', 'load', 'play', 'playing',
+                                       'timeupdate', 'ended']) {
+                     video.addEventListener(type, () => mediaEvents.push(type));
+                   }
+                   video.src = 'data:video/mp4,fixture';
+                   globalThis.playResult = 'pending';
+                   video.play().then(() => { playResult = 'resolved'; },
+                                     error => { playResult = 'rejected:' + error.name; });
+                   globalThis.audio = new Audio('data:audio/mpeg,fixture');"#,
+            )
+            .unwrap();
+        runtime.run_until_idle().unwrap();
+        assert_eq!(
+            eval_str(&mut runtime, "mediaEvents.join(',')"),
+            "loadstart,durationchange,loadedmetadata,loadeddata,canplay,load,play,playing"
+        );
+        assert_eq!(eval_str(&mut runtime, "playResult"), "resolved");
+        assert_eq!(eval_str(&mut runtime, "String(video instanceof HTMLVideoElement)"), "true");
+        assert_eq!(eval_str(&mut runtime, "String(audio instanceof HTMLAudioElement)"), "true");
+        assert_eq!(eval_str(&mut runtime, "String(audio instanceof HTMLMediaElement)"), "true");
+        assert_eq!(eval_num(&mut runtime, "video.readyState"), 4.0);
+        assert_eq!(eval_num(&mut runtime, "video.networkState"), 1.0);
+        assert_eq!(eval_num(&mut runtime, "video.duration"), 1.0);
+        assert_eq!(eval_str(&mut runtime, "video.canPlayType('audio/mpeg')"), "probably");
+        runtime.eval("video.width = 3.5; video.height = -2.5;").unwrap();
+        assert_eq!(eval_str(&mut runtime, "[video.width, video.height].join('|')"), "3|0");
+        assert_eq!(
+            eval_str(&mut runtime, "(() => { try { new MediaError(4); return 'constructible'; } catch (error) { return error.name; } })()"),
+            "TypeError"
+        );
+
+        runtime.run_timers(1_000, 100, 32);
+        runtime.run_until_idle().unwrap();
+        assert_eq!(
+            eval_str(&mut runtime, "mediaEvents.slice(-2).join(',')"),
+            "timeupdate,ended"
+        );
+        assert_eq!(eval_str(&mut runtime, "String(video.paused) + '|' + String(video.ended)"), "true|true");
+        assert_eq!(eval_num(&mut runtime, "video.currentTime"), 1.0);
+        runtime
+            .eval(
+                "video.currentTime = 0.25; video.volume = 0.5; video.muted = true; video.controls = true;",
+            )
+            .unwrap();
+        runtime.run_until_idle().unwrap();
+        assert_eq!(eval_num(&mut runtime, "video.currentTime"), 0.25);
+        assert_eq!(eval_str(&mut runtime, "[video.volume, video.muted, video.controls].join('|')"), "0.5|true|true");
+
+        runtime
+            .eval(
+                r#"globalThis.pauseEvents = [];
+                   const pauseProbe = document.createElement('audio');
+                   pauseProbe.src = 'data:audio/mpeg,fixture';
+                   pauseProbe.addEventListener('play', () => pauseEvents.push('play'));
+                   pauseProbe.addEventListener('pause', () => pauseEvents.push('pause'));
+                   pauseProbe.play();
+                   globalThis.pauseProbe = pauseProbe;"#,
+            )
+            .unwrap();
+        runtime.run_until_idle().unwrap();
+        runtime.eval("pauseProbe.pause()").unwrap();
+        runtime.run_until_idle().unwrap();
+        assert_eq!(eval_str(&mut runtime, "pauseEvents.join(',')"), "play,pause");
+        assert_eq!(eval_str(&mut runtime, "String(pauseProbe.paused)"), "true");
+
+        runtime
+            .eval(
+                r#"const seekProbe = document.createElement('audio');
+                   seekProbe.src = 'data:audio/mpeg,seek-end';
+                   seekProbe.play();
+                   globalThis.seekProbe = seekProbe;"#,
+            )
+            .unwrap();
+        runtime.run_until_idle().unwrap();
+        runtime.eval("seekProbe.currentTime = seekProbe.duration").unwrap();
+        runtime.run_until_idle().unwrap();
+        assert_eq!(
+            eval_str(&mut runtime, "[seekProbe.paused, seekProbe.ended, seekProbe.currentTime].join('|')"),
+            "true|true|1"
+        );
+        runtime.eval("seekProbe.play()").unwrap();
+        runtime.run_until_idle().unwrap();
+        assert_eq!(
+            eval_str(&mut runtime, "[seekProbe.paused, seekProbe.ended, seekProbe.currentTime].join('|')"),
+            "false|false|0"
+        );
+
+        runtime
+            .eval(
+                r#"globalThis.cancelResult = 'pending';
+                   const cancelProbe = document.createElement('audio');
+                   cancelProbe.src = 'data:audio/mpeg,cancel';
+                   cancelProbe.play().catch(error => { cancelResult = error.name; });
+                   cancelProbe.pause();
+                   globalThis.cancelProbe = cancelProbe;"#,
+            )
+            .unwrap();
+        runtime.run_until_idle().unwrap();
+        assert_eq!(eval_str(&mut runtime, "cancelResult"), "AbortError");
+
+        runtime
+            .eval(
+                r#"globalThis.emptyEvents = [];
+                   const empty = document.createElement('audio');
+                   empty.addEventListener('error', () => emptyEvents.push('error'));
+                   empty.load();
+                   globalThis.empty = empty;"#,
+            )
+            .unwrap();
+        runtime.run_until_idle().unwrap();
+        assert_eq!(eval_str(&mut runtime, "emptyEvents.join(',')"), "");
+        assert_eq!(eval_str(&mut runtime, "String(empty.error)"), "null");
+        runtime
+            .eval(
+                "globalThis.emptyPlayResult = 'pending'; empty.play().catch(error => { emptyPlayResult = error.name; });",
+            )
+            .unwrap();
+        runtime.run_until_idle().unwrap();
+        assert_eq!(eval_str(&mut runtime, "emptyPlayResult"), "NotSupportedError");
+        assert_eq!(eval_num(&mut runtime, "empty.error.code"), 4.0);
+
+        runtime
+            .eval(
+                r#"const attributeProbe = document.createElement('audio');
+                   attributeProbe.setAttribute('muted', '');
+                   attributeProbe.setAttribute('src', 'data:audio/mpeg,attribute');
+                   globalThis.attributeProbe = attributeProbe;"#,
+            )
+            .unwrap();
+        runtime.run_until_idle().unwrap();
+        assert_eq!(eval_str(&mut runtime, "String(attributeProbe.muted)"), "true");
+        assert_eq!(eval_num(&mut runtime, "attributeProbe.readyState"), 4.0);
+        runtime
+            .eval("video.setAttribute('width', '-5'); video.setAttribute('height', '-2');")
+            .unwrap();
+        assert_eq!(eval_str(&mut runtime, "[video.width, video.height].join('|')"), "0|0");
+
+        runtime
+            .eval(
+                r#"globalThis.badResult = 'pending';
+                   const bad = document.createElement('audio');
+                   bad.setAttribute('type', 'application/x-unsupported');
+                   bad.src = 'data:application/x-unsupported,fixture';
+                   bad.play().then(() => { badResult = 'resolved'; },
+                                   error => { badResult = error.name; });
+                   globalThis.bad = bad;"#,
+            )
+            .unwrap();
+        runtime.run_until_idle().unwrap();
+        assert_eq!(eval_str(&mut runtime, "badResult"), "NotSupportedError");
+        assert_eq!(eval_num(&mut runtime, "bad.error.code"), 4.0);
+        assert_eq!(eval_num(&mut runtime, "bad.networkState"), 3.0);
+
+        runtime
+            .eval(
+                r#"globalThis.networkResult = 'pending';
+                   const missing = document.createElement('audio');
+                   missing.src = 'blob:null/missing';
+                   missing.play().catch(error => { networkResult = error.name; });
+                   globalThis.missing = missing;"#,
+            )
+            .unwrap();
+        runtime.run_until_idle().unwrap();
+        assert_eq!(eval_str(&mut runtime, "networkResult"), "NetworkError");
+        assert_eq!(eval_num(&mut runtime, "missing.error.code"), 2.0);
+
+        runtime
+            .eval(
+                r#"globalThis.unknownResult = 'pending';
+                   const unknown = document.createElement('audio');
+                   unknown.src = 'data:,fixture';
+                   unknown.play().catch(error => { unknownResult = error.name; });
+                   globalThis.unknown = unknown;"#,
+            )
+            .unwrap();
+        runtime.run_until_idle().unwrap();
+        assert_eq!(eval_str(&mut runtime, "unknownResult"), "NotSupportedError");
+        assert_eq!(eval_num(&mut runtime, "unknown.error.code"), 4.0);
+    }
+
+    #[test]
+    fn dedicated_worker_does_not_expose_media_constructors() {
+        let mut runtime = JsRuntime::new().unwrap();
+        runtime
+            .eval(
+                r#"globalThis.workerValues = [];
+                   const source = encodeURIComponent(
+                     'postMessage([typeof MediaError, typeof HTMLMediaElement, typeof Audio]);');
+                   const worker = new Worker('data:text/javascript,' + source);
+                   worker.onmessage = event => workerValues.push(event.data);"#,
+            )
+            .unwrap();
+        runtime.run_until_idle().unwrap();
+        assert_eq!(
+            eval_str(&mut runtime, "JSON.stringify(workerValues[0])"),
+            "[\"undefined\",\"undefined\",\"undefined\"]"
+        );
+    }
+
+    #[test]
     fn match_media_evaluates_current_viewport() {
         let doc = NodeHandle::document();
         let mut runtime = JsRuntime::with_document(doc).unwrap();
