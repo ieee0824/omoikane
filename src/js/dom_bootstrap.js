@@ -8663,8 +8663,9 @@
   };
   const audioNow = context => {
     if (context.state !== "running") return context.__currentTime;
-    const now = typeof __omoikane_performance_now === "function"
-      ? Number(__omoikane_performance_now()) : Date.now();
+    const now = typeof __omoikane_event_loop_now === "function"
+      ? Number(__omoikane_event_loop_now())
+      : (typeof __omoikane_performance_now === "function" ? Number(__omoikane_performance_now()) : Date.now());
     return context.__currentTime + Math.max(0, now - context.__runningAt) / 1000;
   };
   function audioNumber(value, name) {
@@ -8690,12 +8691,14 @@
       for (const event of this.__events) {
         if (event.time > now) break;
         if (event.kind === "set") value = event.value;
-        else if (event.kind === "linear") {
+        else if (event.kind === "linear" || event.kind === "exponential") {
           const previous = event.previous;
           if (!previous || previous.time >= event.time) value = event.value;
           else {
             const progress = Math.min(1, Math.max(0, (now - previous.time) / (event.time - previous.time)));
-            value = previous.value + (event.value - previous.value) * progress;
+            value = event.kind === "exponential" && previous.value > 0 && event.value > 0
+              ? previous.value * Math.pow(event.value / previous.value, progress)
+              : previous.value + (event.value - previous.value) * progress;
           }
         }
       }
@@ -8708,7 +8711,7 @@
       const numeric = audioNumber(value, "AudioParam value");
       const at = Math.max(0, audioNumber(time, "AudioParam time"));
       const event = { kind, value: numeric, time: at, previous: null };
-      if (kind === "linear") event.previous = this.__events[this.__events.length - 1] || null;
+      if (kind === "linear" || kind === "exponential") event.previous = this.__events[this.__events.length - 1] || null;
       this.__events = this.__events.filter(existing => existing.time !== at);
       this.__events.push(event);
       this.__events.sort((left, right) => left.time - right.time);
@@ -8719,7 +8722,7 @@
     exponentialRampToValueAtTime(value, endTime) {
       const numeric = audioNumber(value, "AudioParam value");
       if (numeric <= 0 || this.value <= 0) throw new DOMException("Exponential values must be positive.", "RangeError");
-      return this.__schedule("linear", numeric, endTime);
+      return this.__schedule("exponential", numeric, endTime);
     }
     setTargetAtTime(target, startTime, timeConstant) {
       const value = audioNumber(target, "AudioParam target");
@@ -8758,6 +8761,7 @@
       this.channelCountMode = "max";
       this.channelInterpretation = "speakers";
       this.__connections = new Set();
+      if (context && context.__nodes) context.__nodes.add(this);
     }
     connect(destination, output = 0, input = 0) {
       if (!(destination instanceof AudioNode) && !(destination instanceof AudioParam)) {
@@ -8766,9 +8770,12 @@
       if (destination.__context !== this.context) {
         throw new DOMException("Nodes belong to different AudioContexts.", "InvalidAccessError");
       }
-      const out = Math.trunc(Number(output));
-      const inputIndex = Math.trunc(Number(input));
-      if (!Number.isFinite(out) || out < 0 || out >= this.numberOfOutputs || inputIndex < 0) {
+      const outNumber = Number(output);
+      const inputNumber = Number(input);
+      const out = Math.trunc(outNumber);
+      const inputIndex = Math.trunc(inputNumber);
+      const destinationInputCount = destination instanceof AudioNode ? destination.numberOfInputs : 1;
+      if (!Number.isFinite(outNumber) || !Number.isFinite(inputNumber) || out < 0 || out >= this.numberOfOutputs || inputIndex < 0 || inputIndex >= destinationInputCount) {
         throw new DOMException("The AudioNode output or input is invalid.", "IndexSizeError");
       }
       this.__connections.add(destination);
@@ -8816,16 +8823,31 @@
     start(when = 0) {
       if (this.__started) throw new DOMException("OscillatorNode.start() was already called.", "InvalidStateError");
       this.__started = true;
-      const delay = Math.max(0, (audioNumber(when, "OscillatorNode start time") - audioNow(this.context)) * 1000);
-      if (this.__stopRequested !== undefined && this.__stopRequested <= audioNow(this.context)) this.__finish();
-      else if (delay > 0) setTimeout(() => {}, delay);
+      audioNumber(when, "OscillatorNode start time");
+      if (this.__stopRequested !== undefined && this.context.state === "running" && this.__stopRequested <= audioNow(this.context)) this.__finish();
+      else this.__schedulePendingStop();
     }
     stop(when = 0) {
       if (this.__stopped) throw new DOMException("OscillatorNode.stop() was already called.", "InvalidStateError");
       this.__stopRequested = audioNumber(when, "OscillatorNode stop time");
-      const delay = Math.max(0, (this.__stopRequested - audioNow(this.context)) * 1000);
+      this.__schedulePendingStop();
+    }
+    __pauseScheduledStop() {
       if (this.__stopTimer !== null) clearTimeout(this.__stopTimer);
-      this.__stopTimer = setTimeout(() => this.__finish(), delay);
+      this.__stopTimer = null;
+    }
+    __schedulePendingStop() {
+      if (this.__stopped || !this.__started || this.__stopRequested === undefined || this.context.state !== "running") return;
+      if (this.__stopTimer !== null) clearTimeout(this.__stopTimer);
+      const delay = Math.max(0, (this.__stopRequested - audioNow(this.context)) * 1000);
+      if (delay <= 0) {
+        this.__finish();
+        return;
+      }
+      this.__stopTimer = setTimeout(() => {
+        this.__stopTimer = null;
+        if (this.context.state === "running") this.__finish();
+      }, delay);
     }
     __finish() {
       if (this.__stopped) return;
@@ -8853,6 +8875,7 @@
       this.__state = "suspended";
       this.__currentTime = 0;
       this.__runningAt = 0;
+      this.__nodes = new Set();
       this.__destination = new AudioDestinationNode(this);
       this.listener = Object.create(null);
       this.onstatechange = null;
@@ -8863,8 +8886,11 @@
     resume() {
       if (this.__state === "closed") return Promise.reject(new DOMException("The AudioContext is closed.", "InvalidStateError"));
       if (this.__state === "running") return Promise.resolve();
-      this.__runningAt = typeof __omoikane_performance_now === "function" ? Number(__omoikane_performance_now()) : Date.now();
+      this.__runningAt = typeof __omoikane_event_loop_now === "function"
+        ? Number(__omoikane_event_loop_now())
+        : (typeof __omoikane_performance_now === "function" ? Number(__omoikane_performance_now()) : Date.now());
       this.__state = "running";
+      for (const node of this.__nodes) if (typeof node.__schedulePendingStop === "function") node.__schedulePendingStop();
       return new Promise(resolve => audioTask(() => { fireRealtimeEvent(this, new Event("statechange")); resolve(); }));
     }
     suspend() {
@@ -8872,12 +8898,14 @@
       if (this.__state === "suspended") return Promise.resolve();
       this.__currentTime = this.currentTime;
       this.__state = "suspended";
+      for (const node of this.__nodes) if (typeof node.__pauseScheduledStop === "function") node.__pauseScheduledStop();
       return new Promise(resolve => audioTask(() => { fireRealtimeEvent(this, new Event("statechange")); resolve(); }));
     }
     close() {
       if (this.__state === "closed") return Promise.resolve();
       this.__currentTime = this.currentTime;
       this.__state = "closed";
+      for (const node of this.__nodes) if (typeof node.__pauseScheduledStop === "function") node.__pauseScheduledStop();
       return new Promise(resolve => audioTask(() => { fireRealtimeEvent(this, new Event("statechange")); resolve(); }));
     }
     createGain() { if (this.__state === "closed") throw new DOMException("The AudioContext is closed.", "InvalidStateError"); return new GainNode(this); }

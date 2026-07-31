@@ -4615,6 +4615,11 @@ fn register_host_bindings(
             NativeFunction::from_copy_closure(performance_now_native),
         ),
         (
+            js_string!("__omoikane_event_loop_now"),
+            0,
+            NativeFunction::from_copy_closure(event_loop_now_native),
+        ),
+        (
             js_string!("__omoikane_crypto_random"),
             1,
             NativeFunction::from_copy_closure(crypto_random_native),
@@ -5322,6 +5327,14 @@ fn performance_now_native(
             state.borrow().performance_start.elapsed().as_secs_f64() * 1_000.0,
         ))
     })
+}
+
+fn event_loop_now_native(
+    _this: &JsValue,
+    _args: &[JsValue],
+    _context: &mut Context,
+) -> JsResult<JsValue> {
+    with_host_state(|state| Ok(JsValue::from(state.borrow().event_loop.now_ms() as f64)))
 }
 
 fn is_secure_context_url(url: &str) -> bool {
@@ -20011,7 +20024,8 @@ b</textarea></form>"#);
                    oscillator.onended = () => audioEvents.push('ended');
                    oscillator.connect(gain).connect(context.destination);
                    gain.gain.setValueAtTime(0.25, 0);
-                   gain.gain.linearRampToValueAtTime(0.75, 1);"#,
+                   gain.gain.linearRampToValueAtTime(0.75, 1);
+                   gain.gain.exponentialRampToValueAtTime(1.5, 2);"#,
             )
             .unwrap();
         assert_eq!(eval_num(&mut runtime, "context.sampleRate"), 48000.0);
@@ -20025,9 +20039,24 @@ b</textarea></form>"#);
         assert_eq!(eval_str(&mut runtime, "audioEvents.includes('ended')"), "true");
         assert!(eval_num(&mut runtime, "context.currentTime") > 0.0);
         assert!(eval_num(&mut runtime, "gain.gain.value") >= 0.25);
+        assert_eq!(eval_str(&mut runtime, "(() => { try { gain.connect(context.destination, 0, NaN); return 'allowed'; } catch (error) { return error.name; } })()"), "IndexSizeError");
+        assert_eq!(eval_str(&mut runtime, "(() => { try { gain.connect(context.destination, 0, 1); return 'allowed'; } catch (error) { return error.name; } })()"), "IndexSizeError");
         runtime.eval("context.suspend();").unwrap();
         runtime.run_until_idle().unwrap();
         assert_eq!(eval_str(&mut runtime, "context.state"), "suspended");
+        runtime
+            .eval(
+                "globalThis.pausedEvents = []; globalThis.pausedOscillator = context.createOscillator(); pausedOscillator.onended = () => pausedEvents.push('ended'); pausedOscillator.start(); pausedOscillator.stop(0.05);",
+            )
+            .unwrap();
+        runtime.run_timers(100, 10, 100);
+        runtime.run_until_idle().unwrap();
+        assert_eq!(eval_str(&mut runtime, "pausedEvents.includes('ended')"), "false");
+        runtime.eval("context.resume();").unwrap();
+        runtime.run_until_idle().unwrap();
+        runtime.run_timers(100, 10, 100);
+        runtime.run_until_idle().unwrap();
+        assert_eq!(eval_str(&mut runtime, "pausedEvents.includes('ended')"), "true");
         runtime.eval("context.close();").unwrap();
         runtime.run_until_idle().unwrap();
         assert_eq!(eval_str(&mut runtime, "context.state"), "closed");
