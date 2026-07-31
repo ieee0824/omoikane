@@ -64,7 +64,7 @@ thread_local! {
         const { RefCell::new(Vec::new()) };
 }
 
-/// Host clipboard storage shared by all page runtimes in this embedding.
+/// Host clipboard storage shared by all page runtimes in this process.
 /// `HostState` and Boa values remain thread-affine, but the text snapshot is
 /// intentionally synchronized so runtimes hosted on different threads still
 /// observe the same clipboard.
@@ -5307,10 +5307,14 @@ fn is_secure_context_url(url: &str) -> bool {
     if let Some(authority) = url_without_fragment.strip_prefix("http://") {
         let authority_end = authority.find(['/', '?']).unwrap_or(authority.len());
         let authority = &authority[..authority_end];
-        if let Some(port) = authority.strip_prefix("[::1]")
-            && (port.is_empty() || port.starts_with(':'))
-        {
-            return true;
+        if let Some(port) = authority.strip_prefix("[::1]") {
+            let valid_port = match port.strip_prefix(':') {
+                None => true,
+                Some(value) => !value.is_empty() && value.parse::<u16>().is_ok(),
+            };
+            if valid_port {
+                return true;
+            }
         }
     }
     let Ok(url) = url_without_fragment.parse::<crate::http::Url>() else {
@@ -11995,6 +11999,15 @@ mod tests {
         assert_eq!(
             eval_str(&mut ipv6_loopback_fragment, "String(isSecureContext)"),
             "true"
+        );
+        let mut ipv6_invalid_port = JsRuntime::with_document_and_url(
+            default_document(),
+            "http://[::1]:evil/loopback",
+        )
+        .unwrap();
+        assert_eq!(
+            eval_str(&mut ipv6_invalid_port, "String(isSecureContext)"),
+            "false"
         );
         let mut https_fragment = JsRuntime::with_document_and_url(
             default_document(),
