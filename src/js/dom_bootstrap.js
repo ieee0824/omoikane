@@ -2939,6 +2939,9 @@
     setStart(node, offset) {
       offset = this.__validate(node, offset);
       const doc = nodeDocument(node);
+      if (this.__selectionDocument && doc !== this.__selectionDocument) {
+        throw new DOMException("The range belongs to another Document.", "WrongDocumentError");
+      }
       if (doc !== this.__doc) {
         unregisterTraversal(this.__doc, "ranges", this);
         this.__doc = doc;
@@ -2958,6 +2961,9 @@
     setEnd(node, offset) {
       offset = this.__validate(node, offset);
       const doc = nodeDocument(node);
+      if (this.__selectionDocument && doc !== this.__selectionDocument) {
+        throw new DOMException("The range belongs to another Document.", "WrongDocumentError");
+      }
       if (doc !== this.__doc) {
         unregisterTraversal(this.__doc, "ranges", this);
         this.__doc = doc;
@@ -3171,18 +3177,18 @@
     selectionChangeQueued.add(doc);
     const deliver = () => {
       selectionChangeQueued.delete(doc);
-      doc.dispatchEvent(new Event("selectionchange"));
+      doc.dispatchEvent(new Event("selectionchange", { bubbles: true }));
     };
-    if (typeof __omoikane_queue_networking_task === "function") {
-      __omoikane_queue_networking_task(deliver);
+    if (typeof __omoikane_queue_dom_manipulation_task === "function") {
+      __omoikane_queue_dom_manipulation_task(deliver);
     } else {
       setTimeout(deliver, 0);
     }
   }
 
   function selectionRangeMutated(range) {
-    if (!selectionByDocument) return;
-    const selection = selectionByDocument.get(range.__selectionDocument || range.__doc);
+    if (!range.__selectionDocument) return;
+    const selection = selectionByDocument.get(range.__selectionDocument);
     if (selection && selection.__range === range) queueSelectionChange(selection.__doc);
   }
 
