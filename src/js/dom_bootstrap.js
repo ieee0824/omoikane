@@ -6207,7 +6207,7 @@
   }
   function canvasState(canvas) {
     let state=canvasStates.get(canvas); const [width,height]=canvasDimensions(canvas);
-    if (!state || state.width!==width || state.height!==height) { state=initialCanvasState(canvas); canvasStates.set(canvas,state); __omoikane_canvas_commit(canvas.__id,width,height,new Uint8Array(state.pixels.buffer)); }
+    if (!state || state.width!==width || state.height!==height) { state=initialCanvasState(canvas); canvasStates.set(canvas,state); commitCanvas(canvas,state); }
     return state;
   }
   function blendCanvasPixel(state,x,y,color,clear=false) {
@@ -6375,8 +6375,8 @@
       const cropY = Math.trunc(Number(sy));
       const cropWidth = sw === undefined ? input.width - cropX : Math.trunc(Number(sw));
       const cropHeight = sh === undefined ? input.height - cropY : Math.trunc(Number(sh));
-      if (cropX < 0 || cropY < 0 || cropWidth < 0 || cropHeight < 0 || cropX + cropWidth > input.width || cropY + cropHeight > input.height) {
-        throw new DOMException("The crop rectangle is outside the image", "InvalidStateError");
+      if (!Number.isFinite(cropX) || !Number.isFinite(cropY) || !Number.isFinite(cropWidth) || !Number.isFinite(cropHeight) || cropX < 0 || cropY < 0 || cropWidth <= 0 || cropHeight <= 0 || cropX + cropWidth > input.width || cropY + cropHeight > input.height) {
+        throw new DOMException("The crop rectangle is outside the image", "IndexSizeError");
       }
       const pixels = new Uint8ClampedArray(cropWidth * cropHeight * 4);
       for (let y = 0; y < cropHeight; y++) {

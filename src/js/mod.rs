@@ -20050,13 +20050,21 @@ b</textarea></form>"#);
                    target.getContext('2d').drawImage(bitmap, 0, 0);
                    globalThis.pixel = Array.from(target.getContext('2d').getImageData(0, 0, 1, 1).data).join(',');
                    globalThis.blobResult = 'pending';
-                   offscreen.convertToBlob().then(blob => { blobResult = [blob.type, blob.size].join('|'); });"#,
+                   offscreen.convertToBlob().then(blob => { blobResult = [blob.type, blob.size].join('|'); });
+                   globalThis.cropResult = 'pending';
+                   globalThis.cropZeroError = 'pending';
+                   globalThis.cropBoundsError = 'pending';
+                   createImageBitmap(offscreen, 0, 0, 1, 1).then(value => { cropResult = [value.width, value.height].join('|'); });
+                   createImageBitmap(offscreen, 0, 0, 0, 1).catch(error => { cropZeroError = error.name; });
+                   createImageBitmap(offscreen, 0, 0, 3, 1).catch(error => { cropBoundsError = error.name; });"#,
             )
             .unwrap();
         runtime.run_until_idle().unwrap();
         assert_eq!(eval_str(&mut runtime, "pixel"), "255,0,0,255");
         assert_eq!(eval_str(&mut runtime, "[offscreen.width, offscreen.height, bitmap.width, bitmap.height, offscreenContext instanceof OffscreenCanvasRenderingContext2D].join('|')"), "2|1|2|1|true");
         assert!(eval_str(&mut runtime, "blobResult").starts_with("image/png|"));
+        assert_eq!(eval_str(&mut runtime, "cropResult"), "1|1");
+        assert_eq!(eval_str(&mut runtime, "cropZeroError + '|' + cropBoundsError"), "IndexSizeError|IndexSizeError");
         assert_eq!(eval_str(&mut runtime, "(() => { bitmap.close(); return [bitmap.width, bitmap.height, (() => { try { target.getContext('2d').drawImage(bitmap, 0, 0); return 'allowed'; } catch (error) { return error.name; } })()]; })().join('|')"), "0|0|InvalidStateError");
         assert_eq!(eval_str(&mut runtime, "(() => { try { new OffscreenCanvas(-1, 1); return 'allowed'; } catch (error) { return error.name; } })()"), "IndexSizeError");
         assert_eq!(eval_str(&mut runtime, "(() => { const canvas = new OffscreenCanvas(1, 1); canvas.getContext('2d'); return String(canvas.getContext('webgl')); })()"), "null");

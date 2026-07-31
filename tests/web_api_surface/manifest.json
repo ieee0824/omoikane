@@ -482,7 +482,7 @@
       "id": "graphics.offscreen-canvas",
       "area": "graphics",
       "description": "OffscreenCanvas exposes 2D pixels and ImageBitmap snapshots",
-      "probe": "typeof OffscreenCanvas === 'function' && typeof ImageBitmap === 'function' && (() => { const canvas = new OffscreenCanvas(2, 1); const context = canvas.getContext('2d'); context.fillStyle = 'red'; context.fillRect(0, 0, 1, 1); const bitmap = canvas.transferToImageBitmap(); return context instanceof OffscreenCanvasRenderingContext2D && bitmap instanceof ImageBitmap && bitmap.width === 2 && bitmap.height === 1 && typeof canvas.convertToBlob === 'function'; })()",
+      "probe": "typeof OffscreenCanvas === 'function' && typeof ImageBitmap === 'function' && (() => { try { const canvas = new OffscreenCanvas(2, 1); const context = canvas.getContext('2d'); context.fillStyle = 'red'; context.fillRect(0, 0, 1, 1); const bitmap = canvas.transferToImageBitmap(); return context instanceof OffscreenCanvasRenderingContext2D && bitmap instanceof ImageBitmap && bitmap.width === 2 && bitmap.height === 1 && typeof canvas.convertToBlob === 'function'; } catch (_) { return false; } })()",
       "baseline_supported": true
     },
     {
