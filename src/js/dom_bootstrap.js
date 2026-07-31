@@ -4477,7 +4477,7 @@
       },
     });
     adoptedListReplacers.set(observable, candidate => commit(candidate));
-    if (values.length) commit(list);
+    if (values.length) commit(values.slice());
     return observable;
   }
 
