@@ -28409,18 +28409,18 @@ b</textarea></form>"#);
 
         eval_str(
             &mut sender,
-            "globalThis.events = []; globalThis.channel = new BroadcastChannel('events'); channel.onmessage = event => events.push(event.data);",
+            "(() => { globalThis.events = []; globalThis.channel = new BroadcastChannel('events'); channel.onmessage = event => events.push(event.data); })()",
         );
         eval_str(
             &mut receiver,
-            "globalThis.events = []; globalThis.channel = new BroadcastChannel('events'); channel.onmessage = event => events.push({ value: event.data.value, origin: event.origin, proto: Object.getPrototypeOf(event.data) === Object.prototype });",
+            "(() => { globalThis.events = []; globalThis.channel = new BroadcastChannel('events'); channel.onmessage = event => events.push({ value: event.data.value, origin: event.origin, proto: Object.getPrototypeOf(event.data) === Object.prototype }); })()",
         );
         eval_str(
             &mut other_origin,
-            "globalThis.events = []; globalThis.channel = new BroadcastChannel('events'); channel.onmessage = event => events.push(event.data);",
+            "(() => { globalThis.events = []; globalThis.channel = new BroadcastChannel('events'); channel.onmessage = event => events.push(event.data); })()",
         );
 
-        eval_str(&mut sender, "channel.postMessage({ value: 7 });");
+        eval_str(&mut sender, "(() => { channel.postMessage({ value: 7 }); })()");
         assert_eq!(eval_str(&mut sender, "events.length"), "0");
         assert_eq!(eval_str(&mut receiver, "events.length"), "0");
 
@@ -28449,26 +28449,26 @@ b</textarea></form>"#);
 
         eval_str(
             &mut sender,
-            "globalThis.channel = new BroadcastChannel('close'); globalThis.error = ''; try { channel.postMessage(() => {}); } catch (event) { error = event.name; }",
+            "(() => { globalThis.channel = new BroadcastChannel('close'); globalThis.error = ''; try { channel.postMessage(() => {}); } catch (event) { error = event.name; } })()",
         );
         assert_eq!(eval_str(&mut sender, "error"), "DataCloneError");
 
         eval_str(
             &mut receiver,
-            "globalThis.count = 0; globalThis.errorCount = 0; globalThis.channel = new BroadcastChannel('close'); channel.onmessage = () => count++; channel.onmessageerror = () => errorCount++; channel.close();",
+            "(() => { globalThis.count = 0; globalThis.errorCount = 0; globalThis.channel = new BroadcastChannel('close'); channel.onmessage = () => count++; channel.onmessageerror = () => errorCount++; channel.close(); })()",
         );
-        eval_str(&mut sender, "channel.postMessage('ignored');");
+        eval_str(&mut sender, "(() => { channel.postMessage('ignored'); })()");
         receiver.run_until_idle().unwrap();
         assert_eq!(eval_str(&mut receiver, "count + ':' + errorCount"), "0:0");
 
         eval_str(
             &mut receiver,
-            "globalThis.channel = new BroadcastChannel('close'); channel.onmessage = event => { globalThis.value = event.data; };",
+            "(() => { globalThis.channel = new BroadcastChannel('close'); channel.onmessage = event => { globalThis.value = event.data; }; })()",
         );
-        eval_str(&mut sender, "channel.postMessage({ nested: { value: 3 } });");
+        eval_str(&mut sender, "(() => { channel.postMessage({ nested: { value: 3 } }); })()");
         receiver.run_until_idle().unwrap();
         assert_eq!(eval_str(&mut receiver, "value.nested.value"), "3");
-        eval_str(&mut receiver, "channel.close();");
+        eval_str(&mut receiver, "(() => { channel.close(); })()");
         let result = sender.eval("channel.postMessage('after-close')");
         assert!(result.is_ok());
     }
@@ -28482,7 +28482,7 @@ b</textarea></form>"#);
         .unwrap();
         eval_str(
             &mut runtime,
-            r#"globalThis.messages = 0; globalThis.errors = 0;
+            r#"(() => { globalThis.messages = 0; globalThis.errors = 0;
                globalThis.senderChannel = new BroadcastChannel('decode');
                globalThis.receiverChannel = new BroadcastChannel('decode');
                receiverChannel.onmessage = () => messages++;
@@ -28490,7 +28490,7 @@ b</textarea></form>"#);
                // The native hook accepts a clone wire; an invalid wire models
                // a target-side deserialization failure without bypassing the
                // posted-message task source.
-               __omoikane_broadcast_channel_post(senderChannel._id, '{}');"#,
+               __omoikane_broadcast_channel_post(senderChannel._id, '{}'); })()"#,
         );
         runtime.run_until_idle().unwrap();
         assert_eq!(eval_str(&mut runtime, "messages + ':' + errors"), "0:1");
