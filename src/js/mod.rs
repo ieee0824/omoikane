@@ -19465,6 +19465,8 @@ b</textarea></form>"#);
         assert_eq!(eval_num(&mut runtime, "video.networkState"), 1.0);
         assert_eq!(eval_num(&mut runtime, "video.duration"), 1.0);
         assert_eq!(eval_str(&mut runtime, "video.canPlayType('audio/mpeg')"), "probably");
+        runtime.eval("video.width = 3.5; video.height = -2.5;").unwrap();
+        assert_eq!(eval_str(&mut runtime, "[video.width, video.height].join('|')"), "3|0");
 
         runtime.run_timers(1_000, 100, 32);
         runtime.run_until_idle().unwrap();

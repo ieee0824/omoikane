@@ -5251,10 +5251,10 @@
 
   class HTMLAudioElement extends HTMLMediaElement {}
   class HTMLVideoElement extends HTMLMediaElement {
-    get width() { return Math.max(0, Number(this.getAttribute("width")) || 0); }
-    set width(value) { this.setAttribute("width", String(Math.max(0, Number(value) || 0))); }
-    get height() { return Math.max(0, Number(this.getAttribute("height")) || 0); }
-    set height(value) { this.setAttribute("height", String(Math.max(0, Number(value) || 0))); }
+    get width() { return Math.max(0, Math.trunc(Number(this.getAttribute("width")) || 0)); }
+    set width(value) { this.setAttribute("width", String(Math.max(0, Math.trunc(Number(value) || 0)))); }
+    get height() { return Math.max(0, Math.trunc(Number(this.getAttribute("height")) || 0)); }
+    set height(value) { this.setAttribute("height", String(Math.max(0, Math.trunc(Number(value) || 0)))); }
   }
 
   for (const [name, value] of [
