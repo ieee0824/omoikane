@@ -9081,6 +9081,7 @@
       const start = audioTime(startTime, "AudioParam time");
       const constant = audioNumber(timeConstant, "AudioParam timeConstant");
       if (constant <= 0) throw new RangeError("AudioParam timeConstant must be positive");
+      this.__events = this.__events.filter(existing => existing.time !== start);
       this.__events.push({ kind: "target", value, time: start, timeConstant: constant });
       this.__events.sort((left, right) => left.time - right.time);
       return this;
@@ -9112,7 +9113,7 @@
       this.channelCount = 2;
       this.channelCountMode = "max";
       this.channelInterpretation = "speakers";
-      this.__connections = new Set();
+      this.__connections = [];
       if (context && context.__nodes) context.__nodes.add(this);
     }
     connect(destination, output = 0, input = 0) {
@@ -9130,15 +9131,40 @@
       if (!Number.isFinite(outNumber) || !Number.isFinite(inputNumber) || out < 0 || out >= this.numberOfOutputs || inputIndex < 0 || inputIndex >= destinationInputCount) {
         throw new DOMException("The AudioNode output or input is invalid.", "IndexSizeError");
       }
-      this.__connections.add(destination);
+      this.__connections.push({ destination, output: out, input: inputIndex });
       return destination instanceof AudioParam ? undefined : destination;
     }
-    disconnect(destination = undefined) {
+    disconnect(destination = undefined, output = undefined, input = undefined) {
       if (destination === undefined) {
-        this.__connections.clear();
+        this.__connections = [];
         return;
       }
-      if (!this.__connections.delete(destination)) {
+      const hasOutput = output !== undefined;
+      const hasInput = input !== undefined;
+      let outputIndex;
+      let inputIndex;
+      if (hasOutput) {
+        const outputNumber = Number(output);
+        outputIndex = Math.trunc(outputNumber);
+        if (!Number.isFinite(outputNumber) || outputIndex < 0 || outputIndex >= this.numberOfOutputs) {
+          throw new DOMException("The AudioNode output is invalid.", "IndexSizeError");
+        }
+      }
+      if (hasInput) {
+        const inputNumber = Number(input);
+        inputIndex = Math.trunc(inputNumber);
+        const destinationInputCount = destination instanceof AudioNode ? destination.numberOfInputs : 1;
+        if (!Number.isFinite(inputNumber) || inputIndex < 0 || inputIndex >= destinationInputCount) {
+          throw new DOMException("The AudioNode input is invalid.", "IndexSizeError");
+        }
+      }
+      const before = this.__connections.length;
+      this.__connections = this.__connections.filter(connection => (
+        connection.destination !== destination ||
+        (hasOutput && connection.output !== outputIndex) ||
+        (hasInput && connection.input !== inputIndex)
+      ));
+      if (this.__connections.length === before) {
         throw new DOMException("The specified connection was not found.", "InvalidAccessError");
       }
     }

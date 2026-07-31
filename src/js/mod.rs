@@ -20717,6 +20717,7 @@ b</textarea></form>"#);
         assert_eq!(eval_str(&mut runtime, "(() => { try { gain.connect(context.destination, 0, NaN); return 'allowed'; } catch (error) { return error.name; } })()"), "IndexSizeError");
         assert_eq!(eval_str(&mut runtime, "(() => { try { gain.connect(context.destination, 0, 1); return 'allowed'; } catch (error) { return error.name; } })()"), "IndexSizeError");
         assert_eq!(eval_str(&mut runtime, "(() => { const other = new AudioContext(); const node = context.createGain(); node.context = other; try { node.connect(other.destination); return 'allowed'; } catch (error) { return error.name; } })()"), "InvalidAccessError");
+        assert_eq!(eval_str(&mut runtime, "(() => { const source = context.createGain(); const destination = context.createGain(); source.connect(destination, 0, 0); source.connect(destination, 0, 0); source.disconnect(destination, 0, 0); try { source.disconnect(destination, 0, 0); return 'allowed'; } catch (error) { return error.name; } })()"), "InvalidAccessError");
         runtime.eval("context.suspend();").unwrap();
         runtime.run_until_idle().unwrap();
         assert_eq!(eval_str(&mut runtime, "context.state"), "suspended");
