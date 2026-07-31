@@ -6290,16 +6290,19 @@
     }
     return number;
   }
-  function canvasSnapshot(canvas) {
+  function canvasStateChecked(canvas) {
     try {
-      const state = canvasState(canvas);
-      return { width: state.width, height: state.height, pixels: state.pixels.slice() };
+      return canvasState(canvas);
     } catch (error) {
       if (error instanceof RangeError) {
         throw new DOMException("Canvas dimensions are too large", "IndexSizeError");
       }
       throw error;
     }
+  }
+  function canvasSnapshot(canvas) {
+    const state = canvasStateChecked(canvas);
+    return { width: state.width, height: state.height, pixels: state.pixels.slice() };
   }
   function imageBitmapSource(source) {
     if (source instanceof ImageBitmap) {
@@ -6346,9 +6349,17 @@
     set height(value) { this.__resize("height", value); }
     __resize(name, value) {
       if (this.__detached) throw new DOMException("The OffscreenCanvas is detached", "InvalidStateError");
-      this["__" + name] = offscreenDimension(value, name);
+      const property = "__" + name;
+      const previous = this[property];
+      this[property] = offscreenDimension(value, name);
       canvasStates.delete(this);
-      canvasState(this);
+      try {
+        canvasStateChecked(this);
+      } catch (error) {
+        this[property] = previous;
+        canvasStates.delete(this);
+        throw error;
+      }
     }
     getContext(type, options = undefined) {
       if (this.__detached) throw new DOMException("The OffscreenCanvas is detached", "InvalidStateError");
@@ -6356,7 +6367,7 @@
       if (requested !== "2d") return null;
       if (this.__contextMode !== null && this.__contextMode !== requested) return null;
       this.__contextMode = requested;
-      const state = canvasState(this);
+      const state = canvasStateChecked(this);
       if (!this.__context) this.__context = new OffscreenCanvasRenderingContext2D(this, options);
       state.context = this.__context;
       return this.__context;
@@ -6397,7 +6408,9 @@
       }
       return Promise.resolve(new ImageBitmap(imageBitmapConstructionToken, cropWidth, cropHeight, pixels));
     } catch (error) {
-      return Promise.reject(error);
+      return Promise.reject(error instanceof RangeError
+        ? new DOMException("Canvas dimensions are too large", "IndexSizeError")
+        : error);
     }
   };
 
