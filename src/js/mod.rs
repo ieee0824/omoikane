@@ -19999,13 +19999,51 @@ b</textarea></form>"#);
     }
 
     #[test]
-    fn dedicated_worker_does_not_expose_media_constructors() {
+    fn notifications_model_permission_and_task_queued_lifecycle() {
+        let mut runtime = runtime_from_html("<html><body></body></html>");
+        assert_eq!(eval_str(&mut runtime, "Notification.permission"), "default");
+        runtime
+            .eval(
+                "globalThis.permissionResult = 'pending'; Notification.requestPermission(value => permissionResult = value);",
+            )
+            .unwrap();
+        runtime.run_until_idle().unwrap();
+        assert_eq!(eval_str(&mut runtime, "permissionResult"), "denied");
+        assert_eq!(eval_str(&mut runtime, "Notification.permission"), "denied");
+
+        runtime
+            .eval(
+                r#"__omoikane_set_notification_permission('granted');
+                   globalThis.notificationEvents = [];
+                   globalThis.notification = new Notification('Hello', {
+                     body: 'World', tag: 'tag', data: { value: 7 }, actions: [{ action: 'open', title: 'Open' }]
+                   });
+                   notification.onshow = () => notificationEvents.push('show');
+                   notification.onclick = () => notificationEvents.push('click');
+                   notification.addEventListener('close', () => notificationEvents.push('close')) ;"#,
+            )
+            .unwrap();
+        runtime.run_until_idle().unwrap();
+        assert_eq!(eval_str(&mut runtime, "notificationEvents.join(',')"), "show");
+        assert_eq!(eval_str(&mut runtime, "[notification.title, notification.body, notification.tag, notification.data.value, notification.actions[0].action].join('|')"), "Hello|World|tag|7|open");
+        runtime.eval("__omoikane_dispatch_notification_click(notification)").unwrap();
+        runtime.run_until_idle().unwrap();
+        assert_eq!(eval_str(&mut runtime, "notificationEvents.join(',')"), "show,click");
+        runtime.eval("notification.close(); notification.close();").unwrap();
+        runtime.run_until_idle().unwrap();
+        assert_eq!(eval_str(&mut runtime, "notificationEvents.join(',')"), "show,click,close");
+        runtime.eval("__omoikane_set_notification_permission('denied')").unwrap();
+        assert_eq!(eval_str(&mut runtime, "(() => { try { new Notification('blocked'); return 'constructible'; } catch (error) { return error.name; } })()"), "NotAllowedError");
+    }
+
+    #[test]
+    fn dedicated_worker_does_not_expose_media_or_notification_constructors() {
         let mut runtime = JsRuntime::new().unwrap();
         runtime
             .eval(
                 r#"globalThis.workerValues = [];
                    const source = encodeURIComponent(
-                     'postMessage([typeof MediaError, typeof HTMLMediaElement, typeof Audio]);');
+                     'postMessage([typeof MediaError, typeof HTMLMediaElement, typeof Audio, typeof Notification]);');
                    const worker = new Worker('data:text/javascript,' + source);
                    worker.onmessage = event => workerValues.push(event.data);"#,
             )
@@ -20013,7 +20051,7 @@ b</textarea></form>"#);
         runtime.run_until_idle().unwrap();
         assert_eq!(
             eval_str(&mut runtime, "JSON.stringify(workerValues[0])"),
-            "[\"undefined\",\"undefined\",\"undefined\"]"
+            "[\"undefined\",\"undefined\",\"undefined\",\"undefined\"]"
         );
     }
 

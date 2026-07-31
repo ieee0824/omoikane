@@ -8649,6 +8649,122 @@
     }
   }
 
+  // Notifications are modeled as a deterministic, task-queued lifecycle.
+  // Omoikane does not own an OS notification backend, so permission and
+  // show/click/close state remain observable in the realm without opening a
+  // platform window.  The engine hook below lets conformance tests inject a
+  // granted/denied decision without making page code responsible for a UI
+  // prompt.
+  let notificationPermission = "default";
+  const notificationPermissionValues = new Set(["default", "granted", "denied"]);
+  const notificationTask = callback => {
+    if (typeof __omoikane_queue_dom_manipulation_task === "function") {
+      __omoikane_queue_dom_manipulation_task(callback);
+    } else {
+      setTimeout(callback, 0);
+    }
+  };
+  function notificationOptionString(options, name, fallback = "") {
+    const value = options && options[name];
+    return value === undefined || value === null ? fallback : String(value);
+  }
+  function notificationOptionBoolean(options, name, fallback = false) {
+    return options && options[name] === undefined ? fallback : !!(options && options[name]);
+  }
+  class Notification extends EventTarget {
+    constructor(title, options = {}) {
+      super();
+      if (arguments.length < 1) throw new TypeError("Notification requires a title");
+      if (!nativeIsSecureContext()) {
+        throw new DOMException("Notifications require a secure context.", "NotAllowedError");
+      }
+      if (notificationPermission !== "granted") {
+        throw new DOMException("Notification permission was denied.", "NotAllowedError");
+      }
+      const init = options === null || options === undefined ? {} : Object(options);
+      const direction = notificationOptionString(init, "dir", "auto").toLowerCase();
+      const data = init.data === undefined ? null : globalThis.structuredClone(init.data);
+      const actions = Array.isArray(init.actions)
+        ? init.actions.map(action => ({
+            action: notificationOptionString(action, "action"),
+            title: notificationOptionString(action, "title"),
+            icon: notificationOptionString(action, "icon"),
+          }))
+        : [];
+      const values = {
+        title: String(title),
+        dir: ["auto", "ltr", "rtl"].includes(direction) ? direction : "auto",
+        lang: notificationOptionString(init, "lang"),
+        body: notificationOptionString(init, "body"),
+        tag: notificationOptionString(init, "tag"),
+        image: notificationOptionString(init, "image"),
+        icon: notificationOptionString(init, "icon"),
+        badge: notificationOptionString(init, "badge"),
+        vibrate: init.vibrate === undefined ? [] : (Array.isArray(init.vibrate) ? init.vibrate.slice() : [init.vibrate]),
+        timestamp: init.timestamp === undefined ? Date.now() : Number(init.timestamp),
+        renotify: notificationOptionBoolean(init, "renotify"),
+        silent: init.silent === null ? null : notificationOptionBoolean(init, "silent"),
+        requireInteraction: notificationOptionBoolean(init, "requireInteraction"),
+        data,
+        actions,
+      };
+      for (const [name, value] of Object.entries(values)) {
+        Object.defineProperty(this, name, {
+          configurable: false,
+          enumerable: true,
+          writable: false,
+          value,
+        });
+      }
+      this.__notificationClosed = false;
+      for (const type of ["show", "click", "error", "close"]) {
+        Object.defineProperty(this, "on" + type, {
+          configurable: true,
+          enumerable: true,
+          get: () => this["__on" + type] || null,
+          set: callback => { this["__on" + type] = typeof callback === "function" ? callback : null; },
+        });
+      }
+      notificationTask(() => {
+        if (!this.__notificationClosed) fireRealtimeEvent(this, new Event("show"));
+      });
+    }
+    close() {
+      if (this.__notificationClosed) return;
+      this.__notificationClosed = true;
+      notificationTask(() => fireRealtimeEvent(this, new Event("close")));
+    }
+    get [Symbol.toStringTag]() { return "Notification"; }
+    static get permission() { return notificationPermission; }
+    static requestPermission(callback) {
+      const result = Promise.resolve().then(() => {
+        if (!nativeIsSecureContext()) {
+          throw new DOMException("Notifications require a secure context.", "NotAllowedError");
+        }
+        // There is no native prompt in this headless engine. A default
+        // decision therefore follows the browser's non-granting fallback.
+        if (notificationPermission === "default") notificationPermission = "denied";
+        return notificationPermission;
+      });
+      if (typeof callback === "function") result.then(callback);
+      return result;
+    }
+  }
+  globalThis.Notification = Notification;
+  globalThis.__omoikane_set_notification_permission = value => {
+    const next = String(value);
+    if (!notificationPermissionValues.has(next)) throw new TypeError("Invalid notification permission");
+    notificationPermission = next;
+    return next;
+  };
+  globalThis.__omoikane_dispatch_notification_click = notification => {
+    if (!(notification instanceof Notification) || notification.__notificationClosed) return false;
+    notificationTask(() => {
+      if (!notification.__notificationClosed) fireRealtimeEvent(notification, new Event("click"));
+    });
+    return true;
+  };
+
   class Animation extends EventTarget {
     constructor(target, keyframes, options = {}) {
       super();
@@ -9197,7 +9313,7 @@
       "SVGSVGElement", "HTMLTemplateElement", "HTMLFormElement", "HTMLInputElement",
       "HTMLTextAreaElement", "HTMLButtonElement", "HTMLSelectElement", "HTMLOptionElement",
       "HTMLMediaElement", "HTMLAudioElement", "HTMLVideoElement", "Audio",
-      "MediaError",
+      "MediaError", "Notification",
     ]) {
       try { delete globalThis[domName]; } catch (_) { globalThis[domName] = undefined; }
     }
@@ -9208,6 +9324,8 @@
     // a DedicatedWorkerGlobalScope.
     try { if (globalThis.navigator) delete globalThis.navigator.clipboard; } catch (_) {}
     try { delete globalThis.Clipboard; } catch (_) { globalThis.Clipboard = undefined; }
+    try { delete globalThis.__omoikane_set_notification_permission; } catch (_) {}
+    try { delete globalThis.__omoikane_dispatch_notification_click; } catch (_) {}
     try { delete globalThis.__omoikane_install_window_named_properties; } catch (_) {}
     Object.defineProperty(globalThis, "isSecureContext", {
       configurable: true,
