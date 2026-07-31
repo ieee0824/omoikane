@@ -166,6 +166,9 @@ pub struct StyleResolver {
     keyframes: HashMap<String, Vec<KeyframeStep>>,
     /// Before/after style snapshots and running CSS transitions.
     transition_timeline: super::transition::TransitionTimeline,
+    /// Node identities whose inline `style` attribute is blocked by the
+    /// owning Document's CSP `style-src` policy.
+    blocked_inline_style_nodes: HashSet<usize>,
 }
 
 #[derive(Debug, Clone)]
@@ -318,6 +321,28 @@ impl StyleResolver {
         self.cache.clear();
         self.pseudo_cache.clear();
         self.selector_match_cache = SelectorMatchCache::default();
+    }
+
+    /// Installs the CSP-filtered set of inline style attributes for the next
+    /// computed-style pass. The attribute remains observable through CSSOM;
+    /// only its cascade contribution is removed.
+    pub(crate) fn set_blocked_inline_style_nodes(&mut self, nodes: HashSet<usize>) {
+        if self.blocked_inline_style_nodes != nodes {
+            self.blocked_inline_style_nodes = nodes;
+            self.invalidate_style_cache();
+        }
+    }
+
+    /// Updates one CSP-filtered inline-style entry after a `style` attribute
+    /// mutation. The caller invalidates the owning document's computed-style
+    /// cache separately, so this operation does not rescan or clear unrelated
+    /// resolver state.
+    pub(crate) fn set_blocked_inline_style_node(&mut self, node_id: usize, blocked: bool) {
+        if blocked {
+            self.blocked_inline_style_nodes.insert(node_id);
+        } else {
+            self.blocked_inline_style_nodes.remove(&node_id);
+        }
     }
 
     #[cfg(test)]
@@ -570,6 +595,7 @@ impl StyleResolver {
 
         if pseudo.is_none()
             && node.node_type() == NodeType::Element
+            && !self.blocked_inline_style_nodes.contains(&node.identity())
             && let Some(inline_style) = node.get_attribute("style")
         {
             for declaration in super::parse_style_attribute(&inline_style) {

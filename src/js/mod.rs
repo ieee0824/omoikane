@@ -5,7 +5,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::future::Future;
 use std::path::Path;
 use std::pin::Pin;
-use std::rc::Rc;
+use std::rc::{Rc, Weak};
 use std::sync::mpsc::{Receiver, channel};
 use std::task::{Context as TaskContext, Poll};
 use std::thread;
@@ -38,16 +38,20 @@ use crate::layout::{InlineFragmentContent, LayoutBox, Rect, edge_sizes};
 
 mod storage;
 mod event_loop;
+mod csp;
 pub use storage::StorageManager;
 use storage::StorageOrigin;
+use csp::{CspPolicy, CspViolation, ResourceType};
 use event_loop::{EventLoop, Task};
 
 /// Most page-script task errors retained per drain. See
 /// [`JsRuntime::record_task_error`].
 const MAX_TASK_ERRORS: usize = 32;
+const MAX_CSP_VIOLATIONS: usize = 1024;
 
 thread_local! {
     static ACTIVE_HOST_STATE: RefCell<Option<Rc<RefCell<HostState>>>> = const { RefCell::new(None) };
+    static ACTIVE_MODULE_DOCUMENT_ID: Cell<Option<usize>> = const { Cell::new(None) };
 }
 
 struct ActiveHostGuard(Option<Rc<RefCell<HostState>>>);
@@ -63,6 +67,31 @@ impl Drop for ActiveHostGuard {
 fn activate_host_state(host_state: Rc<RefCell<HostState>>) -> ActiveHostGuard {
     let previous = ACTIVE_HOST_STATE.with(|slot| slot.replace(Some(host_state)));
     ActiveHostGuard(previous)
+}
+
+struct ActiveModuleDocumentGuard(Option<usize>);
+
+impl Drop for ActiveModuleDocumentGuard {
+    fn drop(&mut self) {
+        ACTIVE_MODULE_DOCUMENT_ID.with(|slot| slot.set(self.0.take()));
+    }
+}
+
+fn activate_module_document(document_id: usize) -> ActiveModuleDocumentGuard {
+    let previous = ACTIVE_MODULE_DOCUMENT_ID.with(|slot| slot.replace(Some(document_id)));
+    ActiveModuleDocumentGuard(previous)
+}
+
+fn active_document_id() -> Option<usize> {
+    ACTIVE_MODULE_DOCUMENT_ID
+        .with(|slot| slot.get())
+        .or_else(|| {
+            ACTIVE_HOST_STATE.with(|slot| {
+                slot.borrow()
+                    .as_ref()
+                    .map(|host_state| host_state.borrow().document.identity())
+            })
+        })
 }
 
 struct ActiveHostFuture<F> {
@@ -127,8 +156,18 @@ impl HostHooks for BrowserHostHooks {
 
 #[derive(Debug, Default)]
 struct HttpModuleLoader {
-    modules: RefCell<HashMap<String, Module>>,
+    /// Module records are scoped to the owning Document.  Boa can reuse a
+    /// loader while iframe Documents execute in the same JS runtime, and a
+    /// URL alone is not enough to identify the CSP context for an import.
+    modules: RefCell<HashMap<(usize, String), Module>>,
     client: RefCell<Client>,
+    /// CSP context propagated from a module graph's root URL to every module
+    /// it imports.  The same runtime can host iframe Documents with different
+    /// policies, so a single global policy would be incorrect for nested
+    /// module graphs.
+    csp_contexts: RefCell<HashMap<(usize, String), CspPolicy>>,
+    csp_violations: RefCell<Vec<(usize, String, String)>>,
+    csp_violation_keys: RefCell<HashSet<(usize, String)>>,
 }
 
 impl ModuleLoader for HttpModuleLoader {
@@ -159,7 +198,38 @@ impl ModuleLoader for HttpModuleLoader {
             };
             let resolved_string = resolved.to_string();
 
-            if let Some(module) = self.modules.borrow().get(&resolved_string) {
+            let active_document_id = active_document_id();
+            let csp_context = referrer_url.as_ref().and_then(|url| {
+                let document_id = active_document_id?;
+                self.csp_contexts
+                    .borrow()
+                    .get(&(document_id, url.to_string()))
+                    .cloned()
+                    .map(|policy| (document_id, policy))
+            });
+            let module_document_id = active_document_id
+                .or_else(|| csp_context.as_ref().map(|(document_id, _)| *document_id))
+                .unwrap_or(0);
+
+            if let Some((document_id, policy)) = csp_context.as_ref()
+                && !policy.allows_url(ResourceType::Script, &resolved)
+            {
+                self.record_csp_violation(*document_id, resolved_string.clone());
+                return Err(JsNativeError::error()
+                    .with_message(format!("CSP blocked module import: {resolved_string}"))
+                    .into());
+            }
+
+            if let Some(module) = self
+                .modules
+                .borrow()
+                .get(&(module_document_id, resolved_string.clone()))
+            {
+                if let Some((document_id, policy)) = csp_context.as_ref() {
+                    self.csp_contexts
+                        .borrow_mut()
+                        .insert((*document_id, resolved_string.clone()), policy.clone());
+                }
                 if std::env::var_os("OMOIKANE_LOG_SCRIPTS").is_some() {
                     eprintln!("[omoikane][module] cache-hit {resolved_string}");
                 }
@@ -182,6 +252,16 @@ impl ModuleLoader for HttpModuleLoader {
                     ))
                     .into());
             }
+            if let Some(effective_url) = response.effective_url()
+                && let Some((document_id, policy)) = csp_context.as_ref()
+                && !policy.allows_url(ResourceType::Script, effective_url)
+            {
+                let blocked_uri = effective_url.to_string();
+                self.record_csp_violation(*document_id, blocked_uri.clone());
+                return Err(JsNativeError::error()
+                    .with_message(format!("CSP blocked module redirect: {blocked_uri}"))
+                    .into());
+            }
             let fetch_elapsed = fetch_start.elapsed();
             let source_bytes = response.body().len();
             let source = String::from_utf8_lossy(response.body());
@@ -199,9 +279,14 @@ impl ModuleLoader for HttpModuleLoader {
                     parse_elapsed.as_secs_f64() * 1_000.0,
                 );
             }
+            if let Some((document_id, policy)) = csp_context {
+                self.csp_contexts
+                    .borrow_mut()
+                    .insert((document_id, resolved_string.clone()), policy);
+            }
             self.modules
                 .borrow_mut()
-                .insert(resolved_string, module.clone());
+                .insert((module_document_id, resolved_string), module.clone());
             Ok(module)
         })();
         async { result }
@@ -216,6 +301,56 @@ impl ModuleLoader for HttpModuleLoader {
         if let Some(url) = module.path().and_then(|path| path.to_str()) {
             let _ = import_meta.set(js_string!("url"), js_string!(url), false, context);
         }
+    }
+}
+
+impl HttpModuleLoader {
+    fn set_csp_policy_for_module_graph(
+        &self,
+        document_id: usize,
+        root_url: &str,
+        policy: CspPolicy,
+    ) {
+        self.csp_contexts
+            .borrow_mut()
+            .insert((document_id, root_url.to_string()), policy);
+    }
+
+    fn clear_csp_context_for_document(&self, document_id: usize) {
+        self.csp_contexts
+            .borrow_mut()
+            .retain(|(context_document_id, _), _| *context_document_id != document_id);
+        self.modules
+            .borrow_mut()
+            .retain(|(module_document_id, _), _| *module_document_id != document_id);
+        self.csp_violations
+            .borrow_mut()
+            .retain(|(violation_document_id, _, _)| *violation_document_id != document_id);
+        self.csp_violation_keys
+            .borrow_mut()
+            .retain(|(violation_document_id, _)| *violation_document_id != document_id);
+    }
+
+    fn record_csp_violation(&self, document_id: usize, blocked_uri: String) {
+        let mut violations = self.csp_violations.borrow_mut();
+        if violations.len() >= MAX_CSP_VIOLATIONS {
+            return;
+        }
+        let mut keys = self.csp_violation_keys.borrow_mut();
+        if !keys.insert((document_id, blocked_uri.clone())) {
+            return;
+        }
+        violations.push((
+            document_id,
+            "script-src".to_string(),
+            blocked_uri,
+        ));
+    }
+
+    fn take_csp_violations(&self) -> Vec<(usize, String, String)> {
+        let violations = std::mem::take(&mut *self.csp_violations.borrow_mut());
+        self.csp_violation_keys.borrow_mut().clear();
+        violations
     }
 }
 
@@ -612,6 +747,13 @@ struct HostState {
     storage_manager: StorageManager,
     storage_session_id: u64,
     document_origins: HashMap<usize, Option<StorageOrigin>>,
+    /// Enforced CSP policies keyed by the root Document node identity.  A
+    /// fresh runtime starts with an empty (allow-all) policy and navigation
+    /// replaces the entry before any page script executes.
+    document_csp: HashMap<usize, CspPolicy>,
+    csp_violations: Vec<CspViolation>,
+    csp_violation_keys: HashSet<(usize, String, String)>,
+    module_loader: Option<Weak<HttpModuleLoader>>,
     /// Dedicated workers owned by this global. The map lives on the page
     /// global; worker globals instead hold `worker_owner` and `worker_id`.
     workers: HashMap<u64, Rc<RefCell<WorkerRuntime>>>,
@@ -787,6 +929,10 @@ impl HostState {
             storage_manager,
             storage_session_id,
             document_origins,
+            document_csp: HashMap::from([(document.identity(), CspPolicy::default())]),
+            csp_violations: Vec::new(),
+            csp_violation_keys: HashSet::new(),
+            module_loader: None,
             workers: HashMap::new(),
             next_worker_id: 1,
             worker_owner: None,
@@ -915,10 +1061,18 @@ impl HostState {
         if let Some(previous) = self.iframe_documents.remove(&iframe_id) {
             self.document_styles.remove(&previous.document.identity());
             self.document_origins.remove(&previous.document.identity());
+            self.document_csp.remove(&previous.document.identity());
+            self.csp_violations
+                .retain(|violation| violation.document_id != previous.document.identity());
+            self.csp_violation_keys
+                .retain(|(document_id, _, _)| *document_id != previous.document.identity());
             self.unregister_tree(&previous.document);
+            if let Some(loader) = self.module_loader.as_ref().and_then(Weak::upgrade) {
+                loader.clear_csp_context_for_document(previous.document.identity());
+            }
         }
 
-        let document = self.load_iframe_document(&src);
+        let (document, csp_headers, child_url) = self.load_iframe_document(&src);
         let origin = if src.is_empty() || src.eq_ignore_ascii_case("about:blank") {
             let owner_document = owner_document_for_node(iframe);
             self.document_origins
@@ -933,6 +1087,31 @@ impl HostState {
         };
         self.register_tree(&document);
         self.document_origins.insert(document.identity(), origin);
+        let inherits_owner_csp = src.is_empty() || src.eq_ignore_ascii_case("about:blank");
+        // `data:` documents have an opaque origin.  They must not inherit the
+        // embedding document's URL as the CSP base, otherwise `'self'` in a
+        // meta policy would incorrectly match the parent origin.
+        let policy_base = if src
+            .get(..5)
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case("data:"))
+        {
+            String::new()
+        } else {
+            child_url
+                .as_deref()
+                .map(str::to_owned)
+                .or_else(|| self.base_url.as_ref().map(ToString::to_string))
+                .unwrap_or_default()
+        };
+        let policy = if inherits_owner_csp {
+            owner_document_for_node(iframe)
+                .or_else(|| Some(self.document.clone()))
+                .and_then(|owner| self.document_csp.get(&owner.identity()).cloned())
+                .unwrap_or_default()
+        } else {
+            CspPolicy::from_headers_and_document(&csp_headers, &document, &policy_base)
+        };
+        self.document_csp.insert(document.identity(), policy);
         // Seed a dirty style cache entry for the freshly loaded sub-document so
         // its resolver is built from its own `<style>` rules on first query.
         self.document_styles.insert(
@@ -959,9 +1138,16 @@ impl HostState {
     /// Returns an `about:blank` skeleton for an empty/`about:blank` reference, a
     /// fetch failure, or an unsupported content type. HTML resources are parsed
     /// as HTML; XML MIME types, including SVG, are parsed as XML.
-    fn load_iframe_document(&mut self, src: &str) -> NodeHandle {
+    fn load_iframe_document(
+        &mut self,
+        src: &str,
+    ) -> (NodeHandle, Vec<String>, Option<String>) {
         if src.is_empty() || src.eq_ignore_ascii_case("about:blank") {
-            return blank_html_document();
+            return (
+                blank_html_document(),
+                Vec::new(),
+                self.base_url.as_ref().map(ToString::to_string),
+            );
         }
 
         // Resolve the reference (shared with script loading) to either inline
@@ -973,29 +1159,46 @@ impl HostState {
         // adopt the response body as the sub-document regardless of status.
         // This asymmetry with `fetch_script_source` (which requires 200) is
         // deliberate.
-        let fetched: Option<(String, Vec<u8>)> =
+        let fetched: Option<(String, Vec<u8>, Vec<String>, Option<String>)> =
             match resolve_resource_ref(src, self.base_url.as_ref()) {
-                Some(ResolvedResource::Data { mime_type, data }) => Some((mime_type, data)),
+                Some(ResolvedResource::Data { mime_type, data }) => {
+                    Some((mime_type, data, Vec::new(), None))
+                }
                 Some(ResolvedResource::Url(url)) => self.http_client.get(&url).ok().map(|resp| {
                     let mime = resp.header("Content-Type").unwrap_or("").to_string();
-                    (mime, resp.body().to_vec())
+                    let csp_headers = resp
+                        .headers()
+                        .iter()
+                        .filter(|(name, _)| name.eq_ignore_ascii_case("content-security-policy"))
+                        .map(|(_, value)| value.clone())
+                        .collect();
+                    let effective_url = resp.effective_url().map(ToString::to_string);
+                    (mime, resp.body().to_vec(), csp_headers, effective_url)
                 }),
                 None => None,
             };
 
         match fetched {
-            Some((mime, body)) if is_html_mime_type(&mime) => {
+            Some((mime, body, csp_headers, effective_url)) if is_html_mime_type(&mime) => {
                 let html = String::from_utf8_lossy(&body);
-                crate::html::TreeBuilder::parse(&html).document()
+                (
+                    crate::html::TreeBuilder::parse(&html).document(),
+                    csp_headers,
+                    effective_url,
+                )
             }
-            Some((mime, body)) if is_xml_mime_type(&mime) => {
-                crate::xml::parse(&body).unwrap_or_else(|_| blank_html_document())
+            Some((mime, body, csp_headers, effective_url)) if is_xml_mime_type(&mime) => {
+                (
+                    crate::xml::parse(&body).unwrap_or_else(|_| blank_html_document()),
+                    csp_headers,
+                    effective_url,
+                )
             }
             // Unsupported content types (image/png, text/plain, ...) leave the
             // sub-document as an empty skeleton so a page cannot mine markup
             // from them. Acid3 tests 14 and 15 depend on this (a PNG/text file
             // must not yield a <p>).
-            _ => blank_html_document(),
+            _ => (blank_html_document(), Vec::new(), None),
         }
     }
 
@@ -1032,6 +1235,84 @@ impl HostState {
 
     fn get_node(&self, id: usize) -> Option<NodeHandle> {
         self.nodes.get(&id).cloned()
+    }
+
+    fn csp_policy_for_document(&self, document: &NodeHandle) -> CspPolicy {
+        self.document_csp
+            .get(&document.identity())
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    fn csp_policy_for_node(&self, node: &NodeHandle) -> CspPolicy {
+        document_root_for_node(node)
+            .map(|document| self.csp_policy_for_document(&document))
+            .unwrap_or_default()
+    }
+
+    fn record_csp_violation(
+        &mut self,
+        document: &NodeHandle,
+        resource_type: ResourceType,
+        blocked_uri: impl Into<String>,
+    ) {
+        let blocked_uri = blocked_uri.into();
+        let document_id = document.identity();
+        let directive = resource_type.directive().to_string();
+        let key = (document_id, directive.clone(), blocked_uri.clone());
+        if self.csp_violation_keys.contains(&key)
+            || self.csp_violation_keys.len() >= MAX_CSP_VIOLATIONS
+        {
+            return;
+        }
+        self.csp_violation_keys.insert(key);
+        self.csp_violations.push(CspViolation {
+            document_id,
+            effective_directive: directive,
+            blocked_uri,
+            resource_type: resource_type.label().to_string(),
+            source: "enforced".to_string(),
+        });
+    }
+
+    fn record_csp_violation_for_node(
+        &mut self,
+        node: &NodeHandle,
+        resource_type: ResourceType,
+        blocked_uri: impl Into<String>,
+    ) {
+        if let Some(document) = document_root_for_node(node) {
+            self.record_csp_violation(&document, resource_type, blocked_uri);
+        }
+    }
+
+    /// Refreshes the resolver's CSP-filtered inline-style set after a `style`
+    /// attribute mutation without reparsing the document's stylesheets.  A
+    /// normal inline-style edit is intentionally only a computed-style cache
+    /// invalidation; this keeps the existing resolver-generation contract while
+    /// still making a newly added/removed blocked attribute take effect.
+    fn refresh_csp_inline_style_nodes(&mut self, node: &NodeHandle) {
+        let Some(document) = document_root_for_node(node) else {
+            return;
+        };
+        let blocked = !self
+            .csp_policy_for_document(&document)
+            .allows_inline(ResourceType::Style)
+            && node.get_attribute("style").is_some();
+        if blocked {
+            self.record_csp_violation(
+                &document,
+                ResourceType::Style,
+                format!("style-attribute:{}", node.identity()),
+            );
+        }
+        if let Some(resolver) = self
+            .document_styles
+            .get_mut(&document.identity())
+            .and_then(|entry| entry.resolver.as_mut())
+        {
+            resolver.set_blocked_inline_style_node(node.identity(), blocked);
+        }
     }
 
     /// Marks the given document's cached style resolver as stale, creating its
@@ -1193,7 +1474,16 @@ impl HostState {
         }
         let _ = resolver.set_transition_time_ms(transition_time_ms);
         resolver.set_viewport(viewport.width, viewport.height);
-        for (scope, implicit_scope_root, css) in collect_inline_stylesheets(document) {
+        let policy = self.csp_policy_for_document(document);
+        for (style_node, scope, implicit_scope_root, css) in collect_inline_stylesheets(document) {
+            if !policy.allows_inline(ResourceType::Style) {
+                self.record_csp_violation(
+                    document,
+                    ResourceType::Style,
+                    format!("style-element:{}", style_node.identity()),
+                );
+                continue;
+            }
             let sheet = crate::paint::stylesheet::parse_stylesheet_forgiving(&css);
             if let Some((scope, order)) = scope {
                 resolver.add_scoped_stylesheet_in_order(Origin::Author, sheet, scope, order);
@@ -1207,6 +1497,23 @@ impl HostState {
                 resolver.add_stylesheet(Origin::Author, sheet);
             }
         }
+        let blocked_inline_styles = if policy.allows_inline(ResourceType::Style) {
+            HashSet::new()
+        } else {
+            let mut blocked = HashSet::new();
+            for element in collect_element_nodes(document) {
+                if element.get_attribute("style").is_some() {
+                    self.record_csp_violation(
+                        document,
+                        ResourceType::Style,
+                        format!("style-attribute:{}", element.identity()),
+                    );
+                    blocked.insert(element.identity());
+                }
+            }
+            blocked
+        };
+        resolver.set_blocked_inline_style_nodes(blocked_inline_styles);
         self.document_styles.insert(
             document_id,
             DocumentStyleEntry {
@@ -1484,6 +1791,7 @@ impl Default for SandboxConfig {
 pub struct JsRuntime {
     context: Context,
     host_state: Rc<RefCell<HostState>>,
+    module_loader: Rc<HttpModuleLoader>,
     sandbox: SandboxConfig,
 }
 
@@ -1584,8 +1892,10 @@ impl JsRuntime {
             storage_manager,
             storage_session_id,
         )));
+        let module_loader = Rc::new(HttpModuleLoader::default());
+        host_state.borrow_mut().module_loader = Some(Rc::downgrade(&module_loader));
         let mut context = Context::builder()
-            .module_loader(Rc::new(HttpModuleLoader::default()))
+            .module_loader(module_loader.clone())
             .host_hooks(Rc::new(BrowserHostHooks))
             .build()?;
 
@@ -1594,6 +1904,7 @@ impl JsRuntime {
         let mut runtime = Self {
             context,
             host_state,
+            module_loader,
             sandbox,
         };
         runtime.eval(DOM_BOOTSTRAP)?;
@@ -1798,6 +2109,36 @@ impl JsRuntime {
         self.host_state.borrow_mut().base_url = Some(url);
     }
 
+    /// Installs the enforced CSP for the current Document before document
+    /// scripts and style resolution run.  The policy is immutable for the
+    /// lifetime of this browsing-context generation; a navigation constructs a
+    /// fresh runtime and therefore cannot inherit the previous policy.
+    pub(crate) fn install_csp_policy(&mut self, headers: &[String]) {
+        let document = self.document();
+        let base_url = self.host_state.borrow().location_href.clone();
+        let policy = CspPolicy::from_headers_and_document(headers, &document, &base_url);
+        self.host_state
+            .borrow_mut()
+            .document_csp
+            .insert(document.identity(), policy);
+    }
+
+    fn sync_module_csp_violations(&mut self) {
+        let violations = self.module_loader.take_csp_violations();
+        if violations.is_empty() {
+            return;
+        }
+        let mut state = self.host_state.borrow_mut();
+        for (document_id, _directive, blocked_uri) in violations {
+            // Module loading is the one CSP path that runs inside Boa's
+            // ModuleLoader callback, so retain its blocked target here while
+            // sharing the same per-document deduplication as native paths.
+            if let Some(document) = state.get_node(document_id) {
+                state.record_csp_violation(&document, ResourceType::Script, blocked_uri);
+            }
+        }
+    }
+
     /// Takes navigation requests queued by Location/History APIs in FIFO order.
     pub fn take_navigation_requests(&mut self) -> Vec<NavigationRequest> {
         self.host_state
@@ -1897,15 +2238,31 @@ impl JsRuntime {
     }
 
     /// Evaluates one module with asynchronous jobs and suspendable host calls.
-    async fn eval_module_async(&mut self, source: &str, url: &str) -> JsResult<JsValue> {
+    async fn eval_module_async(
+        &mut self,
+        source: &str,
+        url: &str,
+        document: NodeHandle,
+    ) -> JsResult<JsValue> {
+        let policy = self.host_state.borrow().csp_policy_for_document(&document);
+        self.module_loader.set_csp_policy_for_module_graph(
+            document.identity(),
+            url,
+            policy,
+        );
         let module = Module::parse(
             Source::from_reader(source.as_bytes(), Some(Path::new(url))),
             None,
             &mut self.context,
         )?;
+        let document_id = document.identity();
+        let host_state = Rc::clone(&self.host_state);
         ActiveHostFuture {
-            future: Box::pin(module.load_link_evaluate_async(&mut self.context)),
-            host_state: Rc::clone(&self.host_state),
+            future: Box::pin(async move {
+                let _module_document = activate_module_document(document_id);
+                module.load_link_evaluate_async(&mut self.context).await
+            }),
+            host_state,
         }
         .await
     }
@@ -1938,24 +2295,53 @@ impl JsRuntime {
             }
             let src = attrs.get("src").cloned();
             let has_src = src.is_some();
+            let policy = self.host_state.borrow().csp_policy_for_node(script);
+            if let Some(src_url) = src.as_deref() {
+                if !policy.allows_reference(ResourceType::Script, src_url) {
+                    self.host_state.borrow_mut().record_csp_violation_for_node(
+                        script,
+                        ResourceType::Script,
+                        src_url,
+                    );
+                    continue;
+                }
+            } else if !policy.allows_inline(ResourceType::Script) {
+                self.host_state.borrow_mut().record_csp_violation_for_node(
+                    script,
+                    ResourceType::Script,
+                    "inline",
+                );
+                continue;
+            }
             let (source, label) = if let Some(src) = src {
                 let fetched = {
                     let mut state = self.host_state.borrow_mut();
-                    fetch_script_source_with_client(
+                    fetch_script_resource_with_client(
                         &src,
                         base_url.as_ref(),
                         &mut state.http_client,
                     )
                 };
-                (
-                    fetched.unwrap_or_else(|| {
+                let (effective_url, source) = match fetched {
+                    Some((effective_url, source)) => (Some(effective_url), source),
+                    None => {
                         let message = format!("failed to fetch script: {src}");
                         let quoted = serde_json::to_string(&message)
                             .expect("JavaScript error messages must serialize as JSON strings");
-                        format!("throw new Error({quoted})")
-                    }),
-                    src,
-                )
+                        (None, format!("throw new Error({quoted})"))
+                    }
+                };
+                if let Some(effective_url) = effective_url
+                    && !policy.allows_reference(ResourceType::Script, &effective_url)
+                {
+                    self.host_state.borrow_mut().record_csp_violation_for_node(
+                        script,
+                        ResourceType::Script,
+                        effective_url,
+                    );
+                    continue;
+                }
+                (source, src)
             } else {
                 (
                     collect_text_content(script),
@@ -2040,7 +2426,11 @@ impl JsRuntime {
                 let evaluation_result = {
                     let mut evaluation: Pin<Box<dyn Future<Output = JsResult<JsValue>> + '_>> =
                         if let Some(url) = module_url.as_deref() {
-                            Box::pin(self.eval_module_async(&source, url))
+                            let module_document = script_node_id
+                                .and_then(|node_id| self.host_state.borrow().get_node(node_id))
+                                .and_then(|node| document_root_for_node(&node))
+                                .unwrap_or_else(|| self.document());
+                            Box::pin(self.eval_module_async(&source, url, module_document))
                         } else {
                             Box::pin(self.eval_async(&source))
                         };
@@ -2071,6 +2461,7 @@ impl JsRuntime {
                     errors.push(format!("[script jobs: {label}] {error}"));
                 }
             }
+            self.sync_module_csp_violations();
             let page_work_result = {
                 let mut page_work = Box::pin(async {
                     self.run_until_idle_async().await?;
@@ -2172,11 +2563,18 @@ impl JsRuntime {
         &mut self,
         source: &str,
         url: &str,
+        document: NodeHandle,
     ) -> (
         Result<JsValue, String>,
         std::time::Duration,
         std::time::Duration,
     ) {
+        let policy = self.host_state.borrow().csp_policy_for_document(&document);
+        self.module_loader.set_csp_policy_for_module_graph(
+            document.identity(),
+            url,
+            policy,
+        );
         let parse_start = std::time::Instant::now();
         let module = match Module::parse(
             Source::from_reader(source.as_bytes(), Some(Path::new(url))),
@@ -2194,7 +2592,8 @@ impl JsRuntime {
         };
         let parse_elapsed = parse_start.elapsed();
         let execute_start = std::time::Instant::now();
-        let promise = module.load_link_evaluate(&mut self.context);
+        let _module_document = activate_module_document(document.identity());
+        let promise = self.with_active_host_value(|context| module.load_link_evaluate(context));
         let result =
             self.run_jobs()
                 .map_err(|error| error.to_string())
@@ -2409,13 +2808,14 @@ impl JsRuntime {
     }
 
     async fn run_dynamic_script_resource_async(&mut self, node_id: usize) -> JsResult<()> {
-        let Some((src, kind, base_url)) = ({
+        let Some((script_node, src, kind, base_url)) = ({
             let mut state = self.host_state.borrow_mut();
             state.pending_resource_loads.remove(&node_id);
             state.get_node(node_id).and_then(|node| {
                 document_root_for_node(&node)?;
                 let src = node.get_attribute("src")?;
                 Some((
+                    node.clone(),
                     src,
                     ScriptKind::from_type_attribute(node.get_attribute("type").as_deref()),
                     state.base_url.clone(),
@@ -2428,11 +2828,24 @@ impl JsRuntime {
         if kind == ScriptKind::NotExecutable {
             return Ok(());
         }
-        let source = {
+        if !self
+            .host_state
+            .borrow()
+            .csp_policy_for_node(&script_node)
+            .allows_reference(ResourceType::Script, &src)
+        {
+            self.host_state.borrow_mut().record_csp_violation_for_node(
+                &script_node,
+                ResourceType::Script,
+                &src,
+            );
+            return Ok(());
+        }
+        let fetched = {
             let mut state = self.host_state.borrow_mut();
-            fetch_script_source_with_client(&src, base_url.as_ref(), &mut state.http_client)
+            fetch_script_resource_with_client(&src, base_url.as_ref(), &mut state.http_client)
         };
-        let Some(source) = source else {
+        let Some((effective_url, source)) = fetched else {
             self.record_task_error(format!("[dynamic script: {src}] failed to fetch"));
             let result = self
                 .eval_async(&format!("__omoikane_dispatch_resource_error({node_id})"))
@@ -2440,18 +2853,39 @@ impl JsRuntime {
             self.record_error_from(&src, result);
             return Ok(());
         };
+        if !self
+            .host_state
+            .borrow()
+            .csp_policy_for_node(&script_node)
+            .allows_reference(ResourceType::Script, &effective_url)
+        {
+            self.host_state.borrow_mut().record_csp_violation_for_node(
+                &script_node,
+                ResourceType::Script,
+                effective_url,
+            );
+            let result = self
+                .eval_async(&format!("__omoikane_dispatch_resource_error({node_id})"))
+                .await;
+            self.record_error_from(&src, result);
+            return Ok(());
+        }
 
         let marked = self
             .eval_async(&format!("__omoikane_set_current_script({node_id})"))
             .await;
         self.record_error_from(&src, marked);
         let result = match kind {
-            ScriptKind::Module => self
-                .eval_module_async(
+            ScriptKind::Module => {
+                let module_document = document_root_for_node(&script_node)
+                    .unwrap_or_else(|| self.document());
+                self.eval_module_async(
                     &source,
                     &module_script_url(&src, base_url.as_ref(), false),
+                    module_document,
                 )
-                .await,
+                .await
+            }
             _ => self.eval_async(&source).await,
         };
         let _ = self.eval("__omoikane_set_current_script(null)");
@@ -2463,6 +2897,7 @@ impl JsRuntime {
             .eval_async(&format!("__omoikane_dispatch_resource_load({node_id})"))
             .await;
         self.record_error_from("resource load", dispatched);
+        self.sync_module_csp_violations();
         Ok(())
     }
 
@@ -3036,7 +3471,7 @@ impl JsRuntime {
                     if document_root_for_node(&node).is_none() {
                         (false, Vec::new(), None)
                     } else {
-                        let mut xhtml_scripts = Vec::new();
+                        let mut xhtml_scripts: Vec<NodeHandle> = Vec::new();
                         // A dynamically inserted external script is classified by
                         // the same `type` gate the parsed-document path uses, so a
                         // script runs the same way however it reached the tree.
@@ -3048,7 +3483,7 @@ impl JsRuntime {
                                 let kind = ScriptKind::from_type_attribute(
                                     node.get_attribute("type").as_deref(),
                                 );
-                                (src, kind, state.base_url.clone())
+                                (node.clone(), src, kind, state.base_url.clone())
                             })
                         } else {
                             None
@@ -3063,7 +3498,17 @@ impl JsRuntime {
                             let previous = state.iframe_documents.remove(&node_id);
                             if let Some(previous) = previous.as_ref() {
                                 state.document_styles.remove(&previous.document.identity());
+                                state.document_origins.remove(&previous.document.identity());
+                                state.document_csp.remove(&previous.document.identity());
+                                state.csp_violations.retain(|violation| {
+                                    violation.document_id != previous.document.identity()
+                                });
+                                state.csp_violation_keys.retain(|(document_id, _, _)| {
+                                    *document_id != previous.document.identity()
+                                });
                                 state.unregister_tree(&previous.document);
+                                self.module_loader
+                                    .clear_csp_context_for_document(previous.document.identity());
                             }
                             let document = state.iframe_content_document(&node);
                             let is_xhtml = document
@@ -3081,7 +3526,6 @@ impl JsRuntime {
                                             == Some("http://www.w3.org/1999/xhtml")
                                     })
                                     .filter(is_inline_classic_script)
-                                    .map(|script| collect_text_content(&script))
                                     .collect();
                             }
                             // JS wrappers are cached by native identity, so keep
@@ -3092,36 +3536,64 @@ impl JsRuntime {
                         (true, xhtml_scripts, dynamic_script)
                     }
                 };
-                for source in xhtml_scripts {
+                for script in xhtml_scripts {
                     // Like top-level document scripts, one failing XHTML
                     // script must not prevent later scripts or the iframe load
                     // event from running.
-                    let _ = self.eval(&source);
+                    let allowed = self
+                        .host_state
+                        .borrow()
+                        .csp_policy_for_node(&script)
+                        .allows_inline(ResourceType::Script);
+                    if !allowed {
+                        self.host_state.borrow_mut().record_csp_violation_for_node(
+                            &script,
+                            ResourceType::Script,
+                            "inline",
+                        );
+                        continue;
+                    }
+                    let _ = self.eval(&collect_text_content(&script));
                     let _ = self.run_jobs();
                 }
                 // A script whose type Omoikane does not execute is not fetched and
                 // does not load, so it must not go on to dispatch `load` either.
                 let mut dispatch_load = should_dispatch;
-                if let Some((src, kind, base_url)) = dynamic_script {
+                if let Some((script_node, src, kind, base_url)) = dynamic_script {
                     let log_scripts = std::env::var_os("OMOIKANE_LOG_SCRIPTS").is_some();
                     if kind == ScriptKind::NotExecutable {
                         if log_scripts {
                             eprintln!("[omoikane][script] skipped dynamic {src}");
                         }
                         dispatch_load = false;
+                    } else if !self
+                        .host_state
+                        .borrow()
+                        .csp_policy_for_node(&script_node)
+                        .allows_reference(ResourceType::Script, &src)
+                    {
+                        self.host_state.borrow_mut().record_csp_violation_for_node(
+                            &script_node,
+                            ResourceType::Script,
+                            &src,
+                        );
+                        if log_scripts {
+                            eprintln!("[omoikane][script] blocked dynamic {src} by CSP");
+                        }
+                        dispatch_load = false;
                     } else {
                         if log_scripts {
                             eprintln!("[omoikane][script] loading dynamic {src} kind={kind:?}");
                         }
-                        let source = {
+                        let fetched = {
                             let mut state = self.host_state.borrow_mut();
-                            fetch_script_source_with_client(
+                            fetch_script_resource_with_client(
                                 &src,
                                 base_url.as_ref(),
                                 &mut state.http_client,
                             )
                         };
-                        match source {
+                        match fetched {
                             // Every failure below is the page's, not the engine's:
                             // it is recorded and execution continues, exactly as
                             // `execute_document_scripts` treats a parsed script.
@@ -3142,7 +3614,27 @@ impl JsRuntime {
                                 let jobs = self.run_jobs();
                                 self.record_error_from(&src, jobs);
                             }
-                            Some(source) => {
+                            Some((effective_url, _source))
+                                if !self
+                                    .host_state
+                                    .borrow()
+                                    .csp_policy_for_node(&script_node)
+                                    .allows_reference(ResourceType::Script, &effective_url) =>
+                            {
+                                self.host_state.borrow_mut().record_csp_violation_for_node(
+                                    &script_node,
+                                    ResourceType::Script,
+                                    effective_url,
+                                );
+                                dispatch_load = false;
+                                let dispatched = self.eval(&format!(
+                                    "__omoikane_dispatch_resource_error({node_id})"
+                                ));
+                                self.record_error_from(&src, dispatched);
+                                let jobs = self.run_jobs();
+                                self.record_error_from(&src, jobs);
+                            }
+                            Some((_, source)) => {
                                 let marked = self
                                     .eval(&format!("__omoikane_set_current_script({node_id})"));
                                 self.record_error_from(&src, marked);
@@ -3151,6 +3643,8 @@ impl JsRuntime {
                                         .eval_module_timed(
                                             &source,
                                             &module_script_url(&src, base_url.as_ref(), false),
+                                            document_root_for_node(&script_node)
+                                                .unwrap_or_else(|| self.document()),
                                         )
                                         .0,
                                     _ => self
@@ -3303,19 +3797,46 @@ impl JsRuntime {
             // HTML spec: defer only applies to external (src) scripts.
             let is_defer = is_module || (attrs.contains_key("defer") && src.is_some());
 
+            let policy = self.host_state.borrow().csp_policy_for_node(script);
+            if let Some(src_url) = src.as_deref() {
+                if !policy.allows_reference(ResourceType::Script, src_url) {
+                    self.host_state.borrow_mut().record_csp_violation_for_node(
+                        script,
+                        ResourceType::Script,
+                        src_url,
+                    );
+                    continue;
+                }
+            } else if !policy.allows_inline(ResourceType::Script) {
+                self.host_state.borrow_mut().record_csp_violation_for_node(
+                    script,
+                    ResourceType::Script,
+                    "inline",
+                );
+                continue;
+            }
+
             let (source_code, script_label) = if let Some(src_url) = src {
                 // External script: fetch
                 let fetch_start = std::time::Instant::now();
                 let fetched = {
                     let mut state = self.host_state.borrow_mut();
-                    fetch_script_source_with_client(
+                    fetch_script_resource_with_client(
                         &src_url,
                         base_url,
                         &mut state.http_client,
                     )
                 };
                 match fetched {
-                    Some(code) => {
+                    Some((effective_url, code)) => {
+                        if !policy.allows_reference(ResourceType::Script, &effective_url) {
+                            self.host_state.borrow_mut().record_csp_violation_for_node(
+                                script,
+                                ResourceType::Script,
+                                effective_url,
+                            );
+                            continue;
+                        }
                         if log_scripts {
                             eprintln!(
                                 "[omoikane][script] fetched {src_url} elapsed_ms={:.3}",
@@ -3415,7 +3936,7 @@ impl JsRuntime {
             let (result, parse_elapsed, compile_elapsed, execute_elapsed) =
                 if let Some(module_url) = module_url {
                     let (result, parse_elapsed, execute_elapsed) =
-                        self.eval_module_timed(&source_code, &module_url);
+                        self.eval_module_timed(&source_code, &module_url, script.clone());
                     (
                         result,
                         parse_elapsed,
@@ -3446,6 +3967,8 @@ impl JsRuntime {
             let _ = self.eval("__omoikane_set_current_script(null)");
             self.host_state.borrow_mut().write_insertion_ref = None;
         }
+
+        self.sync_module_csp_violations();
 
         // Fire DOMContentLoaded
         if let Err(err) = self.fire_dom_content_loaded() {
@@ -3653,19 +4176,20 @@ fn requires_public_fetch(url: &crate::http::Url, base_url: Option<&crate::http::
 /// failure), matching how browsers refuse to run non-script `data:` sources.
 #[cfg(test)]
 fn fetch_script_source(src: &str, base_url: Option<&crate::http::Url>) -> Option<String> {
-    fetch_script_source_with_client(src, base_url, &mut Client::new())
+    fetch_script_resource_with_client(src, base_url, &mut Client::new())
+        .map(|(_, source)| source)
 }
 
-/// Fetches script source through the supplied page-scoped HTTP client.
+/// Fetches an external script and retains the response's effective URL.
 ///
-/// Keeping one client for a document preserves cookies and allows its
-/// connection pool to reuse TLS connections across external scripts. The
-/// standalone wrapper above remains useful for focused URI-decoding tests.
-fn fetch_script_source_with_client(
+/// The effective URL matters for CSP: an initially permitted script may follow
+/// a redirect into a source that the policy does not permit, in which case its
+/// bytes must never reach the evaluator.
+fn fetch_script_resource_with_client(
     src: &str,
     base_url: Option<&crate::http::Url>,
     client: &mut Client,
-) -> Option<String> {
+) -> Option<(String, String)> {
     match resolve_resource_ref(src, base_url)? {
         // data: URI scripts are decoded inline without a network fetch. Only
         // JavaScript media types are executed as classic scripts; any other
@@ -3675,7 +4199,7 @@ fn fetch_script_source_with_client(
             if !is_javascript_mime_type(&mime_type) {
                 return None;
             }
-            String::from_utf8(data).ok()
+            Some((src.to_string(), String::from_utf8(data).ok()?))
         }
         ResolvedResource::Url(url) => {
             let resolved = url.parse::<crate::http::Url>().ok()?;
@@ -3691,9 +4215,14 @@ fn fetch_script_source_with_client(
             if response.status_code() != 200 {
                 return None;
             }
-            std::str::from_utf8(response.body())
-                .ok()
-                .map(|s| s.to_string())
+            let effective_url = response
+                .effective_url()
+                .map(ToString::to_string)
+                .unwrap_or(url);
+            Some((
+                effective_url,
+                std::str::from_utf8(response.body()).ok()?.to_string(),
+            ))
         }
     }
 }
@@ -4179,6 +4708,11 @@ fn register_host_bindings(
             NativeFunction::from_copy_closure(computed_style_native),
         ),
         (
+            js_string!("__omoikane_csp_violations"),
+            1,
+            NativeFunction::from_copy_closure(csp_violations_native),
+        ),
+        (
             js_string!("__omoikane_is_rendered_for_focus"),
             1,
             NativeFunction::from_copy_closure(is_rendered_for_focus_native),
@@ -4616,12 +5150,17 @@ fn storage_clear_native(
 /// keep computed-style resolution synchronous and side-effect free.
 fn collect_inline_stylesheets(
     document: &NodeHandle,
-) -> Vec<(Option<(NodeHandle, usize)>, Option<NodeHandle>, String)> {
+) -> Vec<(NodeHandle, Option<(NodeHandle, usize)>, Option<NodeHandle>, String)> {
     fn walk(
         node: &NodeHandle,
         scope: Option<&(NodeHandle, usize)>,
         next_scope_order: &mut usize,
-        out: &mut Vec<(Option<(NodeHandle, usize)>, Option<NodeHandle>, String)>,
+        out: &mut Vec<(
+            NodeHandle,
+            Option<(NodeHandle, usize)>,
+            Option<NodeHandle>,
+            String,
+        )>,
     ) {
         if node.node_type() == NodeType::Element
             && node
@@ -4634,7 +5173,7 @@ fn collect_inline_stylesheets(
                 let implicit_scope_root = node
                     .parent_node()
                     .filter(|parent| parent.node_type() == NodeType::Element);
-                out.push((scope.cloned(), implicit_scope_root, css));
+                out.push((node.clone(), scope.cloned(), implicit_scope_root, css));
             }
         }
         if let Some(root) = node.shadow_root() {
@@ -6103,6 +6642,7 @@ fn set_attribute_native(_: &JsValue, args: &[JsValue], context: &mut Context) ->
         .unwrap_or_default()
         .to_string(context)?
         .to_std_string_escaped();
+    let is_style_attribute = name.eq_ignore_ascii_case("style");
     with_host_state(|state| {
         let node = state
             .borrow()
@@ -6126,7 +6666,10 @@ fn set_attribute_native(_: &JsValue, args: &[JsValue], context: &mut Context) ->
         // Any attribute may participate in a selector (id/class/attribute
         // selectors), so invalidate the element's live document. Detached
         // elements cannot affect it until the insertion path invalidates it.
-        if node.tag_name().as_deref() == Some("style") {
+        if is_style_attribute {
+            state.borrow_mut().refresh_csp_inline_style_nodes(&node);
+            state.borrow_mut().invalidate_style_cache_for_node(&node);
+        } else if node.tag_name().as_deref() == Some("style") {
             state.borrow_mut().mark_style_dirty_for_node(&node);
         } else {
             state.borrow_mut().invalidate_style_cache_for_node(&node);
@@ -6420,7 +6963,8 @@ fn create_worker_for_owner_state(
     let worker_url = resolve_worker_url(requested_url, &owner_url, base_url.as_ref())?;
     let source = {
         let mut state = owner_state.borrow_mut();
-        fetch_script_source_with_client(requested_url, base_url.as_ref(), &mut state.http_client)
+        fetch_script_resource_with_client(requested_url, base_url.as_ref(), &mut state.http_client)
+            .map(|(_, source)| source)
     };
     let mut worker_runtime = JsRuntime::with_document_url_and_storage(
         blank_html_document(),
@@ -6719,6 +7263,16 @@ fn websocket_connect_native(
     })?;
     with_host_state(|state| {
         let mut state = state.borrow_mut();
+        let document = state.document.clone();
+        if !state
+            .csp_policy_for_document(&document)
+            .allows_reference(ResourceType::Connect, &url)
+        {
+            state.record_csp_violation(&document, ResourceType::Connect, &url);
+            return Err(JsNativeError::error()
+                .with_message("WebSocket connection blocked by CSP connect-src")
+                .into());
+        }
         let origin = state.base_url.as_ref().map(|url| format!("{}://{}", url.scheme(), url.authority()));
         let client = crate::realtime::WebSocketClient::connect(&url, &protocols, origin.as_deref())
             .map_err(|error| JsError::from(JsNativeError::error().with_message(error)))?;
@@ -6812,6 +7366,16 @@ fn event_source_fetch_native(
         let mut state = state.borrow_mut();
         let parsed = url.parse::<crate::http::Url>()
             .map_err(|error| JsError::from(JsNativeError::typ().with_message(error.to_string())))?;
+        let document = state.document.clone();
+        if !state
+            .csp_policy_for_document(&document)
+            .allows_reference(ResourceType::Connect, &url)
+        {
+            state.record_csp_violation(&document, ResourceType::Connect, &url);
+            return Err(JsNativeError::error()
+                .with_message("EventSource connection blocked by CSP connect-src")
+                .into());
+        }
         let origin = state.base_url.as_ref().map(CorsOrigin::from_url).unwrap_or_else(CorsOrigin::opaque);
         let mut request = HttpRequest::new(Method::Get, parsed);
         request.set_header("Accept", "text/event-stream");
@@ -6822,6 +7386,17 @@ fn event_source_fetch_native(
             if with_credentials { CredentialsMode::Include } else { CredentialsMode::SameOrigin },
             RedirectMode::Follow, cors_preflight_cache,
         ).map_err(|error| JsError::from(JsNativeError::error().with_message(error.to_string())))?;
+        if let Some(effective_url) = fetched.response.effective_url()
+            && !state
+                .csp_policy_for_document(&document)
+                .allows_url(ResourceType::Connect, effective_url)
+        {
+            let blocked_uri = effective_url.to_string();
+            state.record_csp_violation(&document, ResourceType::Connect, &blocked_uri);
+            return Err(JsNativeError::error()
+                .with_message("EventSource redirect blocked by CSP connect-src")
+                .into());
+        }
         if fetched.response.status_code() != 200 {
             return Err(JsNativeError::error().with_message("EventSource response must be HTTP 200").into());
         }
@@ -6909,6 +7484,16 @@ fn fetch_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResul
             JsError::from(JsNativeError::typ().with_message(error.to_string()))
         })?;
         let normalized_url = parsed_url.to_string();
+        let document = state.document.clone();
+        if !state
+            .csp_policy_for_document(&document)
+            .allows_reference(ResourceType::Connect, &normalized_url)
+        {
+            state.record_csp_violation(&document, ResourceType::Connect, &normalized_url);
+            return Err(JsNativeError::error()
+                .with_message("fetch blocked by CSP connect-src")
+                .into());
+        }
         let origin = state
             .base_url
             .as_ref()
@@ -6939,6 +7524,17 @@ fn fetch_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResul
         .map_err(|error| {
             JsError::from(JsNativeError::error().with_message(error.to_string()))
         })?;
+        if let Some(effective_url) = fetched.response.effective_url()
+            && !state
+                .csp_policy_for_document(&document)
+                .allows_url(ResourceType::Connect, effective_url)
+        {
+            let blocked_uri = effective_url.to_string();
+            state.record_csp_violation(&document, ResourceType::Connect, &blocked_uri);
+            return Err(JsNativeError::error()
+                .with_message("fetch redirect blocked by CSP connect-src")
+                .into());
+        }
         let response = fetched.response;
         let opaque = matches!(
             fetched.response_type,
@@ -6985,6 +7581,31 @@ fn fetch_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResul
         })
         .to_string();
         Ok(js_string!(payload.as_str()).into())
+    })
+}
+
+/// `__omoikane_csp_violations(documentId)` exposes the enforced violations
+/// retained by the current Document generation.  It is intentionally a
+/// snapshot rather than a consuming queue so repeated DOM inspection remains
+/// deterministic and navigation replacement naturally drops the old state.
+fn csp_violations_native(
+    _: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let document_id = parse_node_id(args.first(), context)?;
+    with_host_state(|state| {
+        let violations = state
+            .borrow()
+            .csp_violations
+            .iter()
+            .filter(|violation| violation.document_id == document_id)
+            .cloned()
+            .collect::<Vec<_>>();
+        Ok(js_string!(
+            serde_json::to_string(&violations).unwrap_or_else(|_| "[]".to_string())
+        )
+        .into())
     })
 }
 
@@ -7702,6 +8323,7 @@ fn remove_attribute_native(
         .unwrap_or_default()
         .to_string(context)?
         .to_std_string_escaped();
+    let is_style_attribute = name.eq_ignore_ascii_case("style");
     with_host_state(|state| {
         let node = state
             .borrow()
@@ -7710,7 +8332,10 @@ fn remove_attribute_native(
         node.remove_attribute(&name);
         // Any attribute may participate in a selector, so invalidate the
         // element's live document. Detached elements affect no document yet.
-        if node.tag_name().as_deref() == Some("style") {
+        if is_style_attribute {
+            state.borrow_mut().refresh_csp_inline_style_nodes(&node);
+            state.borrow_mut().invalidate_style_cache_for_node(&node);
+        } else if node.tag_name().as_deref() == Some("style") {
             state.borrow_mut().mark_style_dirty_for_node(&node);
         } else {
             state.borrow_mut().invalidate_style_cache_for_node(&node);
@@ -8508,11 +9133,22 @@ fn document_write_native(
         for child in &parsed_children {
             collect_script_elements_recursive(child, &mut script_nodes);
         }
-        let script_ids: Vec<JsValue> = script_nodes
-            .iter()
-            .filter(|n| is_inline_classic_script(n))
-            .map(|n| JsValue::from(n.identity() as f64))
-            .collect();
+        let mut script_ids = Vec::new();
+        for script in script_nodes.iter().filter(|n| is_inline_classic_script(n)) {
+            let allowed = state
+                .borrow()
+                .csp_policy_for_node(script)
+                .allows_inline(ResourceType::Script);
+            if allowed {
+                script_ids.push(JsValue::from(script.identity() as f64));
+            } else {
+                state.borrow_mut().record_csp_violation_for_node(
+                    script,
+                    ResourceType::Script,
+                    "inline",
+                );
+            }
+        }
         Ok(JsValue::from(
             boa_engine::object::builtins::JsArray::from_iter(script_ids, context),
         ))
@@ -9859,7 +10495,11 @@ mod tests {
         assert_eq!(runtime.pending_javascript_dialog(), None);
 
         let (module_result, ..) =
-            runtime.eval_module_timed("alert('module script')", "https://example.test/a.js");
+            runtime.eval_module_timed(
+                "alert('module script')",
+                "https://example.test/a.js",
+                runtime.document(),
+            );
         assert!(module_result.is_err());
         assert_eq!(runtime.pending_javascript_dialog(), None);
 
@@ -13736,6 +14376,201 @@ b</textarea></form>"#);
         let target = doc.query_selector("#target").expect("should find #target");
         let attrs = target.attributes().unwrap_or_default();
         assert_eq!(attrs.get("data-ran").map(|s| s.as_str()), Some("yes"));
+    }
+
+    #[test]
+    fn csp_blocks_inline_script_and_style_with_document_observability() {
+        use crate::html::TreeBuilder;
+
+        let document = TreeBuilder::parse(
+            r#"<html><head><style>#target { color: red; }</style></head><body>
+                <div id="target" style="color: blue"></div>
+                <script>globalThis.cspInlineRan = true;</script>
+            </body></html>"#,
+        )
+        .document();
+        let mut runtime = JsRuntime::with_document_and_url(
+            document,
+            "https://example.test/index.html",
+        )
+        .unwrap();
+        runtime.install_csp_policy(&["script-src 'none'; style-src 'none'".to_string()]);
+
+        assert!(runtime
+            .execute_document_scripts(Some(&"https://example.test/index.html".parse().unwrap()))
+            .is_empty());
+        assert_eq!(
+            eval_str(&mut runtime, "typeof globalThis.cspInlineRan"),
+            "undefined"
+        );
+        // CSP removes the cascade contribution, but the DOM/CSSOM attribute
+        // remains observable.
+        assert_eq!(
+            eval_str(
+                &mut runtime,
+                "document.getElementById('target').style.color",
+            ),
+            "blue"
+        );
+        assert_eq!(
+            eval_str(
+                &mut runtime,
+                "getComputedStyle(document.getElementById('target')).color",
+            ),
+            "rgb(0, 0, 0)"
+        );
+        let violations = eval_str(
+            &mut runtime,
+            "document.cspViolations.map(v => v.effectiveDirective + ':' + v.resourceType).sort().join(',')",
+        );
+        assert_eq!(violations, "script-src:script,style-src:style,style-src:style");
+    }
+
+    #[test]
+    fn csp_allows_unsafe_inline_and_ands_header_with_meta_policy() {
+        use crate::html::TreeBuilder;
+
+        let document = TreeBuilder::parse(
+            r#"<html><head>
+                <meta http-equiv="Content-Security-Policy" content="script-src 'unsafe-inline'; style-src 'unsafe-inline'">
+                <style>#target { color: red; }</style>
+            </head><body><div id="target"></div>
+                <script>globalThis.cspInlineRan = true;</script>
+            </body></html>"#,
+        )
+        .document();
+        let mut runtime = JsRuntime::with_document_and_url(
+            document,
+            "https://example.test/index.html",
+        )
+        .unwrap();
+        // The response policy is ANDed with the parser-initial meta policy.
+        // Both policies allow inline execution, but the response still limits
+        // script URLs to this origin.
+        runtime.install_csp_policy(&[
+            "script-src 'self' 'unsafe-inline'; style-src 'unsafe-inline'".to_string(),
+        ]);
+        assert!(runtime
+            .execute_document_scripts(Some(&"https://example.test/index.html".parse().unwrap()))
+            .is_empty());
+        assert_eq!(eval_str(&mut runtime, "String(cspInlineRan)"), "true");
+        assert_eq!(
+            eval_str(
+                &mut runtime,
+                "getComputedStyle(document.getElementById('target')).color",
+            ),
+            "rgb(255, 0, 0)"
+        );
+        assert_eq!(eval_str(&mut runtime, "document.cspViolations.length"), "0");
+    }
+
+    #[test]
+    fn csp_blocks_dynamic_module_before_resource_fetch() {
+        let mut runtime = runtime_from_html("<html><head></head><body></body></html>");
+        runtime.install_csp_policy(&["script-src 'none'".to_string()]);
+        runtime
+            .eval(
+                r#"(() => {
+                    globalThis.dynamicModuleRan = false;
+                    const script = document.createElement('script');
+                    script.type = 'module';
+                    script.src = 'data:text/javascript,globalThis.dynamicModuleRan = true';
+                    document.head.appendChild(script);
+                })()"#,
+            )
+            .unwrap();
+        runtime.run_until_idle().unwrap();
+        assert_eq!(eval_str(&mut runtime, "String(dynamicModuleRan)"), "false");
+        assert_eq!(
+            eval_str(&mut runtime, "document.cspViolations[0].effectiveDirective"),
+            "script-src"
+        );
+    }
+
+    #[test]
+    fn csp_data_iframe_meta_policy_keeps_an_opaque_origin() {
+        let mut runtime = runtime_from_html("<html><head></head><body></body></html>");
+        runtime.set_base_url("https://example.test/index.html".parse().unwrap());
+        let encoded = base64::engine::general_purpose::STANDARD.encode(
+            br#"<html><head><meta http-equiv="Content-Security-Policy" content="script-src 'self'"></head><body></body></html>"#,
+        );
+        runtime
+            .eval(&format!(
+                r#"globalThis.frame = document.createElement('iframe');
+                   frame.src = 'data:text/html;base64,{encoded}';
+                   document.body.appendChild(frame);"#
+            ))
+            .unwrap();
+        runtime.run_until_idle().unwrap();
+        runtime
+            .eval(
+                r#"const script = frame.contentDocument.createElement('script');
+                   script.src = 'https://example.test/app.js';
+                   frame.contentDocument.head.appendChild(script);"#,
+            )
+            .unwrap();
+        runtime.run_until_idle().unwrap();
+
+        assert_eq!(
+            eval_str(
+                &mut runtime,
+                "frame.contentDocument.cspViolations[0].blockedURI",
+            ),
+            "https://example.test/app.js"
+        );
+    }
+
+    #[test]
+    fn csp_about_blank_iframe_inherits_owner_policy() {
+        let mut runtime = runtime_from_html("<html><head></head><body></body></html>");
+        runtime.install_csp_policy(&["script-src 'none'".to_string()]);
+        runtime
+            .eval(
+                "globalThis.frame = document.createElement('iframe'); document.body.appendChild(frame);",
+            )
+            .unwrap();
+        runtime.run_until_idle().unwrap();
+        runtime
+            .eval(
+                "const script = frame.contentDocument.createElement('script'); script.src = 'data:text/javascript,globalThis.blankRan = true'; frame.contentDocument.head.appendChild(script);",
+            )
+            .unwrap();
+        runtime.run_until_idle().unwrap();
+
+        assert_eq!(eval_str(&mut runtime, "String(frame.contentDocument.cspViolations.length)"), "1");
+        assert_eq!(eval_str(&mut runtime, "typeof globalThis.blankRan"), "undefined");
+    }
+
+    #[test]
+    fn csp_connect_src_rejects_fetch_xhr_and_websocket_without_network_access() {
+        let mut runtime = runtime_from_html("<html><head></head><body></body></html>");
+        runtime.install_csp_policy(&["connect-src 'none'".to_string()]);
+        runtime
+            .eval(
+                r#"(() => {
+                    globalThis.fetchRejected = false;
+                    fetch('http://127.0.0.1:1/blocked').catch(() => fetchRejected = true);
+                    globalThis.xhrEvents = [];
+                    const xhr = new XMLHttpRequest();
+                    xhr.onerror = () => xhrEvents.push('error');
+                    xhr.onloadend = () => xhrEvents.push('loadend');
+                    xhr.open('GET', 'http://127.0.0.1:1/xhr');
+                    xhr.send();
+                    globalThis.ws = new WebSocket('ws://127.0.0.1:1/socket');
+                })()"#,
+            )
+            .unwrap();
+        runtime.run_until_idle().unwrap();
+        assert_eq!(eval_str(&mut runtime, "String(fetchRejected)"), "true");
+        assert_eq!(eval_str(&mut runtime, "xhrEvents.join(',')"), "error,loadend");
+        assert_eq!(eval_str(&mut runtime, "String(ws.readyState)"), "3");
+        assert_eq!(
+            eval_str(
+                &mut runtime,
+                "document.cspViolations.map(v => v.resourceType).sort().join(',')",
+            ),
+            "connect,connect,connect"
+        );
     }
 
     #[test]

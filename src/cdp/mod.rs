@@ -935,7 +935,7 @@ impl CdpSession {
                 "type": "Document",
             }),
         );
-        let (html, status, document_url) = self
+        let (html, status, document_url, csp_headers) = self
             .load_page_request(url, Method::Get, None, None)
             .map_err(|message| JsonRpcError {
                 code: -32000,
@@ -948,6 +948,7 @@ impl CdpSession {
                 &html,
                 history_length,
                 &history_state,
+                &csp_headers,
             )
             .map_err(|message| JsonRpcError {
                 code: -32000,
@@ -1012,7 +1013,7 @@ impl CdpSession {
             }),
         );
 
-        let (html, status, document_url) = self
+        let (html, status, document_url, csp_headers) = self
             .load_page_request(url, method, body, content_type)
             .map_err(|message| JsonRpcError {
                 code: -32000,
@@ -1021,11 +1022,12 @@ impl CdpSession {
 
         let (next_history_length, next_history_state) =
             self.prospective_history_state(commit);
-        self.install_document(
+        self.install_document_with_csp(
             &document_url,
             &html,
             next_history_length,
             &next_history_state,
+            &csp_headers,
         )
             .map_err(|message| JsonRpcError {
                 code: -32000,
@@ -1578,17 +1580,18 @@ impl CdpSession {
         method: Method,
         body: Option<Vec<u8>>,
         content_type: Option<String>,
-    ) -> Result<(String, u16, String), String> {
+    ) -> Result<(String, u16, String, Vec<String>), String> {
         if method == Method::Get {
             if url == "about:blank" {
                 return Ok((
                     "<html><head></head><body></body></html>".to_string(),
                     200,
                     url.to_string(),
+                    Vec::new(),
                 ));
             }
             if let Some(data) = url.strip_prefix("data:text/html,") {
-                return Ok((percent_decode(data), 200, url.to_string()));
+                return Ok((percent_decode(data), 200, url.to_string(), Vec::new()));
             }
         }
         let parsed: crate::http::url::Url = url
@@ -1609,19 +1612,38 @@ impl CdpSession {
             .effective_url()
             .map(ToString::to_string)
             .unwrap_or_else(|| url.to_string());
+        let csp_headers = response
+            .headers()
+            .iter()
+            .filter(|(name, _)| name.eq_ignore_ascii_case("content-security-policy"))
+            .map(|(_, value)| value.clone())
+            .collect();
         Ok((
             decode_html_response(&response),
             response.status_code(),
             effective_url,
+            csp_headers,
         ))
     }
 
+    #[cfg(test)]
     fn install_document(
         &mut self,
         url: &str,
         html: &str,
         history_length: usize,
         history_state_json: &str,
+    ) -> Result<(), String> {
+        self.install_document_with_csp(url, html, history_length, history_state_json, &[])
+    }
+
+    fn install_document_with_csp(
+        &mut self,
+        url: &str,
+        html: &str,
+        history_length: usize,
+        history_state_json: &str,
+        csp_headers: &[String],
     ) -> Result<(), String> {
         let document = TreeBuilder::parse(html).document();
         let mut runtime = JsRuntime::with_document_url_and_storage(
@@ -1633,6 +1655,7 @@ impl CdpSession {
         .map_err(|error| error.to_string())?;
         runtime.set_user_agent(self.http_client.user_agent().to_string());
         Self::install_runtime_helpers_on(&mut runtime).map_err(js_error_message)?;
+        runtime.install_csp_policy(csp_headers);
         runtime
             .eval(&format!(
                 "__omoikane_sync_history({history_length}, {history_state_json:?})"
@@ -1683,6 +1706,7 @@ impl CdpSession {
         html: &str,
         history_length: usize,
         history_state_json: &str,
+        csp_headers: &[String],
     ) -> Result<(OwnedPageTask, PendingDocumentCommit), String> {
         let document = TreeBuilder::parse(html).document();
         let mut runtime = JsRuntime::with_document_url_and_storage(
@@ -1694,6 +1718,7 @@ impl CdpSession {
         .map_err(|error| error.to_string())?;
         runtime.set_user_agent(self.http_client.user_agent().to_string());
         Self::install_runtime_helpers_on(&mut runtime).map_err(js_error_message)?;
+        runtime.install_csp_policy(csp_headers);
         runtime
             .eval(&format!(
                 "__omoikane_sync_history({history_length}, {history_state_json:?})"

@@ -3583,6 +3583,23 @@
       return "text/html";
     }
 
+    // Omoikane's enforced CSP core exposes a stable per-Document snapshot for
+    // diagnostics and focused conformance tests.  It is deliberately not a
+    // mutable policy object: navigation installs a fresh Document/global.
+    get cspViolations() {
+      try {
+        const violations = JSON.parse(__omoikane_csp_violations(this.__id));
+        return violations.map(violation => ({
+          ...violation,
+          effectiveDirective: violation.effective_directive,
+          blockedURI: violation.blocked_uri,
+          resourceType: violation.resource_type,
+        }));
+      } catch (_) {
+        return [];
+      }
+    }
+
     get URL() {
       return this.__documentURL || globalThis.location.href;
     }
