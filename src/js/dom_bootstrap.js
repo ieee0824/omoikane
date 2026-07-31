@@ -6301,8 +6301,15 @@
     }
   }
   function canvasSnapshot(canvas) {
-    const state = canvasStateChecked(canvas);
-    return { width: state.width, height: state.height, pixels: state.pixels.slice() };
+    try {
+      const state = canvasStateChecked(canvas);
+      return { width: state.width, height: state.height, pixels: state.pixels.slice() };
+    } catch (error) {
+      if (error instanceof RangeError) {
+        throw new DOMException("Canvas dimensions are too large", "IndexSizeError");
+      }
+      throw error;
+    }
   }
   function imageBitmapSource(source) {
     if (source instanceof ImageBitmap) {
