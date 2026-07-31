@@ -8649,6 +8649,248 @@
     }
   }
 
+  // Web Audio is represented as a deterministic graph/state model.  The
+  // runtime has no platform audio sink, but keeping context time, node
+  // connections, AudioParam automation, and oscillator lifecycle observable
+  // lets applications exercise the API without producing host audio.
+  const audioConstructionToken = {};
+  const audioTask = callback => {
+    if (typeof __omoikane_queue_dom_manipulation_task === "function") {
+      __omoikane_queue_dom_manipulation_task(callback);
+    } else {
+      setTimeout(callback, 0);
+    }
+  };
+  const audioNow = context => {
+    if (context.state !== "running") return context.__currentTime;
+    const now = typeof __omoikane_performance_now === "function"
+      ? Number(__omoikane_performance_now()) : Date.now();
+    return context.__currentTime + Math.max(0, now - context.__runningAt) / 1000;
+  };
+  function audioNumber(value, name) {
+    const number = Number(value);
+    if (!Number.isFinite(number)) throw new TypeError(name + " must be finite");
+    return number;
+  }
+
+  class AudioParam {
+    constructor(token, context, defaultValue, minValue, maxValue) {
+      if (token !== audioConstructionToken) throw new TypeError("Illegal constructor");
+      this.__context = context;
+      this.defaultValue = Number(defaultValue);
+      this.minValue = Number(minValue);
+      this.maxValue = Number(maxValue);
+      this.__value = this.defaultValue;
+      this.__events = [];
+      this.automationRate = "a-rate";
+    }
+    get value() {
+      const now = audioNow(this.__context);
+      let value = this.__value;
+      for (const event of this.__events) {
+        if (event.time > now) break;
+        if (event.kind === "set") value = event.value;
+        else if (event.kind === "linear") {
+          const previous = event.previous;
+          if (!previous || previous.time >= event.time) value = event.value;
+          else {
+            const progress = Math.min(1, Math.max(0, (now - previous.time) / (event.time - previous.time)));
+            value = previous.value + (event.value - previous.value) * progress;
+          }
+        }
+      }
+      return value;
+    }
+    set value(next) {
+      this.__value = Math.min(this.maxValue, Math.max(this.minValue, audioNumber(next, "AudioParam.value")));
+    }
+    __schedule(kind, value, time) {
+      const numeric = audioNumber(value, "AudioParam value");
+      const at = Math.max(0, audioNumber(time, "AudioParam time"));
+      const event = { kind, value: numeric, time: at, previous: null };
+      if (kind === "linear") event.previous = this.__events[this.__events.length - 1] || null;
+      this.__events = this.__events.filter(existing => existing.time !== at);
+      this.__events.push(event);
+      this.__events.sort((left, right) => left.time - right.time);
+      return this;
+    }
+    setValueAtTime(value, startTime) { return this.__schedule("set", value, startTime); }
+    linearRampToValueAtTime(value, endTime) { return this.__schedule("linear", value, endTime); }
+    exponentialRampToValueAtTime(value, endTime) {
+      const numeric = audioNumber(value, "AudioParam value");
+      if (numeric <= 0 || this.value <= 0) throw new DOMException("Exponential values must be positive.", "RangeError");
+      return this.__schedule("linear", numeric, endTime);
+    }
+    setTargetAtTime(target, startTime, timeConstant) {
+      const value = audioNumber(target, "AudioParam target");
+      const start = Math.max(0, audioNumber(startTime, "AudioParam time"));
+      const constant = audioNumber(timeConstant, "AudioParam timeConstant");
+      if (constant <= 0) throw new RangeError("AudioParam timeConstant must be positive");
+      this.__events.push({ kind: "set", value, time: start });
+      this.__events.sort((left, right) => left.time - right.time);
+      return this;
+    }
+    cancelScheduledValues(cancelTime) {
+      const at = audioNumber(cancelTime, "AudioParam time");
+      this.__events = this.__events.filter(event => event.time < at);
+      return this;
+    }
+    cancelAndHoldAtTime(cancelTime) {
+      const at = audioNumber(cancelTime, "AudioParam time");
+      const held = this.value;
+      this.cancelScheduledValues(at);
+      this.__events.push({ kind: "set", value: held, time: at });
+      this.__events.sort((left, right) => left.time - right.time);
+      return this;
+    }
+    get [Symbol.toStringTag]() { return "AudioParam"; }
+  }
+
+  class AudioNode extends EventTarget {
+    constructor(token, context, inputs = 1, outputs = 1) {
+      super();
+      if (token !== audioConstructionToken) throw new TypeError("Illegal constructor");
+      this.context = context;
+      this.__context = context;
+      this.numberOfInputs = inputs;
+      this.numberOfOutputs = outputs;
+      this.channelCount = 2;
+      this.channelCountMode = "max";
+      this.channelInterpretation = "speakers";
+      this.__connections = new Set();
+    }
+    connect(destination, output = 0, input = 0) {
+      if (!(destination instanceof AudioNode) && !(destination instanceof AudioParam)) {
+        throw new TypeError("AudioNode.connect destination must be an AudioNode or AudioParam");
+      }
+      if (destination.__context !== this.context) {
+        throw new DOMException("Nodes belong to different AudioContexts.", "InvalidAccessError");
+      }
+      const out = Math.trunc(Number(output));
+      const inputIndex = Math.trunc(Number(input));
+      if (!Number.isFinite(out) || out < 0 || out >= this.numberOfOutputs || inputIndex < 0) {
+        throw new DOMException("The AudioNode output or input is invalid.", "IndexSizeError");
+      }
+      this.__connections.add(destination);
+      return destination;
+    }
+    disconnect(destination = undefined) {
+      if (destination === undefined) {
+        this.__connections.clear();
+        return;
+      }
+      if (!this.__connections.delete(destination)) {
+        throw new DOMException("The specified connection was not found.", "InvalidAccessError");
+      }
+    }
+    get [Symbol.toStringTag]() { return "AudioNode"; }
+  }
+
+  class AudioDestinationNode extends AudioNode {
+    constructor(context) { super(audioConstructionToken, context, 1, 0); this.maxChannelCount = 2; }
+    get [Symbol.toStringTag]() { return "AudioDestinationNode"; }
+  }
+
+  class GainNode extends AudioNode {
+    constructor(context, options = {}) {
+      super(audioConstructionToken, context, 1, 1);
+      this.gain = new AudioParam(audioConstructionToken, context, options.gain ?? 1, -3.402823466e38, 3.402823466e38);
+    }
+    get [Symbol.toStringTag]() { return "GainNode"; }
+  }
+
+  class OscillatorNode extends AudioNode {
+    constructor(context, options = {}) {
+      super(audioConstructionToken, context, 0, 1);
+      this.type = options.type === undefined ? "sine" : String(options.type);
+      if (!["sine", "square", "sawtooth", "triangle", "custom"].includes(this.type)) {
+        throw new TypeError("Unsupported oscillator type");
+      }
+      this.frequency = new AudioParam(audioConstructionToken, context, options.frequency ?? 440, -3.402823466e38, 3.402823466e38);
+      this.detune = new AudioParam(audioConstructionToken, context, options.detune ?? 0, -3.402823466e38, 3.402823466e38);
+      this.onended = null;
+      this.__started = false;
+      this.__stopped = false;
+      this.__stopTimer = null;
+    }
+    start(when = 0) {
+      if (this.__started) throw new DOMException("OscillatorNode.start() was already called.", "InvalidStateError");
+      this.__started = true;
+      const delay = Math.max(0, (audioNumber(when, "OscillatorNode start time") - audioNow(this.context)) * 1000);
+      if (this.__stopRequested !== undefined && this.__stopRequested <= audioNow(this.context)) this.__finish();
+      else if (delay > 0) setTimeout(() => {}, delay);
+    }
+    stop(when = 0) {
+      if (this.__stopped) throw new DOMException("OscillatorNode.stop() was already called.", "InvalidStateError");
+      this.__stopRequested = audioNumber(when, "OscillatorNode stop time");
+      const delay = Math.max(0, (this.__stopRequested - audioNow(this.context)) * 1000);
+      if (this.__stopTimer !== null) clearTimeout(this.__stopTimer);
+      this.__stopTimer = setTimeout(() => this.__finish(), delay);
+    }
+    __finish() {
+      if (this.__stopped) return;
+      this.__stopped = true;
+      this.__stopTimer = null;
+      audioTask(() => {
+        const event = new Event("ended");
+        if (typeof this.onended === "function") this.onended.call(this, event);
+        this.dispatchEvent(event);
+      });
+    }
+    get [Symbol.toStringTag]() { return "OscillatorNode"; }
+  }
+
+  class AudioContext extends EventTarget {
+    constructor(options = {}) {
+      super();
+      const init = options === null || options === undefined ? {} : Object(options);
+      const sampleRate = init.sampleRate === undefined ? 44100 : audioNumber(init.sampleRate, "AudioContext sampleRate");
+      if (sampleRate <= 0) throw new DOMException("The sampleRate must be positive.", "NotSupportedError");
+      this.sampleRate = sampleRate;
+      this.baseLatency = 0;
+      this.outputLatency = 0;
+      this.latencyHint = init.latencyHint === undefined ? "interactive" : init.latencyHint;
+      this.__state = "suspended";
+      this.__currentTime = 0;
+      this.__runningAt = 0;
+      this.__destination = new AudioDestinationNode(this);
+      this.listener = Object.create(null);
+      this.onstatechange = null;
+    }
+    get state() { return this.__state; }
+    get currentTime() { return audioNow(this); }
+    get destination() { return this.__destination; }
+    resume() {
+      if (this.__state === "closed") return Promise.reject(new DOMException("The AudioContext is closed.", "InvalidStateError"));
+      if (this.__state === "running") return Promise.resolve();
+      this.__runningAt = typeof __omoikane_performance_now === "function" ? Number(__omoikane_performance_now()) : Date.now();
+      this.__state = "running";
+      return new Promise(resolve => audioTask(() => { fireRealtimeEvent(this, new Event("statechange")); resolve(); }));
+    }
+    suspend() {
+      if (this.__state === "closed") return Promise.reject(new DOMException("The AudioContext is closed.", "InvalidStateError"));
+      if (this.__state === "suspended") return Promise.resolve();
+      this.__currentTime = this.currentTime;
+      this.__state = "suspended";
+      return new Promise(resolve => audioTask(() => { fireRealtimeEvent(this, new Event("statechange")); resolve(); }));
+    }
+    close() {
+      if (this.__state === "closed") return Promise.resolve();
+      this.__currentTime = this.currentTime;
+      this.__state = "closed";
+      return new Promise(resolve => audioTask(() => { fireRealtimeEvent(this, new Event("statechange")); resolve(); }));
+    }
+    createGain() { if (this.__state === "closed") throw new DOMException("The AudioContext is closed.", "InvalidStateError"); return new GainNode(this); }
+    createOscillator() { if (this.__state === "closed") throw new DOMException("The AudioContext is closed.", "InvalidStateError"); return new OscillatorNode(this); }
+    get [Symbol.toStringTag]() { return "AudioContext"; }
+  }
+  globalThis.AudioParam = AudioParam;
+  globalThis.AudioNode = AudioNode;
+  globalThis.AudioDestinationNode = AudioDestinationNode;
+  globalThis.GainNode = GainNode;
+  globalThis.OscillatorNode = OscillatorNode;
+  globalThis.AudioContext = AudioContext;
+
   class Animation extends EventTarget {
     constructor(target, keyframes, options = {}) {
       super();
@@ -9197,7 +9439,8 @@
       "SVGSVGElement", "HTMLTemplateElement", "HTMLFormElement", "HTMLInputElement",
       "HTMLTextAreaElement", "HTMLButtonElement", "HTMLSelectElement", "HTMLOptionElement",
       "HTMLMediaElement", "HTMLAudioElement", "HTMLVideoElement", "Audio",
-      "MediaError",
+      "MediaError", "AudioContext", "AudioNode", "AudioParam", "AudioDestinationNode",
+      "GainNode", "OscillatorNode",
     ]) {
       try { delete globalThis[domName]; } catch (_) { globalThis[domName] = undefined; }
     }

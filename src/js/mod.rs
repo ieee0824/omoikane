@@ -19999,13 +19999,51 @@ b</textarea></form>"#);
     }
 
     #[test]
+    fn web_audio_models_context_state_param_automation_and_node_lifecycle() {
+        let mut runtime = runtime_from_html("<html><body></body></html>");
+        runtime
+            .eval(
+                r#"globalThis.audioEvents = [];
+                   globalThis.context = new AudioContext({ sampleRate: 48000 });
+                   context.onstatechange = () => audioEvents.push(context.state);
+                   globalThis.gain = context.createGain();
+                   globalThis.oscillator = context.createOscillator();
+                   oscillator.onended = () => audioEvents.push('ended');
+                   oscillator.connect(gain).connect(context.destination);
+                   gain.gain.setValueAtTime(0.25, 0);
+                   gain.gain.linearRampToValueAtTime(0.75, 1);"#,
+            )
+            .unwrap();
+        assert_eq!(eval_num(&mut runtime, "context.sampleRate"), 48000.0);
+        assert_eq!(eval_str(&mut runtime, "context.state"), "suspended");
+        assert_eq!(eval_str(&mut runtime, "String(gain instanceof GainNode) + '|' + String(oscillator instanceof OscillatorNode)"), "true|true");
+        runtime.eval("context.resume(); oscillator.start(); oscillator.stop(0.02);").unwrap();
+        runtime.run_until_idle().unwrap();
+        assert_eq!(eval_str(&mut runtime, "context.state"), "running");
+        runtime.run_timers(100, 10, 100);
+        runtime.run_until_idle().unwrap();
+        assert_eq!(eval_str(&mut runtime, "audioEvents.includes('ended')"), "true");
+        assert!(eval_num(&mut runtime, "context.currentTime") > 0.0);
+        assert!(eval_num(&mut runtime, "gain.gain.value") >= 0.25);
+        runtime.eval("context.suspend();").unwrap();
+        runtime.run_until_idle().unwrap();
+        assert_eq!(eval_str(&mut runtime, "context.state"), "suspended");
+        runtime.eval("context.close();").unwrap();
+        runtime.run_until_idle().unwrap();
+        assert_eq!(eval_str(&mut runtime, "context.state"), "closed");
+        assert_eq!(eval_str(&mut runtime, "(() => { try { context.createGain(); return 'allowed'; } catch (error) { return error.name; } })()"), "InvalidStateError");
+        assert_eq!(eval_str(&mut runtime, "(() => { try { new AudioContext({ sampleRate: 0 }); return 'allowed'; } catch (error) { return error.name; } })()"), "NotSupportedError");
+        assert_eq!(eval_str(&mut runtime, "(() => { try { new AudioNode(); return 'constructible'; } catch (error) { return error.name; } })()"), "TypeError");
+    }
+
+    #[test]
     fn dedicated_worker_does_not_expose_media_constructors() {
         let mut runtime = JsRuntime::new().unwrap();
         runtime
             .eval(
                 r#"globalThis.workerValues = [];
                    const source = encodeURIComponent(
-                     'postMessage([typeof MediaError, typeof HTMLMediaElement, typeof Audio]);');
+                     'postMessage([typeof MediaError, typeof HTMLMediaElement, typeof Audio, typeof AudioContext, typeof AudioNode, typeof AudioParam]);');
                    const worker = new Worker('data:text/javascript,' + source);
                    worker.onmessage = event => workerValues.push(event.data);"#,
             )
@@ -20013,7 +20051,7 @@ b</textarea></form>"#);
         runtime.run_until_idle().unwrap();
         assert_eq!(
             eval_str(&mut runtime, "JSON.stringify(workerValues[0])"),
-            "[\"undefined\",\"undefined\",\"undefined\"]"
+            "[\"undefined\",\"undefined\",\"undefined\",\"undefined\",\"undefined\",\"undefined\"]"
         );
     }
 
