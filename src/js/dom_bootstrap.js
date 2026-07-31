@@ -9017,6 +9017,10 @@
     if (time < 0) throw new RangeError(name + " must be non-negative");
     return time;
   }
+  function audioContextValue(context) {
+    if (!(context instanceof AudioContext)) throw new TypeError("An AudioContext is required");
+    return context;
+  }
 
   class AudioParam {
     constructor(token, context, defaultValue, minValue, maxValue) {
@@ -9107,7 +9111,12 @@
     constructor(token, context, inputs = 1, outputs = 1) {
       super();
       if (token !== audioConstructionToken) throw new TypeError("Illegal constructor");
-      this.context = context;
+      Object.defineProperty(this, "context", {
+        configurable: false,
+        enumerable: true,
+        writable: false,
+        value: context,
+      });
       this.__context = context;
       this.numberOfInputs = inputs;
       this.numberOfOutputs = outputs;
@@ -9201,21 +9210,27 @@
 
   class GainNode extends AudioNode {
     constructor(context, options = {}) {
-      super(audioConstructionToken, context, 1, 1);
-      this.gain = new AudioParam(audioConstructionToken, context, options.gain ?? 1, -3.402823466e38, 3.402823466e38);
+      const owner = audioContextValue(context);
+      const init = options === null || options === undefined ? {} : options;
+      if (typeof init !== "object" && typeof init !== "function") throw new TypeError("GainNode options must be a dictionary");
+      super(audioConstructionToken, owner, 1, 1);
+      this.gain = new AudioParam(audioConstructionToken, owner, init.gain ?? 1, -3.402823466e38, 3.402823466e38);
     }
     get [Symbol.toStringTag]() { return "GainNode"; }
   }
 
   class OscillatorNode extends AudioNode {
     constructor(context, options = {}) {
-      super(audioConstructionToken, context, 0, 1);
-      this.type = options.type === undefined ? "sine" : String(options.type);
+      const owner = audioContextValue(context);
+      const init = options === null || options === undefined ? {} : options;
+      if (typeof init !== "object" && typeof init !== "function") throw new TypeError("OscillatorNode options must be a dictionary");
+      super(audioConstructionToken, owner, 0, 1);
+      this.type = init.type === undefined ? "sine" : String(init.type);
       if (!["sine", "square", "sawtooth", "triangle", "custom"].includes(this.type)) {
         throw new TypeError("Unsupported oscillator type");
       }
-      this.frequency = new AudioParam(audioConstructionToken, context, options.frequency ?? 440, -3.402823466e38, 3.402823466e38);
-      this.detune = new AudioParam(audioConstructionToken, context, options.detune ?? 0, -3.402823466e38, 3.402823466e38);
+      this.frequency = new AudioParam(audioConstructionToken, owner, init.frequency ?? 440, -3.402823466e38, 3.402823466e38);
+      this.detune = new AudioParam(audioConstructionToken, owner, init.detune ?? 0, -3.402823466e38, 3.402823466e38);
       this.onended = null;
       this.__started = false;
       this.__stopped = false;
@@ -9299,7 +9314,14 @@
         : (typeof __omoikane_performance_now === "function" ? Number(__omoikane_performance_now()) : Date.now());
       this.__state = "running";
       for (const node of this.__nodes) if (typeof node.__schedulePendingStop === "function") node.__schedulePendingStop();
-      return new Promise(resolve => audioTask(() => { fireRealtimeEvent(this, new Event("statechange")); resolve(); }));
+      const context = this;
+      return new Promise(resolve => audioTask(() => {
+        const event = new Event("statechange");
+        const handler = context.onstatechange;
+        if (typeof handler === "function") handler.call(context, event);
+        context.dispatchEvent(event);
+        resolve();
+      }));
     }
     suspend() {
       if (this.__state === "closed") return Promise.reject(new DOMException("The AudioContext is closed.", "InvalidStateError"));
@@ -9307,14 +9329,28 @@
       this.__currentTime = this.currentTime;
       this.__state = "suspended";
       for (const node of this.__nodes) if (typeof node.__pauseScheduledStop === "function") node.__pauseScheduledStop();
-      return new Promise(resolve => audioTask(() => { fireRealtimeEvent(this, new Event("statechange")); resolve(); }));
+      const context = this;
+      return new Promise(resolve => audioTask(() => {
+        const event = new Event("statechange");
+        const handler = context.onstatechange;
+        if (typeof handler === "function") handler.call(context, event);
+        context.dispatchEvent(event);
+        resolve();
+      }));
     }
     close() {
       if (this.__state === "closed") return Promise.resolve();
       this.__currentTime = this.currentTime;
       this.__state = "closed";
       for (const node of this.__nodes) if (typeof node.__pauseScheduledStop === "function") node.__pauseScheduledStop();
-      return new Promise(resolve => audioTask(() => { fireRealtimeEvent(this, new Event("statechange")); resolve(); }));
+      const context = this;
+      return new Promise(resolve => audioTask(() => {
+        const event = new Event("statechange");
+        const handler = context.onstatechange;
+        if (typeof handler === "function") handler.call(context, event);
+        context.dispatchEvent(event);
+        resolve();
+      }));
     }
     createGain() { if (this.__state === "closed") throw new DOMException("The AudioContext is closed.", "InvalidStateError"); return new GainNode(this); }
     createOscillator() { if (this.__state === "closed") throw new DOMException("The AudioContext is closed.", "InvalidStateError"); return new OscillatorNode(this); }

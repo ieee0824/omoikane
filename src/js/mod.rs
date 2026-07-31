@@ -20683,8 +20683,9 @@ b</textarea></form>"#);
         runtime
             .eval(
                 r#"globalThis.audioEvents = [];
+                   globalThis.stateEvents = [];
                    globalThis.context = new AudioContext({ sampleRate: 48000 });
-                   context.onstatechange = () => audioEvents.push(context.state);
+                   context.addEventListener('statechange', () => globalThis.stateEvents.push(context.state));
                    globalThis.gain = context.createGain();
                    globalThis.oscillator = context.createOscillator();
                    oscillator.onended = () => audioEvents.push('ended');
@@ -20710,6 +20711,7 @@ b</textarea></form>"#);
         assert_eq!(eval_str(&mut runtime, "(() => { try { oscillator.stop(0.03); return 'allowed'; } catch (error) { return error.name; } })()"), "InvalidStateError");
         runtime.run_until_idle().unwrap();
         assert_eq!(eval_str(&mut runtime, "context.state"), "running");
+        assert_eq!(eval_str(&mut runtime, "JSON.stringify(stateEvents)"), "[\"running\"]");
         runtime.run_timers(100, 10, 100);
         runtime.run_until_idle().unwrap();
         assert_eq!(eval_str(&mut runtime, "audioEvents.includes('ended')"), "true");
@@ -20723,6 +20725,7 @@ b</textarea></form>"#);
         runtime.eval("context.suspend();").unwrap();
         runtime.run_until_idle().unwrap();
         assert_eq!(eval_str(&mut runtime, "context.state"), "suspended");
+        assert_eq!(eval_str(&mut runtime, "JSON.stringify(stateEvents)"), "[\"running\",\"suspended\"]");
         runtime
             .eval(
                 "globalThis.pausedEvents = []; globalThis.pausedOscillator = context.createOscillator(); pausedOscillator.onended = () => pausedEvents.push('ended'); pausedOscillator.start(); pausedOscillator.stop(0.05);",
@@ -20733,6 +20736,7 @@ b</textarea></form>"#);
         assert_eq!(eval_str(&mut runtime, "pausedEvents.includes('ended')"), "false");
         runtime.eval("context.resume();").unwrap();
         runtime.run_until_idle().unwrap();
+        assert_eq!(eval_str(&mut runtime, "JSON.stringify(stateEvents)"), "[\"running\",\"suspended\",\"running\"]");
         runtime.run_timers(100, 10, 100);
         runtime.run_until_idle().unwrap();
         assert_eq!(eval_str(&mut runtime, "pausedEvents.includes('ended')"), "true");
@@ -20742,10 +20746,13 @@ b</textarea></form>"#);
         runtime.eval("context.close();").unwrap();
         runtime.run_until_idle().unwrap();
         assert_eq!(eval_str(&mut runtime, "context.state"), "closed");
+        assert_eq!(eval_str(&mut runtime, "JSON.stringify(stateEvents)"), "[\"running\",\"suspended\",\"running\",\"closed\"]");
         assert_eq!(eval_str(&mut runtime, "(() => { try { context.createGain(); return 'allowed'; } catch (error) { return error.name; } })()"), "InvalidStateError");
         assert_eq!(eval_str(&mut runtime, "(() => { try { new AudioContext({ sampleRate: 0 }); return 'allowed'; } catch (error) { return error.name; } })()"), "NotSupportedError");
         assert_eq!(eval_str(&mut runtime, "(() => { try { new AudioNode(); return 'constructible'; } catch (error) { return error.name; } })()"), "TypeError");
         assert_eq!(eval_str(&mut runtime, "(() => { try { new AudioDestinationNode(context); return 'constructible'; } catch (error) { return error.name; } })()"), "TypeError");
+        assert_eq!(eval_str(&mut runtime, "(() => { try { new GainNode(context, 1); return 'allowed'; } catch (error) { return error.name; } })()"), "TypeError");
+        assert_eq!(eval_str(&mut runtime, "(() => { try { new OscillatorNode(context, 1); return 'allowed'; } catch (error) { return error.name; } })()"), "TypeError");
     }
 
     #[test]
