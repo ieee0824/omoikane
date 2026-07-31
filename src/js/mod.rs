@@ -2214,7 +2214,11 @@ impl JsRuntime {
         port: JsValue,
         data: JsValue,
     ) -> JsResult<()> {
-        self.install_posted_message_values(port, data)?;
+        if let Err(error) = self.install_posted_message_values(port, data) {
+            let cleanup_result = self.clear_posted_message_values();
+            self.record_error_from("posted message cleanup", cleanup_result);
+            return Err(error);
+        }
         let result = self
             .eval_async(
                 "if (!__omoikane_posted_message_port._closed) { \
@@ -8349,6 +8353,57 @@ mod tests {
                 .iter()
                 .all(|error| error.contains("posted message") && error.contains("blocked port install")),
             "the install error must be reported: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn async_posted_message_install_errors_cleanup_before_continuing() {
+        let runtime = JsRuntime::new().unwrap();
+        let mut task = Box::pin(runtime.into_page_task(
+            23,
+            vec![PageTaskSource::Classic {
+                source: r#"(() => {
+                  globalThis.afterAsyncPostedMessageInstallError = false;
+                  const channel = new MessageChannel();
+                  channel.port2.onmessage = () => {};
+                  Object.defineProperty(globalThis, '__omoikane_posted_message_port', {
+                    configurable: true,
+                    set() {
+                      throw new Error('blocked async port install');
+                    }
+                  });
+                  channel.port1.postMessage('payload');
+                  setTimeout(() => { afterAsyncPostedMessageInstallError = true; }, 0);
+                })()"#
+                .to_string(),
+                label: "async posted-message install".to_string(),
+                script_node_id: None,
+            }],
+        ));
+        let waker: &'static std::task::Waker = std::task::Waker::noop();
+        let mut context = FutureContext::from_waker(waker);
+        let mut completed = loop {
+            if let Poll::Ready(completed) = task.as_mut().poll(&mut context) {
+                break completed;
+            }
+        };
+
+        assert_eq!(completed.result, Ok(Vec::new()));
+        assert_eq!(
+            completed
+                .runtime
+                .eval("afterAsyncPostedMessageInstallError")
+                .unwrap()
+                .as_boolean(),
+            Some(true)
+        );
+        let errors = completed.runtime.take_task_errors();
+        assert_eq!(errors.len(), 2, "expected install and cleanup errors, got {errors:?}");
+        assert!(
+            errors.iter().all(|error| {
+                error.contains("posted message") && error.contains("blocked async port install")
+            }),
+            "the async install error must be reported: {errors:?}"
         );
     }
 
