@@ -365,9 +365,11 @@
     {
       "id": "storage.cache-storage",
       "area": "storage",
-      "description": "Cache Storage is exposed",
-      "probe": "typeof caches === 'object' && typeof Cache === 'function'",
-      "baseline_supported": false
+      "description": "Cache Storage exposes asynchronous open/put/match snapshots",
+      "setup": "globalThis.__cacheSurfaceProbe = { done: false, value: '' }; caches.open('omoikane-surface-cache').then(cache => cache.put('/surface-cache?probe=1', new Response('ok', { headers: { 'X-Cache-Probe': 'yes' } })).then(() => cache.match('/surface-cache?probe=1'))).then(response => response.text()).then(value => { __cacheSurfaceProbe.done = true; __cacheSurfaceProbe.value = value; }, () => { __cacheSurfaceProbe.done = false; })",
+      "run_tasks": true,
+      "probe": "typeof caches === 'object' && typeof Cache === 'function' && typeof CacheStorage === 'function' && __cacheSurfaceProbe.done === true && __cacheSurfaceProbe.value === 'ok'",
+      "baseline_supported": true
     },
     {
       "id": "workers.dedicated-worker",

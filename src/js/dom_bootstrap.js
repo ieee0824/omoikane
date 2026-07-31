@@ -10075,6 +10075,396 @@
     });
   };
 
+  // -------------------------------------------------------------------------
+  // Cache Storage
+  // -------------------------------------------------------------------------
+  //
+  // Cache and CacheStorage objects are realm-local wrappers around a native
+  // origin-partitioned snapshot store.  A cache operation is deliberately
+  // delivered through the networking task source: callers observe a pending
+  // Promise until the next event-loop turn, and Promise reactions run at the
+  // normal checkpoint after that task.  Only JSON snapshots cross the native
+  // boundary; Request/Response objects and their bodies never do.
+
+  const CACHE_CONSTRUCTION_TOKEN = {};
+  const CACHE_STORAGE_CONSTRUCTION_TOKEN = {};
+
+  function cacheNative(operation, name = "", payload = "") {
+    const raw = __omoikane_cache_storage(
+      String(operation),
+      String(name),
+      typeof payload === "string" ? payload : JSON.stringify(payload),
+    );
+    return JSON.parse(String(raw));
+  }
+
+  function queueCacheTask(callback) {
+    return new Promise((resolve, reject) => {
+      try {
+        __omoikane_queue_networking_task(() => {
+          try {
+            resolve(callback());
+          } catch (error) {
+            reject(error);
+          }
+        });
+      } catch (error) {
+        reject(error);
+      }
+    });
+  }
+
+  function cacheBodySnapshot(body) {
+    return {
+      text: body.text,
+      bytes: body.bytes === null ? null : base64FromBytes(body.bytes),
+      contentType: body.contentType,
+    };
+  }
+
+  function cacheBodyFromSnapshot(snapshot) {
+    if (!snapshot || typeof snapshot !== "object") return EMPTY_BODY;
+    return bodyRecord(
+      snapshot.text == null ? null : String(snapshot.text),
+      snapshot.bytes == null ? null : bytesFromBase64(snapshot.bytes),
+      snapshot.contentType == null ? null : String(snapshot.contentType),
+    );
+  }
+
+  function cacheRequestSnapshot(request) {
+    return {
+      url: String(request.url),
+      method: String(request.method).toUpperCase(),
+      headers: Array.from(request.headers.entries()),
+      credentials: request.credentials,
+      mode: request.mode,
+      redirect: request.redirect,
+      body: cacheBodySnapshot(request.__body),
+    };
+  }
+
+  function cacheResponseSnapshot(response) {
+    return {
+      status: Number(response.status),
+      statusText: String(response.statusText),
+      headers: Array.from(response.headers.entries()),
+      url: String(response.url || ""),
+      type: String(response.type || "basic"),
+      redirected: Boolean(response.redirected),
+      body: cacheBodySnapshot(response.__body),
+    };
+  }
+
+  function cacheRestoreRequest(snapshot) {
+    const request = new Request(snapshot.url, {
+      method: snapshot.method,
+      headers: snapshot.headers,
+      credentials: snapshot.credentials,
+      mode: snapshot.mode,
+      redirect: snapshot.redirect,
+    });
+    // Cache entries are immutable snapshots.  Assigning this private record
+    // avoids re-extracting (and potentially re-encoding) a binary body.
+    request.__body = cacheBodyFromSnapshot(snapshot.body);
+    request.bodyUsed = false;
+    return request;
+  }
+
+  function cacheRestoreResponse(snapshot) {
+    const response = new Response(null, {
+      status: snapshot.status,
+      statusText: snapshot.statusText,
+      headers: snapshot.headers,
+      url: snapshot.url,
+      redirected: snapshot.redirected,
+    });
+    response.__body = cacheBodyFromSnapshot(snapshot.body);
+    response.type = snapshot.type || "basic";
+    response.bodyUsed = false;
+    return response;
+  }
+
+  function cacheRequestForInput(input, init = undefined) {
+    if (input instanceof Request) {
+      return init === undefined ? input : new Request(input, init);
+    }
+    return new Request(input, init || {});
+  }
+
+  function cacheURLKey(url, ignoreSearch) {
+    try {
+      const parsed = new URL(String(url));
+      return parsed.protocol + "//" + parsed.host + parsed.pathname +
+        (ignoreSearch ? "" : parsed.search);
+    } catch (_) {
+      const withoutFragment = String(url).split("#", 1)[0];
+      return ignoreSearch ? withoutFragment.split("?", 1)[0] : withoutFragment;
+    }
+  }
+
+  function cacheHeaderValue(headers, name) {
+    const found = headers.find(entry => String(entry[0]).toLowerCase() === name);
+    return found === undefined ? null : String(found[1]);
+  }
+
+  function cacheEntryMatches(entry, request, options = {}) {
+    let storedRequest;
+    let storedResponse;
+    try {
+      storedRequest = JSON.parse(String(entry.request));
+      storedResponse = JSON.parse(String(entry.response));
+    } catch (_) {
+      return false;
+    }
+    const ignoreMethod = Boolean(options && options.ignoreMethod);
+    const ignoreSearch = Boolean(options && options.ignoreSearch);
+    if (!ignoreMethod && String(storedRequest.method).toUpperCase() !== String(request.method).toUpperCase()) {
+      return false;
+    }
+    if (cacheURLKey(storedRequest.url, ignoreSearch) !== cacheURLKey(request.url, ignoreSearch)) {
+      return false;
+    }
+    if (Boolean(options && options.ignoreVary)) return true;
+
+    const vary = cacheHeaderValue(storedResponse.headers || [], "vary");
+    if (vary === null) return true;
+    for (const field of vary.split(",")) {
+      const name = field.trim().toLowerCase();
+      if (!name) continue;
+      if (name === "*") return false;
+      const storedValue = cacheHeaderValue(storedRequest.headers || [], name);
+      const currentValue = request.headers.get(name);
+      if (storedValue !== currentValue) return false;
+    }
+    return true;
+  }
+
+  function cacheMatchingEntries(entries, request, options = {}) {
+    return entries.filter(entry => cacheEntryMatches(entry, request, options));
+  }
+
+  class Cache {
+    constructor(name, token) {
+      if (token !== CACHE_CONSTRUCTION_TOKEN) {
+        throw new TypeError("Cache objects cannot be constructed directly");
+      }
+      this._name = String(name);
+    }
+
+    get [Symbol.toStringTag]() { return "Cache"; }
+
+    match(request, options = {}) {
+      let normalized;
+      try {
+        normalized = cacheRequestForInput(request);
+      } catch (error) {
+        return Promise.reject(error);
+      }
+      return queueCacheTask(() => {
+        const entries = cacheNative("entries", this._name);
+        const match = cacheMatchingEntries(entries, normalized, options)[0];
+        if (!match) return undefined;
+        return cacheRestoreResponse(JSON.parse(String(match.response)));
+      });
+    }
+
+    matchAll(request = undefined, options = {}) {
+      let normalized = null;
+      try {
+        if (request !== undefined) normalized = cacheRequestForInput(request);
+      } catch (error) {
+        return Promise.reject(error);
+      }
+      return queueCacheTask(() => {
+        const entries = cacheNative("entries", this._name);
+        const matches = normalized === null
+          ? entries
+          : cacheMatchingEntries(entries, normalized, options);
+        return matches.map(entry => cacheRestoreResponse(JSON.parse(String(entry.response))));
+      });
+    }
+
+    put(request, response) {
+      let normalizedRequest;
+      let requestSnapshot;
+      let responseSnapshot;
+      try {
+        normalizedRequest = cacheRequestForInput(request);
+        if (!(response instanceof Response)) {
+          throw new TypeError("Cache.put requires a Response");
+        }
+        if (normalizedRequest.method !== "GET") {
+          throw new TypeError("Cache.put only supports GET requests");
+        }
+        if (["opaque", "opaqueredirect", "error"].includes(String(response.type))) {
+          throw new TypeError("Cache.put cannot store an opaque response");
+        }
+        if (Number(response.status) === 0 || Number(response.status) === 206) {
+          throw new TypeError("Cache.put cannot store a partial response");
+        }
+        requestSnapshot = cacheRequestSnapshot(normalizedRequest);
+        responseSnapshot = cacheResponseSnapshot(response);
+      } catch (error) {
+        return Promise.reject(error);
+      }
+      return queueCacheTask(() => {
+        cacheNative("put", this._name, {
+          request: JSON.stringify(requestSnapshot),
+          response: JSON.stringify(responseSnapshot),
+        });
+        return undefined;
+      });
+    }
+
+    add(request) {
+      let normalized;
+      try {
+        normalized = cacheRequestForInput(request);
+        if (normalized.method !== "GET") {
+          throw new TypeError("Cache.add only supports GET requests");
+        }
+      } catch (error) {
+        return Promise.reject(error);
+      }
+      // Fetch errors and non-successful responses are surfaced as Promise
+      // rejections, matching Cache.add rather than silently caching failures.
+      return fetch(normalized.clone()).then(response => {
+        if (!response.ok || ["opaque", "opaqueredirect", "error"].includes(String(response.type))) {
+          throw new TypeError("Cache.add received a non-successful response");
+        }
+        return this.put(normalized, response);
+      });
+    }
+
+    addAll(requests) {
+      let values;
+      try {
+        values = Array.from(requests, request => cacheRequestForInput(request));
+        for (const request of values) {
+          if (request.method !== "GET") throw new TypeError("Cache.addAll only supports GET requests");
+        }
+      } catch (error) {
+        return Promise.reject(error);
+      }
+      // Fetch the complete batch before mutating the cache.  In particular, a
+      // later network failure must not leave an earlier request half-installed.
+      return Promise.all(values.map(request => fetch(request.clone()).then(response => {
+        if (!response.ok || ["opaque", "opaqueredirect", "error"].includes(String(response.type))) {
+          throw new TypeError("Cache.addAll received a non-successful response");
+        }
+        return response;
+      }))).then(responses => {
+        let result = Promise.resolve();
+        responses.forEach((response, index) => {
+          result = result.then(() => this.put(values[index], response));
+        });
+        return result.then(() => undefined);
+      });
+    }
+
+    delete(request, options = {}) {
+      let normalized;
+      try {
+        normalized = cacheRequestForInput(request);
+      } catch (error) {
+        return Promise.reject(error);
+      }
+      return queueCacheTask(() => {
+        const entries = cacheNative("entries", this._name);
+        const matches = cacheMatchingEntries(entries, normalized, options);
+        let deleted = false;
+        for (const entry of matches) {
+          deleted = cacheNative("delete-entry", this._name, String(entry.id)) || deleted;
+        }
+        return deleted;
+      });
+    }
+
+    keys(request = undefined, options = {}) {
+      let normalized = null;
+      try {
+        if (request !== undefined) normalized = cacheRequestForInput(request);
+      } catch (error) {
+        return Promise.reject(error);
+      }
+      return queueCacheTask(() => {
+        const entries = cacheNative("entries", this._name);
+        const matches = normalized === null
+          ? entries
+          : cacheMatchingEntries(entries, normalized, options);
+        return matches.map(entry => cacheRestoreRequest(JSON.parse(String(entry.request))));
+      });
+    }
+  }
+
+  class CacheStorage {
+    constructor(token) {
+      if (token !== CACHE_STORAGE_CONSTRUCTION_TOKEN) {
+        throw new TypeError("CacheStorage objects cannot be constructed directly");
+      }
+      this._cacheObjects = new Map();
+    }
+
+    get [Symbol.toStringTag]() { return "CacheStorage"; }
+
+    _cache(name) {
+      const key = String(name);
+      let cache = this._cacheObjects.get(key);
+      if (!cache) {
+        cache = new Cache(key, CACHE_CONSTRUCTION_TOKEN);
+        this._cacheObjects.set(key, cache);
+      }
+      return cache;
+    }
+
+    open(name) {
+      const key = String(name);
+      return queueCacheTask(() => {
+        cacheNative("open", key);
+        return this._cache(key);
+      });
+    }
+
+    has(name) {
+      return queueCacheTask(() => Boolean(cacheNative("has", String(name))));
+    }
+
+    keys() {
+      return queueCacheTask(() => cacheNative("keys"));
+    }
+
+    delete(name) {
+      const key = String(name);
+      return queueCacheTask(() => {
+        const deleted = Boolean(cacheNative("delete", key));
+        if (deleted) this._cacheObjects.delete(key);
+        return deleted;
+      });
+    }
+
+    match(request, options = {}) {
+      let normalized;
+      try {
+        normalized = cacheRequestForInput(request);
+      } catch (error) {
+        return Promise.reject(error);
+      }
+      return queueCacheTask(() => {
+        const names = cacheNative("keys");
+        for (const name of names) {
+          const entries = cacheNative("entries", name);
+          const match = cacheMatchingEntries(entries, normalized, options)[0];
+          if (match) return cacheRestoreResponse(JSON.parse(String(match.response)));
+        }
+        return undefined;
+      });
+    }
+  }
+
+  globalThis.Cache = Cache;
+  globalThis.CacheStorage = CacheStorage;
+  globalThis.caches = new CacheStorage(CACHE_STORAGE_CONSTRUCTION_TOKEN);
+
   function observerRect(x, y, width, height) {
     x = Number.isFinite(Number(x)) ? Number(x) : 0;
     y = Number.isFinite(Number(y)) ? Number(y) : 0;
