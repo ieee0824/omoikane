@@ -8783,7 +8783,28 @@
   const nativeNotificationRequestPermission = globalThis.__omoikane_notification_request_permission;
   try { delete globalThis.__omoikane_notification_permission; } catch (_) {}
   try { delete globalThis.__omoikane_notification_request_permission; } catch (_) {}
-  const currentNotificationPermission = () => String(nativeNotificationPermission());
+  const notificationPermissionValues = new Set(["default", "granted", "denied"]);
+  const normalizeNotificationPermission = value => {
+    const normalized = String(value);
+    return notificationPermissionValues.has(normalized) ? normalized : "default";
+  };
+  const currentNotificationPermission = () => {
+    try {
+      return typeof nativeNotificationPermission === "function"
+        ? normalizeNotificationPermission(nativeNotificationPermission()) : "default";
+    } catch (_) {
+      return "default";
+    }
+  };
+  const requestNotificationPermission = () => {
+    try {
+      return typeof nativeNotificationRequestPermission === "function"
+        ? normalizeNotificationPermission(nativeNotificationRequestPermission())
+        : currentNotificationPermission();
+    } catch (_) {
+      return currentNotificationPermission();
+    }
+  };
   const closedNotifications = new WeakSet();
   const notificationTask = callback => {
     if (typeof __omoikane_queue_dom_manipulation_task === "function") {
@@ -8870,7 +8891,7 @@
         }
         // There is no native prompt in this headless engine. A default
         // decision therefore follows the browser's non-granting fallback.
-        return String(nativeNotificationRequestPermission());
+        return requestNotificationPermission();
       });
       if (typeof callback === "function") result.then(callback);
       return result;

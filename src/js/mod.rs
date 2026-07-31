@@ -2834,9 +2834,7 @@ impl JsRuntime {
     }
 
     /// Sets the deterministic Notification permission used by this runtime's
-    /// Window. Production page code cannot call this test/embedder hook; the
-    /// JavaScript bootstrap captures and removes the corresponding host
-    /// binding before scripts run.
+    /// Window. This is an embedder/test hook and is not exposed to page JS.
     pub fn set_notification_permission(&mut self, permission: &str) -> Result<(), String> {
         if !matches!(permission, "default" | "granted" | "denied") {
             return Err("invalid notification permission".to_string());
@@ -20546,6 +20544,16 @@ b</textarea></form>"#);
         assert_eq!(eval_str(&mut runtime, "notificationEvents.join(',')"), "show,click,close");
         runtime.set_notification_permission("denied").unwrap();
         assert_eq!(eval_str(&mut runtime, "(() => { try { new Notification('blocked'); return 'constructible'; } catch (error) { return error.name; } })()"), "NotAllowedError");
+
+        let mut insecure = JsRuntime::with_document_and_url(default_document(), "http://example.com/").unwrap();
+        insecure.set_notification_permission("granted").unwrap();
+        assert_eq!(eval_str(&mut insecure, "String(isSecureContext)"), "false");
+        assert_eq!(eval_str(&mut insecure, "(() => { try { new Notification('blocked'); return 'constructible'; } catch (error) { return error.name; } })()"), "NotAllowedError");
+        insecure
+            .eval("globalThis.insecurePermission = 'pending'; Notification.requestPermission().then(value => insecurePermission = value, error => insecurePermission = error.name);")
+            .unwrap();
+        insecure.run_until_idle().unwrap();
+        assert_eq!(eval_str(&mut insecure, "insecurePermission"), "NotAllowedError");
     }
 
     #[test]
