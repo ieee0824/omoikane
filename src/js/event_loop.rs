@@ -32,7 +32,7 @@ pub(crate) enum TaskSource {
 pub(crate) enum Task {
     Timer(TimerPayload),
     Navigation(NavigationRequest),
-    PostedMessage(JsValue),
+    PostedMessage { port: JsValue, data: JsValue },
 }
 
 #[derive(Debug, Clone)]
@@ -107,11 +107,10 @@ impl EventLoop {
         self.enqueue(TaskSource::Networking, Task::Timer(payload));
     }
 
-    /// Queues a `MessagePort` delivery callback on the posted message task
-    /// source. The callback is retained as a live JavaScript value until its
-    /// event-loop turn runs.
-    pub(crate) fn enqueue_posted_message(&mut self, callback: JsValue) {
-        self.enqueue(TaskSource::PostedMessage, Task::PostedMessage(callback));
+    /// Queues a port and cloned data on the posted message task source.
+    /// Both values stay live until their event-loop turn runs.
+    pub(crate) fn enqueue_posted_message(&mut self, port: JsValue, data: JsValue) {
+        self.enqueue(TaskSource::PostedMessage, Task::PostedMessage { port, data });
     }
 
     pub(crate) fn pop_task(&mut self) -> Option<(TaskSource, Task)> {
@@ -278,11 +277,13 @@ mod tests {
     #[test]
     fn posted_message_callbacks_keep_fifo_order() {
         let mut event_loop = EventLoop::default();
-        event_loop.enqueue_posted_message(JsValue::from(1));
-        event_loop.enqueue_posted_message(JsValue::from(2));
+        event_loop.enqueue_posted_message(JsValue::from(1), JsValue::undefined());
+        event_loop.enqueue_posted_message(JsValue::from(2), JsValue::undefined());
 
         for expected in [1.0, 2.0] {
-            let Some((source, Task::PostedMessage(callback))) = event_loop.pop_task() else {
+            let Some((source, Task::PostedMessage { port: callback, .. })) =
+                event_loop.pop_task()
+            else {
                 panic!("expected a posted message task");
             };
             assert_eq!(source, TaskSource::PostedMessage);
@@ -295,7 +296,7 @@ mod tests {
     fn posted_messages_preserve_global_enqueue_order() {
         let mut event_loop = EventLoop::default();
         event_loop.enqueue_timer(TimerPayload::Source("timer".into()));
-        event_loop.enqueue_posted_message(JsValue::from(7));
+        event_loop.enqueue_posted_message(JsValue::from(7), JsValue::undefined());
         event_loop.enqueue_navigation(NavigationRequest::Reload);
 
         assert!(matches!(
@@ -304,7 +305,7 @@ mod tests {
         ));
         assert!(matches!(
             event_loop.pop_task(),
-            Some((TaskSource::PostedMessage, Task::PostedMessage(_)))
+            Some((TaskSource::PostedMessage, Task::PostedMessage { .. }))
         ));
         assert!(matches!(
             event_loop.pop_task(),

@@ -21,7 +21,7 @@ crc32fast = "1.5"
 # primitive property fast path (#313), appending to a string in place when a
 # compound assignment owns it (#318, #319, #320), the collection threshold the
 # profiling in #315 settled on, and suspendable native host calls (#354).
-boa_engine = { git = "https://github.com/ieee0824/boa", rev = "98ce5188", features = ["annex-b"] }
+boa_engine = { git = "https://github.com/ieee0824/boa", rev = "f5aedba4", features = ["annex-b"] }
 flate2 = "1.1"
 gif = "0.13"
 getrandom = "0.3"
@@ -45,7 +45,7 @@ path = "src/bin/omoikane.rs"
 required-features = ["gui"]
 
 [dev-dependencies]
-boa_gc = { git = "https://github.com/ieee0824/boa", rev = "98ce5188" }
+boa_gc = { git = "https://github.com/ieee0824/boa", rev = "f5aedba4" }
 rcgen = "0.13"
 
 [build-dependencies]
