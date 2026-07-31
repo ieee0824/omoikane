@@ -185,8 +185,14 @@ impl ParsedPolicy {
                 port,
                 path,
             } => {
-                if scheme
-                    .as_ref()
+                let expected_scheme = scheme.clone().or_else(|| {
+                    base_url
+                        .as_ref()
+                        .map(ResourceUrl::from)
+                        .map(|base| base.scheme)
+                });
+                if expected_scheme
+                    .as_deref()
                     .is_some_and(|expected| !scheme_matches(expected, &url.scheme))
                 {
                     return false;
@@ -347,7 +353,17 @@ fn parse_source_expression(token: &str) -> Option<SourceExpression> {
     if authority.is_empty() {
         return None;
     }
-    let (host, port) = if let Some((host, port)) = authority.rsplit_once(':') {
+    let (host, port) = if let Some(bracketed) = authority.strip_prefix('[') {
+        let end = bracketed.find(']')?;
+        let host = &bracketed[..end];
+        let rest = &bracketed[end + 1..];
+        let port = match rest {
+            "" => None,
+            rest if rest.starts_with(':') => Some(rest[1..].parse::<u16>().ok()?),
+            _ => return None,
+        };
+        (host.to_string(), port)
+    } else if let Some((host, port)) = authority.rsplit_once(':') {
         if port.is_empty() {
             (authority.to_string(), None)
         } else {
@@ -369,6 +385,7 @@ fn collect_csp_meta_contents(node: &NodeHandle, out: &mut Vec<String>) {
         && node
             .tag_name()
             .is_some_and(|tag| tag.eq_ignore_ascii_case("meta"))
+        && is_descendant_of_head(node)
         && node
             .get_attribute("http-equiv")
             .is_some_and(|value| value.trim().eq_ignore_ascii_case("content-security-policy"))
@@ -379,6 +396,20 @@ fn collect_csp_meta_contents(node: &NodeHandle, out: &mut Vec<String>) {
     for child in node.child_nodes() {
         collect_csp_meta_contents(&child, out);
     }
+}
+
+fn is_descendant_of_head(node: &NodeHandle) -> bool {
+    let mut ancestor = node.parent_node();
+    while let Some(current) = ancestor {
+        if current
+            .tag_name()
+            .is_some_and(|tag| tag.eq_ignore_ascii_case("head"))
+        {
+            return true;
+        }
+        ancestor = current.parent_node();
+    }
+    false
 }
 
 #[cfg(test)]
@@ -467,5 +498,39 @@ mod tests {
         let policy = policy("connect-src wss:", "https://example.test/");
         assert!(policy.allows_reference(ResourceType::Connect, "wss://socket.example.test/stream"));
         assert!(!policy.allows_reference(ResourceType::Connect, "ws://socket.example.test/stream"));
+    }
+
+    #[test]
+    fn host_sources_without_scheme_use_the_document_scheme() {
+        let policy = policy("connect-src api.example.test", "https://example.test/");
+        assert!(policy.allows_reference(ResourceType::Connect, "https://api.example.test/v1"));
+        assert!(!policy.allows_reference(ResourceType::Connect, "http://api.example.test/v1"));
+    }
+
+    #[test]
+    fn meta_csp_is_only_collected_from_head() {
+        let document = TreeBuilder::parse(
+            r#"<html><head></head><body><meta http-equiv="Content-Security-Policy" content="script-src 'none'"></body></html>"#,
+        )
+        .document();
+        let policy = CspPolicy::from_headers_and_document(&[], &document, "https://example.test/");
+        assert!(policy.allows_url(
+            ResourceType::Script,
+            &"https://example.test/app.js".parse().unwrap()
+        ));
+    }
+
+    #[test]
+    fn bracketed_ipv6_host_sources_keep_the_full_authority() {
+        let parsed = parse_source_expression("[::1]:8443").unwrap();
+        assert_eq!(
+            parsed,
+            SourceExpression::Host {
+                scheme: None,
+                host: "::1".to_string(),
+                port: Some(8443),
+                path: None,
+            }
+        );
     }
 }

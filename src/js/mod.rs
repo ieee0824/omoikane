@@ -131,8 +131,12 @@ impl HostHooks for BrowserHostHooks {
 struct HttpModuleLoader {
     modules: RefCell<HashMap<String, Module>>,
     client: RefCell<Client>,
-    csp_policy: RefCell<Option<CspPolicy>>,
-    csp_violations: RefCell<Vec<(String, String)>>,
+    /// CSP context propagated from a module graph's root URL to every module
+    /// it imports.  The same runtime can host iframe Documents with different
+    /// policies, so a single global policy would be incorrect for nested
+    /// module graphs.
+    csp_contexts: RefCell<HashMap<String, (usize, CspPolicy)>>,
+    csp_violations: RefCell<Vec<(usize, String, String)>>,
 }
 
 impl ModuleLoader for HttpModuleLoader {
@@ -163,21 +167,29 @@ impl ModuleLoader for HttpModuleLoader {
             };
             let resolved_string = resolved.to_string();
 
-            if self
-                .csp_policy
-                .borrow()
+            let csp_context = referrer_url
                 .as_ref()
-                .is_some_and(|policy| !policy.allows_url(ResourceType::Script, &resolved))
+                .and_then(|url| self.csp_contexts.borrow().get(&url.to_string()).cloned());
+
+            if let Some((document_id, policy)) = csp_context.as_ref()
+                && !policy.allows_url(ResourceType::Script, &resolved)
             {
-                self.csp_violations
-                    .borrow_mut()
-                    .push(("script-src".to_string(), resolved_string.clone()));
+                self.csp_violations.borrow_mut().push((
+                    *document_id,
+                    "script-src".to_string(),
+                    resolved_string.clone(),
+                ));
                 return Err(JsNativeError::error()
                     .with_message(format!("CSP blocked module import: {resolved_string}"))
                     .into());
             }
 
             if let Some(module) = self.modules.borrow().get(&resolved_string) {
+                if let Some(context) = csp_context.as_ref() {
+                    self.csp_contexts
+                        .borrow_mut()
+                        .insert(resolved_string.clone(), context.clone());
+                }
                 if std::env::var_os("OMOIKANE_LOG_SCRIPTS").is_some() {
                     eprintln!("[omoikane][module] cache-hit {resolved_string}");
                 }
@@ -201,18 +213,15 @@ impl ModuleLoader for HttpModuleLoader {
                     .into());
             }
             if let Some(effective_url) = response.effective_url()
-                && self
-                    .csp_policy
-                    .borrow()
-                    .as_ref()
-                    .is_some_and(|policy| {
-                        !policy.allows_url(ResourceType::Script, effective_url)
-                    })
+                && let Some((document_id, policy)) = csp_context.as_ref()
+                && !policy.allows_url(ResourceType::Script, effective_url)
             {
                 let blocked_uri = effective_url.to_string();
-                self.csp_violations
-                    .borrow_mut()
-                    .push(("script-src".to_string(), blocked_uri.clone()));
+                self.csp_violations.borrow_mut().push((
+                    *document_id,
+                    "script-src".to_string(),
+                    blocked_uri.clone(),
+                ));
                 return Err(JsNativeError::error()
                     .with_message(format!("CSP blocked module redirect: {blocked_uri}"))
                     .into());
@@ -236,7 +245,12 @@ impl ModuleLoader for HttpModuleLoader {
             }
             self.modules
                 .borrow_mut()
-                .insert(resolved_string, module.clone());
+                .insert(resolved_string.clone(), module.clone());
+            if let Some(context) = csp_context {
+                self.csp_contexts
+                    .borrow_mut()
+                    .insert(resolved_string, context);
+            }
             Ok(module)
         })();
         async { result }
@@ -255,11 +269,18 @@ impl ModuleLoader for HttpModuleLoader {
 }
 
 impl HttpModuleLoader {
-    fn set_csp_policy(&self, policy: CspPolicy) {
-        self.csp_policy.replace(Some(policy));
+    fn set_csp_policy_for_module_graph(
+        &self,
+        document_id: usize,
+        root_url: &str,
+        policy: CspPolicy,
+    ) {
+        self.csp_contexts
+            .borrow_mut()
+            .insert(root_url.to_string(), (document_id, policy));
     }
 
-    fn take_csp_violations(&self) -> Vec<(String, String)> {
+    fn take_csp_violations(&self) -> Vec<(usize, String, String)> {
         std::mem::take(&mut *self.csp_violations.borrow_mut())
     }
 }
@@ -968,6 +989,8 @@ impl HostState {
             self.document_styles.remove(&previous.document.identity());
             self.document_origins.remove(&previous.document.identity());
             self.document_csp.remove(&previous.document.identity());
+            self.csp_violations
+                .retain(|violation| violation.document_id != previous.document.identity());
             self.unregister_tree(&previous.document);
         }
 
@@ -2011,7 +2034,6 @@ impl JsRuntime {
             .borrow_mut()
             .document_csp
             .insert(document.identity(), policy.clone());
-        self.module_loader.set_csp_policy(policy);
     }
 
     fn sync_module_csp_violations(&mut self) {
@@ -2019,13 +2041,14 @@ impl JsRuntime {
         if violations.is_empty() {
             return;
         }
-        let document = self.document();
         let mut state = self.host_state.borrow_mut();
-        for (_directive, blocked_uri) in violations {
+        for (document_id, _directive, blocked_uri) in violations {
             // Module loading is the one CSP path that runs inside Boa's
             // ModuleLoader callback, so retain its blocked target here while
             // sharing the same per-document deduplication as native paths.
-            state.record_csp_violation(&document, ResourceType::Script, blocked_uri);
+            if let Some(document) = state.get_node(document_id) {
+                state.record_csp_violation(&document, ResourceType::Script, blocked_uri);
+            }
         }
     }
 
@@ -2129,6 +2152,13 @@ impl JsRuntime {
 
     /// Evaluates one module with asynchronous jobs and suspendable host calls.
     async fn eval_module_async(&mut self, source: &str, url: &str) -> JsResult<JsValue> {
+        let document = self.document();
+        let policy = self.host_state.borrow().csp_policy_for_document(&document);
+        self.module_loader.set_csp_policy_for_module_graph(
+            document.identity(),
+            url,
+            policy,
+        );
         let module = Module::parse(
             Source::from_reader(source.as_bytes(), Some(Path::new(url))),
             None,
@@ -2438,6 +2468,13 @@ impl JsRuntime {
         std::time::Duration,
         std::time::Duration,
     ) {
+        let document = self.document();
+        let policy = self.host_state.borrow().csp_policy_for_document(&document);
+        self.module_loader.set_csp_policy_for_module_graph(
+            document.identity(),
+            url,
+            policy,
+        );
         let parse_start = std::time::Instant::now();
         let module = match Module::parse(
             Source::from_reader(source.as_bytes(), Some(Path::new(url))),
@@ -3356,7 +3393,11 @@ impl JsRuntime {
                             let previous = state.iframe_documents.remove(&node_id);
                             if let Some(previous) = previous.as_ref() {
                                 state.document_styles.remove(&previous.document.identity());
+                                state.document_origins.remove(&previous.document.identity());
                                 state.document_csp.remove(&previous.document.identity());
+                                state.csp_violations.retain(|violation| {
+                                    violation.document_id != previous.document.identity()
+                                });
                                 state.unregister_tree(&previous.document);
                             }
                             let document = state.iframe_content_document(&node);
