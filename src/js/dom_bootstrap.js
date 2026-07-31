@@ -6182,8 +6182,10 @@
   const canvasStates = new WeakMap();
   function canvasDimensions(canvas) {
     const integer = (name, fallback) => {
-      const value = canvas.getAttribute(name);
-      return value === null ? fallback : Math.max(0, Math.min(32768, Math.trunc(Number(value)) || 0));
+      const value = typeof canvas.getAttribute === "function"
+        ? canvas.getAttribute(name) : canvas["__" + name];
+      return value === null || value === undefined
+        ? fallback : Math.max(0, Math.min(32768, Math.trunc(Number(value)) || 0));
     };
     return [integer("width", 300), integer("height", 150)];
   }
@@ -6219,7 +6221,9 @@
   }
   function transformCanvasPoint(m,x,y){return [m[0]*x+m[2]*y+m[4],m[1]*x+m[3]*y+m[5]];}
   function pointInCanvasPaths(x,y,paths,rule){let winding=0,crossings=0;for(const path of paths){for(let i=0;i<path.length;i++){const a=path[i],b=path[(i+1)%path.length];if((a[1]>y)!==(b[1]>y)){const ix=a[0]+(y-a[1])*(b[0]-a[0])/(b[1]-a[1]);if(ix>x){crossings++;winding+=b[1]>a[1]?1:-1;}}}}return rule==="evenodd"?crossings%2===1:winding!==0;}
-  function commitCanvas(canvas,state){__omoikane_canvas_commit(canvas.__id,state.width,state.height,new Uint8Array(state.pixels.buffer));}
+  function commitCanvas(canvas,state){
+    if (canvas.__id != null) __omoikane_canvas_commit(canvas.__id,state.width,state.height,new Uint8Array(state.pixels.buffer));
+  }
 
   class CanvasRenderingContext2D {
     constructor(canvas){this.canvas=canvas;}
@@ -6249,7 +6253,19 @@
     createImageData(a,b){return a instanceof ImageData?new ImageData(a.width,a.height):new ImageData(a,b);}
     getImageData(sx,sy,sw,sh){sw=Number(sw);sh=Number(sh);if(sw<=0||sh<=0)throw new DOMException("ImageData dimensions must be positive","IndexSizeError");const s=this.__s,out=new ImageData(sw,sh);for(let y=0;y<out.height;y++)for(let x=0;x<out.width;x++){const si=((sy+y)*s.width+(sx+x))*4,di=(y*out.width+x)*4;if(sx+x>=0&&sy+y>=0&&sx+x<s.width&&sy+y<s.height)out.data.set(s.pixels.slice(si,si+4),di);}return out;}
     putImageData(image,dx,dy){const s=this.__s;for(let y=0;y<image.height;y++)for(let x=0;x<image.width;x++){const tx=dx+x,ty=dy+y;if(tx>=0&&ty>=0&&tx<s.width&&ty<s.height)s.pixels.set(image.data.slice((y*image.width+x)*4,(y*image.width+x+1)*4),(ty*s.width+tx)*4);}commitCanvas(this.canvas,s);}
-    drawImage(source,...args){let src;if(source instanceof HTMLCanvasElement)src=canvasState(source);else{const raw=source&&source.__id!=null?__omoikane_canvas_image_source(source.__id):null;if(raw===null)throw new DOMException("Image source is unavailable","InvalidStateError");const decoded=JSON.parse(raw);src={width:decoded.width,height:decoded.height,pixels:bytesFromBase64(decoded.pixels)};}const s=this.__s;let sx=0,sy=0,sw=src.width,sh=src.height,dx,dy,dw,dh;if(args.length===2){[dx,dy]=args;dw=sw;dh=sh;}else if(args.length===4){[dx,dy,dw,dh]=args;}else{[sx,sy,sw,sh,dx,dy,dw,dh]=args;}for(let y=0;y<dh;y++)for(let x=0;x<dw;x++){const xx=Math.floor(sx+x*sw/dw),yy=Math.floor(sy+y*sh/dh),i=(yy*src.width+xx)*4;blendCanvasPixel(s,dx+x,dy+y,[src.pixels[i],src.pixels[i+1],src.pixels[i+2],Math.round(src.pixels[i+3]*s.style.globalAlpha)]);}commitCanvas(this.canvas,s);}
+    drawImage(source,...args){let src;
+      if (source instanceof HTMLCanvasElement || source instanceof OffscreenCanvas) src=canvasState(source);
+      else if (source instanceof ImageBitmap) {
+        if (source.__detached) throw new DOMException("The ImageBitmap is detached","InvalidStateError");
+        src={width:source.width,height:source.height,pixels:source.__pixels};
+      } else {
+        const raw=source&&source.__id!=null?__omoikane_canvas_image_source(source.__id):null;
+        if(raw===null)throw new DOMException("Image source is unavailable","InvalidStateError");
+        const decoded=JSON.parse(raw);src={width:decoded.width,height:decoded.height,pixels:bytesFromBase64(decoded.pixels)};
+      }
+      const s=this.__s;let sx=0,sy=0,sw=src.width,sh=src.height,dx,dy,dw,dh;
+      if(args.length===2){[dx,dy]=args;dw=sw;dh=sh;}else if(args.length===4){[dx,dy,dw,dh]=args;}else{[sx,sy,sw,sh,dx,dy,dw,dh]=args;}
+      for(let y=0;y<dh;y++)for(let x=0;x<dw;x++){const xx=Math.floor(sx+x*sw/dw),yy=Math.floor(sy+y*sh/dh),i=(yy*src.width+xx)*4;blendCanvasPixel(s,dx+x,dy+y,[src.pixels[i],src.pixels[i+1],src.pixels[i+2],Math.round(src.pixels[i+3]*s.style.globalAlpha)]);}commitCanvas(this.canvas,s);}
     measureText(text){const size=parseFloat(this.__s.style.font)||10;return {width:String(text).length*size*.6,actualBoundingBoxAscent:size*.8,actualBoundingBoxDescent:size*.2};}
     fillText(text,x,y){const s=this.__s,size=parseFloat(s.style.font)||10,w=this.measureText(text).width;this.fillRect(x,y-size*.8,w,size);}
     strokeText(text,x,y){const s=this.__s,size=parseFloat(s.style.font)||10,w=this.measureText(text).width;this.strokeRect(x,y-size*.8,w,size);}
@@ -6262,6 +6278,116 @@
     getContext(type){if(String(type).toLowerCase()!=="2d")return null;const s=canvasState(this);return s.context||(s.context=new CanvasRenderingContext2D(this));}
     toDataURL(type="image/png"){canvasState(this);return String(type).toLowerCase()==="image/png"?__omoikane_canvas_data_url(this.__id):__omoikane_canvas_data_url(this.__id);}
   }
+
+  const imageBitmapConstructionToken = {};
+  function offscreenDimension(value, name) {
+    const number = Number(value);
+    if (!Number.isFinite(number) || Math.trunc(number) !== number || number < 0 || number > 32768) {
+      throw new DOMException("The " + name + " dimension is invalid", "IndexSizeError");
+    }
+    return number;
+  }
+  function canvasSnapshot(canvas) {
+    const state = canvasState(canvas);
+    return { width: state.width, height: state.height, pixels: state.pixels.slice() };
+  }
+  function imageBitmapSource(source) {
+    if (source instanceof ImageBitmap) {
+      if (source.__detached) throw new DOMException("The ImageBitmap is detached", "InvalidStateError");
+      return { width: source.width, height: source.height, pixels: source.__pixels };
+    }
+    if (source instanceof HTMLCanvasElement || source instanceof OffscreenCanvas) return canvasSnapshot(source);
+    const raw = source && source.__id != null ? __omoikane_canvas_image_source(source.__id) : null;
+    if (raw === null) throw new DOMException("Image source is unavailable", "InvalidStateError");
+    const decoded = JSON.parse(raw);
+    return { width: decoded.width, height: decoded.height, pixels: bytesFromBase64(decoded.pixels) };
+  }
+
+  class ImageBitmap {
+    constructor(token, width, height, pixels) {
+      if (token !== imageBitmapConstructionToken) throw new TypeError("Illegal constructor");
+      this.__width = width;
+      this.__height = height;
+      this.__pixels = pixels;
+      this.__detached = false;
+    }
+    get width() { return this.__detached ? 0 : this.__width; }
+    get height() { return this.__detached ? 0 : this.__height; }
+    close() { this.__detached = true; this.__width = 0; this.__height = 0; this.__pixels = new Uint8ClampedArray(0); }
+    get [Symbol.toStringTag]() { return "ImageBitmap"; }
+  }
+
+  class OffscreenCanvasRenderingContext2D extends CanvasRenderingContext2D {
+    get [Symbol.toStringTag]() { return "OffscreenCanvasRenderingContext2D"; }
+  }
+
+  class OffscreenCanvas {
+    constructor(width, height) {
+      this.__width = offscreenDimension(width, "width");
+      this.__height = offscreenDimension(height, "height");
+      this.__contextMode = null;
+      this.__context = null;
+      this.__detached = false;
+    }
+    get width() { return this.__detached ? 0 : this.__width; }
+    set width(value) { this.__resize("width", value); }
+    get height() { return this.__detached ? 0 : this.__height; }
+    set height(value) { this.__resize("height", value); }
+    __resize(name, value) {
+      if (this.__detached) throw new DOMException("The OffscreenCanvas is detached", "InvalidStateError");
+      this["__" + name] = offscreenDimension(value, name);
+      canvasStates.delete(this);
+      canvasState(this);
+    }
+    getContext(type, options = undefined) {
+      if (this.__detached) throw new DOMException("The OffscreenCanvas is detached", "InvalidStateError");
+      const requested = String(type).toLowerCase();
+      if (requested !== "2d") return null;
+      if (this.__contextMode !== null && this.__contextMode !== requested) return null;
+      this.__contextMode = requested;
+      const state = canvasState(this);
+      if (!this.__context) this.__context = new OffscreenCanvasRenderingContext2D(this, options);
+      state.context = this.__context;
+      return this.__context;
+    }
+    transferToImageBitmap() {
+      if (this.__detached) throw new DOMException("The OffscreenCanvas is detached", "InvalidStateError");
+      const snapshot = canvasSnapshot(this);
+      return new ImageBitmap(imageBitmapConstructionToken, snapshot.width, snapshot.height, snapshot.pixels);
+    }
+    convertToBlob(options = {}) {
+      if (this.__detached) return Promise.reject(new DOMException("The OffscreenCanvas is detached", "InvalidStateError"));
+      const snapshot = canvasSnapshot(this);
+      const encoded = __omoikane_canvas_png(snapshot.width, snapshot.height, new Uint8Array(snapshot.pixels.buffer));
+      if (encoded === null) return Promise.reject(new DOMException("Unable to encode canvas", "EncodingError"));
+      const comma = String(encoded).indexOf(",");
+      const requested = String(options && options.type || "image/png").toLowerCase();
+      const type = requested === "image/png" ? requested : "image/png";
+      return Promise.resolve(new Blob([bytesFromBase64(String(encoded).slice(comma + 1))], { type }));
+    }
+    get [Symbol.toStringTag]() { return "OffscreenCanvas"; }
+  }
+
+  globalThis.createImageBitmap = function createImageBitmap(source, sx = 0, sy = 0, sw = undefined, sh = undefined) {
+    try {
+      const input = imageBitmapSource(source);
+      const cropX = Math.trunc(Number(sx));
+      const cropY = Math.trunc(Number(sy));
+      const cropWidth = sw === undefined ? input.width - cropX : Math.trunc(Number(sw));
+      const cropHeight = sh === undefined ? input.height - cropY : Math.trunc(Number(sh));
+      if (cropX < 0 || cropY < 0 || cropWidth < 0 || cropHeight < 0 || cropX + cropWidth > input.width || cropY + cropHeight > input.height) {
+        throw new DOMException("The crop rectangle is outside the image", "InvalidStateError");
+      }
+      const pixels = new Uint8ClampedArray(cropWidth * cropHeight * 4);
+      for (let y = 0; y < cropHeight; y++) {
+        const from = ((cropY + y) * input.width + cropX) * 4;
+        pixels.set(input.pixels.slice(from, from + cropWidth * 4), y * cropWidth * 4);
+      }
+      return Promise.resolve(new ImageBitmap(imageBitmapConstructionToken, cropWidth, cropHeight, pixels));
+    } catch (error) {
+      return Promise.reject(error);
+    }
+  };
 
   class HTMLLinkElement extends HTMLElement {
     get rel() {
@@ -6929,6 +7055,9 @@
   globalThis.HTMLImageElement = HTMLImageElement;
   globalThis.HTMLCanvasElement = HTMLCanvasElement;
   globalThis.CanvasRenderingContext2D = CanvasRenderingContext2D;
+  globalThis.OffscreenCanvas = OffscreenCanvas;
+  globalThis.OffscreenCanvasRenderingContext2D = OffscreenCanvasRenderingContext2D;
+  globalThis.ImageBitmap = ImageBitmap;
   globalThis.ImageData = ImageData;
   globalThis.Image = function(width, height) {
     const image = document.createElement("img");

@@ -48,7 +48,14 @@ pub fn image(id: usize) -> Option<Image> {
 /// Encodes a canvas element as a PNG data URL.
 pub fn png_data_url(id: usize) -> Option<String> {
     let image = image(id)?;
-    let canvas = Canvas::from_rgba(image.width(), image.height(), image.pixels().to_vec())?;
+    png_data_url_from_rgba(image.width(), image.height(), image.pixels().to_vec())
+}
+
+/// Encodes a caller-owned RGBA snapshot through the same PNG path used by
+/// HTML canvas elements. This is used by OffscreenCanvas, whose backing store
+/// lives in the JavaScript realm rather than the DOM node registry.
+pub fn png_data_url_from_rgba(width: u32, height: u32, pixels: Vec<u8>) -> Option<String> {
+    let canvas = Canvas::from_rgba(width, height, pixels)?;
     Some(format!(
         "data:image/png;base64,{}",
         base64::engine::general_purpose::STANDARD.encode(canvas.encode_png())
