@@ -5,7 +5,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::future::Future;
 use std::path::Path;
 use std::pin::Pin;
-use std::rc::Rc;
+use std::rc::{Rc, Weak};
 use std::sync::mpsc::{Receiver, channel};
 use std::task::{Context as TaskContext, Poll};
 use std::thread;
@@ -149,6 +149,7 @@ struct HttpModuleLoader {
     /// module graphs.
     csp_contexts: RefCell<HashMap<(usize, String), CspPolicy>>,
     csp_violations: RefCell<Vec<(usize, String, String)>>,
+    csp_violation_keys: RefCell<HashSet<(usize, String)>>,
 }
 
 impl ModuleLoader for HttpModuleLoader {
@@ -195,11 +196,7 @@ impl ModuleLoader for HttpModuleLoader {
             if let Some((document_id, policy)) = csp_context.as_ref()
                 && !policy.allows_url(ResourceType::Script, &resolved)
             {
-                self.csp_violations.borrow_mut().push((
-                    *document_id,
-                    "script-src".to_string(),
-                    resolved_string.clone(),
-                ));
+                self.record_csp_violation(*document_id, resolved_string.clone());
                 return Err(JsNativeError::error()
                     .with_message(format!("CSP blocked module import: {resolved_string}"))
                     .into());
@@ -242,11 +239,7 @@ impl ModuleLoader for HttpModuleLoader {
                 && !policy.allows_url(ResourceType::Script, effective_url)
             {
                 let blocked_uri = effective_url.to_string();
-                self.csp_violations.borrow_mut().push((
-                    *document_id,
-                    "script-src".to_string(),
-                    blocked_uri.clone(),
-                ));
+                self.record_csp_violation(*document_id, blocked_uri.clone());
                 return Err(JsNativeError::error()
                     .with_message(format!("CSP blocked module redirect: {blocked_uri}"))
                     .into());
@@ -312,10 +305,34 @@ impl HttpModuleLoader {
         self.modules
             .borrow_mut()
             .retain(|(module_document_id, _), _| *module_document_id != document_id);
+        self.csp_violations
+            .borrow_mut()
+            .retain(|(violation_document_id, _, _)| *violation_document_id != document_id);
+        self.csp_violation_keys
+            .borrow_mut()
+            .retain(|(violation_document_id, _)| *violation_document_id != document_id);
+    }
+
+    fn record_csp_violation(&self, document_id: usize, blocked_uri: String) {
+        let mut violations = self.csp_violations.borrow_mut();
+        if violations.len() >= MAX_CSP_VIOLATIONS {
+            return;
+        }
+        let mut keys = self.csp_violation_keys.borrow_mut();
+        if !keys.insert((document_id, blocked_uri.clone())) {
+            return;
+        }
+        violations.push((
+            document_id,
+            "script-src".to_string(),
+            blocked_uri,
+        ));
     }
 
     fn take_csp_violations(&self) -> Vec<(usize, String, String)> {
-        std::mem::take(&mut *self.csp_violations.borrow_mut())
+        let violations = std::mem::take(&mut *self.csp_violations.borrow_mut());
+        self.csp_violation_keys.borrow_mut().clear();
+        violations
     }
 }
 
@@ -718,6 +735,7 @@ struct HostState {
     document_csp: HashMap<usize, CspPolicy>,
     csp_violations: Vec<CspViolation>,
     csp_violation_keys: HashSet<(usize, String, String)>,
+    module_loader: Option<Weak<HttpModuleLoader>>,
     /// Dedicated workers owned by this global. The map lives on the page
     /// global; worker globals instead hold `worker_owner` and `worker_id`.
     workers: HashMap<u64, Rc<RefCell<WorkerRuntime>>>,
@@ -896,6 +914,7 @@ impl HostState {
             document_csp: HashMap::from([(document.identity(), CspPolicy::default())]),
             csp_violations: Vec::new(),
             csp_violation_keys: HashSet::new(),
+            module_loader: None,
             workers: HashMap::new(),
             next_worker_id: 1,
             worker_owner: None,
@@ -1030,6 +1049,9 @@ impl HostState {
             self.csp_violation_keys
                 .retain(|(document_id, _, _)| *document_id != previous.document.identity());
             self.unregister_tree(&previous.document);
+            if let Some(loader) = self.module_loader.as_ref().and_then(Weak::upgrade) {
+                loader.clear_csp_context_for_document(previous.document.identity());
+            }
         }
 
         let (document, csp_headers, child_url) = self.load_iframe_document(&src);
@@ -1849,6 +1871,7 @@ impl JsRuntime {
             storage_session_id,
         )));
         let module_loader = Rc::new(HttpModuleLoader::default());
+        host_state.borrow_mut().module_loader = Some(Rc::downgrade(&module_loader));
         let mut context = Context::builder()
             .module_loader(module_loader.clone())
             .host_hooks(Rc::new(BrowserHostHooks))
@@ -2075,7 +2098,7 @@ impl JsRuntime {
         self.host_state
             .borrow_mut()
             .document_csp
-            .insert(document.identity(), policy.clone());
+            .insert(document.identity(), policy);
     }
 
     fn sync_module_csp_violations(&mut self) {
