@@ -2953,6 +2953,7 @@
         this.__endContainer = node; this.__endOffset = offset;
       }
       this.__startContainer = node; this.__startOffset = offset;
+      selectionRangeMutated(this);
     }
     setEnd(node, offset) {
       offset = this.__validate(node, offset);
@@ -2967,6 +2968,7 @@
         this.__startContainer = node; this.__startOffset = offset;
       }
       this.__endContainer = node; this.__endOffset = offset;
+      selectionRangeMutated(this);
     }
     __beforeAfter(node, delta, start) {
       if (!node || !node.parentNode) throw new DOMException("Node has no parent.", "InvalidNodeTypeError");
@@ -2982,15 +2984,18 @@
       const parent = node.parentNode, index = indexOfNode(node);
       this.__startContainer = parent; this.__startOffset = index;
       this.__endContainer = parent; this.__endOffset = index + 1;
+      selectionRangeMutated(this);
     }
     selectNodeContents(node) {
       this.__validate(node, 0);
       this.__startContainer = node; this.__startOffset = 0;
       this.__endContainer = node; this.__endOffset = nodeLength(node);
+      selectionRangeMutated(this);
     }
     collapse(toStart = false) {
       if (toStart) { this.__endContainer = this.__startContainer; this.__endOffset = this.__startOffset; }
       else { this.__startContainer = this.__endContainer; this.__startOffset = this.__endOffset; }
+      selectionRangeMutated(this);
     }
     cloneRange() {
       const r = new Range(this.__doc);
@@ -3077,6 +3082,7 @@
       parent.insertBefore(node, reference);
       if (this.collapsed) { this.__endContainer = parent; this.__endOffset = indexOfNode(reference) < 0 ? parent.childNodes.length : indexOfNode(reference); }
       else if (this.__endContainer === parent && this.__endOffset === this.__startOffset) this.__endOffset += count;
+      selectionRangeMutated(this);
     }
     surroundContents(newParent) {
       if ([9,10,11].includes(newParent.nodeType)) throw new DOMException("Invalid wrapper.", "InvalidNodeTypeError");
@@ -3115,6 +3121,7 @@
       };
       [this.__startContainer,this.__startOffset]=adjust(this.__startContainer,this.__startOffset);
       [this.__endContainer,this.__endOffset]=adjust(this.__endContainer,this.__endOffset);
+      selectionRangeMutated(this);
     }
     __mergeText(target, removed, offset, parent, index) {
       const adjust = (container, value) => {
@@ -3124,6 +3131,7 @@
       };
       [this.__startContainer, this.__startOffset] = adjust(this.__startContainer, this.__startOffset);
       [this.__endContainer, this.__endOffset] = adjust(this.__endContainer, this.__endOffset);
+      selectionRangeMutated(this);
     }
     __replaceData(node, offset, count, replacementLength) {
       const adjust = (container, value) => {
@@ -3133,6 +3141,7 @@
       };
       [this.__startContainer, this.__startOffset] = adjust(this.__startContainer, this.__startOffset);
       [this.__endContainer, this.__endOffset] = adjust(this.__endContainer, this.__endOffset);
+      selectionRangeMutated(this);
     }
     __splitText(oldNode,newNode,offset,parent,index) {
       const adjust=(container,value) => container===oldNode && value>offset ? [newNode,value-offset] : [container,value];
@@ -3142,10 +3151,214 @@
         if (this.__startContainer===parent && this.__startOffset>index) this.__startOffset++;
         if (this.__endContainer===parent && this.__endOffset>index) this.__endOffset++;
       }
+      selectionRangeMutated(this);
     }
   }
   Range.START_TO_START=0; Range.START_TO_END=1; Range.END_TO_END=2; Range.END_TO_START=3;
   Range.prototype.START_TO_START=0; Range.prototype.START_TO_END=1; Range.prototype.END_TO_END=2; Range.prototype.END_TO_START=3;
+
+  // A Selection is maintained per wrapped Document. The native DOM already
+  // keeps Range boundary points live through tree mutations; Selection only
+  // owns the currently exposed range and derives its anchor/focus from that
+  // range. This keeps iframe documents isolated because each contentDocument
+  // has its own wrapper identity and WeakMap entry.
+  const selectionConstructionToken = {};
+  const selectionByDocument = new WeakMap();
+  const selectionChangeQueued = new WeakSet();
+
+  function queueSelectionChange(doc) {
+    if (!doc || selectionChangeQueued.has(doc)) return;
+    selectionChangeQueued.add(doc);
+    const deliver = () => {
+      selectionChangeQueued.delete(doc);
+      doc.dispatchEvent(new Event("selectionchange"));
+    };
+    if (typeof __omoikane_queue_networking_task === "function") {
+      __omoikane_queue_networking_task(deliver);
+    } else {
+      setTimeout(deliver, 0);
+    }
+  }
+
+  function selectionRangeMutated(range) {
+    if (!selectionByDocument) return;
+    const selection = selectionByDocument.get(range.__selectionDocument || range.__doc);
+    if (selection && selection.__range === range) queueSelectionChange(selection.__doc);
+  }
+
+  class Selection {
+    constructor(token, doc) {
+      if (token !== selectionConstructionToken || !(doc instanceof Document)) {
+        throw new TypeError("Illegal constructor");
+      }
+      this.__doc = doc;
+      this.__range = null;
+      this.__direction = "forward";
+    }
+
+    get anchorNode() {
+      if (!this.__range) return null;
+      return this.__direction === "backward"
+        ? this.__range.endContainer : this.__range.startContainer;
+    }
+    get anchorOffset() {
+      if (!this.__range) return 0;
+      return this.__direction === "backward"
+        ? this.__range.endOffset : this.__range.startOffset;
+    }
+    get focusNode() {
+      if (!this.__range) return null;
+      return this.__direction === "backward"
+        ? this.__range.startContainer : this.__range.endContainer;
+    }
+    get focusOffset() {
+      if (!this.__range) return 0;
+      return this.__direction === "backward"
+        ? this.__range.startOffset : this.__range.endOffset;
+    }
+    get isCollapsed() { return !this.__range || this.__range.collapsed; }
+    get rangeCount() { return this.__range ? 1 : 0; }
+    get type() {
+      if (!this.__range) return "None";
+      return this.__range.collapsed ? "Caret" : "Range";
+    }
+    getRangeAt(index) {
+      if ((Number(index) | 0) !== 0 || !this.__range) {
+        throw new DOMException("The index is not in the allowed range.", "IndexSizeError");
+      }
+      return this.__range;
+    }
+    addRange(range) {
+      if (!(range instanceof Range)) throw new TypeError("Selection.addRange requires a Range");
+      if (nodeDocument(range.startContainer) !== this.__doc ||
+          nodeDocument(range.endContainer) !== this.__doc) {
+        throw new DOMException("The range belongs to another Document.", "WrongDocumentError");
+      }
+      if (this.__range === range) return;
+      this.__range = range;
+      range.__selectionDocument = this.__doc;
+      this.__direction = "forward";
+      queueSelectionChange(this.__doc);
+    }
+    removeRange(range) {
+      if (this.__range !== range) {
+        throw new DOMException("The range is not in this Selection.", "NotFoundError");
+      }
+      this.__range.__selectionDocument = null;
+      this.__range = null;
+      queueSelectionChange(this.__doc);
+    }
+    removeAllRanges() {
+      if (!this.__range) return;
+      this.__range.__selectionDocument = null;
+      this.__range = null;
+      queueSelectionChange(this.__doc);
+    }
+    empty() { this.removeAllRanges(); }
+    collapse(node, offset = 0) {
+      if (node === null || node === undefined) {
+        this.removeAllRanges();
+        return;
+      }
+      if (!(node instanceof Node) || nodeDocument(node) !== this.__doc) {
+        throw new DOMException("The node belongs to another Document.", "WrongDocumentError");
+      }
+      const range = this.__range || new Range(this.__doc);
+      range.setStart(node, offset);
+      range.setEnd(node, offset);
+      this.__range = range;
+      range.__selectionDocument = this.__doc;
+      this.__direction = "forward";
+      queueSelectionChange(this.__doc);
+    }
+    collapseToStart() {
+      if (!this.__range) throw new DOMException("The Selection is empty.", "InvalidStateError");
+      this.collapse(this.__range.startContainer, this.__range.startOffset);
+    }
+    collapseToEnd() {
+      if (!this.__range) throw new DOMException("The Selection is empty.", "InvalidStateError");
+      this.collapse(this.__range.endContainer, this.__range.endOffset);
+    }
+    selectAllChildren(node) {
+      if (!(node instanceof Node) || nodeDocument(node) !== this.__doc) {
+        throw new DOMException("The node belongs to another Document.", "WrongDocumentError");
+      }
+      const range = this.__range || new Range(this.__doc);
+      range.selectNodeContents(node);
+      this.__range = range;
+      range.__selectionDocument = this.__doc;
+      this.__direction = "forward";
+      queueSelectionChange(this.__doc);
+    }
+    setBaseAndExtent(anchorNode, anchorOffset, focusNode, focusOffset) {
+      if (!(anchorNode instanceof Node) || !(focusNode instanceof Node) ||
+          nodeDocument(anchorNode) !== this.__doc || nodeDocument(focusNode) !== this.__doc) {
+        throw new DOMException("The node belongs to another Document.", "WrongDocumentError");
+      }
+      const range = this.__range || new Range(this.__doc);
+      const order = boundaryCompare(anchorNode, Number(anchorOffset) >>> 0, focusNode, Number(focusOffset) >>> 0);
+      if (order <= 0) {
+        range.setStart(anchorNode, anchorOffset);
+        range.setEnd(focusNode, focusOffset);
+        this.__direction = "forward";
+      } else {
+        range.setStart(focusNode, focusOffset);
+        range.setEnd(anchorNode, anchorOffset);
+        this.__direction = "backward";
+      }
+      this.__range = range;
+      range.__selectionDocument = this.__doc;
+      queueSelectionChange(this.__doc);
+    }
+    extend(node, offset = 0) {
+      if (!this.__range) return;
+      if (!(node instanceof Node) || nodeDocument(node) !== this.__doc) {
+        throw new DOMException("The node belongs to another Document.", "WrongDocumentError");
+      }
+      const anchorNode = this.anchorNode;
+      const anchorOffset = this.anchorOffset;
+      const order = boundaryCompare(anchorNode, anchorOffset, node, Number(offset) >>> 0);
+      if (order <= 0) {
+        this.__range.setStart(anchorNode, anchorOffset);
+        this.__range.setEnd(node, offset);
+        this.__direction = "forward";
+      } else {
+        this.__range.setStart(node, offset);
+        this.__range.setEnd(anchorNode, anchorOffset);
+        this.__direction = "backward";
+      }
+      queueSelectionChange(this.__doc);
+    }
+    containsNode(node, allowPartialContainment = false) {
+      if (!(node instanceof Node) || !this.__range || nodeDocument(node) !== this.__doc) return false;
+      if (!node.parentNode) return false;
+      const parent = node.parentNode;
+      const start = [parent, indexOfNode(node)];
+      const end = [parent, indexOfNode(node) + 1];
+      const afterStart = boundaryCompare(start[0], start[1], this.__range.startContainer, this.__range.startOffset) >= 0;
+      const beforeEnd = boundaryCompare(end[0], end[1], this.__range.endContainer, this.__range.endOffset) <= 0;
+      if (allowPartialContainment) {
+        return boundaryCompare(end[0], end[1], this.__range.startContainer, this.__range.startOffset) > 0 &&
+          boundaryCompare(start[0], start[1], this.__range.endContainer, this.__range.endOffset) < 0;
+      }
+      return afterStart && beforeEnd;
+    }
+    deleteFromDocument() {
+      if (!this.__range) return;
+      this.__range.deleteContents();
+    }
+    toString() { return this.__range ? this.__range.toString() : ""; }
+  }
+
+  function selectionForDocument(doc) {
+    if (!(doc instanceof Document)) return null;
+    let selection = selectionByDocument.get(doc);
+    if (!selection) {
+      selection = new Selection(selectionConstructionToken, doc);
+      selectionByDocument.set(doc, selection);
+    }
+    return selection;
+  }
 
   // Elements whose `name` content attribute participates in HTMLCollection
   // named access, in addition to `id` (which applies to every element). Per the
@@ -3434,6 +3647,8 @@
     }
 
     createRange() { return new Range(this); }
+
+    getSelection() { return selectionForDocument(this); }
 
     createEvent(type) {
       const t = String(type);
@@ -5943,6 +6158,10 @@
   globalThis.NodeIterator = NodeIterator;
   globalThis.TreeWalker = TreeWalker;
   globalThis.Range = Range;
+  globalThis.Selection = Selection;
+  globalThis.getSelection = function getSelection() {
+    return selectionForDocument(globalThis.document);
+  };
   globalThis.HTMLTableElement = HTMLTableElement;
   globalThis.HTMLTableSectionElement = HTMLTableSectionElement;
   globalThis.HTMLTableRowElement = HTMLTableRowElement;
