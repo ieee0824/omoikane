@@ -8657,6 +8657,7 @@
   // prompt.
   let notificationPermission = "default";
   const notificationPermissionValues = new Set(["default", "granted", "denied"]);
+  const closedNotifications = new WeakSet();
   const notificationTask = callback => {
     if (typeof __omoikane_queue_dom_manipulation_task === "function") {
       __omoikane_queue_dom_manipulation_task(callback);
@@ -8679,7 +8680,7 @@
         throw new DOMException("Notifications require a secure context.", "NotAllowedError");
       }
       if (notificationPermission !== "granted") {
-        throw new DOMException("Notification permission was denied.", "NotAllowedError");
+        throw new DOMException("Notification permission is not granted.", "NotAllowedError");
       }
       const init = options === null || options === undefined ? {} : Object(options);
       const direction = notificationOptionString(init, "dir", "auto").toLowerCase();
@@ -8703,7 +8704,7 @@
         vibrate: init.vibrate === undefined ? [] : (Array.isArray(init.vibrate) ? init.vibrate.slice() : [init.vibrate]),
         timestamp: init.timestamp === undefined ? Date.now() : Number(init.timestamp),
         renotify: notificationOptionBoolean(init, "renotify"),
-        silent: init.silent === null ? null : notificationOptionBoolean(init, "silent"),
+        silent: notificationOptionBoolean(init, "silent"),
         requireInteraction: notificationOptionBoolean(init, "requireInteraction"),
         data,
         actions,
@@ -8716,7 +8717,6 @@
           value,
         });
       }
-      this.__notificationClosed = false;
       for (const type of ["show", "click", "error", "close"]) {
         Object.defineProperty(this, "on" + type, {
           configurable: true,
@@ -8726,12 +8726,12 @@
         });
       }
       notificationTask(() => {
-        if (!this.__notificationClosed) fireRealtimeEvent(this, new Event("show"));
+        if (!closedNotifications.has(this)) fireRealtimeEvent(this, new Event("show"));
       });
     }
     close() {
-      if (this.__notificationClosed) return;
-      this.__notificationClosed = true;
+      if (closedNotifications.has(this)) return;
+      closedNotifications.add(this);
       notificationTask(() => fireRealtimeEvent(this, new Event("close")));
     }
     get [Symbol.toStringTag]() { return "Notification"; }
@@ -8758,9 +8758,9 @@
     return next;
   };
   globalThis.__omoikane_dispatch_notification_click = notification => {
-    if (!(notification instanceof Notification) || notification.__notificationClosed) return false;
+    if (!(notification instanceof Notification) || closedNotifications.has(notification)) return false;
     notificationTask(() => {
-      if (!notification.__notificationClosed) fireRealtimeEvent(notification, new Event("click"));
+      if (!closedNotifications.has(notification)) fireRealtimeEvent(notification, new Event("click"));
     });
     return true;
   };

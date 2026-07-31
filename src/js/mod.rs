@@ -20016,7 +20016,7 @@ b</textarea></form>"#);
                 r#"__omoikane_set_notification_permission('granted');
                    globalThis.notificationEvents = [];
                    globalThis.notification = new Notification('Hello', {
-                     body: 'World', tag: 'tag', data: { value: 7 }, actions: [{ action: 'open', title: 'Open' }]
+                     body: 'World', tag: 'tag', silent: null, data: { value: 7 }, actions: [{ action: 'open', title: 'Open' }]
                    });
                    notification.onshow = () => notificationEvents.push('show');
                    notification.onclick = () => notificationEvents.push('click');
@@ -20025,7 +20025,7 @@ b</textarea></form>"#);
             .unwrap();
         runtime.run_until_idle().unwrap();
         assert_eq!(eval_str(&mut runtime, "notificationEvents.join(',')"), "show");
-        assert_eq!(eval_str(&mut runtime, "[notification.title, notification.body, notification.tag, notification.data.value, notification.actions[0].action].join('|')"), "Hello|World|tag|7|open");
+        assert_eq!(eval_str(&mut runtime, "[notification.title, notification.body, notification.tag, notification.silent, notification.data.value, notification.actions[0].action, String('__notificationClosed' in notification)].join('|')"), "Hello|World|tag|false|7|open|false");
         runtime.eval("__omoikane_dispatch_notification_click(notification)").unwrap();
         runtime.run_until_idle().unwrap();
         assert_eq!(eval_str(&mut runtime, "notificationEvents.join(',')"), "show,click");
