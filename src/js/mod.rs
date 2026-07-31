@@ -2855,33 +2855,38 @@ impl JsRuntime {
             return Ok(());
         }
         let owner_state = Rc::clone(&worker.owner_state);
-        let (result, jobs_result) = {
+        let (errors, terminated) = {
             let runtime = &mut worker.runtime;
-            runtime.install_worker_message_values(data, owner_origin)?;
-            let result = runtime.eval(
-                "__omoikane_worker_message_data = __omoikane_decode_worker_message(__omoikane_worker_message_wire); self.dispatchEvent(new MessageEvent('message', { data: __omoikane_worker_message_data, origin: __omoikane_worker_message_origin, source: null, ports: [] }));",
-            );
-            runtime.clear_worker_message_values()?;
-            let jobs_result = if runtime.is_terminated_worker() {
-                Ok(())
+            let mut errors = Vec::new();
+            if let Err(error) = runtime.install_worker_message_values(data, owner_origin) {
+                errors.push(format!("[worker message setup] {error}"));
+                if let Err(cleanup_error) = runtime.clear_worker_message_values() {
+                    errors.push(format!("[worker message cleanup] {cleanup_error}"));
+                }
             } else {
-                runtime.run_jobs()
-            };
-            (result, jobs_result)
+                if let Err(error) = runtime.eval(
+                    "__omoikane_worker_message_data = __omoikane_decode_worker_message(__omoikane_worker_message_wire); self.dispatchEvent(new MessageEvent('message', { data: __omoikane_worker_message_data, origin: __omoikane_worker_message_origin, source: null, ports: [] }));",
+                ) {
+                    errors.push(format!("[worker message] {error}"));
+                }
+                if let Err(error) = runtime.clear_worker_message_values() {
+                    errors.push(format!("[worker message cleanup] {error}"));
+                }
+                if !runtime.is_terminated_worker()
+                    && let Err(error) = runtime.run_jobs()
+                {
+                    errors.push(format!("[worker message jobs] {error}"));
+                }
+            }
+            let terminated = runtime.is_terminated_worker();
+            (errors, terminated)
         };
-        if let Err(error) = result {
+        for error in errors {
             owner_state
                 .borrow_mut()
                 .event_loop
-                .enqueue_worker_error(worker_id, None, error.to_string());
+                .enqueue_worker_error(worker_id, None, error);
         }
-        if let Err(error) = jobs_result {
-            owner_state
-                .borrow_mut()
-                .event_loop
-                .enqueue_worker_error(worker_id, None, error.to_string());
-        }
-        let terminated = worker.runtime.host_state.borrow().worker_terminated;
         drop(worker);
         if !terminated {
             self.host_state
@@ -2898,11 +2903,17 @@ impl JsRuntime {
         owner_object: JsValue,
         data: String,
     ) -> JsResult<()> {
-        self.install_worker_owner_values(owner_object, data)?;
+        if let Err(error) = self.install_worker_owner_values(owner_object, data) {
+            self.record_task_error(format!("[worker message setup] {error}"));
+            let cleanup = self.clear_worker_owner_values();
+            self.record_error_from("worker message cleanup", cleanup);
+            return Ok(());
+        }
         let result = self.eval(
             "__omoikane_worker_owner_data = __omoikane_decode_worker_message(__omoikane_worker_owner_wire); if (!__omoikane_worker_owner.__terminated) { __omoikane_worker_owner.dispatchEvent(new MessageEvent('message', { data: __omoikane_worker_owner_data, origin: String(location.origin), source: null, ports: [] })); }",
         );
-        self.clear_worker_owner_values()?;
+        let cleanup = self.clear_worker_owner_values();
+        self.record_error_from("worker message cleanup", cleanup);
         self.record_error_from("worker message", result);
         Ok(())
     }
@@ -2921,11 +2932,17 @@ impl JsRuntime {
                 .and_then(|entry| entry.borrow().owner_object.clone())
         });
         let Some(owner_object) = owner_object else { return Ok(()); };
-        self.install_worker_owner_values(owner_object, message)?;
+        if let Err(error) = self.install_worker_owner_values(owner_object, message) {
+            self.record_task_error(format!("[worker error setup] {error}"));
+            let cleanup = self.clear_worker_owner_values();
+            self.record_error_from("worker error cleanup", cleanup);
+            return Ok(());
+        }
         let result = self.eval(
             "if (!__omoikane_worker_owner.__terminated) { const event = new Event('error'); event.message = String(__omoikane_worker_owner_wire); event.error = __omoikane_worker_owner_wire; __omoikane_worker_owner.dispatchEvent(event); }",
         );
-        self.clear_worker_owner_values()?;
+        let cleanup = self.clear_worker_owner_values();
+        self.record_error_from("worker error cleanup", cleanup);
         self.record_error_from("worker error", result);
         Ok(())
     }
@@ -6425,12 +6442,21 @@ fn create_worker_for_owner_state(
                 .remove(&worker_id)
                 .expect("new worker entry must be present");
             let result = entry_for_eval.borrow_mut().runtime.eval(&source);
-            let terminated = entry_for_eval
-                .borrow()
-                .runtime
-                .host_state
-                .borrow()
-                .worker_terminated;
+            let terminated = result.is_err()
+                || entry_for_eval
+                    .borrow()
+                    .runtime
+                    .host_state
+                    .borrow()
+                    .worker_terminated;
+            if result.is_err() {
+                entry_for_eval
+                    .borrow()
+                    .runtime
+                    .host_state
+                    .borrow_mut()
+                    .worker_terminated = true;
+            }
             entry_for_eval.borrow_mut().terminated = terminated;
             // Keep a startup-closed entry until the owner endpoint binds. Any
             // postMessage queued before close() must still be flushed to that
@@ -6442,7 +6468,16 @@ fn create_worker_for_owner_state(
                 .insert(worker_id, Rc::clone(&entry_for_eval));
             result.err().map(|error| error.to_string())
         }
-        None => Some(format!("failed to fetch Worker script: {requested_url}")),
+        None => {
+            entry.borrow_mut().terminated = true;
+            entry
+                .borrow()
+                .runtime
+                .host_state
+                .borrow_mut()
+                .worker_terminated = true;
+            Some(format!("failed to fetch Worker script: {requested_url}"))
+        }
     };
     {
         let mut worker = entry.borrow_mut();
@@ -8647,13 +8682,17 @@ mod tests {
         let mut runtime = JsRuntime::new().unwrap();
         runtime
             .eval(
-                "globalThis.workerErrors = []; \
-                 const worker = new Worker('data:text/javascript,throw%20new%20Error(%22boom%22)'); \
-                 worker.onerror = event => workerErrors.push(event.message);",
+                r#"globalThis.workerValues = []; globalThis.workerErrors = [];
+                   const source = encodeURIComponent('postMessage("before failure"); throw new Error("boom");');
+                   const worker = new Worker('data:text/javascript,' + source);
+                   worker.onmessage = event => workerValues.push(event.data);
+                   worker.onerror = event => workerErrors.push(event.message);"#,
             )
             .unwrap();
         runtime.run_until_idle().unwrap();
+        assert_eq!(runtime.eval("JSON.stringify(workerValues)").unwrap().as_string().unwrap().to_std_string_escaped(), "[\"before failure\"]");
         assert_eq!(runtime.eval("workerErrors.length").unwrap().as_number(), Some(1.0));
+        assert_eq!(runtime.host_state.borrow().workers.len(), 0);
         assert_eq!(runtime.eval("1 + 1").unwrap().as_number(), Some(2.0));
     }
 
