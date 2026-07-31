@@ -781,6 +781,11 @@ struct HostState {
     broadcast_channels: HashMap<u64, JsValue>,
     broadcast_channel_metadata: HashMap<u64, BroadcastChannelMetadata>,
     next_broadcast_channel_id: u64,
+    /// Constructable stylesheets adopted by a Document or ShadowRoot. The
+    /// JavaScript wrapper keeps stylesheet objects; this native snapshot lets
+    /// the synchronous style resolver include their parsed text without
+    /// manufacturing DOM `<style>` nodes.
+    adopted_stylesheets: HashMap<usize, Vec<String>>,
 }
 
 #[derive(Debug, Clone)]
@@ -979,6 +984,7 @@ impl HostState {
             broadcast_channels: HashMap::new(),
             broadcast_channel_metadata: HashMap::new(),
             next_broadcast_channel_id: 1,
+            adopted_stylesheets: HashMap::new(),
         };
         state.register_tree(&document);
         state
@@ -1098,6 +1104,8 @@ impl HostState {
         // `document_styles` entries (tracked in issue 049).
         if let Some(previous) = self.iframe_documents.remove(&iframe_id) {
             self.document_styles.remove(&previous.document.identity());
+            self.adopted_stylesheets
+                .remove(&previous.document.identity());
             self.document_origins.remove(&previous.document.identity());
             self.document_csp.remove(&previous.document.identity());
             self.csp_violations
@@ -1531,6 +1539,14 @@ impl HostState {
                     sheet,
                     implicit_scope_root,
                 );
+            } else {
+                resolver.add_stylesheet(Origin::Author, sheet);
+            }
+        }
+        for (scope, css) in collect_adopted_stylesheets(&self.adopted_stylesheets, document) {
+            let sheet = crate::paint::stylesheet::parse_stylesheet_forgiving(&css);
+            if let Some((scope_root, order)) = scope {
+                resolver.add_scoped_stylesheet_in_order(Origin::Author, sheet, scope_root, order);
             } else {
                 resolver.add_stylesheet(Origin::Author, sheet);
             }
@@ -3663,6 +3679,9 @@ impl JsRuntime {
                             let previous = state.iframe_documents.remove(&node_id);
                             if let Some(previous) = previous.as_ref() {
                                 state.document_styles.remove(&previous.document.identity());
+                                state
+                                    .adopted_stylesheets
+                                    .remove(&previous.document.identity());
                                 state.document_origins.remove(&previous.document.identity());
                                 state.document_csp.remove(&previous.document.identity());
                                 state.csp_violations.retain(|violation| {
@@ -4758,6 +4777,11 @@ fn register_host_bindings(
             NativeFunction::from_copy_closure(queue_dom_manipulation_task_native),
         ),
         (
+            js_string!("__omoikane_set_adopted_stylesheets"),
+            2,
+            NativeFunction::from_copy_closure(set_adopted_stylesheets_native),
+        ),
+        (
             js_string!("__omoikane_enqueue_posted_message"),
             2,
             NativeFunction::from_copy_closure(enqueue_posted_message_native),
@@ -5473,6 +5497,44 @@ fn collect_inline_stylesheets(
     let mut out = Vec::new();
     let mut next_scope_order = 0;
     walk(document, None, &mut next_scope_order, &mut out);
+    out
+}
+
+/// Collects constructed stylesheets adopted by `document` and its shadow
+/// roots. A shadow-root stylesheet is scoped to that root just like an inline
+/// `<style>` inside the same tree; document-level sheets apply to the whole
+/// browsing context.
+fn collect_adopted_stylesheets(
+    adopted: &HashMap<usize, Vec<String>>,
+    document: &NodeHandle,
+) -> Vec<(Option<(NodeHandle, usize)>, String)> {
+    fn walk(
+        node: &NodeHandle,
+        scope: Option<&(NodeHandle, usize)>,
+        next_scope_order: &mut usize,
+        adopted: &HashMap<usize, Vec<String>>,
+        out: &mut Vec<(Option<(NodeHandle, usize)>, String)>,
+    ) {
+        if let Some(stylesheets) = adopted.get(&node.identity()) {
+            for css in stylesheets {
+                if !css.trim().is_empty() {
+                    out.push((scope.cloned(), css.clone()));
+                }
+            }
+        }
+        if let Some(root) = node.shadow_root() {
+            *next_scope_order += 1;
+            let root_scope = (root.clone(), *next_scope_order);
+            walk(&root, Some(&root_scope), next_scope_order, adopted, out);
+        }
+        for child in node.child_nodes() {
+            walk(&child, scope, next_scope_order, adopted, out);
+        }
+    }
+
+    let mut out = Vec::new();
+    let mut next_scope_order = 0;
+    walk(document, None, &mut next_scope_order, adopted, &mut out);
     out
 }
 
@@ -7194,6 +7256,41 @@ fn queue_dom_manipulation_task_native(
                 callback,
                 args: Vec::new(),
             });
+        Ok(JsValue::undefined())
+    })
+}
+
+/// Replaces the parsed text snapshot for a Document/ShadowRoot's adopted
+/// constructable stylesheets and invalidates that document's style resolver.
+fn set_adopted_stylesheets_native(
+    _: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let root_id = parse_node_id(args.first(), context)?;
+    let encoded = string_argument(args.get(1), "[]", context)?;
+    let stylesheets: Vec<String> = serde_json::from_str(&encoded).map_err(|_| {
+        JsError::from(JsNativeError::typ().with_message("invalid adoptedStyleSheets payload"))
+    })?;
+    with_host_state(|state| {
+        let mut host = state.borrow_mut();
+        let root = host.get_node(root_id).ok_or_else(|| {
+            JsError::from(JsNativeError::error().with_message("adoptedStyleSheets root not found"))
+        })?;
+        let valid_root = root.node_type() == NodeType::Document
+            || (root.node_type() == NodeType::DocumentFragment && root.shadow_host().is_some());
+        if !valid_root {
+            return Err(JsNativeError::typ()
+                .with_message("adoptedStyleSheets root must be a Document or ShadowRoot")
+                .into());
+        }
+        let document = document_root_for_node(&root).ok_or_else(|| {
+            JsError::from(
+                JsNativeError::error().with_message("adoptedStyleSheets root is detached"),
+            )
+        })?;
+        host.adopted_stylesheets.insert(root_id, stylesheets);
+        host.mark_document_style_dirty(&document);
         Ok(JsValue::undefined())
     })
 }
@@ -22239,6 +22336,77 @@ b</textarea></form>"#);
             "pre-wrap",
             "`:last-child` must re-match after the final child is removed"
         );
+    }
+
+    #[test]
+    fn constructable_stylesheets_apply_to_documents_and_shadow_roots() {
+        let html = r#"<html><body><div id="target"></div><div id="host"></div></body></html>"#;
+        let mut runtime = runtime_from_html(html);
+        let result = eval_str(
+            &mut runtime,
+            r#"(() => {
+                const sheet = new CSSStyleSheet();
+                sheet.replaceSync('#target { width: 37px; }');
+                document.adoptedStyleSheets = [sheet];
+                const host = document.getElementById('host');
+                const root = host.attachShadow({ mode: 'open' });
+                const shadowSheet = new CSSStyleSheet();
+                shadowSheet.replaceSync('.inside { height: 19px; }');
+                root.adoptedStyleSheets = [shadowSheet];
+                const shared = new CSSStyleSheet();
+                shared.replaceSync('#target { width: 41px; } .inside { width: 29px; }');
+                const oldDocumentList = document.adoptedStyleSheets;
+                document.adoptedStyleSheets = [sheet, shared];
+                root.adoptedStyleSheets = [shadowSheet, shared];
+                const inside = document.createElement('span');
+                inside.className = 'inside';
+                root.appendChild(inside);
+                const before = getComputedStyle(document.getElementById('target')).width;
+                const shadowBefore = getComputedStyle(inside).height;
+                const sharedDocument = getComputedStyle(document.getElementById('target')).width;
+                const sharedShadow = getComputedStyle(inside).width;
+                sheet.insertRule('#target { height: 23px; }');
+                const after = getComputedStyle(document.getElementById('target')).height;
+                document.adoptedStyleSheets[0] = shared;
+                document.adoptedStyleSheets.length = 1;
+                const listIdentity = oldDocumentList === document.adoptedStyleSheets;
+                let nonConstructedError = '';
+                try {
+                    document.adoptedStyleSheets.push(document.createElement('style').sheet);
+                } catch (error) {
+                    nonConstructedError = error.name;
+                }
+                return [sheet.ownerNode === null, document.adoptedStyleSheets[0] === sheet,
+                    before, shadowBefore, sharedDocument, sharedShadow, listIdentity,
+                    nonConstructedError, after, sheet.cssRules.length,
+                    typeof sheet.replace === 'function'].join('|');
+            })()"#,
+        );
+        assert_eq!(
+            result,
+            "true|false|41px|19px|41px|29px|true|NotAllowedError|23px|2|true"
+        );
+    }
+
+    #[test]
+    fn constructable_stylesheet_replace_promise_recalculates_style() {
+        let html = r#"<html><body><div id="target"></div></body></html>"#;
+        let mut runtime = runtime_from_html(html);
+        runtime
+            .eval(
+                r#"globalThis.sheet = new CSSStyleSheet();
+                   sheet.replaceSync('#target { width: 11px; }');
+                   document.adoptedStyleSheets = [sheet];
+                   globalThis.replaced = false;
+                   sheet.replace('#target { width: 47px; }').then(() => { replaced = true; });"#,
+            )
+            .unwrap();
+        runtime.run_jobs().unwrap();
+        let result = eval_str(
+            &mut runtime,
+            "[replaced, getComputedStyle(document.getElementById('target')).width, sheet.cssRules.length].join('|')",
+        );
+        assert_eq!(result, "true|47px|1");
     }
 
     #[test]
