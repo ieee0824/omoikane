@@ -8786,12 +8786,13 @@ mod tests {
                    const source = encodeURIComponent('onmessage = event => postMessage({ workerEventOrigin: event.origin, workerLocationOrigin: location.origin });');
                    const worker = new Worker('data:text/javascript,' + source);
                    worker.onmessage = event => workerValues.push({ ownerEventOrigin: event.origin, data: event.data });
+                   const expectedOrigin = location.origin; location.origin = "spoofed";
                    worker.postMessage("origin");"#,
             )
             .unwrap();
         runtime.run_until_idle().unwrap();
         assert!(runtime
-            .eval("workerValues[0].ownerEventOrigin === location.origin && workerValues[0].data.workerEventOrigin === location.origin")
+            .eval("workerValues[0].ownerEventOrigin === expectedOrigin && workerValues[0].data.workerEventOrigin === expectedOrigin")
             .unwrap()
             .as_boolean()
             .unwrap_or(false));
