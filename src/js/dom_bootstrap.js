@@ -8868,7 +8868,7 @@
       for (const type of ["show", "click", "error", "close"]) {
         Object.defineProperty(this, "on" + type, {
           configurable: true,
-          enumerable: true,
+          enumerable: false,
           get: () => this["__on" + type] || null,
           set: callback => { this["__on" + type] = typeof callback === "function" ? callback : null; },
         });

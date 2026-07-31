@@ -2837,7 +2837,9 @@ impl JsRuntime {
     /// Window. This is an embedder/test hook and is not exposed to page JS.
     pub fn set_notification_permission(&mut self, permission: &str) -> Result<(), String> {
         if !matches!(permission, "default" | "granted" | "denied") {
-            return Err("invalid notification permission".to_string());
+            return Err(format!(
+                "invalid notification permission {permission:?}; expected one of default, granted, denied"
+            ));
         }
         self.host_state.borrow_mut().notification_permission = permission.to_string();
         Ok(())
@@ -20638,6 +20640,9 @@ b</textarea></form>"#);
         assert_eq!(eval_str(&mut runtime, "Notification.permission"), "denied");
 
         runtime.set_notification_permission("granted").unwrap();
+        let invalid_permission = runtime.set_notification_permission("unknown").unwrap_err();
+        assert!(invalid_permission.contains("unknown"));
+        assert!(invalid_permission.contains("default, granted, denied"));
         runtime
             .eval(
                 r#"globalThis.notificationEvents = [];
@@ -20651,7 +20656,7 @@ b</textarea></form>"#);
             .unwrap();
         runtime.run_until_idle().unwrap();
         assert_eq!(eval_str(&mut runtime, "notificationEvents.join(',')"), "show");
-        assert_eq!(eval_str(&mut runtime, "[notification.title, notification.body, notification.tag, notification.silent, notification.data.value, notification.actions[0].action, String('__notificationClosed' in notification)].join('|')"), "Hello|World|tag|false|7|open|false");
+        assert_eq!(eval_str(&mut runtime, "[notification.title, notification.body, notification.tag, notification.silent, notification.data.value, notification.actions[0].action, String('__notificationClosed' in notification), String(Object.keys(notification).some(name => name === 'onshow'))].join('|')"), "Hello|World|tag|false|7|open|false|false");
         runtime.eval("__omoikane_dispatch_notification_click(notification)").unwrap();
         runtime.run_until_idle().unwrap();
         assert_eq!(eval_str(&mut runtime, "notificationEvents.join(',')"), "show,click");
