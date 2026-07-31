@@ -8655,8 +8655,11 @@
   // platform window.  The engine hook below lets conformance tests inject a
   // granted/denied decision without making page code responsible for a UI
   // prompt.
-  let notificationPermission = "default";
-  const notificationPermissionValues = new Set(["default", "granted", "denied"]);
+  const nativeNotificationPermission = globalThis.__omoikane_notification_permission;
+  const nativeNotificationRequestPermission = globalThis.__omoikane_notification_request_permission;
+  try { delete globalThis.__omoikane_notification_permission; } catch (_) {}
+  try { delete globalThis.__omoikane_notification_request_permission; } catch (_) {}
+  const currentNotificationPermission = () => String(nativeNotificationPermission());
   const closedNotifications = new WeakSet();
   const notificationTask = callback => {
     if (typeof __omoikane_queue_dom_manipulation_task === "function") {
@@ -8667,7 +8670,7 @@
   };
   function notificationOptionString(options, name, fallback = "") {
     const value = options && options[name];
-    return value === undefined || value === null ? fallback : String(value);
+    return value === undefined ? fallback : String(value);
   }
   function notificationOptionBoolean(options, name, fallback = false) {
     return options && options[name] === undefined ? fallback : !!(options && options[name]);
@@ -8679,7 +8682,7 @@
       if (!nativeIsSecureContext()) {
         throw new DOMException("Notifications require a secure context.", "NotAllowedError");
       }
-      if (notificationPermission !== "granted") {
+      if (currentNotificationPermission() !== "granted") {
         throw new DOMException("Notification permission is not granted.", "NotAllowedError");
       }
       const init = options === null || options === undefined ? {} : Object(options);
@@ -8735,7 +8738,7 @@
       notificationTask(() => fireRealtimeEvent(this, new Event("close")));
     }
     get [Symbol.toStringTag]() { return "Notification"; }
-    static get permission() { return notificationPermission; }
+    static get permission() { return currentNotificationPermission(); }
     static requestPermission(callback) {
       const result = Promise.resolve().then(() => {
         if (!nativeIsSecureContext()) {
@@ -8743,20 +8746,13 @@
         }
         // There is no native prompt in this headless engine. A default
         // decision therefore follows the browser's non-granting fallback.
-        if (notificationPermission === "default") notificationPermission = "denied";
-        return notificationPermission;
+        return String(nativeNotificationRequestPermission());
       });
       if (typeof callback === "function") result.then(callback);
       return result;
     }
   }
   globalThis.Notification = Notification;
-  globalThis.__omoikane_set_notification_permission = value => {
-    const next = String(value);
-    if (!notificationPermissionValues.has(next)) throw new TypeError("Invalid notification permission");
-    notificationPermission = next;
-    return next;
-  };
   globalThis.__omoikane_dispatch_notification_click = notification => {
     if (!(notification instanceof Notification) || closedNotifications.has(notification)) return false;
     notificationTask(() => {

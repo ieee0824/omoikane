@@ -697,6 +697,7 @@ struct HostState {
     navigator_user_agent: String,
     clipboard: HostClipboard,
     clipboard_permission_granted: bool,
+    notification_permission: String,
     http_client: Client,
     websocket_clients: HashMap<u64, WebSocketConnection>,
     next_websocket_id: u64,
@@ -972,6 +973,7 @@ impl HostState {
             navigator_user_agent: default_user_agent(),
             clipboard: host_clipboard(),
             clipboard_permission_granted: true,
+            notification_permission: "default".to_string(),
             http_client: Client::new(),
             websocket_clients: HashMap::new(),
             next_websocket_id: 1,
@@ -2730,6 +2732,18 @@ impl JsRuntime {
     /// Clears a previously scheduled timer.
     pub fn clear_timer(&mut self, id: u64) {
         self.host_state.borrow_mut().event_loop.clear_timer(id);
+    }
+
+    /// Sets the deterministic Notification permission used by this runtime's
+    /// Window. Production page code cannot call this test/embedder hook; the
+    /// JavaScript bootstrap captures and removes the corresponding host
+    /// binding before scripts run.
+    pub fn set_notification_permission(&mut self, permission: &str) -> Result<(), String> {
+        if !matches!(permission, "default" | "granted" | "denied") {
+            return Err("invalid notification permission".to_string());
+        }
+        self.host_state.borrow_mut().notification_permission = permission.to_string();
+        Ok(())
     }
 
     /// Advances the event loop clock and runs due macrotasks and pending jobs.
@@ -4615,6 +4629,16 @@ fn register_host_bindings(
             NativeFunction::from_copy_closure(performance_now_native),
         ),
         (
+            js_string!("__omoikane_notification_permission"),
+            0,
+            NativeFunction::from_copy_closure(notification_permission_native),
+        ),
+        (
+            js_string!("__omoikane_notification_request_permission"),
+            0,
+            NativeFunction::from_copy_closure(notification_request_permission_native),
+        ),
+        (
             js_string!("__omoikane_crypto_random"),
             1,
             NativeFunction::from_copy_closure(crypto_random_native),
@@ -5321,6 +5345,30 @@ fn performance_now_native(
         Ok(JsValue::from(
             state.borrow().performance_start.elapsed().as_secs_f64() * 1_000.0,
         ))
+    })
+}
+
+fn notification_permission_native(
+    _this: &JsValue,
+    _args: &[JsValue],
+    _context: &mut Context,
+) -> JsResult<JsValue> {
+    with_host_state(|state| {
+        Ok(js_string!(state.borrow().notification_permission.as_str()).into())
+    })
+}
+
+fn notification_request_permission_native(
+    _this: &JsValue,
+    _args: &[JsValue],
+    _context: &mut Context,
+) -> JsResult<JsValue> {
+    with_host_state(|state| {
+        let mut state = state.borrow_mut();
+        if state.notification_permission == "default" {
+            state.notification_permission = "denied".to_string();
+        }
+        Ok(js_string!(state.notification_permission.as_str()).into())
     })
 }
 
@@ -20011,10 +20059,10 @@ b</textarea></form>"#);
         assert_eq!(eval_str(&mut runtime, "permissionResult"), "denied");
         assert_eq!(eval_str(&mut runtime, "Notification.permission"), "denied");
 
+        runtime.set_notification_permission("granted").unwrap();
         runtime
             .eval(
-                r#"__omoikane_set_notification_permission('granted');
-                   globalThis.notificationEvents = [];
+                r#"globalThis.notificationEvents = [];
                    globalThis.notification = new Notification('Hello', {
                      body: 'World', tag: 'tag', silent: null, data: { value: 7 }, actions: [{ action: 'open', title: 'Open' }]
                    });
@@ -20032,7 +20080,7 @@ b</textarea></form>"#);
         runtime.eval("notification.close(); notification.close();").unwrap();
         runtime.run_until_idle().unwrap();
         assert_eq!(eval_str(&mut runtime, "notificationEvents.join(',')"), "show,click,close");
-        runtime.eval("__omoikane_set_notification_permission('denied')").unwrap();
+        runtime.set_notification_permission("denied").unwrap();
         assert_eq!(eval_str(&mut runtime, "(() => { try { new Notification('blocked'); return 'constructible'; } catch (error) { return error.name; } })()"), "NotAllowedError");
     }
 
