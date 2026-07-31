@@ -5081,15 +5081,17 @@
       if (waiters.length) this.__mediaStartPlayback(waiters);
     }
 
-    __mediaBeginLoad(loadId, source) {
+    __mediaBeginLoad(loadId, source, rejectNoSource = false) {
       if (loadId !== this.__mediaLoadId) return;
       if (!source) {
-        this.__mediaFailure(
-          loadId,
-          MediaError.MEDIA_ERR_SRC_NOT_SUPPORTED,
-          "NotSupportedError",
-          "The element has no supported source.",
-        );
+        if (rejectNoSource) {
+          this.__mediaFailure(
+            loadId,
+            MediaError.MEDIA_ERR_SRC_NOT_SUPPORTED,
+            "NotSupportedError",
+            "The element has no supported source.",
+          );
+        }
         return;
       }
       const declaredType = mediaTypeToken(this.getAttribute("type"));
@@ -5139,7 +5141,7 @@
       }
     }
 
-    load() {
+    load(rejectNoSource = false) {
       const loadId = ++this.__mediaLoadId;
       this.__mediaCancelPlayback();
       this.__mediaRejectWaiters(new DOMException("The play() request was interrupted.", "AbortError"));
@@ -5152,14 +5154,14 @@
       this.__mediaNetworkState = this.__mediaCurrentSrc ? MEDIA_NETWORK_LOADING : MEDIA_NETWORK_NO_SOURCE;
       this.__mediaError = null;
       this.__mediaQueueEvent("loadstart", loadId);
-      queueMediaTask(() => this.__mediaBeginLoad(loadId, this.__mediaCurrentSrc));
+      queueMediaTask(() => this.__mediaBeginLoad(loadId, this.__mediaCurrentSrc, rejectNoSource));
     }
 
     play() {
       const source = this.src;
       return new Promise((resolve, reject) => {
         if (!source) {
-          this.load();
+          this.load(true);
           this.__mediaPlayWaiters.push({ resolve, reject });
           return;
         }

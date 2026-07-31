@@ -19536,6 +19536,27 @@ b</textarea></form>"#);
 
         runtime
             .eval(
+                r#"globalThis.emptyEvents = [];
+                   const empty = document.createElement('audio');
+                   empty.addEventListener('error', () => emptyEvents.push('error'));
+                   empty.load();
+                   globalThis.empty = empty;"#,
+            )
+            .unwrap();
+        runtime.run_until_idle().unwrap();
+        assert_eq!(eval_str(&mut runtime, "emptyEvents.join(',')"), "");
+        assert_eq!(eval_str(&mut runtime, "String(empty.error)"), "null");
+        runtime
+            .eval(
+                "globalThis.emptyPlayResult = 'pending'; empty.play().catch(error => { emptyPlayResult = error.name; });",
+            )
+            .unwrap();
+        runtime.run_until_idle().unwrap();
+        assert_eq!(eval_str(&mut runtime, "emptyPlayResult"), "NotSupportedError");
+        assert_eq!(eval_num(&mut runtime, "empty.error.code"), 4.0);
+
+        runtime
+            .eval(
                 r#"const attributeProbe = document.createElement('audio');
                    attributeProbe.setAttribute('muted', '');
                    attributeProbe.setAttribute('src', 'data:audio/mpeg,attribute');
