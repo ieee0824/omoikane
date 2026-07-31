@@ -33,6 +33,20 @@ pub(crate) enum Task {
     Timer(TimerPayload),
     Navigation(NavigationRequest),
     PostedMessage { port: JsValue, data: JsValue },
+    /// A message sent from a page-owned `Worker` to its dedicated worker.
+    WorkerMessage { worker_id: u64, data: String },
+    /// A message sent from a dedicated worker back to its owner page.
+    WorkerOwnerMessage {
+        worker_id: u64,
+        owner: JsValue,
+        data: String,
+    },
+    /// A worker startup/runtime failure reported to its owner page.
+    WorkerError {
+        worker_id: u64,
+        owner: Option<JsValue>,
+        message: String,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -111,6 +125,38 @@ impl EventLoop {
     /// Both values stay live until their event-loop turn runs.
     pub(crate) fn enqueue_posted_message(&mut self, port: JsValue, data: JsValue) {
         self.enqueue(TaskSource::PostedMessage, Task::PostedMessage { port, data });
+    }
+
+    pub(crate) fn enqueue_worker_message(&mut self, worker_id: u64, data: String) {
+        self.enqueue(TaskSource::PostedMessage, Task::WorkerMessage { worker_id, data });
+    }
+
+    pub(crate) fn enqueue_worker_owner_message(
+        &mut self,
+        worker_id: u64,
+        owner: JsValue,
+        data: String,
+    ) {
+        self.enqueue(
+            TaskSource::PostedMessage,
+            Task::WorkerOwnerMessage {
+                worker_id,
+                owner,
+                data,
+            },
+        );
+    }
+
+    pub(crate) fn enqueue_worker_error(
+        &mut self,
+        worker_id: u64,
+        owner: Option<JsValue>,
+        message: String,
+    ) {
+        self.enqueue(
+            TaskSource::PostedMessage,
+            Task::WorkerError { worker_id, owner, message },
+        );
     }
 
     pub(crate) fn pop_task(&mut self) -> Option<(TaskSource, Task)> {
