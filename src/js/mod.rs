@@ -19501,6 +19501,18 @@ b</textarea></form>"#);
 
         runtime
             .eval(
+                r#"const attributeProbe = document.createElement('audio');
+                   attributeProbe.setAttribute('muted', '');
+                   attributeProbe.setAttribute('src', 'data:audio/mpeg,attribute');
+                   globalThis.attributeProbe = attributeProbe;"#,
+            )
+            .unwrap();
+        runtime.run_until_idle().unwrap();
+        assert_eq!(eval_str(&mut runtime, "String(attributeProbe.muted)"), "true");
+        assert_eq!(eval_num(&mut runtime, "attributeProbe.readyState"), 4.0);
+
+        runtime
+            .eval(
                 r#"globalThis.badResult = 'pending';
                    const bad = document.createElement('audio');
                    bad.setAttribute('type', 'application/x-unsupported');

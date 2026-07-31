@@ -4918,8 +4918,13 @@
       return raw === null ? "" : __omoikane_resolve_url(raw);
     }
     set src(value) {
-      this.setAttribute("src", String(value));
+      super.setAttribute("src", String(value));
       this.load();
+    }
+    setAttribute(name, value) {
+      const attr = String(name).toLowerCase();
+      super.setAttribute(name, value);
+      if (attr === "src") this.load();
     }
     get currentSrc() { return this.__mediaCurrentSrc; }
     get currentTime() { return this.__mediaCurrentTime; }
@@ -4956,11 +4961,10 @@
       this.__mediaVolume = next;
       this.__mediaQueueEvent("volumechange");
     }
-    get muted() { return this.__mediaMuted; }
+    get muted() { return this.hasAttribute("muted"); }
     set muted(value) {
       const next = Boolean(value);
-      if (next === this.__mediaMuted) return;
-      this.__mediaMuted = next;
+      if (next === this.hasAttribute("muted")) return;
       if (next) this.setAttribute("muted", "");
       else this.removeAttribute("muted");
       this.__mediaQueueEvent("volumechange");
