@@ -8773,6 +8773,46 @@
     }
   }
 
+  // Notifications are modeled as a deterministic, task-queued lifecycle.
+  // Omoikane does not own an OS notification backend, so permission and
+  // show/click/close state remain observable in the realm without opening a
+  // platform window.  The engine hook below lets conformance tests inject a
+  // granted/denied decision without making page code responsible for a UI
+  // prompt.
+  const nativeNotificationPermission = globalThis.__omoikane_notification_permission;
+  const nativeNotificationRequestPermission = globalThis.__omoikane_notification_request_permission;
+  try { delete globalThis.__omoikane_notification_permission; } catch (_) {}
+  try { delete globalThis.__omoikane_notification_request_permission; } catch (_) {}
+  const notificationPermissionValues = new Set(["default", "granted", "denied"]);
+  const normalizeNotificationPermission = value => {
+    const normalized = String(value);
+    return notificationPermissionValues.has(normalized) ? normalized : "default";
+  };
+  const currentNotificationPermission = () => {
+    try {
+      return typeof nativeNotificationPermission === "function"
+        ? normalizeNotificationPermission(nativeNotificationPermission()) : "default";
+    } catch (_) {
+      return "default";
+    }
+  };
+  const requestNotificationPermission = () => {
+    try {
+      return typeof nativeNotificationRequestPermission === "function"
+        ? normalizeNotificationPermission(nativeNotificationRequestPermission())
+        : currentNotificationPermission();
+    } catch (_) {
+      return currentNotificationPermission();
+    }
+  };
+  const closedNotifications = new WeakSet();
+  const notificationTask = callback => {
+    if (typeof __omoikane_queue_dom_manipulation_task === "function") {
+      __omoikane_queue_dom_manipulation_task(callback);
+    } else {
+      setTimeout(callback, 0);
+    }
+  };
   // Web Audio is represented as a deterministic graph/state model.  The
   // runtime has no platform audio sink, but keeping context time, node
   // connections, AudioParam automation, and oscillator lifecycle observable
@@ -9048,6 +9088,98 @@
   globalThis.GainNode = GainNode;
   globalThis.OscillatorNode = OscillatorNode;
   globalThis.AudioContext = AudioContext;
+  function notificationOptionString(options, name, fallback = "") {
+    const value = options && options[name];
+    return value === undefined ? fallback : String(value);
+  }
+  function notificationOptionBoolean(options, name, fallback = false) {
+    return options && options[name] === undefined ? fallback : !!(options && options[name]);
+  }
+  class Notification extends EventTarget {
+    constructor(title, options = {}) {
+      super();
+      if (arguments.length < 1) throw new TypeError("Notification requires a title");
+      if (!nativeIsSecureContext()) {
+        throw new DOMException("Notifications require a secure context.", "NotAllowedError");
+      }
+      if (currentNotificationPermission() !== "granted") {
+        throw new DOMException("Notification permission is not granted.", "NotAllowedError");
+      }
+      const init = options === null || options === undefined ? {} : Object(options);
+      const direction = notificationOptionString(init, "dir", "auto").toLowerCase();
+      const data = init.data === undefined ? null : globalThis.structuredClone(init.data);
+      const actions = Array.isArray(init.actions)
+        ? init.actions.map(action => ({
+            action: notificationOptionString(action, "action"),
+            title: notificationOptionString(action, "title"),
+            icon: notificationOptionString(action, "icon"),
+          }))
+        : [];
+      const values = {
+        title: String(title),
+        dir: ["auto", "ltr", "rtl"].includes(direction) ? direction : "auto",
+        lang: notificationOptionString(init, "lang"),
+        body: notificationOptionString(init, "body"),
+        tag: notificationOptionString(init, "tag"),
+        image: notificationOptionString(init, "image"),
+        icon: notificationOptionString(init, "icon"),
+        badge: notificationOptionString(init, "badge"),
+        vibrate: init.vibrate === undefined ? [] : (Array.isArray(init.vibrate) ? init.vibrate.slice() : [init.vibrate]),
+        timestamp: init.timestamp === undefined ? Date.now() : Number(init.timestamp),
+        renotify: notificationOptionBoolean(init, "renotify"),
+        silent: notificationOptionBoolean(init, "silent"),
+        requireInteraction: notificationOptionBoolean(init, "requireInteraction"),
+        data,
+        actions,
+      };
+      for (const [name, value] of Object.entries(values)) {
+        Object.defineProperty(this, name, {
+          configurable: false,
+          enumerable: true,
+          writable: false,
+          value,
+        });
+      }
+      for (const type of ["show", "click", "error", "close"]) {
+        Object.defineProperty(this, "on" + type, {
+          configurable: true,
+          enumerable: false,
+          get: () => this["__on" + type] || null,
+          set: callback => { this["__on" + type] = typeof callback === "function" ? callback : null; },
+        });
+      }
+      notificationTask(() => {
+        if (!closedNotifications.has(this)) fireRealtimeEvent(this, new Event("show"));
+      });
+    }
+    close() {
+      if (closedNotifications.has(this)) return;
+      closedNotifications.add(this);
+      notificationTask(() => fireRealtimeEvent(this, new Event("close")));
+    }
+    get [Symbol.toStringTag]() { return "Notification"; }
+    static get permission() { return currentNotificationPermission(); }
+    static requestPermission(callback) {
+      const result = Promise.resolve().then(() => {
+        if (!nativeIsSecureContext()) {
+          throw new DOMException("Notifications require a secure context.", "NotAllowedError");
+        }
+        // There is no native prompt in this headless engine. A default
+        // decision therefore follows the browser's non-granting fallback.
+        return requestNotificationPermission();
+      });
+      if (typeof callback === "function") result.then(callback);
+      return result;
+    }
+  }
+  globalThis.Notification = Notification;
+  globalThis.__omoikane_dispatch_notification_click = notification => {
+    if (!(notification instanceof Notification) || closedNotifications.has(notification)) return false;
+    notificationTask(() => {
+      if (!closedNotifications.has(notification)) fireRealtimeEvent(notification, new Event("click"));
+    });
+    return true;
+  };
 
   class Animation extends EventTarget {
     constructor(target, keyframes, options = {}) {
@@ -9601,6 +9733,7 @@
       "GainNode", "OscillatorNode",
       "Geolocation", "GeolocationCoordinates", "GeolocationPosition",
       "GeolocationPositionError",
+      "Notification",
     ]) {
       try { delete globalThis[domName]; } catch (_) { globalThis[domName] = undefined; }
     }
@@ -9612,6 +9745,7 @@
     try { if (globalThis.navigator) delete globalThis.navigator.clipboard; } catch (_) {}
     try { if (globalThis.navigator) delete globalThis.navigator.geolocation; } catch (_) {}
     try { delete globalThis.Clipboard; } catch (_) { globalThis.Clipboard = undefined; }
+    try { delete globalThis.__omoikane_dispatch_notification_click; } catch (_) {}
     for (const name of ["Geolocation", "GeolocationCoordinates", "GeolocationPosition", "GeolocationPositionError"]) {
       try { delete globalThis[name]; } catch (_) { globalThis[name] = undefined; }
     }
@@ -10718,6 +10852,10 @@
         }
         if (Number(response.status) === 0 || Number(response.status) === 206) {
           throw new TypeError("Cache.put cannot store a partial response");
+        }
+        const vary = response.headers.get("vary");
+        if (vary !== null && vary.split(",").some(field => field.trim() === "*")) {
+          throw new TypeError("Cache.put cannot store a Vary: * response");
         }
         requestSnapshot = cacheRequestSnapshot(normalizedRequest);
         responseSnapshot = cacheResponseSnapshot(response);
