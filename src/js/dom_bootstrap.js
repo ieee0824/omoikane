@@ -9073,8 +9073,9 @@
     linearRampToValueAtTime(value, endTime) { return this.__schedule("linear", value, endTime); }
     exponentialRampToValueAtTime(value, endTime) {
       const numeric = audioNumber(value, "AudioParam value");
-      if (numeric <= 0 || this.value <= 0) throw new RangeError("Exponential values must be positive.");
-      return this.__schedule("exponential", numeric, endTime);
+      const at = audioTime(endTime, "AudioParam time");
+      if (numeric <= 0 || this.__valueAt(at) <= 0) throw new RangeError("Exponential values must be positive.");
+      return this.__schedule("exponential", numeric, at);
     }
     setTargetAtTime(target, startTime, timeConstant) {
       const value = audioNumber(target, "AudioParam target");
@@ -9138,6 +9139,25 @@
       if (destination === undefined) {
         this.__connections = [];
         return;
+      }
+      if (typeof destination === "number" && output === undefined && input === undefined) {
+        const outputNumber = Number(destination);
+        const outputIndex = Math.trunc(outputNumber);
+        if (!Number.isFinite(outputNumber) || outputIndex < 0 || outputIndex >= this.numberOfOutputs) {
+          throw new DOMException("The AudioNode output is invalid.", "IndexSizeError");
+        }
+        const before = this.__connections.length;
+        this.__connections = this.__connections.filter(connection => connection.output !== outputIndex);
+        if (this.__connections.length === before) {
+          throw new DOMException("The specified connection was not found.", "InvalidAccessError");
+        }
+        return;
+      }
+      if (!(destination instanceof AudioNode) && !(destination instanceof AudioParam)) {
+        throw new TypeError("AudioNode.disconnect destination must be an AudioNode or AudioParam");
+      }
+      if (destination.__context !== this.__context) {
+        throw new DOMException("Nodes belong to different AudioContexts.", "InvalidAccessError");
       }
       const hasOutput = output !== undefined;
       const hasInput = input !== undefined;
