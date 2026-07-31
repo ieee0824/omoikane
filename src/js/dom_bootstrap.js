@@ -4909,7 +4909,6 @@
       this.__mediaReadyState = MEDIA_HAVE_NOTHING;
       this.__mediaNetworkState = MEDIA_NETWORK_EMPTY;
       this.__mediaVolume = 1;
-      this.__mediaMuted = this.hasAttribute("muted");
       this.__mediaError = null;
     }
 
@@ -4936,13 +4935,20 @@
       const bounded = Number.isFinite(this.__mediaDuration)
         ? Math.min(Math.max(next, 0), this.__mediaDuration) : Math.max(next, 0);
       const changed = bounded !== this.__mediaCurrentTime;
-      this.__mediaCurrentTime = bounded;
-      this.__mediaEnded = Number.isFinite(this.__mediaDuration) &&
+      const wasPlaying = !this.__mediaPaused;
+      const reachedEnd = Number.isFinite(this.__mediaDuration) &&
         bounded >= this.__mediaDuration;
+      this.__mediaCurrentTime = bounded;
+      this.__mediaEnded = reachedEnd;
+      if (reachedEnd && wasPlaying) {
+        this.__mediaPaused = true;
+        this.__mediaCancelPlayback();
+      }
       if (changed) {
         this.__mediaQueueEvent("seeking");
         this.__mediaQueueEvent("timeupdate");
         this.__mediaQueueEvent("seeked");
+        if (reachedEnd && wasPlaying) this.__mediaQueueEvent("ended");
         if (!this.__mediaPaused && !this.__mediaEnded) this.__mediaScheduleEnd();
       }
     }

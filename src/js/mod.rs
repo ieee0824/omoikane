@@ -19501,6 +19501,28 @@ b</textarea></form>"#);
 
         runtime
             .eval(
+                r#"const seekProbe = document.createElement('audio');
+                   seekProbe.src = 'data:audio/mpeg,seek-end';
+                   seekProbe.play();
+                   globalThis.seekProbe = seekProbe;"#,
+            )
+            .unwrap();
+        runtime.run_until_idle().unwrap();
+        runtime.eval("seekProbe.currentTime = seekProbe.duration").unwrap();
+        runtime.run_until_idle().unwrap();
+        assert_eq!(
+            eval_str(&mut runtime, "[seekProbe.paused, seekProbe.ended, seekProbe.currentTime].join('|')"),
+            "true|true|1"
+        );
+        runtime.eval("seekProbe.play()").unwrap();
+        runtime.run_until_idle().unwrap();
+        assert_eq!(
+            eval_str(&mut runtime, "[seekProbe.paused, seekProbe.ended, seekProbe.currentTime].join('|')"),
+            "false|false|0"
+        );
+
+        runtime
+            .eval(
                 r#"const attributeProbe = document.createElement('audio');
                    attributeProbe.setAttribute('muted', '');
                    attributeProbe.setAttribute('src', 'data:audio/mpeg,attribute');
