@@ -2262,6 +2262,9 @@ impl BrowserSessionState {
 pub struct BrowserSession {
     server: CdpServer,
     state: Rc<RefCell<BrowserSessionState>>,
+    /// The first attached CDP client owns the page runtime. A secondary
+    /// observer disconnect must not cancel the owner's dialogs or workers.
+    owner_client_id: Option<u64>,
 }
 
 impl BrowserSession {
@@ -2317,17 +2320,28 @@ impl BrowserSession {
             Ok(json!({ "product": "Omoikane/0.1", "protocolVersion": "1.3" }))
         });
 
-        Ok(Self { server, state })
+        Ok(Self {
+            server,
+            state,
+            owner_client_id: None,
+        })
     }
 
     pub fn accept_upgrade(&mut self, request: &str) -> Result<WebSocketUpgrade, CdpError> {
-        self.server.accept_upgrade(request)
+        let upgrade = self.server.accept_upgrade(request)?;
+        if self.owner_client_id.is_none() {
+            self.owner_client_id = Some(upgrade.client_id);
+        }
+        Ok(upgrade)
     }
 
     pub fn receive(&mut self, client_id: u64, bytes: &[u8]) -> Result<(), CdpError> {
         let owner_disconnect = WebSocketFrame::decode(bytes)
             .ok()
-            .is_some_and(|(frame, _)| frame.opcode == WebSocketOpcode::Close);
+            .is_some_and(|(frame, _)| {
+                frame.opcode == WebSocketOpcode::Close
+                    && self.owner_client_id == Some(client_id)
+            });
         if owner_disconnect {
             let mut state = self.state.borrow_mut();
             state.cancel_pending_dialog();
@@ -2336,6 +2350,9 @@ impl BrowserSession {
             }
         }
         self.server.receive(client_id, bytes)?;
+        if owner_disconnect {
+            self.owner_client_id = None;
+        }
         self.flush_actions()
     }
 
@@ -3466,6 +3483,41 @@ mod tests {
             value["id"] == 2
                 && value["result"]["result"]["value"] == "undefined"
         }));
+    }
+
+    #[test]
+    fn observer_disconnect_does_not_cancel_owner_dialog() {
+        let mut session = BrowserSession::new().unwrap();
+        let owner = session.accept_upgrade(sample_upgrade_request()).unwrap();
+        let observer = session.accept_upgrade(sample_upgrade_request()).unwrap();
+        browser_request(
+            &mut session,
+            owner.client_id,
+            r#"{"jsonrpc":"2.0","id":"eval","method":"Runtime.evaluate","params":{"expression":"alert('keep pending')"}}"#,
+        );
+        browser_payloads(&mut session, owner.client_id);
+        browser_payloads(&mut session, observer.client_id);
+
+        session
+            .receive(
+                observer.client_id,
+                &WebSocketFrame {
+                    fin: true,
+                    opcode: WebSocketOpcode::Close,
+                    payload: Vec::new(),
+                }
+                .encode(true),
+            )
+            .unwrap();
+        assert_eq!(session.pending_response_count(), 1);
+
+        browser_request(
+            &mut session,
+            owner.client_id,
+            r#"{"jsonrpc":"2.0","id":"handle","method":"Page.handleJavaScriptDialog","params":{"accept":true}}"#,
+        );
+        let payloads = browser_payloads(&mut session, owner.client_id);
+        assert!(payloads.iter().any(|value| value["id"] == "eval"));
     }
 
     #[test]

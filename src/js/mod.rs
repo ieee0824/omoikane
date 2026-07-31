@@ -2811,7 +2811,7 @@ impl JsRuntime {
             let runtime = &mut worker.runtime;
             runtime.install_worker_message_values(data)?;
             let result = runtime.eval(
-                "if (!self.__omoikane_worker_terminated) { self.dispatchEvent(new MessageEvent('message', { data: __omoikane_worker_message_data, origin: '', source: null, ports: [] })); }",
+                "self.dispatchEvent(new MessageEvent('message', { data: __omoikane_worker_message_data, origin: '', source: null, ports: [] }));",
             );
             runtime.clear_worker_message_values()?;
             let jobs_result = runtime.run_jobs();
@@ -6393,7 +6393,11 @@ fn terminate_worker_native(
 ) -> JsResult<JsValue> {
     let id = args.first().cloned().unwrap_or_default().to_number(context)? as u64;
     with_host_state(|state| {
-        if let Some(entry) = state.borrow().workers.get(&id).cloned() {
+        // Removing the entry breaks the owner/worker Rc cycle immediately. Any
+        // already queued tasks retain only the id and become harmless no-ops
+        // when the owner map lookup below fails.
+        let entry = state.borrow_mut().workers.remove(&id);
+        if let Some(entry) = entry {
             let mut worker = entry.borrow_mut();
             worker.terminated = true;
             worker.incoming.clear();
@@ -8428,6 +8432,7 @@ mod tests {
                  worker.postMessage('message'); worker.terminate();",
             )
             .unwrap();
+        assert_eq!(runtime.host_state.borrow().workers.len(), 0);
         runtime.tick(10).unwrap();
         assert_eq!(runtime.eval("workerValues.length").unwrap().as_number(), Some(0.0));
     }
