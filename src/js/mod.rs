@@ -1099,13 +1099,11 @@ impl HostState {
         // new one, so stale nodes are released and their ids stop resolving
         // instead of leaking across reloads. The top-level sub-document's style
         // cache entry is dropped too, so the reloaded document does not inherit
-        // the old document's resolver. Cleanup is not recursive: iframes nested
-        // inside the discarded sub-document keep their `iframe_documents` /
-        // `document_styles` entries (tracked in issue 049).
+        // the old document's resolver. The node registry and per-root adopted
+        // stylesheet snapshots are cleaned recursively; caches for nested
+        // iframe metadata remain tracked in issue 049.
         if let Some(previous) = self.iframe_documents.remove(&iframe_id) {
             self.document_styles.remove(&previous.document.identity());
-            self.adopted_stylesheets
-                .remove(&previous.document.identity());
             self.document_origins.remove(&previous.document.identity());
             self.document_csp.remove(&previous.document.identity());
             self.csp_violations
@@ -1265,9 +1263,11 @@ impl HostState {
     ///
     /// Called when an iframe reloads (its `src` changed) so the previous
     /// sub-document tree is released and its ids can no longer be resolved,
-    /// preventing stale nodes from accumulating in the registry across reloads.
+    /// preventing stale nodes and adopted stylesheet snapshots from
+    /// accumulating across reloads.
     fn unregister_tree(&mut self, node: &NodeHandle) {
         self.nodes.remove(&node.identity());
+        self.adopted_stylesheets.remove(&node.identity());
         if let Some(content) = node.template_content() {
             self.unregister_tree(&content);
         }
@@ -3679,9 +3679,6 @@ impl JsRuntime {
                             let previous = state.iframe_documents.remove(&node_id);
                             if let Some(previous) = previous.as_ref() {
                                 state.document_styles.remove(&previous.document.identity());
-                                state
-                                    .adopted_stylesheets
-                                    .remove(&previous.document.identity());
                                 state.document_origins.remove(&previous.document.identity());
                                 state.document_csp.remove(&previous.document.identity());
                                 state.csp_violations.retain(|violation| {

@@ -4436,7 +4436,7 @@
           commit(candidate);
           return true;
         }
-        return Reflect.set(target, property, value, target);
+        return Reflect.set(target, property, value, receiver);
       },
       defineProperty(target, property, descriptor) {
         const index = observableArrayIndex(property);
