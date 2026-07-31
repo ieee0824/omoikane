@@ -1087,6 +1087,7 @@ impl HostState {
         };
         self.register_tree(&document);
         self.document_origins.insert(document.identity(), origin);
+        let inherits_owner_csp = src.is_empty() || src.eq_ignore_ascii_case("about:blank");
         // `data:` documents have an opaque origin.  They must not inherit the
         // embedding document's URL as the CSP base, otherwise `'self'` in a
         // meta policy would incorrectly match the parent origin.
@@ -1102,11 +1103,14 @@ impl HostState {
                 .or_else(|| self.base_url.as_ref().map(ToString::to_string))
                 .unwrap_or_default()
         };
-        let policy = CspPolicy::from_headers_and_document(
-            &csp_headers,
-            &document,
-            &policy_base,
-        );
+        let policy = if inherits_owner_csp {
+            owner_document_for_node(iframe)
+                .or_else(|| Some(self.document.clone()))
+                .and_then(|owner| self.document_csp.get(&owner.identity()).cloned())
+                .unwrap_or_default()
+        } else {
+            CspPolicy::from_headers_and_document(&csp_headers, &document, &policy_base)
+        };
         self.document_csp.insert(document.identity(), policy);
         // Seed a dirty style cache entry for the freshly loaded sub-document so
         // its resolver is built from its own `<style>` rules on first query.
@@ -14514,6 +14518,27 @@ b</textarea></form>"#);
             ),
             "https://example.test/app.js"
         );
+    }
+
+    #[test]
+    fn csp_about_blank_iframe_inherits_owner_policy() {
+        let mut runtime = runtime_from_html("<html><head></head><body></body></html>");
+        runtime.install_csp_policy(&["script-src 'none'".to_string()]);
+        runtime
+            .eval(
+                "globalThis.frame = document.createElement('iframe'); document.body.appendChild(frame);",
+            )
+            .unwrap();
+        runtime.run_until_idle().unwrap();
+        runtime
+            .eval(
+                "const script = frame.contentDocument.createElement('script'); script.src = 'data:text/javascript,globalThis.blankRan = true'; frame.contentDocument.head.appendChild(script);",
+            )
+            .unwrap();
+        runtime.run_until_idle().unwrap();
+
+        assert_eq!(eval_str(&mut runtime, "String(frame.contentDocument.cspViolations.length)"), "1");
+        assert_eq!(eval_str(&mut runtime, "typeof globalThis.blankRan"), "undefined");
     }
 
     #[test]
