@@ -364,11 +364,10 @@ fn parse_source_expression(token: &str) -> Option<SourceExpression> {
         };
         (host.to_string(), port)
     } else if let Some((host, port)) = authority.rsplit_once(':') {
-        if port.is_empty() {
-            (authority.to_string(), None)
-        } else {
-            (host.to_string(), port.parse::<u16>().ok())
+        if host.is_empty() || port.is_empty() {
+            return None;
         }
+        (host.to_string(), Some(port.parse::<u16>().ok()?))
     } else {
         (authority.to_string(), None)
     };
@@ -532,5 +531,12 @@ mod tests {
                 path: None,
             }
         );
+    }
+
+    #[test]
+    fn invalid_host_source_ports_are_ignored() {
+        assert!(parse_source_expression("example.com:").is_none());
+        assert!(parse_source_expression("example.com:not-a-port").is_none());
+        assert!(parse_source_expression("example.com:65536").is_none());
     }
 }

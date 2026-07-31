@@ -47,6 +47,7 @@ use event_loop::{EventLoop, Task};
 /// Most page-script task errors retained per drain. See
 /// [`JsRuntime::record_task_error`].
 const MAX_TASK_ERRORS: usize = 32;
+const MAX_CSP_VIOLATIONS: usize = 1024;
 
 thread_local! {
     static ACTIVE_HOST_STATE: RefCell<Option<Rc<RefCell<HostState>>>> = const { RefCell::new(None) };
@@ -683,6 +684,7 @@ struct HostState {
     /// replaces the entry before any page script executes.
     document_csp: HashMap<usize, CspPolicy>,
     csp_violations: Vec<CspViolation>,
+    csp_violation_keys: HashSet<(usize, String, String)>,
     /// Dedicated workers owned by this global. The map lives on the page
     /// global; worker globals instead hold `worker_owner` and `worker_id`.
     workers: HashMap<u64, Rc<RefCell<WorkerRuntime>>>,
@@ -860,6 +862,7 @@ impl HostState {
             document_origins,
             document_csp: HashMap::from([(document.identity(), CspPolicy::default())]),
             csp_violations: Vec::new(),
+            csp_violation_keys: HashSet::new(),
             workers: HashMap::new(),
             next_worker_id: 1,
             worker_owner: None,
@@ -991,6 +994,8 @@ impl HostState {
             self.document_csp.remove(&previous.document.identity());
             self.csp_violations
                 .retain(|violation| violation.document_id != previous.document.identity());
+            self.csp_violation_keys
+                .retain(|(document_id, _, _)| *document_id != previous.document.identity());
             self.unregister_tree(&previous.document);
         }
 
@@ -1167,13 +1172,13 @@ impl HostState {
         let blocked_uri = blocked_uri.into();
         let document_id = document.identity();
         let directive = resource_type.directive().to_string();
-        if self.csp_violations.iter().any(|violation| {
-            violation.document_id == document_id
-                && violation.effective_directive == directive
-                && violation.blocked_uri == blocked_uri
-        }) {
+        let key = (document_id, directive.clone(), blocked_uri.clone());
+        if self.csp_violation_keys.contains(&key)
+            || self.csp_violation_keys.len() >= MAX_CSP_VIOLATIONS
+        {
             return;
         }
+        self.csp_violation_keys.insert(key);
         self.csp_violations.push(CspViolation {
             document_id,
             effective_directive: directive,
@@ -1203,29 +1208,23 @@ impl HostState {
         let Some(document) = document_root_for_node(node) else {
             return;
         };
-        let policy = self.csp_policy_for_document(&document);
-        let blocked = if policy.allows_inline(ResourceType::Style) {
-            HashSet::new()
-        } else {
-            let mut blocked = HashSet::new();
-            for element in collect_element_nodes(&document) {
-                if element.get_attribute("style").is_some() {
-                    self.record_csp_violation(
-                        &document,
-                        ResourceType::Style,
-                        format!("style-attribute:{}", element.identity()),
-                    );
-                    blocked.insert(element.identity());
-                }
-            }
-            blocked
-        };
+        let blocked = !self
+            .csp_policy_for_document(&document)
+            .allows_inline(ResourceType::Style)
+            && node.get_attribute("style").is_some();
+        if blocked {
+            self.record_csp_violation(
+                &document,
+                ResourceType::Style,
+                format!("style-attribute:{}", node.identity()),
+            );
+        }
         if let Some(resolver) = self
             .document_styles
             .get_mut(&document.identity())
             .and_then(|entry| entry.resolver.as_mut())
         {
-            resolver.set_blocked_inline_style_nodes(blocked);
+            resolver.set_blocked_inline_style_node(node.identity(), blocked);
         }
     }
 
@@ -3397,6 +3396,9 @@ impl JsRuntime {
                                 state.document_csp.remove(&previous.document.identity());
                                 state.csp_violations.retain(|violation| {
                                     violation.document_id != previous.document.identity()
+                                });
+                                state.csp_violation_keys.retain(|(document_id, _, _)| {
+                                    *document_id != previous.document.identity()
                                 });
                                 state.unregister_tree(&previous.document);
                             }

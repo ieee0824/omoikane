@@ -333,6 +333,18 @@ impl StyleResolver {
         }
     }
 
+    /// Updates one CSP-filtered inline-style entry after a `style` attribute
+    /// mutation. The caller invalidates the owning document's computed-style
+    /// cache separately, so this operation does not rescan or clear unrelated
+    /// resolver state.
+    pub(crate) fn set_blocked_inline_style_node(&mut self, node_id: usize, blocked: bool) {
+        if blocked {
+            self.blocked_inline_style_nodes.insert(node_id);
+        } else {
+            self.blocked_inline_style_nodes.remove(&node_id);
+        }
+    }
+
     #[cfg(test)]
     pub(crate) fn invalidate_style_cache_for_test(&mut self) {
         self.invalidate_style_cache();
