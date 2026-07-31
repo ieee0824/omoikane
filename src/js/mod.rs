@@ -5329,13 +5329,32 @@ fn is_secure_context_url(url: &str) -> bool {
             .is_ok_and(|address| address.octets()[0] == 127)
 }
 
+fn is_secure_context_parsed_url(url: &crate::http::Url) -> bool {
+    if url.scheme().eq_ignore_ascii_case("https") {
+        return true;
+    }
+    if !url.scheme().eq_ignore_ascii_case("http") {
+        return false;
+    }
+    let host = url.host();
+    host.eq_ignore_ascii_case("localhost")
+        || host
+            .parse::<std::net::Ipv4Addr>()
+            .is_ok_and(|address| address.octets()[0] == 127)
+}
+
 fn host_is_secure_context(state: &HostState) -> bool {
-    let url = state
-        .base_url
-        .as_ref()
-        .map(ToString::to_string)
-        .unwrap_or_else(|| state.location_href.clone());
-    is_secure_context_url(&url)
+    // The base URL is already parsed and is the canonical origin used by the
+    // runtime. Avoid formatting and reparsing it on every secure-context or
+    // clipboard check. The lightweight URL type does not model fragments, so
+    // retain the string path for fragment-bearing URLs (and IPv6 loopback,
+    // which is handled by its dedicated fast path).
+    if let Some(base_url) = state.base_url.as_ref()
+        && !state.location_href.contains('#')
+    {
+        return is_secure_context_parsed_url(base_url);
+    }
+    is_secure_context_url(&state.location_href)
 }
 
 fn is_secure_context_native(
