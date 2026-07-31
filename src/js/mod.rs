@@ -7288,17 +7288,18 @@ fn set_adopted_stylesheets_native(
                 .with_message("adoptedStyleSheets root must be a Document or ShadowRoot")
                 .into());
         }
-        let document = document_root_for_node(&root).ok_or_else(|| {
-            JsError::from(
-                JsNativeError::error().with_message("adoptedStyleSheets root is detached"),
-            )
-        })?;
+        // A ShadowRoot may be configured before its host is connected. Keep
+        // the snapshot in that detached tree; style invalidation can start
+        // once the host is inserted into a document.
+        let document = document_root_for_node(&root);
         if stylesheets.is_empty() {
             host.adopted_stylesheets.remove(&root_id);
         } else {
             host.adopted_stylesheets.insert(root_id, stylesheets);
         }
-        host.mark_document_style_dirty(&document);
+        if let Some(document) = document {
+            host.mark_document_style_dirty(&document);
+        }
         Ok(JsValue::undefined())
     })
 }
@@ -22358,6 +22359,16 @@ b</textarea></form>"#);
                 document.adoptedStyleSheets = [sheet];
                 const host = document.getElementById('host');
                 const root = host.attachShadow({ mode: 'open' });
+                const detachedHost = document.createElement('div');
+                const detachedRoot = detachedHost.attachShadow({ mode: 'open' });
+                const detachedSheet = new CSSStyleSheet();
+                detachedSheet.replaceSync('.detached { height: 27px; }');
+                detachedRoot.adoptedStyleSheets = [detachedSheet];
+                const detached = document.createElement('span');
+                detached.className = 'detached';
+                detachedRoot.appendChild(detached);
+                document.body.appendChild(detachedHost);
+                const detachedHeight = getComputedStyle(detached).height;
                 const shadowSheet = new CSSStyleSheet();
                 shadowSheet.replaceSync('.inside { height: 19px; }');
                 root.adoptedStyleSheets = [shadowSheet];
@@ -22386,14 +22397,14 @@ b</textarea></form>"#);
                     nonConstructedError = error.name;
                 }
                 return [sheet.ownerNode === null, document.adoptedStyleSheets[0] === sheet,
-                    before, shadowBefore, sharedDocument, sharedShadow, listIdentity, reverseReturnsList,
+                    detachedHeight, before, shadowBefore, sharedDocument, sharedShadow, listIdentity, reverseReturnsList,
                     nonConstructedError, after, sheet.cssRules.length,
                     typeof sheet.replace === 'function'].join('|');
             })()"#,
         );
         assert_eq!(
             result,
-            "true|false|41px|19px|41px|29px|true|true|NotAllowedError|23px|2|true"
+            "true|false|27px|41px|19px|41px|29px|true|true|NotAllowedError|23px|2|true"
         );
         runtime.eval("document.adoptedStyleSheets = []").unwrap();
         let document_id = runtime.host_state.borrow().document.identity();
