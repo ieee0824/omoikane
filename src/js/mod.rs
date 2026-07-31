@@ -29644,5 +29644,20 @@ b</textarea></form>"#);
         );
         other_origin.run_until_idle().unwrap();
         assert_eq!(eval_str(&mut other_origin, "cacheNames.length"), "0");
+
+        let mut opaque_origin = JsRuntime::with_document_url_and_storage(
+            default_document(),
+            "data:text/html,<p>opaque</p>",
+            StorageManager::new(),
+            1,
+        )
+        .unwrap();
+        eval_str(
+            &mut opaque_origin,
+            "(() => { globalThis.cacheError = ''; caches.open('opaque').then(() => { cacheError = 'resolved'; }, error => { cacheError = error.name; }); })()",
+        );
+        assert_eq!(eval_str(&mut opaque_origin, "cacheError"), "");
+        opaque_origin.run_until_idle().unwrap();
+        assert_eq!(eval_str(&mut opaque_origin, "cacheError"), "SecurityError");
     }
 }

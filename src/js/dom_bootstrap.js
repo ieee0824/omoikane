@@ -10081,15 +10081,25 @@
   //
   // Cache and CacheStorage objects are realm-local wrappers around a native
   // origin-partitioned snapshot store.  A cache operation is deliberately
-  // delivered through the networking task source: callers observe a pending
-  // Promise until the next event-loop turn, and Promise reactions run at the
-  // normal checkpoint after that task.  Only JSON snapshots cross the native
+  // delivered through the networking task source: native-boundary operations
+  // observe a pending Promise until the next event-loop turn, and Promise
+  // reactions run at the normal checkpoint after that task.  Input validation
+  // may reject before a task is queued.  Only JSON snapshots cross the native
   // boundary; Request/Response objects and their bodies never do.
 
   const CACHE_CONSTRUCTION_TOKEN = {};
   const CACHE_STORAGE_CONSTRUCTION_TOKEN = {};
 
   function cacheNative(operation, name = "", payload = "") {
+    // Window realms use the same origin validation as Web Storage.  Keep this
+    // inside the networking task callback (all callers reach this helper from
+    // queueCacheTask) so opaque-origin failures reject the operation's Promise
+    // with the standard SecurityError DOMException.  Dedicated workers do not
+    // expose `document`; their host-side binding still applies the worker
+    // origin partition and validation.
+    if (typeof document !== "undefined" && document) {
+      storageOrigin(document);
+    }
     const raw = __omoikane_cache_storage(
       String(operation),
       String(name),

@@ -170,14 +170,18 @@ impl StorageManager {
         {
             let storage = state.caches.get_mut(origin)?;
             let cache = storage.caches.iter_mut().find(|cache| cache.name == name)?;
-            if let Some(existing) = cache
-                .entries
-                .iter_mut()
-                .find(|entry| cache_request_replacement_key(&entry.request) == request_key)
-            {
-                existing.request = request;
-                existing.response = response;
-                return Some(existing.id);
+            // A malformed snapshot has no stable replacement key.  Do not
+            // let the empty sentinel collide with another malformed entry.
+            if request_key != (String::new(), String::new()) {
+                if let Some(existing) = cache
+                    .entries
+                    .iter_mut()
+                    .find(|entry| cache_request_replacement_key(&entry.request) == request_key)
+                {
+                    existing.request = request;
+                    existing.response = response;
+                    return Some(existing.id);
+                }
             }
         }
 
@@ -373,6 +377,16 @@ mod tests {
         assert_eq!(first_id, replacement_id);
         assert_eq!(manager.cache_entries(&first, "v1").unwrap().len(), 1);
         assert_eq!(manager.cache_entries(&first, "v1").unwrap()[0].response, r#"{"status":201}"#);
+
+        let malformed_id = manager
+            .cache_put(&first, "v1", "not-json".to_string(), "{}".to_string())
+            .unwrap();
+        let second_malformed_id = manager
+            .cache_put(&first, "v1", "still-not-json".to_string(), "{}".to_string())
+            .unwrap();
+        assert_ne!(malformed_id, second_malformed_id);
+        assert_eq!(manager.cache_entries(&first, "v1").unwrap().len(), 3);
+
         assert!(manager.cache_delete(&first, "v1"));
         assert!(!manager.cache_has(&first, "v1"));
     }
