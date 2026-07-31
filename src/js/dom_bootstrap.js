@@ -7818,6 +7818,161 @@
     return cloneStructuredValue(value, new Map());
   };
 
+  // Dedicated workers execute in a separate Boa realm. Passing a JsValue
+  // object directly between those realms would retain the sender's
+  // prototypes, so worker messages use this context-independent wire format.
+  // The graph table preserves cycles, shared references, and the structured
+  // clone built-ins supported above; the destination reconstructs every object
+  // with its own realm's constructors and prototypes.
+  function encodeWorkerNumber(value) {
+    if (Number.isNaN(value)) return "NaN";
+    if (value === Infinity) return "Infinity";
+    if (value === -Infinity) return "-Infinity";
+    if (Object.is(value, -0)) return "-0";
+    return String(value);
+  }
+
+  function decodeWorkerNumber(value) {
+    if (value === "NaN") return NaN;
+    if (value === "Infinity") return Infinity;
+    if (value === "-Infinity") return -Infinity;
+    if (value === "-0") return -0;
+    return Number(value);
+  }
+
+  function encodeWorkerMessage(value, options = undefined) {
+    const cloned = globalThis.structuredClone(value, options);
+    const nodes = [];
+    const memory = new Map();
+    const visit = item => {
+      if (item === undefined) return ["u"];
+      if (item === null) return ["z"];
+      switch (typeof item) {
+        case "boolean": return ["b", item];
+        case "number": return ["n", encodeWorkerNumber(item)];
+        case "string": return ["s", item];
+        case "bigint": return ["i", String(item)];
+        default: break;
+      }
+      const known = memory.get(item);
+      if (known !== undefined) return ["r", known];
+      const id = nodes.length;
+      memory.set(item, id);
+      nodes.push(null);
+      if (item instanceof Date) {
+        nodes[id] = ["d", encodeWorkerNumber(item.getTime())];
+      } else if (item instanceof RegExp) {
+        nodes[id] = ["x", item.source, item.flags];
+      } else if (item instanceof ArrayBuffer) {
+        nodes[id] = ["q", Array.from(new Uint8Array(item))];
+      } else if (ArrayBuffer.isView(item)) {
+        const name = item instanceof DataView ? "DataView" : item.constructor.name;
+        nodes[id] = ["v", name, visit(item.buffer), item.byteOffset,
+          item instanceof DataView ? item.byteLength : item.length];
+      } else if (item instanceof Map) {
+        nodes[id] = ["m", Array.from(item, pair => [visit(pair[0]), visit(pair[1])])];
+      } else if (item instanceof Set) {
+        nodes[id] = ["t", Array.from(item, entry => visit(entry))];
+      } else if (Array.isArray(item)) {
+        const entries = [];
+        for (let index = 0; index < item.length; index++) {
+          if (Object.prototype.hasOwnProperty.call(item, index)) entries.push([index, visit(item[index])]);
+        }
+        nodes[id] = ["a", item.length, entries];
+      } else {
+        const prototype = Object.getPrototypeOf(item);
+        if (prototype !== Object.prototype && prototype !== null) throw dataCloneError();
+        if (Object.getOwnPropertySymbols(item).length) throw dataCloneError();
+        nodes[id] = ["o", prototype === null ? 0 : 1,
+          Object.keys(item).map(key => [key, visit(item[key])])];
+      }
+      return ["r", id];
+    };
+    return JSON.stringify({ version: 1, root: visit(cloned), nodes });
+  }
+
+  function decodeWorkerMessage(wire) {
+    const encoded = JSON.parse(String(wire));
+    if (!encoded || encoded.version !== 1 || !Array.isArray(encoded.nodes)) throw dataCloneError();
+    const nodes = encoded.nodes;
+    const objects = new Array(nodes.length);
+    const resolvePrimitive = token => {
+      if (!Array.isArray(token)) throw dataCloneError();
+      switch (token[0]) {
+        case "u": return undefined;
+        case "z": return null;
+        case "b": return !!token[1];
+        case "n": return decodeWorkerNumber(token[1]);
+        case "s": return String(token[1]);
+        case "i": return BigInt(token[1]);
+        case "r": {
+          const object = objects[token[1]];
+          if (object === undefined) throw dataCloneError();
+          return object;
+        }
+        default: throw dataCloneError();
+      }
+    };
+    for (let index = 0; index < nodes.length; index++) {
+      const node = nodes[index];
+      if (!Array.isArray(node)) throw dataCloneError();
+      switch (node[0]) {
+        case "d": objects[index] = new Date(decodeWorkerNumber(node[1])); break;
+        case "x": objects[index] = new RegExp(String(node[1]), String(node[2])); break;
+        case "q": objects[index] = new Uint8Array(node[1]).buffer; break;
+        case "m": objects[index] = new Map(); break;
+        case "t": objects[index] = new Set(); break;
+        case "a": objects[index] = new Array(node[1]); break;
+        case "o": objects[index] = Object.create(node[1] === 0 ? null : Object.prototype); break;
+        case "v": break;
+        default: throw dataCloneError();
+      }
+    }
+    const typedArrayConstructors = {
+      Int8Array, Uint8Array, Uint8ClampedArray, Int16Array, Uint16Array,
+      Int32Array, Uint32Array, Float32Array, Float64Array, BigInt64Array,
+      BigUint64Array,
+    };
+    for (let index = 0; index < nodes.length; index++) {
+      const node = nodes[index];
+      if (node[0] !== "v") continue;
+      const buffer = resolvePrimitive(node[2]);
+      if (!(buffer instanceof ArrayBuffer)) throw dataCloneError();
+      if (node[1] === "DataView") {
+        objects[index] = new DataView(buffer, node[3], node[4]);
+      } else {
+        const Constructor = typedArrayConstructors[node[1]];
+        if (!Constructor) throw dataCloneError();
+        objects[index] = new Constructor(buffer, node[3], node[4]);
+      }
+    }
+    for (let index = 0; index < nodes.length; index++) {
+      const node = nodes[index];
+      const target = objects[index];
+      switch (node[0]) {
+        case "m":
+          for (const pair of node[1]) target.set(resolvePrimitive(pair[0]), resolvePrimitive(pair[1]));
+          break;
+        case "t":
+          for (const entry of node[1]) target.add(resolvePrimitive(entry));
+          break;
+        case "a":
+          for (const pair of node[2]) target[pair[0]] = resolvePrimitive(pair[1]);
+          break;
+        case "o":
+          for (const pair of node[2]) Object.defineProperty(target, pair[0], {
+            value: resolvePrimitive(pair[1]), enumerable: true, writable: true, configurable: true,
+          });
+          break;
+        default: break;
+      }
+    }
+    return resolvePrimitive(encoded.root);
+  }
+
+  globalThis.__omoikane_encode_worker_message = encodeWorkerMessage;
+  globalThis.__omoikane_decode_worker_message = decodeWorkerMessage;
+
   const messagePortConstructionToken = {};
   class MessagePort extends EventTarget {
     constructor(token) {
@@ -7906,7 +8061,7 @@
     }
     postMessage(message, options = undefined) {
       if (this.__terminated) return;
-      const data = globalThis.structuredClone(message, options);
+      const data = __omoikane_encode_worker_message(message, options);
       __omoikane_worker_post_message(this.__id, data);
     }
     terminate() {
@@ -7993,7 +8148,7 @@
       },
     });
     globalThis.postMessage = function(message, options = undefined) {
-      const data = globalThis.structuredClone(message, options);
+      const data = __omoikane_encode_worker_message(message, options);
       __omoikane_worker_owner_post_message(workerId, data);
     };
     globalThis.close = function() {

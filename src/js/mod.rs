@@ -621,7 +621,7 @@ struct HostState {
     worker_terminated: bool,
     worker_owner_bound: bool,
     worker_owner_object: Option<JsValue>,
-    worker_startup_outgoing: VecDeque<JsValue>,
+    worker_startup_outgoing: VecDeque<String>,
 }
 
 #[derive(Debug)]
@@ -643,7 +643,7 @@ struct WorkerRuntime {
     runtime: JsRuntime,
     owner_state: Rc<RefCell<HostState>>,
     owner_object: Option<JsValue>,
-    outgoing: VecDeque<JsValue>,
+    outgoing: VecDeque<String>,
     startup_error: Option<String>,
     terminated: bool,
     generation: u64,
@@ -2829,7 +2829,7 @@ impl JsRuntime {
         }
     }
 
-    fn run_worker_message(&mut self, worker_id: u64, data: JsValue) -> JsResult<()> {
+    fn run_worker_message(&mut self, worker_id: u64, data: String) -> JsResult<()> {
         let entry = self.host_state.borrow_mut().workers.remove(&worker_id);
         let Some(entry) = entry else { return Ok(()); };
         let mut worker = entry.borrow_mut();
@@ -2841,7 +2841,7 @@ impl JsRuntime {
             let runtime = &mut worker.runtime;
             runtime.install_worker_message_values(data)?;
             let result = runtime.eval(
-                "self.dispatchEvent(new MessageEvent('message', { data: __omoikane_worker_message_data, origin: '', source: null, ports: [] }));",
+                "__omoikane_worker_message_data = __omoikane_decode_worker_message(__omoikane_worker_message_wire); self.dispatchEvent(new MessageEvent('message', { data: __omoikane_worker_message_data, origin: '', source: null, ports: [] }));",
             );
             runtime.clear_worker_message_values()?;
             let jobs_result = if runtime.is_terminated_worker() {
@@ -2872,11 +2872,11 @@ impl JsRuntime {
         &mut self,
         _worker_id: u64,
         owner_object: JsValue,
-        data: JsValue,
+        data: String,
     ) -> JsResult<()> {
         self.install_worker_owner_values(owner_object, data)?;
         let result = self.eval(
-            "if (!__omoikane_worker_owner.__terminated) { __omoikane_worker_owner.dispatchEvent(new MessageEvent('message', { data: __omoikane_worker_owner_data, origin: '', source: null, ports: [] })); }",
+            "__omoikane_worker_owner_data = __omoikane_decode_worker_message(__omoikane_worker_owner_wire); if (!__omoikane_worker_owner.__terminated) { __omoikane_worker_owner.dispatchEvent(new MessageEvent('message', { data: __omoikane_worker_owner_data, origin: '', source: null, ports: [] })); }",
         );
         self.clear_worker_owner_values()?;
         self.record_error_from("worker message", result);
@@ -2891,19 +2891,19 @@ impl JsRuntime {
             .get(&worker_id)
             .and_then(|entry| entry.borrow().owner_object.clone());
         let Some(owner_object) = owner_object else { return Ok(()); };
-        self.install_worker_owner_values(owner_object, JsValue::from(js_string!(message)))?;
+        self.install_worker_owner_values(owner_object, message)?;
         let result = self.eval(
-            "if (!__omoikane_worker_owner.__terminated) { const event = new Event('error'); event.message = String(__omoikane_worker_owner_data); event.error = __omoikane_worker_owner_data; __omoikane_worker_owner.dispatchEvent(event); }",
+            "if (!__omoikane_worker_owner.__terminated) { const event = new Event('error'); event.message = String(__omoikane_worker_owner_wire); event.error = __omoikane_worker_owner_wire; __omoikane_worker_owner.dispatchEvent(event); }",
         );
         self.clear_worker_owner_values()?;
         self.record_error_from("worker error", result);
         Ok(())
     }
 
-    fn install_worker_message_values(&mut self, data: JsValue) -> JsResult<()> {
+    fn install_worker_message_values(&mut self, data: String) -> JsResult<()> {
         self.context.global_object().set(
-            js_string!("__omoikane_worker_message_data"),
-            data,
+            js_string!("__omoikane_worker_message_wire"),
+            JsValue::from(js_string!(data)),
             true,
             &mut self.context,
         )?;
@@ -2912,7 +2912,7 @@ impl JsRuntime {
 
     fn clear_worker_message_values(&mut self) -> JsResult<()> {
         self.context.global_object().set(
-            js_string!("__omoikane_worker_message_data"),
+            js_string!("__omoikane_worker_message_wire"),
             JsValue::undefined(),
             true,
             &mut self.context,
@@ -2920,17 +2920,17 @@ impl JsRuntime {
         Ok(())
     }
 
-    fn install_worker_owner_values(&mut self, owner: JsValue, data: JsValue) -> JsResult<()> {
+    fn install_worker_owner_values(&mut self, owner: JsValue, data: String) -> JsResult<()> {
         let global = self.context.global_object();
         global.set(js_string!("__omoikane_worker_owner"), owner, true, &mut self.context)?;
-        global.set(js_string!("__omoikane_worker_owner_data"), data, true, &mut self.context)?;
+        global.set(js_string!("__omoikane_worker_owner_wire"), JsValue::from(js_string!(data)), true, &mut self.context)?;
         Ok(())
     }
 
     fn clear_worker_owner_values(&mut self) -> JsResult<()> {
         let global = self.context.global_object();
         global.set(js_string!("__omoikane_worker_owner"), JsValue::undefined(), true, &mut self.context)?;
-        global.set(js_string!("__omoikane_worker_owner_data"), JsValue::undefined(), true, &mut self.context)?;
+        global.set(js_string!("__omoikane_worker_owner_wire"), JsValue::undefined(), true, &mut self.context)?;
         Ok(())
     }
 
@@ -6439,7 +6439,12 @@ fn worker_post_message_native(
     context: &mut Context,
 ) -> JsResult<JsValue> {
     let id = args.first().cloned().unwrap_or_default().to_number(context)? as u64;
-    let data = args.get(1).cloned().unwrap_or_default();
+    let data = args
+        .get(1)
+        .cloned()
+        .unwrap_or_default()
+        .to_string(context)?
+        .to_std_string_escaped();
     with_host_state(|state| {
         let entry = state.borrow().workers.get(&id).cloned();
         let Some(entry) = entry else { return Ok(JsValue::undefined()); };
@@ -6476,9 +6481,14 @@ fn terminate_worker_native(
 fn worker_owner_post_message_native(
     _: &JsValue,
     args: &[JsValue],
-    _context: &mut Context,
+    context: &mut Context,
 ) -> JsResult<JsValue> {
-    let data = args.get(1).cloned().unwrap_or_default();
+    let data = args
+        .get(1)
+        .cloned()
+        .unwrap_or_default()
+        .to_string(context)?
+        .to_std_string_escaped();
     with_host_state(|state| {
         let (owner, id, owner_bound, owner_object) = {
             let state_ref = state.borrow();
@@ -8502,6 +8512,48 @@ mod tests {
         runtime.run_until_idle().unwrap();
         let values = runtime.eval("JSON.stringify(workerValues)").unwrap();
         assert_eq!(values.as_string().unwrap().to_std_string_escaped(), "[\"first\",\"first-micro\",\"second\",\"second-micro\"]");
+    }
+
+    #[test]
+    fn dedicated_worker_messages_rehydrate_cross_realm_graphs() {
+        let mut runtime = JsRuntime::new().unwrap();
+        runtime
+            .eval(
+                "globalThis.workerValues = []; \
+                 const source = encodeURIComponent('onmessage = e => { const value = e.data; postMessage({ objectProto: Object.getPrototypeOf(value) === Object.prototype, mapProto: Object.getPrototypeOf(value.map) === Map.prototype, dateProto: Object.getPrototypeOf(value.date) === Date.prototype, selfCycle: value.self === value, mapCycle: value.map.get(value) === value }); }'); \
+                 const worker = new Worker('data:text/javascript,' + source); \
+                 worker.onmessage = event => workerValues.push(event.data); \
+                 const payload = { map: new Map(), date: new Date(1234) }; payload.self = payload; payload.map.set(payload, payload); worker.postMessage(payload);",
+            )
+            .unwrap();
+        runtime.run_until_idle().unwrap();
+        assert_eq!(runtime.eval("workerValues.length").unwrap().as_number(), Some(1.0));
+        assert!(runtime
+            .eval("workerValues[0].objectProto && workerValues[0].mapProto && workerValues[0].dateProto && workerValues[0].selfCycle && workerValues[0].mapCycle")
+            .unwrap()
+            .as_boolean()
+            .unwrap_or(false));
+    }
+
+    #[test]
+    fn dedicated_worker_messages_preserve_supported_clone_builtins() {
+        let mut runtime = JsRuntime::new().unwrap();
+        runtime
+            .eval(
+                r#"globalThis.workerValues = [];
+                   const source = encodeURIComponent('onmessage = e => { const value = e.data; postMessage({ regex: value.regex instanceof RegExp && value.regex.source === "a+" && value.regex.flags === "gi", set: value.set instanceof Set && value.set.has("item"), bytes: new Uint8Array(value.buffer)[1] === 2, typed: value.typed instanceof Uint16Array && value.typed[1] === 500, dataView: new DataView(value.buffer).getUint8(0) === 1, bigint: value.big === 12345678901234567890n, undefined: value.missing === undefined, nan: Number.isNaN(value.nan), negativeZero: Object.is(value.negativeZero, -0) }); }');
+                   const worker = new Worker('data:text/javascript,' + source);
+                   worker.onmessage = event => workerValues.push(event.data);
+                   const buffer = new Uint8Array([1, 2, 3]).buffer; worker.postMessage({ regex: /a+/gi, set: new Set(["item"]), buffer, typed: new Uint16Array([400, 500]), big: 12345678901234567890n, nan: NaN, negativeZero: -0 });"#,
+            )
+            .unwrap();
+        runtime.run_until_idle().unwrap();
+        assert_eq!(runtime.eval("workerValues.length").unwrap().as_number(), Some(1.0));
+        assert!(runtime
+            .eval("Object.values(workerValues[0]).every(Boolean)")
+            .unwrap()
+            .as_boolean()
+            .unwrap_or(false));
     }
 
     #[test]
