@@ -124,9 +124,11 @@ impl CspPolicy {
     /// the network client.
     pub(crate) fn allows_reference(&self, resource_type: ResourceType, reference: &str) -> bool {
         let Some(resource_url) = ResourceUrl::parse(reference, self.base_url.as_ref()) else {
-            // An unparseable reference will fail at the resource loader anyway;
-            // do not turn a URL parser error into a misleading CSP violation.
-            return true;
+            // With no base URL (for example, an opaque `data:` Document), a
+            // relative reference cannot be checked against the policy. A
+            // document with an enforced policy must fail closed here; without
+            // CSP, leave the eventual resource-loader error unchanged.
+            return self.policies.is_empty();
         };
         self.policies
             .iter()
@@ -555,6 +557,13 @@ mod tests {
         assert!(
             !policy.allows_reference(ResourceType::Script, "https://example.test/casepath/app.js")
         );
+    }
+
+    #[test]
+    fn opaque_documents_reject_unresolvable_relative_references() {
+        let policy = policy("script-src 'self'", "");
+        assert!(!policy.allows_reference(ResourceType::Script, "app.js"));
+        assert!(CspPolicy::default().allows_reference(ResourceType::Script, "app.js"));
     }
 
     #[test]
