@@ -15,6 +15,8 @@ git_wpt sparse-checkout add \
   "/webmessaging/Channel_postMessage_event_properties.any.js" \
   "/webmessaging/Channel_postMessage_DataCloneErr.any.js" \
   "/webmessaging/MessageEvent.any.js" \
+  "/workers/Worker_basic.htm" \
+  "/workers/support/WorkerBasic.js" \
   "/css/css-shadow/part/support/shadow-helper.js" \
   "/css/css-shadow/part/host-part-001.html" \
   "/css/css-shadow/part/exportparts-multiple.html" \

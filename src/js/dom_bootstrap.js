@@ -7882,6 +7882,125 @@
   globalThis.MessagePort = MessagePort;
   globalThis.MessageChannel = MessageChannel;
 
+  // -------------------------------------------------------------------------
+  // Dedicated Worker / WorkerGlobalScope core.
+  //
+  // The native side allocates a separate JsRuntime for each classic worker.
+  // This wrapper owns only the page-facing endpoint; message payloads are
+  // cloned before they enter either runtime and are delivered by the native
+  // posted-message task source.
+  // -------------------------------------------------------------------------
+  class Worker extends EventTarget {
+    constructor(url, options = undefined) {
+      super();
+      if (options && options.type !== undefined && String(options.type) !== "classic") {
+        throw new TypeError("Only classic Dedicated Workers are supported");
+      }
+      const requested = String(url);
+      this.url = requested;
+      this.onmessage = null;
+      this.onerror = null;
+      this.__terminated = false;
+      this.__id = __omoikane_create_worker(requested);
+      __omoikane_bind_worker_owner(this.__id, this);
+    }
+    postMessage(message, options = undefined) {
+      if (this.__terminated) return;
+      const data = globalThis.structuredClone(message, options);
+      __omoikane_worker_post_message(this.__id, data);
+    }
+    terminate() {
+      if (this.__terminated) return;
+      this.__terminated = true;
+      __omoikane_terminate_worker(this.__id);
+    }
+    get [Symbol.toStringTag]() { return "Worker"; }
+    set onmessage(callback) {
+      if (this.__onmessage) this.removeEventListener("message", this.__onmessage);
+      this.__onmessage = typeof callback === "function" ? callback : null;
+      if (this.__onmessage) this.addEventListener("message", this.__onmessage);
+    }
+    get onmessage() { return this.__onmessage || null; }
+    set onerror(callback) {
+      if (this.__onerror) this.removeEventListener("error", this.__onerror);
+      this.__onerror = typeof callback === "function" ? callback : null;
+      if (this.__onerror) this.addEventListener("error", this.__onerror);
+    }
+    get onerror() { return this.__onerror || null; }
+  }
+  globalThis.Worker = Worker;
+
+  globalThis.__omoikane_install_worker_global = function(url, workerId) {
+    // A worker global is not a Window and cannot reach the page DOM. The
+    // bootstrap has already installed shared language primitives (Event,
+    // MessageEvent, structuredClone, timers, URL, and navigator); remove the
+    // browsing-context objects before user script evaluates.
+    try { delete globalThis.document; } catch (_) { globalThis.document = undefined; }
+    try { delete globalThis.window; } catch (_) { globalThis.window = undefined; }
+    try { delete globalThis.customElements; } catch (_) { globalThis.customElements = undefined; }
+    for (const domName of [
+      "Node", "Element", "HTMLElement", "Document", "DocumentFragment", "Text",
+      "CharacterData", "Attr", "ShadowRoot", "HTMLCollection", "NodeList", "Range",
+      "MutationObserver", "ResizeObserver", "IntersectionObserver", "CustomElementRegistry",
+      "HTMLDivElement", "HTMLSpanElement", "HTMLBodyElement", "HTMLCanvasElement",
+      "HTMLImageElement", "HTMLIFrameElement", "HTMLScriptElement", "SVGElement",
+      "SVGSVGElement", "HTMLTemplateElement", "HTMLFormElement", "HTMLInputElement",
+      "HTMLTextAreaElement", "HTMLButtonElement", "HTMLSelectElement", "HTMLOptionElement",
+    ]) {
+      try { delete globalThis[domName]; } catch (_) { globalThis[domName] = undefined; }
+    }
+    try { delete globalThis.getComputedStyle; } catch (_) { globalThis.getComputedStyle = undefined; }
+    try { delete globalThis.history; } catch (_) { globalThis.history = undefined; }
+    try { delete globalThis.__omoikane_install_window_named_properties; } catch (_) {}
+    Object.defineProperty(globalThis, "_listeners", {
+      configurable: true,
+      value: new Map(),
+    });
+    globalThis.self = globalThis;
+    globalThis.WorkerGlobalScope = Object;
+    globalThis.addEventListener = EventTarget.prototype.addEventListener;
+    globalThis.removeEventListener = EventTarget.prototype.removeEventListener;
+    globalThis.dispatchEvent = EventTarget.prototype.dispatchEvent;
+    const workerLocation = Object.freeze({
+      href: String(url),
+      origin: (() => { try { return new URL(String(url)).origin; } catch (_) { return ""; } })(),
+      protocol: (() => { try { return new URL(String(url)).protocol; } catch (_) { return ""; } })(),
+      host: (() => { try { return new URL(String(url)).host; } catch (_) { return ""; } })(),
+      pathname: (() => { try { return new URL(String(url)).pathname; } catch (_) { return ""; } })(),
+      search: (() => { try { return new URL(String(url)).search; } catch (_) { return ""; } })(),
+      hash: (() => { try { return new URL(String(url)).hash; } catch (_) { return ""; } })(),
+      toString() { return this.href; },
+    });
+    try {
+      Object.defineProperty(globalThis, "location", {
+        configurable: true,
+        writable: true,
+        value: workerLocation,
+      });
+    } catch (_) {
+      // Older Boa versions expose location as a non-configurable accessor;
+      // retaining the existing object is still preferable to exposing a
+      // mutable Window location in a worker global.
+    }
+    let workerOnMessage = null;
+    Object.defineProperty(globalThis, "onmessage", {
+      configurable: true,
+      get() { return workerOnMessage; },
+      set(callback) {
+        if (workerOnMessage) EventTarget.prototype.removeEventListener.call(globalThis, "message", workerOnMessage);
+        workerOnMessage = typeof callback === "function" ? callback : null;
+        if (workerOnMessage) EventTarget.prototype.addEventListener.call(globalThis, "message", workerOnMessage);
+      },
+    });
+    globalThis.postMessage = function(message, options = undefined) {
+      const data = globalThis.structuredClone(message, options);
+      __omoikane_worker_owner_post_message(workerId, data);
+    };
+    globalThis.close = function() {
+      __omoikane_worker_close();
+    };
+  };
+
   const mediaQueryListRefs = [];
 
   class MediaQueryListEvent extends Event {

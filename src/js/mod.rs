@@ -612,6 +612,15 @@ struct HostState {
     storage_manager: StorageManager,
     storage_session_id: u64,
     document_origins: HashMap<usize, Option<StorageOrigin>>,
+    /// Dedicated workers owned by this global. The map lives on the page
+    /// global; worker globals instead hold `worker_owner` and `worker_id`.
+    workers: HashMap<u64, Rc<RefCell<WorkerRuntime>>>,
+    next_worker_id: u64,
+    worker_owner: Option<Rc<RefCell<HostState>>>,
+    worker_id: Option<u64>,
+    worker_terminated: bool,
+    worker_owner_bound: bool,
+    worker_startup_outgoing: VecDeque<JsValue>,
 }
 
 #[derive(Debug)]
@@ -624,6 +633,20 @@ enum WebSocketReadResult {
 struct WebSocketConnection {
     client: crate::realtime::WebSocketClient,
     incoming: Receiver<WebSocketReadResult>,
+}
+
+/// State for one same-origin classic Dedicated Worker. A worker owns a fully
+/// independent `JsRuntime`; only message queues and lifecycle metadata bridge
+/// it back to the page global.
+struct WorkerRuntime {
+    runtime: JsRuntime,
+    owner_state: Rc<RefCell<HostState>>,
+    owner_object: Option<JsValue>,
+    incoming: VecDeque<JsValue>,
+    outgoing: VecDeque<JsValue>,
+    startup_error: Option<String>,
+    terminated: bool,
+    generation: u64,
 }
 
 /// A loaded sub-browsing-context document owned by an `<iframe>` element.
@@ -765,6 +788,13 @@ impl HostState {
             storage_manager,
             storage_session_id,
             document_origins,
+            workers: HashMap::new(),
+            next_worker_id: 1,
+            worker_owner: None,
+            worker_id: None,
+            worker_terminated: false,
+            worker_owner_bound: false,
+            worker_startup_outgoing: VecDeque::new(),
         };
         state.register_tree(&document);
         state
@@ -1582,6 +1612,66 @@ impl JsRuntime {
         self.host_state.borrow().document.clone()
     }
 
+    /// Cancels every worker when this global is replaced by navigation,
+    /// reload, or disconnect. Dropping the map breaks the owner/worker Rc cycle
+    /// after queued task ids have become inert.
+    pub(crate) fn terminate_workers(&mut self) {
+        let workers = std::mem::take(&mut self.host_state.borrow_mut().workers);
+        for entry in workers.values() {
+            let mut worker = entry.borrow_mut();
+            worker.terminated = true;
+            worker.incoming.clear();
+            worker.outgoing.clear();
+            worker.runtime.host_state.borrow_mut().worker_terminated = true;
+        }
+    }
+
+    fn advance_worker_clocks(&mut self, elapsed_ms: u64) {
+        let workers: Vec<_> = self.host_state.borrow().workers.values().cloned().collect();
+        for entry in workers {
+            let worker = entry.borrow_mut();
+            if worker.terminated || worker.runtime.host_state.borrow().worker_terminated { continue; }
+            worker.runtime.host_state.borrow_mut().event_loop.advance(elapsed_ms);
+        }
+    }
+
+    fn run_worker_background_tasks(&mut self) {
+        let workers: Vec<_> = self
+            .host_state
+            .borrow()
+            .workers
+            .iter()
+            .map(|(&worker_id, entry)| (worker_id, Rc::clone(entry)))
+            .collect();
+        for (worker_id, entry) in workers {
+            let (owner_state, result, errors) = {
+                let mut worker = entry.borrow_mut();
+                if worker.terminated || worker.runtime.host_state.borrow().worker_terminated {
+                    continue;
+                }
+                let result = worker.runtime.run_until_idle();
+                let errors = worker.runtime.take_task_errors();
+                (Rc::clone(&worker.owner_state), result, errors)
+            };
+            // A worker task failure is reported to the owner as an error event,
+            // but must not abort the owner's event-loop pump. `run_timer_payload`
+            // records callback failures in the worker runtime, while a rejected
+            // microtask can be returned directly by `run_until_idle`.
+            if let Err(error) = result {
+                owner_state
+                    .borrow_mut()
+                    .event_loop
+                    .enqueue_worker_error(worker_id, error.to_string());
+            }
+            for error in errors {
+                owner_state
+                    .borrow_mut()
+                    .event_loop
+                    .enqueue_worker_error(worker_id, error);
+            }
+        }
+    }
+
     /// Returns the top-level Window scroll offset in CSS pixels.
     pub(crate) fn window_scroll_offset(&self) -> (f32, f32) {
         self.host_state.borrow().window_scroll
@@ -2137,6 +2227,8 @@ impl JsRuntime {
     /// `setTimeout(update, delay)` chain) become due on subsequent ticks.
     pub fn tick(&mut self, elapsed_ms: u64) -> JsResult<()> {
         self.host_state.borrow_mut().event_loop.advance(elapsed_ms);
+        self.advance_worker_clocks(elapsed_ms);
+        self.run_worker_background_tasks();
         self.run_until_idle()
     }
 
@@ -2147,12 +2239,14 @@ impl JsRuntime {
         // An embedder call may have completed a script task and left promise
         // jobs pending. Its checkpoint can itself enqueue host tasks.
         self.run_jobs()?;
+        self.run_worker_background_tasks();
         loop {
             let task = { self.host_state.borrow_mut().event_loop.pop_task() };
             let Some((_, task)) = task else {
                 break;
             };
             self.run_task(task)?;
+            self.run_worker_background_tasks();
             // HTML performs a microtask checkpoint after every task, including
             // host-only navigation tasks that do not directly invoke script.
             self.run_jobs()?;
@@ -2391,6 +2485,8 @@ impl JsRuntime {
     /// animation-frame callbacks.
     pub fn run_animation_frame(&mut self, elapsed_ms: u64) -> JsResult<usize> {
         self.host_state.borrow_mut().event_loop.advance(elapsed_ms);
+        self.advance_worker_clocks(elapsed_ms);
+        self.run_worker_background_tasks();
         self.run_until_idle()?;
         if self.has_pending_scroll_steps() {
             self.flush_pending_scroll_events()?;
@@ -2460,6 +2556,8 @@ impl JsRuntime {
 
     async fn run_animation_frame_async(&mut self, elapsed_ms: u64) -> JsResult<usize> {
         self.host_state.borrow_mut().event_loop.advance(elapsed_ms);
+        self.advance_worker_clocks(elapsed_ms);
+        self.run_worker_background_tasks();
         self.run_until_idle_async().await?;
         if self.has_pending_scroll_steps() {
             self.flush_pending_scroll_events()?;
@@ -2587,6 +2685,8 @@ impl JsRuntime {
                 break;
             }
             self.host_state.borrow_mut().event_loop.advance(step);
+            self.advance_worker_clocks(step);
+            self.run_worker_background_tasks();
             advanced = advanced.saturating_add(step);
 
             loop {
@@ -2606,6 +2706,9 @@ impl JsRuntime {
                         Task::Timer(payload) => payload.kind(),
                         Task::Navigation(_) => "navigation",
                         Task::PostedMessage { .. } => "posted-message",
+                        Task::WorkerMessage { .. }
+                        | Task::WorkerOwnerMessage { .. }
+                        | Task::WorkerError { .. } => "worker",
                     };
                     let callback_start = std::time::Instant::now();
                     let callback_result = self.run_task(task);
@@ -2683,7 +2786,112 @@ impl JsRuntime {
                 self.record_error_from("posted message", result);
                 Ok(())
             }
+            Task::WorkerMessage { worker_id, data } => {
+                self.run_worker_message(worker_id, data)
+            }
+            Task::WorkerOwnerMessage { worker_id, data } => {
+                self.run_worker_owner_message(worker_id, data)
+            }
+            Task::WorkerError { worker_id, message } => {
+                self.run_worker_error(worker_id, message)
+            }
         }
+    }
+
+    fn run_worker_message(&mut self, worker_id: u64, data: JsValue) -> JsResult<()> {
+        let entry = self.host_state.borrow().workers.get(&worker_id).cloned();
+        let Some(entry) = entry else { return Ok(()); };
+        let mut worker = entry.borrow_mut();
+        if worker.terminated || worker.runtime.host_state.borrow().worker_terminated {
+            return Ok(());
+        }
+        let _ = worker.incoming.pop_front();
+        let owner_state = Rc::clone(&worker.owner_state);
+        let (result, jobs_result) = {
+            let runtime = &mut worker.runtime;
+            runtime.install_worker_message_values(data)?;
+            let result = runtime.eval(
+                "if (!self.__omoikane_worker_terminated) { self.dispatchEvent(new MessageEvent('message', { data: __omoikane_worker_message_data, origin: '', source: null, ports: [] })); }",
+            );
+            runtime.clear_worker_message_values()?;
+            let jobs_result = runtime.run_jobs();
+            (result, jobs_result)
+        };
+        if let Err(error) = result {
+            owner_state.borrow_mut().event_loop.enqueue_worker_error(worker_id, error.to_string());
+        }
+        if let Err(error) = jobs_result {
+            owner_state.borrow_mut().event_loop.enqueue_worker_error(worker_id, error.to_string());
+        }
+        Ok(())
+    }
+
+    fn run_worker_owner_message(&mut self, worker_id: u64, data: JsValue) -> JsResult<()> {
+        let owner_object = self
+            .host_state
+            .borrow()
+            .workers
+            .get(&worker_id)
+            .and_then(|entry| entry.borrow().owner_object.clone());
+        let Some(owner_object) = owner_object else { return Ok(()); };
+        self.install_worker_owner_values(owner_object, data)?;
+        let result = self.eval(
+            "if (!__omoikane_worker_owner.__terminated) { __omoikane_worker_owner.dispatchEvent(new MessageEvent('message', { data: __omoikane_worker_owner_data, origin: '', source: null, ports: [] })); }",
+        );
+        self.clear_worker_owner_values()?;
+        self.record_error_from("worker message", result);
+        Ok(())
+    }
+
+    fn run_worker_error(&mut self, worker_id: u64, message: String) -> JsResult<()> {
+        let owner_object = self
+            .host_state
+            .borrow()
+            .workers
+            .get(&worker_id)
+            .and_then(|entry| entry.borrow().owner_object.clone());
+        let Some(owner_object) = owner_object else { return Ok(()); };
+        self.install_worker_owner_values(owner_object, JsValue::from(js_string!(message)))?;
+        let result = self.eval(
+            "if (!__omoikane_worker_owner.__terminated) { const event = new Event('error'); event.message = String(__omoikane_worker_owner_data); event.error = __omoikane_worker_owner_data; __omoikane_worker_owner.dispatchEvent(event); }",
+        );
+        self.clear_worker_owner_values()?;
+        self.record_error_from("worker error", result);
+        Ok(())
+    }
+
+    fn install_worker_message_values(&mut self, data: JsValue) -> JsResult<()> {
+        self.context.global_object().set(
+            js_string!("__omoikane_worker_message_data"),
+            data,
+            true,
+            &mut self.context,
+        )?;
+        Ok(())
+    }
+
+    fn clear_worker_message_values(&mut self) -> JsResult<()> {
+        self.context.global_object().set(
+            js_string!("__omoikane_worker_message_data"),
+            JsValue::undefined(),
+            true,
+            &mut self.context,
+        )?;
+        Ok(())
+    }
+
+    fn install_worker_owner_values(&mut self, owner: JsValue, data: JsValue) -> JsResult<()> {
+        let global = self.context.global_object();
+        global.set(js_string!("__omoikane_worker_owner"), owner, true, &mut self.context)?;
+        global.set(js_string!("__omoikane_worker_owner_data"), data, true, &mut self.context)?;
+        Ok(())
+    }
+
+    fn clear_worker_owner_values(&mut self) -> JsResult<()> {
+        let global = self.context.global_object();
+        global.set(js_string!("__omoikane_worker_owner"), JsValue::undefined(), true, &mut self.context)?;
+        global.set(js_string!("__omoikane_worker_owner_data"), JsValue::undefined(), true, &mut self.context)?;
+        Ok(())
     }
 
     /// Executes a single timer payload: evaluates a source string, or invokes a
@@ -3270,6 +3478,46 @@ fn same_origin_url(a: &crate::http::Url, b: &crate::http::Url) -> bool {
     a.scheme() == b.scheme() && a.host() == b.host() && a.port() == b.port()
 }
 
+fn resolve_worker_url(
+    requested: &str,
+    owner_url: &str,
+    base_url: Option<&crate::http::Url>,
+) -> JsResult<String> {
+    if requested
+        .get(..5)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("data:"))
+    {
+        return Ok(requested.to_string());
+    }
+    let owner = owner_url.parse::<crate::http::Url>().map_err(|_| {
+        JsError::from(JsNativeError::error().with_message("Worker owner has no origin"))
+    })?;
+    let resolved = if requested
+        .get(..7)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("http://"))
+        || requested
+            .get(..8)
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case("https://"))
+    {
+        requested
+            .parse::<crate::http::Url>()
+            .map_err(|_| JsError::from(JsNativeError::syntax().with_message("Invalid Worker URL")))?
+    } else {
+        let base = base_url.ok_or_else(|| {
+            JsError::from(JsNativeError::error().with_message("Worker URL cannot be resolved"))
+        })?;
+        crate::http::url::resolve_url(base, requested).map_err(|_| {
+            JsError::from(JsNativeError::syntax().with_message("Invalid Worker URL"))
+        })?
+    };
+    if !same_origin_url(&owner, &resolved) {
+        return Err(JsNativeError::error()
+            .with_message("Dedicated Worker must be same-origin")
+            .into());
+    }
+    Ok(resolved.to_string())
+}
+
 fn requires_public_fetch(url: &crate::http::Url, base_url: Option<&crate::http::Url>) -> bool {
     base_url.is_none_or(|base| !same_origin_url(url, base))
 }
@@ -3595,6 +3843,36 @@ fn register_host_bindings(
             js_string!("__omoikane_enqueue_posted_message"),
             2,
             NativeFunction::from_copy_closure(enqueue_posted_message_native),
+        ),
+        (
+            js_string!("__omoikane_create_worker"),
+            1,
+            NativeFunction::from_copy_closure(create_worker_native),
+        ),
+        (
+            js_string!("__omoikane_bind_worker_owner"),
+            2,
+            NativeFunction::from_copy_closure(bind_worker_owner_native),
+        ),
+        (
+            js_string!("__omoikane_worker_post_message"),
+            2,
+            NativeFunction::from_copy_closure(worker_post_message_native),
+        ),
+        (
+            js_string!("__omoikane_terminate_worker"),
+            1,
+            NativeFunction::from_copy_closure(terminate_worker_native),
+        ),
+        (
+            js_string!("__omoikane_worker_owner_post_message"),
+            2,
+            NativeFunction::from_copy_closure(worker_owner_post_message_native),
+        ),
+        (
+            js_string!("__omoikane_worker_close"),
+            0,
+            NativeFunction::from_copy_closure(worker_close_native),
         ),
         (
             js_string!("__omoikane_canvas_commit"),
@@ -5966,6 +6244,201 @@ fn enqueue_posted_message_native(
     })
 }
 
+fn create_worker_native(
+    _: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let url = string_argument(args.first(), "", context)?;
+    with_host_state(|state| {
+        create_worker_for_owner_state(Rc::clone(state), &url).map(|id| JsValue::from(id as f64))
+    })
+}
+
+fn create_worker_for_owner_state(
+    owner_state: Rc<RefCell<HostState>>,
+    requested_url: &str,
+) -> JsResult<u64> {
+    let (owner_url, base_url, storage, session_id, user_agent, generation, worker_id) = {
+        let mut state = owner_state.borrow_mut();
+        let id = state.next_worker_id;
+        state.next_worker_id = state.next_worker_id.saturating_add(1);
+        (
+            state
+                .base_url
+                .as_ref()
+                .map(ToString::to_string)
+                .unwrap_or_else(|| state.location_href.clone()),
+            state.base_url.clone(),
+            state.storage_manager.clone(),
+            state.storage_session_id,
+            state.navigator_user_agent.clone(),
+            state
+                .workers
+                .values()
+                .map(|worker| worker.borrow().generation)
+                .max()
+                .unwrap_or(0)
+                .saturating_add(1),
+            id,
+        )
+    };
+    let worker_url = resolve_worker_url(requested_url, &owner_url, base_url.as_ref())?;
+    let source = {
+        let mut state = owner_state.borrow_mut();
+        fetch_script_source_with_client(requested_url, base_url.as_ref(), &mut state.http_client)
+    };
+    let mut worker_runtime = JsRuntime::with_document_url_and_storage(
+        blank_html_document(),
+        &worker_url,
+        storage,
+        session_id,
+    )?;
+    worker_runtime.set_user_agent(user_agent);
+    let worker_state = Rc::clone(&worker_runtime.host_state);
+    {
+        let mut state = worker_state.borrow_mut();
+        state.worker_owner = Some(Rc::clone(&owner_state));
+        state.worker_id = Some(worker_id);
+        state.worker_terminated = false;
+        state.worker_owner_bound = false;
+    }
+    worker_runtime.eval(&format!(
+        "__omoikane_install_worker_global({worker_url:?}, {worker_id})"
+    ))?;
+    let entry = Rc::new(RefCell::new(WorkerRuntime {
+        runtime: worker_runtime,
+        owner_state: Rc::clone(&owner_state),
+        owner_object: None,
+        incoming: VecDeque::new(),
+        outgoing: VecDeque::new(),
+        startup_error: None,
+        terminated: false,
+        generation,
+    }));
+    owner_state.borrow_mut().workers.insert(worker_id, Rc::clone(&entry));
+    let startup_error = match source {
+        Some(source) => entry
+            .borrow_mut()
+            .runtime
+            .eval(&source)
+            .err()
+            .map(|error| error.to_string()),
+        None => Some(format!("failed to fetch Worker script: {requested_url}")),
+    };
+    {
+        let mut worker = entry.borrow_mut();
+        worker.startup_error = startup_error;
+        let queued = std::mem::take(&mut worker.runtime.host_state.borrow_mut().worker_startup_outgoing);
+        worker.outgoing.extend(queued);
+    }
+    Ok(worker_id)
+}
+
+fn bind_worker_owner_native(
+    _: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let id = args
+        .first()
+        .cloned()
+        .unwrap_or_default()
+        .to_number(context)? as u64;
+    let owner_object = args.get(1).cloned().unwrap_or_default();
+    with_host_state(|state| {
+        let entry = state.borrow().workers.get(&id).cloned();
+        let Some(entry) = entry else { return Ok(JsValue::undefined()); };
+        let mut worker = entry.borrow_mut();
+        if worker.terminated { return Ok(JsValue::undefined()); }
+        worker.owner_object = Some(owner_object);
+        worker.runtime.host_state.borrow_mut().worker_owner_bound = true;
+        let startup_queued = std::mem::take(&mut worker.runtime.host_state.borrow_mut().worker_startup_outgoing);
+        worker.outgoing.extend(startup_queued);
+        let queued = std::mem::take(&mut worker.outgoing);
+        for data in queued {
+            state.borrow_mut().event_loop.enqueue_worker_owner_message(id, data);
+        }
+        if let Some(message) = worker.startup_error.take() {
+            state.borrow_mut().event_loop.enqueue_worker_error(id, message);
+        }
+        Ok(JsValue::undefined())
+    })
+}
+
+fn worker_post_message_native(
+    _: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let id = args.first().cloned().unwrap_or_default().to_number(context)? as u64;
+    let data = args.get(1).cloned().unwrap_or_default();
+    with_host_state(|state| {
+        let entry = state.borrow().workers.get(&id).cloned();
+        let Some(entry) = entry else { return Ok(JsValue::undefined()); };
+        let mut worker = entry.borrow_mut();
+        if worker.terminated || worker.runtime.host_state.borrow().worker_terminated {
+            return Ok(JsValue::undefined());
+        }
+        worker.incoming.push_back(data.clone());
+        state.borrow_mut().event_loop.enqueue_worker_message(id, data);
+        Ok(JsValue::undefined())
+    })
+}
+
+fn terminate_worker_native(
+    _: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let id = args.first().cloned().unwrap_or_default().to_number(context)? as u64;
+    with_host_state(|state| {
+        if let Some(entry) = state.borrow().workers.get(&id).cloned() {
+            let mut worker = entry.borrow_mut();
+            worker.terminated = true;
+            worker.incoming.clear();
+            worker.outgoing.clear();
+            worker.runtime.host_state.borrow_mut().worker_terminated = true;
+        }
+        Ok(JsValue::undefined())
+    })
+}
+
+fn worker_owner_post_message_native(
+    _: &JsValue,
+    args: &[JsValue],
+    _context: &mut Context,
+) -> JsResult<JsValue> {
+    let data = args.get(1).cloned().unwrap_or_default();
+    with_host_state(|state| {
+        let (owner, id, owner_bound) = {
+            let state_ref = state.borrow();
+            (
+                state_ref.worker_owner.clone(),
+                state_ref.worker_id,
+                state_ref.worker_owner_bound,
+            )
+        };
+        let Some(owner) = owner else { return Ok(JsValue::undefined()); };
+        let Some(id) = id else { return Ok(JsValue::undefined()); };
+        if state.borrow().worker_terminated { return Ok(JsValue::undefined()); }
+        if !owner_bound {
+            state.borrow_mut().worker_startup_outgoing.push_back(data);
+            return Ok(JsValue::undefined());
+        }
+        if state.borrow().worker_terminated { return Ok(JsValue::undefined()); }
+        owner.borrow_mut().event_loop.enqueue_worker_owner_message(id, data);
+        Ok(JsValue::undefined())
+    })
+}
+
+fn worker_close_native(_: &JsValue, _: &[JsValue], _: &mut Context) -> JsResult<JsValue> {
+    with_host_state(|state| {
+        state.borrow_mut().worker_terminated = true;
+        Ok(JsValue::undefined())
+    })
+}
+
 fn canvas_commit_native(
     _: &JsValue,
     args: &[JsValue],
@@ -7909,6 +8382,103 @@ mod tests {
         let value = runtime.eval("1 + 2 + 3").unwrap();
 
         assert_eq!(value.as_number(), Some(6.0));
+    }
+
+    #[test]
+    fn dedicated_worker_uses_separate_global_and_round_trips_messages() {
+        let mut runtime = JsRuntime::new().unwrap();
+        runtime
+            .eval(
+                "globalThis.workerValues = []; \
+                 const worker = new Worker('data:text/javascript,globalThis.onmessage%3De%3D%3EpostMessage(e.data%2B1)'); \
+                 worker.onmessage = event => workerValues.push(event.data); \
+                 worker.postMessage(41); \
+                 globalThis.workerDocumentType = typeof worker.document;",
+            )
+            .unwrap();
+        runtime.run_until_idle().unwrap();
+        assert_eq!(runtime.eval("workerValues[0]").unwrap().as_number(), Some(42.0));
+        assert_eq!(runtime.eval("workerDocumentType").unwrap().as_string().unwrap().to_std_string_escaped(), "undefined");
+    }
+
+    #[test]
+    fn dedicated_worker_messages_are_fifo_cloned_and_microtask_checkpointed() {
+        let mut runtime = JsRuntime::new().unwrap();
+        runtime
+            .eval(
+                "globalThis.workerValues = []; \
+                 const worker = new Worker('data:text/javascript,globalThis.onmessage%3De%3D%3E%7BpostMessage(e.data.value)%3BqueueMicrotask(()%3D%3EpostMessage(e.data.value%2B%22-micro%22))%7D'); \
+                 worker.onmessage = event => workerValues.push(event.data); \
+                 const payload = { value: 'first' }; worker.postMessage(payload); payload.value = 'mutated'; worker.postMessage({ value: 'second' });",
+            )
+            .unwrap();
+        runtime.run_until_idle().unwrap();
+        let values = runtime.eval("JSON.stringify(workerValues)").unwrap();
+        assert_eq!(values.as_string().unwrap().to_std_string_escaped(), "[\"first\",\"first-micro\",\"second\",\"second-micro\"]");
+    }
+
+    #[test]
+    fn dedicated_worker_terminate_drops_messages_and_timers() {
+        let mut runtime = JsRuntime::new().unwrap();
+        runtime
+            .eval(
+                "globalThis.workerValues = []; \
+                 const worker = new Worker('data:text/javascript,setTimeout(()%3D%3EpostMessage(%22timer%22)%2C1)%3BglobalThis.onmessage%3De%3D%3EpostMessage(e.data)'); \
+                 worker.onmessage = event => workerValues.push(event.data); \
+                 worker.postMessage('message'); worker.terminate();",
+            )
+            .unwrap();
+        runtime.tick(10).unwrap();
+        assert_eq!(runtime.eval("workerValues.length").unwrap().as_number(), Some(0.0));
+    }
+
+    #[test]
+    fn dedicated_worker_startup_failure_is_observable_without_stopping_page() {
+        let mut runtime = JsRuntime::new().unwrap();
+        runtime
+            .eval(
+                "globalThis.workerErrors = []; \
+                 const worker = new Worker('data:text/javascript,throw%20new%20Error(%22boom%22)'); \
+                 worker.onerror = event => workerErrors.push(event.message);",
+            )
+            .unwrap();
+        runtime.run_until_idle().unwrap();
+        assert_eq!(runtime.eval("workerErrors.length").unwrap().as_number(), Some(1.0));
+        assert_eq!(runtime.eval("1 + 1").unwrap().as_number(), Some(2.0));
+    }
+
+    #[test]
+    fn dedicated_worker_runtime_task_errors_are_observable_without_stopping_page() {
+        let mut runtime = JsRuntime::new().unwrap();
+        runtime
+            .eval(
+                "globalThis.workerErrors = []; \
+                 const worker = new Worker('data:text/javascript,setTimeout(()=%3E%7Bthrow%20new%20Error(%22timer%20boom%22)%7D%2C1)'); \
+                 worker.onerror = event => workerErrors.push(event.message);",
+            )
+            .unwrap();
+        runtime.tick(1).unwrap();
+        assert_eq!(runtime.eval("workerErrors.length").unwrap().as_number(), Some(1.0));
+        assert!(runtime
+            .eval("workerErrors[0].includes('timer boom')")
+            .unwrap()
+            .as_boolean()
+            .unwrap_or(false));
+        assert_eq!(runtime.eval("6 * 7").unwrap().as_number(), Some(42.0));
+    }
+
+    #[test]
+    fn dedicated_worker_close_cancels_future_worker_tasks() {
+        let mut runtime = JsRuntime::new().unwrap();
+        runtime
+            .eval(
+                "globalThis.workerValues = []; \
+                 const worker = new Worker('data:text/javascript,globalThis.onmessage%3De%3D%3E%7BpostMessage(%22before%22)%3Bclose()%3BpostMessage(%22after%22)%7D'); \
+                 worker.onmessage = event => workerValues.push(event.data); worker.postMessage('go');",
+            )
+            .unwrap();
+        runtime.run_until_idle().unwrap();
+        assert_eq!(runtime.eval("JSON.stringify(workerValues)").unwrap().as_string().unwrap().to_std_string_escaped(), "[\"before\"]");
     }
 
     fn poll_until_dialog<F>(

@@ -13,6 +13,7 @@
     { "path": "webmessaging/Channel_postMessage_event_properties.any.js" },
     { "path": "webmessaging/Channel_postMessage_DataCloneErr.any.js" },
     { "path": "webmessaging/MessageEvent.any.js" },
+    { "path": "workers/Worker_basic.htm" },
     { "path": "css/css-shadow/shadow-cascade-order-001.html" },
     { "path": "css/css-shadow/part/host-part-001.html" },
     { "path": "css/css-shadow/part/exportparts-multiple.html" },

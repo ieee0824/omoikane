@@ -1646,6 +1646,7 @@ impl CdpSession {
         // are reported like browser event-handler errors and do not cancel the
         // commit; cancellation policy for beforeunload dialogs belongs to the
         // future GUI integration.
+        self.runtime.terminate_workers();
         let _ = self.runtime.eval(
             "window.dispatchEvent(new Event('beforeunload')); \
              window.dispatchEvent(new Event('pagehide')); \
@@ -1744,6 +1745,7 @@ impl CdpSession {
         // Teardown is delayed until the replacement runtime has completed its
         // startup work, so cancellation or startup setup failure keeps the old
         // document intact.
+        self.runtime.terminate_workers();
         let _ = self.runtime.eval(
             "window.dispatchEvent(new Event('beforeunload')); \
              window.dispatchEvent(new Event('pagehide')); \
@@ -2325,19 +2327,13 @@ impl BrowserSession {
     pub fn receive(&mut self, client_id: u64, bytes: &[u8]) -> Result<(), CdpError> {
         let owner_disconnect = WebSocketFrame::decode(bytes)
             .ok()
-            .is_some_and(|(frame, _)| {
-                frame.opcode == WebSocketOpcode::Close
-                    && {
-                        let state = self.state.borrow();
-                        state.pending.as_ref().is_some_and(|pending| {
-                            self.server.deferred_response_client(pending.token) == Some(client_id)
-                        }) || state.pending_page.as_ref().is_some_and(|pending| {
-                            self.server.deferred_response_client(pending.token) == Some(client_id)
-                        })
-                    }
-            });
+            .is_some_and(|(frame, _)| frame.opcode == WebSocketOpcode::Close);
         if owner_disconnect {
-            self.state.borrow_mut().cancel_pending_dialog();
+            let mut state = self.state.borrow_mut();
+            state.cancel_pending_dialog();
+            if let Some(session) = state.session.as_mut() {
+                session.runtime.terminate_workers();
+            }
         }
         self.server.receive(client_id, bytes)?;
         self.flush_actions()
