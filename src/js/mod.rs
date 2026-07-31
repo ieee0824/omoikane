@@ -700,6 +700,7 @@ struct HostState {
     navigator_user_agent: String,
     clipboard: HostClipboard,
     clipboard_permission_granted: bool,
+    notification_permission: String,
     /// Permission and deterministic provider state for the Window geolocation
     /// environment.  The provider is intentionally opt-in: an embedder can
     /// inject a fixed position for tests, while an unset provider reports
@@ -1067,6 +1068,7 @@ impl HostState {
             navigator_user_agent: default_user_agent(),
             clipboard: host_clipboard(),
             clipboard_permission_granted: true,
+            notification_permission: "default".to_string(),
             geolocation_permission_granted: true,
             geolocation_position: None,
             next_geolocation_request_id: 1,
@@ -2829,6 +2831,18 @@ impl JsRuntime {
     /// Clears a previously scheduled timer.
     pub fn clear_timer(&mut self, id: u64) {
         self.host_state.borrow_mut().event_loop.clear_timer(id);
+    }
+
+    /// Sets the deterministic Notification permission used by this runtime's
+    /// Window. This is an embedder/test hook and is not exposed to page JS.
+    pub fn set_notification_permission(&mut self, permission: &str) -> Result<(), String> {
+        if !matches!(permission, "default" | "granted" | "denied") {
+            return Err(format!(
+                "invalid notification permission {permission:?}; expected one of default, granted, denied"
+            ));
+        }
+        self.host_state.borrow_mut().notification_permission = permission.to_string();
+        Ok(())
     }
 
     /// Sets or replaces the deterministic geolocation provider position.
@@ -4906,6 +4920,16 @@ fn register_host_bindings(
             NativeFunction::from_copy_closure(performance_now_native),
         ),
         (
+            js_string!("__omoikane_notification_permission"),
+            0,
+            NativeFunction::from_copy_closure(notification_permission_native),
+        ),
+        (
+            js_string!("__omoikane_notification_request_permission"),
+            0,
+            NativeFunction::from_copy_closure(notification_request_permission_native),
+        ),
+        (
             js_string!("__omoikane_crypto_random"),
             1,
             NativeFunction::from_copy_closure(crypto_random_native),
@@ -5627,6 +5651,30 @@ fn performance_now_native(
         Ok(JsValue::from(
             state.borrow().performance_start.elapsed().as_secs_f64() * 1_000.0,
         ))
+    })
+}
+
+fn notification_permission_native(
+    _this: &JsValue,
+    _args: &[JsValue],
+    _context: &mut Context,
+) -> JsResult<JsValue> {
+    with_host_state(|state| {
+        Ok(js_string!(state.borrow().notification_permission.as_str()).into())
+    })
+}
+
+fn notification_request_permission_native(
+    _this: &JsValue,
+    _args: &[JsValue],
+    _context: &mut Context,
+) -> JsResult<JsValue> {
+    with_host_state(|state| {
+        let mut state = state.borrow_mut();
+        if state.notification_permission == "default" {
+            state.notification_permission = "denied".to_string();
+        }
+        Ok(js_string!(state.notification_permission.as_str()).into())
     })
 }
 
@@ -20579,13 +20627,64 @@ b</textarea></form>"#);
     }
 
     #[test]
-    fn dedicated_worker_does_not_expose_media_constructors() {
+    fn notifications_model_permission_and_task_queued_lifecycle() {
+        let mut runtime = runtime_from_html("<html><body></body></html>");
+        assert_eq!(eval_str(&mut runtime, "Notification.permission"), "default");
+        runtime
+            .eval(
+                "globalThis.permissionResult = 'pending'; Notification.requestPermission(value => permissionResult = value);",
+            )
+            .unwrap();
+        runtime.run_until_idle().unwrap();
+        assert_eq!(eval_str(&mut runtime, "permissionResult"), "denied");
+        assert_eq!(eval_str(&mut runtime, "Notification.permission"), "denied");
+
+        runtime.set_notification_permission("granted").unwrap();
+        let invalid_permission = runtime.set_notification_permission("unknown").unwrap_err();
+        assert!(invalid_permission.contains("unknown"));
+        assert!(invalid_permission.contains("default, granted, denied"));
+        runtime
+            .eval(
+                r#"globalThis.notificationEvents = [];
+                   globalThis.notification = new Notification('Hello', {
+                     body: 'World', tag: 'tag', silent: null, data: { value: 7 }, actions: [{ action: 'open', title: 'Open' }]
+                   });
+                   notification.onshow = () => notificationEvents.push('show');
+                   notification.onclick = () => notificationEvents.push('click');
+                   notification.addEventListener('close', () => notificationEvents.push('close')) ;"#,
+            )
+            .unwrap();
+        runtime.run_until_idle().unwrap();
+        assert_eq!(eval_str(&mut runtime, "notificationEvents.join(',')"), "show");
+        assert_eq!(eval_str(&mut runtime, "[notification.title, notification.body, notification.tag, notification.silent, notification.data.value, notification.actions[0].action, String('__notificationClosed' in notification), String(Object.keys(notification).some(name => name === 'onshow'))].join('|')"), "Hello|World|tag|false|7|open|false|false");
+        runtime.eval("__omoikane_dispatch_notification_click(notification)").unwrap();
+        runtime.run_until_idle().unwrap();
+        assert_eq!(eval_str(&mut runtime, "notificationEvents.join(',')"), "show,click");
+        runtime.eval("notification.close(); notification.close();").unwrap();
+        runtime.run_until_idle().unwrap();
+        assert_eq!(eval_str(&mut runtime, "notificationEvents.join(',')"), "show,click,close");
+        runtime.set_notification_permission("denied").unwrap();
+        assert_eq!(eval_str(&mut runtime, "(() => { try { new Notification('blocked'); return 'constructible'; } catch (error) { return error.name; } })()"), "NotAllowedError");
+
+        let mut insecure = JsRuntime::with_document_and_url(default_document(), "http://example.com/").unwrap();
+        insecure.set_notification_permission("granted").unwrap();
+        assert_eq!(eval_str(&mut insecure, "String(isSecureContext)"), "false");
+        assert_eq!(eval_str(&mut insecure, "(() => { try { new Notification('blocked'); return 'constructible'; } catch (error) { return error.name; } })()"), "NotAllowedError");
+        insecure
+            .eval("globalThis.insecurePermission = 'pending'; Notification.requestPermission().then(value => insecurePermission = value, error => insecurePermission = error.name);")
+            .unwrap();
+        insecure.run_until_idle().unwrap();
+        assert_eq!(eval_str(&mut insecure, "insecurePermission"), "NotAllowedError");
+    }
+
+    #[test]
+    fn dedicated_worker_does_not_expose_media_or_notification_constructors() {
         let mut runtime = JsRuntime::new().unwrap();
         runtime
             .eval(
                 r#"globalThis.workerValues = [];
                    const source = encodeURIComponent(
-                     'postMessage([typeof MediaError, typeof HTMLMediaElement, typeof Audio]);');
+                     'postMessage([typeof MediaError, typeof HTMLMediaElement, typeof Audio, typeof Notification]);');
                    const worker = new Worker('data:text/javascript,' + source);
                    worker.onmessage = event => workerValues.push(event.data);"#,
             )
@@ -20593,7 +20692,7 @@ b</textarea></form>"#);
         runtime.run_until_idle().unwrap();
         assert_eq!(
             eval_str(&mut runtime, "JSON.stringify(workerValues[0])"),
-            "[\"undefined\",\"undefined\",\"undefined\"]"
+            "[\"undefined\",\"undefined\",\"undefined\",\"undefined\"]"
         );
     }
 
