@@ -8885,7 +8885,7 @@
     linearRampToValueAtTime(value, endTime) { return this.__schedule("linear", value, endTime); }
     exponentialRampToValueAtTime(value, endTime) {
       const numeric = audioNumber(value, "AudioParam value");
-      if (numeric <= 0 || this.value <= 0) throw new DOMException("Exponential values must be positive.", "RangeError");
+      if (numeric <= 0 || this.value <= 0) throw new RangeError("Exponential values must be positive.");
       return this.__schedule("exponential", numeric, endTime);
     }
     setTargetAtTime(target, startTime, timeConstant) {
@@ -8991,14 +8991,17 @@
     }
     start(when = 0) {
       if (this.__started) throw new DOMException("OscillatorNode.start() was already called.", "InvalidStateError");
-      this.__startRequested = Math.max(0, audioNumber(when, "OscillatorNode start time"));
+      const startAt = audioNumber(when, "OscillatorNode start time");
+      if (startAt < 0) throw new RangeError("OscillatorNode start time must be non-negative");
+      this.__startRequested = startAt;
       this.__started = true;
       this.__schedulePendingStop();
     }
     stop(when = 0) {
       if (this.__stopCalled) throw new DOMException("OscillatorNode.stop() was already called.", "InvalidStateError");
+      const stopAt = audioNumber(when, "OscillatorNode stop time");
       this.__stopCalled = true;
-      this.__stopRequested = audioNumber(when, "OscillatorNode stop time");
+      this.__stopRequested = stopAt;
       this.__schedulePendingStop();
     }
     __pauseScheduledStop() {
