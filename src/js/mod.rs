@@ -30150,7 +30150,7 @@ b</textarea></form>"#);
                 cacheProbe.ignoredVary = values[3];
                 cacheProbe.secondRead = values[4];
               });
-              globalThis.cacheRejected = { method: false, opaque: false };
+              globalThis.cacheRejected = { method: false, opaque: false, vary: false };
               caches.open('v1').then(cache => {
                 cache.put(new Request('/post', { method: 'POST' }), new Response('bad'))
                   .then(() => {}, error => { cacheRejected.method = error instanceof TypeError; });
@@ -30158,6 +30158,8 @@ b</textarea></form>"#);
                 opaque.type = 'opaque';
                 cache.put('/opaque', opaque)
                   .then(() => {}, error => { cacheRejected.opaque = error instanceof TypeError; });
+                cache.put('/vary-star', new Response('bad', { headers: { Vary: '*' } }))
+                  .then(() => {}, error => { cacheRejected.vary = error instanceof TypeError; });
               });
             })()"#,
         );
@@ -30171,7 +30173,13 @@ b</textarea></form>"#);
         assert_eq!(eval_str(&mut runtime, "cacheProbe.ignoredSearch"), "snapshot");
         assert_eq!(eval_str(&mut runtime, "cacheProbe.varied + ':' + cacheProbe.ignoredVary"), "true:snapshot");
         assert_eq!(eval_str(&mut runtime, "cacheProbe.secondRead"), "snapshot");
-        assert_eq!(eval_str(&mut runtime, "cacheRejected.method + ':' + cacheRejected.opaque"), "true:true");
+        assert_eq!(
+            eval_str(
+                &mut runtime,
+                "cacheRejected.method + ':' + cacheRejected.opaque + ':' + cacheRejected.vary"
+            ),
+            "true:true:true"
+        );
         eval_str(&mut runtime, "(() => { globalThis.cacheHas = undefined; caches.has('v1').then(value => { cacheHas = value; }); })()");
         assert_eq!(eval_str(&mut runtime, "cacheHas === undefined"), "true");
         runtime.run_until_idle().unwrap();
