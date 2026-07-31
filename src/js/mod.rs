@@ -2830,6 +2830,11 @@ impl JsRuntime {
     }
 
     fn run_worker_message(&mut self, worker_id: u64, data: String) -> JsResult<()> {
+        let owner_origin = self
+            .eval("String(location.origin)")
+            .ok()
+            .and_then(|value| value.as_string().map(|string| string.to_std_string_escaped()))
+            .unwrap_or_default();
         let entry = self.host_state.borrow_mut().workers.remove(&worker_id);
         let Some(entry) = entry else { return Ok(()); };
         let mut worker = entry.borrow_mut();
@@ -2839,9 +2844,9 @@ impl JsRuntime {
         let owner_state = Rc::clone(&worker.owner_state);
         let (result, jobs_result) = {
             let runtime = &mut worker.runtime;
-            runtime.install_worker_message_values(data)?;
+            runtime.install_worker_message_values(data, owner_origin)?;
             let result = runtime.eval(
-                "__omoikane_worker_message_data = __omoikane_decode_worker_message(__omoikane_worker_message_wire); self.dispatchEvent(new MessageEvent('message', { data: __omoikane_worker_message_data, origin: '', source: null, ports: [] }));",
+                "__omoikane_worker_message_data = __omoikane_decode_worker_message(__omoikane_worker_message_wire); self.dispatchEvent(new MessageEvent('message', { data: __omoikane_worker_message_data, origin: __omoikane_worker_message_origin, source: null, ports: [] }));",
             );
             runtime.clear_worker_message_values()?;
             let jobs_result = if runtime.is_terminated_worker() {
@@ -2876,7 +2881,7 @@ impl JsRuntime {
     ) -> JsResult<()> {
         self.install_worker_owner_values(owner_object, data)?;
         let result = self.eval(
-            "__omoikane_worker_owner_data = __omoikane_decode_worker_message(__omoikane_worker_owner_wire); if (!__omoikane_worker_owner.__terminated) { __omoikane_worker_owner.dispatchEvent(new MessageEvent('message', { data: __omoikane_worker_owner_data, origin: '', source: null, ports: [] })); }",
+            "__omoikane_worker_owner_data = __omoikane_decode_worker_message(__omoikane_worker_owner_wire); if (!__omoikane_worker_owner.__terminated) { __omoikane_worker_owner.dispatchEvent(new MessageEvent('message', { data: __omoikane_worker_owner_data, origin: String(location.origin), source: null, ports: [] })); }",
         );
         self.clear_worker_owner_values()?;
         self.record_error_from("worker message", result);
@@ -2900,10 +2905,17 @@ impl JsRuntime {
         Ok(())
     }
 
-    fn install_worker_message_values(&mut self, data: String) -> JsResult<()> {
-        self.context.global_object().set(
+    fn install_worker_message_values(&mut self, data: String, origin: String) -> JsResult<()> {
+        let global = self.context.global_object();
+        global.set(
             js_string!("__omoikane_worker_message_wire"),
             JsValue::from(js_string!(data)),
+            true,
+            &mut self.context,
+        )?;
+        global.set(
+            js_string!("__omoikane_worker_message_origin"),
+            JsValue::from(js_string!(origin)),
             true,
             &mut self.context,
         )?;
@@ -2911,8 +2923,15 @@ impl JsRuntime {
     }
 
     fn clear_worker_message_values(&mut self) -> JsResult<()> {
-        self.context.global_object().set(
+        let global = self.context.global_object();
+        global.set(
             js_string!("__omoikane_worker_message_wire"),
+            JsValue::undefined(),
+            true,
+            &mut self.context,
+        )?;
+        global.set(
+            js_string!("__omoikane_worker_message_origin"),
             JsValue::undefined(),
             true,
             &mut self.context,
@@ -6291,8 +6310,30 @@ fn create_worker_native(
 ) -> JsResult<JsValue> {
     let url = string_argument(args.first(), "", context)?;
     with_host_state(|state| {
-        create_worker_for_owner_state(Rc::clone(state), &url).map(|id| JsValue::from(id as f64))
+        create_worker_for_owner_state(Rc::clone(state), &url)
+            .map(|id| JsValue::from(js_string!(id.to_string())))
     })
+}
+
+fn worker_id_argument(args: &[JsValue], context: &mut Context) -> JsResult<u64> {
+    let value = args.first().cloned().unwrap_or_default();
+    if let Some(string) = value.as_string() {
+        return string
+            .to_std_string_escaped()
+            .parse::<u64>()
+            .map_err(|_| JsNativeError::typ().with_message("invalid worker id").into());
+    }
+    let number = value.to_number(context)?;
+    if !number.is_finite()
+        || number < 0.0
+        || number.fract() != 0.0
+        || number > 9_007_199_254_740_991.0
+    {
+        return Err(JsNativeError::typ()
+            .with_message("invalid worker id")
+            .into());
+    }
+    Ok(number as u64)
 }
 
 fn create_worker_for_owner_state(
@@ -6344,7 +6385,7 @@ fn create_worker_for_owner_state(
         state.worker_owner_bound = false;
     }
     worker_runtime.eval(&format!(
-        "__omoikane_install_worker_global({worker_url:?}, {worker_id})"
+        "__omoikane_install_worker_global({worker_url:?}, {worker_id:?})"
     ))?;
     let entry = Rc::new(RefCell::new(WorkerRuntime {
         runtime: worker_runtime,
@@ -6373,14 +6414,15 @@ fn create_worker_for_owner_state(
                 .host_state
                 .borrow()
                 .worker_terminated;
-            if !terminated {
-                owner_state
-                    .borrow_mut()
-                    .workers
-                    .insert(worker_id, Rc::clone(&entry_for_eval));
-            } else {
-                return Ok(worker_id);
-            }
+            entry_for_eval.borrow_mut().terminated = terminated;
+            // Keep a startup-closed entry until the owner endpoint binds. Any
+            // postMessage queued before close() must still be flushed to that
+            // endpoint; bind_worker_owner_native removes the terminated entry
+            // immediately after that flush.
+            owner_state
+                .borrow_mut()
+                .workers
+                .insert(worker_id, Rc::clone(&entry_for_eval));
             result.err().map(|error| error.to_string())
         }
         None => Some(format!("failed to fetch Worker script: {requested_url}")),
@@ -6399,17 +6441,12 @@ fn bind_worker_owner_native(
     args: &[JsValue],
     context: &mut Context,
 ) -> JsResult<JsValue> {
-    let id = args
-        .first()
-        .cloned()
-        .unwrap_or_default()
-        .to_number(context)? as u64;
+    let id = worker_id_argument(args, context)?;
     let owner_object = args.get(1).cloned().unwrap_or_default();
     with_host_state(|state| {
         let entry = state.borrow().workers.get(&id).cloned();
         let Some(entry) = entry else { return Ok(JsValue::undefined()); };
         let mut worker = entry.borrow_mut();
-        if worker.terminated { return Ok(JsValue::undefined()); }
         worker.owner_object = Some(owner_object.clone());
         {
             let mut worker_state = worker.runtime.host_state.borrow_mut();
@@ -6429,6 +6466,9 @@ fn bind_worker_owner_native(
         if let Some(message) = worker.startup_error.take() {
             state.borrow_mut().event_loop.enqueue_worker_error(id, message);
         }
+        if worker.terminated {
+            state.borrow_mut().workers.remove(&id);
+        }
         Ok(JsValue::undefined())
     })
 }
@@ -6438,7 +6478,7 @@ fn worker_post_message_native(
     args: &[JsValue],
     context: &mut Context,
 ) -> JsResult<JsValue> {
-    let id = args.first().cloned().unwrap_or_default().to_number(context)? as u64;
+    let id = worker_id_argument(args, context)?;
     let data = args
         .get(1)
         .cloned()
@@ -6462,7 +6502,7 @@ fn terminate_worker_native(
     args: &[JsValue],
     context: &mut Context,
 ) -> JsResult<JsValue> {
-    let id = args.first().cloned().unwrap_or_default().to_number(context)? as u64;
+    let id = worker_id_argument(args, context)?;
     with_host_state(|state| {
         // Removing the entry breaks the owner/worker Rc cycle immediately. Any
         // already queued tasks retain only the id and become harmless no-ops
@@ -6519,18 +6559,28 @@ fn worker_owner_post_message_native(
 
 fn worker_close_native(_: &JsValue, _: &[JsValue], _: &mut Context) -> JsResult<JsValue> {
     with_host_state(|state| {
-        let (owner, worker_id) = {
+        let (owner, worker_id, owner_bound) = {
             let state_ref = state.borrow();
-            (state_ref.worker_owner.clone(), state_ref.worker_id)
+            (
+                state_ref.worker_owner.clone(),
+                state_ref.worker_id,
+                state_ref.worker_owner_bound,
+            )
         };
         state.borrow_mut().worker_terminated = true;
-        if let (Some(owner), Some(worker_id)) = (owner, worker_id) {
+        if let (Some(owner), Some(worker_id)) = (owner.clone(), worker_id)
+            && owner_bound
+        {
             if let Some(entry) = owner.borrow_mut().workers.remove(&worker_id) {
                 let mut worker = entry.borrow_mut();
                 worker.terminated = true;
                 worker.outgoing.clear();
                 worker.runtime.host_state.borrow_mut().worker_terminated = true;
             }
+        } else if let (Some(owner), Some(worker_id)) = (owner, worker_id)
+            && let Some(entry) = owner.borrow().workers.get(&worker_id).cloned()
+        {
+            entry.borrow_mut().terminated = true;
         }
         Ok(JsValue::undefined())
     })
@@ -8620,6 +8670,63 @@ mod tests {
         runtime.run_until_idle().unwrap();
         assert_eq!(runtime.eval("JSON.stringify(workerValues)").unwrap().as_string().unwrap().to_std_string_escaped(), "[\"before\"]");
         assert_eq!(runtime.host_state.borrow().workers.len(), 0);
+    }
+
+    #[test]
+    fn dedicated_worker_startup_close_flushes_messages_before_removal() {
+        let mut runtime = JsRuntime::new().unwrap();
+        runtime
+            .eval(
+                r#"globalThis.workerValues = [];
+                   const source = encodeURIComponent('postMessage("startup"); close();');
+                   const worker = new Worker('data:text/javascript,' + source);
+                   worker.onmessage = event => workerValues.push(event.data);"#,
+            )
+            .unwrap();
+        runtime.run_until_idle().unwrap();
+        assert_eq!(runtime.eval("JSON.stringify(workerValues)").unwrap().as_string().unwrap().to_std_string_escaped(), "[\"startup\"]");
+        assert_eq!(runtime.host_state.borrow().workers.len(), 0);
+    }
+
+    #[test]
+    fn dedicated_worker_ids_round_trip_as_exact_strings() {
+        let mut runtime = JsRuntime::new().unwrap();
+        runtime.host_state.borrow_mut().next_worker_id = 9_007_199_254_740_993;
+        runtime
+            .eval(
+                r#"globalThis.workerValues = [];
+                   const source = encodeURIComponent('onmessage = event => postMessage(event.data);');
+                   const worker = new Worker('data:text/javascript,' + source);
+                   globalThis.workerIdType = typeof worker.__id;
+                   globalThis.workerIdValue = worker.__id;
+                   worker.onmessage = event => workerValues.push(event.data);
+                   worker.postMessage("exact");"#,
+            )
+            .unwrap();
+        runtime.run_until_idle().unwrap();
+        assert_eq!(runtime.eval("workerIdType").unwrap().as_string().unwrap().to_std_string_escaped(), "string");
+        assert_eq!(runtime.eval("workerIdValue").unwrap().as_string().unwrap().to_std_string_escaped(), "9007199254740993");
+        assert_eq!(runtime.eval("workerValues[0]").unwrap().as_string().unwrap().to_std_string_escaped(), "exact");
+    }
+
+    #[test]
+    fn dedicated_worker_message_origins_use_the_owner_origin() {
+        let mut runtime = JsRuntime::new().unwrap();
+        runtime
+            .eval(
+                r#"globalThis.workerValues = [];
+                   const source = encodeURIComponent('onmessage = event => postMessage({ workerEventOrigin: event.origin, workerLocationOrigin: location.origin });');
+                   const worker = new Worker('data:text/javascript,' + source);
+                   worker.onmessage = event => workerValues.push({ ownerEventOrigin: event.origin, data: event.data });
+                   worker.postMessage("origin");"#,
+            )
+            .unwrap();
+        runtime.run_until_idle().unwrap();
+        assert!(runtime
+            .eval("workerValues[0].ownerEventOrigin === location.origin && workerValues[0].data.workerEventOrigin === location.origin")
+            .unwrap()
+            .as_boolean()
+            .unwrap_or(false));
     }
 
     fn poll_until_dialog<F>(
