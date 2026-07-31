@@ -19577,6 +19577,25 @@ b</textarea></form>"#);
     }
 
     #[test]
+    fn dedicated_worker_does_not_expose_media_constructors() {
+        let mut runtime = JsRuntime::new().unwrap();
+        runtime
+            .eval(
+                r#"globalThis.workerValues = [];
+                   const source = encodeURIComponent(
+                     'postMessage([typeof MediaError, typeof HTMLMediaElement, typeof Audio]);');
+                   const worker = new Worker('data:text/javascript,' + source);
+                   worker.onmessage = event => workerValues.push(event.data);"#,
+            )
+            .unwrap();
+        runtime.run_until_idle().unwrap();
+        assert_eq!(
+            eval_str(&mut runtime, "JSON.stringify(workerValues[0])"),
+            "[\"undefined\",\"undefined\",\"undefined\"]"
+        );
+    }
+
+    #[test]
     fn match_media_evaluates_current_viewport() {
         let doc = NodeHandle::document();
         let mut runtime = JsRuntime::with_document(doc).unwrap();

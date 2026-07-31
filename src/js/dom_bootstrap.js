@@ -9127,6 +9127,7 @@
       "SVGSVGElement", "HTMLTemplateElement", "HTMLFormElement", "HTMLInputElement",
       "HTMLTextAreaElement", "HTMLButtonElement", "HTMLSelectElement", "HTMLOptionElement",
       "HTMLMediaElement", "HTMLAudioElement", "HTMLVideoElement", "Audio",
+      "MediaError",
     ]) {
       try { delete globalThis[domName]; } catch (_) { globalThis[domName] = undefined; }
     }
