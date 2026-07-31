@@ -8918,7 +8918,10 @@
   }
 
   class AudioDestinationNode extends AudioNode {
-    constructor(context) { super(audioConstructionToken, context, 1, 0); this.maxChannelCount = 2; }
+    constructor(token, context) {
+      super(token, context, 1, 0);
+      this.maxChannelCount = 2;
+    }
     get [Symbol.toStringTag]() { return "AudioDestinationNode"; }
   }
 
@@ -8943,14 +8946,14 @@
       this.__started = false;
       this.__stopped = false;
       this.__stopCalled = false;
+      this.__startRequested = 0;
       this.__stopTimer = null;
     }
     start(when = 0) {
       if (this.__started) throw new DOMException("OscillatorNode.start() was already called.", "InvalidStateError");
+      this.__startRequested = Math.max(0, audioNumber(when, "OscillatorNode start time"));
       this.__started = true;
-      audioNumber(when, "OscillatorNode start time");
-      if (this.__stopRequested !== undefined && this.context.state === "running" && this.__stopRequested <= audioNow(this.context)) this.__finish();
-      else this.__schedulePendingStop();
+      this.__schedulePendingStop();
     }
     stop(when = 0) {
       if (this.__stopCalled) throw new DOMException("OscillatorNode.stop() was already called.", "InvalidStateError");
@@ -8965,7 +8968,8 @@
     __schedulePendingStop() {
       if (this.__stopped || !this.__started || this.__stopRequested === undefined || this.context.state !== "running") return;
       if (this.__stopTimer !== null) clearTimeout(this.__stopTimer);
-      const delay = Math.max(0, (this.__stopRequested - audioNow(this.context)) * 1000);
+      const effectiveStop = Math.max(this.__stopRequested, this.__startRequested);
+      const delay = Math.max(0, (effectiveStop - audioNow(this.context)) * 1000);
       if (delay <= 0) {
         this.__finish();
         return;
@@ -9002,7 +9006,7 @@
       this.__currentTime = 0;
       this.__runningAt = 0;
       this.__nodes = new Set();
-      this.__destination = new AudioDestinationNode(this);
+      this.__destination = new AudioDestinationNode(audioConstructionToken, this);
       this.listener = Object.create(null);
       this.onstatechange = null;
     }
