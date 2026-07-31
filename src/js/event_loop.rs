@@ -42,7 +42,11 @@ pub(crate) enum Task {
         data: String,
     },
     /// A worker startup/runtime failure reported to its owner page.
-    WorkerError { worker_id: u64, message: String },
+    WorkerError {
+        worker_id: u64,
+        owner: Option<JsValue>,
+        message: String,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -143,10 +147,15 @@ impl EventLoop {
         );
     }
 
-    pub(crate) fn enqueue_worker_error(&mut self, worker_id: u64, message: String) {
+    pub(crate) fn enqueue_worker_error(
+        &mut self,
+        worker_id: u64,
+        owner: Option<JsValue>,
+        message: String,
+    ) {
         self.enqueue(
             TaskSource::PostedMessage,
-            Task::WorkerError { worker_id, message },
+            Task::WorkerError { worker_id, owner, message },
         );
     }
 

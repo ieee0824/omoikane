@@ -1671,13 +1671,13 @@ impl JsRuntime {
                 owner_state
                     .borrow_mut()
                     .event_loop
-                    .enqueue_worker_error(worker_id, error.to_string());
+                    .enqueue_worker_error(worker_id, None, error.to_string());
             }
             for error in errors {
                 owner_state
                     .borrow_mut()
                     .event_loop
-                    .enqueue_worker_error(worker_id, error);
+                    .enqueue_worker_error(worker_id, None, error);
             }
         }
     }
@@ -2823,8 +2823,12 @@ impl JsRuntime {
             } => {
                 self.run_worker_owner_message(worker_id, owner, data)
             }
-            Task::WorkerError { worker_id, message } => {
-                self.run_worker_error(worker_id, message)
+            Task::WorkerError {
+                worker_id,
+                owner,
+                message,
+            } => {
+                self.run_worker_error(worker_id, owner, message)
             }
         }
     }
@@ -2857,10 +2861,16 @@ impl JsRuntime {
             (result, jobs_result)
         };
         if let Err(error) = result {
-            owner_state.borrow_mut().event_loop.enqueue_worker_error(worker_id, error.to_string());
+            owner_state
+                .borrow_mut()
+                .event_loop
+                .enqueue_worker_error(worker_id, None, error.to_string());
         }
         if let Err(error) = jobs_result {
-            owner_state.borrow_mut().event_loop.enqueue_worker_error(worker_id, error.to_string());
+            owner_state
+                .borrow_mut()
+                .event_loop
+                .enqueue_worker_error(worker_id, None, error.to_string());
         }
         let terminated = worker.runtime.host_state.borrow().worker_terminated;
         drop(worker);
@@ -2888,13 +2898,19 @@ impl JsRuntime {
         Ok(())
     }
 
-    fn run_worker_error(&mut self, worker_id: u64, message: String) -> JsResult<()> {
-        let owner_object = self
-            .host_state
-            .borrow()
-            .workers
-            .get(&worker_id)
-            .and_then(|entry| entry.borrow().owner_object.clone());
+    fn run_worker_error(
+        &mut self,
+        worker_id: u64,
+        owner: Option<JsValue>,
+        message: String,
+    ) -> JsResult<()> {
+        let owner_object = owner.or_else(|| {
+            self.host_state
+                .borrow()
+                .workers
+                .get(&worker_id)
+                .and_then(|entry| entry.borrow().owner_object.clone())
+        });
         let Some(owner_object) = owner_object else { return Ok(()); };
         self.install_worker_owner_values(owner_object, message)?;
         let result = self.eval(
@@ -6464,7 +6480,10 @@ fn bind_worker_owner_native(
             );
         }
         if let Some(message) = worker.startup_error.take() {
-            state.borrow_mut().event_loop.enqueue_worker_error(id, message);
+            state
+                .borrow_mut()
+                .event_loop
+                .enqueue_worker_error(id, Some(owner_object.clone()), message);
         }
         if worker.terminated {
             state.borrow_mut().workers.remove(&id);
@@ -8677,14 +8696,16 @@ mod tests {
         let mut runtime = JsRuntime::new().unwrap();
         runtime
             .eval(
-                r#"globalThis.workerValues = [];
-                   const source = encodeURIComponent('postMessage("startup"); close();');
+                r#"globalThis.workerValues = []; globalThis.workerErrors = [];
+                   const source = encodeURIComponent('postMessage("startup"); close(); throw new Error("startup failed");');
                    const worker = new Worker('data:text/javascript,' + source);
-                   worker.onmessage = event => workerValues.push(event.data);"#,
+                   worker.onmessage = event => workerValues.push(event.data);
+                   worker.onerror = event => workerErrors.push(event.message);"#,
             )
             .unwrap();
         runtime.run_until_idle().unwrap();
         assert_eq!(runtime.eval("JSON.stringify(workerValues)").unwrap().as_string().unwrap().to_std_string_escaped(), "[\"startup\"]");
+        assert_eq!(runtime.eval("workerErrors.length").unwrap().as_number(), Some(1.0));
         assert_eq!(runtime.host_state.borrow().workers.len(), 0);
     }
 
