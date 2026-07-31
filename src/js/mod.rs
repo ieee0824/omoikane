@@ -51,6 +51,7 @@ const MAX_CSP_VIOLATIONS: usize = 1024;
 
 thread_local! {
     static ACTIVE_HOST_STATE: RefCell<Option<Rc<RefCell<HostState>>>> = const { RefCell::new(None) };
+    static ACTIVE_MODULE_DOCUMENT_ID: Cell<Option<usize>> = const { Cell::new(None) };
 }
 
 struct ActiveHostGuard(Option<Rc<RefCell<HostState>>>);
@@ -68,12 +69,29 @@ fn activate_host_state(host_state: Rc<RefCell<HostState>>) -> ActiveHostGuard {
     ActiveHostGuard(previous)
 }
 
+struct ActiveModuleDocumentGuard(Option<usize>);
+
+impl Drop for ActiveModuleDocumentGuard {
+    fn drop(&mut self) {
+        ACTIVE_MODULE_DOCUMENT_ID.with(|slot| slot.set(self.0.take()));
+    }
+}
+
+fn activate_module_document(document_id: usize) -> ActiveModuleDocumentGuard {
+    let previous = ACTIVE_MODULE_DOCUMENT_ID.with(|slot| slot.replace(Some(document_id)));
+    ActiveModuleDocumentGuard(previous)
+}
+
 fn active_document_id() -> Option<usize> {
-    ACTIVE_HOST_STATE.with(|slot| {
-        slot.borrow()
-            .as_ref()
-            .map(|host_state| host_state.borrow().document.identity())
-    })
+    ACTIVE_MODULE_DOCUMENT_ID
+        .with(|slot| slot.get())
+        .or_else(|| {
+            ACTIVE_HOST_STATE.with(|slot| {
+                slot.borrow()
+                    .as_ref()
+                    .map(|host_state| host_state.borrow().document.identity())
+            })
+        })
 }
 
 struct ActiveHostFuture<F> {
@@ -2216,8 +2234,12 @@ impl JsRuntime {
     }
 
     /// Evaluates one module with asynchronous jobs and suspendable host calls.
-    async fn eval_module_async(&mut self, source: &str, url: &str) -> JsResult<JsValue> {
-        let document = self.document();
+    async fn eval_module_async(
+        &mut self,
+        source: &str,
+        url: &str,
+        document: NodeHandle,
+    ) -> JsResult<JsValue> {
         let policy = self.host_state.borrow().csp_policy_for_document(&document);
         self.module_loader.set_csp_policy_for_module_graph(
             document.identity(),
@@ -2229,9 +2251,14 @@ impl JsRuntime {
             None,
             &mut self.context,
         )?;
+        let document_id = document.identity();
+        let host_state = Rc::clone(&self.host_state);
         ActiveHostFuture {
-            future: Box::pin(module.load_link_evaluate_async(&mut self.context)),
-            host_state: Rc::clone(&self.host_state),
+            future: Box::pin(async move {
+                let _module_document = activate_module_document(document_id);
+                module.load_link_evaluate_async(&mut self.context).await
+            }),
+            host_state,
         }
         .await
     }
@@ -2395,7 +2422,11 @@ impl JsRuntime {
                 let evaluation_result = {
                     let mut evaluation: Pin<Box<dyn Future<Output = JsResult<JsValue>> + '_>> =
                         if let Some(url) = module_url.as_deref() {
-                            Box::pin(self.eval_module_async(&source, url))
+                            let module_document = script_node_id
+                                .and_then(|node_id| self.host_state.borrow().get_node(node_id))
+                                .and_then(|node| document_root_for_node(&node))
+                                .unwrap_or_else(|| self.document());
+                            Box::pin(self.eval_module_async(&source, url, module_document))
                         } else {
                             Box::pin(self.eval_async(&source))
                         };
@@ -2528,12 +2559,12 @@ impl JsRuntime {
         &mut self,
         source: &str,
         url: &str,
+        document: NodeHandle,
     ) -> (
         Result<JsValue, String>,
         std::time::Duration,
         std::time::Duration,
     ) {
-        let document = self.document();
         let policy = self.host_state.borrow().csp_policy_for_document(&document);
         self.module_loader.set_csp_policy_for_module_graph(
             document.identity(),
@@ -2557,6 +2588,7 @@ impl JsRuntime {
         };
         let parse_elapsed = parse_start.elapsed();
         let execute_start = std::time::Instant::now();
+        let _module_document = activate_module_document(document.identity());
         let promise = self.with_active_host_value(|context| module.load_link_evaluate(context));
         let result =
             self.run_jobs()
@@ -2840,12 +2872,16 @@ impl JsRuntime {
             .await;
         self.record_error_from(&src, marked);
         let result = match kind {
-            ScriptKind::Module => self
-                .eval_module_async(
+            ScriptKind::Module => {
+                let module_document = document_root_for_node(&script_node)
+                    .unwrap_or_else(|| self.document());
+                self.eval_module_async(
                     &source,
                     &module_script_url(&src, base_url.as_ref(), false),
+                    module_document,
                 )
-                .await,
+                .await
+            }
             _ => self.eval_async(&source).await,
         };
         let _ = self.eval("__omoikane_set_current_script(null)");
@@ -3603,6 +3639,8 @@ impl JsRuntime {
                                         .eval_module_timed(
                                             &source,
                                             &module_script_url(&src, base_url.as_ref(), false),
+                                            document_root_for_node(&script_node)
+                                                .unwrap_or_else(|| self.document()),
                                         )
                                         .0,
                                     _ => self
@@ -3894,7 +3932,7 @@ impl JsRuntime {
             let (result, parse_elapsed, compile_elapsed, execute_elapsed) =
                 if let Some(module_url) = module_url {
                     let (result, parse_elapsed, execute_elapsed) =
-                        self.eval_module_timed(&source_code, &module_url);
+                        self.eval_module_timed(&source_code, &module_url, script.clone());
                     (
                         result,
                         parse_elapsed,
@@ -10453,7 +10491,11 @@ mod tests {
         assert_eq!(runtime.pending_javascript_dialog(), None);
 
         let (module_result, ..) =
-            runtime.eval_module_timed("alert('module script')", "https://example.test/a.js");
+            runtime.eval_module_timed(
+                "alert('module script')",
+                "https://example.test/a.js",
+                runtime.document(),
+            );
         assert!(module_result.is_err());
         assert_eq!(runtime.pending_javascript_dialog(), None);
 
