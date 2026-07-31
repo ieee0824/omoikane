@@ -5230,6 +5230,11 @@ fn register_host_bindings(
             NativeFunction::from_copy_closure(canvas_data_url_native),
         ),
         (
+            js_string!("__omoikane_canvas_png"),
+            3,
+            NativeFunction::from_copy_closure(canvas_png_native),
+        ),
+        (
             js_string!("__omoikane_canvas_image_source"),
             1,
             NativeFunction::from_copy_closure(canvas_image_source_native),
@@ -8526,6 +8531,39 @@ fn canvas_data_url_native(
 ) -> JsResult<JsValue> {
     let id = args.first().cloned().unwrap_or_default().to_number(context)? as usize;
     Ok(js_string!(crate::canvas::png_data_url(id).unwrap_or_else(|| "data:,".into())).into())
+}
+
+fn canvas_png_native(
+    _: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let width_number = args.first().cloned().unwrap_or_default().to_number(context)?;
+    let height_number = args.get(1).cloned().unwrap_or_default().to_number(context)?;
+    if !width_number.is_finite()
+        || !height_number.is_finite()
+        || width_number.fract() != 0.0
+        || height_number.fract() != 0.0
+        || !(0.0..=32_768.0).contains(&width_number)
+        || !(0.0..=32_768.0).contains(&height_number)
+    {
+        return Ok(JsValue::null());
+    }
+    let width = width_number as u32;
+    let height = height_number as u32;
+    let pixels = body_bytes_argument(args.get(2), context)?.unwrap_or_default();
+    let Some(expected_len) = (width as usize)
+        .checked_mul(height as usize)
+        .and_then(|pixels| pixels.checked_mul(4))
+    else {
+        return Ok(JsValue::null());
+    };
+    if pixels.len() != expected_len {
+        return Ok(JsValue::null());
+    }
+    Ok(crate::canvas::png_data_url_from_rgba(width, height, pixels)
+        .map(|url| js_string!(url).into())
+        .unwrap_or_else(JsValue::null))
 }
 
 fn canvas_image_source_native(
@@ -20762,7 +20800,16 @@ b</textarea></form>"#);
             .eval(
                 r#"globalThis.workerValues = [];
                    const source = encodeURIComponent(
-                     'postMessage([typeof MediaError, typeof HTMLMediaElement, typeof Audio, typeof AudioContext, typeof AudioNode, typeof AudioParam, typeof Notification]);');
+                     'const values = [typeof MediaError, typeof HTMLMediaElement, typeof Audio, typeof AudioContext, typeof AudioNode, typeof AudioParam, typeof Notification, typeof OffscreenCanvas, typeof ImageBitmap];' +
+                     'const sourceCanvas = new OffscreenCanvas(1, 1);' +
+                     'const sourceContext = sourceCanvas.getContext("2d");' +
+                     'sourceContext.fillStyle = "red"; sourceContext.fillRect(0, 0, 1, 1);' +
+                     'createImageBitmap(sourceCanvas).then(bitmap => {' +
+                     '  const targetCanvas = new OffscreenCanvas(1, 1);' +
+                     '  const targetContext = targetCanvas.getContext("2d");' +
+                     '  targetContext.drawImage(bitmap, 0, 0);' +
+                     '  postMessage(values.concat([bitmap.width, targetContext.getImageData(0, 0, 1, 1).data[0]]));' +
+                     '});');
                    const worker = new Worker('data:text/javascript,' + source);
                    worker.onmessage = event => workerValues.push(event.data);"#,
             )
@@ -20770,8 +20817,46 @@ b</textarea></form>"#);
         runtime.run_until_idle().unwrap();
         assert_eq!(
             eval_str(&mut runtime, "JSON.stringify(workerValues[0])"),
-            "[\"undefined\",\"undefined\",\"undefined\",\"undefined\",\"undefined\",\"undefined\",\"undefined\"]"
+            "[\"undefined\",\"undefined\",\"undefined\",\"undefined\",\"undefined\",\"undefined\",\"undefined\",\"function\",\"function\",1,255]"
         );
+    }
+
+    #[test]
+    fn offscreen_canvas_models_pixels_bitmaps_blobs_and_detachment() {
+        let mut runtime = JsRuntime::new().unwrap();
+        runtime
+            .eval(
+                r#"globalThis.offscreen = new OffscreenCanvas(2, 1);
+                   globalThis.offscreenContext = offscreen.getContext('2d');
+                   offscreenContext.fillStyle = 'red';
+                   offscreenContext.fillRect(0, 0, 1, 1);
+                   globalThis.bitmap = offscreen.transferToImageBitmap();
+                   globalThis.target = document.createElement('canvas');
+                   target.width = 2; target.height = 1;
+                   target.getContext('2d').drawImage(bitmap, 0, 0);
+                   globalThis.pixel = Array.from(target.getContext('2d').getImageData(0, 0, 1, 1).data).join(',');
+                   globalThis.blobResult = 'pending';
+                   offscreen.convertToBlob().then(blob => { blobResult = [blob.type, blob.size].join('|'); });
+                   globalThis.emptyBlobResult = 'pending';
+                   new OffscreenCanvas(0, 0).convertToBlob().then(blob => { emptyBlobResult = [blob.type, blob.size].join('|'); });
+                   globalThis.cropResult = 'pending';
+                   globalThis.cropZeroError = 'pending';
+                   globalThis.cropBoundsError = 'pending';
+                   createImageBitmap(offscreen, 0, 0, 1, 1).then(value => { cropResult = [value.width, value.height].join('|'); });
+                   createImageBitmap(offscreen, 0, 0, 0, 1).catch(error => { cropZeroError = error.name; });
+                   createImageBitmap(offscreen, 0, 0, 3, 1).catch(error => { cropBoundsError = error.name; });"#,
+            )
+            .unwrap();
+        runtime.run_until_idle().unwrap();
+        assert_eq!(eval_str(&mut runtime, "pixel"), "255,0,0,255");
+        assert_eq!(eval_str(&mut runtime, "[offscreen.width, offscreen.height, bitmap.width, bitmap.height, offscreenContext instanceof OffscreenCanvasRenderingContext2D].join('|')"), "2|1|2|1|true");
+        assert!(eval_str(&mut runtime, "blobResult").starts_with("image/png|"));
+        assert_eq!(eval_str(&mut runtime, "emptyBlobResult"), "image/png|0");
+        assert_eq!(eval_str(&mut runtime, "cropResult"), "1|1");
+        assert_eq!(eval_str(&mut runtime, "cropZeroError + '|' + cropBoundsError"), "IndexSizeError|IndexSizeError");
+        assert_eq!(eval_str(&mut runtime, "(() => { bitmap.close(); return [bitmap.width, bitmap.height, (() => { try { target.getContext('2d').drawImage(bitmap, 0, 0); return 'allowed'; } catch (error) { return error.name; } })()]; })().join('|')"), "0|0|InvalidStateError");
+        assert_eq!(eval_str(&mut runtime, "(() => { try { new OffscreenCanvas(-1, 1); return 'allowed'; } catch (error) { return error.name; } })()"), "IndexSizeError");
+        assert_eq!(eval_str(&mut runtime, "(() => { const canvas = new OffscreenCanvas(1, 1); canvas.getContext('2d'); return String(canvas.getContext('webgl')); })()"), "null");
     }
 
     #[test]
