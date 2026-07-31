@@ -4998,6 +4998,11 @@ fn register_host_bindings(
             NativeFunction::from_copy_closure(storage_clear_native),
         ),
         (
+            js_string!("__omoikane_cache_storage"),
+            3,
+            NativeFunction::from_copy_closure(cache_storage_native),
+        ),
+        (
             js_string!("__omoikane_query_selector"),
             2,
             NativeFunction::from_copy_closure(query_selector_native),
@@ -6115,6 +6120,117 @@ fn storage_clear_native(
 ) -> JsResult<JsValue> {
     let (local, _, manager, session, origin) = storage_arguments(args, context)?;
     Ok(JsValue::from(manager.clear(session, &origin, local)))
+}
+
+/// Host-side backing store for the Cache Storage JavaScript wrappers.
+///
+/// Cache operations are deliberately exposed as one JSON boundary: request
+/// and response objects are realm-local, immutable snapshots and must never be
+/// retained as `JsValue`s by the native manager.  The wrapper queues the call
+/// on the networking task source before invoking this binding, so the native
+/// store itself remains synchronous and lock-scoped.
+fn cache_storage_native(
+    _this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let operation = string_argument(args.first(), "", context)?;
+    let name = string_argument(args.get(1), "", context)?;
+    let payload = string_argument(args.get(2), "", context)?;
+    with_host_state(|host| {
+        let state = host.borrow();
+        let origin = state
+            .document_origins
+            .get(&state.document.identity())
+            .cloned()
+            .flatten()
+            .ok_or_else(|| {
+                JsError::from(
+                    JsNativeError::error()
+                        .with_message("Cache Storage is unavailable for an opaque origin"),
+                )
+            })?;
+        let manager = state.storage_manager.clone();
+        let output = match operation.as_str() {
+            "open" => {
+                manager.cache_open(&origin, name);
+                serde_json::json!(true)
+            }
+            "has" => serde_json::json!(manager.cache_has(&origin, &name)),
+            "keys" => serde_json::json!(manager.cache_names(&origin)),
+            "delete" => serde_json::json!(manager.cache_delete(&origin, &name)),
+            "entries" => {
+                let entries = manager.cache_entries(&origin, &name).ok_or_else(|| {
+                    JsError::from(
+                        JsNativeError::error().with_message("Cache object no longer exists"),
+                    )
+                })?;
+                serde_json::Value::Array(
+                    entries
+                        .into_iter()
+                        .map(|entry| {
+                            serde_json::json!({
+                                "id": entry.id,
+                                "request": entry.request,
+                                "response": entry.response,
+                            })
+                        })
+                        .collect(),
+                )
+            }
+            "put" => {
+                let value: serde_json::Value = serde_json::from_str(&payload).map_err(|error| {
+                    JsError::from(
+                        JsNativeError::typ()
+                            .with_message(format!("invalid Cache.put snapshot: {error}")),
+                    )
+                })?;
+                let request = value
+                    .get("request")
+                    .and_then(serde_json::Value::as_str)
+                    .ok_or_else(|| {
+                        JsError::from(
+                            JsNativeError::typ().with_message("Cache.put request snapshot missing"),
+                        )
+                    })?;
+                let response = value
+                    .get("response")
+                    .and_then(serde_json::Value::as_str)
+                    .ok_or_else(|| {
+                        JsError::from(
+                            JsNativeError::typ()
+                                .with_message("Cache.put response snapshot missing"),
+                        )
+                    })?;
+                if manager
+                    .cache_put(&origin, &name, request.to_string(), response.to_string())
+                    .is_none()
+                {
+                    return Err(JsError::from(
+                        JsNativeError::error().with_message("Cache object no longer exists"),
+                    ));
+                }
+                serde_json::json!(true)
+            }
+            "delete-entry" => {
+                let id = serde_json::from_str::<u64>(&payload).map_err(|error| {
+                    JsError::from(
+                        JsNativeError::typ().with_message(format!("invalid Cache entry id: {error}")),
+                    )
+                })?;
+                serde_json::json!(manager.cache_delete_entry(&origin, &name, id))
+            }
+            _ => {
+                return Err(JsError::from(
+                    JsNativeError::typ().with_message(format!("unknown Cache Storage operation: {operation}")),
+                ));
+            }
+        };
+        let encoded = serde_json::to_string(&output).map_err(|error| {
+            JsError::from(JsNativeError::error().with_message(error.to_string()))
+        })?;
+        Ok(js_string!(encoded).into())
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -30087,5 +30203,126 @@ b</textarea></form>"#);
         );
         runtime.run_until_idle().unwrap();
         assert_eq!(eval_str(&mut runtime, "messages + ':' + errors"), "0:1");
+    }
+
+    #[test]
+    fn cache_storage_snapshots_match_options_and_delivers_on_networking_tasks() {
+        let storage = StorageManager::new();
+        let first_session = storage.create_session();
+        let second_session = storage.create_session();
+        let mut runtime = JsRuntime::with_document_url_and_storage(
+            default_document(),
+            "https://cache.example.test/page",
+            storage.clone(),
+            first_session,
+        )
+        .unwrap();
+
+        eval_str(
+            &mut runtime,
+            r#"(() => {
+              globalThis.cacheProbe = { events: [], body: '', ignoredSearch: '', varied: true, ignoredVary: '' };
+              caches.open('v1').then(cache => {
+                cacheProbe.events.push('opened');
+                const request = new Request('/asset?a=1', { headers: { Accept: 'text/plain' } });
+                const response = new Response('snapshot', { headers: { Vary: 'Accept', 'X-Cache': 'yes' } });
+                return cache.put(request, response).then(() => {
+                  cacheProbe.events.push('put');
+                  return Promise.all([
+                    cache.match(new Request('/asset?a=1', { headers: { Accept: 'text/plain' } })).then(value => value.text()),
+                    cache.match(new Request('/asset?a=2', { headers: { Accept: 'text/plain' } }), { ignoreSearch: true }).then(value => value.text()),
+                    cache.match(new Request('/asset?a=1', { headers: { Accept: 'application/json' } })),
+                    cache.match('/asset?a=1', { ignoreVary: true }).then(value => value.text()),
+                    cache.match(new Request('/asset?a=1', { headers: { Accept: 'text/plain' } })).then(value => value.text()),
+                  ]);
+                });
+              }).then(values => {
+                cacheProbe.events.push('matched');
+                cacheProbe.body = values[0];
+                cacheProbe.ignoredSearch = values[1];
+                cacheProbe.varied = values[2] === undefined;
+                cacheProbe.ignoredVary = values[3];
+                cacheProbe.secondRead = values[4];
+              });
+              globalThis.cacheRejected = { method: false, opaque: false };
+              caches.open('v1').then(cache => {
+                cache.put(new Request('/post', { method: 'POST' }), new Response('bad'))
+                  .then(() => {}, error => { cacheRejected.method = error instanceof TypeError; });
+                const opaque = new Response('opaque');
+                opaque.type = 'opaque';
+                cache.put('/opaque', opaque)
+                  .then(() => {}, error => { cacheRejected.opaque = error instanceof TypeError; });
+              });
+            })()"#,
+        );
+        assert_eq!(eval_str(&mut runtime, "cacheProbe.events.length"), "0");
+        runtime.run_until_idle().unwrap();
+        assert_eq!(
+            eval_str(&mut runtime, "cacheProbe.events.join(',')"),
+            "opened,put,matched"
+        );
+        assert_eq!(eval_str(&mut runtime, "cacheProbe.body"), "snapshot");
+        assert_eq!(eval_str(&mut runtime, "cacheProbe.ignoredSearch"), "snapshot");
+        assert_eq!(eval_str(&mut runtime, "cacheProbe.varied + ':' + cacheProbe.ignoredVary"), "true:snapshot");
+        assert_eq!(eval_str(&mut runtime, "cacheProbe.secondRead"), "snapshot");
+        assert_eq!(eval_str(&mut runtime, "cacheRejected.method + ':' + cacheRejected.opaque"), "true:true");
+        eval_str(&mut runtime, "(() => { globalThis.cacheHas = undefined; caches.has('v1').then(value => { cacheHas = value; }); })()");
+        assert_eq!(eval_str(&mut runtime, "cacheHas === undefined"), "true");
+        runtime.run_until_idle().unwrap();
+        assert_eq!(eval_str(&mut runtime, "cacheHas"), "true");
+        eval_str(
+            &mut runtime,
+            "(() => { globalThis.cacheNames = []; caches.keys().then(names => { cacheNames = names; }); })()",
+        );
+        assert_eq!(eval_str(&mut runtime, "cacheNames.length"), "0");
+        runtime.run_until_idle().unwrap();
+        assert_eq!(eval_str(&mut runtime, "cacheNames.join(',')"), "v1");
+
+        // StorageManager is shared by independently created realms: the
+        // origin namespace is visible in the second runtime, while another
+        // origin receives an empty CacheStorage namespace.
+        let mut same_origin = JsRuntime::with_document_url_and_storage(
+            default_document(),
+            "https://cache.example.test/other",
+            storage.clone(),
+            second_session,
+        )
+        .unwrap();
+        eval_str(
+            &mut same_origin,
+            "(() => { globalThis.cacheNames = []; caches.keys().then(names => { cacheNames = names; }); })()",
+        );
+        assert_eq!(eval_str(&mut same_origin, "cacheNames.length"), "0");
+        same_origin.run_until_idle().unwrap();
+        assert_eq!(eval_str(&mut same_origin, "cacheNames.join(',')"), "v1");
+
+        let mut other_origin = JsRuntime::with_document_url_and_storage(
+            default_document(),
+            "https://other-cache.example.test/",
+            storage,
+            second_session,
+        )
+        .unwrap();
+        eval_str(
+            &mut other_origin,
+            "(() => { globalThis.cacheNames = []; caches.keys().then(names => { cacheNames = names; }); })()",
+        );
+        other_origin.run_until_idle().unwrap();
+        assert_eq!(eval_str(&mut other_origin, "cacheNames.length"), "0");
+
+        let mut opaque_origin = JsRuntime::with_document_url_and_storage(
+            default_document(),
+            "data:text/html,<p>opaque</p>",
+            StorageManager::new(),
+            1,
+        )
+        .unwrap();
+        eval_str(
+            &mut opaque_origin,
+            "(() => { globalThis.cacheError = ''; caches.open('opaque').then(() => { cacheError = 'resolved'; }, error => { cacheError = error.name; }); })()",
+        );
+        assert_eq!(eval_str(&mut opaque_origin, "cacheError"), "");
+        opaque_origin.run_until_idle().unwrap();
+        assert_eq!(eval_str(&mut opaque_origin, "cacheError"), "SecurityError");
     }
 }
