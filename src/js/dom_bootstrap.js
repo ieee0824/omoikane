@@ -3613,6 +3613,13 @@
       return this.__styleSheets;
     }
 
+    get adoptedStyleSheets() {
+      return adoptedStyleSheetsForRoot(this);
+    }
+    set adoptedStyleSheets(value) {
+      setAdoptedStyleSheets(this, value);
+    }
+
     createTextNode(text) {
       return this.__own(wrapNode(__omoikane_create_text_node(String(text))));
     }
@@ -3956,6 +3963,12 @@
     get host() { return wrapNode(__omoikane_shadow_host(this.__id)); }
     get mode() { return __omoikane_shadow_mode(this.__id); }
     get delegatesFocus() { return false; }
+    get adoptedStyleSheets() {
+      return adoptedStyleSheetsForRoot(this);
+    }
+    set adoptedStyleSheets(value) {
+      setAdoptedStyleSheets(this, value);
+    }
     get innerHTML() {
       return Object.getOwnPropertyDescriptor(Element.prototype, "innerHTML")
         .get.call(this);
@@ -4304,16 +4317,219 @@
 
   const dirtyStyleSheets = new Set();
 
+  // Constructable stylesheets are kept as JavaScript objects while native
+  // style resolution receives a per-root text snapshot through a small host
+  // hook. Weak references avoid keeping detached ShadowRoots alive solely
+  // because a stylesheet was once adopted by them.
+  const adoptedStyleSheetsByRoot = new WeakMap();
+  const adoptedRootsBySheet = new WeakMap();
+  const adoptedListReplacers = new WeakMap();
+  const ADOPTED_LIST_MUTATORS = [
+    "copyWithin", "fill", "pop", "push", "reverse", "shift", "sort", "splice", "unshift",
+  ];
+
+  function adoptedRootDocument(root) {
+    if (root instanceof Document) return root;
+    if (root instanceof ShadowRoot) return root.host ? root.host.ownerDocument : null;
+    return null;
+  }
+
+  function adoptedRefTarget(ref) {
+    return typeof WeakRef === "function" && ref instanceof WeakRef ? ref.deref() : ref;
+  }
+
+  function adoptedRootsForSheet(sheet) {
+    const refs = adoptedRootsBySheet.get(sheet);
+    if (!refs) return [];
+    const roots = [];
+    for (const ref of Array.from(refs)) {
+      const root = adoptedRefTarget(ref);
+      if (root) roots.push(root);
+      else refs.delete(ref);
+    }
+    return roots;
+  }
+
+  function detachAdoptedRootFromSheet(root, sheet) {
+    const refs = adoptedRootsBySheet.get(sheet);
+    if (!refs) return;
+    for (const ref of Array.from(refs)) {
+      const target = adoptedRefTarget(ref);
+      if (!target || target === root) refs.delete(ref);
+    }
+  }
+
+  function attachAdoptedRootToSheet(root, sheet) {
+    let refs = adoptedRootsBySheet.get(sheet);
+    if (!refs) {
+      refs = new Set();
+      adoptedRootsBySheet.set(sheet, refs);
+    }
+    if (!adoptedRootsForSheet(sheet).includes(root)) {
+      refs.add(typeof WeakRef === "function" ? new WeakRef(root) : root);
+    }
+  }
+
+  function validateAdoptedStyleSheetValues(root, value) {
+    const document = adoptedRootDocument(root);
+    if (!document) throw new DOMException("The root has no owner Document.", "NotAllowedError");
+    for (const sheet of value) {
+      if (!(sheet instanceof CSSStyleSheet)) {
+        throw new TypeError("adoptedStyleSheets entries must be CSSStyleSheet objects");
+      }
+      if (!sheet.__constructed || sheet.__ownerDocument !== document) {
+        throw new DOMException("The stylesheet cannot be adopted by this root.", "NotAllowedError");
+      }
+    }
+  }
+
+  function observableArrayIndex(property) {
+    if (typeof property !== "string" || !/^(?:0|[1-9]\d*)$/.test(property)) return null;
+    const index = Number(property);
+    return index <= 0xffffffff - 1 ? index : null;
+  }
+
+  function makeAdoptedStyleSheetList(root, values = []) {
+    const list = values.slice();
+    let observable;
+
+    const commit = candidate => {
+      validateAdoptedStyleSheetValues(root, candidate);
+      const previous = list.slice();
+      list.length = 0;
+      for (const sheet of candidate) list.push(sheet);
+      try {
+        syncAdoptedStyleSheetRoot(root, observable);
+      } catch (error) {
+        list.length = 0;
+        for (const sheet of previous) list.push(sheet);
+        throw error;
+      }
+    };
+
+    const mutate = (method, args) => {
+      const candidate = list.slice();
+      const result = Array.prototype[method].apply(candidate, args);
+      commit(candidate);
+      return result === candidate ? observable : result;
+    };
+
+    observable = new Proxy(list, {
+      get(target, property, receiver) {
+        if (ADOPTED_LIST_MUTATORS.includes(property)) {
+          return (...args) => mutate(property, args);
+        }
+        return Reflect.get(target, property, receiver);
+      },
+      set(target, property, value, receiver) {
+        if (property === "length") {
+          const length = Number(value);
+          if (!Number.isInteger(length) || length < 0 || length > target.length) {
+            return false;
+          }
+          return commit(target.slice(0, length)), true;
+        }
+        const index = observableArrayIndex(property);
+        if (index !== null) {
+          if (index > target.length) return false;
+          const candidate = target.slice();
+          candidate[index] = value;
+          commit(candidate);
+          return true;
+        }
+        return Reflect.set(target, property, value, receiver);
+      },
+      defineProperty(target, property, descriptor) {
+        const index = observableArrayIndex(property);
+        if (index !== null) {
+          if (descriptor.get || descriptor.set || descriptor.configurable === false ||
+              descriptor.enumerable === false || descriptor.writable === false) {
+            return false;
+          }
+          if (Object.prototype.hasOwnProperty.call(descriptor, "value")) {
+            if (index > target.length) return false;
+            const candidate = target.slice();
+            candidate[index] = descriptor.value;
+            commit(candidate);
+          }
+          return true;
+        }
+        if (property === "length" && Object.prototype.hasOwnProperty.call(descriptor, "value")) {
+          if (descriptor.writable === false) return false;
+          const length = Number(descriptor.value);
+          if (!Number.isInteger(length) || length < 0 || length > target.length) return false;
+          commit(target.slice(0, length));
+          return true;
+        }
+        return Reflect.defineProperty(target, property, descriptor);
+      },
+      deleteProperty(target, property) {
+        const index = observableArrayIndex(property);
+        if (index === null) return Reflect.deleteProperty(target, property);
+        if (index >= target.length) return true;
+        const candidate = target.slice();
+        candidate.splice(index, 1);
+        commit(candidate);
+        return true;
+      },
+      preventExtensions() {
+        return false;
+      },
+    });
+    adoptedListReplacers.set(observable, candidate => commit(candidate));
+    if (values.length) commit(values.slice());
+    return observable;
+  }
+
+  function syncAdoptedStyleSheetRoot(root, value) {
+    validateAdoptedStyleSheetValues(root, value);
+    const cssText = JSON.stringify(value.map(sheet => sheet.__cssText()));
+    // Keep the JS bookkeeping unchanged if the native root has already been
+    // detached or otherwise rejects the update.
+    __omoikane_set_adopted_stylesheets(root.__id, cssText);
+    const previous = adoptedStyleSheetsByRoot.get(root) || [];
+    for (const sheet of previous) detachAdoptedRootFromSheet(root, sheet);
+    adoptedStyleSheetsByRoot.set(root, value);
+    for (const sheet of value) attachAdoptedRootToSheet(root, sheet);
+  }
+
+  function adoptedStyleSheetsForRoot(root) {
+    let value = adoptedStyleSheetsByRoot.get(root);
+    if (!value) {
+      value = makeAdoptedStyleSheetList(root);
+      adoptedStyleSheetsByRoot.set(root, value);
+    }
+    return value;
+  }
+
+  function setAdoptedStyleSheets(root, value) {
+    if (value === null || value === undefined ||
+        (typeof value !== "object" && typeof value !== "function")) {
+      throw new TypeError("adoptedStyleSheets must be an iterable or array-like object");
+    }
+    const values = Array.from(value);
+    const list = adoptedStyleSheetsForRoot(root);
+    // The ObservableArray setter replaces the backing list, preserving the
+    // object returned by earlier getter calls. `commit` validates and rolls
+    // back the list itself if the native update fails.
+    adoptedListReplacers.get(list)(values.slice());
+  }
+
   class CSSStyleSheet {
     constructor(ownerNode) {
-      this.ownerNode = ownerNode;
+      this.__constructed = !ownerNode || !ownerNode.nodeType;
+      this.ownerNode = this.__constructed ? null : ownerNode;
+      this.__ownerDocument = this.ownerNode ? nodeDocument(this.ownerNode) : globalThis.document;
       this.href = null;
-      this.__rules = splitCssRules(ownerNode.textContent);
-      this.__ownerText = ownerNode.textContent;
+      const ownerText = ownerNode && typeof ownerNode.textContent === "string"
+        ? ownerNode.textContent : "";
+      this.__rules = splitCssRules(ownerText);
+      this.__ownerText = this.ownerNode ? this.ownerNode.textContent : ownerText;
       this.__ruleViews = new Set();
       this.__cssRules = ruleListProxy(this);
     }
     __syncFromOwner() {
+      if (!this.ownerNode) return;
       if (dirtyStyleSheets.has(this)) return;
       const text = this.ownerNode.textContent;
       if (text !== this.__ownerText) {
@@ -4330,7 +4546,20 @@
       this.__syncFromOwner();
       return this.__rules;
     }
-    __markDirty() { dirtyStyleSheets.add(this); }
+    __cssText() {
+      this.__syncFromOwner();
+      return this.__rules.join("\n");
+    }
+    __syncAdoptedRoots() {
+      for (const root of adoptedRootsForSheet(this)) {
+        const list = adoptedStyleSheetsByRoot.get(root);
+        if (list) syncAdoptedStyleSheetRoot(root, list);
+      }
+    }
+    __markDirty() {
+      if (this.__constructed) this.__syncAdoptedRoots();
+      else dirtyStyleSheets.add(this);
+    }
     __registerRuleView(rule) { this.__ruleViews.add(rule); }
     __shiftRuleViewsForInsert(index) {
       for (const rule of this.__ruleViews) {
@@ -4356,6 +4585,7 @@
     }
     __flush() {
       if (!dirtyStyleSheets.delete(this)) return;
+      if (!this.ownerNode) return;
       const text = this.__rules.join("\n");
       this.ownerNode.textContent = text;
       this.__ownerText = text;
@@ -4363,6 +4593,9 @@
     get cssRules() { return this.__cssRules; }
     get rules() { return this.__cssRules; }
     insertRule(rule, index) {
+      if (this.__replacing) {
+        throw new DOMException("The stylesheet is being replaced.", "NotAllowedError");
+      }
       const text = String(rule);
       let count;
       try { count = __omoikane_css_rule_count(text); }
@@ -4378,6 +4611,9 @@
       return position;
     }
     deleteRule(index) {
+      if (this.__replacing) {
+        throw new DOMException("The stylesheet is being replaced.", "NotAllowedError");
+      }
       const rules = this.__ruleTexts();
       const position = Number(index);
       if (!Number.isInteger(position) || position < 0 || position >= rules.length)
@@ -4385,6 +4621,43 @@
       rules.splice(position, 1);
       this.__shiftRuleViewsForDelete(position);
       this.__markDirty();
+    }
+    replaceSync(text) {
+      if (!this.__constructed || this.__replacing) {
+        throw new DOMException("Only constructed stylesheets can be replaced.", "NotAllowedError");
+      }
+      this.__rules = splitCssRules(String(text));
+      for (const rule of this.__ruleViews) {
+        rule.__sheet = null;
+        rule.__index = -1;
+      }
+      this.__ruleViews.clear();
+      this.__markDirty();
+    }
+    replace(text) {
+      if (!this.__constructed || this.__replacing) {
+        return Promise.reject(new DOMException(
+          "Only constructed stylesheets can be replaced.", "NotAllowedError"
+        ));
+      }
+      this.__replacing = true;
+      return Promise.resolve().then(() => {
+        try {
+          this.__rules = splitCssRules(String(text));
+          for (const rule of this.__ruleViews) {
+            rule.__sheet = null;
+            rule.__index = -1;
+          }
+          this.__ruleViews.clear();
+          this.__markDirty();
+          return this;
+        } finally {
+          this.__replacing = false;
+        }
+      }, error => {
+        this.__replacing = false;
+        throw error;
+      });
     }
   }
 

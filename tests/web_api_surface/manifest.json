@@ -275,6 +275,14 @@
       "baseline_supported": true
     },
     {
+      "id": "css.constructable-stylesheets",
+      "area": "cssom",
+      "description": "Constructable stylesheets can be replaced and adopted by a Document",
+      "setup": "globalThis.__constructedSheet = new CSSStyleSheet(); __constructedSheet.replaceSync('#probe { visibility: hidden; }'); document.adoptedStyleSheets = [__constructedSheet]",
+      "probe": "__constructedSheet.ownerNode === null && __constructedSheet.cssRules.length === 1 && document.adoptedStyleSheets[0] === __constructedSheet && getComputedStyle(document.getElementById('probe')).visibility === 'hidden'",
+      "baseline_supported": false
+    },
+    {
       "id": "css.web-animations",
       "area": "cssom",
       "description": "Elements expose the Web Animations entry point",
