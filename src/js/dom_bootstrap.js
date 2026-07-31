@@ -5044,7 +5044,7 @@
     __mediaReady(loadId, responseType = "") {
       if (loadId !== this.__mediaLoadId) return;
       const type = mediaTypeToken(responseType) || mediaTypeFromSource(this.__mediaCurrentSrc);
-      if (type && !mediaTypeSupported(this, type)) {
+      if (!type || !mediaTypeSupported(this, type)) {
         this.__mediaFailure(
           loadId,
           MediaError.MEDIA_ERR_SRC_NOT_SUPPORTED,

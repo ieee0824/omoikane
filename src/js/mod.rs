@@ -19527,6 +19527,19 @@ b</textarea></form>"#);
         runtime.run_until_idle().unwrap();
         assert_eq!(eval_str(&mut runtime, "networkResult"), "NetworkError");
         assert_eq!(eval_num(&mut runtime, "missing.error.code"), 2.0);
+
+        runtime
+            .eval(
+                r#"globalThis.unknownResult = 'pending';
+                   const unknown = document.createElement('audio');
+                   unknown.src = 'data:,fixture';
+                   unknown.play().catch(error => { unknownResult = error.name; });
+                   globalThis.unknown = unknown;"#,
+            )
+            .unwrap();
+        runtime.run_until_idle().unwrap();
+        assert_eq!(eval_str(&mut runtime, "unknownResult"), "NotSupportedError");
+        assert_eq!(eval_num(&mut runtime, "unknown.error.code"), 4.0);
     }
 
     #[test]
