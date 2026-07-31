@@ -8818,6 +8818,8 @@
   // connections, AudioParam automation, and oscillator lifecycle observable
   // lets applications exercise the API without producing host audio.
   const audioConstructionToken = {};
+  const nativeAudioEventLoopNow = globalThis.__omoikane_event_loop_now;
+  try { delete globalThis.__omoikane_event_loop_now; } catch (_) {}
   const audioTask = callback => {
     if (typeof __omoikane_queue_dom_manipulation_task === "function") {
       __omoikane_queue_dom_manipulation_task(callback);
@@ -8827,8 +8829,8 @@
   };
   const audioNow = context => {
     if (context.state !== "running") return context.__currentTime;
-    const now = typeof __omoikane_event_loop_now === "function"
-      ? Number(__omoikane_event_loop_now())
+    const now = typeof nativeAudioEventLoopNow === "function"
+      ? Number(nativeAudioEventLoopNow())
       : (typeof __omoikane_performance_now === "function" ? Number(__omoikane_performance_now()) : Date.now());
     return context.__currentTime + Math.max(0, now - context.__runningAt) / 1000;
   };
@@ -9000,6 +9002,7 @@
     stop(when = 0) {
       if (this.__stopCalled) throw new DOMException("OscillatorNode.stop() was already called.", "InvalidStateError");
       const stopAt = audioNumber(when, "OscillatorNode stop time");
+      if (stopAt < 0) throw new RangeError("OscillatorNode stop time must be non-negative");
       this.__stopCalled = true;
       this.__stopRequested = stopAt;
       this.__schedulePendingStop();
@@ -9059,8 +9062,8 @@
     resume() {
       if (this.__state === "closed") return Promise.reject(new DOMException("The AudioContext is closed.", "InvalidStateError"));
       if (this.__state === "running") return Promise.resolve();
-      this.__runningAt = typeof __omoikane_event_loop_now === "function"
-        ? Number(__omoikane_event_loop_now())
+      this.__runningAt = typeof nativeAudioEventLoopNow === "function"
+        ? Number(nativeAudioEventLoopNow())
         : (typeof __omoikane_performance_now === "function" ? Number(__omoikane_performance_now()) : Date.now());
       this.__state = "running";
       for (const node of this.__nodes) if (typeof node.__schedulePendingStop === "function") node.__schedulePendingStop();
