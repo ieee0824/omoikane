@@ -19523,6 +19523,19 @@ b</textarea></form>"#);
 
         runtime
             .eval(
+                r#"globalThis.cancelResult = 'pending';
+                   const cancelProbe = document.createElement('audio');
+                   cancelProbe.src = 'data:audio/mpeg,cancel';
+                   cancelProbe.play().catch(error => { cancelResult = error.name; });
+                   cancelProbe.pause();
+                   globalThis.cancelProbe = cancelProbe;"#,
+            )
+            .unwrap();
+        runtime.run_until_idle().unwrap();
+        assert_eq!(eval_str(&mut runtime, "cancelResult"), "AbortError");
+
+        runtime
+            .eval(
                 r#"const attributeProbe = document.createElement('audio');
                    attributeProbe.setAttribute('muted', '');
                    attributeProbe.setAttribute('src', 'data:audio/mpeg,attribute');

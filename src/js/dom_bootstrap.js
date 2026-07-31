@@ -4901,6 +4901,7 @@
       this.__mediaPlaybackId = 0;
       this.__mediaPlaybackTimer = null;
       this.__mediaPlayWaiters = [];
+      this.__mediaScheduledPlayWaiters = [];
       this.__mediaCurrentSrc = "";
       this.__mediaCurrentTime = 0;
       this.__mediaDuration = NaN;
@@ -5030,6 +5031,9 @@
         clearTimeout(this.__mediaPlaybackTimer);
         this.__mediaPlaybackTimer = null;
       }
+      const waiters = this.__mediaScheduledPlayWaiters.splice(0);
+      const error = new DOMException("The play() request was interrupted.", "AbortError");
+      for (const waiter of waiters) waiter.reject(error);
     }
 
     __mediaRejectWaiters(error) {
@@ -5046,7 +5050,8 @@
       const waiters = this.__mediaPlayWaiters.splice(0);
       this.__mediaQueueEvent("error", loadId);
       queueMediaTask(() => {
-        if (loadId !== this.__mediaLoadId) return;
+        // The request belongs to this failed load even if a newer load has
+        // already started by the time the rejection task runs.
         for (const waiter of waiters) waiter.reject(error);
       });
     }
@@ -5194,8 +5199,10 @@
       this.__mediaPaused = false;
       this.__mediaEnded = false;
       const playbackId = ++this.__mediaPlaybackId;
+      this.__mediaScheduledPlayWaiters = waiters;
       queueMediaTask(() => {
         if (playbackId !== this.__mediaPlaybackId || this.__mediaPaused) return;
+        this.__mediaScheduledPlayWaiters = [];
         fireRealtimeEvent(this, new Event("play"));
         fireRealtimeEvent(this, new Event("playing"));
         for (const waiter of waiters) waiter.resolve();
