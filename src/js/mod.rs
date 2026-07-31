@@ -11803,6 +11803,14 @@ mod tests {
             eval_str(&mut writer, "typeof __omoikane_clipboard_write_text"),
             "undefined"
         );
+        writer
+            .eval(
+                r#"globalThis.missingWriteArgument = false;
+                   try { navigator.clipboard.writeText(); }
+                   catch (error) { missingWriteArgument = error instanceof TypeError; }"#,
+            )
+            .unwrap();
+        assert_eq!(eval_str(&mut writer, "String(missingWriteArgument)"), "true");
         writer.eval("navigator.clipboard.writeText('')").unwrap();
         writer.run_jobs().unwrap();
         writer

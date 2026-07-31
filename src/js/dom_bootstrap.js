@@ -6680,6 +6680,9 @@
       });
     }
     writeText(value) {
+      if (arguments.length < 1) {
+        throw new TypeError("Clipboard.writeText requires one argument");
+      }
       return Promise.resolve().then(() => {
         if (!__omoikane_is_secure_context()) {
           throw new DOMException("Clipboard access requires a secure context.", "NotAllowedError");
