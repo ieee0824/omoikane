@@ -10312,6 +10312,10 @@
         if (Number(response.status) === 0 || Number(response.status) === 206) {
           throw new TypeError("Cache.put cannot store a partial response");
         }
+        const vary = response.headers.get("vary");
+        if (vary !== null && vary.split(",").some(field => field.trim() === "*")) {
+          throw new TypeError("Cache.put cannot store a Vary: * response");
+        }
         requestSnapshot = cacheRequestSnapshot(normalizedRequest);
         responseSnapshot = cacheResponseSnapshot(response);
       } catch (error) {

@@ -172,7 +172,7 @@ impl StorageManager {
             let cache = storage.caches.iter_mut().find(|cache| cache.name == name)?;
             // A malformed snapshot has no stable replacement key.  Do not
             // let the empty sentinel collide with another malformed entry.
-            if request_key != (String::new(), String::new()) {
+            if !request_key.0.is_empty() {
                 if let Some(existing) = cache
                     .entries
                     .iter_mut()
