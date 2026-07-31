@@ -4978,8 +4978,11 @@
     }
     get defaultMuted() { return this.hasAttribute("muted"); }
     set defaultMuted(value) {
-      if (value) this.setAttribute("muted", "");
+      const next = Boolean(value);
+      if (next === this.hasAttribute("muted")) return;
+      if (next) this.setAttribute("muted", "");
       else this.removeAttribute("muted");
+      this.__mediaQueueEvent("volumechange");
     }
     get controls() { return this.hasAttribute("controls"); }
     set controls(value) {
@@ -5086,17 +5089,7 @@
       if (!source) {
         return;
       }
-      const declaredType = mediaTypeToken(this.getAttribute("type"));
-      const sourceType = declaredType || mediaTypeFromSource(source);
-      if (declaredType && !mediaTypeSupported(this, declaredType)) {
-        this.__mediaFailure(
-          loadId,
-          MediaError.MEDIA_ERR_SRC_NOT_SUPPORTED,
-          "NotSupportedError",
-          "The media resource is not supported.",
-        );
-        return;
-      }
+      const sourceType = mediaTypeFromSource(source);
       if (/^data:/i.test(source)) {
         queueMediaTask(() => this.__mediaReady(loadId, sourceType));
         return;
