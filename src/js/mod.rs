@@ -6810,7 +6810,8 @@ fn create_worker_for_owner_state(
     let worker_url = resolve_worker_url(requested_url, &owner_url, base_url.as_ref())?;
     let source = {
         let mut state = owner_state.borrow_mut();
-        fetch_script_source_with_client(requested_url, base_url.as_ref(), &mut state.http_client)
+        fetch_script_resource_with_client(requested_url, base_url.as_ref(), &mut state.http_client)
+            .map(|(_, source)| source)
     };
     let mut worker_runtime = JsRuntime::with_document_url_and_storage(
         blank_html_document(),
