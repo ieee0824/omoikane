@@ -366,7 +366,7 @@
       "area": "workers",
       "description": "Dedicated workers are exposed",
       "probe": "typeof Worker === 'function'",
-      "baseline_supported": false
+      "baseline_supported": true
     },
     {
       "id": "workers.shared-worker",

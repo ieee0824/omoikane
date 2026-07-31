@@ -7818,6 +7818,162 @@
     return cloneStructuredValue(value, new Map());
   };
 
+  // Dedicated workers execute in a separate Boa realm. Passing a JsValue
+  // object directly between those realms would retain the sender's
+  // prototypes, so worker messages use this context-independent wire format.
+  // The graph table preserves cycles, shared references, and the structured
+  // clone built-ins supported above; the destination reconstructs every object
+  // with its own realm's constructors and prototypes.
+  function encodeWorkerNumber(value) {
+    if (Number.isNaN(value)) return "NaN";
+    if (value === Infinity) return "Infinity";
+    if (value === -Infinity) return "-Infinity";
+    if (Object.is(value, -0)) return "-0";
+    return String(value);
+  }
+
+  function decodeWorkerNumber(value) {
+    if (value === "NaN") return NaN;
+    if (value === "Infinity") return Infinity;
+    if (value === "-Infinity") return -Infinity;
+    if (value === "-0") return -0;
+    return Number(value);
+  }
+
+  function encodeWorkerMessage(value, options = undefined) {
+    if (Array.isArray(options)) throw dataCloneError("Transfer lists are not supported yet.");
+    const cloned = globalThis.structuredClone(value, options);
+    const nodes = [];
+    const memory = new Map();
+    const visit = item => {
+      if (item === undefined) return ["u"];
+      if (item === null) return ["z"];
+      switch (typeof item) {
+        case "boolean": return ["b", item];
+        case "number": return ["n", encodeWorkerNumber(item)];
+        case "string": return ["s", item];
+        case "bigint": return ["i", String(item)];
+        default: break;
+      }
+      const known = memory.get(item);
+      if (known !== undefined) return ["r", known];
+      const id = nodes.length;
+      memory.set(item, id);
+      nodes.push(null);
+      if (item instanceof Date) {
+        nodes[id] = ["d", encodeWorkerNumber(item.getTime())];
+      } else if (item instanceof RegExp) {
+        nodes[id] = ["x", item.source, item.flags];
+      } else if (item instanceof ArrayBuffer) {
+        nodes[id] = ["q", Array.from(new Uint8Array(item))];
+      } else if (ArrayBuffer.isView(item)) {
+        const name = item instanceof DataView ? "DataView" : item.constructor.name;
+        nodes[id] = ["v", name, visit(item.buffer), item.byteOffset,
+          item instanceof DataView ? item.byteLength : item.length];
+      } else if (item instanceof Map) {
+        nodes[id] = ["m", Array.from(item, pair => [visit(pair[0]), visit(pair[1])])];
+      } else if (item instanceof Set) {
+        nodes[id] = ["t", Array.from(item, entry => visit(entry))];
+      } else if (Array.isArray(item)) {
+        const entries = [];
+        for (let index = 0; index < item.length; index++) {
+          if (Object.prototype.hasOwnProperty.call(item, index)) entries.push([index, visit(item[index])]);
+        }
+        nodes[id] = ["a", item.length, entries];
+      } else {
+        const prototype = Object.getPrototypeOf(item);
+        if (prototype !== Object.prototype && prototype !== null) throw dataCloneError();
+        if (Object.getOwnPropertySymbols(item).length) throw dataCloneError();
+        nodes[id] = ["o", prototype === null ? 0 : 1,
+          Object.keys(item).map(key => [key, visit(item[key])])];
+      }
+      return ["r", id];
+    };
+    return JSON.stringify({ version: 1, root: visit(cloned), nodes });
+  }
+
+  function decodeWorkerMessage(wire) {
+    const encoded = JSON.parse(String(wire));
+    if (!encoded || encoded.version !== 1 || !Array.isArray(encoded.nodes)) throw dataCloneError();
+    const nodes = encoded.nodes;
+    const objects = new Array(nodes.length);
+    const resolvePrimitive = token => {
+      if (!Array.isArray(token)) throw dataCloneError();
+      switch (token[0]) {
+        case "u": return undefined;
+        case "z": return null;
+        case "b": return !!token[1];
+        case "n": return decodeWorkerNumber(token[1]);
+        case "s": return String(token[1]);
+        case "i": return BigInt(token[1]);
+        case "r": {
+          const object = objects[token[1]];
+          if (object === undefined) throw dataCloneError();
+          return object;
+        }
+        default: throw dataCloneError();
+      }
+    };
+    for (let index = 0; index < nodes.length; index++) {
+      const node = nodes[index];
+      if (!Array.isArray(node)) throw dataCloneError();
+      switch (node[0]) {
+        case "d": objects[index] = new Date(decodeWorkerNumber(node[1])); break;
+        case "x": objects[index] = new RegExp(String(node[1]), String(node[2])); break;
+        case "q": objects[index] = new Uint8Array(node[1]).buffer; break;
+        case "m": objects[index] = new Map(); break;
+        case "t": objects[index] = new Set(); break;
+        case "a": objects[index] = new Array(node[1]); break;
+        case "o": objects[index] = Object.create(node[1] === 0 ? null : Object.prototype); break;
+        case "v": break;
+        default: throw dataCloneError();
+      }
+    }
+    const typedArrayConstructors = {
+      Int8Array, Uint8Array, Uint8ClampedArray, Int16Array, Uint16Array,
+      Int32Array, Uint32Array, Float32Array, Float64Array, BigInt64Array,
+      BigUint64Array,
+    };
+    for (let index = 0; index < nodes.length; index++) {
+      const node = nodes[index];
+      if (node[0] !== "v") continue;
+      const buffer = resolvePrimitive(node[2]);
+      if (!(buffer instanceof ArrayBuffer)) throw dataCloneError();
+      if (node[1] === "DataView") {
+        objects[index] = new DataView(buffer, node[3], node[4]);
+      } else {
+        const Constructor = typedArrayConstructors[node[1]];
+        if (!Constructor) throw dataCloneError();
+        objects[index] = new Constructor(buffer, node[3], node[4]);
+      }
+    }
+    for (let index = 0; index < nodes.length; index++) {
+      const node = nodes[index];
+      const target = objects[index];
+      switch (node[0]) {
+        case "m":
+          for (const pair of node[1]) target.set(resolvePrimitive(pair[0]), resolvePrimitive(pair[1]));
+          break;
+        case "t":
+          for (const entry of node[1]) target.add(resolvePrimitive(entry));
+          break;
+        case "a":
+          for (const pair of node[2]) target[pair[0]] = resolvePrimitive(pair[1]);
+          break;
+        case "o":
+          for (const pair of node[2]) Object.defineProperty(target, pair[0], {
+            value: resolvePrimitive(pair[1]), enumerable: true, writable: true, configurable: true,
+          });
+          break;
+        default: break;
+      }
+    }
+    return resolvePrimitive(encoded.root);
+  }
+
+  globalThis.__omoikane_encode_worker_message = encodeWorkerMessage;
+  globalThis.__omoikane_decode_worker_message = decodeWorkerMessage;
+
   const messagePortConstructionToken = {};
   class MessagePort extends EventTarget {
     constructor(token) {
@@ -7881,6 +8037,125 @@
   }
   globalThis.MessagePort = MessagePort;
   globalThis.MessageChannel = MessageChannel;
+
+  // -------------------------------------------------------------------------
+  // Dedicated Worker / WorkerGlobalScope core.
+  //
+  // The native side allocates a separate JsRuntime for each classic worker.
+  // This wrapper owns only the page-facing endpoint; message payloads are
+  // cloned before they enter either runtime and are delivered by the native
+  // posted-message task source.
+  // -------------------------------------------------------------------------
+  class Worker extends EventTarget {
+    constructor(url, options = undefined) {
+      super();
+      if (options && options.type !== undefined && String(options.type) !== "classic") {
+        throw new TypeError("Only classic Dedicated Workers are supported");
+      }
+      const requested = String(url);
+      this.url = requested;
+      this.onmessage = null;
+      this.onerror = null;
+      this.__terminated = false;
+      this.__id = __omoikane_create_worker(requested);
+      __omoikane_bind_worker_owner(this.__id, this);
+    }
+    postMessage(message, options = undefined) {
+      if (this.__terminated) return;
+      const data = __omoikane_encode_worker_message(message, options);
+      __omoikane_worker_post_message(this.__id, data);
+    }
+    terminate() {
+      if (this.__terminated) return;
+      this.__terminated = true;
+      __omoikane_terminate_worker(this.__id);
+    }
+    get [Symbol.toStringTag]() { return "Worker"; }
+    set onmessage(callback) {
+      if (this.__onmessage) this.removeEventListener("message", this.__onmessage);
+      this.__onmessage = typeof callback === "function" ? callback : null;
+      if (this.__onmessage) this.addEventListener("message", this.__onmessage);
+    }
+    get onmessage() { return this.__onmessage || null; }
+    set onerror(callback) {
+      if (this.__onerror) this.removeEventListener("error", this.__onerror);
+      this.__onerror = typeof callback === "function" ? callback : null;
+      if (this.__onerror) this.addEventListener("error", this.__onerror);
+    }
+    get onerror() { return this.__onerror || null; }
+  }
+  globalThis.Worker = Worker;
+
+  globalThis.__omoikane_install_worker_global = function(url, workerId) {
+    // A worker global is not a Window and cannot reach the page DOM. The
+    // bootstrap has already installed shared language primitives (Event,
+    // MessageEvent, structuredClone, timers, URL, and navigator); remove the
+    // browsing-context objects before user script evaluates.
+    try { delete globalThis.document; } catch (_) { globalThis.document = undefined; }
+    try { delete globalThis.window; } catch (_) { globalThis.window = undefined; }
+    try { delete globalThis.customElements; } catch (_) { globalThis.customElements = undefined; }
+    for (const domName of [
+      "Node", "Element", "HTMLElement", "Document", "DocumentFragment", "Text",
+      "CharacterData", "Attr", "ShadowRoot", "HTMLCollection", "NodeList", "Range",
+      "MutationObserver", "ResizeObserver", "IntersectionObserver", "CustomElementRegistry",
+      "HTMLDivElement", "HTMLSpanElement", "HTMLBodyElement", "HTMLCanvasElement",
+      "HTMLImageElement", "HTMLIFrameElement", "HTMLScriptElement", "SVGElement",
+      "SVGSVGElement", "HTMLTemplateElement", "HTMLFormElement", "HTMLInputElement",
+      "HTMLTextAreaElement", "HTMLButtonElement", "HTMLSelectElement", "HTMLOptionElement",
+    ]) {
+      try { delete globalThis[domName]; } catch (_) { globalThis[domName] = undefined; }
+    }
+    try { delete globalThis.getComputedStyle; } catch (_) { globalThis.getComputedStyle = undefined; }
+    try { delete globalThis.history; } catch (_) { globalThis.history = undefined; }
+    try { delete globalThis.__omoikane_install_window_named_properties; } catch (_) {}
+    Object.defineProperty(globalThis, "_listeners", {
+      configurable: true,
+      value: new Map(),
+    });
+    globalThis.self = globalThis;
+    globalThis.WorkerGlobalScope = Object;
+    globalThis.addEventListener = EventTarget.prototype.addEventListener;
+    globalThis.removeEventListener = EventTarget.prototype.removeEventListener;
+    globalThis.dispatchEvent = EventTarget.prototype.dispatchEvent;
+    const workerLocation = Object.freeze({
+      href: String(url),
+      origin: (() => { try { return new URL(String(url)).origin; } catch (_) { return ""; } })(),
+      protocol: (() => { try { return new URL(String(url)).protocol; } catch (_) { return ""; } })(),
+      host: (() => { try { return new URL(String(url)).host; } catch (_) { return ""; } })(),
+      pathname: (() => { try { return new URL(String(url)).pathname; } catch (_) { return ""; } })(),
+      search: (() => { try { return new URL(String(url)).search; } catch (_) { return ""; } })(),
+      hash: (() => { try { return new URL(String(url)).hash; } catch (_) { return ""; } })(),
+      toString() { return this.href; },
+    });
+    try {
+      Object.defineProperty(globalThis, "location", {
+        configurable: true,
+        writable: true,
+        value: workerLocation,
+      });
+    } catch (_) {
+      // Older Boa versions expose location as a non-configurable accessor;
+      // retaining the existing object is still preferable to exposing a
+      // mutable Window location in a worker global.
+    }
+    let workerOnMessage = null;
+    Object.defineProperty(globalThis, "onmessage", {
+      configurable: true,
+      get() { return workerOnMessage; },
+      set(callback) {
+        if (workerOnMessage) EventTarget.prototype.removeEventListener.call(globalThis, "message", workerOnMessage);
+        workerOnMessage = typeof callback === "function" ? callback : null;
+        if (workerOnMessage) EventTarget.prototype.addEventListener.call(globalThis, "message", workerOnMessage);
+      },
+    });
+    globalThis.postMessage = function(message, options = undefined) {
+      const data = __omoikane_encode_worker_message(message, options);
+      __omoikane_worker_owner_post_message(workerId, data);
+    };
+    globalThis.close = function() {
+      __omoikane_worker_close();
+    };
+  };
 
   const mediaQueryListRefs = [];
 
