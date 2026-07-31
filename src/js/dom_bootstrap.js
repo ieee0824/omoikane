@@ -9031,19 +9031,27 @@
     }
     __valueAt(time) {
       let value = this.__value;
+      let lastTime = 0;
       for (let index = 0; index < this.__events.length; index++) {
         const event = this.__events[index];
-        if (event.time > time) break;
-        if (event.kind === "set") value = event.value;
-        else if (event.kind === "linear" || event.kind === "exponential") {
-          const previous = index > 0 ? this.__events[index - 1] : null;
-          if (!previous || previous.time >= event.time) value = event.value;
-          else {
-            const progress = Math.min(1, Math.max(0, (time - previous.time) / (event.time - previous.time)));
-            value = event.kind === "exponential" && previous.value > 0 && event.value > 0
-              ? previous.value * Math.pow(event.value / previous.value, progress)
-              : previous.value + (event.value - previous.value) * progress;
+        if (event.time > time) {
+          if (event.kind === "linear" || event.kind === "exponential") {
+            const progress = Math.min(1, Math.max(0, (time - lastTime) / (event.time - lastTime)));
+            return event.kind === "exponential" && value > 0 && event.value > 0
+              ? value * Math.pow(event.value / value, progress)
+              : value + (event.value - value) * progress;
           }
+          return value;
+        }
+        if (event.kind === "target") {
+          const nextTime = index + 1 < this.__events.length ? this.__events[index + 1].time : time;
+          const evaluatedTime = Math.min(time, nextTime);
+          value = event.value + (value - event.value) * Math.exp(-(evaluatedTime - event.time) / event.timeConstant);
+          lastTime = evaluatedTime;
+          if (time < nextTime) return value;
+        } else {
+          value = event.value;
+          lastTime = event.time;
         }
       }
       return value;
@@ -9073,7 +9081,7 @@
       const start = audioTime(startTime, "AudioParam time");
       const constant = audioNumber(timeConstant, "AudioParam timeConstant");
       if (constant <= 0) throw new RangeError("AudioParam timeConstant must be positive");
-      this.__events.push({ kind: "set", value, time: start });
+      this.__events.push({ kind: "target", value, time: start, timeConstant: constant });
       this.__events.sort((left, right) => left.time - right.time);
       return this;
     }
