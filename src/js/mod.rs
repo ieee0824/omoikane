@@ -3584,7 +3584,9 @@ fn resolve_resource_ref(
 }
 
 fn same_origin_url(a: &crate::http::Url, b: &crate::http::Url) -> bool {
-    a.scheme() == b.scheme() && a.host() == b.host() && a.port() == b.port()
+    a.scheme().eq_ignore_ascii_case(b.scheme())
+        && a.host().eq_ignore_ascii_case(b.host())
+        && a.port() == b.port()
 }
 
 fn host_state_origin(state: &HostState) -> String {
@@ -8600,6 +8602,15 @@ mod tests {
         let value = runtime.eval("1 + 2 + 3").unwrap();
 
         assert_eq!(value.as_number(), Some(6.0));
+    }
+
+    #[test]
+    fn dedicated_worker_same_origin_hostnames_are_case_insensitive() {
+        let owner: crate::http::Url = "https://EXAMPLE.com/".parse().unwrap();
+        let worker: crate::http::Url = "https://example.COM/worker.js".parse().unwrap();
+
+        assert_ne!(owner.host(), worker.host());
+        assert!(same_origin_url(&owner, &worker));
     }
 
     #[test]
