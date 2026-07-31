@@ -531,8 +531,8 @@
       "id": "platform.geolocation",
       "area": "platform",
       "description": "Geolocation API is exposed",
-      "probe": "navigator.geolocation && typeof navigator.geolocation.getCurrentPosition === 'function'",
-      "baseline_supported": false
+      "probe": "typeof Geolocation === 'function' && typeof GeolocationCoordinates === 'function' && typeof GeolocationPosition === 'function' && typeof GeolocationPositionError === 'function' && navigator.geolocation instanceof Geolocation && typeof navigator.geolocation.getCurrentPosition === 'function' && typeof navigator.geolocation.watchPosition === 'function' && typeof navigator.geolocation.clearWatch === 'function' && GeolocationPositionError.PERMISSION_DENIED === 1 && GeolocationPositionError.POSITION_UNAVAILABLE === 2 && GeolocationPositionError.TIMEOUT === 3",
+      "baseline_supported": true
     },
     {
       "id": "platform.webrtc",
