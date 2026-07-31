@@ -9000,11 +9000,11 @@
       setTimeout(callback, 0);
     }
   };
+  const audioClockNow = () => typeof nativeAudioEventLoopNow === "function"
+    ? Number(nativeAudioEventLoopNow()) : 0;
   const audioNow = context => {
     if (context.state !== "running") return context.__currentTime;
-    const now = typeof nativeAudioEventLoopNow === "function"
-      ? Number(nativeAudioEventLoopNow())
-      : (typeof __omoikane_performance_now === "function" ? Number(__omoikane_performance_now()) : Date.now());
+    const now = audioClockNow();
     return context.__currentTime + Math.max(0, now - context.__runningAt) / 1000;
   };
   function audioNumber(value, name) {
@@ -9309,9 +9309,7 @@
     resume() {
       if (this.__state === "closed") return Promise.reject(new DOMException("The AudioContext is closed.", "InvalidStateError"));
       if (this.__state === "running") return Promise.resolve();
-      this.__runningAt = typeof nativeAudioEventLoopNow === "function"
-        ? Number(nativeAudioEventLoopNow())
-        : (typeof __omoikane_performance_now === "function" ? Number(__omoikane_performance_now()) : Date.now());
+      this.__runningAt = audioClockNow();
       this.__state = "running";
       for (const node of this.__nodes) if (typeof node.__schedulePendingStop === "function") node.__schedulePendingStop();
       const context = this;
