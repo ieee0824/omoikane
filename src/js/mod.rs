@@ -7,7 +7,7 @@ use std::path::Path;
 use std::pin::Pin;
 use std::rc::{Rc, Weak};
 use std::sync::mpsc::{Receiver, channel};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::task::{Context as TaskContext, Poll};
 use std::thread;
 
@@ -62,11 +62,13 @@ thread_local! {
     /// posted-message path).
     static BROADCAST_CHANNEL_REGISTRY: RefCell<Vec<BroadcastChannelRegistration>> =
         const { RefCell::new(Vec::new()) };
-    /// Host clipboard state shared by page runtimes on the same thread. Like
-    /// the BroadcastChannel registry, this models one embedding host while
-    /// keeping Boa values and synchronization thread-local.
-    static HOST_CLIPBOARD: RefCell<Option<HostClipboard>> = const { RefCell::new(None) };
 }
+
+/// Host clipboard storage shared by all page runtimes in this embedding.
+/// `HostState` and Boa values remain thread-affine, but the text snapshot is
+/// intentionally synchronized so runtimes hosted on different threads still
+/// observe the same clipboard.
+static HOST_CLIPBOARD: OnceLock<HostClipboard> = OnceLock::new();
 
 struct ActiveHostGuard(Option<Rc<RefCell<HostState>>>);
 
@@ -795,20 +797,22 @@ struct HostClipboard(Arc<Mutex<String>>);
 
 impl HostClipboard {
     fn read_text(&self) -> String {
-        self.0.lock().expect("clipboard mutex poisoned").clone()
+        match self.0.lock() {
+            Ok(guard) => guard.clone(),
+            Err(poisoned) => poisoned.into_inner().clone(),
+        }
     }
 
     fn write_text(&self, text: String) {
-        *self.0.lock().expect("clipboard mutex poisoned") = text;
+        match self.0.lock() {
+            Ok(mut guard) => *guard = text,
+            Err(poisoned) => *poisoned.into_inner() = text,
+        }
     }
 }
 
 fn host_clipboard() -> HostClipboard {
-    HOST_CLIPBOARD.with(|slot| {
-        slot.borrow_mut()
-            .get_or_insert_with(HostClipboard::default)
-            .clone()
-    })
+    HOST_CLIPBOARD.get_or_init(HostClipboard::default).clone()
 }
 
 #[derive(Debug, Clone)]
@@ -5306,6 +5310,15 @@ fn is_secure_context_url(url: &str) -> bool {
         )
 }
 
+fn host_is_secure_context(state: &HostState) -> bool {
+    let url = state
+        .base_url
+        .as_ref()
+        .map(ToString::to_string)
+        .unwrap_or_else(|| state.location_href.clone());
+    is_secure_context_url(&url)
+}
+
 fn is_secure_context_native(
     _: &JsValue,
     _: &[JsValue],
@@ -5313,12 +5326,7 @@ fn is_secure_context_native(
 ) -> JsResult<JsValue> {
     with_host_state(|state| {
         let state = state.borrow();
-        let url = state
-            .base_url
-            .as_ref()
-            .map(ToString::to_string)
-            .unwrap_or_else(|| state.location_href.clone());
-        Ok(JsValue::from(is_secure_context_url(&url)))
+        Ok(JsValue::from(host_is_secure_context(&state)))
     })
 }
 
@@ -5329,7 +5337,7 @@ fn clipboard_read_text_native(
 ) -> JsResult<JsValue> {
     with_host_state(|state| {
         let state = state.borrow();
-        if !state.clipboard_permission_granted {
+        if !host_is_secure_context(&state) || !state.clipboard_permission_granted {
             return Ok(JsValue::null());
         }
         Ok(JsValue::from(js_string!(state.clipboard.read_text())))
@@ -5344,7 +5352,7 @@ fn clipboard_write_text_native(
     let text = string_argument(args.first(), "", context)?;
     with_host_state(|state| {
         let state = state.borrow_mut();
-        if !state.clipboard_permission_granted {
+        if !host_is_secure_context(&state) || !state.clipboard_permission_granted {
             return Ok(JsValue::from(false));
         }
         state.clipboard.write_text(text);
@@ -11821,6 +11829,15 @@ mod tests {
             .unwrap();
         reader.run_jobs().unwrap();
         assert_eq!(eval_str(&mut reader, "denied"), "NotAllowedError");
+        reader
+            .eval(
+                r#"globalThis.writeDenied = '';
+                   navigator.clipboard.writeText('blocked')
+                     .catch(error => { writeDenied = error.name; });"#,
+            )
+            .unwrap();
+        reader.run_jobs().unwrap();
+        assert_eq!(eval_str(&mut reader, "writeDenied"), "NotAllowedError");
 
         let mut insecure = JsRuntime::with_document_and_url(
             default_document(),
@@ -11839,7 +11856,7 @@ mod tests {
             "false|NotAllowedError"
         );
 
-        // Keep the thread-local host clipboard empty for subsequent tests.
+        // Keep the host clipboard empty for subsequent tests.
         reader.host_state.borrow_mut().clipboard_permission_granted = true;
         reader.eval("navigator.clipboard.writeText('')").unwrap();
         reader.run_jobs().unwrap();
