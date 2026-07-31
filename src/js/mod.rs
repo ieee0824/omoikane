@@ -2659,7 +2659,12 @@ impl JsRuntime {
                 Ok(())
             }
             Task::PostedMessage { port, data } => {
-                self.install_posted_message_values(port, data)?;
+                if let Err(error) = self.install_posted_message_values(port, data) {
+                    self.record_task_error(format!("[posted message] {error}"));
+                    let cleanup_result = self.clear_posted_message_values();
+                    self.record_error_from("posted message cleanup", cleanup_result);
+                    return Ok(());
+                }
                 let result = self.eval(
                     "if (!__omoikane_posted_message_port._closed) { \
                      __omoikane_posted_message_port.dispatchEvent(new MessageEvent('message', { \
@@ -8303,6 +8308,47 @@ mod tests {
             errors[0].contains("posted message cleanup")
                 && errors[0].contains("blocked port cleanup"),
             "the cleanup error must be reported: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn posted_message_install_errors_do_not_abort_the_host_pump() {
+        let mut runtime = JsRuntime::new().unwrap();
+        runtime
+            .eval(
+                r#"(() => {
+                  globalThis.afterPostedMessageInstallError = false;
+                  const channel = new MessageChannel();
+                  channel.port2.onmessage = () => {
+                    throw new Error('message should not dispatch');
+                  };
+                  Object.defineProperty(globalThis, '__omoikane_posted_message_port', {
+                    configurable: true,
+                    set() {
+                      throw new Error('blocked port install');
+                    }
+                  });
+                  channel.port1.postMessage('payload');
+                  setTimeout(() => { afterPostedMessageInstallError = true; }, 0);
+                })()"#,
+            )
+            .unwrap();
+
+        runtime.tick(1).unwrap();
+        assert_eq!(
+            runtime
+                .eval("afterPostedMessageInstallError")
+                .unwrap()
+                .as_boolean(),
+            Some(true)
+        );
+        let errors = runtime.take_task_errors();
+        assert_eq!(errors.len(), 2, "expected install and cleanup errors, got {errors:?}");
+        assert!(
+            errors
+                .iter()
+                .all(|error| error.contains("posted message") && error.contains("blocked port install")),
+            "the install error must be reported: {errors:?}"
         );
     }
 
