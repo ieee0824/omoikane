@@ -2288,8 +2288,14 @@ impl JsRuntime {
     }
 
     async fn run_until_idle_async(&mut self) -> JsResult<()> {
+        if self.is_terminated_worker() {
+            return Ok(());
+        }
         self.run_jobs()?;
         loop {
+            if self.is_terminated_worker() {
+                break;
+            }
             let task = { self.host_state.borrow_mut().event_loop.pop_task() };
             let Some((_, task)) = task else { break };
             match task {
@@ -2321,6 +2327,9 @@ impl JsRuntime {
                     self.record_error_from("posted message", result);
                 }
                 task => self.run_task(task)?,
+            }
+            if self.is_terminated_worker() {
+                break;
             }
             self.run_jobs()?;
         }
