@@ -512,8 +512,8 @@
       "id": "media.web-audio",
       "area": "media",
       "description": "Web Audio is exposed",
-      "probe": "typeof AudioContext === 'function'",
-      "baseline_supported": false
+      "probe": "typeof AudioContext === 'function' && typeof AudioNode === 'function' && typeof AudioParam === 'function' && (() => { const context = new AudioContext(); const gain = context.createGain(); return context.state === 'suspended' && gain.gain instanceof AudioParam && gain.connect(context.destination) === context.destination; })()",
+      "baseline_supported": true
     },
     {
       "id": "platform.clipboard",

@@ -8986,6 +8986,444 @@
       setTimeout(callback, 0);
     }
   };
+  // Web Audio is represented as a deterministic graph/state model.  The
+  // runtime has no platform audio sink, but keeping context time, node
+  // connections, AudioParam automation, and oscillator lifecycle observable
+  // lets applications exercise the API without producing host audio.
+  const audioConstructionToken = {};
+  const nativeAudioEventLoopNow = globalThis.__omoikane_event_loop_now;
+  try { delete globalThis.__omoikane_event_loop_now; } catch (_) {}
+  const audioTask = callback => {
+    if (typeof __omoikane_queue_dom_manipulation_task === "function") {
+      __omoikane_queue_dom_manipulation_task(callback);
+    } else {
+      setTimeout(callback, 0);
+    }
+  };
+  const audioClockNow = () => typeof nativeAudioEventLoopNow === "function"
+    ? Number(nativeAudioEventLoopNow()) : 0;
+  const audioNow = context => {
+    if (context.state !== "running") return context.__currentTime;
+    const now = audioClockNow();
+    return context.__currentTime + Math.max(0, now - context.__runningAt) / 1000;
+  };
+  function audioNumber(value, name) {
+    const number = Number(value);
+    if (!Number.isFinite(number)) throw new TypeError(name + " must be finite");
+    return number;
+  }
+  function audioTime(value, name) {
+    const time = audioNumber(value, name);
+    if (time < 0) throw new RangeError(name + " must be non-negative");
+    return time;
+  }
+  function audioContextValue(context) {
+    if (!(context instanceof AudioContext)) throw new TypeError("An AudioContext is required");
+    return context;
+  }
+
+  class AudioParam {
+    constructor(token, context, defaultValue, minValue, maxValue) {
+      if (token !== audioConstructionToken) throw new TypeError("Illegal constructor");
+      this.__context = context;
+      Object.defineProperty(this, "defaultValue", {
+        configurable: false,
+        enumerable: true,
+        writable: false,
+        value: Number(defaultValue),
+      });
+      Object.defineProperty(this, "minValue", {
+        configurable: false,
+        enumerable: true,
+        writable: false,
+        value: Number(minValue),
+      });
+      Object.defineProperty(this, "maxValue", {
+        configurable: false,
+        enumerable: true,
+        writable: false,
+        value: Number(maxValue),
+      });
+      this.__value = this.defaultValue;
+      this.__events = [];
+      this.automationRate = "a-rate";
+    }
+    __valueAt(time) {
+      let value = this.__value;
+      let lastTime = 0;
+      for (let index = 0; index < this.__events.length; index++) {
+        const event = this.__events[index];
+        if (event.time > time) {
+          if (event.kind === "linear" || event.kind === "exponential") {
+            const progress = Math.min(1, Math.max(0, (time - lastTime) / (event.time - lastTime)));
+            return event.kind === "exponential" && value > 0 && event.value > 0
+              ? value * Math.pow(event.value / value, progress)
+              : value + (event.value - value) * progress;
+          }
+          return value;
+        }
+        if (event.kind === "target") {
+          const nextTime = index + 1 < this.__events.length ? this.__events[index + 1].time : time;
+          const evaluatedTime = Math.min(time, nextTime);
+          value = event.value + (value - event.value) * Math.exp(-(evaluatedTime - event.time) / event.timeConstant);
+          lastTime = evaluatedTime;
+          if (time < nextTime) return value;
+        } else {
+          value = event.value;
+          lastTime = event.time;
+        }
+      }
+      return value;
+    }
+    get value() { return this.__valueAt(audioNow(this.__context)); }
+    set value(next) {
+      this.__value = Math.min(this.maxValue, Math.max(this.minValue, audioNumber(next, "AudioParam.value")));
+    }
+    __schedule(kind, value, time) {
+      const numeric = audioNumber(value, "AudioParam value");
+      const at = audioTime(time, "AudioParam time");
+      const event = { kind, value: numeric, time: at };
+      this.__events = this.__events.filter(existing => existing.time !== at);
+      this.__events.push(event);
+      this.__events.sort((left, right) => left.time - right.time);
+      return this;
+    }
+    setValueAtTime(value, startTime) { return this.__schedule("set", value, startTime); }
+    linearRampToValueAtTime(value, endTime) { return this.__schedule("linear", value, endTime); }
+    exponentialRampToValueAtTime(value, endTime) {
+      const numeric = audioNumber(value, "AudioParam value");
+      const at = audioTime(endTime, "AudioParam time");
+      if (numeric <= 0 || this.__valueAt(at) <= 0) throw new RangeError("Exponential values must be positive.");
+      return this.__schedule("exponential", numeric, at);
+    }
+    setTargetAtTime(target, startTime, timeConstant) {
+      const value = audioNumber(target, "AudioParam target");
+      const start = audioTime(startTime, "AudioParam time");
+      const constant = audioNumber(timeConstant, "AudioParam timeConstant");
+      if (constant <= 0) throw new RangeError("AudioParam timeConstant must be positive");
+      this.__events = this.__events.filter(existing => existing.time !== start);
+      this.__events.push({ kind: "target", value, time: start, timeConstant: constant });
+      this.__events.sort((left, right) => left.time - right.time);
+      return this;
+    }
+    cancelScheduledValues(cancelTime) {
+      const at = audioTime(cancelTime, "AudioParam time");
+      this.__events = this.__events.filter(event => event.time < at);
+      return this;
+    }
+    cancelAndHoldAtTime(cancelTime) {
+      const at = audioTime(cancelTime, "AudioParam time");
+      const held = this.__valueAt(at);
+      this.cancelScheduledValues(at);
+      this.__events.push({ kind: "set", value: held, time: at });
+      this.__events.sort((left, right) => left.time - right.time);
+      return this;
+    }
+    get [Symbol.toStringTag]() { return "AudioParam"; }
+  }
+
+  class AudioNode extends EventTarget {
+    constructor(token, context, inputs = 1, outputs = 1) {
+      super();
+      if (token !== audioConstructionToken) throw new TypeError("Illegal constructor");
+      Object.defineProperty(this, "context", {
+        configurable: false,
+        enumerable: true,
+        writable: false,
+        value: context,
+      });
+      this.__context = context;
+      Object.defineProperty(this, "numberOfInputs", {
+        configurable: false,
+        enumerable: true,
+        writable: false,
+        value: inputs,
+      });
+      Object.defineProperty(this, "numberOfOutputs", {
+        configurable: false,
+        enumerable: true,
+        writable: false,
+        value: outputs,
+      });
+      this.channelCount = 2;
+      this.channelCountMode = "max";
+      this.channelInterpretation = "speakers";
+      this.__connections = [];
+      if (context && context.__nodes) context.__nodes.add(this);
+    }
+    connect(destination, output = 0, input = 0) {
+      if (!(destination instanceof AudioNode) && !(destination instanceof AudioParam)) {
+        throw new TypeError("AudioNode.connect destination must be an AudioNode or AudioParam");
+      }
+      if (destination.__context !== this.__context) {
+        throw new DOMException("Nodes belong to different AudioContexts.", "InvalidAccessError");
+      }
+      const outNumber = Number(output);
+      const inputNumber = Number(input);
+      const out = Math.trunc(outNumber);
+      const inputIndex = Math.trunc(inputNumber);
+      const destinationInputCount = destination instanceof AudioNode ? destination.numberOfInputs : 1;
+      if (!Number.isFinite(outNumber) || !Number.isFinite(inputNumber) || out < 0 || out >= this.numberOfOutputs || inputIndex < 0 || inputIndex >= destinationInputCount) {
+        throw new DOMException("The AudioNode output or input is invalid.", "IndexSizeError");
+      }
+      this.__connections.push({ destination, output: out, input: inputIndex });
+      return destination instanceof AudioParam ? undefined : destination;
+    }
+    disconnect(destination = undefined, output = undefined, input = undefined) {
+      if (destination === undefined) {
+        this.__connections = [];
+        return;
+      }
+      if (typeof destination === "number" && output === undefined && input === undefined) {
+        const outputNumber = Number(destination);
+        const outputIndex = Math.trunc(outputNumber);
+        if (!Number.isFinite(outputNumber) || outputIndex < 0 || outputIndex >= this.numberOfOutputs) {
+          throw new DOMException("The AudioNode output is invalid.", "IndexSizeError");
+        }
+        const before = this.__connections.length;
+        this.__connections = this.__connections.filter(connection => connection.output !== outputIndex);
+        if (this.__connections.length === before) {
+          throw new DOMException("The specified connection was not found.", "InvalidAccessError");
+        }
+        return;
+      }
+      if (!(destination instanceof AudioNode) && !(destination instanceof AudioParam)) {
+        throw new TypeError("AudioNode.disconnect destination must be an AudioNode or AudioParam");
+      }
+      if (destination.__context !== this.__context) {
+        throw new DOMException("Nodes belong to different AudioContexts.", "InvalidAccessError");
+      }
+      const hasOutput = output !== undefined;
+      const hasInput = input !== undefined;
+      let outputIndex;
+      let inputIndex;
+      if (hasOutput) {
+        const outputNumber = Number(output);
+        outputIndex = Math.trunc(outputNumber);
+        if (!Number.isFinite(outputNumber) || outputIndex < 0 || outputIndex >= this.numberOfOutputs) {
+          throw new DOMException("The AudioNode output is invalid.", "IndexSizeError");
+        }
+      }
+      if (hasInput) {
+        const inputNumber = Number(input);
+        inputIndex = Math.trunc(inputNumber);
+        const destinationInputCount = destination instanceof AudioNode ? destination.numberOfInputs : 1;
+        if (!Number.isFinite(inputNumber) || inputIndex < 0 || inputIndex >= destinationInputCount) {
+          throw new DOMException("The AudioNode input is invalid.", "IndexSizeError");
+        }
+      }
+      const before = this.__connections.length;
+      this.__connections = this.__connections.filter(connection => (
+        connection.destination !== destination ||
+        (hasOutput && connection.output !== outputIndex) ||
+        (hasInput && connection.input !== inputIndex)
+      ));
+      if (this.__connections.length === before) {
+        throw new DOMException("The specified connection was not found.", "InvalidAccessError");
+      }
+    }
+    get [Symbol.toStringTag]() { return "AudioNode"; }
+  }
+
+  class AudioDestinationNode extends AudioNode {
+    constructor(token, context) {
+      super(token, context, 1, 0);
+      this.maxChannelCount = 2;
+    }
+    get [Symbol.toStringTag]() { return "AudioDestinationNode"; }
+  }
+
+  class GainNode extends AudioNode {
+    constructor(context, options = {}) {
+      const owner = audioContextValue(context);
+      const init = options === null || options === undefined ? {} : options;
+      if (typeof init !== "object" && typeof init !== "function") throw new TypeError("GainNode options must be a dictionary");
+      super(audioConstructionToken, owner, 1, 1);
+      Object.defineProperty(this, "gain", {
+        configurable: false,
+        enumerable: true,
+        writable: false,
+        value: new AudioParam(audioConstructionToken, owner, init.gain ?? 1, -3.402823466e38, 3.402823466e38),
+      });
+    }
+    get [Symbol.toStringTag]() { return "GainNode"; }
+  }
+
+  class OscillatorNode extends AudioNode {
+    constructor(context, options = {}) {
+      const owner = audioContextValue(context);
+      const init = options === null || options === undefined ? {} : options;
+      if (typeof init !== "object" && typeof init !== "function") throw new TypeError("OscillatorNode options must be a dictionary");
+      super(audioConstructionToken, owner, 0, 1);
+      this.type = init.type === undefined ? "sine" : String(init.type);
+      if (!["sine", "square", "sawtooth", "triangle", "custom"].includes(this.type)) {
+        throw new TypeError("Unsupported oscillator type");
+      }
+      Object.defineProperty(this, "frequency", {
+        configurable: false,
+        enumerable: true,
+        writable: false,
+        value: new AudioParam(audioConstructionToken, owner, init.frequency ?? 440, -3.402823466e38, 3.402823466e38),
+      });
+      Object.defineProperty(this, "detune", {
+        configurable: false,
+        enumerable: true,
+        writable: false,
+        value: new AudioParam(audioConstructionToken, owner, init.detune ?? 0, -3.402823466e38, 3.402823466e38),
+      });
+      this.onended = null;
+      this.__started = false;
+      this.__stopped = false;
+      this.__stopCalled = false;
+      this.__startRequested = 0;
+      this.__stopTimer = null;
+    }
+    start(when = 0) {
+      if (this.__started) throw new DOMException("OscillatorNode.start() was already called.", "InvalidStateError");
+      const startAt = audioNumber(when, "OscillatorNode start time");
+      if (startAt < 0) throw new RangeError("OscillatorNode start time must be non-negative");
+      this.__startRequested = startAt;
+      this.__started = true;
+      this.__schedulePendingStop();
+    }
+    stop(when = 0) {
+      if (this.__stopCalled) throw new DOMException("OscillatorNode.stop() was already called.", "InvalidStateError");
+      const stopAt = audioNumber(when, "OscillatorNode stop time");
+      if (stopAt < 0) throw new RangeError("OscillatorNode stop time must be non-negative");
+      this.__stopCalled = true;
+      this.__stopRequested = stopAt;
+      this.__schedulePendingStop();
+    }
+    __pauseScheduledStop() {
+      if (this.__stopTimer !== null) clearTimeout(this.__stopTimer);
+      this.__stopTimer = null;
+    }
+    __schedulePendingStop() {
+      if (this.__stopped || !this.__started || this.__stopRequested === undefined || this.__context.state !== "running") return;
+      if (this.__stopTimer !== null) clearTimeout(this.__stopTimer);
+      const effectiveStop = Math.max(this.__stopRequested, this.__startRequested);
+      const delay = Math.max(0, (effectiveStop - audioNow(this.__context)) * 1000);
+      if (delay <= 0) {
+        this.__finish();
+        return;
+      }
+      this.__stopTimer = setTimeout(() => {
+        this.__stopTimer = null;
+        if (this.__context.state === "running") this.__finish();
+      }, delay);
+    }
+    __finish() {
+      if (this.__stopped) return;
+      this.__stopped = true;
+      this.__stopTimer = null;
+      audioTask(() => {
+        const event = new Event("ended");
+        if (typeof this.onended === "function") this.onended.call(this, event);
+        this.dispatchEvent(event);
+      });
+    }
+    get [Symbol.toStringTag]() { return "OscillatorNode"; }
+  }
+
+  class AudioContext extends EventTarget {
+    constructor(options = {}) {
+      super();
+      const init = options === null || options === undefined ? {} : Object(options);
+      const sampleRate = init.sampleRate === undefined ? 44100 : audioNumber(init.sampleRate, "AudioContext sampleRate");
+      if (sampleRate <= 0) throw new DOMException("The sampleRate must be positive.", "NotSupportedError");
+      Object.defineProperty(this, "sampleRate", {
+        configurable: false,
+        enumerable: true,
+        writable: false,
+        value: sampleRate,
+      });
+      Object.defineProperty(this, "baseLatency", {
+        configurable: false,
+        enumerable: true,
+        writable: false,
+        value: 0,
+      });
+      Object.defineProperty(this, "outputLatency", {
+        configurable: false,
+        enumerable: true,
+        writable: false,
+        value: 0,
+      });
+      this.latencyHint = init.latencyHint === undefined ? "interactive" : init.latencyHint;
+      this.__state = "suspended";
+      this.__currentTime = 0;
+      this.__runningAt = 0;
+      this.__nodes = new Set();
+      this.__destination = new AudioDestinationNode(audioConstructionToken, this);
+      this.listener = Object.create(null);
+      this.onstatechange = null;
+    }
+    get state() { return this.__state; }
+    get currentTime() { return audioNow(this); }
+    get destination() { return this.__destination; }
+    resume() {
+      if (this.__state === "closed") return Promise.reject(new DOMException("The AudioContext is closed.", "InvalidStateError"));
+      if (this.__state === "running") return Promise.resolve();
+      this.__runningAt = audioClockNow();
+      this.__state = "running";
+      for (const node of this.__nodes) if (typeof node.__schedulePendingStop === "function") node.__schedulePendingStop();
+      const context = this;
+      return new Promise(resolve => audioTask(() => {
+        const event = new Event("statechange");
+        try {
+          const handler = context.onstatechange;
+          if (typeof handler === "function") handler.call(context, event);
+          context.dispatchEvent(event);
+        } finally {
+          resolve();
+        }
+      }));
+    }
+    suspend() {
+      if (this.__state === "closed") return Promise.reject(new DOMException("The AudioContext is closed.", "InvalidStateError"));
+      if (this.__state === "suspended") return Promise.resolve();
+      this.__currentTime = this.currentTime;
+      this.__state = "suspended";
+      for (const node of this.__nodes) if (typeof node.__pauseScheduledStop === "function") node.__pauseScheduledStop();
+      const context = this;
+      return new Promise(resolve => audioTask(() => {
+        const event = new Event("statechange");
+        try {
+          const handler = context.onstatechange;
+          if (typeof handler === "function") handler.call(context, event);
+          context.dispatchEvent(event);
+        } finally {
+          resolve();
+        }
+      }));
+    }
+    close() {
+      if (this.__state === "closed") return Promise.resolve();
+      this.__currentTime = this.currentTime;
+      this.__state = "closed";
+      for (const node of this.__nodes) if (typeof node.__pauseScheduledStop === "function") node.__pauseScheduledStop();
+      const context = this;
+      return new Promise(resolve => audioTask(() => {
+        const event = new Event("statechange");
+        try {
+          const handler = context.onstatechange;
+          if (typeof handler === "function") handler.call(context, event);
+          context.dispatchEvent(event);
+        } finally {
+          resolve();
+        }
+      }));
+    }
+    createGain() { if (this.__state === "closed") throw new DOMException("The AudioContext is closed.", "InvalidStateError"); return new GainNode(this); }
+    createOscillator() { if (this.__state === "closed") throw new DOMException("The AudioContext is closed.", "InvalidStateError"); return new OscillatorNode(this); }
+    get [Symbol.toStringTag]() { return "AudioContext"; }
+  }
+  globalThis.AudioParam = AudioParam;
+  globalThis.AudioNode = AudioNode;
+  globalThis.AudioDestinationNode = AudioDestinationNode;
+  globalThis.GainNode = GainNode;
+  globalThis.OscillatorNode = OscillatorNode;
+  globalThis.AudioContext = AudioContext;
   function notificationOptionString(options, name, fallback = "") {
     const value = options && options[name];
     return value === undefined ? fallback : String(value);
@@ -9627,7 +10065,8 @@
       "SVGSVGElement", "HTMLTemplateElement", "HTMLFormElement", "HTMLInputElement",
       "HTMLTextAreaElement", "HTMLButtonElement", "HTMLSelectElement", "HTMLOptionElement",
       "HTMLMediaElement", "HTMLAudioElement", "HTMLVideoElement", "Audio",
-      "MediaError",
+      "MediaError", "AudioContext", "AudioNode", "AudioParam", "AudioDestinationNode",
+      "GainNode", "OscillatorNode",
       "Geolocation", "GeolocationCoordinates", "GeolocationPosition",
       "GeolocationPositionError",
       "Notification",

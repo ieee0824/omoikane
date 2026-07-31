@@ -4920,6 +4920,11 @@ fn register_host_bindings(
             NativeFunction::from_copy_closure(performance_now_native),
         ),
         (
+            js_string!("__omoikane_event_loop_now"),
+            0,
+            NativeFunction::from_copy_closure(event_loop_now_native),
+        ),
+        (
             js_string!("__omoikane_notification_permission"),
             0,
             NativeFunction::from_copy_closure(notification_permission_native),
@@ -5657,6 +5662,14 @@ fn performance_now_native(
             state.borrow().performance_start.elapsed().as_secs_f64() * 1_000.0,
         ))
     })
+}
+
+fn event_loop_now_native(
+    _this: &JsValue,
+    _args: &[JsValue],
+    _context: &mut Context,
+) -> JsResult<JsValue> {
+    with_host_state(|state| Ok(JsValue::from(state.borrow().event_loop.now_ms() as f64)))
 }
 
 fn notification_permission_native(
@@ -20662,6 +20675,92 @@ b</textarea></form>"#);
         runtime.run_until_idle().unwrap();
         assert_eq!(eval_str(&mut runtime, "unknownResult"), "NotSupportedError");
         assert_eq!(eval_num(&mut runtime, "unknown.error.code"), 4.0);
+    }
+
+    #[test]
+    fn web_audio_models_context_state_param_automation_and_node_lifecycle() {
+        let mut runtime = runtime_from_html("<html><body></body></html>");
+        runtime
+            .eval(
+                r#"globalThis.audioEvents = [];
+                   globalThis.stateEvents = [];
+                   globalThis.context = new AudioContext({ sampleRate: 48000 });
+                   context.addEventListener('statechange', () => globalThis.stateEvents.push(context.state));
+                   globalThis.gain = context.createGain();
+                   globalThis.oscillator = context.createOscillator();
+                   oscillator.onended = () => audioEvents.push('ended');
+                   oscillator.connect(gain).connect(context.destination);
+                   gain.gain.setValueAtTime(0.25, 0);
+                   gain.gain.linearRampToValueAtTime(0.75, 1);
+                   gain.gain.exponentialRampToValueAtTime(1.5, 2);"#,
+            )
+            .unwrap();
+        assert_eq!(eval_num(&mut runtime, "context.sampleRate"), 48000.0);
+        assert_eq!(eval_str(&mut runtime, "context.state"), "suspended");
+        assert_eq!(eval_str(&mut runtime, "typeof __omoikane_event_loop_now"), "undefined");
+        assert_eq!(eval_str(&mut runtime, "String(gain instanceof GainNode) + '|' + String(oscillator instanceof OscillatorNode)"), "true|true");
+        assert_eq!(eval_str(&mut runtime, "String(gain.connect(gain.gain))"), "undefined");
+        assert!((eval_num(&mut runtime, "gain.gain.__valueAt(0.5)") - 0.5).abs() < 1e-9);
+        runtime.eval("globalThis.targetGain = context.createGain(); targetGain.gain.setValueAtTime(1, 0); targetGain.gain.setTargetAtTime(0, 0, 1);").unwrap();
+        assert!((eval_num(&mut runtime, "targetGain.gain.__valueAt(0.5)") - (-0.5f64).exp()).abs() < 1e-9);
+        assert_eq!(eval_str(&mut runtime, "(() => { try { gain.gain.setValueAtTime(0.5, -1); return 'allowed'; } catch (error) { return error.name; } })()"), "RangeError");
+        assert_eq!(eval_str(&mut runtime, "(() => { try { gain.gain.setTargetAtTime(0.5, -1, 0.1); return 'allowed'; } catch (error) { return error.name; } })()"), "RangeError");
+        assert_eq!(eval_str(&mut runtime, "(() => { try { gain.gain.exponentialRampToValueAtTime(0, 1); return 'allowed'; } catch (error) { return String(error instanceof RangeError) + '|' + error.name; } })()"), "true|RangeError");
+        assert_eq!(eval_str(&mut runtime, "(() => { const param = context.createGain().gain; param.setValueAtTime(-1, 1); try { param.exponentialRampToValueAtTime(1, 2); return 'allowed'; } catch (error) { return error.name; } })()"), "RangeError");
+        runtime.eval("context.resume(); oscillator.start(); oscillator.stop(0.02);").unwrap();
+        assert_eq!(eval_str(&mut runtime, "(() => { try { oscillator.stop(0.03); return 'allowed'; } catch (error) { return error.name; } })()"), "InvalidStateError");
+        runtime.run_until_idle().unwrap();
+        assert_eq!(eval_str(&mut runtime, "context.state"), "running");
+        assert_eq!(eval_str(&mut runtime, "JSON.stringify(stateEvents)"), "[\"running\"]");
+        runtime.run_timers(100, 10, 100);
+        runtime.run_until_idle().unwrap();
+        assert_eq!(eval_str(&mut runtime, "audioEvents.includes('ended')"), "true");
+        assert!(eval_num(&mut runtime, "context.currentTime") > 0.0);
+        assert!(eval_num(&mut runtime, "gain.gain.value") >= 0.25);
+        assert_eq!(eval_str(&mut runtime, "(() => { try { gain.connect(context.destination, 0, NaN); return 'allowed'; } catch (error) { return error.name; } })()"), "IndexSizeError");
+        assert_eq!(eval_str(&mut runtime, "(() => { try { gain.connect(context.destination, 0, 1); return 'allowed'; } catch (error) { return error.name; } })()"), "IndexSizeError");
+        assert_eq!(eval_str(&mut runtime, "(() => { const other = new AudioContext(); const node = context.createGain(); node.context = other; try { node.connect(other.destination); return 'allowed'; } catch (error) { return error.name; } })()"), "InvalidAccessError");
+        assert_eq!(eval_str(&mut runtime, "(() => { const source = context.createGain(); const destination = context.createGain(); source.connect(destination, 0, 0); source.connect(destination, 0, 0); source.disconnect(destination, 0, 0); try { source.disconnect(destination, 0, 0); return 'allowed'; } catch (error) { return error.name; } })()"), "InvalidAccessError");
+        assert_eq!(eval_str(&mut runtime, "(() => { const source = context.createGain(); const destination = context.createGain(); source.connect(destination); source.disconnect(0); try { source.disconnect(destination); return 'allowed'; } catch (error) { return error.name; } })()"), "InvalidAccessError");
+        runtime.eval("context.suspend();").unwrap();
+        runtime.run_until_idle().unwrap();
+        assert_eq!(eval_str(&mut runtime, "context.state"), "suspended");
+        assert_eq!(eval_str(&mut runtime, "JSON.stringify(stateEvents)"), "[\"running\",\"suspended\"]");
+        runtime
+            .eval(
+                "globalThis.pausedEvents = []; globalThis.pausedOscillator = context.createOscillator(); pausedOscillator.onended = () => pausedEvents.push('ended'); pausedOscillator.start(); pausedOscillator.stop(0.05);",
+            )
+            .unwrap();
+        runtime.run_timers(100, 10, 100);
+        runtime.run_until_idle().unwrap();
+        assert_eq!(eval_str(&mut runtime, "pausedEvents.includes('ended')"), "false");
+        runtime.eval("context.resume();").unwrap();
+        runtime.run_until_idle().unwrap();
+        assert_eq!(eval_str(&mut runtime, "JSON.stringify(stateEvents)"), "[\"running\",\"suspended\",\"running\"]");
+        runtime.run_timers(100, 10, 100);
+        runtime.run_until_idle().unwrap();
+        assert_eq!(eval_str(&mut runtime, "pausedEvents.includes('ended')"), "true");
+        assert_eq!(eval_str(&mut runtime, "(() => { const candidate = context.createOscillator(); try { candidate.start(-1); return 'allowed'; } catch (error) { return error.name; } })()"), "RangeError");
+        assert_eq!(eval_str(&mut runtime, "(() => { const candidate = context.createOscillator(); candidate.start(); try { candidate.stop(NaN); } catch (error) { if (error.name !== 'TypeError') return error.name; } try { candidate.stop(0.02); return 'allowed'; } catch (error) { return error.name; } })()"), "allowed");
+        assert_eq!(eval_str(&mut runtime, "(() => { const candidate = context.createOscillator(); candidate.start(); try { candidate.stop(-1); return 'allowed'; } catch (error) { return error.name; } })()"), "RangeError");
+        runtime.eval("context.close();").unwrap();
+        runtime.run_until_idle().unwrap();
+        assert_eq!(eval_str(&mut runtime, "context.state"), "closed");
+        assert_eq!(eval_str(&mut runtime, "JSON.stringify(stateEvents)"), "[\"running\",\"suspended\",\"running\",\"closed\"]");
+        assert_eq!(eval_str(&mut runtime, "(() => { try { context.createGain(); return 'allowed'; } catch (error) { return error.name; } })()"), "InvalidStateError");
+        assert_eq!(eval_str(&mut runtime, "(() => { try { new AudioContext({ sampleRate: 0 }); return 'allowed'; } catch (error) { return error.name; } })()"), "NotSupportedError");
+        assert_eq!(eval_str(&mut runtime, "(() => { try { new AudioNode(); return 'constructible'; } catch (error) { return error.name; } })()"), "TypeError");
+        assert_eq!(eval_str(&mut runtime, "(() => { try { new AudioDestinationNode(context); return 'constructible'; } catch (error) { return error.name; } })()"), "TypeError");
+        assert_eq!(eval_str(&mut runtime, "(() => { try { new GainNode(context, 1); return 'allowed'; } catch (error) { return error.name; } })()"), "TypeError");
+        assert_eq!(eval_str(&mut runtime, "(() => { try { new OscillatorNode(context, 1); return 'allowed'; } catch (error) { return error.name; } })()"), "TypeError");
+        assert_eq!(eval_str(&mut runtime, "[Object.getOwnPropertyDescriptor(gain, 'gain').writable, Object.getOwnPropertyDescriptor(oscillator, 'frequency').writable, Object.getOwnPropertyDescriptor(oscillator, 'detune').writable, Object.getOwnPropertyDescriptor(gain, 'numberOfInputs').writable, Object.getOwnPropertyDescriptor(gain.gain, 'defaultValue').writable, Object.getOwnPropertyDescriptor(context, 'sampleRate').writable, Object.getOwnPropertyDescriptor(context, 'baseLatency').writable, Object.getOwnPropertyDescriptor(context, 'outputLatency').writable].join('|')"), "false|false|false|false|false|false|false|false");
+        runtime
+            .eval(
+                "globalThis.throwingContext = new AudioContext(); globalThis.throwingResult = 'pending'; throwingContext.onstatechange = () => { throw new Error('statechange'); }; throwingContext.resume().then(() => throwingResult = 'resolved', error => throwingResult = 'rejected:' + error.name);",
+            )
+            .unwrap();
+        runtime.run_until_idle().unwrap();
+        assert_eq!(eval_str(&mut runtime, "throwingResult"), "resolved");
     }
 
     #[test]

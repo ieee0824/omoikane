@@ -256,6 +256,10 @@ impl EventLoop {
         }
     }
 
+    pub(crate) fn now_ms(&self) -> u64 {
+        self.now_ms
+    }
+
     pub(crate) fn has_pending_timers(&self) -> bool {
         !self.timers.is_empty()
             || self
@@ -301,9 +305,6 @@ impl EventLoop {
         self.now_ms as f64
     }
 
-    pub(crate) fn now_ms(&self) -> u64 {
-        self.now_ms
-    }
 }
 
 #[cfg(test)]
