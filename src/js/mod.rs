@@ -2843,11 +2843,7 @@ impl JsRuntime {
     }
 
     fn run_worker_message(&mut self, worker_id: u64, data: String) -> JsResult<()> {
-        let owner_origin = self
-            .eval("String(location.origin)")
-            .ok()
-            .and_then(|value| value.as_string().map(|string| string.to_std_string_escaped()))
-            .unwrap_or_default();
+        let owner_origin = host_state_origin(&self.host_state.borrow());
         let entry = self.host_state.borrow_mut().workers.remove(&worker_id);
         let Some(entry) = entry else { return Ok(()); };
         let mut worker = entry.borrow_mut();
@@ -2903,6 +2899,7 @@ impl JsRuntime {
         owner_object: JsValue,
         data: String,
     ) -> JsResult<()> {
+        let owner_origin = host_state_origin(&self.host_state.borrow());
         if let Err(error) = self.install_worker_owner_values(owner_object, data) {
             self.record_task_error(format!("[worker message setup] {error}"));
             let cleanup = self.clear_worker_owner_values();
@@ -2910,7 +2907,9 @@ impl JsRuntime {
             return Ok(());
         }
         let result = self.eval(
-            "__omoikane_worker_owner_data = __omoikane_decode_worker_message(__omoikane_worker_owner_wire); if (!__omoikane_worker_owner.__terminated) { __omoikane_worker_owner.dispatchEvent(new MessageEvent('message', { data: __omoikane_worker_owner_data, origin: String(location.origin), source: null, ports: [] })); }",
+            &format!(
+                "__omoikane_worker_owner_data = __omoikane_decode_worker_message(__omoikane_worker_owner_wire); if (!__omoikane_worker_owner.__terminated) {{ __omoikane_worker_owner.dispatchEvent(new MessageEvent('message', {{ data: __omoikane_worker_owner_data, origin: {owner_origin:?}, source: null, ports: [] }})); }}"
+            ),
         );
         let cleanup = self.clear_worker_owner_values();
         self.record_error_from("worker message cleanup", cleanup);
@@ -3577,6 +3576,14 @@ fn resolve_resource_ref(
 
 fn same_origin_url(a: &crate::http::Url, b: &crate::http::Url) -> bool {
     a.scheme() == b.scheme() && a.host() == b.host() && a.port() == b.port()
+}
+
+fn host_state_origin(state: &HostState) -> String {
+    state
+        .base_url
+        .as_ref()
+        .map(|url| format!("{}://{}", url.scheme(), url.authority()))
+        .unwrap_or_default()
 }
 
 fn resolve_worker_url(
