@@ -5081,17 +5081,9 @@
       if (waiters.length) this.__mediaStartPlayback(waiters);
     }
 
-    __mediaBeginLoad(loadId, source, rejectNoSource = false) {
+    __mediaBeginLoad(loadId, source) {
       if (loadId !== this.__mediaLoadId) return;
       if (!source) {
-        if (rejectNoSource) {
-          this.__mediaFailure(
-            loadId,
-            MediaError.MEDIA_ERR_SRC_NOT_SUPPORTED,
-            "NotSupportedError",
-            "The element has no supported source.",
-          );
-        }
         return;
       }
       const declaredType = mediaTypeToken(this.getAttribute("type"));
@@ -5141,7 +5133,7 @@
       }
     }
 
-    load(rejectNoSource = false) {
+    __mediaLoad() {
       const loadId = ++this.__mediaLoadId;
       this.__mediaCancelPlayback();
       this.__mediaRejectWaiters(new DOMException("The play() request was interrupted.", "AbortError"));
@@ -5154,15 +5146,29 @@
       this.__mediaNetworkState = this.__mediaCurrentSrc ? MEDIA_NETWORK_LOADING : MEDIA_NETWORK_NO_SOURCE;
       this.__mediaError = null;
       this.__mediaQueueEvent("loadstart", loadId);
-      queueMediaTask(() => this.__mediaBeginLoad(loadId, this.__mediaCurrentSrc, rejectNoSource));
+      queueMediaTask(() => this.__mediaBeginLoad(loadId, this.__mediaCurrentSrc));
+      return loadId;
+    }
+
+    load() {
+      this.__mediaLoad();
     }
 
     play() {
       const source = this.src;
       return new Promise((resolve, reject) => {
         if (!source) {
-          this.load(true);
+          const loadId = this.__mediaLoad();
           this.__mediaPlayWaiters.push({ resolve, reject });
+          queueMediaTask(() => {
+            if (loadId !== this.__mediaLoadId || this.__mediaCurrentSrc) return;
+            this.__mediaFailure(
+              loadId,
+              MediaError.MEDIA_ERR_SRC_NOT_SUPPORTED,
+              "NotSupportedError",
+              "The element has no supported source.",
+            );
+          });
           return;
         }
         if (this.__mediaPaused === false) {
