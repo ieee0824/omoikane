@@ -4323,6 +4323,7 @@
   // because a stylesheet was once adopted by them.
   const adoptedStyleSheetsByRoot = new WeakMap();
   const adoptedRootsBySheet = new WeakMap();
+  const adoptedListReplacers = new WeakMap();
   const ADOPTED_LIST_MUTATORS = [
     "copyWithin", "fill", "pop", "push", "reverse", "shift", "sort", "splice", "unshift",
   ];
@@ -4475,20 +4476,21 @@
         return false;
       },
     });
+    adoptedListReplacers.set(observable, candidate => commit(candidate));
     if (values.length) commit(list);
     return observable;
   }
 
   function syncAdoptedStyleSheetRoot(root, value) {
     validateAdoptedStyleSheetValues(root, value);
+    const cssText = JSON.stringify(value.map(sheet => sheet.__cssText()));
+    // Keep the JS bookkeeping unchanged if the native root has already been
+    // detached or otherwise rejects the update.
+    __omoikane_set_adopted_stylesheets(root.__id, cssText);
     const previous = adoptedStyleSheetsByRoot.get(root) || [];
     for (const sheet of previous) detachAdoptedRootFromSheet(root, sheet);
     adoptedStyleSheetsByRoot.set(root, value);
     for (const sheet of value) attachAdoptedRootToSheet(root, sheet);
-    __omoikane_set_adopted_stylesheets(
-      root.__id,
-      JSON.stringify(value.map(sheet => sheet.__cssText())),
-    );
   }
 
   function adoptedStyleSheetsForRoot(root) {
@@ -4507,20 +4509,10 @@
     }
     const values = Array.from(value);
     const list = adoptedStyleSheetsForRoot(root);
-    const previous = list.slice();
-    try {
-      // The ObservableArray setter replaces the backing list, preserving the
-      // object returned by earlier getter calls.
-      const candidate = values.slice();
-      validateAdoptedStyleSheetValues(root, candidate);
-      list.length = 0;
-      for (const sheet of candidate) list.push(sheet);
-      syncAdoptedStyleSheetRoot(root, list);
-    } catch (error) {
-      list.length = 0;
-      for (const sheet of previous) list.push(sheet);
-      throw error;
-    }
+    // The ObservableArray setter replaces the backing list, preserving the
+    // object returned by earlier getter calls. `commit` validates and rolls
+    // back the list itself if the native update fails.
+    adoptedListReplacers.get(list)(values.slice());
   }
 
   class CSSStyleSheet {
