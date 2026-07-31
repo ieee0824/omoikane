@@ -8685,17 +8685,17 @@
       this.__events = [];
       this.automationRate = "a-rate";
     }
-    get value() {
-      const now = audioNow(this.__context);
+    __valueAt(time) {
       let value = this.__value;
-      for (const event of this.__events) {
-        if (event.time > now) break;
+      for (let index = 0; index < this.__events.length; index++) {
+        const event = this.__events[index];
+        if (event.time > time) break;
         if (event.kind === "set") value = event.value;
         else if (event.kind === "linear" || event.kind === "exponential") {
-          const previous = event.previous;
+          const previous = index > 0 ? this.__events[index - 1] : null;
           if (!previous || previous.time >= event.time) value = event.value;
           else {
-            const progress = Math.min(1, Math.max(0, (now - previous.time) / (event.time - previous.time)));
+            const progress = Math.min(1, Math.max(0, (time - previous.time) / (event.time - previous.time)));
             value = event.kind === "exponential" && previous.value > 0 && event.value > 0
               ? previous.value * Math.pow(event.value / previous.value, progress)
               : previous.value + (event.value - previous.value) * progress;
@@ -8704,14 +8704,14 @@
       }
       return value;
     }
+    get value() { return this.__valueAt(audioNow(this.__context)); }
     set value(next) {
       this.__value = Math.min(this.maxValue, Math.max(this.minValue, audioNumber(next, "AudioParam.value")));
     }
     __schedule(kind, value, time) {
       const numeric = audioNumber(value, "AudioParam value");
       const at = Math.max(0, audioNumber(time, "AudioParam time"));
-      const event = { kind, value: numeric, time: at, previous: null };
-      if (kind === "linear" || kind === "exponential") event.previous = this.__events[this.__events.length - 1] || null;
+      const event = { kind, value: numeric, time: at };
       this.__events = this.__events.filter(existing => existing.time !== at);
       this.__events.push(event);
       this.__events.sort((left, right) => left.time - right.time);
@@ -8740,7 +8740,7 @@
     }
     cancelAndHoldAtTime(cancelTime) {
       const at = audioNumber(cancelTime, "AudioParam time");
-      const held = this.value;
+      const held = this.__valueAt(at);
       this.cancelScheduledValues(at);
       this.__events.push({ kind: "set", value: held, time: at });
       this.__events.sort((left, right) => left.time - right.time);
@@ -8779,7 +8779,7 @@
         throw new DOMException("The AudioNode output or input is invalid.", "IndexSizeError");
       }
       this.__connections.add(destination);
-      return destination;
+      return destination instanceof AudioParam ? undefined : destination;
     }
     disconnect(destination = undefined) {
       if (destination === undefined) {
@@ -8818,6 +8818,7 @@
       this.onended = null;
       this.__started = false;
       this.__stopped = false;
+      this.__stopCalled = false;
       this.__stopTimer = null;
     }
     start(when = 0) {
@@ -8828,7 +8829,8 @@
       else this.__schedulePendingStop();
     }
     stop(when = 0) {
-      if (this.__stopped) throw new DOMException("OscillatorNode.stop() was already called.", "InvalidStateError");
+      if (this.__stopCalled) throw new DOMException("OscillatorNode.stop() was already called.", "InvalidStateError");
+      this.__stopCalled = true;
       this.__stopRequested = audioNumber(when, "OscillatorNode stop time");
       this.__schedulePendingStop();
     }
