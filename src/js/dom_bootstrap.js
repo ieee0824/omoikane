@@ -8077,7 +8077,12 @@
       this._closed = false;
       this._onmessage = null;
       this._onmessageerror = null;
-      this._id = __omoikane_broadcast_channel_register(this._name, this);
+      // Native delivery retains only this weak endpoint reference when the
+      // realm supports WeakRef, so an unreferenced channel can be collected
+      // without waiting for close(). Older Boa builds without WeakRef retain
+      // the endpoint directly as a strong compatibility fallback.
+      const endpoint = typeof WeakRef === "function" ? new WeakRef(this) : this;
+      this._id = __omoikane_broadcast_channel_register(this._name, endpoint);
     }
     get name() { return this._name; }
     postMessage(message, options = undefined) {

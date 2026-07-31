@@ -773,10 +773,11 @@ struct HostState {
     worker_owner_bound: bool,
     worker_owner_object: Option<JsValue>,
     worker_startup_outgoing: VecDeque<String>,
-    /// `BroadcastChannel` objects owned by this realm, keyed by a per-realm
-    /// numeric id.  The map keeps a target object alive while it has a native
-    /// registration and lets delivery tasks look it up without crossing Boa
-    /// contexts.
+    /// `BroadcastChannel` endpoint references owned by this realm, keyed by a
+    /// per-realm numeric id.  Modern realms store a `WeakRef` here so native
+    /// registration does not keep an otherwise unreachable channel alive;
+    /// legacy realms may store the endpoint itself as a compatibility
+    /// fallback.  Delivery dereferences the value in the target realm.
     broadcast_channels: HashMap<u64, JsValue>,
     broadcast_channel_metadata: HashMap<u64, BroadcastChannelMetadata>,
     next_broadcast_channel_id: u64,
@@ -2868,13 +2869,14 @@ impl JsRuntime {
             // the task was queued.  Closing drops queued messages silently.
             return Ok(());
         };
-        if let Err(error) = self.install_broadcast_channel_values(channel, data, origin) {
+        if let Err(error) = self.install_broadcast_channel_values(channel, channel_id, data, origin) {
+            self.record_task_error(format!("[broadcast channel setup] {error}"));
             let cleanup_result = self.clear_broadcast_channel_values();
             self.record_error_from("broadcast channel cleanup", cleanup_result);
-            return Err(error);
+            return Ok(());
         }
         let result = self.eval(
-            "if (!__omoikane_broadcast_channel_target._closed) { \
+            "const __omoikane_broadcast_channel_ref_value = __omoikane_broadcast_channel_ref; const __omoikane_broadcast_channel_target = (__omoikane_broadcast_channel_ref_value && typeof __omoikane_broadcast_channel_ref_value.deref === 'function') ? __omoikane_broadcast_channel_ref_value.deref() : __omoikane_broadcast_channel_ref_value; if (!__omoikane_broadcast_channel_target) { __omoikane_broadcast_channel_close(__omoikane_broadcast_channel_id); } if (__omoikane_broadcast_channel_target && !__omoikane_broadcast_channel_target._closed) { \
              let __omoikane_broadcast_channel_decoded; \
              let __omoikane_broadcast_channel_decoded_ok = false; \
              try { __omoikane_broadcast_channel_decoded = __omoikane_decode_worker_message(__omoikane_broadcast_channel_wire); __omoikane_broadcast_channel_decoded_ok = true; } \
@@ -2899,13 +2901,20 @@ impl JsRuntime {
     fn install_broadcast_channel_values(
         &mut self,
         channel: JsValue,
+        channel_id: u64,
         data: String,
         origin: String,
     ) -> JsResult<()> {
         let global = self.context.global_object();
         global.set(
-            js_string!("__omoikane_broadcast_channel_target"),
+            js_string!("__omoikane_broadcast_channel_ref"),
             channel,
+            true,
+            &mut self.context,
+        )?;
+        global.set(
+            js_string!("__omoikane_broadcast_channel_id"),
+            JsValue::from(js_string!(channel_id.to_string())),
             true,
             &mut self.context,
         )?;
@@ -2927,13 +2936,19 @@ impl JsRuntime {
     fn clear_broadcast_channel_values(&mut self) -> JsResult<()> {
         let global = self.context.global_object();
         let target_result = global.set(
-            js_string!("__omoikane_broadcast_channel_target"),
+            js_string!("__omoikane_broadcast_channel_ref"),
             JsValue::undefined(),
             true,
             &mut self.context,
         );
         let wire_result = global.set(
             js_string!("__omoikane_broadcast_channel_wire"),
+            JsValue::undefined(),
+            true,
+            &mut self.context,
+        );
+        let id_result = global.set(
+            js_string!("__omoikane_broadcast_channel_id"),
             JsValue::undefined(),
             true,
             &mut self.context,
@@ -2945,6 +2960,7 @@ impl JsRuntime {
             &mut self.context,
         );
         target_result?;
+        id_result?;
         wire_result?;
         origin_result?;
         Ok(())
@@ -7190,19 +7206,20 @@ fn broadcast_channel_id_argument(
     Ok(number as u64)
 }
 
-/// Allocates a per-runtime BroadcastChannel id and records the channel object
-/// in that runtime's target table.  The second argument is the JS endpoint
-/// itself; retaining it here keeps queued delivery tasks safe until close().
+/// Allocates a per-runtime BroadcastChannel id and records the endpoint
+/// reference in that runtime's target table.  Modern callers pass a `WeakRef`
+/// so this native table does not extend the channel's lifetime; realms without
+/// WeakRef pass the endpoint itself as a strong compatibility fallback.
 fn broadcast_channel_register_native(
     _: &JsValue,
     args: &[JsValue],
     context: &mut Context,
 ) -> JsResult<JsValue> {
     let name = string_argument(args.first(), "", context)?;
-    let channel = args.get(1).cloned().unwrap_or_default();
-    if !channel.is_object() {
+    let endpoint = args.get(1).cloned().unwrap_or_default();
+    if !endpoint.is_object() {
         return Err(JsNativeError::typ()
-            .with_message("BroadcastChannel endpoint must be an object")
+            .with_message("BroadcastChannel endpoint reference must be an object")
             .into());
     }
     with_host_state(|state| {
@@ -7215,7 +7232,7 @@ fn broadcast_channel_register_native(
                 origin: broadcast_channel_origin(&host),
                 origin_text: host_state_origin(&host),
             };
-            host.broadcast_channels.insert(channel_id, channel);
+            host.broadcast_channels.insert(channel_id, endpoint);
             host.broadcast_channel_metadata
                 .insert(channel_id, metadata.clone());
             (channel_id, metadata)
@@ -28454,5 +28471,28 @@ b</textarea></form>"#);
         eval_str(&mut receiver, "channel.close();");
         let result = sender.eval("channel.postMessage('after-close')");
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn broadcast_channel_decode_failure_dispatches_messageerror_only() {
+        let mut runtime = JsRuntime::with_document_and_url(
+            default_document(),
+            "https://example.test/broadcast",
+        )
+        .unwrap();
+        eval_str(
+            &mut runtime,
+            r#"globalThis.messages = 0; globalThis.errors = 0;
+               globalThis.senderChannel = new BroadcastChannel('decode');
+               globalThis.receiverChannel = new BroadcastChannel('decode');
+               receiverChannel.onmessage = () => messages++;
+               receiverChannel.onmessageerror = () => errors++;
+               // The native hook accepts a clone wire; an invalid wire models
+               // a target-side deserialization failure without bypassing the
+               // posted-message task source.
+               __omoikane_broadcast_channel_post(senderChannel._id, '{}');"#,
+        );
+        runtime.run_until_idle().unwrap();
+        assert_eq!(eval_str(&mut runtime, "messages + ':' + errors"), "0:1");
     }
 }
