@@ -6291,8 +6291,15 @@
     return number;
   }
   function canvasSnapshot(canvas) {
-    const state = canvasState(canvas);
-    return { width: state.width, height: state.height, pixels: state.pixels.slice() };
+    try {
+      const state = canvasState(canvas);
+      return { width: state.width, height: state.height, pixels: state.pixels.slice() };
+    } catch (error) {
+      if (error instanceof RangeError) {
+        throw new DOMException("Canvas dimensions are too large", "IndexSizeError");
+      }
+      throw error;
+    }
   }
   function imageBitmapSource(source) {
     if (source instanceof ImageBitmap) {
@@ -6361,12 +6368,13 @@
     }
     convertToBlob(options = {}) {
       if (this.__detached) return Promise.reject(new DOMException("The OffscreenCanvas is detached", "InvalidStateError"));
+      const requested = String(options && options.type || "image/png").toLowerCase();
+      const type = requested === "image/png" ? requested : "image/png";
       const snapshot = canvasSnapshot(this);
+      if (snapshot.width === 0 || snapshot.height === 0) return Promise.resolve(new Blob([], { type }));
       const encoded = nativeCanvasPng(snapshot.width, snapshot.height, new Uint8Array(snapshot.pixels.buffer));
       if (encoded === null) return Promise.reject(new DOMException("Unable to encode canvas", "EncodingError"));
       const comma = String(encoded).indexOf(",");
-      const requested = String(options && options.type || "image/png").toLowerCase();
-      const type = requested === "image/png" ? requested : "image/png";
       return Promise.resolve(new Blob([bytesFromBase64(String(encoded).slice(comma + 1))], { type }));
     }
     get [Symbol.toStringTag]() { return "OffscreenCanvas"; }
