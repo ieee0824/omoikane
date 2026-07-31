@@ -5370,7 +5370,7 @@ fn clipboard_write_text_native(
 ) -> JsResult<JsValue> {
     let text = string_argument(args.first(), "", context)?;
     with_host_state(|state| {
-        let state = state.borrow_mut();
+        let state = state.borrow();
         if !host_is_secure_context(&state) || !state.clipboard_permission_granted {
             return Ok(JsValue::from(false));
         }
