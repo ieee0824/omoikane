@@ -7,6 +7,7 @@ use std::path::Path;
 use std::pin::Pin;
 use std::rc::{Rc, Weak};
 use std::sync::mpsc::{Receiver, channel};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::task::{Context as TaskContext, Poll};
 use std::thread;
 
@@ -62,6 +63,12 @@ thread_local! {
     static BROADCAST_CHANNEL_REGISTRY: RefCell<Vec<BroadcastChannelRegistration>> =
         const { RefCell::new(Vec::new()) };
 }
+
+/// Host clipboard storage shared by all page runtimes in this process.
+/// `HostState` and Boa values remain thread-affine, but the text snapshot is
+/// intentionally synchronized so runtimes hosted on different threads still
+/// observe the same clipboard.
+static HOST_CLIPBOARD: OnceLock<HostClipboard> = OnceLock::new();
 
 struct ActiveHostGuard(Option<Rc<RefCell<HostState>>>);
 
@@ -688,6 +695,8 @@ struct HostState {
     suppressed_task_errors: usize,
     location_href: String,
     navigator_user_agent: String,
+    clipboard: HostClipboard,
+    clipboard_permission_granted: bool,
     http_client: Client,
     websocket_clients: HashMap<u64, WebSocketConnection>,
     next_websocket_id: u64,
@@ -786,6 +795,29 @@ struct HostState {
     /// the synchronous style resolver include their parsed text without
     /// manufacturing DOM `<style>` nodes.
     adopted_stylesheets: HashMap<usize, Vec<String>>,
+}
+
+#[derive(Clone, Debug, Default)]
+struct HostClipboard(Arc<Mutex<String>>);
+
+impl HostClipboard {
+    fn read_text(&self) -> String {
+        match self.0.lock() {
+            Ok(guard) => guard.clone(),
+            Err(poisoned) => poisoned.into_inner().clone(),
+        }
+    }
+
+    fn write_text(&self, text: String) {
+        match self.0.lock() {
+            Ok(mut guard) => *guard = text,
+            Err(poisoned) => *poisoned.into_inner() = text,
+        }
+    }
+}
+
+fn host_clipboard() -> HostClipboard {
+    HOST_CLIPBOARD.get_or_init(HostClipboard::default).clone()
 }
 
 #[derive(Debug, Clone)]
@@ -938,6 +970,8 @@ impl HostState {
             base_url: location_href.parse::<crate::http::Url>().ok(),
             location_href,
             navigator_user_agent: default_user_agent(),
+            clipboard: host_clipboard(),
+            clipboard_permission_granted: true,
             http_client: Client::new(),
             websocket_clients: HashMap::new(),
             next_websocket_id: 1,
@@ -4591,6 +4625,21 @@ fn register_host_bindings(
             NativeFunction::from_copy_closure(crypto_digest_native),
         ),
         (
+            js_string!("__omoikane_is_secure_context"),
+            0,
+            NativeFunction::from_copy_closure(is_secure_context_native),
+        ),
+        (
+            js_string!("__omoikane_clipboard_read_text"),
+            0,
+            NativeFunction::from_copy_closure(clipboard_read_text_native),
+        ),
+        (
+            js_string!("__omoikane_clipboard_write_text"),
+            1,
+            NativeFunction::from_copy_closure(clipboard_write_text_native),
+        ),
+        (
             js_string!("__omoikane_storage_origin"),
             1,
             NativeFunction::from_copy_closure(storage_origin_native),
@@ -5272,6 +5321,112 @@ fn performance_now_native(
         Ok(JsValue::from(
             state.borrow().performance_start.elapsed().as_secs_f64() * 1_000.0,
         ))
+    })
+}
+
+fn is_secure_context_url(url: &str) -> bool {
+    let lower_url = url.to_ascii_lowercase();
+    // Fragments are not part of an origin.  Strip them before the IPv6
+    // fast-path and the lightweight URL parser so `http://[::1]#section`
+    // behaves like the corresponding fragment-free loopback URL.
+    let url_without_fragment = lower_url
+        .split_once('#')
+        .map_or(lower_url.as_str(), |(prefix, _)| prefix);
+    if let Some(authority) = url_without_fragment.strip_prefix("http://") {
+        let authority_end = authority.find(['/', '?']).unwrap_or(authority.len());
+        let authority = &authority[..authority_end];
+        if let Some(port) = authority.strip_prefix("[::1]") {
+            let valid_port = match port.strip_prefix(':') {
+                None => true,
+                Some(value) => !value.is_empty() && value.parse::<u16>().is_ok(),
+            };
+            if valid_port {
+                return true;
+            }
+        }
+    }
+    let Ok(url) = url_without_fragment.parse::<crate::http::Url>() else {
+        return false;
+    };
+    if url.scheme().eq_ignore_ascii_case("https") {
+        return true;
+    }
+    if !url.scheme().eq_ignore_ascii_case("http") {
+        return false;
+    }
+    let host = url.host().to_ascii_lowercase();
+    host == "localhost"
+        || host
+            .parse::<std::net::Ipv4Addr>()
+            .is_ok_and(|address| address.octets()[0] == 127)
+}
+
+fn is_secure_context_parsed_url(url: &crate::http::Url) -> bool {
+    if url.scheme().eq_ignore_ascii_case("https") {
+        return true;
+    }
+    if !url.scheme().eq_ignore_ascii_case("http") {
+        return false;
+    }
+    let host = url.host();
+    host.eq_ignore_ascii_case("localhost")
+        || host
+            .parse::<std::net::Ipv4Addr>()
+            .is_ok_and(|address| address.octets()[0] == 127)
+}
+
+fn host_is_secure_context(state: &HostState) -> bool {
+    // The base URL is already parsed and is the canonical origin used by the
+    // runtime. Avoid formatting and reparsing it on every secure-context or
+    // clipboard check. The lightweight URL type does not model fragments, so
+    // retain the string path for fragment-bearing URLs (and IPv6 loopback,
+    // which is handled by its dedicated fast path).
+    if let Some(base_url) = state.base_url.as_ref()
+        && !state.location_href.contains('#')
+    {
+        return is_secure_context_parsed_url(base_url);
+    }
+    is_secure_context_url(&state.location_href)
+}
+
+fn is_secure_context_native(
+    _: &JsValue,
+    _: &[JsValue],
+    _: &mut Context,
+) -> JsResult<JsValue> {
+    with_host_state(|state| {
+        let state = state.borrow();
+        Ok(JsValue::from(host_is_secure_context(&state)))
+    })
+}
+
+fn clipboard_read_text_native(
+    _: &JsValue,
+    _: &[JsValue],
+    _: &mut Context,
+) -> JsResult<JsValue> {
+    with_host_state(|state| {
+        let state = state.borrow();
+        if !host_is_secure_context(&state) || !state.clipboard_permission_granted {
+            return Ok(JsValue::null());
+        }
+        Ok(JsValue::from(js_string!(state.clipboard.read_text())))
+    })
+}
+
+fn clipboard_write_text_native(
+    _: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let text = string_argument(args.first(), "", context)?;
+    with_host_state(|state| {
+        let state = state.borrow();
+        if !host_is_secure_context(&state) || !state.clipboard_permission_granted {
+            return Ok(JsValue::from(false));
+        }
+        state.clipboard.write_text(text);
+        Ok(JsValue::from(true))
     })
 }
 
@@ -9770,6 +9925,29 @@ mod tests {
     }
 
     #[test]
+    fn dedicated_worker_does_not_expose_async_clipboard() {
+        let mut runtime = JsRuntime::new().unwrap();
+        runtime
+            .eval(
+                r#"globalThis.workerValues = [];
+                   const source = encodeURIComponent('postMessage([typeof Clipboard, typeof navigator.clipboard]);');
+                   const worker = new Worker('data:text/javascript,' + source);
+                   worker.onmessage = event => workerValues.push(event.data);"#,
+            )
+            .unwrap();
+        runtime.run_until_idle().unwrap();
+        assert_eq!(
+            runtime
+                .eval("JSON.stringify(workerValues[0])")
+                .unwrap()
+                .as_string()
+                .unwrap()
+                .to_std_string_escaped(),
+            "[\"undefined\",\"undefined\"]"
+        );
+    }
+
+    #[test]
     fn dedicated_worker_messages_are_fifo_cloned_and_microtask_checkpointed() {
         let mut runtime = JsRuntime::new().unwrap();
         runtime
@@ -11752,6 +11930,205 @@ mod tests {
         assert_eq!(logs.len(), 1);
         assert!(logs[0].contains("http://localhost/"));
         assert!(logs[0].contains(&default_user_agent()));
+    }
+
+    #[test]
+    fn navigator_clipboard_shares_utf8_text_and_enforces_permissions() {
+        struct ClipboardResetGuard;
+        impl Drop for ClipboardResetGuard {
+            fn drop(&mut self) {
+                host_clipboard().write_text(String::new());
+            }
+        }
+        let _clipboard_reset_guard = ClipboardResetGuard;
+
+        let mut writer = JsRuntime::with_document_and_url(
+            default_document(),
+            "https://clipboard.example.test/page",
+        )
+        .unwrap();
+        assert_eq!(
+            eval_str(&mut writer, "typeof __omoikane_clipboard_read_text"),
+            "undefined"
+        );
+        assert_eq!(
+            eval_str(&mut writer, "typeof __omoikane_clipboard_write_text"),
+            "undefined"
+        );
+        writer
+            .eval(
+                r#"globalThis.missingWriteArgument = false;
+                   try { navigator.clipboard.writeText(); }
+                   catch (error) { missingWriteArgument = error instanceof TypeError; }"#,
+            )
+            .unwrap();
+        assert_eq!(eval_str(&mut writer, "String(missingWriteArgument)"), "true");
+        writer.eval("navigator.clipboard.writeText('')").unwrap();
+        writer.run_jobs().unwrap();
+        writer
+            .eval(
+                r#"globalThis.emptyResult = 'pending';
+                   navigator.clipboard.readText().then(value => { emptyResult = value; });"#,
+            )
+            .unwrap();
+        writer.run_jobs().unwrap();
+        assert_eq!(eval_str(&mut writer, "emptyResult"), "");
+        writer
+            .eval(
+                r#"globalThis.writeResult = 'pending';
+                   navigator.clipboard.writeText('first\nsecond').then(() => { writeResult = 'done'; });"#,
+            )
+            .unwrap();
+        writer.run_jobs().unwrap();
+        assert_eq!(
+            eval_str(&mut writer, "[isSecureContext, writeResult].join('|')"),
+            "true|done"
+        );
+        writer
+            .eval(
+                r#"globalThis.__omoikane_is_secure_context = () => false;
+                   globalThis.tamperedSecure = isSecureContext;
+                   globalThis.tamperedWrite = 'pending';
+                   navigator.clipboard.writeText('captured')
+                     .then(() => { tamperedWrite = 'done'; });"#,
+            )
+            .unwrap();
+        writer.run_jobs().unwrap();
+        assert_eq!(
+            eval_str(&mut writer, "[tamperedSecure, tamperedWrite].join('|')"),
+            "true|done"
+        );
+
+        // A separate runtime sees the same host clipboard, and a dropped
+        // writer does not clear the host-owned snapshot.
+        drop(writer);
+        let mut reader = JsRuntime::with_document_and_url(
+            default_document(),
+            "https://clipboard.example.test/reader",
+        )
+        .unwrap();
+        reader
+            .eval(
+                r#"globalThis.readResult = 'pending';
+                   navigator.clipboard.readText().then(value => { readResult = value; });"#,
+            )
+            .unwrap();
+        reader.run_jobs().unwrap();
+        assert_eq!(eval_str(&mut reader, "readResult"), "captured");
+
+        reader
+            .eval(
+                r#"globalThis.order = [];
+                   Promise.all([
+                     navigator.clipboard.writeText('A').then(() => order.push('A')),
+                     navigator.clipboard.writeText('B').then(() => order.push('B'))
+                   ]).then(() => navigator.clipboard.readText())
+                     .then(value => order.push(value));"#,
+            )
+            .unwrap();
+        reader.run_jobs().unwrap();
+        assert_eq!(eval_str(&mut reader, "order.join('|')"), "A|B|B");
+
+        // A read queued beside a write observes the clipboard snapshot at its
+        // own turn, while a subsequent read sees the completed write.  This
+        // exercises the same Promise/mutex ordering as real read/write
+        // contention rather than only write/write ordering.
+        reader
+            .eval(
+                r#"globalThis.concurrent = 'pending';
+                   globalThis.concurrentFinal = 'pending';
+                   Promise.all([
+                     navigator.clipboard.readText().then(value => { concurrent = value; }),
+                     navigator.clipboard.writeText('during-contention')
+                   ]).then(() => navigator.clipboard.readText())
+                     .then(value => { concurrentFinal = `${concurrent}|${value}`; });"#,
+            )
+            .unwrap();
+        reader.run_jobs().unwrap();
+        assert_eq!(
+            eval_str(&mut reader, "concurrent + '|' + concurrentFinal"),
+            "B|B|during-contention"
+        );
+
+        reader.host_state.borrow_mut().clipboard_permission_granted = false;
+        reader
+            .eval(
+                r#"globalThis.denied = '';
+                   navigator.clipboard.readText().catch(error => { denied = error.name; });"#,
+            )
+            .unwrap();
+        reader.run_jobs().unwrap();
+        assert_eq!(eval_str(&mut reader, "denied"), "NotAllowedError");
+        reader
+            .eval(
+                r#"globalThis.writeDenied = '';
+                   navigator.clipboard.writeText('blocked')
+                     .catch(error => { writeDenied = error.name; });"#,
+            )
+            .unwrap();
+        reader.run_jobs().unwrap();
+        assert_eq!(eval_str(&mut reader, "writeDenied"), "NotAllowedError");
+
+        let mut insecure = JsRuntime::with_document_and_url(
+            default_document(),
+            "http://clipboard.example.test/insecure",
+        )
+        .unwrap();
+        insecure
+            .eval(
+                r#"globalThis.denied = '';
+                   navigator.clipboard.writeText('blocked').catch(error => { denied = error.name; });"#,
+            )
+            .unwrap();
+        insecure.run_jobs().unwrap();
+        assert_eq!(
+            eval_str(&mut insecure, "[isSecureContext, denied].join('|')"),
+            "false|NotAllowedError"
+        );
+        let mut loopback = JsRuntime::with_document_and_url(
+            default_document(),
+            "http://127.0.0.2/loopback",
+        )
+        .unwrap();
+        assert!(eval_str(&mut loopback, "String(isSecureContext)") == "true");
+        let mut ipv6_loopback = JsRuntime::with_document_and_url(
+            default_document(),
+            "http://[::1]/loopback",
+        )
+        .unwrap();
+        assert_eq!(eval_str(&mut ipv6_loopback, "String(isSecureContext)"), "true");
+        let mut ipv6_loopback_fragment = JsRuntime::with_document_and_url(
+            default_document(),
+            "http://[::1]#fragment",
+        )
+        .unwrap();
+        assert_eq!(
+            eval_str(&mut ipv6_loopback_fragment, "String(isSecureContext)"),
+            "true"
+        );
+        let mut ipv6_invalid_port = JsRuntime::with_document_and_url(
+            default_document(),
+            "http://[::1]:evil/loopback",
+        )
+        .unwrap();
+        assert_eq!(
+            eval_str(&mut ipv6_invalid_port, "String(isSecureContext)"),
+            "false"
+        );
+        let mut https_fragment = JsRuntime::with_document_and_url(
+            default_document(),
+            "https://clipboard.example.test/page#fragment",
+        )
+        .unwrap();
+        assert_eq!(
+            eval_str(&mut https_fragment, "String(isSecureContext)"),
+            "true"
+        );
+
+        // Keep the host clipboard empty for subsequent tests.
+        reader.host_state.borrow_mut().clipboard_permission_granted = true;
+        reader.eval("navigator.clipboard.writeText('')").unwrap();
+        reader.run_jobs().unwrap();
     }
 
     #[test]

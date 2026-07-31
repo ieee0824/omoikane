@@ -4,6 +4,15 @@
   // cannot use it to inspect closed shadow trees.
   const internalAssignedSlot = globalThis.__omoikane_internal_assigned_slot;
   delete globalThis.__omoikane_internal_assigned_slot;
+  // Keep the host clipboard bindings private to this bootstrap closure. Page
+  // code must go through the Promise-based Clipboard API, where secure-context
+  // and permission checks are applied consistently.
+  const nativeClipboardReadText = globalThis.__omoikane_clipboard_read_text;
+  const nativeClipboardWriteText = globalThis.__omoikane_clipboard_write_text;
+  const nativeIsSecureContext = globalThis.__omoikane_is_secure_context;
+  delete globalThis.__omoikane_clipboard_read_text;
+  delete globalThis.__omoikane_clipboard_write_text;
+  delete globalThis.__omoikane_is_secure_context;
 
   // The top-level browsing context is its own parent and top-level context.
   globalThis.parent = globalThis;
@@ -6928,6 +6937,38 @@
     *[Symbol.iterator]() {}
     get [Symbol.toStringTag]() { return "MimeTypeArray"; }
   }
+  const clipboardConstructionToken = {};
+  class Clipboard {
+    constructor(token) {
+      if (token !== clipboardConstructionToken) throw new TypeError("Illegal constructor");
+    }
+    readText() {
+      return Promise.resolve().then(() => {
+        if (!nativeIsSecureContext()) {
+          throw new DOMException("Clipboard access requires a secure context.", "NotAllowedError");
+        }
+        const text = nativeClipboardReadText();
+        if (text === null) {
+          throw new DOMException("Clipboard permission was denied.", "NotAllowedError");
+        }
+        return String(text);
+      });
+    }
+    writeText(value) {
+      if (arguments.length < 1) {
+        throw new TypeError("Clipboard.writeText requires one argument");
+      }
+      return Promise.resolve().then(() => {
+        if (!nativeIsSecureContext()) {
+          throw new DOMException("Clipboard access requires a secure context.", "NotAllowedError");
+        }
+        if (!nativeClipboardWriteText(String(value))) {
+          throw new DOMException("Clipboard permission was denied.", "NotAllowedError");
+        }
+      });
+    }
+    get [Symbol.toStringTag]() { return "Clipboard"; }
+  }
   class Navigator {
     constructor(token) {
       if (token !== navigatorConstructionToken) throw new TypeError("Illegal constructor");
@@ -6939,13 +6980,20 @@
       this.onLine = true;
       this.plugins = new PluginArray(navigatorConstructionToken);
       this.mimeTypes = new MimeTypeArray(navigatorConstructionToken);
+      this.clipboard = new Clipboard(clipboardConstructionToken);
     }
     get [Symbol.toStringTag]() { return "Navigator"; }
   }
   globalThis.PluginArray = PluginArray;
   globalThis.MimeTypeArray = MimeTypeArray;
   globalThis.Navigator = Navigator;
+  globalThis.Clipboard = Clipboard;
   globalThis.navigator = new Navigator(navigatorConstructionToken);
+  Object.defineProperty(globalThis, "isSecureContext", {
+    configurable: true,
+    enumerable: true,
+    get() { return nativeIsSecureContext(); },
+  });
   if (globalThis.Intl === undefined) {
     class IntlFormatter {
       constructor(locales, options) {
@@ -8681,7 +8729,17 @@
     }
     try { delete globalThis.getComputedStyle; } catch (_) { globalThis.getComputedStyle = undefined; }
     try { delete globalThis.history; } catch (_) { globalThis.history = undefined; }
+    // Async Clipboard is a Window-only surface in this runtime. Keep the
+    // worker navigator object, but do not expose a page clipboard handle from
+    // a DedicatedWorkerGlobalScope.
+    try { if (globalThis.navigator) delete globalThis.navigator.clipboard; } catch (_) {}
+    try { delete globalThis.Clipboard; } catch (_) { globalThis.Clipboard = undefined; }
     try { delete globalThis.__omoikane_install_window_named_properties; } catch (_) {}
+    Object.defineProperty(globalThis, "isSecureContext", {
+      configurable: true,
+      enumerable: true,
+      get() { return nativeIsSecureContext(); },
+    });
     Object.defineProperty(globalThis, "_listeners", {
       configurable: true,
       value: new Map(),

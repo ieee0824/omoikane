@@ -510,8 +510,8 @@
       "id": "platform.clipboard",
       "area": "platform",
       "description": "Clipboard API is exposed",
-      "probe": "navigator.clipboard && typeof navigator.clipboard.readText === 'function'",
-      "baseline_supported": false
+      "probe": "typeof Clipboard === 'function' && navigator.clipboard instanceof Clipboard && typeof navigator.clipboard.readText === 'function' && typeof navigator.clipboard.writeText === 'function'",
+      "baseline_supported": true
     },
     {
       "id": "platform.notifications",
