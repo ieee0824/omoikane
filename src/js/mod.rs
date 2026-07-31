@@ -5297,6 +5297,16 @@ fn performance_now_native(
 }
 
 fn is_secure_context_url(url: &str) -> bool {
+    let lower_url = url.to_ascii_lowercase();
+    if let Some(authority) = lower_url.strip_prefix("http://") {
+        let authority_end = authority.find(['/', '?']).unwrap_or(authority.len());
+        let authority = &authority[..authority_end];
+        if let Some(port) = authority.strip_prefix("[::1]")
+            && (port.is_empty() || port.starts_with(':'))
+        {
+            return true;
+        }
+    }
     let Ok(url) = url.parse::<crate::http::Url>() else {
         return false;
     };
@@ -11864,6 +11874,12 @@ mod tests {
         )
         .unwrap();
         assert!(eval_str(&mut loopback, "String(isSecureContext)") == "true");
+        let mut ipv6_loopback = JsRuntime::with_document_and_url(
+            default_document(),
+            "http://[::1]/loopback",
+        )
+        .unwrap();
+        assert_eq!(eval_str(&mut ipv6_loopback, "String(isSecureContext)"), "true");
 
         // Keep the host clipboard empty for subsequent tests.
         reader.host_state.borrow_mut().clipboard_permission_granted = true;
