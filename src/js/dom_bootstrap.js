@@ -8445,6 +8445,11 @@
     try { delete globalThis.getComputedStyle; } catch (_) { globalThis.getComputedStyle = undefined; }
     try { delete globalThis.history; } catch (_) { globalThis.history = undefined; }
     try { delete globalThis.__omoikane_install_window_named_properties; } catch (_) {}
+    Object.defineProperty(globalThis, "isSecureContext", {
+      configurable: true,
+      enumerable: true,
+      get() { return __omoikane_is_secure_context(); },
+    });
     Object.defineProperty(globalThis, "_listeners", {
       configurable: true,
       value: new Map(),

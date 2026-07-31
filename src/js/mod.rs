@@ -5303,11 +5303,14 @@ fn is_secure_context_url(url: &str) -> bool {
     if url.scheme().eq_ignore_ascii_case("https") {
         return true;
     }
-    url.scheme().eq_ignore_ascii_case("http")
-        && matches!(
-            url.host().to_ascii_lowercase().as_str(),
-            "localhost" | "127.0.0.1"
-        )
+    if !url.scheme().eq_ignore_ascii_case("http") {
+        return false;
+    }
+    let host = url.host().to_ascii_lowercase();
+    host == "localhost"
+        || host
+            .parse::<std::net::Ipv4Addr>()
+            .is_ok_and(|address| address.octets()[0] == 127)
 }
 
 fn host_is_secure_context(state: &HostState) -> bool {
@@ -11855,6 +11858,12 @@ mod tests {
             eval_str(&mut insecure, "[isSecureContext, denied].join('|')"),
             "false|NotAllowedError"
         );
+        let mut loopback = JsRuntime::with_document_and_url(
+            default_document(),
+            "http://127.0.0.2/loopback",
+        )
+        .unwrap();
+        assert!(eval_str(&mut loopback, "String(isSecureContext)") == "true");
 
         // Keep the host clipboard empty for subsequent tests.
         reader.host_state.borrow_mut().clipboard_permission_granted = true;
