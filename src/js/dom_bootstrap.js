@@ -4873,8 +4873,7 @@
     if (!token) return false;
     const isAudio = token.startsWith("audio/");
     const isVideo = token.startsWith("video/");
-    if ((!isAudio && !isVideo) || (element.localName === "audio" && !isAudio) ||
-        (element.localName === "video" && !isVideo)) return false;
+    if ((!isAudio && !isVideo) || (element.localName === "audio" && !isAudio)) return false;
     return isAudio ? MEDIA_AUDIO_TYPES.has(token) : MEDIA_VIDEO_TYPES.has(token);
   }
 
@@ -5030,6 +5029,15 @@
       });
     }
 
+    __mediaQueueReadyEvent(type, readyState, loadId = this.__mediaLoadId, finalState = readyState) {
+      queueMediaTask(() => {
+        if (loadId !== this.__mediaLoadId) return;
+        this.__mediaReadyState = readyState;
+        fireRealtimeEvent(this, new Event(type));
+        this.__mediaReadyState = finalState;
+      });
+    }
+
     __mediaCancelPlayback() {
       this.__mediaPlaybackId += 1;
       if (this.__mediaPlaybackTimer !== null) {
@@ -5075,14 +5083,16 @@
       }
       this.__mediaError = null;
       this.__mediaNetworkState = MEDIA_NETWORK_IDLE;
-      this.__mediaReadyState = MEDIA_HAVE_ENOUGH_DATA;
+      this.__mediaReadyState = MEDIA_HAVE_METADATA;
       this.__mediaDuration = mediaDurationFromSource(this.__mediaCurrentSrc);
       this.__mediaCurrentTime = 0;
       this.__mediaEnded = false;
       const waiters = this.__mediaPlayWaiters.splice(0);
-      for (const eventType of ["durationchange", "loadedmetadata", "loadeddata", "canplay"]) {
-        this.__mediaQueueEvent(eventType, loadId);
-      }
+      this.__mediaQueueReadyEvent("durationchange", MEDIA_HAVE_METADATA, loadId);
+      this.__mediaQueueReadyEvent("loadedmetadata", MEDIA_HAVE_METADATA, loadId);
+      this.__mediaQueueReadyEvent("loadeddata", MEDIA_HAVE_CURRENT_DATA, loadId);
+      this.__mediaQueueReadyEvent("canplay", MEDIA_HAVE_FUTURE_DATA, loadId, MEDIA_HAVE_ENOUGH_DATA);
+      this.__mediaQueueEvent("load", loadId);
       if (waiters.length) this.__mediaStartPlayback(waiters);
     }
 

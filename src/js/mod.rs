@@ -19441,7 +19441,7 @@ b</textarea></form>"#);
                    const video = document.createElement('video');
                    document.body.appendChild(video);
                    for (const type of ['loadstart', 'durationchange', 'loadedmetadata',
-                                       'loadeddata', 'canplay', 'play', 'playing',
+                                       'loadeddata', 'canplay', 'load', 'play', 'playing',
                                        'timeupdate', 'ended']) {
                      video.addEventListener(type, () => mediaEvents.push(type));
                    }
@@ -19455,7 +19455,7 @@ b</textarea></form>"#);
         runtime.run_until_idle().unwrap();
         assert_eq!(
             eval_str(&mut runtime, "mediaEvents.join(',')"),
-            "loadstart,durationchange,loadedmetadata,loadeddata,canplay,play,playing"
+            "loadstart,durationchange,loadedmetadata,loadeddata,canplay,load,play,playing"
         );
         assert_eq!(eval_str(&mut runtime, "playResult"), "resolved");
         assert_eq!(eval_str(&mut runtime, "String(video instanceof HTMLVideoElement)"), "true");
@@ -19464,6 +19464,7 @@ b</textarea></form>"#);
         assert_eq!(eval_num(&mut runtime, "video.readyState"), 4.0);
         assert_eq!(eval_num(&mut runtime, "video.networkState"), 1.0);
         assert_eq!(eval_num(&mut runtime, "video.duration"), 1.0);
+        assert_eq!(eval_str(&mut runtime, "video.canPlayType('audio/mpeg')"), "probably");
 
         runtime.run_timers(1_000, 100, 32);
         runtime.run_until_idle().unwrap();
