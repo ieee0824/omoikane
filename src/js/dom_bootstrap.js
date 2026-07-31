@@ -7841,7 +7841,7 @@
   }
 
   function encodeWorkerMessage(value, options = undefined) {
-    if (Array.isArray(options)) options = { transfer: options };
+    if (Array.isArray(options)) throw dataCloneError("Transfer lists are not supported yet.");
     const cloned = globalThis.structuredClone(value, options);
     const nodes = [];
     const memory = new Map();
