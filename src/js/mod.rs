@@ -2225,7 +2225,8 @@ impl JsRuntime {
             )
             .await
             .map(|_| ());
-        self.clear_posted_message_values();
+        let cleanup_result = self.clear_posted_message_values();
+        self.record_error_from("posted message cleanup", cleanup_result);
         result
     }
 
@@ -2234,32 +2235,35 @@ impl JsRuntime {
         global.set(
             js_string!("__omoikane_posted_message_port"),
             port,
-            false,
+            true,
             &mut self.context,
         )?;
         global.set(
             js_string!("__omoikane_posted_message_data"),
             data,
-            false,
+            true,
             &mut self.context,
         )?;
         Ok(())
     }
 
-    fn clear_posted_message_values(&mut self) {
+    fn clear_posted_message_values(&mut self) -> JsResult<()> {
         let global = self.context.global_object();
-        let _ = global.set(
+        let port_result = global.set(
             js_string!("__omoikane_posted_message_port"),
             JsValue::undefined(),
-            false,
+            true,
             &mut self.context,
         );
-        let _ = global.set(
+        let data_result = global.set(
             js_string!("__omoikane_posted_message_data"),
             JsValue::undefined(),
-            false,
+            true,
             &mut self.context,
         );
+        port_result?;
+        data_result?;
+        Ok(())
     }
 
     async fn run_dynamic_script_resource_async(&mut self, node_id: usize) -> JsResult<()> {
@@ -2663,7 +2667,8 @@ impl JsRuntime {
                      })); \
                      }",
                 );
-                self.clear_posted_message_values();
+                let cleanup_result = self.clear_posted_message_values();
+                self.record_error_from("posted message cleanup", cleanup_result);
                 self.record_error_from("posted message", result);
                 Ok(())
             }
@@ -8250,6 +8255,54 @@ mod tests {
                 .unwrap()
                 .as_number(),
             Some(2.0)
+        );
+    }
+
+    #[test]
+    fn posted_message_cleanup_attempts_both_tampered_global_properties() {
+        let mut runtime = JsRuntime::new().unwrap();
+        runtime
+            .eval(
+                r#"(() => {
+                  globalThis.cleanupAttempts = [];
+                  const channel = new MessageChannel();
+                  channel.port2.onmessage = () => {
+                    Object.defineProperty(globalThis, '__omoikane_posted_message_port', {
+                      configurable: true,
+                      set() {
+                        cleanupAttempts.push('port');
+                        throw new Error('blocked port cleanup');
+                      }
+                    });
+                    Object.defineProperty(globalThis, '__omoikane_posted_message_data', {
+                      configurable: true,
+                      set() {
+                        cleanupAttempts.push('data');
+                        throw new Error('blocked data cleanup');
+                      }
+                    });
+                  };
+                  channel.port1.postMessage('payload');
+                })()"#,
+            )
+            .unwrap();
+
+        runtime.run_until_idle().unwrap();
+        assert_eq!(
+            runtime
+                .eval("cleanupAttempts.join(',')")
+                .unwrap()
+                .as_string()
+                .unwrap()
+                .to_std_string_escaped(),
+            "port,data"
+        );
+        let errors = runtime.take_task_errors();
+        assert_eq!(errors.len(), 1, "expected one cleanup error, got {errors:?}");
+        assert!(
+            errors[0].contains("posted message cleanup")
+                && errors[0].contains("blocked port cleanup"),
+            "the cleanup error must be reported: {errors:?}"
         );
     }
 
