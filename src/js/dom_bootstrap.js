@@ -6279,6 +6279,8 @@
     toDataURL(type="image/png"){canvasState(this);return String(type).toLowerCase()==="image/png"?__omoikane_canvas_data_url(this.__id):__omoikane_canvas_data_url(this.__id);}
   }
 
+  const nativeCanvasPng = globalThis.__omoikane_canvas_png;
+  try { delete globalThis.__omoikane_canvas_png; } catch (_) {}
   const imageBitmapConstructionToken = {};
   function offscreenDimension(value, name) {
     const number = Number(value);
@@ -6358,7 +6360,7 @@
     convertToBlob(options = {}) {
       if (this.__detached) return Promise.reject(new DOMException("The OffscreenCanvas is detached", "InvalidStateError"));
       const snapshot = canvasSnapshot(this);
-      const encoded = __omoikane_canvas_png(snapshot.width, snapshot.height, new Uint8Array(snapshot.pixels.buffer));
+      const encoded = nativeCanvasPng(snapshot.width, snapshot.height, new Uint8Array(snapshot.pixels.buffer));
       if (encoded === null) return Promise.reject(new DOMException("Unable to encode canvas", "EncodingError"));
       const comma = String(encoded).indexOf(",");
       const requested = String(options && options.type || "image/png").toLowerCase();

@@ -7897,9 +7897,29 @@ fn canvas_png_native(
     args: &[JsValue],
     context: &mut Context,
 ) -> JsResult<JsValue> {
-    let width = args.first().cloned().unwrap_or_default().to_number(context)? as u32;
-    let height = args.get(1).cloned().unwrap_or_default().to_number(context)? as u32;
+    let width_number = args.first().cloned().unwrap_or_default().to_number(context)?;
+    let height_number = args.get(1).cloned().unwrap_or_default().to_number(context)?;
+    if !width_number.is_finite()
+        || !height_number.is_finite()
+        || width_number.fract() != 0.0
+        || height_number.fract() != 0.0
+        || !(0.0..=32_768.0).contains(&width_number)
+        || !(0.0..=32_768.0).contains(&height_number)
+    {
+        return Ok(JsValue::null());
+    }
+    let width = width_number as u32;
+    let height = height_number as u32;
     let pixels = body_bytes_argument(args.get(2), context)?.unwrap_or_default();
+    let Some(expected_len) = (width as usize)
+        .checked_mul(height as usize)
+        .and_then(|pixels| pixels.checked_mul(4))
+    else {
+        return Ok(JsValue::null());
+    };
+    if pixels.len() != expected_len {
+        return Ok(JsValue::null());
+    }
     Ok(crate::canvas::png_data_url_from_rgba(width, height, pixels)
         .map(|url| js_string!(url).into())
         .unwrap_or_else(JsValue::null))
