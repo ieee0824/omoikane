@@ -5298,7 +5298,13 @@ fn performance_now_native(
 
 fn is_secure_context_url(url: &str) -> bool {
     let lower_url = url.to_ascii_lowercase();
-    if let Some(authority) = lower_url.strip_prefix("http://") {
+    // Fragments are not part of an origin.  Strip them before the IPv6
+    // fast-path and the lightweight URL parser so `http://[::1]#section`
+    // behaves like the corresponding fragment-free loopback URL.
+    let url_without_fragment = lower_url
+        .split_once('#')
+        .map_or(lower_url.as_str(), |(prefix, _)| prefix);
+    if let Some(authority) = url_without_fragment.strip_prefix("http://") {
         let authority_end = authority.find(['/', '?']).unwrap_or(authority.len());
         let authority = &authority[..authority_end];
         if let Some(port) = authority.strip_prefix("[::1]")
@@ -5307,7 +5313,7 @@ fn is_secure_context_url(url: &str) -> bool {
             return true;
         }
     }
-    let Ok(url) = url.parse::<crate::http::Url>() else {
+    let Ok(url) = url_without_fragment.parse::<crate::http::Url>() else {
         return false;
     };
     if url.scheme().eq_ignore_ascii_case("https") {
@@ -11833,6 +11839,27 @@ mod tests {
         reader.run_jobs().unwrap();
         assert_eq!(eval_str(&mut reader, "order.join('|')"), "A|B|B");
 
+        // A read queued beside a write observes the clipboard snapshot at its
+        // own turn, while a subsequent read sees the completed write.  This
+        // exercises the same Promise/mutex ordering as real read/write
+        // contention rather than only write/write ordering.
+        reader
+            .eval(
+                r#"globalThis.concurrent = 'pending';
+                   globalThis.concurrentFinal = 'pending';
+                   Promise.all([
+                     navigator.clipboard.readText().then(value => { concurrent = value; }),
+                     navigator.clipboard.writeText('during-contention')
+                   ]).then(() => navigator.clipboard.readText())
+                     .then(value => { concurrentFinal = `${concurrent}|${value}`; });"#,
+            )
+            .unwrap();
+        reader.run_jobs().unwrap();
+        assert_eq!(
+            eval_str(&mut reader, "concurrent + '|' + concurrentFinal"),
+            "B|B|during-contention"
+        );
+
         reader.host_state.borrow_mut().clipboard_permission_granted = false;
         reader
             .eval(
@@ -11880,6 +11907,24 @@ mod tests {
         )
         .unwrap();
         assert_eq!(eval_str(&mut ipv6_loopback, "String(isSecureContext)"), "true");
+        let mut ipv6_loopback_fragment = JsRuntime::with_document_and_url(
+            default_document(),
+            "http://[::1]#fragment",
+        )
+        .unwrap();
+        assert_eq!(
+            eval_str(&mut ipv6_loopback_fragment, "String(isSecureContext)"),
+            "true"
+        );
+        let mut https_fragment = JsRuntime::with_document_and_url(
+            default_document(),
+            "https://clipboard.example.test/page#fragment",
+        )
+        .unwrap();
+        assert_eq!(
+            eval_str(&mut https_fragment, "String(isSecureContext)"),
+            "true"
+        );
 
         // Keep the host clipboard empty for subsequent tests.
         reader.host_state.borrow_mut().clipboard_permission_granted = true;
