@@ -9026,9 +9026,24 @@
     constructor(token, context, defaultValue, minValue, maxValue) {
       if (token !== audioConstructionToken) throw new TypeError("Illegal constructor");
       this.__context = context;
-      this.defaultValue = Number(defaultValue);
-      this.minValue = Number(minValue);
-      this.maxValue = Number(maxValue);
+      Object.defineProperty(this, "defaultValue", {
+        configurable: false,
+        enumerable: true,
+        writable: false,
+        value: Number(defaultValue),
+      });
+      Object.defineProperty(this, "minValue", {
+        configurable: false,
+        enumerable: true,
+        writable: false,
+        value: Number(minValue),
+      });
+      Object.defineProperty(this, "maxValue", {
+        configurable: false,
+        enumerable: true,
+        writable: false,
+        value: Number(maxValue),
+      });
       this.__value = this.defaultValue;
       this.__events = [];
       this.automationRate = "a-rate";
@@ -9118,8 +9133,18 @@
         value: context,
       });
       this.__context = context;
-      this.numberOfInputs = inputs;
-      this.numberOfOutputs = outputs;
+      Object.defineProperty(this, "numberOfInputs", {
+        configurable: false,
+        enumerable: true,
+        writable: false,
+        value: inputs,
+      });
+      Object.defineProperty(this, "numberOfOutputs", {
+        configurable: false,
+        enumerable: true,
+        writable: false,
+        value: outputs,
+      });
       this.channelCount = 2;
       this.channelCountMode = "max";
       this.channelInterpretation = "speakers";
@@ -9306,9 +9331,24 @@
       const init = options === null || options === undefined ? {} : Object(options);
       const sampleRate = init.sampleRate === undefined ? 44100 : audioNumber(init.sampleRate, "AudioContext sampleRate");
       if (sampleRate <= 0) throw new DOMException("The sampleRate must be positive.", "NotSupportedError");
-      this.sampleRate = sampleRate;
-      this.baseLatency = 0;
-      this.outputLatency = 0;
+      Object.defineProperty(this, "sampleRate", {
+        configurable: false,
+        enumerable: true,
+        writable: false,
+        value: sampleRate,
+      });
+      Object.defineProperty(this, "baseLatency", {
+        configurable: false,
+        enumerable: true,
+        writable: false,
+        value: 0,
+      });
+      Object.defineProperty(this, "outputLatency", {
+        configurable: false,
+        enumerable: true,
+        writable: false,
+        value: 0,
+      });
       this.latencyHint = init.latencyHint === undefined ? "interactive" : init.latencyHint;
       this.__state = "suspended";
       this.__currentTime = 0;
