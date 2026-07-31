@@ -8839,6 +8839,11 @@
     if (!Number.isFinite(number)) throw new TypeError(name + " must be finite");
     return number;
   }
+  function audioTime(value, name) {
+    const time = audioNumber(value, name);
+    if (time < 0) throw new RangeError(name + " must be non-negative");
+    return time;
+  }
 
   class AudioParam {
     constructor(token, context, defaultValue, minValue, maxValue) {
@@ -8876,7 +8881,7 @@
     }
     __schedule(kind, value, time) {
       const numeric = audioNumber(value, "AudioParam value");
-      const at = Math.max(0, audioNumber(time, "AudioParam time"));
+      const at = audioTime(time, "AudioParam time");
       const event = { kind, value: numeric, time: at };
       this.__events = this.__events.filter(existing => existing.time !== at);
       this.__events.push(event);
@@ -8892,7 +8897,7 @@
     }
     setTargetAtTime(target, startTime, timeConstant) {
       const value = audioNumber(target, "AudioParam target");
-      const start = Math.max(0, audioNumber(startTime, "AudioParam time"));
+      const start = audioTime(startTime, "AudioParam time");
       const constant = audioNumber(timeConstant, "AudioParam timeConstant");
       if (constant <= 0) throw new RangeError("AudioParam timeConstant must be positive");
       this.__events.push({ kind: "set", value, time: start });
@@ -8900,12 +8905,12 @@
       return this;
     }
     cancelScheduledValues(cancelTime) {
-      const at = audioNumber(cancelTime, "AudioParam time");
+      const at = audioTime(cancelTime, "AudioParam time");
       this.__events = this.__events.filter(event => event.time < at);
       return this;
     }
     cancelAndHoldAtTime(cancelTime) {
-      const at = audioNumber(cancelTime, "AudioParam time");
+      const at = audioTime(cancelTime, "AudioParam time");
       const held = this.__valueAt(at);
       this.cancelScheduledValues(at);
       this.__events.push({ kind: "set", value: held, time: at });
@@ -8933,7 +8938,7 @@
       if (!(destination instanceof AudioNode) && !(destination instanceof AudioParam)) {
         throw new TypeError("AudioNode.connect destination must be an AudioNode or AudioParam");
       }
-      if (destination.__context !== this.context) {
+      if (destination.__context !== this.__context) {
         throw new DOMException("Nodes belong to different AudioContexts.", "InvalidAccessError");
       }
       const outNumber = Number(output);
@@ -9012,17 +9017,17 @@
       this.__stopTimer = null;
     }
     __schedulePendingStop() {
-      if (this.__stopped || !this.__started || this.__stopRequested === undefined || this.context.state !== "running") return;
+      if (this.__stopped || !this.__started || this.__stopRequested === undefined || this.__context.state !== "running") return;
       if (this.__stopTimer !== null) clearTimeout(this.__stopTimer);
       const effectiveStop = Math.max(this.__stopRequested, this.__startRequested);
-      const delay = Math.max(0, (effectiveStop - audioNow(this.context)) * 1000);
+      const delay = Math.max(0, (effectiveStop - audioNow(this.__context)) * 1000);
       if (delay <= 0) {
         this.__finish();
         return;
       }
       this.__stopTimer = setTimeout(() => {
         this.__stopTimer = null;
-        if (this.context.state === "running") this.__finish();
+        if (this.__context.state === "running") this.__finish();
       }, delay);
     }
     __finish() {
