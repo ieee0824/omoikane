@@ -7441,6 +7441,125 @@
     }
     get [Symbol.toStringTag]() { return "Clipboard"; }
   }
+  const geolocationConstructionToken = {};
+  const nativeGeolocationRequest = globalThis.__omoikane_geolocation_request;
+  const nativeGeolocationClearWatch = globalThis.__omoikane_geolocation_clear_watch;
+  try { delete globalThis.__omoikane_geolocation_request; } catch (_) {}
+  try { delete globalThis.__omoikane_geolocation_clear_watch; } catch (_) {}
+
+  class GeolocationCoordinates {
+    constructor(token, data) {
+      if (token !== geolocationConstructionToken) throw new TypeError("Illegal constructor");
+      const values = data || {};
+      const define = (name, value) => Object.defineProperty(this, name, {
+        configurable: false, enumerable: true, writable: false, value,
+      });
+      define("latitude", Number(values.latitude));
+      define("longitude", Number(values.longitude));
+      define("accuracy", Number(values.accuracy));
+      define("altitude", values.altitude == null ? null : Number(values.altitude));
+      define("altitudeAccuracy", values.altitudeAccuracy == null ? null : Number(values.altitudeAccuracy));
+      define("heading", values.heading == null ? null : Number(values.heading));
+      define("speed", values.speed == null ? null : Number(values.speed));
+    }
+    get [Symbol.toStringTag]() { return "GeolocationCoordinates"; }
+  }
+
+  class GeolocationPosition {
+    constructor(token, data) {
+      if (token !== geolocationConstructionToken) throw new TypeError("Illegal constructor");
+      const values = data || {};
+      Object.defineProperty(this, "coords", {
+        configurable: false, enumerable: true, writable: false,
+        value: new GeolocationCoordinates(geolocationConstructionToken, values.coords || {}),
+      });
+      Object.defineProperty(this, "timestamp", {
+        configurable: false, enumerable: true, writable: false, value: Number(values.timestamp),
+      });
+    }
+    get [Symbol.toStringTag]() { return "GeolocationPosition"; }
+  }
+
+  class GeolocationPositionError {
+    constructor(token, code, message) {
+      if (token !== geolocationConstructionToken) throw new TypeError("Illegal constructor");
+      Object.defineProperty(this, "code", {
+        configurable: false, enumerable: true, writable: false, value: Number(code),
+      });
+      Object.defineProperty(this, "message", {
+        configurable: false, enumerable: true, writable: false, value: String(message || ""),
+      });
+    }
+    get [Symbol.toStringTag]() { return "GeolocationPositionError"; }
+  }
+  GeolocationPositionError.PERMISSION_DENIED = 1;
+  GeolocationPositionError.POSITION_UNAVAILABLE = 2;
+  GeolocationPositionError.TIMEOUT = 3;
+  for (const name of ["PERMISSION_DENIED", "POSITION_UNAVAILABLE", "TIMEOUT"]) {
+    GeolocationPositionError.prototype[name] = GeolocationPositionError[name];
+  }
+
+  function normalizeGeolocationOptions(options) {
+    if (options == null) return { timeout: Infinity, maximumAge: 0 };
+    const value = Object(options);
+    let timeout = value.timeout === undefined ? Infinity : Number(value.timeout);
+    let maximumAge = value.maximumAge === undefined ? 0 : Number(value.maximumAge);
+    if (Number.isNaN(timeout) || timeout < 0 || Number.isNaN(maximumAge) || maximumAge < 0) {
+      throw new RangeError("geolocation timeout and maximumAge must be non-negative");
+    }
+    if (Number.isFinite(timeout)) timeout = Math.floor(timeout);
+    if (Number.isFinite(maximumAge)) maximumAge = Math.floor(maximumAge);
+    return { timeout, maximumAge };
+  }
+
+  class Geolocation {
+    constructor(token) {
+      if (token !== geolocationConstructionToken) throw new TypeError("Illegal constructor");
+      this.__nextWatchId = 1;
+    }
+    getCurrentPosition(success, error = undefined, options = undefined) {
+      if (typeof success !== "function") throw new TypeError("success callback must be callable");
+      if (error != null && typeof error !== "function") throw new TypeError("error callback must be callable");
+      const normalized = normalizeGeolocationOptions(options);
+      nativeGeolocationRequest(success, error == null ? undefined : error, -1,
+        normalized.timeout, normalized.maximumAge);
+    }
+    watchPosition(success, error = undefined, options = undefined) {
+      if (typeof success !== "function") throw new TypeError("success callback must be callable");
+      if (error != null && typeof error !== "function") throw new TypeError("error callback must be callable");
+      const normalized = normalizeGeolocationOptions(options);
+      const id = this.__nextWatchId++ >>> 0;
+      nativeGeolocationRequest(success, error == null ? undefined : error, id,
+        normalized.timeout, normalized.maximumAge);
+      return id;
+    }
+    clearWatch(id) {
+      const number = Number(id);
+      if (!Number.isFinite(number)) return;
+      nativeGeolocationClearWatch(number >>> 0);
+    }
+    get [Symbol.toStringTag]() { return "Geolocation"; }
+  }
+
+  globalThis.__omoikane_dispatch_geolocation_task = function() {
+    const status = globalThis.__omoikane_geolocation_status;
+    const callback = globalThis.__omoikane_geolocation_callback;
+    if (status === "success") {
+      if (typeof callback === "function") {
+        callback(new GeolocationPosition(
+          geolocationConstructionToken,
+          JSON.parse(globalThis.__omoikane_geolocation_payload || "{}"),
+        ));
+      }
+    } else if (typeof globalThis.__omoikane_geolocation_error_callback === "function") {
+      globalThis.__omoikane_geolocation_error_callback(new GeolocationPositionError(
+        geolocationConstructionToken,
+        globalThis.__omoikane_geolocation_error_code,
+        globalThis.__omoikane_geolocation_error_message,
+      ));
+    }
+  };
+
   class Navigator {
     constructor(token) {
       if (token !== navigatorConstructionToken) throw new TypeError("Illegal constructor");
@@ -7453,6 +7572,7 @@
       this.plugins = new PluginArray(navigatorConstructionToken);
       this.mimeTypes = new MimeTypeArray(navigatorConstructionToken);
       this.clipboard = new Clipboard(clipboardConstructionToken);
+      this.geolocation = new Geolocation(geolocationConstructionToken);
     }
     get [Symbol.toStringTag]() { return "Navigator"; }
   }
@@ -7460,6 +7580,10 @@
   globalThis.MimeTypeArray = MimeTypeArray;
   globalThis.Navigator = Navigator;
   globalThis.Clipboard = Clipboard;
+  globalThis.Geolocation = Geolocation;
+  globalThis.GeolocationCoordinates = GeolocationCoordinates;
+  globalThis.GeolocationPosition = GeolocationPosition;
+  globalThis.GeolocationPositionError = GeolocationPositionError;
   globalThis.navigator = new Navigator(navigatorConstructionToken);
   Object.defineProperty(globalThis, "isSecureContext", {
     configurable: true,
@@ -9198,6 +9322,8 @@
       "HTMLTextAreaElement", "HTMLButtonElement", "HTMLSelectElement", "HTMLOptionElement",
       "HTMLMediaElement", "HTMLAudioElement", "HTMLVideoElement", "Audio",
       "MediaError",
+      "Geolocation", "GeolocationCoordinates", "GeolocationPosition",
+      "GeolocationPositionError",
     ]) {
       try { delete globalThis[domName]; } catch (_) { globalThis[domName] = undefined; }
     }
@@ -9207,7 +9333,11 @@
     // worker navigator object, but do not expose a page clipboard handle from
     // a DedicatedWorkerGlobalScope.
     try { if (globalThis.navigator) delete globalThis.navigator.clipboard; } catch (_) {}
+    try { if (globalThis.navigator) delete globalThis.navigator.geolocation; } catch (_) {}
     try { delete globalThis.Clipboard; } catch (_) { globalThis.Clipboard = undefined; }
+    for (const name of ["Geolocation", "GeolocationCoordinates", "GeolocationPosition", "GeolocationPositionError"]) {
+      try { delete globalThis[name]; } catch (_) { globalThis[name] = undefined; }
+    }
     try { delete globalThis.__omoikane_install_window_named_properties; } catch (_) {}
     Object.defineProperty(globalThis, "isSecureContext", {
       configurable: true,
