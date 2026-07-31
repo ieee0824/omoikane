@@ -1977,6 +1977,8 @@ impl JsRuntime {
                 let _ = self.eval("__omoikane_set_current_script(null)");
                 self.host_state.borrow_mut().write_insertion_ref = None;
                 self.host_state.borrow_mut().pending_javascript_dialog = None;
+                let cleanup_result = self.clear_posted_message_values();
+                self.record_error_from("posted message cleanup", cleanup_result);
                 return CompletedPageTask { runtime: self, generation, result: Err(PageTaskError::Cancelled) };
             };
             if let Err(error) = page_work_result {
@@ -8404,6 +8406,46 @@ mod tests {
                 error.contains("posted message") && error.contains("blocked async port install")
             }),
             "the async install error must be reported: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn cancelling_posted_message_task_clears_dispatch_globals() {
+        let runtime = JsRuntime::new().unwrap();
+        let mut task = Box::pin(runtime.into_page_task(
+            24,
+            vec![PageTaskSource::Classic {
+                source: r#"(() => {
+                  const channel = new MessageChannel();
+                  channel.port2.onmessage = () => alert('cancel posted message');
+                  channel.port1.postMessage('payload');
+                })()"#
+                .to_string(),
+                label: "cancel posted-message".to_string(),
+                script_node_id: None,
+            }],
+        ));
+        let controller = task.dialog_controller();
+        let waker: &'static std::task::Waker = std::task::Waker::noop();
+        let mut context = FutureContext::from_waker(waker);
+        while controller.pending().is_none() {
+            assert!(matches!(task.as_mut().poll(&mut context), Poll::Pending));
+        }
+
+        task.cancel();
+        let mut completed = match task.as_mut().poll(&mut context) {
+            Poll::Ready(completed) => completed,
+            Poll::Pending => panic!("cancelled posted-message task did not return its runtime"),
+        };
+        assert_eq!(completed.result, Err(PageTaskError::Cancelled));
+        assert_eq!(controller.pending(), None);
+        assert_eq!(
+            completed
+                .runtime
+                .eval("__omoikane_posted_message_port === undefined && __omoikane_posted_message_data === undefined")
+                .unwrap()
+                .as_boolean(),
+            Some(true)
         );
     }
 
