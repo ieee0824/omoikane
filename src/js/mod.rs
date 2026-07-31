@@ -19433,6 +19433,103 @@ b</textarea></form>"#);
     }
 
     #[test]
+    fn html_media_element_models_playback_state_and_errors() {
+        let mut runtime = runtime_from_html("<html><body></body></html>");
+        runtime
+            .eval(
+                r#"globalThis.mediaEvents = [];
+                   const video = document.createElement('video');
+                   document.body.appendChild(video);
+                   for (const type of ['loadstart', 'durationchange', 'loadedmetadata',
+                                       'loadeddata', 'canplay', 'play', 'playing',
+                                       'timeupdate', 'ended']) {
+                     video.addEventListener(type, () => mediaEvents.push(type));
+                   }
+                   video.src = 'data:video/mp4,fixture';
+                   globalThis.playResult = 'pending';
+                   video.play().then(() => { playResult = 'resolved'; },
+                                     error => { playResult = 'rejected:' + error.name; });
+                   globalThis.audio = new Audio('data:audio/mpeg,fixture');"#,
+            )
+            .unwrap();
+        runtime.run_until_idle().unwrap();
+        assert_eq!(
+            eval_str(&mut runtime, "mediaEvents.join(',')"),
+            "loadstart,durationchange,loadedmetadata,loadeddata,canplay,play,playing"
+        );
+        assert_eq!(eval_str(&mut runtime, "playResult"), "resolved");
+        assert_eq!(eval_str(&mut runtime, "String(video instanceof HTMLVideoElement)"), "true");
+        assert_eq!(eval_str(&mut runtime, "String(audio instanceof HTMLAudioElement)"), "true");
+        assert_eq!(eval_str(&mut runtime, "String(audio instanceof HTMLMediaElement)"), "true");
+        assert_eq!(eval_num(&mut runtime, "video.readyState"), 4.0);
+        assert_eq!(eval_num(&mut runtime, "video.networkState"), 1.0);
+        assert_eq!(eval_num(&mut runtime, "video.duration"), 1.0);
+
+        runtime.run_timers(1_000, 100, 32);
+        runtime.run_until_idle().unwrap();
+        assert_eq!(
+            eval_str(&mut runtime, "mediaEvents.slice(-2).join(',')"),
+            "timeupdate,ended"
+        );
+        assert_eq!(eval_str(&mut runtime, "String(video.paused) + '|' + String(video.ended)"), "true|true");
+        assert_eq!(eval_num(&mut runtime, "video.currentTime"), 1.0);
+        runtime
+            .eval(
+                "video.currentTime = 0.25; video.volume = 0.5; video.muted = true; video.controls = true;",
+            )
+            .unwrap();
+        runtime.run_until_idle().unwrap();
+        assert_eq!(eval_num(&mut runtime, "video.currentTime"), 0.25);
+        assert_eq!(eval_str(&mut runtime, "[video.volume, video.muted, video.controls].join('|')"), "0.5|true|true");
+
+        runtime
+            .eval(
+                r#"globalThis.pauseEvents = [];
+                   const pauseProbe = document.createElement('audio');
+                   pauseProbe.src = 'data:audio/mpeg,fixture';
+                   pauseProbe.addEventListener('play', () => pauseEvents.push('play'));
+                   pauseProbe.addEventListener('pause', () => pauseEvents.push('pause'));
+                   pauseProbe.play();
+                   globalThis.pauseProbe = pauseProbe;"#,
+            )
+            .unwrap();
+        runtime.run_until_idle().unwrap();
+        runtime.eval("pauseProbe.pause()").unwrap();
+        runtime.run_until_idle().unwrap();
+        assert_eq!(eval_str(&mut runtime, "pauseEvents.join(',')"), "play,pause");
+        assert_eq!(eval_str(&mut runtime, "String(pauseProbe.paused)"), "true");
+
+        runtime
+            .eval(
+                r#"globalThis.badResult = 'pending';
+                   const bad = document.createElement('audio');
+                   bad.setAttribute('type', 'application/x-unsupported');
+                   bad.src = 'data:application/x-unsupported,fixture';
+                   bad.play().then(() => { badResult = 'resolved'; },
+                                   error => { badResult = error.name; });
+                   globalThis.bad = bad;"#,
+            )
+            .unwrap();
+        runtime.run_until_idle().unwrap();
+        assert_eq!(eval_str(&mut runtime, "badResult"), "NotSupportedError");
+        assert_eq!(eval_num(&mut runtime, "bad.error.code"), 4.0);
+        assert_eq!(eval_num(&mut runtime, "bad.networkState"), 3.0);
+
+        runtime
+            .eval(
+                r#"globalThis.networkResult = 'pending';
+                   const missing = document.createElement('audio');
+                   missing.src = 'blob:null/missing';
+                   missing.play().catch(error => { networkResult = error.name; });
+                   globalThis.missing = missing;"#,
+            )
+            .unwrap();
+        runtime.run_until_idle().unwrap();
+        assert_eq!(eval_str(&mut runtime, "networkResult"), "NetworkError");
+        assert_eq!(eval_num(&mut runtime, "missing.error.code"), 2.0);
+    }
+
+    #[test]
     fn match_media_evaluates_current_viewport() {
         let doc = NodeHandle::document();
         let mut runtime = JsRuntime::with_document(doc).unwrap();
