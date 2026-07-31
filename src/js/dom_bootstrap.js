@@ -4411,7 +4411,7 @@
       const candidate = list.slice();
       const result = Array.prototype[method].apply(candidate, args);
       commit(candidate);
-      return result;
+      return result === candidate ? observable : result;
     };
 
     observable = new Proxy(list, {

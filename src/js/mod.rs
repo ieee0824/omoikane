@@ -7293,7 +7293,11 @@ fn set_adopted_stylesheets_native(
                 JsNativeError::error().with_message("adoptedStyleSheets root is detached"),
             )
         })?;
-        host.adopted_stylesheets.insert(root_id, stylesheets);
+        if stylesheets.is_empty() {
+            host.adopted_stylesheets.remove(&root_id);
+        } else {
+            host.adopted_stylesheets.insert(root_id, stylesheets);
+        }
         host.mark_document_style_dirty(&document);
         Ok(JsValue::undefined())
     })
@@ -22374,6 +22378,7 @@ b</textarea></form>"#);
                 document.adoptedStyleSheets[0] = shared;
                 document.adoptedStyleSheets.length = 1;
                 const listIdentity = oldDocumentList === document.adoptedStyleSheets;
+                const reverseReturnsList = document.adoptedStyleSheets.reverse() === document.adoptedStyleSheets;
                 let nonConstructedError = '';
                 try {
                     document.adoptedStyleSheets.push(document.createElement('style').sheet);
@@ -22381,15 +22386,23 @@ b</textarea></form>"#);
                     nonConstructedError = error.name;
                 }
                 return [sheet.ownerNode === null, document.adoptedStyleSheets[0] === sheet,
-                    before, shadowBefore, sharedDocument, sharedShadow, listIdentity,
+                    before, shadowBefore, sharedDocument, sharedShadow, listIdentity, reverseReturnsList,
                     nonConstructedError, after, sheet.cssRules.length,
                     typeof sheet.replace === 'function'].join('|');
             })()"#,
         );
         assert_eq!(
             result,
-            "true|false|41px|19px|41px|29px|true|NotAllowedError|23px|2|true"
+            "true|false|41px|19px|41px|29px|true|true|NotAllowedError|23px|2|true"
         );
+        runtime.eval("document.adoptedStyleSheets = []").unwrap();
+        let document_id = runtime.host_state.borrow().document.identity();
+        assert!(runtime
+            .host_state
+            .borrow()
+            .adopted_stylesheets
+            .get(&document_id)
+            .is_none());
     }
 
     #[test]
