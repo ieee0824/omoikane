@@ -20623,7 +20623,16 @@ b</textarea></form>"#);
             .eval(
                 r#"globalThis.workerValues = [];
                    const source = encodeURIComponent(
-                     'postMessage([typeof MediaError, typeof HTMLMediaElement, typeof Audio, typeof OffscreenCanvas, typeof ImageBitmap]);');
+                     'const values = [typeof MediaError, typeof HTMLMediaElement, typeof Audio, typeof OffscreenCanvas, typeof ImageBitmap];' +
+                     'const sourceCanvas = new OffscreenCanvas(1, 1);' +
+                     'const sourceContext = sourceCanvas.getContext("2d");' +
+                     'sourceContext.fillStyle = "red"; sourceContext.fillRect(0, 0, 1, 1);' +
+                     'createImageBitmap(sourceCanvas).then(bitmap => {' +
+                     '  const targetCanvas = new OffscreenCanvas(1, 1);' +
+                     '  const targetContext = targetCanvas.getContext("2d");' +
+                     '  targetContext.drawImage(bitmap, 0, 0);' +
+                     '  postMessage(values.concat([bitmap.width, targetContext.getImageData(0, 0, 1, 1).data[0]]));' +
+                     '});');
                    const worker = new Worker('data:text/javascript,' + source);
                    worker.onmessage = event => workerValues.push(event.data);"#,
             )
@@ -20631,7 +20640,7 @@ b</textarea></form>"#);
         runtime.run_until_idle().unwrap();
         assert_eq!(
             eval_str(&mut runtime, "JSON.stringify(workerValues[0])"),
-            "[\"undefined\",\"undefined\",\"undefined\",\"function\",\"function\"]"
+            "[\"undefined\",\"undefined\",\"undefined\",\"function\",\"function\",1,255]"
         );
     }
 

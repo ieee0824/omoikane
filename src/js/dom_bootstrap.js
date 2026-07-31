@@ -6254,7 +6254,8 @@
     getImageData(sx,sy,sw,sh){sw=Number(sw);sh=Number(sh);if(sw<=0||sh<=0)throw new DOMException("ImageData dimensions must be positive","IndexSizeError");const s=this.__s,out=new ImageData(sw,sh);for(let y=0;y<out.height;y++)for(let x=0;x<out.width;x++){const si=((sy+y)*s.width+(sx+x))*4,di=(y*out.width+x)*4;if(sx+x>=0&&sy+y>=0&&sx+x<s.width&&sy+y<s.height)out.data.set(s.pixels.slice(si,si+4),di);}return out;}
     putImageData(image,dx,dy){const s=this.__s;for(let y=0;y<image.height;y++)for(let x=0;x<image.width;x++){const tx=dx+x,ty=dy+y;if(tx>=0&&ty>=0&&tx<s.width&&ty<s.height)s.pixels.set(image.data.slice((y*image.width+x)*4,(y*image.width+x+1)*4),(ty*s.width+tx)*4);}commitCanvas(this.canvas,s);}
     drawImage(source,...args){let src;
-      if (source instanceof HTMLCanvasElement || source instanceof OffscreenCanvas) src=canvasState(source);
+      const isHtmlCanvas = typeof HTMLCanvasElement !== "undefined" && source instanceof HTMLCanvasElement;
+      if (isHtmlCanvas || source instanceof OffscreenCanvas) src=canvasState(source);
       else if (source instanceof ImageBitmap) {
         if (source.__detached) throw new DOMException("The ImageBitmap is detached","InvalidStateError");
         src={width:source.width,height:source.height,pixels:source.__pixels};
@@ -6298,7 +6299,8 @@
       if (source.__detached) throw new DOMException("The ImageBitmap is detached", "InvalidStateError");
       return { width: source.width, height: source.height, pixels: source.__pixels };
     }
-    if (source instanceof HTMLCanvasElement || source instanceof OffscreenCanvas) return canvasSnapshot(source);
+    const isHtmlCanvas = typeof HTMLCanvasElement !== "undefined" && source instanceof HTMLCanvasElement;
+    if (isHtmlCanvas || source instanceof OffscreenCanvas) return canvasSnapshot(source);
     const raw = source && source.__id != null ? __omoikane_canvas_image_source(source.__id) : null;
     if (raw === null) throw new DOMException("Image source is unavailable", "InvalidStateError");
     const decoded = JSON.parse(raw);
