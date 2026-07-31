@@ -526,8 +526,8 @@
       "id": "platform.notifications",
       "area": "platform",
       "description": "Notifications API is exposed",
-      "probe": "typeof Notification === 'function'",
-      "baseline_supported": false
+      "probe": "typeof Notification === 'function' && ['default', 'granted', 'denied'].includes(Notification.permission) && typeof Notification.requestPermission === 'function'",
+      "baseline_supported": true
     },
     {
       "id": "platform.geolocation",
