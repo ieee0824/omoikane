@@ -620,6 +620,7 @@ struct HostState {
     worker_id: Option<u64>,
     worker_terminated: bool,
     worker_owner_bound: bool,
+    worker_owner_object: Option<JsValue>,
     worker_startup_outgoing: VecDeque<JsValue>,
 }
 
@@ -642,7 +643,6 @@ struct WorkerRuntime {
     runtime: JsRuntime,
     owner_state: Rc<RefCell<HostState>>,
     owner_object: Option<JsValue>,
-    incoming: VecDeque<JsValue>,
     outgoing: VecDeque<JsValue>,
     startup_error: Option<String>,
     terminated: bool,
@@ -794,6 +794,7 @@ impl HostState {
             worker_id: None,
             worker_terminated: false,
             worker_owner_bound: false,
+            worker_owner_object: None,
             worker_startup_outgoing: VecDeque::new(),
         };
         state.register_tree(&document);
@@ -1620,7 +1621,6 @@ impl JsRuntime {
         for entry in workers.values() {
             let mut worker = entry.borrow_mut();
             worker.terminated = true;
-            worker.incoming.clear();
             worker.outgoing.clear();
             worker.runtime.host_state.borrow_mut().worker_terminated = true;
         }
@@ -1636,23 +1636,33 @@ impl JsRuntime {
     }
 
     fn run_worker_background_tasks(&mut self) {
-        let workers: Vec<_> = self
+        let worker_ids: Vec<_> = self
             .host_state
             .borrow()
             .workers
-            .iter()
-            .map(|(&worker_id, entry)| (worker_id, Rc::clone(entry)))
+            .keys()
+            .copied()
             .collect();
-        for (worker_id, entry) in workers {
-            let (owner_state, result, errors) = {
+        for worker_id in worker_ids {
+            let Some(entry) = self.host_state.borrow_mut().workers.remove(&worker_id) else {
+                continue;
+            };
+            let (owner_state, result, errors, terminated) = {
                 let mut worker = entry.borrow_mut();
                 if worker.terminated || worker.runtime.host_state.borrow().worker_terminated {
                     continue;
                 }
                 let result = worker.runtime.run_until_idle();
                 let errors = worker.runtime.take_task_errors();
-                (Rc::clone(&worker.owner_state), result, errors)
+                let terminated = worker.runtime.host_state.borrow().worker_terminated;
+                (Rc::clone(&worker.owner_state), result, errors, terminated)
             };
+            if !terminated {
+                self.host_state
+                    .borrow_mut()
+                    .workers
+                    .insert(worker_id, Rc::clone(&entry));
+            }
             // A worker task failure is reported to the owner as an error event,
             // but must not abort the owner's event-loop pump. `run_timer_payload`
             // records callback failures in the worker runtime, while a rejected
@@ -2236,22 +2246,36 @@ impl JsRuntime {
     ///
     /// Propagates the first error thrown by a timer callback or source string.
     pub fn run_until_idle(&mut self) -> JsResult<()> {
+        if self.is_terminated_worker() {
+            return Ok(());
+        }
         // An embedder call may have completed a script task and left promise
         // jobs pending. Its checkpoint can itself enqueue host tasks.
         self.run_jobs()?;
         self.run_worker_background_tasks();
         loop {
+            if self.is_terminated_worker() {
+                break;
+            }
             let task = { self.host_state.borrow_mut().event_loop.pop_task() };
             let Some((_, task)) = task else {
                 break;
             };
             self.run_task(task)?;
             self.run_worker_background_tasks();
+            if self.is_terminated_worker() {
+                break;
+            }
             // HTML performs a microtask checkpoint after every task, including
             // host-only navigation tasks that do not directly invoke script.
             self.run_jobs()?;
         }
         Ok(())
+    }
+
+    fn is_terminated_worker(&self) -> bool {
+        let state = self.host_state.borrow();
+        state.worker_id.is_some() && state.worker_terminated
     }
 
     async fn run_until_idle_async(&mut self) -> JsResult<()> {
@@ -2761,6 +2785,9 @@ impl JsRuntime {
     }
 
     fn run_task(&mut self, task: Task) -> JsResult<()> {
+        if self.is_terminated_worker() {
+            return Ok(());
+        }
         match task {
             Task::Timer(payload) => self.run_timer_payload(payload),
             Task::Navigation(request) => {
@@ -2789,8 +2816,12 @@ impl JsRuntime {
             Task::WorkerMessage { worker_id, data } => {
                 self.run_worker_message(worker_id, data)
             }
-            Task::WorkerOwnerMessage { worker_id, data } => {
-                self.run_worker_owner_message(worker_id, data)
+            Task::WorkerOwnerMessage {
+                worker_id,
+                owner,
+                data,
+            } => {
+                self.run_worker_owner_message(worker_id, owner, data)
             }
             Task::WorkerError { worker_id, message } => {
                 self.run_worker_error(worker_id, message)
@@ -2799,13 +2830,12 @@ impl JsRuntime {
     }
 
     fn run_worker_message(&mut self, worker_id: u64, data: JsValue) -> JsResult<()> {
-        let entry = self.host_state.borrow().workers.get(&worker_id).cloned();
+        let entry = self.host_state.borrow_mut().workers.remove(&worker_id);
         let Some(entry) = entry else { return Ok(()); };
         let mut worker = entry.borrow_mut();
         if worker.terminated || worker.runtime.host_state.borrow().worker_terminated {
             return Ok(());
         }
-        let _ = worker.incoming.pop_front();
         let owner_state = Rc::clone(&worker.owner_state);
         let (result, jobs_result) = {
             let runtime = &mut worker.runtime;
@@ -2814,7 +2844,11 @@ impl JsRuntime {
                 "self.dispatchEvent(new MessageEvent('message', { data: __omoikane_worker_message_data, origin: '', source: null, ports: [] }));",
             );
             runtime.clear_worker_message_values()?;
-            let jobs_result = runtime.run_jobs();
+            let jobs_result = if runtime.is_terminated_worker() {
+                Ok(())
+            } else {
+                runtime.run_jobs()
+            };
             (result, jobs_result)
         };
         if let Err(error) = result {
@@ -2823,17 +2857,23 @@ impl JsRuntime {
         if let Err(error) = jobs_result {
             owner_state.borrow_mut().event_loop.enqueue_worker_error(worker_id, error.to_string());
         }
+        let terminated = worker.runtime.host_state.borrow().worker_terminated;
+        drop(worker);
+        if !terminated {
+            self.host_state
+                .borrow_mut()
+                .workers
+                .insert(worker_id, entry);
+        }
         Ok(())
     }
 
-    fn run_worker_owner_message(&mut self, worker_id: u64, data: JsValue) -> JsResult<()> {
-        let owner_object = self
-            .host_state
-            .borrow()
-            .workers
-            .get(&worker_id)
-            .and_then(|entry| entry.borrow().owner_object.clone());
-        let Some(owner_object) = owner_object else { return Ok(()); };
+    fn run_worker_owner_message(
+        &mut self,
+        _worker_id: u64,
+        owner_object: JsValue,
+        data: JsValue,
+    ) -> JsResult<()> {
         self.install_worker_owner_values(owner_object, data)?;
         let result = self.eval(
             "if (!__omoikane_worker_owner.__terminated) { __omoikane_worker_owner.dispatchEvent(new MessageEvent('message', { data: __omoikane_worker_owner_data, origin: '', source: null, ports: [] })); }",
@@ -6310,7 +6350,6 @@ fn create_worker_for_owner_state(
         runtime: worker_runtime,
         owner_state: Rc::clone(&owner_state),
         owner_object: None,
-        incoming: VecDeque::new(),
         outgoing: VecDeque::new(),
         startup_error: None,
         terminated: false,
@@ -6318,12 +6357,32 @@ fn create_worker_for_owner_state(
     }));
     owner_state.borrow_mut().workers.insert(worker_id, Rc::clone(&entry));
     let startup_error = match source {
-        Some(source) => entry
-            .borrow_mut()
-            .runtime
-            .eval(&source)
-            .err()
-            .map(|error| error.to_string()),
+        Some(source) => {
+            // Keep the entry out of the owner map while evaluating worker
+            // startup. This lets self.close() remove the entry immediately
+            // without recursively borrowing the entry currently executing.
+            let entry_for_eval = owner_state
+                .borrow_mut()
+                .workers
+                .remove(&worker_id)
+                .expect("new worker entry must be present");
+            let result = entry_for_eval.borrow_mut().runtime.eval(&source);
+            let terminated = entry_for_eval
+                .borrow()
+                .runtime
+                .host_state
+                .borrow()
+                .worker_terminated;
+            if !terminated {
+                owner_state
+                    .borrow_mut()
+                    .workers
+                    .insert(worker_id, Rc::clone(&entry_for_eval));
+            } else {
+                return Ok(worker_id);
+            }
+            result.err().map(|error| error.to_string())
+        }
         None => Some(format!("failed to fetch Worker script: {requested_url}")),
     };
     {
@@ -6351,13 +6410,21 @@ fn bind_worker_owner_native(
         let Some(entry) = entry else { return Ok(JsValue::undefined()); };
         let mut worker = entry.borrow_mut();
         if worker.terminated { return Ok(JsValue::undefined()); }
-        worker.owner_object = Some(owner_object);
-        worker.runtime.host_state.borrow_mut().worker_owner_bound = true;
+        worker.owner_object = Some(owner_object.clone());
+        {
+            let mut worker_state = worker.runtime.host_state.borrow_mut();
+            worker_state.worker_owner_bound = true;
+            worker_state.worker_owner_object = Some(owner_object.clone());
+        }
         let startup_queued = std::mem::take(&mut worker.runtime.host_state.borrow_mut().worker_startup_outgoing);
         worker.outgoing.extend(startup_queued);
         let queued = std::mem::take(&mut worker.outgoing);
         for data in queued {
-            state.borrow_mut().event_loop.enqueue_worker_owner_message(id, data);
+            state.borrow_mut().event_loop.enqueue_worker_owner_message(
+                id,
+                owner_object.clone(),
+                data,
+            );
         }
         if let Some(message) = worker.startup_error.take() {
             state.borrow_mut().event_loop.enqueue_worker_error(id, message);
@@ -6376,11 +6443,10 @@ fn worker_post_message_native(
     with_host_state(|state| {
         let entry = state.borrow().workers.get(&id).cloned();
         let Some(entry) = entry else { return Ok(JsValue::undefined()); };
-        let mut worker = entry.borrow_mut();
+        let worker = entry.borrow();
         if worker.terminated || worker.runtime.host_state.borrow().worker_terminated {
             return Ok(JsValue::undefined());
         }
-        worker.incoming.push_back(data.clone());
         state.borrow_mut().event_loop.enqueue_worker_message(id, data);
         Ok(JsValue::undefined())
     })
@@ -6400,7 +6466,6 @@ fn terminate_worker_native(
         if let Some(entry) = entry {
             let mut worker = entry.borrow_mut();
             worker.terminated = true;
-            worker.incoming.clear();
             worker.outgoing.clear();
             worker.runtime.host_state.borrow_mut().worker_terminated = true;
         }
@@ -6415,12 +6480,13 @@ fn worker_owner_post_message_native(
 ) -> JsResult<JsValue> {
     let data = args.get(1).cloned().unwrap_or_default();
     with_host_state(|state| {
-        let (owner, id, owner_bound) = {
+        let (owner, id, owner_bound, owner_object) = {
             let state_ref = state.borrow();
             (
                 state_ref.worker_owner.clone(),
                 state_ref.worker_id,
                 state_ref.worker_owner_bound,
+                state_ref.worker_owner_object.clone(),
             )
         };
         let Some(owner) = owner else { return Ok(JsValue::undefined()); };
@@ -6431,14 +6497,31 @@ fn worker_owner_post_message_native(
             return Ok(JsValue::undefined());
         }
         if state.borrow().worker_terminated { return Ok(JsValue::undefined()); }
-        owner.borrow_mut().event_loop.enqueue_worker_owner_message(id, data);
+        let Some(owner_object) = owner_object else { return Ok(JsValue::undefined()); };
+        owner.borrow_mut().event_loop.enqueue_worker_owner_message(
+            id,
+            owner_object,
+            data,
+        );
         Ok(JsValue::undefined())
     })
 }
 
 fn worker_close_native(_: &JsValue, _: &[JsValue], _: &mut Context) -> JsResult<JsValue> {
     with_host_state(|state| {
+        let (owner, worker_id) = {
+            let state_ref = state.borrow();
+            (state_ref.worker_owner.clone(), state_ref.worker_id)
+        };
         state.borrow_mut().worker_terminated = true;
+        if let (Some(owner), Some(worker_id)) = (owner, worker_id) {
+            if let Some(entry) = owner.borrow_mut().workers.remove(&worker_id) {
+                let mut worker = entry.borrow_mut();
+                worker.terminated = true;
+                worker.outgoing.clear();
+                worker.runtime.host_state.borrow_mut().worker_terminated = true;
+            }
+        }
         Ok(JsValue::undefined())
     })
 }
@@ -8484,6 +8567,7 @@ mod tests {
             .unwrap();
         runtime.run_until_idle().unwrap();
         assert_eq!(runtime.eval("JSON.stringify(workerValues)").unwrap().as_string().unwrap().to_std_string_escaped(), "[\"before\"]");
+        assert_eq!(runtime.host_state.borrow().workers.len(), 0);
     }
 
     fn poll_until_dialog<F>(

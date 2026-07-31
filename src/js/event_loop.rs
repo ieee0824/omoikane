@@ -36,7 +36,11 @@ pub(crate) enum Task {
     /// A message sent from a page-owned `Worker` to its dedicated worker.
     WorkerMessage { worker_id: u64, data: JsValue },
     /// A message sent from a dedicated worker back to its owner page.
-    WorkerOwnerMessage { worker_id: u64, data: JsValue },
+    WorkerOwnerMessage {
+        worker_id: u64,
+        owner: JsValue,
+        data: JsValue,
+    },
     /// A worker startup/runtime failure reported to its owner page.
     WorkerError { worker_id: u64, message: String },
 }
@@ -123,10 +127,19 @@ impl EventLoop {
         self.enqueue(TaskSource::PostedMessage, Task::WorkerMessage { worker_id, data });
     }
 
-    pub(crate) fn enqueue_worker_owner_message(&mut self, worker_id: u64, data: JsValue) {
+    pub(crate) fn enqueue_worker_owner_message(
+        &mut self,
+        worker_id: u64,
+        owner: JsValue,
+        data: JsValue,
+    ) {
         self.enqueue(
             TaskSource::PostedMessage,
-            Task::WorkerOwnerMessage { worker_id, data },
+            Task::WorkerOwnerMessage {
+                worker_id,
+                owner,
+                data,
+            },
         );
     }
 
