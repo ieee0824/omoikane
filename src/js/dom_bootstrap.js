@@ -9,8 +9,10 @@
   // and permission checks are applied consistently.
   const nativeClipboardReadText = globalThis.__omoikane_clipboard_read_text;
   const nativeClipboardWriteText = globalThis.__omoikane_clipboard_write_text;
+  const nativeIsSecureContext = globalThis.__omoikane_is_secure_context;
   delete globalThis.__omoikane_clipboard_read_text;
   delete globalThis.__omoikane_clipboard_write_text;
+  delete globalThis.__omoikane_is_secure_context;
 
   // The top-level browsing context is its own parent and top-level context.
   globalThis.parent = globalThis;
@@ -6669,7 +6671,7 @@
     }
     readText() {
       return Promise.resolve().then(() => {
-        if (!__omoikane_is_secure_context()) {
+        if (!nativeIsSecureContext()) {
           throw new DOMException("Clipboard access requires a secure context.", "NotAllowedError");
         }
         const text = nativeClipboardReadText();
@@ -6684,7 +6686,7 @@
         throw new TypeError("Clipboard.writeText requires one argument");
       }
       return Promise.resolve().then(() => {
-        if (!__omoikane_is_secure_context()) {
+        if (!nativeIsSecureContext()) {
           throw new DOMException("Clipboard access requires a secure context.", "NotAllowedError");
         }
         if (!nativeClipboardWriteText(String(value))) {
@@ -6717,7 +6719,7 @@
   Object.defineProperty(globalThis, "isSecureContext", {
     configurable: true,
     enumerable: true,
-    get() { return __omoikane_is_secure_context(); },
+    get() { return nativeIsSecureContext(); },
   });
   if (globalThis.Intl === undefined) {
     class IntlFormatter {
@@ -8463,7 +8465,7 @@
     Object.defineProperty(globalThis, "isSecureContext", {
       configurable: true,
       enumerable: true,
-      get() { return __omoikane_is_secure_context(); },
+      get() { return nativeIsSecureContext(); },
     });
     Object.defineProperty(globalThis, "_listeners", {
       configurable: true,

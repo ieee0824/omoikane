@@ -11855,6 +11855,20 @@ mod tests {
             eval_str(&mut writer, "[isSecureContext, writeResult].join('|')"),
             "true|done"
         );
+        writer
+            .eval(
+                r#"globalThis.__omoikane_is_secure_context = () => false;
+                   globalThis.tamperedSecure = isSecureContext;
+                   globalThis.tamperedWrite = 'pending';
+                   navigator.clipboard.writeText('captured')
+                     .then(() => { tamperedWrite = 'done'; });"#,
+            )
+            .unwrap();
+        writer.run_jobs().unwrap();
+        assert_eq!(
+            eval_str(&mut writer, "[tamperedSecure, tamperedWrite].join('|')"),
+            "true|done"
+        );
 
         // A separate runtime sees the same host clipboard, and a dropped
         // writer does not clear the host-owned snapshot.
@@ -11871,7 +11885,7 @@ mod tests {
             )
             .unwrap();
         reader.run_jobs().unwrap();
-        assert_eq!(eval_str(&mut reader, "readResult"), "first\nsecond");
+        assert_eq!(eval_str(&mut reader, "readResult"), "captured");
 
         reader
             .eval(
