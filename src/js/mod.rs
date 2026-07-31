@@ -20753,6 +20753,14 @@ b</textarea></form>"#);
         assert_eq!(eval_str(&mut runtime, "(() => { try { new AudioDestinationNode(context); return 'constructible'; } catch (error) { return error.name; } })()"), "TypeError");
         assert_eq!(eval_str(&mut runtime, "(() => { try { new GainNode(context, 1); return 'allowed'; } catch (error) { return error.name; } })()"), "TypeError");
         assert_eq!(eval_str(&mut runtime, "(() => { try { new OscillatorNode(context, 1); return 'allowed'; } catch (error) { return error.name; } })()"), "TypeError");
+        assert_eq!(eval_str(&mut runtime, "[Object.getOwnPropertyDescriptor(gain, 'gain').writable, Object.getOwnPropertyDescriptor(oscillator, 'frequency').writable, Object.getOwnPropertyDescriptor(oscillator, 'detune').writable].join('|')"), "false|false|false");
+        runtime
+            .eval(
+                "globalThis.throwingContext = new AudioContext(); globalThis.throwingResult = 'pending'; throwingContext.onstatechange = () => { throw new Error('statechange'); }; throwingContext.resume().then(() => throwingResult = 'resolved', error => throwingResult = 'rejected:' + error.name);",
+            )
+            .unwrap();
+        runtime.run_until_idle().unwrap();
+        assert_eq!(eval_str(&mut runtime, "throwingResult"), "resolved");
     }
 
     #[test]
