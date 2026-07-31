@@ -334,16 +334,25 @@ fn parse_source_expression(token: &str) -> Option<SourceExpression> {
     if let Some(scheme) = lower.strip_suffix(':')
         && !scheme.is_empty()
         && !scheme.contains('/')
+        // A dotted token ending in ':' is a malformed host:port expression
+        // (for example, `example.com:`), not a useful scheme source.
+        && !scheme.contains('.')
     {
         return Some(SourceExpression::Scheme(scheme.to_string()));
     }
 
-    let (scheme, authority_and_path) = if let Some((scheme, rest)) = lower.split_once("://") {
-        (Some(scheme.to_string()), rest)
-    } else if let Some(rest) = lower.strip_prefix("//") {
-        (None, rest)
+    // Keep the original spelling for the path component: host and scheme
+    // matching are ASCII case-insensitive, but CSP host-source paths are
+    // case-sensitive.
+    let (scheme, authority_and_path) = if let Some(index) = lower.find("://") {
+        (
+            Some(token[..index].to_ascii_lowercase()),
+            &token[index + 3..],
+        )
+    } else if lower.starts_with("//") {
+        (None, &token[2..])
     } else {
-        (None, lower.as_str())
+        (None, token)
     };
     let (authority, path) = authority_and_path
         .split_once('/')
@@ -353,7 +362,8 @@ fn parse_source_expression(token: &str) -> Option<SourceExpression> {
     if authority.is_empty() {
         return None;
     }
-    let (host, port) = if let Some(bracketed) = authority.strip_prefix('[') {
+    let authority_lower = authority.to_ascii_lowercase();
+    let (host, port) = if let Some(bracketed) = authority_lower.strip_prefix('[') {
         let end = bracketed.find(']')?;
         let host = &bracketed[..end];
         let rest = &bracketed[end + 1..];
@@ -363,13 +373,13 @@ fn parse_source_expression(token: &str) -> Option<SourceExpression> {
             _ => return None,
         };
         (host.to_string(), port)
-    } else if let Some((host, port)) = authority.rsplit_once(':') {
+    } else if let Some((host, port)) = authority_lower.rsplit_once(':') {
         if host.is_empty() || port.is_empty() {
             return None;
         }
         (host.to_string(), Some(port.parse::<u16>().ok()?))
     } else {
-        (authority.to_string(), None)
+        (authority_lower, None)
     };
     Some(SourceExpression::Host {
         scheme,
@@ -530,6 +540,20 @@ mod tests {
                 port: Some(8443),
                 path: None,
             }
+        );
+    }
+
+    #[test]
+    fn host_source_paths_keep_case_sensitive_matching() {
+        let policy = policy(
+            "script-src https://example.test/CasePath",
+            "https://example.test/",
+        );
+        assert!(
+            policy.allows_reference(ResourceType::Script, "https://example.test/CasePath/app.js")
+        );
+        assert!(
+            !policy.allows_reference(ResourceType::Script, "https://example.test/casepath/app.js")
         );
     }
 
