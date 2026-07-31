@@ -470,7 +470,10 @@
     constructor(type, init = {}) {
       init = init ?? {};
       super(type, init);
-      this.data = init.data ?? null;
+      // Preserve an explicitly-cloned `undefined` payload.  The MessageEvent
+      // constructor defaults to null only when `data` is absent; posted-message
+      // delivery can legitimately carry the structured-clone value undefined.
+      this.data = Object.prototype.hasOwnProperty.call(init, "data") ? init.data : null;
       this.origin = init.origin ?? "";
       this.lastEventId = init.lastEventId ?? "";
       this.source = init.source ?? null;
@@ -8226,6 +8229,7 @@
       this._closed = false;
       this._pendingMessages = [];
       this._onmessage = null;
+      this._onmessageerror = null;
     }
     postMessage(message, options = undefined) {
       const data = globalThis.structuredClone(message, options);
@@ -8267,6 +8271,12 @@
         this.start();
       }
     }
+    get onmessageerror() { return this._onmessageerror; }
+    set onmessageerror(callback) {
+      if (this._onmessageerror) this.removeEventListener("messageerror", this._onmessageerror);
+      this._onmessageerror = typeof callback === "function" ? callback : null;
+      if (this._onmessageerror) this.addEventListener("messageerror", this._onmessageerror);
+    }
   }
 
   class MessageChannel {
@@ -8279,6 +8289,55 @@
   }
   globalThis.MessagePort = MessagePort;
   globalThis.MessageChannel = MessageChannel;
+
+  // BroadcastChannel endpoints are registered natively by origin/name.  The
+  // native side only queues a context-independent structured-clone wire; the
+  // target runtime decodes it when its posted-message task runs, preserving
+  // realm-local prototypes and asynchronous task ordering.
+  class BroadcastChannel extends EventTarget {
+    constructor(name) {
+      super();
+      if (arguments.length < 1) throw new TypeError("BroadcastChannel requires a name");
+      this._name = String(name);
+      this._closed = false;
+      this._onmessage = null;
+      this._onmessageerror = null;
+      // Native delivery retains only this weak endpoint reference when the
+      // realm supports WeakRef, so an unreferenced channel can be collected
+      // without waiting for close(). Older Boa builds without WeakRef retain
+      // the endpoint directly as a strong compatibility fallback.
+      const endpoint = typeof WeakRef === "function" ? new WeakRef(this) : this;
+      this._id = __omoikane_broadcast_channel_register(this._name, endpoint);
+    }
+    get name() { return this._name; }
+    postMessage(message, options = undefined) {
+      if (this._closed) throw new DOMException("The BroadcastChannel is closed.", "InvalidStateError");
+      // Encoding performs the structured-clone operation synchronously, so
+      // functions, symbols, DOM objects, and unsupported transfer lists throw
+      // DataCloneError before any recipient is queued.
+      const wire = __omoikane_encode_worker_message(message, options);
+      __omoikane_broadcast_channel_post(this._id, wire);
+    }
+    close() {
+      if (this._closed) return;
+      this._closed = true;
+      __omoikane_broadcast_channel_close(this._id);
+    }
+    get onmessage() { return this._onmessage; }
+    set onmessage(callback) {
+      if (this._onmessage) this.removeEventListener("message", this._onmessage);
+      this._onmessage = typeof callback === "function" ? callback : null;
+      if (this._onmessage) this.addEventListener("message", this._onmessage);
+    }
+    get onmessageerror() { return this._onmessageerror; }
+    set onmessageerror(callback) {
+      if (this._onmessageerror) this.removeEventListener("messageerror", this._onmessageerror);
+      this._onmessageerror = typeof callback === "function" ? callback : null;
+      if (this._onmessageerror) this.addEventListener("messageerror", this._onmessageerror);
+    }
+    get [Symbol.toStringTag]() { return "BroadcastChannel"; }
+  }
+  globalThis.BroadcastChannel = BroadcastChannel;
 
   // -------------------------------------------------------------------------
   // Dedicated Worker / WorkerGlobalScope core.

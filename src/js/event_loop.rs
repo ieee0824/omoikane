@@ -33,6 +33,16 @@ pub(crate) enum Task {
     Timer(TimerPayload),
     Navigation(NavigationRequest),
     PostedMessage { port: JsValue, data: JsValue },
+    /// A message delivered to a page-owned `BroadcastChannel` endpoint.
+    ///
+    /// The payload stays in the context-independent structured-clone wire
+    /// format until the target runtime's task turn, where it is rehydrated
+    /// with that realm's constructors and prototypes.
+    BroadcastChannelMessage {
+        channel_id: u64,
+        data: String,
+        origin: String,
+    },
     /// A message sent from a page-owned `Worker` to its dedicated worker.
     WorkerMessage { worker_id: u64, data: String },
     /// A message sent from a dedicated worker back to its owner page.
@@ -130,6 +140,25 @@ impl EventLoop {
     /// Both values stay live until their event-loop turn runs.
     pub(crate) fn enqueue_posted_message(&mut self, port: JsValue, data: JsValue) {
         self.enqueue(TaskSource::PostedMessage, Task::PostedMessage { port, data });
+    }
+
+    /// Queues a message on a target `BroadcastChannel`'s posted-message task
+    /// source.  The receiver channel is identified by a per-runtime id so a
+    /// `JsValue` never crosses Boa realms.
+    pub(crate) fn enqueue_broadcast_channel_message(
+        &mut self,
+        channel_id: u64,
+        data: String,
+        origin: String,
+    ) {
+        self.enqueue(
+            TaskSource::PostedMessage,
+            Task::BroadcastChannelMessage {
+                channel_id,
+                data,
+                origin,
+            },
+        );
     }
 
     pub(crate) fn enqueue_worker_message(&mut self, worker_id: u64, data: String) {

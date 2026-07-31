@@ -399,8 +399,8 @@
     {
       "id": "messaging.broadcast-channel",
       "area": "messaging",
-      "description": "BroadcastChannel is exposed",
-      "probe": "typeof BroadcastChannel === 'function'",
+      "description": "BroadcastChannel same-origin messaging is exposed",
+      "probe": "typeof BroadcastChannel === 'function' && (() => { const channel = new BroadcastChannel('web-api-surface'); const supported = channel.name === 'web-api-surface' && typeof channel.postMessage === 'function' && typeof channel.close === 'function' && 'onmessage' in channel && 'onmessageerror' in channel; channel.close(); return supported; })()",
       "baseline_supported": false
     },
     {
