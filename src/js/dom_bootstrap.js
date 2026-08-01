@@ -10266,7 +10266,11 @@
           Promise.resolve().then(() => {
             const handler = performance.onresourcetimingbufferfull;
             if (typeof handler === "function") {
-              try { handler.call(performance, new Event("resourcetimingbufferfull")); } catch (_) {}
+              const event = new Event("resourcetimingbufferfull");
+              event.target = performance;
+              event.currentTarget = performance;
+              try { handler.call(performance, event); } catch (_) {}
+              event.currentTarget = null;
             }
           });
         }

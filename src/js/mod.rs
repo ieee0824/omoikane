@@ -4714,7 +4714,8 @@ impl JsRuntime {
                         }
                         let _ = self.eval(&format!(
                             "__omoikane_record_resource_timing({}, 'script', 200, false)",
-                            serde_json::to_string(&src_url).unwrap_or_else(|_| "\"\"".to_string()),
+                            serde_json::to_string(&effective_url)
+                                .unwrap_or_else(|_| "\"\"".to_string()),
                         ));
                         if log_scripts {
                             eprintln!(
@@ -22528,6 +22529,31 @@ b</textarea></form>"#);
                     aborted[0].responseStatus === 0 && aborted[0].responseEnd >= aborted[0].startTime;
                 }})()"#,
             ))
+            .unwrap()
+            .as_boolean()
+            .unwrap());
+    }
+
+    #[test]
+    fn performance_resource_timing_buffer_full_event_targets_performance() {
+        let mut runtime = JsRuntime::with_document(default_document()).unwrap();
+        runtime
+            .eval(
+                r#"(() => {
+                  globalThis.bufferFullState = null;
+                  performance.clearResourceTimings();
+                  performance.setResourceTimingBufferSize(1);
+                  performance.onresourcetimingbufferfull = event => {
+                    bufferFullState = [event.target === performance, event.currentTarget === performance];
+                  };
+                  new Image().src = "data:image/png;base64,AA==";
+                  new Image().src = "data:image/png;base64,AA==";
+                })()"#,
+            )
+            .unwrap();
+        runtime.run_jobs().unwrap();
+        assert!(runtime
+            .eval("bufferFullState && bufferFullState[0] && bufferFullState[1]")
             .unwrap()
             .as_boolean()
             .unwrap());
