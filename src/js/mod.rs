@@ -11608,7 +11608,7 @@ mod tests {
         let mut runtime = JsRuntime::new().unwrap();
         runtime
             .eval(
-                r#"globalThis.webTransportValidation = { errors: [], first: false, second: false, drained: false, close: '', writeError: '', streamError: '', datagramError: '', datagramErrorSet: false, streamReason: '' };
+                r#"globalThis.webTransportValidation = { errors: [], first: false, second: false, drained: false, close: '', writeError: '', streamError: '', datagramError: '', datagramErrorName: '', datagramErrorSet: false, streamReason: '' };
                    for (const make of [
                      () => new WebTransport('http://insecure.example.test/'),
                      () => new WebTransport('https://valid.example.test/', { congestionControl: 'invalid' }),
@@ -11623,7 +11623,7 @@ mod tests {
                    const writer = left.datagrams.writable.getWriter();
                    const datagramPair = WebTransport.createPair();
                    const datagramErrorReader = datagramPair.right.datagrams.readable.getReader();
-                   datagramErrorReader.read().catch(error => { webTransportValidation.datagramError = error.message; webTransportValidation.datagramErrorSet = true; });
+                   datagramErrorReader.read().catch(error => { webTransportValidation.datagramError = error.message; webTransportValidation.datagramErrorName = error.name; webTransportValidation.datagramErrorSet = true; });
                    datagramPair.right.datagrams.writable.getWriter().abort('');
                    writer.write(new Uint8Array([1])).then(() => webTransportValidation.first = true);
                    writer.write(new Uint8Array([2])).then(() => webTransportValidation.second = true, error => webTransportValidation.writeError = error.name);
@@ -11658,6 +11658,7 @@ mod tests {
         assert_eq!(eval_str(&mut runtime, "webTransportValidation.close"), "9|closed");
         assert_eq!(eval_str(&mut runtime, "webTransportValidation.writeError"), "InvalidStateError");
         assert_eq!(eval_str(&mut runtime, "String(webTransportValidation.datagramErrorSet)"), "true");
+        assert_eq!(eval_str(&mut runtime, "webTransportValidation.datagramErrorName"), "WebTransportError");
         assert_eq!(eval_str(&mut runtime, "webTransportValidation.datagramError"), "");
         runtime.eval("reader.read().then(() => webTransportValidation.drained = true)").unwrap();
         runtime.run_until_idle().unwrap();

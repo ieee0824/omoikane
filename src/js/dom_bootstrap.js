@@ -11457,14 +11457,16 @@
       };
       const originalCancel = reader.cancel.bind(reader);
       reader.cancel = function(reason) {
-        if (typeof onCancel === "function") onCancel(reason);
         return originalCancel(reason);
       };
       return reader;
     };
     const originalCancel = stream.cancel.bind(stream);
     stream.cancel = function(reason) {
-      if (typeof onCancel === "function") onCancel(reason);
+      if (!stream.__webTransportClosed) {
+        if (typeof onCancel === "function") onCancel(reason);
+        stream.__webTransportClose();
+      }
       return originalCancel(reason);
     };
     return stream;
@@ -11854,11 +11856,17 @@
       this.__datagramReadable.__webTransportClose();
       this.__incomingBidirectional.__webTransportClose();
       this.__incomingUnidirectional.__webTransportClose();
+      this.__datagramReadable._queue.length = 0;
+      this.__incomingBidirectional._queue.length = 0;
+      this.__incomingUnidirectional._queue.length = 0;
       if (this.datagrams && this.datagrams.writable && !this.datagrams.writable._closed) {
         this.datagrams.writable._close();
       }
       for (const pending of this.__pendingDatagrams.splice(0)) pending.reject(webTransportInvalidState());
       for (const stream of this.__streams) stream.__closeInternal();
+      this.__pendingIncomingBidirectional.length = 0;
+      this.__pendingIncomingUnidirectional.length = 0;
+      this.__streams.clear();
       this.__closedResolve(closeInfo);
       queueMicrotask(() => {
         const event = new Event("close");
@@ -11877,11 +11885,17 @@
       this.__datagramReadable.__webTransportClose();
       this.__incomingBidirectional.__webTransportClose();
       this.__incomingUnidirectional.__webTransportClose();
+      this.__datagramReadable._queue.length = 0;
+      this.__incomingBidirectional._queue.length = 0;
+      this.__incomingUnidirectional._queue.length = 0;
       if (this.datagrams && this.datagrams.writable && !this.datagrams.writable._closed) {
         this.datagrams.writable._close();
       }
       for (const pending of this.__pendingDatagrams.splice(0)) pending.reject(webTransportInvalidState());
       for (const stream of this.__streams) stream.__closeInternal();
+      this.__pendingIncomingBidirectional.length = 0;
+      this.__pendingIncomingUnidirectional.length = 0;
+      this.__streams.clear();
       this.__closedResolve(this.__closeInfo);
       queueMicrotask(() => {
         const event = new Event("close");
