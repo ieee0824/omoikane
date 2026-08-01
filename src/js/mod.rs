@@ -16187,6 +16187,31 @@ mod tests {
     }
 
     #[test]
+    fn drag_event_exposes_data_transfer_and_html_drag_handlers() {
+        let mut runtime = runtime_from_html("<html><body><div id='source'>source</div><div id='target'></div></body></html>");
+        let value = runtime
+            .eval(
+                r#"(() => {
+                const source = document.getElementById('source');
+                const target = document.getElementById('target');
+                source.draggable = true;
+                const transfer = new DataTransfer();
+                transfer.setData('text/plain', 'payload');
+                let seen = null;
+                target.ondrop = event => { seen = [event instanceof DragEvent, event.dataTransfer === transfer, event.clientX, event.bubbles, event.cancelable]; };
+                const event = new DragEvent('drop', { bubbles: true, cancelable: true, dataTransfer: transfer, clientX: 12 });
+                target.dispatchEvent(event);
+                return [source.draggable, seen.join(':'), event.dataTransfer.getData('text/plain')].join('|');
+              })()"#,
+            )
+            .unwrap()
+            .as_string()
+            .unwrap()
+            .to_std_string_escaped();
+        assert_eq!(value, "true|true:true:12:true:true|payload");
+    }
+
+    #[test]
     fn response_and_request_round_trip_blob_bodies() {
         let mut runtime = JsRuntime::new().unwrap();
         runtime
