@@ -1,5 +1,7 @@
 //! Basic SVG rendering: rasterizes inline SVG elements to an RGBA image.
 
+use std::collections::BTreeMap;
+
 use crate::dom::{Node, NodeHandle, NodeType};
 use crate::paint::Canvas;
 use crate::paint::Image;
@@ -41,13 +43,18 @@ pub(crate) fn render_svg_to_image_with_current_color(
     let tx = -vb_x * sx;
     let ty = -vb_y * sy;
 
-    let inherited_fill = match attrs.get("fill").map(String::as_str) {
-        Some(value) if value.eq_ignore_ascii_case("currentcolor") => current_color,
-        Some(value) if !value.eq_ignore_ascii_case("none") => {
-            parse_color(value).unwrap_or(Color::rgb(0, 0, 0))
-        }
-        _ => Color::rgb(0, 0, 0),
+    let initial_paint = SvgPaint {
+        fill: Some(Color::rgb(0, 0, 0)),
+        stroke: None,
+        stroke_width: 1.0,
+        line_cap: LineCap::Butt,
+        line_join: LineJoin::Miter,
+        opacity: 1.0,
+        fill_opacity: 1.0,
+        stroke_opacity: 1.0,
+        current_color,
     };
+    let root_paint = resolve_paint(&initial_paint, &attrs);
     render_svg_children(
         svg_node,
         &mut canvas,
@@ -55,8 +62,7 @@ pub(crate) fn render_svg_to_image_with_current_color(
         sy,
         tx,
         ty,
-        inherited_fill,
-        current_color,
+        root_paint,
     );
 
     Image::new(w, h, canvas.into_pixels()).ok()
@@ -75,6 +81,138 @@ pub fn svg_display_size(svg_node: &NodeHandle) -> Option<(f32, f32)> {
     }
 }
 
+#[derive(Clone, Copy)]
+struct SvgPaint {
+    fill: Option<Color>,
+    stroke: Option<Color>,
+    stroke_width: f32,
+    line_cap: LineCap,
+    line_join: LineJoin,
+    opacity: f32,
+    fill_opacity: f32,
+    stroke_opacity: f32,
+    current_color: Color,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum LineCap {
+    Butt,
+    Round,
+    Square,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum LineJoin {
+    Miter,
+    Round,
+    Bevel,
+}
+
+fn resolve_paint(parent: &SvgPaint, attrs: &BTreeMap<String, String>) -> SvgPaint {
+    let current_color = property_value(attrs, "color")
+        .and_then(|value| parse_color(&value))
+        .unwrap_or(parent.current_color);
+    let fill = property_value(attrs, "fill")
+        .map(|value| parse_paint_value(&value, parent.fill, current_color))
+        .unwrap_or(parent.fill);
+    let stroke = property_value(attrs, "stroke")
+        .map(|value| parse_paint_value(&value, parent.stroke, current_color))
+        .unwrap_or(parent.stroke);
+    let stroke_width = property_value(attrs, "stroke-width")
+        .and_then(|value| parse_svg_nonnegative(Some(&value)))
+        .unwrap_or(parent.stroke_width);
+    let opacity = parent.opacity
+        * parse_opacity(property_value(attrs, "opacity").as_deref()).unwrap_or(1.0);
+    let fill_opacity = parent.fill_opacity
+        * parse_opacity(property_value(attrs, "fill-opacity").as_deref()).unwrap_or(1.0);
+    let stroke_opacity = parent.stroke_opacity
+        * parse_opacity(property_value(attrs, "stroke-opacity").as_deref()).unwrap_or(1.0);
+    let line_cap = property_value(attrs, "stroke-linecap")
+        .map(|value| parse_line_cap(&value))
+        .unwrap_or(parent.line_cap);
+    let line_join = property_value(attrs, "stroke-linejoin")
+        .map(|value| parse_line_join(&value))
+        .unwrap_or(parent.line_join);
+    SvgPaint {
+        fill,
+        stroke,
+        stroke_width,
+        line_cap,
+        line_join,
+        opacity,
+        fill_opacity,
+        stroke_opacity,
+        current_color,
+    }
+}
+
+fn parse_paint_value(value: &str, inherited: Option<Color>, current_color: Color) -> Option<Color> {
+    let value = value.trim();
+    if value.eq_ignore_ascii_case("none") {
+        None
+    } else if value.eq_ignore_ascii_case("currentcolor") {
+        Some(current_color)
+    } else {
+        parse_color(value).or(inherited)
+    }
+}
+
+fn property_value(attrs: &BTreeMap<String, String>, name: &str) -> Option<String> {
+    if let Some(style) = attrs
+        .iter()
+        .find(|(key, _)| key.eq_ignore_ascii_case("style"))
+        .map(|(_, value)| value)
+    {
+        for declaration in style.split(';').rev() {
+            let Some((key, value)) = declaration.split_once(':') else { continue };
+            if key.trim().eq_ignore_ascii_case(name) {
+                return Some(value.trim().to_string());
+            }
+        }
+    }
+    attrs
+        .iter()
+        .find(|(key, _)| key.eq_ignore_ascii_case(name))
+        .map(|(_, value)| value.trim().to_string())
+}
+
+fn parse_opacity(value: Option<&str>) -> Option<f32> {
+    value?.trim().parse::<f32>().ok().map(|value| value.clamp(0.0, 1.0))
+}
+
+fn parse_line_cap(value: &str) -> LineCap {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "round" => LineCap::Round,
+        "square" => LineCap::Square,
+        _ => LineCap::Butt,
+    }
+}
+
+fn parse_line_join(value: &str) -> LineJoin {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "round" => LineJoin::Round,
+        "bevel" => LineJoin::Bevel,
+        _ => LineJoin::Miter,
+    }
+}
+
+fn with_alpha(color: Color, opacity: f32) -> Color {
+    Color::rgba(color.r, color.g, color.b, (color.a as f32 * opacity.clamp(0.0, 1.0)).round() as u8)
+}
+
+fn parse_svg_points(value: Option<&String>) -> Vec<(f32, f32)> {
+    let Some(value) = value else { return Vec::new() };
+    let values = value
+        .replace(',', " ")
+        .split_whitespace()
+        .filter_map(|part| part.parse::<f32>().ok())
+        .collect::<Vec<_>>();
+    values
+        .chunks_exact(2)
+        .map(|pair| (pair[0], pair[1]))
+        .collect()
+}
+
 fn render_svg_children(
     node: &NodeHandle,
     canvas: &mut Canvas,
@@ -82,8 +220,7 @@ fn render_svg_children(
     sy: f32,
     tx: f32,
     ty: f32,
-    inherited_fill: Color,
-    current_color: Color,
+    inherited: SvgPaint,
 ) {
     for child in node.child_nodes() {
         if child.node_type() != NodeType::Element {
@@ -94,61 +231,102 @@ fn render_svg_children(
             None => continue,
         };
         let attrs = child.attributes().unwrap_or_default();
-        let fill_attr = attrs.get("fill").map(|s| s.as_str());
-        // fill="none" means do not fill (transparent).
-        let fill = match fill_attr {
-            Some(v) if v.eq_ignore_ascii_case("none") => None,
-            Some(v) if v.eq_ignore_ascii_case("currentcolor") => Some(current_color),
-            Some(v) => Some(parse_color(v).unwrap_or(inherited_fill)),
-            None => Some(inherited_fill),
-        };
+        let paint = resolve_paint(&inherited, &attrs);
+        let fill = paint
+            .fill
+            .map(|color| with_alpha(color, paint.opacity * paint.fill_opacity));
+        let stroke = paint
+            .stroke
+            .map(|color| with_alpha(color, paint.opacity * paint.stroke_opacity));
+        let tag = tag.to_ascii_lowercase();
 
         match tag.as_str() {
             "g" => {
-                let g_fill = fill.unwrap_or(inherited_fill);
-                render_svg_children(&child, canvas, sx, sy, tx, ty, g_fill, current_color);
+                render_svg_children(&child, canvas, sx, sy, tx, ty, paint);
             }
             "rect" => {
-                let Some(fill_color) = fill else { continue };
                 let rx = parse_svg_coord(attrs.get("x")).unwrap_or(0.0) * sx + tx;
                 let ry = parse_svg_coord(attrs.get("y")).unwrap_or(0.0) * sy + ty;
                 let rw = parse_svg_size(attrs.get("width")).unwrap_or(0.0) * sx;
                 let rh = parse_svg_size(attrs.get("height")).unwrap_or(0.0) * sy;
                 if rw > 0.0 && rh > 0.0 {
-                    canvas.fill_rect(
-                        crate::layout::Rect {
-                            x: rx,
-                            y: ry,
-                            width: rw,
-                            height: rh,
-                        },
-                        fill_color,
-                    );
+                    if let Some(fill_color) = fill {
+                        canvas.fill_rect(
+                            crate::layout::Rect { x: rx, y: ry, width: rw, height: rh },
+                            fill_color,
+                        );
+                    }
+                    let points = vec![(rx, ry), (rx + rw, ry), (rx + rw, ry + rh), (rx, ry + rh)];
+                    stroke_polyline(canvas, &points, true, stroke, paint.stroke_width * sx.min(sy), paint.line_cap, paint.line_join);
                 }
             }
             "circle" => {
-                let Some(fill_color) = fill else { continue };
                 let cx = parse_svg_coord(attrs.get("cx")).unwrap_or(0.0) * sx + tx;
                 let cy = parse_svg_coord(attrs.get("cy")).unwrap_or(0.0) * sy + ty;
                 let r = parse_svg_size(attrs.get("r")).unwrap_or(0.0) * sx.min(sy);
                 if r > 0.0 {
-                    fill_circle(canvas, cx, cy, r, fill_color);
+                    if let Some(fill_color) = fill {
+                        fill_circle(canvas, cx, cy, r, fill_color);
+                    }
+                    if let Some(stroke_color) = stroke {
+                        stroke_ellipse(canvas, cx, cy, r, r, paint.stroke_width * sx.min(sy), stroke_color);
+                    }
                 }
             }
+            "ellipse" => {
+                let cx = parse_svg_coord(attrs.get("cx")).unwrap_or(0.0) * sx + tx;
+                let cy = parse_svg_coord(attrs.get("cy")).unwrap_or(0.0) * sy + ty;
+                let rx = parse_svg_size(attrs.get("rx")).unwrap_or(0.0) * sx;
+                let ry = parse_svg_size(attrs.get("ry")).unwrap_or(0.0) * sy;
+                if rx > 0.0 && ry > 0.0 {
+                    if let Some(fill_color) = fill {
+                        fill_ellipse(canvas, cx, cy, rx, ry, fill_color);
+                    }
+                    if let Some(stroke_color) = stroke {
+                        stroke_ellipse(canvas, cx, cy, rx, ry, paint.stroke_width * sx.min(sy), stroke_color);
+                    }
+                }
+            }
+            "line" => {
+                let x1 = parse_svg_coord(attrs.get("x1")).unwrap_or(0.0) * sx + tx;
+                let y1 = parse_svg_coord(attrs.get("y1")).unwrap_or(0.0) * sy + ty;
+                let x2 = parse_svg_coord(attrs.get("x2")).unwrap_or(0.0) * sx + tx;
+                let y2 = parse_svg_coord(attrs.get("y2")).unwrap_or(0.0) * sy + ty;
+                stroke_polyline(
+                    canvas,
+                    &[(x1, y1), (x2, y2)],
+                    false,
+                    stroke,
+                    paint.stroke_width * sx.min(sy),
+                    paint.line_cap,
+                    paint.line_join,
+                );
+            }
+            "polyline" | "polygon" => {
+                let points = parse_svg_points(attrs.get("points"))
+                    .into_iter()
+                    .map(|(x, y)| (x * sx + tx, y * sy + ty))
+                    .collect::<Vec<_>>();
+                let closed = tag == "polygon";
+                if closed && points.len() >= 3 {
+                    if let Some(fill_color) = fill {
+                        fill_compound_path(canvas, std::slice::from_ref(&points), fill_color, FillRule::NonZero);
+                    }
+                }
+                stroke_polyline(canvas, &points, closed, stroke, paint.stroke_width * sx.min(sy), paint.line_cap, paint.line_join);
+            }
             "path" => {
-                let Some(fill_color) = fill else { continue };
                 if let Some(d) = attrs.get("d") {
-                    let fill_rule = match attrs.get("fill-rule").map(String::as_str) {
+                    let fill_rule = match property_value(&attrs, "fill-rule").as_deref() {
                         Some(value) if value.eq_ignore_ascii_case("evenodd") => FillRule::EvenOdd,
                         _ => FillRule::NonZero,
                     };
-                    render_path(canvas, d, sx, sy, tx, ty, fill_color, fill_rule);
+                    render_path(canvas, d, sx, sy, tx, ty, fill, fill_rule, stroke, paint.stroke_width * sx.min(sy), paint.line_cap, paint.line_join);
                 }
             }
             _ => {
-                let recurse_fill = fill.unwrap_or(inherited_fill);
                 // Recurse into unknown elements (may contain renderable children)
-                render_svg_children(&child, canvas, sx, sy, tx, ty, recurse_fill, current_color);
+                render_svg_children(&child, canvas, sx, sy, tx, ty, paint);
             }
         }
     }
@@ -165,10 +343,189 @@ fn fill_circle(canvas: &mut Canvas, cx: f32, cy: f32, r: f32, color: Color) {
             let dx = px as f32 + 0.5 - cx;
             let dy = py as f32 + 0.5 - cy;
             if dx * dx + dy * dy <= r2 {
-                canvas.set_pixel(px, py, color);
+                canvas.blend_pixel(px, py, color);
             }
         }
     }
+}
+
+fn fill_ellipse(canvas: &mut Canvas, cx: f32, cy: f32, rx: f32, ry: f32, color: Color) {
+    let x0 = ((cx - rx).floor() as i32).max(0) as u32;
+    let y0 = ((cy - ry).floor() as i32).max(0) as u32;
+    let x1 = ((cx + rx).ceil() as u32).min(canvas.width());
+    let y1 = ((cy + ry).ceil() as u32).min(canvas.height());
+    for py in y0..y1 {
+        for px in x0..x1 {
+            let dx = (px as f32 + 0.5 - cx) / rx;
+            let dy = (py as f32 + 0.5 - cy) / ry;
+            if dx * dx + dy * dy <= 1.0 {
+                canvas.blend_pixel(px, py, color);
+            }
+        }
+    }
+}
+
+fn stroke_ellipse(canvas: &mut Canvas, cx: f32, cy: f32, rx: f32, ry: f32, width: f32, color: Color) {
+    if width <= 0.0 || color.a == 0 {
+        return;
+    }
+    let outer_rx = rx + width / 2.0;
+    let outer_ry = ry + width / 2.0;
+    let inner_rx = (rx - width / 2.0).max(0.0);
+    let inner_ry = (ry - width / 2.0).max(0.0);
+    let x0 = ((cx - outer_rx).floor() as i32).max(0) as u32;
+    let y0 = ((cy - outer_ry).floor() as i32).max(0) as u32;
+    let x1 = ((cx + outer_rx).ceil() as u32).min(canvas.width());
+    let y1 = ((cy + outer_ry).ceil() as u32).min(canvas.height());
+    for py in y0..y1 {
+        for px in x0..x1 {
+            let dx = px as f32 + 0.5 - cx;
+            let dy = py as f32 + 0.5 - cy;
+            let outer = (dx / outer_rx).powi(2) + (dy / outer_ry).powi(2) <= 1.0;
+            let inner = inner_rx > 0.0 && inner_ry > 0.0
+                && (dx / inner_rx).powi(2) + (dy / inner_ry).powi(2) < 1.0;
+            if outer && !inner {
+                canvas.blend_pixel(px, py, color);
+            }
+        }
+    }
+}
+
+fn stroke_polyline(
+    canvas: &mut Canvas,
+    points: &[(f32, f32)],
+    closed: bool,
+    color: Option<Color>,
+    width: f32,
+    line_cap: LineCap,
+    line_join: LineJoin,
+) {
+    let Some(color) = color else { return };
+    if points.len() < 2 || width <= 0.0 || color.a == 0 {
+        return;
+    }
+    let half = width / 2.0;
+    let segment_count = if closed { points.len() } else { points.len() - 1 };
+    for index in 0..segment_count {
+        let start = points[index];
+        let end = points[(index + 1) % points.len()];
+        stroke_segment(canvas, start, end, half, color, if closed || index > 0 { LineCap::Butt } else { line_cap }, if closed || index + 1 < segment_count { LineCap::Butt } else { line_cap });
+    }
+    let join_count = if closed { points.len() } else { points.len().saturating_sub(2) };
+    for index in 0..join_count {
+        let (previous, point, next) = if closed {
+            (
+                points[(index + points.len() - 1) % points.len()],
+                points[index],
+                points[(index + 1) % points.len()],
+            )
+        } else {
+            (points[index], points[index + 1], points[index + 2])
+        };
+        match line_join {
+            LineJoin::Round => fill_circle(canvas, point.0, point.1, half, color),
+            LineJoin::Bevel => stroke_bevel_join(canvas, previous, point, next, half, color),
+            LineJoin::Miter => stroke_miter_join(canvas, previous, point, next, half, color),
+        }
+    }
+}
+
+fn stroke_segment(
+    canvas: &mut Canvas,
+    start: (f32, f32),
+    end: (f32, f32),
+    half: f32,
+    color: Color,
+    start_cap: LineCap,
+    end_cap: LineCap,
+) {
+    let dx = end.0 - start.0;
+    let dy = end.1 - start.1;
+    let length = (dx * dx + dy * dy).sqrt();
+    if length == 0.0 {
+        fill_circle(canvas, start.0, start.1, half, color);
+        return;
+    }
+    let ux = dx / length;
+    let uy = dy / length;
+    let mut from = start;
+    let mut to = end;
+    if start_cap == LineCap::Square {
+        from = (from.0 - ux * half, from.1 - uy * half);
+    }
+    if end_cap == LineCap::Square {
+        to = (to.0 + ux * half, to.1 + uy * half);
+    }
+    let nx = -uy * half;
+    let ny = ux * half;
+    let polygon = vec![
+        (from.0 + nx, from.1 + ny),
+        (to.0 + nx, to.1 + ny),
+        (to.0 - nx, to.1 - ny),
+        (from.0 - nx, from.1 - ny),
+    ];
+    fill_compound_path(canvas, std::slice::from_ref(&polygon), color, FillRule::NonZero);
+    if start_cap == LineCap::Round {
+        fill_circle(canvas, start.0, start.1, half, color);
+    }
+    if end_cap == LineCap::Round {
+        fill_circle(canvas, end.0, end.1, half, color);
+    }
+}
+
+fn stroke_bevel_join(
+    canvas: &mut Canvas,
+    previous: (f32, f32),
+    point: (f32, f32),
+    next: (f32, f32),
+    half: f32,
+    color: Color,
+) {
+    let Some((d1x, d1y)) = unit_vector(previous, point) else { return };
+    let Some((d2x, d2y)) = unit_vector(point, next) else { return };
+    let cross = d1x * d2y - d1y * d2x;
+    if cross.abs() < 1e-5 {
+        return;
+    }
+    let side = if cross > 0.0 { -1.0 } else { 1.0 };
+    let p1 = (point.0 - d1y * half * side, point.1 + d1x * half * side);
+    let p2 = (point.0 - d2y * half * side, point.1 + d2x * half * side);
+    fill_compound_path(canvas, &[vec![point, p1, p2]], color, FillRule::NonZero);
+}
+
+fn stroke_miter_join(
+    canvas: &mut Canvas,
+    previous: (f32, f32),
+    point: (f32, f32),
+    next: (f32, f32),
+    half: f32,
+    color: Color,
+) {
+    let Some((d1x, d1y)) = unit_vector(previous, point) else { return };
+    let Some((d2x, d2y)) = unit_vector(point, next) else { return };
+    let cross = d1x * d2y - d1y * d2x;
+    if cross.abs() < 1e-5 {
+        return;
+    }
+    let side = if cross > 0.0 { -1.0 } else { 1.0 };
+    let p1 = (point.0 - d1y * half * side, point.1 + d1x * half * side);
+    let p2 = (point.0 - d2y * half * side, point.1 + d2x * half * side);
+    let delta = (p2.0 - p1.0, p2.1 - p1.1);
+    let distance = (delta.0 * d2y - delta.1 * d2x) / cross;
+    let miter = (p1.0 + d1x * distance, p1.1 + d1y * distance);
+    let miter_length = ((miter.0 - point.0).powi(2) + (miter.1 - point.1).powi(2)).sqrt();
+    if miter_length <= half * 4.0 {
+        fill_compound_path(canvas, &[vec![p1, miter, p2]], color, FillRule::NonZero);
+    } else {
+        stroke_bevel_join(canvas, previous, point, next, half, color);
+    }
+}
+
+fn unit_vector(start: (f32, f32), end: (f32, f32)) -> Option<(f32, f32)> {
+    let dx = end.0 - start.0;
+    let dy = end.1 - start.1;
+    let length = (dx * dx + dy * dy).sqrt();
+    (length > 0.0).then_some((dx / length, dy / length))
 }
 
 /// Renders an SVG path `d` attribute using common line and curve commands.
@@ -179,29 +536,39 @@ fn render_path(
     sy: f32,
     tx: f32,
     ty: f32,
-    fill: Color,
+    fill: Option<Color>,
     fill_rule: FillRule,
+    stroke: Option<Color>,
+    stroke_width: f32,
+    line_cap: LineCap,
+    line_join: LineJoin,
 ) {
     let commands = parse_path_data(d);
     if commands.is_empty() {
         return;
     }
 
-    // Collect polygon points from path commands
+    // Collect flattened geometry from path commands. Keeping the closed bit
+    // lets fills implicitly close an open path while strokes preserve open
+    // endpoints and their line caps.
     let mut points = Vec::new();
-    let mut subpaths = Vec::new();
+    let mut subpaths: Vec<(Vec<(f32, f32)>, bool)> = Vec::new();
+    let mut closed = false;
     let mut cx = 0.0f32;
     let mut cy = 0.0f32;
+    let mut subpath_start = (0.0f32, 0.0f32);
 
     for cmd in &commands {
         match cmd {
             PathCommand::MoveTo(x, y) => {
                 // Flush previous subpath
-                if points.len() >= 3 {
-                    subpaths.push(std::mem::take(&mut points));
+                if points.len() >= 2 {
+                    subpaths.push((std::mem::take(&mut points), closed));
                 }
+                closed = false;
                 cx = *x;
                 cy = *y;
+                subpath_start = (cx, cy);
                 points.push((cx * sx + tx, cy * sy + ty));
             }
             PathCommand::LineTo(x, y) => {
@@ -275,19 +642,33 @@ fn render_path(
                 cy = *y;
             }
             PathCommand::Close => {
-                if points.len() >= 3 {
-                    subpaths.push(std::mem::take(&mut points));
+                if points.len() >= 2 {
+                    subpaths.push((std::mem::take(&mut points), true));
                 }
+                cx = subpath_start.0;
+                cy = subpath_start.1;
+                points.push((cx * sx + tx, cy * sy + ty));
+                closed = false;
             }
         }
     }
 
     // Flush remaining subpath
-    if points.len() >= 3 {
-        subpaths.push(points);
+    if points.len() >= 2 {
+        subpaths.push((points, closed));
     }
-    if !subpaths.is_empty() {
-        fill_compound_path(canvas, &subpaths, fill, fill_rule);
+    if let Some(fill) = fill {
+        let fill_paths = subpaths
+            .iter()
+            .filter(|(points, _)| points.len() >= 3)
+            .map(|(points, _)| points.clone())
+            .collect::<Vec<_>>();
+        if !fill_paths.is_empty() {
+            fill_compound_path(canvas, &fill_paths, fill, fill_rule);
+        }
+    }
+    for (points, closed) in subpaths {
+        stroke_polyline(canvas, &points, closed, stroke, stroke_width, line_cap, line_join);
     }
 }
 
@@ -756,7 +1137,7 @@ fn fill_compound_path(
                 let x_start = (pair[0].0.floor() as i32).max(0) as u32;
                 let x_end = (pair[1].0.ceil() as u32).min(canvas.width());
                 for x in x_start..x_end {
-                    canvas.set_pixel(x, y, color);
+                    canvas.blend_pixel(x, y, color);
                 }
             }
         }
@@ -785,6 +1166,15 @@ fn parse_svg_size(value: Option<&String>) -> Option<f32> {
         .parse::<f32>()
         .ok()
         .filter(|v| *v > 0.0)
+}
+
+fn parse_svg_nonnegative(value: Option<&String>) -> Option<f32> {
+    let s = value?.trim();
+    s.strip_suffix("px")
+        .unwrap_or(s)
+        .parse::<f32>()
+        .ok()
+        .filter(|v| *v >= 0.0)
 }
 
 /// Parses an SVG coordinate (may be negative, for x, y, cx, cy, etc.).
@@ -863,6 +1253,80 @@ mod tests {
         assert_eq!(image.pixels()[idx], 0);
         assert_eq!(image.pixels()[idx + 1], 0);
         assert_eq!(image.pixels()[idx + 2], 255);
+    }
+
+    #[test]
+    fn renders_svg_ellipse_line_polyline_and_polygon_with_strokes() {
+        let html = r#"<svg width="40" height="24">
+          <ellipse cx="8" cy="8" rx="6" ry="4" fill="red" stroke="black" stroke-width="2"/>
+          <line x1="16" y1="2" x2="16" y2="14" stroke="blue" stroke-width="2" stroke-linecap="round"/>
+          <polyline points="20,2 25,8 20,14" fill="none" stroke="green" stroke-width="2"/>
+          <polygon points="28,2 38,2 34,14 28,14" fill="yellow" stroke="black" stroke-width="1"/>
+        </svg>"#;
+        let doc = TreeBuilder::parse(html).document();
+        let image = render_svg_to_image(&find_svg(&doc).unwrap()).unwrap();
+        let pixel = |x: u32, y: u32| {
+            let index = (y * image.width() + x) as usize * 4;
+            Color::rgba(
+                image.pixels()[index],
+                image.pixels()[index + 1],
+                image.pixels()[index + 2],
+                image.pixels()[index + 3],
+            )
+        };
+        assert_eq!(pixel(8, 8), Color::rgb(255, 0, 0));
+        assert_eq!(pixel(16, 8).b, 255);
+        assert!(pixel(25, 8).g > 0);
+        assert_eq!(pixel(32, 8), Color::rgb(255, 255, 0));
+        assert!(pixel(8, 3).a > 0, "ellipse stroke should be painted");
+    }
+
+    #[test]
+    fn svg_group_inherits_paint_and_applies_opacity() {
+        let html = r#"<svg width="20" height="10" color="white">
+          <g fill="currentColor" opacity="0.5"><rect x="0" y="0" width="10" height="10"/></g>
+          <g fill="none" stroke="blue" stroke-width="2" stroke-linejoin="round">
+            <path d="M12 2L18 2L18 8"/>
+          </g>
+        </svg>"#;
+        let doc = TreeBuilder::parse(html).document();
+        let image = render_svg_to_image(&find_svg(&doc).unwrap()).unwrap();
+        let pixel = |x: u32, y: u32| {
+            let index = (y * image.width() + x) as usize * 4;
+            Color::rgba(
+                image.pixels()[index],
+                image.pixels()[index + 1],
+                image.pixels()[index + 2],
+                image.pixels()[index + 3],
+            )
+        };
+        let filled = pixel(5, 5);
+        assert_eq!((filled.r, filled.g, filled.b), (255, 255, 255));
+        assert!(filled.a >= 127 && filled.a <= 128, "opacity should halve alpha: {filled:?}");
+        assert!(pixel(15, 2).b > 0, "inherited stroke should be painted");
+    }
+
+    #[test]
+    fn svg_style_uses_last_declaration_and_close_resets_path_stroke_point() {
+        let html = r#"<svg width="20" height="10">
+          <rect width="8" height="8" style="fill:red; fill:blue"/>
+          <path fill="none" stroke="black" stroke-width="1" d="M2 2H6V6ZH10"/>
+        </svg>"#;
+        let doc = TreeBuilder::parse(html).document();
+        let svg = find_svg(&doc).unwrap();
+        let image = render_svg_to_image(&svg).unwrap();
+        let pixel = |x: u32, y: u32| {
+            let index = (y * image.width() + x) as usize * 4;
+            Color::rgba(
+                image.pixels()[index],
+                image.pixels()[index + 1],
+                image.pixels()[index + 2],
+                image.pixels()[index + 3],
+            )
+        };
+        assert_eq!(pixel(4, 0), Color::rgb(0, 0, 255));
+        assert!(pixel(9, 1).a > 0, "commands after close should start at the subpath origin");
+        assert_eq!(pixel(9, 6).a, 0, "the closed path must not continue from its old endpoint");
     }
 
     #[test]
