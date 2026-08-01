@@ -7820,7 +7820,26 @@
       countBefore(owner);
       if (found) {
         const length = String(element.textContent || "").length;
-        return allRecords.slice(offset, offset + length);
+        const sliced = allRecords.slice(offset, offset + length);
+        const transform = element.getAttribute("transform");
+        if (!transform) return sliced;
+        const inverse = svgTransformMatrix(transform).inverse();
+        return sliced.map(record => {
+          const start = inverse.transformPoint(record.start);
+          const end = inverse.transformPoint(record.end);
+          const corners = [
+            [record.box.x, record.box.y],
+            [record.box.x + record.box.width, record.box.y],
+            [record.box.x, record.box.y + record.box.height],
+            [record.box.x + record.box.width, record.box.y + record.box.height],
+          ].map(([x, y]) => inverse.transformPoint({ x, y }));
+          return {
+            ...record,
+            start: new SVGPoint(start.x, start.y),
+            end: new SVGPoint(end.x, end.y),
+            box: svgRectBounds(corners.map(point => [point.x, point.y])),
+          };
+        });
       }
     }
     const cursor = {

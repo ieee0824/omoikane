@@ -29287,6 +29287,8 @@ b</textarea></form>"#);
                 const end = text.getEndPositionOfChar(2);
                 const extent = text.getExtentOfChar(2);
                 const box = text.getBBox();
+                const spanStart = span.getStartPositionOfChar(0);
+                const spanBox = span.getBBox();
                 const round = value => Math.round(value * 100) / 100;
                 return [
                     text.getNumberOfChars(),
@@ -29302,12 +29304,14 @@ b</textarea></form>"#);
                     Object.getOwnPropertyDescriptor(SVGRectElement.prototype, 'width').set === undefined,
                     span instanceof SVGTextContentElement,
                     span instanceof SVGTSpanElement,
+                    round(spanStart.x), round(spanStart.y),
+                    round(spanBox.x), round(spanBox.y),
                 ].join('|');
             })()"#,
         );
         assert_eq!(
             actual,
-            "3|18|12|29|23|35|23|29|15|6|10|10|12|25|13|true|true|true|true|true|true|true"
+            "3|18|12|29|23|35|23|29|15|6|10|10|12|25|13|true|true|true|true|true|true|true|24|20|24|12"
         );
     }
 
