@@ -22432,7 +22432,8 @@ b</textarea></form>"#);
                       entry.name !== "https://example.test/index.html" ||
                       entry.entryType !== "navigation" || entry.startTime !== 0 ||
                       entry.duration < 0 || entry.type !== "navigate" ||
-                      entry.redirectCount !== 0 || entry.toJSON().entryType !== "navigation") return false;
+                      entry.redirectCount !== 0 || entry.toJSON().entryType !== "navigation" ||
+                      entry.toJSON().type !== "navigate") return false;
                   performance.clearResourceTimings();
                   performance.setResourceTimingBufferSize(2);
                   const first = new Image();
