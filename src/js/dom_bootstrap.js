@@ -10440,62 +10440,112 @@
   class ReadableStreamDefaultController {
     constructor(stream) { this._stream = stream; }
     enqueue(chunk) {
-      if (this._stream._closed) throw new TypeError("ReadableStream is closed");
-      const waiter = this._stream._waiters.shift();
+      const stream = this._stream;
+      if (stream._closed || stream._errorSet) throw new TypeError("ReadableStream is closed");
+      const waiter = stream._waiters.shift();
       if (waiter) waiter.resolve({ value: chunk, done: false });
-      else this._stream._queue.push(chunk);
+      else stream._queue.push(chunk);
     }
     close() {
-      if (this._stream._closed) return;
-      this._stream._closed = true;
-      for (const waiter of this._stream._waiters.splice(0)) {
+      const stream = this._stream;
+      if (stream._closed || stream._errorSet) return;
+      stream._closed = true;
+      if (stream._closedResolve) {
+        stream._closedResolve();
+        stream._closedResolve = null;
+        stream._closedReject = null;
+      }
+      for (const waiter of stream._waiters.splice(0)) {
         waiter.resolve({ value: undefined, done: true });
       }
     }
     error(reason) {
-      this._stream._error = reason;
-      this._stream._closed = true;
-      for (const waiter of this._stream._waiters.splice(0)) waiter.reject(reason);
+      const stream = this._stream;
+      if (stream._closed || stream._errorSet) return;
+      stream._error = reason;
+      stream._errorSet = true;
+      stream._closed = true;
+      stream._queue.length = 0;
+      if (stream._closedReject) {
+        stream._closedReject(reason);
+        stream._closedResolve = null;
+        stream._closedReject = null;
+      }
+      for (const waiter of stream._waiters.splice(0)) waiter.reject(reason);
     }
-    get desiredSize() { return this._stream._closed ? 0 : 1; }
+    get desiredSize() { return this._stream._closed || this._stream._errorSet ? 0 : 1; }
   }
   class ReadableStreamDefaultReader {
     constructor(stream) {
       if (!(stream instanceof ReadableStream) || stream.locked) throw new TypeError("Invalid or locked stream");
       this._stream = stream;
       stream._reader = this;
-      this.closed = stream._closed ? Promise.resolve() : new Promise(resolve => { stream._closedResolve = resolve; });
+      this.closed = stream._closed
+        ? (stream._errorSet ? Promise.reject(stream._error) : Promise.resolve())
+        : new Promise((resolve, reject) => {
+            stream._closedResolve = resolve;
+            stream._closedReject = reject;
+          });
     }
     read() {
       const stream = this._stream;
       if (!stream) return Promise.reject(new TypeError("Reader has no stream"));
+      stream._markDisturbed();
       if (stream._queue.length) return Promise.resolve({ value: stream._queue.shift(), done: false });
-      if (stream._error !== undefined) return Promise.reject(stream._error);
+      if (stream._errorSet) return Promise.reject(stream._error);
       if (stream._closed) return Promise.resolve({ value: undefined, done: true });
       return new Promise((resolve, reject) => stream._waiters.push({ resolve, reject }));
     }
-    cancel(reason) { return this._stream ? this._stream.cancel(reason) : Promise.reject(new TypeError("Reader has no stream")); }
+    cancel(reason) { return this._stream ? this._stream._cancel(reason) : Promise.reject(new TypeError("Reader has no stream")); }
     releaseLock() { if (this._stream) this._stream._reader = null; this._stream = null; }
   }
   class ReadableStream {
     constructor(underlyingSource = {}) {
       this._queue = []; this._waiters = []; this._reader = null;
-      this._closed = false; this._error = undefined; this._source = underlyingSource || {};
+      this._closed = false; this._error = undefined; this._errorSet = false;
+      this._source = underlyingSource || {};
+      this._closedResolve = null; this._closedReject = null;
+      this._disturbed = false; this._onDisturb = null; this._cancelled = false;
       this._controller = new ReadableStreamDefaultController(this);
       if (typeof this._source.start === "function") {
-        Promise.resolve(this._source.start(this._controller)).catch(e => this._controller.error(e));
+        try {
+          Promise.resolve(this._source.start(this._controller)).catch(e => this._controller.error(e));
+        } catch (error) {
+          this._controller.error(error);
+        }
       }
     }
     get locked() { return this._reader !== null; }
+    get [Symbol.toStringTag]() { return "ReadableStream"; }
+    _markDisturbed() {
+      if (this._disturbed) return;
+      this._disturbed = true;
+      if (typeof this._onDisturb === "function") this._onDisturb();
+    }
     getReader() { return new ReadableStreamDefaultReader(this); }
     cancel(reason) {
-      this._queue.length = 0; this._controller.close();
-      return Promise.resolve(typeof this._source.cancel === "function" ? this._source.cancel(reason) : undefined);
+      if (this.locked) return Promise.reject(new TypeError("ReadableStream is locked"));
+      return this._cancel(reason);
+    }
+    _cancel(reason) {
+      if (this._cancelled) return Promise.resolve();
+      this._markDisturbed();
+      this._cancelled = true;
+      this._queue.length = 0;
+      if (!this._closed && !this._errorSet) this._controller.close();
+      try {
+        return Promise.resolve(typeof this._source.cancel === "function" ? this._source.cancel(reason) : undefined);
+      } catch (error) {
+        return Promise.reject(error);
+      }
     }
     pipeTo(destination) {
       const reader = this.getReader(); const writer = destination.getWriter();
-      const pump = () => reader.read().then(result => result.done ? writer.close() : Promise.resolve(writer.write(result.value)).then(pump));
-      return pump().finally(() => reader.releaseLock());
+      const pump = () => reader.read().then(result => result.done
+        ? writer.close()
+        : Promise.resolve(writer.write(result.value)).then(pump));
+      return pump().catch(error => Promise.resolve(writer.abort(error)).then(() => { throw error; }))
+        .finally(() => reader.releaseLock());
     }
     pipeThrough(pair) { this.pipeTo(pair.writable); return pair.readable; }
   }
@@ -10553,6 +10603,22 @@
   globalThis.WritableStream = WritableStream;
   globalThis.WritableStreamDefaultWriter = WritableStreamDefaultWriter;
   globalThis.TransformStream = TransformStream;
+
+  // Body streams are byte streams in the Fetch/File APIs.  The current host
+  // keeps response bytes in memory, so one immutable chunk is sufficient while
+  // preserving the observable ReadableStream lifecycle (locked, disturbed,
+  // cancel and close) for consumers.
+  function readableByteStream(bytes, onDisturb = null) {
+    const snapshot = bytes instanceof Uint8Array ? bytes.slice() : new Uint8Array(bytes || []);
+    const stream = new ReadableStream({
+      start(controller) {
+        if (snapshot.length) controller.enqueue(snapshot);
+        controller.close();
+      },
+    });
+    stream._onDisturb = onDisturb;
+    return stream;
+  }
 
   class EventTarget {
     constructor() { this._listeners = new Map(); }
@@ -13740,6 +13806,7 @@
     text() { return Promise.resolve(this.__text()); }
     arrayBuffer() { return Promise.resolve(this.__bytes.slice().buffer); }
     bytes() { return Promise.resolve(this.__bytes.slice()); }
+    stream() { return readableByteStream(this.__bytes); }
     // Synchronous UTF-8 decode used by the platform internals that already hold
     // the bytes (`XMLHttpRequest.responseText`, fetch body text).
     __text() { return blobTextDecoder.decode(this.__bytes); }
@@ -14144,6 +14211,17 @@
 
   function extractBody(source) {
     if (source === null || source === undefined) return EMPTY_BODY;
+    if (source instanceof ReadableStream) {
+      if (source.locked || source._disturbed) throw new TypeError("ReadableStream body is unusable");
+      if (source._errorSet) throw source._error;
+      // The host keeps Fetch bodies as immutable snapshots.  A stream whose
+      // producer has not closed yet cannot be synchronously extracted without
+      // dropping future chunks, so reject it instead of silently truncating it.
+      if (!source._closed) throw new TypeError("ReadableStream body is not ready");
+      const chunks = source._queue.splice(0);
+      source._markDisturbed();
+      return bodyRecord(null, blobPartsToBytes(chunks), null);
+    }
     if (source instanceof Blob) {
       return bodyRecord(null, source.__bytes, source.type || null);
     }
@@ -14190,6 +14268,129 @@
     return new Blob([bodyAsBytes(body)], { type: headers.get("content-type") ?? "" });
   }
 
+  function bodyStreamFor(owner) {
+    if (bodyIsEmpty(owner.__body)) return null;
+    if (owner.__stream === null) {
+      owner.__stream = readableByteStream(bodyAsBytes(owner.__body), () => {
+        owner.__bodyUsed = true;
+      });
+      if (owner.bodyUsed) {
+        owner.__stream._markDisturbed();
+        owner.__stream._queue.length = 0;
+        owner.__stream._cancelled = true;
+      }
+    }
+    return owner.__stream;
+  }
+
+  function bodyIsDisturbed(owner) {
+    return owner.bodyUsed || (owner.__stream !== null &&
+      (owner.__stream._disturbed || owner.__stream.locked));
+  }
+
+  function disturbBody(owner) {
+    owner.__bodyUsed = true;
+    if (owner.__stream !== null) {
+      owner.__stream._markDisturbed();
+      owner.__stream._queue.length = 0;
+      owner.__stream._cancelled = true;
+      if (!owner.__stream._closed && !owner.__stream._errorSet) owner.__stream._controller.close();
+    }
+  }
+
+  // The convenience methods consume the same body represented by `.body`.
+  // Marking an exposed-but-not-yet-read stream as consumed prevents a later
+  // reader from observing a second copy of the payload.
+  function consumeBody(owner, callback) {
+    if (bodyIsDisturbed(owner)) {
+      return Promise.reject(new TypeError("Body is unusable"));
+    }
+    disturbBody(owner);
+    return Promise.resolve().then(() => callback(owner.__body));
+  }
+
+  function formDataPercentDecode(value) {
+    try {
+      return decodeURIComponent(String(value).replace(/\+/g, " "));
+    } catch (_) {
+      throw new TypeError("Invalid form-urlencoded body");
+    }
+  }
+
+  function formDataFromUrlEncoded(body) {
+    const form = new FormData();
+    const text = bodyAsText(body);
+    if (text === "") return form;
+    for (const pair of text.split("&")) {
+      if (pair === "") continue;
+      const separator = pair.indexOf("=");
+      const key = separator < 0 ? pair : pair.slice(0, separator);
+      const value = separator < 0 ? "" : pair.slice(separator + 1);
+      form.append(formDataPercentDecode(key), formDataPercentDecode(value));
+    }
+    return form;
+  }
+
+  function multipartHeaderParameter(header, name) {
+    const pattern = new RegExp("(?:^|;)\\s*" + name + "\\s*=\\s*(?:\\\"([^\\\"]*)\\\"|([^;\\s]*))", "i");
+    const match = pattern.exec(header);
+    return match ? (match[1] ?? match[2] ?? "") : null;
+  }
+
+  function formDataFromMultipart(body, boundary) {
+    if (!boundary) throw new TypeError("Multipart boundary is missing");
+    const bytes = bodyAsBytes(body);
+    const binary = Array.from(bytes, byte => String.fromCharCode(byte)).join("");
+    const delimiter = "--" + boundary;
+    const form = new FormData();
+    let cursor = binary.indexOf(delimiter);
+    if (cursor < 0) throw new TypeError("Malformed multipart body");
+    while (cursor >= 0) {
+      let after = cursor + delimiter.length;
+      if (binary.slice(after, after + 2) === "--") break;
+      if (binary.slice(after, after + 2) !== "\r\n") throw new TypeError("Malformed multipart boundary");
+      const headerStart = after + 2;
+      const headerEnd = binary.indexOf("\r\n\r\n", headerStart);
+      if (headerEnd < 0) throw new TypeError("Malformed multipart headers");
+      const headerText = binary.slice(headerStart, headerEnd);
+      const headers = new Map();
+      for (const line of headerText.split("\r\n")) {
+        const separator = line.indexOf(":");
+        if (separator <= 0) throw new TypeError("Malformed multipart header");
+        headers.set(line.slice(0, separator).trim().toLowerCase(), line.slice(separator + 1).trim());
+      }
+      const disposition = headers.get("content-disposition") || "";
+      if (!/^form-data\s*(?:;|$)/i.test(disposition)) throw new TypeError("Invalid multipart disposition");
+      const name = multipartHeaderParameter(disposition, "name");
+      if (name === null) throw new TypeError("Multipart field name is missing");
+      const bodyStart = headerEnd + 4;
+      const nextMarker = "\r\n" + delimiter;
+      const bodyEnd = binary.indexOf(nextMarker, bodyStart);
+      if (bodyEnd < 0) throw new TypeError("Malformed multipart body");
+      const partBytes = bytes.slice(bodyStart, bodyEnd);
+      const filename = multipartHeaderParameter(disposition, "filename");
+      if (filename !== null) {
+        form.append(name, new File([partBytes], filename, {
+          type: headers.get("content-type") || "application/octet-stream",
+        }));
+      } else {
+        form.append(name, blobTextDecoder.decode(partBytes));
+      }
+      cursor = bodyEnd + 2;
+    }
+    return form;
+  }
+
+  function formDataFromBody(body, contentType) {
+    const type = String(contentType || "").split(";", 1)[0].trim().toLowerCase();
+    if (type === "application/x-www-form-urlencoded") return formDataFromUrlEncoded(body);
+    if (type === "multipart/form-data") {
+      const match = /(?:^|;)\s*boundary\s*=\s*(?:\"([^\"]*)\"|([^;\s]*))/i.exec(String(contentType));
+      return formDataFromMultipart(body, match ? (match[1] ?? match[2] ?? "") : "");
+    }
+    throw new TypeError("Unsupported form data content type");
+  }
+
   class Request {
     constructor(input, init = {}) {
       const source = input instanceof Request ? input : null;
@@ -14204,8 +14405,12 @@
       const body = init.body === undefined
         ? (source ? source.__body : EMPTY_BODY)
         : extractBody(init.body);
+      if (source && init.body === undefined && bodyIsDisturbed(source)) {
+        throw new TypeError("Cannot construct a Request from a used body");
+      }
       this.__body = body;
-      this.bodyUsed = false;
+      this.__stream = null;
+      this.__bodyUsed = false;
       if (body.contentType !== null && !this.headers.has("content-type")) {
         this.headers.set("content-type", body.contentType);
       }
@@ -14223,18 +14428,17 @@
         throw new TypeError("Request with GET/HEAD method cannot have body");
       }
     }
-    // Non-standard: the spec exposes a `ReadableStream`. Omoikane exposes the
-    // payload itself — the text of a text body, otherwise a `Blob` over its
-    // bytes — because scripts only read it back to inspect what they sent.
-    get body() {
-      if (this.__body.text !== null) return this.__body.text;
-      return this.__body.bytes === null ? null : new Blob([this.__body.bytes]);
-    }
-    text() { this.bodyUsed = true; return Promise.resolve(bodyAsText(this.__body)); }
+    get bodyUsed() { return this.__bodyUsed; }
+    get body() { return bodyStreamFor(this); }
+    text() { return consumeBody(this, bodyAsText); }
     json() { return this.text().then(JSON.parse); }
-    arrayBuffer() { this.bodyUsed = true; return Promise.resolve(bodyAsBytes(this.__body).slice().buffer); }
-    blob() { this.bodyUsed = true; return Promise.resolve(bodyAsBlob(this.__body, this.headers)); }
-    clone() { return new Request(this); }
+    arrayBuffer() { return consumeBody(this, body => bodyAsBytes(body).slice().buffer); }
+    blob() { return consumeBody(this, body => bodyAsBlob(body, this.headers)); }
+    formData() { return consumeBody(this, body => formDataFromBody(body, this.headers.get("content-type"))); }
+    clone() {
+      if (bodyIsDisturbed(this)) throw new TypeError("Cannot clone a used body");
+      return new Request(this);
+    }
   }
   class Response {
     constructor(body = null, init = {}) {
@@ -14249,18 +14453,19 @@
       this.url = init.url || "";
       this.type = "basic";
       this.redirected = Boolean(init.redirected);
-      this.bodyUsed = false;
+      this.__stream = null;
+      this.__bodyUsed = false;
     }
+    get bodyUsed() { return this.__bodyUsed; }
     get ok() { return this.status >= 200 && this.status <= 299; }
-    get body() {
-      if (this.__body.text !== null) return this.__body.text;
-      return this.__body.bytes === null ? null : new Blob([this.__body.bytes]);
-    }
-    text() { this.bodyUsed = true; return Promise.resolve(bodyAsText(this.__body)); }
+    get body() { return bodyStreamFor(this); }
+    text() { return consumeBody(this, bodyAsText); }
     json() { return this.text().then(JSON.parse); }
-    arrayBuffer() { this.bodyUsed = true; return Promise.resolve(bodyAsBytes(this.__body).slice().buffer); }
-    blob() { this.bodyUsed = true; return Promise.resolve(bodyAsBlob(this.__body, this.headers)); }
+    arrayBuffer() { return consumeBody(this, body => bodyAsBytes(body).slice().buffer); }
+    blob() { return consumeBody(this, body => bodyAsBlob(body, this.headers)); }
+    formData() { return consumeBody(this, body => formDataFromBody(body, this.headers.get("content-type"))); }
     clone() {
+      if (bodyIsDisturbed(this)) throw new TypeError("Cannot clone a used body");
       const response = new Response(null, { status: this.status, statusText: this.statusText, headers: this.headers, url: this.url, redirected: this.redirected });
       // A body is an immutable snapshot, so both responses can share it.
       response.__body = this.__body;
@@ -14295,11 +14500,13 @@
     // Both forms are retained: `text()` must not re-decode, and for a payload
     // that is not valid UTF-8 the lossy decoding is still the defined text
     // result while the bytes remain available to `blob()`/`arrayBuffer()`.
-    response.__body = bodyRecord(
-      data.bodyText,
-      data.bodyBase64 == null ? null : bytesFromBase64(data.bodyBase64),
-      null,
-    );
+    response.__body = data.bodyPresent === false || data.type === "opaque" || data.type === "opaqueredirect"
+      ? EMPTY_BODY
+      : bodyRecord(
+          data.bodyText,
+          data.bodyBase64 == null ? null : bytesFromBase64(data.bodyBase64),
+          null,
+        );
     response.type = data.type;
     return response;
   }
@@ -14316,7 +14523,9 @@
   }
 
   globalThis.fetch = function(input, init = {}) {
-    const request = input instanceof Request ? new Request(input, init) : new Request(input, init);
+    const source = input instanceof Request ? input : null;
+    const request = new Request(input, init);
+    if (source && init.body === undefined && !bodyIsEmpty(source.__body)) disturbBody(source);
     if (request.signal && request.signal.aborted) return Promise.reject(request.signal.reason);
     if (isBlobUrl(request.url)) {
       return Promise.resolve().then(() => {
@@ -14444,7 +14653,7 @@
     // Cache entries are immutable snapshots.  Assigning this private record
     // avoids re-extracting (and potentially re-encoding) a binary body.
     request.__body = cacheBodyFromSnapshot(snapshot.body);
-    request.bodyUsed = false;
+    request.__bodyUsed = false;
     return request;
   }
 
@@ -14458,7 +14667,7 @@
     });
     response.__body = cacheBodyFromSnapshot(snapshot.body);
     response.type = snapshot.type || "basic";
-    response.bodyUsed = false;
+    response.__bodyUsed = false;
     return response;
   }
 

@@ -10121,6 +10121,7 @@ fn fetch_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResul
             "headers": exposed_headers,
             "bodyText": body_text.as_deref().unwrap_or(""),
             "bodyBase64": body_base64,
+            "bodyPresent": !opaque && !response.body().is_empty(),
         })
         .to_string();
         Ok(js_string!(payload.as_str()).into())
@@ -16030,7 +16031,7 @@ b</textarea></form>"#);
     #[test]
     fn multipart_form_data_is_used_by_request_and_xhr() {
         let mut runtime = JsRuntime::new().unwrap();
-        assert!(runtime.eval(r#"(() => { const data = new FormData(); data.append("a", "one"); data.append("a", "two"); const encoded = data.__multipart("fixed-boundary"); const request = new Request("/upload", { method: "POST", body: data }); const xhr = new XMLHttpRequest(); xhr.open("POST", "/upload"); xhr.send(data); return encoded.body === "--fixed-boundary\r\nContent-Disposition: form-data; name=\"a\"\r\n\r\none\r\n--fixed-boundary\r\nContent-Disposition: form-data; name=\"a\"\r\n\r\ntwo\r\n--fixed-boundary--\r\n" && request.headers.get("content-type").startsWith("multipart/form-data; boundary=") && request.body.includes("name=\"a\"") && xhr._headers["content-type"].startsWith("multipart/form-data; boundary="); })()"#).unwrap().as_boolean().unwrap());
+        assert!(runtime.eval(r#"(() => { const data = new FormData(); data.append("a", "one"); data.append("a", "two"); const encoded = data.__multipart("fixed-boundary"); const request = new Request("/upload", { method: "POST", body: data }); const xhr = new XMLHttpRequest(); xhr.open("POST", "/upload"); xhr.send(data); return encoded.body === "--fixed-boundary\r\nContent-Disposition: form-data; name=\"a\"\r\n\r\none\r\n--fixed-boundary\r\nContent-Disposition: form-data; name=\"a\"\r\n\r\ntwo\r\n--fixed-boundary--\r\n" && request.headers.get("content-type").startsWith("multipart/form-data; boundary=") && request.body instanceof ReadableStream && xhr._headers["content-type"].startsWith("multipart/form-data; boundary="); })()"#).unwrap().as_boolean().unwrap());
     }
 
     #[test]
@@ -16161,6 +16162,149 @@ b</textarea></form>"#);
                 .to_std_string_escaped(),
             "B"
         );
+    }
+
+    #[test]
+    fn fetch_bodies_expose_streams_one_shot_consumption_and_form_data() {
+        let mut runtime = JsRuntime::new().unwrap();
+        runtime
+            .eval(
+                r#"
+                globalThis.fetchBodyChecks = (async () => {
+                  const blob = new Blob([new Uint8Array([97, 98, 99])], { type: "text/plain" });
+                  const blobReader = blob.stream().getReader();
+                  const blobChunk = await blobReader.read();
+                  const blobDone = await blobReader.read();
+
+                  const response = new Response("hello");
+                  const responseStream = response.body;
+                  const responseSameStream = response.body === responseStream;
+                  const reader = responseStream.getReader();
+                  const first = await reader.read();
+                  const done = await reader.read();
+                  let cloneRejected = false;
+                  try { response.clone(); } catch (_) { cloneRejected = true; }
+                  try { response.bodyUsed = false; } catch (_) {}
+                  const cloneSource = new Response("clone");
+                  const cloneCopy = cloneSource.clone();
+                  const cloneValues = await Promise.all([cloneSource.text(), cloneCopy.text()]);
+                  const streamCloneSource = new Response("parallel");
+                  const streamCloneCopy = streamCloneSource.clone();
+                  const parallelValues = await Promise.all([
+                    streamCloneSource.body.getReader().read(),
+                    streamCloneCopy.body.getReader().read(),
+                  ]);
+
+                  const streamInput = new ReadableStream({ start(controller) {
+                    controller.enqueue(new Uint8Array([115, 116, 114, 101, 97, 109]));
+                    controller.close();
+                  } });
+                  const streamRequest = new Request("https://example.test/stream", {
+                    method: "POST", body: streamInput,
+                  });
+                  const streamInputText = await streamRequest.text();
+                  const openStream = new ReadableStream({ start(controller) {
+                    controller.enqueue(new Uint8Array([120]));
+                  } });
+                  let openStreamRejected = false;
+                  try { new Request("https://example.test/open", { method: "POST", body: openStream }); }
+                  catch (error) { openStreamRejected = error instanceof TypeError; }
+                  const emptyBody = new Response().body === null;
+                  const failingStream = new ReadableStream({ start(controller) {
+                    controller.error(new Error("stream failed"));
+                  } });
+                  const failingReader = failingStream.getReader();
+                  let streamErrorRejected = false;
+                  let streamClosedRejected = false;
+                  try { await failingReader.read(); } catch (_) { streamErrorRejected = true; }
+                  try { await failingReader.closed; } catch (_) { streamClosedRejected = true; }
+                  let cancelReason = "";
+                  const cancellable = new ReadableStream({ cancel(reason) { cancelReason = String(reason); } });
+                  await cancellable.cancel("abort");
+
+                  const formResponse = new Response("name=Miku&message=hello+world", {
+                    headers: { "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8" },
+                  });
+                  const form = await formResponse.formData();
+                  const unsupportedForm = new Response("x", { headers: { "Content-Type": "text/plain" } });
+                  let unsupportedFormRejected = false;
+                  try { await unsupportedForm.formData(); } catch (error) { unsupportedFormRejected = error instanceof TypeError; }
+
+                  const outgoing = new FormData();
+                  outgoing.append("title", "song");
+                  outgoing.append("payload", new Blob([new Uint8Array([0, 255, 65])], { type: "application/octet-stream" }), "data.bin");
+                  const request = new Request("https://example.test/upload", { method: "POST", body: outgoing });
+                  const parsed = await request.formData();
+                  const file = parsed.get("payload");
+                  return {
+                    blobType: blobChunk.value instanceof Uint8Array,
+                    blobText: new TextDecoder().decode(blobChunk.value),
+                    blobDone: blobDone.done,
+                    responseType: responseStream instanceof ReadableStream,
+                    responseSameStream,
+                    responseChunk: new TextDecoder().decode(first.value),
+                    responseDone: done.done,
+                    bodyUsed: response.bodyUsed,
+                    cloneRejected,
+                    cloneValues: cloneValues.join("|"),
+                    parallelValues: parallelValues.map(value => new TextDecoder().decode(value.value)).join("|"),
+                    streamInputText,
+                    openStreamRejected,
+                    emptyBody,
+                    unsupportedFormRejected,
+                    streamErrorRejected,
+                    streamClosedRejected,
+                    cancelReason,
+                    formValues: [form.get("name"), form.get("message")].join("|"),
+                    parsedTitle: parsed.get("title"),
+                    fileName: file.name,
+                    fileType: file.type,
+                    fileBytes: Array.from(new Uint8Array(await file.arrayBuffer())).join(","),
+                  };
+                })();
+                "#,
+            )
+            .unwrap();
+        runtime.run_jobs().unwrap();
+        assert!(runtime
+            .eval(
+                r#"fetchBodyChecks instanceof Promise"#,
+            )
+            .unwrap()
+            .as_boolean()
+            .unwrap());
+        runtime.run_jobs().unwrap();
+        assert!(runtime
+            .eval(
+                r#"fetchBodyChecks.then(value => globalThis.fetchBodyCheckResult = value)"#,
+            )
+            .is_ok());
+        runtime.run_jobs().unwrap();
+        assert_eq!(
+            eval_str(&mut runtime, "fetchBodyCheckResult.blobText"),
+            "abc"
+        );
+        assert!(runtime
+            .eval(
+                r#"fetchBodyCheckResult.blobType && fetchBodyCheckResult.blobDone &&
+                   fetchBodyCheckResult.responseType && fetchBodyCheckResult.responseSameStream &&
+                   fetchBodyCheckResult.responseChunk === "hello" && fetchBodyCheckResult.responseDone &&
+                   fetchBodyCheckResult.bodyUsed && fetchBodyCheckResult.cloneRejected &&
+                   fetchBodyCheckResult.cloneValues === "clone|clone" &&
+                   fetchBodyCheckResult.parallelValues === "parallel|parallel" &&
+                   fetchBodyCheckResult.streamInputText === "stream" && fetchBodyCheckResult.openStreamRejected &&
+                   fetchBodyCheckResult.emptyBody &&
+                   fetchBodyCheckResult.unsupportedFormRejected &&
+                   fetchBodyCheckResult.streamErrorRejected && fetchBodyCheckResult.streamClosedRejected &&
+                   fetchBodyCheckResult.cancelReason === "abort" &&
+                   fetchBodyCheckResult.formValues === "Miku|hello world" &&
+                   fetchBodyCheckResult.parsedTitle === "song" && fetchBodyCheckResult.fileName === "data.bin" &&
+                   fetchBodyCheckResult.fileType === "application/octet-stream" &&
+                   fetchBodyCheckResult.fileBytes === "0,255,65""#,
+            )
+            .unwrap()
+            .as_boolean()
+            .unwrap());
     }
 
     #[test]
