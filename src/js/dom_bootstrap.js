@@ -9145,9 +9145,9 @@
     const key = pointerCaptureKey(doc, pointerId);
     if (pointerCaptureTargets.get(key) === target) pointerCaptureTargets.delete(key);
   }
-  function capturedInputTarget(target) {
+  function capturedInputTarget(target, pointerId = 1) {
     const doc = target && target.nodeType === 9 ? target : target && target.ownerDocument;
-    return pointerCaptureTarget(doc || document, 1) || target;
+    return pointerCaptureTarget(doc || document, normalizePointerId(pointerId)) || target;
   }
   globalThis.__omoikane_release_pointer_capture = function(pointerId = 1) {
     const normalized = normalizePointerId(pointerId);
@@ -9187,8 +9187,8 @@
       relatedTarget,
     });
   }
-  function dragInputTarget(id) {
-    return capturedInputTarget(wrapNode(id) || document) || document;
+  function dragInputTarget(id, init = {}) {
+    return capturedInputTarget(wrapNode(id) || document, init.pointerId || 1) || document;
   }
   function updateDragInputTarget(target, init) {
     const changed = target !== dragInputState.currentTarget;
@@ -9243,7 +9243,7 @@
         dragInputState.active = true;
         dragInputState.candidate = null;
       }
-      const target = dragInputTarget(id);
+      const target = dragInputTarget(id, init);
       dragInputState.source.dispatchEvent(dragEvent(
         "drag", init, dragInputState.dataTransfer, target,
       ));
@@ -9263,7 +9263,7 @@
       }
       const source = dragInputState.source;
       const dataTransfer = dragInputState.dataTransfer;
-      const finalTarget = dragInputTarget(id);
+      const finalTarget = dragInputTarget(id, init);
       updateDragInputTarget(finalTarget, init);
       const target = dragInputState.currentTarget;
       if (target && dragInputState.dropAllowed) {
@@ -9277,7 +9277,7 @@
   };
 
   globalThis.__omoikane_dispatch_mouse_input = function(id, type, init, focusTarget) {
-    const target = capturedInputTarget(wrapNode(id) || document) || document;
+    const target = capturedInputTarget(wrapNode(id) || document, init && init.pointerId || 1) || document;
     const notCanceled = target.dispatchEvent(new MouseEvent(type, {
       ...init, bubbles: true, cancelable: true, composed: true,
     }));

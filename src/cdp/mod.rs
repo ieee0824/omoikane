@@ -1464,6 +1464,7 @@ impl CdpSession {
             "metaKey": modifiers & 4 != 0,
             "shiftKey": modifiers & 8 != 0,
             "detail": params.get("clickCount").and_then(Value::as_u64).unwrap_or(0),
+            "pointerId": params.get("pointerId").and_then(Value::as_u64).unwrap_or(1),
         });
         if dom_type == "wheel" {
             init["deltaX"] = json!(optional_f64(params, "deltaX", 0.0)?);
@@ -1534,7 +1535,10 @@ impl CdpSession {
                 ))?;
                 click_default_prevented = !click_not_canceled;
             }
-            let _ = self.eval_input_bool("__omoikane_release_pointer_capture(1)")?;
+            let _ = self.eval_input_bool(&format!(
+                "__omoikane_release_pointer_capture({})",
+                init.get("pointerId").and_then(Value::as_u64).unwrap_or(1)
+            ))?;
         }
         Ok(json!({
             "defaultPrevented": !not_canceled,
