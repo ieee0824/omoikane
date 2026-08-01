@@ -3544,18 +3544,23 @@ impl ClipPathShape {
 
     fn contains(&self, point: (f32, f32)) -> bool {
         match self {
-            Self::RoundedRect { rect, radii } => point_in_rounded_rect(
-                point.0,
-                point.1,
-                rect.x,
-                rect.y,
-                rect.width,
-                rect.height,
-                radii.0,
-                radii.1,
-                radii.2,
-                radii.3,
-            ),
+            Self::RoundedRect { rect, radii } => {
+                if rect.width <= 0.0 || rect.height <= 0.0 {
+                    return false;
+                }
+                point_in_rounded_rect(
+                    point.0,
+                    point.1,
+                    rect.x,
+                    rect.y,
+                    rect.width,
+                    rect.height,
+                    radii.0,
+                    radii.1,
+                    radii.2,
+                    radii.3,
+                )
+            }
             Self::Circle { center, radius, .. } => {
                 let dx = point.0 - center.0;
                 let dy = point.1 - center.1;
@@ -3684,8 +3689,7 @@ fn clip_path_shape(style: &ComputedStyle, border_box: Rect) -> Option<ClipPathSh
                 .skip(round_at + 1)
                 .collect::<Vec<_>>()
                 .join(" ");
-            let rect = parse_clip_path_inset_rect_value(&format!("inset({before})"), border_box)?;
-            let rect = rect?;
+            let rect = parse_clip_path_inset_rect_geometry(&format!("inset({before})"), border_box)?;
             let radii = parse_shape_radii(&after, rect)?;
             Some(ClipPathShape::RoundedRect { rect, radii })
         }
@@ -3998,6 +4002,13 @@ fn clip_path_inset_rect(style: &ComputedStyle, border_box: Rect) -> Option<Optio
 }
 
 fn parse_clip_path_inset_rect_value(value: &str, border_box: Rect) -> Option<Option<Rect>> {
+    parse_clip_path_inset_rect_geometry(value, border_box).map(normalize_rect)
+}
+
+/// Parses inset geometry without normalizing an empty result away. Rounded
+/// inset clips need to retain a non-positive rectangle so their shape can
+/// explicitly reject every point instead of falling back to no clip.
+fn parse_clip_path_inset_rect_geometry(value: &str, border_box: Rect) -> Option<Rect> {
     let open = value.find('(')?;
     if !value[..open].trim().eq_ignore_ascii_case("inset") || !value.ends_with(')') {
         return None;
@@ -4028,7 +4039,7 @@ fn parse_clip_path_inset_rect_value(value: &str, border_box: Rect) -> Option<Opt
         width: border_box.width - left - right,
         height: border_box.height - top - bottom,
     };
-    Some(normalize_rect(rect))
+    Some(rect)
 }
 
 fn split_top_level_whitespace(value: &str) -> Vec<&str> {
@@ -4654,6 +4665,9 @@ fn point_in_rounded_rect(
     br: f32,
     bl: f32,
 ) -> bool {
+    if rw <= 0.0 || rh <= 0.0 {
+        return false;
+    }
     // 矩形の外側は除外
     if px < rx || px > rx + rw || py < ry || py > ry + rh {
         return false;

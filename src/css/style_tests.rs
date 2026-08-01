@@ -3250,6 +3250,53 @@ fn canonicalizes_clip_shape_and_mask_layer_values() {
 }
 
 #[test]
+fn preserves_mask_position_size_and_repeat_layers() {
+    let (_document, body, _title, _html) = sample_tree();
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "body { mask-image: url(a.svg), url(b.svg); \
+             mask-position: left, right; mask-size: contain, cover; \
+             mask-repeat: no-repeat, repeat; }",
+        )
+        .unwrap(),
+    );
+    let style = resolver.computed_style(&body);
+    assert_eq!(
+        style.get("mask-position-x"),
+        Some(&ComputedValue::Keyword("left, right".to_string()))
+    );
+    assert_eq!(
+        style.get("mask-position-y"),
+        Some(&ComputedValue::Keyword("center, center".to_string()))
+    );
+    assert_eq!(
+        style.get("mask-size"),
+        Some(&ComputedValue::Keyword("contain, cover".to_string()))
+    );
+    assert_eq!(
+        style.get("mask-repeat"),
+        Some(&ComputedValue::Keyword("no-repeat, repeat".to_string()))
+    );
+}
+
+#[test]
+fn canonicalizes_uppercase_clip_shape_function_names() {
+    let (_document, body, _title, _html) = sample_tree();
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet("body { clip-path: CIRCLE(50% AT 50% 50%); }").unwrap(),
+    );
+    let style = resolver.computed_style(&body);
+    assert_eq!(
+        style.get("clip-path"),
+        Some(&ComputedValue::Keyword("circle(50% AT 50% 50%)".to_string()))
+    );
+}
+
+#[test]
 fn invalid_clip_shape_and_mask_mode_declarations_are_ignored() {
     let (_document, body, _title, _html) = sample_tree();
     let mut resolver = StyleResolver::new();

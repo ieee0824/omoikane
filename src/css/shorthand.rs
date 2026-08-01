@@ -1142,6 +1142,41 @@ fn render_mask_value(value: &Value) -> String {
 }
 
 fn expand_mask_position_shorthand(value: Value, important: bool) -> Vec<Declaration> {
+    if let Value::CommaList(layers) = value {
+        let mut x_values = Vec::with_capacity(layers.len());
+        let mut y_values = Vec::with_capacity(layers.len());
+        for layer in layers {
+            let values = match layer {
+                Value::List(values) => values,
+                single => vec![single],
+            };
+            let declarations = expand_mask_position_values(&values, important);
+            let x = declarations
+                .iter()
+                .find(|declaration| declaration.name == "mask-position-x")
+                .map(|declaration| declaration.value.clone());
+            let y = declarations
+                .iter()
+                .find(|declaration| declaration.name == "mask-position-y")
+                .map(|declaration| declaration.value.clone());
+            if let (Some(x), Some(y)) = (x, y) {
+                x_values.push(x);
+                y_values.push(y);
+            }
+        }
+        return vec![
+            Declaration {
+                name: "mask-position-x".to_string(),
+                value: Value::CommaList(x_values),
+                important,
+            },
+            Declaration {
+                name: "mask-position-y".to_string(),
+                value: Value::CommaList(y_values),
+                important,
+            },
+        ];
+    }
     let values = match value {
         Value::List(values) => values,
         single => vec![single],

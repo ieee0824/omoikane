@@ -809,35 +809,9 @@ impl Parser {
         }
 
         let (value_tokens, important) = split_important(&value_tokens);
-        // Preserve mask image/mode/composite layer lists.  The paint path uses
-        // the comma-separated values to apply the basic mask compositing
-        // operators; position/size/repeat shorthands still intentionally use
-        // the first layer until their per-layer normalization is available.
-        let value_tokens = if matches!(
-            name.as_str(),
-            "mask-image"
-                | "-webkit-mask-image"
-                | "mask"
-                | "-webkit-mask"
-                | "mask-mode"
-                | "-webkit-mask-mode"
-                | "mask-composite"
-                | "-webkit-mask-composite"
-        ) {
-            value_tokens
-        } else if matches!(
-            name.as_str(),
-            "mask-position"
-                | "-webkit-mask-position"
-                | "mask-size"
-                | "-webkit-mask-size"
-                | "mask-repeat"
-                | "-webkit-mask-repeat"
-        ) {
-            first_mask_layer(&value_tokens)
-        } else {
-            value_tokens
-        };
+        // Preserve comma-separated mask layer lists. The paint path uses the
+        // per-layer values for compositing, positioning, sizing, and repeat
+        // behavior instead of silently dropping every layer after the first.
         let value = if (is_layered_background_property(&name)
             || matches!(
                 name.as_str(),
@@ -849,6 +823,12 @@ impl Parser {
                     | "-webkit-mask-mode"
                     | "mask-composite"
                     | "-webkit-mask-composite"
+                    | "mask-position"
+                    | "-webkit-mask-position"
+                    | "mask-size"
+                    | "-webkit-mask-size"
+                    | "mask-repeat"
+                    | "-webkit-mask-repeat"
             ))
             && has_top_level_comma(&value_tokens)
         {
@@ -998,19 +978,6 @@ fn parse_comma_separated_value(tokens: &[CssToken]) -> Result<Value, CssParseErr
     }
     layers.push(parse_value_tokens(&layer)?);
     Ok(Value::CommaList(layers))
-}
-
-fn first_mask_layer(tokens: &[CssToken]) -> Vec<CssToken> {
-    let mut depth = 0usize;
-    for (index, token) in tokens.iter().enumerate() {
-        match token {
-            CssToken::ParenOpen | CssToken::BracketOpen => depth += 1,
-            CssToken::ParenClose | CssToken::BracketClose => depth = depth.saturating_sub(1),
-            CssToken::Comma if depth == 0 => return tokens[..index].to_vec(),
-            _ => {}
-        }
-    }
-    tokens.to_vec()
 }
 
 fn render_nth_argument(tokens: &[CssToken]) -> String {

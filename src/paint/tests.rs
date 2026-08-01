@@ -5982,6 +5982,21 @@ fn clip_path_inset_round_clips_rounded_corners() {
     assert_eq!(canvas.pixel(0, 0), Some(Color::rgba(0, 0, 0, 0)));
 }
 
+#[test]
+fn clip_path_inset_round_with_empty_rect_clips_everything() {
+    let canvas = paint_clip_path_document(
+        ".target { width: 20px; height: 20px; background: red; \
+         clip-path: inset(100% round 6px); }",
+        "<div class='target'></div>",
+        20.0,
+        20.0,
+    );
+    assert_eq!(count_pixels(&canvas, Color::rgb(255, 0, 0)), 0);
+    assert!(!point_in_rounded_rect(
+        10.0, 10.0, 0.0, 0.0, 0.0, 0.0, 6.0, 6.0, 6.0, 6.0,
+    ));
+}
+
 // --- box-shadow テスト ---
 
 #[test]

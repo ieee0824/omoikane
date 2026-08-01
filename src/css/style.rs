@@ -4269,9 +4269,10 @@ fn render_clip_path_value(value: &Value, ctx: ResolutionContext) -> String {
                 "inset" | "circle" | "ellipse" | "polygon"
             ) =>
         {
+            let canonical_name = name.to_ascii_lowercase();
             format!(
                 "{}({})",
-                name,
+                canonical_name,
                 arguments
                     .iter()
                     .map(|argument| render_clip_path_value(argument, ctx))
