@@ -359,7 +359,9 @@
       "id": "storage.indexed-db",
       "area": "storage",
       "description": "IndexedDB is exposed",
-      "probe": "typeof indexedDB === 'object' && typeof IDBDatabase === 'function'",
+      "setup": "globalThis.__indexedDbSurfaceProbe = { done: false, value: '' }; const request = indexedDB.open('omoikane-surface-db', 1); request.onupgradeneeded = event => event.target.result.createObjectStore('items', { keyPath: 'id' }); request.onsuccess = event => { const tx = event.target.result.transaction('items', 'readwrite'); tx.objectStore('items').put({ id: 1, value: 'ok' }).onsuccess = () => { const read = event.target.result.transaction('items').objectStore('items').get(1); read.onsuccess = result => { __indexedDbSurfaceProbe.done = true; __indexedDbSurfaceProbe.value = result.target.result.value; }; }; };",
+      "run_tasks": true,
+      "probe": "typeof indexedDB === 'object' && typeof IDBDatabase === 'function' && __indexedDbSurfaceProbe.done === true && __indexedDbSurfaceProbe.value === 'ok'",
       "baseline_supported": false
     },
     {

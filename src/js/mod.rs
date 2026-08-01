@@ -20765,6 +20765,98 @@ b</textarea></form>"#);
     }
 
     #[test]
+    fn indexeddb_open_upgrade_transaction_and_clone_isolation() {
+        let mut runtime = JsRuntime::with_document_and_url(
+            default_document(),
+            "https://indexeddb.example.test/",
+        )
+        .unwrap();
+        runtime
+            .eval(
+                r#"globalThis.idbProbe = { events: [], value: null, count: -1, error: '' };
+                   const open = indexedDB.open('books', 1);
+                   open.onupgradeneeded = event => {
+                     idbProbe.events.push('upgrade:' + event.oldVersion + '>' + event.newVersion);
+                     event.target.result.createObjectStore('books', { keyPath: 'id', autoIncrement: true });
+                   };
+                   open.onerror = event => { idbProbe.error = event.target.error.name; };
+                   open.onsuccess = event => {
+                     idbProbe.events.push('open');
+                     const db = event.target.result;
+                     const tx = db.transaction('books', 'readwrite');
+                     tx.oncomplete = () => idbProbe.events.push('complete');
+                     const store = tx.objectStore('books');
+                     const original = { title: 'first', nested: { value: 3 } };
+                     store.add(original).onsuccess = event => {
+                       original.title = 'mutated';
+                       idbProbe.events.push('add:' + event.target.result);
+                     };
+                     store.get(1).onsuccess = event => {
+                       idbProbe.value = event.target.result.title + ':' + event.target.result.nested.value;
+                     };
+                     store.count().onsuccess = event => { idbProbe.count = event.target.result; };
+                   };"#,
+            )
+            .unwrap();
+        assert_eq!(runtime.eval("idbProbe.events.length").unwrap().as_number(), Some(0.0));
+        runtime.run_until_idle().unwrap();
+        assert_eq!(
+            eval_str(&mut runtime, "idbProbe.events.join('|')"),
+            "upgrade:0>1|open|add:1|complete",
+        );
+        assert_eq!(eval_str(&mut runtime, "idbProbe.value"), "first:3");
+        assert_eq!(eval_str(&mut runtime, "String(idbProbe.count)"), "1");
+        assert_eq!(eval_str(&mut runtime, "idbProbe.error"), "");
+        runtime
+            .eval(
+                r#"globalThis.idbSecond = { value: '', names: '', rejected: '' };
+                   const reopen = indexedDB.open('books');
+                   reopen.onsuccess = event => {
+                     const db = event.target.result;
+                     idbSecond.names = Array.from(db.objectStoreNames).join(',');
+                     const request = db.transaction('books').objectStore('books').get(1);
+                     request.onsuccess = event => { idbSecond.value = event.target.result.title; };
+                   };
+                   indexedDB.open('books', 0).onerror = event => { idbSecond.rejected = event.target.error.name; };"#,
+            )
+            .unwrap();
+        runtime.run_until_idle().unwrap();
+        assert_eq!(eval_str(&mut runtime, "idbSecond.value + '|' + idbSecond.names + '|' + idbSecond.rejected"), "first|books|TypeError");
+    }
+
+    #[test]
+    fn indexeddb_rejects_array_key_paths_and_normalizes_boxed_store_names() {
+        let mut runtime = JsRuntime::with_document_and_url(
+            default_document(),
+            "https://indexeddb-keypath.example.test/",
+        )
+        .unwrap();
+        runtime
+            .eval(
+                r#"globalThis.idbEdge = { objectStore: '', index: '', boxed: '' };
+                   const request = indexedDB.open('edge', 1);
+                   request.onupgradeneeded = event => {
+                     const db = event.target.result;
+                     try { db.createObjectStore('bad', { keyPath: ['a', 'b'] }); }
+                     catch (error) { idbEdge.objectStore = error.name; }
+                     const store = db.createObjectStore('books');
+                     try { store.createIndex('bad', ['a', 'b']); }
+                     catch (error) { idbEdge.index = error.name; }
+                   };
+                   request.onsuccess = event => {
+                     try { event.target.result.transaction(new String('books')); idbEdge.boxed = 'ok'; }
+                     catch (error) { idbEdge.boxed = error.name; }
+                   };"#,
+            )
+            .unwrap();
+        runtime.run_until_idle().unwrap();
+        assert_eq!(
+            eval_str(&mut runtime, "idbEdge.objectStore + '|' + idbEdge.index + '|' + idbEdge.boxed"),
+            "NotSupportedError|NotSupportedError|ok",
+        );
+    }
+
+    #[test]
     fn storage_is_scoped_by_origin_and_top_level_session() {
         let storage = StorageManager::new();
         let first_session = storage.create_session();
