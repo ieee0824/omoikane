@@ -6469,11 +6469,27 @@
       this.__state.viewport = [0, 0, this.drawingBufferWidth, this.drawingBufferHeight];
       this.__state.scissor = [0, 0, this.drawingBufferWidth, this.drawingBufferHeight];
       this.__state.enabled.clear();
+      for (const resource of [...this.__state.buffers, ...this.__state.shaders, ...this.__state.programs]) resource.__deleted = true;
+      this.__state.buffers.clear();
+      this.__state.shaders.clear();
+      this.__state.programs.clear();
       this.__state.arrayBuffer = null;
       this.__state.elementArrayBuffer = null;
       this.__state.currentProgram = null;
       this.dispatchEvent(new Event("webglcontextrestored"));
       return true;
+    }
+    get oncontextlost() { return this.__oncontextlost || null; }
+    set oncontextlost(callback) {
+      if (this.__oncontextlost) this.removeEventListener("webglcontextlost", this.__oncontextlost);
+      this.__oncontextlost = typeof callback === "function" ? callback : null;
+      if (this.__oncontextlost) this.addEventListener("webglcontextlost", this.__oncontextlost);
+    }
+    get oncontextrestored() { return this.__oncontextrestored || null; }
+    set oncontextrestored(callback) {
+      if (this.__oncontextrestored) this.removeEventListener("webglcontextrestored", this.__oncontextrestored);
+      this.__oncontextrestored = typeof callback === "function" ? callback : null;
+      if (this.__oncontextrestored) this.addEventListener("webglcontextrestored", this.__oncontextrestored);
     }
     clearColor(red, green, blue, alpha) {
       if (!webglActive(this)) return;
