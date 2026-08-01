@@ -22621,7 +22621,10 @@ b</textarea></form>"#);
             .eval(
                 r#"(() => {
                   const entry = performance.getEntriesByType("navigation")[0];
+                  delete entry.domInteractive;
+                  __omoikane_performance_navigation_event("domInteractive");
                   return windowDclCount === 1 && entry.loadEventEnd === 42 &&
+                    entry.domInteractive === 42 &&
                     entry.duration === entry.loadEventEnd - entry.startTime &&
                     entry.toJSON().duration === entry.duration;
                 })()"#,

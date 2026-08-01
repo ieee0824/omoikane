@@ -10562,7 +10562,6 @@
     if (!navigationEntryForLifecycle) return;
     const now = performance.now();
     const update = field => {
-      if (!(field in navigationEntryForLifecycle)) return;
       const previous = Number(navigationEntryForLifecycle[field]) || 0;
       try {
         Object.defineProperty(navigationEntryForLifecycle, field, {
