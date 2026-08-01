@@ -85,6 +85,33 @@ pub(crate) fn matches_selector_with_scope_cached(
     cache: &mut SelectorMatchCache,
     scope_root: Option<&NodeHandle>,
 ) -> bool {
+    matches_selector_with_scope_mode_cached(node, selector, pseudo, cache, scope_root, false)
+}
+
+/// Matches a scope-boundary selector with `:scope` bound to `scope_root`.
+///
+/// Boundary selectors are allowed to inspect ancestors outside the scope root
+/// (for example `.sidebar :scope .limit`).  Scoped style selectors still use
+/// [`matches_selector_with_scope_cached`] and stop ancestor matching at the
+/// scope root, so the two contexts must remain distinct.
+pub(crate) fn matches_selector_boundary_cached(
+    node: &NodeHandle,
+    selector: &Selector,
+    pseudo: Option<PseudoElement>,
+    cache: &mut SelectorMatchCache,
+    scope_root: Option<&NodeHandle>,
+) -> bool {
+    matches_selector_with_scope_mode_cached(node, selector, pseudo, cache, scope_root, true)
+}
+
+fn matches_selector_with_scope_mode_cached(
+    node: &NodeHandle,
+    selector: &Selector,
+    pseudo: Option<PseudoElement>,
+    cache: &mut SelectorMatchCache,
+    scope_root: Option<&NodeHandle>,
+    allow_scope_ancestor_escape: bool,
+) -> bool {
     if selector.parts.is_empty() || node.node_type() != NodeType::Element {
         return false;
     }
@@ -100,6 +127,7 @@ pub(crate) fn matches_selector_with_scope_cached(
         pseudo,
         cache,
         scope_root,
+        allow_scope_ancestor_escape,
     )
 }
 
@@ -228,9 +256,17 @@ fn matches_selector_part(
     pseudo: Option<PseudoElement>,
     cache: &mut SelectorMatchCache,
     scope_root: Option<&NodeHandle>,
+    allow_scope_ancestor_escape: bool,
 ) -> bool {
     let part = &selector.parts[index];
-    if !matches_compound(node, part, pseudo, cache, scope_root) {
+    if !matches_compound(
+        node,
+        part,
+        pseudo,
+        cache,
+        scope_root,
+        allow_scope_ancestor_escape,
+    ) {
         return false;
     }
 
@@ -241,7 +277,7 @@ fn matches_selector_part(
     if index == 0 {
         return false;
     }
-    if scope_root.is_some_and(|root| root == node) {
+    if !allow_scope_ancestor_escape && scope_root.is_some_and(|root| root == node) {
         // Scoped selector matching cannot walk from the scoping root into its
         // ancestors or siblings outside the scoped subtree.
         return false;
@@ -251,10 +287,18 @@ fn matches_selector_part(
         Combinator::Descendant => {
             let mut ancestor = node.parent_node();
             while let Some(parent) = ancestor {
-                if matches_selector_part(&parent, selector, index - 1, None, cache, scope_root) {
+                if matches_selector_part(
+                    &parent,
+                    selector,
+                    index - 1,
+                    None,
+                    cache,
+                    scope_root,
+                    allow_scope_ancestor_escape,
+                ) {
                     return true;
                 }
-                if scope_root.is_some_and(|root| root == &parent) {
+                if !allow_scope_ancestor_escape && scope_root.is_some_and(|root| root == &parent) {
                     break;
                 }
                 ancestor = parent.parent_node();
@@ -263,9 +307,29 @@ fn matches_selector_part(
         }
         Combinator::Child => node
             .parent_node()
-            .is_some_and(|parent| matches_selector_part(&parent, selector, index - 1, None, cache, scope_root)),
+            .is_some_and(|parent| {
+                matches_selector_part(
+                    &parent,
+                    selector,
+                    index - 1,
+                    None,
+                    cache,
+                    scope_root,
+                    allow_scope_ancestor_escape,
+                )
+            }),
         Combinator::AdjacentSibling => previous_element_sibling(node)
-            .is_some_and(|sibling| matches_selector_part(&sibling, selector, index - 1, None, cache, scope_root)),
+            .is_some_and(|sibling| {
+                matches_selector_part(
+                    &sibling,
+                    selector,
+                    index - 1,
+                    None,
+                    cache,
+                    scope_root,
+                    allow_scope_ancestor_escape,
+                )
+            }),
         Combinator::GeneralSibling => {
             let Some(parent) = node.parent_node() else {
                 return false;
@@ -276,7 +340,15 @@ fn matches_selector_part(
             };
             siblings[..position].iter().rev().any(|sibling| {
                 sibling.node_type() == NodeType::Element
-                    && matches_selector_part(sibling, selector, index - 1, None, cache, scope_root)
+                    && matches_selector_part(
+                        sibling,
+                        selector,
+                        index - 1,
+                        None,
+                        cache,
+                        scope_root,
+                        allow_scope_ancestor_escape,
+                    )
             })
         }
     }
@@ -288,10 +360,20 @@ fn matches_compound(
     pseudo: Option<PseudoElement>,
     cache: &mut SelectorMatchCache,
     scope_root: Option<&NodeHandle>,
+    allow_scope_ancestor_escape: bool,
 ) -> bool {
     part.simples
         .iter()
-        .all(|simple| matches_simple_selector(node, simple, pseudo, cache, scope_root))
+        .all(|simple| {
+            matches_simple_selector(
+                node,
+                simple,
+                pseudo,
+                cache,
+                scope_root,
+                allow_scope_ancestor_escape,
+            )
+        })
 }
 
 fn matches_simple_selector(
@@ -300,6 +382,7 @@ fn matches_simple_selector(
     pseudo: Option<PseudoElement>,
     cache: &mut SelectorMatchCache,
     scope_root: Option<&NodeHandle>,
+    allow_scope_ancestor_escape: bool,
 ) -> bool {
     match simple {
         SimpleSelector::Type(name) => node
@@ -322,19 +405,50 @@ fn matches_simple_selector(
             operator,
             value,
         } => matches_attribute_selector(node, name, *operator, value.as_deref()),
-        SimpleSelector::PseudoClass(name) => {
-            matches_pseudo_class(node, name, pseudo, cache, scope_root)
-        }
+        SimpleSelector::PseudoClass(name) => matches_pseudo_class(
+            node,
+            name,
+            pseudo,
+            cache,
+            scope_root,
+            allow_scope_ancestor_escape,
+        ),
         SimpleSelector::PseudoElement(name) => matches_pseudo_element(name, pseudo),
         SimpleSelector::Is(selectors) | SimpleSelector::Where(selectors) => selectors
             .iter()
-            .any(|selector| matches_selector_with_scope_cached(node, selector, pseudo, cache, scope_root)),
+            .any(|selector| {
+                matches_selector_with_scope_mode_cached(
+                    node,
+                    selector,
+                    pseudo,
+                    cache,
+                    scope_root,
+                    allow_scope_ancestor_escape,
+                )
+            }),
         SimpleSelector::Not(selectors) => !selectors
             .iter()
-            .any(|selector| matches_selector_with_scope_cached(node, selector, pseudo, cache, scope_root)),
+            .any(|selector| {
+                matches_selector_with_scope_mode_cached(
+                    node,
+                    selector,
+                    pseudo,
+                    cache,
+                    scope_root,
+                    allow_scope_ancestor_escape,
+                )
+            }),
         SimpleSelector::Has(selectors) => selectors
             .iter()
-            .any(|selector| matches_relative_selector_cached(node, selector, cache)),
+            .any(|selector| {
+                matches_relative_selector_cached(
+                    node,
+                    selector,
+                    cache,
+                    scope_root,
+                    allow_scope_ancestor_escape,
+                )
+            }),
     }
 }
 
@@ -342,15 +456,33 @@ fn matches_relative_selector_cached(
     anchor: &NodeHandle,
     relative: &RelativeSelector,
     cache: &mut SelectorMatchCache,
+    scope_root: Option<&NodeHandle>,
+    allow_scope_ancestor_escape: bool,
 ) -> bool {
     let key = (anchor.identity(), relative as *const RelativeSelector as usize);
-    if let Some(result) = cache.relational_matches.get(&key) {
-        return *result;
+    // A relative selector can contain :scope.  Its result depends on the
+    // active scope root, so only reuse the document-wide cache for the
+    // unscoped path where no such binding exists.
+    if scope_root.is_none() && !allow_scope_ancestor_escape {
+        if let Some(result) = cache.relational_matches.get(&key) {
+            return *result;
+        }
     }
     let result = related_elements(anchor, relative.leading_combinator)
         .into_iter()
-        .any(|candidate| matches_relative_selector_part(&candidate, &relative.selector, 0, cache));
-    cache.relational_matches.insert(key, result);
+        .any(|candidate| {
+            matches_relative_selector_part(
+                &candidate,
+                &relative.selector,
+                0,
+                cache,
+                scope_root,
+                allow_scope_ancestor_escape,
+            )
+        });
+    if scope_root.is_none() && !allow_scope_ancestor_escape {
+        cache.relational_matches.insert(key, result);
+    }
     result
 }
 
@@ -359,8 +491,17 @@ fn matches_relative_selector_part(
     selector: &Selector,
     index: usize,
     cache: &mut SelectorMatchCache,
+    scope_root: Option<&NodeHandle>,
+    allow_scope_ancestor_escape: bool,
 ) -> bool {
-    if !matches_compound(node, &selector.parts[index], None, cache, None) {
+    if !matches_compound(
+        node,
+        &selector.parts[index],
+        None,
+        cache,
+        scope_root,
+        allow_scope_ancestor_escape,
+    ) {
         return false;
     }
     let next_index = index + 1;
@@ -372,7 +513,16 @@ fn matches_relative_selector_part(
     };
     related_elements(node, combinator)
         .into_iter()
-        .any(|candidate| matches_relative_selector_part(&candidate, selector, next_index, cache))
+        .any(|candidate| {
+            matches_relative_selector_part(
+                &candidate,
+                selector,
+                next_index,
+                cache,
+                scope_root,
+                allow_scope_ancestor_escape,
+            )
+        })
 }
 
 fn related_elements(node: &NodeHandle, combinator: Combinator) -> Vec<NodeHandle> {
@@ -460,6 +610,7 @@ fn matches_pseudo_class(
     pseudo: Option<PseudoElement>,
     cache: &mut SelectorMatchCache,
     scope_root: Option<&NodeHandle>,
+    _allow_scope_ancestor_escape: bool,
 ) -> bool {
     if let Some((function, argument)) = functional_pseudo(name) {
         // Pseudo-class names are ASCII case-insensitive; the argument keeps
