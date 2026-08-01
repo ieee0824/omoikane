@@ -284,8 +284,9 @@ impl Matrix4 {
             return None;
         }
         let mut matrix = Self::identity();
-        // CSS perspective uses m34 = -1 / distance.  In row-major form this
-        // is the fourth row, third column.
+        // CSS perspective contributes -1 / distance to homogeneous w.  In
+        // this row-major, column-vector representation that is the fourth
+        // row, third column (`values[14]`).
         matrix.values[14] = -1.0 / distance;
         Some(matrix)
     }
@@ -341,7 +342,7 @@ pub(crate) fn parse_transform_list(
 }
 
 /// Parses the `perspective` property and returns the projective matrix that
-/// should be applied to a child plane.  `none` and CSS-wide initial keywords
+/// should be applied to a child plane.  `none` and CSS-wide keywords
 /// intentionally produce identity; callers can use the same helper for value
 /// validation and layout composition.
 pub(crate) fn parse_perspective_with_origin(
