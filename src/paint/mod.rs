@@ -1705,6 +1705,24 @@ fn hit_test_box(
             }
         }
     }
+    // Inline SVG is represented by one replaced layout box for painting, but
+    // pointer events still target its child geometry.  Resolve the child hit
+    // after regular layout descendants (which preserve CSS paint order) and
+    // before falling back to the SVG viewport element itself.
+    if layout.node.tag_name().as_deref() == Some("svg") {
+        let svg_box = border_box_rect(layout);
+        let local_x = local_point.0 - svg_box.x;
+        let local_y = local_point.1 - svg_box.y;
+        if let Some(target) = crate::svg::hit_test_svg(
+            &layout.node,
+            local_x,
+            local_y,
+            svg_box.width,
+            svg_box.height,
+        ) {
+            return Some(target);
+        }
+    }
     if rect_contains_point(border_box, local_point.0, local_point.1)
         && accepts_pointer_events(&style)
     {
@@ -1714,10 +1732,10 @@ fn hit_test_box(
 }
 
 fn accepts_pointer_events(style: &ComputedStyle) -> bool {
-    !matches!(
-        style.get("pointer-events"),
-        Some(ComputedValue::Keyword(value)) if value.eq_ignore_ascii_case("none")
-    )
+    match style.get("pointer-events") {
+        Some(ComputedValue::Keyword(value)) => !value.eq_ignore_ascii_case("none"),
+        _ => true,
+    }
 }
 
 fn event_target_element(node: &NodeHandle) -> Option<NodeHandle> {

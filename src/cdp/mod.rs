@@ -4557,6 +4557,58 @@ mod tests {
     }
 
     #[test]
+    fn mouse_hit_test_respects_pointer_events_and_svg_geometry() {
+        let mut session = CdpSession::new().unwrap();
+        session
+            .install_document(
+                "https://example.test/",
+                r#"<html><head><style>*{margin:0}#back,#overlay{position:absolute;left:0;top:0;width:120px;height:80px}#back{background:gray}#overlay{background:red;pointer-events:none}#icon{position:absolute;left:130px;top:0;width:100px;height:100px}</style></head><body>
+                    <div id="back"></div><div id="overlay"></div>
+                    <svg id="icon" width="100" height="100" viewBox="0 0 100 100">
+                      <rect id="base" x="0" y="0" width="100" height="100" fill="red" pointer-events="none"></rect>
+                      <rect id="shape" x="20" y="20" width="30" height="30" fill="blue"></rect>
+                      <rect id="stroke" x="60" y="20" width="30" height="30" fill="none" stroke="green" stroke-width="4" pointer-events="stroke"></rect>
+                    </svg>
+                    <script>
+                      globalThis.targets=[];
+                      document.addEventListener('click',e=>targets.push(e.target.id||e.target.localName));
+                    </script>
+                </body></html>"#,
+                1,
+                "null",
+            )
+            .unwrap();
+
+        for (x, y) in [(10, 10), (155, 35), (190, 35)] {
+            session
+                .dispatch(
+                    "Input.dispatchMouseEvent",
+                    json!({"type":"mousePressed","x":x,"y":y,"button":"left","buttons":1}),
+                )
+                .unwrap();
+            session
+                .dispatch(
+                    "Input.dispatchMouseEvent",
+                    json!({"type":"mouseReleased","x":x,"y":y,"button":"left","buttons":0}),
+                )
+                .unwrap();
+        }
+        let state = session
+            .dispatch(
+                "Runtime.evaluate",
+                json!({
+                    "expression": "JSON.stringify({targets,none:getComputedStyle(overlay).pointerEvents})",
+                    "returnByValue": true,
+                }),
+            )
+            .unwrap();
+        assert_eq!(
+            state["result"]["value"],
+            r#"{"targets":["back","shape","stroke"],"none":"none"}"#
+        );
+    }
+
+    #[test]
     fn keyboard_input_targets_the_focused_element_with_cdp_fields() {
         let mut session = CdpSession::new().unwrap();
         session
