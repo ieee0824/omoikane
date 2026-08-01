@@ -5947,6 +5947,64 @@ fn clip_path_circle_keyword_radius_uses_positioned_center() {
 }
 
 #[test]
+fn clip_path_shape_bounds_cover_geometry_outside_border_box() {
+    let border_box = Rect {
+        x: 10.0,
+        y: 20.0,
+        width: 20.0,
+        height: 10.0,
+    };
+    let cases = [
+        (
+            "circle(200% at center)",
+            Rect {
+                x: 0.0,
+                y: 5.0,
+                width: 40.0,
+                height: 40.0,
+            },
+        ),
+        (
+            "ellipse(200% 300% at center)",
+            Rect {
+                x: -20.0,
+                y: -5.0,
+                width: 80.0,
+                height: 60.0,
+            },
+        ),
+        (
+            "polygon(-100% -100%, 300% -100%, 50% 300%)",
+            Rect {
+                x: -10.0,
+                y: 10.0,
+                width: 80.0,
+                height: 40.0,
+            },
+        ),
+    ];
+    for (value, expected) in cases {
+        let mut style = ComputedStyle::default();
+        style.set_paint_value("clip-path", value.to_string());
+        let shape = clip_path_shape(&style, border_box).expect("valid basic shape");
+        let bounds = shape.bounds();
+        assert_eq!(bounds, expected, "bounds for {value}");
+    }
+}
+
+#[test]
+fn clip_path_outer_bounds_preserve_shadow_paint() {
+    let canvas = paint_clip_path_document(
+        ".target { position: absolute; left: 0; top: 0; width: 10px; height: 10px; \
+         box-shadow: 15px 0 0 red; clip-path: circle(200% at center); }",
+        "<div class='target'></div>",
+        30.0,
+        10.0,
+    );
+    assert_eq!(canvas.pixel(20, 5), Some(Color::rgb(255, 0, 0)));
+}
+
+#[test]
 fn clip_path_ellipse_and_polygon_shapes_clip_paint() {
     let ellipse = paint_clip_path_document(
         ".target { width: 20px; height: 10px; background: blue; \
@@ -8536,19 +8594,23 @@ div {{ width: 8px; height: 8px; background: blue;
 fn mask_preparation_failure_falls_back_to_unmasked_painting() {
     let html = r#"<html><head><style>
 body { margin: 0; }
-div { width: 4px; height: 2px; background: red;
+div { width: 4px; height: 2px; background: red; box-shadow: 15px 0 0 blue;
       mask-image: linear-gradient(to right, black, white);
       mask-size: 0px 0px; }
 </style></head><body><div></div></body></html>"#;
     let document = TreeBuilder::parse(html).document();
     let canvas = render_document(
         &document,
-        Rect { x: 0.0, y: 0.0, width: 4.0, height: 2.0 },
+        Rect { x: 0.0, y: 0.0, width: 24.0, height: 2.0 },
     )
     .unwrap();
 
     assert_eq!(canvas.pixel(0, 0), Some(Color::rgb(255, 0, 0)));
     assert_eq!(canvas.pixel(3, 1), Some(Color::rgb(255, 0, 0)));
+    assert!(
+        (4..24).any(|x| canvas.pixel(x, 0) == Some(Color::rgb(0, 0, 255))),
+        "expected fallback painting to preserve the outer shadow"
+    );
 }
 
 #[test]

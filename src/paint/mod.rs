@@ -2007,12 +2007,6 @@ fn paint_box_internal_untransformed(
             height: canvas.height() as f32,
         };
         let mut effect_bounds = subtree_paint_bounds(layout, resolver);
-        if !masks.is_empty() {
-            let Some(masked_bounds) = intersect(effect_bounds, border_box) else {
-                return;
-            };
-            effect_bounds = masked_bounds;
-        }
         if let Some(shape) = &clip_shape {
             let Some(shaped_bounds) = intersect(effect_bounds, shape.bounds()) else {
                 return;
@@ -3738,10 +3732,16 @@ fn clip_path_shape(style: &ComputedStyle, border_box: Rect) -> Option<ClipPathSh
                 }
                 _ => shape_length(radius_text, border_box.width.min(border_box.height))?,
             };
+            let radius = radius.max(0.0);
             Some(ClipPathShape::Circle {
                 center,
-                radius: radius.max(0.0),
-                bounds: border_box,
+                radius,
+                bounds: Rect {
+                    x: center.0 - radius,
+                    y: center.1 - radius,
+                    width: radius * 2.0,
+                    height: radius * 2.0,
+                },
             })
         }
         "ellipse" => {
@@ -3757,10 +3757,17 @@ fn clip_path_shape(style: &ComputedStyle, border_box: Rect) -> Option<ClipPathSh
             let rx = shape_length(radii[0], border_box.width)?;
             let ry = shape_length(radii.get(1).copied().unwrap_or(radii[0]), border_box.height)?;
             let center = shape_position(position_text.trim(), border_box)?;
+            let rx = rx.max(0.0);
+            let ry = ry.max(0.0);
             Some(ClipPathShape::Ellipse {
                 center,
-                radii: (rx.max(0.0), ry.max(0.0)),
-                bounds: border_box,
+                radii: (rx, ry),
+                bounds: Rect {
+                    x: center.0 - rx,
+                    y: center.1 - ry,
+                    width: rx * 2.0,
+                    height: ry * 2.0,
+                },
             })
         }
         "polygon" => {
@@ -3777,9 +3784,24 @@ fn clip_path_shape(style: &ComputedStyle, border_box: Rect) -> Option<ClipPathSh
             if points.len() < 3 || points.len() > MAX_CLIP_PATH_POLYGON_POINTS {
                 return None;
             }
+            let min_x = points.iter().map(|point| point.0).fold(f32::INFINITY, f32::min);
+            let min_y = points.iter().map(|point| point.1).fold(f32::INFINITY, f32::min);
+            let max_x = points
+                .iter()
+                .map(|point| point.0)
+                .fold(f32::NEG_INFINITY, f32::max);
+            let max_y = points
+                .iter()
+                .map(|point| point.1)
+                .fold(f32::NEG_INFINITY, f32::max);
             Some(ClipPathShape::Polygon {
                 points,
-                bounds: border_box,
+                bounds: Rect {
+                    x: min_x,
+                    y: min_y,
+                    width: max_x - min_x,
+                    height: max_y - min_y,
+                },
             })
         }
         _ => None,
