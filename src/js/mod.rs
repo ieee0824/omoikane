@@ -49,6 +49,26 @@ use event_loop::{EventLoop, Task};
 /// [`JsRuntime::record_task_error`].
 const MAX_TASK_ERRORS: usize = 32;
 const MAX_CSP_VIOLATIONS: usize = 1024;
+const DOM_CONTENT_LOADED_SCRIPT: &str = concat!(
+    "document.__readyState = 'interactive'; ",
+    "try { if (typeof __omoikane_performance_navigation_event === 'function') ",
+    "__omoikane_performance_navigation_event('domInteractive'); } catch (_) { void 0; } ",
+    "try { if (typeof __omoikane_performance_navigation_event === 'function') ",
+    "__omoikane_performance_navigation_event('domContentLoadedStart'); } catch (_) { void 0; } ",
+    "document.dispatchEvent(new Event('DOMContentLoaded', { bubbles: true })); ",
+    "try { if (typeof __omoikane_performance_navigation_event === 'function') ",
+    "__omoikane_performance_navigation_event('domContentLoadedEnd'); } catch (_) { void 0; }",
+);
+const LOAD_SCRIPT: &str = concat!(
+    "document.__readyState = 'complete'; ",
+    "try { if (typeof __omoikane_performance_navigation_event === 'function') ",
+    "__omoikane_performance_navigation_event('domComplete'); } catch (_) { void 0; } ",
+    "try { if (typeof __omoikane_performance_navigation_event === 'function') ",
+    "__omoikane_performance_navigation_event('loadStart'); } catch (_) { void 0; } ",
+    "window.dispatchEvent(new Event('load', { bubbles: false })); ",
+    "try { if (typeof __omoikane_performance_navigation_event === 'function') ",
+    "__omoikane_performance_navigation_event('loadEnd'); } catch (_) { void 0; }",
+);
 
 thread_local! {
     static ACTIVE_HOST_STATE: RefCell<Option<Rc<RefCell<HostState>>>> = const { RefCell::new(None) };
@@ -2739,13 +2759,12 @@ impl JsRuntime {
         }
         immediate.extend(deferred);
         immediate.push(PageTaskSource::Classic {
-            source: "document.__readyState = 'interactive'; document.dispatchEvent(new Event('DOMContentLoaded'))".to_string(),
+            source: DOM_CONTENT_LOADED_SCRIPT.to_string(),
             label: "DOMContentLoaded".to_string(),
             script_node_id: None,
         });
         immediate.push(PageTaskSource::Classic {
-            source: "document.__readyState = 'complete'; window.dispatchEvent(new Event('load'))"
-                .to_string(),
+            source: LOAD_SCRIPT.to_string(),
             label: "load".to_string(),
             script_node_id: None,
         });
@@ -3472,18 +3491,25 @@ impl JsRuntime {
             );
             return Ok(());
         }
+        let timing_name = resource_reference_timing_name(&src, base_url.as_ref());
+        let fetch_start = std::time::Instant::now();
         let fetched = {
             let mut state = self.host_state.borrow_mut();
             fetch_script_resource_with_client(&src, base_url.as_ref(), &mut state.http_client)
         };
+        let elapsed_ms = fetch_start.elapsed().as_secs_f64() * 1_000.0;
         let Some((effective_url, source)) = fetched else {
             self.record_task_error(format!("[dynamic script: {src}] failed to fetch"));
+            let dispatch = dispatch_resource_timing_script(
+                "error", node_id, &timing_name, false, elapsed_ms,
+            );
             let result = self
-                .eval_async(&format!("__omoikane_dispatch_resource_error({node_id})"))
+                .eval_async(&dispatch)
                 .await;
             self.record_error_from(&src, result);
             return Ok(());
         };
+        let redirected = resource_reference_was_redirected(&src, &effective_url, base_url.as_ref());
         if !self
             .host_state
             .borrow()
@@ -3493,10 +3519,13 @@ impl JsRuntime {
             self.host_state.borrow_mut().record_csp_violation_for_node(
                 &script_node,
                 ResourceType::Script,
-                effective_url,
+                effective_url.clone(),
+            );
+            let dispatch = dispatch_resource_timing_script(
+                "error", node_id, &effective_url, redirected, elapsed_ms,
             );
             let result = self
-                .eval_async(&format!("__omoikane_dispatch_resource_error({node_id})"))
+                .eval_async(&dispatch)
                 .await;
             self.record_error_from(&src, result);
             return Ok(());
@@ -3525,7 +3554,9 @@ impl JsRuntime {
             self.record_task_error(format!("[dynamic script: {src}; {context}] {error}"));
         }
         let dispatched = self
-            .eval_async(&format!("__omoikane_dispatch_resource_load({node_id})"))
+            .eval_async(&dispatch_resource_timing_script(
+                "load", node_id, &effective_url, redirected, elapsed_ms,
+            ))
             .await;
         self.record_error_from("resource load", dispatched);
         self.sync_module_csp_violations();
@@ -4432,6 +4463,7 @@ impl JsRuntime {
                 // A script whose type Omoikane does not execute is not fetched and
                 // does not load, so it must not go on to dispatch `load` either.
                 let mut dispatch_load = should_dispatch;
+                let mut dispatch_timing: Option<(String, bool, f64)> = None;
                 if let Some((script_node, src, kind, base_url)) = dynamic_script {
                     let log_scripts = std::env::var_os("OMOIKANE_LOG_SCRIPTS").is_some();
                     if kind == ScriptKind::NotExecutable {
@@ -4458,6 +4490,8 @@ impl JsRuntime {
                         if log_scripts {
                             eprintln!("[omoikane][script] loading dynamic {src} kind={kind:?}");
                         }
+                        let timing_name = resource_reference_timing_name(&src, base_url.as_ref());
+                        let fetch_start = std::time::Instant::now();
                         let fetched = {
                             let mut state = self.host_state.borrow_mut();
                             fetch_script_resource_with_client(
@@ -4466,6 +4500,7 @@ impl JsRuntime {
                                 &mut state.http_client,
                             )
                         };
+                        let elapsed_ms = fetch_start.elapsed().as_secs_f64() * 1_000.0;
                         match fetched {
                             // Every failure below is the page's, not the engine's:
                             // it is recorded and execution continues, exactly as
@@ -4480,8 +4515,8 @@ impl JsRuntime {
                                     "[dynamic script: {src}] failed to fetch"
                                 ));
                                 dispatch_load = false;
-                                let dispatched = self.eval(&format!(
-                                    "__omoikane_dispatch_resource_error({node_id})"
+                                let dispatched = self.eval(&dispatch_resource_timing_script(
+                                    "error", node_id, &timing_name, false, elapsed_ms,
                                 ));
                                 self.record_error_from(&src, dispatched);
                                 let jobs = self.run_jobs();
@@ -4494,20 +4529,31 @@ impl JsRuntime {
                                     .csp_policy_for_node(&script_node)
                                     .allows_reference(ResourceType::Script, &effective_url) =>
                             {
+                                let redirected = resource_reference_was_redirected(
+                                    &src,
+                                    &effective_url,
+                                    base_url.as_ref(),
+                                );
                                 self.host_state.borrow_mut().record_csp_violation_for_node(
                                     &script_node,
                                     ResourceType::Script,
-                                    effective_url,
+                                    effective_url.clone(),
                                 );
                                 dispatch_load = false;
-                                let dispatched = self.eval(&format!(
-                                    "__omoikane_dispatch_resource_error({node_id})"
+                                let dispatched = self.eval(&dispatch_resource_timing_script(
+                                    "error", node_id, &effective_url, redirected, elapsed_ms,
                                 ));
                                 self.record_error_from(&src, dispatched);
                                 let jobs = self.run_jobs();
                                 self.record_error_from(&src, jobs);
                             }
-                            Some((_, source)) => {
+                            Some((effective_url, source)) => {
+                                let redirected = resource_reference_was_redirected(
+                                    &src,
+                                    &effective_url,
+                                    base_url.as_ref(),
+                                );
+                                dispatch_timing = Some((effective_url, redirected, elapsed_ms));
                                 let marked = self
                                     .eval(&format!("__omoikane_set_current_script({node_id})"));
                                 self.record_error_from(&src, marked);
@@ -4542,8 +4588,11 @@ impl JsRuntime {
                     }
                 }
                 if dispatch_load {
-                    let dispatched =
-                        self.eval(&format!("__omoikane_dispatch_resource_load({node_id})"));
+                    let (timing_name, redirected, elapsed_ms) = dispatch_timing
+                        .unwrap_or_else(|| (String::new(), false, 0.0));
+                    let dispatched = self.eval(&dispatch_resource_timing_script(
+                        "load", node_id, &timing_name, redirected, elapsed_ms,
+                    ));
                     self.record_error_from("resource load", dispatched);
                     let jobs = self.run_jobs();
                     self.record_error_from("resource load", jobs);
@@ -4562,9 +4611,7 @@ impl JsRuntime {
     /// and executing inline scripts). Listeners registered via
     /// `document.addEventListener('DOMContentLoaded', fn)` will be invoked.
     pub fn fire_dom_content_loaded(&mut self) -> JsResult<()> {
-        self.eval(
-            "document.__readyState = 'interactive'; document.dispatchEvent(new Event('DOMContentLoaded'))",
-        )?;
+        self.eval(DOM_CONTENT_LOADED_SCRIPT)?;
         self.run_jobs()
     }
 
@@ -4610,9 +4657,7 @@ impl JsRuntime {
     /// page's `<body onload="...">` handler runs at this point.
     pub fn fire_load(&mut self) -> JsResult<()> {
         // The load event does not bubble.
-        self.eval(
-            "document.__readyState = 'complete'; window.dispatchEvent(new Event('load', { bubbles: false }))",
-        )?;
+        self.eval(LOAD_SCRIPT)?;
         self.run_jobs()
     }
 
@@ -4713,15 +4758,33 @@ impl JsRuntime {
                             );
                             continue;
                         }
+                        let redirected = resource_reference_was_redirected(
+                            &src_url,
+                            &effective_url,
+                            base_url,
+                        );
+                        let elapsed_ms = fetch_start.elapsed().as_secs_f64() * 1_000.0;
+                        let _ = self.eval(&format!(
+                            "__omoikane_record_resource_timing({}, 'script', 200, false, {redirected}, {elapsed_ms})",
+                            serde_json::to_string(&effective_url)
+                                .unwrap_or_else(|_| "\"\"".to_string()),
+                        ));
                         if log_scripts {
                             eprintln!(
                                 "[omoikane][script] fetched {src_url} elapsed_ms={:.3}",
-                                fetch_start.elapsed().as_secs_f64() * 1_000.0,
+                                elapsed_ms,
                             );
                         }
                         (code, src_url.clone())
                     }
                     None => {
+                        let timing_name = resource_reference_timing_name(&src_url, base_url);
+                        let elapsed_ms = fetch_start.elapsed().as_secs_f64() * 1_000.0;
+                        let _ = self.eval(&format!(
+                            "__omoikane_record_resource_timing({}, 'script', 0, true, false, {elapsed_ms})",
+                            serde_json::to_string(&timing_name)
+                                .unwrap_or_else(|_| "\"\"".to_string()),
+                        ));
                         errors.push(format!("failed to fetch script: {src_url}"));
                         continue;
                     }
@@ -4980,6 +5043,57 @@ fn resolve_resource_ref(
         let url = crate::http::url::resolve_url(base, src).ok()?;
         Some(ResolvedResource::Url(url.to_string()))
     }
+}
+
+/// Returns whether a fetched resource ended at a different URL than the one
+/// requested by the document. Relative references are resolved against the
+/// document base before comparing parsed HTTP(S) URLs, so a relative script
+/// does not look redirected merely because the fetch helper returns an
+/// absolute effective URL.
+fn resource_reference_was_redirected(
+    requested: &str,
+    effective: &str,
+    base_url: Option<&crate::http::Url>,
+) -> bool {
+    let requested = match resolve_resource_ref(requested, base_url) {
+        Some(ResolvedResource::Url(url)) => url,
+        _ => requested.to_string(),
+    };
+    match (
+        requested.parse::<crate::http::Url>(),
+        effective.parse::<crate::http::Url>(),
+    ) {
+        (Ok(requested), Ok(effective)) => requested != effective,
+        _ => requested != effective,
+    }
+}
+
+fn resource_reference_timing_name(
+    requested: &str,
+    base_url: Option<&crate::http::Url>,
+) -> String {
+    match resolve_resource_ref(requested, base_url) {
+        Some(ResolvedResource::Url(url)) => url,
+        _ => requested.to_string(),
+    }
+}
+
+fn dispatch_resource_timing_script(
+    event: &str,
+    node_id: usize,
+    url: &str,
+    redirected: bool,
+    elapsed_ms: f64,
+) -> String {
+    let safe_url = serde_json::to_string(url).unwrap_or_else(|_| "\"\"".to_string());
+    let safe_elapsed = if elapsed_ms.is_finite() && elapsed_ms >= 0.0 {
+        elapsed_ms
+    } else {
+        0.0
+    };
+    format!(
+        "__omoikane_dispatch_resource_{event}({node_id}, {safe_url}, {redirected}, {safe_elapsed})"
+    )
 }
 
 fn same_origin_url(a: &crate::http::Url, b: &crate::http::Url) -> bool {
@@ -13708,6 +13822,53 @@ mod tests {
                 .unwrap()
                 .as_boolean()
                 .unwrap()
+        );
+    }
+
+    #[test]
+    fn owned_document_task_lifecycle_survives_overwritten_navigation_hook() {
+        let document = crate::html::TreeBuilder::parse(
+            r#"<html><body>
+            <script>
+              globalThis.pageLifecycle = [];
+              document.addEventListener('DOMContentLoaded', () => pageLifecycle.push('dcl'));
+              window.addEventListener('load', () => pageLifecycle.push('load'));
+              globalThis.__omoikane_performance_navigation_event = () => {
+                throw new Error('hook failure');
+              };
+            </script>
+            </body></html>"#,
+        )
+        .document();
+        let runtime = JsRuntime::with_document(document).unwrap();
+        let mut task = Box::pin(runtime.into_document_page_task(25, None));
+        let waker: &'static std::task::Waker = std::task::Waker::noop();
+        let mut context = FutureContext::from_waker(waker);
+        let mut completed = loop {
+            if let Poll::Ready(completed) = task.as_mut().poll(&mut context) {
+                break completed;
+            }
+        };
+        assert_eq!(completed.result, Ok(Vec::new()));
+        assert_eq!(
+            completed
+                .runtime
+                .eval("pageLifecycle.join(',')")
+                .unwrap()
+                .as_string()
+                .unwrap()
+                .to_std_string_escaped(),
+            "dcl,load"
+        );
+        assert_eq!(
+            completed
+                .runtime
+                .eval("document.readyState")
+                .unwrap()
+                .as_string()
+                .unwrap()
+                .to_std_string_escaped(),
+            "complete"
         );
     }
 
@@ -22809,6 +22970,400 @@ b</textarea></form>"#);
     }
 
     #[test]
+    fn performance_navigation_and_resource_timing_entries_have_lifecycle_semantics() {
+        let mut runtime = JsRuntime::with_document_and_url(
+            default_document(),
+            "https://example.test/index.html",
+        )
+        .unwrap();
+        assert!(runtime
+            .eval(
+                r#"(() => {
+                  const navigation = performance.getEntriesByType("navigation");
+                  if (navigation.length !== 1) return false;
+                  const entry = navigation[0];
+                  if (!(entry instanceof PerformanceNavigationTiming) ||
+                      entry.name !== "https://example.test/index.html" ||
+                      entry.entryType !== "navigation" || entry.startTime !== 0 ||
+                      entry.duration < 0 || entry.type !== "navigate" ||
+                      entry.redirectCount !== 0 || entry.toJSON().entryType !== "navigation" ||
+                      entry.toJSON().type !== "navigate" ||
+                      "navigationStart" in entry || "navigationStart" in entry.toJSON()) return false;
+                  performance.clearResourceTimings();
+                  performance.setResourceTimingBufferSize(2);
+                  performance.mark("survivor");
+                  const first = new Image();
+                  first.src = "data:image/png;base64,AA==";
+                  const second = new Image();
+                  second.src = "data:image/png;base64,AA==";
+                  const third = new Image();
+                  third.src = "data:image/png;base64,AA==";
+                  const resources = performance.getEntriesByType("resource");
+                  const resourceStart = Object.getOwnPropertyDescriptor(first, "__resourceTimingStart");
+                  const resourceRecorded = Object.getOwnPropertyDescriptor(first, "__resourceTimingRecorded");
+                  return resources.length === 2 &&
+                    resourceStart && resourceRecorded &&
+                    resourceStart.enumerable === false && resourceRecorded.enumerable === false &&
+                    resources.every(resource => resource instanceof PerformanceResourceTiming &&
+                      resource.initiatorType === "img" && resource.responseEnd >= resource.startTime &&
+                      resource.toJSON().initiatorType === "img") &&
+                    performance.getEntriesByName("data:image/png;base64,AA==").length === 2;
+                })()"#,
+            )
+            .unwrap()
+            .as_boolean()
+            .unwrap());
+        assert!(runtime
+            .eval(
+                r#"(() => {
+                  performance.clearResourceTimings();
+                  return performance.getEntriesByType("resource").length === 0 &&
+                    performance.getEntriesByType("navigation").length === 1 &&
+                    performance.getEntriesByName("survivor", "mark").length === 1;
+                })()"#,
+            )
+            .unwrap()
+            .as_boolean()
+            .unwrap());
+        runtime.fire_dom_content_loaded().unwrap();
+        runtime.fire_load().unwrap();
+        assert!(runtime
+            .eval(
+                r#"(() => {
+                  const entry = performance.getEntriesByType("navigation")[0];
+                  return entry.domInteractive >= 0 &&
+                    entry.domContentLoadedEventStart <= entry.domContentLoadedEventEnd &&
+                    entry.domContentLoadedEventEnd <= entry.domComplete &&
+                    entry.loadEventStart <= entry.loadEventEnd;
+                })()"#,
+            )
+            .unwrap()
+            .as_boolean()
+            .unwrap());
+    }
+
+    #[test]
+    fn performance_navigation_lifecycle_survives_hook_overwrite() {
+        let mut runtime = JsRuntime::with_document(default_document()).unwrap();
+        runtime
+            .eval(
+                r#"globalThis.lifecycleEvents = [];
+                   document.addEventListener("DOMContentLoaded", () => lifecycleEvents.push("dcl"));
+                   window.addEventListener("load", () => lifecycleEvents.push("load"));
+                   globalThis.__omoikane_performance_navigation_event = () => { throw new Error("hook failure"); };"#,
+            )
+            .unwrap();
+        runtime.fire_dom_content_loaded().unwrap();
+        runtime.fire_load().unwrap();
+        assert_eq!(eval_str(&mut runtime, "lifecycleEvents.join(',')"), "dcl,load");
+    }
+
+    #[test]
+    fn performance_navigation_duration_and_domcontentloaded_bubble() {
+        let mut runtime = JsRuntime::with_document(default_document()).unwrap();
+        runtime
+            .eval(
+                r#"globalThis.windowDclCount = 0;
+                   window.addEventListener("DOMContentLoaded", () => windowDclCount++);"#,
+            )
+            .unwrap();
+        runtime.fire_dom_content_loaded().unwrap();
+        runtime.fire_load().unwrap();
+        assert!(runtime
+            .eval(
+                r#"(() => {
+                  const entry = performance.getEntriesByType("navigation")[0];
+                  const domInteractiveDescriptor = Object.getOwnPropertyDescriptor(entry, "domInteractive");
+                  const durationDescriptor = Object.getOwnPropertyDescriptor(entry, "duration");
+                  const previousDomInteractive = entry.domInteractive;
+                  const deleted = delete entry.domInteractive;
+                  __omoikane_performance_navigation_event("domInteractive");
+                  return windowDclCount === 1 && !deleted &&
+                    domInteractiveDescriptor.configurable === false &&
+                    durationDescriptor.configurable === false &&
+                    typeof domInteractiveDescriptor.get === "function" &&
+                    typeof durationDescriptor.get === "function" &&
+                    entry.domInteractive >= previousDomInteractive &&
+                    entry.loadEventEnd >= entry.loadEventStart &&
+                    entry.duration === entry.loadEventEnd - entry.startTime &&
+                    entry.toJSON().duration === entry.duration;
+                })()"#,
+            )
+            .unwrap()
+            .as_boolean()
+            .unwrap());
+    }
+
+    #[test]
+    fn performance_resource_timing_records_fetch_and_xhr_success_and_abort() {
+        let port = spawn_static_http_server("text/plain", "tïmed");
+        let mut runtime = JsRuntime::with_document_and_url(
+            default_document(),
+            &format!("http://127.0.0.1:{port}/index.html"),
+        )
+        .unwrap();
+        runtime
+            .eval(&format!(
+                r#"globalThis.fetchResult = null;
+                   fetch("http://127.0.0.1:{port}/fetch").then(response => response.text()).then(text => fetchResult = text);
+                   globalThis.xhr = new XMLHttpRequest();
+                   xhr.open("GET", "http://127.0.0.1:{port}/xhr");
+                   xhr.send();"#,
+            ))
+            .unwrap();
+        runtime.run_until_idle().unwrap();
+        assert!(runtime
+            .eval(&format!(
+                r#"(() => {{
+                  const fetchEntries = performance.getEntriesByName("http://127.0.0.1:{port}/fetch");
+                  const xhrEntries = performance.getEntriesByName("http://127.0.0.1:{port}/xhr");
+                  const resources = performance.getEntriesByType("resource");
+                  const expectedBytes = new TextEncoder().encode("tïmed").length;
+                  return fetchResult === "tïmed" && xhr.status === 200 &&
+                    fetchEntries.length === 1 && xhrEntries.length === 1 &&
+                    fetchEntries[0].initiatorType === "fetch" &&
+                    fetchEntries[0].transferSize === expectedBytes &&
+                    fetchEntries[0].encodedBodySize === expectedBytes &&
+                    fetchEntries[0].decodedBodySize === expectedBytes &&
+                    xhrEntries[0].initiatorType === "xmlhttprequest" &&
+                    xhrEntries[0].transferSize === expectedBytes &&
+                    xhrEntries[0].encodedBodySize === expectedBytes &&
+                    xhrEntries[0].decodedBodySize === expectedBytes &&
+                    resources.every(entry => entry.responseEnd >= entry.startTime && entry.fetchStart <= entry.requestStart && entry.requestStart <= entry.responseStart);
+                }})()"#,
+            ))
+            .unwrap()
+            .as_boolean()
+            .unwrap());
+        runtime
+            .eval(&format!(
+                r#"xhr.open("GET", "http://127.0.0.1:{port}/abort"); xhr.send(); xhr.abort();"#,
+            ))
+            .unwrap();
+        runtime.run_until_idle().unwrap();
+        assert!(runtime
+            .eval(&format!(
+                r#"(() => {{
+                  const aborted = performance.getEntriesByName("http://127.0.0.1:{port}/abort");
+                  return aborted.length === 1 && aborted[0].initiatorType === "xmlhttprequest" &&
+                    aborted[0].responseStatus === 0 && aborted[0].responseEnd >= aborted[0].startTime;
+                }})()"#,
+            ))
+            .unwrap()
+            .as_boolean()
+            .unwrap());
+    }
+
+    #[test]
+    fn performance_resource_timing_fetch_completion_is_idempotent() {
+        let mut runtime = JsRuntime::with_document(default_document()).unwrap();
+        runtime
+            .eval(
+                r#"(() => {
+                  performance.clearResourceTimings();
+                  const originalFetch = globalThis.__omoikane_fetch;
+                  globalThis.__omoikane_fetch = () => Promise.resolve(JSON.stringify({
+                    status: 200,
+                    statusText: "OK",
+                    url: "https://example.test/broken-response",
+                    redirected: false,
+                    type: "basic",
+                    headers: [null],
+                    bodyText: "",
+                    bodyBase64: null,
+                  }));
+                  const restoreFetch = () => {
+                    globalThis.__omoikane_fetch = originalFetch;
+                  };
+                  fetch("https://example.test/broken-response").then(restoreFetch, restoreFetch);
+                })()"#,
+            )
+            .unwrap();
+        runtime.run_until_idle().unwrap();
+        assert!(runtime
+            .eval(
+                r#"(() => {
+                  const entries = performance.getEntriesByName("https://example.test/broken-response");
+                  return entries.length === 1 && entries[0].responseStatus === 200;
+                })()"#,
+            )
+            .unwrap()
+            .as_boolean()
+            .unwrap());
+    }
+
+    #[test]
+    fn performance_resource_timing_buffer_count_resets_after_clear() {
+        let mut runtime = JsRuntime::with_document(default_document()).unwrap();
+        assert!(runtime
+            .eval(
+                r#"(() => {
+                  performance.clearResourceTimings();
+                  performance.setResourceTimingBufferSize(1);
+                  performance.mark("before");
+                  new Image().src = "data:image/png;base64,AA==";
+                  new Image().src = "data:image/png;base64,AA==";
+                  const full = performance.getEntriesByType("resource").length === 1;
+                  performance.clearResourceTimings();
+                  performance.mark("after");
+                  new Image().src = "data:image/png;base64,AA==";
+                  return full && performance.getEntriesByType("resource").length === 1 &&
+                    performance.getEntriesByType("mark").length === 2;
+                })()"#,
+            )
+            .unwrap()
+            .as_boolean()
+            .unwrap());
+    }
+
+    #[test]
+    fn performance_resource_timing_link_finishes_when_rel_follows_href() {
+        let mut runtime = JsRuntime::with_document(default_document()).unwrap();
+        assert!(runtime
+            .eval(
+                r#"(() => {
+                  performance.clearResourceTimings();
+                  const stylesheetHref = "data:text/css,body%7Bcolor%3Ared%7D";
+                  const stylesheet = document.createElement("link");
+                  stylesheet.href = stylesheetHref;
+                  stylesheet.rel = "stylesheet";
+                  const preloadHref = "data:text/css,body%7Bbackground%3Ablue%7D";
+                  const preload = document.createElement("link");
+                  preload.setAttribute("href", preloadHref);
+                  preload.setAttribute("rel", "preload");
+                  const entries = performance.getEntriesByType("resource");
+                  return entries.length === 2 &&
+                    entries.every(entry => entry.initiatorType === "link" &&
+                      entry.responseStatus === 200 && entry.responseEnd >= entry.startTime) &&
+                    performance.getEntriesByName(stylesheetHref).length === 1 &&
+                    performance.getEntriesByName(preloadHref).length === 1;
+                })()"#,
+            )
+            .unwrap()
+            .as_boolean()
+            .unwrap());
+    }
+
+    #[test]
+    fn performance_resource_timing_script_redirect_records_redirect_window() {
+        let port = spawn_redirect_script_server();
+        let requested = format!("http://127.0.0.1:{port}/redirect.js");
+        let effective = format!("http://127.0.0.1:{port}/final.js");
+        let mut runtime = runtime_from_html(&format!(
+            r#"<html><head><script src="{requested}"></script></head><body></body></html>"#
+        ));
+        let base: crate::http::Url = format!("http://127.0.0.1:{port}/index.html")
+            .parse()
+            .unwrap();
+        let errors = runtime.execute_document_scripts(Some(&base));
+        assert!(errors.is_empty(), "unexpected errors: {errors:?}");
+        assert!(runtime
+            .eval(&format!(
+                r#"(() => {{
+                  const entry = performance.getEntriesByType("resource")
+                    .find(item => item.initiatorType === "script");
+                  return globalThis.redirectScriptRan === true && entry &&
+                    entry.name === "{effective}" && entry.responseStatus === 200 &&
+                    entry.redirectStart > 0 && entry.redirectEnd >= entry.redirectStart &&
+                    entry.redirectEnd <= entry.fetchStart && entry.fetchStart <= entry.requestStart &&
+                    entry.requestStart <= entry.responseStart && entry.responseStart <= entry.responseEnd &&
+                    entry.responseEnd >= entry.redirectEnd && entry.responseEnd > entry.startTime;
+                }})()"#,
+            ))
+            .unwrap()
+            .as_boolean()
+            .unwrap());
+    }
+
+    #[test]
+    fn performance_resource_timing_fetch_redirect_uses_effective_url() {
+        let port = spawn_redirect_script_server();
+        let requested = format!("http://127.0.0.1:{port}/redirect.js");
+        let effective = format!("http://127.0.0.1:{port}/final.js");
+        let mut runtime = JsRuntime::with_document_and_url(
+            default_document(),
+            &format!("http://127.0.0.1:{port}/index.html"),
+        )
+        .unwrap();
+        runtime
+            .eval(&format!(
+                r#"fetch("{requested}").then(response => response.text());"#,
+            ))
+            .unwrap();
+        runtime.run_until_idle().unwrap();
+        assert!(runtime
+            .eval(&format!(
+                r#"(() => {{
+                  const entries = performance.getEntriesByType("resource")
+                    .filter(item => item.initiatorType === "fetch");
+                  const entry = entries[0];
+                  return entries.length === 1 && entry.name === "{effective}" &&
+                    entry.responseStatus === 200 && entry.redirectStart > 0 &&
+                    entry.redirectEnd >= entry.redirectStart &&
+                    entry.redirectEnd <= entry.fetchStart && entry.fetchStart <= entry.requestStart &&
+                    entry.requestStart <= entry.responseStart && entry.responseStart <= entry.responseEnd &&
+                    entry.responseEnd > entry.startTime;
+                }})()"#,
+            ))
+            .unwrap()
+            .as_boolean()
+            .unwrap());
+    }
+
+    #[test]
+    fn performance_resource_timing_failed_script_resolves_reference_name() {
+        let port = spawn_redirect_script_server();
+        let effective = format!("http://127.0.0.1:{port}/missing.js");
+        let mut runtime = runtime_from_html(
+            r#"<html><head><script src="missing.js"></script></head><body></body></html>"#,
+        );
+        let base: crate::http::Url = format!("http://127.0.0.1:{port}/index.html")
+            .parse()
+            .unwrap();
+        let errors = runtime.execute_document_scripts(Some(&base));
+        assert_eq!(errors.len(), 1, "expected one missing-script error: {errors:?}");
+        assert!(runtime
+            .eval(&format!(
+                r#"(() => {{
+                  const entry = performance.getEntriesByName("{effective}")[0];
+                  return entry && entry.entryType === "resource" &&
+                    entry.initiatorType === "script" && entry.responseStatus === 0;
+                }})()"#,
+            ))
+            .unwrap()
+            .as_boolean()
+            .unwrap());
+    }
+
+    #[test]
+    fn performance_resource_timing_buffer_full_event_targets_performance() {
+        let mut runtime = JsRuntime::with_document(default_document()).unwrap();
+        runtime
+            .eval(
+                r#"(() => {
+                  globalThis.bufferFullState = null;
+                  performance.clearResourceTimings();
+                  performance.setResourceTimingBufferSize(1);
+                  performance.onresourcetimingbufferfull = event => {
+                    event.initEvent("mutated", false, false);
+                    bufferFullState = [event.target === performance, event.currentTarget === performance,
+                      event.eventPhase === 2, event.type === "resourcetimingbufferfull",
+                      event.composedPath().length === 1 && event.composedPath()[0] === performance];
+                  };
+                  new Image().src = "data:image/png;base64,AA==";
+                  new Image().src = "data:image/png;base64,AA==";
+                })()"#,
+            )
+            .unwrap();
+        runtime.run_jobs().unwrap();
+        assert!(runtime
+            .eval("bufferFullState && bufferFullState[0] && bufferFullState[1] && bufferFullState[2] && bufferFullState[3] && bufferFullState[4]")
+            .unwrap()
+            .as_boolean()
+            .unwrap());
+    }
+
+    #[test]
     fn user_timing_records_orders_and_clears_entries() {
         let mut runtime = JsRuntime::with_document(default_document()).unwrap();
         assert!(runtime
@@ -22830,7 +23385,8 @@ b</textarea></form>"#);
                   const late = performance.mark("same", { startTime: 20, detail: { id: 1 } });
                   const early = performance.mark("same", { startTime: 10 });
                   const measure = performance.measure("span", { start: 10, end: 25, detail: "d" });
-                  const entries = performance.getEntries();
+                  const entries = performance.getEntries().filter(entry =>
+                    entry.entryType === "mark" || entry.entryType === "measure");
                   const valid = late instanceof PerformanceMark && late instanceof PerformanceEntry &&
                     measure instanceof PerformanceMeasure && measure.duration === 15 && measure.detail === "d" &&
                     late.detail.id === 1 && entries.length === 3 &&
@@ -22839,7 +23395,9 @@ b</textarea></form>"#);
                     performance.getEntriesByType("measure")[0] === measure;
                   performance.clearMarks("same");
                   performance.clearMeasures("span");
-                  return valid && performance.getEntries().length === 0;
+                  return valid && performance.getEntries().filter(entry =>
+                    entry.entryType === "mark" || entry.entryType === "measure").length === 0 &&
+                    performance.getEntriesByType("navigation").length === 1;
                 })()"#
             )
             .unwrap()
@@ -23014,7 +23572,7 @@ b</textarea></form>"#);
                     throwsTypeError(() => observer.observe({ type: "mark", entryTypes: ["mark"] })) &&
                     throwsTypeError(() => observer.observe({ entryTypes: [] })) && modeError &&
                     Object.isFrozen(PerformanceObserver.supportedEntryTypes) &&
-                    PerformanceObserver.supportedEntryTypes.join(",") === "mark,measure";
+                    PerformanceObserver.supportedEntryTypes.join(",") === "navigation,resource,mark,measure";
                 })()"#,
             )
             .unwrap()
@@ -24516,6 +25074,44 @@ b</textarea></form>"#);
                 .as_boolean()
                 .unwrap()
         );
+    }
+
+    #[test]
+    fn connected_dynamic_script_redirect_records_effective_resource_timing() {
+        let port = spawn_redirect_script_server();
+        let requested = format!("http://127.0.0.1:{port}/redirect.js");
+        let effective = format!("http://127.0.0.1:{port}/final.js");
+        use crate::html::TreeBuilder;
+        let document = TreeBuilder::parse("<html><head></head><body></body></html>").document();
+        let mut runtime = JsRuntime::with_document_and_url(
+            document,
+            &format!("http://127.0.0.1:{port}/index.html"),
+        )
+        .unwrap();
+        runtime
+            .eval(&format!(
+                r#"const script = document.createElement("script");
+                   script.src = "{requested}";
+                   script.addEventListener("load", () => globalThis.dynamicRedirectLoaded = true);
+                   document.head.appendChild(script);"#,
+            ))
+            .unwrap();
+        runtime.run_until_idle().unwrap();
+        assert!(runtime
+            .eval(&format!(
+                r#"(() => {{
+                  const entry = performance.getEntriesByType("resource")
+                    .find(item => item.initiatorType === "script");
+                  return globalThis.dynamicRedirectLoaded === true && entry &&
+                    entry.name === "{effective}" && entry.responseStatus === 200 &&
+                    entry.redirectStart > 0 && entry.redirectEnd >= entry.redirectStart &&
+                    entry.redirectEnd <= entry.fetchStart && entry.fetchStart <= entry.requestStart &&
+                    entry.requestStart <= entry.responseStart && entry.responseStart <= entry.responseEnd;
+                }})()"#,
+            ))
+            .unwrap()
+            .as_boolean()
+            .unwrap());
     }
 
     #[test]
@@ -28043,6 +28639,35 @@ b</textarea></form>"#);
                     content_type,
                     body.len(),
                     body
+                );
+                let _ = stream.write_all(response.as_bytes());
+            }
+        });
+        port
+    }
+
+    fn spawn_redirect_script_server() -> u16 {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { break };
+                let mut request = [0u8; 4096];
+                let size = stream.read(&mut request).unwrap_or(0);
+                let request = String::from_utf8_lossy(&request[..size]);
+                let path = request.split_whitespace().nth(1).unwrap_or("/");
+                let (status, headers, body) = match path {
+                    "/redirect.js" => ("302 Found", "Location: /final.js\r\n", ""),
+                    "/final.js" => (
+                        "200 OK",
+                        "Content-Type: text/javascript\r\n",
+                        "globalThis.redirectScriptRan = true;",
+                    ),
+                    _ => ("404 Not Found", "", ""),
+                };
+                let response = format!(
+                    "HTTP/1.1 {status}\r\n{headers}Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len(),
                 );
                 let _ = stream.write_all(response.as_bytes());
             }

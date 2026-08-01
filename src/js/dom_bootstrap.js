@@ -6183,6 +6183,10 @@
   }
 
   class HTMLScriptElement extends HTMLElement {
+    setAttribute(name, value) {
+      if (String(name).toLowerCase() === "src") noteElementResourceStart(this);
+      super.setAttribute(name, value);
+    }
     get src() {
       return this.getAttribute("src") || "";
     }
@@ -6215,6 +6219,14 @@
   }
 
   class HTMLImageElement extends HTMLElement {
+    setAttribute(name, value) {
+      const isSource = String(name).toLowerCase() === "src";
+      if (isSource) noteElementResourceStart(this);
+      super.setAttribute(name, value);
+      if (isSource && /^(?:data:|blob:)/i.test(String(value))) {
+        finishElementResourceTiming(this, 200, false);
+      }
+    }
     get src() {
       return this.getAttribute("src") || "";
     }
@@ -7200,11 +7212,31 @@
   };
 
   class HTMLLinkElement extends HTMLElement {
+    setAttribute(name, value) {
+      const attribute = String(name).toLowerCase();
+      const isHref = attribute === "href";
+      const isRel = attribute === "rel";
+      if (isHref) noteElementResourceStart(this);
+      super.setAttribute(name, value);
+      const href = this.getAttribute("href");
+      if ((isHref || isRel) &&
+          (this.relList.contains("stylesheet") || this.relList.contains("preload")) &&
+          /^(?:data:|blob:)/i.test(String(href || ""))) {
+        finishElementResourceTiming(this, 200, false);
+      }
+    }
     get rel() {
       return this.getAttribute("rel") || "";
     }
     set rel(value) {
       this.setAttribute("rel", String(value));
+    }
+    get href() {
+      const raw = this.getAttribute("href");
+      return raw === null ? "" : __omoikane_resolve_url(raw);
+    }
+    set href(value) {
+      this.setAttribute("href", String(value));
     }
     get relList() {
       const link = this;
@@ -8364,15 +8396,21 @@
   globalThis.__omoikane_wire_inline_handlers = function() {
     wireInlineHandlers(globalThis.document);
   };
-  globalThis.__omoikane_dispatch_resource_load = function(id) {
+  globalThis.__omoikane_dispatch_resource_load = function(id, url = "", redirected = false, elapsedMs = 0) {
     const element = wrapNode(id);
-    if (element) element.dispatchEvent(new Event("load", { bubbles: false }));
+    if (element) {
+      finishElementResourceTiming(element, 200, false, { url, redirected, elapsedMs });
+      element.dispatchEvent(new Event("load", { bubbles: false }));
+    }
   };
   // A resource that could not be fetched fires `error`, not `load`. Loaders that
   // fall back when a script is unavailable listen for exactly this.
-  globalThis.__omoikane_dispatch_resource_error = function(id) {
+  globalThis.__omoikane_dispatch_resource_error = function(id, url = "", redirected = false, elapsedMs = 0) {
     const element = wrapNode(id);
-    if (element) element.dispatchEvent(new Event("error", { bubbles: false }));
+    if (element) {
+      finishElementResourceTiming(element, 0, true, { url, redirected, elapsedMs });
+      element.dispatchEvent(new Event("error", { bubbles: false }));
+    }
   };
   globalThis.__omoikane_dispatch_mouse_input = function(id, type, init, focusTarget) {
     const target = wrapNode(id) || document;
@@ -10281,9 +10319,38 @@
     return hours + ":" + minutes + ":" + seconds;
   };
 
-  // Performance Timeline, User Timing, and observation of User Timing entries.
-  // Resource/Navigation/Paint Timing remain outside this core implementation.
+  // Performance Timeline, User Timing, Resource/Navigation Timing, and
+  // observation of all entries implemented by this runtime.  Network timing is
+  // recorded at the JS/native boundary below (fetch/XHR and resource element
+  // completion), so every entry uses the host's monotonic clock and the same
+  // time origin as User Timing.
   const performanceEntryToken = Symbol("PerformanceEntry internal constructor");
+  const nativePerformanceNow = __omoikane_performance_now;
+  const navigationTimingValues = new WeakMap();
+
+  function navigationTimingState(target) {
+    let state = navigationTimingValues.get(target);
+    if (!state) {
+      state = Object.create(null);
+      navigationTimingValues.set(target, state);
+    }
+    return state;
+  }
+
+  function defineNavigationTimingField(target, field, value) {
+    const state = navigationTimingState(target);
+    state[field] = value;
+    if (Object.prototype.hasOwnProperty.call(target, field)) return;
+    Object.defineProperty(target, field, {
+      get() {
+        const state = navigationTimingValues.get(this);
+        return state ? state[field] : 0;
+      },
+      enumerable: true,
+      configurable: false,
+    });
+  }
+
   function isDictionary(value) {
     return value !== null && (typeof value === "object" || typeof value === "function");
   }
@@ -10295,8 +10362,15 @@
         name: { value: String(name), enumerable: true },
         entryType: { value: String(entryType), enumerable: true },
         startTime: { value: Number(startTime), enumerable: true },
-        duration: { value: Number(duration), enumerable: true },
       });
+      if (String(entryType) === "navigation") {
+        defineNavigationTimingField(this, "duration", Number(duration));
+      } else {
+        Object.defineProperty(this, "duration", {
+          value: Number(duration),
+          enumerable: true,
+        });
+      }
     }
     toJSON() {
       return {
@@ -10313,7 +10387,7 @@
       options = options ?? {};
       if (!isDictionary(options)) throw new TypeError("PerformanceMark options must be a dictionary");
       const startTime = options.startTime === undefined
-        ? __omoikane_performance_now()
+        ? nativePerformanceNow()
         : Number(options.startTime);
       if (Number.isNaN(startTime) || startTime < 0) {
         throw new TypeError("PerformanceMark startTime must be a non-negative number");
@@ -10333,11 +10407,113 @@
     toJSON() { return { ...super.toJSON(), detail: this.detail }; }
   }
 
+  const performanceResourceTimingNumericFields = [
+    "workerStart", "redirectStart", "redirectEnd", "fetchStart",
+    "domainLookupStart", "domainLookupEnd", "connectStart", "connectEnd",
+    "secureConnectionStart", "requestStart", "responseStart", "responseEnd",
+    "transferSize", "encodedBodySize", "decodedBodySize", "responseStatus",
+  ];
+  const performanceNavigationTimingNumericFields = [
+    "unloadEventStart", "unloadEventEnd", "domInteractive",
+    "domContentLoadedEventStart", "domContentLoadedEventEnd", "domComplete",
+    "loadEventStart", "loadEventEnd", "activationStart", "criticalCHRestart",
+  ];
+  const performanceResourceTimingStringFields = [
+    "initiatorType", "nextHopProtocol", "renderBlockingStatus",
+  ];
+
+  function definePerformanceTimingFields(target, options, fields) {
+    const isNavigation = options.entryType === "navigation" ||
+      fields === performanceNavigationTimingNumericFields;
+    for (const field of fields) {
+      const value = options[field] === undefined ? 0 : Number(options[field]);
+      const normalized = Number.isFinite(value) && value >= 0 ? value : 0;
+      if (isNavigation) {
+        defineNavigationTimingField(target, field, normalized);
+      } else {
+        Object.defineProperty(target, field, {
+          value: normalized,
+          enumerable: true,
+        });
+      }
+    }
+    for (const field of performanceResourceTimingStringFields) {
+      if (fields !== performanceNavigationTimingNumericFields &&
+          options[field] === undefined && field === "renderBlockingStatus") continue;
+      const value = options[field] === undefined ? "" : String(options[field]);
+      if (isNavigation) {
+        defineNavigationTimingField(target, field, value);
+      } else {
+        Object.defineProperty(target, field, {
+          value,
+          enumerable: true,
+        });
+      }
+    }
+  }
+
+  function performanceTimingJSON(entry, fields) {
+    const result = entry.toJSONBase();
+    for (const field of performanceResourceTimingNumericFields) result[field] = entry[field];
+    for (const field of performanceNavigationTimingNumericFields) {
+      if (field in entry) result[field] = entry[field];
+    }
+    for (const field of performanceResourceTimingStringFields) {
+      if (field in entry) result[field] = entry[field];
+    }
+    if (fields === "navigation") {
+      result.type = entry.type;
+      result.redirectCount = entry.redirectCount;
+    }
+    if ("serverTiming" in entry) result.serverTiming = entry.serverTiming.slice();
+    return result;
+  }
+
+  class PerformanceResourceTiming extends PerformanceEntry {
+    constructor(token, options = {}) {
+      if (token !== performanceEntryToken) throw new TypeError("Illegal constructor");
+      const startTime = Number(options.startTime ?? 0);
+      const responseEnd = Number(options.responseEnd ?? startTime);
+      const safeStart = Number.isFinite(startTime) && startTime >= 0 ? startTime : 0;
+      const safeEnd = Number.isFinite(responseEnd) && responseEnd >= safeStart ? responseEnd : safeStart;
+      super(performanceEntryToken, options.name ?? "", options.entryType ?? "resource", safeStart, safeEnd - safeStart);
+      definePerformanceTimingFields(this, { ...options, responseEnd: safeEnd }, performanceResourceTimingNumericFields);
+      Object.defineProperty(this, "serverTiming", {
+        value: Object.freeze(Array.isArray(options.serverTiming) ? options.serverTiming.slice() : []),
+        enumerable: true,
+      });
+    }
+    toJSONBase() { return super.toJSON(); }
+    toJSON() { return performanceTimingJSON(this, "resource"); }
+  }
+
+  class PerformanceNavigationTiming extends PerformanceResourceTiming {
+    constructor(token, options = {}) {
+      if (token !== performanceEntryToken) throw new TypeError("Illegal constructor");
+      super(token, { ...options, entryType: "navigation" });
+      definePerformanceTimingFields(this, options, performanceNavigationTimingNumericFields);
+      Object.defineProperty(this, "type", {
+        value: options.type === undefined ? "navigate" : String(options.type),
+        enumerable: true,
+      });
+      Object.defineProperty(this, "redirectCount", {
+        value: Math.max(0, Math.trunc(Number(options.redirectCount) || 0)),
+        enumerable: true,
+      });
+    }
+    toJSON() { return performanceTimingJSON(this, "navigation"); }
+  }
+
   const performanceEntries = [];
   let performanceEntrySequence = 0;
   const performanceObservers = [];
   let pendingPerformanceObservers = [];
   let performanceObserverDeliveryScheduled = false;
+  let resourceTimingBufferSize = 250;
+  let resourceTimingBufferFull = false;
+  let resourceEntryCount = 0;
+  const resourceTimingTextEncoder = new TextEncoder();
+  const finishedResourceTimings = new WeakSet();
 
   function sortedPerformanceEntries(entries) {
     return entries.slice().sort((a, b) =>
@@ -10437,19 +10613,217 @@
     }
   }
   Object.defineProperty(PerformanceObserver, "supportedEntryTypes", {
-    get() { return Object.freeze(["mark", "measure"]); },
+    get() { return Object.freeze(["navigation", "resource", "mark", "measure"]); },
     enumerable: true,
   });
 
   function addPerformanceEntry(entry) {
+    if (entry.entryType === "resource") {
+      if (resourceEntryCount >= resourceTimingBufferSize) {
+        if (!resourceTimingBufferFull) {
+          resourceTimingBufferFull = true;
+          Promise.resolve().then(() => {
+            const handler = performance.onresourcetimingbufferfull;
+            if (typeof handler === "function") {
+              const event = new Event("resourcetimingbufferfull");
+              // This event is delivered through the `on…` property rather
+              // than `dispatchEvent`, so seed the propagation path that
+              // `composedPath()` uses while the handler is running.
+              event.__path = [{
+                node: performance,
+                closedRoots: [],
+                target: performance,
+                relatedTarget: null,
+                hostTarget: false,
+              }];
+              event.target = performance;
+              event.currentTarget = performance;
+              event.eventPhase = 2;
+              event.__dispatching = true;
+              try { handler.call(performance, event); } catch (_) {} finally {
+                event.__dispatching = false;
+                event.currentTarget = null;
+                event.eventPhase = 0;
+                event.__path = [];
+              }
+            }
+          });
+        }
+        return null;
+      }
+    }
     Object.defineProperty(entry, "__sequence", { value: performanceEntrySequence++ });
     performanceEntries.push(entry);
+    if (entry.entryType === "resource") resourceEntryCount += 1;
     for (const observer of performanceObservers) {
       if (!observer._entryTypes.has(entry.entryType)) continue;
       observer._queue.push(entry);
       schedulePerformanceObserver(observer);
     }
     return entry;
+  }
+
+  function normalizeTimingNumber(value, fallback = 0) {
+    const number = Number(value);
+    return Number.isFinite(number) && number >= 0 ? number : fallback;
+  }
+
+  function resourceTimingBase64ByteLength(value) {
+    const normalized = String(value).replace(/[^A-Za-z0-9+/=]/g, "");
+    const padding = normalized.endsWith("==") ? 2 : normalized.endsWith("=") ? 1 : 0;
+    return Math.max(0, Math.floor(normalized.length * 3 / 4) - padding);
+  }
+
+  function recordResourceTiming(options = {}) {
+    const now = nativePerformanceNow();
+    const startTime = normalizeTimingNumber(options.startTime, now);
+    const responseEnd = normalizeTimingNumber(options.responseEnd, now);
+    const responseStart = normalizeTimingNumber(options.responseStart, responseEnd);
+    const fetchStart = normalizeTimingNumber(options.fetchStart, startTime);
+    const requestStart = normalizeTimingNumber(options.requestStart, fetchStart);
+    const timing = {
+      ...options,
+      name: String(options.name ?? ""),
+      startTime,
+      fetchStart,
+      requestStart,
+      responseStart: Math.max(responseStart, requestStart),
+      responseEnd: Math.max(responseEnd, responseStart, requestStart),
+    };
+    return addPerformanceEntry(new PerformanceResourceTiming(performanceEntryToken, timing));
+  }
+
+  function beginResourceTiming(name, initiatorType, startAt = undefined) {
+    const sampledStart = startAt === undefined ? nativePerformanceNow() : Number(startAt);
+    const startTime = Number.isFinite(sampledStart) && sampledStart >= 0
+      ? sampledStart
+      : Math.max(0, nativePerformanceNow());
+    return {
+      name: String(name),
+      initiatorType: String(initiatorType),
+      startTime,
+      fetchStart: startTime,
+      requestStart: startTime,
+      domainLookupStart: startTime,
+      domainLookupEnd: startTime,
+      connectStart: startTime,
+      connectEnd: startTime,
+      secureConnectionStart: 0,
+      responseStart: startTime,
+    };
+  }
+
+  function finishResourceTiming(timing, data = {}, error = false) {
+    if (!timing || finishedResourceTimings.has(timing)) return null;
+    finishedResourceTimings.add(timing);
+    const responseEnd = data && data.responseEnd !== undefined
+      ? normalizeTimingNumber(data.responseEnd, normalizeTimingNumber(timing.responseEnd, 0))
+      : nativePerformanceNow();
+    const responseStart = data && data.responseStart !== undefined
+      ? normalizeTimingNumber(data.responseStart, responseEnd)
+      : responseEnd;
+    const bodyText = data && data.bodyText !== undefined ? String(data.bodyText) : "";
+    const bodyBytes = data && data.bodyBase64 !== undefined && data.bodyBase64 !== null
+      ? resourceTimingBase64ByteLength(data.bodyBase64)
+      : resourceTimingTextEncoder.encode(bodyText).length;
+    const status = error ? 0 : normalizeTimingNumber(data.responseStatus ?? data.status, 0);
+    const redirected = Boolean(data.redirected);
+    const redirectStart = normalizeTimingNumber(timing.startTime, 0);
+    const effectiveResponseStart = redirected
+      ? Math.max(redirectStart, responseStart)
+      : responseStart;
+    const redirectEnd = redirected
+      ? Math.min(effectiveResponseStart, Math.max(redirectStart, responseEnd - 0.001))
+      : 0;
+    const fetchStart = redirected
+      ? Math.max(normalizeTimingNumber(timing.fetchStart, redirectStart), redirectEnd)
+      : timing.fetchStart;
+    const requestStart = redirected
+      ? Math.max(normalizeTimingNumber(timing.requestStart, fetchStart), fetchStart)
+      : timing.requestStart;
+    const responseName = data && data.url !== undefined && data.url !== null
+      ? String(data.url)
+      : "";
+    return recordResourceTiming({
+      ...timing,
+      responseStart: effectiveResponseStart,
+      responseEnd,
+      fetchStart,
+      requestStart,
+      redirectStart: redirected ? redirectStart : 0,
+      redirectEnd,
+      transferSize: error ? 0 : bodyBytes,
+      encodedBodySize: error ? 0 : bodyBytes,
+      decodedBodySize: error ? 0 : bodyBytes,
+      responseStatus: status,
+      name: responseName || timing.name,
+    });
+  }
+
+  function finishElementResourceTiming(element, status = 200, error = false, timing = {}) {
+    if (!element || element.__resourceTimingRecorded) return;
+    const fallbackSource = typeof element.getAttribute === "function"
+      ? element.getAttribute("src")
+      : "";
+    const rawName = element.src || element.data || element.href || fallbackSource || "";
+    if (!rawName) return;
+    const timingData = timing && typeof timing === "object" ? timing : {};
+    const effectiveName = timingData.url === undefined || timingData.url === null
+      ? ""
+      : String(timingData.url);
+    const name = effectiveName || String(__omoikane_resolve_url(rawName));
+    if (!name) return;
+    const startTime = element.__resourceTimingStart === undefined
+      ? Math.max(0, nativePerformanceNow() - 0.001)
+      : element.__resourceTimingStart;
+    const responseTime = nativePerformanceNow();
+    const elapsed = normalizeTimingNumber(timingData.elapsedMs, 0);
+    const responseStart = timingData.responseStart === undefined
+      ? Math.max(startTime, responseTime - elapsed)
+      : normalizeTimingNumber(timingData.responseStart, responseTime);
+    const redirected = Boolean(timingData.redirected);
+    const redirectEnd = redirected
+      ? Math.min(Math.max(startTime, responseStart), Math.max(startTime, responseTime - 0.001))
+      : 0;
+    const fetchStart = redirected ? Math.max(startTime, redirectEnd) : startTime;
+    const requestStart = redirected ? Math.max(startTime, fetchStart) : startTime;
+    setElementResourceTimingState(element, "__resourceTimingRecorded", true);
+    recordResourceTiming({
+      name,
+      initiatorType: String(element.localName || "other"),
+      startTime,
+      fetchStart,
+      requestStart,
+      responseStart,
+      responseEnd: responseTime,
+      redirectStart: redirected ? startTime : 0,
+      redirectEnd,
+      responseStatus: error ? 0 : status,
+      transferSize: 0,
+      encodedBodySize: 0,
+      decodedBodySize: 0,
+    });
+  }
+
+  function noteElementResourceStart(element) {
+    if (!element) return;
+    setElementResourceTimingState(element, "__resourceTimingStart", nativePerformanceNow());
+    setElementResourceTimingState(element, "__resourceTimingRecorded", false);
+  }
+
+  function setElementResourceTimingState(element, field, value) {
+    try {
+      Object.defineProperty(element, field, {
+        value,
+        writable: true,
+        enumerable: false,
+        configurable: true,
+      });
+    } catch (_) {
+      // If page code made the internal slot non-configurable, preserve the
+      // previous best-effort behavior without breaking resource completion.
+      try { element[field] = value; } catch (_) { void 0; }
+    }
   }
 
   function resolvePerformanceTime(value, defaultValue) {
@@ -10468,9 +10842,30 @@
     return time;
   }
 
+  // A fresh global starts with one navigation entry.  The native runtime has
+  // already established the URL and time origin before this bootstrap runs, so
+  // the initial navigation is represented by the same zero-based clock as all
+  // subsequent resource entries.  Load-pipeline code may add resource entries
+  // later without replacing this entry.
+  let navigationEntryForLifecycle = null;
+  const initialNavigationEntry = new PerformanceNavigationTiming(
+    performanceEntryToken,
+    {
+      name: String(__omoikane_location_href),
+      startTime: 0,
+      fetchStart: 0,
+      requestStart: 0,
+      responseStart: 0,
+      responseEnd: 0,
+      type: "navigate",
+      redirectCount: 0,
+      initiatorType: "navigation",
+    },
+  );
+
   const performance = {
     timing: {},
-    now() { return __omoikane_performance_now(); },
+    now() { return nativePerformanceNow(); },
     mark(name, options = {}) {
       return addPerformanceEntry(new PerformanceMark(name, options));
     },
@@ -10536,7 +10931,36 @@
         }
       }
     },
+    setResourceTimingBufferSize(maxSize) {
+      const numeric = Number(maxSize);
+      if (!Number.isFinite(numeric) || numeric < 0) {
+        throw new TypeError("The resource timing buffer size must be non-negative");
+      }
+      resourceTimingBufferSize = Math.floor(numeric);
+      if (resourceEntryCount < resourceTimingBufferSize) {
+        resourceTimingBufferFull = false;
+      }
+    },
+    clearResourceTimings() {
+      let writeIndex = 0;
+      for (let readIndex = 0; readIndex < performanceEntries.length; readIndex += 1) {
+        const entry = performanceEntries[readIndex];
+        if (entry.entryType !== "resource") {
+          performanceEntries[writeIndex] = entry;
+          writeIndex += 1;
+        }
+      }
+      performanceEntries.length = writeIndex;
+      resourceEntryCount = 0;
+      resourceTimingBufferFull = false;
+    },
   };
+  Object.defineProperty(performance, "onresourcetimingbufferfull", {
+    value: null,
+    writable: true,
+    enumerable: true,
+    configurable: true,
+  });
   Object.defineProperty(performance, "timeOrigin", {
     value: Number(__omoikane_performance_time_origin),
     enumerable: true,
@@ -10544,9 +10968,53 @@
   globalThis.PerformanceEntry = PerformanceEntry;
   globalThis.PerformanceMark = PerformanceMark;
   globalThis.PerformanceMeasure = PerformanceMeasure;
+  globalThis.PerformanceResourceTiming = PerformanceResourceTiming;
+  globalThis.PerformanceNavigationTiming = PerformanceNavigationTiming;
   globalThis.PerformanceObserver = PerformanceObserver;
   globalThis.PerformanceObserverEntryList = PerformanceObserverEntryList;
   globalThis.performance = performance;
+  addPerformanceEntry(initialNavigationEntry);
+  navigationEntryForLifecycle = initialNavigationEntry;
+  globalThis.__omoikane_performance_navigation_event = function(type) {
+    if (!navigationEntryForLifecycle) return;
+    const state = navigationTimingValues.get(navigationEntryForLifecycle);
+    if (!state) return;
+    const now = nativePerformanceNow();
+    const update = field => {
+      const previous = Number(state[field]) || 0;
+      state[field] = Math.max(previous, now);
+    };
+    const updateDuration = () => {
+      const startTime = Number(navigationEntryForLifecycle.startTime) || 0;
+      const loadEventEnd = Number(state.loadEventEnd) || 0;
+      state.duration = Math.max(0, loadEventEnd - startTime);
+    };
+    switch (String(type)) {
+      case "domInteractive": update("domInteractive"); break;
+      case "domContentLoadedStart": update("domContentLoadedEventStart"); break;
+      case "domContentLoadedEnd": update("domContentLoadedEventEnd"); break;
+      case "domComplete": update("domComplete"); break;
+      case "loadStart": update("loadEventStart"); break;
+      case "loadEnd": update("loadEventEnd"); updateDuration(); break;
+      default: break;
+    }
+  };
+  // Host-side document/module loaders complete outside the JS fetch wrapper.
+  // They report their terminal status through this small host bridge so
+  // initial parser-discovered resources participate in the same timeline.
+  globalThis.__omoikane_record_resource_timing = function(name, initiatorType, status, error, redirected = false, elapsedMs = 0) {
+    const responseEnd = nativePerformanceNow();
+    const elapsed = normalizeTimingNumber(elapsedMs, 0);
+    const startTime = Math.max(0, responseEnd - elapsed);
+    const timing = beginResourceTiming(String(name), String(initiatorType || "other"), startTime);
+    finishResourceTiming(timing, {
+      status: Number(status) || 0,
+      redirected: Boolean(redirected),
+      responseStart: responseEnd,
+      responseEnd,
+      url: String(name),
+    }, Boolean(error));
+  };
 
   globalThis.DOMParser = class DOMParser {
     parseFromString(source, type) {
@@ -10606,8 +11074,15 @@
       this._responseHeaders = [];
       this._requestId = 0;
       this._sendFlag = false;
+      this.__resourceTiming = null;
     }
     open(method, url, async = true) {
+      // Re-opening an active request aborts the old fetch.  Preserve the
+      // Resource Timing entry even though no terminal network payload arrives.
+      if (this.__resourceTiming) {
+        finishResourceTiming(this.__resourceTiming, {}, true);
+        this.__resourceTiming = null;
+      }
       this._requestId++;
       this.status = 0;
       this.statusText = "";
@@ -10655,6 +11130,10 @@
       this._listeners[type] = (this._listeners[type] || []).filter(item => item !== callback);
     }
     abort() {
+      if (this.__resourceTiming) {
+        finishResourceTiming(this.__resourceTiming, {}, true);
+        this.__resourceTiming = null;
+      }
       this._requestId++;
       this.readyState = 0;
       this.status = 0;
@@ -10671,6 +11150,7 @@
       if (this.readyState !== 1 || this._sendFlag) throw new Error("InvalidStateError");
       this._sendFlag = true;
       const requestId = this._requestId;
+      this.__resourceTiming = beginResourceTiming(this._url, "xmlhttprequest");
       const requestBody = this._method === "GET" || this._method === "HEAD"
         ? EMPTY_BODY
         : extractBody(body);
@@ -10706,6 +11186,8 @@
           ).then(raw => JSON.parse(String(raw)));
       payload.then(data => {
         if (requestId !== this._requestId) return;
+        finishResourceTiming(this.__resourceTiming, data, false);
+        this.__resourceTiming = null;
         this.status = data.status;
         this.statusText = data.statusText;
         this.responseURL = data.url;
@@ -10728,6 +11210,8 @@
         this._notify("loadend");
       }).catch(() => {
         if (requestId !== this._requestId) return;
+        finishResourceTiming(this.__resourceTiming, {}, true);
+        this.__resourceTiming = null;
         this.status = 0;
         this.statusText = "";
         this.responseText = "";
@@ -14884,12 +15368,23 @@
     const request = new Request(input, init);
     if (source && init.body === undefined && !bodyIsEmpty(source.__body)) disturbBody(source);
     if (request.signal && request.signal.aborted) return Promise.reject(request.signal.reason);
+    const resourceTiming = beginResourceTiming(request.url, "fetch");
     if (isBlobUrl(request.url)) {
       return Promise.resolve().then(() => {
         if (request.signal && request.signal.aborted) throw request.signal.reason;
         const response = blobUrlResponse(request.url, request.method);
         if (response === null) throw new TypeError("Failed to fetch blob URL");
         return response;
+      }).then(response => {
+        finishResourceTiming(resourceTiming, {
+          status: response.status,
+          bodyText: response.__body && response.__body.text,
+          url: response.url,
+        });
+        return response;
+      }, error => {
+        finishResourceTiming(resourceTiming, {}, true);
+        throw error;
       });
     }
     return Promise.resolve().then(() => {
@@ -14905,7 +15400,12 @@
       );
     }).then(raw => {
       if (request.signal && request.signal.aborted) throw request.signal.reason;
-      return responseFromFetchPayload(JSON.parse(String(raw)));
+      const data = JSON.parse(String(raw));
+      finishResourceTiming(resourceTiming, data, false);
+      return responseFromFetchPayload(data);
+    }).catch(error => {
+      finishResourceTiming(resourceTiming, {}, true);
+      throw error;
     });
   };
 
