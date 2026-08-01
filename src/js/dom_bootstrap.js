@@ -7754,11 +7754,24 @@
     return "";
   }
 
+  function svgTextDeclaredValue(element, name) {
+    if (!element) return "";
+    const attribute = element.getAttribute(name);
+    if (attribute !== null && String(attribute).trim() !== "") return String(attribute);
+    try {
+      const inline = element.style && element.style.getPropertyValue(name);
+      if (inline) return String(inline);
+    } catch (_) {}
+    return "";
+  }
+
   function svgTextFontSize(element) {
     for (let current = element; current && current.nodeType === 1; current = current.parentNode) {
-      const value = Number.parseFloat(svgTextCssValue(current, "font-size"));
+      const value = Number.parseFloat(svgTextDeclaredValue(current, "font-size"));
       if (Number.isFinite(value) && value > 0) return value;
     }
+    const computed = Number.parseFloat(svgTextCssValue(element, "font-size"));
+    if (Number.isFinite(computed) && computed > 0) return computed;
     return 16;
   }
 
