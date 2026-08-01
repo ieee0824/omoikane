@@ -22946,7 +22946,8 @@ b</textarea></form>"#);
                   performance.onresourcetimingbufferfull = event => {
                     event.initEvent("mutated", false, false);
                     bufferFullState = [event.target === performance, event.currentTarget === performance,
-                      event.eventPhase === 2, event.type === "resourcetimingbufferfull"];
+                      event.eventPhase === 2, event.type === "resourcetimingbufferfull",
+                      event.composedPath().length === 1 && event.composedPath()[0] === performance];
                   };
                   new Image().src = "data:image/png;base64,AA==";
                   new Image().src = "data:image/png;base64,AA==";
@@ -22955,7 +22956,7 @@ b</textarea></form>"#);
             .unwrap();
         runtime.run_jobs().unwrap();
         assert!(runtime
-            .eval("bufferFullState && bufferFullState[0] && bufferFullState[1] && bufferFullState[2] && bufferFullState[3]")
+            .eval("bufferFullState && bufferFullState[0] && bufferFullState[1] && bufferFullState[2] && bufferFullState[3] && bufferFullState[4]")
             .unwrap()
             .as_boolean()
             .unwrap());

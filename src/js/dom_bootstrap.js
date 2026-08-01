@@ -10309,6 +10309,16 @@
             const handler = performance.onresourcetimingbufferfull;
             if (typeof handler === "function") {
               const event = new Event("resourcetimingbufferfull");
+              // This event is delivered through the `on…` property rather
+              // than `dispatchEvent`, so seed the propagation path that
+              // `composedPath()` uses while the handler is running.
+              event.__path = [{
+                node: performance,
+                closedRoots: [],
+                target: performance,
+                relatedTarget: null,
+                hostTarget: false,
+              }];
               event.target = performance;
               event.currentTarget = performance;
               event.eventPhase = 2;
@@ -10317,6 +10327,7 @@
                 event.__dispatching = false;
                 event.currentTarget = null;
                 event.eventPhase = 0;
+                event.__path = [];
               }
             }
           });
