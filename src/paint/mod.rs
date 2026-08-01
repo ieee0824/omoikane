@@ -1692,16 +1692,21 @@ fn hit_test_box(
     // before line fragments return the SVG viewport element itself.
     if layout.node.tag_name().as_deref() == Some("svg")
         && rect_contains_point(border_box, local_point.0, local_point.1)
+        && accepts_pointer_events(&style)
     {
         let svg_box = border_box_rect(layout);
         let local_x = local_point.0 - svg_box.x;
         let local_y = local_point.1 - svg_box.y;
+        let mut accepts_target = |node: &NodeHandle| {
+            accepts_pointer_events(&resolver.computed_style(node))
+        };
         if let Some(target) = crate::svg::hit_test_svg(
             &layout.node,
             local_x,
             local_y,
             svg_box.width,
             svg_box.height,
+            &mut accepts_target,
         ) {
             return Some(target);
         }

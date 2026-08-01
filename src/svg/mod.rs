@@ -98,6 +98,7 @@ pub(crate) fn hit_test_svg(
     y: f32,
     width: f32,
     height: f32,
+    accepts_target: &mut dyn FnMut(&NodeHandle) -> bool,
 ) -> Option<NodeHandle> {
     if svg_node.tag_name().as_deref() != Some("svg")
         || !x.is_finite()
@@ -149,6 +150,7 @@ pub(crate) fn hit_test_svg(
         scale_x,
         scale_y,
         &initial,
+        accepts_target,
     )
 }
 
@@ -166,6 +168,7 @@ fn hit_test_svg_children(
     scale_x: f32,
     scale_y: f32,
     inherited: &SvgHitStyle,
+    accepts_target: &mut dyn FnMut(&NodeHandle) -> bool,
 ) -> Option<NodeHandle> {
     let children = parent.child_nodes();
     for child in children.iter().rev() {
@@ -177,11 +180,12 @@ fn hit_test_svg_children(
             continue;
         }
         let attrs = child.attributes().unwrap_or_default();
-        let Some((local_point, child_scale_x, child_scale_y)) =
-            inverse_svg_transform(point, property_value(&attrs, "transform").as_deref())
-        else {
-            continue;
-        };
+        // The rasterizer currently ignores SVG `transform` attributes; keep
+        // hit testing in the same untransformed coordinate system until paint
+        // gains matching transform support.
+        let local_point = point;
+        let child_scale_x = 1.0;
+        let child_scale_y = 1.0;
         let paint = resolve_paint(&inherited.paint, &attrs);
         let pointer_events = property_value(&attrs, "pointer-events")
             .unwrap_or_else(|| inherited.pointer_events.clone())
@@ -213,6 +217,7 @@ fn hit_test_svg_children(
             next_scale_x,
             next_scale_y,
             &style,
+            accepts_target,
         ) {
             return Some(target);
         }
@@ -225,7 +230,7 @@ fn hit_test_svg_children(
             &style.paint,
             style.visible,
             geometry,
-        ) {
+        ) && accepts_target(child) {
             return Some(child.clone());
         }
     }
@@ -279,6 +284,9 @@ fn svg_hit_geometry(tag: &str, attrs: &BTreeMap<String, String>, point: (f32, f3
             let y = parse_svg_coord(attribute_ref(attrs, "y")).unwrap_or(0.0);
             let width = parse_svg_size(attribute_ref(attrs, "width")).unwrap_or(0.0).max(0.0);
             let height = parse_svg_size(attribute_ref(attrs, "height")).unwrap_or(0.0).max(0.0);
+            if width <= 0.0 || height <= 0.0 {
+                return SvgHitGeometry::default();
+            }
             let fill = point_in_rect(point, Rect { x, y, width, height });
             let stroke = point_near_rect(point, Rect { x, y, width, height }, stroke_width / 2.0);
             SvgHitGeometry { fill, stroke, bounding_box: fill || stroke || point_in_rect(point, Rect { x, y, width, height }) }
@@ -378,11 +386,58 @@ fn parse_path_endpoints(value: Option<&String>) -> Vec<(f32, f32)> {
                 current.1 = y;
                 points.push(current);
             }
-            PathCommand::CurveTo(_, _, _, _, x, y)
-            | PathCommand::QuadraticCurveTo(_, _, x, y)
-            | PathCommand::ArcTo(_, _, _, _, _, x, y) => {
+            PathCommand::CurveTo(cp1x, cp1y, cp2x, cp2y, x, y) => {
+                let start_point = current;
+                for step in 1..=12 {
+                    let t = step as f32 / 12.0;
+                    let inverse = 1.0 - t;
+                    points.push((
+                        inverse.powi(3) * start_point.0
+                            + 3.0 * inverse.powi(2) * t * cp1x
+                            + 3.0 * inverse * t.powi(2) * cp2x
+                            + t.powi(3) * x,
+                        inverse.powi(3) * start_point.1
+                            + 3.0 * inverse.powi(2) * t * cp1y
+                            + 3.0 * inverse * t.powi(2) * cp2y
+                            + t.powi(3) * y,
+                    ));
+                }
                 current = (x, y);
-                points.push(current);
+            }
+            PathCommand::QuadraticCurveTo(cpx, cpy, x, y) => {
+                let start_point = current;
+                for step in 1..=12 {
+                    let t = step as f32 / 12.0;
+                    let inverse = 1.0 - t;
+                    points.push((
+                        inverse.powi(2) * start_point.0
+                            + 2.0 * inverse * t * cpx
+                            + t.powi(2) * x,
+                        inverse.powi(2) * start_point.1
+                            + 2.0 * inverse * t * cpy
+                            + t.powi(2) * y,
+                    ));
+                }
+                current = (x, y);
+            }
+            PathCommand::ArcTo(rx, ry, rotation, large_arc, sweep, x, y) => {
+                flatten_arc(
+                    &mut points,
+                    current.0,
+                    current.1,
+                    rx,
+                    ry,
+                    rotation,
+                    large_arc,
+                    sweep,
+                    x,
+                    y,
+                    1.0,
+                    1.0,
+                    0.0,
+                    0.0,
+                );
+                current = (x, y);
             }
             PathCommand::Close => {
                 current = start;
