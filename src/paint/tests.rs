@@ -5931,6 +5931,22 @@ fn clip_path_circle_clips_corners_and_keeps_center() {
 }
 
 #[test]
+fn clip_path_circle_keyword_radius_uses_positioned_center() {
+    let canvas = paint_clip_path_document(
+        ".target { width: 10px; height: 4px; background: red; \
+         clip-path: circle(closest-side at 25% 50%); }",
+        "<div class='target'></div>",
+        10.0,
+        4.0,
+    );
+
+    // The center is (2.5, 2), so closest-side is the 2px distance to the
+    // top/bottom edges rather than half the element's width/height.
+    assert_eq!(canvas.pixel(2, 1), Some(Color::rgb(255, 0, 0)));
+    assert_eq!(canvas.pixel(5, 1), Some(Color::rgba(0, 0, 0, 0)));
+}
+
+#[test]
 fn clip_path_ellipse_and_polygon_shapes_clip_paint() {
     let ellipse = paint_clip_path_document(
         ".target { width: 20px; height: 10px; background: blue; \

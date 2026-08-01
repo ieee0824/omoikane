@@ -3274,6 +3274,33 @@ fn invalid_clip_shape_and_mask_mode_declarations_are_ignored() {
     );
 }
 
+#[test]
+fn validates_clip_shape_function_arguments() {
+    assert!(!supports_declaration("clip-path", "circle(not-a-length)"));
+    assert!(!supports_declaration("clip-path", "inset(1px round)"));
+    assert!(!supports_declaration(
+        "clip-path",
+        "polygon(0% 0%, 100% 0%)"
+    ));
+    assert!(!supports_declaration(
+        "clip-path",
+        "polygon(0% 0%, 100% 0%, 0% 100% round 2px)"
+    ));
+    assert!(supports_declaration("clip-path", "inset(1px)"));
+    assert!(supports_declaration(
+        "clip-path",
+        "circle(closest-side at 25% 50%)"
+    ));
+    assert!(supports_declaration(
+        "clip-path",
+        "circle(10px at 1rem 2rem)"
+    ));
+    assert!(supports_declaration(
+        "clip-path",
+        "polygon(0% 0%, 100% 0%, 0% 100%)"
+    ));
+}
+
 // --- border-radius shorthand 展開テスト ---
 
 #[test]
@@ -5473,6 +5500,44 @@ fn expands_mask_shorthand_position_size_and_repeat() {
             ("mask-size", &Value::Keyword("contain".to_string())),
             ("mask-repeat", &Value::Keyword("no-repeat".to_string())),
         ]
+    );
+}
+
+#[test]
+fn aligns_omitted_mask_shorthand_components_per_layer() {
+    let stylesheet = parse_stylesheet("h1 { mask: url(a.svg), url(b.svg) no-repeat; }").unwrap();
+    let Rule::Style(rule) = &stylesheet.rules[0] else {
+        panic!("expected style rule");
+    };
+    let declaration = |name: &str| {
+        rule.declarations
+            .iter()
+            .find(|declaration| declaration.name == name)
+            .map(|declaration| &declaration.value)
+            .expect("mask shorthand longhand")
+    };
+    assert_eq!(
+        declaration("mask-image"),
+        &Value::CommaList(vec![
+            Value::Keyword("url(a.svg)".to_string()),
+            Value::Keyword("url(b.svg)".to_string()),
+        ])
+    );
+    assert_eq!(
+        declaration("mask-repeat"),
+        &Value::CommaList(vec![
+            Value::Keyword("repeat".to_string()),
+            Value::Keyword("no-repeat".to_string()),
+        ])
+    );
+
+    let (_document, _body, title, _html) = sample_tree();
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(Origin::Author, stylesheet);
+    let style = resolver.computed_style(&title);
+    assert_eq!(
+        style.get("mask-repeat"),
+        Some(&ComputedValue::Keyword("repeat, no-repeat".to_string()))
     );
 }
 

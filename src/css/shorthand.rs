@@ -968,29 +968,40 @@ fn is_color_function(name: &str) -> bool {
 
 fn expand_mask_shorthand(value: Value, important: bool) -> Vec<Declaration> {
     if let Value::CommaList(layers) = value {
-        let mut grouped: Vec<(String, Vec<Value>)> = Vec::new();
-        for layer in layers {
-            for declaration in expand_mask_shorthand(layer, important) {
-                if let Some((_, values)) = grouped
-                    .iter_mut()
-                    .find(|(name, _)| name == &declaration.name)
-                {
-                    values.push(declaration.value);
-                } else {
-                    grouped.push((declaration.name, vec![declaration.value]));
-                }
-            }
-        }
-        return grouped
+        // Each comma-separated mask layer has its own longhand slots.  A
+        // component omitted from one layer still consumes that layer's slot
+        // and takes the property's initial value; dropping it would shift a
+        // later value onto the wrong image layer (for example, `url(a),
+        // url(b) no-repeat`).
+        let expanded_layers = layers
             .into_iter()
-            .map(|(name, values)| Declaration {
-                name,
-                value: if values.len() == 1 {
-                    values.into_iter().next().expect("one value")
-                } else {
-                    Value::CommaList(values)
-                },
-                important,
+            .map(|layer| expand_mask_shorthand(layer, important))
+            .collect::<Vec<_>>();
+        let names = [
+            "mask-image",
+            "mask-position-x",
+            "mask-position-y",
+            "mask-size",
+            "mask-repeat",
+        ];
+        return names
+            .into_iter()
+            .map(|name| {
+                let values = expanded_layers
+                    .iter()
+                    .map(|declarations| {
+                        declarations
+                            .iter()
+                            .find(|declaration| declaration.name == name)
+                            .map(|declaration| declaration.value.clone())
+                            .unwrap_or_else(|| mask_initial_value(name))
+                    })
+                    .collect::<Vec<_>>();
+                Declaration {
+                    name: name.to_string(),
+                    value: Value::CommaList(values),
+                    important,
+                }
             })
             .collect();
     }
@@ -1078,6 +1089,16 @@ fn expand_mask_shorthand(value: Value, important: bool) -> Vec<Declaration> {
         });
     }
     declarations
+}
+
+fn mask_initial_value(name: &str) -> Value {
+    match name {
+        "mask-image" => Value::Keyword("none".to_string()),
+        "mask-position-x" | "mask-position-y" => Value::Percentage(0.0),
+        "mask-size" => Value::Keyword("auto".to_string()),
+        "mask-repeat" => Value::Keyword("repeat".to_string()),
+        _ => Value::Keyword("initial".to_string()),
+    }
 }
 
 fn is_mask_image_function(name: &str) -> bool {

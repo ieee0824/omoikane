@@ -1275,14 +1275,17 @@ fn validate_declaration(name: &str, value: &Value) -> DeclarationValidation {
             }
             Value::Function {
                 name: function,
-                arguments,
-            } if !arguments.is_empty()
-                && matches!(
-                    function.to_ascii_lowercase().as_str(),
-                    "inset" | "circle" | "ellipse" | "polygon"
-                ) =>
-            {
-                DeclarationValidation::Unvalidated
+                ..
+            } if matches!(
+                function.to_ascii_lowercase().as_str(),
+                "inset" | "circle" | "ellipse" | "polygon"
+            ) => {
+                let rendered = render_value(value);
+                if crate::paint::is_valid_clip_path_value(&rendered) {
+                    DeclarationValidation::Unvalidated
+                } else {
+                    DeclarationValidation::Invalid
+                }
             }
             _ => DeclarationValidation::Invalid,
         };

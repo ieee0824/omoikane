@@ -2357,16 +2357,34 @@ fn union_rect(left: Rect, right: Rect) -> Rect {
     }
 }
 
-fn mask_mode_for_layer(style: &ComputedStyle, index: usize) -> String {
-    computed_style_layer_text(style.get("mask-mode"), index)
-        .unwrap_or_else(|| "match-source".to_string())
-        .to_ascii_lowercase()
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum MaskMode {
+    Alpha,
+    Luminance,
 }
 
-fn mask_composite_for_layer(style: &ComputedStyle, index: usize) -> String {
-    computed_style_layer_text(style.get("mask-composite"), index)
-        .unwrap_or_else(|| "add".to_string())
-        .to_ascii_lowercase()
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum MaskComposite {
+    Add,
+    Subtract,
+    Intersect,
+    Exclude,
+}
+
+fn mask_mode_for_layer(style: &ComputedStyle, index: usize) -> MaskMode {
+    match computed_style_layer_text(style.get("mask-mode"), index).as_deref() {
+        Some(value) if value.eq_ignore_ascii_case("luminance") => MaskMode::Luminance,
+        _ => MaskMode::Alpha,
+    }
+}
+
+fn mask_composite_for_layer(style: &ComputedStyle, index: usize) -> MaskComposite {
+    match computed_style_layer_text(style.get("mask-composite"), index).as_deref() {
+        Some(value) if value.eq_ignore_ascii_case("subtract") => MaskComposite::Subtract,
+        Some(value) if value.eq_ignore_ascii_case("intersect") => MaskComposite::Intersect,
+        Some(value) if value.eq_ignore_ascii_case("exclude") => MaskComposite::Exclude,
+        _ => MaskComposite::Add,
+    }
 }
 
 fn prepare_mask_tile(
@@ -2424,8 +2442,9 @@ fn apply_mask_alpha(canvas: &mut Canvas, layers: &[MaskLayer], style: &ComputedS
                 tile_width,
                 tile_height,
             );
+            let mode = mask_mode_for_layer(style, layer.index);
+            let composite = mask_composite_for_layer(style, layer.index);
             Some((
-                layer,
                 tile,
                 tile_width,
                 tile_height,
@@ -2433,6 +2452,8 @@ fn apply_mask_alpha(canvas: &mut Canvas, layers: &[MaskLayer], style: &ComputedS
                 repeat_y,
                 position_x,
                 position_y,
+                mode,
+                composite,
             ))
         })
         .collect::<Vec<_>>();
@@ -2453,7 +2474,6 @@ fn apply_mask_alpha(canvas: &mut Canvas, layers: &[MaskLayer], style: &ComputedS
             let mut combined: Option<u8> = None;
             if inside_area {
                 for (
-                    layer,
                     tile,
                     tile_width,
                     tile_height,
@@ -2461,6 +2481,8 @@ fn apply_mask_alpha(canvas: &mut Canvas, layers: &[MaskLayer], style: &ComputedS
                     repeat_y,
                     position_x,
                     position_y,
+                    mode,
+                    composite,
                 ) in &prepared
                 {
                     let anchor_x = area.x + *position_x;
@@ -2476,8 +2498,7 @@ fn apply_mask_alpha(canvas: &mut Canvas, layers: &[MaskLayer], style: &ComputedS
                         *repeat_x,
                         *repeat_y,
                     );
-                    let mode = mask_mode_for_layer(style, layer.index);
-                    let alpha = if mode == "luminance" {
+                    let alpha = if *mode == MaskMode::Luminance {
                         let luminance = (0.2126 * color.r as f32
                             + 0.7152 * color.g as f32
                             + 0.0722 * color.b as f32)
@@ -2490,19 +2511,21 @@ fn apply_mask_alpha(canvas: &mut Canvas, layers: &[MaskLayer], style: &ComputedS
                     combined = Some(match combined {
                         None => alpha,
                         Some(previous) => {
-                            match mask_composite_for_layer(style, layer.index).as_str() {
-                                "subtract" => {
+                            match composite {
+                                MaskComposite::Subtract => {
                                     ((previous as u16 * (255 - alpha as u16) + 127) / 255) as u8
                                 }
-                                "intersect" => ((previous as u16 * alpha as u16 + 127) / 255) as u8,
-                                "exclude" => {
+                                MaskComposite::Intersect => {
+                                    ((previous as u16 * alpha as u16 + 127) / 255) as u8
+                                }
+                                MaskComposite::Exclude => {
                                     let product = (previous as u16 * alpha as u16 + 127) / 255;
                                     let doubled = (2 * product).min(255) as u8;
                                     previous
                                         .saturating_add(alpha)
                                         .saturating_sub(doubled)
                                 }
-                                _ => previous.saturating_add(alpha),
+                                MaskComposite::Add => previous.saturating_add(alpha),
                             }
                         }
                     });
@@ -3673,18 +3696,40 @@ fn clip_path_shape(style: &ComputedStyle, border_box: Rect) -> Option<ClipPathSh
                 } else {
                     (body, "center")
                 };
+            let center = shape_position(position_text.trim(), border_box)?;
             let radius_text = radius_text.trim();
             let radius = match radius_text.to_ascii_lowercase().as_str() {
-                "closest-side" => border_box.width.min(border_box.height) * 0.5,
-                "farthest-side" => border_box.width.max(border_box.height) * 0.5,
-                "closest-corner" => 0.0,
-                "farthest-corner" => {
-                    (border_box.width * border_box.width + border_box.height * border_box.height)
-                        .sqrt()
+                keyword @ ("closest-side"
+                | "farthest-side"
+                | "closest-corner"
+                | "farthest-corner") => {
+                    let left = (center.0 - border_box.x).abs();
+                    let right = (border_box.x + border_box.width - center.0).abs();
+                    let top = (center.1 - border_box.y).abs();
+                    let bottom = (border_box.y + border_box.height - center.1).abs();
+                    let side_distances = [left, right, top, bottom];
+                    let corner_distances = [
+                        (left * left + top * top).sqrt(),
+                        (right * right + top * top).sqrt(),
+                        (right * right + bottom * bottom).sqrt(),
+                        (left * left + bottom * bottom).sqrt(),
+                    ];
+                    let distances = if keyword.ends_with("side") {
+                        &side_distances
+                    } else {
+                        &corner_distances
+                    };
+                    if keyword.starts_with("closest") {
+                        distances.iter().copied().fold(f32::INFINITY, f32::min)
+                    } else {
+                        distances
+                            .iter()
+                            .copied()
+                            .fold(f32::NEG_INFINITY, f32::max)
+                    }
                 }
                 _ => shape_length(radius_text, border_box.width.min(border_box.height))?,
             };
-            let center = shape_position(position_text.trim(), border_box)?;
             Some(ClipPathShape::Circle {
                 center,
                 radius: radius.max(0.0),
@@ -3711,12 +3756,8 @@ fn clip_path_shape(style: &ComputedStyle, border_box: Rect) -> Option<ClipPathSh
             })
         }
         "polygon" => {
-            let mut polygon_body = body.trim();
-            if let Some(round) = polygon_body.to_ascii_lowercase().find(" round ") {
-                polygon_body = polygon_body[..round].trim_end();
-            }
             let mut points = Vec::new();
-            for component in crate::css::split_top_level_commas(polygon_body) {
+            for component in crate::css::split_top_level_commas(body.trim()) {
                 let components = split_top_level_whitespace(component.trim());
                 if components.len() != 2 {
                     return None;
@@ -3735,6 +3776,187 @@ fn clip_path_shape(style: &ComputedStyle, border_box: Rect) -> Option<ClipPathSh
         }
         _ => None,
     }
+}
+
+/// Validates the subset of CSS basic shapes supported by the paint pipeline.
+/// This is intentionally syntax-only: dimensions are resolved later against
+/// the element's border box, so a valid shape must not depend on its size.
+pub(crate) fn is_valid_clip_path_value(value: &str) -> bool {
+    let value = value.trim();
+    let Some(open) = value.find('(') else {
+        return false;
+    };
+    if !value.ends_with(')') || value[..open].trim().is_empty() {
+        return false;
+    }
+    let name = value[..open].trim();
+    let body = &value[open + 1..value.len() - 1];
+    match name.to_ascii_lowercase().as_str() {
+        "inset" => valid_clip_path_inset_body(body),
+        "circle" => valid_clip_path_circle_body(body),
+        "ellipse" => valid_clip_path_ellipse_body(body),
+        "polygon" => valid_clip_path_polygon_body(body),
+        _ => false,
+    }
+}
+
+fn valid_clip_path_length(value: &str) -> bool {
+    if parse_clip_path_inset_length(value).is_some() {
+        return true;
+    }
+    let value = value.trim();
+    if value.len() >= 6
+        && value
+            .get(..5)
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case("calc("))
+        && value.ends_with(')')
+    {
+        let parts = split_top_level_whitespace(&value[5..value.len() - 1]);
+        let mut has_quantity = false;
+        for part in parts {
+            if matches!(part, "+" | "-") {
+                continue;
+            }
+            if !valid_clip_path_dimension(part) {
+                return false;
+            }
+            has_quantity = true;
+        }
+        return has_quantity;
+    }
+    valid_clip_path_dimension(value)
+}
+
+fn valid_clip_path_dimension(value: &str) -> bool {
+    if value == "0" {
+        return true;
+    }
+    if let Some(number) = value.strip_suffix('%') {
+        return number.trim().parse::<f32>().is_ok();
+    }
+    const UNITS: [&str; 17] = [
+        "px", "em", "ex", "ch", "rem", "lh", "rlh", "vw", "vh", "vi", "vb", "vmin",
+        "vmax", "cm", "mm", "q", "in", // keep the list explicit to reject identifiers
+    ];
+    UNITS.iter().any(|unit| {
+        value
+            .strip_suffix(unit)
+            .is_some_and(|number| number.trim().parse::<f32>().is_ok())
+    })
+}
+
+fn valid_clip_path_position(value: &str) -> bool {
+    let parts = split_top_level_whitespace(value.trim());
+    if parts.is_empty() || parts.len() > 2 {
+        return false;
+    }
+    let valid_component = |part: &str, horizontal: bool| {
+        valid_clip_path_length(part)
+            || match part.to_ascii_lowercase().as_str() {
+                "center" => true,
+                "left" | "right" if horizontal => true,
+                "top" | "bottom" if !horizontal => true,
+                _ => false,
+            }
+    };
+    match parts.as_slice() {
+        [part] => valid_component(part, true) || valid_component(part, false),
+        [first, second] => {
+            let first_vertical = matches!(
+                first.to_ascii_lowercase().as_str(),
+                "top" | "bottom"
+            );
+            let second_horizontal = matches!(
+                second.to_ascii_lowercase().as_str(),
+                "left" | "right"
+            );
+            let (x, y) = if first_vertical || second_horizontal {
+                (*second, *first)
+            } else {
+                (*first, *second)
+            };
+            valid_component(x, true) && valid_component(y, false)
+        }
+        _ => false,
+    }
+}
+
+fn valid_clip_path_inset_body(body: &str) -> bool {
+    let parts = split_top_level_whitespace(body.trim());
+    if parts.is_empty() {
+        return false;
+    }
+    let round_indices = parts
+        .iter()
+        .enumerate()
+        .filter_map(|(index, part)| part.eq_ignore_ascii_case("round").then_some(index))
+        .collect::<Vec<_>>();
+    if round_indices.len() > 1 {
+        return false;
+    }
+    let (inset_parts, radius_parts) = if let Some(&round_index) = round_indices.first() {
+        (&parts[..round_index], &parts[round_index + 1..])
+    } else {
+        (&parts[..], &[][..])
+    };
+    let radius_valid = if round_indices.is_empty() {
+        radius_parts.is_empty()
+    } else {
+        (1..=4).contains(&radius_parts.len())
+            && radius_parts.iter().all(|part| valid_clip_path_length(part))
+    };
+    (1..=4).contains(&inset_parts.len())
+        && inset_parts.iter().all(|part| valid_clip_path_length(part))
+        && radius_valid
+}
+
+fn split_shape_at(body: &str) -> Option<(&str, &str)> {
+    let lower = body.to_ascii_lowercase();
+    let mut indices = lower.match_indices(" at ");
+    let Some((index, _)) = indices.next() else {
+        return Some((body, "center"));
+    };
+    if indices.next().is_some() {
+        return None;
+    }
+    Some((&body[..index], &body[index + 4..]))
+}
+
+fn valid_clip_path_circle_body(body: &str) -> bool {
+    let Some((radius_text, position_text)) = split_shape_at(body) else {
+        return false;
+    };
+    let radius = radius_text.trim();
+    let radius_parts = split_top_level_whitespace(radius);
+    if radius_parts.len() != 1 {
+        return false;
+    }
+    let radius = radius_parts[0];
+    (matches!(
+        radius.to_ascii_lowercase().as_str(),
+        "closest-side" | "farthest-side" | "closest-corner" | "farthest-corner"
+    ) || valid_clip_path_length(radius))
+        && valid_clip_path_position(position_text)
+}
+
+fn valid_clip_path_ellipse_body(body: &str) -> bool {
+    let Some((radii_text, position_text)) = split_shape_at(body) else {
+        return false;
+    };
+    let radii = split_top_level_whitespace(radii_text.trim());
+    (1..=2).contains(&radii.len())
+        && radii.iter().all(|part| valid_clip_path_length(part))
+        && valid_clip_path_position(position_text)
+}
+
+fn valid_clip_path_polygon_body(body: &str) -> bool {
+    let components = crate::css::split_top_level_commas(body.trim());
+    components.len() >= 3
+        && components.iter().all(|component| {
+            let point = split_top_level_whitespace(component.trim());
+            point.len() == 2
+                && point.iter().all(|part| valid_clip_path_length(part))
+        })
 }
 
 fn point_in_polygon(point: (f32, f32), points: &[(f32, f32)]) -> bool {
