@@ -5398,6 +5398,11 @@ fn register_host_bindings(
             NativeFunction::from_copy_closure(crypto_digest_native),
         ),
         (
+            js_string!("__omoikane_crypto_hmac"),
+            3,
+            NativeFunction::from_copy_closure(crypto_hmac_native),
+        ),
+        (
             js_string!("__omoikane_is_secure_context"),
             0,
             NativeFunction::from_copy_closure(is_secure_context_native),
@@ -6545,6 +6550,74 @@ fn crypto_digest_native(
         _ => {
             return Err(JsError::from(
                 JsNativeError::error().with_message("unsupported digest algorithm"),
+            ));
+        }
+    };
+    let json = serde_json::to_string(&digest).map_err(|error| {
+        JsError::from(JsNativeError::error().with_message(error.to_string()))
+    })?;
+    Ok(js_string!(json).into())
+}
+
+/// Computes an HMAC over a caller-owned byte snapshot.
+///
+/// The Web Crypto wrapper keeps CryptoKey objects realm-local and only passes
+/// the immutable key/data snapshots into this host hook.  Dispatching the
+/// digest implementation here avoids exposing a Rust crypto object to Boa
+/// while still making the operation's Promise/task boundary explicit in JS.
+fn crypto_hmac_native(
+    _this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    use hmac::{Hmac, Mac};
+
+    let algorithm = string_argument(args.first(), "", context)?;
+    let key_json = string_argument(args.get(1), "[]", context)?;
+    let data_json = string_argument(args.get(2), "[]", context)?;
+    let key: Vec<u8> = serde_json::from_str(&key_json).map_err(|error| {
+        JsError::from(
+            JsNativeError::typ().with_message(format!("invalid HMAC key data: {error}")),
+        )
+    })?;
+    let data: Vec<u8> = serde_json::from_str(&data_json).map_err(|error| {
+        JsError::from(
+            JsNativeError::typ().with_message(format!("invalid HMAC input data: {error}")),
+        )
+    })?;
+
+    let digest = match algorithm.as_str() {
+        "SHA-1" => {
+            let mut mac = Hmac::<sha1::Sha1>::new_from_slice(&key).map_err(|error| {
+                JsError::from(JsNativeError::error().with_message(error.to_string()))
+            })?;
+            mac.update(&data);
+            mac.finalize().into_bytes().to_vec()
+        }
+        "SHA-256" => {
+            let mut mac = Hmac::<sha2::Sha256>::new_from_slice(&key).map_err(|error| {
+                JsError::from(JsNativeError::error().with_message(error.to_string()))
+            })?;
+            mac.update(&data);
+            mac.finalize().into_bytes().to_vec()
+        }
+        "SHA-384" => {
+            let mut mac = Hmac::<sha2::Sha384>::new_from_slice(&key).map_err(|error| {
+                JsError::from(JsNativeError::error().with_message(error.to_string()))
+            })?;
+            mac.update(&data);
+            mac.finalize().into_bytes().to_vec()
+        }
+        "SHA-512" => {
+            let mut mac = Hmac::<sha2::Sha512>::new_from_slice(&key).map_err(|error| {
+                JsError::from(JsNativeError::error().with_message(error.to_string()))
+            })?;
+            mac.update(&data);
+            mac.finalize().into_bytes().to_vec()
+        }
+        _ => {
+            return Err(JsError::from(
+                JsNativeError::error().with_message("unsupported HMAC hash algorithm"),
             ));
         }
     };
@@ -15003,6 +15076,107 @@ mod tests {
                 .unwrap()
                 .as_boolean()
                 .unwrap()
+        );
+    }
+
+    #[test]
+    fn web_crypto_hmac_key_lifecycle_and_operations() {
+        let mut runtime = JsRuntime::new().unwrap();
+        runtime
+            .eval(
+                r#"globalThis.hmacResult = { done: false, errors: [] };
+                (async () => {
+                  const source = new Uint8Array(20); source.fill(0x0b);
+                  const key = await crypto.subtle.importKey(
+                    'raw', source, { name: 'HMAC', hash: 'SHA-256' }, true, ['sign', 'verify']);
+                  hmacResult.shape = [
+                    key instanceof CryptoKey, key.type, key.extractable,
+                    key.algorithm.name, key.algorithm.hash.name, key.algorithm.length,
+                    Object.isFrozen(key.algorithm), Object.isFrozen(key.usages),
+                    key.usages.join(',')
+                  ];
+                  const data = new TextEncoder().encode('Hi There');
+                  const signature = await crypto.subtle.sign('HMAC', key, data);
+                  hmacResult.signature = Array.from(new Uint8Array(signature))
+                    .map(value => value.toString(16).padStart(2, '0')).join('');
+                  hmacResult.verify = await crypto.subtle.verify('HMAC', key, signature, data);
+                  const altered = new Uint8Array(signature.slice(0)); altered[0] ^= 1;
+                  hmacResult.verifyAltered = await crypto.subtle.verify('HMAC', key, altered, data);
+                  const raw = await crypto.subtle.exportKey('raw', key);
+                  hmacResult.raw = Array.from(new Uint8Array(raw)).join(',');
+                  const jwk = await crypto.subtle.exportKey('jwk', key);
+                  hmacResult.jwk = [jwk.kty, jwk.alg, jwk.key_ops.join(','), jwk.ext, jwk.k];
+                  const generated = await crypto.subtle.generateKey(
+                    { name: 'HMAC', hash: { name: 'SHA-256' }, length: 128 }, true, ['sign']);
+                  hmacResult.generated = [generated instanceof CryptoKey, generated.algorithm.length, generated.usages.join(',')];
+                  const importedJwk = await crypto.subtle.importKey(
+                    'jwk', jwk, { name: 'HMAC', hash: 'SHA-256' }, true, ['verify']);
+                  hmacResult.jwkRoundTrip = await crypto.subtle.verify('HMAC', importedJwk, signature, data);
+                  hmacResult.done = true;
+                })().catch(error => hmacResult.errors.push(error.name));"#,
+            )
+            .unwrap();
+        runtime.run_jobs().unwrap();
+        assert!(runtime
+            .eval(
+                r#"hmacResult.done && hmacResult.errors.length === 0 &&
+                JSON.stringify(hmacResult.shape) === '[true,"secret",true,"HMAC","SHA-256",160,true,true,"sign,verify"]' &&
+                hmacResult.signature === 'b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7' &&
+                hmacResult.verify === true && hmacResult.verifyAltered === false &&
+                hmacResult.raw === '11,11,11,11,11,11,11,11,11,11,11,11,11,11,11,11,11,11,11,11' &&
+                hmacResult.jwk[0] === 'oct' && hmacResult.jwk[1] === 'HS256' &&
+                hmacResult.jwk[2] === 'sign,verify' && hmacResult.jwk[3] === true &&
+                hmacResult.jwk[4] === 'CwsLCwsLCwsLCwsLCwsLCwsLCws' &&
+                JSON.stringify(hmacResult.generated) === '[true,128,"sign"]' &&
+                hmacResult.jwkRoundTrip === true"#,
+            )
+            .unwrap()
+            .as_boolean()
+            .unwrap_or(false));
+
+        let mut teardown_runtime = JsRuntime::new().unwrap();
+        teardown_runtime
+            .eval(
+                r#"globalThis.teardownResult = 'pending';
+                   const pending = crypto.subtle.importKey(
+                     'raw', new Uint8Array([1, 2, 3]), { name: 'HMAC', hash: 'SHA-256' }, true, ['sign']);
+                   __omoikane_crypto_teardown();
+                   pending.then(() => teardownResult = 'resolved', error => teardownResult = error.name);"#,
+            )
+            .unwrap();
+        teardown_runtime.run_jobs().unwrap();
+        assert_eq!(
+            teardown_runtime
+                .eval("teardownResult")
+                .unwrap()
+                .as_string()
+                .unwrap()
+                .to_std_string_escaped(),
+            "InvalidStateError"
+        );
+    }
+
+    #[test]
+    fn web_crypto_hmac_rejects_invalid_usages_and_non_extractable_exports() {
+        let mut runtime = JsRuntime::new().unwrap();
+        runtime
+            .eval(
+                r#"globalThis.cryptoErrors = [];
+                const remember = promise => promise.then(() => cryptoErrors.push('resolved'), error => cryptoErrors.push(error.name));
+                remember(crypto.subtle.importKey('raw', new Uint8Array([1]), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']).then(key => crypto.subtle.exportKey('raw', key)));
+                remember(crypto.subtle.generateKey({ name: 'HMAC', hash: 'SHA-256' }, true, ['encrypt']));
+                remember(crypto.subtle.importKey('jwk', { kty: 'oct', k: '!!!' }, { name: 'HMAC', hash: 'SHA-256' }, true, ['sign']));"#,
+            )
+            .unwrap();
+        runtime.run_jobs().unwrap();
+        assert_eq!(
+            runtime
+                .eval("cryptoErrors.slice().sort().join(',')")
+                .unwrap()
+                .as_string()
+                .unwrap()
+                .to_std_string_escaped(),
+            "DataError,InvalidAccessError,SyntaxError"
         );
     }
 
