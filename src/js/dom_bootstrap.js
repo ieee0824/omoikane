@@ -10005,9 +10005,35 @@
   // Performance Timeline, User Timing, Resource/Navigation Timing, and
   // observation of all entries implemented by this runtime.  Network timing is
   // recorded at the JS/native boundary below (fetch/XHR and resource element
-  // completion), so every entry uses this realm's `performance.now()` clock and
-  // the same time origin as User Timing.
+  // completion), so every entry uses the host's monotonic clock and the same
+  // time origin as User Timing.
   const performanceEntryToken = Symbol("PerformanceEntry internal constructor");
+  const nativePerformanceNow = __omoikane_performance_now;
+  const navigationTimingValues = new WeakMap();
+
+  function navigationTimingState(target) {
+    let state = navigationTimingValues.get(target);
+    if (!state) {
+      state = Object.create(null);
+      navigationTimingValues.set(target, state);
+    }
+    return state;
+  }
+
+  function defineNavigationTimingField(target, field, value) {
+    const state = navigationTimingState(target);
+    state[field] = value;
+    if (Object.prototype.hasOwnProperty.call(target, field)) return;
+    Object.defineProperty(target, field, {
+      get() {
+        const state = navigationTimingValues.get(this);
+        return state ? state[field] : 0;
+      },
+      enumerable: true,
+      configurable: false,
+    });
+  }
+
   function isDictionary(value) {
     return value !== null && (typeof value === "object" || typeof value === "function");
   }
@@ -10019,12 +10045,15 @@
         name: { value: String(name), enumerable: true },
         entryType: { value: String(entryType), enumerable: true },
         startTime: { value: Number(startTime), enumerable: true },
-        duration: {
+      });
+      if (String(entryType) === "navigation") {
+        defineNavigationTimingField(this, "duration", Number(duration));
+      } else {
+        Object.defineProperty(this, "duration", {
           value: Number(duration),
           enumerable: true,
-          configurable: String(entryType) === "navigation",
-        },
-      });
+        });
+      }
     }
     toJSON() {
       return {
@@ -10041,7 +10070,7 @@
       options = options ?? {};
       if (!isDictionary(options)) throw new TypeError("PerformanceMark options must be a dictionary");
       const startTime = options.startTime === undefined
-        ? __omoikane_performance_now()
+        ? nativePerformanceNow()
         : Number(options.startTime);
       if (Number.isNaN(startTime) || startTime < 0) {
         throw new TypeError("PerformanceMark startTime must be a non-negative number");
@@ -10077,22 +10106,32 @@
   ];
 
   function definePerformanceTimingFields(target, options, fields) {
+    const isNavigation = options.entryType === "navigation" ||
+      fields === performanceNavigationTimingNumericFields;
     for (const field of fields) {
       const value = options[field] === undefined ? 0 : Number(options[field]);
-      Object.defineProperty(target, field, {
-        value: Number.isFinite(value) && value >= 0 ? value : 0,
-        enumerable: true,
-        configurable: options.entryType === "navigation" || fields === performanceNavigationTimingNumericFields,
-      });
+      const normalized = Number.isFinite(value) && value >= 0 ? value : 0;
+      if (isNavigation) {
+        defineNavigationTimingField(target, field, normalized);
+      } else {
+        Object.defineProperty(target, field, {
+          value: normalized,
+          enumerable: true,
+        });
+      }
     }
     for (const field of performanceResourceTimingStringFields) {
       if (fields !== performanceNavigationTimingNumericFields &&
           options[field] === undefined && field === "renderBlockingStatus") continue;
-      Object.defineProperty(target, field, {
-        value: options[field] === undefined ? "" : String(options[field]),
-        enumerable: true,
-        configurable: options.entryType === "navigation" || fields === performanceNavigationTimingNumericFields,
-      });
+      const value = options[field] === undefined ? "" : String(options[field]);
+      if (isNavigation) {
+        defineNavigationTimingField(target, field, value);
+      } else {
+        Object.defineProperty(target, field, {
+          value,
+          enumerable: true,
+        });
+      }
     }
   }
 
@@ -10305,8 +10344,9 @@
   }
 
   function recordResourceTiming(options = {}) {
-    const startTime = normalizeTimingNumber(options.startTime, performance.now());
-    const responseEnd = normalizeTimingNumber(options.responseEnd, performance.now());
+    const now = nativePerformanceNow();
+    const startTime = normalizeTimingNumber(options.startTime, now);
+    const responseEnd = normalizeTimingNumber(options.responseEnd, now);
     const responseStart = normalizeTimingNumber(options.responseStart, responseEnd);
     const fetchStart = normalizeTimingNumber(options.fetchStart, startTime);
     const requestStart = normalizeTimingNumber(options.requestStart, fetchStart);
@@ -10323,10 +10363,10 @@
   }
 
   function beginResourceTiming(name, initiatorType, startAt = undefined) {
-    const sampledStart = startAt === undefined ? performance.now() : Number(startAt);
+    const sampledStart = startAt === undefined ? nativePerformanceNow() : Number(startAt);
     const startTime = Number.isFinite(sampledStart) && sampledStart >= 0
       ? sampledStart
-      : Math.max(0, performance.now());
+      : Math.max(0, nativePerformanceNow());
     return {
       name: String(name),
       initiatorType: String(initiatorType),
@@ -10347,7 +10387,7 @@
     finishedResourceTimings.add(timing);
     const responseEnd = data && data.responseEnd !== undefined
       ? normalizeTimingNumber(data.responseEnd, normalizeTimingNumber(timing.responseEnd, 0))
-      : performance.now();
+      : nativePerformanceNow();
     const responseStart = data && data.responseStart !== undefined
       ? normalizeTimingNumber(data.responseStart, responseEnd)
       : responseEnd;
@@ -10384,9 +10424,9 @@
     const name = String(__omoikane_resolve_url(rawName));
     if (!name) return;
     const startTime = element.__resourceTimingStart === undefined
-      ? Math.max(0, performance.now() - 0.001)
+      ? Math.max(0, nativePerformanceNow() - 0.001)
       : element.__resourceTimingStart;
-    const responseTime = performance.now();
+    const responseTime = nativePerformanceNow();
     element.__resourceTimingRecorded = true;
     recordResourceTiming({
       name,
@@ -10405,7 +10445,7 @@
 
   function noteElementResourceStart(element) {
     if (!element) return;
-    element.__resourceTimingStart = performance.now();
+    element.__resourceTimingStart = nativePerformanceNow();
     element.__resourceTimingRecorded = false;
   }
 
@@ -10448,7 +10488,7 @@
 
   const performance = {
     timing: {},
-    now() { return __omoikane_performance_now(); },
+    now() { return nativePerformanceNow(); },
     mark(name, options = {}) {
       return addPerformanceEntry(new PerformanceMark(name, options));
     },
@@ -10560,33 +10600,17 @@
   navigationEntryForLifecycle = initialNavigationEntry;
   globalThis.__omoikane_performance_navigation_event = function(type) {
     if (!navigationEntryForLifecycle) return;
-    const now = performance.now();
+    const state = navigationTimingValues.get(navigationEntryForLifecycle);
+    if (!state) return;
+    const now = nativePerformanceNow();
     const update = field => {
-      const previous = Number(navigationEntryForLifecycle[field]) || 0;
-      try {
-        Object.defineProperty(navigationEntryForLifecycle, field, {
-          value: Math.max(previous, now),
-          enumerable: true,
-          configurable: true,
-        });
-      } catch (_) {
-        // A page may have made the entry non-configurable.  Lifecycle
-        // bookkeeping must remain best-effort and never break event dispatch.
-      }
+      const previous = Number(state[field]) || 0;
+      state[field] = Math.max(previous, now);
     };
     const updateDuration = () => {
       const startTime = Number(navigationEntryForLifecycle.startTime) || 0;
-      const loadEventEnd = Number(navigationEntryForLifecycle.loadEventEnd) || 0;
-      try {
-        Object.defineProperty(navigationEntryForLifecycle, "duration", {
-          value: Math.max(0, loadEventEnd - startTime),
-          enumerable: true,
-          configurable: true,
-        });
-      } catch (_) {
-        // A page may have made duration non-configurable.  Lifecycle bookkeeping
-        // remains best-effort and must not break event dispatch.
-      }
+      const loadEventEnd = Number(state.loadEventEnd) || 0;
+      state.duration = Math.max(0, loadEventEnd - startTime);
     };
     switch (String(type)) {
       case "domInteractive": update("domInteractive"); break;
@@ -10602,7 +10626,7 @@
   // They report their terminal status through this small host bridge so
   // initial parser-discovered resources participate in the same timeline.
   globalThis.__omoikane_record_resource_timing = function(name, initiatorType, status, error, redirected = false, elapsedMs = 0) {
-    const responseEnd = performance.now();
+    const responseEnd = nativePerformanceNow();
     const elapsed = normalizeTimingNumber(elapsedMs, 0);
     const startTime = Math.max(0, responseEnd - elapsed);
     const timing = beginResourceTiming(String(name), String(initiatorType || "other"), startTime);

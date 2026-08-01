@@ -22611,8 +22611,7 @@ b</textarea></form>"#);
         runtime
             .eval(
                 r#"globalThis.windowDclCount = 0;
-                   window.addEventListener("DOMContentLoaded", () => windowDclCount++);
-                   performance.now = () => 42;"#,
+                   window.addEventListener("DOMContentLoaded", () => windowDclCount++);"#,
             )
             .unwrap();
         runtime.fire_dom_content_loaded().unwrap();
@@ -22621,10 +22620,18 @@ b</textarea></form>"#);
             .eval(
                 r#"(() => {
                   const entry = performance.getEntriesByType("navigation")[0];
-                  delete entry.domInteractive;
+                  const domInteractiveDescriptor = Object.getOwnPropertyDescriptor(entry, "domInteractive");
+                  const durationDescriptor = Object.getOwnPropertyDescriptor(entry, "duration");
+                  const previousDomInteractive = entry.domInteractive;
+                  const deleted = delete entry.domInteractive;
                   __omoikane_performance_navigation_event("domInteractive");
-                  return windowDclCount === 1 && entry.loadEventEnd === 42 &&
-                    entry.domInteractive === 42 &&
+                  return windowDclCount === 1 && !deleted &&
+                    domInteractiveDescriptor.configurable === false &&
+                    durationDescriptor.configurable === false &&
+                    typeof domInteractiveDescriptor.get === "function" &&
+                    typeof durationDescriptor.get === "function" &&
+                    entry.domInteractive >= previousDomInteractive &&
+                    entry.loadEventEnd >= entry.loadEventStart &&
                     entry.duration === entry.loadEventEnd - entry.startTime &&
                     entry.toJSON().duration === entry.duration;
                 })()"#,
