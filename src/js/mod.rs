@@ -2237,6 +2237,21 @@ impl JsRuntime {
         }
     }
 
+    fn advance_worklet_clocks(&mut self, elapsed_ms: u64) {
+        let Some(runtime) = self.host_state.borrow().worklet_runtime.clone() else {
+            return;
+        };
+        if runtime.borrow().host_state.borrow().worklet_terminated {
+            return;
+        }
+        runtime
+            .borrow_mut()
+            .host_state
+            .borrow_mut()
+            .event_loop
+            .advance(elapsed_ms);
+    }
+
     fn run_worker_background_tasks(&mut self) {
         let worker_ids: Vec<_> = self
             .host_state
@@ -2281,6 +2296,37 @@ impl JsRuntime {
                     .event_loop
                     .enqueue_worker_error(worker_id, None, error);
             }
+        }
+    }
+
+    /// Pumps the page-owned WorkletGlobalScope between page tasks. Worklet
+    /// timers and posted microtasks stay in the isolated realm, but their
+    /// deterministic clock advances with the owner page's clock.
+    fn run_worklet_background_tasks(&mut self) {
+        if self.host_state.borrow().worklet_id.is_some() {
+            return;
+        }
+        let Some(runtime) = self.host_state.borrow().worklet_runtime.clone() else {
+            return;
+        };
+        let (result, errors, terminated) = {
+            let mut runtime = runtime.borrow_mut();
+            if runtime.host_state.borrow().worklet_terminated {
+                return;
+            }
+            let result = runtime.run_until_idle();
+            let errors = runtime.take_task_errors();
+            let terminated = runtime.host_state.borrow().worklet_terminated;
+            (result, errors, terminated)
+        };
+        if let Err(error) = result {
+            self.record_task_error(format!("[worklet] {error}"));
+        }
+        for error in errors {
+            self.record_task_error(format!("[worklet] {error}"));
+        }
+        if terminated {
+            terminate_worklet_runtime(&self.host_state);
         }
     }
 
@@ -3036,7 +3082,9 @@ impl JsRuntime {
     pub fn tick(&mut self, elapsed_ms: u64) -> JsResult<()> {
         self.host_state.borrow_mut().event_loop.advance(elapsed_ms);
         self.advance_worker_clocks(elapsed_ms);
+        self.advance_worklet_clocks(elapsed_ms);
         self.run_worker_background_tasks();
+        self.run_worklet_background_tasks();
         self.run_shared_worker_background_tasks();
         self.run_until_idle()
     }
@@ -3052,6 +3100,7 @@ impl JsRuntime {
         // jobs pending. Its checkpoint can itself enqueue host tasks.
         self.run_jobs()?;
         self.run_worker_background_tasks();
+        self.run_worklet_background_tasks();
         self.run_shared_worker_background_tasks();
         loop {
             if self.is_terminated_worker() {
@@ -3063,6 +3112,7 @@ impl JsRuntime {
             };
             self.run_task(task)?;
             self.run_worker_background_tasks();
+            self.run_worklet_background_tasks();
             self.run_shared_worker_background_tasks();
             if self.is_terminated_worker() {
                 break;
@@ -3084,6 +3134,7 @@ impl JsRuntime {
             return Ok(());
         }
         self.run_jobs()?;
+        self.run_worklet_background_tasks();
         self.run_shared_worker_background_tasks();
         loop {
             if self.is_terminated_worker() {
@@ -3132,6 +3183,7 @@ impl JsRuntime {
                 break;
             }
             self.run_shared_worker_background_tasks();
+            self.run_worklet_background_tasks();
             self.run_jobs()?;
         }
         Ok(())
@@ -3493,7 +3545,9 @@ impl JsRuntime {
     pub fn run_animation_frame(&mut self, elapsed_ms: u64) -> JsResult<usize> {
         self.host_state.borrow_mut().event_loop.advance(elapsed_ms);
         self.advance_worker_clocks(elapsed_ms);
+        self.advance_worklet_clocks(elapsed_ms);
         self.run_worker_background_tasks();
+        self.run_worklet_background_tasks();
         self.run_until_idle()?;
         if self.has_pending_scroll_steps() {
             self.flush_pending_scroll_events()?;
@@ -3564,7 +3618,9 @@ impl JsRuntime {
     async fn run_animation_frame_async(&mut self, elapsed_ms: u64) -> JsResult<usize> {
         self.host_state.borrow_mut().event_loop.advance(elapsed_ms);
         self.advance_worker_clocks(elapsed_ms);
+        self.advance_worklet_clocks(elapsed_ms);
         self.run_worker_background_tasks();
+        self.run_worklet_background_tasks();
         self.run_until_idle_async().await?;
         if self.has_pending_scroll_steps() {
             self.flush_pending_scroll_events()?;
@@ -3696,7 +3752,9 @@ impl JsRuntime {
             }
             self.host_state.borrow_mut().event_loop.advance(step);
             self.advance_worker_clocks(step);
+            self.advance_worklet_clocks(step);
             self.run_worker_background_tasks();
+            self.run_worklet_background_tasks();
             advanced = advanced.saturating_add(step);
 
             loop {
@@ -8854,6 +8912,14 @@ fn worklet_status(ok: bool, name: &str, message: &str, duplicate: bool) -> JsVal
 
 fn worklet_error_name(error: &str) -> &'static str {
     for name in [
+        "InvalidModificationError",
+        "InvalidStateError",
+        "DataCloneError",
+        "SecurityError",
+        "NotAllowedError",
+        "OperationError",
+        "NetworkError",
+        "AbortError",
         "AggregateError",
         "EvalError",
         "RangeError",
@@ -8863,7 +8929,7 @@ fn worklet_error_name(error: &str) -> &'static str {
         "URIError",
         "Error",
     ] {
-        if error.starts_with(name) {
+        if error.starts_with(name) || error.contains(&format!("name: \"{name}\"")) {
             return name;
         }
     }
@@ -11713,6 +11779,39 @@ mod tests {
             .unwrap();
         insecure.run_jobs().unwrap();
         assert_eq!(eval_str(&mut insecure, "workletError"), "NotAllowedError");
+    }
+
+    #[test]
+    fn worklet_rejects_duplicate_registration_names() {
+        let mut runtime = JsRuntime::new().unwrap();
+        runtime
+            .eval(
+                r#"globalThis.workletError = '';
+                   const first = 'data:text/javascript,' + encodeURIComponent("registerWorklet('same-name')");
+                   const second = 'data:text/javascript,' + encodeURIComponent("/* second */ registerWorklet('same-name')");
+                   CSS.paintWorklet.addModule(first).then(() => CSS.paintWorklet.addModule(second)).catch(error => workletError = error.name);"#,
+            )
+            .unwrap();
+        runtime.run_until_idle().unwrap();
+        assert_eq!(eval_str(&mut runtime, "workletError"), "InvalidModificationError");
+    }
+
+    #[test]
+    fn worklet_tasks_follow_owner_clock_after_module_microtasks() {
+        let mut runtime = JsRuntime::new().unwrap();
+        runtime
+            .eval(
+                r#"globalThis.workletProbe = [];
+                   const source = encodeURIComponent("queueMicrotask(() => registerWorklet('micro')); setTimeout(() => registerWorklet('timer'), 0)");
+                   CSS.paintWorklet.addModule('data:text/javascript,' + source).then(() => {
+                     workletProbe.push(CSS.paintWorklet.registeredNames.join(','));
+                   });"#,
+            )
+            .unwrap();
+        runtime.run_until_idle().unwrap();
+        assert_eq!(eval_str(&mut runtime, "workletProbe.join('|')"), "micro");
+        runtime.tick(0).unwrap();
+        assert_eq!(eval_str(&mut runtime, "CSS.paintWorklet.registeredNames.join(',')"), "micro,timer");
     }
 
     #[test]
