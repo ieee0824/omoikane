@@ -10373,6 +10373,7 @@
     const startTime = element.__resourceTimingStart === undefined
       ? Math.max(0, performance.now() - 0.001)
       : element.__resourceTimingStart;
+    const responseTime = performance.now();
     element.__resourceTimingRecorded = true;
     recordResourceTiming({
       name,
@@ -10380,8 +10381,8 @@
       startTime,
       fetchStart: startTime,
       requestStart: startTime,
-      responseStart: performance.now(),
-      responseEnd: performance.now(),
+      responseStart: responseTime,
+      responseEnd: responseTime,
       responseStatus: error ? 0 : status,
       transferSize: 0,
       encodedBodySize: 0,

@@ -2739,12 +2739,12 @@ impl JsRuntime {
         }
         immediate.extend(deferred);
         immediate.push(PageTaskSource::Classic {
-            source: "document.__readyState = 'interactive'; try { if (typeof __omoikane_performance_navigation_event === 'function') __omoikane_performance_navigation_event('domInteractive'); } catch (_) {} try { if (typeof __omoikane_performance_navigation_event === 'function') __omoikane_performance_navigation_event('domContentLoadedStart'); } catch (_) {} document.dispatchEvent(new Event('DOMContentLoaded')); try { if (typeof __omoikane_performance_navigation_event === 'function') __omoikane_performance_navigation_event('domContentLoadedEnd'); } catch (_) {}".to_string(),
+            source: "document.__readyState = 'interactive'; try { if (typeof __omoikane_performance_navigation_event === 'function') __omoikane_performance_navigation_event('domInteractive'); } catch (_) { void 0; } try { if (typeof __omoikane_performance_navigation_event === 'function') __omoikane_performance_navigation_event('domContentLoadedStart'); } catch (_) { void 0; } document.dispatchEvent(new Event('DOMContentLoaded')); try { if (typeof __omoikane_performance_navigation_event === 'function') __omoikane_performance_navigation_event('domContentLoadedEnd'); } catch (_) { void 0; }".to_string(),
             label: "DOMContentLoaded".to_string(),
             script_node_id: None,
         });
         immediate.push(PageTaskSource::Classic {
-            source: "document.__readyState = 'complete'; try { if (typeof __omoikane_performance_navigation_event === 'function') __omoikane_performance_navigation_event('domComplete'); } catch (_) {} try { if (typeof __omoikane_performance_navigation_event === 'function') __omoikane_performance_navigation_event('loadStart'); } catch (_) {} window.dispatchEvent(new Event('load')); try { if (typeof __omoikane_performance_navigation_event === 'function') __omoikane_performance_navigation_event('loadEnd'); } catch (_) {}".to_string(),
+            source: "document.__readyState = 'complete'; try { if (typeof __omoikane_performance_navigation_event === 'function') __omoikane_performance_navigation_event('domComplete'); } catch (_) { void 0; } try { if (typeof __omoikane_performance_navigation_event === 'function') __omoikane_performance_navigation_event('loadStart'); } catch (_) { void 0; } window.dispatchEvent(new Event('load')); try { if (typeof __omoikane_performance_navigation_event === 'function') __omoikane_performance_navigation_event('loadEnd'); } catch (_) { void 0; }".to_string(),
             label: "load".to_string(),
             script_node_id: None,
         });
@@ -4562,7 +4562,7 @@ impl JsRuntime {
     /// `document.addEventListener('DOMContentLoaded', fn)` will be invoked.
     pub fn fire_dom_content_loaded(&mut self) -> JsResult<()> {
         self.eval(
-            "document.__readyState = 'interactive'; try { if (typeof __omoikane_performance_navigation_event === 'function') __omoikane_performance_navigation_event('domInteractive'); } catch (_) {} try { if (typeof __omoikane_performance_navigation_event === 'function') __omoikane_performance_navigation_event('domContentLoadedStart'); } catch (_) {} document.dispatchEvent(new Event('DOMContentLoaded')); try { if (typeof __omoikane_performance_navigation_event === 'function') __omoikane_performance_navigation_event('domContentLoadedEnd'); } catch (_) {}",
+            "document.__readyState = 'interactive'; try { if (typeof __omoikane_performance_navigation_event === 'function') __omoikane_performance_navigation_event('domInteractive'); } catch (_) { void 0; } try { if (typeof __omoikane_performance_navigation_event === 'function') __omoikane_performance_navigation_event('domContentLoadedStart'); } catch (_) { void 0; } document.dispatchEvent(new Event('DOMContentLoaded')); try { if (typeof __omoikane_performance_navigation_event === 'function') __omoikane_performance_navigation_event('domContentLoadedEnd'); } catch (_) { void 0; }",
         )?;
         self.run_jobs()
     }
@@ -4610,7 +4610,7 @@ impl JsRuntime {
     pub fn fire_load(&mut self) -> JsResult<()> {
         // The load event does not bubble.
         self.eval(
-            "document.__readyState = 'complete'; try { if (typeof __omoikane_performance_navigation_event === 'function') __omoikane_performance_navigation_event('domComplete'); } catch (_) {} try { if (typeof __omoikane_performance_navigation_event === 'function') __omoikane_performance_navigation_event('loadStart'); } catch (_) {} window.dispatchEvent(new Event('load', { bubbles: false })); try { if (typeof __omoikane_performance_navigation_event === 'function') __omoikane_performance_navigation_event('loadEnd'); } catch (_) {}",
+            "document.__readyState = 'complete'; try { if (typeof __omoikane_performance_navigation_event === 'function') __omoikane_performance_navigation_event('domComplete'); } catch (_) { void 0; } try { if (typeof __omoikane_performance_navigation_event === 'function') __omoikane_performance_navigation_event('loadStart'); } catch (_) { void 0; } window.dispatchEvent(new Event('load', { bubbles: false })); try { if (typeof __omoikane_performance_navigation_event === 'function') __omoikane_performance_navigation_event('loadEnd'); } catch (_) { void 0; }",
         )?;
         self.run_jobs()
     }
@@ -13667,6 +13667,53 @@ mod tests {
                 .unwrap()
                 .as_boolean()
                 .unwrap()
+        );
+    }
+
+    #[test]
+    fn owned_document_task_lifecycle_survives_overwritten_navigation_hook() {
+        let document = crate::html::TreeBuilder::parse(
+            r#"<html><body>
+            <script>
+              globalThis.pageLifecycle = [];
+              document.addEventListener('DOMContentLoaded', () => pageLifecycle.push('dcl'));
+              window.addEventListener('load', () => pageLifecycle.push('load'));
+              globalThis.__omoikane_performance_navigation_event = () => {
+                throw new Error('hook failure');
+              };
+            </script>
+            </body></html>"#,
+        )
+        .document();
+        let runtime = JsRuntime::with_document(document).unwrap();
+        let mut task = Box::pin(runtime.into_document_page_task(25, None));
+        let waker: &'static std::task::Waker = std::task::Waker::noop();
+        let mut context = FutureContext::from_waker(waker);
+        let mut completed = loop {
+            if let Poll::Ready(completed) = task.as_mut().poll(&mut context) {
+                break completed;
+            }
+        };
+        assert_eq!(completed.result, Ok(Vec::new()));
+        assert_eq!(
+            completed
+                .runtime
+                .eval("pageLifecycle.join(',')")
+                .unwrap()
+                .as_string()
+                .unwrap()
+                .to_std_string_escaped(),
+            "dcl,load"
+        );
+        assert_eq!(
+            completed
+                .runtime
+                .eval("document.readyState")
+                .unwrap()
+                .as_string()
+                .unwrap()
+                .to_std_string_escaped(),
+            "complete"
         );
     }
 
