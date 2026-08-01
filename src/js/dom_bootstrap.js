@@ -6214,10 +6214,6 @@
         state.contextMode = previous.contextMode;
         state.context = previous.context;
         state.webgl = previous.webgl;
-        if (state.webgl) {
-          state.webgl.__state.viewport = [0, 0, width, height];
-          state.webgl.__state.scissor = [0, 0, width, height];
-        }
       }
       canvasStates.set(canvas,state); commitCanvas(canvas,state);
     }
@@ -6960,10 +6956,6 @@
     next.contextMode = previous.contextMode;
     next.context = previous.context;
     next.webgl = previous.webgl;
-    if (next.webgl) {
-      next.webgl.__state.viewport = [0, 0, next.width, next.height];
-      next.webgl.__state.scissor = [0, 0, next.width, next.height];
-    }
   }
 
   class HTMLCanvasElement extends HTMLElement {

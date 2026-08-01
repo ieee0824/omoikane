@@ -12204,6 +12204,7 @@ mod tests {
           const bufferSize = gl.getBufferParameter(gl.ARRAY_BUFFER, gl.BUFFER_SIZE);
           canvas.width = 3;
           const resizeKeepsContext = canvas.getContext('webgl') === gl && canvas.getContext('2d') === null && gl.drawingBufferWidth === 3;
+          const viewportSurvivesResize = Array.from(gl.getParameter(gl.VIEWPORT)).join(',') === viewport;
           canvas.setAttribute('height', '2');
           const attributeResizeKeepsContext = canvas.getContext('webgl') === gl && canvas.getContext('2d') === null && gl.drawingBufferHeight === 2;
           const vertex = gl.createShader(gl.VERTEX_SHADER);
@@ -12232,13 +12233,13 @@ mod tests {
           __omoikane_webgl_restore_context(gl);
           const restored = !gl.isContextLost() && events.join(',') === 'lost,restored' && canvasEvents.join(',') === 'lost,restored';
           return [typeof WebGLRenderingContext, gl instanceof WebGLRenderingContext, same, exclusive,
-            clear, boundsError, viewport, stringParameter, invalidEnum, bufferSize, resizeKeepsContext,
+            clear, boundsError, viewport, stringParameter, invalidEnum, bufferSize, resizeKeepsContext, viewportSurvivesResize,
             attributeResizeKeepsContext, linked, uniformLocation, ownership, repeatedDelete,
             constantsImmutable, lost, restored].join('|');
         })()"#);
         assert_eq!(
             result,
-            "function|true|true|true|255,64,128,255|true|1,2,3,4|true|true|12|true|true|true|true|true|true|true|true|true"
+            "function|true|true|true|255,64,128,255|true|1,2,3,4|true|true|12|true|true|true|true|true|true|true|true|true|true"
         );
     }
 
