@@ -11568,6 +11568,8 @@ mod tests {
                            webgpuProbe.byteOffset = new Uint32Array(byteOffset.getMappedRange())[0] === 0x22222222;
                            byteOffset.unmap();
                            device.destroy();
+                           const afterDestroy = device.createBuffer({ size: 4, usage: GPUBufferUsage.COPY_DST });
+                           webgpuProbe.afterDestroy = afterDestroy.size === 0 && afterDestroy.mapState === 'unmapped';
                            return device.lost;
                          });
                        });
@@ -11585,6 +11587,7 @@ mod tests {
         assert_eq!(eval_str(&mut runtime, "String(webgpuProbe.invalidRange)"), "true");
         assert_eq!(eval_str(&mut runtime, "String(webgpuProbe.relativeMap)"), "8");
         assert_eq!(eval_str(&mut runtime, "String(webgpuProbe.byteOffset)"), "true");
+        assert_eq!(eval_str(&mut runtime, "String(webgpuProbe.afterDestroy)"), "true");
         assert_eq!(eval_str(&mut runtime, "webgpuProbe.lost"), "destroyed|Device was destroyed.");
     }
 

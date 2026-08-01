@@ -8952,7 +8952,9 @@
       if (this.__destroyed) return;
       this.unmap();
       this.__destroyed = true;
-      this.__mapState = "destroyed";
+      // WebGPU exposes only unmapped/pending/mapped map states.  A destroyed
+      // buffer is no longer mapped, so keep the enum at its unmapped value.
+      this.__mapState = "unmapped";
       this.__data = new Uint8Array(0);
     }
     get [Symbol.toStringTag]() { return "GPUBuffer"; }
@@ -9116,6 +9118,11 @@
     createBuffer(descriptor = undefined) {
       if (!isDictionary(descriptor)) throw new TypeError("GPUBufferDescriptor is required");
       const values = descriptor || {};
+      if (!webgpuDeviceActive(this, "GPUDevice.createBuffer")) {
+        const buffer = new GPUBuffer(this, { ...values, size: 0, usage: 0 }, gpuBufferConstructionToken, true);
+        this.__buffers.push(buffer);
+        return buffer;
+      }
       const size = Number(values.size);
       const usage = Number(values.usage);
       let invalid = false;
