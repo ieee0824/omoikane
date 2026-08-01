@@ -389,7 +389,9 @@
       "id": "workers.service-worker",
       "area": "workers",
       "description": "Service worker container is exposed",
-      "probe": "navigator.serviceWorker && typeof navigator.serviceWorker.register === 'function'",
+      "setup": "globalThis.__serviceWorkerSurface = { done: false }; navigator.serviceWorker.register('/surface-worker.js', { scope: '/surface/' }).then(registration => navigator.serviceWorker.getRegistration('/surface/page.html').then(found => { __serviceWorkerSurface.done = found === registration && registration.active && registration.active.state === 'activated'; }), () => { __serviceWorkerSurface.done = false; })",
+      "run_tasks": true,
+      "probe": "navigator.serviceWorker && typeof navigator.serviceWorker.register === 'function' && __serviceWorkerSurface.done === true",
       "baseline_supported": false
     },
     {
