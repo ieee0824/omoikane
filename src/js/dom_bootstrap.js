@@ -10108,7 +10108,6 @@
     if (fields === "navigation") {
       result.type = entry.type;
       result.redirectCount = entry.redirectCount;
-      result.navigationStart = entry.navigationStart;
     }
     if ("serverTiming" in entry) result.serverTiming = entry.serverTiming.slice();
     return result;
@@ -10145,7 +10144,6 @@
         value: Math.max(0, Math.trunc(Number(options.redirectCount) || 0)),
         enumerable: true,
       });
-      Object.defineProperty(this, "navigationStart", { value: 0, enumerable: true });
     }
     toJSON() { return performanceTimingJSON(this, "navigation"); }
   }

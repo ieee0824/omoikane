@@ -22538,7 +22538,8 @@ b</textarea></form>"#);
                       entry.entryType !== "navigation" || entry.startTime !== 0 ||
                       entry.duration < 0 || entry.type !== "navigate" ||
                       entry.redirectCount !== 0 || entry.toJSON().entryType !== "navigation" ||
-                      entry.toJSON().type !== "navigate") return false;
+                      entry.toJSON().type !== "navigate" ||
+                      "navigationStart" in entry || "navigationStart" in entry.toJSON()) return false;
                   performance.clearResourceTimings();
                   performance.setResourceTimingBufferSize(2);
                   performance.mark("survivor");
