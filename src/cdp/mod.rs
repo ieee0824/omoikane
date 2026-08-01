@@ -4669,7 +4669,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             state["result"]["value"],
-            r#"{"events":["start:true:true:true","drag","enter","over","drag","over","leave","enter","over","drop:payload","end:payload"],"sameTransfer":true,"clicks":0}"#
+            r#"{"events":["start:true:true:true","drag","enter","over","drag","over","leave","over","drop:payload","end:payload"],"sameTransfer":true,"clicks":0}"#
         );
     }
 
