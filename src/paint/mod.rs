@@ -2581,18 +2581,30 @@ fn apply_clip_path_shape(canvas: &mut Canvas, shape: &ClipPathShape) {
     let y0 = bounds.y.floor().max(0.0) as i32;
     let x1 = (bounds.x + bounds.width).ceil().min(canvas.width as f32) as i32;
     let y1 = (bounds.y + bounds.height).ceil().min(canvas.height as f32) as i32;
+    if x0 >= x1 || y0 >= y1 {
+        canvas.pixels.fill(0);
+        return;
+    }
+
+    let canvas_width = canvas.width as usize;
+    let row_bytes = canvas_width * 4;
     for y in 0..canvas.height as i32 {
-        for x in 0..canvas.width as i32 {
-            if x >= x0
-                && x < x1
-                && y >= y0
-                && y < y1
-                && shape.contains((x as f32 + 0.5, y as f32 + 0.5))
-            {
-                continue;
+        let row_start = y as usize * row_bytes;
+        let row_end = row_start + row_bytes;
+        if y < y0 || y >= y1 {
+            canvas.pixels[row_start..row_end].fill(0);
+            continue;
+        }
+
+        let left_end = row_start + x0 as usize * 4;
+        canvas.pixels[row_start..left_end].fill(0);
+        let right_start = row_start + x1 as usize * 4;
+        canvas.pixels[right_start..row_end].fill(0);
+        for x in x0..x1 {
+            if !shape.contains((x as f32 + 0.5, y as f32 + 0.5)) {
+                let index = row_start + x as usize * 4;
+                canvas.pixels[index..index + 4].fill(0);
             }
-            let index = ((y * canvas.width as i32 + x) * 4) as usize;
-            canvas.pixels[index..index + 4].copy_from_slice(&[0, 0, 0, 0]);
         }
     }
 }

@@ -1168,21 +1168,6 @@ fn validate_declaration(name: &str, value: &Value) -> DeclarationValidation {
         };
     }
     if name.eq_ignore_ascii_case("mask-image") {
-        if let Value::CommaList(values) = value {
-            if values.is_empty() || values.len() > crate::paint::MAX_MASK_LAYERS {
-                return DeclarationValidation::Invalid;
-            }
-            return if values.iter().all(|layer| {
-                !matches!(
-                    validate_declaration(name, layer),
-                    DeclarationValidation::Invalid
-                )
-            }) {
-                DeclarationValidation::Unvalidated
-            } else {
-                DeclarationValidation::Invalid
-            };
-        }
         if let Value::Function { name: function, .. } = value {
             let lower = function.to_ascii_lowercase();
             if lower == "linear-gradient"
@@ -1212,21 +1197,6 @@ fn validate_declaration(name: &str, value: &Value) -> DeclarationValidation {
         };
     }
     if name.eq_ignore_ascii_case("mask-mode") {
-        if let Value::CommaList(values) = value {
-            if values.is_empty() || values.len() > crate::paint::MAX_MASK_LAYERS {
-                return DeclarationValidation::Invalid;
-            }
-            return if values.iter().all(|layer| {
-                matches!(
-                    validate_declaration(name, layer),
-                    DeclarationValidation::Unvalidated
-                )
-            }) {
-                DeclarationValidation::Unvalidated
-            } else {
-                DeclarationValidation::Invalid
-            };
-        }
         return match value {
             Value::Keyword(keyword)
                 if is_css_wide_keyword(&keyword.to_ascii_lowercase())
@@ -1241,21 +1211,6 @@ fn validate_declaration(name: &str, value: &Value) -> DeclarationValidation {
         };
     }
     if name.eq_ignore_ascii_case("mask-composite") {
-        if let Value::CommaList(values) = value {
-            if values.is_empty() || values.len() > crate::paint::MAX_MASK_LAYERS {
-                return DeclarationValidation::Invalid;
-            }
-            return if values.iter().all(|layer| {
-                matches!(
-                    validate_declaration(name, layer),
-                    DeclarationValidation::Unvalidated
-                )
-            }) {
-                DeclarationValidation::Unvalidated
-            } else {
-                DeclarationValidation::Invalid
-            };
-        }
         return match value {
             Value::Keyword(keyword)
                 if is_css_wide_keyword(&keyword.to_ascii_lowercase())
