@@ -12233,7 +12233,7 @@ mod tests {
         })()"#);
         assert_eq!(
             result,
-            "function|true|true|true|255,64,128,255|1,2,3,4|true|12|true|true|true|true|true|true|true"
+            "function|true|true|true|255,64,128,255|1,2,3,4|true|12|true|true|true|true|true|true|true|true"
         );
     }
 
