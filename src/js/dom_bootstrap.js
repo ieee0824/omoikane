@@ -7795,6 +7795,10 @@
       if (String(owner.localName || "").toLowerCase() === "text") break;
       owner = owner.parentNode;
     }
+    if (!owner || owner.nodeType !== 1 || owner.namespaceURI !== SVG_NAMESPACE ||
+        String(owner.localName || "").toLowerCase() !== "text") {
+      owner = null;
+    }
     if (owner && owner !== element) {
       const allRecords = svgTextLayout(owner);
       let offset = 0;
