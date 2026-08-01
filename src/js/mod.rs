@@ -976,7 +976,9 @@ struct WorkerRuntime {
 /// shared only when its resolved script URL, name, and origin all match.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct SharedWorkerKey {
-    origin: Option<StorageOrigin>,
+    /// Shared workers are only constructible for an eligible tuple origin;
+    /// opaque/no-origin callers are rejected before a key is created.
+    origin: StorageOrigin,
     url: String,
     name: String,
 }
@@ -8732,7 +8734,7 @@ fn create_shared_worker_for_owner_state(
             state.storage_manager.clone(),
             state.storage_session_id,
             state.navigator_user_agent.clone(),
-            Some(origin),
+            origin,
             host_state_origin(&state),
         )
     };
