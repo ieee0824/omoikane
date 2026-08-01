@@ -6443,9 +6443,15 @@
   }
   function webglSourceNames(source, keyword) {
     const names = [];
-    const expression = new RegExp("\\b" + keyword + "\\s+\\w+\\s+(\\w+)\\s*;", "g");
+    const seen = new Set();
+    const expression = new RegExp(
+      "\\b" + keyword + "\\s+(?:(?:lowp|mediump|highp)\\s+)?\\w+\\s+(\\w+)(?:\\s*\\[[^\\]]*\\])?\\s*;",
+      "g",
+    );
     let match;
-    while ((match = expression.exec(source))) if (!names.includes(match[1])) names.push(match[1]);
+    while ((match = expression.exec(source))) {
+      if (!seen.has(match[1])) { seen.add(match[1]); names.push(match[1]); }
+    }
     return names;
   }
 
@@ -6599,6 +6605,7 @@
     }
     getParameter(parameter) {
       if (!webglActive(this)) return null;
+      parameter = Number(parameter);
       switch (parameter) {
         case WEBGL_CONSTANTS.VIEWPORT: return new Int32Array(this.__state.viewport);
         case WEBGL_CONSTANTS.SCISSOR_BOX: return new Int32Array(this.__state.scissor);
@@ -6791,14 +6798,20 @@
       value.__uniforms = new Map();
       if (value.__linked) {
         const names = [];
+        const attributes = new Set();
+        const uniforms = new Set();
         for (const shader of value.__shaders) {
-          for (const name of webglSourceNames(shader.__source, "attribute")) if (!names.includes(name)) names.push(name);
-          for (const name of webglSourceNames(shader.__source, "uniform")) if (!names.includes(name)) names.push(name);
+          for (const name of webglSourceNames(shader.__source, "attribute")) {
+            if (!attributes.has(name)) { attributes.add(name); names.push(name); }
+          }
+          for (const name of webglSourceNames(shader.__source, "uniform")) {
+            if (!uniforms.has(name)) { uniforms.add(name); names.push(name); }
+          }
         }
         let attributeIndex = 0;
         for (const name of names) {
-          if (value.__shaders.some(shader => /\battribute\s+\w+\s+/.test(shader.__source) && shader.__source.includes(name))) value.__attributes.set(name, attributeIndex++);
-          if (value.__shaders.some(shader => /\buniform\s+\w+\s+/.test(shader.__source) && shader.__source.includes(name))) value.__uniforms.set(name, new WebGLUniformLocation(value, name, webglResourceConstructionToken));
+          if (attributes.has(name)) value.__attributes.set(name, attributeIndex++);
+          if (uniforms.has(name)) value.__uniforms.set(name, new WebGLUniformLocation(value, name, webglResourceConstructionToken));
         }
       }
     }
@@ -6906,6 +6919,10 @@
         return;
       }
       const state = canvasState(this.canvas);
+      if (values[0] < 0 || values[1] < 0 || values[0] + values[2] > state.width || values[1] + values[3] > state.height) {
+        webglError(this, WEBGL_CONSTANTS.INVALID_VALUE);
+        return;
+      }
       const bytes = new Uint8Array(pixels.buffer, pixels.byteOffset, pixels.byteLength);
       for (let row = 0; row < values[3]; row++) {
         for (let column = 0; column < values[2]; column++) {
