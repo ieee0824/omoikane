@@ -11773,6 +11773,7 @@
       }
       const key = String(name);
       if (this.__record.indexes.has(key)) throw idbError("ConstraintError", "The index already exists.");
+      if (Array.isArray(keyPath)) throw idbError("NotSupportedError", "Array key paths are not supported.");
       const definition = { name: key, keyPath: String(keyPath), unique: Boolean(options.unique), multiEntry: Boolean(options.multiEntry) };
       this.__record.indexes.set(key, definition);
       return new IDBIndex(this, definition, IDB_CONSTRUCTION_TOKEN);
@@ -11812,8 +11813,11 @@
       }
       const key = String(name);
       if (this.__record.stores.has(key)) throw idbError("ConstraintError", "The object store already exists.");
-      const keyPath = options.keyPath === undefined ? null : options.keyPath === null ? null : String(options.keyPath);
-      if (Array.isArray(keyPath)) throw idbError("NotSupportedError", "Array key paths are not supported.");
+      let keyPath = null;
+      if (options.keyPath !== undefined && options.keyPath !== null) {
+        if (Array.isArray(options.keyPath)) throw idbError("NotSupportedError", "Array key paths are not supported.");
+        keyPath = String(options.keyPath);
+      }
       const record = { name: key, keyPath, autoIncrement: Boolean(options.autoIncrement), nextKey: 1, records: new Map(), indexes: new Map() };
       this.__record.stores.set(key, record);
       return new IDBObjectStore(record, this.__upgradeTransaction);
@@ -11826,7 +11830,7 @@
     }
     transaction(storeNames, mode = "readonly", options = undefined) {
       if (this.__closed) throw idbError("InvalidStateError", "The database connection is closed.");
-      const names = typeof storeNames === "string" ? [storeNames] : Array.from(storeNames || [], String);
+      const names = typeof storeNames === "string" || storeNames instanceof String ? [String(storeNames)] : Array.from(storeNames || [], String);
       if (names.length === 0) throw idbError("InvalidAccessError", "At least one object store is required.");
       const selected = Array.from(new Set(names));
       for (const name of selected) if (!this.__record.stores.has(name)) throw idbError("NotFoundError", "The object store was not found.");

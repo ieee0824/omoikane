@@ -20216,6 +20216,38 @@ b</textarea></form>"#);
     }
 
     #[test]
+    fn indexeddb_rejects_array_key_paths_and_normalizes_boxed_store_names() {
+        let mut runtime = JsRuntime::with_document_and_url(
+            default_document(),
+            "https://indexeddb-keypath.example.test/",
+        )
+        .unwrap();
+        runtime
+            .eval(
+                r#"globalThis.idbEdge = { objectStore: '', index: '', boxed: '' };
+                   const request = indexedDB.open('edge', 1);
+                   request.onupgradeneeded = event => {
+                     const db = event.target.result;
+                     try { db.createObjectStore('bad', { keyPath: ['a', 'b'] }); }
+                     catch (error) { idbEdge.objectStore = error.name; }
+                     const store = db.createObjectStore('books');
+                     try { store.createIndex('bad', ['a', 'b']); }
+                     catch (error) { idbEdge.index = error.name; }
+                   };
+                   request.onsuccess = event => {
+                     try { event.target.result.transaction(new String('books')); idbEdge.boxed = 'ok'; }
+                     catch (error) { idbEdge.boxed = error.name; }
+                   };"#,
+            )
+            .unwrap();
+        runtime.run_until_idle().unwrap();
+        assert_eq!(
+            eval_str(&mut runtime, "idbEdge.objectStore + '|' + idbEdge.index + '|' + idbEdge.boxed"),
+            "NotSupportedError|NotSupportedError|ok",
+        );
+    }
+
+    #[test]
     fn storage_is_scoped_by_origin_and_top_level_session() {
         let storage = StorageManager::new();
         let first_session = storage.create_session();
