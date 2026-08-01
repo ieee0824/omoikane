@@ -4674,6 +4674,65 @@ mod tests {
     }
 
     #[test]
+    fn canceled_dragstart_consumes_candidate_and_keeps_click_default() {
+        let mut session = CdpSession::new().unwrap();
+        session
+            .install_document(
+                "https://example.test/",
+                r#"<html><head><style>*{margin:0}#source{position:absolute;left:0;top:0;width:80px;height:40px}</style></head><body>
+                    <div id="source" draggable="true">source</div>
+                    <script>
+                      globalThis.events=[];globalThis.clicks=0;
+                      source.addEventListener('dragstart',e=>{events.push('dragstart');e.preventDefault()});
+                      source.addEventListener('click',()=>{events.push('click');clicks++});
+                    </script>
+                </body></html>"#,
+                1,
+                "null",
+            )
+            .unwrap();
+
+        session
+            .dispatch(
+                "Input.dispatchMouseEvent",
+                json!({"type":"mousePressed","x":10,"y":10,"button":"left","buttons":1}),
+            )
+            .unwrap();
+        session
+            .dispatch(
+                "Input.dispatchMouseEvent",
+                json!({"type":"mouseMoved","x":20,"y":10,"button":"none","buttons":1}),
+            )
+            .unwrap();
+        session
+            .dispatch(
+                "Input.dispatchMouseEvent",
+                json!({"type":"mouseMoved","x":30,"y":10,"button":"none","buttons":1}),
+            )
+            .unwrap();
+        session
+            .dispatch(
+                "Input.dispatchMouseEvent",
+                json!({"type":"mouseReleased","x":10,"y":10,"button":"left","buttons":0}),
+            )
+            .unwrap();
+
+        let state = session
+            .dispatch(
+                "Runtime.evaluate",
+                json!({
+                    "expression": "JSON.stringify({events,clicks})",
+                    "returnByValue": true,
+                }),
+            )
+            .unwrap();
+        assert_eq!(
+            state["result"]["value"],
+            r#"{"events":["dragstart","click"],"clicks":1}"#
+        );
+    }
+
+    #[test]
     fn keyboard_input_targets_the_focused_element_with_cdp_fields() {
         let mut session = CdpSession::new().unwrap();
         session
