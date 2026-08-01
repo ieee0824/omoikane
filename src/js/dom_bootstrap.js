@@ -11040,6 +11040,7 @@
         return parsed;
       }
       const error = document.implementation.createDocument("", "parsererror", null);
+      error.__documentURL = "about:blank";
       error.documentElement.textContent = "XML parse error";
       return error;
     }
