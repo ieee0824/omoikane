@@ -3346,6 +3346,14 @@ fn validates_clip_shape_function_arguments() {
         "clip-path",
         "polygon(0% 0%, 100% 0%, 0% 100%)"
     ));
+    let oversized_polygon = (0..257)
+        .map(|index| format!("{index}% 0%"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    assert!(!supports_declaration(
+        "clip-path",
+        &format!("polygon({oversized_polygon})")
+    ));
 }
 
 // --- border-radius shorthand 展開テスト ---

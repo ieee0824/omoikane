@@ -2458,7 +2458,9 @@ fn apply_mask_alpha(canvas: &mut Canvas, layers: &[MaskLayer], style: &ComputedS
         })
         .collect::<Vec<_>>();
     if prepared.is_empty() {
-        canvas.multiply_alpha(0.0);
+        // A mask that could not be prepared (for example because its size is
+        // zero or exceeds the allocation cap) falls back to painting without
+        // a mask rather than making the entire element transparent.
         return;
     }
     let width = canvas.width as i32;
@@ -3506,6 +3508,8 @@ impl ClipPathInsetLength {
     }
 }
 
+const MAX_CLIP_PATH_POLYGON_POINTS: usize = 256;
+
 /// A paint-time representation of the basic-shape forms accepted by
 /// `clip-path`.  The layout engine keeps the shape in the element's local
 /// border-box coordinate space; callers apply the same shape to descendants,
@@ -3770,7 +3774,7 @@ fn clip_path_shape(style: &ComputedStyle, border_box: Rect) -> Option<ClipPathSh
                 let y = shape_length(components[1], border_box.height)?;
                 points.push((border_box.x + x, border_box.y + y));
             }
-            if points.len() < 3 {
+            if points.len() < 3 || points.len() > MAX_CLIP_PATH_POLYGON_POINTS {
                 return None;
             }
             Some(ClipPathShape::Polygon {
@@ -3955,7 +3959,7 @@ fn valid_clip_path_ellipse_body(body: &str) -> bool {
 
 fn valid_clip_path_polygon_body(body: &str) -> bool {
     let components = crate::css::split_top_level_commas(body.trim());
-    components.len() >= 3
+    (3..=MAX_CLIP_PATH_POLYGON_POINTS).contains(&components.len())
         && components.iter().all(|component| {
             let point = split_top_level_whitespace(component.trim());
             point.len() == 2

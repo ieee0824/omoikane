@@ -8533,6 +8533,25 @@ div {{ width: 8px; height: 8px; background: blue;
 }
 
 #[test]
+fn mask_preparation_failure_falls_back_to_unmasked_painting() {
+    let html = r#"<html><head><style>
+body { margin: 0; }
+div { width: 4px; height: 2px; background: red;
+      mask-image: linear-gradient(to right, black, white);
+      mask-size: 0px 0px; }
+</style></head><body><div></div></body></html>"#;
+    let document = TreeBuilder::parse(html).document();
+    let canvas = render_document(
+        &document,
+        Rect { x: 0.0, y: 0.0, width: 4.0, height: 2.0 },
+    )
+    .unwrap();
+
+    assert_eq!(canvas.pixel(0, 0), Some(Color::rgb(255, 0, 0)));
+    assert_eq!(canvas.pixel(3, 1), Some(Color::rgb(255, 0, 0)));
+}
+
+#[test]
 fn mask_applies_to_descendant_painting() {
     let mask = rgba_mask_data_uri(2, 1, &[255, 0]);
     let html = format!(
