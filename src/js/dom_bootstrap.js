@@ -6491,6 +6491,9 @@
       this.__state.lost = false;
       this.__state.errors.length = 0;
       this.__state.clearColor = [0, 0, 0, 0];
+      this.__state.clearDepth = 1;
+      this.__state.clearStencil = 0;
+      this.__state.activeTexture = WEBGL_CONSTANTS.TEXTURE0;
       this.__state.colorMask = [true, true, true, true];
       this.__state.depthMask = true;
       this.__state.stencilMask = 0xffffffff;
@@ -6939,7 +6942,7 @@
       }
     }
     getExtension() { return null; }
-    getSupportedExtensions() { return []; }
+    getSupportedExtensions() { return this.__state.lost ? null : []; }
   }
   for (const [name, value] of Object.entries(WEBGL_CONSTANTS)) {
     Object.defineProperty(WebGLRenderingContext, name, { value, writable: false, enumerable: false, configurable: false });
