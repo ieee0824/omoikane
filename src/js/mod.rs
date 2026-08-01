@@ -6017,6 +6017,11 @@ fn register_host_bindings(
             NativeFunction::from_copy_closure(create_document_native),
         ),
         (
+            js_string!("__omoikane_parse_xml"),
+            1,
+            NativeFunction::from_copy_closure(parse_xml_native),
+        ),
+        (
             js_string!("__omoikane_create_document_type"),
             1,
             NativeFunction::from_copy_closure(create_document_type_native),
@@ -11304,6 +11309,40 @@ fn create_document_native(
     with_host_state(|state| {
         let mut state = state.borrow_mut();
         state.nodes.insert(id, document);
+        state.document_styles.insert(
+            id,
+            DocumentStyleEntry {
+                resolver: None,
+                dirty: true,
+                needs_full_sample: true,
+            },
+        );
+        Ok(JsValue::from(id as f64))
+    })
+}
+
+/// Parses an XML-family document using the host XML parser and enrolls the
+/// complete detached tree in this runtime's node/style registries.  A null
+/// result means the input is not well-formed; DOMParser turns that into the
+/// script-visible `parsererror` document instead of exposing parser internals.
+fn parse_xml_native(
+    _: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let source = args
+        .first()
+        .cloned()
+        .unwrap_or_default()
+        .to_string(context)?
+        .to_std_string_escaped();
+    let Ok(document) = crate::xml::parse(source.as_bytes()) else {
+        return Ok(JsValue::null());
+    };
+    let id = document.identity();
+    with_host_state(|state| {
+        let mut state = state.borrow_mut();
+        state.register_tree(&document);
         state.document_styles.insert(
             id,
             DocumentStyleEntry {
@@ -19307,6 +19346,38 @@ b</textarea></form>"#);
         assert_eq!(
             actual,
             "1|abcd|true|3|true|4|true|4|true|true|InvalidCharacterError|TypeError|TypeError|4|true|4|true|true|parsed"
+        );
+    }
+
+    #[test]
+    fn dom_parser_builds_xml_and_svg_trees_and_reports_parsererror() {
+        let mut runtime = JsRuntime::with_document(default_document()).unwrap();
+        let actual = eval_str(
+            &mut runtime,
+            r#"(() => {
+                const xml = new DOMParser().parseFromString(
+                  "<?xml version='1.0'?><svg xmlns='http://www.w3.org/2000/svg'><g id='group'>hello<rect width='4' height='5'/><!--comment--><![CDATA[raw]]><?note data?></g></svg>",
+                  "image/svg+xml"
+                );
+                const root = xml.documentElement;
+                const group = root.firstElementChild;
+                const rect = group.firstElementChild;
+                const kinds = Array.from(group.childNodes).map(node => node.nodeType).join(",");
+                const malformed = new DOMParser().parseFromString("<root><child></root>", "text/xml");
+                return [
+                  xml !== document,
+                  root.localName, root.namespaceURI,
+                  group.id, group.firstChild.data,
+                  rect.localName, rect.getAttribute("width"), rect.namespaceURI,
+                  kinds, group.lastChild.nodeType, group.lastChild.target,
+                  malformed.documentElement.localName,
+                  malformed.documentElement.textContent.includes("XML parse error")
+                ].join("|");
+            })()"#,
+        );
+        assert_eq!(
+            actual,
+            "true|svg|http://www.w3.org/2000/svg|group|hello|rect|4|http://www.w3.org/2000/svg|3,1,8,3,7|7|note|parsererror|true"
         );
     }
 

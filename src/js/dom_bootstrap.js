@@ -11033,9 +11033,15 @@
         parsed.body.innerHTML = input;
         return parsed;
       }
-      const match = input.match(/<([A-Za-z_][A-Za-z0-9_.:-]*)(?:\s[^<>]*)?\s*\/?\s*>/);
-      if (!match) return document.implementation.createDocument("", "parsererror", null);
-      return document.implementation.createDocument("", match[1], null);
+      const parsedId = __omoikane_parse_xml(input);
+      if (parsedId !== null && parsedId !== undefined) {
+        const parsed = wrapNode(parsedId);
+        parsed.__documentURL = "about:blank";
+        return parsed;
+      }
+      const error = document.implementation.createDocument("", "parsererror", null);
+      error.documentElement.textContent = "XML parse error";
+      return error;
     }
   };
 

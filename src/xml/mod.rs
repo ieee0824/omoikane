@@ -146,7 +146,9 @@ impl<'a> Parser<'a> {
         if target.eq_ignore_ascii_case("xml") {
             return self.err("the processing-instruction target 'xml' is reserved");
         }
-        self.take_until("?>")?;
+        let data = self.take_until("?>")?.trim_start().to_string();
+        self.parent()
+            .append_child(NodeHandle::processing_instruction(target, data));
         Ok(())
     }
     fn parse_cdata(&mut self) -> Result<(), XmlParseError> {
