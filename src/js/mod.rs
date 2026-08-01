@@ -22719,9 +22719,10 @@ b</textarea></form>"#);
                     bodyText: "",
                     bodyBase64: null,
                   }));
-                  fetch("https://example.test/broken-response").catch(() => {
+                  const restoreFetch = () => {
                     globalThis.__omoikane_fetch = originalFetch;
-                  });
+                  };
+                  fetch("https://example.test/broken-response").then(restoreFetch, restoreFetch);
                 })()"#,
             )
             .unwrap();
