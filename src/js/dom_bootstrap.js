@@ -11065,9 +11065,9 @@
       this.readyState = 0;
       this.status = 0;
       this.statusText = "";
-      this.responseText = "";
-      this.response = "";
-      this.responseType = "";
+      this._responseText = "";
+      this._responseType = "";
+      this.response = null;
       this.responseURL = "";
       this.timeout = 0;
       this.withCredentials = false;
@@ -11080,6 +11080,35 @@
       this._requestId = 0;
       this._sendFlag = false;
       this.__resourceTiming = null;
+      Object.defineProperty(this, "responseText", {
+        enumerable: true,
+        configurable: true,
+        get() {
+          if (this._responseType !== "" && this._responseType !== "text") {
+            throw new DOMException("responseText is unavailable for this responseType", "InvalidStateError");
+          }
+          return this._responseText;
+        },
+        // Keep legacy embedders that assign this diagnostic property from
+        // throwing, while all network state changes use the internal slot.
+        set(value) { this._responseText = String(value); },
+      });
+      Object.defineProperty(this, "responseType", {
+        enumerable: true,
+        configurable: true,
+        get() { return this._responseType; },
+        set(value) {
+          if (this.readyState === XMLHttpRequest.LOADING ||
+              this.readyState === XMLHttpRequest.DONE) {
+            throw new DOMException("responseType cannot change after loading starts", "InvalidStateError");
+          }
+          const normalized = String(value);
+          if (!["", "text", "arraybuffer", "blob", "document", "json"].includes(normalized)) {
+            throw new DOMException("Unsupported responseType", "SyntaxError");
+          }
+          this._responseType = normalized;
+        },
+      });
     }
     open(method, url, async = true) {
       // Re-opening an active request aborts the old fetch.  Preserve the
@@ -11091,8 +11120,8 @@
       this._requestId++;
       this.status = 0;
       this.statusText = "";
-      this.responseText = "";
-      this.response = "";
+      this._responseText = "";
+      this.response = null;
       this.responseURL = "";
       this._headers = {};
       this._responseHeaders = [];
@@ -11143,8 +11172,8 @@
       this.readyState = 0;
       this.status = 0;
       this.statusText = "";
-      this.responseText = "";
-      this.response = "";
+      this._responseText = "";
+      this.response = null;
       this.responseURL = "";
       this._responseHeaders = [];
       this._sendFlag = false;
@@ -11176,6 +11205,8 @@
               type: "basic",
               headers: [["content-type", blob.type], ["content-length", String(blob.size)]],
               bodyText: blob.__text(),
+              bodyBase64: base64FromBytes(blob.__bytes),
+              bodyPresent: true,
             };
           })
         : Promise.resolve().then(() =>
@@ -11201,12 +11232,29 @@
         this._notify("readystatechange");
         this.readyState = 3;
         this._notify("readystatechange");
-        this.responseText = data.bodyText;
-        if (this.responseType === "json") {
-          try { this.response = JSON.parse(this.responseText); }
-          catch (_) { this.response = null; }
-        } else {
-          this.response = this.responseText;
+        this._responseText = data.bodyText === undefined ? "" : String(data.bodyText);
+        const bytes = xhrResponseBytes(data);
+        switch (this._responseType) {
+          case "arraybuffer":
+            this.response = bytes.slice().buffer;
+            break;
+          case "blob":
+            this.response = new Blob([bytes], { type: xhrResponseMime(data.headers) });
+            break;
+          case "json":
+            try { this.response = JSON.parse(this._responseText); }
+            catch (_) { this.response = null; }
+            break;
+          case "document": {
+            const contentType = xhrResponseMime(data.headers);
+            const mime = contentType.includes("xml") ? "text/xml" : "text/html";
+            try { this.response = new DOMParser().parseFromString(this._responseText, mime); }
+            catch (_) { this.response = null; }
+            break;
+          }
+          default:
+            this.response = this._responseText;
+            break;
         }
         this.readyState = 4;
         this._sendFlag = false;
@@ -11219,8 +11267,8 @@
         this.__resourceTiming = null;
         this.status = 0;
         this.statusText = "";
-        this.responseText = "";
-        this.response = "";
+        this._responseText = "";
+        this.response = null;
         this.responseURL = "";
         this._responseHeaders = [];
         this.readyState = 4;
@@ -11237,6 +11285,20 @@
       for (const callback of this._listeners[type] || []) callback.call(this, event);
     }
   };
+
+  function xhrResponseBytes(data) {
+    if (!data || data.bodyPresent === false) return new Uint8Array();
+    if (data.bodyBase64 !== undefined && data.bodyBase64 !== null) {
+      return bytesFromBase64(data.bodyBase64);
+    }
+    return blobTextEncoder.encode(data.bodyText === undefined ? "" : String(data.bodyText));
+  }
+
+  function xhrResponseMime(headers) {
+    const entry = (headers || []).find(([name]) => String(name).toLowerCase() === "content-type");
+    return entry ? String(entry[1]).split(";", 1)[0].trim().toLowerCase() : "";
+  }
+
   globalThis.XMLHttpRequest.UNSENT = 0;
   globalThis.XMLHttpRequest.OPENED = 1;
   globalThis.XMLHttpRequest.HEADERS_RECEIVED = 2;
