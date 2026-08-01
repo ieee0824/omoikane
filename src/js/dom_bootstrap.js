@@ -7746,6 +7746,16 @@
   const serviceWorkerConstructionToken = {};
   const serviceWorkerContainerConstructionToken = {};
 
+  // EventTarget is declared later in this bootstrap (after Navigator is
+  // constructed).  This bridge keeps construction safe during that initial
+  // pass, then adopts the real EventTarget prototype once it is installed.
+  class ServiceWorkerEventTarget {
+    constructor() { this._listeners = new Map(); }
+    addEventListener(...args) { return globalThis.EventTarget.prototype.addEventListener.call(this, ...args); }
+    removeEventListener(...args) { return globalThis.EventTarget.prototype.removeEventListener.call(this, ...args); }
+    dispatchEvent(...args) { return globalThis.EventTarget.prototype.dispatchEvent.call(this, ...args); }
+  }
+
   function serviceWorkerURL(value, base) {
     return new URL(String(value), base || String(globalThis.location && globalThis.location.href || ""));
   }
@@ -7766,7 +7776,7 @@
     return requested;
   }
 
-  class ServiceWorker extends EventTarget {
+  class ServiceWorker extends ServiceWorkerEventTarget {
     constructor(record, state, token) {
       if (token !== serviceWorkerConstructionToken) throw new TypeError("Illegal constructor");
       super();
@@ -7794,7 +7804,7 @@
     get [Symbol.toStringTag]() { return "ServiceWorker"; }
   }
 
-  class ServiceWorkerRegistration extends EventTarget {
+  class ServiceWorkerRegistration extends ServiceWorkerEventTarget {
     constructor(record, container, token) {
       if (token !== serviceWorkerContainerConstructionToken) throw new TypeError("Illegal constructor");
       super();
@@ -7823,7 +7833,7 @@
     get [Symbol.toStringTag]() { return "ServiceWorkerRegistration"; }
   }
 
-  class ServiceWorkerContainer extends EventTarget {
+  class ServiceWorkerContainer extends ServiceWorkerEventTarget {
     constructor(token) {
       if (token !== serviceWorkerContainerConstructionToken) throw new TypeError("Illegal constructor");
       super();
@@ -9848,6 +9858,7 @@
     }
   }
   globalThis.EventTarget = EventTarget;
+  Object.setPrototypeOf(ServiceWorkerEventTarget.prototype, EventTarget.prototype);
   globalThis.AbortSignal = AbortSignal;
   globalThis.AbortController = AbortController;
 
