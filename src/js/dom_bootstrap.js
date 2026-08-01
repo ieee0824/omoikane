@@ -7814,10 +7814,10 @@
       this.installing = record.worker;
       this.waiting = null;
       this.active = null;
-      this.onupdatefound = null;
+      this._onupdatefound = null;
     }
     update() {
-      return Promise.resolve(this);
+      return Promise.resolve(undefined);
     }
     unregister() {
       return Promise.resolve().then(() => {
@@ -7829,6 +7829,12 @@
         this._container.__updateController();
         return true;
       });
+    }
+    get onupdatefound() { return this._onupdatefound; }
+    set onupdatefound(callback) {
+      if (this._onupdatefound) this.removeEventListener("updatefound", this._onupdatefound);
+      this._onupdatefound = typeof callback === "function" ? callback : null;
+      if (this._onupdatefound) this.addEventListener("updatefound", this._onupdatefound);
     }
     get [Symbol.toStringTag]() { return "ServiceWorkerRegistration"; }
   }
@@ -7847,7 +7853,7 @@
     __validateRegistration(scriptURL, options) {
       const script = serviceWorkerURL(scriptURL);
       const origin = serviceWorkerCurrentOrigin();
-      if (!origin || serviceWorkerOrigin(script) !== origin) {
+      if (!origin || origin === "null" || serviceWorkerOrigin(script) !== origin) {
         throw new DOMException("Service worker script must be same-origin.", "SecurityError");
       }
       const scope = serviceWorkerScopeURL(script, options || {});
@@ -7858,6 +7864,9 @@
     }
     register(scriptURL, options = undefined) {
       return Promise.resolve().then(() => {
+        if (typeof nativeIsSecureContext !== "function" || !nativeIsSecureContext()) {
+          throw new DOMException("Service workers require a secure context.", "SecurityError");
+        }
         const validated = this.__validateRegistration(scriptURL, options || {});
         let record = this._records.get(validated.scope);
         if (record) {
