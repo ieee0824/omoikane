@@ -9106,9 +9106,9 @@
       element.dispatchEvent(new Event("error", { bubbles: false }));
     }
   };
-  // CDP mouse input uses pointer id 1. Keep capture in the JS realm so a
-  // captured pointer remains in the same document and cannot leak an event
-  // path through an unrelated iframe or browsing context.
+  // CDP mouse input uses pointer id 1. Keep one capture target per pointer in
+  // the JS realm so a captured pointer remains in its owning document and
+  // cannot leak an event path through an unrelated iframe or browsing context.
   const pointerCaptureTargets = new Map();
   function normalizePointerId(pointerId) {
     const value = Number(pointerId);
@@ -9118,8 +9118,8 @@
     }
     return integer;
   }
-  function pointerCaptureKey(doc, pointerId) {
-    return String(doc && doc.__id !== undefined ? doc.__id : __omoikane_document_id) + ":" + pointerId;
+  function pointerCaptureKey(_doc, pointerId) {
+    return String(pointerId);
   }
   function pointerCaptureTarget(doc, pointerId) {
     const key = pointerCaptureKey(doc, pointerId);
@@ -9147,10 +9147,7 @@
   }
   globalThis.__omoikane_release_pointer_capture = function(pointerId = 1) {
     const normalized = normalizePointerId(pointerId);
-    const suffix = ":" + normalized;
-    for (const key of pointerCaptureTargets.keys()) {
-      if (key.endsWith(suffix)) pointerCaptureTargets.delete(key);
-    }
+    pointerCaptureTargets.delete(pointerCaptureKey(null, normalized));
   };
 
   function draggableAncestor(target) {
