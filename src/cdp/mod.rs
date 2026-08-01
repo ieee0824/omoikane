@@ -1497,7 +1497,7 @@ impl CdpSession {
             self.drag_active = false;
             self.drag_candidate = if not_canceled {
                 self.eval_input_bool(&format!(
-                    "__omoikane_prepare_drag_input({target_id})"
+                    "__omoikane_prepare_drag_input({target_id}, {init})"
                 ))?
             } else {
                 false

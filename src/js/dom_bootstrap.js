@@ -9214,8 +9214,8 @@
     }
     return changed;
   }
-  globalThis.__omoikane_prepare_drag_input = function(id) {
-    const target = dragInputTarget(id);
+  globalThis.__omoikane_prepare_drag_input = function(id, init = {}) {
+    const target = dragInputTarget(id, init);
     const source = draggableAncestor(target);
     resetDragInputState();
     dragInputState.candidate = source;
@@ -9268,8 +9268,14 @@
       const source = dragInputState.source;
       const dataTransfer = dragInputState.dataTransfer;
       const finalTarget = dragInputTarget(id, init);
-      updateDragInputTarget(finalTarget, init);
+      const targetChanged = updateDragInputTarget(finalTarget, init);
       const target = dragInputState.currentTarget;
+      if (target && !targetChanged) {
+        const over = target.dispatchEvent(dragEvent(
+          "dragover", init, dataTransfer,
+        ));
+        dragInputState.dropAllowed = !over;
+      }
       if (target && dragInputState.dropAllowed) {
         target.dispatchEvent(dragEvent("drop", init, dataTransfer));
       }
