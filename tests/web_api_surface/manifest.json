@@ -189,6 +189,20 @@
       "baseline_supported": true
     },
     {
+      "id": "performance.navigation-entry",
+      "area": "scheduling",
+      "description": "Initial navigation timing is exposed as a PerformanceNavigationTiming entry",
+      "probe": "performance.getEntriesByType('navigation').length === 1 && performance.getEntriesByType('navigation')[0] instanceof PerformanceNavigationTiming && typeof performance.getEntriesByType('navigation')[0].name === 'string' && performance.getEntriesByType('navigation')[0].entryType === 'navigation'",
+      "baseline_supported": false
+    },
+    {
+      "id": "performance.resource-timing-core",
+      "area": "scheduling",
+      "description": "Resource Timing classes, filtering, buffer controls, and clearing are exposed",
+      "probe": "typeof PerformanceResourceTiming === 'function' && typeof performance.clearResourceTimings === 'function' && typeof performance.setResourceTimingBufferSize === 'function' && PerformanceObserver.supportedEntryTypes.includes('resource')",
+      "baseline_supported": false
+    },
+    {
       "id": "performance.observer-user-timing",
       "area": "scheduling",
       "description": "PerformanceObserver delivers buffered User Timing entries",
