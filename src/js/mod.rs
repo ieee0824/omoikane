@@ -10083,6 +10083,13 @@ fn fetch_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResul
             fetched.response_type,
             ResponseType::Opaque | ResponseType::OpaqueRedirect
         );
+        // Fetch creates a null body for HEAD responses and for status codes
+        // whose semantics forbid a body. A successful response with an empty
+        // payload (for example `200 Content-Length: 0`) still has an empty
+        // ReadableStream, so presence cannot be inferred from byte length.
+        let body_present = !opaque
+            && !matches!(method, Method::Head)
+            && !matches!(response.status_code(), 100..=199 | 204 | 205 | 304);
         // `bodyText` is the lossy UTF-8 decoding the Fetch and XHR text paths are
         // defined in terms of, so it stays the primary representation. It cannot
         // represent a payload that is not valid UTF-8 though (an image, a font),
@@ -10093,7 +10100,7 @@ fn fetch_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResul
         // `from_utf8_lossy` borrows when the input is already valid UTF-8 and
         // only allocates to substitute replacement characters, so an owned `Cow`
         // is the signal that bytes were lost — no second validation pass needed.
-        let decoded_body = (!opaque).then(|| String::from_utf8_lossy(response.body()));
+        let decoded_body = body_present.then(|| String::from_utf8_lossy(response.body()));
         let body_base64 = matches!(decoded_body, Some(std::borrow::Cow::Owned(_)))
             .then(|| base64::engine::general_purpose::STANDARD.encode(response.body()));
         let body_text = decoded_body.map(std::borrow::Cow::into_owned);
@@ -10109,13 +10116,6 @@ fn fetch_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResul
             ResponseType::Opaque => "opaque",
             ResponseType::OpaqueRedirect => "opaqueredirect",
         };
-        // Fetch creates a null body for HEAD responses and for status codes
-        // whose semantics forbid a body.  A successful response with an empty
-        // payload (for example `200 Content-Length: 0`) still has an empty
-        // ReadableStream, so presence cannot be inferred from byte length.
-        let body_present = !opaque
-            && !matches!(method, Method::Head)
-            && !matches!(response.status_code(), 100..=199 | 204 | 205 | 304);
         let exposed_headers =
             exposed_response_headers(&response, fetched.response_type, credentials);
         let payload = serde_json::json!({
