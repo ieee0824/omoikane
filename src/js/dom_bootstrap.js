@@ -11827,9 +11827,13 @@
         get() { return this._timeout; },
         set(value) {
           const number = Number(value);
-          if (Number.isNaN(number) || number <= 0) this._timeout = 0;
-          else if (!Number.isFinite(number)) this._timeout = 0xFFFFFFFF;
-          else this._timeout = Math.min(Math.floor(number), 0xFFFFFFFF);
+          if (!Number.isFinite(number)) {
+            this._timeout = 0;
+            return;
+          }
+          const integer = Math.trunc(number);
+          const modulo = 0x100000000;
+          this._timeout = ((integer % modulo) + modulo) % modulo;
         },
       });
       Object.defineProperty(this, "responseText", {

@@ -17632,6 +17632,28 @@ b</textarea></form>"#);
     }
 
     #[test]
+    fn xml_http_request_timeout_uses_unsigned_long_conversion() {
+        let mut runtime = JsRuntime::new().unwrap();
+        assert!(runtime
+            .eval(
+                r#"(() => {
+                    const xhr = new XMLHttpRequest();
+                    xhr.timeout = Infinity;
+                    const infinity = xhr.timeout === 0;
+                    xhr.timeout = -1;
+                    const negative = xhr.timeout === 4294967295;
+                    xhr.timeout = 2 ** 32;
+                    const wrapped = xhr.timeout === 0;
+                    xhr.timeout = 1.9;
+                    return infinity && negative && wrapped && xhr.timeout === 1;
+                })()"#,
+            )
+            .unwrap()
+            .as_boolean()
+            .unwrap());
+    }
+
+    #[test]
     fn xml_http_request_open_resets_request_and_response_state() {
         let mut runtime = JsRuntime::new().unwrap();
         assert!(runtime
