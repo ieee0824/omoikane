@@ -8925,11 +8925,12 @@
     }
     getMappedRange(offset = undefined, size = undefined) {
       if (this.__mapState !== "mapped" || !this.__map) throw webgpuOperationError("The GPUBuffer is not mapped.");
-      const start = offset === undefined ? this.__map.offset : webgpuInteger(offset, "offset");
-      const length = size === undefined ? this.__map.size - (start - this.__map.offset) : webgpuInteger(size, "size");
-      if (start < this.__map.offset || start + length > this.__map.offset + this.__map.size ||
-          start % 8 !== 0 || length % 4 !== 0) throw webgpuOperationError("The mapped range is invalid or misaligned.");
-      const relative = start - this.__map.offset;
+      // WebGPU's getMappedRange offset is relative to the beginning of the
+      // mapped range (unlike mapAsync's buffer-relative offset).
+      const relative = offset === undefined ? 0 : webgpuInteger(offset, "offset");
+      const length = size === undefined ? this.__map.size - relative : webgpuInteger(size, "size");
+      if (relative < 0 || relative + length > this.__map.size ||
+          relative % 8 !== 0 || length % 4 !== 0) throw webgpuOperationError("The mapped range is invalid or misaligned.");
       if (relative === 0 && length === this.__map.size) return this.__map.buffer;
       const view = this.__map.buffer.slice(relative, relative + length);
       this.__map.views.push({ offset: relative, buffer: view });
@@ -9037,20 +9038,15 @@
     writeBuffer(buffer, bufferOffset, data, dataOffset = 0, size = undefined) {
       if (!webgpuDeviceActive(this.__device, "GPUQueue.writeBuffer")) return;
       const bytes = webgpuBytes(data);
-      const elementSize = ArrayBuffer.isView(data) && !(data instanceof DataView)
-        ? Number(data.BYTES_PER_ELEMENT || 1) : 1;
       const destination = Number(bufferOffset);
-      const sourceElements = Number(dataOffset);
-      const requestedElements = size === undefined
-        ? (bytes.byteLength / elementSize - sourceElements) : Number(size);
-      const source = sourceElements * elementSize;
-      const length = requestedElements * elementSize;
+      // Both dataOffset and size are byte counts into the supplied
+      // ArrayBuffer/ArrayBufferView, independent of the view's element width.
+      const source = Number(dataOffset);
+      const length = size === undefined ? bytes.byteLength - source : Number(size);
       if (!(buffer instanceof GPUBuffer) || buffer.__device !== this.__device || buffer.__invalid || buffer.__destroyed ||
-          buffer.mapState !== "unmapped" || !Number.isFinite(destination) || !Number.isFinite(sourceElements) ||
-          !Number.isFinite(requestedElements) || !Number.isFinite(source) || !Number.isFinite(length) ||
-          Math.trunc(destination) !== destination || Math.trunc(sourceElements) !== sourceElements ||
-          Math.trunc(requestedElements) !== requestedElements || Math.trunc(source) !== source || Math.trunc(length) !== length ||
-          destination < 0 || sourceElements < 0 || length < 0 || destination % 4 || source % 4 || length % 4 ||
+          buffer.mapState !== "unmapped" || !Number.isFinite(destination) || !Number.isFinite(source) || !Number.isFinite(length) ||
+          Math.trunc(destination) !== destination || Math.trunc(source) !== source || Math.trunc(length) !== length ||
+          destination < 0 || source < 0 || length < 0 || destination % 4 || source % 4 || length % 4 ||
           source + length > bytes.byteLength || destination + length > buffer.size ||
           !(buffer.usage & WEBGPU_BUFFER_USAGE.COPY_DST)) {
         webgpuRecordError(this.__device, "validation", "writeBuffer arguments are invalid.");

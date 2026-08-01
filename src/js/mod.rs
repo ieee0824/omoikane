@@ -11556,8 +11556,19 @@ mod tests {
                      return mapping.then(() => {
                        webgpuProbe.bytes = Array.from(new Uint32Array(destination.getMappedRange())).join(',');
                        destination.unmap();
-                       device.destroy();
-                       return device.lost;
+                       const relative = device.createBuffer({ size: 16, usage: GPUBufferUsage.MAP_WRITE | GPUBufferUsage.COPY_SRC });
+                       return relative.mapAsync(GPUMapMode.WRITE, 8, 8).then(() => {
+                         webgpuProbe.relativeMap = relative.getMappedRange(0, 8).byteLength;
+                         relative.unmap();
+                         const byteOffset = device.createBuffer({ size: 8, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+                         device.queue.writeBuffer(byteOffset, 0, new Uint32Array([0x11111111, 0x22222222]), 4, 4);
+                         return byteOffset.mapAsync(GPUMapMode.READ).then(() => {
+                           webgpuProbe.byteOffset = new Uint32Array(byteOffset.getMappedRange())[0] === 0x22222222;
+                           byteOffset.unmap();
+                           device.destroy();
+                           return device.lost;
+                         });
+                       });
                      });
                    }).then(info => { webgpuProbe.lost = info.reason + '|' + info.message; }, error => { webgpuProbe.error = error.name + '|' + error.message; });"#,
             )
@@ -11569,6 +11580,8 @@ mod tests {
         assert_eq!(eval_str(&mut runtime, "webgpuProbe.info"), "deterministic|software|false");
         assert_eq!(eval_str(&mut runtime, "webgpuProbe.labels"), "copy|unmapped");
         assert_eq!(eval_str(&mut runtime, "webgpuProbe.bytes"), "1,2,3,4");
+        assert_eq!(eval_str(&mut runtime, "String(webgpuProbe.relativeMap)"), "8");
+        assert_eq!(eval_str(&mut runtime, "String(webgpuProbe.byteOffset)"), "true");
         assert_eq!(eval_str(&mut runtime, "webgpuProbe.lost"), "destroyed|Device was destroyed.");
     }
 
