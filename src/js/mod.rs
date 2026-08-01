@@ -2185,6 +2185,7 @@ impl JsRuntime {
             worker.outgoing.clear();
             worker.runtime.host_state.borrow_mut().worker_terminated = true;
         }
+        terminate_shared_worker_connections(&self.host_state);
     }
 
     fn advance_worker_clocks(&mut self, elapsed_ms: u64) {
@@ -5002,6 +5003,25 @@ fn shared_worker_entry_for_key(
             .find(|entry| entry.borrow().key == *key)
             .cloned()
     })
+}
+
+fn terminate_shared_worker_connections(state: &Rc<RefCell<HostState>>) {
+    let connection_ids: Vec<_> = state
+        .borrow()
+        .shared_worker_ports
+        .keys()
+        .copied()
+        .collect();
+    for connection_id in connection_ids {
+        if let Some(entry) = shared_worker_entry_for_connection(connection_id) {
+            if let Some(connection) = entry.borrow_mut().connections.get_mut(&connection_id) {
+                connection.closed = true;
+                connection.owner_port = None;
+                connection.pending_to_owner.clear();
+            }
+        }
+    }
+    state.borrow_mut().shared_worker_ports.clear();
 }
 
 fn resolve_worker_url(
