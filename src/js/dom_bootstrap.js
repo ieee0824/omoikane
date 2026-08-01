@@ -10153,7 +10153,9 @@
   let performanceObserverDeliveryScheduled = false;
   let resourceTimingBufferSize = 250;
   let resourceTimingBufferFull = false;
+  let resourceEntryCount = 0;
   const resourceTimingTextEncoder = new TextEncoder();
+  const finishedResourceTimings = new WeakSet();
 
   function sortedPerformanceEntries(entries) {
     return entries.slice().sort((a, b) =>
@@ -10259,13 +10261,7 @@
 
   function addPerformanceEntry(entry) {
     if (entry.entryType === "resource") {
-      let resourceCount = 0;
-      for (let index = performanceEntries.length - 1;
-           index >= 0 && resourceCount < resourceTimingBufferSize;
-           index -= 1) {
-        if (performanceEntries[index].entryType === "resource") resourceCount += 1;
-      }
-      if (resourceCount >= resourceTimingBufferSize) {
+      if (resourceEntryCount >= resourceTimingBufferSize) {
         if (!resourceTimingBufferFull) {
           resourceTimingBufferFull = true;
           Promise.resolve().then(() => {
@@ -10286,6 +10282,7 @@
     }
     Object.defineProperty(entry, "__sequence", { value: performanceEntrySequence++ });
     performanceEntries.push(entry);
+    if (entry.entryType === "resource") resourceEntryCount += 1;
     for (const observer of performanceObservers) {
       if (!observer._entryTypes.has(entry.entryType)) continue;
       observer._queue.push(entry);
@@ -10341,7 +10338,8 @@
   }
 
   function finishResourceTiming(timing, data = {}, error = false) {
-    if (!timing) return null;
+    if (!timing || finishedResourceTimings.has(timing)) return null;
+    finishedResourceTimings.add(timing);
     const responseEnd = performance.now();
     const bodyText = data && data.bodyText !== undefined ? String(data.bodyText) : "";
     const bodyBytes = data && data.bodyBase64 !== undefined && data.bodyBase64 !== null
@@ -10508,7 +10506,7 @@
         throw new TypeError("The resource timing buffer size must be non-negative");
       }
       resourceTimingBufferSize = Math.floor(numeric);
-      if (performanceEntries.filter(entry => entry.entryType === "resource").length < resourceTimingBufferSize) {
+      if (resourceEntryCount < resourceTimingBufferSize) {
         resourceTimingBufferFull = false;
       }
     },
@@ -10522,6 +10520,7 @@
         }
       }
       performanceEntries.length = writeIndex;
+      resourceEntryCount = 0;
       resourceTimingBufferFull = false;
     },
   };

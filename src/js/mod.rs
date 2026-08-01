@@ -22600,6 +22600,67 @@ b</textarea></form>"#);
     }
 
     #[test]
+    fn performance_resource_timing_fetch_completion_is_idempotent() {
+        let mut runtime = JsRuntime::with_document(default_document()).unwrap();
+        runtime
+            .eval(
+                r#"(() => {
+                  performance.clearResourceTimings();
+                  const originalFetch = globalThis.__omoikane_fetch;
+                  globalThis.__omoikane_fetch = () => Promise.resolve(JSON.stringify({
+                    status: 200,
+                    statusText: "OK",
+                    url: "https://example.test/broken-response",
+                    redirected: false,
+                    type: "basic",
+                    headers: [null],
+                    bodyText: "",
+                    bodyBase64: null,
+                  }));
+                  fetch("https://example.test/broken-response").catch(() => {
+                    globalThis.__omoikane_fetch = originalFetch;
+                  });
+                })()"#,
+            )
+            .unwrap();
+        runtime.run_until_idle().unwrap();
+        assert!(runtime
+            .eval(
+                r#"(() => {
+                  const entries = performance.getEntriesByName("https://example.test/broken-response");
+                  return entries.length === 1 && entries[0].responseStatus === 200;
+                })()"#,
+            )
+            .unwrap()
+            .as_boolean()
+            .unwrap());
+    }
+
+    #[test]
+    fn performance_resource_timing_buffer_count_resets_after_clear() {
+        let mut runtime = JsRuntime::with_document(default_document()).unwrap();
+        assert!(runtime
+            .eval(
+                r#"(() => {
+                  performance.clearResourceTimings();
+                  performance.setResourceTimingBufferSize(1);
+                  performance.mark("before");
+                  new Image().src = "data:image/png;base64,AA==";
+                  new Image().src = "data:image/png;base64,AA==";
+                  const full = performance.getEntriesByType("resource").length === 1;
+                  performance.clearResourceTimings();
+                  performance.mark("after");
+                  new Image().src = "data:image/png;base64,AA==";
+                  return full && performance.getEntriesByType("resource").length === 1 &&
+                    performance.getEntriesByType("mark").length === 2;
+                })()"#,
+            )
+            .unwrap()
+            .as_boolean()
+            .unwrap());
+    }
+
+    #[test]
     fn performance_resource_timing_link_finishes_when_rel_follows_href() {
         let mut runtime = JsRuntime::with_document(default_document()).unwrap();
         assert!(runtime
