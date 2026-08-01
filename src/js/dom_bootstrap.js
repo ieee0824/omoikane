@@ -9,9 +9,13 @@
   // and permission checks are applied consistently.
   const nativeClipboardReadText = globalThis.__omoikane_clipboard_read_text;
   const nativeClipboardWriteText = globalThis.__omoikane_clipboard_write_text;
+  const nativeClipboardPermission = globalThis.__omoikane_clipboard_permission;
+  const nativeGeolocationPermission = globalThis.__omoikane_geolocation_permission;
   const nativeIsSecureContext = globalThis.__omoikane_is_secure_context;
   delete globalThis.__omoikane_clipboard_read_text;
   delete globalThis.__omoikane_clipboard_write_text;
+  delete globalThis.__omoikane_clipboard_permission;
+  delete globalThis.__omoikane_geolocation_permission;
   delete globalThis.__omoikane_is_secure_context;
 
   // The top-level browsing context is its own parent and top-level context.
@@ -9369,6 +9373,10 @@
       this.clipboard = new Clipboard(clipboardConstructionToken);
       this.geolocation = new Geolocation(geolocationConstructionToken);
       this.serviceWorker = new ServiceWorkerContainer(serviceWorkerContainerConstructionToken);
+      // The Permissions object is installed after EventTarget is defined
+      // below.  Keep the property present while Navigator is constructed so
+      // its shape is stable during bootstrap and in worker globals.
+      this.permissions = null;
       this.gpu = new GPU(gpuConstructionToken);
     }
     get [Symbol.toStringTag]() { return "Navigator"; }
@@ -10594,13 +10602,19 @@
     }
   };
   const requestNotificationPermission = () => {
+    const before = currentNotificationPermission();
+    let result;
     try {
-      return typeof nativeNotificationRequestPermission === "function"
+      result = typeof nativeNotificationRequestPermission === "function"
         ? normalizeNotificationPermission(nativeNotificationRequestPermission())
         : currentNotificationPermission();
     } catch (_) {
-      return currentNotificationPermission();
+      result = currentNotificationPermission();
     }
+    if (result !== before && typeof globalThis.__omoikane_permission_changed === "function") {
+      globalThis.__omoikane_permission_changed("notifications", result === "default" ? "prompt" : result);
+    }
+    return result;
   };
   const closedNotifications = new WeakSet();
   const notificationTask = callback => {
@@ -11139,6 +11153,145 @@
       if (!closedNotifications.has(notification)) fireRealtimeEvent(notification, new Event("click"));
     });
     return true;
+  };
+
+  // -------------------------------------------------------------------------
+  // Permissions API query/lifecycle core.
+  //
+  // The host has deterministic permission state for the APIs that already
+  // exist in this runtime (Notifications, Geolocation, and Async Clipboard).
+  // Keep PermissionStatus objects in this realm and fan out host transitions
+  // through a small weak registry, so no Boa object crosses a runtime boundary
+  // and stale statuses do not keep a document alive after teardown.
+  // -------------------------------------------------------------------------
+  const permissionsConstructionToken = {};
+  const permissionStatusEntries = new Map();
+  const permissionStatusUsesWeakRefs = typeof WeakRef === "function";
+  let permissionLifecycleActive = true;
+  const supportedPermissionNames = Object.freeze([
+    "notifications", "geolocation", "clipboard-read", "clipboard-write",
+  ]);
+
+  function permissionDescriptorName(descriptor) {
+    if (descriptor === null || descriptor === undefined) {
+      throw new TypeError("Permissions.query requires a permission descriptor");
+    }
+    const value = Object(descriptor);
+    const name = String(value.name);
+    if (!supportedPermissionNames.includes(name)) {
+      throw new DOMException(`The permission descriptor '${name}' is not supported.`, "NotSupportedError");
+    }
+    return name;
+  }
+
+  function permissionStateFor(name) {
+    if (name === "notifications") {
+      const permission = currentNotificationPermission();
+      return permission === "default" ? "prompt" : permission;
+    }
+    if (name === "geolocation") {
+      try {
+        return nativeGeolocationPermission() ? "granted" : "denied";
+      } catch (_) {
+        return "denied";
+      }
+    }
+    try {
+      return nativeIsSecureContext() && nativeClipboardPermission() ? "granted" : "denied";
+    } catch (_) {
+      return "denied";
+    }
+  }
+
+  function registerPermissionStatus(status) {
+    const entries = permissionStatusEntries.get(status.__permissionName) || [];
+    entries.push(permissionStatusUsesWeakRefs ? new WeakRef(status) : status);
+    permissionStatusEntries.set(status.__permissionName, entries);
+  }
+
+  function notifyPermissionStatuses(name, state) {
+    if (!permissionLifecycleActive || !supportedPermissionNames.includes(name)) return;
+    const entries = permissionStatusEntries.get(name) || [];
+    const retained = [];
+    for (const entry of entries) {
+      const status = permissionStatusUsesWeakRefs ? entry.deref() : entry;
+      if (!status) continue;
+      if (status.__active) status.__setState(state);
+      if (status.__active) retained.push(entry);
+    }
+    permissionStatusEntries.set(name, retained);
+  }
+
+  class PermissionStatus extends EventTarget {
+    constructor(name, state) {
+      super();
+      if (!supportedPermissionNames.includes(name)) {
+        throw new TypeError("Illegal constructor");
+      }
+      this.__permissionName = name;
+      this.__state = state;
+      this.__active = true;
+      this.__onchange = null;
+    }
+    get state() { return this.__state; }
+    get onchange() { return this.__onchange; }
+    set onchange(callback) {
+      this.__onchange = typeof callback === "function" ? callback : null;
+    }
+    __setState(state) {
+      if (!this.__active || state === this.__state) return;
+      this.__state = state;
+      queueMicrotask(() => {
+        if (this.__active) fireRealtimeEvent(this, new Event("change"));
+      });
+    }
+    __teardown() {
+      this.__active = false;
+      this.__onchange = null;
+      this._listeners.clear();
+    }
+    get [Symbol.toStringTag]() { return "PermissionStatus"; }
+  }
+
+  class Permissions {
+    constructor(token) {
+      if (token !== permissionsConstructionToken) throw new TypeError("Illegal constructor");
+    }
+    query(descriptor) {
+      // Dictionary conversion and descriptor validation happen in the
+      // promise job, preserving the asynchronous ordering of the platform
+      // API and making getter exceptions observable as rejections.
+      return Promise.resolve().then(() => {
+        const name = permissionDescriptorName(descriptor);
+        const status = new PermissionStatus(name, permissionStateFor(name));
+        registerPermissionStatus(status);
+        return status;
+      });
+    }
+    get [Symbol.toStringTag]() { return "Permissions"; }
+  }
+
+  globalThis.PermissionStatus = PermissionStatus;
+  globalThis.Permissions = Permissions;
+  navigator.permissions = new Permissions(permissionsConstructionToken);
+  globalThis.__omoikane_permission_changed = (name, _state) => {
+    const normalizedName = String(name);
+    if (!supportedPermissionNames.includes(normalizedName)) return;
+    // The host transition argument is only a notification hint.  Always
+    // recompute from the authoritative source so page code cannot forge a
+    // granted/denied state by calling this private-looking global directly.
+    notifyPermissionStatuses(normalizedName, permissionStateFor(normalizedName));
+  };
+  globalThis.__omoikane_permission_teardown = () => {
+    if (!permissionLifecycleActive) return;
+    permissionLifecycleActive = false;
+    for (const entries of permissionStatusEntries.values()) {
+      for (const entry of entries) {
+        const status = permissionStatusUsesWeakRefs ? entry.deref() : entry;
+        if (status) status.__teardown();
+      }
+    }
+    permissionStatusEntries.clear();
   };
 
   class Animation extends EventTarget {
