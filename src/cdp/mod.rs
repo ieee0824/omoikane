@@ -1490,7 +1490,9 @@ impl CdpSession {
         ))?;
         if dom_type == "mousedown" {
             if self.drag_active {
-                let _ = self.eval_input_bool("__omoikane_dispatch_drag_input(0, \"cancel\", {})")?;
+                let _ = self.eval_input_bool(&format!(
+                    "__omoikane_dispatch_drag_input(0, \"cancel\", {init})"
+                ))?;
             }
             self.drag_active = false;
             self.drag_candidate = if not_canceled {
