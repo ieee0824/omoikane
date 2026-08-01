@@ -10156,6 +10156,13 @@ fn fetch_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResul
             fetched.response_type,
             ResponseType::Opaque | ResponseType::OpaqueRedirect
         );
+        // Fetch creates a null body for HEAD responses and for status codes
+        // whose semantics forbid a body. A successful response with an empty
+        // payload (for example `200 Content-Length: 0`) still has an empty
+        // ReadableStream, so presence cannot be inferred from byte length.
+        let body_present = !opaque
+            && !matches!(method, Method::Head)
+            && !matches!(response.status_code(), 100..=199 | 204 | 205 | 304);
         // `bodyText` is the lossy UTF-8 decoding the Fetch and XHR text paths are
         // defined in terms of, so it stays the primary representation. It cannot
         // represent a payload that is not valid UTF-8 though (an image, a font),
@@ -10166,7 +10173,7 @@ fn fetch_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResul
         // `from_utf8_lossy` borrows when the input is already valid UTF-8 and
         // only allocates to substitute replacement characters, so an owned `Cow`
         // is the signal that bytes were lost — no second validation pass needed.
-        let decoded_body = (!opaque).then(|| String::from_utf8_lossy(response.body()));
+        let decoded_body = body_present.then(|| String::from_utf8_lossy(response.body()));
         let body_base64 = matches!(decoded_body, Some(std::borrow::Cow::Owned(_)))
             .then(|| base64::engine::general_purpose::STANDARD.encode(response.body()));
         let body_text = decoded_body.map(std::borrow::Cow::into_owned);
@@ -10194,6 +10201,7 @@ fn fetch_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResul
             "headers": exposed_headers,
             "bodyText": body_text.as_deref().unwrap_or(""),
             "bodyBase64": body_base64,
+            "bodyPresent": body_present,
         })
         .to_string();
         Ok(js_string!(payload.as_str()).into())
@@ -15914,10 +15922,13 @@ mod tests {
                     await new Response(new Blob([new Uint8Array([1, 2, 3])])).arrayBuffer(),
                   ));
                   const request = new Request("https://x.test/", { method: "POST", body: blob });
+                  const requestTextCopy = request.clone();
                   const requestBlob = await request.blob();
-                  bodyResult.request = [requestBlob.type, await requestBlob.text(), await request.text()];
-                  const clone = new Response(blob, { headers: { "content-type": "text/html" } }).clone();
-                  bodyResult.clone = [(await clone.blob()).type, await clone.text()];
+                  bodyResult.request = [requestBlob.type, await requestBlob.text(), await requestTextCopy.text()];
+                  const cloneSource = new Response(blob, { headers: { "content-type": "text/html" } });
+                  const cloneBlob = cloneSource.clone();
+                  const cloneText = cloneSource.clone();
+                  bodyResult.clone = [(await cloneBlob.blob()).type, await cloneText.text()];
                   bodyResult.done = true;
                 })();"#,
             )
@@ -15969,14 +15980,15 @@ mod tests {
             .eval(
                 r#"globalThis.binaryResult = {};
                 fetch("/image.png").then(async response => {
-                  const copy = response.clone();
+                  const arrayCopy = response.clone();
+                  const textCopy = response.clone();
                   const blob = await response.blob();
                   binaryResult.blob = [blob.type, blob.size];
                   binaryResult.bytes = Array.from(new Uint8Array(await blob.arrayBuffer()));
-                  binaryResult.buffer = Array.from(new Uint8Array(await copy.arrayBuffer()));
+                  binaryResult.buffer = Array.from(new Uint8Array(await arrayCopy.arrayBuffer()));
                   // The text path still sees the lossy UTF-8 decoding it is defined
                   // to return, with one replacement character per invalid byte.
-                  binaryResult.text = Array.from(await copy.text(), c => c.codePointAt(0));
+                  binaryResult.text = Array.from(await textCopy.text(), c => c.codePointAt(0));
                   binaryResult.done = true;
                 });"#,
             )
@@ -16204,7 +16216,7 @@ b</textarea></form>"#);
     #[test]
     fn multipart_form_data_is_used_by_request_and_xhr() {
         let mut runtime = JsRuntime::new().unwrap();
-        assert!(runtime.eval(r#"(() => { const data = new FormData(); data.append("a", "one"); data.append("a", "two"); const encoded = data.__multipart("fixed-boundary"); const request = new Request("/upload", { method: "POST", body: data }); const xhr = new XMLHttpRequest(); xhr.open("POST", "/upload"); xhr.send(data); return encoded.body === "--fixed-boundary\r\nContent-Disposition: form-data; name=\"a\"\r\n\r\none\r\n--fixed-boundary\r\nContent-Disposition: form-data; name=\"a\"\r\n\r\ntwo\r\n--fixed-boundary--\r\n" && request.headers.get("content-type").startsWith("multipart/form-data; boundary=") && request.body.includes("name=\"a\"") && xhr._headers["content-type"].startsWith("multipart/form-data; boundary="); })()"#).unwrap().as_boolean().unwrap());
+        assert!(runtime.eval(r#"(() => { const data = new FormData(); data.append("a", "one"); data.append("a", "two"); const encoded = data.__multipart("fixed-boundary"); const request = new Request("/upload", { method: "POST", body: data }); const xhr = new XMLHttpRequest(); xhr.open("POST", "/upload"); xhr.send(data); return encoded.body === "--fixed-boundary\r\nContent-Disposition: form-data; name=\"a\"\r\n\r\none\r\n--fixed-boundary\r\nContent-Disposition: form-data; name=\"a\"\r\n\r\ntwo\r\n--fixed-boundary--\r\n" && request.headers.get("content-type").startsWith("multipart/form-data; boundary=") && request.body instanceof ReadableStream && request.__body.text.includes('name="a"') && xhr._headers["content-type"].startsWith("multipart/form-data; boundary="); })()"#).unwrap().as_boolean().unwrap());
     }
 
     #[test]
@@ -16338,6 +16350,160 @@ b</textarea></form>"#);
     }
 
     #[test]
+    fn fetch_bodies_expose_streams_one_shot_consumption_and_form_data() {
+        let mut runtime = JsRuntime::new().unwrap();
+        runtime
+            .eval(
+                r#"
+                globalThis.fetchBodyChecks = (async () => {
+                  const blob = new Blob([new Uint8Array([97, 98, 99])], { type: "text/plain" });
+                  const blobReader = blob.stream().getReader();
+                  const blobChunk = await blobReader.read();
+                  const blobDone = await blobReader.read();
+
+                  const response = new Response("hello");
+                  const responseStream = response.body;
+                  const responseSameStream = response.body === responseStream;
+                  const reader = responseStream.getReader();
+                  const first = await reader.read();
+                  const done = await reader.read();
+                  let cloneRejected = false;
+                  try { response.clone(); } catch (_) { cloneRejected = true; }
+                  try { response.bodyUsed = false; } catch (_) {}
+                  const cloneSource = new Response("clone");
+                  const cloneCopy = cloneSource.clone();
+                  const cloneValues = await Promise.all([cloneSource.text(), cloneCopy.text()]);
+                  const streamCloneSource = new Response("parallel");
+                  const streamCloneCopy = streamCloneSource.clone();
+                  const parallelValues = await Promise.all([
+                    streamCloneSource.body.getReader().read(),
+                    streamCloneCopy.body.getReader().read(),
+                  ]);
+
+                  const streamInput = new ReadableStream({ start(controller) {
+                    controller.enqueue(new Uint8Array([115, 116, 114, 101, 97, 109]));
+                    controller.close();
+                  } });
+                  const streamRequest = new Request("https://example.test/stream", {
+                    method: "POST", body: streamInput,
+                  });
+                  const streamInputText = await streamRequest.text();
+                  const openStream = new ReadableStream({ start(controller) {
+                    controller.enqueue(new Uint8Array([120]));
+                  } });
+                  let openStreamRejected = false;
+                  try { new Request("https://example.test/open", { method: "POST", body: openStream }); }
+                  catch (error) { openStreamRejected = error instanceof TypeError; }
+                  const emptyBody = new Response().body === null;
+                  const failingStream = new ReadableStream({ start(controller) {
+                    controller.error(new Error("stream failed"));
+                  } });
+                  const failingReader = failingStream.getReader();
+                  let streamErrorRejected = false;
+                  let streamClosedRejected = false;
+                  try { await failingReader.read(); } catch (_) { streamErrorRejected = true; }
+                  try { await failingReader.closed; } catch (_) { streamClosedRejected = true; }
+                  let cancelReason = "";
+                  const cancellable = new ReadableStream({ cancel(reason) { cancelReason = String(reason); } });
+                  await cancellable.cancel("abort");
+                  let releaseController;
+                  const releasable = new ReadableStream({ start(controller) { releaseController = controller; } });
+                  const releasedReader = releasable.getReader();
+                  releasedReader.releaseLock();
+                  let releasedClosedRejected = false;
+                  try { await releasedReader.closed; } catch (_) { releasedClosedRejected = true; }
+                  const replacementReader = releasable.getReader();
+                  releaseController.close();
+                  await replacementReader.closed;
+
+                  const formResponse = new Response("name=Miku&message=hello+world", {
+                    headers: { "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8" },
+                  });
+                  const form = await formResponse.formData();
+                  const unsupportedForm = new Response("x", { headers: { "Content-Type": "text/plain" } });
+                  let unsupportedFormRejected = false;
+                  try { await unsupportedForm.formData(); } catch (error) { unsupportedFormRejected = error instanceof TypeError; }
+
+                  const outgoing = new FormData();
+                  outgoing.append("title", "song");
+                  outgoing.append("payload", new Blob([new Uint8Array([0, 255, 65])], { type: "application/octet-stream" }), "data.bin");
+                  const request = new Request("https://example.test/upload", { method: "POST", body: outgoing });
+                  const parsed = await request.formData();
+                  const file = parsed.get("payload");
+                  return {
+                    blobType: blobChunk.value instanceof Uint8Array,
+                    blobText: new TextDecoder().decode(blobChunk.value),
+                    blobDone: blobDone.done,
+                    responseType: responseStream instanceof ReadableStream,
+                    responseSameStream,
+                    responseChunk: new TextDecoder().decode(first.value),
+                    responseDone: done.done,
+                    bodyUsed: response.bodyUsed,
+                    cloneRejected,
+                    cloneValues: cloneValues.join("|"),
+                    parallelValues: parallelValues.map(value => new TextDecoder().decode(value.value)).join("|"),
+                    streamInputText,
+                    openStreamRejected,
+                    emptyBody,
+                    unsupportedFormRejected,
+                    streamErrorRejected,
+                    streamClosedRejected,
+                    cancelReason,
+                    releasedClosedRejected,
+                    formValues: [form.get("name"), form.get("message")].join("|"),
+                    parsedTitle: parsed.get("title"),
+                    fileName: file.name,
+                    fileType: file.type,
+                    fileBytes: Array.from(new Uint8Array(await file.arrayBuffer())).join(","),
+                  };
+                })();
+                "#,
+            )
+            .unwrap();
+        runtime.run_jobs().unwrap();
+        assert!(runtime
+            .eval(
+                r#"fetchBodyChecks instanceof Promise"#,
+            )
+            .unwrap()
+            .as_boolean()
+            .unwrap());
+        runtime.run_jobs().unwrap();
+        assert!(runtime
+            .eval(
+                r#"fetchBodyChecks.then(value => globalThis.fetchBodyCheckResult = value)"#,
+            )
+            .is_ok());
+        runtime.run_jobs().unwrap();
+        assert_eq!(
+            eval_str(&mut runtime, "fetchBodyCheckResult.blobText"),
+            "abc"
+        );
+        assert!(runtime
+            .eval(
+                r#"fetchBodyCheckResult.blobType && fetchBodyCheckResult.blobDone &&
+                   fetchBodyCheckResult.responseType && fetchBodyCheckResult.responseSameStream &&
+                   fetchBodyCheckResult.responseChunk === "hello" && fetchBodyCheckResult.responseDone &&
+                   fetchBodyCheckResult.bodyUsed && fetchBodyCheckResult.cloneRejected &&
+                   fetchBodyCheckResult.cloneValues === "clone|clone" &&
+                   fetchBodyCheckResult.parallelValues === "parallel|parallel" &&
+                   fetchBodyCheckResult.streamInputText === "stream" && fetchBodyCheckResult.openStreamRejected &&
+                   fetchBodyCheckResult.emptyBody &&
+                   fetchBodyCheckResult.unsupportedFormRejected &&
+                   fetchBodyCheckResult.streamErrorRejected && fetchBodyCheckResult.streamClosedRejected &&
+                   fetchBodyCheckResult.cancelReason === "abort" &&
+                   fetchBodyCheckResult.releasedClosedRejected &&
+                   fetchBodyCheckResult.formValues === "Miku|hello world" &&
+                   fetchBodyCheckResult.parsedTitle === "song" && fetchBodyCheckResult.fileName === "data.bin" &&
+                   fetchBodyCheckResult.fileType === "application/octet-stream" &&
+                   fetchBodyCheckResult.fileBytes === "0,255,65""#,
+            )
+            .unwrap()
+            .as_boolean()
+            .unwrap());
+    }
+
+    #[test]
     fn implements_fetch_api() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
@@ -16368,6 +16534,59 @@ b</textarea></form>"#);
         handle.join().unwrap();
 
         assert_eq!(result, "hello");
+    }
+
+    #[test]
+    fn fetch_body_presence_distinguishes_empty_streams_from_null_bodies() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let handle = thread::spawn(move || {
+            for _ in 0..3 {
+                let (mut stream, _) = listener.accept().unwrap();
+                let request = String::from_utf8(read_http_request(&mut stream)).unwrap();
+                let response = if request.starts_with("GET /empty ") {
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".as_slice()
+                } else if request.starts_with("GET /none ") {
+                    b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                        .as_slice()
+                } else {
+                    assert!(request.starts_with("HEAD /head "));
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\nConnection: close\r\n\r\nbody"
+                        .as_slice()
+                };
+                stream.write_all(response).unwrap();
+            }
+        });
+
+        let mut runtime = JsRuntime::new().unwrap();
+        runtime.set_base_url(format!("http://{address}/").parse().unwrap());
+        runtime
+            .eval(&format!(
+                r#"globalThis.bodyPresenceResult = null;
+                (async () => {{
+                    const empty = await fetch("http://127.0.0.1:{}/empty");
+                    const none = await fetch("http://127.0.0.1:{}/none");
+                    const head = await fetch("http://127.0.0.1:{}/head", {{ method: "HEAD" }});
+                    const emptyRead = await empty.body.getReader().read();
+                    return [empty.body !== null, emptyRead.done, none.body === null, head.body === null];
+                }})().then(value => globalThis.bodyPresenceResult = value);"#,
+                address.port(),
+                address.port(),
+                address.port(),
+            ))
+            .unwrap();
+        runtime.run_jobs().unwrap();
+        handle.join().unwrap();
+
+        assert_eq!(
+            runtime
+                .eval("JSON.stringify(bodyPresenceResult)")
+                .unwrap()
+                .as_string()
+                .unwrap()
+                .to_std_string_escaped(),
+            "[true,true,true,true]",
+        );
     }
 
     #[test]
