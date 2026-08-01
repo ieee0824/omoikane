@@ -10115,7 +10115,7 @@ fn fetch_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResul
         // ReadableStream, so presence cannot be inferred from byte length.
         let body_present = !opaque
             && !matches!(method, Method::Head)
-            && !matches!(response.status_code(), 101 | 204 | 205 | 304);
+            && !matches!(response.status_code(), 100..=199 | 204 | 205 | 304);
         let exposed_headers =
             exposed_response_headers(&response, fetched.response_type, credentials);
         let payload = serde_json::json!({
@@ -16232,6 +16232,15 @@ b</textarea></form>"#);
                   let cancelReason = "";
                   const cancellable = new ReadableStream({ cancel(reason) { cancelReason = String(reason); } });
                   await cancellable.cancel("abort");
+                  let releaseController;
+                  const releasable = new ReadableStream({ start(controller) { releaseController = controller; } });
+                  const releasedReader = releasable.getReader();
+                  releasedReader.releaseLock();
+                  let releasedClosedRejected = false;
+                  try { await releasedReader.closed; } catch (_) { releasedClosedRejected = true; }
+                  const replacementReader = releasable.getReader();
+                  releaseController.close();
+                  await replacementReader.closed;
 
                   const formResponse = new Response("name=Miku&message=hello+world", {
                     headers: { "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8" },
@@ -16266,6 +16275,7 @@ b</textarea></form>"#);
                     streamErrorRejected,
                     streamClosedRejected,
                     cancelReason,
+                    releasedClosedRejected,
                     formValues: [form.get("name"), form.get("message")].join("|"),
                     parsedTitle: parsed.get("title"),
                     fileName: file.name,
@@ -16308,6 +16318,7 @@ b</textarea></form>"#);
                    fetchBodyCheckResult.unsupportedFormRejected &&
                    fetchBodyCheckResult.streamErrorRejected && fetchBodyCheckResult.streamClosedRejected &&
                    fetchBodyCheckResult.cancelReason === "abort" &&
+                   fetchBodyCheckResult.releasedClosedRejected &&
                    fetchBodyCheckResult.formValues === "Miku|hello world" &&
                    fetchBodyCheckResult.parsedTitle === "song" && fetchBodyCheckResult.fileName === "data.bin" &&
                    fetchBodyCheckResult.fileType === "application/octet-stream" &&

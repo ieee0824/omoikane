@@ -10497,7 +10497,20 @@
       return new Promise((resolve, reject) => stream._waiters.push({ resolve, reject }));
     }
     cancel(reason) { return this._stream ? this._stream._cancel(reason) : Promise.reject(new TypeError("Reader has no stream")); }
-    releaseLock() { if (this._stream) this._stream._reader = null; this._stream = null; }
+    releaseLock() {
+      const stream = this._stream;
+      if (!stream) return;
+      if (stream._reader === this) {
+        stream._reader = null;
+        const reject = stream._closedReject;
+        stream._closedResolve = null;
+        stream._closedReject = null;
+        if (reject && !stream._closed && !stream._errorSet) {
+          reject(new TypeError("Reader lock was released"));
+        }
+      }
+      this._stream = null;
+    }
   }
   class ReadableStream {
     constructor(underlyingSource = {}) {
