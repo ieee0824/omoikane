@@ -10563,11 +10563,11 @@
   // Host-side document/module loaders complete outside the JS fetch wrapper.
   // They report their terminal status through this tiny private bridge so
   // initial parser-discovered resources participate in the same timeline.
-  globalThis.__omoikane_record_resource_timing = function(name, initiatorType, status, error) {
+  globalThis.__omoikane_record_resource_timing = function(name, initiatorType, status, error, redirected = false) {
     const timing = beginResourceTiming(String(name), String(initiatorType || "other"));
     finishResourceTiming(timing, {
       status: Number(status) || 0,
-      redirected: false,
+      redirected: Boolean(redirected),
     }, Boolean(error));
   };
 

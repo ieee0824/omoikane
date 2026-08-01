@@ -4712,8 +4712,13 @@ impl JsRuntime {
                             );
                             continue;
                         }
+                        let redirected = resource_reference_was_redirected(
+                            &src_url,
+                            &effective_url,
+                            base_url,
+                        );
                         let _ = self.eval(&format!(
-                            "__omoikane_record_resource_timing({}, 'script', 200, false)",
+                            "__omoikane_record_resource_timing({}, 'script', 200, false, {redirected})",
                             serde_json::to_string(&effective_url)
                                 .unwrap_or_else(|_| "\"\"".to_string()),
                         ));
@@ -4987,6 +4992,29 @@ fn resolve_resource_ref(
         let base = base_url?;
         let url = crate::http::url::resolve_url(base, src).ok()?;
         Some(ResolvedResource::Url(url.to_string()))
+    }
+}
+
+/// Returns whether a fetched resource ended at a different URL than the one
+/// requested by the document. Relative references are resolved against the
+/// document base before comparing parsed HTTP(S) URLs, so a relative script
+/// does not look redirected merely because the fetch helper returns an
+/// absolute effective URL.
+fn resource_reference_was_redirected(
+    requested: &str,
+    effective: &str,
+    base_url: Option<&crate::http::Url>,
+) -> bool {
+    let requested = match resolve_resource_ref(requested, base_url) {
+        Some(ResolvedResource::Url(url)) => url,
+        _ => requested.to_string(),
+    };
+    match (
+        requested.parse::<crate::http::Url>(),
+        effective.parse::<crate::http::Url>(),
+    ) {
+        (Ok(requested), Ok(effective)) => requested != effective,
+        _ => requested != effective,
     }
 }
 
@@ -22542,6 +22570,35 @@ b</textarea></form>"#);
     }
 
     #[test]
+    fn performance_resource_timing_script_redirect_records_redirect_window() {
+        let port = spawn_redirect_script_server();
+        let requested = format!("http://127.0.0.1:{port}/redirect.js");
+        let effective = format!("http://127.0.0.1:{port}/final.js");
+        let mut runtime = runtime_from_html(&format!(
+            r#"<html><head><script src="{requested}"></script></head><body></body></html>"#
+        ));
+        let base: crate::http::Url = format!("http://127.0.0.1:{port}/index.html")
+            .parse()
+            .unwrap();
+        let errors = runtime.execute_document_scripts(Some(&base));
+        assert!(errors.is_empty(), "unexpected errors: {errors:?}");
+        assert!(runtime
+            .eval(&format!(
+                r#"(() => {{
+                  const entry = performance.getEntriesByType("resource")
+                    .find(item => item.initiatorType === "script");
+                  return globalThis.redirectScriptRan === true && entry &&
+                    entry.name === "{effective}" && entry.responseStatus === 200 &&
+                    entry.redirectStart > 0 && entry.redirectEnd >= entry.redirectStart &&
+                    entry.responseEnd >= entry.redirectEnd;
+                }})()"#,
+            ))
+            .unwrap()
+            .as_boolean()
+            .unwrap());
+    }
+
+    #[test]
     fn performance_resource_timing_buffer_full_event_targets_performance() {
         let mut runtime = JsRuntime::with_document(default_document()).unwrap();
         runtime
@@ -27774,6 +27831,35 @@ b</textarea></form>"#);
                     content_type,
                     body.len(),
                     body
+                );
+                let _ = stream.write_all(response.as_bytes());
+            }
+        });
+        port
+    }
+
+    fn spawn_redirect_script_server() -> u16 {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { break };
+                let mut request = [0u8; 4096];
+                let size = stream.read(&mut request).unwrap_or(0);
+                let request = String::from_utf8_lossy(&request[..size]);
+                let path = request.split_whitespace().nth(1).unwrap_or("/");
+                let (status, headers, body) = match path {
+                    "/redirect.js" => ("302 Found", "Location: /final.js\r\n", ""),
+                    "/final.js" => (
+                        "200 OK",
+                        "Content-Type: text/javascript\r\n",
+                        "globalThis.redirectScriptRan = true;",
+                    ),
+                    _ => ("404 Not Found", "", ""),
+                };
+                let response = format!(
+                    "HTTP/1.1 {status}\r\n{headers}Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len(),
                 );
                 let _ = stream.write_all(response.as_bytes());
             }
