@@ -11555,6 +11555,8 @@ mod tests {
                      const mapping = destination.mapAsync(GPUMapMode.READ);
                      return mapping.then(() => {
                        webgpuProbe.bytes = Array.from(new Uint32Array(destination.getMappedRange())).join(',');
+                       try { destination.getMappedRange(24); webgpuProbe.invalidRange = false; }
+                       catch (error) { webgpuProbe.invalidRange = error.name === 'OperationError'; }
                        destination.unmap();
                        const relative = device.createBuffer({ size: 16, usage: GPUBufferUsage.MAP_WRITE | GPUBufferUsage.COPY_SRC });
                        return relative.mapAsync(GPUMapMode.WRITE, 8, 8).then(() => {
@@ -11580,6 +11582,7 @@ mod tests {
         assert_eq!(eval_str(&mut runtime, "webgpuProbe.info"), "deterministic|software|false");
         assert_eq!(eval_str(&mut runtime, "webgpuProbe.labels"), "copy|unmapped");
         assert_eq!(eval_str(&mut runtime, "webgpuProbe.bytes"), "1,2,3,4");
+        assert_eq!(eval_str(&mut runtime, "String(webgpuProbe.invalidRange)"), "true");
         assert_eq!(eval_str(&mut runtime, "String(webgpuProbe.relativeMap)"), "8");
         assert_eq!(eval_str(&mut runtime, "String(webgpuProbe.byteOffset)"), "true");
         assert_eq!(eval_str(&mut runtime, "webgpuProbe.lost"), "destroyed|Device was destroyed.");

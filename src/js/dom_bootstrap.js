@@ -8929,7 +8929,7 @@
       // mapped range (unlike mapAsync's buffer-relative offset).
       const relative = offset === undefined ? 0 : webgpuInteger(offset, "offset");
       const length = size === undefined ? this.__map.size - relative : webgpuInteger(size, "size");
-      if (relative < 0 || relative + length > this.__map.size ||
+      if (relative < 0 || relative > this.__map.size || length < 0 || relative + length > this.__map.size ||
           relative % 8 !== 0 || length % 4 !== 0) throw webgpuOperationError("The mapped range is invalid or misaligned.");
       if (relative === 0 && length === this.__map.size) return this.__map.buffer;
       const view = this.__map.buffer.slice(relative, relative + length);
