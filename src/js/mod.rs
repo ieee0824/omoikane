@@ -11671,6 +11671,102 @@ mod tests {
     }
 
     #[test]
+    fn webgpu_adapter_device_queue_and_buffer_ordering_are_deterministic() {
+        let mut runtime = JsRuntime::new().unwrap();
+        runtime
+            .eval(
+                r#"globalThis.webgpuProbe = {
+                     surface: typeof GPU === 'function' && typeof navigator.gpu.requestAdapter === 'function' &&
+                       typeof GPUAdapter === 'function' && typeof GPUDevice === 'function' &&
+                       typeof GPUQueue === 'function' && typeof GPUBuffer === 'function',
+                     adapter: false, device: false, info: '', labels: '', bytes: '', lost: ''
+                   };
+                   navigator.gpu.requestAdapter({ powerPreference: 'high-performance' }).then(adapter => {
+                     webgpuProbe.adapter = adapter instanceof GPUAdapter &&
+                       adapter.features instanceof GPUSupportedFeatures &&
+                       adapter.limits.maxBufferSize >= 16 && adapter.info.vendor === 'Omoikane' &&
+                       navigator.gpu.getPreferredCanvasFormat() === 'rgba8unorm';
+                     webgpuProbe.info = adapter.info.architecture + '|' + adapter.info.device + '|' + adapter.isFallbackAdapter;
+                     return adapter.requestDevice({ label: 'device', defaultQueue: { label: 'queue' } });
+                   }).then(device => {
+                     webgpuProbe.device = device instanceof GPUDevice && device.queue instanceof GPUQueue &&
+                       device.label === 'device' && device.queue.label === 'queue';
+                     const source = device.createBuffer({ size: 16, usage: GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST });
+                     const destination = device.createBuffer({ size: 16, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+                     device.queue.writeBuffer(source, 0, new Uint32Array([1, 2, 3, 4]));
+                     const encoder = device.createCommandEncoder({ label: 'copy' });
+                     encoder.copyBufferToBuffer(source, 0, destination, 0, 16);
+                     device.queue.submit([encoder.finish()]);
+                     webgpuProbe.labels = encoder.label + '|' + destination.mapState;
+                     const mapping = destination.mapAsync(GPUMapMode.READ);
+                     return mapping.then(() => {
+                       webgpuProbe.bytes = Array.from(new Uint32Array(destination.getMappedRange())).join(',');
+                       try { destination.getMappedRange(24); webgpuProbe.invalidRange = false; }
+                       catch (error) { webgpuProbe.invalidRange = error.name === 'OperationError'; }
+                       destination.unmap();
+                       const relative = device.createBuffer({ size: 16, usage: GPUBufferUsage.MAP_WRITE | GPUBufferUsage.COPY_SRC });
+                       return relative.mapAsync(GPUMapMode.WRITE, 8, 8).then(() => {
+                         webgpuProbe.relativeMap = relative.getMappedRange(0, 8).byteLength;
+                         relative.unmap();
+                         const byteOffset = device.createBuffer({ size: 8, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+                         device.queue.writeBuffer(byteOffset, 0, new Uint32Array([0x11111111, 0x22222222]), 4, 4);
+                         return byteOffset.mapAsync(GPUMapMode.READ).then(() => {
+                           webgpuProbe.byteOffset = new Uint32Array(byteOffset.getMappedRange())[0] === 0x22222222;
+                           byteOffset.unmap();
+                           device.destroy();
+                           const afterDestroy = device.createBuffer({ size: 4, usage: GPUBufferUsage.COPY_DST });
+                           webgpuProbe.afterDestroy = afterDestroy.size === 0 && afterDestroy.mapState === 'unmapped';
+                           return device.lost;
+                         });
+                       });
+                     });
+                   }).then(info => { webgpuProbe.lost = info.reason + '|' + info.message; }, error => { webgpuProbe.error = error.name + '|' + error.message; });"#,
+            )
+            .unwrap();
+        runtime.run_until_idle().unwrap();
+        assert_eq!(eval_str(&mut runtime, "String(webgpuProbe.surface)"), "true");
+        assert_eq!(eval_str(&mut runtime, "String(webgpuProbe.adapter)"), "true");
+        assert_eq!(eval_str(&mut runtime, "String(webgpuProbe.device)"), "true");
+        assert_eq!(eval_str(&mut runtime, "webgpuProbe.info"), "deterministic|software|false");
+        assert_eq!(eval_str(&mut runtime, "webgpuProbe.labels"), "copy|unmapped");
+        assert_eq!(eval_str(&mut runtime, "webgpuProbe.bytes"), "1,2,3,4");
+        assert_eq!(eval_str(&mut runtime, "String(webgpuProbe.invalidRange)"), "true");
+        assert_eq!(eval_str(&mut runtime, "String(webgpuProbe.relativeMap)"), "8");
+        assert_eq!(eval_str(&mut runtime, "String(webgpuProbe.byteOffset)"), "true");
+        assert_eq!(eval_str(&mut runtime, "String(webgpuProbe.afterDestroy)"), "true");
+        assert_eq!(eval_str(&mut runtime, "webgpuProbe.lost"), "destroyed|Device was destroyed.");
+    }
+
+    #[test]
+    fn webgpu_options_and_error_scopes_are_validated_deterministically() {
+        let mut runtime = JsRuntime::new().unwrap();
+        runtime
+            .eval(
+                r#"globalThis.webgpuErrors = { power: '', feature: '', validation: '', uncaptured: 0 };
+                   navigator.gpu.requestAdapter({ powerPreference: 'turbo' }).catch(error => webgpuErrors.power = error.name);
+                   navigator.gpu.requestAdapter().then(adapter =>
+                     adapter.requestDevice({ requiredFeatures: ['texture-compression-bc'] })
+                   ).catch(error => webgpuErrors.feature = error.name);
+                   navigator.gpu.requestAdapter().then(adapter => adapter.requestDevice()).then(device => {
+                     device.onuncapturederror = event => { if (event.error instanceof GPUValidationError) webgpuErrors.uncaptured++; };
+                     device.pushErrorScope('validation');
+                     device.createBuffer({ size: 3, usage: GPUBufferUsage.COPY_DST });
+                     return device.popErrorScope().then(error => {
+                       webgpuErrors.validation = error.constructor.name + '|' + error.message;
+                       device.createBuffer({ size: 3, usage: GPUBufferUsage.COPY_DST });
+                       return Promise.resolve();
+                     });
+                   });"#,
+            )
+            .unwrap();
+        runtime.run_until_idle().unwrap();
+        assert_eq!(eval_str(&mut runtime, "webgpuErrors.power"), "TypeError");
+        assert_eq!(eval_str(&mut runtime, "webgpuErrors.feature"), "NotSupportedError");
+        assert_eq!(eval_str(&mut runtime, "webgpuErrors.validation"), "GPUValidationError|GPUBuffer size must be a positive multiple of four within maxBufferSize.");
+        assert_eq!(eval_str(&mut runtime, "String(webgpuErrors.uncaptured)"), "1");
+    }
+
+    #[test]
     fn webtransport_pair_datagrams_and_streams_are_deterministic() {
         let mut runtime = JsRuntime::new().unwrap();
         runtime
