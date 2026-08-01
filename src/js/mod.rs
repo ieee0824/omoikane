@@ -7240,7 +7240,9 @@ fn transform_rect(rect: Rect, transform: AffineTransform) -> Rect {
         .iter()
         .any(|point| !point.0.is_finite() || !point.1.is_finite())
     {
-        return Rect::default();
+        // Keep CSSOM geometry anchored in layout space when projection has no
+        // finite corner, avoiding a discontinuous jump to the origin.
+        return rect;
     }
     let min_x = corners
         .iter()

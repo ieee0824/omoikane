@@ -2291,7 +2291,10 @@ fn transformed_rect_bounds(rect: Rect, transform: AffineTransform) -> Rect {
         .iter()
         .any(|point| !point.0.is_finite() || !point.1.is_finite())
     {
-        return Rect::default();
+        // If a corner crosses the projective horizon, preserve the original
+        // bounds rather than jumping to the origin while keeping the paint
+        // geometry finite and bounded.
+        return rect;
     }
     let min_x = corners
         .iter()
