@@ -6393,7 +6393,7 @@
     SHADING_LANGUAGE_VERSION: 0x8B8C,
   };
 
-  const WEBGL_CAPABILITIES = new Set([
+  const WEBGL_CAPABILITIES = Object.freeze([
     WEBGL_CONSTANTS.BLEND, WEBGL_CONSTANTS.CULL_FACE, WEBGL_CONSTANTS.DEPTH_TEST,
     WEBGL_CONSTANTS.DITHER, WEBGL_CONSTANTS.POLYGON_OFFSET_FILL,
     WEBGL_CONSTANTS.SAMPLE_ALPHA_TO_COVERAGE, WEBGL_CONSTANTS.SAMPLE_COVERAGE,
@@ -6401,10 +6401,10 @@
   ]);
   const WEBGL_CLEAR_BITS = WEBGL_CONSTANTS.COLOR_BUFFER_BIT |
     WEBGL_CONSTANTS.DEPTH_BUFFER_BIT | WEBGL_CONSTANTS.STENCIL_BUFFER_BIT;
-  const WEBGL_BUFFER_TARGETS = new Set([
+  const WEBGL_BUFFER_TARGETS = Object.freeze([
     WEBGL_CONSTANTS.ARRAY_BUFFER, WEBGL_CONSTANTS.ELEMENT_ARRAY_BUFFER,
   ]);
-  const WEBGL_DRAW_MODES = new Set([
+  const WEBGL_DRAW_MODES = Object.freeze([
     WEBGL_CONSTANTS.POINTS, WEBGL_CONSTANTS.LINES, WEBGL_CONSTANTS.LINE_LOOP,
     WEBGL_CONSTANTS.LINE_STRIP, WEBGL_CONSTANTS.TRIANGLES,
     WEBGL_CONSTANTS.TRIANGLE_STRIP, WEBGL_CONSTANTS.TRIANGLE_FAN,
@@ -6584,17 +6584,17 @@
     }
     enable(capability) {
       if (!webglActive(this)) return;
-      if (!WEBGL_CAPABILITIES.has(capability)) webglError(this, WEBGL_CONSTANTS.INVALID_ENUM);
+      if (!WEBGL_CAPABILITIES.includes(capability)) webglError(this, WEBGL_CONSTANTS.INVALID_ENUM);
       else this.__state.enabled.add(capability);
     }
     disable(capability) {
       if (!webglActive(this)) return;
-      if (!WEBGL_CAPABILITIES.has(capability)) webglError(this, WEBGL_CONSTANTS.INVALID_ENUM);
+      if (!WEBGL_CAPABILITIES.includes(capability)) webglError(this, WEBGL_CONSTANTS.INVALID_ENUM);
       else this.__state.enabled.delete(capability);
     }
     isEnabled(capability) {
       if (!webglActive(this)) return false;
-      if (!WEBGL_CAPABILITIES.has(capability)) { webglError(this, WEBGL_CONSTANTS.INVALID_ENUM); return false; }
+      if (!WEBGL_CAPABILITIES.includes(capability)) { webglError(this, WEBGL_CONSTANTS.INVALID_ENUM); return false; }
       return this.__state.enabled.has(capability);
     }
     isContextLost() { return this.__state.lost; }
@@ -6674,14 +6674,14 @@
     }
     bindBuffer(target, buffer) {
       if (!webglActive(this)) return;
-      if (!WEBGL_BUFFER_TARGETS.has(target)) { webglError(this, WEBGL_CONSTANTS.INVALID_ENUM); return; }
+      if (!WEBGL_BUFFER_TARGETS.includes(target)) { webglError(this, WEBGL_CONSTANTS.INVALID_ENUM); return; }
       if (buffer !== null && webglOwned(this, buffer, WebGLBuffer) === undefined) return;
       if (target === WEBGL_CONSTANTS.ARRAY_BUFFER) this.__state.arrayBuffer = buffer;
       else this.__state.elementArrayBuffer = buffer;
     }
     bufferData(target, dataOrSize, usage) {
       if (!webglActive(this)) return;
-      if (!WEBGL_BUFFER_TARGETS.has(target)) { webglError(this, WEBGL_CONSTANTS.INVALID_ENUM); return; }
+      if (!WEBGL_BUFFER_TARGETS.includes(target)) { webglError(this, WEBGL_CONSTANTS.INVALID_ENUM); return; }
       if (![WEBGL_CONSTANTS.STREAM_DRAW, WEBGL_CONSTANTS.STATIC_DRAW, WEBGL_CONSTANTS.DYNAMIC_DRAW].includes(usage)) { webglError(this, WEBGL_CONSTANTS.INVALID_ENUM); return; }
       const buffer = target === WEBGL_CONSTANTS.ARRAY_BUFFER ? this.__state.arrayBuffer : this.__state.elementArrayBuffer;
       if (!buffer) { webglError(this, WEBGL_CONSTANTS.INVALID_OPERATION); return; }
@@ -6695,7 +6695,7 @@
     }
     bufferSubData(target, offset, data) {
       if (!webglActive(this)) return;
-      if (!WEBGL_BUFFER_TARGETS.has(target)) { webglError(this, WEBGL_CONSTANTS.INVALID_ENUM); return; }
+      if (!WEBGL_BUFFER_TARGETS.includes(target)) { webglError(this, WEBGL_CONSTANTS.INVALID_ENUM); return; }
       const buffer = target === WEBGL_CONSTANTS.ARRAY_BUFFER ? this.__state.arrayBuffer : this.__state.elementArrayBuffer;
       if (!buffer) { webglError(this, WEBGL_CONSTANTS.INVALID_OPERATION); return; }
       const start = Number(offset);
@@ -6704,7 +6704,7 @@
     }
     getBufferParameter(target, parameter) {
       if (!webglActive(this)) return null;
-      if (!WEBGL_BUFFER_TARGETS.has(target)) { webglError(this, WEBGL_CONSTANTS.INVALID_ENUM); return null; }
+      if (!WEBGL_BUFFER_TARGETS.includes(target)) { webglError(this, WEBGL_CONSTANTS.INVALID_ENUM); return null; }
       const buffer = target === WEBGL_CONSTANTS.ARRAY_BUFFER ? this.__state.arrayBuffer : this.__state.elementArrayBuffer;
       if (!buffer) { webglError(this, WEBGL_CONSTANTS.INVALID_OPERATION); return null; }
       if (parameter === WEBGL_CONSTANTS.BUFFER_SIZE) return buffer.__size;
@@ -6885,13 +6885,13 @@
     }
     drawArrays(mode, first, count) {
       if (!webglActive(this)) return;
-      if (!WEBGL_DRAW_MODES.has(mode)) { webglError(this, WEBGL_CONSTANTS.INVALID_ENUM); return; }
+      if (!WEBGL_DRAW_MODES.includes(mode)) { webglError(this, WEBGL_CONSTANTS.INVALID_ENUM); return; }
       if (!Number.isFinite(Number(first)) || !Number.isFinite(Number(count)) || Number(first) < 0 || Number(count) < 0 || Math.trunc(Number(first)) !== Number(first) || Math.trunc(Number(count)) !== Number(count)) { webglError(this, WEBGL_CONSTANTS.INVALID_VALUE); return; }
       if (!this.__state.currentProgram) webglError(this, WEBGL_CONSTANTS.INVALID_OPERATION);
     }
     drawElements(mode, count, type, offset) {
       if (!webglActive(this)) return;
-      if (!WEBGL_DRAW_MODES.has(mode)) { webglError(this, WEBGL_CONSTANTS.INVALID_ENUM); return; }
+      if (!WEBGL_DRAW_MODES.includes(mode)) { webglError(this, WEBGL_CONSTANTS.INVALID_ENUM); return; }
       if (![WEBGL_CONSTANTS.UNSIGNED_BYTE, WEBGL_CONSTANTS.UNSIGNED_SHORT].includes(type)) { webglError(this, WEBGL_CONSTANTS.INVALID_ENUM); return; }
       if (!Number.isFinite(Number(count)) || Number(count) < 0 || !Number.isFinite(Number(offset)) || Number(offset) < 0) { webglError(this, WEBGL_CONSTANTS.INVALID_VALUE); return; }
       if (!this.__state.currentProgram || !this.__state.elementArrayBuffer) webglError(this, WEBGL_CONSTANTS.INVALID_OPERATION);
