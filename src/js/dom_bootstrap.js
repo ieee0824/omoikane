@@ -10427,7 +10427,7 @@
       ? Math.max(0, nativePerformanceNow() - 0.001)
       : element.__resourceTimingStart;
     const responseTime = nativePerformanceNow();
-    element.__resourceTimingRecorded = true;
+    setElementResourceTimingState(element, "__resourceTimingRecorded", true);
     recordResourceTiming({
       name,
       initiatorType: String(element.localName || "other"),
@@ -10445,8 +10445,23 @@
 
   function noteElementResourceStart(element) {
     if (!element) return;
-    element.__resourceTimingStart = nativePerformanceNow();
-    element.__resourceTimingRecorded = false;
+    setElementResourceTimingState(element, "__resourceTimingStart", nativePerformanceNow());
+    setElementResourceTimingState(element, "__resourceTimingRecorded", false);
+  }
+
+  function setElementResourceTimingState(element, field, value) {
+    try {
+      Object.defineProperty(element, field, {
+        value,
+        writable: true,
+        enumerable: false,
+        configurable: true,
+      });
+    } catch (_) {
+      // If page code made the internal slot non-configurable, preserve the
+      // previous best-effort behavior without breaking resource completion.
+      try { element[field] = value; } catch (_) { void 0; }
+    }
   }
 
   function resolvePerformanceTime(value, defaultValue) {

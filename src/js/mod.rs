@@ -22550,7 +22550,11 @@ b</textarea></form>"#);
                   const third = new Image();
                   third.src = "data:image/png;base64,AA==";
                   const resources = performance.getEntriesByType("resource");
+                  const resourceStart = Object.getOwnPropertyDescriptor(first, "__resourceTimingStart");
+                  const resourceRecorded = Object.getOwnPropertyDescriptor(first, "__resourceTimingRecorded");
                   return resources.length === 2 &&
+                    resourceStart && resourceRecorded &&
+                    resourceStart.enumerable === false && resourceRecorded.enumerable === false &&
                     resources.every(resource => resource instanceof PerformanceResourceTiming &&
                       resource.initiatorType === "img" && resource.responseEnd >= resource.startTime &&
                       resource.toJSON().initiatorType === "img") &&
