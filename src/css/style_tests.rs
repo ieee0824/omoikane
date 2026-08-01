@@ -3390,6 +3390,24 @@ fn validates_clip_shape_function_arguments() {
             .collect::<Vec<_>>()
             .join(", "))
     ));
+    let oversized_mask_layers = |value: &str| {
+        (0..=crate::paint::MAX_MASK_LAYERS)
+            .map(|_| value)
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    assert!(!supports_declaration(
+        "mask-repeat",
+        &oversized_mask_layers("repeat")
+    ));
+    assert!(!supports_declaration(
+        "-webkit-mask-size",
+        &oversized_mask_layers("auto")
+    ));
+    assert!(!supports_declaration(
+        "mask-position",
+        &oversized_mask_layers("center")
+    ));
 }
 
 // --- border-radius shorthand 展開テスト ---

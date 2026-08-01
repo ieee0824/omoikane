@@ -3694,20 +3694,13 @@ fn clip_path_shape(style: &ComputedStyle, border_box: Rect) -> Option<ClipPathSh
     let body = &value[open + 1..value.len() - 1];
     match name.as_str() {
         "inset" => {
-            let round_at = body
-                .split_whitespace()
+            let parts = split_top_level_whitespace(body);
+            let round_at = parts
+                .iter()
                 .position(|part| part.eq_ignore_ascii_case("round"));
             let round_at = round_at?;
-            let before = body
-                .split_whitespace()
-                .take(round_at)
-                .collect::<Vec<_>>()
-                .join(" ");
-            let after = body
-                .split_whitespace()
-                .skip(round_at + 1)
-                .collect::<Vec<_>>()
-                .join(" ");
+            let before = parts[..round_at].join(" ");
+            let after = parts[round_at + 1..].join(" ");
             let rect = parse_clip_path_inset_rect_geometry(&format!("inset({before})"), border_box)?;
             let radii = parse_shape_radii(&after, rect)?;
             Some(ClipPathShape::RoundedRect { rect, radii })

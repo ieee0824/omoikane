@@ -6041,6 +6041,25 @@ fn clip_path_inset_round_clips_rounded_corners() {
 }
 
 #[test]
+fn clip_path_inset_round_parses_calc_with_spaces() {
+    let mut style = ComputedStyle::default();
+    style.set_paint_value(
+        "clip-path",
+        "inset(calc(2px + 2px) round calc(2px + 2px))".to_string(),
+    );
+    let border_box = Rect {
+        x: 0.0,
+        y: 0.0,
+        width: 20.0,
+        height: 20.0,
+    };
+    let shape = clip_path_shape(&style, border_box).expect("calc rounded inset should parse");
+
+    assert!(shape.contains((10.0, 10.0)));
+    assert!(!shape.contains((0.5, 0.5)));
+}
+
+#[test]
 fn clip_path_inset_round_with_empty_rect_clips_everything() {
     let canvas = paint_clip_path_document(
         ".target { width: 20px; height: 20px; background: red; \

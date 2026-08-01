@@ -1073,11 +1073,27 @@ enum DeclarationValidation {
 /// [`DeclarationValidation::Invalid`].
 fn validate_declaration(name: &str, value: &Value) -> DeclarationValidation {
     if let Value::CommaList(values) = value {
+        let is_mask_layer_property = matches!(
+            name.to_ascii_lowercase().as_str(),
+            "mask-image"
+                | "mask-mode"
+                | "mask-composite"
+                | "mask-repeat"
+                | "mask-size"
+                | "mask-position"
+                | "mask-position-x"
+                | "mask-position-y"
+                | "-webkit-mask-image"
+                | "-webkit-mask-mode"
+                | "-webkit-mask-composite"
+                | "-webkit-mask-repeat"
+                | "-webkit-mask-size"
+                | "-webkit-mask-position"
+                | "-webkit-mask-position-x"
+                | "-webkit-mask-position-y"
+        );
         if values.is_empty()
-            || (values.len() > crate::paint::MAX_MASK_LAYERS
-                && (name.eq_ignore_ascii_case("mask-image")
-                    || name.eq_ignore_ascii_case("mask-mode")
-                    || name.eq_ignore_ascii_case("mask-composite")))
+            || (values.len() > crate::paint::MAX_MASK_LAYERS && is_mask_layer_property)
         {
             return DeclarationValidation::Invalid;
         }
