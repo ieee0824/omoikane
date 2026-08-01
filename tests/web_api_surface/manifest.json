@@ -399,6 +399,15 @@
       "baseline_supported": false
     },
     {
+      "id": "workers.worklet",
+      "area": "workers",
+      "description": "Worklet addModule runs in an isolated global with deterministic registration",
+      "setup": "globalThis.__workletSurface = { done: false }; globalThis.__workletSurfaceSource = encodeURIComponent(\"registerWorklet('surface'); queueMicrotask(() => registerPaint('surface-paint', class {}));\"); __workletSurface.promise = CSS.paintWorklet.addModule('data:text/javascript,' + __workletSurfaceSource).then(() => { __workletSurface.done = CSS.paintWorklet instanceof Worklet && CSS.paintWorklet.moduleCount === 1 && CSS.paintWorklet.registeredNames.join(',') === 'surface,surface-paint'; }, () => { __workletSurface.done = false; });",
+      "run_tasks": true,
+      "probe": "typeof Worklet === 'function' && typeof WorkletGlobalScope === 'function' && CSS.paintWorklet instanceof Worklet && __workletSurface.done === true",
+      "baseline_supported": false
+    },
+    {
       "id": "messaging.message-channel",
       "area": "messaging",
       "description": "MessageChannel is exposed",

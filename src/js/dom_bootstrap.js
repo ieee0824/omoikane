@@ -12,11 +12,25 @@
   const nativeClipboardPermission = globalThis.__omoikane_clipboard_permission;
   const nativeGeolocationPermission = globalThis.__omoikane_geolocation_permission;
   const nativeIsSecureContext = globalThis.__omoikane_is_secure_context;
+  // Worklet lifecycle bindings are private implementation hooks. Keep them in
+  // this closure so page code can only reach the standard Worklet methods.
+  const nativeCreateWorklet = globalThis.__omoikane_create_worklet;
+  const nativeWorkletAddModule = globalThis.__omoikane_worklet_add_module;
+  const nativeWorkletRegister = globalThis.__omoikane_worklet_register;
+  const nativeWorkletRegisteredNames = globalThis.__omoikane_worklet_registered_names;
+  const nativeWorkletModuleCount = globalThis.__omoikane_worklet_module_count;
+  const nativeWorkletTeardown = globalThis.__omoikane_worklet_teardown;
   delete globalThis.__omoikane_clipboard_read_text;
   delete globalThis.__omoikane_clipboard_write_text;
   delete globalThis.__omoikane_clipboard_permission;
   delete globalThis.__omoikane_geolocation_permission;
   delete globalThis.__omoikane_is_secure_context;
+  delete globalThis.__omoikane_create_worklet;
+  delete globalThis.__omoikane_worklet_add_module;
+  delete globalThis.__omoikane_worklet_register;
+  delete globalThis.__omoikane_worklet_registered_names;
+  delete globalThis.__omoikane_worklet_module_count;
+  delete globalThis.__omoikane_worklet_teardown;
 
   // The top-level browsing context is its own parent and top-level context.
   globalThis.parent = globalThis;
@@ -13365,6 +13379,155 @@
     // events; a global postMessage call is therefore intentionally inert.
     globalThis.postMessage = function() {
       throw new DOMException("SharedWorkerGlobalScope has no owner window.", "InvalidStateError");
+    };
+  };
+
+  // -------------------------------------------------------------------------
+  // Worklet / WorkletGlobalScope core.
+  //
+  // A Worklet owns a separate, same-origin Boa runtime.  `addModule()` is
+  // promise-shaped at the page boundary, while the native side evaluates the
+  // fetched module in FIFO order and drains that realm's microtasks before
+  // resolving the page promise.  The global deliberately exposes no Window or
+  // DOM objects; paint registration is retained as metadata for the
+  // deterministic CSS.paintWorklet seam rather than invoking a renderer.
+  // -------------------------------------------------------------------------
+  const workletConstructionToken = {};
+  class WorkletGlobalScope {
+    constructor() { throw new TypeError("Illegal constructor"); }
+    get [Symbol.toStringTag]() { return "WorkletGlobalScope"; }
+  }
+
+  class Worklet {
+    constructor(token) {
+      if (token !== workletConstructionToken) throw new TypeError("Illegal constructor");
+      const id = nativeCreateWorklet();
+      Object.defineProperty(this, "__id", {
+        configurable: false,
+        enumerable: false,
+        writable: false,
+        value: String(id),
+      });
+      Object.defineProperty(this, "__terminated", {
+        configurable: false,
+        enumerable: false,
+        writable: true,
+        value: false,
+      });
+    }
+    addModule(url, options = undefined) {
+      if (this.__terminated) {
+        return Promise.reject(new DOMException("Worklet has been torn down.", "InvalidStateError"));
+      }
+      if (arguments.length < 1) return Promise.reject(new TypeError("Worklet.addModule requires a module URL"));
+      if (options !== undefined && (options === null || typeof options !== "object")) {
+        return Promise.reject(new TypeError("Worklet.addModule options must be an object"));
+      }
+      if (options && options.credentials !== undefined &&
+          !["omit", "same-origin", "include"].includes(String(options.credentials))) {
+        return Promise.reject(new TypeError("Unsupported Worklet credentials mode"));
+      }
+      let status;
+      try {
+        status = JSON.parse(nativeWorkletAddModule(this.__id, String(url)));
+      } catch (error) {
+        return Promise.reject(error);
+      }
+      return Promise.resolve().then(() => {
+        if (!status || status.ok !== true) {
+          const name = status && status.name ? String(status.name) : "OperationError";
+          const message = status && status.message ? String(status.message) : "Worklet module failed";
+          throw new DOMException(message, name);
+        }
+        return undefined;
+      });
+    }
+    get registeredNames() {
+      try {
+        const names = JSON.parse(nativeWorkletRegisteredNames(this.__id));
+        return Object.freeze(Array.isArray(names) ? names.map(String) : []);
+      } catch (_) {
+        return Object.freeze([]);
+      }
+    }
+    get moduleCount() {
+      try { return Number(nativeWorkletModuleCount(this.__id)); }
+      catch (_) { return 0; }
+    }
+    teardown() {
+      if (this.__terminated) return Promise.resolve();
+      let result = false;
+      try { result = !!nativeWorkletTeardown(this.__id); } catch (_) {}
+      this.__terminated = true;
+      // Teardown is deliberately promise-shaped so callers can order it after
+      // the final addModule() checkpoint and observe it deterministically.
+      return Promise.resolve().then(() => undefined);
+    }
+    terminate() { return this.teardown(); }
+    get [Symbol.toStringTag]() { return "Worklet"; }
+  }
+  globalThis.Worklet = Worklet;
+  globalThis.WorkletGlobalScope = WorkletGlobalScope;
+
+  // CSS.paintWorklet is a stable Worklet instance.  Keep this assignment near
+  // the Worklet definition because the CSS namespace itself is created much
+  // earlier in the bootstrap.
+  if (globalThis.CSS && typeof globalThis.CSS === "object") {
+    Object.defineProperty(globalThis.CSS, "paintWorklet", {
+      configurable: true,
+      enumerable: true,
+      writable: false,
+      value: new Worklet(workletConstructionToken),
+    });
+  }
+
+  globalThis.__omoikane_install_worklet_global = function(url, workletId) {
+    // Worklets share language primitives with workers but are not message
+    // endpoints. Reusing the sanitizer guarantees `document` and `window` are
+    // absent while preserving timers, URL, structuredClone and microtasks.
+    globalThis.__omoikane_install_worker_global(url, workletId);
+    try { delete globalThis.Worker; } catch (_) { globalThis.Worker = undefined; }
+    try { delete globalThis.SharedWorker; } catch (_) { globalThis.SharedWorker = undefined; }
+    try { delete globalThis.SharedWorkerGlobalScope; } catch (_) {}
+    try { delete globalThis.Worklet; } catch (_) { globalThis.Worklet = undefined; }
+    try { delete globalThis.WorkletGlobalScope; } catch (_) {}
+    try { delete globalThis.CSS; } catch (_) { globalThis.CSS = undefined; }
+    try { delete globalThis.onmessage; } catch (_) {}
+    try { delete globalThis.postMessage; } catch (_) {}
+    try { delete globalThis.close; } catch (_) {}
+    const nativeRegister = nativeWorkletRegister;
+    const registrations = new Map();
+    const scope = class WorkletGlobalScope {};
+    globalThis.WorkletGlobalScope = scope;
+    globalThis.__omoikane_worklet_registrations = registrations;
+    globalThis.registerPaint = function(name, paintCtor, inputProperties = [], inputArguments = []) {
+      const key = String(name);
+      if (!key) throw new DOMException("A paint worklet name is required.", "SyntaxError");
+      if (typeof paintCtor !== "function") throw new TypeError("Paint definition must be callable");
+      if (registrations.has(key)) throw new DOMException("Paint name already registered.", "InvalidModificationError");
+      if (!Array.isArray(inputProperties) || !Array.isArray(inputArguments)) {
+        throw new TypeError("Paint input lists must be arrays");
+      }
+      if (typeof nativeRegister !== "function" || !nativeRegister(workletId, key)) {
+        throw new DOMException("WorkletGlobalScope has been torn down.", "InvalidStateError");
+      }
+      registrations.set(key, Object.freeze({
+        name: key,
+        constructor: paintCtor,
+        inputProperties: Object.freeze(inputProperties.map(String)),
+        inputArguments: Object.freeze(inputArguments.map(String)),
+      }));
+    };
+    // Generic registration is useful to deterministic Worklet consumers that
+    // do not need the paint-specific constructor contract.
+    globalThis.registerWorklet = function(name, value = undefined) {
+      const key = String(name);
+      if (!key) throw new DOMException("A worklet name is required.", "SyntaxError");
+      if (registrations.has(key)) throw new DOMException("Worklet name already registered.", "InvalidModificationError");
+      if (typeof nativeRegister !== "function" || !nativeRegister(workletId, key)) {
+        throw new DOMException("WorkletGlobalScope has been torn down.", "InvalidStateError");
+      }
+      registrations.set(key, Object.freeze({ name: key, value }));
     };
   };
 
