@@ -10,9 +10,23 @@
   const nativeClipboardReadText = globalThis.__omoikane_clipboard_read_text;
   const nativeClipboardWriteText = globalThis.__omoikane_clipboard_write_text;
   const nativeIsSecureContext = globalThis.__omoikane_is_secure_context;
+  // Worklet lifecycle bindings are private implementation hooks. Keep them in
+  // this closure so page code can only reach the standard Worklet methods.
+  const nativeCreateWorklet = globalThis.__omoikane_create_worklet;
+  const nativeWorkletAddModule = globalThis.__omoikane_worklet_add_module;
+  const nativeWorkletRegister = globalThis.__omoikane_worklet_register;
+  const nativeWorkletRegisteredNames = globalThis.__omoikane_worklet_registered_names;
+  const nativeWorkletModuleCount = globalThis.__omoikane_worklet_module_count;
+  const nativeWorkletTeardown = globalThis.__omoikane_worklet_teardown;
   delete globalThis.__omoikane_clipboard_read_text;
   delete globalThis.__omoikane_clipboard_write_text;
   delete globalThis.__omoikane_is_secure_context;
+  delete globalThis.__omoikane_create_worklet;
+  delete globalThis.__omoikane_worklet_add_module;
+  delete globalThis.__omoikane_worklet_register;
+  delete globalThis.__omoikane_worklet_registered_names;
+  delete globalThis.__omoikane_worklet_module_count;
+  delete globalThis.__omoikane_worklet_teardown;
 
   // The top-level browsing context is its own parent and top-level context.
   globalThis.parent = globalThis;
@@ -13234,7 +13248,7 @@
   class Worklet {
     constructor(token) {
       if (token !== workletConstructionToken) throw new TypeError("Illegal constructor");
-      const id = __omoikane_create_worklet();
+      const id = nativeCreateWorklet();
       Object.defineProperty(this, "__id", {
         configurable: false,
         enumerable: false,
@@ -13262,7 +13276,7 @@
       }
       let status;
       try {
-        status = JSON.parse(__omoikane_worklet_add_module(this.__id, String(url)));
+        status = JSON.parse(nativeWorkletAddModule(this.__id, String(url)));
       } catch (error) {
         return Promise.reject(error);
       }
@@ -13277,20 +13291,20 @@
     }
     get registeredNames() {
       try {
-        const names = JSON.parse(__omoikane_worklet_registered_names(this.__id));
+        const names = JSON.parse(nativeWorkletRegisteredNames(this.__id));
         return Object.freeze(Array.isArray(names) ? names.map(String) : []);
       } catch (_) {
         return Object.freeze([]);
       }
     }
     get moduleCount() {
-      try { return Number(__omoikane_worklet_module_count(this.__id)); }
+      try { return Number(nativeWorkletModuleCount(this.__id)); }
       catch (_) { return 0; }
     }
     teardown() {
       if (this.__terminated) return Promise.resolve();
       let result = false;
-      try { result = !!__omoikane_worklet_teardown(this.__id); } catch (_) {}
+      try { result = !!nativeWorkletTeardown(this.__id); } catch (_) {}
       this.__terminated = true;
       // Teardown is deliberately promise-shaped so callers can order it after
       // the final addModule() checkpoint and observe it deterministically.
@@ -13328,8 +13342,7 @@
     try { delete globalThis.onmessage; } catch (_) {}
     try { delete globalThis.postMessage; } catch (_) {}
     try { delete globalThis.close; } catch (_) {}
-    const nativeRegister = globalThis.__omoikane_worklet_register;
-    try { delete globalThis.__omoikane_worklet_register; } catch (_) {}
+    const nativeRegister = nativeWorkletRegister;
     const registrations = new Map();
     const scope = class WorkletGlobalScope {};
     globalThis.WorkletGlobalScope = scope;

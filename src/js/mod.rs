@@ -8994,6 +8994,25 @@ fn worklet_add_module_native(
                 ));
             }
         };
+        // A module map hit is resolved entirely from the deterministic cache:
+        // do not refetch a resource that has already executed successfully.
+        // This also ensures a repeated `addModule()` call cannot observe a
+        // changing network response after the first successful registration.
+        if let Some(runtime) = owner_state.borrow().worklet_runtime.clone() {
+            let runtime_ref = runtime.borrow();
+            let worklet_state = runtime_ref.host_state.borrow();
+            if worklet_state.worklet_terminated {
+                return Ok(worklet_status(
+                    false,
+                    "InvalidStateError",
+                    "WorkletGlobalScope has been torn down",
+                    false,
+                ));
+            }
+            if worklet_state.worklet_modules.contains(&resolved_url) {
+                return Ok(worklet_status(true, "", "", true));
+            }
+        }
         // Fetch before constructing the isolated realm. This keeps failed
         // addModule() calls side-effect free and makes retries deterministic.
         let fetched = {
@@ -11726,6 +11745,8 @@ mod tests {
         );
         assert_eq!(eval_str(&mut runtime, "typeof WorkletGlobalScope"), "function");
         assert_eq!(eval_str(&mut runtime, "typeof CSS.paintWorklet.addModule"), "function");
+        assert_eq!(eval_str(&mut runtime, "typeof __omoikane_create_worklet"), "undefined");
+        assert_eq!(eval_str(&mut runtime, "typeof __omoikane_worklet_add_module"), "undefined");
     }
 
     #[test]
