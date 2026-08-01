@@ -10109,6 +10109,13 @@ fn fetch_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResul
             ResponseType::Opaque => "opaque",
             ResponseType::OpaqueRedirect => "opaqueredirect",
         };
+        // Fetch creates a null body for HEAD responses and for status codes
+        // whose semantics forbid a body.  A successful response with an empty
+        // payload (for example `200 Content-Length: 0`) still has an empty
+        // ReadableStream, so presence cannot be inferred from byte length.
+        let body_present = !opaque
+            && !matches!(method, Method::Head)
+            && !matches!(response.status_code(), 101 | 204 | 205 | 304);
         let exposed_headers =
             exposed_response_headers(&response, fetched.response_type, credentials);
         let payload = serde_json::json!({
@@ -10121,7 +10128,7 @@ fn fetch_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResul
             "headers": exposed_headers,
             "bodyText": body_text.as_deref().unwrap_or(""),
             "bodyBase64": body_base64,
-            "bodyPresent": !opaque && !response.body().is_empty(),
+            "bodyPresent": body_present,
         })
         .to_string();
         Ok(js_string!(payload.as_str()).into())
@@ -15741,10 +15748,13 @@ mod tests {
                     await new Response(new Blob([new Uint8Array([1, 2, 3])])).arrayBuffer(),
                   ));
                   const request = new Request("https://x.test/", { method: "POST", body: blob });
+                  const requestTextCopy = request.clone();
                   const requestBlob = await request.blob();
-                  bodyResult.request = [requestBlob.type, await requestBlob.text(), await request.text()];
-                  const clone = new Response(blob, { headers: { "content-type": "text/html" } }).clone();
-                  bodyResult.clone = [(await clone.blob()).type, await clone.text()];
+                  bodyResult.request = [requestBlob.type, await requestBlob.text(), await requestTextCopy.text()];
+                  const cloneSource = new Response(blob, { headers: { "content-type": "text/html" } });
+                  const cloneBlob = cloneSource.clone();
+                  const cloneText = cloneSource.clone();
+                  bodyResult.clone = [(await cloneBlob.blob()).type, await cloneText.text()];
                   bodyResult.done = true;
                 })();"#,
             )
@@ -15796,14 +15806,15 @@ mod tests {
             .eval(
                 r#"globalThis.binaryResult = {};
                 fetch("/image.png").then(async response => {
-                  const copy = response.clone();
+                  const arrayCopy = response.clone();
+                  const textCopy = response.clone();
                   const blob = await response.blob();
                   binaryResult.blob = [blob.type, blob.size];
                   binaryResult.bytes = Array.from(new Uint8Array(await blob.arrayBuffer()));
-                  binaryResult.buffer = Array.from(new Uint8Array(await copy.arrayBuffer()));
+                  binaryResult.buffer = Array.from(new Uint8Array(await arrayCopy.arrayBuffer()));
                   // The text path still sees the lossy UTF-8 decoding it is defined
                   // to return, with one replacement character per invalid byte.
-                  binaryResult.text = Array.from(await copy.text(), c => c.codePointAt(0));
+                  binaryResult.text = Array.from(await textCopy.text(), c => c.codePointAt(0));
                   binaryResult.done = true;
                 });"#,
             )
@@ -16338,6 +16349,59 @@ b</textarea></form>"#);
         handle.join().unwrap();
 
         assert_eq!(result, "hello");
+    }
+
+    #[test]
+    fn fetch_body_presence_distinguishes_empty_streams_from_null_bodies() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let handle = thread::spawn(move || {
+            for _ in 0..3 {
+                let (mut stream, _) = listener.accept().unwrap();
+                let request = String::from_utf8(read_http_request(&mut stream)).unwrap();
+                let response = if request.starts_with("GET /empty ") {
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".as_slice()
+                } else if request.starts_with("GET /none ") {
+                    b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                        .as_slice()
+                } else {
+                    assert!(request.starts_with("HEAD /head "));
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\nConnection: close\r\n\r\nbody"
+                        .as_slice()
+                };
+                stream.write_all(response).unwrap();
+            }
+        });
+
+        let mut runtime = JsRuntime::new().unwrap();
+        runtime.set_base_url(format!("http://{address}/").parse().unwrap());
+        runtime
+            .eval(&format!(
+                r#"globalThis.bodyPresenceResult = null;
+                (async () => {{
+                    const empty = await fetch("http://127.0.0.1:{}/empty");
+                    const none = await fetch("http://127.0.0.1:{}/none");
+                    const head = await fetch("http://127.0.0.1:{}/head", {{ method: "HEAD" }});
+                    const emptyRead = await empty.body.getReader().read();
+                    return [empty.body !== null, emptyRead.done, none.body === null, head.body === null];
+                }})().then(value => globalThis.bodyPresenceResult = value);"#,
+                address.port(),
+                address.port(),
+                address.port(),
+            ))
+            .unwrap();
+        runtime.run_jobs().unwrap();
+        handle.join().unwrap();
+
+        assert_eq!(
+            runtime
+                .eval("JSON.stringify(bodyPresenceResult)")
+                .unwrap()
+                .as_string()
+                .unwrap()
+                .to_std_string_escaped(),
+            "[true,true,true,true]",
+        );
     }
 
     #[test]

@@ -14337,22 +14337,50 @@
     return match ? (match[1] ?? match[2] ?? "") : null;
   }
 
+  function byteSequenceIndexOf(bytes, needle, start = 0) {
+    if (needle.length === 0) return Math.min(start, bytes.length);
+    const limit = bytes.length - needle.length;
+    for (let offset = Math.max(0, start); offset <= limit; offset++) {
+      let match = true;
+      for (let index = 0; index < needle.length; index++) {
+        if (bytes[offset + index] !== needle[index]) {
+          match = false;
+          break;
+        }
+      }
+      if (match) return offset;
+    }
+    return -1;
+  }
+
+  function byteSequenceAfter(bytes, offset, sequence) {
+    if (offset < 0 || offset + sequence.length > bytes.length) return false;
+    for (let index = 0; index < sequence.length; index++) {
+      if (bytes[offset + index] !== sequence[index]) return false;
+    }
+    return true;
+  }
+
   function formDataFromMultipart(body, boundary) {
     if (!boundary) throw new TypeError("Multipart boundary is missing");
     const bytes = bodyAsBytes(body);
-    const binary = Array.from(bytes, byte => String.fromCharCode(byte)).join("");
-    const delimiter = "--" + boundary;
+    const delimiter = blobTextEncoder.encode("--" + boundary);
+    const delimiterWithPrefix = new Uint8Array(delimiter.length + 2);
+    delimiterWithPrefix.set([13, 10]);
+    delimiterWithPrefix.set(delimiter, 2);
     const form = new FormData();
-    let cursor = binary.indexOf(delimiter);
+    let cursor = byteSequenceIndexOf(bytes, delimiter);
     if (cursor < 0) throw new TypeError("Malformed multipart body");
     while (cursor >= 0) {
       let after = cursor + delimiter.length;
-      if (binary.slice(after, after + 2) === "--") break;
-      if (binary.slice(after, after + 2) !== "\r\n") throw new TypeError("Malformed multipart boundary");
+      if (byteSequenceAfter(bytes, after, new Uint8Array([45, 45]))) break;
+      if (!byteSequenceAfter(bytes, after, new Uint8Array([13, 10]))) {
+        throw new TypeError("Malformed multipart boundary");
+      }
       const headerStart = after + 2;
-      const headerEnd = binary.indexOf("\r\n\r\n", headerStart);
+      const headerEnd = byteSequenceIndexOf(bytes, new Uint8Array([13, 10, 13, 10]), headerStart);
       if (headerEnd < 0) throw new TypeError("Malformed multipart headers");
-      const headerText = binary.slice(headerStart, headerEnd);
+      const headerText = blobTextDecoder.decode(bytes.slice(headerStart, headerEnd));
       const headers = new Map();
       for (const line of headerText.split("\r\n")) {
         const separator = line.indexOf(":");
@@ -14364,8 +14392,7 @@
       const name = multipartHeaderParameter(disposition, "name");
       if (name === null) throw new TypeError("Multipart field name is missing");
       const bodyStart = headerEnd + 4;
-      const nextMarker = "\r\n" + delimiter;
-      const bodyEnd = binary.indexOf(nextMarker, bodyStart);
+      const bodyEnd = byteSequenceIndexOf(bytes, delimiterWithPrefix, bodyStart);
       if (bodyEnd < 0) throw new TypeError("Malformed multipart body");
       const partBytes = bytes.slice(bodyStart, bodyEnd);
       const filename = multipartHeaderParameter(disposition, "filename");
