@@ -50,8 +50,9 @@ impl ConnectionPool {
             insecure,
             request.requires_public_ip()
         );
+        let session_timeout = timeout.or(Some(Duration::from_secs(DEFAULT_TIMEOUT_SECS)));
         if let Some(session) = self.http2.get_mut(&key) {
-            session.set_timeout(timeout)?;
+            session.set_timeout(session_timeout)?;
             match session.send_request(request) {
                 Ok(response) => {
                     if std::env::var_os("OMOIKANE_LOG_HTTP").is_some() {
@@ -68,7 +69,7 @@ impl ConnectionPool {
             }
         }
         if let Some(session) = self.http1.get_mut(&key) {
-            session.set_timeout(timeout)?;
+            session.set_timeout(session_timeout)?;
             match session.send_request(request) {
                 Ok(response) => {
                     if response.header("connection").is_some_and(|value| {

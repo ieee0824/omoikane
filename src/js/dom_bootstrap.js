@@ -11763,9 +11763,9 @@
       dispatched.currentTarget = this;
       const handler = this["on" + dispatched.type];
       if (typeof handler === "function") handler.call(this, dispatched);
-      for (const callback of this._listeners[dispatched.type] || []) callback.call(this, dispatched);
+      for (const callback of (this._listeners[dispatched.type] || []).slice()) callback.call(this, dispatched);
       dispatched.currentTarget = null;
-      return true;
+      return !dispatched.defaultPrevented;
     }
     _notify(type, init = {}) {
       return this.dispatchEvent(createXhrEvent(type, init));
@@ -12149,7 +12149,7 @@
       if (typeof handler === "function") handler.call(this, dispatched);
       for (const callback of (this._listeners[dispatched.type] || []).slice()) callback.call(this, dispatched);
       dispatched.currentTarget = null;
-      return true;
+      return !dispatched.defaultPrevented;
     }
     get [Symbol.toStringTag]() { return "XMLHttpRequest"; }
   };
