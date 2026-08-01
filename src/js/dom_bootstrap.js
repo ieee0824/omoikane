@@ -9937,6 +9937,700 @@
     return cloneStructuredValue(value, new Map());
   };
 
+  // -------------------------------------------------------------------------
+  // WebRTC deterministic signaling/data-channel core.
+  //
+  // Omoikane deliberately does not open sockets or run ICE/DTLS.  The model
+  // below keeps the Web IDL-facing state machine useful by pairing two
+  // RTCPeerConnection objects in the same JS realm.  Offers carry an internal
+  // owner marker (and are also indexed by their deterministic SDP), so the
+  // normal offer/answer exchange can discover the in-memory peer without
+  // exposing a cross-realm object.  `RTCPeerConnection.createPair()` and the
+  // `__omoikane_create_webrtc_peer_pair` hook provide an explicit test seam.
+  // -------------------------------------------------------------------------
+  const webrtcDescriptionOwners = new Map();
+  let webrtcConnectionSerial = 1;
+  let webrtcDataChannelSerial = 0;
+  const WEBRTC_DESCRIPTION_TYPES = new Set(["offer", "answer", "pranswer", "rollback"]);
+  const WEBRTC_BUNDLE_POLICIES = new Set(["balanced", "max-compat", "max-bundle"]);
+  const WEBRTC_ICE_TRANSPORT_POLICIES = new Set(["all", "relay"]);
+  const WEBRTC_RTCP_MUX_POLICIES = new Set(["negotiate", "require"]);
+
+  function webrtcQueue(callback) {
+    queueMicrotask(callback);
+  }
+
+  function webrtcEventHandler(target, eventType, property, callback) {
+    const previous = target[property];
+    if (previous) target.removeEventListener(eventType, previous);
+    const next = typeof callback === "function" ? callback : null;
+    target[property] = next;
+    if (next) target.addEventListener(eventType, next);
+  }
+
+  function webrtcState(target, property, eventType, value) {
+    if (target[property] === value) return false;
+    target[property] = value;
+    webrtcQueue(() => target.dispatchEvent(new Event(eventType)));
+    return true;
+  }
+
+  function webrtcInvalidState(message) {
+    return new DOMException(message || "The RTCPeerConnection is closed.", "InvalidStateError");
+  }
+
+  function webrtcSessionDescription(type, sdp, owner = null) {
+    const description = new RTCSessionDescription({ type, sdp });
+    if (owner) {
+      Object.defineProperty(description, "__owner", {
+        configurable: false, enumerable: false, writable: false, value: owner,
+      });
+      webrtcDescriptionOwners.set(description.sdp, owner);
+    }
+    return description;
+  }
+
+  function webrtcDescriptionOwner(description) {
+    return (description && description.__owner) ||
+      (description && webrtcDescriptionOwners.get(description.sdp)) || null;
+  }
+
+  function webrtcNormalizeSessionDescription(value) {
+    if (value instanceof RTCSessionDescription) return value;
+    if (value == null || typeof value !== "object") {
+      throw new TypeError("An RTCSessionDescriptionInit dictionary is required");
+    }
+    return new RTCSessionDescription(value);
+  }
+
+  class RTCSessionDescription {
+    constructor(init = {}) {
+      if (init == null || typeof init !== "object") {
+        throw new TypeError("RTCSessionDescriptionInit must be an object");
+      }
+      const type = String(init.type === undefined ? "" : init.type);
+      if (!WEBRTC_DESCRIPTION_TYPES.has(type)) {
+        throw new TypeError("Invalid RTCSessionDescription type");
+      }
+      const sdp = init.sdp === undefined || init.sdp === null ? "" : String(init.sdp);
+      Object.defineProperty(this, "type", {
+        configurable: false, enumerable: true, writable: false, value: type,
+      });
+      Object.defineProperty(this, "sdp", {
+        configurable: false, enumerable: true, writable: false, value: sdp,
+      });
+    }
+    toJSON() { return { type: this.type, sdp: this.sdp }; }
+    get [Symbol.toStringTag]() { return "RTCSessionDescription"; }
+  }
+
+  class RTCIceCandidate {
+    constructor(init = {}) {
+      if (typeof init === "string") init = { candidate: init };
+      if (init == null || typeof init !== "object") {
+        throw new TypeError("RTCIceCandidateInit must be an object");
+      }
+      const candidate = init.candidate === undefined || init.candidate === null
+        ? "" : String(init.candidate);
+      const sdpMid = init.sdpMid === undefined || init.sdpMid === null ? null : String(init.sdpMid);
+      const sdpMLineIndex = init.sdpMLineIndex === undefined || init.sdpMLineIndex === null
+        ? null : Number(init.sdpMLineIndex);
+      if (sdpMLineIndex !== null && (!Number.isInteger(sdpMLineIndex) || sdpMLineIndex < 0)) {
+        throw new TypeError("sdpMLineIndex must be a non-negative integer or null");
+      }
+      const usernameFragment = init.usernameFragment === undefined || init.usernameFragment === null
+        ? null : String(init.usernameFragment);
+      Object.defineProperty(this, "candidate", {
+        configurable: false, enumerable: true, writable: false, value: candidate,
+      });
+      Object.defineProperty(this, "sdpMid", {
+        configurable: false, enumerable: true, writable: false, value: sdpMid,
+      });
+      Object.defineProperty(this, "sdpMLineIndex", {
+        configurable: false, enumerable: true, writable: false, value: sdpMLineIndex,
+      });
+      Object.defineProperty(this, "foundation", {
+        configurable: false, enumerable: true, writable: false,
+        value: candidate ? "0" : null,
+      });
+      Object.defineProperty(this, "component", {
+        configurable: false, enumerable: true, writable: false,
+        value: candidate ? 1 : null,
+      });
+      Object.defineProperty(this, "priority", {
+        configurable: false, enumerable: true, writable: false,
+        value: candidate ? 1 : null,
+      });
+      Object.defineProperty(this, "address", {
+        configurable: false, enumerable: true, writable: false,
+        value: candidate ? "127.0.0.1" : null,
+      });
+      Object.defineProperty(this, "protocol", {
+        configurable: false, enumerable: true, writable: false,
+        value: candidate ? "udp" : null,
+      });
+      Object.defineProperty(this, "port", {
+        configurable: false, enumerable: true, writable: false,
+        value: candidate ? 9 : null,
+      });
+      Object.defineProperty(this, "type", {
+        configurable: false, enumerable: true, writable: false,
+        value: candidate ? "host" : null,
+      });
+      Object.defineProperty(this, "tcpType", {
+        configurable: false, enumerable: true, writable: false, value: null,
+      });
+      Object.defineProperty(this, "relatedAddress", {
+        configurable: false, enumerable: true, writable: false, value: null,
+      });
+      Object.defineProperty(this, "relatedPort", {
+        configurable: false, enumerable: true, writable: false, value: null,
+      });
+      Object.defineProperty(this, "usernameFragment", {
+        configurable: false, enumerable: true, writable: false, value: usernameFragment,
+      });
+    }
+    toJSON() {
+      return {
+        candidate: this.candidate,
+        sdpMid: this.sdpMid,
+        sdpMLineIndex: this.sdpMLineIndex,
+        usernameFragment: this.usernameFragment,
+      };
+    }
+    get [Symbol.toStringTag]() { return "RTCIceCandidate"; }
+  }
+
+  function webrtcChannelBytes(value) {
+    if (typeof value === "string") return value.length;
+    if (value instanceof ArrayBuffer) return value.byteLength;
+    if (ArrayBuffer.isView(value)) return value.byteLength;
+    if (typeof Blob === "function" && value instanceof Blob) return value.size;
+    return 0;
+  }
+
+  function webrtcChannelPayload(value) {
+    if (typeof value === "string") return value;
+    if (value instanceof ArrayBuffer) return value.slice(0);
+    if (ArrayBuffer.isView(value)) {
+      return value.buffer.slice(value.byteOffset, value.byteOffset + value.byteLength);
+    }
+    if (typeof Blob === "function" && value instanceof Blob) return value;
+    throw new TypeError("RTCDataChannel.send requires a string or binary data");
+  }
+
+  const webrtcDataChannelConstructionToken = {};
+  class RTCDataChannel extends EventTarget {
+    constructor(token, owner, label, options, id) {
+      if (token !== webrtcDataChannelConstructionToken) throw new TypeError("Illegal constructor");
+      super();
+      this.__owner = owner;
+      this.__peer = null;
+      this.__announced = false;
+      this.__closedEvent = false;
+      this.__onopen = null;
+      this.__onmessage = null;
+      this.__onclose = null;
+      this.__onerror = null;
+      this.__onbufferedamountlow = null;
+      this.label = String(label);
+      this.ordered = options.ordered !== false;
+      this.maxPacketLifeTime = options.maxPacketLifeTime == null ? null : Number(options.maxPacketLifeTime);
+      this.maxRetransmits = options.maxRetransmits == null ? null : Number(options.maxRetransmits);
+      this.protocol = options.protocol === undefined ? "" : String(options.protocol);
+      this.negotiated = options.negotiated === true;
+      this.id = id;
+      this.readyState = "connecting";
+      this.bufferedAmount = 0;
+      this.bufferedAmountLowThreshold = 0;
+      this.__binaryType = "blob";
+    }
+    get binaryType() { return this.__binaryType; }
+    set binaryType(value) {
+      const next = String(value);
+      if (next !== "blob" && next !== "arraybuffer") throw new TypeError("Invalid binaryType");
+      this.__binaryType = next;
+    }
+    send(data) {
+      if (this.readyState !== "open") throw webrtcInvalidState("RTCDataChannel is not open");
+      const payload = webrtcChannelPayload(data);
+      const bytes = webrtcChannelBytes(payload);
+      this.bufferedAmount += bytes;
+      const peer = this.__peer;
+      if (!peer || peer.readyState !== "open") {
+        this.__drainBufferedAmount(bytes);
+        throw webrtcInvalidState("The peer RTCDataChannel is closed");
+      }
+      let cloned;
+      try {
+        cloned = typeof payload === "string" ? payload
+          : payload instanceof ArrayBuffer ? payload.slice(0)
+          : (typeof Blob === "function" && payload instanceof Blob) ? payload.slice(0)
+          : cloneStructuredValue(payload, new Map());
+      } catch (error) {
+        this.__drainBufferedAmount(bytes);
+        throw error;
+      }
+      webrtcQueue(() => {
+        this.__drainBufferedAmount(bytes);
+        if (peer.readyState !== "open") return;
+        let dataForPeer = cloned;
+        if (peer.binaryType === "arraybuffer" && typeof Blob === "function" && cloned instanceof Blob) {
+          // Blob.arrayBuffer() is asynchronous in the host model; retaining a
+          // Blob here is deterministic and still a valid binary message.
+          dataForPeer = cloned;
+        }
+        peer.dispatchEvent(new MessageEvent("message", { data: dataForPeer }));
+      });
+    }
+    close() {
+      if (this.readyState === "closed" || this.readyState === "closing") return;
+      this.readyState = "closing";
+      const peer = this.__peer;
+      webrtcQueue(() => {
+        this.__closeInternal();
+        if (peer) peer.__closeInternal();
+      });
+    }
+    __drainBufferedAmount(bytes) {
+      const previous = this.bufferedAmount;
+      this.bufferedAmount = Math.max(0, this.bufferedAmount - bytes);
+      if (previous > this.bufferedAmountLowThreshold &&
+          this.bufferedAmount <= this.bufferedAmountLowThreshold) {
+        webrtcQueue(() => this.dispatchEvent(new Event("bufferedamountlow")));
+      }
+    }
+    __open() {
+      if (this.readyState !== "connecting") return;
+      this.readyState = "open";
+      webrtcQueue(() => this.dispatchEvent(new Event("open")));
+    }
+    __closeInternal() {
+      if (this.__closedEvent) return;
+      this.readyState = "closed";
+      this.__closedEvent = true;
+      webrtcQueue(() => this.dispatchEvent(new Event("close")));
+    }
+    __error(error) {
+      webrtcQueue(() => this.dispatchEvent(new Event("error")));
+      return error;
+    }
+    get onopen() { return this.__onopen; }
+    set onopen(callback) { webrtcEventHandler(this, "open", "__onopen", callback); }
+    get onmessage() { return this.__onmessage; }
+    set onmessage(callback) { webrtcEventHandler(this, "message", "__onmessage", callback); }
+    get onclose() { return this.__onclose; }
+    set onclose(callback) { webrtcEventHandler(this, "close", "__onclose", callback); }
+    get onerror() { return this.__onerror; }
+    set onerror(callback) { webrtcEventHandler(this, "error", "__onerror", callback); }
+    get onbufferedamountlow() { return this.__onbufferedamountlow; }
+    set onbufferedamountlow(callback) {
+      webrtcEventHandler(this, "bufferedamountlow", "__onbufferedamountlow", callback);
+    }
+    get [Symbol.toStringTag]() { return "RTCDataChannel"; }
+  }
+
+  function webrtcValidateConfiguration(configuration) {
+    if (configuration == null) return {};
+    if (typeof configuration !== "object") throw new TypeError("RTCConfiguration must be an object");
+    const result = {};
+    if (configuration.bundlePolicy !== undefined) {
+      result.bundlePolicy = String(configuration.bundlePolicy);
+      if (!WEBRTC_BUNDLE_POLICIES.has(result.bundlePolicy)) throw new TypeError("Invalid bundlePolicy");
+    } else result.bundlePolicy = "balanced";
+    if (configuration.iceTransportPolicy !== undefined) {
+      result.iceTransportPolicy = String(configuration.iceTransportPolicy);
+      if (!WEBRTC_ICE_TRANSPORT_POLICIES.has(result.iceTransportPolicy)) throw new TypeError("Invalid iceTransportPolicy");
+    } else result.iceTransportPolicy = "all";
+    if (configuration.rtcpMuxPolicy !== undefined) {
+      result.rtcpMuxPolicy = String(configuration.rtcpMuxPolicy);
+      if (!WEBRTC_RTCP_MUX_POLICIES.has(result.rtcpMuxPolicy)) throw new TypeError("Invalid rtcpMuxPolicy");
+    } else result.rtcpMuxPolicy = "require";
+    const poolSize = configuration.iceCandidatePoolSize === undefined
+      ? 0 : Number(configuration.iceCandidatePoolSize);
+    if (!Number.isInteger(poolSize) || poolSize < 0 || poolSize > 255) {
+      throw new TypeError("iceCandidatePoolSize must be an integer from 0 to 255");
+    }
+    result.iceCandidatePoolSize = poolSize;
+    if (configuration.iceServers !== undefined) {
+      if (!Array.isArray(configuration.iceServers)) throw new TypeError("iceServers must be an array");
+      result.iceServers = configuration.iceServers.map(server => {
+        if (typeof server === "string") return { urls: server };
+        if (server == null || typeof server !== "object") throw new TypeError("Invalid ice server");
+        const urls = server.urls === undefined ? [] : server.urls;
+        if (!(typeof urls === "string" || Array.isArray(urls))) throw new TypeError("Invalid ice server urls");
+        return { urls: Array.isArray(urls) ? urls.map(String) : String(urls),
+          username: server.username === undefined ? undefined : String(server.username),
+          credential: server.credential === undefined ? undefined : server.credential };
+      });
+    } else result.iceServers = [];
+    return result;
+  }
+
+  function webrtcSdp(id, type) {
+    return [
+      "v=0",
+      "o=- " + id + " 2 IN IP4 127.0.0.1",
+      "s=omoikane-deterministic-webrtc",
+      "t=0 0",
+      "a=group:BUNDLE 0",
+      "m=application 9 UDP/DTLS/SCTP webrtc-datachannel",
+      "a=mid:0",
+      "a=sctp-port:5000",
+      "a=setup:" + (type === "offer" ? "actpass" : "active"),
+    ].join("\r\n") + "\r\n";
+  }
+
+  class RTCPeerConnection extends EventTarget {
+    constructor(configuration = {}) {
+      super();
+      this.__configuration = webrtcValidateConfiguration(configuration);
+      this.__serial = webrtcConnectionSerial++;
+      this.__peer = null;
+      this.__closed = false;
+      this.__channels = new Set();
+      this.__localDescription = null;
+      this.__remoteDescription = null;
+      this.__pendingLocalDescription = null;
+      this.__pendingRemoteDescription = null;
+      this.__connectionState = "new";
+      this.__iceConnectionState = "new";
+      this.__iceGatheringState = "new";
+      this.__signalingState = "stable";
+      this.__onconnectionstatechange = null;
+      this.__onicecandidate = null;
+      this.__onicecandidateerror = null;
+      this.__oniceconnectionstatechange = null;
+      this.__onicegatheringstatechange = null;
+      this.__onnegotiationneeded = null;
+      this.__onsignalingstatechange = null;
+      this.__ondatachannel = null;
+      this.__ontrack = null;
+    }
+    get canTrickleIceCandidates() { return this.__remoteDescription ? true : null; }
+    get connectionState() { return this.__connectionState; }
+    get iceConnectionState() { return this.__iceConnectionState; }
+    get iceGatheringState() { return this.__iceGatheringState; }
+    get signalingState() { return this.__signalingState; }
+    get localDescription() { return this.__localDescription; }
+    get currentLocalDescription() {
+      return this.__signalingState === "stable" ? this.__localDescription : null;
+    }
+    get pendingLocalDescription() { return this.__pendingLocalDescription; }
+    get remoteDescription() { return this.__remoteDescription; }
+    get currentRemoteDescription() {
+      return this.__signalingState === "stable" ? this.__remoteDescription : null;
+    }
+    get pendingRemoteDescription() { return this.__pendingRemoteDescription; }
+    get sctp() { return null; }
+    getConfiguration() { return JSON.parse(JSON.stringify(this.__configuration)); }
+    setConfiguration(configuration) {
+      if (this.__closed) throw webrtcInvalidState();
+      this.__configuration = webrtcValidateConfiguration(configuration);
+    }
+    createOffer() {
+      if (this.__closed) return Promise.reject(webrtcInvalidState());
+      const description = webrtcSessionDescription("offer", webrtcSdp(this.__serial, "offer"), this);
+      return Promise.resolve(description);
+    }
+    createAnswer() {
+      if (this.__closed) return Promise.reject(webrtcInvalidState());
+      if (this.__signalingState !== "have-remote-offer" && this.__signalingState !== "have-local-pranswer") {
+        return Promise.reject(new DOMException("Cannot create an answer in the current signaling state.", "InvalidStateError"));
+      }
+      const description = webrtcSessionDescription("answer", webrtcSdp(this.__serial, "answer"), this);
+      return Promise.resolve(description);
+    }
+    setLocalDescription(description = undefined) {
+      if (this.__closed) return Promise.reject(webrtcInvalidState());
+      let normalized;
+      try {
+        if (description === undefined) {
+          normalized = this.__signalingState === "stable"
+            ? webrtcSessionDescription("offer", webrtcSdp(this.__serial, "offer"), this)
+            : this.__signalingState === "have-remote-offer"
+              ? webrtcSessionDescription("answer", webrtcSdp(this.__serial, "answer"), this)
+              : (() => { throw new DOMException("Cannot infer a local description.", "InvalidStateError"); })();
+        } else normalized = webrtcNormalizeSessionDescription(description);
+        this.__applyLocalDescription(normalized);
+      } catch (error) {
+        return Promise.reject(error);
+      }
+      return Promise.resolve();
+    }
+    setRemoteDescription(description) {
+      if (this.__closed) return Promise.reject(webrtcInvalidState());
+      let normalized;
+      try {
+        normalized = webrtcNormalizeSessionDescription(description);
+        this.__applyRemoteDescription(normalized);
+      } catch (error) {
+        return Promise.reject(error);
+      }
+      return Promise.resolve();
+    }
+    addIceCandidate(candidate = null) {
+      if (this.__closed) return Promise.reject(webrtcInvalidState());
+      if (candidate !== null && candidate !== undefined &&
+          !(candidate instanceof RTCIceCandidate) && typeof candidate !== "object") {
+        return Promise.reject(new TypeError("RTCIceCandidateInit must be an object"));
+      }
+      if (!this.__remoteDescription && candidate != null && candidate.candidate !== "") {
+        return Promise.reject(new DOMException("Remote description is not set.", "InvalidStateError"));
+      }
+      return Promise.resolve();
+    }
+    createDataChannel(label, options = undefined) {
+      if (this.__closed) throw webrtcInvalidState();
+      const value = options == null ? {} : Object(options);
+      if (value.maxPacketLifeTime != null && value.maxRetransmits != null) {
+        throw new TypeError("maxPacketLifeTime and maxRetransmits are mutually exclusive");
+      }
+      const lifetime = value.maxPacketLifeTime == null ? null : Number(value.maxPacketLifeTime);
+      const retransmits = value.maxRetransmits == null ? null : Number(value.maxRetransmits);
+      if (lifetime !== null && (!Number.isInteger(lifetime) || lifetime < 0)) throw new TypeError("Invalid maxPacketLifeTime");
+      if (retransmits !== null && (!Number.isInteger(retransmits) || retransmits < 0)) throw new TypeError("Invalid maxRetransmits");
+      const normalized = {
+        ordered: value.ordered !== false,
+        maxPacketLifeTime: lifetime,
+        maxRetransmits: retransmits,
+        protocol: value.protocol === undefined ? "" : String(value.protocol),
+        negotiated: value.negotiated === true,
+      };
+      const id = value.negotiated ? (value.id === undefined ? null : Number(value.id)) : webrtcDataChannelSerial++;
+      if (normalized.negotiated && (!Number.isInteger(id) || id < 0 || id > 65534)) {
+        throw new TypeError("negotiated data channels require an id from 0 to 65534");
+      }
+      const channel = new RTCDataChannel(webrtcDataChannelConstructionToken, this, label, normalized, id);
+      this.__channels.add(channel);
+      this.__attachChannel(channel);
+      return channel;
+    }
+    restartIce() {
+      if (this.__closed) throw webrtcInvalidState();
+      if (this.__signalingState === "stable") webrtcQueue(() => this.dispatchEvent(new Event("negotiationneeded")));
+    }
+    getStats() {
+      if (this.__closed) return Promise.reject(webrtcInvalidState());
+      return Promise.resolve(new Map());
+    }
+    close() {
+      if (this.__closed) return;
+      this.__closed = true;
+      this.__connectionState = "closed";
+      this.__iceConnectionState = "closed";
+      this.__signalingState = "closed";
+      webrtcQueue(() => {
+        this.dispatchEvent(new Event("connectionstatechange"));
+        this.dispatchEvent(new Event("iceconnectionstatechange"));
+        this.dispatchEvent(new Event("signalingstatechange"));
+      });
+      for (const channel of this.__channels) channel.__closeInternal();
+      if (this.__peer && !this.__peer.__closed) {
+        const peer = this.__peer;
+        this.__peer = null;
+        peer.__peer = null;
+        peer.__closeFromPeer();
+      }
+      this.__channels.clear();
+    }
+    __closeFromPeer() {
+      if (this.__closed) return;
+      this.__closed = true;
+      this.__connectionState = "closed";
+      this.__iceConnectionState = "closed";
+      this.__signalingState = "closed";
+      webrtcQueue(() => {
+        this.dispatchEvent(new Event("connectionstatechange"));
+        this.dispatchEvent(new Event("iceconnectionstatechange"));
+        this.dispatchEvent(new Event("signalingstatechange"));
+      });
+      for (const channel of this.__channels) channel.__closeInternal();
+      this.__channels.clear();
+    }
+    __applyLocalDescription(description) {
+      const type = description.type;
+      if (type === "rollback") {
+        if (this.__signalingState !== "have-local-offer" && this.__signalingState !== "have-remote-pranswer") {
+          throw new DOMException("Cannot rollback in the current signaling state.", "InvalidStateError");
+        }
+        this.__pendingLocalDescription = null;
+        this.__pendingRemoteDescription = null;
+        this.__setSignalingState("stable");
+        return;
+      }
+      const valid = (type === "offer" && this.__signalingState === "stable") ||
+        (type === "answer" && this.__signalingState === "have-remote-offer") ||
+        (type === "pranswer" && this.__signalingState === "have-remote-offer");
+      if (!valid) throw new DOMException("Invalid local description for the current signaling state.", "InvalidStateError");
+      this.__localDescription = description;
+      this.__pendingLocalDescription = type === "offer" || type === "pranswer" ? description : null;
+      if (type === "offer") this.__setSignalingState("have-local-offer");
+      else if (type === "pranswer") this.__setSignalingState("have-local-pranswer");
+      else {
+        this.__pendingLocalDescription = null;
+        this.__setSignalingState("stable");
+      }
+      this.__beginIceGathering();
+      this.__maybeConnect();
+    }
+    __applyRemoteDescription(description) {
+      const type = description.type;
+      if (type === "rollback") {
+        if (this.__signalingState !== "have-remote-offer" && this.__signalingState !== "have-local-pranswer") {
+          throw new DOMException("Cannot rollback in the current signaling state.", "InvalidStateError");
+        }
+        this.__pendingRemoteDescription = null;
+        this.__pendingLocalDescription = null;
+        this.__setSignalingState("stable");
+        return;
+      }
+      const valid = (type === "offer" && this.__signalingState === "stable") ||
+        (type === "answer" && this.__signalingState === "have-local-offer") ||
+        (type === "pranswer" && this.__signalingState === "have-local-offer");
+      if (!valid) throw new DOMException("Invalid remote description for the current signaling state.", "InvalidStateError");
+      this.__remoteDescription = description;
+      this.__pendingRemoteDescription = type === "offer" || type === "pranswer" ? description : null;
+      const owner = webrtcDescriptionOwner(description);
+      if (owner && owner !== this) this.__linkPeer(owner);
+      if (type === "offer") this.__setSignalingState("have-remote-offer");
+      else if (type === "pranswer") this.__setSignalingState("have-remote-pranswer");
+      else {
+        this.__pendingRemoteDescription = null;
+        this.__setSignalingState("stable");
+      }
+      this.__maybeConnect();
+    }
+    __setSignalingState(value) {
+      if (this.__signalingState === value) return;
+      this.__signalingState = value;
+      webrtcQueue(() => this.dispatchEvent(new Event("signalingstatechange")));
+    }
+    __beginIceGathering() {
+      if (this.__iceGatheringState !== "new") return;
+      this.__iceGatheringState = "gathering";
+      webrtcQueue(() => {
+        this.dispatchEvent(new Event("icegatheringstatechange"));
+        const candidateEvent = new Event("icecandidate");
+        candidateEvent.candidate = null;
+        this.dispatchEvent(candidateEvent);
+        this.__iceGatheringState = "complete";
+        this.dispatchEvent(new Event("icegatheringstatechange"));
+      });
+    }
+    __attachChannel(channel) {
+      if (!this.__peer) return;
+      this.__pairChannel(channel, this.__peer);
+    }
+    __pairChannel(channel, peer) {
+      if (channel.__peer || !peer || peer.__closed) return;
+      const remote = new RTCDataChannel(
+        webrtcDataChannelConstructionToken, peer, channel.label,
+        { ordered: channel.ordered, maxPacketLifeTime: channel.maxPacketLifeTime,
+          maxRetransmits: channel.maxRetransmits, protocol: channel.protocol,
+          negotiated: channel.negotiated }, channel.id,
+      );
+      channel.__peer = remote;
+      remote.__peer = channel;
+      peer.__channels.add(remote);
+      if (peer.__connectionState === "connected") peer.__openChannels();
+    }
+    __linkPeer(peer) {
+      if (!peer || peer === this || peer.__closed || this.__closed) return;
+      if (this.__peer === peer) return;
+      this.__peer = peer;
+      if (peer.__peer !== this) peer.__peer = this;
+      for (const channel of this.__channels) this.__pairChannel(channel, peer);
+      for (const channel of peer.__channels) peer.__pairChannel(channel, this);
+      this.__maybeConnect();
+      peer.__maybeConnect();
+    }
+    __maybeConnect() {
+      const peer = this.__peer;
+      if (!peer || this.__closed || peer.__closed) return;
+      const localType = this.__localDescription && this.__localDescription.type;
+      const remoteType = this.__remoteDescription && this.__remoteDescription.type;
+      const negotiated = (localType === "offer" && remoteType === "answer") ||
+        (localType === "answer" && remoteType === "offer");
+      if (this.__signalingState !== "stable" || peer.__signalingState !== "stable" || !negotiated) {
+        if (this.__signalingState === "have-local-offer" || this.__signalingState === "have-remote-offer") {
+          webrtcState(this, "__connectionState", "connectionstatechange", "connecting");
+          webrtcState(this, "__iceConnectionState", "iceconnectionstatechange", "checking");
+        }
+        return;
+      }
+      webrtcQueue(() => {
+        if (this.__closed || peer.__closed) return;
+        for (const connection of [this, peer]) {
+          webrtcState(connection, "__connectionState", "connectionstatechange", "connected");
+          webrtcState(connection, "__iceConnectionState", "iceconnectionstatechange", "completed");
+        }
+        this.__openChannels();
+        peer.__openChannels();
+      });
+    }
+    __openChannels() {
+      for (const channel of this.__channels) {
+        if (!channel.__peer || channel.__announced) continue;
+        channel.__announced = true;
+        const remote = channel.__peer;
+        remote.__announced = true;
+        const remoteOwner = remote.__owner;
+        webrtcQueue(() => {
+          if (remote.readyState === "connecting") {
+            const event = new MessageEvent("datachannel", { data: undefined });
+            event.channel = remote;
+            remoteOwner.dispatchEvent(event);
+            remote.__open();
+            channel.__open();
+          }
+        });
+      }
+    }
+    get onconnectionstatechange() { return this.__onconnectionstatechange; }
+    set onconnectionstatechange(callback) { webrtcEventHandler(this, "connectionstatechange", "__onconnectionstatechange", callback); }
+    get onicecandidate() { return this.__onicecandidate; }
+    set onicecandidate(callback) { webrtcEventHandler(this, "icecandidate", "__onicecandidate", callback); }
+    get onicecandidateerror() { return this.__onicecandidateerror; }
+    set onicecandidateerror(callback) { webrtcEventHandler(this, "icecandidateerror", "__onicecandidateerror", callback); }
+    get oniceconnectionstatechange() { return this.__oniceconnectionstatechange; }
+    set oniceconnectionstatechange(callback) { webrtcEventHandler(this, "iceconnectionstatechange", "__oniceconnectionstatechange", callback); }
+    get onicegatheringstatechange() { return this.__onicegatheringstatechange; }
+    set onicegatheringstatechange(callback) { webrtcEventHandler(this, "icegatheringstatechange", "__onicegatheringstatechange", callback); }
+    get onnegotiationneeded() { return this.__onnegotiationneeded; }
+    set onnegotiationneeded(callback) { webrtcEventHandler(this, "negotiationneeded", "__onnegotiationneeded", callback); }
+    get onsignalingstatechange() { return this.__onsignalingstatechange; }
+    set onsignalingstatechange(callback) { webrtcEventHandler(this, "signalingstatechange", "__onsignalingstatechange", callback); }
+    get ondatachannel() { return this.__ondatachannel; }
+    set ondatachannel(callback) { webrtcEventHandler(this, "datachannel", "__ondatachannel", callback); }
+    get ontrack() { return this.__ontrack; }
+    set ontrack(callback) { webrtcEventHandler(this, "track", "__ontrack", callback); }
+    get [Symbol.toStringTag]() { return "RTCPeerConnection"; }
+    static createPair(leftConfiguration = {}, rightConfiguration = {}) {
+      const left = new RTCPeerConnection(leftConfiguration);
+      const right = new RTCPeerConnection(rightConfiguration);
+      left.__linkPeer(right);
+      const pair = [left, right];
+      pair.left = left;
+      pair.right = right;
+      pair.local = left;
+      pair.remote = right;
+      pair.peers = pair;
+      return pair;
+    }
+    static createDeterministicPair(leftConfiguration = {}, rightConfiguration = {}) {
+      return RTCPeerConnection.createPair(leftConfiguration, rightConfiguration);
+    }
+  }
+
+  globalThis.RTCSessionDescription = RTCSessionDescription;
+  globalThis.RTCIceCandidate = RTCIceCandidate;
+  globalThis.RTCDataChannel = RTCDataChannel;
+  globalThis.RTCPeerConnection = RTCPeerConnection;
+  globalThis.__omoikane_create_webrtc_peer_pair = function(leftConfiguration = {}, rightConfiguration = {}) {
+    return RTCPeerConnection.createPair(leftConfiguration, rightConfiguration);
+  };
+
   // Dedicated workers execute in a separate Boa realm. Passing a JsValue
   // object directly between those realms would retain the sender's
   // prototypes, so worker messages use this context-independent wire format.

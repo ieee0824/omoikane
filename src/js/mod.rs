@@ -10680,6 +10680,75 @@ mod tests {
     }
 
     #[test]
+    fn webrtc_offer_answer_and_data_channel_are_deterministic() {
+        let mut runtime = JsRuntime::new().unwrap();
+        runtime
+            .eval(
+                r#"globalThis.webrtcProbe = {
+                     surface: typeof RTCPeerConnection === 'function' &&
+                       typeof RTCSessionDescription === 'function' &&
+                       typeof RTCIceCandidate === 'function' &&
+                       typeof RTCDataChannel === 'function',
+                     states: [], data: null, remoteLabel: '', events: [], sendError: ''
+                   };
+                   const pair = RTCPeerConnection.createPair();
+                   const caller = pair[0];
+                   const callee = pair[1];
+                   caller.onconnectionstatechange = () => webrtcProbe.states.push('caller:' + caller.connectionState);
+                   callee.onconnectionstatechange = () => webrtcProbe.states.push('callee:' + callee.connectionState);
+                   callee.ondatachannel = event => {
+                     webrtcProbe.remoteLabel = event.channel.label;
+                     event.channel.onmessage = message => webrtcProbe.data = message.data;
+                   };
+                   const channel = caller.createDataChannel('chat');
+                   channel.onopen = () => { webrtcProbe.events.push('open'); channel.send('hello'); };
+                   channel.onclose = () => webrtcProbe.events.push('close');
+                   caller.createOffer().then(offer => {
+                     webrtcProbe.offerType = offer.type;
+                     webrtcProbe.offerJSON = JSON.stringify(offer.toJSON());
+                     return caller.setLocalDescription(offer).then(() => callee.setRemoteDescription(offer));
+                   }).then(() => callee.createAnswer()).then(answer => {
+                     webrtcProbe.answerType = answer.type;
+                     return callee.setLocalDescription(answer).then(() => caller.setRemoteDescription(answer));
+                   }).then(() => {
+                     webrtcProbe.signaling = caller.signalingState + '|' + callee.signalingState;
+                     webrtcProbe.connected = caller.connectionState + '|' + callee.connectionState;
+                     caller.close();
+                     try { channel.send('closed'); } catch (error) { webrtcProbe.sendError = error.name; }
+                   });"#,
+            )
+            .unwrap();
+        runtime.run_until_idle().unwrap();
+        assert_eq!(eval_str(&mut runtime, "String(webrtcProbe.surface)"), "true");
+        assert_eq!(eval_str(&mut runtime, "webrtcProbe.offerType + '|' + webrtcProbe.answerType"), "offer|answer");
+        assert_eq!(eval_str(&mut runtime, "webrtcProbe.remoteLabel + '|' + webrtcProbe.data"), "chat|hello");
+        assert_eq!(eval_str(&mut runtime, "webrtcProbe.signaling"), "stable|stable");
+        assert_eq!(eval_str(&mut runtime, "webrtcProbe.connected"), "connected|connected");
+        assert_eq!(eval_str(&mut runtime, "webrtcProbe.sendError"), "InvalidStateError");
+        assert_eq!(eval_str(&mut runtime, "webrtcProbe.events.join('|')"), "open|close");
+        assert_eq!(eval_str(&mut runtime, "JSON.parse(webrtcProbe.offerJSON).type"), "offer");
+    }
+
+    #[test]
+    fn webrtc_invalid_states_rollback_and_candidate_json_are_rejected_or_stable() {
+        let mut runtime = JsRuntime::new().unwrap();
+        runtime
+            .eval(
+                r#"globalThis.webrtcErrors = [];
+                   const peer = new RTCPeerConnection();
+                   peer.createAnswer().catch(error => webrtcErrors.push(error.name));
+                   peer.setRemoteDescription({ type: 'rollback', sdp: '' }).catch(error => webrtcErrors.push(error.name));
+                   globalThis.candidateJSON = JSON.stringify(new RTCIceCandidate({ candidate: '', sdpMid: null, sdpMLineIndex: null }).toJSON());
+                   globalThis.descriptionJSON = JSON.stringify(new RTCSessionDescription({ type: 'offer', sdp: 'v=0' }).toJSON());"#,
+            )
+            .unwrap();
+        runtime.run_until_idle().unwrap();
+        assert_eq!(eval_str(&mut runtime, "webrtcErrors.join('|')"), "InvalidStateError|InvalidStateError");
+        assert_eq!(eval_str(&mut runtime, "candidateJSON"), r#"{"candidate":"","sdpMid":null,"sdpMLineIndex":null,"usernameFragment":null}"#);
+        assert_eq!(eval_str(&mut runtime, "descriptionJSON"), r#"{"type":"offer","sdp":"v=0"}"#);
+    }
+
+    #[test]
     fn dedicated_worker_does_not_expose_async_clipboard() {
         let mut runtime = JsRuntime::new().unwrap();
         runtime

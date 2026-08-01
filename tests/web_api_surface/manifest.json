@@ -544,8 +544,8 @@
       "id": "platform.webrtc",
       "area": "platform",
       "description": "WebRTC peer connections are exposed",
-      "probe": "typeof RTCPeerConnection === 'function'",
-      "baseline_supported": false
+      "probe": "typeof RTCPeerConnection === 'function' && typeof RTCSessionDescription === 'function' && typeof RTCIceCandidate === 'function' && typeof RTCDataChannel === 'function' && typeof RTCPeerConnection.createPair === 'function'",
+      "baseline_supported": true
     },
     {
       "id": "dom.active-element",
