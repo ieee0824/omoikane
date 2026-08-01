@@ -3187,7 +3187,7 @@ fn canonicalizes_clip_path_inset_and_webkit_alias() {
     resolver.add_stylesheet(
         Origin::Author,
         parse_stylesheet(
-            "body { clip-path: inset(calc(1rem + 2px) 10% calc(25% - 5px) 3px round 8px); } \
+            "body { clip-path: inset(calc(16px + 2px) 10% calc(25% - 5px) 3px round 8px); } \
              h1 { -webkit-clip-path: inset(0 0 100% 0); }",
         )
         .unwrap(),
@@ -3338,9 +3338,14 @@ fn validates_clip_shape_function_arguments() {
         "clip-path",
         "circle(closest-side at 25% 50%)"
     ));
-    assert!(supports_declaration(
+    assert!(!supports_declaration(
         "clip-path",
         "circle(10px at 1rem 2rem)"
+    ));
+    assert!(!supports_declaration("clip-path", "ellipse(1em 2px)"));
+    assert!(!supports_declaration(
+        "clip-path",
+        "inset(calc(1rem + 2px))"
     ));
     assert!(supports_declaration(
         "clip-path",
@@ -3353,6 +3358,18 @@ fn validates_clip_shape_function_arguments() {
     assert!(!supports_declaration(
         "clip-path",
         &format!("polygon({oversized_polygon})")
+    ));
+    let oversized_mask = (0..=crate::paint::MAX_MASK_LAYERS)
+        .map(|_| "none")
+        .collect::<Vec<_>>()
+        .join(", ");
+    assert!(!supports_declaration("mask-image", &oversized_mask));
+    assert!(!supports_declaration(
+        "mask-mode",
+        &format!("{}", (0..=crate::paint::MAX_MASK_LAYERS)
+            .map(|_| "alpha")
+            .collect::<Vec<_>>()
+            .join(", "))
     ));
 }
 

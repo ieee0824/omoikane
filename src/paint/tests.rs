@@ -8713,6 +8713,19 @@ div { width: 2px; height: 1px; background: blue;
 }
 
 #[test]
+fn mask_layers_cap_effective_multilayer_work() {
+    let mut style = crate::css::ComputedStyle::default();
+    let images = (0..(super::MAX_MASK_LAYERS + 8))
+        .map(|_| "linear-gradient(to right, black, white)")
+        .collect::<Vec<_>>()
+        .join(", ");
+    style.set_paint_value("mask-image", images);
+
+    let layers = super::mask_layers(&style);
+    assert_eq!(layers.len(), super::MAX_MASK_LAYERS);
+}
+
+#[test]
 fn form_control_text_measure_matches_painter_advance_model() {
     use super::text::measure_form_control_text_width;
 

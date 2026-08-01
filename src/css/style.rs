@@ -1073,7 +1073,12 @@ enum DeclarationValidation {
 /// [`DeclarationValidation::Invalid`].
 fn validate_declaration(name: &str, value: &Value) -> DeclarationValidation {
     if let Value::CommaList(values) = value {
-        if values.is_empty() {
+        if values.is_empty()
+            || (values.len() > crate::paint::MAX_MASK_LAYERS
+                && (name.eq_ignore_ascii_case("mask-image")
+                    || name.eq_ignore_ascii_case("mask-mode")
+                    || name.eq_ignore_ascii_case("mask-composite")))
+        {
             return DeclarationValidation::Invalid;
         }
         let mut normalized = Vec::with_capacity(values.len());
@@ -1164,7 +1169,7 @@ fn validate_declaration(name: &str, value: &Value) -> DeclarationValidation {
     }
     if name.eq_ignore_ascii_case("mask-image") {
         if let Value::CommaList(values) = value {
-            if values.is_empty() {
+            if values.is_empty() || values.len() > crate::paint::MAX_MASK_LAYERS {
                 return DeclarationValidation::Invalid;
             }
             return if values.iter().all(|layer| {
@@ -1208,7 +1213,7 @@ fn validate_declaration(name: &str, value: &Value) -> DeclarationValidation {
     }
     if name.eq_ignore_ascii_case("mask-mode") {
         if let Value::CommaList(values) = value {
-            if values.is_empty() {
+            if values.is_empty() || values.len() > crate::paint::MAX_MASK_LAYERS {
                 return DeclarationValidation::Invalid;
             }
             return if values.iter().all(|layer| {
@@ -1237,7 +1242,7 @@ fn validate_declaration(name: &str, value: &Value) -> DeclarationValidation {
     }
     if name.eq_ignore_ascii_case("mask-composite") {
         if let Value::CommaList(values) = value {
-            if values.is_empty() {
+            if values.is_empty() || values.len() > crate::paint::MAX_MASK_LAYERS {
                 return DeclarationValidation::Invalid;
             }
             return if values.iter().all(|layer| {

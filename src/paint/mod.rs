@@ -2385,7 +2385,7 @@ fn prepare_mask_tile(
     source: &PreparedMask,
     layer_style: &ComputedStyle,
     area: Rect,
-) -> Option<(Image, f32, f32)> {
+) -> Option<(Arc<Image>, f32, f32)> {
     let (intrinsic_width, intrinsic_height) = match source {
         PreparedMask::Image(image) => (image.width().max(1) as f32, image.height().max(1) as f32),
         PreparedMask::Gradient(_) => (area.width.max(1.0), area.height.max(1.0)),
@@ -2401,7 +2401,7 @@ fn prepare_mask_tile(
         return None;
     }
     let tile = match source {
-        PreparedMask::Image(image) => image.clone(),
+        PreparedMask::Image(image) => Arc::clone(image),
         PreparedMask::Gradient(gradient) => {
             let mut canvas = Canvas::new(width, height);
             color::paint_gradient(
@@ -2415,7 +2415,7 @@ fn prepare_mask_tile(
                 },
                 None,
             );
-            Image::new(width, height, canvas.pixels).ok()?
+            Arc::new(Image::new(width, height, canvas.pixels).ok()?)
         }
     };
     Some((tile, tile_width, tile_height))
@@ -2484,7 +2484,7 @@ fn apply_mask_alpha(canvas: &mut Canvas, layers: &[MaskLayer], style: &ComputedS
                     let anchor_x = area.x + *position_x;
                     let anchor_y = area.y + *position_y;
                     let color = sample_mask_color(
-                        tile,
+                        tile.as_ref(),
                         x as f32,
                         y as f32,
                         anchor_x,
@@ -3232,7 +3232,7 @@ fn background_image(style: &ComputedStyle) -> Option<Image> {
 
 #[derive(Clone)]
 enum PreparedMask {
-    Image(Image),
+    Image(Arc<Image>),
     Gradient(Gradient),
 }
 
@@ -3241,6 +3241,12 @@ struct MaskLayer {
     source: PreparedMask,
     index: usize,
 }
+
+/// Maximum number of effective mask layers prepared for one element.
+///
+/// Each layer is sampled for every pixel, so bounding the layer count keeps
+/// hostile styles from turning mask painting into an unbounded hot loop.
+pub(crate) const MAX_MASK_LAYERS: usize = 64;
 
 fn computed_style_layer_text(value: Option<&ComputedValue>, index: usize) -> Option<String> {
     let value = match value {
@@ -3303,10 +3309,11 @@ fn mask_layers(style: &ComputedStyle) -> Vec<MaskLayer> {
             }
             let image = image::parse_background_image_value(value)?;
             Some(MaskLayer {
-                source: PreparedMask::Image(image),
+                source: PreparedMask::Image(Arc::new(image)),
                 index,
             })
         })
+        .take(MAX_MASK_LAYERS)
         .collect()
 }
 
@@ -3864,10 +3871,11 @@ fn valid_clip_path_dimension(value: &str) -> bool {
     if let Some(number) = value.strip_suffix('%') {
         return number.trim().parse::<f32>().is_ok();
     }
-    const UNITS: [&str; 17] = [
-        "px", "em", "ex", "ch", "rem", "lh", "rlh", "vw", "vh", "vi", "vb", "vmin",
-        "vmax", "cm", "mm", "q", "in", // keep the list explicit to reject identifiers
-    ];
+    // The clip painter currently resolves only absolute px and percentage
+    // lengths (including px/% terms inside calc()). Keep validation aligned
+    // with that resolver instead of accepting units that would later be
+    // interpreted as zero or otherwise painted incorrectly.
+    const UNITS: [&str; 1] = ["px"];
     UNITS.iter().any(|unit| {
         value
             .strip_suffix(unit)
