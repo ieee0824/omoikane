@@ -9970,9 +9970,6 @@
         this._pendingMessages = [];
         this._onmessage = null;
         this._onmessageerror = null;
-        this._origin = (() => {
-          try { return globalThis.location && String(globalThis.location.origin || ""); } catch (_) { return ""; }
-        })();
       }
       postMessage(message, options = undefined) {
         if (this._closed) throw new DOMException("The SharedWorker port is closed.", "InvalidStateError");
@@ -9991,6 +9988,9 @@
         this._closed = true;
         this._pendingMessages.length = 0;
         __omoikane_shared_worker_port_close(this._id);
+        if (typeof globalThis.__omoikane_remove_shared_worker_port === "function") {
+          globalThis.__omoikane_remove_shared_worker_port(this._id, this);
+        }
       }
       _queueMessage(data) {
         if (this._closed) return;
@@ -10001,7 +10001,7 @@
         if (this._closed) return;
         this.dispatchEvent(new MessageEvent("message", {
           data,
-          origin: this._origin,
+          origin: "",
           source: null,
           ports: [],
         }));
@@ -10264,6 +10264,10 @@
         ports.set(id, port);
       }
       return port;
+    };
+    globalThis.__omoikane_remove_shared_worker_port = function(connectionId, port) {
+      const id = String(connectionId);
+      if (ports.get(id) === port) ports.delete(id);
     };
     let workerOnConnect = null;
     Object.defineProperty(globalThis, "onconnect", {

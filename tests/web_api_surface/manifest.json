@@ -384,9 +384,9 @@
       "id": "workers.shared-worker",
       "area": "workers",
       "description": "Shared workers are exposed",
-      "setup": "globalThis.__sharedWorkerSurface = { done: false }; const source = encodeURIComponent('onconnect = event => { const port = event.ports[0]; port.onmessage = message => port.postMessage(message.data); };'); const sharedWorker = new SharedWorker('data:text/javascript,' + source, { name: 'omoikane-surface-shared-worker' }); sharedWorker.port.onmessage = event => { __sharedWorkerSurface.done = event.data === 'ok'; }; sharedWorker.port.postMessage('ok')",
+      "setup": "globalThis.__sharedWorkerSurface = { done: false }; const source = encodeURIComponent('onconnect = event => { const port = event.ports[0]; port.onmessage = message => port.postMessage(message.data); };'); __sharedWorkerSurface.worker = new SharedWorker('data:text/javascript,' + source, { name: 'omoikane-surface-shared-worker' }); __sharedWorkerSurface.worker.port.onmessage = event => { __sharedWorkerSurface.done = event.data === 'ok'; }; __sharedWorkerSurface.worker.port.postMessage('ok')",
       "run_tasks": true,
-      "probe": "typeof SharedWorker === 'function' && typeof sharedWorker.port.postMessage === 'function' && __sharedWorkerSurface.done === true",
+      "probe": "typeof SharedWorker === 'function' && typeof __sharedWorkerSurface.worker.port.postMessage === 'function' && __sharedWorkerSurface.done === true",
       "baseline_supported": false
     },
     {

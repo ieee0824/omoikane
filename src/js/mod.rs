@@ -11311,6 +11311,67 @@ mod tests {
     }
 
     #[test]
+    fn shared_worker_port_close_drops_future_messages() {
+        let mut runtime = JsRuntime::new().unwrap();
+        runtime
+            .eval(
+                r#"globalThis.sharedCloseValues = [];
+                   globalThis.sharedCloseOrigins = [];
+                   const source = encodeURIComponent('onconnect = event => { const port = event.ports[0]; port.onmessage = message => port.postMessage(message.data); };');
+                   globalThis.sharedCloseWorker = new SharedWorker('data:text/javascript,' + source);
+                   sharedCloseWorker.port.onmessage = event => { sharedCloseValues.push(event.data); sharedCloseOrigins.push(event.origin); };
+                   sharedCloseWorker.port.postMessage('before');"#,
+            )
+            .unwrap();
+        runtime.run_until_idle().unwrap();
+        assert_eq!(
+            runtime
+                .eval("JSON.stringify(sharedCloseValues)")
+                .unwrap()
+                .as_string()
+                .unwrap()
+                .to_std_string_escaped(),
+            r#"["before"]"#
+        );
+        assert_eq!(
+            runtime
+                .eval("JSON.stringify(sharedCloseOrigins)")
+                .unwrap()
+                .as_string()
+                .unwrap()
+                .to_std_string_escaped(),
+            r#"[""]"#
+        );
+        runtime
+            .eval(
+                r#"globalThis.sharedCloseError = '';
+                   sharedCloseWorker.port.close();
+                   try { sharedCloseWorker.port.postMessage('after'); }
+                   catch (error) { sharedCloseError = error.name; }"#,
+            )
+            .unwrap();
+        runtime.run_until_idle().unwrap();
+        assert_eq!(
+            runtime
+                .eval("JSON.stringify(sharedCloseValues)")
+                .unwrap()
+                .as_string()
+                .unwrap()
+                .to_std_string_escaped(),
+            r#"["before"]"#
+        );
+        assert_eq!(
+            runtime
+                .eval("sharedCloseError")
+                .unwrap()
+                .as_string()
+                .unwrap()
+                .to_std_string_escaped(),
+            "InvalidStateError"
+        );
+    }
+
+    #[test]
     fn dedicated_worker_does_not_expose_async_clipboard() {
         let mut runtime = JsRuntime::new().unwrap();
         runtime
