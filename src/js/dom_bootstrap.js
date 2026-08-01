@@ -20,6 +20,9 @@
   const nativeWorkletRegisteredNames = globalThis.__omoikane_worklet_registered_names;
   const nativeWorkletModuleCount = globalThis.__omoikane_worklet_module_count;
   const nativeWorkletTeardown = globalThis.__omoikane_worklet_teardown;
+  const nativeCryptoRandom = globalThis.__omoikane_crypto_random;
+  const nativeCryptoDigest = globalThis.__omoikane_crypto_digest;
+  const nativeCryptoHmac = globalThis.__omoikane_crypto_hmac;
   delete globalThis.__omoikane_clipboard_read_text;
   delete globalThis.__omoikane_clipboard_write_text;
   delete globalThis.__omoikane_clipboard_permission;
@@ -31,6 +34,9 @@
   delete globalThis.__omoikane_worklet_registered_names;
   delete globalThis.__omoikane_worklet_module_count;
   delete globalThis.__omoikane_worklet_teardown;
+  delete globalThis.__omoikane_crypto_random;
+  delete globalThis.__omoikane_crypto_digest;
+  delete globalThis.__omoikane_crypto_hmac;
 
   // The top-level browsing context is its own parent and top-level context.
   globalThis.parent = globalThis;
@@ -7772,6 +7778,172 @@
   }
 
   const cryptoConstructionToken = {};
+  const cryptoKeyConstructionToken = {};
+  const cryptoKeyPairConstructionToken = {};
+  const cryptoKeyData = new WeakMap();
+  const cryptoHashNames = Object.freeze(["SHA-1", "SHA-256", "SHA-384", "SHA-512"]);
+  const cryptoHmacUsages = Object.freeze(["sign", "verify"]);
+  let cryptoLifecycleActive = true;
+
+  function cryptoLifecycleError() {
+    return new DOMException("The CryptoKey operation belongs to a torn-down document.", "InvalidStateError");
+  }
+
+  function normalizeCryptoHash(value) {
+    const selected = typeof value === "object" && value !== null ? value.name : value;
+    const name = String(selected).toUpperCase();
+    if (!cryptoHashNames.includes(name)) {
+      throw new DOMException("Unrecognized hash algorithm", "NotSupportedError");
+    }
+    return name;
+  }
+
+  function hashOutputBits(hash) {
+    return hash === "SHA-1" ? 160 : hash === "SHA-256" ? 256 : hash === "SHA-384" ? 384 : 512;
+  }
+
+  function normalizeHmacAlgorithm(algorithm, requireHash) {
+    const objectAlgorithm = typeof algorithm === "object" && algorithm !== null ? algorithm : null;
+    const selected = objectAlgorithm ? objectAlgorithm.name : algorithm;
+    if (String(selected).toUpperCase() !== "HMAC") {
+      throw new DOMException("The requested algorithm is not supported.", "NotSupportedError");
+    }
+    let hash = null;
+    if (objectAlgorithm && objectAlgorithm.hash !== undefined) hash = normalizeCryptoHash(objectAlgorithm.hash);
+    if (requireHash && hash === null) {
+      throw new DOMException("HMAC requires a hash algorithm.", "NotSupportedError");
+    }
+    let length = null;
+    if (objectAlgorithm && objectAlgorithm.length !== undefined) {
+      length = Number(objectAlgorithm.length);
+      if (!Number.isSafeInteger(length) || length < 8 || length % 8 !== 0 || length > 524280) {
+        throw new DOMException("Invalid HMAC key length.", "OperationError");
+      }
+    }
+    return { name: "HMAC", hash, length };
+  }
+
+  function normalizeCryptoUsages(usages, allowed) {
+    if (usages === null || usages === undefined || typeof usages === "string") {
+      throw new TypeError("keyUsages must be an iterable sequence");
+    }
+    const iterator = usages[Symbol.iterator];
+    if (typeof iterator !== "function") throw new TypeError("keyUsages must be an iterable sequence");
+    const result = [];
+    for (const usage of usages) {
+      const normalized = String(usage);
+      if (!allowed.includes(normalized)) {
+        throw new DOMException("Invalid key usage.", "SyntaxError");
+      }
+      if (!result.includes(normalized)) result.push(normalized);
+    }
+    return result;
+  }
+
+  function cryptoBytesToBase64Url(bytes) {
+    const chunks = [];
+    for (let offset = 0; offset < bytes.length; offset += 0x8000) {
+      chunks.push(String.fromCharCode(...bytes.slice(offset, offset + 0x8000)));
+    }
+    const binary = chunks.join("");
+    return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
+  }
+
+  function cryptoBase64UrlToBytes(value) {
+    if (typeof value !== "string" || !/^[A-Za-z0-9_-]*$/.test(value)) {
+      throw new DOMException("Invalid JWK key encoding.", "DataError");
+    }
+    const padding = (4 - (value.length % 4)) % 4;
+    try {
+      const binary = atob(value.replace(/-/g, "+").replace(/_/g, "/") + "=".repeat(padding));
+      return Array.from(binary, character => character.charCodeAt(0));
+    } catch (_) {
+      throw new DOMException("Invalid JWK key encoding.", "DataError");
+    }
+  }
+
+  function hmacJwkAlgorithm(hash) {
+    return hash === "SHA-256" ? "HS256" : hash === "SHA-384" ? "HS384" : hash === "SHA-512" ? "HS512" : null;
+  }
+
+  function hmacAlgorithmForJwk(algorithm) {
+    return algorithm === "HS256" ? "SHA-256" : algorithm === "HS384" ? "SHA-384" : algorithm === "HS512" ? "SHA-512" : null;
+  }
+
+  function makeHmacKey(bytes, hash, extractable, usages) {
+    const keyBytes = Array.from(bytes);
+    const algorithm = Object.freeze({
+      name: "HMAC",
+      hash: Object.freeze({ name: hash }),
+      length: keyBytes.length * 8,
+    });
+    return new CryptoKey(cryptoKeyConstructionToken, {
+      extractable: !!extractable,
+      algorithm,
+      usages,
+      bytes: keyBytes,
+    });
+  }
+
+  function assertCryptoKey(key) {
+    if (!(key instanceof CryptoKey) || !cryptoKeyData.has(key)) {
+      throw new TypeError("Expected a CryptoKey");
+    }
+    return cryptoKeyData.get(key);
+  }
+
+  function assertHmacKey(key, usage, algorithm) {
+    const metadata = assertCryptoKey(key);
+    if (metadata.algorithm.name !== "HMAC") {
+      throw new DOMException("The key algorithm is incompatible with HMAC.", "InvalidAccessError");
+    }
+    if (!metadata.usages.includes(usage)) {
+      throw new DOMException("The key does not permit this operation.", "InvalidAccessError");
+    }
+    const normalized = normalizeHmacAlgorithm(algorithm, false);
+    if (normalized.hash !== null && normalized.hash !== metadata.algorithm.hash.name) {
+      throw new DOMException("The algorithm hash does not match the key.", "InvalidAccessError");
+    }
+    return metadata;
+  }
+
+  function cryptoOperation(callback) {
+    return Promise.resolve().then(() => {
+      if (!cryptoLifecycleActive) throw cryptoLifecycleError();
+      return callback();
+    });
+  }
+
+  class CryptoKey {
+    constructor(token, details) {
+      if (token !== cryptoKeyConstructionToken) throw new TypeError("Illegal constructor");
+      Object.defineProperties(this, {
+        type: { value: "secret", enumerable: true },
+        extractable: { value: !!details.extractable, enumerable: true },
+        algorithm: { value: details.algorithm, enumerable: true },
+        usages: { value: Object.freeze(details.usages.slice()), enumerable: true },
+      });
+      cryptoKeyData.set(this, {
+        bytes: details.bytes.slice(),
+        algorithm: details.algorithm,
+        extractable: !!details.extractable,
+        usages: details.usages.slice(),
+      });
+    }
+    get [Symbol.toStringTag]() { return "CryptoKey"; }
+  }
+
+  class CryptoKeyPair {
+    constructor(token, details) {
+      if (token !== cryptoKeyPairConstructionToken) throw new TypeError("Illegal constructor");
+      Object.defineProperties(this, {
+        publicKey: { value: details.publicKey, enumerable: true },
+        privateKey: { value: details.privateKey, enumerable: true },
+      });
+    }
+    get [Symbol.toStringTag]() { return "CryptoKeyPair"; }
+  }
+
   class SubtleCrypto {
     constructor(token) {
       if (token !== cryptoConstructionToken) throw new TypeError("Illegal constructor");
@@ -7783,7 +7955,7 @@
         const selected = typeof algorithm === "object" && algorithm !== null
           ? algorithm.name : algorithm;
         name = String(selected).toUpperCase();
-        if (!["SHA-1", "SHA-256", "SHA-384", "SHA-512"].includes(name)) {
+        if (!cryptoHashNames.includes(name)) {
           throw new DOMException("Unrecognized digest algorithm", "NotSupportedError");
         }
         bytes = copyBufferSourceBytes(data);
@@ -7791,10 +7963,150 @@
         return Promise.reject(error);
       }
       return Promise.resolve().then(() => {
-        const digest = JSON.parse(__omoikane_crypto_digest(name, JSON.stringify(bytes)));
+        if (!cryptoLifecycleActive) throw cryptoLifecycleError();
+        const digest = JSON.parse(nativeCryptoDigest(name, JSON.stringify(bytes)));
         return new Uint8Array(digest).buffer;
       });
     }
+
+    generateKey(algorithm, extractable, keyUsages) {
+      return cryptoOperation(() => {
+        const normalized = normalizeHmacAlgorithm(algorithm, true);
+        const usages = normalizeCryptoUsages(keyUsages, cryptoHmacUsages);
+        if (usages.length === 0) throw new DOMException("At least one key usage is required.", "SyntaxError");
+        const bits = normalized.length === null ? hashOutputBits(normalized.hash) : normalized.length;
+        const bytes = JSON.parse(nativeCryptoRandom(bits / 8));
+        if (!Array.isArray(bytes) || bytes.length !== bits / 8) {
+          throw new DOMException("Unable to generate an HMAC key.", "OperationError");
+        }
+        return makeHmacKey(bytes, normalized.hash, extractable, usages);
+      });
+    }
+
+    importKey(format, keyData, algorithm, extractable, keyUsages) {
+      let rawSnapshot = null;
+      try {
+        if (String(format).toLowerCase() === "raw") rawSnapshot = copyBufferSourceBytes(keyData);
+      } catch (error) {
+        return Promise.reject(error);
+      }
+      return cryptoOperation(() => {
+        const selectedFormat = String(format).toLowerCase();
+        if (selectedFormat !== "raw" && selectedFormat !== "jwk") {
+          throw new DOMException("The key format is not supported.", "NotSupportedError");
+        }
+        const normalized = normalizeHmacAlgorithm(algorithm, true);
+        const usages = normalizeCryptoUsages(keyUsages, cryptoHmacUsages);
+        if (usages.length === 0) throw new DOMException("At least one key usage is required.", "SyntaxError");
+        let bytes;
+        if (selectedFormat === "raw") {
+          bytes = rawSnapshot;
+          if (bytes.length === 0) throw new DOMException("The HMAC key must not be empty.", "DataError");
+        } else {
+          if (keyData === null || typeof keyData !== "object" || Array.isArray(keyData)) {
+            throw new DOMException("The JWK key is invalid.", "DataError");
+          }
+          if (keyData.kty !== "oct" || typeof keyData.k !== "string") {
+            throw new DOMException("The JWK key is invalid.", "DataError");
+          }
+          bytes = cryptoBase64UrlToBytes(keyData.k);
+          if (bytes.length === 0) throw new DOMException("The HMAC key must not be empty.", "DataError");
+          if (keyData.alg !== undefined && keyData.alg !== null) {
+            const jwkHash = hmacAlgorithmForJwk(String(keyData.alg));
+            if (jwkHash === null || jwkHash !== normalized.hash) {
+              throw new DOMException("The JWK algorithm does not match HMAC.", "DataError");
+            }
+          }
+          if (keyData.key_ops !== undefined) {
+            const normalizedKeyOps = Array.isArray(keyData.key_ops)
+              ? keyData.key_ops.map(usage => String(usage)) : null;
+            if (normalizedKeyOps === null ||
+                normalizedKeyOps.some(usage => !cryptoHmacUsages.includes(usage)) ||
+                usages.some(usage => !normalizedKeyOps.includes(usage))) {
+              throw new DOMException("The JWK key operations do not permit this key.", "DataError");
+            }
+          }
+          if (keyData.ext === false && extractable) {
+            throw new DOMException("The JWK key is not extractable.", "DataError");
+          }
+        }
+        if (normalized.length !== null && normalized.length !== bytes.length * 8) {
+          throw new DOMException("The HMAC key length does not match the algorithm.", "DataError");
+        }
+        return makeHmacKey(bytes, normalized.hash, extractable, usages);
+      });
+    }
+
+    exportKey(format, key) {
+      return cryptoOperation(() => {
+        const selectedFormat = String(format).toLowerCase();
+        if (selectedFormat !== "raw" && selectedFormat !== "jwk") {
+          throw new DOMException("The key format is not supported.", "NotSupportedError");
+        }
+        const metadata = assertCryptoKey(key);
+        if (!metadata.extractable) {
+          throw new DOMException("The key is not extractable.", "InvalidAccessError");
+        }
+        if (metadata.algorithm.name !== "HMAC") {
+          throw new DOMException("The key algorithm is not supported.", "NotSupportedError");
+        }
+        if (selectedFormat === "raw") return new Uint8Array(metadata.bytes).buffer;
+        const jwk = {
+          kty: "oct",
+          k: cryptoBytesToBase64Url(metadata.bytes),
+          key_ops: metadata.usages.slice(),
+          ext: metadata.extractable,
+        };
+        const alg = hmacJwkAlgorithm(metadata.algorithm.hash.name);
+        if (alg !== null) jwk.alg = alg;
+        return jwk;
+      });
+    }
+
+    sign(algorithm, key, data) {
+      let bytes;
+      try { bytes = copyBufferSourceBytes(data); }
+      catch (error) { return Promise.reject(error); }
+      return cryptoOperation(() => {
+        const metadata = assertHmacKey(key, "sign", algorithm);
+        const signed = JSON.parse(nativeCryptoHmac(
+          metadata.algorithm.hash.name,
+          JSON.stringify(metadata.bytes),
+          JSON.stringify(bytes),
+        ));
+        return new Uint8Array(signed).buffer;
+      });
+    }
+
+    verify(algorithm, key, signature, data) {
+      let signatureBytes;
+      let dataBytes;
+      try {
+        signatureBytes = copyBufferSourceBytes(signature);
+        dataBytes = copyBufferSourceBytes(data);
+      } catch (error) {
+        return Promise.reject(error);
+      }
+      return cryptoOperation(() => {
+        const metadata = assertHmacKey(key, "verify", algorithm);
+        const expected = JSON.parse(nativeCryptoHmac(
+          metadata.algorithm.hash.name,
+          JSON.stringify(metadata.bytes),
+          JSON.stringify(dataBytes),
+        ));
+        if (signatureBytes.length !== expected.length) return false;
+        let difference = 0;
+        for (let index = 0; index < expected.length; index++) difference |= signatureBytes[index] ^ expected[index];
+        return difference === 0;
+      });
+    }
+
+    encrypt() { return Promise.reject(new DOMException("The requested algorithm is not supported.", "NotSupportedError")); }
+    decrypt() { return Promise.reject(new DOMException("The requested algorithm is not supported.", "NotSupportedError")); }
+    deriveBits() { return Promise.reject(new DOMException("The requested algorithm is not supported.", "NotSupportedError")); }
+    deriveKey() { return Promise.reject(new DOMException("The requested algorithm is not supported.", "NotSupportedError")); }
+    wrapKey() { return Promise.reject(new DOMException("The requested algorithm is not supported.", "NotSupportedError")); }
+    unwrapKey() { return Promise.reject(new DOMException("The requested algorithm is not supported.", "NotSupportedError")); }
   }
 
   class Crypto {
@@ -7809,7 +8121,7 @@
       if (array.byteLength > 65536) {
         throw new DOMException("The requested length exceeds 65,536 bytes", "QuotaExceededError");
       }
-      const bytes = JSON.parse(__omoikane_crypto_random(array.byteLength));
+      const bytes = JSON.parse(nativeCryptoRandom(array.byteLength));
       new Uint8Array(array.buffer, array.byteOffset, array.byteLength).set(bytes);
       return array;
     }
@@ -7825,6 +8137,11 @@
   }
   globalThis.Crypto = Crypto;
   globalThis.SubtleCrypto = SubtleCrypto;
+  globalThis.CryptoKey = CryptoKey;
+  globalThis.CryptoKeyPair = CryptoKeyPair;
+  globalThis.__omoikane_crypto_teardown = () => {
+    cryptoLifecycleActive = false;
+  };
   // Omoikane does not yet model mixed-content/security contexts, so realms are
   // currently treated as secure and expose the complete core API.
   globalThis.crypto = new Crypto(cryptoConstructionToken);
