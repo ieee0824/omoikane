@@ -4615,10 +4615,14 @@ mod tests {
                 r#"<html><head><style>*{margin:0}#source,#target{position:absolute;top:0;width:80px;height:40px}#source{left:0}#target{left:100px}</style></head><body>
                     <div id="source" draggable="true">source</div><div id="target">target</div>
                     <script>
-                      globalThis.dragEvents=[];globalThis.transfer=null;globalThis.sameTransfer=true;
+                      globalThis.dragEvents=[];globalThis.transfer=null;globalThis.sameTransfer=true;globalThis.clicks=0;
+                      source.addEventListener('click',()=>clicks++);
                       source.addEventListener('dragstart',e=>{dragEvents.push('start:'+e.bubbles+':'+e.cancelable+':'+(e instanceof DragEvent));transfer=e.dataTransfer;e.dataTransfer.setData('text/plain','payload')});
                       source.addEventListener('drag',e=>{dragEvents.push('drag');sameTransfer=sameTransfer&&e.dataTransfer===transfer});
+                      source.addEventListener('dragover',e=>{dragEvents.push('over');sameTransfer=sameTransfer&&e.dataTransfer===transfer;e.preventDefault()});
+                      source.addEventListener('drop',e=>{dragEvents.push('drop:'+e.dataTransfer.getData('text/plain'));sameTransfer=sameTransfer&&e.dataTransfer===transfer});
                       target.addEventListener('dragenter',e=>{dragEvents.push('enter');sameTransfer=sameTransfer&&e.dataTransfer===transfer});
+                      target.addEventListener('dragleave',e=>{dragEvents.push('leave');sameTransfer=sameTransfer&&e.dataTransfer===transfer});
                       target.addEventListener('dragover',e=>{dragEvents.push('over');sameTransfer=sameTransfer&&e.dataTransfer===transfer;e.preventDefault()});
                       target.addEventListener('drop',e=>{dragEvents.push('drop:'+e.dataTransfer.getData('text/plain'));sameTransfer=sameTransfer&&e.dataTransfer===transfer});
                       source.addEventListener('dragend',e=>{dragEvents.push('end:'+e.dataTransfer.getData('text/plain'));sameTransfer=sameTransfer&&e.dataTransfer===transfer});
@@ -4644,13 +4648,13 @@ mod tests {
         session
             .dispatch(
                 "Input.dispatchMouseEvent",
-                json!({"type":"mouseMoved","x":110,"y":10,"button":"none","buttons":1}),
+                json!({"type":"mouseMoved","x":10,"y":10,"button":"none","buttons":1}),
             )
             .unwrap();
         session
             .dispatch(
                 "Input.dispatchMouseEvent",
-                json!({"type":"mouseReleased","x":110,"y":10,"button":"left","buttons":0}),
+                json!({"type":"mouseReleased","x":10,"y":10,"button":"left","buttons":0}),
             )
             .unwrap();
 
@@ -4665,7 +4669,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             state["result"]["value"],
-            r#"{"events":["start:true:true:true","drag","enter","over","drag","over","drop:payload","end:payload"],"sameTransfer":true,"clicks":0}"#
+            r#"{"events":["start:true:true:true","drag","enter","over","drag","leave","enter","over","drop:payload","end:payload"],"sameTransfer":true,"clicks":0}"#
         );
     }
 

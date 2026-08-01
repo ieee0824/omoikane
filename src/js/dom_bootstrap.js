@@ -2484,11 +2484,11 @@
 
     get draggable() {
       const value = this.getAttribute("draggable");
-      if (value === null || value.toLowerCase() === "auto") {
-        const name = String(this.localName || "").toLowerCase();
-        return name === "img" || (name === "a" && this.hasAttribute("href"));
-      }
-      return value.toLowerCase() === "true";
+      const normalized = value === null ? "auto" : value.trim().toLowerCase();
+      if (normalized === "true") return true;
+      if (normalized === "false") return false;
+      const name = String(this.localName || "").toLowerCase();
+      return name === "img" || (name === "a" && this.hasAttribute("href"));
     }
 
     set draggable(value) {
@@ -9112,7 +9112,11 @@
   const pointerCaptureTargets = new Map();
   function normalizePointerId(pointerId) {
     const value = Number(pointerId);
-    return Number.isFinite(value) ? Math.trunc(value) : 0;
+    const integer = Math.trunc(value);
+    if (!Number.isFinite(value) || integer <= 0) {
+      throw new TypeError("pointerId must be a positive finite number");
+    }
+    return integer;
   }
   function pointerCaptureKey(doc, pointerId) {
     return String(doc && doc.__id !== undefined ? doc.__id : __omoikane_document_id) + ":" + pointerId;
