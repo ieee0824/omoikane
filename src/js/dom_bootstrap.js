@@ -11369,6 +11369,581 @@
     return globalThis.__omoikane_connect_webrtc_peers(left, right);
   };
 
+  // -------------------------------------------------------------------------
+  // WebTransport deterministic client/session/stream core.
+  //
+  // The real WebTransport transport is QUIC/HTTP-3 based and therefore cannot
+  // be provided by the in-process engine without introducing a network
+  // backend.  This model keeps the Web IDL-facing lifecycle useful by
+  // connecting two clients through an explicit same-realm pair hook.  Every
+  // byte delivered through that hook is copied before it is queued, so tests
+  // observe the same ownership boundary as a structured-clone/message path.
+  // There is deliberately no network, TLS, proxy, congestion, or certificate
+  // implementation here.
+  // -------------------------------------------------------------------------
+  const WEBTRANSPORT_CLOSE_CODE_MAX = 0xFFFFFFFF;
+  const WEBTRANSPORT_DEFAULT_HIGH_WATER_MARK = 16;
+  const WEBTRANSPORT_MAX_PENDING_WRITES = 64;
+  const WEBTRANSPORT_MAX_DATAGRAM_SIZE = 65536;
+  const WEBTRANSPORT_CONGESTION_CONTROLS = ["default", "throughput"];
+  const WEBTRANSPORT_STREAM_SOURCES = ["stream", "session"];
+
+  function webTransportInvalidState(message = "The WebTransport is closed.") {
+    return new DOMException(message, "InvalidStateError");
+  }
+
+  function webTransportBufferSource(value) {
+    if (value instanceof ArrayBuffer) return new Uint8Array(value.slice(0));
+    if (ArrayBuffer.isView(value)) {
+      return new Uint8Array(value.buffer, value.byteOffset, value.byteLength).slice();
+    }
+    throw new TypeError("WebTransport data must be an ArrayBuffer or ArrayBufferView");
+  }
+
+  function webTransportNumber(value, fallback, name, max = Infinity) {
+    if (value === undefined) return fallback;
+    const number = Number(value);
+    if (!Number.isInteger(number) || number < 0 || number > max) {
+      throw new TypeError(`${name} must be a non-negative integer`);
+    }
+    return number;
+  }
+
+  function webTransportReadable(hwm = WEBTRANSPORT_DEFAULT_HIGH_WATER_MARK, onConsume = null, onCancel = null, target = null) {
+    const stream = target || new ReadableStream();
+    stream.__webTransportHighWaterMark = hwm;
+    stream.__webTransportClosed = false;
+    stream.__webTransportPending = [];
+    stream.__webTransportCanEnqueue = () =>
+      !stream.__webTransportClosed && stream._queue.length < stream.__webTransportHighWaterMark;
+    stream.__webTransportEnqueue = value => {
+      if (!stream.__webTransportCanEnqueue()) return false;
+      stream._controller.enqueue(value);
+      return true;
+    };
+    stream.__webTransportFlush = () => {
+      while (stream.__webTransportPending.length && stream.__webTransportCanEnqueue()) {
+        const pending = stream.__webTransportPending.shift();
+        if (stream.__webTransportEnqueue(pending.value)) pending.resolve();
+        else pending.reject(webTransportInvalidState());
+      }
+    };
+    stream.__webTransportClose = () => {
+      if (stream.__webTransportClosed) return;
+      stream.__webTransportClosed = true;
+      stream._controller.close();
+      for (const pending of stream.__webTransportPending.splice(0)) {
+        pending.reject(webTransportInvalidState());
+      }
+    };
+    stream.__webTransportError = reason => {
+      if (stream.__webTransportClosed) return;
+      stream.__webTransportClosed = true;
+      stream._controller.error(reason);
+      for (const pending of stream.__webTransportPending.splice(0)) pending.reject(reason);
+    };
+    const originalGetReader = stream.getReader.bind(stream);
+    stream.getReader = function(...args) {
+      const reader = originalGetReader(...args);
+      const originalRead = reader.read.bind(reader);
+      reader.read = function(...readArgs) {
+        return originalRead(...readArgs).then(result => {
+          if (result && !result.done) {
+            if (typeof onConsume === "function") onConsume();
+            stream.__webTransportFlush();
+          }
+          return result;
+        });
+      };
+      const originalCancel = reader.cancel.bind(reader);
+      reader.cancel = function(reason) {
+        return originalCancel(reason);
+      };
+      return reader;
+    };
+    const originalCancel = stream.cancel.bind(stream);
+    stream.cancel = function(reason) {
+      if (!stream.__webTransportClosed) {
+        if (typeof onCancel === "function") onCancel(reason);
+        stream.__webTransportClose();
+      }
+      return originalCancel(reason);
+    };
+    return stream;
+  }
+
+  class WebTransportError extends Error {
+    constructor(init = {}) {
+      const source = typeof init === "object" && init !== null ? init : { message: init };
+      super(source.message === undefined ? "" : String(source.message));
+      this.name = "WebTransportError";
+      this.source = WEBTRANSPORT_STREAM_SOURCES.includes(source.source) ? source.source : "stream";
+      this.streamErrorCode = source.streamErrorCode === undefined || source.streamErrorCode === null
+        ? null : webTransportNumber(source.streamErrorCode, 0, "streamErrorCode", WEBTRANSPORT_CLOSE_CODE_MAX);
+    }
+    get [Symbol.toStringTag]() { return "WebTransportError"; }
+  }
+
+  class WebTransportCloseInfo {
+    constructor(init = {}) {
+      if (init == null || typeof init !== "object") throw new TypeError("WebTransportCloseInfo must be an object");
+      const closeCode = webTransportNumber(init.closeCode, 0, "closeCode", WEBTRANSPORT_CLOSE_CODE_MAX);
+      const reason = init.reason === undefined ? "" : String(init.reason);
+      if (reason.length > 1024) throw new TypeError("WebTransport close reason is too long");
+      Object.defineProperty(this, "closeCode", { configurable: false, enumerable: true, writable: false, value: closeCode });
+      Object.defineProperty(this, "reason", { configurable: false, enumerable: true, writable: false, value: reason });
+    }
+    toJSON() { return { closeCode: this.closeCode, reason: this.reason }; }
+    get [Symbol.toStringTag]() { return "WebTransportCloseInfo"; }
+  }
+
+  class WebTransportReadableStream extends ReadableStream {
+    constructor(hwm, onConsume = null, onCancel = null) {
+      super();
+      return webTransportReadable(hwm, onConsume, onCancel, this);
+    }
+    get [Symbol.toStringTag]() { return "ReadableStream"; }
+  }
+
+  class WebTransportWritableStream extends WritableStream {
+    constructor(send, close, abort) {
+      super({});
+      this.__webTransportSend = send;
+      this.__webTransportClose = close;
+      this.__webTransportAbort = abort;
+    }
+    _write(chunk) {
+      if (this._closed) return Promise.reject(webTransportInvalidState());
+      try { return Promise.resolve(this.__webTransportSend(chunk)); }
+      catch (error) { return Promise.reject(error); }
+    }
+    _close() {
+      if (this._closed) return Promise.resolve();
+      this._closed = true;
+      let result;
+      try { result = this.__webTransportClose(); }
+      catch (error) { this._closedResolve(); return Promise.reject(error); }
+      this._closedResolve();
+      return Promise.resolve(result);
+    }
+    abort(reason) {
+      if (this._closed) return Promise.resolve();
+      this._closed = true;
+      let result;
+      try { result = this.__webTransportAbort(reason); }
+      catch (error) { this._closedResolve(); return Promise.reject(error); }
+      this._closedResolve();
+      return Promise.resolve(result);
+    }
+    get [Symbol.toStringTag]() { return "WritableStream"; }
+  }
+
+  class WebTransportReceiveStream extends WebTransportReadableStream {
+    get [Symbol.toStringTag]() { return "WebTransportReceiveStream"; }
+  }
+
+  class WebTransportSendStream extends WebTransportWritableStream {
+    get [Symbol.toStringTag]() { return "WebTransportSendStream"; }
+  }
+
+  class WebTransportDatagrams {
+    constructor(owner) {
+      this.__owner = owner;
+      this.__incomingHighWaterMark = WEBTRANSPORT_DEFAULT_HIGH_WATER_MARK;
+      this.__outgoingHighWaterMark = WEBTRANSPORT_DEFAULT_HIGH_WATER_MARK;
+      this.incomingMaxAge = 0;
+      this.outgoingMaxAge = 0;
+      this.incomingHighWaterMark = this.__incomingHighWaterMark;
+      this.outgoingHighWaterMark = this.__outgoingHighWaterMark;
+      this.readable = owner.__datagramReadable;
+      this.writable = new WebTransportWritableStream(
+        value => owner.__writeDatagram(value),
+        () => owner.__closeDatagrams(),
+        reason => owner.__abortDatagrams(reason),
+      );
+    }
+    get incomingHighWaterMark() { return this.__incomingHighWaterMark; }
+    set incomingHighWaterMark(value) {
+      this.__incomingHighWaterMark = webTransportNumber(value, WEBTRANSPORT_DEFAULT_HIGH_WATER_MARK, "incomingHighWaterMark", 65536);
+      if (this.readable) this.readable.__webTransportHighWaterMark = this.__incomingHighWaterMark;
+    }
+    get outgoingHighWaterMark() { return this.__outgoingHighWaterMark; }
+    set outgoingHighWaterMark(value) {
+      this.__outgoingHighWaterMark = webTransportNumber(value, WEBTRANSPORT_DEFAULT_HIGH_WATER_MARK, "outgoingHighWaterMark", 65536);
+    }
+    get [Symbol.toStringTag]() { return "WebTransportDatagrams"; }
+  }
+
+  class WebTransportBidirectionalStream {
+    constructor(owner, readHighWaterMark = WEBTRANSPORT_DEFAULT_HIGH_WATER_MARK) {
+      this.__owner = owner;
+      this.__peerStream = null;
+      this.__writableClosed = false;
+      this.__readableClosed = false;
+      this.readable = new WebTransportReceiveStream(
+        readHighWaterMark,
+        () => this.__flushReadable(),
+        reason => this.__cancelReadable(reason),
+      );
+      this.writable = new WebTransportSendStream(
+        value => this.__write(value),
+        () => this.__closeWritable(),
+        reason => this.__abortWritable(reason),
+      );
+    }
+    __write(value) {
+      if (this.__writableClosed || this.__owner.__closed) return Promise.reject(webTransportInvalidState());
+      const bytes = webTransportBufferSource(value);
+      if (!this.__peerStream || this.__peerStream.__owner.__closed) return Promise.reject(webTransportInvalidState("The peer WebTransport is closed."));
+      return this.__peerStream.__enqueueReadable(bytes);
+    }
+    __closeWritable() {
+      if (this.__writableClosed) return Promise.resolve();
+      this.__writableClosed = true;
+      if (this.__peerStream) this.__peerStream.__closeReadable();
+      return Promise.resolve();
+    }
+    __abortWritable(reason) {
+      if (this.__writableClosed) return Promise.resolve();
+      this.__writableClosed = true;
+      if (this.__peerStream) this.__peerStream.__errorReadable(new WebTransportError({
+        source: "stream", message: reason === undefined ? "The stream was aborted." : String(reason),
+      }));
+      return Promise.resolve();
+    }
+    __enqueueReadable(value) {
+      if (this.__readableClosed) return Promise.reject(webTransportInvalidState("The receive stream is closed."));
+      const pending = this.readable.__webTransportEnqueue(value);
+      if (pending) return Promise.resolve();
+      if (this.readable.__webTransportPending.length >= WEBTRANSPORT_MAX_PENDING_WRITES) {
+        return Promise.reject(new WebTransportError({ source: "stream", message: "The receive stream backpressure limit was exceeded." }));
+      }
+      return new Promise((resolve, reject) => {
+        this.readable.__webTransportPending.push({ value, resolve, reject });
+      });
+    }
+    __flushReadable() { this.readable.__webTransportFlush(); }
+    __closeReadable() {
+      if (this.__readableClosed) return;
+      this.__readableClosed = true;
+      this.readable.__webTransportClose();
+    }
+    __errorReadable(reason) {
+      if (this.__readableClosed) return;
+      this.__readableClosed = true;
+      this.readable.__webTransportError(reason);
+    }
+    __cancelReadable(reason) {
+      if (this.__peerStream && !this.__peerStream.__writableClosed) this.__peerStream.__abortWritable(reason);
+    }
+    __closeInternal(reason = undefined) {
+      if (!this.__writableClosed) {
+        this.__writableClosed = true;
+        if (this.__peerStream && !this.__peerStream.__readableClosed) {
+          if (reason === undefined) this.__peerStream.__closeReadable();
+          else this.__peerStream.__errorReadable(reason);
+        }
+      }
+      this.__closeReadable();
+    }
+    get [Symbol.toStringTag]() { return "WebTransportBidirectionalStream"; }
+  }
+
+  class WebTransport extends EventTarget {
+    constructor(url, options = {}) {
+      super();
+      if (options == null || typeof options !== "object") throw new TypeError("WebTransport options must be an object");
+      this.url = WebTransport.__normalizeURL(url);
+      const congestionControl = options.congestionControl === undefined ? "default" : String(options.congestionControl);
+      if (!WEBTRANSPORT_CONGESTION_CONTROLS.includes(congestionControl)) {
+        throw new TypeError("Invalid WebTransport congestionControl");
+      }
+      if (options.requireUnreliable !== undefined && typeof options.requireUnreliable !== "boolean") {
+        throw new TypeError("WebTransport requireUnreliable must be a boolean");
+      }
+      if (options.allowPooling !== undefined && typeof options.allowPooling !== "boolean") {
+        throw new TypeError("WebTransport allowPooling must be a boolean");
+      }
+      if (options.serverCertificateHashes !== undefined) {
+        if (options.serverCertificateHashes == null || typeof options.serverCertificateHashes[Symbol.iterator] !== "function") {
+          throw new TypeError("serverCertificateHashes must be iterable");
+        }
+        for (const hash of options.serverCertificateHashes) {
+          if (hash == null || typeof hash !== "object" || typeof hash.algorithm !== "string" || hash.value === undefined) {
+            throw new TypeError("Invalid serverCertificateHashes entry");
+          }
+          webTransportBufferSource(hash.value);
+        }
+      }
+      this.congestionControl = congestionControl;
+      this.requireUnreliable = options.requireUnreliable === true;
+      this.allowPooling = options.allowPooling !== false;
+      this.__state = "connecting";
+      this.__peer = null;
+      this.__closed = false;
+      this.__streams = new Set();
+      this.__pendingDatagrams = [];
+      this.__pendingIncomingBidirectional = [];
+      this.__pendingIncomingUnidirectional = [];
+      this.__datagramReadable = webTransportReadable(WEBTRANSPORT_DEFAULT_HIGH_WATER_MARK,
+        () => this.__flushDatagrams(), reason => this.__abortDatagrams(reason));
+      this.__datagramReadable.__webTransportHighWaterMark = WEBTRANSPORT_DEFAULT_HIGH_WATER_MARK;
+      this.datagrams = new WebTransportDatagrams(this);
+      this.incomingBidirectionalStreams = webTransportReadable(WEBTRANSPORT_DEFAULT_HIGH_WATER_MARK,
+        () => this.__flushIncoming(this.__pendingIncomingBidirectional, this.incomingBidirectionalStreams));
+      this.incomingUnidirectionalStreams = webTransportReadable(WEBTRANSPORT_DEFAULT_HIGH_WATER_MARK,
+        () => this.__flushIncoming(this.__pendingIncomingUnidirectional, this.incomingUnidirectionalStreams));
+      this.__incomingBidirectional = this.incomingBidirectionalStreams;
+      this.__incomingUnidirectional = this.incomingUnidirectionalStreams;
+      this.__ready = new Promise((resolve, reject) => { this.__readyResolve = resolve; this.__readyReject = reject; });
+      this.__closedPromise = new Promise(resolve => { this.__closedResolve = resolve; });
+      this.ready = this.__ready;
+      this.closed = this.__closedPromise;
+      this.draining = false;
+      this.__closeInfo = null;
+      this.__onclose = null;
+      this.__onstatechange = null;
+      this.__onerror = null;
+    }
+    static __normalizeURL(value) {
+      let parsed;
+      try {
+        parsed = value instanceof URL ? new URL(value.href) : new URL(String(value), globalThis.location && globalThis.location.href || "https://omoikane.invalid/");
+      } catch (_) {
+        throw new TypeError("Invalid WebTransport URL");
+      }
+      if (parsed.protocol !== "https:") throw new DOMException("WebTransport requires a secure URL.", "SecurityError");
+      if (parsed.username || parsed.password || parsed.hash) throw new TypeError("Invalid WebTransport URL");
+      return parsed.href;
+    }
+    __dispatchState() {
+      const event = new Event("statechange");
+      this.dispatchEvent(event);
+      if (typeof this.__onstatechange === "function") this.__onstatechange.call(this, event);
+    }
+    __connect(peer) {
+      if (this.__closed || !peer || peer.__closed) return;
+      if (this.__peer === peer && this.__state === "connected") return;
+      this.__peer = peer;
+      this.__state = "connected";
+      queueMicrotask(() => {
+        if (this.__closed) return;
+        this.__readyResolve(this);
+        this.__dispatchState();
+      });
+    }
+    __whenReady(action) {
+      if (this.__closed) return Promise.reject(webTransportInvalidState());
+      if (this.__state === "connected") return Promise.resolve().then(action);
+      return this.ready.then(() => action());
+    }
+    __writeDatagram(value) {
+      if (this.__closed) return Promise.reject(webTransportInvalidState());
+      let bytes;
+      try { bytes = webTransportBufferSource(value); }
+      catch (error) { return Promise.reject(error); }
+      if (bytes.byteLength > WEBTRANSPORT_MAX_DATAGRAM_SIZE) {
+        return Promise.reject(new DOMException("The datagram is too large.", "QuotaExceededError"));
+      }
+      if (this.__state !== "connected") return this.ready.then(() => this.__writeDatagram(bytes));
+      if (!this.__peer || this.__peer.__closed) return Promise.reject(webTransportInvalidState("The peer WebTransport is closed."));
+      return this.__peer.__enqueueDatagram(bytes);
+    }
+    __enqueueDatagram(bytes) {
+      if (this.__closed) return Promise.reject(webTransportInvalidState("The peer WebTransport is closed."));
+      if (this.__datagramReadable.__webTransportEnqueue(new Uint8Array(bytes))) return Promise.resolve();
+      if (this.__pendingDatagrams.length >= WEBTRANSPORT_MAX_PENDING_WRITES) {
+        return Promise.reject(new DOMException("The incoming datagram queue is full.", "QuotaExceededError"));
+      }
+      return new Promise((resolve, reject) => this.__pendingDatagrams.push({ value: new Uint8Array(bytes), resolve, reject }));
+    }
+    __flushDatagrams() {
+      while (this.__pendingDatagrams.length && this.__datagramReadable.__webTransportCanEnqueue()) {
+        const pending = this.__pendingDatagrams.shift();
+        if (this.__datagramReadable.__webTransportEnqueue(pending.value)) pending.resolve();
+        else pending.reject(webTransportInvalidState());
+      }
+    }
+    __closeDatagrams() { return Promise.resolve(); }
+    __abortDatagrams(reason) {
+      const error = reason instanceof WebTransportError ? reason : new WebTransportError({
+        source: "session", message: String(reason === undefined ? "Datagrams were aborted." : reason),
+      });
+      this.__datagramReadable.__webTransportError(error);
+      for (const pending of this.__pendingDatagrams.splice(0)) pending.reject(error);
+      return Promise.resolve();
+    }
+    __flushIncoming(pending, readable) {
+      while (pending.length && readable.__webTransportCanEnqueue()) {
+        const stream = pending.shift();
+        if (!readable.__webTransportEnqueue(stream)) break;
+      }
+    }
+    __enqueueIncoming(readable, pending, stream) {
+      if (this.__closed) {
+        if (typeof stream.__closeInternal === "function") stream.__closeInternal(webTransportInvalidState());
+        else if (typeof stream.__webTransportError === "function") stream.__webTransportError(webTransportInvalidState());
+        return;
+      }
+      if (!readable.__webTransportEnqueue(stream)) pending.push(stream);
+    }
+    createBidirectionalStream(options = {}) {
+      if (options == null || typeof options !== "object") return Promise.reject(new TypeError("Stream options must be an object"));
+      if (options.sendOrder !== undefined) {
+        try { webTransportNumber(options.sendOrder, 0, "sendOrder"); }
+        catch (error) { return Promise.reject(error); }
+      }
+      return this.__whenReady(() => {
+        if (this.__closed || !this.__peer || this.__peer.__closed) throw webTransportInvalidState();
+        const local = new WebTransportBidirectionalStream(this);
+        const remote = new WebTransportBidirectionalStream(this.__peer);
+        local.__peerStream = remote; remote.__peerStream = local;
+        this.__streams.add(local); this.__peer.__streams.add(remote);
+        this.__peer.__enqueueIncoming(this.__peer.__incomingBidirectional, this.__peer.__pendingIncomingBidirectional, remote);
+        return local;
+      });
+    }
+    createUnidirectionalStream(options = {}) {
+      if (options == null || typeof options !== "object") return Promise.reject(new TypeError("Stream options must be an object"));
+      if (options.sendOrder !== undefined) {
+        try { webTransportNumber(options.sendOrder, 0, "sendOrder"); }
+        catch (error) { return Promise.reject(error); }
+      }
+      return this.__whenReady(() => {
+        if (this.__closed || !this.__peer || this.__peer.__closed) throw webTransportInvalidState();
+        const local = { __owner: this, __writableClosed: false, __peerStream: null };
+        const remote = new WebTransportReceiveStream(WEBTRANSPORT_DEFAULT_HIGH_WATER_MARK,
+          () => remote.__webTransportFlush(), reason => { if (local.__peerStream) local.__peerStream.__abort(reason); });
+        remote.__closeInternal = reason => {
+          if (reason === undefined) remote.__webTransportClose();
+          else remote.__webTransportError(reason);
+        };
+        const send = new WebTransportSendStream(
+          value => {
+            if (local.__writableClosed || this.__closed) return Promise.reject(webTransportInvalidState());
+            const bytes = webTransportBufferSource(value);
+            return remote.__webTransportEnqueue(bytes) ? Promise.resolve() : new Promise((resolve, reject) => {
+              if (remote.__webTransportPending.length >= WEBTRANSPORT_MAX_PENDING_WRITES) reject(new WebTransportError({ source: "stream", message: "The receive stream backpressure limit was exceeded." }));
+              else remote.__webTransportPending.push({ value: bytes, resolve, reject });
+            });
+          },
+          () => { local.__writableClosed = true; remote.__webTransportClose(); },
+          reason => { local.__writableClosed = true; remote.__webTransportError(new WebTransportError({ source: "stream", message: String(reason === undefined ? "The stream was aborted." : reason) })); },
+        );
+        local.__closeInternal = reason => {
+          if (local.__writableClosed) return;
+          local.__writableClosed = true;
+          if (reason === undefined) remote.__webTransportClose();
+          else remote.__webTransportError(reason);
+        };
+        local.writable = send;
+        local.__peerStream = remote;
+        this.__streams.add(local);
+        this.__peer.__streams.add(remote);
+        this.__peer.__enqueueIncoming(this.__peer.__incomingUnidirectional, this.__peer.__pendingIncomingUnidirectional, remote);
+        return send;
+      });
+    }
+    close(info = {}) {
+      if (info == null || typeof info !== "object") throw new TypeError("WebTransportCloseInfo must be an object");
+      if (this.__closed) return;
+      const closeInfo = new WebTransportCloseInfo(info);
+      this.__closed = true;
+      this.__state = "closed";
+      this.__closeInfo = closeInfo;
+      this.draining = false;
+      this.__readyReject(webTransportInvalidState("The WebTransport was closed before it became ready."));
+      this.__datagramReadable.__webTransportClose();
+      this.__incomingBidirectional.__webTransportClose();
+      this.__incomingUnidirectional.__webTransportClose();
+      this.__datagramReadable._queue.length = 0;
+      this.__incomingBidirectional._queue.length = 0;
+      this.__incomingUnidirectional._queue.length = 0;
+      if (this.datagrams && this.datagrams.writable && !this.datagrams.writable._closed) {
+        this.datagrams.writable._close();
+      }
+      for (const pending of this.__pendingDatagrams.splice(0)) pending.reject(webTransportInvalidState());
+      for (const stream of this.__streams) stream.__closeInternal();
+      this.__pendingIncomingBidirectional.length = 0;
+      this.__pendingIncomingUnidirectional.length = 0;
+      this.__streams.clear();
+      this.__closedResolve(closeInfo);
+      queueMicrotask(() => {
+        const event = new Event("close");
+        this.dispatchEvent(event);
+        if (typeof this.__onclose === "function") this.__onclose.call(this, event);
+      });
+      if (this.__peer && !this.__peer.__closed) this.__peer.__closeFromPeer(closeInfo);
+      this.__peer = null;
+    }
+    __closeFromPeer(closeInfo) {
+      if (this.__closed) return;
+      this.__closed = true;
+      this.__state = "closed";
+      this.__closeInfo = new WebTransportCloseInfo(closeInfo);
+      this.__readyReject(webTransportInvalidState("The peer WebTransport was closed before this transport became ready."));
+      this.__datagramReadable.__webTransportClose();
+      this.__incomingBidirectional.__webTransportClose();
+      this.__incomingUnidirectional.__webTransportClose();
+      this.__datagramReadable._queue.length = 0;
+      this.__incomingBidirectional._queue.length = 0;
+      this.__incomingUnidirectional._queue.length = 0;
+      if (this.datagrams && this.datagrams.writable && !this.datagrams.writable._closed) {
+        this.datagrams.writable._close();
+      }
+      for (const pending of this.__pendingDatagrams.splice(0)) pending.reject(webTransportInvalidState());
+      for (const stream of this.__streams) stream.__closeInternal();
+      this.__pendingIncomingBidirectional.length = 0;
+      this.__pendingIncomingUnidirectional.length = 0;
+      this.__streams.clear();
+      this.__closedResolve(this.__closeInfo);
+      queueMicrotask(() => {
+        const event = new Event("close");
+        this.dispatchEvent(event);
+        if (typeof this.__onclose === "function") this.__onclose.call(this, event);
+      });
+      this.__peer = null;
+    }
+    get maxDatagramSize() { return WEBTRANSPORT_MAX_DATAGRAM_SIZE; }
+    get onclose() { return this.__onclose; }
+    set onclose(callback) { this.__onclose = typeof callback === "function" ? callback : null; }
+    get onstatechange() { return this.__onstatechange; }
+    set onstatechange(callback) { this.__onstatechange = typeof callback === "function" ? callback : null; }
+    get onerror() { return this.__onerror; }
+    set onerror(callback) { this.__onerror = typeof callback === "function" ? callback : null; }
+    get [Symbol.toStringTag]() { return "WebTransport"; }
+    static createPair(leftURL = "https://omoikane.invalid/transport", rightURL = leftURL, leftOptions = {}, rightOptions = {}) {
+      const left = new WebTransport(leftURL, leftOptions);
+      const right = new WebTransport(rightURL, rightOptions);
+      left.__connect(right); right.__connect(left);
+      const pair = [left, right];
+      pair.left = left; pair.right = right; pair.local = left; pair.remote = right; pair.peers = pair;
+      return pair;
+    }
+    static createDeterministicPair(leftURL, rightURL, leftOptions, rightOptions) {
+      return WebTransport.createPair(leftURL, rightURL, leftOptions, rightOptions);
+    }
+  }
+
+  globalThis.WebTransportError = WebTransportError;
+  globalThis.WebTransportCloseInfo = WebTransportCloseInfo;
+  globalThis.WebTransportDatagrams = WebTransportDatagrams;
+  globalThis.WebTransportBidirectionalStream = WebTransportBidirectionalStream;
+  globalThis.WebTransportReceiveStream = WebTransportReceiveStream;
+  globalThis.WebTransportSendStream = WebTransportSendStream;
+  globalThis.WebTransport = WebTransport;
+  globalThis.__omoikane_create_webtransport_pair = function(leftURL, rightURL, leftOptions, rightOptions) {
+    return WebTransport.createPair(leftURL, rightURL, leftOptions, rightOptions);
+  };
+  globalThis.__omoikane_connect_webtransport_peers = function(left, right) {
+    if (!(left instanceof WebTransport) || !(right instanceof WebTransport)) throw new TypeError("WebTransport peers are required");
+    left.__connect(right); right.__connect(left);
+    return [left, right];
+  };
+  WebTransport.__createPair = WebTransport.createPair;
+  WebTransport.__createPeerPair = WebTransport.createPair;
+  WebTransport.connectPeers = globalThis.__omoikane_connect_webtransport_peers;
+
   // Dedicated workers execute in a separate Boa realm. Passing a JsValue
   // object directly between those realms would retain the sender's
   // prototypes, so worker messages use this context-independent wire format.

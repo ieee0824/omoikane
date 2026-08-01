@@ -11525,6 +11525,150 @@ mod tests {
     }
 
     #[test]
+    fn webtransport_pair_datagrams_and_streams_are_deterministic() {
+        let mut runtime = JsRuntime::new().unwrap();
+        runtime
+            .eval(
+                r#"globalThis.webTransportProbe = {
+                     surface: typeof WebTransport === 'function' &&
+                       typeof WebTransportError === 'function' &&
+                       typeof WebTransportCloseInfo === 'function' &&
+                       typeof WebTransportBidirectionalStream === 'function',
+                     ready: '', readyEvents: 0, closeEvents: 0, eventTarget: false,
+                     datagram: '', bidi: '', bidiDone: false,
+                     uni: '', uniDone: false, close: '', peerClose: '', errors: []
+                   };
+                   const pair = WebTransport.createPair(
+                     'https://wt-left.example.test/transport',
+                     'https://wt-right.example.test/transport',
+                   );
+                   const left = pair.left;
+                   const right = pair.right;
+                   webTransportProbe.eventTarget = left instanceof EventTarget && typeof left.addEventListener === 'function';
+                   left.addEventListener('statechange', () => webTransportProbe.readyEvents++);
+                   left.addEventListener('close', () => webTransportProbe.closeEvents++);
+                   Promise.all([left.ready, right.ready]).then(() => {
+                     webTransportProbe.ready = left.url + '|' + right.url;
+                     const datagramReader = right.datagrams.readable.getReader();
+                     const payload = new Uint8Array([1, 2, 3]);
+                     const datagramWrite = left.datagrams.writable.getWriter().write(payload);
+                     payload[0] = 9;
+                     return datagramWrite.then(() => datagramReader.read()).then(result => {
+                       webTransportProbe.datagram = Array.from(result.value).join(',');
+                       const incoming = right.incomingBidirectionalStreams.getReader();
+                       return left.createBidirectionalStream().then(local => incoming.read().then(result => {
+                         const remote = result.value;
+                         webTransportProbe.bidi = String(local instanceof WebTransportBidirectionalStream) + '|' + String(remote instanceof WebTransportBidirectionalStream);
+                         const remoteReader = remote.readable.getReader();
+                         const localWriter = local.writable.getWriter();
+                         return localWriter.write(new Uint8Array([4, 5])).then(() => remoteReader.read()).then(value => {
+                           webTransportProbe.bidi += '|' + Array.from(value.value).join(',');
+                           return localWriter.close().then(() => remoteReader.read());
+                         }).then(value => {
+                           webTransportProbe.bidiDone = value.done;
+                           const incomingUni = right.incomingUnidirectionalStreams.getReader();
+                           return left.createUnidirectionalStream().then(send => incomingUni.read().then(result => {
+                             const receiveReader = result.value.getReader();
+                             const sendWriter = send.getWriter();
+                             return sendWriter.write(new Uint8Array([7, 8])).then(() => receiveReader.read()).then(value => {
+                               webTransportProbe.uni = Array.from(value.value).join(',');
+                               return sendWriter.close().then(() => receiveReader.read());
+                             }).then(value => { webTransportProbe.uniDone = value.done; });
+                           }));
+                         });
+                       }));
+                     });
+                   }).then(() => {
+                     left.close({ closeCode: 42, reason: 'done' });
+                     return Promise.all([left.closed, right.closed]);
+                   }).then(values => {
+                     webTransportProbe.close = values[0].closeCode + '|' + values[0].reason;
+                     webTransportProbe.peerClose = values[1].closeCode + '|' + values[1].reason;
+                   }).catch(error => webTransportProbe.errors.push(error.name + ':' + error.message));"#,
+            )
+            .unwrap();
+        runtime.run_until_idle().unwrap();
+        assert_eq!(eval_str(&mut runtime, "String(webTransportProbe.surface)"), "true");
+        assert_eq!(eval_str(&mut runtime, "String(webTransportProbe.eventTarget)"), "true");
+        assert_eq!(eval_str(&mut runtime, "String(webTransportProbe.readyEvents)"), "1");
+        assert_eq!(eval_str(&mut runtime, "webTransportProbe.ready"), "https://wt-left.example.test/transport|https://wt-right.example.test/transport");
+        assert_eq!(eval_str(&mut runtime, "webTransportProbe.datagram"), "1,2,3");
+        assert_eq!(eval_str(&mut runtime, "webTransportProbe.bidi"), "true|true|4,5");
+        assert_eq!(eval_str(&mut runtime, "String(webTransportProbe.bidiDone)"), "true");
+        assert_eq!(eval_str(&mut runtime, "webTransportProbe.uni"), "7,8");
+        assert_eq!(eval_str(&mut runtime, "String(webTransportProbe.uniDone)"), "true");
+        assert_eq!(eval_str(&mut runtime, "webTransportProbe.close"), "42|done");
+        assert_eq!(eval_str(&mut runtime, "webTransportProbe.peerClose"), "42|done");
+        assert_eq!(eval_str(&mut runtime, "String(webTransportProbe.closeEvents)"), "1");
+        assert_eq!(eval_str(&mut runtime, "webTransportProbe.errors.length"), "0");
+    }
+
+    #[test]
+    fn webtransport_validates_urls_options_and_observes_backpressure_and_close() {
+        let mut runtime = JsRuntime::new().unwrap();
+        runtime
+            .eval(
+                r#"globalThis.webTransportValidation = { errors: [], first: false, second: false, drained: false, close: '', writeError: '', streamError: '', datagramError: '', datagramErrorName: '', datagramErrorSet: false, streamReason: '' };
+                   for (const make of [
+                     () => new WebTransport('http://insecure.example.test/'),
+                     () => new WebTransport('https://valid.example.test/', { congestionControl: 'invalid' }),
+                     () => new WebTransport('https://valid.example.test/', { requireUnreliable: 'yes' }),
+                     () => new WebTransport('https://valid.example.test/', { serverCertificateHashes: [{}] }),
+                   ]) { try { make(); } catch (error) { webTransportValidation.errors.push(error.name); } }
+                   const pair = WebTransport.createPair();
+                   const left = pair.left;
+                   const right = pair.right;
+                   right.datagrams.incomingHighWaterMark = 1;
+                   const reader = right.datagrams.readable.getReader();
+                   const writer = left.datagrams.writable.getWriter();
+                   const datagramPair = WebTransport.createPair();
+                   const datagramErrorReader = datagramPair.right.datagrams.readable.getReader();
+                   datagramErrorReader.read().catch(error => { webTransportValidation.datagramError = error.message; webTransportValidation.datagramErrorName = error.name; webTransportValidation.datagramErrorSet = true; });
+                   datagramPair.right.datagrams.writable.getWriter().abort('');
+                   writer.write(new Uint8Array([1])).then(() => webTransportValidation.first = true);
+                   writer.write(new Uint8Array([2])).then(() => webTransportValidation.second = true, error => webTransportValidation.writeError = error.name);
+                   const errorPair = WebTransport.createPair();
+                   const errorLeft = errorPair.left;
+                   const errorRight = errorPair.right;
+                   const incoming = errorRight.incomingBidirectionalStreams.getReader();
+                   errorLeft.createBidirectionalStream().then(local => incoming.read().then(result => {
+                     const remoteReader = result.value.readable.getReader();
+                     local.writable.getWriter().abort('abort-me');
+                     return remoteReader.read().then(() => {}, error => {
+                       webTransportValidation.streamError = error.name;
+                       errorLeft.close({ closeCode: 9, reason: 'closed' });
+                       return errorLeft.datagrams.writable.getWriter().write(new Uint8Array([3])).catch(closeError => {
+                         webTransportValidation.writeError = closeError.name;
+                       });
+                     });
+                   }));
+                   errorLeft.closed.then(info => webTransportValidation.close = info.closeCode + '|' + info.reason);
+                   const reasonPair = WebTransport.createPair();
+                   const reasonIncoming = reasonPair.right.incomingUnidirectionalStreams.getReader();
+                   reasonPair.left.createUnidirectionalStream().then(send => reasonIncoming.read().then(result => {
+                     result.value.getReader().read().catch(error => webTransportValidation.streamReason = error.message);
+                     send.getWriter().abort(0);
+                   }));"#,
+            )
+            .unwrap();
+        runtime.run_until_idle().unwrap();
+        assert_eq!(eval_str(&mut runtime, "webTransportValidation.errors.join('|')"), "SecurityError|TypeError|TypeError|TypeError");
+        assert_eq!(eval_str(&mut runtime, "String(webTransportValidation.first)"), "true");
+        assert_eq!(eval_str(&mut runtime, "String(webTransportValidation.second)"), "false");
+        assert_eq!(eval_str(&mut runtime, "webTransportValidation.close"), "9|closed");
+        assert_eq!(eval_str(&mut runtime, "webTransportValidation.writeError"), "InvalidStateError");
+        assert_eq!(eval_str(&mut runtime, "String(webTransportValidation.datagramErrorSet)"), "true");
+        assert_eq!(eval_str(&mut runtime, "webTransportValidation.datagramErrorName"), "WebTransportError");
+        assert_eq!(eval_str(&mut runtime, "webTransportValidation.datagramError"), "");
+        runtime.eval("reader.read().then(() => webTransportValidation.drained = true)").unwrap();
+        runtime.run_until_idle().unwrap();
+        assert_eq!(eval_str(&mut runtime, "String(webTransportValidation.drained)"), "true");
+        assert_eq!(eval_str(&mut runtime, "String(webTransportValidation.second)"), "true");
+        assert_eq!(eval_str(&mut runtime, "webTransportValidation.streamError"), "WebTransportError");
+        assert_eq!(eval_str(&mut runtime, "webTransportValidation.streamReason"), "0");
+    }
+
+    #[test]
     fn dedicated_worker_does_not_expose_async_clipboard() {
         let mut runtime = JsRuntime::new().unwrap();
         runtime
