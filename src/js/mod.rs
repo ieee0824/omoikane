@@ -16112,6 +16112,62 @@ mod tests {
     }
 
     #[test]
+    fn data_transfer_assigns_synthetic_files_and_preserves_file_boundaries() {
+        let mut runtime = runtime_from_html(
+            "<html><body><form id='target'><input id='upload' type='file' name='upload'></form></body></html>",
+        );
+        let value = runtime
+            .eval(
+                r#"(() => {
+                const input = document.getElementById('upload');
+                const transfer = new DataTransfer();
+                const file = new File([new Uint8Array([0, 255, 65])], '/tmp/private/asset.bin', {
+                  type: 'Application/Octet-Stream', lastModified: 7
+                });
+                const events = [];
+                input.addEventListener('input', () => events.push('input'));
+                input.addEventListener('change', () => events.push('change'));
+                const item = transfer.items.add(file);
+                transfer.items.add('payload', 'text/plain');
+                const files = transfer.files;
+                input.files = files;
+                const formFile = new FormData(document.getElementById('target')).get('upload');
+                const firstList = transfer.files;
+                const transferData = transfer.getData('text/plain');
+                const transferTypes = transfer.types.join(',');
+                const initialFile = files.item(0) === file;
+                const initialLength = files.length;
+                transfer.items.remove(1);
+                const afterRemove = transfer.files;
+                const removeLength = afterRemove.length;
+                transfer.items.clear();
+                return [
+                  transfer instanceof DataTransfer,
+                  item instanceof DataTransferItem,
+                  item.kind, item.type, item.getAsFile() === file,
+                  transferData, transferTypes,
+                  files === firstList, initialFile, initialLength,
+                  input.files !== files, input.files.item(0) === file,
+                  input.value, input.value.includes('/tmp/private'),
+                  events.join(','),
+                  formFile instanceof File, formFile.name, formFile.type, formFile.size,
+                  removeLength, transfer.files.length,
+                  Object.prototype.toString.call(input.files),
+                  transfer.items.item(0) === item
+                ].join('|');
+              })()"#,
+            )
+            .unwrap()
+            .as_string()
+            .unwrap()
+            .to_std_string_escaped();
+        assert_eq!(
+            value,
+            "true|true|file|application/octet-stream|true|payload|text/plain,Files|true|true|1|true|true|C:\\fakepath\\asset.bin|false|input,change|true|/tmp/private/asset.bin|application/octet-stream|3|1|0|[object FileList]|false"
+        );
+    }
+
+    #[test]
     fn response_and_request_round_trip_blob_bodies() {
         let mut runtime = JsRuntime::new().unwrap();
         runtime

@@ -5997,25 +5997,59 @@
       return t || "text";
     }
     set type(v) {
+      const before = this.type;
       this.setAttribute("type", String(v));
+      if (before === "file" && this.type !== "file") this.__files = undefined;
+      if (before !== "file" && this.type === "file") this.__files = new FileList();
     }
-    // Only a file control has a selected files list. Omoikane cannot open a file
-    // picker, so the list stays empty; it is cached per element so repeated reads
-    // return the same object, as in browsers.
+    // Only a file control has a selected files list. The host has no native
+    // picker, but scripts can provide a deterministic synthetic selection via
+    // `input.files = new DataTransfer().files`.
     get files() {
       if (this.type !== "file") return null;
       if (this.__files === undefined) this.__files = new FileList();
       return this.__files;
+    }
+    set files(value) {
+      if (this.type !== "file") {
+        throw new DOMException("The input is not a file control.", "InvalidStateError");
+      }
+      if (value !== null && !(value instanceof FileList)) {
+        throw new TypeError("HTMLInputElement.files must be a FileList or null");
+      }
+      const next = value ? Array.from(value) : [];
+      if (next.some(file => !(file instanceof File))) {
+        throw new TypeError("HTMLInputElement.files contains a non-File value");
+      }
+      const previous = this.files;
+      const unchanged = previous.__files.length === next.length &&
+        previous.__files.every((file, index) => file === next[index]);
+      if (unchanged) return;
+      this.__files = new FileList(next);
+      // A synthetic selection is an observable user-input boundary. Keep the
+      // event order deterministic and expose no host path: `value` below only
+      // ever reports the browser-style fakepath plus the selected filename.
+      this.dispatchEvent(new Event("input", { bubbles: true }));
+      this.dispatchEvent(new Event("change", { bubbles: true }));
     }
     // The `value` IDL attribute is the control's "dirty value": it is held in
     // JS and is NOT reflected to the `value` content attribute. Storing it in
     // JS also preserves lone UTF-16 surrogates that would otherwise be mangled
     // crossing the native boundary.
     get value() {
+      if (this.type === "file") {
+        const files = this.files;
+        return files.length ? "C:\\fakepath\\" + files[0].name.split(/[\\/]/).pop() : "";
+      }
       if (this.__value !== undefined) return this.__value;
       return this.getAttribute("value") || "";
     }
     set value(v) {
+      if (this.type === "file") {
+        if (String(v) !== "") throw new DOMException("The value of a file input may only be cleared.", "InvalidStateError");
+        this.files = null;
+        return;
+      }
       this.__value = v == null ? "" : String(v);
       setTextControlSelection(this, this.__value.length, this.__value.length, "none");
     }
@@ -14718,23 +14752,157 @@
     get [Symbol.toStringTag]() { return "File"; }
   }
 
-  // Read-only, index-accessible list of files. Omoikane has no file picker, so a
-  // file control's list is always empty; the type exists so pages that reach for
-  // `input.files.length` behave instead of throwing.
+  // Read-only, index-accessible list of files. The list itself is immutable from
+  // script, while DataTransfer keeps one live instance and refreshes its indexed
+  // view when items are added or removed.
   class FileList {
     constructor(files = []) {
-      Object.defineProperty(this, "__files", { value: Array.from(files) });
+      Object.defineProperty(this, "__files", { value: [], configurable: false });
+      this.__replace(files);
+    }
+    __replace(files) {
+      for (let index = 0; index < this.__files.length; index++) delete this[index];
+      this.__files.splice(0, this.__files.length, ...Array.from(files));
       for (let index = 0; index < this.__files.length; index++) {
-        Object.defineProperty(this, index, { value: this.__files[index], enumerable: true });
+        Object.defineProperty(this, index, {
+          configurable: true, enumerable: true, value: this.__files[index], writable: false,
+        });
       }
     }
     get length() { return this.__files.length; }
     item(index) {
-      const position = Math.trunc(Number(index)) || 0;
-      return this.__files[position] ?? null;
+      const number = Number(index);
+      if (!Number.isFinite(number) || number < 0) return null;
+      return this.__files[Math.trunc(number)] ?? null;
     }
     [Symbol.iterator]() { return this.__files[Symbol.iterator](); }
     get [Symbol.toStringTag]() { return "FileList"; }
+  }
+
+  class DataTransferItem {
+    constructor(kind, type, value) {
+      this.__kind = kind;
+      this.__type = type;
+      this.__value = value;
+    }
+    get kind() { return this.__kind; }
+    get type() { return this.__type; }
+    getAsFile() { return this.__kind === "file" ? this.__value : null; }
+    getAsString(callback) {
+      if (typeof callback !== "function") throw new TypeError("getAsString callback must be callable");
+      if (this.__kind !== "string") {
+        queueMicrotask(() => callback(null));
+        return;
+      }
+      const value = this.__value;
+      queueMicrotask(() => callback(value));
+    }
+    webkitGetAsEntry() { return null; }
+    get [Symbol.toStringTag]() { return "DataTransferItem"; }
+  }
+
+  class DataTransferItemList {
+    constructor(owner) {
+      this.__owner = owner;
+      this.__items = [];
+    }
+    __syncIndices() {
+      for (const key of Object.keys(this)) {
+        if (/^\d+$/.test(key)) delete this[key];
+      }
+      for (let index = 0; index < this.__items.length; index++) {
+        Object.defineProperty(this, index, {
+          configurable: true, enumerable: true, get: () => this.__items[index],
+        });
+      }
+    }
+    get length() { return this.__items.length; }
+    item(index) {
+      const number = Number(index);
+      if (!Number.isFinite(number) || number < 0) return null;
+      return this.__items[Math.trunc(number)] ?? null;
+    }
+    add(data, type = undefined) {
+      let item;
+      if (data instanceof File) {
+        if (type !== undefined) throw new TypeError("A File item does not accept a type argument");
+        item = new DataTransferItem("file", data.type, data);
+      } else {
+        if (type === undefined) throw new TypeError("DataTransferItemList.add requires a File or string type");
+        const mime = String(type).toLowerCase();
+        if (!mime) throw new DOMException("The item type must not be empty.", "InvalidStateError");
+        if (this.__items.some(existing => existing.kind === "string" && existing.type === mime)) {
+          throw new DOMException("An item of this type already exists.", "NotSupportedError");
+        }
+        item = new DataTransferItem("string", mime, String(data));
+      }
+      this.__items.push(item);
+      this.__syncIndices();
+      this.__owner.__syncFiles();
+      return item;
+    }
+    remove(index) {
+      const number = Number(index);
+      const position = Math.trunc(number);
+      if (!Number.isFinite(number) || position < 0 || position >= this.__items.length) {
+        throw new DOMException("The item index is out of range.", "IndexSizeError");
+      }
+      this.__items.splice(position, 1);
+      this.__syncIndices();
+      this.__owner.__syncFiles();
+    }
+    clear() {
+      this.__items.length = 0;
+      this.__syncIndices();
+      this.__owner.__syncFiles();
+    }
+    [Symbol.iterator]() { return this.__items[Symbol.iterator](); }
+    get [Symbol.toStringTag]() { return "DataTransferItemList"; }
+  }
+
+  class DataTransfer {
+    constructor() {
+      this.dropEffect = "none";
+      this.effectAllowed = "none";
+      this.__files = new FileList();
+      this.items = new DataTransferItemList(this);
+    }
+    __syncFiles() {
+      this.__files.__replace(this.items.__items
+        .filter(item => item.kind === "file")
+        .map(item => item.getAsFile()));
+    }
+    get files() { return this.__files; }
+    get types() {
+      const types = [];
+      for (const item of this.items) {
+        if (item.kind === "string" && !types.includes(item.type)) types.push(item.type);
+      }
+      if (this.__files.length > 0) types.push("Files");
+      return types;
+    }
+    setData(format, data) {
+      const type = String(format).toLowerCase();
+      const existing = this.items.__items.find(item => item.kind === "string" && item.type === type);
+      if (existing) existing.__value = String(data);
+      else this.items.add(String(data), type);
+    }
+    getData(format) {
+      const type = String(format).toLowerCase();
+      return this.items.__items.find(item => item.kind === "string" && item.type === type)?.__value || "";
+    }
+    clearData(format = undefined) {
+      if (format === undefined) {
+        this.items.__items = this.items.__items.filter(item => item.kind !== "string");
+      } else {
+        const type = String(format).toLowerCase();
+        this.items.__items = this.items.__items.filter(item => !(item.kind === "string" && item.type === type));
+      }
+      this.items.__syncIndices();
+      this.__syncFiles();
+    }
+    setDragImage(_element, _x, _y) {}
+    get [Symbol.toStringTag]() { return "DataTransfer"; }
   }
 
   class ProgressEvent extends Event {
@@ -14883,6 +15051,9 @@
   globalThis.Blob = Blob;
   globalThis.File = File;
   globalThis.FileList = FileList;
+  globalThis.DataTransfer = DataTransfer;
+  globalThis.DataTransferItem = DataTransferItem;
+  globalThis.DataTransferItemList = DataTransferItemList;
   globalThis.FileReader = FileReader;
   globalThis.ProgressEvent = ProgressEvent;
   globalThis.URL.createObjectURL = createObjectURL;
