@@ -8713,6 +8713,34 @@ div { width: 2px; height: 1px; background: blue;
 }
 
 #[test]
+fn mask_composite_exclude_keeps_wide_intermediate_sum() {
+    let mask = rgba_mask_data_uri(1, 1, &[200]);
+    let html = format!(
+        r#"<html><head><style>
+body {{ margin: 0; }}
+div {{ width: 1px; height: 1px; background: red;
+       mask-image: url("{mask}"), url("{mask}");
+       mask-composite: exclude; mask-repeat: no-repeat; }}
+</style></head><body><div></div></body></html>"#
+    );
+    let document = TreeBuilder::parse(&html).document();
+    let canvas = render_document(
+        &document,
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 1.0,
+            height: 1.0,
+        },
+    )
+    .unwrap();
+
+    // 200 + 200 - 2 * round(200 * 200 / 255) = 86. Clamping the
+    // intermediate sum to 255 would incorrectly produce 0 here.
+    assert_eq!(canvas.pixel(0, 0), Some(Color::rgba(255, 0, 0, 86)));
+}
+
+#[test]
 fn mask_layers_cap_effective_multilayer_work() {
     let mut style = crate::css::ComputedStyle::default();
     let images = (0..(super::MAX_MASK_LAYERS + 8))

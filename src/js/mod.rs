@@ -8161,9 +8161,10 @@ fn css_supports_native(
     )))
 }
 
-/// Normalizes values assigned through CSSStyleDeclaration. Transition and the
-/// CSS Masking/Clipping properties use native grammar validation so invalid
-/// assignments are ignored and specified-value serialization is canonical.
+/// Normalizes values assigned through CSSStyleDeclaration. Transition values
+/// are canonicalized; CSS Masking/Clipping properties use native grammar
+/// validation so invalid assignments are ignored while valid specified values
+/// are preserved for CSSOM serialization.
 fn normalize_style_value_native(
     _: &JsValue,
     args: &[JsValue],

@@ -2515,11 +2515,13 @@ fn apply_mask_alpha(canvas: &mut Canvas, layers: &[MaskLayer], style: &ComputedS
                                     ((previous as u16 * alpha as u16 + 127) / 255) as u8
                                 }
                                 MaskComposite::Exclude => {
-                                    let product = (previous as u16 * alpha as u16 + 127) / 255;
-                                    let doubled = (2 * product).min(255) as u8;
-                                    previous
-                                        .saturating_add(alpha)
-                                        .saturating_sub(doubled)
+                                    // Keep the intermediate sum in a wide type. Clamping
+                                    // `previous + alpha` before subtracting the product
+                                    // changes the exclude result for mid/high alphas.
+                                    let product =
+                                        (u32::from(previous) * u32::from(alpha) + 127) / 255;
+                                    (u32::from(previous) + u32::from(alpha) - 2 * product)
+                                        .clamp(0, 255) as u8
                                 }
                                 MaskComposite::Add => previous.saturating_add(alpha),
                             }
