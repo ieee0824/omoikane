@@ -11098,8 +11098,7 @@
         configurable: true,
         get() { return this._responseType; },
         set(value) {
-          if (this.readyState === XMLHttpRequest.LOADING ||
-              this.readyState === XMLHttpRequest.DONE) {
+          if (this._sendFlag || this.readyState >= XMLHttpRequest.HEADERS_RECEIVED) {
             throw new DOMException("responseType cannot change after loading starts", "InvalidStateError");
           }
           const normalized = String(value);
@@ -11205,7 +11204,9 @@
               type: "basic",
               headers: [["content-type", blob.type], ["content-length", String(blob.size)]],
               bodyText: blob.__text(),
-              bodyBase64: base64FromBytes(blob.__bytes),
+              bodyBase64: ["arraybuffer", "blob"].includes(this._responseType)
+                ? base64FromBytes(blob.__bytes)
+                : null,
               bodyPresent: true,
             };
           })

@@ -17466,6 +17466,13 @@ b</textarea></form>"#);
                   try { void probe.responseText; } catch (error) { responseTextError = error.name; }
                   let syntaxError = null;
                   try { probe.responseType = "wat"; } catch (error) { syntaxError = error.name; }
+                  const pending = new XMLHttpRequest();
+                  pending.open("GET", "blob:null/pending");
+                  pending.send();
+                  let sendStateError = null;
+                  try { pending.responseType = "text"; }
+                  catch (error) { sendStateError = error.name; }
+                  pending.abort();
                   let doneStateError = null;
                   try { xhrBinary.arrayXhr.responseType = "text"; }
                   catch (error) { doneStateError = error.name; }
@@ -17475,6 +17482,7 @@ b</textarea></form>"#);
                     xhrBinary.json === 42 &&
                     responseTextError === "InvalidStateError" &&
                     syntaxError === "SyntaxError" &&
+                    sendStateError === "InvalidStateError" &&
                     doneStateError === "InvalidStateError";
                 })()"#,
             )
