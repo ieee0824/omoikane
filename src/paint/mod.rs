@@ -1709,7 +1709,9 @@ fn hit_test_box(
     // pointer events still target its child geometry.  Resolve the child hit
     // after regular layout descendants (which preserve CSS paint order) and
     // before falling back to the SVG viewport element itself.
-    if layout.node.tag_name().as_deref() == Some("svg") {
+    if layout.node.tag_name().as_deref() == Some("svg")
+        && rect_contains_point(border_box, local_point.0, local_point.1)
+    {
         let svg_box = border_box_rect(layout);
         let local_x = local_point.0 - svg_box.x;
         let local_y = local_point.1 - svg_box.y;
