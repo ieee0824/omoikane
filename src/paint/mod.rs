@@ -3852,49 +3852,7 @@ pub(crate) fn is_valid_clip_path_value(value: &str) -> bool {
 }
 
 fn valid_clip_path_length(value: &str) -> bool {
-    if parse_clip_path_inset_length(value).is_some() {
-        return true;
-    }
-    let value = value.trim();
-    if value.len() >= 6
-        && value
-            .get(..5)
-            .is_some_and(|prefix| prefix.eq_ignore_ascii_case("calc("))
-        && value.ends_with(')')
-    {
-        let parts = split_top_level_whitespace(&value[5..value.len() - 1]);
-        let mut has_quantity = false;
-        for part in parts {
-            if matches!(part, "+" | "-") {
-                continue;
-            }
-            if !valid_clip_path_dimension(part) {
-                return false;
-            }
-            has_quantity = true;
-        }
-        return has_quantity;
-    }
-    valid_clip_path_dimension(value)
-}
-
-fn valid_clip_path_dimension(value: &str) -> bool {
-    if value == "0" {
-        return true;
-    }
-    if let Some(number) = value.strip_suffix('%') {
-        return number.trim().parse::<f32>().is_ok();
-    }
-    // The clip painter currently resolves only absolute px and percentage
-    // lengths (including px/% terms inside calc()). Keep validation aligned
-    // with that resolver instead of accepting units that would later be
-    // interpreted as zero or otherwise painted incorrectly.
-    const UNITS: [&str; 1] = ["px"];
-    UNITS.iter().any(|unit| {
-        value
-            .strip_suffix(unit)
-            .is_some_and(|number| number.trim().parse::<f32>().is_ok())
-    })
+    parse_clip_path_inset_length(value).is_some()
 }
 
 fn valid_clip_path_position(value: &str) -> bool {
@@ -3914,6 +3872,22 @@ fn valid_clip_path_position(value: &str) -> bool {
     match parts.as_slice() {
         [part] => valid_component(part, true) || valid_component(part, false),
         [first, second] => {
+            let first_edge = matches!(
+                first.to_ascii_lowercase().as_str(),
+                "top" | "right" | "bottom" | "left"
+            );
+            let second_edge = matches!(
+                second.to_ascii_lowercase().as_str(),
+                "top" | "right" | "bottom" | "left"
+            );
+            // Edge-offset positions (e.g. `right 10px`) require the full
+            // CSS <position> grammar, which the painter does not implement.
+            // Reject them instead of treating the length as the other axis.
+            if (first_edge && valid_clip_path_length(second))
+                || (second_edge && valid_clip_path_length(first))
+            {
+                return false;
+            }
             let first_vertical = matches!(
                 first.to_ascii_lowercase().as_str(),
                 "top" | "bottom"

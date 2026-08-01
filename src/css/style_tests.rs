@@ -3347,6 +3347,18 @@ fn validates_clip_shape_function_arguments() {
         "clip-path",
         "inset(calc(1rem + 2px))"
     ));
+    assert!(!supports_declaration(
+        "clip-path",
+        "circle(10px at right 10px)"
+    ));
+    assert!(!supports_declaration(
+        "clip-path",
+        "circle(10px at 10px right)"
+    ));
+    assert!(!supports_declaration(
+        "clip-path",
+        "inset(calc(1px + 2px + 3px))"
+    ));
     assert!(supports_declaration(
         "clip-path",
         "polygon(0% 0%, 100% 0%, 0% 100%)"
