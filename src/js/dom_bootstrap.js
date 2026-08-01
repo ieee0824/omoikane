@@ -11803,7 +11803,9 @@
       this._terminal = false;
       this._downloadLoaded = 0;
       this._downloadTotal = 0;
+      this._downloadLengthComputable = false;
       this._uploadCompleted = true;
+      this._uploadLengthComputable = false;
       this.upload = new XMLHttpRequestUpload();
       this.withCredentials = false;
       this.onreadystatechange = null;
@@ -11879,7 +11881,9 @@
       this._terminal = false;
       this._downloadLoaded = 0;
       this._downloadTotal = 0;
+      this._downloadLengthComputable = false;
       this._uploadCompleted = true;
+      this._uploadLengthComputable = false;
       this._method = String(method).toUpperCase();
       this._url = isBlobUrl(url) ? String(url) : resolveNetworkUrl(url);
       this._async = async !== false;
@@ -11972,6 +11976,7 @@
       const hasUploadBody = this._method !== "GET" && this._method !== "HEAD" &&
         body !== null && body !== undefined;
       this._uploadTotal = hasUploadBody ? bodyAsBytes(requestBody).byteLength : 0;
+      this._uploadLengthComputable = hasUploadBody;
       this._uploadCompleted = !hasUploadBody;
       this._downloadLoaded = 0;
       this._downloadTotal = 0;
@@ -12062,7 +12067,7 @@
     _downloadProgressInit(loaded = this._downloadLoaded) {
       const value = Number(loaded) || 0;
       return {
-        lengthComputable: this._downloadTotal > 0,
+        lengthComputable: this._downloadLengthComputable,
         loaded: value,
         total: this._downloadTotal,
       };
@@ -12070,7 +12075,7 @@
     _uploadProgressInit(loaded = 0) {
       const value = Number(loaded) || 0;
       return {
-        lengthComputable: this._uploadTotal > 0,
+        lengthComputable: this._uploadLengthComputable,
         loaded: value,
         total: this._uploadTotal,
       };
@@ -12092,7 +12097,8 @@
       const bytes = xhrResponseBytes(data);
       const contentLength = xhrResponseContentLength(data.headers);
       this._downloadLoaded = bytes.byteLength;
-      this._downloadTotal = contentLength === null ? this._downloadLoaded : contentLength;
+      this._downloadLengthComputable = contentLength !== null;
+      this._downloadTotal = contentLength === null ? 0 : contentLength;
       this._notify("progress", this._downloadProgressInit(this._downloadLoaded));
       switch (this._responseType) {
         case "arraybuffer":
