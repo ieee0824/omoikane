@@ -7897,9 +7897,11 @@ fn css_scope_rules_valid_native(
         .unwrap_or_default()
         .to_string(context)?
         .to_std_string_escaped();
-    let valid = crate::css::parse_stylesheet(&css)
-        .map(|sheet| scope_rules_valid(&sheet.rules))
-        .unwrap_or(false);
+    // CSSOM mutation validation is concerned with @scope preludes.  Keep the
+    // rest of the stylesheet forgiving so an unrelated malformed rule does
+    // not get reported as an invalid scope prelude.
+    let sheet = crate::paint::stylesheet::parse_stylesheet_forgiving(&css);
+    let valid = scope_rules_valid(&sheet.rules);
     Ok(JsValue::from(valid))
 }
 
