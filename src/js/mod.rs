@@ -4731,9 +4731,11 @@ impl JsRuntime {
                         (code, src_url.clone())
                     }
                     None => {
+                        let timing_name = resource_reference_timing_name(&src_url, base_url);
                         let _ = self.eval(&format!(
                             "__omoikane_record_resource_timing({}, 'script', 0, true)",
-                            serde_json::to_string(&src_url).unwrap_or_else(|_| "\"\"".to_string()),
+                            serde_json::to_string(&timing_name)
+                                .unwrap_or_else(|_| "\"\"".to_string()),
                         ));
                         errors.push(format!("failed to fetch script: {src_url}"));
                         continue;
@@ -5015,6 +5017,16 @@ fn resource_reference_was_redirected(
     ) {
         (Ok(requested), Ok(effective)) => requested != effective,
         _ => requested != effective,
+    }
+}
+
+fn resource_reference_timing_name(
+    requested: &str,
+    base_url: Option<&crate::http::Url>,
+) -> String {
+    match resolve_resource_ref(requested, base_url) {
+        Some(ResolvedResource::Url(url)) => url,
+        _ => requested.to_string(),
     }
 }
 
@@ -22464,6 +22476,7 @@ b</textarea></form>"#);
                       entry.toJSON().type !== "navigate") return false;
                   performance.clearResourceTimings();
                   performance.setResourceTimingBufferSize(2);
+                  performance.mark("survivor");
                   const first = new Image();
                   first.src = "data:image/png;base64,AA==";
                   const second = new Image();
@@ -22486,7 +22499,8 @@ b</textarea></form>"#);
                 r#"(() => {
                   performance.clearResourceTimings();
                   return performance.getEntriesByType("resource").length === 0 &&
-                    performance.getEntriesByType("navigation").length === 1;
+                    performance.getEntriesByType("navigation").length === 1 &&
+                    performance.getEntriesByName("survivor", "mark").length === 1;
                 })()"#,
             )
             .unwrap()
@@ -22615,6 +22629,31 @@ b</textarea></form>"#);
     }
 
     #[test]
+    fn performance_resource_timing_failed_script_resolves_reference_name() {
+        let port = spawn_redirect_script_server();
+        let effective = format!("http://127.0.0.1:{port}/missing.js");
+        let mut runtime = runtime_from_html(
+            r#"<html><head><script src="missing.js"></script></head><body></body></html>"#,
+        );
+        let base: crate::http::Url = format!("http://127.0.0.1:{port}/index.html")
+            .parse()
+            .unwrap();
+        let errors = runtime.execute_document_scripts(Some(&base));
+        assert_eq!(errors.len(), 1, "expected one missing-script error: {errors:?}");
+        assert!(runtime
+            .eval(&format!(
+                r#"(() => {{
+                  const entry = performance.getEntriesByName("{effective}")[0];
+                  return entry && entry.entryType === "resource" &&
+                    entry.initiatorType === "script" && entry.responseStatus === 0;
+                }})()"#,
+            ))
+            .unwrap()
+            .as_boolean()
+            .unwrap());
+    }
+
+    #[test]
     fn performance_resource_timing_buffer_full_event_targets_performance() {
         let mut runtime = JsRuntime::with_document(default_document()).unwrap();
         runtime
@@ -22624,7 +22663,7 @@ b</textarea></form>"#);
                   performance.clearResourceTimings();
                   performance.setResourceTimingBufferSize(1);
                   performance.onresourcetimingbufferfull = event => {
-                    bufferFullState = [event.target === performance, event.currentTarget === performance];
+                    bufferFullState = [event.target === performance, event.currentTarget === performance, event.eventPhase === 2];
                   };
                   new Image().src = "data:image/png;base64,AA==";
                   new Image().src = "data:image/png;base64,AA==";
@@ -22633,7 +22672,7 @@ b</textarea></form>"#);
             .unwrap();
         runtime.run_jobs().unwrap();
         assert!(runtime
-            .eval("bufferFullState && bufferFullState[0] && bufferFullState[1]")
+            .eval("bufferFullState && bufferFullState[0] && bufferFullState[1] && bufferFullState[2]")
             .unwrap()
             .as_boolean()
             .unwrap());

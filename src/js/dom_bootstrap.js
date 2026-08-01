@@ -10270,8 +10270,10 @@
               const event = new Event("resourcetimingbufferfull");
               event.target = performance;
               event.currentTarget = performance;
+              event.eventPhase = 2;
               try { handler.call(performance, event); } catch (_) {}
               event.currentTarget = null;
+              event.eventPhase = 0;
             }
           });
         }
@@ -10507,9 +10509,15 @@
       }
     },
     clearResourceTimings() {
-      for (let index = performanceEntries.length - 1; index >= 0; index--) {
-        if (performanceEntries[index].entryType === "resource") performanceEntries.splice(index, 1);
+      let writeIndex = 0;
+      for (let readIndex = 0; readIndex < performanceEntries.length; readIndex += 1) {
+        const entry = performanceEntries[readIndex];
+        if (entry.entryType !== "resource") {
+          performanceEntries[writeIndex] = entry;
+          writeIndex += 1;
+        }
       }
+      performanceEntries.length = writeIndex;
       resourceTimingBufferFull = false;
     },
   };
