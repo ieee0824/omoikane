@@ -14326,7 +14326,7 @@
     try {
       return decodeURIComponent(String(value).replace(/\+/g, " "));
     } catch (_) {
-      throw new TypeError("Invalid form-urlencoded body");
+      throw new TypeError("Invalid application/x-www-form-urlencoded body");
     }
   }
 
