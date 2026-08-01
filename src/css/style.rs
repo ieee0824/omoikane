@@ -9,7 +9,8 @@ use std::time::Duration;
 use crate::dom::{Node, NodeHandle, NodeType};
 use rusqlite::{Connection, params};
 use super::matcher::{
-    SelectorMatchCache, matches_selector_with_pseudo_cached, matches_selector_with_scope_cached,
+    SelectorMatchCache, matches_selector_boundary_cached, matches_selector_with_pseudo_cached,
+    matches_selector_with_scope_cached,
 };
 
 use super::{
@@ -458,12 +459,33 @@ impl StyleResolver {
         scope: NodeHandle,
         encapsulation_order: usize,
     ) {
+        self.add_scoped_stylesheet_in_order_with_implicit_scope_root(
+            origin,
+            stylesheet,
+            scope,
+            encapsulation_order,
+            None,
+        );
+    }
+
+    /// Adds a shadow-tree stylesheet while retaining the implicit scope root
+    /// of a directly-owned `<style>` element.  A style element whose parent is
+    /// the shadow root itself is implicitly scoped to the shadow host rather
+    /// than to the detached ShadowRoot fragment.
+    pub(crate) fn add_scoped_stylesheet_in_order_with_implicit_scope_root(
+        &mut self,
+        origin: Origin,
+        stylesheet: Stylesheet,
+        scope: NodeHandle,
+        encapsulation_order: usize,
+        implicit_scope_root: Option<NodeHandle>,
+    ) {
         collect_keyframes(&stylesheet.rules, &mut self.keyframes);
         self.rule_indexes.push(StylesheetRuleIndex::build(&stylesheet));
         self.stylesheets.push(StylesheetInput { origin, stylesheet });
         self.stylesheet_scopes.push(StylesheetScope {
             root: Some(scope),
-            implicit_scope_root: None,
+            implicit_scope_root,
             encapsulation_order,
         });
         self.cache.clear();
@@ -2469,12 +2491,13 @@ fn applicable_scope(
             continue;
         };
         let candidates: Vec<(usize, NodeHandle)> = if let Some(start) = &prelude.start {
-            ancestors[..=ambient_proximity]
+            ancestors
                 .iter()
+                .take(ambient_proximity + 1)
                 .enumerate()
                 .filter(|(_, candidate)| {
                     start.iter().any(|selector| {
-                        matches_selector_with_scope_cached(
+                        matches_selector_boundary_cached(
                             candidate,
                             selector,
                             None,
@@ -2486,10 +2509,21 @@ fn applicable_scope(
                 .map(|(proximity, root)| (proximity, root.clone()))
                 .collect()
         } else if let Some(implicit_root) = implicit_scope_root {
-            ancestors[..=ambient_proximity]
+            ancestors
                 .iter()
+                .take(ambient_proximity + 1)
                 .position(|candidate| candidate == implicit_root)
                 .map(|proximity| vec![(proximity, implicit_root.clone())])
+                .or_else(|| {
+                    // A style directly in a shadow tree is implicitly scoped
+                    // to its host, which is not represented as a parent of
+                    // nodes in the separate shadow-tree fragment.
+                    let in_shadow_tree = node
+                        .containing_shadow_root()
+                        .and_then(|root| root.shadow_host())
+                        .is_some_and(|host| host == *implicit_root);
+                    in_shadow_tree.then_some(vec![(ancestors.len(), implicit_root.clone())])
+                })
                 .unwrap_or_default()
         } else {
             vec![(ambient_proximity, ambient_root)]
@@ -2497,9 +2531,9 @@ fn applicable_scope(
 
         for (proximity, root) in candidates {
             let excluded_by_limit = prelude.end.as_ref().is_some_and(|limits| {
-                ancestors[..=proximity].iter().any(|candidate| {
+                ancestors.iter().take(proximity + 1).any(|candidate| {
                     limits.iter().any(|selector| {
-                        matches_selector_with_scope_cached(
+                        matches_selector_boundary_cached(
                             candidate,
                             selector,
                             None,

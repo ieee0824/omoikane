@@ -4069,6 +4069,11 @@
     return rules;
   }
 
+  function scopeRulesValid(source) {
+    try { return __omoikane_css_scope_rules_valid(String(source)); }
+    catch (_) { return false; }
+  }
+
   function declarationView(block) {
     const declarations = [];
     for (const part of block.split(";")) {
@@ -4153,7 +4158,30 @@
     get style() { return this.__style; }
   }
 
-  class CSSGroupingRule {}
+  class CSSGroupingRule {
+    // Grouping-rule CSSOM mutations operate on a live child stylesheet.  Keep
+    // that child linked to its owning rule so edits are reflected in the
+    // containing stylesheet (and therefore in native style resolution) rather
+    // than being stranded in a detached CSSRuleList snapshot.
+    insertRule(rule, index) {
+      if (!this.__innerSheet) {
+        throw new DOMException("The rule has no child rule list.", "InvalidStateError");
+      }
+      return this.__innerSheet.insertRule(rule, index);
+    }
+    deleteRule(index) {
+      if (!this.__innerSheet) {
+        throw new DOMException("The rule has no child rule list.", "InvalidStateError");
+      }
+      return this.__innerSheet.deleteRule(index);
+    }
+    __syncFromInner() {
+      if (!this.__sheet || this.__index < 0 || !this.__innerSheet ||
+          typeof this.__serializeCssText !== "function") return;
+      this.__text = this.__serializeCssText();
+      this.__sheet.__replaceRule(this.__index, this.__text);
+    }
+  }
   class CSSConditionRule extends CSSGroupingRule {}
 
   class CSSSupportsRule extends CSSConditionRule {
@@ -4170,12 +4198,18 @@
         : "";
       this.__innerText = this.__hasBlock ? this.__text.slice(open + 1, close) : "";
       this.__innerSheet = new CSSStyleSheet({ textContent: this.__innerText });
+      this.__innerSheet.__parentRule = this;
       if (this.__sheet) this.__sheet.__registerRuleView(this);
     }
     get conditionText() { return this.__conditionText; }
     get matches() { return CSS.supports(this.conditionText); }
     get cssRules() { return this.__innerSheet.cssRules; }
-    get cssText() { return this.__text.trim(); }
+    __serializeCssText() {
+      const nested = Array.from(this.cssRules, rule => "  " + rule.cssText).join("\n");
+      return "@supports" + (this.conditionText ? " " + this.conditionText : "") +
+        " {\n" + (nested ? nested + "\n" : "") + "}";
+    }
+    get cssText() { return this.__serializeCssText(); }
   }
 
   class CSSContainerRule extends CSSConditionRule {
@@ -4197,6 +4231,7 @@
         (this.__containerName ? prelude.slice(conditionStart) : prelude);
       this.__innerText = this.__hasBlock ? this.__text.slice(open + 1, close) : "";
       this.__innerSheet = new CSSStyleSheet({ textContent: this.__innerText });
+      this.__innerSheet.__parentRule = this;
       if (this.__sheet) this.__sheet.__registerRuleView(this);
     }
     get containerName() { return this.__containerName; }
@@ -4207,12 +4242,13 @@
         : this.containerQuery;
     }
     get cssRules() { return this.__innerSheet.cssRules; }
-    get cssText() {
+    __serializeCssText() {
       const name = this.containerName ? " " + this.containerName : "";
       const query = this.containerQuery ? " " + this.containerQuery : "";
       const nested = Array.from(this.cssRules, rule => "  " + rule.cssText).join("\n");
       return "@container" + name + query + " {\n" + (nested ? nested + "\n" : "") + "}";
     }
+    get cssText() { return this.__serializeCssText(); }
   }
 
   function scopeBoundaryTexts(prelude) {
@@ -4278,18 +4314,20 @@
       this.__end = boundaries.end;
       this.__innerText = this.__hasBlock ? this.__text.slice(open + 1, close) : "";
       this.__innerSheet = new CSSStyleSheet({ textContent: this.__innerText });
+      this.__innerSheet.__parentRule = this;
       if (this.__sheet) this.__sheet.__registerRuleView(this);
     }
     get start() { return this.__start; }
     get end() { return this.__end; }
     get cssRules() { return this.__innerSheet.cssRules; }
-    get cssText() {
+    __serializeCssText() {
       let prelude = "@scope";
       if (this.start !== null) prelude += " (" + this.start + ")";
       if (this.end !== null) prelude += " to (" + this.end + ")";
       const nested = Array.from(this.cssRules, rule => "  " + rule.cssText).join("\n");
       return prelude + " {\n" + (nested ? nested + "\n" : "") + "}";
     }
+    get cssText() { return this.__serializeCssText(); }
   }
 
   function createCssRule(text, sheet = null, index = -1) {
@@ -4536,6 +4574,7 @@
       this.__ownerText = this.ownerNode ? this.ownerNode.textContent : ownerText;
       this.__ruleViews = new Set();
       this.__cssRules = ruleListProxy(this);
+      this.__parentRule = null;
     }
     __syncFromOwner() {
       if (!this.ownerNode) return;
@@ -4568,6 +4607,7 @@
     __markDirty() {
       if (this.__constructed) this.__syncAdoptedRoots();
       else dirtyStyleSheets.add(this);
+      if (this.__parentRule) this.__parentRule.__syncFromInner();
     }
     __registerRuleView(rule) { this.__ruleViews.add(rule); }
     __shiftRuleViewsForInsert(index) {
@@ -4610,6 +4650,9 @@
       try { count = __omoikane_css_rule_count(text); }
       catch (error) { throw new DOMException(error.message || "Invalid CSS rule.", "SyntaxError"); }
       if (count !== 1) throw new DOMException("Exactly one rule is required.", "SyntaxError");
+      if (!scopeRulesValid(text)) {
+        throw new DOMException("Invalid @scope prelude.", "SyntaxError");
+      }
       const rules = this.__ruleTexts();
       const position = index === undefined ? 0 : Number(index);
       if (!Number.isInteger(position) || position < 0 || position > rules.length)
@@ -4635,6 +4678,9 @@
       if (!this.__constructed || this.__replacing) {
         throw new DOMException("Only constructed stylesheets can be replaced.", "NotAllowedError");
       }
+      if (!scopeRulesValid(text)) {
+        throw new DOMException("Invalid @scope prelude.", "SyntaxError");
+      }
       this.__rules = splitCssRules(String(text));
       for (const rule of this.__ruleViews) {
         rule.__sheet = null;
@@ -4648,6 +4694,9 @@
         return Promise.reject(new DOMException(
           "Only constructed stylesheets can be replaced.", "NotAllowedError"
         ));
+      }
+      if (!scopeRulesValid(text)) {
+        return Promise.reject(new DOMException("Invalid @scope prelude.", "SyntaxError"));
       }
       this.__replacing = true;
       return Promise.resolve().then(() => {

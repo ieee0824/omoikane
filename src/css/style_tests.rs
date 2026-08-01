@@ -542,6 +542,73 @@ fn scoped_selector_ancestor_matching_stops_at_the_scope_root() {
 }
 
 #[test]
+fn scope_limits_can_reference_ancestors_outside_the_scope_root() {
+    let document = NodeHandle::document();
+    let sidebar = NodeHandle::element("aside");
+    sidebar.set_attribute("class", "sidebar");
+    let root = NodeHandle::element("section");
+    root.set_attribute("class", "feature");
+    let direct = NodeHandle::element("p");
+    let limit = NodeHandle::element("div");
+    limit.set_attribute("class", "limit");
+    let nested = NodeHandle::element("p");
+    document.append_child(sidebar.clone());
+    sidebar.append_child(root.clone());
+    root.append_child(direct.clone());
+    root.append_child(limit.clone());
+    limit.append_child(nested.clone());
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "p { color: black; } @scope (.feature) to (.sidebar :scope .limit) { p { color: red; } }",
+        )
+        .unwrap(),
+    );
+
+    assert_eq!(
+        resolver.computed_style(&direct).get("color"),
+        Some(&ComputedValue::Color("red".to_string()))
+    );
+    assert_eq!(
+        resolver.computed_style(&nested).get("color"),
+        Some(&ComputedValue::Color("black".to_string())),
+        "a scope limit may use :scope to match an ancestor outside the root"
+    );
+}
+
+#[test]
+fn nested_scope_start_is_relative_to_the_outer_scope() {
+    let document = NodeHandle::document();
+    let sidebar = NodeHandle::element("aside");
+    sidebar.set_attribute("class", "sidebar");
+    let outer = NodeHandle::element("section");
+    outer.set_attribute("class", "outer");
+    let inner = NodeHandle::element("section");
+    inner.set_attribute("class", "inner");
+    let target = NodeHandle::element("p");
+    document.append_child(sidebar.clone());
+    sidebar.append_child(outer.clone());
+    outer.append_child(inner.clone());
+    inner.append_child(target.clone());
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "p { color: black; } @scope (.outer) { @scope (.sidebar :scope .inner) { p { color: red; } } }",
+        )
+        .unwrap(),
+    );
+
+    assert_eq!(
+        resolver.computed_style(&target).get("color"),
+        Some(&ComputedValue::Color("red".to_string()))
+    );
+}
+
+#[test]
 fn scope_reference_detection_descends_into_has_arguments() {
     let stylesheet = parse_stylesheet(":has(:scope > .child) { color: red; }").unwrap();
     let Rule::Style(rule) = &stylesheet.rules[0] else {
