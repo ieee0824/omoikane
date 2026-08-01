@@ -9106,10 +9106,10 @@
       element.dispatchEvent(new Event("error", { bubbles: false }));
     }
   };
-  // CDP mouse input uses pointer id 1. Keep one capture target per pointer in
-  // the JS realm. A capture is only used while hit testing the same owner
-  // document, so a pointer captured in an iframe cannot leak an event path
-  // into an unrelated browsing context.
+  // CDP mouse input uses pointer id 1. Keep captures scoped to their owner
+  // document so a pointer captured in an iframe cannot leak an event path into
+  // an unrelated browsing context. The native mouse bridge releases a pointer
+  // across all documents when the button is released.
   const pointerCaptureTargets = new Map();
   function normalizePointerId(pointerId) {
     const value = Number(pointerId);
@@ -9119,15 +9119,16 @@
     }
     return integer;
   }
-  function pointerCaptureKey(_doc, pointerId) {
-    return String(pointerId);
+  function pointerCaptureKey(doc, pointerId) {
+    const owner = doc && doc.nodeType === 9 ? doc : doc && doc.ownerDocument;
+    const id = owner && owner.__id !== undefined ? owner.__id : __omoikane_document_id;
+    return String(id) + ":" + pointerId;
   }
   function pointerCaptureTarget(doc, pointerId) {
     const key = pointerCaptureKey(doc, pointerId);
     const target = pointerCaptureTargets.get(key);
     if (target && target.isConnected) {
-      if (!doc || target.ownerDocument === doc) return target;
-      return null;
+      return target;
     }
     if (target) pointerCaptureTargets.delete(key);
     return null;
@@ -9151,7 +9152,10 @@
   }
   globalThis.__omoikane_release_pointer_capture = function(pointerId = 1) {
     const normalized = normalizePointerId(pointerId);
-    pointerCaptureTargets.delete(pointerCaptureKey(null, normalized));
+    const suffix = ":" + normalized;
+    for (const key of pointerCaptureTargets.keys()) {
+      if (key.endsWith(suffix)) pointerCaptureTargets.delete(key);
+    }
   };
 
   function draggableAncestor(target) {

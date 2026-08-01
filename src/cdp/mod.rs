@@ -1451,6 +1451,11 @@ impl CdpSession {
             .get("buttons")
             .and_then(Value::as_u64)
             .unwrap_or(default_buttons);
+        let pointer_id = params
+            .get("pointerId")
+            .and_then(Value::as_u64)
+            .filter(|id| *id > 0)
+            .unwrap_or(1);
         let (scroll_x, scroll_y) = self.runtime.window_scroll_offset();
         let mut init = json!({
             "clientX": x, "clientY": y,
@@ -1464,7 +1469,7 @@ impl CdpSession {
             "metaKey": modifiers & 4 != 0,
             "shiftKey": modifiers & 8 != 0,
             "detail": params.get("clickCount").and_then(Value::as_u64).unwrap_or(0),
-            "pointerId": params.get("pointerId").and_then(Value::as_u64).unwrap_or(1),
+            "pointerId": pointer_id,
         });
         if dom_type == "wheel" {
             init["deltaX"] = json!(optional_f64(params, "deltaX", 0.0)?);
@@ -1537,7 +1542,7 @@ impl CdpSession {
             }
             let _ = self.eval_input_bool(&format!(
                 "__omoikane_release_pointer_capture({})",
-                init.get("pointerId").and_then(Value::as_u64).unwrap_or(1)
+                pointer_id
             ))?;
         }
         Ok(json!({
