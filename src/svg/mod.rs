@@ -460,7 +460,11 @@ impl SvgGradient {
                     (((x - start.0) * dx + (y - start.1) * dy) / denominator, true)
                 }
             }
-            SvgGradientKind::Radial { cx: _, cy: _, r, fx, fy } => {
+            SvgGradientKind::Radial { cx, cy, r, fx, fy } => {
+                let center = (
+                    resolve_gradient_coord(cx, self.units, bbox.x, bbox.width, transform.tx, transform.sx, transform.viewport_width),
+                    resolve_gradient_coord(cy, self.units, bbox.y, bbox.height, transform.ty, transform.sy, transform.viewport_height),
+                );
                 let focal = (
                     resolve_gradient_coord(fx, self.units, bbox.x, bbox.width, transform.tx, transform.sx, transform.viewport_width),
                     resolve_gradient_coord(fy, self.units, bbox.y, bbox.height, transform.ty, transform.sy, transform.viewport_height),
@@ -469,7 +473,26 @@ impl SvgGradient {
                 if radius <= f32::EPSILON {
                     (1.0, false)
                 } else {
-                    (((x - focal.0).hypot(y - focal.1) / radius), true)
+                    let dx = x - focal.0;
+                    let dy = y - focal.1;
+                    let distance = dx.hypot(dy);
+                    if distance <= f32::EPSILON {
+                        (0.0, true)
+                    } else {
+                        let ux = dx / distance;
+                        let uy = dy / distance;
+                        let focus_x = focal.0 - center.0;
+                        let focus_y = focal.1 - center.1;
+                        let b = 2.0 * (focus_x * ux + focus_y * uy);
+                        let c = focus_x * focus_x + focus_y * focus_y - radius * radius;
+                        let discriminant = (b * b - 4.0 * c).max(0.0);
+                        let boundary = (-b + discriminant.sqrt()) / 2.0;
+                        if boundary > f32::EPSILON {
+                            (distance / boundary, true)
+                        } else {
+                            (distance / radius, true)
+                        }
+                    }
                 }
             }
         };
@@ -913,6 +936,25 @@ fn rect_for_points(points: &[(f32, f32)]) -> Rect {
     Rect { x: min_x, y: min_y, width: (max_x - min_x).max(0.0), height: (max_y - min_y).max(0.0) }
 }
 
+fn rect_for_subpaths(subpaths: &[(Vec<(f32, f32)>, bool)]) -> Rect {
+    let mut min_x = f32::INFINITY;
+    let mut min_y = f32::INFINITY;
+    let mut max_x = f32::NEG_INFINITY;
+    let mut max_y = f32::NEG_INFINITY;
+    for (points, _) in subpaths {
+        for &(x, y) in points {
+            min_x = min_x.min(x);
+            min_y = min_y.min(y);
+            max_x = max_x.max(x);
+            max_y = max_y.max(y);
+        }
+    }
+    if !min_x.is_finite() {
+        return Rect { x: 0.0, y: 0.0, width: 0.0, height: 0.0 };
+    }
+    Rect { x: min_x, y: min_y, width: (max_x - min_x).max(0.0), height: (max_y - min_y).max(0.0) }
+}
+
 fn fill_rect_source(canvas: &mut Canvas, rect: Rect, source: &PaintSource, transform: SvgTransform) {
     if let PaintSource::Solid(color) = source {
         canvas.fill_rect(rect, *color);
@@ -1341,12 +1383,7 @@ fn render_path(
     if points.len() >= 2 {
         subpaths.push((points, closed));
     }
-    let bbox = rect_for_points(
-        &subpaths
-            .iter()
-            .flat_map(|(points, _)| points.iter().copied())
-            .collect::<Vec<_>>(),
-    );
+    let bbox = rect_for_subpaths(&subpaths);
     if let Some(fill) = fill {
         let fill_paths = subpaths
             .iter()
