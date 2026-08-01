@@ -6185,7 +6185,6 @@
       return this.getAttribute("src") || "";
     }
     set src(value) {
-      noteElementResourceStart(this);
       this.setAttribute("src", String(value));
     }
     // Reflected, because how the element is evaluated is decided from the
@@ -6218,21 +6217,15 @@
       const isSource = String(name).toLowerCase() === "src";
       if (isSource) noteElementResourceStart(this);
       super.setAttribute(name, value);
-      if (isSource) {
-        finishElementResourceTiming(this, /^(?:data:|blob:)/i.test(String(value)) ? 200 : 0, false);
+      if (isSource && /^(?:data:|blob:)/i.test(String(value))) {
+        finishElementResourceTiming(this, 200, false);
       }
     }
     get src() {
       return this.getAttribute("src") || "";
     }
     set src(value) {
-      noteElementResourceStart(this);
       this.setAttribute("src", String(value));
-      // Image decoding is intentionally outside the host's layout core. A
-      // data/blob image completes synchronously; a network image gets a
-      // deterministic provisional entry until a loader dispatches load/error.
-      const source = String(value);
-      finishElementResourceTiming(this, /^(?:data:|blob:)/i.test(source) ? 200 : 0, false);
     }
     get height() {
       const attr = this.getAttribute("height");
@@ -7214,8 +7207,13 @@
 
   class HTMLLinkElement extends HTMLElement {
     setAttribute(name, value) {
-      if (String(name).toLowerCase() === "href") noteElementResourceStart(this);
+      const isHref = String(name).toLowerCase() === "href";
+      if (isHref) noteElementResourceStart(this);
       super.setAttribute(name, value);
+      if (isHref && (this.relList.contains("stylesheet") || this.relList.contains("preload")) &&
+          /^(?:data:|blob:)/i.test(String(value))) {
+        finishElementResourceTiming(this, 200, false);
+      }
     }
     get rel() {
       return this.getAttribute("rel") || "";
@@ -7228,11 +7226,7 @@
       return raw === null ? "" : __omoikane_resolve_url(raw);
     }
     set href(value) {
-      noteElementResourceStart(this);
       this.setAttribute("href", String(value));
-      if (this.relList.contains("stylesheet") || this.relList.contains("preload")) {
-        finishElementResourceTiming(this, /^(?:data:|blob:)/i.test(String(value)) ? 200 : 0, false);
-      }
     }
     get relList() {
       const link = this;
@@ -10260,8 +10254,12 @@
 
   function addPerformanceEntry(entry) {
     if (entry.entryType === "resource") {
-      const resourceCount = performanceEntries.reduce(
-        (count, current) => count + (current.entryType === "resource" ? 1 : 0), 0);
+      let resourceCount = 0;
+      for (let index = performanceEntries.length - 1;
+           index >= 0 && resourceCount < resourceTimingBufferSize;
+           index -= 1) {
+        if (performanceEntries[index].entryType === "resource") resourceCount += 1;
+      }
       if (resourceCount >= resourceTimingBufferSize) {
         if (!resourceTimingBufferFull) {
           resourceTimingBufferFull = true;
@@ -10353,7 +10351,9 @@
     const fallbackSource = typeof element.getAttribute === "function"
       ? element.getAttribute("src")
       : "";
-    const name = element.src || element.data || element.href || fallbackSource || "";
+    const rawName = element.src || element.data || element.href || fallbackSource || "";
+    if (!rawName) return;
+    const name = String(__omoikane_resolve_url(rawName));
     if (!name) return;
     const startTime = element.__resourceTimingStart === undefined
       ? Math.max(0, performance.now() - 0.001)
@@ -10528,11 +10528,16 @@
     const update = field => {
       if (!(field in navigationEntryForLifecycle)) return;
       const previous = Number(navigationEntryForLifecycle[field]) || 0;
-      Object.defineProperty(navigationEntryForLifecycle, field, {
-        value: Math.max(previous, now),
-        enumerable: true,
-        configurable: true,
-      });
+      try {
+        Object.defineProperty(navigationEntryForLifecycle, field, {
+          value: Math.max(previous, now),
+          enumerable: true,
+          configurable: true,
+        });
+      } catch (_) {
+        // A page may have made the entry non-configurable.  Lifecycle
+        // bookkeeping must remain best-effort and never break event dispatch.
+      }
     };
     switch (String(type)) {
       case "domInteractive": update("domInteractive"); break;

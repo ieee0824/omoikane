@@ -2739,13 +2739,12 @@ impl JsRuntime {
         }
         immediate.extend(deferred);
         immediate.push(PageTaskSource::Classic {
-            source: "document.__readyState = 'interactive'; document.dispatchEvent(new Event('DOMContentLoaded'))".to_string(),
+            source: "document.__readyState = 'interactive'; __omoikane_performance_navigation_event('domInteractive'); __omoikane_performance_navigation_event('domContentLoadedStart'); document.dispatchEvent(new Event('DOMContentLoaded')); __omoikane_performance_navigation_event('domContentLoadedEnd')".to_string(),
             label: "DOMContentLoaded".to_string(),
             script_node_id: None,
         });
         immediate.push(PageTaskSource::Classic {
-            source: "document.__readyState = 'complete'; window.dispatchEvent(new Event('load'))"
-                .to_string(),
+            source: "document.__readyState = 'complete'; __omoikane_performance_navigation_event('domComplete'); __omoikane_performance_navigation_event('loadStart'); window.dispatchEvent(new Event('load')); __omoikane_performance_navigation_event('loadEnd')".to_string(),
             label: "load".to_string(),
             script_node_id: None,
         });
