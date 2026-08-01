@@ -10312,9 +10312,12 @@
               event.target = performance;
               event.currentTarget = performance;
               event.eventPhase = 2;
-              try { handler.call(performance, event); } catch (_) {}
-              event.currentTarget = null;
-              event.eventPhase = 0;
+              event.__dispatching = true;
+              try { handler.call(performance, event); } catch (_) {} finally {
+                event.__dispatching = false;
+                event.currentTarget = null;
+                event.eventPhase = 0;
+              }
             }
           });
         }
@@ -10397,15 +10400,30 @@
       : resourceTimingTextEncoder.encode(bodyText).length;
     const status = error ? 0 : normalizeTimingNumber(data.responseStatus ?? data.status, 0);
     const redirected = Boolean(data.redirected);
+    const redirectStart = normalizeTimingNumber(timing.startTime, 0);
+    const effectiveResponseStart = redirected
+      ? Math.max(redirectStart, responseStart)
+      : responseStart;
+    const redirectEnd = redirected
+      ? Math.min(effectiveResponseStart, Math.max(redirectStart, responseEnd - 0.001))
+      : 0;
+    const fetchStart = redirected
+      ? Math.max(normalizeTimingNumber(timing.fetchStart, redirectStart), redirectEnd)
+      : timing.fetchStart;
+    const requestStart = redirected
+      ? Math.max(normalizeTimingNumber(timing.requestStart, fetchStart), fetchStart)
+      : timing.requestStart;
     const responseName = data && data.url !== undefined && data.url !== null
       ? String(data.url)
       : "";
     return recordResourceTiming({
       ...timing,
-      responseStart,
+      responseStart: effectiveResponseStart,
       responseEnd,
-      redirectStart: redirected ? timing.startTime : 0,
-      redirectEnd: redirected ? Math.max(timing.startTime, responseEnd - 0.001) : 0,
+      fetchStart,
+      requestStart,
+      redirectStart: redirected ? redirectStart : 0,
+      redirectEnd,
       transferSize: error ? 0 : bodyBytes,
       encodedBodySize: error ? 0 : bodyBytes,
       decodedBodySize: error ? 0 : bodyBytes,

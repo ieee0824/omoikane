@@ -22816,6 +22816,8 @@ b</textarea></form>"#);
                   return globalThis.redirectScriptRan === true && entry &&
                     entry.name === "{effective}" && entry.responseStatus === 200 &&
                     entry.redirectStart > 0 && entry.redirectEnd >= entry.redirectStart &&
+                    entry.redirectEnd <= entry.fetchStart && entry.fetchStart <= entry.requestStart &&
+                    entry.requestStart <= entry.responseStart && entry.responseStart <= entry.responseEnd &&
                     entry.responseEnd >= entry.redirectEnd && entry.responseEnd > entry.startTime;
                 }})()"#,
             ))
@@ -22849,6 +22851,8 @@ b</textarea></form>"#);
                   return entries.length === 1 && entry.name === "{effective}" &&
                     entry.responseStatus === 200 && entry.redirectStart > 0 &&
                     entry.redirectEnd >= entry.redirectStart &&
+                    entry.redirectEnd <= entry.fetchStart && entry.fetchStart <= entry.requestStart &&
+                    entry.requestStart <= entry.responseStart && entry.responseStart <= entry.responseEnd &&
                     entry.responseEnd > entry.startTime;
                 }})()"#,
             ))
@@ -22892,7 +22896,9 @@ b</textarea></form>"#);
                   performance.clearResourceTimings();
                   performance.setResourceTimingBufferSize(1);
                   performance.onresourcetimingbufferfull = event => {
-                    bufferFullState = [event.target === performance, event.currentTarget === performance, event.eventPhase === 2];
+                    event.initEvent("mutated", false, false);
+                    bufferFullState = [event.target === performance, event.currentTarget === performance,
+                      event.eventPhase === 2, event.type === "resourcetimingbufferfull"];
                   };
                   new Image().src = "data:image/png;base64,AA==";
                   new Image().src = "data:image/png;base64,AA==";
@@ -22901,7 +22907,7 @@ b</textarea></form>"#);
             .unwrap();
         runtime.run_jobs().unwrap();
         assert!(runtime
-            .eval("bufferFullState && bufferFullState[0] && bufferFullState[1] && bufferFullState[2]")
+            .eval("bufferFullState && bufferFullState[0] && bufferFullState[1] && bufferFullState[2] && bufferFullState[3]")
             .unwrap()
             .as_boolean()
             .unwrap());
