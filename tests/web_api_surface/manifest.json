@@ -343,9 +343,9 @@
     {
       "id": "network.web-transport",
       "area": "realtime",
-      "description": "WebTransport is exposed",
-      "probe": "typeof WebTransport === 'function'",
-      "baseline_supported": false
+      "description": "WebTransport exposes deterministic sessions, datagrams and stream hooks",
+      "probe": "typeof WebTransport === 'function' && typeof WebTransportError === 'function' && typeof WebTransportCloseInfo === 'function' && typeof WebTransportBidirectionalStream === 'function' && typeof WebTransport.createPair === 'function'",
+      "baseline_supported": true
     },
     {
       "id": "storage.local-storage-roundtrip",
