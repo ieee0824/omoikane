@@ -17462,6 +17462,139 @@ b</textarea></form>"#);
     }
 
     #[test]
+    fn xml_http_request_response_type_preserves_binary_bytes() {
+        let mut runtime = JsRuntime::new().unwrap();
+        runtime
+            .eval(
+                r#"globalThis.xhrBinary = {};
+                const binaryUrl = URL.createObjectURL(new Blob([
+                  new Uint8Array([0, 255, 1, 128])
+                ], { type: "application/octet-stream" }));
+                const jsonUrl = URL.createObjectURL(new Blob(["{\"answer\":42}"], {
+                  type: "application/json"
+                }));
+                const request = (url, type) => new Promise(resolve => {
+                  const xhr = new XMLHttpRequest();
+                  xhr.open("GET", url);
+                  xhr.responseType = type;
+                  xhr.onloadend = () => resolve(xhr);
+                  xhr.send();
+                });
+                Promise.all([
+                  request(binaryUrl, "arraybuffer"),
+                  request(binaryUrl, "blob"),
+                  request(jsonUrl, "json"),
+                ]).then(([array, blob, json]) => {
+                  Object.defineProperty(xhrBinary, "arrayXhr", { value: array });
+                  xhrBinary.array = [array.status, Array.from(new Uint8Array(array.response))];
+                  xhrBinary.blob = [blob.response.type, blob.response.size];
+                  xhrBinary.blobBytes = blob.response.arrayBuffer().then(buffer =>
+                    Array.from(new Uint8Array(buffer)));
+                  xhrBinary.json = json.response.answer;
+                  xhrBinary.done = true;
+                });"#,
+            )
+            .unwrap();
+        runtime.run_until_idle().unwrap();
+        let probe = runtime
+            .eval(
+                r#"(() => {
+                  const probe = new XMLHttpRequest();
+                  probe.responseType = "arraybuffer";
+                  let responseTextError = null;
+                  try { void probe.responseText; } catch (error) { responseTextError = error.name; }
+                  let syntaxError = null;
+                  try { probe.responseType = "wat"; } catch (error) { syntaxError = error.name; }
+                  const pending = new XMLHttpRequest();
+                  pending.open("GET", "blob:null/pending");
+                  pending.send();
+                  let sendStateError = null;
+                  try { pending.responseType = "text"; }
+                  catch (error) { sendStateError = error.name; }
+                  pending.abort();
+                  let doneStateError = null;
+                  try { xhrBinary.arrayXhr.responseType = "text"; }
+                  catch (error) { doneStateError = error.name; }
+                  return xhrBinary.done &&
+                    JSON.stringify(xhrBinary.array) === '[200,[0,255,1,128]]' &&
+                    JSON.stringify(xhrBinary.blob) === '["application/octet-stream",4]' &&
+                    xhrBinary.json === 42 &&
+                    responseTextError === "InvalidStateError" &&
+                    syntaxError === "SyntaxError" &&
+                    sendStateError === "InvalidStateError" &&
+                    doneStateError === "InvalidStateError";
+                })()"#,
+            )
+            .unwrap();
+        let state = runtime.eval("JSON.stringify(xhrBinary)").unwrap();
+        assert!(
+            probe.as_boolean().unwrap_or(false),
+            "probe={probe:?}, state={}",
+            state.display()
+        );
+        assert!(runtime
+            .eval(r#"xhrBinary.blobBytes.then(bytes => xhrBinary.blobBytesResult = JSON.stringify(bytes))"#)
+            .is_ok());
+        runtime.run_until_idle().unwrap();
+        assert_eq!(
+            runtime
+                .eval("xhrBinary.blobBytesResult")
+                .unwrap()
+                .as_string()
+                .unwrap()
+                .to_std_string_escaped(),
+            "[0,255,1,128]"
+        );
+    }
+
+    #[test]
+    fn xml_http_request_http_binary_response_type_preserves_bytes() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let handle = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let _ = read_http_request(&mut stream);
+            let body = [0u8, 255, 1, 128];
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            )
+            .unwrap();
+            stream.write_all(&body).unwrap();
+        });
+
+        let mut runtime = JsRuntime::new().unwrap();
+        runtime.set_base_url(format!("http://{address}/").parse().unwrap());
+        runtime
+            .eval(&format!(
+                r#"globalThis.httpBinary = null;
+                const xhr = new XMLHttpRequest();
+                xhr.open("GET", "http://127.0.0.1:{}/binary");
+                xhr.responseType = "arraybuffer";
+                xhr.onloadend = () => {{
+                  httpBinary = [xhr.status, xhr.response.byteLength,
+                    Array.from(new Uint8Array(xhr.response)), xhr.responseURL];
+                }};
+                xhr.send();"#,
+                address.port()
+            ))
+            .unwrap();
+        runtime.run_jobs().unwrap();
+        handle.join().unwrap();
+
+        assert!(runtime
+            .eval(&format!(
+                r#"JSON.stringify(httpBinary) ===
+                  '[200,4,[0,255,1,128],"http://127.0.0.1:{}/binary"]'"#,
+                address.port()
+            ))
+            .unwrap()
+            .as_boolean()
+            .unwrap());
+    }
+
+    #[test]
     fn eval_safe_catches_syntax_error() {
         let mut runtime = JsRuntime::new().unwrap();
         let result = runtime.eval_safe("this is not valid javascript }{");
