@@ -543,6 +543,13 @@
       "baseline_supported": true
     },
     {
+      "id": "platform.permissions",
+      "area": "platform",
+      "description": "Permissions API query and PermissionStatus lifecycle are exposed",
+      "probe": "typeof Permissions === 'function' && typeof PermissionStatus === 'function' && navigator.permissions instanceof Permissions && typeof navigator.permissions.query === 'function' && (() => { const status = Object.create(PermissionStatus.prototype); return 'state' in status && 'onchange' in status; })()",
+      "baseline_supported": true
+    },
+    {
       "id": "platform.webrtc",
       "area": "platform",
       "description": "WebRTC peer connections are exposed",

@@ -2931,6 +2931,19 @@ impl JsRuntime {
         self.host_state.borrow_mut().event_loop.clear_timer(id);
     }
 
+    /// Notifies live `PermissionStatus` objects in this realm after an
+    /// embedder-controlled permission transition.  The helper is intentionally
+    /// best-effort: a runtime may be in the middle of teardown, in which case
+    /// there are no page objects left to notify.
+    fn notify_permission_change(&mut self, name: &str, state: &str) {
+        let Ok(name) = serde_json::to_string(name) else { return };
+        let Ok(state) = serde_json::to_string(state) else { return };
+        let source = format!(
+            "if (typeof globalThis.__omoikane_permission_changed === 'function') {{ globalThis.__omoikane_permission_changed({name}, {state}); }}"
+        );
+        let _ = self.eval(&source);
+    }
+
     /// Sets the deterministic Notification permission used by this runtime's
     /// Window. This is an embedder/test hook and is not exposed to page JS.
     pub fn set_notification_permission(&mut self, permission: &str) -> Result<(), String> {
@@ -2939,8 +2952,44 @@ impl JsRuntime {
                 "invalid notification permission {permission:?}; expected one of default, granted, denied"
             ));
         }
-        self.host_state.borrow_mut().notification_permission = permission.to_string();
+        let changed = {
+            let mut state = self.host_state.borrow_mut();
+            if state.notification_permission == permission {
+                false
+            } else {
+                state.notification_permission = permission.to_string();
+                true
+            }
+        };
+        if changed {
+            let mapped = if permission == "default" { "prompt" } else { permission };
+            self.notify_permission_change("notifications", mapped);
+        }
         Ok(())
+    }
+
+    /// Sets the deterministic Async Clipboard permission used by this
+    /// runtime. This is an embedder/test hook and is not exposed to page JS.
+    pub fn set_clipboard_permission(&mut self, granted: bool) {
+        let changed = {
+            let mut state = self.host_state.borrow_mut();
+            if state.clipboard_permission_granted == granted {
+                false
+            } else {
+                state.clipboard_permission_granted = granted;
+                true
+            }
+        };
+        if changed {
+            self.notify_permission_change(
+                "clipboard-read",
+                if granted { "granted" } else { "denied" },
+            );
+            self.notify_permission_change(
+                "clipboard-write",
+                if granted { "granted" } else { "denied" },
+            );
+        }
     }
 
     /// Sets or replaces the deterministic geolocation provider position.
@@ -2986,18 +3035,28 @@ impl JsRuntime {
     /// requests.  A denied state is delivered through the normal geolocation
     /// task source, never synchronously from the setter.
     pub fn set_geolocation_permission(&mut self, granted: bool) {
-        let mut state = self.host_state.borrow_mut();
-        state.geolocation_permission_granted = granted;
-        let request_ids: Vec<_> = state
-            .geolocation_requests
-            .iter()
-            .filter_map(|(request_id, request)| {
-                (!request.pending || request.timeout_timer_id.is_some()).then_some(*request_id)
-            })
-            .collect();
-        for request_id in request_ids {
-            wake_geolocation_request(&mut state, request_id);
-            schedule_geolocation_request(&mut state, request_id);
+        let changed = {
+            let mut state = self.host_state.borrow_mut();
+            let changed = state.geolocation_permission_granted != granted;
+            state.geolocation_permission_granted = granted;
+            let request_ids: Vec<_> = state
+                .geolocation_requests
+                .iter()
+                .filter_map(|(request_id, request)| {
+                    (!request.pending || request.timeout_timer_id.is_some()).then_some(*request_id)
+                })
+                .collect();
+            for request_id in request_ids {
+                wake_geolocation_request(&mut state, request_id);
+                schedule_geolocation_request(&mut state, request_id);
+            }
+            changed
+        };
+        if changed {
+            self.notify_permission_change(
+                "geolocation",
+                if granted { "granted" } else { "denied" },
+            );
         }
     }
 
@@ -5226,6 +5285,11 @@ fn register_host_bindings(
             NativeFunction::from_copy_closure(notification_request_permission_native),
         ),
         (
+            js_string!("__omoikane_geolocation_permission"),
+            0,
+            NativeFunction::from_copy_closure(geolocation_permission_native),
+        ),
+        (
             js_string!("__omoikane_crypto_random"),
             1,
             NativeFunction::from_copy_closure(crypto_random_native),
@@ -5249,6 +5313,11 @@ fn register_host_bindings(
             js_string!("__omoikane_clipboard_write_text"),
             1,
             NativeFunction::from_copy_closure(clipboard_write_text_native),
+        ),
+        (
+            js_string!("__omoikane_clipboard_permission"),
+            0,
+            NativeFunction::from_copy_closure(clipboard_permission_native),
         ),
         (
             js_string!("__omoikane_geolocation_request"),
@@ -6012,6 +6081,16 @@ fn notification_request_permission_native(
     })
 }
 
+fn geolocation_permission_native(
+    _this: &JsValue,
+    _args: &[JsValue],
+    _context: &mut Context,
+) -> JsResult<JsValue> {
+    with_host_state(|state| {
+        Ok(JsValue::from(state.borrow().geolocation_permission_granted))
+    })
+}
+
 fn is_secure_context_url(url: &str) -> bool {
     let lower_url = url.to_ascii_lowercase();
     // Fragments are not part of an origin.  Strip them before the IPv6
@@ -6100,6 +6179,14 @@ fn clipboard_read_text_native(
         }
         Ok(JsValue::from(js_string!(state.clipboard.read_text())))
     })
+}
+
+fn clipboard_permission_native(
+    _: &JsValue,
+    _: &[JsValue],
+    _: &mut Context,
+) -> JsResult<JsValue> {
+    with_host_state(|state| Ok(JsValue::from(state.borrow().clipboard_permission_granted)))
 }
 
 fn clipboard_write_text_native(
@@ -22207,6 +22294,94 @@ b</textarea></form>"#);
             .unwrap();
         insecure.run_until_idle().unwrap();
         assert_eq!(eval_str(&mut insecure, "insecurePermission"), "NotAllowedError");
+    }
+
+    #[test]
+    fn permissions_query_maps_existing_states_and_notifies_lifecycle_changes() {
+        let mut runtime = JsRuntime::new().unwrap();
+        assert_eq!(
+            eval_str(
+                &mut runtime,
+                "[typeof Permissions, typeof PermissionStatus, navigator.permissions instanceof Permissions, typeof navigator.permissions.query].join('|')",
+            ),
+            "function|function|true|function"
+        );
+        runtime
+            .eval(
+                r#"globalThis.permissionOrder = [];
+                   globalThis.permissionChanges = [];
+                   navigator.permissions.query({ name: 'notifications' }).then(status => {
+                     globalThis.notificationStatus = status;
+                     permissionOrder.push(['notifications', status.state].join(':'));
+                     status.onchange = () => permissionChanges.push(['notifications', status.state].join(':'));
+                     status.addEventListener('change', () => permissionChanges.push('listener'));
+                   });
+                   navigator.permissions.query({ name: 'geolocation' }).then(status => {
+                     globalThis.geolocationStatus = status;
+                     permissionOrder.push(['geolocation', status.state].join(':'));
+                   });
+                   navigator.permissions.query({ name: 'clipboard-read' }).then(status => {
+                     globalThis.clipboardStatus = status;
+                     permissionOrder.push(['clipboard-read', status.state].join(':'));
+                   });
+                   navigator.permissions.query({ name: 'clipboard-write' }).then(status => {
+                     globalThis.clipboardWriteStatus = status;
+                     permissionOrder.push(['clipboard-write', status.state].join(':'));
+                   });
+                   permissionOrder.push('after-query');"#,
+            )
+            .unwrap();
+        runtime.run_jobs().unwrap();
+        assert_eq!(
+            eval_str(&mut runtime, "permissionOrder.join('|')"),
+            "after-query|notifications:prompt|geolocation:granted|clipboard-read:granted|clipboard-write:granted"
+        );
+        assert_eq!(
+            eval_str(
+                &mut runtime,
+                "[notificationStatus instanceof PermissionStatus, notificationStatus.state, notificationStatus.onchange !== null].join('|')",
+            ),
+            "true|prompt|true"
+        );
+
+        runtime.set_notification_permission("granted").unwrap();
+        runtime.run_jobs().unwrap();
+        assert_eq!(eval_str(&mut runtime, "permissionChanges.join('|')"), "notifications:granted|listener");
+        runtime.set_notification_permission("granted").unwrap();
+        runtime.run_jobs().unwrap();
+        assert_eq!(eval_str(&mut runtime, "permissionChanges.length"), "2");
+
+        runtime.set_geolocation_permission(false);
+        runtime.set_clipboard_permission(false);
+        runtime.run_jobs().unwrap();
+        assert_eq!(eval_str(&mut runtime, "[geolocationStatus.state, clipboardStatus.state, clipboardWriteStatus.state].join('|')"), "denied|denied|denied");
+
+        runtime.set_notification_permission("default").unwrap();
+        runtime.run_jobs().unwrap();
+        runtime
+            .eval("globalThis.requestResult = 'pending'; Notification.requestPermission().then(value => requestResult = value);")
+            .unwrap();
+        runtime.run_until_idle().unwrap();
+        assert_eq!(eval_str(&mut runtime, "requestResult + '|' + notificationStatus.state"), "denied|denied");
+        assert_eq!(eval_str(&mut runtime, "permissionChanges.length"), "6");
+
+        runtime
+            .eval(
+                r#"globalThis.invalidPermission = 'pending';
+                   navigator.permissions.query({ name: 'camera' }).catch(error => invalidPermission = error.name);
+                   globalThis.invalidDescriptor = 'pending';
+                   navigator.permissions.query(null).catch(error => invalidDescriptor = error.name);"#,
+            )
+            .unwrap();
+        runtime.run_jobs().unwrap();
+        assert_eq!(eval_str(&mut runtime, "invalidPermission + '|' + invalidDescriptor"), "NotSupportedError|TypeError");
+
+        // A document teardown invalidates all retained statuses and drops
+        // their listeners before a later host transition can enqueue a change.
+        runtime.eval("__omoikane_permission_teardown();").unwrap();
+        runtime.set_notification_permission("granted").unwrap();
+        runtime.run_jobs().unwrap();
+        assert_eq!(eval_str(&mut runtime, "permissionChanges.length"), "6");
     }
 
     #[test]

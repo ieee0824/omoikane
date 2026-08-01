@@ -1673,7 +1673,9 @@ impl CdpSession {
         let _ = self.runtime.eval(
             "window.dispatchEvent(new Event('beforeunload')); \
              window.dispatchEvent(new Event('pagehide')); \
-             window.dispatchEvent(new Event('unload'));",
+             window.dispatchEvent(new Event('unload')); \
+             if (typeof globalThis.__omoikane_permission_teardown === 'function') \
+             globalThis.__omoikane_permission_teardown();",
         );
         let _ = self.runtime.run_jobs();
 
@@ -1774,7 +1776,9 @@ impl CdpSession {
         let _ = self.runtime.eval(
             "window.dispatchEvent(new Event('beforeunload')); \
              window.dispatchEvent(new Event('pagehide')); \
-             window.dispatchEvent(new Event('unload'));",
+             window.dispatchEvent(new Event('unload')); \
+             if (typeof globalThis.__omoikane_permission_teardown === 'function') \
+             globalThis.__omoikane_permission_teardown();",
         );
         let _ = self.runtime.run_jobs();
 
@@ -2372,6 +2376,10 @@ impl BrowserSession {
             state.cancel_pending_dialog();
             if let Some(session) = state.session.as_mut() {
                 session.runtime.terminate_workers();
+                let _ = session.runtime.eval(
+                    "if (typeof globalThis.__omoikane_permission_teardown === 'function') \
+                     globalThis.__omoikane_permission_teardown();",
+                );
             }
         }
         self.server.receive(client_id, bytes)?;
