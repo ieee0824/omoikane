@@ -12136,6 +12136,8 @@ mod tests {
           const other = document.createElement('canvas').getContext('webgl');
           other.bindBuffer(other.ARRAY_BUFFER, buffer);
           const ownership = other.getError() === other.INVALID_OPERATION;
+          gl.deleteBuffer(buffer); gl.deleteBuffer(buffer);
+          const repeatedDelete = gl.getError() === gl.NO_ERROR;
           const events = [];
           gl.addEventListener('webglcontextlost', () => events.push('lost'));
           gl.addEventListener('webglcontextrestored', () => events.push('restored'));
@@ -12144,11 +12146,11 @@ mod tests {
           __omoikane_webgl_restore_context(gl);
           const restored = !gl.isContextLost() && events.join(',') === 'lost,restored';
           return [typeof WebGLRenderingContext, gl instanceof WebGLRenderingContext, same, exclusive,
-            clear, viewport, invalidEnum, bufferSize, resizeKeepsContext, linked, ownership, lost, restored].join('|');
+            clear, viewport, invalidEnum, bufferSize, resizeKeepsContext, linked, ownership, repeatedDelete, lost, restored].join('|');
         })()"#);
         assert_eq!(
             result,
-            "function|true|true|true|255,64,128,255|1,2,3,4|true|12|true|true|true|true|true"
+            "function|true|true|true|255,64,128,255|1,2,3,4|true|12|true|true|true|true|true|true"
         );
     }
 

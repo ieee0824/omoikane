@@ -6336,7 +6336,6 @@
     SRC_ALPHA_SATURATE: 0x0308, FUNC_ADD: 0x8006, BLEND_EQUATION: 0x8009,
     BLEND_EQUATION_RGB: 0x8009, BLEND_EQUATION_ALPHA: 0x883D,
     FUNC_SUBTRACT: 0x800A, FUNC_REVERSE_SUBTRACT: 0x800B,
-    BLEND_EQUATION_RGB: 0x8009, BLEND_EQUATION_ALPHA: 0x883D,
     BLEND_DST_RGB: 0x80C8, BLEND_SRC_RGB: 0x80C9, BLEND_DST_ALPHA: 0x80CA,
     BLEND_SRC_ALPHA: 0x80CB, BLEND_COLOR: 0x8005,
     CONSTANT_COLOR: 0x8001, ONE_MINUS_CONSTANT_COLOR: 0x8002,
@@ -6352,7 +6351,7 @@
     NO_ERROR: 0, INVALID_ENUM: 0x0500, INVALID_VALUE: 0x0501,
     INVALID_OPERATION: 0x0502, OUT_OF_MEMORY: 0x0505,
     INVALID_FRAMEBUFFER_OPERATION: 0x0506, CONTEXT_LOST_WEBGL: 0x9242,
-    EXP: 0x0800, EXP2: 0x0801, BLEND_COLOR: 0x8005,
+    EXP: 0x0800, EXP2: 0x0801,
     NEVER: 0x0200, LESS: 0x0201, EQUAL: 0x0202, LEQUAL: 0x0203,
     GREATER: 0x0204, NOTEQUAL: 0x0205, GEQUAL: 0x0206, ALWAYS: 0x0207,
     KEEP: 0x1E00, REPLACE: 0x1E01, INCR: 0x1E02, DECR: 0x1E03,
@@ -6361,7 +6360,7 @@
     VERTEX_ATTRIB_ARRAY_STRIDE: 0x8624, VERTEX_ATTRIB_ARRAY_TYPE: 0x8625,
     VERTEX_ATTRIB_ARRAY_NORMALIZED: 0x886A, VERTEX_ATTRIB_ARRAY_POINTER: 0x8645,
     VERTEX_ATTRIB_ARRAY_BUFFER_BINDING: 0x889F,
-    STATIC_DRAW: 0x88E4, FLOAT: 0x1406, UNSIGNED_BYTE: 0x1401,
+    FLOAT: 0x1406, UNSIGNED_BYTE: 0x1401,
     UNSIGNED_SHORT: 0x1403, UNSIGNED_INT: 0x1405,
     VERTEX_SHADER: 0x8B31, FRAGMENT_SHADER: 0x8B30,
     COMPILE_STATUS: 0x8B81, DELETE_STATUS: 0x8B80, SHADER_TYPE: 0x8B4F,
@@ -6414,9 +6413,16 @@
     if (context.__state.lost) return false;
     return true;
   }
-  function webglOwned(context, value, constructor, nullable = false) {
+  function webglOwned(context, value, constructor, nullable = false, allowDeleted = false) {
     if (value === null && nullable) return null;
-    if (!(value instanceof constructor) || value.__context !== context || value.__deleted) {
+    if (!(value instanceof constructor) || value.__context !== context || (!allowDeleted && value.__deleted)) {
+      webglError(context, WEBGL_CONSTANTS.INVALID_OPERATION);
+      return undefined;
+    }
+    return value;
+  }
+  function webglDeletable(context, value, constructor) {
+    if (!(value instanceof constructor) || value.__context !== context) {
       webglError(context, WEBGL_CONSTANTS.INVALID_OPERATION);
       return undefined;
     }
@@ -6633,8 +6639,9 @@
     }
     deleteBuffer(buffer) {
       if (buffer === null) return;
-      const value = webglOwned(this, buffer, WebGLBuffer);
+      const value = webglDeletable(this, buffer, WebGLBuffer);
       if (!value) return;
+      if (value.__deleted) return;
       value.__deleted = true;
       this.__state.buffers.delete(value);
       if (this.__state.arrayBuffer === value) this.__state.arrayBuffer = null;
@@ -6705,7 +6712,7 @@
     }
     getShaderParameter(shader, parameter) {
       if (!webglActive(this)) return null;
-      const value = webglOwned(this, shader, WebGLShader);
+      const value = webglOwned(this, shader, WebGLShader, false, true);
       if (!value) return null;
       if (parameter === WEBGL_CONSTANTS.COMPILE_STATUS) return value.__compiled;
       if (parameter === WEBGL_CONSTANTS.DELETE_STATUS) return value.__deleted;
@@ -6715,18 +6722,19 @@
     }
     getShaderInfoLog(shader) {
       if (!webglActive(this)) return null;
-      const value = webglOwned(this, shader, WebGLShader);
+      const value = webglOwned(this, shader, WebGLShader, false, true);
       return value ? value.__infoLog : null;
     }
     getShaderSource(shader) {
       if (!webglActive(this)) return null;
-      const value = webglOwned(this, shader, WebGLShader);
+      const value = webglOwned(this, shader, WebGLShader, false, true);
       return value ? value.__source : null;
     }
     deleteShader(shader) {
       if (shader === null) return;
-      const value = webglOwned(this, shader, WebGLShader);
+      const value = webglDeletable(this, shader, WebGLShader);
       if (!value) return;
+      if (value.__deleted) return;
       value.__deleted = true;
       this.__state.shaders.delete(value);
     }
@@ -6777,7 +6785,7 @@
     }
     getProgramParameter(program, parameter) {
       if (!webglActive(this)) return null;
-      const value = webglOwned(this, program, WebGLProgram);
+      const value = webglOwned(this, program, WebGLProgram, false, true);
       if (!value) return null;
       if (parameter === WEBGL_CONSTANTS.LINK_STATUS || parameter === WEBGL_CONSTANTS.VALIDATE_STATUS) return value.__linked;
       if (parameter === WEBGL_CONSTANTS.DELETE_STATUS) return value.__deleted;
@@ -6789,13 +6797,14 @@
     }
     getProgramInfoLog(program) {
       if (!webglActive(this)) return null;
-      const value = webglOwned(this, program, WebGLProgram);
+      const value = webglOwned(this, program, WebGLProgram, false, true);
       return value ? value.__infoLog : null;
     }
     deleteProgram(program) {
       if (program === null) return;
-      const value = webglOwned(this, program, WebGLProgram);
+      const value = webglDeletable(this, program, WebGLProgram);
       if (!value) return;
+      if (value.__deleted) return;
       value.__deleted = true;
       this.__state.programs.delete(value);
       if (this.__state.currentProgram === value) this.__state.currentProgram = null;
@@ -6889,7 +6898,7 @@
             continue;
           }
           const source = (sourceY * state.width + sourceX) * 4;
-          bytes.set(state.pixels.slice(source, source + 4), target);
+          bytes.set(state.pixels.subarray(source, source + 4), target);
         }
       }
     }
