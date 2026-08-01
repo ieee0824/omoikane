@@ -2484,7 +2484,10 @@
 
     get draggable() {
       const value = this.getAttribute("draggable");
-      if (value === null || value.toLowerCase() === "auto") return false;
+      if (value === null || value.toLowerCase() === "auto") {
+        const name = String(this.localName || "").toLowerCase();
+        return name === "img" || (name === "a" && this.hasAttribute("href"));
+      }
       return value.toLowerCase() === "true";
     }
 
@@ -9139,7 +9142,11 @@
     return pointerCaptureTarget(doc || document, 1) || target;
   }
   globalThis.__omoikane_release_pointer_capture = function(pointerId = 1) {
-    pointerCaptureTargets.delete(pointerCaptureKey(document, normalizePointerId(pointerId)));
+    const normalized = normalizePointerId(pointerId);
+    const suffix = ":" + normalized;
+    for (const key of pointerCaptureTargets.keys()) {
+      if (key.endsWith(suffix)) pointerCaptureTargets.delete(key);
+    }
   };
 
   function draggableAncestor(target) {

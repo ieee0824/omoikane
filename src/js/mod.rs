@@ -16194,6 +16194,9 @@ mod tests {
                 r#"(() => {
                 const source = document.getElementById('source');
                 const target = document.getElementById('target');
+                const image = document.createElement('img');
+                const link = document.createElement('a');
+                link.setAttribute('href', 'https://example.test/target');
                 source.draggable = true;
                 const transfer = new DataTransfer();
                 transfer.setData('text/plain', 'payload');
@@ -16201,14 +16204,14 @@ mod tests {
                 target.ondrop = event => { seen = [event instanceof DragEvent, event.dataTransfer === transfer, event.clientX, event.bubbles, event.cancelable]; };
                 const event = new DragEvent('drop', { bubbles: true, cancelable: true, dataTransfer: transfer, clientX: 12 });
                 target.dispatchEvent(event);
-                return [source.draggable, seen.join(':'), event.dataTransfer.getData('text/plain')].join('|');
+                return [source.draggable, image.draggable, link.draggable, seen.join(':'), event.dataTransfer.getData('text/plain')].join('|');
               })()"#,
             )
             .unwrap()
             .as_string()
             .unwrap()
             .to_std_string_escaped();
-        assert_eq!(value, "true|true:true:12:true:true|payload");
+        assert_eq!(value, "true|true|true|true:true:12:true:true|payload");
     }
 
     #[test]
