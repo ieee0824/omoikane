@@ -9266,9 +9266,9 @@
       updateDragInputTarget(finalTarget, init);
       const target = dragInputState.currentTarget;
       if (target && dragInputState.dropAllowed) {
-        target.dispatchEvent(dragEvent("drop", init, dataTransfer, source));
+        target.dispatchEvent(dragEvent("drop", init, dataTransfer));
       }
-      source.dispatchEvent(dragEvent("dragend", init, dataTransfer, target, false));
+      source.dispatchEvent(dragEvent("dragend", init, dataTransfer, null, false));
       resetDragInputState();
       return true;
     }
