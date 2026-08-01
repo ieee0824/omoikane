@@ -28991,6 +28991,77 @@ b</textarea></form>"#);
     }
 
     #[test]
+    fn svg_geometry_interfaces_expose_bbox_ctm_points_and_idl_shapes() {
+        let mut runtime = JsRuntime::new().unwrap();
+        let actual = eval_str(
+            &mut runtime,
+            r#"(() => {
+                const ns = 'http://www.w3.org/2000/svg';
+                const svg = document.createElementNS(ns, 'svg');
+                svg.setAttribute('viewBox', '10 20 100 50');
+                svg.setAttribute('width', '200');
+                svg.setAttribute('height', '100');
+                const rect = document.createElementNS(ns, 'rect');
+                rect.setAttribute('x', '5');
+                rect.setAttribute('y', '6');
+                rect.setAttribute('width', '20');
+                rect.setAttribute('height', '10');
+                rect.setAttribute('transform', 'translate(3 4)');
+                const circle = document.createElementNS(ns, 'circle');
+                circle.setAttribute('cx', '40');
+                circle.setAttribute('cy', '30');
+                circle.setAttribute('r', '5');
+                const path = document.createElementNS(ns, 'path');
+                path.setAttribute('d', 'M 1 2 L 11 12');
+                svg.appendChild(rect);
+                svg.appendChild(circle);
+                svg.appendChild(path);
+                document.body.appendChild(svg);
+                const box = rect.getBBox();
+                const circleBox = circle.getBBox();
+                const pathBox = path.getBBox();
+                const ctm = rect.getCTM();
+                const defaultStrokeBox = rect.getBBox({ stroke: true });
+                rect.setAttribute('stroke', 'red');
+                rect.setAttribute('stroke-width', '4');
+                const strokeBox = rect.getBBox({ stroke: true });
+                const matrix = new DOMMatrix([1, 2, 3, 4, 5, 6]);
+                const point = svg.createSVGPoint();
+                point.x = 1;
+                point.y = 2;
+                const transformed = point.matrixTransform(ctm);
+                const widthDescriptor = Object.getOwnPropertyDescriptor(SVGRectElement.prototype, 'width');
+                return [
+                    rect instanceof SVGElement,
+                    rect instanceof SVGGraphicsElement,
+                    rect instanceof SVGGeometryElement,
+                    rect instanceof SVGRectElement,
+                    circle instanceof SVGCircleElement,
+                    path instanceof SVGPathElement,
+                    Object.prototype.toString.call(rect),
+                    Object.prototype.toString.call(box),
+                    Object.prototype.toString.call(point),
+                    box.x, box.y, box.width, box.height,
+                    circleBox.x, circleBox.y, circleBox.width, circleBox.height,
+                    pathBox.x, pathBox.y, pathBox.width, pathBox.height,
+                    ctm.a, ctm.d, ctm.e, ctm.f,
+                    transformed.x, transformed.y,
+                    matrix.m12, matrix.m21,
+                    defaultStrokeBox.width, strokeBox.width,
+                    svg.createSVGRect().width,
+                    widthDescriptor.get !== undefined && widthDescriptor.set === undefined,
+                    typeof SVGGraphicsElement.prototype.getBBox,
+                    typeof SVGSVGElement.prototype.createSVGPoint
+                ].join('|');
+            })()"#,
+        );
+        assert_eq!(
+            actual,
+            "true|true|true|true|true|true|[object SVGRectElement]|[object SVGRect]|[object SVGPoint]|5|6|20|10|35|25|10|10|1|2|10|10|2|2|-14|-32|-12|-28|2|3|20|24|0|true|function|function"
+        );
+    }
+
+    #[test]
     fn embedded_svg_documents_are_exposed_by_iframe_and_object() {
         let port = spawn_static_http_server(
             "image/svg+xml",

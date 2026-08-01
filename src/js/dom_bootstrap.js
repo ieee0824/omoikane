@@ -7265,22 +7265,612 @@
     }
   }
 
-  // Minimal SVG DOM layer. Rendering remains owned by src/svg; these wrappers
-  // only provide the interfaces exercised by script and Acid3.
+  // SVG DOM layer. Painting remains owned by src/svg, while these wrappers
+  // expose the deterministic geometry interfaces used by scripts.  The
+  // native DOM deliberately keeps no layout-specific SVG state, so geometry
+  // is derived from the element attributes and the SVG ancestor chain here.
+  function finiteSvgNumber(value, fallback = 0) {
+    const number = Number(value);
+    return Number.isFinite(number) ? number : fallback;
+  }
+
+  function svgAttributeNumber(element, name, fallback = 0) {
+    const value = element && element.getAttribute(name);
+    if (value === null || String(value).trim() === "") return fallback;
+    const number = Number.parseFloat(String(value));
+    return Number.isFinite(number) ? number : fallback;
+  }
+
+  function svgNumberList(value) {
+    if (value === null || value === undefined) return [];
+    const numbers = String(value).match(/[+-]?(?:\d*\.\d+|\d+\.?)(?:[eE][+-]?\d+)?/g);
+    return numbers ? numbers.map(number => Number(number)).filter(Number.isFinite) : [];
+  }
+
+  function svgRectBounds(points) {
+    if (!points || points.length === 0) return new SVGRect();
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    for (const point of points) {
+      const x = finiteSvgNumber(point[0]);
+      const y = finiteSvgNumber(point[1]);
+      minX = Math.min(minX, x);
+      minY = Math.min(minY, y);
+      maxX = Math.max(maxX, x);
+      maxY = Math.max(maxY, y);
+    }
+    return new SVGRect(minX, minY, Math.max(0, maxX - minX), Math.max(0, maxY - minY));
+  }
+
+  function svgUnionRect(left, right) {
+    if (!left) return right;
+    if (!right) return left;
+    const minX = Math.min(left.x, right.x);
+    const minY = Math.min(left.y, right.y);
+    const maxX = Math.max(left.x + left.width, right.x + right.width);
+    const maxY = Math.max(left.y + left.height, right.y + right.height);
+    return new SVGRect(minX, minY, Math.max(0, maxX - minX), Math.max(0, maxY - minY));
+  }
+
+  class SVGRect {
+    constructor(x = 0, y = 0, width = 0, height = 0) {
+      this.x = finiteSvgNumber(x);
+      this.y = finiteSvgNumber(y);
+      this.width = Math.max(0, finiteSvgNumber(width));
+      this.height = Math.max(0, finiteSvgNumber(height));
+    }
+    get [Symbol.toStringTag]() { return "SVGRect"; }
+  }
+
+  class SVGPoint {
+    constructor(x = 0, y = 0) {
+      this.x = finiteSvgNumber(x);
+      this.y = finiteSvgNumber(y);
+    }
+    matrixTransform(matrix) {
+      const m = svgMatrixFrom(matrix);
+      return new DOMPoint(
+        m.a * this.x + m.c * this.y + m.e,
+        m.b * this.x + m.d * this.y + m.f,
+      );
+    }
+    get [Symbol.toStringTag]() { return "SVGPoint"; }
+  }
+
+  class DOMPoint extends SVGPoint {
+    get [Symbol.toStringTag]() { return "DOMPoint"; }
+  }
+
+  function svgMatrixFrom(value) {
+    if (value instanceof DOMMatrix) return value;
+    if (value && typeof value === "object") {
+      return new DOMMatrix([
+        finiteSvgNumber(value.a, 1), finiteSvgNumber(value.b),
+        finiteSvgNumber(value.c), finiteSvgNumber(value.d, 1),
+        finiteSvgNumber(value.e), finiteSvgNumber(value.f),
+      ]);
+    }
+    return new DOMMatrix(value);
+  }
+
+  function multiplySvgMatrices(left, right) {
+    return [
+      left.a * right.a + left.c * right.b,
+      left.b * right.a + left.d * right.b,
+      left.a * right.c + left.c * right.d,
+      left.b * right.c + left.d * right.d,
+      left.a * right.e + left.c * right.f + left.e,
+      left.b * right.e + left.d * right.f + left.f,
+    ];
+  }
+
+  class DOMMatrix {
+    constructor(init) {
+      let values;
+      if (init === undefined || init === null) {
+        values = [1, 0, 0, 1, 0, 0];
+      } else if (typeof init === "string") {
+        values = svgTransformMatrix(init).toArray();
+      } else if (Array.isArray(init) || ArrayBuffer.isView(init)) {
+        values = Array.from(init).map(value => finiteSvgNumber(value));
+        if (values.length === 16) {
+          values = [values[0], values[1], values[4], values[5], values[12], values[13]];
+        }
+        if (values.length < 6) values = [1, 0, 0, 1, 0, 0];
+      } else if (typeof init === "object") {
+        values = [
+          finiteSvgNumber(init.a, 1), finiteSvgNumber(init.b),
+          finiteSvgNumber(init.c), finiteSvgNumber(init.d, 1),
+          finiteSvgNumber(init.e), finiteSvgNumber(init.f),
+        ];
+      } else {
+        values = [1, 0, 0, 1, 0, 0];
+      }
+      [this.a, this.b, this.c, this.d, this.e, this.f] = values.slice(0, 6);
+    }
+
+    get m11() { return this.a; }
+    set m11(value) { this.a = finiteSvgNumber(value); }
+    get m12() { return this.b; }
+    set m12(value) { this.b = finiteSvgNumber(value); }
+    get m21() { return this.c; }
+    set m21(value) { this.c = finiteSvgNumber(value); }
+    get m22() { return this.d; }
+    set m22(value) { this.d = finiteSvgNumber(value); }
+    get m41() { return this.e; }
+    set m41(value) { this.e = finiteSvgNumber(value); }
+    get m42() { return this.f; }
+    set m42(value) { this.f = finiteSvgNumber(value); }
+    get is2D() { return true; }
+    get isIdentity() {
+      return this.a === 1 && this.b === 0 && this.c === 0 && this.d === 1 &&
+        this.e === 0 && this.f === 0;
+    }
+    multiply(other) {
+      const rhs = svgMatrixFrom(other);
+      return new DOMMatrix(multiplySvgMatrices(this, rhs));
+    }
+    translate(tx, ty = 0) {
+      return this.multiply(new DOMMatrix([1, 0, 0, 1, finiteSvgNumber(tx), finiteSvgNumber(ty)]));
+    }
+    scale(scaleX, scaleY = scaleX) {
+      return this.multiply(new DOMMatrix([
+        finiteSvgNumber(scaleX), 0, 0, finiteSvgNumber(scaleY), 0, 0,
+      ]));
+    }
+    rotate(angle = 0) {
+      const radians = finiteSvgNumber(angle) * Math.PI / 180;
+      const cosine = Math.cos(radians), sine = Math.sin(radians);
+      return this.multiply(new DOMMatrix([cosine, sine, -sine, cosine, 0, 0]));
+    }
+    inverse() {
+      const determinant = this.a * this.d - this.b * this.c;
+      if (determinant === 0) {
+        throw new DOMException("The matrix is not invertible.", "InvalidStateError");
+      }
+      return new DOMMatrix([
+        this.d / determinant, -this.b / determinant,
+        -this.c / determinant, this.a / determinant,
+        (this.c * this.f - this.d * this.e) / determinant,
+        (this.b * this.e - this.a * this.f) / determinant,
+      ]);
+    }
+    transformPoint(point) {
+      return new DOMPoint(
+        this.a * finiteSvgNumber(point && point.x) + this.c * finiteSvgNumber(point && point.y) + this.e,
+        this.b * finiteSvgNumber(point && point.x) + this.d * finiteSvgNumber(point && point.y) + this.f,
+      );
+    }
+    toArray() { return [this.a, this.b, this.c, this.d, this.e, this.f]; }
+    get [Symbol.toStringTag]() { return "DOMMatrix"; }
+  }
+
+  class SVGMatrix extends DOMMatrix {
+    get [Symbol.toStringTag]() { return "SVGMatrix"; }
+  }
+
+  function svgTransformMatrix(value) {
+    const result = new DOMMatrix();
+    const source = String(value || "");
+    const expression = /([a-zA-Z]+)\s*\(([^)]*)\)/g;
+    let match;
+    while ((match = expression.exec(source))) {
+      const name = match[1].toLowerCase();
+      const values = svgNumberList(match[2]);
+      let operation = null;
+      if (name === "matrix" && values.length >= 6) {
+        operation = new DOMMatrix(values.slice(0, 6));
+      } else if (name === "translate" && values.length >= 1) {
+        operation = new DOMMatrix([1, 0, 0, 1, values[0], values[1] || 0]);
+      } else if (name === "scale" && values.length >= 1) {
+        operation = new DOMMatrix([values[0], 0, 0, values.length > 1 ? values[1] : values[0], 0, 0]);
+      } else if (name === "rotate" && values.length >= 1) {
+        operation = new DOMMatrix().rotate(values[0]);
+        if (values.length >= 3) {
+          operation = new DOMMatrix().translate(values[1], values[2])
+            .multiply(operation)
+            .translate(-values[1], -values[2]);
+        }
+      } else if (name === "skewx" && values.length >= 1) {
+        operation = new DOMMatrix([1, 0, Math.tan(values[0] * Math.PI / 180), 1, 0, 0]);
+      } else if (name === "skewy" && values.length >= 1) {
+        operation = new DOMMatrix([1, Math.tan(values[0] * Math.PI / 180), 0, 1, 0, 0]);
+      }
+      if (operation) {
+        // SVG transform lists are matrix products in source order.
+        const next = multiplySvgMatrices(result, operation);
+        [result.a, result.b, result.c, result.d, result.e, result.f] = next;
+      }
+    }
+    return result;
+  }
+
+  function svgTransformForElement(element) {
+    let matrix = new DOMMatrix();
+    const tag = String(element && element.localName || "").toLowerCase();
+    if (tag === "svg") {
+      matrix = matrix.translate(svgAttributeNumber(element, "x"), svgAttributeNumber(element, "y"));
+    }
+    const transform = element && element.getAttribute("transform");
+    if (transform) matrix = matrix.multiply(svgTransformMatrix(transform));
+    if (tag === "svg") {
+      const values = svgNumberList(element.getAttribute("viewBox") || element.getAttribute("viewbox"));
+      if (values.length >= 4 && values[2] > 0 && values[3] > 0) {
+        const width = svgAttributeNumber(element, "width", values[2]);
+        const height = svgAttributeNumber(element, "height", values[3]);
+        if (width > 0 && height > 0) {
+          matrix = matrix.multiply(new DOMMatrix([
+            width / values[2], 0, 0, height / values[3],
+            -values[0] * width / values[2], -values[1] * height / values[3],
+          ]));
+        }
+      }
+    }
+    return matrix;
+  }
+
+  function svgTransformRect(rect, matrix) {
+    if (!rect) return null;
+    return svgRectBounds([
+      [matrix.a * rect.x + matrix.c * rect.y + matrix.e,
+        matrix.b * rect.x + matrix.d * rect.y + matrix.f],
+      [matrix.a * (rect.x + rect.width) + matrix.c * rect.y + matrix.e,
+        matrix.b * (rect.x + rect.width) + matrix.d * rect.y + matrix.f],
+      [matrix.a * rect.x + matrix.c * (rect.y + rect.height) + matrix.e,
+        matrix.b * rect.x + matrix.d * (rect.y + rect.height) + matrix.f],
+      [matrix.a * (rect.x + rect.width) + matrix.c * (rect.y + rect.height) + matrix.e,
+        matrix.b * (rect.x + rect.width) + matrix.d * (rect.y + rect.height) + matrix.f],
+    ]);
+  }
+
+  function svgPathPoints(value) {
+    const tokens = [];
+    const expression = /([a-zA-Z])|([+-]?(?:\d*\.\d+|\d+\.?)(?:[eE][+-]?\d+)?)/g;
+    let match;
+    while ((match = expression.exec(String(value || "")))) {
+      tokens.push(match[1] ? { command: match[1] } : { number: Number(match[2]) });
+    }
+    const parameterCount = { m: 2, l: 2, h: 1, v: 1, c: 6, s: 4, q: 4, t: 2, a: 7 };
+    const subpaths = [];
+    let points = null;
+    let cursorX = 0, cursorY = 0, startX = 0, startY = 0;
+    let command = null, previousControl = null, previousCommand = null;
+    const add = (x, y) => {
+      if (!points) { points = []; subpaths.push(points); }
+      points.push([x, y]);
+    };
+    const addCubic = (x0, y0, x1, y1, x2, y2, x3, y3) => {
+      for (let step = 1; step <= 20; step++) {
+        const t = step / 20, u = 1 - t;
+        add(
+          u * u * u * x0 + 3 * u * u * t * x1 + 3 * u * t * t * x2 + t * t * t * x3,
+          u * u * u * y0 + 3 * u * u * t * y1 + 3 * u * t * t * y2 + t * t * t * y3,
+        );
+      }
+    };
+    const addQuadratic = (x0, y0, x1, y1, x2, y2) => {
+      for (let step = 1; step <= 20; step++) {
+        const t = step / 20, u = 1 - t;
+        add(u * u * x0 + 2 * u * t * x1 + t * t * x2,
+          u * u * y0 + 2 * u * t * y1 + t * t * y2);
+      }
+    };
+    while (tokens.length) {
+      if (tokens[0].command) {
+        command = tokens.shift().command;
+        if (command === "Z" || command === "z") {
+          if (points && points.length) add(startX, startY);
+          cursorX = startX; cursorY = startY;
+          previousControl = null; previousCommand = command;
+          command = null;
+        }
+        continue;
+      }
+      if (!command) { tokens.shift(); continue; }
+      const lower = command.toLowerCase();
+      const count = parameterCount[lower];
+      if (!count || tokens.length < count || tokens.slice(0, count).some(token => token.number === undefined)) {
+        command = null;
+        continue;
+      }
+      const values = tokens.splice(0, count).map(token => token.number);
+      const relative = command === lower;
+      const x = value => relative ? cursorX + value : value;
+      const y = value => relative ? cursorY + value : value;
+      const oldX = cursorX, oldY = cursorY;
+      if (lower === "m") {
+        const nextX = x(values[0]), nextY = y(values[1]);
+        points = []; subpaths.push(points); points.push([nextX, nextY]);
+        cursorX = startX = nextX; cursorY = startY = nextY;
+        command = relative ? "l" : "L";
+        previousControl = null; previousCommand = "m";
+      } else if (lower === "l") {
+        cursorX = x(values[0]); cursorY = y(values[1]); add(cursorX, cursorY);
+        previousControl = null; previousCommand = lower;
+      } else if (lower === "h") {
+        cursorX = x(values[0]); add(cursorX, cursorY);
+        previousControl = null; previousCommand = lower;
+      } else if (lower === "v") {
+        cursorY = y(values[0]); add(cursorX, cursorY);
+        previousControl = null; previousCommand = lower;
+      } else if (lower === "c") {
+        const x1 = x(values[0]), y1 = y(values[1]);
+        const x2 = x(values[2]), y2 = y(values[3]);
+        cursorX = x(values[4]); cursorY = y(values[5]);
+        addCubic(oldX, oldY, x1, y1, x2, y2, cursorX, cursorY);
+        previousControl = [x2, y2]; previousCommand = lower;
+      } else if (lower === "s") {
+        const x1 = (previousCommand === "c" || previousCommand === "s") && previousControl
+          ? 2 * oldX - previousControl[0] : oldX;
+        const y1 = (previousCommand === "c" || previousCommand === "s") && previousControl
+          ? 2 * oldY - previousControl[1] : oldY;
+        const x2 = x(values[0]), y2 = y(values[1]);
+        cursorX = x(values[2]); cursorY = y(values[3]);
+        addCubic(oldX, oldY, x1, y1, x2, y2, cursorX, cursorY);
+        previousControl = [x2, y2]; previousCommand = lower;
+      } else if (lower === "q") {
+        const x1 = x(values[0]), y1 = y(values[1]);
+        cursorX = x(values[2]); cursorY = y(values[3]);
+        addQuadratic(oldX, oldY, x1, y1, cursorX, cursorY);
+        previousControl = [x1, y1]; previousCommand = lower;
+      } else if (lower === "t") {
+        const x1 = (previousCommand === "q" || previousCommand === "t") && previousControl
+          ? 2 * oldX - previousControl[0] : oldX;
+        const y1 = (previousCommand === "q" || previousCommand === "t") && previousControl
+          ? 2 * oldY - previousControl[1] : oldY;
+        cursorX = x(values[0]); cursorY = y(values[1]);
+        addQuadratic(oldX, oldY, x1, y1, cursorX, cursorY);
+        previousControl = [x1, y1]; previousCommand = lower;
+      } else if (lower === "a") {
+        const rx = Math.abs(values[0]), ry = Math.abs(values[1]);
+        cursorX = x(values[5]); cursorY = y(values[6]);
+        // The exact elliptical-arc extrema are unnecessary for the DOM
+        // surface's deterministic bounds; include the endpoint and the
+        // radius envelope so common icon paths remain conservative.
+        add(oldX - rx, oldY - ry); add(oldX + rx, oldY + ry);
+        add(cursorX - rx, cursorY - ry); add(cursorX + rx, cursorY + ry);
+        previousControl = null; previousCommand = lower;
+      }
+    }
+    return subpaths;
+  }
+
+  function svgShapeBBox(element) {
+    const tag = String(element && element.localName || "").toLowerCase();
+    if (tag === "rect") {
+      return new SVGRect(
+        svgAttributeNumber(element, "x"), svgAttributeNumber(element, "y"),
+        Math.max(0, svgAttributeNumber(element, "width")),
+        Math.max(0, svgAttributeNumber(element, "height")),
+      );
+    }
+    if (tag === "circle") {
+      const radius = Math.max(0, svgAttributeNumber(element, "r"));
+      return new SVGRect(
+        svgAttributeNumber(element, "cx") - radius,
+        svgAttributeNumber(element, "cy") - radius,
+        radius * 2, radius * 2,
+      );
+    }
+    if (tag === "ellipse") {
+      const rx = Math.max(0, svgAttributeNumber(element, "rx"));
+      const ry = Math.max(0, svgAttributeNumber(element, "ry"));
+      return new SVGRect(svgAttributeNumber(element, "cx") - rx,
+        svgAttributeNumber(element, "cy") - ry, rx * 2, ry * 2);
+    }
+    if (tag === "line") {
+      return svgRectBounds([
+        [svgAttributeNumber(element, "x1"), svgAttributeNumber(element, "y1")],
+        [svgAttributeNumber(element, "x2"), svgAttributeNumber(element, "y2")],
+      ]);
+    }
+    if (tag === "polyline" || tag === "polygon") {
+      const values = svgNumberList(element.getAttribute("points"));
+      const points = [];
+      for (let index = 0; index + 1 < values.length; index += 2) {
+        points.push([values[index], values[index + 1]]);
+      }
+      return svgRectBounds(points);
+    }
+    if (tag === "path") {
+      const points = [];
+      for (const subpath of svgPathPoints(element.getAttribute("d"))) points.push(...subpath);
+      return svgRectBounds(points);
+    }
+    return null;
+  }
+
+  function svgElementBBox(element) {
+    const own = svgShapeBBox(element);
+    if (own) return own;
+    let result = null;
+    for (const child of element && element.children || []) {
+      if (!(child instanceof SVGElement)) continue;
+      const childBox = svgElementBBox(child);
+      if (childBox) result = svgUnionRect(result, svgTransformRect(childBox, svgTransformForElement(child)));
+    }
+    return result || new SVGRect();
+  }
+
+  function svgAncestorChain(element) {
+    const chain = [];
+    let current = element;
+    while (current && current.nodeType === 1 && current.namespaceURI === SVG_NAMESPACE) {
+      chain.push(current);
+      current = current.parentNode;
+    }
+    return chain.reverse();
+  }
+
   class SVGElement extends Element {}
-  class SVGSVGElement extends SVGElement {}
-  class SVGRectElement extends SVGElement {
-    get width() {
-      if (!this.__width) this.__width = {};
-      return this.__width;
+  class SVGGraphicsElement extends SVGElement {
+    getBBox(options = {}) {
+      const box = svgElementBBox(this);
+      const stroke = this.getAttribute("stroke") || (this.style && this.style.stroke) || "";
+      if (options && options.stroke && stroke && String(stroke).toLowerCase() !== "none") {
+        const width = Math.max(0, svgAttributeNumber(this, "stroke-width", 1));
+        return new SVGRect(box.x - width / 2, box.y - width / 2,
+          box.width + width, box.height + width);
+      }
+      return box;
+    }
+    getCTM() {
+      const chain = svgAncestorChain(this);
+      if (!chain.length) return null;
+      let matrix = new DOMMatrix();
+      for (const element of chain) matrix = matrix.multiply(svgTransformForElement(element));
+      return matrix;
+    }
+    getScreenCTM() { return this.getCTM(); }
+  }
+  class SVGGeometryElement extends SVGGraphicsElement {
+    isPointInFill(point) {
+      const box = this.getBBox();
+      return !!point && point.x >= box.x && point.x <= box.x + box.width &&
+        point.y >= box.y && point.y <= box.y + box.height;
+    }
+    isPointInStroke(point) {
+      const box = this.getBBox({ stroke: true });
+      return !!point && point.x >= box.x && point.x <= box.x + box.width &&
+        point.y >= box.y && point.y <= box.y + box.height;
     }
   }
-  class SVGTextContentElement extends SVGElement {
+  class SVGSVGElement extends SVGGraphicsElement {
+    createSVGPoint() { return new SVGPoint(); }
+    createSVGRect() { return new SVGRect(); }
+    getElementById(id) {
+      const wanted = String(id);
+      let result = null;
+      const visit = node => {
+        for (const child of node.children || []) {
+          if (child.getAttribute("id") === wanted) { result = child; return; }
+          visit(child);
+          if (result) return;
+        }
+      };
+      visit(this);
+      return result;
+    }
+    get viewBox() {
+      if (!this.__viewBox) {
+        this.__viewBox = new SVGAnimatedRect(this);
+      }
+      return this.__viewBox;
+    }
+  }
+  class SVGRectElement extends SVGGeometryElement {}
+  class SVGCircleElement extends SVGGeometryElement {}
+  class SVGEllipseElement extends SVGGeometryElement {}
+  class SVGLineElement extends SVGGeometryElement {}
+  class SVGPathElement extends SVGGeometryElement {}
+  class SVGPolylineElement extends SVGGeometryElement {}
+  class SVGPolygonElement extends SVGGeometryElement {}
+  class SVGTextContentElement extends SVGGraphicsElement {
     getNumberOfChars() {
       return String(this.textContent || "").length;
     }
   }
   class SVGTextElement extends SVGTextContentElement {}
+
+  function svgViewBoxValues(element) {
+    const values = svgNumberList(element.getAttribute("viewBox") || element.getAttribute("viewbox"));
+    return [values[0] || 0, values[1] || 0, values[2] || 0, values[3] || 0];
+  }
+
+  function svgWriteViewBoxValue(element, index, value) {
+    const values = svgViewBoxValues(element);
+    values[index] = finiteSvgNumber(value);
+    element.setAttribute("viewBox", values.join(" "));
+  }
+
+  function svgMakeViewBoxValue(element, writable) {
+    const value = new SVGRect();
+    const names = ["x", "y", "width", "height"];
+    for (let index = 0; index < names.length; index++) {
+      const descriptor = {
+        configurable: true,
+        enumerable: true,
+        get: () => svgViewBoxValues(element)[index],
+      };
+      if (writable) descriptor.set = next => svgWriteViewBoxValue(element, index, next);
+      Object.defineProperty(value, names[index], descriptor);
+    }
+    return value;
+  }
+
+  class SVGAnimatedRect {
+    constructor(element) {
+      Object.defineProperty(this, "baseVal", {
+        configurable: true, enumerable: true, writable: false,
+        value: svgMakeViewBoxValue(element, true),
+      });
+      Object.defineProperty(this, "animVal", {
+        configurable: true, enumerable: true, writable: false,
+        value: svgMakeViewBoxValue(element, false),
+      });
+    }
+    get [Symbol.toStringTag]() { return "SVGAnimatedRect"; }
+  }
+
+  class SVGAnimatedLength {
+    constructor(element, name) {
+      this.__element = element;
+      this.__name = name;
+      const value = () => svgAttributeNumber(this.__element, this.__name);
+      const baseVal = {};
+      Object.defineProperty(baseVal, "value", {
+        configurable: true,
+        enumerable: true,
+        get: value,
+        set: next => this.__element.setAttribute(this.__name, String(finiteSvgNumber(next))),
+      });
+      Object.defineProperty(baseVal, "valueAsString", {
+        configurable: true, enumerable: true,
+        get: () => this.__element.getAttribute(this.__name) || "0",
+        set: next => this.__element.setAttribute(this.__name, String(next)),
+      });
+      Object.defineProperty(this, "baseVal", {
+        configurable: true, enumerable: true, writable: false, value: baseVal,
+      });
+      Object.defineProperty(this, "animVal", {
+        configurable: true, enumerable: true, writable: false, value: baseVal,
+      });
+    }
+    get [Symbol.toStringTag]() { return "SVGAnimatedLength"; }
+  }
+
+  function defineSvgAnimatedLengthProperties(ctor, names) {
+    for (const name of names) {
+      Object.defineProperty(ctor.prototype, name, {
+        configurable: true,
+        enumerable: false,
+        get() {
+          const key = "__animated_" + name;
+          if (!this[key]) this[key] = new SVGAnimatedLength(this, name);
+          return this[key];
+        },
+      });
+    }
+  }
+
+  defineSvgAnimatedLengthProperties(SVGRectElement, ["x", "y", "width", "height", "rx", "ry"]);
+  defineSvgAnimatedLengthProperties(SVGCircleElement, ["cx", "cy", "r"]);
+  defineSvgAnimatedLengthProperties(SVGEllipseElement, ["cx", "cy", "rx", "ry"]);
+  defineSvgAnimatedLengthProperties(SVGLineElement, ["x1", "y1", "x2", "y2"]);
+  defineSvgAnimatedLengthProperties(SVGSVGElement, ["x", "y", "width", "height"]);
+
+  for (const [ctor, tag] of [
+    [SVGElement, "SVGElement"], [SVGGraphicsElement, "SVGGraphicsElement"],
+    [SVGGeometryElement, "SVGGeometryElement"], [SVGSVGElement, "SVGSVGElement"],
+    [SVGRectElement, "SVGRectElement"], [SVGCircleElement, "SVGCircleElement"],
+    [SVGEllipseElement, "SVGEllipseElement"], [SVGLineElement, "SVGLineElement"],
+    [SVGPathElement, "SVGPathElement"], [SVGPolylineElement, "SVGPolylineElement"],
+    [SVGPolygonElement, "SVGPolygonElement"], [SVGTextContentElement, "SVGTextContentElement"],
+    [SVGTextElement, "SVGTextElement"],
+  ]) {
+    Object.defineProperty(ctor.prototype, Symbol.toStringTag, {
+      configurable: true, value: tag,
+    });
+  }
 
   // HTMLOrSVGElement and ElementCSSInlineStyle are shared by HTML and SVG
   // elements, but not by arbitrary Node objects.
@@ -7317,7 +7907,21 @@
 
   const SVG_ELEMENT_CTORS = {
     svg: SVGSVGElement,
+    g: SVGGraphicsElement,
+    a: SVGGraphicsElement,
+    defs: SVGGraphicsElement,
+    symbol: SVGGraphicsElement,
+    use: SVGGraphicsElement,
+    image: SVGGraphicsElement,
+    foreignobject: SVGGraphicsElement,
+    switch: SVGGraphicsElement,
     rect: SVGRectElement,
+    circle: SVGCircleElement,
+    ellipse: SVGEllipseElement,
+    line: SVGLineElement,
+    path: SVGPathElement,
+    polyline: SVGPolylineElement,
+    polygon: SVGPolygonElement,
     text: SVGTextElement,
   };
 
@@ -8254,8 +8858,23 @@
   };
   globalThis.Audio.prototype = HTMLAudioElement.prototype;
   globalThis.SVGElement = SVGElement;
+  globalThis.SVGGraphicsElement = SVGGraphicsElement;
+  globalThis.SVGGeometryElement = SVGGeometryElement;
   globalThis.SVGSVGElement = SVGSVGElement;
+  globalThis.SVGRect = SVGRect;
+  globalThis.SVGPoint = SVGPoint;
+  globalThis.SVGMatrix = SVGMatrix;
+  globalThis.SVGAnimatedLength = SVGAnimatedLength;
+  globalThis.SVGAnimatedRect = SVGAnimatedRect;
+  globalThis.DOMPoint = DOMPoint;
+  globalThis.DOMMatrix = DOMMatrix;
   globalThis.SVGRectElement = SVGRectElement;
+  globalThis.SVGCircleElement = SVGCircleElement;
+  globalThis.SVGEllipseElement = SVGEllipseElement;
+  globalThis.SVGLineElement = SVGLineElement;
+  globalThis.SVGPathElement = SVGPathElement;
+  globalThis.SVGPolylineElement = SVGPolylineElement;
+  globalThis.SVGPolygonElement = SVGPolygonElement;
   globalThis.SVGTextContentElement = SVGTextContentElement;
   globalThis.SVGTextElement = SVGTextElement;
   globalThis.Event = Event;
