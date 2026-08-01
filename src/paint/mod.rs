@@ -455,6 +455,15 @@ impl Canvas {
         self.pixels[offset + 3] = color.a;
     }
 
+    /// Alpha-blends one pixel over the existing canvas contents.
+    pub(crate) fn blend_pixel(&mut self, x: u32, y: u32, color: Color) {
+        if x >= self.width || y >= self.height || color.a == 0 {
+            return;
+        }
+        let offset = (y as usize * self.width as usize + x as usize) * 4;
+        blend_pixel(&mut self.pixels[offset..offset + 4], color);
+    }
+
     /// Returns the pixel color at `(x, y)`, if in bounds.
     pub fn pixel(&self, x: u32, y: u32) -> Option<Color> {
         if x >= self.width || y >= self.height {
