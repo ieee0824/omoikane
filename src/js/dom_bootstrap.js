@@ -7841,8 +7841,11 @@
   }
 
   function cryptoBytesToBase64Url(bytes) {
-    let binary = "";
-    for (const byte of bytes) binary += String.fromCharCode(byte);
+    const chunks = [];
+    for (let offset = 0; offset < bytes.length; offset += 0x8000) {
+      chunks.push(String.fromCharCode(...bytes.slice(offset, offset + 0x8000)));
+    }
+    const binary = chunks.join("");
     return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
   }
 
@@ -8015,9 +8018,11 @@
             }
           }
           if (keyData.key_ops !== undefined) {
-            if (!Array.isArray(keyData.key_ops) ||
-                keyData.key_ops.some(usage => !cryptoHmacUsages.includes(String(usage))) ||
-                usages.some(usage => !keyData.key_ops.includes(usage))) {
+            const normalizedKeyOps = Array.isArray(keyData.key_ops)
+              ? keyData.key_ops.map(usage => String(usage)) : null;
+            if (normalizedKeyOps === null ||
+                normalizedKeyOps.some(usage => !cryptoHmacUsages.includes(usage)) ||
+                usages.some(usage => !normalizedKeyOps.includes(usage))) {
               throw new DOMException("The JWK key operations do not permit this key.", "DataError");
             }
           }
