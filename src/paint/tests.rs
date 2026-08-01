@@ -5913,6 +5913,167 @@ fn clip_path_inset_clips_descendants() {
     assert_eq!(count_pixels(&canvas, Color::rgb(0, 0, 255)), 40 * 40);
 }
 
+#[test]
+fn clip_path_circle_clips_corners_and_keeps_center() {
+    let canvas = paint_clip_path_document(
+        ".target { width: 20px; height: 20px; background: red; \
+         clip-path: circle(50% at 50% 50%); }",
+        "<div class='target'></div>",
+        20.0,
+        20.0,
+    );
+
+    assert_eq!(canvas.pixel(10, 10), Some(Color::rgb(255, 0, 0)));
+    assert_eq!(canvas.pixel(0, 0), Some(Color::rgba(0, 0, 0, 0)));
+    assert_eq!(canvas.pixel(19, 0), Some(Color::rgba(0, 0, 0, 0)));
+    assert_eq!(canvas.pixel(0, 19), Some(Color::rgba(0, 0, 0, 0)));
+    assert_eq!(canvas.pixel(19, 19), Some(Color::rgba(0, 0, 0, 0)));
+}
+
+#[test]
+fn clip_path_circle_keyword_radius_uses_positioned_center() {
+    let canvas = paint_clip_path_document(
+        ".target { width: 10px; height: 4px; background: red; \
+         clip-path: circle(closest-side at 25% 50%); }",
+        "<div class='target'></div>",
+        10.0,
+        4.0,
+    );
+
+    // The center is (2.5, 2), so closest-side is the 2px distance to the
+    // top/bottom edges rather than half the element's width/height.
+    assert_eq!(canvas.pixel(2, 1), Some(Color::rgb(255, 0, 0)));
+    assert_eq!(canvas.pixel(5, 1), Some(Color::rgba(0, 0, 0, 0)));
+}
+
+#[test]
+fn clip_path_shape_bounds_cover_geometry_outside_border_box() {
+    let border_box = Rect {
+        x: 10.0,
+        y: 20.0,
+        width: 20.0,
+        height: 10.0,
+    };
+    let cases = [
+        (
+            "circle(200% at center)",
+            Rect {
+                x: 0.0,
+                y: 5.0,
+                width: 40.0,
+                height: 40.0,
+            },
+        ),
+        (
+            "ellipse(200% 300% at center)",
+            Rect {
+                x: -20.0,
+                y: -5.0,
+                width: 80.0,
+                height: 60.0,
+            },
+        ),
+        (
+            "polygon(-100% -100%, 300% -100%, 50% 300%)",
+            Rect {
+                x: -10.0,
+                y: 10.0,
+                width: 80.0,
+                height: 40.0,
+            },
+        ),
+    ];
+    for (value, expected) in cases {
+        let mut style = ComputedStyle::default();
+        style.set_paint_value("clip-path", value.to_string());
+        let shape = clip_path_shape(&style, border_box).expect("valid basic shape");
+        let bounds = shape.bounds();
+        assert_eq!(bounds, expected, "bounds for {value}");
+    }
+}
+
+#[test]
+fn clip_path_outer_bounds_preserve_shadow_paint() {
+    let canvas = paint_clip_path_document(
+        ".target { position: absolute; left: 0; top: 0; width: 10px; height: 10px; \
+         box-shadow: 15px 0 0 red; clip-path: circle(200% at center); }",
+        "<div class='target'></div>",
+        30.0,
+        10.0,
+    );
+    assert_eq!(canvas.pixel(20, 5), Some(Color::rgb(255, 0, 0)));
+}
+
+#[test]
+fn clip_path_ellipse_and_polygon_shapes_clip_paint() {
+    let ellipse = paint_clip_path_document(
+        ".target { width: 20px; height: 10px; background: blue; \
+         clip-path: ellipse(50% 50% at center); }",
+        "<div class='target'></div>",
+        20.0,
+        10.0,
+    );
+    assert_eq!(ellipse.pixel(10, 5), Some(Color::rgb(0, 0, 255)));
+    assert_eq!(ellipse.pixel(0, 0), Some(Color::rgba(0, 0, 0, 0)));
+
+    let triangle = paint_clip_path_document(
+        ".target { width: 20px; height: 20px; background: green; \
+         clip-path: polygon(50% 0%, 100% 100%, 0% 100%); }",
+        "<div class='target'></div>",
+        20.0,
+        20.0,
+    );
+    assert_eq!(triangle.pixel(10, 18), Some(Color::rgb(0, 128, 0)));
+    assert_eq!(triangle.pixel(1, 1), Some(Color::rgba(0, 0, 0, 0)));
+}
+
+#[test]
+fn clip_path_inset_round_clips_rounded_corners() {
+    let canvas = paint_clip_path_document(
+        ".target { width: 20px; height: 20px; background: red; \
+         clip-path: inset(0 round 6px); }",
+        "<div class='target'></div>",
+        20.0,
+        20.0,
+    );
+    assert_eq!(canvas.pixel(10, 10), Some(Color::rgb(255, 0, 0)));
+    assert_eq!(canvas.pixel(0, 0), Some(Color::rgba(0, 0, 0, 0)));
+}
+
+#[test]
+fn clip_path_inset_round_parses_calc_with_spaces() {
+    let mut style = ComputedStyle::default();
+    style.set_paint_value(
+        "clip-path",
+        "inset(calc(2px + 2px) round calc(2px + 2px))".to_string(),
+    );
+    let border_box = Rect {
+        x: 0.0,
+        y: 0.0,
+        width: 20.0,
+        height: 20.0,
+    };
+    let shape = clip_path_shape(&style, border_box).expect("calc rounded inset should parse");
+
+    assert!(shape.contains((10.0, 10.0)));
+    assert!(!shape.contains((0.5, 0.5)));
+}
+
+#[test]
+fn clip_path_inset_round_with_empty_rect_clips_everything() {
+    let canvas = paint_clip_path_document(
+        ".target { width: 20px; height: 20px; background: red; \
+         clip-path: inset(100% round 6px); }",
+        "<div class='target'></div>",
+        20.0,
+        20.0,
+    );
+    assert_eq!(count_pixels(&canvas, Color::rgb(255, 0, 0)), 0);
+    assert!(!point_in_rounded_rect(
+        10.0, 10.0, 0.0, 0.0, 0.0, 0.0, 6.0, 6.0, 6.0, 6.0,
+    ));
+}
+
 // --- box-shadow テスト ---
 
 #[test]
@@ -8449,6 +8610,29 @@ div {{ width: 8px; height: 8px; background: blue;
 }
 
 #[test]
+fn mask_preparation_failure_falls_back_to_unmasked_painting() {
+    let html = r#"<html><head><style>
+body { margin: 0; }
+div { width: 4px; height: 2px; background: red; box-shadow: 15px 0 0 blue;
+      mask-image: linear-gradient(to right, black, white);
+      mask-size: 0px 0px; }
+</style></head><body><div></div></body></html>"#;
+    let document = TreeBuilder::parse(html).document();
+    let canvas = render_document(
+        &document,
+        Rect { x: 0.0, y: 0.0, width: 24.0, height: 2.0 },
+    )
+    .unwrap();
+
+    assert_eq!(canvas.pixel(0, 0), Some(Color::rgb(255, 0, 0)));
+    assert_eq!(canvas.pixel(3, 1), Some(Color::rgb(255, 0, 0)));
+    assert!(
+        (4..24).any(|x| canvas.pixel(x, 0) == Some(Color::rgb(0, 0, 255))),
+        "expected fallback painting to preserve the outer shadow"
+    );
+}
+
+#[test]
 fn mask_applies_to_descendant_painting() {
     let mask = rgba_mask_data_uri(2, 1, &[255, 0]);
     let html = format!(
@@ -8501,6 +8685,91 @@ div {{ position: absolute; left: 10.5px; top: 10.5px;
     assert_eq!(canvas.pixel(12, 12), Some(Color::rgb(255, 0, 0)));
     assert_eq!(canvas.pixel(9, 10), Some(Color::rgba(0, 0, 0, 0)));
     assert_eq!(canvas.pixel(10, 9), Some(Color::rgba(0, 0, 0, 0)));
+}
+
+#[test]
+fn gradient_mask_uses_alpha_channel_and_css_positioning() {
+    let html = r#"<html><head><style>
+body { margin: 0; }
+div { width: 4px; height: 1px; background: red;
+      mask-image: linear-gradient(to right, black 0%, transparent 75%);
+      mask-repeat: no-repeat; }
+</style></head><body><div></div></body></html>"#;
+    let document = TreeBuilder::parse(html).document();
+    let canvas = render_document(
+        &document,
+        Rect { x: 0.0, y: 0.0, width: 4.0, height: 1.0 },
+    )
+    .unwrap();
+    // Sampling at the pixel center gives the first gradient sample a small
+    // interpolation step toward transparent; it remains substantially opaque.
+    assert!(canvas
+        .pixel(0, 0)
+        .is_some_and(|color| color.r == 255 && color.g == 0 && color.b == 0 && color.a > 200));
+    assert!(canvas.pixel(2, 0).is_some_and(|color| color.a < 200));
+    assert_eq!(canvas.pixel(3, 0).unwrap().a, 0);
+}
+
+#[test]
+fn luminance_mask_and_composite_layers_use_basic_semantics() {
+    let html = r#"<html><head><style>
+body { margin: 0; }
+div { width: 2px; height: 1px; background: blue;
+      mask-image: linear-gradient(to right, black, white),
+                  linear-gradient(to right, white, white);
+      mask-mode: luminance, alpha; mask-composite: add; mask-repeat: no-repeat; }
+</style></head><body><div></div></html>"#;
+    let document = TreeBuilder::parse(html).document();
+    let canvas = render_document(
+        &document,
+        Rect { x: 0.0, y: 0.0, width: 2.0, height: 1.0 },
+    )
+    .unwrap();
+    // The second opaque layer is added to the first luminance layer, so both
+    // pixels remain visible and the result never exceeds full opacity.
+    assert!(canvas.pixel(0, 0).is_some_and(|color| color.a > 0));
+    assert!(canvas.pixel(1, 0).is_some_and(|color| color.a > 0));
+}
+
+#[test]
+fn mask_composite_exclude_keeps_wide_intermediate_sum() {
+    let mask = rgba_mask_data_uri(1, 1, &[200]);
+    let html = format!(
+        r#"<html><head><style>
+body {{ margin: 0; }}
+div {{ width: 1px; height: 1px; background: red;
+       mask-image: url("{mask}"), url("{mask}");
+       mask-composite: exclude; mask-repeat: no-repeat; }}
+</style></head><body><div></div></body></html>"#
+    );
+    let document = TreeBuilder::parse(&html).document();
+    let canvas = render_document(
+        &document,
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 1.0,
+            height: 1.0,
+        },
+    )
+    .unwrap();
+
+    // 200 + 200 - 2 * round(200 * 200 / 255) = 86. Clamping the
+    // intermediate sum to 255 would incorrectly produce 0 here.
+    assert_eq!(canvas.pixel(0, 0), Some(Color::rgba(255, 0, 0, 86)));
+}
+
+#[test]
+fn mask_layers_cap_effective_multilayer_work() {
+    let mut style = crate::css::ComputedStyle::default();
+    let images = (0..(super::MAX_MASK_LAYERS + 8))
+        .map(|_| "linear-gradient(to right, black, white)")
+        .collect::<Vec<_>>()
+        .join(", ");
+    style.set_paint_value("mask-image", images);
+
+    let layers = super::mask_layers(&style);
+    assert_eq!(layers.len(), super::MAX_MASK_LAYERS);
 }
 
 #[test]

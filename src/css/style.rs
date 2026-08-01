@@ -6,12 +6,12 @@ use std::hash::{Hash, Hasher};
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
-use crate::dom::{Node, NodeHandle, NodeType};
-use rusqlite::{Connection, params};
 use super::matcher::{
     SelectorMatchCache, matches_selector_boundary_cached, matches_selector_with_pseudo_cached,
     matches_selector_with_scope_cached,
 };
+use crate::dom::{Node, NodeHandle, NodeType};
+use rusqlite::{Connection, params};
 
 use super::{
     Combinator, CssToken, Declaration, MediaQuery, PseudoElement, Rule, Selector, SelectorPart,
@@ -225,9 +225,9 @@ impl StyleResolver {
 
     /// Whether any loaded stylesheet contains a size container query.
     pub(crate) fn has_container_queries(&self) -> bool {
-        self.stylesheets.iter().any(|input| {
-            contains_at_rule_named(&input.stylesheet.rules, "container")
-        })
+        self.stylesheets
+            .iter()
+            .any(|input| contains_at_rule_named(&input.stylesheet.rules, "container"))
     }
 
     /// Returns the number of distinct `@media` prelude strings currently held
@@ -274,9 +274,7 @@ impl StyleResolver {
 
     /// Moves transition state into a replacement resolver after stylesheet
     /// invalidation, preserving before-change values and running transitions.
-    pub(crate) fn take_transition_timeline(
-        &mut self,
-    ) -> super::transition::TransitionTimeline {
+    pub(crate) fn take_transition_timeline(&mut self) -> super::transition::TransitionTimeline {
         std::mem::take(&mut self.transition_timeline)
     }
 
@@ -308,7 +306,8 @@ impl StyleResolver {
     }
 
     pub(crate) fn running_transitions_require_layout(&self) -> bool {
-        self.transition_timeline.running_transitions_require_layout()
+        self.transition_timeline
+            .running_transitions_require_layout()
     }
 
     pub(crate) fn cancel_detached_transitions(&mut self, active_node_ids: &HashSet<usize>) {
@@ -394,8 +393,10 @@ impl StyleResolver {
     pub fn add_stylesheet(&mut self, origin: Origin, stylesheet: Stylesheet) {
         // Extract @keyframes rules before storing the stylesheet.
         collect_keyframes(&stylesheet.rules, &mut self.keyframes);
-        self.rule_indexes.push(StylesheetRuleIndex::build(&stylesheet));
-        self.stylesheets.push(StylesheetInput { origin, stylesheet });
+        self.rule_indexes
+            .push(StylesheetRuleIndex::build(&stylesheet));
+        self.stylesheets
+            .push(StylesheetInput { origin, stylesheet });
         self.stylesheet_scopes.push(StylesheetScope {
             root: None,
             implicit_scope_root: None,
@@ -415,8 +416,10 @@ impl StyleResolver {
         implicit_scope_root: NodeHandle,
     ) {
         collect_keyframes(&stylesheet.rules, &mut self.keyframes);
-        self.rule_indexes.push(StylesheetRuleIndex::build(&stylesheet));
-        self.stylesheets.push(StylesheetInput { origin, stylesheet });
+        self.rule_indexes
+            .push(StylesheetRuleIndex::build(&stylesheet));
+        self.stylesheets
+            .push(StylesheetInput { origin, stylesheet });
         self.stylesheet_scopes.push(StylesheetScope {
             root: None,
             implicit_scope_root: Some(implicit_scope_root),
@@ -481,8 +484,10 @@ impl StyleResolver {
         implicit_scope_root: Option<NodeHandle>,
     ) {
         collect_keyframes(&stylesheet.rules, &mut self.keyframes);
-        self.rule_indexes.push(StylesheetRuleIndex::build(&stylesheet));
-        self.stylesheets.push(StylesheetInput { origin, stylesheet });
+        self.rule_indexes
+            .push(StylesheetRuleIndex::build(&stylesheet));
+        self.stylesheets
+            .push(StylesheetInput { origin, stylesheet });
         self.stylesheet_scopes.push(StylesheetScope {
             root: Some(scope),
             implicit_scope_root,
@@ -527,10 +532,9 @@ impl StyleResolver {
                     .parent_node()
                     .map(|p| p.node_type() == NodeType::Document)
                     .unwrap_or(false);
-            if is_root
-                && let Some(ComputedValue::Px(px)) = style.get("font-size") {
-                    self.root_font_size = *px;
-                }
+            if is_root && let Some(ComputedValue::Px(px)) = style.get("font-size") {
+                self.root_font_size = *px;
+            }
         }
 
         self.cache.insert(key, style.clone());
@@ -675,36 +679,36 @@ impl StyleResolver {
         if let Some(fs_candidate) = candidates.iter().rfind(|c| c.name == "font-size")
             && let Some(resolved_value) =
                 resolve_value_with_custom_properties(&fs_candidate.value, &custom_properties)
-            {
-                let parent_fs = parent_style
-                    .and_then(|ps| ps.get("font-size"))
-                    .and_then(|v| match v {
-                        ComputedValue::Px(px) => Some(*px),
-                        _ => None,
-                    })
-                    .unwrap_or(16.0);
-                let ctx = ResolutionContext {
-                    parent_font_size: parent_fs,
-                    root_font_size,
-                    viewport_width: self.viewport_width,
-                    viewport_height: self.viewport_height,
-                };
-                let computed = compute_value(&resolved_value, "font-size", ctx);
-                // Resolve font-size keywords "smaller" / "larger" relative to parent.
-                let resolved = match &computed {
-                    ComputedValue::Keyword(kw) if kw.eq_ignore_ascii_case("smaller") => {
-                        ComputedValue::Px(parent_fs * 0.833)
-                    }
-                    ComputedValue::Keyword(kw) if kw.eq_ignore_ascii_case("larger") => {
-                        ComputedValue::Px(parent_fs * 1.2)
-                    }
-                    other => other.clone(),
-                };
-                properties.insert("font-size".to_string(), resolved);
-                if fs_candidate.important {
-                    important_properties.insert("font-size".to_string());
+        {
+            let parent_fs = parent_style
+                .and_then(|ps| ps.get("font-size"))
+                .and_then(|v| match v {
+                    ComputedValue::Px(px) => Some(*px),
+                    _ => None,
+                })
+                .unwrap_or(16.0);
+            let ctx = ResolutionContext {
+                parent_font_size: parent_fs,
+                root_font_size,
+                viewport_width: self.viewport_width,
+                viewport_height: self.viewport_height,
+            };
+            let computed = compute_value(&resolved_value, "font-size", ctx);
+            // Resolve font-size keywords "smaller" / "larger" relative to parent.
+            let resolved = match &computed {
+                ComputedValue::Keyword(kw) if kw.eq_ignore_ascii_case("smaller") => {
+                    ComputedValue::Px(parent_fs * 0.833)
                 }
+                ComputedValue::Keyword(kw) if kw.eq_ignore_ascii_case("larger") => {
+                    ComputedValue::Px(parent_fs * 1.2)
+                }
+                other => other.clone(),
+            };
+            properties.insert("font-size".to_string(), resolved);
+            if fs_candidate.important {
+                important_properties.insert("font-size".to_string());
             }
+        }
 
         // For the root element, update root_font_size from its computed font-size
         // so that rem-based properties on the root itself resolve correctly.
@@ -714,10 +718,9 @@ impl StyleResolver {
                 .tag_name()
                 .as_deref()
                 .is_some_and(|t| t.eq_ignore_ascii_case("html"));
-            if is_root
-                && let Some(ComputedValue::Px(px)) = properties.get("font-size") {
-                    root_font_size = *px;
-                }
+            if is_root && let Some(ComputedValue::Px(px)) = properties.get("font-size") {
+                root_font_size = *px;
+            }
         }
 
         for candidate in candidates {
@@ -756,9 +759,7 @@ impl StyleResolver {
                 viewport_height: self.viewport_height,
             };
             if candidate.name == "gap" || candidate.name == "grid-gap" {
-                if let Some((row_gap, column_gap)) =
-                    compute_gap_shorthand(&resolved_value, ctx)
-                {
+                if let Some((row_gap, column_gap)) = compute_gap_shorthand(&resolved_value, ctx) {
                     insert_computed_property(&mut properties, "row-gap", row_gap);
                     insert_computed_property(&mut properties, "column-gap", column_gap);
                     if candidate.important {
@@ -769,7 +770,11 @@ impl StyleResolver {
                 continue;
             }
             if candidate.name == "grid-row-gap" || candidate.name == "grid-column-gap" {
-                let target = if candidate.name == "grid-row-gap" { "row-gap" } else { "column-gap" };
+                let target = if candidate.name == "grid-row-gap" {
+                    "row-gap"
+                } else {
+                    "column-gap"
+                };
                 let computed = compute_value(&resolved_value, target, ctx);
                 insert_computed_property(&mut properties, target, computed);
                 if candidate.important {
@@ -825,7 +830,9 @@ impl StyleResolver {
         if anim_name.eq_ignore_ascii_case("none") || anim_name.is_empty() {
             return;
         }
-        let Some(steps) = self.keyframes.get(&anim_name) else { return; };
+        let Some(steps) = self.keyframes.get(&anim_name) else {
+            return;
+        };
 
         let fill_mode = match properties.get("animation-fill-mode") {
             Some(ComputedValue::Keyword(value)) => value.to_ascii_lowercase(),
@@ -843,8 +850,7 @@ impl StyleResolver {
             if duration <= 0.0 || STATIC_ANIMATION_TIME_SECONDS < delay {
                 None
             } else {
-                let progress =
-                    ((STATIC_ANIMATION_TIME_SECONDS - delay) / duration).rem_euclid(1.0);
+                let progress = ((STATIC_ANIMATION_TIME_SECONDS - delay) / duration).rem_euclid(1.0);
                 steps
                     .iter()
                     .rev()
@@ -854,7 +860,9 @@ impl StyleResolver {
         } else {
             None
         };
-        let Some(declarations) = declarations else { return; };
+        let Some(declarations) = declarations else {
+            return;
+        };
 
         let element_font_size = properties
             .get("font-size")
@@ -901,11 +909,13 @@ impl StyleResolver {
 
 fn contains_at_rule_named(rules: &[Rule], expected: &str) -> bool {
     rules.iter().any(|rule| match rule {
-        Rule::At(at_rule) => at_rule.name.eq_ignore_ascii_case(expected)
-            || at_rule
-                .block
-                .as_deref()
-                .is_some_and(|block| contains_at_rule_named(block, expected)),
+        Rule::At(at_rule) => {
+            at_rule.name.eq_ignore_ascii_case(expected)
+                || at_rule
+                    .block
+                    .as_deref()
+                    .is_some_and(|block| contains_at_rule_named(block, expected))
+        }
         _ => false,
     })
 }
@@ -1001,19 +1011,20 @@ fn should_skip_computed_property(name: &str, computed: &ComputedValue) -> bool {
     // relies on `white-space: pre-wrap; white-space: x-bogus;` keeping the
     // `pre-wrap` value (the invalid `x-bogus` declaration is dropped).
     if let ComputedValue::Keyword(keyword) = computed
-        && let Some(valid) = enumerated_keyword_set(name) {
-            let lower = keyword.to_ascii_lowercase();
-            // CSS-wide keywords are resolved in a later pass; never drop them.
-            // `revert-layer` (CSS Cascade 5) is a CSS-wide keyword too and must
-            // not be discarded by the enumerated-value validation.
-            let is_css_wide = matches!(
-                lower.as_str(),
-                "inherit" | "initial" | "unset" | "revert" | "revert-layer"
-            );
-            if !is_css_wide && !valid.iter().any(|candidate| *candidate == lower) {
-                return true;
-            }
+        && let Some(valid) = enumerated_keyword_set(name)
+    {
+        let lower = keyword.to_ascii_lowercase();
+        // CSS-wide keywords are resolved in a later pass; never drop them.
+        // `revert-layer` (CSS Cascade 5) is a CSS-wide keyword too and must
+        // not be discarded by the enumerated-value validation.
+        let is_css_wide = matches!(
+            lower.as_str(),
+            "inherit" | "initial" | "unset" | "revert" | "revert-layer"
+        );
+        if !is_css_wide && !valid.iter().any(|candidate| *candidate == lower) {
+            return true;
         }
+    }
 
     false
 }
@@ -1026,7 +1037,14 @@ fn should_skip_computed_property(name: &str, computed: &ComputedValue) -> bool {
 /// valid value that a property accepts but that is not enumerated here.
 fn enumerated_keyword_set(name: &str) -> Option<&'static [&'static str]> {
     match name {
-        "white-space" => Some(&["normal", "pre", "nowrap", "pre-wrap", "pre-line", "break-spaces"]),
+        "white-space" => Some(&[
+            "normal",
+            "pre",
+            "nowrap",
+            "pre-wrap",
+            "pre-line",
+            "break-spaces",
+        ]),
         _ => None,
     }
 }
@@ -1055,7 +1073,28 @@ enum DeclarationValidation {
 /// [`DeclarationValidation::Invalid`].
 fn validate_declaration(name: &str, value: &Value) -> DeclarationValidation {
     if let Value::CommaList(values) = value {
-        if values.is_empty() {
+        let is_mask_layer_property = matches!(
+            name.to_ascii_lowercase().as_str(),
+            "mask-image"
+                | "mask-mode"
+                | "mask-composite"
+                | "mask-repeat"
+                | "mask-size"
+                | "mask-position"
+                | "mask-position-x"
+                | "mask-position-y"
+                | "-webkit-mask-image"
+                | "-webkit-mask-mode"
+                | "-webkit-mask-composite"
+                | "-webkit-mask-repeat"
+                | "-webkit-mask-size"
+                | "-webkit-mask-position"
+                | "-webkit-mask-position-x"
+                | "-webkit-mask-position-y"
+        );
+        if values.is_empty()
+            || (values.len() > crate::paint::MAX_MASK_LAYERS && is_mask_layer_property)
+        {
             return DeclarationValidation::Invalid;
         }
         let mut normalized = Vec::with_capacity(values.len());
@@ -1082,7 +1121,10 @@ fn validate_declaration(name: &str, value: &Value) -> DeclarationValidation {
             Value::Keyword(keyword) => {
                 let lower = keyword.to_ascii_lowercase();
                 if is_css_wide_keyword(&lower)
-                    || matches!(lower.as_str(), "static" | "relative" | "absolute" | "fixed" | "sticky")
+                    || matches!(
+                        lower.as_str(),
+                        "static" | "relative" | "absolute" | "fixed" | "sticky"
+                    )
                 {
                     DeclarationValidation::Valid(ComputedValue::Keyword(lower))
                 } else {
@@ -1141,10 +1183,119 @@ fn validate_declaration(name: &str, value: &Value) -> DeclarationValidation {
             _ => DeclarationValidation::Invalid,
         };
     }
-    if name.eq_ignore_ascii_case("background-repeat") {
-        let valid_axis = |value: &Value| {
-            matches!(value, Value::Keyword(keyword) if matches!(keyword.to_ascii_lowercase().as_str(), "repeat" | "no-repeat"))
+    if name.eq_ignore_ascii_case("mask-image") {
+        if let Value::Function { name: function, .. } = value {
+            let lower = function.to_ascii_lowercase();
+            if lower == "linear-gradient"
+                || lower == "repeating-linear-gradient"
+                || lower == "radial-gradient"
+                || lower == "repeating-radial-gradient"
+                || lower == "conic-gradient"
+                || lower == "repeating-conic-gradient"
+            {
+                let rendered = render_value(value);
+                return if crate::paint::color::parse_gradient(&rendered).is_some() {
+                    DeclarationValidation::Valid(ComputedValue::Keyword(rendered))
+                } else {
+                    DeclarationValidation::Invalid
+                };
+            }
+        }
+        return match value {
+            Value::Keyword(keyword)
+                if is_css_wide_keyword(&keyword.to_ascii_lowercase())
+                    || keyword.eq_ignore_ascii_case("none")
+                    || keyword.to_ascii_lowercase().starts_with("url(") =>
+            {
+                DeclarationValidation::Unvalidated
+            }
+            _ => DeclarationValidation::Invalid,
         };
+    }
+    if name.eq_ignore_ascii_case("mask-mode") {
+        return match value {
+            Value::Keyword(keyword)
+                if is_css_wide_keyword(&keyword.to_ascii_lowercase())
+                    || matches!(
+                        keyword.to_ascii_lowercase().as_str(),
+                        "alpha" | "luminance" | "match-source"
+                    ) =>
+            {
+                DeclarationValidation::Unvalidated
+            }
+            _ => DeclarationValidation::Invalid,
+        };
+    }
+    if name.eq_ignore_ascii_case("mask-composite") {
+        return match value {
+            Value::Keyword(keyword)
+                if is_css_wide_keyword(&keyword.to_ascii_lowercase())
+                    || matches!(
+                        keyword.to_ascii_lowercase().as_str(),
+                        "add" | "subtract" | "intersect" | "exclude"
+                    ) =>
+            {
+                DeclarationValidation::Unvalidated
+            }
+            _ => DeclarationValidation::Invalid,
+        };
+    }
+    if name.eq_ignore_ascii_case("clip-path") {
+        return match value {
+            Value::Keyword(keyword)
+                if is_css_wide_keyword(&keyword.to_ascii_lowercase())
+                    || keyword.eq_ignore_ascii_case("none") =>
+            {
+                DeclarationValidation::Unvalidated
+            }
+            Value::Function {
+                name: function,
+                ..
+            } if matches!(
+                function.to_ascii_lowercase().as_str(),
+                "inset" | "circle" | "ellipse" | "polygon"
+            ) => {
+                let rendered = render_value(value);
+                if crate::paint::is_valid_clip_path_value(&rendered) {
+                    DeclarationValidation::Unvalidated
+                } else {
+                    DeclarationValidation::Invalid
+                }
+            }
+            _ => DeclarationValidation::Invalid,
+        };
+    }
+    if name.eq_ignore_ascii_case("mask-repeat") {
+        let valid_axis = |value: &Value| {
+            matches!(
+                value,
+                Value::Keyword(keyword)
+                    if matches!(
+                        keyword.to_ascii_lowercase().as_str(),
+                        "repeat" | "no-repeat"
+                    )
+            )
+        };
+        return match value {
+            Value::Keyword(keyword)
+                if is_css_wide_keyword(&keyword.to_ascii_lowercase())
+                    || matches!(
+                        keyword.to_ascii_lowercase().as_str(),
+                        "repeat" | "no-repeat" | "repeat-x" | "repeat-y"
+                    ) =>
+            {
+                DeclarationValidation::Unvalidated
+            }
+            Value::List(values)
+                if (1..=2).contains(&values.len()) && values.iter().all(valid_axis) =>
+            {
+                DeclarationValidation::Unvalidated
+            }
+            _ => DeclarationValidation::Invalid,
+        };
+    }
+    if name.eq_ignore_ascii_case("background-repeat") {
+        let valid_axis = |value: &Value| matches!(value, Value::Keyword(keyword) if matches!(keyword.to_ascii_lowercase().as_str(), "repeat" | "no-repeat"));
         return match value {
             Value::Keyword(keyword)
                 if is_css_wide_keyword(&keyword.to_ascii_lowercase())
@@ -1221,8 +1372,17 @@ fn validate_declaration(name: &str, value: &Value) -> DeclarationValidation {
                 if is_css_wide_keyword(&lower)
                     || matches!(
                         lower.as_str(),
-                        "auto" | "none" | "visiblepainted" | "visiblefill" | "visiblestroke"
-                            | "visible" | "painted" | "fill" | "stroke" | "bounding-box" | "all"
+                        "auto"
+                            | "none"
+                            | "visiblepainted"
+                            | "visiblefill"
+                            | "visiblestroke"
+                            | "visible"
+                            | "painted"
+                            | "fill"
+                            | "stroke"
+                            | "bounding-box"
+                            | "all"
                     )
                 {
                     DeclarationValidation::Valid(ComputedValue::Keyword(lower))
@@ -1255,7 +1415,10 @@ fn validate_declaration(name: &str, value: &Value) -> DeclarationValidation {
         return match value {
             Value::Keyword(keyword)
                 if is_css_wide_keyword(&keyword.to_ascii_lowercase())
-                    || matches!(keyword.to_ascii_lowercase().as_str(), "normal" | "inline-size" | "size") =>
+                    || matches!(
+                        keyword.to_ascii_lowercase().as_str(),
+                        "normal" | "inline-size" | "size"
+                    ) =>
             {
                 DeclarationValidation::Valid(ComputedValue::Keyword(keyword.to_ascii_lowercase()))
             }
@@ -1275,9 +1438,9 @@ fn validate_declaration(name: &str, value: &Value) -> DeclarationValidation {
                     || valid_custom_name(keyword)
             }
             Value::List(values) => !values.is_empty()
-                && values
-                    .iter()
-                    .all(|value| matches!(value, Value::Keyword(keyword) if valid_custom_name(keyword))),
+                && values.iter().all(
+                    |value| matches!(value, Value::Keyword(keyword) if valid_custom_name(keyword)),
+                ),
             _ => false,
         };
         return if valid {
@@ -1625,8 +1788,7 @@ impl StylesheetRuleIndex {
             index.declaration_offsets.push(offset);
             offset += match rule {
                 Rule::Style(rule) => {
-                    index.has_part_selector |=
-                        rule.selectors.iter().any(selector_uses_part_pseudo);
+                    index.has_part_selector |= rule.selectors.iter().any(selector_uses_part_pseudo);
                     rule.declarations.len()
                 }
                 Rule::At(rule) => {
@@ -1669,9 +1831,10 @@ impl StylesheetRuleIndex {
     fn candidates(&self, keys: &ElementMatchKeys) -> BTreeSet<usize> {
         let mut candidates = self.fallback.iter().copied().collect::<BTreeSet<_>>();
         if let Some(id) = &keys.id
-            && let Some(rules) = self.by_id.get(id) {
-                candidates.extend(rules);
-            }
+            && let Some(rules) = self.by_id.get(id)
+        {
+            candidates.extend(rules);
+        }
         for class in &keys.classes {
             if let Some(rules) = self.by_class.get(class) {
                 candidates.extend(rules);
@@ -1754,12 +1917,12 @@ fn selector_uses_shadow_pseudo(selector: &super::Selector) -> bool {
                     || functional_selector(name)
                         .is_some_and(|(function, _)| function.eq_ignore_ascii_case("host"))
             }
-            SimpleSelector::PseudoElement(name) => functional_selector(name).is_some_and(
-                |(function, _)| {
+            SimpleSelector::PseudoElement(name) => {
+                functional_selector(name).is_some_and(|(function, _)| {
                     function.eq_ignore_ascii_case("slotted")
                         || function.eq_ignore_ascii_case("part")
-                },
-            ),
+                })
+            }
             _ => false,
         })
     })
@@ -1797,8 +1960,7 @@ fn matches_shadow_scoped_selector(
     cache: &mut SelectorMatchCache,
 ) -> bool {
     if selector_uses_part_pseudo(selector) {
-        return pseudo.is_none()
-            && matches_part_selector(node, selector, Some(scope), cache);
+        return pseudo.is_none() && matches_part_selector(node, selector, Some(scope), cache);
     }
     if selector.parts.iter().any(|part| {
         part.simples.iter().any(|simple| {
@@ -1887,14 +2049,7 @@ fn matches_host_selector_part(
             };
             siblings[..position].iter().rev().any(|sibling| {
                 sibling.node_type() == NodeType::Element
-                    && matches_host_selector_part(
-                        sibling,
-                        selector,
-                        index - 1,
-                        scope,
-                        None,
-                        cache,
-                    )
+                    && matches_host_selector_part(sibling, selector, index - 1, scope, None, cache)
             })
         }
     }
@@ -1963,11 +2118,13 @@ fn host_arguments_match(
         if !function.eq_ignore_ascii_case("host") {
             return true;
         }
-        super::parse_selector_list(argument).ok().is_some_and(|selectors| {
-            selectors.len() == 1
-                && selectors[0].parts.len() == 1
-                && matches_selector_with_pseudo_cached(host, &selectors[0], None, cache)
-        })
+        super::parse_selector_list(argument)
+            .ok()
+            .is_some_and(|selectors| {
+                selectors.len() == 1
+                    && selectors[0].parts.len() == 1
+                    && matches_selector_with_pseudo_cached(host, &selectors[0], None, cache)
+            })
     })
 }
 
@@ -2416,12 +2573,7 @@ fn matches_part_selector(
             let host_matches = if let Some(scope) = stylesheet_scope {
                 matches_shadow_scoped_selector(&host, &host_selector, scope, None, cache)
             } else {
-                matches_selector_with_pseudo_cached(
-                    &host,
-                    &host_selector,
-                    None,
-                    cache,
-                )
+                matches_selector_with_pseudo_cached(&host, &host_selector, None, cache)
             };
             if host_matches {
                 return true;
@@ -2462,7 +2614,11 @@ fn part_selector_components(selector: &Selector) -> Option<(String, Selector)> {
     }
     let part_name = part_name?;
     if host_selector.parts.last()?.simples.is_empty() {
-        host_selector.parts.last_mut()?.simples.push(SimpleSelector::Universal);
+        host_selector
+            .parts
+            .last_mut()?
+            .simples
+            .push(SimpleSelector::Universal);
     }
     Some((part_name, host_selector))
 }
@@ -2486,9 +2642,11 @@ fn parse_exportparts_entry(entry: &str) -> Option<(String, String)> {
         .collect();
     match tokens.as_slice() {
         [CssToken::Ident(name)] => Some((name.clone(), name.clone())),
-        [CssToken::Ident(inner), CssToken::Colon, CssToken::Ident(outer)] => {
-            Some((inner.clone(), outer.clone()))
-        }
+        [
+            CssToken::Ident(inner),
+            CssToken::Colon,
+            CssToken::Ident(outer),
+        ] => Some((inner.clone(), outer.clone())),
         _ => None,
     }
 }
@@ -2580,9 +2738,14 @@ fn applicable_scope(
                 })
             });
             if !excluded_by_limit
-                && !roots.iter().any(|existing: &ScopeRoot| existing.node == root)
+                && !roots
+                    .iter()
+                    .any(|existing: &ScopeRoot| existing.node == root)
             {
-                roots.push(ScopeRoot { node: root, proximity });
+                roots.push(ScopeRoot {
+                    node: root,
+                    proximity,
+                });
             }
         }
     }
@@ -2662,20 +2825,19 @@ fn container_query_matches(
     let mut ancestor = node.parent_node();
     while let Some(candidate) = ancestor {
         if candidate.node_type() == NodeType::Element
-            && let Some(context) = contexts.get(&candidate.identity()) {
-                let supports_axis = context.container_type.eq_ignore_ascii_case("size")
-                    || (!query.requires_block_size()
-                        && context.container_type.eq_ignore_ascii_case("inline-size"));
-                let name_matches = query.name.as_ref().is_none_or(|name| {
-                    context
-                        .names
-                        .iter()
-                        .any(|candidate| candidate == name)
-                });
-                if supports_axis && name_matches {
-                    return query.matches(context.width, context.height);
-                }
+            && let Some(context) = contexts.get(&candidate.identity())
+        {
+            let supports_axis = context.container_type.eq_ignore_ascii_case("size")
+                || (!query.requires_block_size()
+                    && context.container_type.eq_ignore_ascii_case("inline-size"));
+            let name_matches = query
+                .name
+                .as_ref()
+                .is_none_or(|name| context.names.iter().any(|candidate| candidate == name));
+            if supports_axis && name_matches {
+                return query.matches(context.width, context.height);
             }
+        }
         ancestor = candidate.parent_node();
     }
     false
@@ -2685,14 +2847,16 @@ fn container_query_matches(
 /// source_order bookkeeping when a block is skipped due to a non-matching
 /// media query).
 fn count_declarations(rules: &[Rule]) -> usize {
-    rules.iter().map(|r| match r {
-        Rule::Style(s) => s.declarations.len(),
-        Rule::At(a) => {
-            a.declarations.len()
-                + a.block.as_deref().map(count_declarations).unwrap_or(0)
-        }
-        Rule::FontFace(_) => 0,
-    }).sum()
+    rules
+        .iter()
+        .map(|r| match r {
+            Rule::Style(s) => s.declarations.len(),
+            Rule::At(a) => {
+                a.declarations.len() + a.block.as_deref().map(count_declarations).unwrap_or(0)
+            }
+            Rule::FontFace(_) => 0,
+        })
+        .sum()
 }
 
 fn is_length_property(name: &str) -> bool {
@@ -2826,7 +2990,9 @@ fn parse_keyframe_steps(block_text: &str) -> Vec<KeyframeStep> {
         }
 
         let fake_rule = format!("x {{ {declaration_text} }}");
-        let Ok(stylesheet) = super::parse_stylesheet(&fake_rule) else { continue; };
+        let Ok(stylesheet) = super::parse_stylesheet(&fake_rule) else {
+            continue;
+        };
         let Some(declarations) = stylesheet.rules.iter().find_map(|rule| match rule {
             Rule::Style(style_rule) => Some(style_rule.declarations.clone()),
             _ => None,
@@ -2995,12 +3161,7 @@ fn ensure_unsupported_css_sqlite_schema(conn: &Connection) -> Result<(), rusqlit
 
 #[cfg(test)]
 fn persist_unsupported_css_to_sqlite(path: &str, property: &str, value: &str) {
-    persist_css_audit_to_sqlite(
-        path,
-        CssAuditCategory::Unsupported,
-        property,
-        value,
-    );
+    persist_css_audit_to_sqlite(path, CssAuditCategory::Unsupported, property, value);
 }
 
 fn persist_css_audit_to_sqlite(
@@ -3038,11 +3199,7 @@ fn persist_css_audit_to_sqlite(
     }
 }
 
-fn emit_css_audit_top_n_summary_if_updated(
-    path: &str,
-    top_n: usize,
-    category: CssAuditCategory,
-) {
+fn emit_css_audit_top_n_summary_if_updated(path: &str, top_n: usize, category: CssAuditCategory) {
     let rows = SQLITE_CONNECTIONS.with(|connections| {
         let mut connections = connections.borrow_mut();
         let Some(conn) = connections.get_mut(path) else {
@@ -3413,6 +3570,8 @@ pub(super) fn is_supported_property(name: &str) -> bool {
             | "mask-position-y"
             | "mask-repeat"
             | "mask-size"
+            | "mask-mode"
+            | "mask-composite"
             | "-webkit-mask"
             | "-webkit-mask-image"
             | "-webkit-mask-position"
@@ -3420,6 +3579,8 @@ pub(super) fn is_supported_property(name: &str) -> bool {
             | "-webkit-mask-position-y"
             | "-webkit-mask-repeat"
             | "-webkit-mask-size"
+            | "-webkit-mask-mode"
+            | "-webkit-mask-composite"
     )
 }
 
@@ -3475,8 +3636,7 @@ pub(crate) fn supports_declaration(property: &str, value: &str) -> bool {
 fn value_contains_var_function(value: &Value) -> bool {
     match value {
         Value::Function { name, arguments } => {
-            name.eq_ignore_ascii_case("var")
-                || arguments.iter().any(value_contains_var_function)
+            name.eq_ignore_ascii_case("var") || arguments.iter().any(value_contains_var_function)
         }
         Value::List(values) => values.iter().any(value_contains_var_function),
         _ => false,
@@ -3820,6 +3980,10 @@ fn canonical_property_name(name: &str) -> &str {
         "mask-repeat"
     } else if name.eq_ignore_ascii_case("-webkit-mask-size") {
         "mask-size"
+    } else if name.eq_ignore_ascii_case("-webkit-mask-mode") {
+        "mask-mode"
+    } else if name.eq_ignore_ascii_case("-webkit-mask-composite") {
+        "mask-composite"
     } else {
         name
     }
@@ -3939,9 +4103,9 @@ fn aspect_ratio_parts(value: &Value) -> Option<(bool, Option<(Value, Value)>)> {
             Value::Keyword(keyword) => {
                 let mut pieces = keyword.split('/');
                 let first = pieces.next()?;
-                parts.push(AspectRatioPart::Number(Value::Number(
-                    non_negative_number(first)?,
-                )));
+                parts.push(AspectRatioPart::Number(Value::Number(non_negative_number(
+                    first,
+                )?)));
                 for piece in pieces {
                     parts.push(AspectRatioPart::Slash);
                     parts.push(AspectRatioPart::Number(Value::Number(non_negative_number(
@@ -3970,9 +4134,7 @@ fn aspect_ratio_parts(value: &Value) -> Option<(bool, Option<(Value, Value)>)> {
     let ratio_from = |parts: &[AspectRatioPart]| -> Option<Option<(Value, Value)>> {
         match parts {
             [] => Some(None),
-            [AspectRatioPart::Number(width)] => {
-                Some(Some((width.clone(), Value::Number(1.0))))
-            }
+            [AspectRatioPart::Number(width)] => Some(Some((width.clone(), Value::Number(1.0)))),
             [
                 AspectRatioPart::Number(width),
                 AspectRatioPart::Slash,
@@ -3984,9 +4146,7 @@ fn aspect_ratio_parts(value: &Value) -> Option<(bool, Option<(Value, Value)>)> {
     match parts.first() {
         Some(AspectRatioPart::Auto) => Some((true, ratio_from(&parts[1..])?)),
         _ => match parts.last() {
-            Some(AspectRatioPart::Auto) => {
-                Some((true, ratio_from(&parts[..parts.len() - 1])?))
-            }
+            Some(AspectRatioPart::Auto) => Some((true, ratio_from(&parts[..parts.len() - 1])?)),
             _ => {
                 let ratio = ratio_from(&parts)?;
                 // A bare `auto` is the only value with neither part.
@@ -4146,14 +4306,23 @@ fn render_clip_path_value(value: &Value, ctx: ResolutionContext) -> String {
             }
             render_value(value)
         }
-        Value::Function { name, arguments } if name.eq_ignore_ascii_case("inset") => format!(
-            "inset({})",
-            arguments
-                .iter()
-                .map(|argument| render_clip_path_value(argument, ctx))
-                .collect::<Vec<_>>()
-                .join(", ")
-        ),
+        Value::Function { name, arguments }
+            if matches!(
+                name.to_ascii_lowercase().as_str(),
+                "inset" | "circle" | "ellipse" | "polygon"
+            ) =>
+        {
+            let canonical_name = name.to_ascii_lowercase();
+            format!(
+                "{}({})",
+                canonical_name,
+                arguments
+                    .iter()
+                    .map(|argument| render_clip_path_value(argument, ctx))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        }
         Value::List(values) => values
             .iter()
             .map(|value| render_clip_path_value(value, ctx))
@@ -4425,25 +4594,25 @@ fn apply_presentational_hints(
         && let Some(background) = attributes
             .get("bgcolor")
             .and_then(|value| parse_legacy_color_hint(value))
-        {
-            properties.insert(
-                "background-color".to_string(),
-                ComputedValue::Color(background),
-            );
-        }
+    {
+        properties.insert(
+            "background-color".to_string(),
+            ComputedValue::Color(background),
+        );
+    }
 
     if !properties.contains_key("background-image")
         && let Some(background) = attributes
             .get("background")
             .map(|value| value.trim())
             .filter(|value| !value.is_empty())
-        {
-            let escaped = background.replace('\\', "\\\\").replace('"', "\\\"");
-            properties.insert(
-                "background-image".to_string(),
-                ComputedValue::Keyword(format!("url(\"{escaped}\")")),
-            );
-        }
+    {
+        let escaped = background.replace('\\', "\\\\").replace('"', "\\\"");
+        properties.insert(
+            "background-image".to_string(),
+            ComputedValue::Keyword(format!("url(\"{escaped}\")")),
+        );
+    }
 
     if !properties.contains_key("color")
         && node
@@ -4453,9 +4622,9 @@ fn apply_presentational_hints(
         && let Some(color) = attributes
             .get("text")
             .and_then(|value| parse_legacy_color_hint(value))
-        {
-            properties.insert("color".to_string(), ComputedValue::Color(color));
-        }
+    {
+        properties.insert("color".to_string(), ComputedValue::Color(color));
+    }
 
     if let Some(align) = attributes
         .get("align")
@@ -4470,15 +4639,12 @@ fn apply_presentational_hints(
         }
         // For block/table elements, align="center" means auto margins (structural centering)
         if align == "center" {
-            let is_table_or_block = node
-                .tag_name()
-                .as_deref()
-                .is_some_and(|tag| {
-                    matches!(
-                        tag.to_ascii_lowercase().as_str(),
-                        "table" | "div" | "h1" | "h2" | "h3" | "h4" | "h5" | "h6" | "p"
-                    )
-                });
+            let is_table_or_block = node.tag_name().as_deref().is_some_and(|tag| {
+                matches!(
+                    tag.to_ascii_lowercase().as_str(),
+                    "table" | "div" | "h1" | "h2" | "h3" | "h4" | "h5" | "h6" | "p"
+                )
+            });
             if is_table_or_block {
                 if !properties.contains_key("margin-left") {
                     properties.insert(
@@ -4500,34 +4666,34 @@ fn apply_presentational_hints(
         && let Some(width) = attributes
             .get("width")
             .and_then(|value| parse_legacy_dimension_hint(value))
-        {
-            properties.insert("width".to_string(), width);
-        }
+    {
+        properties.insert("width".to_string(), width);
+    }
 
     if !properties.contains_key("height")
         && let Some(height) = attributes
             .get("height")
             .and_then(|value| parse_legacy_dimension_hint(value))
-        {
-            properties.insert("height".to_string(), height);
-        }
+    {
+        properties.insert("height".to_string(), height);
+    }
 
     if !properties.contains_key("color")
         && let Some(color) = attributes
             .get("color")
             .and_then(|value| parse_legacy_color_hint(value))
-        {
-            properties.insert("color".to_string(), ComputedValue::Color(color));
-        }
+    {
+        properties.insert("color".to_string(), ComputedValue::Color(color));
+    }
 
     if !properties.contains_key("font-family")
         && let Some(face) = attributes
             .get("face")
             .map(|value| value.trim().to_string())
             .filter(|value| !value.is_empty())
-        {
-            properties.insert("font-family".to_string(), ComputedValue::Keyword(face));
-        }
+    {
+        properties.insert("font-family".to_string(), ComputedValue::Keyword(face));
+    }
 }
 
 fn parse_legacy_color_hint(value: &str) -> Option<String> {
@@ -4621,12 +4787,36 @@ fn apply_ua_defaults(
     }
 
     let defaults = match tag.as_str() {
-        "h1" => Some(UaDefaults { font_size_em: 2.0, font_weight_bold: true, margin_em: 0.67 }),
-        "h2" => Some(UaDefaults { font_size_em: 1.5, font_weight_bold: true, margin_em: 0.83 }),
-        "h3" => Some(UaDefaults { font_size_em: 1.17, font_weight_bold: true, margin_em: 1.0 }),
-        "h4" => Some(UaDefaults { font_size_em: 1.0, font_weight_bold: true, margin_em: 1.33 }),
-        "h5" => Some(UaDefaults { font_size_em: 0.83, font_weight_bold: true, margin_em: 1.67 }),
-        "h6" => Some(UaDefaults { font_size_em: 0.67, font_weight_bold: true, margin_em: 2.33 }),
+        "h1" => Some(UaDefaults {
+            font_size_em: 2.0,
+            font_weight_bold: true,
+            margin_em: 0.67,
+        }),
+        "h2" => Some(UaDefaults {
+            font_size_em: 1.5,
+            font_weight_bold: true,
+            margin_em: 0.83,
+        }),
+        "h3" => Some(UaDefaults {
+            font_size_em: 1.17,
+            font_weight_bold: true,
+            margin_em: 1.0,
+        }),
+        "h4" => Some(UaDefaults {
+            font_size_em: 1.0,
+            font_weight_bold: true,
+            margin_em: 1.33,
+        }),
+        "h5" => Some(UaDefaults {
+            font_size_em: 0.83,
+            font_weight_bold: true,
+            margin_em: 1.67,
+        }),
+        "h6" => Some(UaDefaults {
+            font_size_em: 0.67,
+            font_weight_bold: true,
+            margin_em: 2.33,
+        }),
         _ => None,
     };
 
@@ -4873,21 +5063,37 @@ fn apply_ua_defaults(
         }
         "p" => {
             let em = parent_font_size;
-            properties.entry("margin-top".to_string()).or_insert(ComputedValue::Px(em));
-            properties.entry("margin-bottom".to_string()).or_insert(ComputedValue::Px(em));
+            properties
+                .entry("margin-top".to_string())
+                .or_insert(ComputedValue::Px(em));
+            properties
+                .entry("margin-bottom".to_string())
+                .or_insert(ComputedValue::Px(em));
         }
         "b" | "strong" => {
-            properties.entry("font-weight".to_string()).or_insert(ComputedValue::Keyword("bold".to_string()));
+            properties
+                .entry("font-weight".to_string())
+                .or_insert(ComputedValue::Keyword("bold".to_string()));
         }
         "i" | "em" => {
-            properties.entry("font-style".to_string()).or_insert(ComputedValue::Keyword("italic".to_string()));
+            properties
+                .entry("font-style".to_string())
+                .or_insert(ComputedValue::Keyword("italic".to_string()));
         }
         "hr" => {
-            properties.entry("border-top-style".to_string()).or_insert(ComputedValue::Keyword("inset".to_string()));
-            properties.entry("border-top-width".to_string()).or_insert(ComputedValue::Px(1.0));
+            properties
+                .entry("border-top-style".to_string())
+                .or_insert(ComputedValue::Keyword("inset".to_string()));
+            properties
+                .entry("border-top-width".to_string())
+                .or_insert(ComputedValue::Px(1.0));
             let half_em = parent_font_size * 0.5;
-            properties.entry("margin-top".to_string()).or_insert(ComputedValue::Px(half_em));
-            properties.entry("margin-bottom".to_string()).or_insert(ComputedValue::Px(half_em));
+            properties
+                .entry("margin-top".to_string())
+                .or_insert(ComputedValue::Px(half_em));
+            properties
+                .entry("margin-bottom".to_string())
+                .or_insert(ComputedValue::Px(half_em));
         }
         "ul" => {
             properties
@@ -4897,9 +5103,15 @@ fn apply_ua_defaults(
                 .entry("list-style-position".to_string())
                 .or_insert(ComputedValue::Keyword("outside".to_string()));
             let em = parent_font_size;
-            properties.entry("margin-top".to_string()).or_insert(ComputedValue::Px(em));
-            properties.entry("margin-bottom".to_string()).or_insert(ComputedValue::Px(em));
-            properties.entry("padding-left".to_string()).or_insert(ComputedValue::Px(em * 2.5));
+            properties
+                .entry("margin-top".to_string())
+                .or_insert(ComputedValue::Px(em));
+            properties
+                .entry("margin-bottom".to_string())
+                .or_insert(ComputedValue::Px(em));
+            properties
+                .entry("padding-left".to_string())
+                .or_insert(ComputedValue::Px(em * 2.5));
         }
         "ol" => {
             properties
@@ -4909,9 +5121,15 @@ fn apply_ua_defaults(
                 .entry("list-style-position".to_string())
                 .or_insert(ComputedValue::Keyword("outside".to_string()));
             let em = parent_font_size;
-            properties.entry("margin-top".to_string()).or_insert(ComputedValue::Px(em));
-            properties.entry("margin-bottom".to_string()).or_insert(ComputedValue::Px(em));
-            properties.entry("padding-left".to_string()).or_insert(ComputedValue::Px(em * 2.5));
+            properties
+                .entry("margin-top".to_string())
+                .or_insert(ComputedValue::Px(em));
+            properties
+                .entry("margin-bottom".to_string())
+                .or_insert(ComputedValue::Px(em));
+            properties
+                .entry("padding-left".to_string())
+                .or_insert(ComputedValue::Px(em * 2.5));
         }
         "li" => {
             properties
@@ -4920,71 +5138,133 @@ fn apply_ua_defaults(
         }
         "blockquote" => {
             let em = parent_font_size;
-            properties.entry("margin-top".to_string()).or_insert(ComputedValue::Px(em));
-            properties.entry("margin-bottom".to_string()).or_insert(ComputedValue::Px(em));
-            properties.entry("margin-left".to_string()).or_insert(ComputedValue::Px(40.0));
-            properties.entry("margin-right".to_string()).or_insert(ComputedValue::Px(40.0));
+            properties
+                .entry("margin-top".to_string())
+                .or_insert(ComputedValue::Px(em));
+            properties
+                .entry("margin-bottom".to_string())
+                .or_insert(ComputedValue::Px(em));
+            properties
+                .entry("margin-left".to_string())
+                .or_insert(ComputedValue::Px(40.0));
+            properties
+                .entry("margin-right".to_string())
+                .or_insert(ComputedValue::Px(40.0));
         }
         "pre" => {
-            properties.entry("font-family".to_string()).or_insert(ComputedValue::Keyword("monospace".to_string()));
-            properties.entry("white-space".to_string()).or_insert(ComputedValue::Keyword("pre".to_string()));
+            properties
+                .entry("font-family".to_string())
+                .or_insert(ComputedValue::Keyword("monospace".to_string()));
+            properties
+                .entry("white-space".to_string())
+                .or_insert(ComputedValue::Keyword("pre".to_string()));
             let em = parent_font_size;
-            properties.entry("margin-top".to_string()).or_insert(ComputedValue::Px(em));
-            properties.entry("margin-bottom".to_string()).or_insert(ComputedValue::Px(em));
+            properties
+                .entry("margin-top".to_string())
+                .or_insert(ComputedValue::Px(em));
+            properties
+                .entry("margin-bottom".to_string())
+                .or_insert(ComputedValue::Px(em));
         }
         "code" | "kbd" | "samp" | "tt" => {
-            properties.entry("font-family".to_string()).or_insert(ComputedValue::Keyword("monospace".to_string()));
-            properties.entry("display".to_string()).or_insert(ComputedValue::Keyword("inline".to_string()));
+            properties
+                .entry("font-family".to_string())
+                .or_insert(ComputedValue::Keyword("monospace".to_string()));
+            properties
+                .entry("display".to_string())
+                .or_insert(ComputedValue::Keyword("inline".to_string()));
         }
         "dd" => {
-            properties.entry("margin-left".to_string()).or_insert(ComputedValue::Px(40.0));
+            properties
+                .entry("margin-left".to_string())
+                .or_insert(ComputedValue::Px(40.0));
         }
         "th" => {
-            properties.entry("font-weight".to_string()).or_insert(ComputedValue::Keyword("bold".to_string()));
-            properties.entry("text-align".to_string()).or_insert(ComputedValue::Keyword("center".to_string()));
-            properties.entry("display".to_string()).or_insert(ComputedValue::Keyword("table-cell".to_string()));
+            properties
+                .entry("font-weight".to_string())
+                .or_insert(ComputedValue::Keyword("bold".to_string()));
+            properties
+                .entry("text-align".to_string())
+                .or_insert(ComputedValue::Keyword("center".to_string()));
+            properties
+                .entry("display".to_string())
+                .or_insert(ComputedValue::Keyword("table-cell".to_string()));
         }
         "td" => {
-            properties.entry("display".to_string()).or_insert(ComputedValue::Keyword("table-cell".to_string()));
+            properties
+                .entry("display".to_string())
+                .or_insert(ComputedValue::Keyword("table-cell".to_string()));
         }
         "a" => {
-            properties.entry("text-decoration-line".to_string()).or_insert(ComputedValue::Keyword("underline".to_string()));
-            properties.entry("color".to_string()).or_insert(ComputedValue::Color("#0000ee".to_string()));
+            properties
+                .entry("text-decoration-line".to_string())
+                .or_insert(ComputedValue::Keyword("underline".to_string()));
+            properties
+                .entry("color".to_string())
+                .or_insert(ComputedValue::Color("#0000ee".to_string()));
         }
         "sub" => {
-            properties.entry("display".to_string()).or_insert(ComputedValue::Keyword("inline".to_string()));
-            properties.entry("vertical-align".to_string()).or_insert(ComputedValue::Keyword("sub".to_string()));
+            properties
+                .entry("display".to_string())
+                .or_insert(ComputedValue::Keyword("inline".to_string()));
+            properties
+                .entry("vertical-align".to_string())
+                .or_insert(ComputedValue::Keyword("sub".to_string()));
             let smaller = parent_font_size * 0.833;
-            properties.entry("font-size".to_string()).or_insert(ComputedValue::Px(smaller));
+            properties
+                .entry("font-size".to_string())
+                .or_insert(ComputedValue::Px(smaller));
         }
         "sup" => {
-            properties.entry("display".to_string()).or_insert(ComputedValue::Keyword("inline".to_string()));
-            properties.entry("vertical-align".to_string()).or_insert(ComputedValue::Keyword("super".to_string()));
+            properties
+                .entry("display".to_string())
+                .or_insert(ComputedValue::Keyword("inline".to_string()));
+            properties
+                .entry("vertical-align".to_string())
+                .or_insert(ComputedValue::Keyword("super".to_string()));
             let smaller = parent_font_size * 0.833;
-            properties.entry("font-size".to_string()).or_insert(ComputedValue::Px(smaller));
+            properties
+                .entry("font-size".to_string())
+                .or_insert(ComputedValue::Px(smaller));
         }
         "small" => {
-            properties.entry("display".to_string()).or_insert(ComputedValue::Keyword("inline".to_string()));
+            properties
+                .entry("display".to_string())
+                .or_insert(ComputedValue::Keyword("inline".to_string()));
             let smaller = parent_font_size * 0.833;
-            properties.entry("font-size".to_string()).or_insert(ComputedValue::Px(smaller));
+            properties
+                .entry("font-size".to_string())
+                .or_insert(ComputedValue::Px(smaller));
         }
         "center" => {
-            properties.entry("text-align".to_string()).or_insert(ComputedValue::Keyword("center".to_string()));
+            properties
+                .entry("text-align".to_string())
+                .or_insert(ComputedValue::Keyword("center".to_string()));
         }
         "table" => {
-            properties.entry("display".to_string()).or_insert(ComputedValue::Keyword("table".to_string()));
+            properties
+                .entry("display".to_string())
+                .or_insert(ComputedValue::Keyword("table".to_string()));
         }
         "tr" => {
-            properties.entry("display".to_string()).or_insert(ComputedValue::Keyword("table-row".to_string()));
+            properties
+                .entry("display".to_string())
+                .or_insert(ComputedValue::Keyword("table-row".to_string()));
         }
         "thead" => {
-            properties.entry("display".to_string()).or_insert(ComputedValue::Keyword("table-header-group".to_string()));
+            properties
+                .entry("display".to_string())
+                .or_insert(ComputedValue::Keyword("table-header-group".to_string()));
         }
         "tbody" => {
-            properties.entry("display".to_string()).or_insert(ComputedValue::Keyword("table-row-group".to_string()));
+            properties
+                .entry("display".to_string())
+                .or_insert(ComputedValue::Keyword("table-row-group".to_string()));
         }
         "tfoot" => {
-            properties.entry("display".to_string()).or_insert(ComputedValue::Keyword("table-footer-group".to_string()));
+            properties
+                .entry("display".to_string())
+                .or_insert(ComputedValue::Keyword("table-footer-group".to_string()));
         }
         _ => {}
     }
@@ -5040,6 +5320,18 @@ fn apply_initial_values(properties: &mut BTreeMap<String, ComputedValue>) {
     properties
         .entry("object-position".to_string())
         .or_insert_with(|| ComputedValue::Keyword("50% 50%".to_string()));
+    // CSS Masking initial values.  `none` is an identity mask in the paint
+    // implementation; match-source resolves gradients/images through their
+    // alpha channel and keeps SVG/image defaults deterministic.
+    properties
+        .entry("mask-image".to_string())
+        .or_insert_with(|| ComputedValue::Keyword("none".to_string()));
+    properties
+        .entry("mask-mode".to_string())
+        .or_insert_with(|| ComputedValue::Keyword("match-source".to_string()));
+    properties
+        .entry("mask-composite".to_string())
+        .or_insert_with(|| ComputedValue::Keyword("add".to_string()));
     properties
         .entry("transform".to_string())
         .or_insert_with(|| ComputedValue::Keyword("none".to_string()));
@@ -5099,9 +5391,9 @@ fn normalize_background_layer_lists(properties: &mut BTreeMap<String, ComputedVa
 
 fn computed_value_css_text(value: &ComputedValue) -> String {
     match value {
-        ComputedValue::Keyword(value) | ComputedValue::String(value) | ComputedValue::Color(value) => {
-            value.clone()
-        }
+        ComputedValue::Keyword(value)
+        | ComputedValue::String(value)
+        | ComputedValue::Color(value) => value.clone(),
         ComputedValue::Px(value) => format!("{value}px"),
         ComputedValue::Percentage(value) => format!("{value}%"),
         ComputedValue::Number(value) => value.to_string(),
@@ -5120,6 +5412,9 @@ fn resolve_non_inherited_css_wide_keywords(properties: &mut BTreeMap<String, Com
         "container-type",
         "object-fit",
         "object-position",
+        "mask-image",
+        "mask-mode",
+        "mask-composite",
         "position",
         "perspective",
         "perspective-origin",
@@ -5209,10 +5504,11 @@ fn resolve_explicit_inherit(
 
     for name in inherited_names {
         if let Some(parent_style) = parent_style
-            && let Some(parent_value) = parent_style.get(&name) {
-                properties.insert(name, parent_value.clone());
-                continue;
-            }
+            && let Some(parent_value) = parent_style.get(&name)
+        {
+            properties.insert(name, parent_value.clone());
+            continue;
+        }
         properties.remove(&name);
     }
 }
@@ -5257,9 +5553,10 @@ fn apply_inheritance(
         "word-spacing",
     ] {
         if !properties.contains_key(inherited_name)
-            && let Some(value) = parent_style.get(inherited_name) {
-                properties.insert(inherited_name.to_string(), value.clone());
-            }
+            && let Some(value) = parent_style.get(inherited_name)
+        {
+            properties.insert(inherited_name.to_string(), value.clone());
+        }
     }
 
     // CSS custom properties inherit by default.
@@ -5278,9 +5575,10 @@ fn inherited_font_size(
         return *value;
     }
     if let Some(parent_style) = parent_style
-        && let Some(ComputedValue::Px(value)) = parent_style.get("font-size") {
-            return *value;
-        }
+        && let Some(ComputedValue::Px(value)) = parent_style.get("font-size")
+    {
+        return *value;
+    }
     16.0
 }
 
@@ -5452,9 +5750,10 @@ fn extract_alpha(v: &Value) -> Option<f32> {
 /// space-separated — into a flat slice.
 fn flatten_color_args(arguments: &[Value]) -> Vec<&Value> {
     if arguments.len() == 1
-        && let Value::List(items) = &arguments[0] {
-            return items.iter().collect();
-        }
+        && let Value::List(items) = &arguments[0]
+    {
+        return items.iter().collect();
+    }
     arguments.iter().collect()
 }
 
@@ -5507,9 +5806,7 @@ fn compute_hsl_function(arguments: &[Value]) -> Option<String> {
 
     // Use 4th value as alpha for hsla(h,s%,l%,a) comma form.
     // Extract via extract_alpha so percentages are 0-1.
-    let a = alpha.or_else(|| {
-        flat.get(3).and_then(|v| extract_alpha(v))
-    });
+    let a = alpha.or_else(|| flat.get(3).and_then(|v| extract_alpha(v)));
 
     let (h, s, l) = match numbers.as_slice() {
         [h, s, l] | [h, s, l, _] => (*h, *s, *l),

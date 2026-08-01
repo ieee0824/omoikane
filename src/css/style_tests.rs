@@ -3220,7 +3220,7 @@ fn canonicalizes_clip_path_inset_and_webkit_alias() {
     resolver.add_stylesheet(
         Origin::Author,
         parse_stylesheet(
-            "body { clip-path: inset(calc(1rem + 2px) 10% calc(25% - 5px) 3px round 8px); } \
+            "body { clip-path: inset(calc(16px + 2px) 10% calc(25% - 5px) 3px round 8px); } \
              h1 { -webkit-clip-path: inset(0 0 100% 0); }",
         )
         .unwrap(),
@@ -3242,6 +3242,205 @@ fn canonicalizes_clip_path_inset_and_webkit_alias() {
     assert_eq!(title_style.get("-webkit-clip-path"), None);
     assert!(is_supported_property("clip-path"));
     assert!(is_supported_property("-webkit-clip-path"));
+}
+
+#[test]
+fn canonicalizes_clip_shape_and_mask_layer_values() {
+    let (_document, body, _title, _html) = sample_tree();
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "body { clip-path: circle(50% at 50% 50%); \
+             mask-image: linear-gradient(to right, black, transparent), url(mask.svg); \
+             mask-mode: luminance, alpha; mask-composite: add; }",
+        )
+        .unwrap(),
+    );
+    let style = resolver.computed_style(&body);
+    assert_eq!(
+        style.get("clip-path"),
+        Some(&ComputedValue::Keyword(
+            "circle(50% at 50% 50%)".to_string()
+        ))
+    );
+    assert_eq!(
+        style.get("mask-image"),
+        Some(&ComputedValue::Keyword(
+            "linear-gradient(to right, black, transparent), url(mask.svg)".to_string()
+        ))
+    );
+    assert_eq!(
+        style.get("mask-mode"),
+        Some(&ComputedValue::Keyword("luminance, alpha".to_string()))
+    );
+    assert_eq!(
+        style.get("mask-composite"),
+        Some(&ComputedValue::Keyword("add".to_string()))
+    );
+    assert!(is_supported_property("mask-mode"));
+    assert!(is_supported_property("mask-composite"));
+}
+
+#[test]
+fn preserves_mask_position_size_and_repeat_layers() {
+    let (_document, body, _title, _html) = sample_tree();
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "body { mask-image: url(a.svg), url(b.svg); \
+             mask-position: left, right; mask-size: contain, cover; \
+             mask-repeat: no-repeat, repeat; }",
+        )
+        .unwrap(),
+    );
+    let style = resolver.computed_style(&body);
+    assert_eq!(
+        style.get("mask-position-x"),
+        Some(&ComputedValue::Keyword("left, right".to_string()))
+    );
+    assert_eq!(
+        style.get("mask-position-y"),
+        Some(&ComputedValue::Keyword("center, center".to_string()))
+    );
+    assert_eq!(
+        style.get("mask-size"),
+        Some(&ComputedValue::Keyword("contain, cover".to_string()))
+    );
+    assert_eq!(
+        style.get("mask-repeat"),
+        Some(&ComputedValue::Keyword("no-repeat, repeat".to_string()))
+    );
+}
+
+#[test]
+fn canonicalizes_uppercase_clip_shape_function_names() {
+    let (_document, body, _title, _html) = sample_tree();
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet("body { clip-path: CIRCLE(50% AT 50% 50%); }").unwrap(),
+    );
+    let style = resolver.computed_style(&body);
+    assert_eq!(
+        style.get("clip-path"),
+        Some(&ComputedValue::Keyword("circle(50% AT 50% 50%)".to_string()))
+    );
+}
+
+#[test]
+fn invalid_clip_shape_and_mask_mode_declarations_are_ignored() {
+    let (_document, body, _title, _html) = sample_tree();
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "body { clip-path: made-up(1px); mask-mode: invalid; \
+             clip-path: polygon(0% 0%, 100% 0%, 0% 100%); }",
+        )
+        .unwrap(),
+    );
+    let style = resolver.computed_style(&body);
+    assert_eq!(
+        style.get("clip-path"),
+        Some(&ComputedValue::Keyword(
+            "polygon(0% 0%, 100% 0%, 0% 100%)".to_string()
+        ))
+    );
+    assert_eq!(
+        style.get("mask-mode"),
+        Some(&ComputedValue::Keyword("match-source".to_string()))
+    );
+}
+
+#[test]
+fn validates_clip_shape_function_arguments() {
+    assert!(!supports_declaration("clip-path", "circle(not-a-length)"));
+    assert!(!supports_declaration("clip-path", "inset(1px round)"));
+    assert!(!supports_declaration(
+        "clip-path",
+        "polygon(0% 0%, 100% 0%)"
+    ));
+    assert!(!supports_declaration(
+        "clip-path",
+        "polygon(0% 0%, 100% 0%, 0% 100% round 2px)"
+    ));
+    assert!(supports_declaration("clip-path", "inset(1px)"));
+    assert!(supports_declaration(
+        "clip-path",
+        "circle(closest-side at 25% 50%)"
+    ));
+    assert!(!supports_declaration(
+        "clip-path",
+        "circle(10px at 1rem 2rem)"
+    ));
+    assert!(!supports_declaration("clip-path", "ellipse(1em 2px)"));
+    assert!(!supports_declaration(
+        "clip-path",
+        "inset(calc(1rem + 2px))"
+    ));
+    assert!(!supports_declaration(
+        "clip-path",
+        "circle(10px at right 10px)"
+    ));
+    assert!(!supports_declaration(
+        "clip-path",
+        "circle(10px at 10px right)"
+    ));
+    assert!(!supports_declaration(
+        "clip-path",
+        "inset(calc(1px + 2px + 3px))"
+    ));
+    assert!(!supports_declaration("clip-path", "url(#clip)"));
+    assert!(!supports_declaration("-webkit-clip-path", "url(#clip)"));
+    assert!(supports_declaration("mask-repeat", "repeat"));
+    assert!(supports_declaration("mask-repeat", "no-repeat repeat"));
+    assert!(supports_declaration("-webkit-mask-repeat", "repeat-x"));
+    assert!(!supports_declaration("mask-repeat", "space"));
+    assert!(!supports_declaration("mask-repeat", "repeat round"));
+    assert!(supports_declaration(
+        "clip-path",
+        "polygon(0% 0%, 100% 0%, 0% 100%)"
+    ));
+    let oversized_polygon = (0..257)
+        .map(|index| format!("{index}% 0%"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    assert!(!supports_declaration(
+        "clip-path",
+        &format!("polygon({oversized_polygon})")
+    ));
+    let oversized_mask = (0..=crate::paint::MAX_MASK_LAYERS)
+        .map(|_| "none")
+        .collect::<Vec<_>>()
+        .join(", ");
+    assert!(!supports_declaration("mask-image", &oversized_mask));
+    assert!(!supports_declaration(
+        "mask-mode",
+        &format!("{}", (0..=crate::paint::MAX_MASK_LAYERS)
+            .map(|_| "alpha")
+            .collect::<Vec<_>>()
+            .join(", "))
+    ));
+    let oversized_mask_layers = |value: &str| {
+        (0..=crate::paint::MAX_MASK_LAYERS)
+            .map(|_| value)
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    assert!(!supports_declaration(
+        "mask-repeat",
+        &oversized_mask_layers("repeat")
+    ));
+    assert!(!supports_declaration(
+        "-webkit-mask-size",
+        &oversized_mask_layers("auto")
+    ));
+    assert!(!supports_declaration(
+        "mask-position",
+        &oversized_mask_layers("center")
+    ));
 }
 
 // --- border-radius shorthand 展開テスト ---
@@ -5443,6 +5642,44 @@ fn expands_mask_shorthand_position_size_and_repeat() {
             ("mask-size", &Value::Keyword("contain".to_string())),
             ("mask-repeat", &Value::Keyword("no-repeat".to_string())),
         ]
+    );
+}
+
+#[test]
+fn aligns_omitted_mask_shorthand_components_per_layer() {
+    let stylesheet = parse_stylesheet("h1 { mask: url(a.svg), url(b.svg) no-repeat; }").unwrap();
+    let Rule::Style(rule) = &stylesheet.rules[0] else {
+        panic!("expected style rule");
+    };
+    let declaration = |name: &str| {
+        rule.declarations
+            .iter()
+            .find(|declaration| declaration.name == name)
+            .map(|declaration| &declaration.value)
+            .expect("mask shorthand longhand")
+    };
+    assert_eq!(
+        declaration("mask-image"),
+        &Value::CommaList(vec![
+            Value::Keyword("url(a.svg)".to_string()),
+            Value::Keyword("url(b.svg)".to_string()),
+        ])
+    );
+    assert_eq!(
+        declaration("mask-repeat"),
+        &Value::CommaList(vec![
+            Value::Keyword("repeat".to_string()),
+            Value::Keyword("no-repeat".to_string()),
+        ])
+    );
+
+    let (_document, _body, title, _html) = sample_tree();
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(Origin::Author, stylesheet);
+    let style = resolver.computed_style(&title);
+    assert_eq!(
+        style.get("mask-repeat"),
+        Some(&ComputedValue::Keyword("repeat, no-repeat".to_string()))
     );
 }
 

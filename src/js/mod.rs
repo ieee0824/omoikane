@@ -8357,8 +8357,9 @@ fn css_supports_native(
 }
 
 /// Normalizes values assigned through CSSStyleDeclaration. Transition values
-/// use native grammar validation so invalid assignments are ignored and
-/// specified-value serialization is canonical.
+/// are canonicalized; CSS Masking/Clipping properties use native grammar
+/// validation so invalid assignments are ignored while valid specified values
+/// are preserved for CSSOM serialization.
 fn normalize_style_value_native(
     _: &JsValue,
     args: &[JsValue],
@@ -8387,6 +8388,20 @@ fn normalize_style_value_native(
             | "transition-delay"
     ) {
         crate::css::normalize_transition_longhand(&property, &value)
+    } else if matches!(
+        property.as_str(),
+        "clip-path"
+            | "-webkit-clip-path"
+            | "mask"
+            | "-webkit-mask"
+            | "mask-image"
+            | "-webkit-mask-image"
+            | "mask-mode"
+            | "-webkit-mask-mode"
+            | "mask-composite"
+            | "-webkit-mask-composite"
+    ) {
+        crate::css::supports_declaration(&property, &value).then_some(value)
     } else {
         Some(value)
     };
@@ -17715,6 +17730,52 @@ b</textarea></form>"#);
                 "document.querySelector('div').style.getPropertyValue('margin-top')"
             ),
             "5px"
+        );
+    }
+
+    #[test]
+    fn style_mutation_accepts_clip_shapes_and_mask_layers_but_rejects_invalid_values() {
+        let doc = NodeHandle::document();
+        let div = NodeHandle::element("div");
+        doc.append_child(div.clone());
+
+        let mut runtime = JsRuntime::with_document(doc).unwrap();
+        runtime
+            .eval(
+                r#"
+                const el = document.querySelector("div");
+                el.style.setProperty("clip-path", "circle(50% at 50% 50%)");
+                el.style.setProperty(
+                  "mask-image",
+                  "linear-gradient(to right, black, transparent), url(mask.svg)"
+                );
+                el.style.setProperty("mask-mode", "luminance, alpha");
+                el.style.setProperty("clip-path", "not-a-basic-shape()");
+                "#,
+            )
+            .unwrap();
+
+        assert_eq!(
+            eval_str(
+                &mut runtime,
+                "getComputedStyle(document.querySelector('div')).clipPath"
+            ),
+            "circle(50% at 50% 50%)",
+            "an invalid later declaration must not replace a valid clip-path"
+        );
+        assert_eq!(
+            eval_str(
+                &mut runtime,
+                "getComputedStyle(document.querySelector('div')).maskImage"
+            ),
+            "linear-gradient(to right, black, transparent), url(mask.svg)"
+        );
+        assert_eq!(
+            eval_str(
+                &mut runtime,
+                "getComputedStyle(document.querySelector('div')).maskMode"
+            ),
+            "luminance, alpha"
         );
     }
 
