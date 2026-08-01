@@ -12959,6 +12959,9 @@ mod tests {
           const pixels = new Uint8Array(8);
           gl.readPixels(0, 0, 2, 1, gl.RGBA, gl.UNSIGNED_BYTE, pixels);
           const clear = Array.from(pixels.slice(0, 4)).join(',');
+          const dataView = new DataView(new ArrayBuffer(8));
+          gl.readPixels(0, 0, 2, 1, gl.RGBA, gl.UNSIGNED_BYTE, dataView);
+          const dataViewReadback = dataView.getUint8(0) === 255;
           gl.readPixels(2, 0, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, new Uint8Array(4));
           const boundsError = gl.getError() === gl.INVALID_VALUE;
           gl.viewport(1, 2, 3, 4);
@@ -13001,13 +13004,13 @@ mod tests {
           __omoikane_webgl_restore_context(gl);
           const restored = !gl.isContextLost() && events.join(',') === 'lost,restored' && canvasEvents.join(',') === 'lost,restored';
           return [typeof WebGLRenderingContext, gl instanceof WebGLRenderingContext, same, exclusive,
-            clear, boundsError, viewport, stringParameter, invalidEnum, bufferSize, resizeKeepsContext, viewportSurvivesResize,
+            clear, dataViewReadback, boundsError, viewport, stringParameter, invalidEnum, bufferSize, resizeKeepsContext, viewportSurvivesResize,
             attributeResizeKeepsContext, linked, uniformLocation, ownership, repeatedDelete,
             constantsImmutable, lost, restored].join('|');
         })()"#);
         assert_eq!(
             result,
-            "function|true|true|true|255,64,128,255|true|1,2,3,4|true|true|12|true|true|true|true|true|true|true|true|true|true"
+            "function|true|true|true|255,64,128,255|true|true|1,2,3,4|true|true|12|true|true|true|true|true|true|true|true|true|true"
         );
     }
 

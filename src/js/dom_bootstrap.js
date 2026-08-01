@@ -6883,7 +6883,6 @@
       const value = webglOwned(this, program, WebGLProgram);
       return value ? value.__shaders.slice() : null;
     }
-    useFixedAttrib() { if (webglActive(this)) webglError(this, WEBGL_CONSTANTS.INVALID_OPERATION); }
     drawArrays(mode, first, count) {
       if (!webglActive(this)) return;
       if (!WEBGL_DRAW_MODES.has(mode)) { webglError(this, WEBGL_CONSTANTS.INVALID_ENUM); return; }
@@ -6908,7 +6907,7 @@
         webglError(this, WEBGL_CONSTANTS.INVALID_ENUM);
         return;
       }
-      if (!(pixels instanceof Uint8Array) && !(pixels instanceof Uint8ClampedArray)) {
+      if (!ArrayBuffer.isView(pixels)) {
         webglError(this, WEBGL_CONSTANTS.INVALID_OPERATION);
         return;
       }
@@ -6928,10 +6927,6 @@
           const sourceX = values[0] + column;
           const sourceY = values[1] + (values[3] - row - 1);
           const target = (row * values[2] + column) * 4;
-          if (sourceX < 0 || sourceY < 0 || sourceX >= state.width || sourceY >= state.height) {
-            bytes.fill(0, target, target + 4);
-            continue;
-          }
           const source = (sourceY * state.width + sourceX) * 4;
           bytes.set(state.pixels.subarray(source, source + 4), target);
         }
