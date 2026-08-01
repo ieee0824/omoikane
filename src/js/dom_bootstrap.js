@@ -11735,6 +11735,12 @@
       ? new EventConstructor(type, init)
       : { type: String(type) };
   }
+  function invokeXhrListener(listener, target, event) {
+    if (typeof listener === "function") listener.call(target, event);
+    else if (listener && typeof listener.handleEvent === "function") {
+      listener.handleEvent.call(listener, event);
+    }
+  }
 
   class XMLHttpRequestUpload {
     constructor() {
@@ -11746,16 +11752,22 @@
       this.onerror = null;
       this.onloadend = null;
     }
-    addEventListener(type, callback) {
-      if (callback == null) return;
+    addEventListener(type, callback, options = false) {
+      if (callback == null ||
+          (typeof callback !== "function" && typeof callback.handleEvent !== "function")) return;
       const key = String(type);
       const listeners = this._listeners[key] || [];
-      if (!listeners.includes(callback)) listeners.push(callback);
+      const capture = typeof options === "boolean" ? options : !!(options && options.capture);
+      if (!listeners.some(entry => entry.listener === callback && entry.capture === capture)) {
+        listeners.push({ listener: callback, capture });
+      }
       this._listeners[key] = listeners;
     }
-    removeEventListener(type, callback) {
+    removeEventListener(type, callback, options = false) {
       const key = String(type);
-      this._listeners[key] = (this._listeners[key] || []).filter(item => item !== callback);
+      const capture = typeof options === "boolean" ? options : !!(options && options.capture);
+      this._listeners[key] = (this._listeners[key] || [])
+        .filter(entry => !(entry.listener === callback && entry.capture === capture));
     }
     dispatchEvent(event) {
       const dispatched = event instanceof Event ? event : createXhrEvent(event);
@@ -11763,7 +11775,9 @@
       dispatched.currentTarget = this;
       const handler = this["on" + dispatched.type];
       if (typeof handler === "function") handler.call(this, dispatched);
-      for (const callback of (this._listeners[dispatched.type] || []).slice()) callback.call(this, dispatched);
+      for (const entry of (this._listeners[dispatched.type] || []).slice()) {
+        invokeXhrListener(entry.listener, this, dispatched);
+      }
       dispatched.currentTarget = null;
       return !dispatched.defaultPrevented;
     }
@@ -11897,11 +11911,22 @@
         .map(([, value]) => String(value));
       return values.length ? values.join(", ") : null;
     }
-    addEventListener(type, callback) {
-      (this._listeners[type] ||= []).push(callback);
+    addEventListener(type, callback, options = false) {
+      if (callback == null ||
+          (typeof callback !== "function" && typeof callback.handleEvent !== "function")) return;
+      const key = String(type);
+      const listeners = this._listeners[key] || [];
+      const capture = typeof options === "boolean" ? options : !!(options && options.capture);
+      if (!listeners.some(entry => entry.listener === callback && entry.capture === capture)) {
+        listeners.push({ listener: callback, capture });
+      }
+      this._listeners[key] = listeners;
     }
-    removeEventListener(type, callback) {
-      this._listeners[type] = (this._listeners[type] || []).filter(item => item !== callback);
+    removeEventListener(type, callback, options = false) {
+      const key = String(type);
+      const capture = typeof options === "boolean" ? options : !!(options && options.capture);
+      this._listeners[key] = (this._listeners[key] || [])
+        .filter(entry => !(entry.listener === callback && entry.capture === capture));
     }
     abort() {
       const active = this._sendFlag && !this._terminal;
@@ -12147,7 +12172,9 @@
       dispatched.currentTarget = this;
       const handler = this["on" + dispatched.type];
       if (typeof handler === "function") handler.call(this, dispatched);
-      for (const callback of (this._listeners[dispatched.type] || []).slice()) callback.call(this, dispatched);
+      for (const entry of (this._listeners[dispatched.type] || []).slice()) {
+        invokeXhrListener(entry.listener, this, dispatched);
+      }
       dispatched.currentTarget = null;
       return !dispatched.defaultPrevented;
     }

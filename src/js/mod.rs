@@ -17546,14 +17546,21 @@ b</textarea></form>"#);
             .eval(&format!(
                 r#"globalThis.downloadEvents = [];
                 globalThis.uploadEvents = [];
+                globalThis.uploadObjectCalls = 0;
                 const recordProgress = (target, label, type) => event =>
                   target.push([label, type, event.loaded, event.total,
                     event.lengthComputable, event instanceof ProgressEvent].join(":"));
                 const xhr = new XMLHttpRequest();
+                const uploadObject = {{ handleEvent(event) {{
+                  if (event.type === "progress") uploadObjectCalls++;
+                }}}};
                 for (const type of ["loadstart", "progress", "load", "loadend"])
                   xhr.addEventListener(type, recordProgress(downloadEvents, "download", type));
                 for (const type of ["loadstart", "progress", "load", "loadend"])
                   xhr.upload.addEventListener(type, recordProgress(uploadEvents, "upload", type));
+                xhr.upload.addEventListener("progress", uploadObject);
+                xhr.upload.addEventListener("progress", uploadObject);
+                xhr.upload.addEventListener("progress", null);
                 xhr.open("POST", "http://127.0.0.1:{}/upload");
                 xhr.send("request");
                 globalThis.progressXhr = xhr;"#,
@@ -17571,6 +17578,7 @@ b</textarea></form>"#);
                   "upload:loadstart:0:7:true:true|upload:progress:7:7:true:true|upload:load:7:7:true:true|upload:loadend:7:7:true:true" &&
                 progressXhr.upload instanceof XMLHttpRequestUpload &&
                 progressXhr.upload instanceof EventTarget &&
+                uploadObjectCalls === 1 &&
                 progressXhr.status === 200 && progressXhr.responseText === "hello""#,
             )
             .unwrap()
