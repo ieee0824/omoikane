@@ -3359,6 +3359,13 @@ fn validates_clip_shape_function_arguments() {
         "clip-path",
         "inset(calc(1px + 2px + 3px))"
     ));
+    assert!(!supports_declaration("clip-path", "url(#clip)"));
+    assert!(!supports_declaration("-webkit-clip-path", "url(#clip)"));
+    assert!(supports_declaration("mask-repeat", "repeat"));
+    assert!(supports_declaration("mask-repeat", "no-repeat repeat"));
+    assert!(supports_declaration("-webkit-mask-repeat", "repeat-x"));
+    assert!(!supports_declaration("mask-repeat", "space"));
+    assert!(!supports_declaration("mask-repeat", "repeat round"));
     assert!(supports_declaration(
         "clip-path",
         "polygon(0% 0%, 100% 0%, 0% 100%)"

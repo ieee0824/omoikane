@@ -1228,8 +1228,7 @@ fn validate_declaration(name: &str, value: &Value) -> DeclarationValidation {
         return match value {
             Value::Keyword(keyword)
                 if is_css_wide_keyword(&keyword.to_ascii_lowercase())
-                    || keyword.eq_ignore_ascii_case("none")
-                    || keyword.to_ascii_lowercase().starts_with("url(") =>
+                    || keyword.eq_ignore_ascii_case("none") =>
             {
                 DeclarationValidation::Unvalidated
             }
@@ -1246,6 +1245,35 @@ fn validate_declaration(name: &str, value: &Value) -> DeclarationValidation {
                 } else {
                     DeclarationValidation::Invalid
                 }
+            }
+            _ => DeclarationValidation::Invalid,
+        };
+    }
+    if name.eq_ignore_ascii_case("mask-repeat") {
+        let valid_axis = |value: &Value| {
+            matches!(
+                value,
+                Value::Keyword(keyword)
+                    if matches!(
+                        keyword.to_ascii_lowercase().as_str(),
+                        "repeat" | "no-repeat"
+                    )
+            )
+        };
+        return match value {
+            Value::Keyword(keyword)
+                if is_css_wide_keyword(&keyword.to_ascii_lowercase())
+                    || matches!(
+                        keyword.to_ascii_lowercase().as_str(),
+                        "repeat" | "no-repeat" | "repeat-x" | "repeat-y"
+                    ) =>
+            {
+                DeclarationValidation::Unvalidated
+            }
+            Value::List(values)
+                if (1..=2).contains(&values.len()) && values.iter().all(valid_axis) =>
+            {
+                DeclarationValidation::Unvalidated
             }
             _ => DeclarationValidation::Invalid,
         };
