@@ -29264,6 +29264,53 @@ b</textarea></form>"#);
     }
 
     #[test]
+    fn svg_text_geometry_uses_utf16_ranges_and_nested_transforms() {
+        let mut runtime = JsRuntime::new().unwrap();
+        let actual = eval_str(
+            &mut runtime,
+            r#"(() => {
+                const ns = 'http://www.w3.org/2000/svg';
+                const svg = document.createElementNS(ns, 'svg');
+                const text = document.createElementNS(ns, 'text');
+                text.setAttribute('x', '10');
+                text.setAttribute('y', '20');
+                text.setAttribute('font-size', '10');
+                text.appendChild(document.createTextNode('AB'));
+                const span = document.createElementNS(ns, 'tspan');
+                span.setAttribute('dx', '2');
+                span.setAttribute('transform', 'translate(5 3)');
+                span.appendChild(document.createTextNode('C'));
+                text.appendChild(span);
+                svg.appendChild(text);
+                document.body.appendChild(svg);
+                const start = text.getStartPositionOfChar(2);
+                const end = text.getEndPositionOfChar(2);
+                const extent = text.getExtentOfChar(2);
+                const box = text.getBBox();
+                const round = value => Math.round(value * 100) / 100;
+                return [
+                    text.getNumberOfChars(),
+                    round(text.getComputedTextLength()),
+                    round(text.getSubStringLength(1, 2)),
+                    round(start.x), round(start.y), round(end.x), round(end.y),
+                    round(extent.x), round(extent.y), round(extent.width), round(extent.height),
+                    round(box.x), round(box.y), round(box.width), round(box.height),
+                    start instanceof SVGPoint,
+                    extent instanceof SVGRect,
+                    Object.getPrototypeOf(start) === SVGPoint.prototype,
+                    Object.getPrototypeOf(extent) === SVGRect.prototype,
+                    Object.getOwnPropertyDescriptor(SVGRectElement.prototype, 'width').set === undefined,
+                    span instanceof SVGTextContentElement,
+                ].join('|');
+            })()"#,
+        );
+        assert_eq!(
+            actual,
+            "3|18|12|29|23|35|23|29|15|6|10|10|12|25|13|true|true|true|true|true|true"
+        );
+    }
+
+    #[test]
     fn embedded_svg_documents_are_exposed_by_iframe_and_object() {
         let port = spawn_static_http_server(
             "image/svg+xml",
