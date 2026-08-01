@@ -10698,6 +10698,7 @@ mod tests {
                    callee.onconnectionstatechange = () => webrtcProbe.states.push('callee:' + callee.connectionState);
                    callee.ondatachannel = event => {
                      webrtcProbe.remoteLabel = event.channel.label;
+                     webrtcProbe.remoteChannel = event.channel;
                      event.channel.onmessage = message => webrtcProbe.data = message.data;
                    };
                    const channel = caller.createDataChannel('chat');
@@ -10714,6 +10715,7 @@ mod tests {
                      webrtcProbe.signaling = caller.signalingState + '|' + callee.signalingState;
                      webrtcProbe.connected = caller.connectionState + '|' + callee.connectionState;
                      caller.close();
+                     webrtcProbe.remoteReadyState = webrtcProbe.remoteChannel.readyState;
                      try { channel.send('closed'); } catch (error) { webrtcProbe.sendError = error.name; }
                    });"#,
             )
@@ -10724,6 +10726,7 @@ mod tests {
         assert_eq!(eval_str(&mut runtime, "webrtcProbe.remoteLabel + '|' + webrtcProbe.data"), "chat|hello");
         assert_eq!(eval_str(&mut runtime, "webrtcProbe.signaling"), "stable|stable");
         assert_eq!(eval_str(&mut runtime, "webrtcProbe.connected"), "connected|connected");
+        assert_eq!(eval_str(&mut runtime, "webrtcProbe.remoteReadyState"), "closed");
         assert_eq!(eval_str(&mut runtime, "webrtcProbe.sendError"), "InvalidStateError");
         assert_eq!(eval_str(&mut runtime, "webrtcProbe.events.join('|')"), "open|close");
         assert_eq!(eval_str(&mut runtime, "JSON.parse(webrtcProbe.offerJSON).type"), "offer");
@@ -10738,12 +10741,17 @@ mod tests {
                    const peer = new RTCPeerConnection();
                    peer.createAnswer().catch(error => webrtcErrors.push(error.name));
                    peer.setRemoteDescription({ type: 'rollback', sdp: '' }).catch(error => webrtcErrors.push(error.name));
+                   const rollbackPeer = new RTCPeerConnection();
+                   rollbackPeer.createOffer().then(offer => rollbackPeer.setLocalDescription(offer))
+                     .then(() => rollbackPeer.setLocalDescription({ type: 'rollback', sdp: '' }))
+                     .then(() => globalThis.rollbackState = rollbackPeer.signalingState + '|' + (rollbackPeer.localDescription === null));
                    globalThis.candidateJSON = JSON.stringify(new RTCIceCandidate({ candidate: '', sdpMid: null, sdpMLineIndex: null }).toJSON());
                    globalThis.descriptionJSON = JSON.stringify(new RTCSessionDescription({ type: 'offer', sdp: 'v=0' }).toJSON());"#,
             )
             .unwrap();
         runtime.run_until_idle().unwrap();
         assert_eq!(eval_str(&mut runtime, "webrtcErrors.join('|')"), "InvalidStateError|InvalidStateError");
+        assert_eq!(eval_str(&mut runtime, "rollbackState"), "stable|true");
         assert_eq!(eval_str(&mut runtime, "candidateJSON"), r#"{"candidate":"","sdpMid":null,"sdpMLineIndex":null,"usernameFragment":null}"#);
         assert_eq!(eval_str(&mut runtime, "descriptionJSON"), r#"{"type":"offer","sdp":"v=0"}"#);
     }

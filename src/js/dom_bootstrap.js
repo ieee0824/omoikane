@@ -10445,7 +10445,10 @@
         this.dispatchEvent(new Event("iceconnectionstatechange"));
         this.dispatchEvent(new Event("signalingstatechange"));
       });
-      for (const channel of this.__channels) channel.__closeInternal();
+      for (const channel of this.__channels) {
+        channel.__closeInternal();
+        if (channel.__peer) channel.__peer.__closeInternal();
+      }
       this.__channels.clear();
     }
     __applyLocalDescription(description) {
@@ -10456,6 +10459,8 @@
         }
         this.__pendingLocalDescription = null;
         this.__pendingRemoteDescription = null;
+        if (this.__localDescription && (this.__localDescription.type === "offer" ||
+            this.__localDescription.type === "pranswer")) this.__localDescription = null;
         this.__setSignalingState("stable");
         return;
       }
@@ -10482,6 +10487,8 @@
         }
         this.__pendingRemoteDescription = null;
         this.__pendingLocalDescription = null;
+        if (this.__remoteDescription && (this.__remoteDescription.type === "offer" ||
+            this.__remoteDescription.type === "pranswer")) this.__remoteDescription = null;
         this.__setSignalingState("stable");
         return;
       }
@@ -10630,6 +10637,9 @@
   globalThis.__omoikane_create_webrtc_peer_pair = function(leftConfiguration = {}, rightConfiguration = {}) {
     return RTCPeerConnection.createPair(leftConfiguration, rightConfiguration);
   };
+  globalThis.__omoikane_create_webrtc_pair = globalThis.__omoikane_create_webrtc_peer_pair;
+  RTCPeerConnection.__createPair = RTCPeerConnection.createPair;
+  RTCPeerConnection.__createPeerPair = RTCPeerConnection.createPair;
 
   // Dedicated workers execute in a separate Boa realm. Passing a JsValue
   // object directly between those realms would retain the sender's
