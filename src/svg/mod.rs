@@ -98,7 +98,7 @@ pub(crate) fn hit_test_svg(
     y: f32,
     width: f32,
     height: f32,
-    accepts_target: &mut dyn FnMut(&NodeHandle) -> bool,
+    computed_pointer_events: &mut dyn FnMut(&NodeHandle) -> Option<String>,
 ) -> Option<NodeHandle> {
     if svg_node.tag_name().as_deref() != Some("svg")
         || !x.is_finite()
@@ -150,7 +150,7 @@ pub(crate) fn hit_test_svg(
         scale_x,
         scale_y,
         &initial,
-        accepts_target,
+        computed_pointer_events,
     )
 }
 
@@ -168,7 +168,7 @@ fn hit_test_svg_children(
     scale_x: f32,
     scale_y: f32,
     inherited: &SvgHitStyle,
-    accepts_target: &mut dyn FnMut(&NodeHandle) -> bool,
+    computed_pointer_events: &mut dyn FnMut(&NodeHandle) -> Option<String>,
 ) -> Option<NodeHandle> {
     let children = parent.child_nodes();
     for child in children.iter().rev() {
@@ -187,7 +187,8 @@ fn hit_test_svg_children(
         let child_scale_x = 1.0;
         let child_scale_y = 1.0;
         let paint = resolve_paint(&inherited.paint, &attrs);
-        let pointer_events = property_value(&attrs, "pointer-events")
+        let pointer_events = computed_pointer_events(child)
+            .or_else(|| property_value(&attrs, "pointer-events"))
             .unwrap_or_else(|| inherited.pointer_events.clone())
             .to_ascii_lowercase();
         let visible = inherited.visible
@@ -217,7 +218,7 @@ fn hit_test_svg_children(
             next_scale_x,
             next_scale_y,
             &style,
-            accepts_target,
+            computed_pointer_events,
         ) {
             return Some(target);
         }
@@ -230,7 +231,7 @@ fn hit_test_svg_children(
             &style.paint,
             style.visible,
             geometry,
-        ) && accepts_target(child) {
+        ) {
             return Some(child.clone());
         }
     }
@@ -299,7 +300,16 @@ fn svg_hit_geometry(tag: &str, attrs: &BTreeMap<String, String>, point: (f32, f3
             SvgHitGeometry {
                 fill: radius > 0.0 && distance <= radius,
                 stroke: radius > 0.0 && (distance - radius).abs() <= stroke_width / 2.0,
-                bounding_box: radius > 0.0 && distance <= radius + stroke_width / 2.0,
+                bounding_box: radius > 0.0
+                    && point_in_rect(
+                        point,
+                        Rect {
+                            x: cx - radius - stroke_width / 2.0,
+                            y: cy - radius - stroke_width / 2.0,
+                            width: radius * 2.0 + stroke_width,
+                            height: radius * 2.0 + stroke_width,
+                        },
+                    ),
             }
         }
         "ellipse" => {
@@ -312,7 +322,19 @@ fn svg_hit_geometry(tag: &str, attrs: &BTreeMap<String, String>, point: (f32, f3
             }
             let normalized = ((point.0 - cx) / rx).powi(2) + ((point.1 - cy) / ry).powi(2);
             let stroke = (normalized.sqrt() - 1.0).abs() * rx.min(ry) <= stroke_width / 2.0;
-            SvgHitGeometry { fill: normalized <= 1.0, stroke, bounding_box: normalized <= 1.0 || stroke }
+            SvgHitGeometry {
+                fill: normalized <= 1.0,
+                stroke,
+                bounding_box: point_in_rect(
+                    point,
+                    Rect {
+                        x: cx - rx - stroke_width / 2.0,
+                        y: cy - ry - stroke_width / 2.0,
+                        width: rx * 2.0 + stroke_width,
+                        height: ry * 2.0 + stroke_width,
+                    },
+                ),
+            }
         }
         "line" => {
             let start = (
@@ -325,7 +347,17 @@ fn svg_hit_geometry(tag: &str, attrs: &BTreeMap<String, String>, point: (f32, f3
             );
             let distance = point_segment_distance(point, start, end);
             let hit = distance <= stroke_width / 2.0;
-            SvgHitGeometry { fill: false, stroke: hit, bounding_box: hit }
+            let bbox = rect_for_points(&[start, end]);
+            let bounding_box = point_in_rect(
+                point,
+                Rect {
+                    x: bbox.x - stroke_width / 2.0,
+                    y: bbox.y - stroke_width / 2.0,
+                    width: bbox.width + stroke_width,
+                    height: bbox.height + stroke_width,
+                },
+            );
+            SvgHitGeometry { fill: false, stroke: hit, bounding_box }
         }
         "polyline" | "polygon" => {
             let points = parse_svg_points(attribute_ref(attrs, "points"));
@@ -494,60 +526,6 @@ fn point_in_polygon(point: (f32, f32), points: &[(f32, f32)]) -> bool {
         }
     }
     inside
-}
-
-fn inverse_svg_transform(
-    point: (f32, f32),
-    transform: Option<&str>,
-) -> Option<((f32, f32), f32, f32)> {
-    let Some(transform) = transform else {
-        return Some((point, 1.0, 1.0));
-    };
-    let mut matrix = (1.0, 0.0, 0.0, 1.0, 0.0, 0.0);
-    for part in transform.split(')') {
-        let Some((name, values)) = part.split_once('(') else { continue };
-        let numbers = parse_number_list(values);
-        let operation = match name.trim().to_ascii_lowercase().as_str() {
-            "translate" if !numbers.is_empty() => (1.0, 0.0, 0.0, 1.0, numbers[0], numbers.get(1).copied().unwrap_or(0.0)),
-            "scale" if !numbers.is_empty() => (numbers[0], 0.0, 0.0, numbers.get(1).copied().unwrap_or(numbers[0]), 0.0, 0.0),
-            "matrix" if numbers.len() >= 6 => (numbers[0], numbers[1], numbers[2], numbers[3], numbers[4], numbers[5]),
-            _ => continue,
-        };
-        matrix = multiply_svg_matrix(matrix, operation);
-    }
-    let determinant = matrix.0 * matrix.3 - matrix.1 * matrix.2;
-    if determinant.abs() <= f32::EPSILON {
-        return None;
-    }
-    let x = point.0 - matrix.4;
-    let y = point.1 - matrix.5;
-    Some((
-        ((matrix.3 * x - matrix.2 * y) / determinant,
-            (-matrix.1 * x + matrix.0 * y) / determinant),
-        matrix.0.abs().max(matrix.2.abs()),
-        matrix.1.abs().max(matrix.3.abs()),
-    ))
-}
-
-fn parse_number_list(value: &str) -> Vec<f32> {
-    value
-        .split(|character: char| character == ',' || character.is_ascii_whitespace())
-        .filter_map(|part| part.trim().parse::<f32>().ok())
-        .collect()
-}
-
-fn multiply_svg_matrix(
-    left: (f32, f32, f32, f32, f32, f32),
-    right: (f32, f32, f32, f32, f32, f32),
-) -> (f32, f32, f32, f32, f32, f32) {
-    (
-        left.0 * right.0 + left.2 * right.1,
-        left.1 * right.0 + left.3 * right.1,
-        left.0 * right.2 + left.2 * right.3,
-        left.1 * right.2 + left.3 * right.3,
-        left.0 * right.4 + left.2 * right.5 + left.4,
-        left.1 * right.4 + left.3 * right.5 + left.5,
-    )
 }
 
 #[derive(Clone)]

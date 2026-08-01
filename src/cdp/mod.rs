@@ -4597,7 +4597,7 @@ mod tests {
             .dispatch(
                 "Runtime.evaluate",
                 json!({
-                    "expression": "JSON.stringify({targets,none:getComputedStyle(overlay).pointerEvents})",
+                    "expression": "JSON.stringify({targets,none:getComputedStyle(document.getElementById('overlay')).pointerEvents})",
                     "returnByValue": true,
                 }),
             )

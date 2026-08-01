@@ -1697,8 +1697,12 @@ fn hit_test_box(
         let svg_box = border_box_rect(layout);
         let local_x = local_point.0 - svg_box.x;
         let local_y = local_point.1 - svg_box.y;
-        let mut accepts_target = |node: &NodeHandle| {
-            accepts_pointer_events(&resolver.computed_style(node))
+        let mut computed_pointer_events = |node: &NodeHandle| {
+            match resolver.computed_style(node).get("pointer-events") {
+                Some(ComputedValue::Keyword(value))
+                    if !value.eq_ignore_ascii_case("auto") => Some(value.clone()),
+                _ => None,
+            }
         };
         if let Some(target) = crate::svg::hit_test_svg(
             &layout.node,
@@ -1706,7 +1710,7 @@ fn hit_test_box(
             local_y,
             svg_box.width,
             svg_box.height,
-            &mut accepts_target,
+            &mut computed_pointer_events,
         ) {
             return Some(target);
         }
