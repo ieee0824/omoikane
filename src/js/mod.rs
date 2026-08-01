@@ -11534,7 +11534,8 @@ mod tests {
                        typeof WebTransportError === 'function' &&
                        typeof WebTransportCloseInfo === 'function' &&
                        typeof WebTransportBidirectionalStream === 'function',
-                     ready: '', datagram: '', bidi: '', bidiDone: false,
+                     ready: '', readyEvents: 0, closeEvents: 0, eventTarget: false,
+                     datagram: '', bidi: '', bidiDone: false,
                      uni: '', uniDone: false, close: '', peerClose: '', errors: []
                    };
                    const pair = WebTransport.createPair(
@@ -11543,6 +11544,9 @@ mod tests {
                    );
                    const left = pair.left;
                    const right = pair.right;
+                   webTransportProbe.eventTarget = left instanceof EventTarget && typeof left.addEventListener === 'function';
+                   left.addEventListener('statechange', () => webTransportProbe.readyEvents++);
+                   left.addEventListener('close', () => webTransportProbe.closeEvents++);
                    Promise.all([left.ready, right.ready]).then(() => {
                      webTransportProbe.ready = left.url + '|' + right.url;
                      const datagramReader = right.datagrams.readable.getReader();
@@ -11585,6 +11589,8 @@ mod tests {
             .unwrap();
         runtime.run_until_idle().unwrap();
         assert_eq!(eval_str(&mut runtime, "String(webTransportProbe.surface)"), "true");
+        assert_eq!(eval_str(&mut runtime, "String(webTransportProbe.eventTarget)"), "true");
+        assert_eq!(eval_str(&mut runtime, "String(webTransportProbe.readyEvents)"), "1");
         assert_eq!(eval_str(&mut runtime, "webTransportProbe.ready"), "https://wt-left.example.test/transport|https://wt-right.example.test/transport");
         assert_eq!(eval_str(&mut runtime, "webTransportProbe.datagram"), "1,2,3");
         assert_eq!(eval_str(&mut runtime, "webTransportProbe.bidi"), "true|true|4,5");
@@ -11593,6 +11599,7 @@ mod tests {
         assert_eq!(eval_str(&mut runtime, "String(webTransportProbe.uniDone)"), "true");
         assert_eq!(eval_str(&mut runtime, "webTransportProbe.close"), "42|done");
         assert_eq!(eval_str(&mut runtime, "webTransportProbe.peerClose"), "42|done");
+        assert_eq!(eval_str(&mut runtime, "String(webTransportProbe.closeEvents)"), "1");
         assert_eq!(eval_str(&mut runtime, "webTransportProbe.errors.length"), "0");
     }
 
@@ -11601,7 +11608,7 @@ mod tests {
         let mut runtime = JsRuntime::new().unwrap();
         runtime
             .eval(
-                r#"globalThis.webTransportValidation = { errors: [], first: false, second: false, drained: false, close: '', writeError: '', streamError: '' };
+                r#"globalThis.webTransportValidation = { errors: [], first: false, second: false, drained: false, close: '', writeError: '', streamError: '', datagramError: '', datagramErrorSet: false, streamReason: '' };
                    for (const make of [
                      () => new WebTransport('http://insecure.example.test/'),
                      () => new WebTransport('https://valid.example.test/', { congestionControl: 'invalid' }),
@@ -11614,6 +11621,10 @@ mod tests {
                    right.datagrams.incomingHighWaterMark = 1;
                    const reader = right.datagrams.readable.getReader();
                    const writer = left.datagrams.writable.getWriter();
+                   const datagramPair = WebTransport.createPair();
+                   const datagramErrorReader = datagramPair.right.datagrams.readable.getReader();
+                   datagramErrorReader.read().catch(error => { webTransportValidation.datagramError = error.message; webTransportValidation.datagramErrorSet = true; });
+                   datagramPair.right.datagrams.writable.getWriter().abort('');
                    writer.write(new Uint8Array([1])).then(() => webTransportValidation.first = true);
                    writer.write(new Uint8Array([2])).then(() => webTransportValidation.second = true, error => webTransportValidation.writeError = error.name);
                    const errorPair = WebTransport.createPair();
@@ -11631,7 +11642,13 @@ mod tests {
                        });
                      });
                    }));
-                   errorLeft.closed.then(info => webTransportValidation.close = info.closeCode + '|' + info.reason);"#,
+                   errorLeft.closed.then(info => webTransportValidation.close = info.closeCode + '|' + info.reason);
+                   const reasonPair = WebTransport.createPair();
+                   const reasonIncoming = reasonPair.right.incomingUnidirectionalStreams.getReader();
+                   reasonPair.left.createUnidirectionalStream().then(send => reasonIncoming.read().then(result => {
+                     result.value.getReader().read().catch(error => webTransportValidation.streamReason = error.message);
+                     send.getWriter().abort(0);
+                   }));"#,
             )
             .unwrap();
         runtime.run_until_idle().unwrap();
@@ -11640,11 +11657,14 @@ mod tests {
         assert_eq!(eval_str(&mut runtime, "String(webTransportValidation.second)"), "false");
         assert_eq!(eval_str(&mut runtime, "webTransportValidation.close"), "9|closed");
         assert_eq!(eval_str(&mut runtime, "webTransportValidation.writeError"), "InvalidStateError");
+        assert_eq!(eval_str(&mut runtime, "String(webTransportValidation.datagramErrorSet)"), "true");
+        assert_eq!(eval_str(&mut runtime, "webTransportValidation.datagramError"), "");
         runtime.eval("reader.read().then(() => webTransportValidation.drained = true)").unwrap();
         runtime.run_until_idle().unwrap();
         assert_eq!(eval_str(&mut runtime, "String(webTransportValidation.drained)"), "true");
         assert_eq!(eval_str(&mut runtime, "String(webTransportValidation.second)"), "true");
         assert_eq!(eval_str(&mut runtime, "webTransportValidation.streamError"), "WebTransportError");
+        assert_eq!(eval_str(&mut runtime, "webTransportValidation.streamReason"), "0");
     }
 
     #[test]

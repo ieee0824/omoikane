@@ -11647,8 +11647,9 @@
     get [Symbol.toStringTag]() { return "WebTransportBidirectionalStream"; }
   }
 
-  class WebTransport {
+  class WebTransport extends EventTarget {
     constructor(url, options = {}) {
+      super();
       if (options == null || typeof options !== "object") throw new TypeError("WebTransport options must be an object");
       this.url = WebTransport.__normalizeURL(url);
       const congestionControl = options.congestionControl === undefined ? "default" : String(options.congestionControl);
@@ -11763,7 +11764,9 @@
     }
     __closeDatagrams() { return Promise.resolve(); }
     __abortDatagrams(reason) {
-      const error = reason instanceof WebTransportError ? reason : new WebTransportError({ source: "session", message: String(reason || "Datagrams were aborted.") });
+      const error = reason instanceof WebTransportError ? reason : new WebTransportError({
+        source: "session", message: String(reason === undefined ? "Datagrams were aborted." : reason),
+      });
       this.__datagramReadable.__webTransportError(error);
       for (const pending of this.__pendingDatagrams.splice(0)) pending.reject(error);
       return Promise.resolve();
@@ -11823,7 +11826,7 @@
             });
           },
           () => { local.__writableClosed = true; remote.__webTransportClose(); },
-          reason => { local.__writableClosed = true; remote.__webTransportError(new WebTransportError({ source: "stream", message: String(reason || "The stream was aborted.") })); },
+          reason => { local.__writableClosed = true; remote.__webTransportError(new WebTransportError({ source: "stream", message: String(reason === undefined ? "The stream was aborted." : reason) })); },
         );
         local.__closeInternal = reason => {
           if (local.__writableClosed) return;
