@@ -22461,6 +22461,14 @@ b</textarea></form>"#);
         assert_eq!(eval_str(&mut runtime, "requestResult + '|' + notificationStatus.state"), "denied|denied");
         assert_eq!(eval_str(&mut runtime, "permissionChanges.length"), "6");
 
+        // A page cannot forge a granted transition by invoking the bridge
+        // directly: the host-backed state remains authoritative.
+        runtime
+            .eval("__omoikane_permission_changed('clipboard-read', 'granted');")
+            .unwrap();
+        runtime.run_jobs().unwrap();
+        assert_eq!(eval_str(&mut runtime, "clipboardStatus.state + '|' + permissionChanges.length"), "denied|6");
+
         runtime
             .eval(
                 r#"globalThis.invalidPermission = 'pending';

@@ -11274,12 +11274,13 @@
   globalThis.PermissionStatus = PermissionStatus;
   globalThis.Permissions = Permissions;
   navigator.permissions = new Permissions(permissionsConstructionToken);
-  globalThis.__omoikane_permission_changed = (name, state) => {
+  globalThis.__omoikane_permission_changed = (name, _state) => {
     const normalizedName = String(name);
     if (!supportedPermissionNames.includes(normalizedName)) return;
-    const normalizedState = ["granted", "denied", "prompt"].includes(String(state))
-      ? String(state) : permissionStateFor(normalizedName);
-    notifyPermissionStatuses(normalizedName, normalizedState);
+    // The host transition argument is only a notification hint.  Always
+    // recompute from the authoritative source so page code cannot forge a
+    // granted/denied state by calling this private-looking global directly.
+    notifyPermissionStatuses(normalizedName, permissionStateFor(normalizedName));
   };
   globalThis.__omoikane_permission_teardown = () => {
     if (!permissionLifecycleActive) return;
