@@ -10101,6 +10101,15 @@
     get [Symbol.toStringTag]() { return "RTCIceCandidate"; }
   }
 
+  class RTCPeerConnectionIceEvent extends Event {
+    constructor(type, init = {}) {
+      super(type, init);
+      this.candidate = init.candidate === undefined ? null : init.candidate;
+      this.url = init.url === undefined || init.url === null ? null : String(init.url);
+    }
+    get [Symbol.toStringTag]() { return "RTCPeerConnectionIceEvent"; }
+  }
+
   function webrtcChannelBytes(value) {
     if (typeof value === "string") return value.length;
     if (value instanceof ArrayBuffer) return value.byteLength;
@@ -10518,8 +10527,7 @@
       this.__iceGatheringState = "gathering";
       webrtcQueue(() => {
         this.dispatchEvent(new Event("icegatheringstatechange"));
-        const candidateEvent = new Event("icecandidate");
-        candidateEvent.candidate = null;
+        const candidateEvent = new RTCPeerConnectionIceEvent("icecandidate", { candidate: null });
         this.dispatchEvent(candidateEvent);
         this.__iceGatheringState = "complete";
         this.dispatchEvent(new Event("icegatheringstatechange"));
@@ -10632,14 +10640,25 @@
 
   globalThis.RTCSessionDescription = RTCSessionDescription;
   globalThis.RTCIceCandidate = RTCIceCandidate;
+  globalThis.RTCPeerConnectionIceEvent = RTCPeerConnectionIceEvent;
   globalThis.RTCDataChannel = RTCDataChannel;
   globalThis.RTCPeerConnection = RTCPeerConnection;
   globalThis.__omoikane_create_webrtc_peer_pair = function(leftConfiguration = {}, rightConfiguration = {}) {
     return RTCPeerConnection.createPair(leftConfiguration, rightConfiguration);
   };
   globalThis.__omoikane_create_webrtc_pair = globalThis.__omoikane_create_webrtc_peer_pair;
+  globalThis.__omoikane_connect_webrtc_peers = function(left, right) {
+    if (!(left instanceof RTCPeerConnection) || !(right instanceof RTCPeerConnection)) {
+      throw new TypeError("RTCPeerConnection peers are required");
+    }
+    left.__linkPeer(right);
+    return [left, right];
+  };
   RTCPeerConnection.__createPair = RTCPeerConnection.createPair;
   RTCPeerConnection.__createPeerPair = RTCPeerConnection.createPair;
+  RTCPeerConnection.connectPeers = function(left, right) {
+    return globalThis.__omoikane_connect_webrtc_peers(left, right);
+  };
 
   // Dedicated workers execute in a separate Boa realm. Passing a JsValue
   // object directly between those realms would retain the sender's
