@@ -10324,8 +10324,11 @@
     return addPerformanceEntry(new PerformanceResourceTiming(performanceEntryToken, timing));
   }
 
-  function beginResourceTiming(name, initiatorType) {
-    const startTime = performance.now();
+  function beginResourceTiming(name, initiatorType, startAt = undefined) {
+    const sampledStart = startAt === undefined ? performance.now() : Number(startAt);
+    const startTime = Number.isFinite(sampledStart) && sampledStart >= 0
+      ? sampledStart
+      : Math.max(0, performance.now());
     return {
       name: String(name),
       initiatorType: String(initiatorType),
@@ -10344,16 +10347,24 @@
   function finishResourceTiming(timing, data = {}, error = false) {
     if (!timing || finishedResourceTimings.has(timing)) return null;
     finishedResourceTimings.add(timing);
-    const responseEnd = performance.now();
+    const responseEnd = data && data.responseEnd !== undefined
+      ? normalizeTimingNumber(data.responseEnd, normalizeTimingNumber(timing.responseEnd, 0))
+      : performance.now();
+    const responseStart = data && data.responseStart !== undefined
+      ? normalizeTimingNumber(data.responseStart, responseEnd)
+      : responseEnd;
     const bodyText = data && data.bodyText !== undefined ? String(data.bodyText) : "";
     const bodyBytes = data && data.bodyBase64 !== undefined && data.bodyBase64 !== null
       ? resourceTimingBase64ByteLength(data.bodyBase64)
       : resourceTimingTextEncoder.encode(bodyText).length;
     const status = error ? 0 : normalizeTimingNumber(data.responseStatus ?? data.status, 0);
     const redirected = Boolean(data.redirected);
+    const responseName = data && data.url !== undefined && data.url !== null
+      ? String(data.url)
+      : "";
     return recordResourceTiming({
       ...timing,
-      responseStart: responseEnd,
+      responseStart,
       responseEnd,
       redirectStart: redirected ? timing.startTime : 0,
       redirectEnd: redirected ? Math.max(timing.startTime, responseEnd - 0.001) : 0,
@@ -10361,7 +10372,7 @@
       encodedBodySize: error ? 0 : bodyBytes,
       decodedBodySize: error ? 0 : bodyBytes,
       responseStatus: status,
-      name: timing.name,
+      name: responseName || timing.name,
     });
   }
 
@@ -10593,11 +10604,17 @@
   // Host-side document/module loaders complete outside the JS fetch wrapper.
   // They report their terminal status through this tiny private bridge so
   // initial parser-discovered resources participate in the same timeline.
-  globalThis.__omoikane_record_resource_timing = function(name, initiatorType, status, error, redirected = false) {
-    const timing = beginResourceTiming(String(name), String(initiatorType || "other"));
+  globalThis.__omoikane_record_resource_timing = function(name, initiatorType, status, error, redirected = false, elapsedMs = 0) {
+    const responseEnd = performance.now();
+    const elapsed = normalizeTimingNumber(elapsedMs, 0);
+    const startTime = Math.max(0, responseEnd - elapsed);
+    const timing = beginResourceTiming(String(name), String(initiatorType || "other"), startTime);
     finishResourceTiming(timing, {
       status: Number(status) || 0,
       redirected: Boolean(redirected),
+      responseStart: responseEnd,
+      responseEnd,
+      url: String(name),
     }, Boolean(error));
   };
 

@@ -4733,23 +4733,25 @@ impl JsRuntime {
                             &effective_url,
                             base_url,
                         );
+                        let elapsed_ms = fetch_start.elapsed().as_secs_f64() * 1_000.0;
                         let _ = self.eval(&format!(
-                            "__omoikane_record_resource_timing({}, 'script', 200, false, {redirected})",
+                            "__omoikane_record_resource_timing({}, 'script', 200, false, {redirected}, {elapsed_ms})",
                             serde_json::to_string(&effective_url)
                                 .unwrap_or_else(|_| "\"\"".to_string()),
                         ));
                         if log_scripts {
                             eprintln!(
                                 "[omoikane][script] fetched {src_url} elapsed_ms={:.3}",
-                                fetch_start.elapsed().as_secs_f64() * 1_000.0,
+                                elapsed_ms,
                             );
                         }
                         (code, src_url.clone())
                     }
                     None => {
                         let timing_name = resource_reference_timing_name(&src_url, base_url);
+                        let elapsed_ms = fetch_start.elapsed().as_secs_f64() * 1_000.0;
                         let _ = self.eval(&format!(
-                            "__omoikane_record_resource_timing({}, 'script', 0, true)",
+                            "__omoikane_record_resource_timing({}, 'script', 0, true, false, {elapsed_ms})",
                             serde_json::to_string(&timing_name)
                                 .unwrap_or_else(|_| "\"\"".to_string()),
                         ));
@@ -22798,7 +22800,40 @@ b</textarea></form>"#);
                   return globalThis.redirectScriptRan === true && entry &&
                     entry.name === "{effective}" && entry.responseStatus === 200 &&
                     entry.redirectStart > 0 && entry.redirectEnd >= entry.redirectStart &&
-                    entry.responseEnd >= entry.redirectEnd;
+                    entry.responseEnd >= entry.redirectEnd && entry.responseEnd > entry.startTime;
+                }})()"#,
+            ))
+            .unwrap()
+            .as_boolean()
+            .unwrap());
+    }
+
+    #[test]
+    fn performance_resource_timing_fetch_redirect_uses_effective_url() {
+        let port = spawn_redirect_script_server();
+        let requested = format!("http://127.0.0.1:{port}/redirect.js");
+        let effective = format!("http://127.0.0.1:{port}/final.js");
+        let mut runtime = JsRuntime::with_document_and_url(
+            default_document(),
+            &format!("http://127.0.0.1:{port}/index.html"),
+        )
+        .unwrap();
+        runtime
+            .eval(&format!(
+                r#"fetch("{requested}").then(response => response.text());"#,
+            ))
+            .unwrap();
+        runtime.run_until_idle().unwrap();
+        assert!(runtime
+            .eval(&format!(
+                r#"(() => {{
+                  const entries = performance.getEntriesByType("resource")
+                    .filter(item => item.initiatorType === "fetch");
+                  const entry = entries[0];
+                  return entries.length === 1 && entry.name === "{effective}" &&
+                    entry.responseStatus === 200 && entry.redirectStart > 0 &&
+                    entry.redirectEnd >= entry.redirectStart &&
+                    entry.responseEnd > entry.startTime;
                 }})()"#,
             ))
             .unwrap()
