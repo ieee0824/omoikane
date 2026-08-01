@@ -55,6 +55,17 @@ pub(crate) enum Task {
         owner: JsValue,
         data: String,
     },
+    /// A message sent from a page-owned `SharedWorkerPort` to the shared
+    /// worker runtime.  The endpoint is identified by a process-local id;
+    /// the structured-clone wire is decoded in the target realm.
+    SharedWorkerMessage { connection_id: u64, data: String },
+    /// A message sent from a shared worker runtime to a page-owned port.
+    SharedWorkerOwnerMessage {
+        connection_id: u64,
+        port: JsValue,
+        data: String,
+        origin: String,
+    },
     /// A worker startup/runtime failure reported to its owner page.
     WorkerError {
         worker_id: u64,
@@ -187,6 +198,31 @@ impl EventLoop {
                 worker_id,
                 owner,
                 data,
+            },
+        );
+    }
+
+    pub(crate) fn enqueue_shared_worker_message(&mut self, connection_id: u64, data: String) {
+        self.enqueue(
+            TaskSource::PostedMessage,
+            Task::SharedWorkerMessage { connection_id, data },
+        );
+    }
+
+    pub(crate) fn enqueue_shared_worker_owner_message(
+        &mut self,
+        connection_id: u64,
+        port: JsValue,
+        data: String,
+        origin: String,
+    ) {
+        self.enqueue(
+            TaskSource::PostedMessage,
+            Task::SharedWorkerOwnerMessage {
+                connection_id,
+                port,
+                data,
+                origin,
             },
         );
     }
