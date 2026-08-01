@@ -3491,18 +3491,25 @@ impl JsRuntime {
             );
             return Ok(());
         }
+        let timing_name = resource_reference_timing_name(&src, base_url.as_ref());
+        let fetch_start = std::time::Instant::now();
         let fetched = {
             let mut state = self.host_state.borrow_mut();
             fetch_script_resource_with_client(&src, base_url.as_ref(), &mut state.http_client)
         };
+        let elapsed_ms = fetch_start.elapsed().as_secs_f64() * 1_000.0;
         let Some((effective_url, source)) = fetched else {
             self.record_task_error(format!("[dynamic script: {src}] failed to fetch"));
+            let dispatch = dispatch_resource_timing_script(
+                "error", node_id, &timing_name, false, elapsed_ms,
+            );
             let result = self
-                .eval_async(&format!("__omoikane_dispatch_resource_error({node_id})"))
+                .eval_async(&dispatch)
                 .await;
             self.record_error_from(&src, result);
             return Ok(());
         };
+        let redirected = resource_reference_was_redirected(&src, &effective_url, base_url.as_ref());
         if !self
             .host_state
             .borrow()
@@ -3512,10 +3519,13 @@ impl JsRuntime {
             self.host_state.borrow_mut().record_csp_violation_for_node(
                 &script_node,
                 ResourceType::Script,
-                effective_url,
+                effective_url.clone(),
+            );
+            let dispatch = dispatch_resource_timing_script(
+                "error", node_id, &effective_url, redirected, elapsed_ms,
             );
             let result = self
-                .eval_async(&format!("__omoikane_dispatch_resource_error({node_id})"))
+                .eval_async(&dispatch)
                 .await;
             self.record_error_from(&src, result);
             return Ok(());
@@ -3544,7 +3554,9 @@ impl JsRuntime {
             self.record_task_error(format!("[dynamic script: {src}; {context}] {error}"));
         }
         let dispatched = self
-            .eval_async(&format!("__omoikane_dispatch_resource_load({node_id})"))
+            .eval_async(&dispatch_resource_timing_script(
+                "load", node_id, &effective_url, redirected, elapsed_ms,
+            ))
             .await;
         self.record_error_from("resource load", dispatched);
         self.sync_module_csp_violations();
@@ -4451,6 +4463,7 @@ impl JsRuntime {
                 // A script whose type Omoikane does not execute is not fetched and
                 // does not load, so it must not go on to dispatch `load` either.
                 let mut dispatch_load = should_dispatch;
+                let mut dispatch_timing: Option<(String, bool, f64)> = None;
                 if let Some((script_node, src, kind, base_url)) = dynamic_script {
                     let log_scripts = std::env::var_os("OMOIKANE_LOG_SCRIPTS").is_some();
                     if kind == ScriptKind::NotExecutable {
@@ -4477,6 +4490,8 @@ impl JsRuntime {
                         if log_scripts {
                             eprintln!("[omoikane][script] loading dynamic {src} kind={kind:?}");
                         }
+                        let timing_name = resource_reference_timing_name(&src, base_url.as_ref());
+                        let fetch_start = std::time::Instant::now();
                         let fetched = {
                             let mut state = self.host_state.borrow_mut();
                             fetch_script_resource_with_client(
@@ -4485,6 +4500,7 @@ impl JsRuntime {
                                 &mut state.http_client,
                             )
                         };
+                        let elapsed_ms = fetch_start.elapsed().as_secs_f64() * 1_000.0;
                         match fetched {
                             // Every failure below is the page's, not the engine's:
                             // it is recorded and execution continues, exactly as
@@ -4499,8 +4515,8 @@ impl JsRuntime {
                                     "[dynamic script: {src}] failed to fetch"
                                 ));
                                 dispatch_load = false;
-                                let dispatched = self.eval(&format!(
-                                    "__omoikane_dispatch_resource_error({node_id})"
+                                let dispatched = self.eval(&dispatch_resource_timing_script(
+                                    "error", node_id, &timing_name, false, elapsed_ms,
                                 ));
                                 self.record_error_from(&src, dispatched);
                                 let jobs = self.run_jobs();
@@ -4513,20 +4529,31 @@ impl JsRuntime {
                                     .csp_policy_for_node(&script_node)
                                     .allows_reference(ResourceType::Script, &effective_url) =>
                             {
+                                let redirected = resource_reference_was_redirected(
+                                    &src,
+                                    &effective_url,
+                                    base_url.as_ref(),
+                                );
                                 self.host_state.borrow_mut().record_csp_violation_for_node(
                                     &script_node,
                                     ResourceType::Script,
-                                    effective_url,
+                                    effective_url.clone(),
                                 );
                                 dispatch_load = false;
-                                let dispatched = self.eval(&format!(
-                                    "__omoikane_dispatch_resource_error({node_id})"
+                                let dispatched = self.eval(&dispatch_resource_timing_script(
+                                    "error", node_id, &effective_url, redirected, elapsed_ms,
                                 ));
                                 self.record_error_from(&src, dispatched);
                                 let jobs = self.run_jobs();
                                 self.record_error_from(&src, jobs);
                             }
-                            Some((_, source)) => {
+                            Some((effective_url, source)) => {
+                                let redirected = resource_reference_was_redirected(
+                                    &src,
+                                    &effective_url,
+                                    base_url.as_ref(),
+                                );
+                                dispatch_timing = Some((effective_url, redirected, elapsed_ms));
                                 let marked = self
                                     .eval(&format!("__omoikane_set_current_script({node_id})"));
                                 self.record_error_from(&src, marked);
@@ -4561,8 +4588,11 @@ impl JsRuntime {
                     }
                 }
                 if dispatch_load {
-                    let dispatched =
-                        self.eval(&format!("__omoikane_dispatch_resource_load({node_id})"));
+                    let (timing_name, redirected, elapsed_ms) = dispatch_timing
+                        .unwrap_or_else(|| (String::new(), false, 0.0));
+                    let dispatched = self.eval(&dispatch_resource_timing_script(
+                        "load", node_id, &timing_name, redirected, elapsed_ms,
+                    ));
                     self.record_error_from("resource load", dispatched);
                     let jobs = self.run_jobs();
                     self.record_error_from("resource load", jobs);
@@ -5046,6 +5076,24 @@ fn resource_reference_timing_name(
         Some(ResolvedResource::Url(url)) => url,
         _ => requested.to_string(),
     }
+}
+
+fn dispatch_resource_timing_script(
+    event: &str,
+    node_id: usize,
+    url: &str,
+    redirected: bool,
+    elapsed_ms: f64,
+) -> String {
+    let safe_url = serde_json::to_string(url).unwrap_or_else(|_| "\"\"".to_string());
+    let safe_elapsed = if elapsed_ms.is_finite() && elapsed_ms >= 0.0 {
+        elapsed_ms
+    } else {
+        0.0
+    };
+    format!(
+        "__omoikane_dispatch_resource_{event}({node_id}, {safe_url}, {redirected}, {safe_elapsed})"
+    )
 }
 
 fn same_origin_url(a: &crate::http::Url, b: &crate::http::Url) -> bool {
@@ -24624,6 +24672,44 @@ b</textarea></form>"#);
                 .as_boolean()
                 .unwrap()
         );
+    }
+
+    #[test]
+    fn connected_dynamic_script_redirect_records_effective_resource_timing() {
+        let port = spawn_redirect_script_server();
+        let requested = format!("http://127.0.0.1:{port}/redirect.js");
+        let effective = format!("http://127.0.0.1:{port}/final.js");
+        use crate::html::TreeBuilder;
+        let document = TreeBuilder::parse("<html><head></head><body></body></html>").document();
+        let mut runtime = JsRuntime::with_document_and_url(
+            document,
+            &format!("http://127.0.0.1:{port}/index.html"),
+        )
+        .unwrap();
+        runtime
+            .eval(&format!(
+                r#"const script = document.createElement("script");
+                   script.src = "{requested}";
+                   script.addEventListener("load", () => globalThis.dynamicRedirectLoaded = true);
+                   document.head.appendChild(script);"#,
+            ))
+            .unwrap();
+        runtime.run_until_idle().unwrap();
+        assert!(runtime
+            .eval(&format!(
+                r#"(() => {{
+                  const entry = performance.getEntriesByType("resource")
+                    .find(item => item.initiatorType === "script");
+                  return globalThis.dynamicRedirectLoaded === true && entry &&
+                    entry.name === "{effective}" && entry.responseStatus === 200 &&
+                    entry.redirectStart > 0 && entry.redirectEnd >= entry.redirectStart &&
+                    entry.redirectEnd <= entry.fetchStart && entry.fetchStart <= entry.requestStart &&
+                    entry.requestStart <= entry.responseStart && entry.responseStart <= entry.responseEnd;
+                }})()"#,
+            ))
+            .unwrap()
+            .as_boolean()
+            .unwrap());
     }
 
     #[test]

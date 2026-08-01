@@ -8079,19 +8079,19 @@
   globalThis.__omoikane_wire_inline_handlers = function() {
     wireInlineHandlers(globalThis.document);
   };
-  globalThis.__omoikane_dispatch_resource_load = function(id) {
+  globalThis.__omoikane_dispatch_resource_load = function(id, url = "", redirected = false, elapsedMs = 0) {
     const element = wrapNode(id);
     if (element) {
-      finishElementResourceTiming(element, 200, false);
+      finishElementResourceTiming(element, 200, false, { url, redirected, elapsedMs });
       element.dispatchEvent(new Event("load", { bubbles: false }));
     }
   };
   // A resource that could not be fetched fires `error`, not `load`. Loaders that
   // fall back when a script is unavailable listen for exactly this.
-  globalThis.__omoikane_dispatch_resource_error = function(id) {
+  globalThis.__omoikane_dispatch_resource_error = function(id, url = "", redirected = false, elapsedMs = 0) {
     const element = wrapNode(id);
     if (element) {
-      finishElementResourceTiming(element, 0, true);
+      finishElementResourceTiming(element, 0, true, { url, redirected, elapsedMs });
       element.dispatchEvent(new Event("error", { bubbles: false }));
     }
   };
@@ -10432,28 +10432,44 @@
     });
   }
 
-  function finishElementResourceTiming(element, status = 200, error = false) {
+  function finishElementResourceTiming(element, status = 200, error = false, timing = {}) {
     if (!element || element.__resourceTimingRecorded) return;
     const fallbackSource = typeof element.getAttribute === "function"
       ? element.getAttribute("src")
       : "";
     const rawName = element.src || element.data || element.href || fallbackSource || "";
     if (!rawName) return;
-    const name = String(__omoikane_resolve_url(rawName));
+    const timingData = timing && typeof timing === "object" ? timing : {};
+    const effectiveName = timingData.url === undefined || timingData.url === null
+      ? ""
+      : String(timingData.url);
+    const name = effectiveName || String(__omoikane_resolve_url(rawName));
     if (!name) return;
     const startTime = element.__resourceTimingStart === undefined
       ? Math.max(0, nativePerformanceNow() - 0.001)
       : element.__resourceTimingStart;
     const responseTime = nativePerformanceNow();
+    const elapsed = normalizeTimingNumber(timingData.elapsedMs, 0);
+    const responseStart = timingData.responseStart === undefined
+      ? Math.max(startTime, responseTime - elapsed)
+      : normalizeTimingNumber(timingData.responseStart, responseTime);
+    const redirected = Boolean(timingData.redirected);
+    const redirectEnd = redirected
+      ? Math.min(Math.max(startTime, responseStart), Math.max(startTime, responseTime - 0.001))
+      : 0;
+    const fetchStart = redirected ? Math.max(startTime, redirectEnd) : startTime;
+    const requestStart = redirected ? Math.max(startTime, fetchStart) : startTime;
     setElementResourceTimingState(element, "__resourceTimingRecorded", true);
     recordResourceTiming({
       name,
       initiatorType: String(element.localName || "other"),
       startTime,
-      fetchStart: startTime,
-      requestStart: startTime,
-      responseStart: responseTime,
+      fetchStart,
+      requestStart,
+      responseStart,
       responseEnd: responseTime,
+      redirectStart: redirected ? startTime : 0,
+      redirectEnd,
       responseStatus: error ? 0 : status,
       transferSize: 0,
       encodedBodySize: 0,
