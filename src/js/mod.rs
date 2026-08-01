@@ -49,6 +49,26 @@ use event_loop::{EventLoop, Task};
 /// [`JsRuntime::record_task_error`].
 const MAX_TASK_ERRORS: usize = 32;
 const MAX_CSP_VIOLATIONS: usize = 1024;
+const DOM_CONTENT_LOADED_SCRIPT: &str = concat!(
+    "document.__readyState = 'interactive'; ",
+    "try { if (typeof __omoikane_performance_navigation_event === 'function') ",
+    "__omoikane_performance_navigation_event('domInteractive'); } catch (_) { void 0; } ",
+    "try { if (typeof __omoikane_performance_navigation_event === 'function') ",
+    "__omoikane_performance_navigation_event('domContentLoadedStart'); } catch (_) { void 0; } ",
+    "document.dispatchEvent(new Event('DOMContentLoaded')); ",
+    "try { if (typeof __omoikane_performance_navigation_event === 'function') ",
+    "__omoikane_performance_navigation_event('domContentLoadedEnd'); } catch (_) { void 0; }",
+);
+const LOAD_SCRIPT: &str = concat!(
+    "document.__readyState = 'complete'; ",
+    "try { if (typeof __omoikane_performance_navigation_event === 'function') ",
+    "__omoikane_performance_navigation_event('domComplete'); } catch (_) { void 0; } ",
+    "try { if (typeof __omoikane_performance_navigation_event === 'function') ",
+    "__omoikane_performance_navigation_event('loadStart'); } catch (_) { void 0; } ",
+    "window.dispatchEvent(new Event('load', { bubbles: false })); ",
+    "try { if (typeof __omoikane_performance_navigation_event === 'function') ",
+    "__omoikane_performance_navigation_event('loadEnd'); } catch (_) { void 0; }",
+);
 
 thread_local! {
     static ACTIVE_HOST_STATE: RefCell<Option<Rc<RefCell<HostState>>>> = const { RefCell::new(None) };
@@ -2739,12 +2759,12 @@ impl JsRuntime {
         }
         immediate.extend(deferred);
         immediate.push(PageTaskSource::Classic {
-            source: "document.__readyState = 'interactive'; try { if (typeof __omoikane_performance_navigation_event === 'function') __omoikane_performance_navigation_event('domInteractive'); } catch (_) { void 0; } try { if (typeof __omoikane_performance_navigation_event === 'function') __omoikane_performance_navigation_event('domContentLoadedStart'); } catch (_) { void 0; } document.dispatchEvent(new Event('DOMContentLoaded')); try { if (typeof __omoikane_performance_navigation_event === 'function') __omoikane_performance_navigation_event('domContentLoadedEnd'); } catch (_) { void 0; }".to_string(),
+            source: DOM_CONTENT_LOADED_SCRIPT.to_string(),
             label: "DOMContentLoaded".to_string(),
             script_node_id: None,
         });
         immediate.push(PageTaskSource::Classic {
-            source: "document.__readyState = 'complete'; try { if (typeof __omoikane_performance_navigation_event === 'function') __omoikane_performance_navigation_event('domComplete'); } catch (_) { void 0; } try { if (typeof __omoikane_performance_navigation_event === 'function') __omoikane_performance_navigation_event('loadStart'); } catch (_) { void 0; } window.dispatchEvent(new Event('load')); try { if (typeof __omoikane_performance_navigation_event === 'function') __omoikane_performance_navigation_event('loadEnd'); } catch (_) { void 0; }".to_string(),
+            source: LOAD_SCRIPT.to_string(),
             label: "load".to_string(),
             script_node_id: None,
         });
@@ -4561,9 +4581,7 @@ impl JsRuntime {
     /// and executing inline scripts). Listeners registered via
     /// `document.addEventListener('DOMContentLoaded', fn)` will be invoked.
     pub fn fire_dom_content_loaded(&mut self) -> JsResult<()> {
-        self.eval(
-            "document.__readyState = 'interactive'; try { if (typeof __omoikane_performance_navigation_event === 'function') __omoikane_performance_navigation_event('domInteractive'); } catch (_) { void 0; } try { if (typeof __omoikane_performance_navigation_event === 'function') __omoikane_performance_navigation_event('domContentLoadedStart'); } catch (_) { void 0; } document.dispatchEvent(new Event('DOMContentLoaded')); try { if (typeof __omoikane_performance_navigation_event === 'function') __omoikane_performance_navigation_event('domContentLoadedEnd'); } catch (_) { void 0; }",
-        )?;
+        self.eval(DOM_CONTENT_LOADED_SCRIPT)?;
         self.run_jobs()
     }
 
@@ -4609,9 +4627,7 @@ impl JsRuntime {
     /// page's `<body onload="...">` handler runs at this point.
     pub fn fire_load(&mut self) -> JsResult<()> {
         // The load event does not bubble.
-        self.eval(
-            "document.__readyState = 'complete'; try { if (typeof __omoikane_performance_navigation_event === 'function') __omoikane_performance_navigation_event('domComplete'); } catch (_) { void 0; } try { if (typeof __omoikane_performance_navigation_event === 'function') __omoikane_performance_navigation_event('loadStart'); } catch (_) { void 0; } window.dispatchEvent(new Event('load', { bubbles: false })); try { if (typeof __omoikane_performance_navigation_event === 'function') __omoikane_performance_navigation_event('loadEnd'); } catch (_) { void 0; }",
-        )?;
+        self.eval(LOAD_SCRIPT)?;
         self.run_jobs()
     }
 
