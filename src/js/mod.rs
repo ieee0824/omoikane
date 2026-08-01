@@ -29301,12 +29301,13 @@ b</textarea></form>"#);
                     Object.getPrototypeOf(extent) === SVGRect.prototype,
                     Object.getOwnPropertyDescriptor(SVGRectElement.prototype, 'width').set === undefined,
                     span instanceof SVGTextContentElement,
+                    span instanceof SVGTSpanElement,
                 ].join('|');
             })()"#,
         );
         assert_eq!(
             actual,
-            "3|18|12|29|23|35|23|29|15|6|10|10|12|25|13|true|true|true|true|true|true"
+            "3|18|12|29|23|35|23|29|15|6|10|10|12|25|13|true|true|true|true|true|true|true"
         );
     }
 

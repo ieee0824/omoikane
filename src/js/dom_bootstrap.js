@@ -7790,6 +7790,35 @@
   function svgTextLayout(element) {
     const records = [];
     if (!element || element.nodeType !== 1) return records;
+    let owner = element.parentNode;
+    while (owner && owner.nodeType === 1 && owner.namespaceURI === SVG_NAMESPACE) {
+      if (String(owner.localName || "").toLowerCase() === "text") break;
+      owner = owner.parentNode;
+    }
+    if (owner && owner !== element) {
+      const allRecords = svgTextLayout(owner);
+      let offset = 0;
+      let found = false;
+      const countBefore = node => {
+        if (node === element) {
+          found = true;
+          return;
+        }
+        if (node.nodeType === 3) {
+          offset += String(node.data || "").length;
+          return;
+        }
+        for (const child of node.childNodes || []) {
+          if (found) break;
+          countBefore(child);
+        }
+      };
+      countBefore(owner);
+      if (found) {
+        const length = String(element.textContent || "").length;
+        return allRecords.slice(offset, offset + length);
+      }
+    }
     const cursor = {
       x: svgTextNumberList(element, "x")[0] || 0,
       y: svgTextNumberList(element, "y")[0] || 0,
