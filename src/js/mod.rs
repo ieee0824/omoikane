@@ -12123,6 +12123,8 @@ mod tests {
           gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
           gl.bufferData(gl.ARRAY_BUFFER, 12, gl.STATIC_DRAW);
           const bufferSize = gl.getBufferParameter(gl.ARRAY_BUFFER, gl.BUFFER_SIZE);
+          canvas.width = 3;
+          const resizeKeepsContext = canvas.getContext('webgl') === gl && canvas.getContext('2d') === null && gl.drawingBufferWidth === 3;
           const vertex = gl.createShader(gl.VERTEX_SHADER);
           const fragment = gl.createShader(gl.FRAGMENT_SHADER);
           gl.shaderSource(vertex, 'attribute vec2 a_position; void main() { gl_Position = vec4(a_position, 0.0, 1.0); }');
@@ -12142,11 +12144,11 @@ mod tests {
           __omoikane_webgl_restore_context(gl);
           const restored = !gl.isContextLost() && events.join(',') === 'lost,restored';
           return [typeof WebGLRenderingContext, gl instanceof WebGLRenderingContext, same, exclusive,
-            clear, viewport, invalidEnum, bufferSize, linked, ownership, lost, restored].join('|');
+            clear, viewport, invalidEnum, bufferSize, resizeKeepsContext, linked, ownership, lost, restored].join('|');
         })()"#);
         assert_eq!(
             result,
-            "function|true|true|true|255,64,128,255|1,2,3,4|true|12|true|true|true|true"
+            "function|true|true|true|255,64,128,255|1,2,3,4|true|12|true|true|true|true|true"
         );
     }
 

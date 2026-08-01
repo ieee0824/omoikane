@@ -6885,9 +6885,26 @@
     WebGLRenderingContext.prototype[name] = value;
   }
 
+  function resetHtmlCanvasState(canvas) {
+    const previous = canvasStates.get(canvas);
+    canvasStates.delete(canvas);
+    const next = canvasState(canvas);
+    if (!previous) return;
+    // Resizing resets the backing store and rendering state, but does not
+    // release the canvas's context mode. Preserve the context identity so a
+    // subsequent getContext call remains exclusive to its original API.
+    next.contextMode = previous.contextMode;
+    next.context = previous.context;
+    next.webgl = previous.webgl;
+    if (next.webgl) {
+      next.webgl.__state.viewport = [0, 0, next.width, next.height];
+      next.webgl.__state.scissor = [0, 0, next.width, next.height];
+    }
+  }
+
   class HTMLCanvasElement extends HTMLElement {
-    get width(){return canvasDimensions(this)[0];} set width(value){this.setAttribute("width",String(Math.max(0,Math.trunc(Number(value))||0)));canvasStates.delete(this);canvasState(this);}
-    get height(){return canvasDimensions(this)[1];} set height(value){this.setAttribute("height",String(Math.max(0,Math.trunc(Number(value))||0)));canvasStates.delete(this);canvasState(this);}
+    get width(){return canvasDimensions(this)[0];} set width(value){this.setAttribute("width",String(Math.max(0,Math.trunc(Number(value))||0)));resetHtmlCanvasState(this);}
+    get height(){return canvasDimensions(this)[1];} set height(value){this.setAttribute("height",String(Math.max(0,Math.trunc(Number(value))||0)));resetHtmlCanvasState(this);}
     getContext(type){
       const requested=String(type).toLowerCase(),s=canvasState(this);
       if(requested==="2d"){
