@@ -7309,6 +7309,14 @@ fn transform_rect(rect: Rect, transform: AffineTransform) -> Rect {
         transform.transform_point(rect.x, rect.y + rect.height),
         transform.transform_point(rect.x + rect.width, rect.y + rect.height),
     ];
+    if corners
+        .iter()
+        .any(|point| !point.0.is_finite() || !point.1.is_finite())
+    {
+        // Keep CSSOM geometry anchored in layout space when projection has no
+        // finite corner, avoiding a discontinuous jump to the origin.
+        return rect;
+    }
     let min_x = corners
         .iter()
         .map(|point| point.0)
@@ -27007,6 +27015,36 @@ b</textarea></form>"#);
         // scale(2) around the child's center expands -5..15, then the parent
         // translation moves that bounding box to 25..45.
         assert_eq!(eval_str(&mut runtime, expression), "25|-5|20|20");
+    }
+
+    #[test]
+    fn bounding_client_rect_handles_3d_perspective_without_changing_offset_size() {
+        let html = r#"<html><head><style>
+            * { margin: 0; padding: 0; }
+            #box { width: 100px; height: 50px; transform-origin: 50% 50%;
+                   transform: perspective(500px) rotateY(30deg) translateZ(20px); }
+        </style></head><body><div id="box"></div></body></html>"#;
+        let mut runtime = runtime_from_html(html);
+        let expression = r#"(() => {
+            const box = document.getElementById('box');
+            const rect = box.getBoundingClientRect();
+            const computed = getComputedStyle(box).transform;
+            return [rect.width, rect.height, box.offsetWidth, box.offsetHeight,
+                    Number.isFinite(rect.left), computed.includes('perspective')].join('|');
+        })()"#;
+
+        let values = eval_str(&mut runtime, expression)
+            .split('|')
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+        let width = values[0].parse::<f32>().unwrap();
+        let height = values[1].parse::<f32>().unwrap();
+        assert!(width > 70.0 && width < 110.0);
+        assert!(height > 45.0 && height < 60.0);
+        assert_eq!(values[2], "100");
+        assert_eq!(values[3], "50");
+        assert_eq!(values[4], "true");
+        assert_eq!(values[5], "true");
     }
 
     #[test]

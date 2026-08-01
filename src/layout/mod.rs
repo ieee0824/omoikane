@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use crate::css::{
     AffineTransform, ContainerContext, ComputedStyle, ComputedValue, PseudoElement, StyleResolver,
-    TransformReferenceBox, parse_transform_with_origin,
+    TransformReferenceBox, parse_perspective_with_origin, parse_transform_with_origin,
 };
 use crate::dom::{Node, NodeHandle, NodeType};
 use crate::font::{Font, FontFamilyKey, FontStyle, FontWeight, WebFontRegistry};
@@ -822,7 +822,12 @@ pub fn layout_tree(
             layout = layout_node(node, resolver, containing_block, containing_block, None)?;
         }
     }
-    populate_layout_transforms(&mut layout, resolver, resolver.root_font_size());
+    populate_layout_transforms(
+        &mut layout,
+        resolver,
+        resolver.root_font_size(),
+        AffineTransform::identity(),
+    );
     Some(layout)
 }
 
@@ -830,18 +835,40 @@ fn populate_layout_transforms(
     layout: &mut LayoutBox,
     resolver: &mut StyleResolver,
     root_font_size: f32,
+    parent_perspective: AffineTransform,
 ) {
     let style = resolver.computed_style(&layout.node);
     let transform = computed_keyword(&style, "transform").unwrap_or("none");
     let origin = computed_keyword(&style, "transform-origin").unwrap_or("50% 50%");
-    let border_box = layout.dimensions.border_box();
+    let perspective_box = layout.dimensions.border_box();
     let font_size = match style.get("font-size") {
         Some(ComputedValue::Px(value)) => *value,
         _ => 16.0,
     };
-    layout.transform = parse_transform_with_origin(
+    let local_transform = parse_transform_with_origin(
         transform,
         origin,
+        TransformReferenceBox {
+            x: perspective_box.x,
+            y: perspective_box.y,
+            width: perspective_box.width,
+            height: perspective_box.height,
+            font_size,
+            root_font_size,
+        },
+    )
+    .unwrap_or_default();
+    // `perspective` is a parent effect: it projects the immediate child
+    // coordinate plane while leaving the parent's own border box untouched.
+    // Keeping it in the child's paint-time matrix preserves normal-flow
+    // geometry and composes with the child's transform in CSS order.
+    layout.transform = parent_perspective.multiply(local_transform);
+    let perspective = computed_keyword(&style, "perspective").unwrap_or("none");
+    let perspective_origin = computed_keyword(&style, "perspective-origin").unwrap_or("50% 50%");
+    let border_box = layout.dimensions.border_box();
+    let perspective_matrix = parse_perspective_with_origin(
+        perspective,
+        perspective_origin,
         TransformReferenceBox {
             x: border_box.x,
             y: border_box.y,
@@ -853,7 +880,7 @@ fn populate_layout_transforms(
     )
     .unwrap_or_default();
     for child in &mut layout.children {
-        populate_layout_transforms(child, resolver, root_font_size);
+        populate_layout_transforms(child, resolver, root_font_size, perspective_matrix);
     }
     layout.needs_scroll_translation = matches!(
         style.get("position"),

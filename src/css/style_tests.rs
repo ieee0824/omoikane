@@ -1269,6 +1269,39 @@ fn computes_transform_origin_and_initial_transform_values() {
 }
 
 #[test]
+fn computes_3d_transform_and_perspective_properties() {
+    let (_document, _body, title, _html) = sample_tree();
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "h1 { transform: matrix3d(1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 4, 5, 6, 1) rotateX(20deg); transform-origin: 10px 20px 3px; perspective: 600px; perspective-origin: right bottom; }",
+        )
+        .unwrap(),
+    );
+
+    let style = resolver.computed_style(&title);
+    assert!(matches!(style.get("transform"), Some(ComputedValue::Keyword(value)) if value.contains("matrix3d")));
+    assert_eq!(
+        style.get("transform-origin"),
+        Some(&ComputedValue::Keyword("10px 20px 3px".to_string()))
+    );
+    assert_eq!(
+        style.get("perspective"),
+        Some(&ComputedValue::Keyword("600px".to_string()))
+    );
+    assert_eq!(
+        style.get("perspective-origin"),
+        Some(&ComputedValue::Keyword("right bottom".to_string()))
+    );
+    assert!(supports_declaration("transform", "rotateY(20deg) translateZ(3px)"));
+    assert!(supports_declaration("perspective", "600px"));
+    assert!(!supports_declaration("perspective", "-1px"));
+    assert!(!supports_declaration("perspective", ""));
+    assert!(!supports_declaration("perspective-origin", ""));
+}
+
+#[test]
 fn transition_shorthand_expands_lists_and_computes_initial_values() {
     let element = NodeHandle::element("div");
     element.set_attribute(
