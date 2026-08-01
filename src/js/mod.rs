@@ -22483,7 +22483,7 @@ b</textarea></form>"#);
 
     #[test]
     fn performance_resource_timing_records_fetch_and_xhr_success_and_abort() {
-        let port = spawn_static_http_server("text/plain", "timed");
+        let port = spawn_static_http_server("text/plain", "tïmed");
         let mut runtime = JsRuntime::with_document_and_url(
             default_document(),
             &format!("http://127.0.0.1:{port}/index.html"),
@@ -22505,10 +22505,17 @@ b</textarea></form>"#);
                   const fetchEntries = performance.getEntriesByName("http://127.0.0.1:{port}/fetch");
                   const xhrEntries = performance.getEntriesByName("http://127.0.0.1:{port}/xhr");
                   const resources = performance.getEntriesByType("resource");
-                  return fetchResult === "timed" && xhr.status === 200 &&
+                  const expectedBytes = new TextEncoder().encode("tïmed").length;
+                  return fetchResult === "tïmed" && xhr.status === 200 &&
                     fetchEntries.length === 1 && xhrEntries.length === 1 &&
                     fetchEntries[0].initiatorType === "fetch" &&
+                    fetchEntries[0].transferSize === expectedBytes &&
+                    fetchEntries[0].encodedBodySize === expectedBytes &&
+                    fetchEntries[0].decodedBodySize === expectedBytes &&
                     xhrEntries[0].initiatorType === "xmlhttprequest" &&
+                    xhrEntries[0].transferSize === expectedBytes &&
+                    xhrEntries[0].encodedBodySize === expectedBytes &&
+                    xhrEntries[0].decodedBodySize === expectedBytes &&
                     resources.every(entry => entry.responseEnd >= entry.startTime && entry.fetchStart <= entry.requestStart && entry.requestStart <= entry.responseStart);
                 }})()"#,
             ))

@@ -10149,6 +10149,7 @@
   let performanceObserverDeliveryScheduled = false;
   let resourceTimingBufferSize = 250;
   let resourceTimingBufferFull = false;
+  const resourceTimingTextEncoder = new TextEncoder();
 
   function sortedPerformanceEntries(entries) {
     return entries.slice().sort((a, b) =>
@@ -10292,6 +10293,12 @@
     return Number.isFinite(number) && number >= 0 ? number : fallback;
   }
 
+  function resourceTimingBase64ByteLength(value) {
+    const normalized = String(value).replace(/[^A-Za-z0-9+/=]/g, "");
+    const padding = normalized.endsWith("==") ? 2 : normalized.endsWith("=") ? 1 : 0;
+    return Math.max(0, Math.floor(normalized.length * 3 / 4) - padding);
+  }
+
   function recordResourceTiming(options = {}) {
     const startTime = normalizeTimingNumber(options.startTime, performance.now());
     const responseEnd = normalizeTimingNumber(options.responseEnd, performance.now());
@@ -10332,8 +10339,8 @@
     const responseEnd = performance.now();
     const bodyText = data && data.bodyText !== undefined ? String(data.bodyText) : "";
     const bodyBytes = data && data.bodyBase64 !== undefined && data.bodyBase64 !== null
-      ? Math.max(0, Math.floor(String(data.bodyBase64).length * 3 / 4))
-      : bodyText.length;
+      ? resourceTimingBase64ByteLength(data.bodyBase64)
+      : resourceTimingTextEncoder.encode(bodyText).length;
     const status = error ? 0 : normalizeTimingNumber(data.responseStatus ?? data.status, 0);
     const redirected = Boolean(data.redirected);
     return recordResourceTiming({
@@ -10344,7 +10351,7 @@
       redirectEnd: redirected ? Math.max(timing.startTime, responseEnd - 0.001) : 0,
       transferSize: error ? 0 : bodyBytes,
       encodedBodySize: error ? 0 : bodyBytes,
-      decodedBodySize: error ? 0 : bodyText.length,
+      decodedBodySize: error ? 0 : bodyBytes,
       responseStatus: status,
       name: timing.name,
     });
