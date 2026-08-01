@@ -13023,6 +13023,75 @@ mod tests {
     }
 
     #[test]
+    fn webgl_canvas_context_state_resources_and_loss_boundary() {
+        let mut runtime = JsRuntime::new().unwrap();
+        let result = eval_str(&mut runtime, r#"(() => {
+          const canvas = document.createElement('canvas');
+          canvas.width = 2; canvas.height = 1;
+          const gl = canvas.getContext('webgl');
+          const same = canvas.getContext('experimental-webgl') === gl;
+          const exclusive = canvas.getContext('2d') === null;
+          gl.clearColor(1, 0.25, 0.5, 1);
+          gl.clear(gl.COLOR_BUFFER_BIT);
+          const pixels = new Uint8Array(8);
+          gl.readPixels(0, 0, 2, 1, gl.RGBA, gl.UNSIGNED_BYTE, pixels);
+          const clear = Array.from(pixels.slice(0, 4)).join(',');
+          const dataView = new DataView(new ArrayBuffer(8));
+          gl.readPixels(0, 0, 2, 1, gl.RGBA, gl.UNSIGNED_BYTE, dataView);
+          const dataViewReadback = dataView.getUint8(0) === 255;
+          gl.readPixels(2, 0, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, new Uint8Array(4));
+          const boundsError = gl.getError() === gl.INVALID_VALUE;
+          gl.viewport(1, 2, 3, 4);
+          const viewport = Array.from(gl.getParameter(gl.VIEWPORT)).join(',');
+          const stringParameter = Array.from(gl.getParameter(String(gl.VIEWPORT))).join(',') === viewport;
+          gl.getParameter(0xdead);
+          const invalidEnum = gl.getError() === gl.INVALID_ENUM && gl.getError() === gl.NO_ERROR;
+          const buffer = gl.createBuffer();
+          gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
+          gl.bufferData(gl.ARRAY_BUFFER, 12, gl.STATIC_DRAW);
+          const bufferSize = gl.getBufferParameter(gl.ARRAY_BUFFER, gl.BUFFER_SIZE);
+          canvas.width = 3;
+          const resizeKeepsContext = canvas.getContext('webgl') === gl && canvas.getContext('2d') === null && gl.drawingBufferWidth === 3;
+          const viewportSurvivesResize = Array.from(gl.getParameter(gl.VIEWPORT)).join(',') === viewport;
+          canvas.setAttribute('height', '2');
+          const attributeResizeKeepsContext = canvas.getContext('webgl') === gl && canvas.getContext('2d') === null && gl.drawingBufferHeight === 2;
+          const vertex = gl.createShader(gl.VERTEX_SHADER);
+          const fragment = gl.createShader(gl.FRAGMENT_SHADER);
+          gl.shaderSource(vertex, 'attribute vec2 a_position; void main() { gl_Position = vec4(a_position, 0.0, 1.0); }');
+          gl.shaderSource(fragment, 'uniform mediump vec4 u_color; void main() { gl_FragColor = u_color; }');
+          gl.compileShader(vertex); gl.compileShader(fragment);
+          const program = gl.createProgram();
+          gl.attachShader(program, vertex); gl.attachShader(program, fragment); gl.linkProgram(program);
+          const linked = gl.getShaderParameter(vertex, gl.COMPILE_STATUS) && gl.getProgramParameter(program, gl.LINK_STATUS);
+          const uniformLocation = gl.getUniformLocation(program, 'u_color') instanceof WebGLUniformLocation;
+          const other = document.createElement('canvas').getContext('webgl');
+          other.bindBuffer(other.ARRAY_BUFFER, buffer);
+          const ownership = other.getError() === other.INVALID_OPERATION;
+          gl.deleteBuffer(buffer); gl.deleteBuffer(buffer);
+          const repeatedDelete = gl.getError() === gl.NO_ERROR;
+          const events = [];
+          const canvasEvents = [];
+          gl.addEventListener('webglcontextlost', () => events.push('lost'));
+          gl.addEventListener('webglcontextrestored', () => events.push('restored'));
+          canvas.addEventListener('webglcontextlost', () => canvasEvents.push('lost'));
+          canvas.addEventListener('webglcontextrestored', () => canvasEvents.push('restored'));
+          const constantsImmutable = (() => { const value = gl.COLOR_BUFFER_BIT; try { gl.COLOR_BUFFER_BIT = 0; } catch (_) {} return gl.COLOR_BUFFER_BIT === value && WebGLRenderingContext.COLOR_BUFFER_BIT === value; })();
+          __omoikane_webgl_lose_context(gl);
+          const lost = gl.isContextLost() && gl.getError() === gl.CONTEXT_LOST_WEBGL;
+          __omoikane_webgl_restore_context(gl);
+          const restored = !gl.isContextLost() && events.join(',') === 'lost,restored' && canvasEvents.join(',') === 'lost,restored';
+          return [typeof WebGLRenderingContext, gl instanceof WebGLRenderingContext, same, exclusive,
+            clear, dataViewReadback, boundsError, viewport, stringParameter, invalidEnum, bufferSize, resizeKeepsContext, viewportSurvivesResize,
+            attributeResizeKeepsContext, linked, uniformLocation, ownership, repeatedDelete,
+            constantsImmutable, lost, restored].join('|');
+        })()"#);
+        assert_eq!(
+            result,
+            "function|true|true|true|255,64,128,255|true|true|1,2,3,4|true|true|12|true|true|true|true|true|true|true|true|true|true"
+        );
+    }
+
+    #[test]
     fn websocket_api_echo_close_and_networking_task_order() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
