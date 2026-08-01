@@ -2739,12 +2739,12 @@ impl JsRuntime {
         }
         immediate.extend(deferred);
         immediate.push(PageTaskSource::Classic {
-            source: "document.__readyState = 'interactive'; __omoikane_performance_navigation_event('domInteractive'); __omoikane_performance_navigation_event('domContentLoadedStart'); document.dispatchEvent(new Event('DOMContentLoaded')); __omoikane_performance_navigation_event('domContentLoadedEnd')".to_string(),
+            source: "document.__readyState = 'interactive'; try { if (typeof __omoikane_performance_navigation_event === 'function') __omoikane_performance_navigation_event('domInteractive'); } catch (_) {} try { if (typeof __omoikane_performance_navigation_event === 'function') __omoikane_performance_navigation_event('domContentLoadedStart'); } catch (_) {} document.dispatchEvent(new Event('DOMContentLoaded')); try { if (typeof __omoikane_performance_navigation_event === 'function') __omoikane_performance_navigation_event('domContentLoadedEnd'); } catch (_) {}".to_string(),
             label: "DOMContentLoaded".to_string(),
             script_node_id: None,
         });
         immediate.push(PageTaskSource::Classic {
-            source: "document.__readyState = 'complete'; __omoikane_performance_navigation_event('domComplete'); __omoikane_performance_navigation_event('loadStart'); window.dispatchEvent(new Event('load')); __omoikane_performance_navigation_event('loadEnd')".to_string(),
+            source: "document.__readyState = 'complete'; try { if (typeof __omoikane_performance_navigation_event === 'function') __omoikane_performance_navigation_event('domComplete'); } catch (_) {} try { if (typeof __omoikane_performance_navigation_event === 'function') __omoikane_performance_navigation_event('loadStart'); } catch (_) {} window.dispatchEvent(new Event('load')); try { if (typeof __omoikane_performance_navigation_event === 'function') __omoikane_performance_navigation_event('loadEnd'); } catch (_) {}".to_string(),
             label: "load".to_string(),
             script_node_id: None,
         });
@@ -4562,7 +4562,7 @@ impl JsRuntime {
     /// `document.addEventListener('DOMContentLoaded', fn)` will be invoked.
     pub fn fire_dom_content_loaded(&mut self) -> JsResult<()> {
         self.eval(
-            "document.__readyState = 'interactive'; __omoikane_performance_navigation_event('domInteractive'); __omoikane_performance_navigation_event('domContentLoadedStart'); document.dispatchEvent(new Event('DOMContentLoaded')); __omoikane_performance_navigation_event('domContentLoadedEnd')",
+            "document.__readyState = 'interactive'; try { if (typeof __omoikane_performance_navigation_event === 'function') __omoikane_performance_navigation_event('domInteractive'); } catch (_) {} try { if (typeof __omoikane_performance_navigation_event === 'function') __omoikane_performance_navigation_event('domContentLoadedStart'); } catch (_) {} document.dispatchEvent(new Event('DOMContentLoaded')); try { if (typeof __omoikane_performance_navigation_event === 'function') __omoikane_performance_navigation_event('domContentLoadedEnd'); } catch (_) {}",
         )?;
         self.run_jobs()
     }
@@ -4610,7 +4610,7 @@ impl JsRuntime {
     pub fn fire_load(&mut self) -> JsResult<()> {
         // The load event does not bubble.
         self.eval(
-            "document.__readyState = 'complete'; __omoikane_performance_navigation_event('domComplete'); __omoikane_performance_navigation_event('loadStart'); window.dispatchEvent(new Event('load', { bubbles: false })); __omoikane_performance_navigation_event('loadEnd')",
+            "document.__readyState = 'complete'; try { if (typeof __omoikane_performance_navigation_event === 'function') __omoikane_performance_navigation_event('domComplete'); } catch (_) {} try { if (typeof __omoikane_performance_navigation_event === 'function') __omoikane_performance_navigation_event('loadStart'); } catch (_) {} window.dispatchEvent(new Event('load', { bubbles: false })); try { if (typeof __omoikane_performance_navigation_event === 'function') __omoikane_performance_navigation_event('loadEnd'); } catch (_) {}",
         )?;
         self.run_jobs()
     }
@@ -22507,6 +22507,22 @@ b</textarea></form>"#);
             .unwrap()
             .as_boolean()
             .unwrap());
+    }
+
+    #[test]
+    fn performance_navigation_lifecycle_survives_hook_overwrite() {
+        let mut runtime = JsRuntime::with_document(default_document()).unwrap();
+        runtime
+            .eval(
+                r#"globalThis.lifecycleEvents = [];
+                   document.addEventListener("DOMContentLoaded", () => lifecycleEvents.push("dcl"));
+                   window.addEventListener("load", () => lifecycleEvents.push("load"));
+                   globalThis.__omoikane_performance_navigation_event = () => { throw new Error("hook failure"); };"#,
+            )
+            .unwrap();
+        runtime.fire_dom_content_loaded().unwrap();
+        runtime.fire_load().unwrap();
+        assert_eq!(eval_str(&mut runtime, "lifecycleEvents.join(',')"), "dcl,load");
     }
 
     #[test]
