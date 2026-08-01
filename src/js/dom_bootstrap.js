@@ -8992,7 +8992,8 @@
     copyBufferToBuffer(source, sourceOffset, destination, destinationOffset, size) {
       if (!this.__ensureOpen()) return;
       const srcOffset = Number(sourceOffset), dstOffset = Number(destinationOffset), length = Number(size);
-      const validBuffer = value => value instanceof GPUBuffer && value.__device === this.__device && !value.__destroyed && !value.__invalid;
+      const validBuffer = value => value instanceof GPUBuffer && value.__device === this.__device &&
+        !value.__destroyed && !value.__invalid && value.mapState === "unmapped";
       if (!validBuffer(source) || !validBuffer(destination) ||
           !Number.isFinite(srcOffset) || !Number.isFinite(dstOffset) || !Number.isFinite(length) ||
           Math.trunc(srcOffset) !== srcOffset || Math.trunc(dstOffset) !== dstOffset || Math.trunc(length) !== length ||
@@ -9011,6 +9012,7 @@
       const start = Number(offset);
       const length = size === undefined ? (buffer && buffer.size - start) : Number(size);
       if (!(buffer instanceof GPUBuffer) || buffer.__device !== this.__device || buffer.__destroyed || buffer.__invalid ||
+          buffer.mapState !== "unmapped" ||
           !Number.isFinite(start) || !Number.isFinite(length) || Math.trunc(start) !== start || Math.trunc(length) !== length ||
           start < 0 || length < 0 || start % 4 || length % 4 || start + length > buffer.size ||
           !(buffer.usage & WEBGPU_BUFFER_USAGE.COPY_DST)) {
@@ -9070,9 +9072,25 @@
         if (command.__invalid) continue;
         for (const entry of command.__commands) {
           if (entry.type === "copy") {
+            const valid = entry.source instanceof GPUBuffer && entry.destination instanceof GPUBuffer &&
+              entry.source.__device === this.__device && entry.destination.__device === this.__device &&
+              !entry.source.__destroyed && !entry.destination.__destroyed &&
+              !entry.source.__invalid && !entry.destination.__invalid &&
+              entry.source.mapState === "unmapped" && entry.destination.mapState === "unmapped" &&
+              entry.sourceOffset + entry.size <= entry.source.size && entry.destinationOffset + entry.size <= entry.destination.size;
+            if (!valid) {
+              webgpuRecordError(this.__device, "validation", "copyBufferToBuffer resources are no longer valid at submit time.");
+              continue;
+            }
             const bytes = entry.source.__data.slice(entry.sourceOffset, entry.sourceOffset + entry.size);
             entry.destination.__data.set(bytes, entry.destinationOffset);
           } else if (entry.type === "clear") {
+            if (!(entry.buffer instanceof GPUBuffer) || entry.buffer.__device !== this.__device ||
+                entry.buffer.__destroyed || entry.buffer.__invalid || entry.buffer.mapState !== "unmapped" ||
+                entry.offset + entry.size > entry.buffer.size) {
+              webgpuRecordError(this.__device, "validation", "clearBuffer resources are no longer valid at submit time.");
+              continue;
+            }
             entry.buffer.__data.fill(0, entry.offset, entry.offset + entry.size);
           }
         }
