@@ -25,6 +25,8 @@ const TIMER_PUMP_MAX_TASKS: usize = 100_000;
 const ANIMATION_FRAME_PUMP_MAX_FRAMES: usize = 8;
 /// Nominal headless refresh interval used for animation-frame timestamps.
 const ANIMATION_FRAME_INTERVAL_MS: u64 = 16;
+/// Maximum pixels allocated for a reusable background or mask tile surface.
+const MAX_TILE_PIXELS: u64 = 16_777_216;
 
 thread_local! {
     static FORCE_OPACITY: Cell<bool> = const { Cell::new(false) };
@@ -2397,7 +2399,7 @@ fn prepare_mask_tile(
     let width = tile_width.ceil().max(1.0) as u32;
     let height = tile_height.ceil().max(1.0) as u32;
     // Keep malformed/hostile CSS from allocating an unbounded mask surface.
-    if u64::from(width) * u64::from(height) > 16_777_216 {
+    if u64::from(width) * u64::from(height) > MAX_TILE_PIXELS {
         return None;
     }
     let tile = match source {
@@ -5260,7 +5262,6 @@ fn paint_prepared_background_image(
                 area.y + area.height
             };
 
-            const MAX_TILE_PIXELS: u64 = 16_777_216;
             let tile_image = if repeat_x || repeat_y {
                 let tw = tile_w.ceil().max(1.0) as u32;
                 let th = tile_h.ceil().max(1.0) as u32;
@@ -5319,7 +5320,6 @@ fn paint_prepared_background_image(
             let tile_height = area.height.max(1.0);
             let tw = tile_width.ceil() as u32;
             let th = tile_height.ceil() as u32;
-            const MAX_TILE_PIXELS: u64 = 16_777_216;
             let tile_image = if u64::from(tw) * u64::from(th) <= MAX_TILE_PIXELS {
                 let mut tile_canvas = Canvas::new(tw, th);
                 color::paint_gradient(

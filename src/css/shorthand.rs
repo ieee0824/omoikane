@@ -1061,7 +1061,7 @@ fn expand_mask_shorthand(value: Value, important: bool) -> Vec<Declaration> {
     }
 
     let mut declarations = Vec::new();
-    // This implementation supports only URL masks. Gradients and other image
+    // This implementation supports URL and gradient masks. Other image
     // functions deliberately compute to `none`, i.e. no mask is applied.
     if unsupported_image && image.is_none() {
         image = Some(Value::Keyword("none".to_string()));

@@ -1194,7 +1194,7 @@ fn validate_declaration(name: &str, value: &Value) -> DeclarationValidation {
                 || lower == "repeating-conic-gradient"
             {
                 let rendered = render_value(value);
-                return if crate::paint::parse_gradient(&rendered).is_some() {
+                return if crate::paint::color::parse_gradient(&rendered).is_some() {
                     DeclarationValidation::Valid(ComputedValue::Keyword(rendered))
                 } else {
                     DeclarationValidation::Invalid
