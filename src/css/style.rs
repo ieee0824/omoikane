@@ -1302,6 +1302,26 @@ fn validate_declaration(name: &str, value: &Value) -> DeclarationValidation {
             DeclarationValidation::Invalid
         };
     }
+    if name.eq_ignore_ascii_case("perspective") {
+        let rendered = render_value(value);
+        let lower = rendered.to_ascii_lowercase();
+        if is_css_wide_keyword(&lower) || lower == "none" {
+            return DeclarationValidation::Valid(ComputedValue::Keyword(lower));
+        }
+        let reference = super::TransformReferenceBox {
+            x: 0.0,
+            y: 0.0,
+            width: 100.0,
+            height: 100.0,
+            font_size: 16.0,
+            root_font_size: 16.0,
+        };
+        return if super::parse_perspective_with_origin(&rendered, "50% 50%", reference).is_some() {
+            DeclarationValidation::Valid(ComputedValue::Keyword(rendered))
+        } else {
+            DeclarationValidation::Invalid
+        };
+    }
     if name.eq_ignore_ascii_case("filter") || name.eq_ignore_ascii_case("backdrop-filter") {
         let rendered = render_value(value);
         if is_css_wide_keyword(&rendered.to_ascii_lowercase()) {
@@ -1325,6 +1345,22 @@ fn validate_declaration(name: &str, value: &Value) -> DeclarationValidation {
             root_font_size: 16.0,
         };
         return if super::parse_transform_with_origin("scale(2)", &rendered, reference).is_some() {
+            DeclarationValidation::Valid(ComputedValue::Keyword(rendered))
+        } else {
+            DeclarationValidation::Invalid
+        };
+    }
+    if name.eq_ignore_ascii_case("perspective-origin") {
+        let rendered = render_value(value);
+        let reference = super::TransformReferenceBox {
+            x: 0.0,
+            y: 0.0,
+            width: 100.0,
+            height: 100.0,
+            font_size: 16.0,
+            root_font_size: 16.0,
+        };
+        return if super::parse_perspective_origin(&rendered, reference).is_some() {
             DeclarationValidation::Valid(ComputedValue::Keyword(rendered))
         } else {
             DeclarationValidation::Invalid
@@ -3334,6 +3370,8 @@ pub(super) fn is_supported_property(name: &str) -> bool {
             | "padding-block-start"
             | "padding-block-end"
             | "position"
+            | "perspective"
+            | "perspective-origin"
             | "pointer-events"
             | "right"
             | "row-gap"
@@ -3620,6 +3658,7 @@ fn compute_value(value: &Value, property_name: &str, ctx: ResolutionContext) -> 
         Value::List(values) => {
             if property_name.eq_ignore_ascii_case("transform")
                 || property_name.eq_ignore_ascii_case("transform-origin")
+                || property_name.eq_ignore_ascii_case("perspective-origin")
                 || property_name.eq_ignore_ascii_case("overflow")
                 || property_name.eq_ignore_ascii_case("box-shadow")
                 || property_name.eq_ignore_ascii_case("background-size")
@@ -5008,6 +5047,12 @@ fn apply_initial_values(properties: &mut BTreeMap<String, ComputedValue>) {
         .entry("transform-origin".to_string())
         .or_insert_with(|| ComputedValue::Keyword("50% 50%".to_string()));
     properties
+        .entry("perspective".to_string())
+        .or_insert_with(|| ComputedValue::Keyword("none".to_string()));
+    properties
+        .entry("perspective-origin".to_string())
+        .or_insert_with(|| ComputedValue::Keyword("50% 50%".to_string()));
+    properties
         .entry("transition-property".to_string())
         .or_insert_with(|| ComputedValue::Keyword("all".to_string()));
     properties
@@ -5076,6 +5121,8 @@ fn resolve_non_inherited_css_wide_keywords(properties: &mut BTreeMap<String, Com
         "object-fit",
         "object-position",
         "position",
+        "perspective",
+        "perspective-origin",
         "transform",
         "transform-origin",
         "transition-property",

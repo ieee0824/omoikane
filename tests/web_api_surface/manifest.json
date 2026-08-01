@@ -243,6 +243,14 @@
       "baseline_supported": false
     },
     {
+      "id": "css.transforms-3d-perspective-geometry",
+      "area": "cssom",
+      "description": "3D transform functions project DOM geometry while preserving untransformed layout size",
+      "setup": "globalThis.__transform3dProbe = document.createElement('div'); __transform3dProbe.style.cssText = 'position:absolute;left:0;top:0;width:100px;height:50px;transform-origin:50% 50%;transform:perspective(500px) rotateY(30deg) translateZ(20px)'; document.body.appendChild(__transform3dProbe)",
+      "probe": "CSS.supports('transform', 'matrix3d(1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1)') && CSS.supports('transform', 'perspective(500px) rotateY(30deg)') && (() => { const rect = __transform3dProbe.getBoundingClientRect(); const computed = getComputedStyle(__transform3dProbe).transform; return computed.includes('perspective') && Number.isFinite(rect.left) && Number.isFinite(rect.width) && rect.width > 70 && rect.width < 110 && __transform3dProbe.offsetWidth === 100 && __transform3dProbe.offsetHeight === 50; })()",
+      "baseline_supported": false
+    },
+    {
       "id": "css.transitions-timeline",
       "area": "cssom",
       "description": "CSS transitions sample one timeline value across computed style and layout geometry",

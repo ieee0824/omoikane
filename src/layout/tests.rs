@@ -376,6 +376,80 @@ fn transform_translate_function_variants_and_matrix_accumulate_offsets() {
 }
 
 #[test]
+fn transform_3d_projects_geometry_without_changing_flow_size() {
+    let (_document, _html, body, _card) = sample_tree();
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "body { margin: 0; } div { width: 100px; height: 50px; transform-origin: 50% 50%; transform: perspective(500px) rotateY(30deg); }",
+        )
+        .unwrap(),
+    );
+
+    let layout = layout_tree(
+        &body,
+        &mut resolver,
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 200.0,
+            height: 0.0,
+        },
+    )
+    .unwrap();
+
+    let child = &layout.children[0];
+    assert_eq!(child.dimensions.content.width, 100.0);
+    assert_eq!(child.dimensions.content.height, 50.0);
+    let corners = [
+        child.transform.transform_point(0.0, 0.0),
+        child.transform.transform_point(100.0, 0.0),
+        child.transform.transform_point(0.0, 50.0),
+        child.transform.transform_point(100.0, 50.0),
+    ];
+    let min_x = corners
+        .iter()
+        .map(|point| point.0)
+        .fold(f32::INFINITY, f32::min);
+    let max_x = corners
+        .iter()
+        .map(|point| point.0)
+        .fold(f32::NEG_INFINITY, f32::max);
+    assert!(max_x - min_x > 70.0 && max_x - min_x < 110.0);
+}
+
+#[test]
+fn perspective_property_projects_direct_child_at_paint_time() {
+    let (_document, _html, body, _card) = sample_tree();
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "body { margin: 0; perspective: 500px; perspective-origin: 50% 50%; } div { width: 100px; height: 50px; transform: rotateY(30deg); }",
+        )
+        .unwrap(),
+    );
+
+    let layout = layout_tree(
+        &body,
+        &mut resolver,
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 200.0,
+            height: 0.0,
+        },
+    )
+    .unwrap();
+
+    let child = &layout.children[0];
+    let left = child.transform.transform_point(0.0, 0.0);
+    let right = child.transform.transform_point(100.0, 0.0);
+    assert!(right.0 - left.0 < 100.0);
+}
+
+#[test]
 fn transform_does_not_change_following_sibling_flow_position() {
     let document = NodeHandle::document();
     let body = NodeHandle::element("body");

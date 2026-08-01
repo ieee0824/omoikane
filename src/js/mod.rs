@@ -26617,6 +26617,36 @@ b</textarea></form>"#);
     }
 
     #[test]
+    fn bounding_client_rect_handles_3d_perspective_without_changing_offset_size() {
+        let html = r#"<html><head><style>
+            * { margin: 0; padding: 0; }
+            #box { width: 100px; height: 50px; transform-origin: 50% 50%;
+                   transform: perspective(500px) rotateY(30deg) translateZ(20px); }
+        </style></head><body><div id="box"></div></body></html>"#;
+        let mut runtime = runtime_from_html(html);
+        let expression = r#"(() => {
+            const box = document.getElementById('box');
+            const rect = box.getBoundingClientRect();
+            const computed = getComputedStyle(box).transform;
+            return [rect.width, rect.height, box.offsetWidth, box.offsetHeight,
+                    Number.isFinite(rect.left), computed.includes('perspective')].join('|');
+        })()"#;
+
+        let values = eval_str(&mut runtime, expression)
+            .split('|')
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+        let width = values[0].parse::<f32>().unwrap();
+        let height = values[1].parse::<f32>().unwrap();
+        assert!(width > 70.0 && width < 110.0);
+        assert!(height > 45.0 && height < 60.0);
+        assert_eq!(values[2], "100");
+        assert_eq!(values[3], "50");
+        assert_eq!(values[4], "true");
+        assert_eq!(values[5], "true");
+    }
+
+    #[test]
     fn inline_style_is_the_source_for_computed_width_and_layout() {
         let html = r#"<html><head><style>
             * { margin: 0; padding: 0; }
