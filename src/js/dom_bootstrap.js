@@ -10602,7 +10602,7 @@
     }
   };
   // Host-side document/module loaders complete outside the JS fetch wrapper.
-  // They report their terminal status through this tiny private bridge so
+  // They report their terminal status through this small host bridge so
   // initial parser-discovered resources participate in the same timeline.
   globalThis.__omoikane_record_resource_timing = function(name, initiatorType, status, error, redirected = false, elapsedMs = 0) {
     const responseEnd = performance.now();
