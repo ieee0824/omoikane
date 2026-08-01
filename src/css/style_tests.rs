@@ -1297,6 +1297,8 @@ fn computes_3d_transform_and_perspective_properties() {
     assert!(supports_declaration("transform", "rotateY(20deg) translateZ(3px)"));
     assert!(supports_declaration("perspective", "600px"));
     assert!(!supports_declaration("perspective", "-1px"));
+    assert!(!supports_declaration("perspective", ""));
+    assert!(!supports_declaration("perspective-origin", ""));
 }
 
 #[test]

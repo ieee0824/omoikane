@@ -350,7 +350,10 @@ pub(crate) fn parse_perspective_with_origin(
     reference: TransformReferenceBox,
 ) -> Option<AffineTransform> {
     let value = perspective.trim();
-    if value.is_empty() || value.eq_ignore_ascii_case("none") || is_css_wide_keyword(value) {
+    if value.is_empty() {
+        return None;
+    }
+    if value.eq_ignore_ascii_case("none") || is_css_wide_keyword(value) {
         return Some(AffineTransform::identity());
     }
     let distance = parse_length(value, reference)?;
@@ -367,7 +370,10 @@ pub(crate) fn parse_perspective_origin(
     reference: TransformReferenceBox,
 ) -> Option<(f32, f32)> {
     let value = value.trim();
-    let value = if value.is_empty() || is_css_wide_keyword(value) {
+    if value.is_empty() {
+        return None;
+    }
+    let value = if is_css_wide_keyword(value) {
         "50% 50%"
     } else {
         value
@@ -1195,6 +1201,16 @@ mod tests {
         let point = matrix.transform_point(-1.0, 10.0);
         assert!(point.0.is_nan());
         assert!(point.1.is_nan());
+    }
+
+    #[test]
+    fn rejects_empty_perspective_values_but_accepts_css_wide_keywords() {
+        assert!(parse_perspective_with_origin("", "50% 50%", reference()).is_none());
+        assert!(parse_perspective_with_origin("500px", "", reference()).is_none());
+        assert!(parse_perspective_origin("", reference()).is_none());
+        assert!(parse_perspective_with_origin("none", "50% 50%", reference()).is_some());
+        assert!(parse_perspective_with_origin("initial", "50% 50%", reference()).is_some());
+        assert!(parse_perspective_origin("initial", reference()).is_some());
     }
 
     #[test]
