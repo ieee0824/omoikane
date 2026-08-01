@@ -9189,6 +9189,26 @@
   function dragInputTarget(id) {
     return capturedInputTarget(wrapNode(id) || document) || document;
   }
+  function updateDragInputTarget(target, init) {
+    const changed = target !== dragInputState.currentTarget;
+    if (changed) {
+      const previous = dragInputState.currentTarget;
+      if (previous) {
+        previous.dispatchEvent(dragEvent(
+          "dragleave", init, dragInputState.dataTransfer, target,
+        ));
+      }
+      dragInputState.currentTarget = target;
+      target.dispatchEvent(dragEvent(
+        "dragenter", init, dragInputState.dataTransfer, previous,
+      ));
+      const over = target.dispatchEvent(dragEvent(
+        "dragover", init, dragInputState.dataTransfer,
+      ));
+      dragInputState.dropAllowed = !over;
+    }
+    return changed;
+  }
   globalThis.__omoikane_prepare_drag_input = function(id) {
     const target = dragInputTarget(id);
     const source = draggableAncestor(target);
@@ -9226,22 +9246,13 @@
       dragInputState.source.dispatchEvent(dragEvent(
         "drag", init, dragInputState.dataTransfer, target,
       ));
-      if (target !== dragInputState.currentTarget) {
-        const previous = dragInputState.currentTarget;
-        if (previous) {
-          previous.dispatchEvent(dragEvent(
-            "dragleave", init, dragInputState.dataTransfer, target,
-          ));
-        }
-        dragInputState.currentTarget = target;
-        target.dispatchEvent(dragEvent(
-          "dragenter", init, dragInputState.dataTransfer, previous,
+      const targetChanged = updateDragInputTarget(target, init);
+      if (!targetChanged) {
+        const over = target.dispatchEvent(dragEvent(
+          "dragover", init, dragInputState.dataTransfer,
         ));
+        dragInputState.dropAllowed = !over;
       }
-      const over = target.dispatchEvent(dragEvent(
-        "dragover", init, dragInputState.dataTransfer,
-      ));
-      dragInputState.dropAllowed = !over;
       return true;
     }
     if (phase === "end") {
@@ -9251,6 +9262,8 @@
       }
       const source = dragInputState.source;
       const dataTransfer = dragInputState.dataTransfer;
+      const finalTarget = dragInputTarget(id);
+      updateDragInputTarget(finalTarget, init);
       const target = dragInputState.currentTarget;
       if (target && dragInputState.dropAllowed) {
         target.dispatchEvent(dragEvent("drop", init, dataTransfer, source));

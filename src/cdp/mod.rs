@@ -4648,7 +4648,7 @@ mod tests {
         session
             .dispatch(
                 "Input.dispatchMouseEvent",
-                json!({"type":"mouseMoved","x":10,"y":10,"button":"none","buttons":1}),
+                json!({"type":"mouseMoved","x":110,"y":10,"button":"none","buttons":1}),
             )
             .unwrap();
         session
@@ -4669,7 +4669,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             state["result"]["value"],
-            r#"{"events":["start:true:true:true","drag","enter","over","drag","leave","enter","over","drop:payload","end:payload"],"sameTransfer":true,"clicks":0}"#
+            r#"{"events":["start:true:true:true","drag","enter","over","drag","over","leave","enter","over","drop:payload","end:payload"],"sameTransfer":true,"clicks":0}"#
         );
     }
 
