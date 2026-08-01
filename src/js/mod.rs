@@ -10604,6 +10604,82 @@ mod tests {
     }
 
     #[test]
+    fn service_worker_registration_scopes_lifecycle_and_controller_selection() {
+        let mut runtime = JsRuntime::with_document_and_url(
+            default_document(),
+            "https://service-worker.example.test/app/index.html",
+        )
+        .unwrap();
+        runtime
+            .eval(
+                r#"globalThis.swProbe = { scope: '', state: '', found: false, controller: false, changes: 0, invalid: '', updateFound: 0, updateUndefined: false, replaced: false };
+                   navigator.serviceWorker.oncontrollerchange = () => swProbe.changes++;
+                   navigator.serviceWorker.register('/worker.js', { scope: '/app/' }).then(registration => {
+                     swProbe.scope = registration.scope;
+                     swProbe.state = registration.active.state;
+                     swProbe.controller = navigator.serviceWorker.controller === registration.active;
+                     globalThis.swRegistration = registration;
+                     registration.onupdatefound = () => swProbe.updateFound++;
+                     registration.update().then(value => { swProbe.updateUndefined = value === undefined; });
+                     navigator.serviceWorker.getRegistration('/app/page.html').then(found => { swProbe.found = found === registration; });
+                   });
+                   navigator.serviceWorker.register('https://other.example.test/worker.js').catch(error => { swProbe.invalid = error.name; });"#,
+            )
+            .unwrap();
+        runtime.run_until_idle().unwrap();
+        assert_eq!(
+            eval_str(&mut runtime, "[swProbe.scope, swProbe.state, swProbe.found, swProbe.controller, swProbe.changes, swProbe.invalid].join('|')"),
+            "https://service-worker.example.test/app/|activated|true|true|1|SecurityError",
+        );
+        assert_eq!(eval_str(&mut runtime, "String(swProbe.updateUndefined)"), "true");
+        runtime
+            .eval(
+                "navigator.serviceWorker.register('/worker-v2.js', { scope: '/app/' }).then(registration => { swProbe.replaced = registration === swRegistration; });",
+            )
+            .unwrap();
+        runtime.run_until_idle().unwrap();
+        assert_eq!(eval_str(&mut runtime, "[swProbe.updateFound, swProbe.replaced].join('|')"), "1|true");
+        runtime
+            .eval("navigator.serviceWorker.getRegistration('/app/page.html').then(registration => registration.unregister().then(result => globalThis.swUnregistered = result))")
+            .unwrap();
+        runtime.run_until_idle().unwrap();
+        assert_eq!(eval_str(&mut runtime, "String(swUnregistered) + '|' + (navigator.serviceWorker.controller === null)"), "true|true");
+    }
+
+    #[test]
+    fn service_worker_register_rejects_insecure_and_opaque_origins() {
+        let mut insecure = JsRuntime::with_document_and_url(
+            default_document(),
+            "http://service-worker-insecure.example.test/",
+        )
+        .unwrap();
+        insecure
+            .eval(
+                "globalThis.result = 'pending'; navigator.serviceWorker.register('/worker.js').then(() => result = 'resolved', error => result = error.name);",
+            )
+            .unwrap();
+        insecure.run_until_idle().unwrap();
+        assert_eq!(eval_str(&mut insecure, "result"), "SecurityError");
+
+        // A secure URL with an opaque origin is useful for exercising the
+        // origin gate independently of the secure-context gate.  Location's
+        // origin slot is mutable in this model, so mirror the platform's
+        // opaque-origin serialization (`"null"`) directly.
+        let mut opaque = JsRuntime::with_document_and_url(
+            default_document(),
+            "https://service-worker-opaque.example.test/",
+        )
+        .unwrap();
+        opaque
+            .eval(
+                "location.origin = 'null'; globalThis.result = 'pending'; navigator.serviceWorker.register('data:text/javascript,').then(() => result = 'resolved', error => result = error.name);",
+            )
+            .unwrap();
+        opaque.run_until_idle().unwrap();
+        assert_eq!(eval_str(&mut opaque, "result"), "SecurityError");
+    }
+
+    #[test]
     fn dedicated_worker_does_not_expose_async_clipboard() {
         let mut runtime = JsRuntime::new().unwrap();
         runtime

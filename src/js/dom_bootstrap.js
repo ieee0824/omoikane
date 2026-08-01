@@ -8415,6 +8415,217 @@
     }
   };
 
+  // -------------------------------------------------------------------------
+  // Service Worker registration/container lifecycle core.
+  //
+  // Script execution and fetch interception are intentionally out of scope
+  // for this deterministic model.  Registrations still retain their
+  // same-origin script/scope URLs, expose the installing/active state
+  // transitions, and select the longest matching scope for the current
+  // document.  Keeping records in this realm avoids moving Boa objects across
+  // runtimes while preserving the Web IDL-facing object graph.
+  // -------------------------------------------------------------------------
+  const serviceWorkerConstructionToken = {};
+  const serviceWorkerContainerConstructionToken = {};
+
+  // EventTarget is declared later in this bootstrap (after Navigator is
+  // constructed).  This bridge keeps construction safe during that initial
+  // pass, then adopts the real EventTarget prototype once it is installed.
+  class ServiceWorkerEventTarget {
+    constructor() { this._listeners = new Map(); }
+    addEventListener(...args) { return globalThis.EventTarget.prototype.addEventListener.call(this, ...args); }
+    removeEventListener(...args) { return globalThis.EventTarget.prototype.removeEventListener.call(this, ...args); }
+    dispatchEvent(...args) { return globalThis.EventTarget.prototype.dispatchEvent.call(this, ...args); }
+  }
+
+  function serviceWorkerURL(value, base) {
+    return new URL(String(value), base || String(globalThis.location && globalThis.location.href || ""));
+  }
+
+  function serviceWorkerOrigin(url) {
+    return String(url.origin || "");
+  }
+
+  function serviceWorkerCurrentOrigin() {
+    return String(globalThis.location && globalThis.location.origin || "");
+  }
+
+  function serviceWorkerScopeURL(scriptURL, options) {
+    const requested = options && options.scope !== undefined
+      ? serviceWorkerURL(options.scope, scriptURL.href)
+      : serviceWorkerURL(scriptURL.pathname.slice(0, scriptURL.pathname.lastIndexOf("/") + 1), scriptURL.href);
+    requested.hash = "";
+    return requested;
+  }
+
+  class ServiceWorker extends ServiceWorkerEventTarget {
+    constructor(record, state, token) {
+      if (token !== serviceWorkerConstructionToken) throw new TypeError("Illegal constructor");
+      super();
+      this.scriptURL = record.scriptURL;
+      this._state = String(state);
+      this._record = record;
+      this._onstatechange = null;
+    }
+    get state() { return this._state; }
+    __setState(state) {
+      const next = String(state);
+      if (next === this._state) return;
+      this._state = next;
+      this.dispatchEvent(new Event("statechange"));
+    }
+    postMessage() {
+      throw new DOMException("Service worker script execution is not available.", "InvalidStateError");
+    }
+    get onstatechange() { return this._onstatechange; }
+    set onstatechange(callback) {
+      if (this._onstatechange) this.removeEventListener("statechange", this._onstatechange);
+      this._onstatechange = typeof callback === "function" ? callback : null;
+      if (this._onstatechange) this.addEventListener("statechange", this._onstatechange);
+    }
+    get [Symbol.toStringTag]() { return "ServiceWorker"; }
+  }
+
+  class ServiceWorkerRegistration extends ServiceWorkerEventTarget {
+    constructor(record, container, token) {
+      if (token !== serviceWorkerContainerConstructionToken) throw new TypeError("Illegal constructor");
+      super();
+      this._record = record;
+      this._container = container;
+      this.scope = record.scope;
+      this.installing = record.worker;
+      this.waiting = null;
+      this.active = null;
+      this._onupdatefound = null;
+    }
+    update() {
+      return Promise.resolve(undefined);
+    }
+    unregister() {
+      return Promise.resolve().then(() => {
+        if (!this._container._records.has(this.scope)) return false;
+        this._container._records.delete(this.scope);
+        this.installing = null;
+        this.waiting = null;
+        this.active = null;
+        this._container.__updateController();
+        return true;
+      });
+    }
+    get onupdatefound() { return this._onupdatefound; }
+    set onupdatefound(callback) {
+      if (this._onupdatefound) this.removeEventListener("updatefound", this._onupdatefound);
+      this._onupdatefound = typeof callback === "function" ? callback : null;
+      if (this._onupdatefound) this.addEventListener("updatefound", this._onupdatefound);
+    }
+    get [Symbol.toStringTag]() { return "ServiceWorkerRegistration"; }
+  }
+
+  class ServiceWorkerContainer extends ServiceWorkerEventTarget {
+    constructor(token) {
+      if (token !== serviceWorkerContainerConstructionToken) throw new TypeError("Illegal constructor");
+      super();
+      this._records = new Map();
+      this.controller = null;
+      this._readyResolved = false;
+      this._readyResolve = null;
+      this.ready = new Promise(resolve => { this._readyResolve = resolve; });
+      this._oncontrollerchange = null;
+    }
+    __validateRegistration(scriptURL, options) {
+      const script = serviceWorkerURL(scriptURL);
+      const origin = serviceWorkerCurrentOrigin();
+      if (!origin || origin === "null" || serviceWorkerOrigin(script) !== origin) {
+        throw new DOMException("Service worker script must be same-origin.", "SecurityError");
+      }
+      const scope = serviceWorkerScopeURL(script, options || {});
+      if (serviceWorkerOrigin(scope) !== origin) {
+        throw new DOMException("Service worker scope must be same-origin.", "SecurityError");
+      }
+      return { script: script.href, scope: scope.href };
+    }
+    register(scriptURL, options = undefined) {
+      return Promise.resolve().then(() => {
+        if (typeof nativeIsSecureContext !== "function" || !nativeIsSecureContext()) {
+          throw new DOMException("Service workers require a secure context.", "SecurityError");
+        }
+        const validated = this.__validateRegistration(scriptURL, options || {});
+        let record = this._records.get(validated.scope);
+        if (record) {
+          if (record.scriptURL !== validated.script) {
+            record.scriptURL = validated.script;
+            record.worker = new ServiceWorker(record, "installing", serviceWorkerConstructionToken);
+            record.registration.installing = record.worker;
+            record.registration.waiting = null;
+            record.registration.active = null;
+            record.registration.dispatchEvent(new Event("updatefound"));
+          }
+        } else {
+          record = { scriptURL: validated.script, scope: validated.scope, worker: null, registration: null };
+          record.worker = new ServiceWorker(record, "installing", serviceWorkerConstructionToken);
+          record.registration = new ServiceWorkerRegistration(record, this, serviceWorkerContainerConstructionToken);
+          this._records.set(validated.scope, record);
+        }
+        const registration = record.registration;
+        // The core has no script evaluator, so install/activate is a single
+        // deterministic microtask transition after registration creation.
+        queueMicrotask(() => {
+          if (!this._records.has(record.scope)) return;
+          record.worker.__setState("activated");
+          registration.installing = null;
+          registration.waiting = null;
+          registration.active = record.worker;
+          this.__updateController();
+          if (!this._readyResolved && this.controller === record.worker) {
+            this._readyResolved = true;
+            this._readyResolve(registration);
+          }
+        });
+        return registration;
+      });
+    }
+    getRegistration(clientURL = undefined) {
+      return Promise.resolve().then(() => {
+        const target = serviceWorkerURL(clientURL === undefined ? globalThis.location.href : clientURL);
+        if (serviceWorkerOrigin(target) !== serviceWorkerCurrentOrigin()) return undefined;
+        let match = null;
+        for (const record of this._records.values()) {
+          if (target.href.startsWith(record.scope) && (!match || record.scope.length > match.scope.length)) {
+            match = record;
+          }
+        }
+        return match ? match.registration : undefined;
+      });
+    }
+    getRegistrations() {
+      return Promise.resolve().then(() => Array.from(this._records.values(), record => record.registration));
+    }
+    __updateController() {
+      const href = String(globalThis.location && globalThis.location.href || "");
+      let match = null;
+      for (const record of this._records.values()) {
+        if (record.registration.active && href.startsWith(record.scope) && (!match || record.scope.length > match.scope.length)) {
+          match = record;
+        }
+      }
+      const next = match ? match.registration.active : null;
+      if (next === this.controller) return;
+      this.controller = next;
+      queueMicrotask(() => this.dispatchEvent(new Event("controllerchange")));
+    }
+    get oncontrollerchange() { return this._oncontrollerchange; }
+    set oncontrollerchange(callback) {
+      if (this._oncontrollerchange) this.removeEventListener("controllerchange", this._oncontrollerchange);
+      this._oncontrollerchange = typeof callback === "function" ? callback : null;
+      if (this._oncontrollerchange) this.addEventListener("controllerchange", this._oncontrollerchange);
+    }
+    get [Symbol.toStringTag]() { return "ServiceWorkerContainer"; }
+  }
+
+  globalThis.ServiceWorker = ServiceWorker;
+  globalThis.ServiceWorkerRegistration = ServiceWorkerRegistration;
+  globalThis.ServiceWorkerContainer = ServiceWorkerContainer;
+
   class Navigator {
     constructor(token) {
       if (token !== navigatorConstructionToken) throw new TypeError("Illegal constructor");
@@ -8428,6 +8639,7 @@
       this.mimeTypes = new MimeTypeArray(navigatorConstructionToken);
       this.clipboard = new Clipboard(clipboardConstructionToken);
       this.geolocation = new Geolocation(geolocationConstructionToken);
+      this.serviceWorker = new ServiceWorkerContainer(serviceWorkerContainerConstructionToken);
     }
     get [Symbol.toStringTag]() { return "Navigator"; }
   }
@@ -10338,6 +10550,7 @@
   }
   globalThis.EventTarget = EventTarget;
   Object.setPrototypeOf(WebGLEventTarget.prototype, EventTarget.prototype);
+  Object.setPrototypeOf(ServiceWorkerEventTarget.prototype, EventTarget.prototype);
   globalThis.AbortSignal = AbortSignal;
   globalThis.AbortController = AbortController;
 
