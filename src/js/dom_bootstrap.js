@@ -7207,11 +7207,15 @@
 
   class HTMLLinkElement extends HTMLElement {
     setAttribute(name, value) {
-      const isHref = String(name).toLowerCase() === "href";
+      const attribute = String(name).toLowerCase();
+      const isHref = attribute === "href";
+      const isRel = attribute === "rel";
       if (isHref) noteElementResourceStart(this);
       super.setAttribute(name, value);
-      if (isHref && (this.relList.contains("stylesheet") || this.relList.contains("preload")) &&
-          /^(?:data:|blob:)/i.test(String(value))) {
+      const href = this.getAttribute("href");
+      if ((isHref || isRel) &&
+          (this.relList.contains("stylesheet") || this.relList.contains("preload")) &&
+          /^(?:data:|blob:)/i.test(String(href || ""))) {
         finishElementResourceTiming(this, 200, false);
       }
     }

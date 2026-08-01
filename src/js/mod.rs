@@ -22600,6 +22600,34 @@ b</textarea></form>"#);
     }
 
     #[test]
+    fn performance_resource_timing_link_finishes_when_rel_follows_href() {
+        let mut runtime = JsRuntime::with_document(default_document()).unwrap();
+        assert!(runtime
+            .eval(
+                r#"(() => {
+                  performance.clearResourceTimings();
+                  const stylesheetHref = "data:text/css,body%7Bcolor%3Ared%7D";
+                  const stylesheet = document.createElement("link");
+                  stylesheet.href = stylesheetHref;
+                  stylesheet.rel = "stylesheet";
+                  const preloadHref = "data:text/css,body%7Bbackground%3Ablue%7D";
+                  const preload = document.createElement("link");
+                  preload.setAttribute("href", preloadHref);
+                  preload.setAttribute("rel", "preload");
+                  const entries = performance.getEntriesByType("resource");
+                  return entries.length === 2 &&
+                    entries.every(entry => entry.initiatorType === "link" &&
+                      entry.responseStatus === 200 && entry.responseEnd >= entry.startTime) &&
+                    performance.getEntriesByName(stylesheetHref).length === 1 &&
+                    performance.getEntriesByName(preloadHref).length === 1;
+                })()"#,
+            )
+            .unwrap()
+            .as_boolean()
+            .unwrap());
+    }
+
+    #[test]
     fn performance_resource_timing_script_redirect_records_redirect_window() {
         let port = spawn_redirect_script_server();
         let requested = format!("http://127.0.0.1:{port}/redirect.js");
