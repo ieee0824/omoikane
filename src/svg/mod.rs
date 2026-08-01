@@ -163,7 +163,7 @@ fn property_value(attrs: &BTreeMap<String, String>, name: &str) -> Option<String
         .find(|(key, _)| key.eq_ignore_ascii_case("style"))
         .map(|(_, value)| value)
     {
-        for declaration in style.split(';') {
+        for declaration in style.split(';').rev() {
             let Some((key, value)) = declaration.split_once(':') else { continue };
             if key.trim().eq_ignore_ascii_case(name) {
                 return Some(value.trim().to_string());
@@ -556,6 +556,7 @@ fn render_path(
     let mut closed = false;
     let mut cx = 0.0f32;
     let mut cy = 0.0f32;
+    let mut subpath_start = (0.0f32, 0.0f32);
 
     for cmd in &commands {
         match cmd {
@@ -567,6 +568,7 @@ fn render_path(
                 closed = false;
                 cx = *x;
                 cy = *y;
+                subpath_start = (cx, cy);
                 points.push((cx * sx + tx, cy * sy + ty));
             }
             PathCommand::LineTo(x, y) => {
@@ -640,7 +642,13 @@ fn render_path(
                 cy = *y;
             }
             PathCommand::Close => {
-                closed = true;
+                if points.len() >= 2 {
+                    subpaths.push((std::mem::take(&mut points), true));
+                }
+                cx = subpath_start.0;
+                cy = subpath_start.1;
+                points.push((cx * sx + tx, cy * sy + ty));
+                closed = false;
             }
         }
     }
@@ -1129,7 +1137,7 @@ fn fill_compound_path(
                 let x_start = (pair[0].0.floor() as i32).max(0) as u32;
                 let x_end = (pair[1].0.ceil() as u32).min(canvas.width());
                 for x in x_start..x_end {
-                    canvas.set_pixel(x, y, color);
+                    canvas.blend_pixel(x, y, color);
                 }
             }
         }
@@ -1296,6 +1304,29 @@ mod tests {
         assert_eq!((filled.r, filled.g, filled.b), (255, 255, 255));
         assert!(filled.a >= 127 && filled.a <= 128, "opacity should halve alpha: {filled:?}");
         assert!(pixel(15, 2).b > 0, "inherited stroke should be painted");
+    }
+
+    #[test]
+    fn svg_style_uses_last_declaration_and_close_resets_path_stroke_point() {
+        let html = r#"<svg width="20" height="10">
+          <rect width="8" height="8" style="fill:red; fill:blue"/>
+          <path fill="none" stroke="black" stroke-width="1" d="M2 2H6V6ZH10"/>
+        </svg>"#;
+        let doc = TreeBuilder::parse(html).document();
+        let svg = find_svg(&doc).unwrap();
+        let image = render_svg_to_image(&svg).unwrap();
+        let pixel = |x: u32, y: u32| {
+            let index = (y * image.width() + x) as usize * 4;
+            Color::rgba(
+                image.pixels()[index],
+                image.pixels()[index + 1],
+                image.pixels()[index + 2],
+                image.pixels()[index + 3],
+            )
+        };
+        assert_eq!(pixel(4, 0), Color::rgb(0, 0, 255));
+        assert!(pixel(9, 1).a > 0, "commands after close should start at the subpath origin");
+        assert_eq!(pixel(9, 6).a, 0, "the closed path must not continue from its old endpoint");
     }
 
     #[test]
