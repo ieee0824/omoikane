@@ -6207,7 +6207,20 @@
   }
   function canvasState(canvas) {
     let state=canvasStates.get(canvas); const [width,height]=canvasDimensions(canvas);
-    if (!state || state.width!==width || state.height!==height) { state=initialCanvasState(canvas); canvasStates.set(canvas,state); commitCanvas(canvas,state); }
+    if (!state || state.width!==width || state.height!==height) {
+      const previous = state;
+      state=initialCanvasState(canvas);
+      if (previous) {
+        state.contextMode = previous.contextMode;
+        state.context = previous.context;
+        state.webgl = previous.webgl;
+        if (state.webgl) {
+          state.webgl.__state.viewport = [0, 0, width, height];
+          state.webgl.__state.scissor = [0, 0, width, height];
+        }
+      }
+      canvasStates.set(canvas,state); commitCanvas(canvas,state);
+    }
     return state;
   }
   function blendCanvasPixel(state,x,y,color,clear=false) {
@@ -6462,6 +6475,9 @@
       if (this.__state.lost) return false;
       this.__state.lost = true;
       this.dispatchEvent(new Event("webglcontextlost", { cancelable: true }));
+      if (this.canvas && typeof this.canvas.dispatchEvent === "function") {
+        this.canvas.dispatchEvent(new Event("webglcontextlost", { cancelable: true }));
+      }
       return true;
     }
     __restore() {
@@ -6483,6 +6499,9 @@
       this.__state.elementArrayBuffer = null;
       this.__state.currentProgram = null;
       this.dispatchEvent(new Event("webglcontextrestored"));
+      if (this.canvas && typeof this.canvas.dispatchEvent === "function") {
+        this.canvas.dispatchEvent(new Event("webglcontextrestored"));
+      }
       return true;
     }
     get oncontextlost() { return this.__oncontextlost || null; }
@@ -6906,8 +6925,8 @@
     getSupportedExtensions() { return []; }
   }
   for (const [name, value] of Object.entries(WEBGL_CONSTANTS)) {
-    WebGLRenderingContext[name] = value;
-    WebGLRenderingContext.prototype[name] = value;
+    Object.defineProperty(WebGLRenderingContext, name, { value, writable: false, enumerable: false, configurable: false });
+    Object.defineProperty(WebGLRenderingContext.prototype, name, { value, writable: false, enumerable: false, configurable: false });
   }
 
   function resetHtmlCanvasState(canvas) {
@@ -6915,9 +6934,9 @@
     canvasStates.delete(canvas);
     const next = canvasState(canvas);
     if (!previous) return;
-    // Resizing resets the backing store and rendering state, but does not
-    // release the canvas's context mode. Preserve the context identity so a
-    // subsequent getContext call remains exclusive to its original API.
+    // Resizing resets the backing store but does not release the canvas's
+    // context mode. Preserve the context identity so a subsequent getContext
+    // call remains exclusive to its original API.
     next.contextMode = previous.contextMode;
     next.context = previous.context;
     next.webgl = previous.webgl;
