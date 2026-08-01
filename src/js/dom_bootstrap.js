@@ -8652,6 +8652,639 @@
   globalThis.ServiceWorkerRegistration = ServiceWorkerRegistration;
   globalThis.ServiceWorkerContainer = ServiceWorkerContainer;
 
+  // -------------------------------------------------------------------------
+  // WebGPU deterministic adapter/device/queue core.
+  //
+  // Omoikane intentionally does not bind a host GPU backend.  The implementation
+  // below nevertheless keeps the WebGPU object graph and the parts of the
+  // validation/state machine that are useful to headless callers deterministic:
+  // one software adapter, an in-memory device, mapped buffers, queue writes,
+  // and copy/clear command buffers.  Shader/pipeline/texture presentation APIs
+  // remain outside this core and are rejected through the normal validation
+  // error path rather than pretending that a GPU exists.
+  // -------------------------------------------------------------------------
+  const gpuConstructionToken = {};
+  const gpuAdapterConstructionToken = {};
+  const gpuDeviceConstructionToken = {};
+  const gpuBufferConstructionToken = {};
+  const gpuCommandConstructionToken = {};
+  const gpuErrorConstructionToken = {};
+
+  // Keep constants as frozen arrays/objects instead of long-lived Set objects.
+  // Boa's Set finalizer can otherwise retain a borrow while the web API surface
+  // probe tears down a realm.
+  const WEBGPU_FEATURES = Object.freeze([]);
+  const WEBGPU_LIMITS = Object.freeze({
+    maxTextureDimension1D: 8192,
+    maxTextureDimension2D: 8192,
+    maxTextureDimension3D: 2048,
+    maxTextureArrayLayers: 256,
+    maxBindGroups: 4,
+    maxBindGroupsPlusVertexBuffers: 24,
+    maxBindingsPerBindGroup: 1000,
+    maxDynamicUniformBuffersPerPipelineLayout: 8,
+    maxDynamicStorageBuffersPerPipelineLayout: 4,
+    maxSampledTexturesPerShaderStage: 16,
+    maxSamplersPerShaderStage: 16,
+    maxStorageBuffersPerShaderStage: 8,
+    maxStorageTexturesPerShaderStage: 4,
+    maxUniformBuffersPerShaderStage: 12,
+    maxUniformBufferBindingSize: 65536,
+    maxStorageBufferBindingSize: 134217728,
+    minUniformBufferOffsetAlignment: 256,
+    minStorageBufferOffsetAlignment: 256,
+    maxVertexBuffers: 8,
+    maxBufferSize: 268435456,
+    maxVertexAttributes: 16,
+    maxVertexBufferArrayStride: 2048,
+    maxInterStageShaderComponents: 60,
+    maxInterStageShaderVariables: 16,
+    maxColorAttachments: 8,
+    maxColorAttachmentBytesPerSample: 32,
+    maxComputeWorkgroupStorageSize: 16384,
+    maxComputeInvocationsPerWorkgroup: 256,
+    maxComputeWorkgroupSizeX: 256,
+    maxComputeWorkgroupSizeY: 256,
+    maxComputeWorkgroupSizeZ: 64,
+    maxComputeWorkgroupsPerDimension: 65535,
+  });
+  const WEBGPU_BUFFER_USAGE = Object.freeze({
+    MAP_READ: 0x0001,
+    MAP_WRITE: 0x0002,
+    COPY_SRC: 0x0004,
+    COPY_DST: 0x0008,
+    INDEX: 0x0010,
+    VERTEX: 0x0020,
+    UNIFORM: 0x0040,
+    STORAGE: 0x0080,
+    INDIRECT: 0x0100,
+    QUERY_RESOLVE: 0x0200,
+  });
+  const WEBGPU_MAP_MODE = Object.freeze({ READ: 0x0001, WRITE: 0x0002 });
+  const WEBGPU_SHADER_STAGE = Object.freeze({ VERTEX: 0x0001, FRAGMENT: 0x0002, COMPUTE: 0x0004 });
+  const WEBGPU_TEXTURE_USAGE = Object.freeze({
+    COPY_SRC: 0x01, COPY_DST: 0x02, TEXTURE_BINDING: 0x04,
+    STORAGE_BINDING: 0x08, RENDER_ATTACHMENT: 0x10,
+  });
+
+  // EventTarget is installed later in this bootstrap.  This bridge mirrors the
+  // ServiceWorker bridge above so GPUDevice can expose EventTarget semantics as
+  // soon as the global constructor is available.
+  class GPUEventTarget {
+    constructor() { this._listeners = new Map(); }
+    addEventListener(...args) { return globalThis.EventTarget.prototype.addEventListener.call(this, ...args); }
+    removeEventListener(...args) { return globalThis.EventTarget.prototype.removeEventListener.call(this, ...args); }
+    dispatchEvent(...args) { return globalThis.EventTarget.prototype.dispatchEvent.call(this, ...args); }
+  }
+
+  class GPUError {
+    constructor(message = "") {
+      Object.defineProperty(this, "message", {
+        configurable: false, enumerable: true, writable: false, value: String(message),
+      });
+    }
+    get [Symbol.toStringTag]() { return "GPUError"; }
+  }
+  class GPUValidationError extends GPUError {
+    get [Symbol.toStringTag]() { return "GPUValidationError"; }
+  }
+  class GPUOutOfMemoryError extends GPUError {
+    get [Symbol.toStringTag]() { return "GPUOutOfMemoryError"; }
+  }
+  class GPUInternalError extends GPUError {
+    get [Symbol.toStringTag]() { return "GPUInternalError"; }
+  }
+  class GPUDeviceLostInfo {
+    constructor(token, reason, message) {
+      if (token !== gpuErrorConstructionToken) throw new TypeError("Illegal constructor");
+      Object.defineProperties(this, {
+        reason: { value: String(reason), enumerable: true },
+        message: { value: String(message), enumerable: true },
+      });
+    }
+    get [Symbol.toStringTag]() { return "GPUDeviceLostInfo"; }
+  }
+  class GPUUncapturedErrorEvent extends Event {
+    constructor(type = "uncapturederror", init = {}) {
+      super(type, init);
+      Object.defineProperty(this, "error", {
+        configurable: false, enumerable: true, writable: false, value: init.error || null,
+      });
+    }
+    get [Symbol.toStringTag]() { return "GPUUncapturedErrorEvent"; }
+  }
+
+  class GPUSupportedFeatures {
+    constructor(token, values = []) {
+      if (token !== gpuAdapterConstructionToken) throw new TypeError("Illegal constructor");
+      this.__values = Object.freeze(Array.from(values, String));
+    }
+    get size() { return this.__values.length; }
+    has(value) { return this.__values.includes(String(value)); }
+    keys() { return this.__values[Symbol.iterator](); }
+    values() { return this.__values[Symbol.iterator](); }
+    entries() { return this.__values.map(value => [value, value])[Symbol.iterator](); }
+    forEach(callback, thisArg = undefined) {
+      if (typeof callback !== "function") throw new TypeError("callback must be callable");
+      for (const value of this.__values) callback.call(thisArg, value, value, this);
+    }
+    [Symbol.iterator]() { return this.values(); }
+    get [Symbol.toStringTag]() { return "GPUSupportedFeatures"; }
+  }
+
+  class GPUSupportedLimits {
+    constructor(token, values = WEBGPU_LIMITS) {
+      if (token !== gpuAdapterConstructionToken && token !== gpuDeviceConstructionToken) {
+        throw new TypeError("Illegal constructor");
+      }
+      this.__values = Object.freeze({ ...values });
+      for (const name of Object.keys(this.__values)) {
+        Object.defineProperty(this, name, {
+          configurable: false, enumerable: true, get: () => this.__values[name],
+        });
+      }
+    }
+    get [Symbol.toStringTag]() { return "GPUSupportedLimits"; }
+  }
+
+  class GPUAdapterInfo {
+    constructor(token, values) {
+      if (token !== gpuAdapterConstructionToken) throw new TypeError("Illegal constructor");
+      const source = values || {};
+      Object.defineProperties(this, {
+        architecture: { value: String(source.architecture || "deterministic"), enumerable: true },
+        description: { value: String(source.description || "Omoikane deterministic WebGPU adapter"), enumerable: true },
+        device: { value: String(source.device || "software"), enumerable: true },
+        vendor: { value: String(source.vendor || "Omoikane"), enumerable: true },
+      });
+    }
+    get [Symbol.toStringTag]() { return "GPUAdapterInfo"; }
+  }
+
+  function webgpuOperationError(message) {
+    return new DOMException(String(message || "WebGPU operation failed."), "OperationError");
+  }
+  function webgpuValidationError(message) {
+    return new GPUValidationError(String(message || "WebGPU validation failed."));
+  }
+  function webgpuInteger(value, name) {
+    const number = Number(value);
+    if (!Number.isFinite(number) || Math.trunc(number) !== number || number < 0) {
+      throw new TypeError(name + " must be a non-negative integer");
+    }
+    return number;
+  }
+  function webgpuBytes(value) {
+    if (value instanceof ArrayBuffer) return new Uint8Array(value);
+    if (ArrayBuffer.isView(value)) return new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
+    throw new TypeError("data must be an ArrayBuffer or ArrayBufferView");
+  }
+  function webgpuDeviceActive(device, operation) {
+    if (!device || device.__destroyed) {
+      if (device) webgpuRecordError(device, "validation", (operation || "Operation") + " used a destroyed device.");
+      return false;
+    }
+    return true;
+  }
+  function webgpuRecordError(device, filter, message) {
+    if (!device) return;
+    const error = filter === "out-of-memory"
+      ? new GPUOutOfMemoryError(message)
+      : filter === "internal" ? new GPUInternalError(message) : webgpuValidationError(message);
+    const scope = device.__errorScopes.length ? device.__errorScopes[device.__errorScopes.length - 1] : null;
+    if (scope && scope.filter === filter) {
+      if (!scope.error) scope.error = error;
+      return;
+    }
+    if (scope && scope.filter !== filter && filter === "validation") {
+      // A validation error cannot be hidden by an out-of-memory/internal scope.
+      // Leave it uncaptured, matching the browser's uncaptured error surface.
+    }
+    queueMicrotask(() => {
+      if (device.__destroyed && device.__uncapturedSuppressed) return;
+      const event = new GPUUncapturedErrorEvent("uncapturederror", { error });
+      try { device.dispatchEvent(event); } catch (_) {}
+    });
+  }
+
+  class GPUBuffer {
+    constructor(device, descriptor, token, invalid = false) {
+      if (token !== gpuBufferConstructionToken) throw new TypeError("Illegal constructor");
+      this.__device = device;
+      this.__invalid = !!invalid;
+      this.__destroyed = false;
+      this.__size = Number(descriptor.size) || 0;
+      this.__usage = Number(descriptor.usage) || 0;
+      this.__label = descriptor.label === undefined ? "" : String(descriptor.label);
+      this.__data = new Uint8Array(Math.max(0, this.__size));
+      this.__mapState = "unmapped";
+      this.__map = null;
+      if (!this.__invalid && descriptor.mappedAtCreation) {
+        this.__mapState = "mapped";
+        this.__map = { mode: WEBGPU_MAP_MODE.WRITE, offset: 0, size: this.__size,
+          buffer: this.__data.slice().buffer, views: [] };
+      }
+    }
+    get label() { return this.__label; }
+    set label(value) { this.__label = String(value); }
+    get size() { return this.__size; }
+    get usage() { return this.__usage; }
+    get mapState() { return this.__mapState; }
+    mapAsync(mode, offset = 0, size = undefined) {
+      const normalizedMode = Number(mode);
+      if (this.__invalid || this.__destroyed || !webgpuDeviceActive(this.__device, "GPUBuffer.mapAsync")) {
+        return Promise.reject(webgpuOperationError("The GPUBuffer is unavailable."));
+      }
+      if (normalizedMode !== WEBGPU_MAP_MODE.READ && normalizedMode !== WEBGPU_MAP_MODE.WRITE) {
+        return Promise.reject(new TypeError("mapMode must be READ or WRITE"));
+      }
+      if (this.__mapState !== "unmapped") return Promise.reject(webgpuOperationError("The GPUBuffer is already mapped."));
+      let start;
+      let length;
+      try {
+        start = webgpuInteger(offset, "offset");
+        length = size === undefined ? this.__size - start : webgpuInteger(size, "size");
+      } catch (error) { return Promise.reject(error); }
+      if (start % 8 !== 0 || length % 4 !== 0 || start > this.__size || start + length > this.__size) {
+        return Promise.reject(webgpuOperationError("The mapped range is outside the buffer or is misaligned."));
+      }
+      if ((normalizedMode === WEBGPU_MAP_MODE.READ && !(this.__usage & WEBGPU_BUFFER_USAGE.MAP_READ)) ||
+          (normalizedMode === WEBGPU_MAP_MODE.WRITE && !(this.__usage & WEBGPU_BUFFER_USAGE.MAP_WRITE))) {
+        return Promise.reject(webgpuOperationError("The requested map mode is not enabled for this buffer."));
+      }
+      this.__mapState = "pending";
+      return Promise.resolve().then(() => {
+        if (this.__destroyed || this.__device.__destroyed) {
+          this.__mapState = "unmapped";
+          throw webgpuOperationError("The GPUBuffer was destroyed while mapping.");
+        }
+        this.__mapState = "mapped";
+        this.__map = { mode: normalizedMode, offset: start, size: length,
+          buffer: this.__data.slice(start, start + length).buffer, views: [] };
+      });
+    }
+    getMappedRange(offset = undefined, size = undefined) {
+      if (this.__mapState !== "mapped" || !this.__map) throw webgpuOperationError("The GPUBuffer is not mapped.");
+      const start = offset === undefined ? this.__map.offset : webgpuInteger(offset, "offset");
+      const length = size === undefined ? this.__map.size - (start - this.__map.offset) : webgpuInteger(size, "size");
+      if (start < this.__map.offset || start + length > this.__map.offset + this.__map.size ||
+          start % 8 !== 0 || length % 4 !== 0) throw webgpuOperationError("The mapped range is invalid or misaligned.");
+      const relative = start - this.__map.offset;
+      if (relative === 0 && length === this.__map.size) return this.__map.buffer;
+      const view = this.__map.buffer.slice(relative, relative + length);
+      this.__map.views.push({ offset: relative, buffer: view });
+      return view;
+    }
+    unmap() {
+      if (this.__mapState !== "mapped" || !this.__map) return;
+      if (this.__map.mode === WEBGPU_MAP_MODE.WRITE && !this.__destroyed) {
+        const base = new Uint8Array(this.__map.buffer);
+        this.__data.set(base, this.__map.offset);
+        for (const view of this.__map.views) {
+          this.__data.set(new Uint8Array(view.buffer), this.__map.offset + view.offset);
+        }
+      }
+      this.__map = null;
+      this.__mapState = "unmapped";
+    }
+    destroy() {
+      if (this.__destroyed) return;
+      this.unmap();
+      this.__destroyed = true;
+      this.__mapState = "destroyed";
+      this.__data = new Uint8Array(0);
+    }
+    get [Symbol.toStringTag]() { return "GPUBuffer"; }
+  }
+
+  class GPUCommandBuffer {
+    constructor(device, commands, label, invalid, token) {
+      if (token !== gpuCommandConstructionToken) throw new TypeError("Illegal constructor");
+      this.__device = device;
+      this.__commands = commands;
+      this.__invalid = !!invalid;
+      this.__submitted = false;
+      this.__label = label;
+    }
+    get label() { return this.__label; }
+    set label(value) { this.__label = String(value); }
+    get [Symbol.toStringTag]() { return "GPUCommandBuffer"; }
+  }
+
+  class GPUCommandEncoder {
+    constructor(device, descriptor, token) {
+      if (token !== gpuDeviceConstructionToken) throw new TypeError("Illegal constructor");
+      this.__device = device;
+      this.__commands = [];
+      this.__finished = false;
+      this.__invalid = false;
+      this.__label = descriptor && descriptor.label !== undefined ? String(descriptor.label) : "";
+    }
+    get label() { return this.__label; }
+    set label(value) { this.__label = String(value); }
+    __ensureOpen() {
+      if (this.__finished) throw webgpuOperationError("The GPUCommandEncoder is already finished.");
+      return webgpuDeviceActive(this.__device, "GPUCommandEncoder");
+    }
+    copyBufferToBuffer(source, sourceOffset, destination, destinationOffset, size) {
+      if (!this.__ensureOpen()) return;
+      const srcOffset = Number(sourceOffset), dstOffset = Number(destinationOffset), length = Number(size);
+      const validBuffer = value => value instanceof GPUBuffer && value.__device === this.__device && !value.__destroyed && !value.__invalid;
+      if (!validBuffer(source) || !validBuffer(destination) ||
+          !Number.isFinite(srcOffset) || !Number.isFinite(dstOffset) || !Number.isFinite(length) ||
+          Math.trunc(srcOffset) !== srcOffset || Math.trunc(dstOffset) !== dstOffset || Math.trunc(length) !== length ||
+          srcOffset < 0 || dstOffset < 0 || length < 0 || srcOffset % 4 || dstOffset % 4 || length % 4 ||
+          srcOffset + length > source.size || dstOffset + length > destination.size ||
+          !(source.usage & WEBGPU_BUFFER_USAGE.COPY_SRC) || !(destination.usage & WEBGPU_BUFFER_USAGE.COPY_DST)) {
+        this.__invalid = true;
+        webgpuRecordError(this.__device, "validation", "copyBufferToBuffer arguments are invalid.");
+        return;
+      }
+      this.__commands.push({ type: "copy", source, sourceOffset: srcOffset, destination,
+        destinationOffset: dstOffset, size: length });
+    }
+    clearBuffer(buffer, offset = 0, size = undefined) {
+      if (!this.__ensureOpen()) return;
+      const start = Number(offset);
+      const length = size === undefined ? (buffer && buffer.size - start) : Number(size);
+      if (!(buffer instanceof GPUBuffer) || buffer.__device !== this.__device || buffer.__destroyed || buffer.__invalid ||
+          !Number.isFinite(start) || !Number.isFinite(length) || Math.trunc(start) !== start || Math.trunc(length) !== length ||
+          start < 0 || length < 0 || start % 4 || length % 4 || start + length > buffer.size ||
+          !(buffer.usage & WEBGPU_BUFFER_USAGE.COPY_DST)) {
+        this.__invalid = true;
+        webgpuRecordError(this.__device, "validation", "clearBuffer arguments are invalid.");
+        return;
+      }
+      this.__commands.push({ type: "clear", buffer, offset: start, size: length });
+    }
+    finish(descriptor = undefined) {
+      if (this.__finished) throw webgpuOperationError("The GPUCommandEncoder is already finished.");
+      this.__finished = true;
+      const label = descriptor && descriptor.label !== undefined ? String(descriptor.label) : this.__label;
+      return new GPUCommandBuffer(this.__device, this.__commands.slice(), label, this.__invalid, gpuCommandConstructionToken);
+    }
+    get [Symbol.toStringTag]() { return "GPUCommandEncoder"; }
+  }
+
+  class GPUQueue {
+    constructor(device, descriptor, token) {
+      if (token !== gpuDeviceConstructionToken) throw new TypeError("Illegal constructor");
+      this.__device = device;
+      this.__label = descriptor && descriptor.label !== undefined ? String(descriptor.label) : "";
+    }
+    get label() { return this.__label; }
+    set label(value) { this.__label = String(value); }
+    writeBuffer(buffer, bufferOffset, data, dataOffset = 0, size = undefined) {
+      if (!webgpuDeviceActive(this.__device, "GPUQueue.writeBuffer")) return;
+      const bytes = webgpuBytes(data);
+      const elementSize = ArrayBuffer.isView(data) && !(data instanceof DataView)
+        ? Number(data.BYTES_PER_ELEMENT || 1) : 1;
+      const destination = Number(bufferOffset);
+      const sourceElements = Number(dataOffset);
+      const requestedElements = size === undefined
+        ? (bytes.byteLength / elementSize - sourceElements) : Number(size);
+      const source = sourceElements * elementSize;
+      const length = requestedElements * elementSize;
+      if (!(buffer instanceof GPUBuffer) || buffer.__device !== this.__device || buffer.__invalid || buffer.__destroyed ||
+          buffer.mapState !== "unmapped" || !Number.isFinite(destination) || !Number.isFinite(sourceElements) ||
+          !Number.isFinite(requestedElements) || !Number.isFinite(source) || !Number.isFinite(length) ||
+          Math.trunc(destination) !== destination || Math.trunc(sourceElements) !== sourceElements ||
+          Math.trunc(requestedElements) !== requestedElements || Math.trunc(source) !== source || Math.trunc(length) !== length ||
+          destination < 0 || sourceElements < 0 || length < 0 || destination % 4 || source % 4 || length % 4 ||
+          source + length > bytes.byteLength || destination + length > buffer.size ||
+          !(buffer.usage & WEBGPU_BUFFER_USAGE.COPY_DST)) {
+        webgpuRecordError(this.__device, "validation", "writeBuffer arguments are invalid.");
+        return;
+      }
+      buffer.__data.set(bytes.subarray(source, source + length), destination);
+    }
+    submit(commandBuffers) {
+      if (!webgpuDeviceActive(this.__device, "GPUQueue.submit")) return;
+      let list;
+      try { list = Array.from(commandBuffers); }
+      catch (_) { throw new TypeError("commandBuffers must be iterable"); }
+      for (const command of list) {
+        if (!(command instanceof GPUCommandBuffer) || command.__device !== this.__device || command.__submitted) {
+          webgpuRecordError(this.__device, "validation", "GPUQueue.submit received an invalid command buffer.");
+          continue;
+        }
+        command.__submitted = true;
+        if (command.__invalid) continue;
+        for (const entry of command.__commands) {
+          if (entry.type === "copy") {
+            const bytes = entry.source.__data.slice(entry.sourceOffset, entry.sourceOffset + entry.size);
+            entry.destination.__data.set(bytes, entry.destinationOffset);
+          } else if (entry.type === "clear") {
+            entry.buffer.__data.fill(0, entry.offset, entry.offset + entry.size);
+          }
+        }
+      }
+    }
+    onSubmittedWorkDone() {
+      if (this.__device.__destroyed) return Promise.reject(webgpuOperationError("The device is lost."));
+      return new Promise(resolve => queueMicrotask(resolve));
+    }
+    get [Symbol.toStringTag]() { return "GPUQueue"; }
+  }
+
+  class GPUDevice extends GPUEventTarget {
+    constructor(adapter, descriptor, token) {
+      if (token !== gpuDeviceConstructionToken) throw new TypeError("Illegal constructor");
+      super();
+      this.__adapter = adapter;
+      this.__destroyed = false;
+      this.__uncapturedSuppressed = false;
+      this.__errorScopes = [];
+      this.__buffers = [];
+      this.__label = descriptor && descriptor.label !== undefined ? String(descriptor.label) : "";
+      Object.defineProperties(this, {
+        features: {
+          configurable: false, enumerable: true, writable: false,
+          value: new GPUSupportedFeatures(gpuAdapterConstructionToken, adapter.__features),
+        },
+        limits: {
+          configurable: false, enumerable: true, writable: false,
+          value: new GPUSupportedLimits(gpuDeviceConstructionToken, adapter.__limits),
+        },
+        queue: {
+          configurable: false, enumerable: true, writable: false,
+          value: new GPUQueue(this, descriptor && descriptor.defaultQueue || {}, gpuDeviceConstructionToken),
+        },
+      });
+      this.__onuncapturederror = null;
+      this.__lostResolve = null;
+      this.lost = new Promise(resolve => { this.__lostResolve = resolve; });
+    }
+    get label() { return this.__label; }
+    set label(value) { this.__label = String(value); }
+    createBuffer(descriptor = undefined) {
+      if (!isDictionary(descriptor)) throw new TypeError("GPUBufferDescriptor is required");
+      const values = descriptor || {};
+      const size = Number(values.size);
+      const usage = Number(values.usage);
+      let invalid = false;
+      if (!Number.isFinite(size) || Math.trunc(size) !== size || size <= 0 || size > this.limits.maxBufferSize || size % 4) {
+        invalid = true;
+        webgpuRecordError(this, "validation", "GPUBuffer size must be a positive multiple of four within maxBufferSize.");
+      }
+      const knownUsage = Object.values(WEBGPU_BUFFER_USAGE).reduce((bits, value) => bits | value, 0);
+      if (!Number.isFinite(usage) || Math.trunc(usage) !== usage || usage <= 0 || (usage & ~knownUsage)) {
+        invalid = true;
+        webgpuRecordError(this, "validation", "GPUBuffer usage contains unsupported bits.");
+      }
+      if ((usage & WEBGPU_BUFFER_USAGE.MAP_READ) && (usage & ~ (WEBGPU_BUFFER_USAGE.MAP_READ | WEBGPU_BUFFER_USAGE.COPY_DST))) {
+        invalid = true;
+        webgpuRecordError(this, "validation", "MAP_READ buffers may only use COPY_DST.");
+      }
+      if ((usage & WEBGPU_BUFFER_USAGE.MAP_WRITE) && (usage & ~ (WEBGPU_BUFFER_USAGE.MAP_WRITE | WEBGPU_BUFFER_USAGE.COPY_SRC))) {
+        invalid = true;
+        webgpuRecordError(this, "validation", "MAP_WRITE buffers may only use COPY_SRC.");
+      }
+      if (values.mappedAtCreation && !(usage & WEBGPU_BUFFER_USAGE.MAP_WRITE)) {
+        invalid = true;
+        webgpuRecordError(this, "validation", "mappedAtCreation requires MAP_WRITE usage.");
+      }
+      const buffer = new GPUBuffer(this, { ...values, size: invalid ? 0 : size, usage }, gpuBufferConstructionToken, invalid);
+      this.__buffers.push(buffer);
+      return buffer;
+    }
+    createCommandEncoder(descriptor = undefined) {
+      if (descriptor !== undefined && !isDictionary(descriptor)) throw new TypeError("GPUCommandEncoderDescriptor must be a dictionary");
+      if (!webgpuDeviceActive(this, "GPUDevice.createCommandEncoder")) {
+        return new GPUCommandEncoder(this, {}, gpuDeviceConstructionToken);
+      }
+      return new GPUCommandEncoder(this, descriptor || {}, gpuDeviceConstructionToken);
+    }
+    pushErrorScope(filter) {
+      const value = String(filter);
+      if (value !== "validation" && value !== "out-of-memory" && value !== "internal") {
+        throw new TypeError("GPU error scope filter is invalid");
+      }
+      this.__errorScopes.push({ filter: value, error: null });
+    }
+    popErrorScope() {
+      if (!this.__errorScopes.length) return Promise.reject(webgpuOperationError("No GPU error scope is active."));
+      const scope = this.__errorScopes.pop();
+      return Promise.resolve(scope.error);
+    }
+    destroy() {
+      if (this.__destroyed) return;
+      this.__destroyed = true;
+      for (const buffer of this.__buffers) buffer.destroy();
+      this.__uncapturedSuppressed = true;
+      this.__lostResolve(new GPUDeviceLostInfo(gpuErrorConstructionToken, "destroyed", "Device was destroyed."));
+    }
+    get onuncapturederror() { return this.__onuncapturederror; }
+    set onuncapturederror(callback) {
+      if (this.__onuncapturederror) this.removeEventListener("uncapturederror", this.__onuncapturederror);
+      this.__onuncapturederror = typeof callback === "function" ? callback : null;
+      if (this.__onuncapturederror) this.addEventListener("uncapturederror", this.__onuncapturederror);
+    }
+    get [Symbol.toStringTag]() { return "GPUDevice"; }
+  }
+
+  class GPUAdapter {
+    constructor(options, token) {
+      if (token !== gpuConstructionToken) throw new TypeError("Illegal constructor");
+      this.__features = WEBGPU_FEATURES.slice();
+      this.__limits = { ...WEBGPU_LIMITS };
+      this.__fallback = !!options.forceFallbackAdapter;
+      this.__powerPreference = options.powerPreference || "low-power";
+      this.__info = new GPUAdapterInfo(gpuAdapterConstructionToken, {
+        architecture: "deterministic",
+        description: "Omoikane deterministic WebGPU adapter",
+        device: "software",
+        vendor: "Omoikane",
+      });
+      Object.defineProperties(this, {
+        features: {
+          configurable: false, enumerable: true, writable: false,
+          value: new GPUSupportedFeatures(gpuAdapterConstructionToken, this.__features),
+        },
+        limits: {
+          configurable: false, enumerable: true, writable: false,
+          value: new GPUSupportedLimits(gpuAdapterConstructionToken, this.__limits),
+        },
+      });
+    }
+    get isFallbackAdapter() { return this.__fallback; }
+    get info() { return this.__info; }
+    requestAdapterInfo() { return Promise.resolve(this.__info); }
+    requestDevice(descriptor = undefined) {
+      return Promise.resolve().then(() => {
+        if (descriptor !== undefined && !isDictionary(descriptor)) throw new TypeError("GPUDeviceDescriptor must be a dictionary");
+        const values = descriptor || {};
+        let features;
+        try { features = values.requiredFeatures === undefined ? [] : Array.from(values.requiredFeatures, String); }
+        catch (_) { throw new TypeError("requiredFeatures must be iterable"); }
+        for (const feature of features) {
+          if (!this.__features.includes(feature)) throw new DOMException("Unsupported required feature: " + feature, "NotSupportedError");
+        }
+        const requiredLimits = values.requiredLimits === undefined || values.requiredLimits === null ? {} : values.requiredLimits;
+        if (!isDictionary(requiredLimits)) throw new TypeError("requiredLimits must be a dictionary");
+        for (const name of Object.keys(requiredLimits)) {
+          if (!Object.prototype.hasOwnProperty.call(this.__limits, name)) {
+            throw new TypeError("Unknown GPU limit: " + name);
+          }
+          const requested = Number(requiredLimits[name]);
+          if (!Number.isFinite(requested) || Math.trunc(requested) !== requested || requested < 0 || requested > this.__limits[name]) {
+            throw new DOMException("Required GPU limit is unsupported: " + name, "NotSupportedError");
+          }
+        }
+        const queue = values.defaultQueue === undefined || values.defaultQueue === null ? {} : values.defaultQueue;
+        if (!isDictionary(queue)) throw new TypeError("defaultQueue must be a dictionary");
+        return new GPUDevice(this, { ...values, defaultQueue: queue }, gpuDeviceConstructionToken);
+      });
+    }
+    get [Symbol.toStringTag]() { return "GPUAdapter"; }
+  }
+
+  class GPU {
+    constructor(token) {
+      if (token !== gpuConstructionToken) throw new TypeError("Illegal constructor");
+    }
+    requestAdapter(options = undefined) {
+      return Promise.resolve().then(() => {
+        if (options !== undefined && !isDictionary(options)) throw new TypeError("GPURequestAdapterOptions must be a dictionary");
+        const values = options || {};
+        const power = values.powerPreference === undefined ? "low-power" : String(values.powerPreference);
+        if (power !== "low-power" && power !== "high-performance") {
+          throw new TypeError("powerPreference must be low-power or high-performance");
+        }
+        if (values.forceFallbackAdapter !== undefined && typeof values.forceFallbackAdapter !== "boolean") {
+          throw new TypeError("forceFallbackAdapter must be boolean");
+        }
+        if (values.xrCompatible !== undefined && Boolean(values.xrCompatible)) {
+          throw new DOMException("XR-compatible adapters are not supported.", "NotSupportedError");
+        }
+        return new GPUAdapter({ powerPreference: power, forceFallbackAdapter: !!values.forceFallbackAdapter }, gpuConstructionToken);
+      });
+    }
+    getPreferredCanvasFormat() { return "rgba8unorm"; }
+    get [Symbol.toStringTag]() { return "GPU"; }
+  }
+
+  globalThis.GPU = GPU;
+  globalThis.GPUAdapter = GPUAdapter;
+  globalThis.GPUAdapterInfo = GPUAdapterInfo;
+  globalThis.GPUSupportedFeatures = GPUSupportedFeatures;
+  globalThis.GPUSupportedLimits = GPUSupportedLimits;
+  globalThis.GPUDevice = GPUDevice;
+  globalThis.GPUQueue = GPUQueue;
+  globalThis.GPUBuffer = GPUBuffer;
+  globalThis.GPUCommandEncoder = GPUCommandEncoder;
+  globalThis.GPUCommandBuffer = GPUCommandBuffer;
+  globalThis.GPUError = GPUError;
+  globalThis.GPUValidationError = GPUValidationError;
+  globalThis.GPUOutOfMemoryError = GPUOutOfMemoryError;
+  globalThis.GPUInternalError = GPUInternalError;
+  globalThis.GPUDeviceLostInfo = GPUDeviceLostInfo;
+  globalThis.GPUUncapturedErrorEvent = GPUUncapturedErrorEvent;
+  globalThis.GPUBufferUsage = WEBGPU_BUFFER_USAGE;
+  globalThis.GPUMapMode = WEBGPU_MAP_MODE;
+  globalThis.GPUShaderStage = WEBGPU_SHADER_STAGE;
+  globalThis.GPUTextureUsage = WEBGPU_TEXTURE_USAGE;
+
   class Navigator {
     constructor(token) {
       if (token !== navigatorConstructionToken) throw new TypeError("Illegal constructor");
@@ -8666,6 +9299,7 @@
       this.clipboard = new Clipboard(clipboardConstructionToken);
       this.geolocation = new Geolocation(geolocationConstructionToken);
       this.serviceWorker = new ServiceWorkerContainer(serviceWorkerContainerConstructionToken);
+      this.gpu = new GPU(gpuConstructionToken);
     }
     get [Symbol.toStringTag]() { return "Navigator"; }
   }
@@ -10577,6 +11211,7 @@
   globalThis.EventTarget = EventTarget;
   Object.setPrototypeOf(WebGLEventTarget.prototype, EventTarget.prototype);
   Object.setPrototypeOf(ServiceWorkerEventTarget.prototype, EventTarget.prototype);
+  Object.setPrototypeOf(GPUEventTarget.prototype, EventTarget.prototype);
   globalThis.AbortSignal = AbortSignal;
   globalThis.AbortController = AbortController;
 
