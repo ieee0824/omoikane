@@ -27,7 +27,7 @@ use boa_engine::{Context, JsError, JsNativeError, JsResult, JsValue, Script, Sou
 
 use crate::css::{
     AffineTransform, ComputedStyle, ComputedValue, Origin, Selector, StyleResolver, matches_selector,
-    parse_selector_list,
+    parse_scope_prelude, parse_selector_list,
 };
 use crate::dom::{Node, NodeHandle, NodeType, ShadowRootMode, is_actually_disabled};
 use crate::http::{Client, HttpRequest, Method, default_user_agent};
@@ -1720,7 +1720,13 @@ impl HostState {
             }
             let sheet = crate::paint::stylesheet::parse_stylesheet_forgiving(&css);
             if let Some((scope, order)) = scope {
-                resolver.add_scoped_stylesheet_in_order(Origin::Author, sheet, scope, order);
+                resolver.add_scoped_stylesheet_in_order_with_implicit_scope_root(
+                    Origin::Author,
+                    sheet,
+                    scope,
+                    order,
+                    implicit_scope_root,
+                );
             } else if let Some(implicit_scope_root) = implicit_scope_root {
                 resolver.add_stylesheet_with_implicit_scope_root(
                     Origin::Author,
@@ -5775,6 +5781,11 @@ fn register_host_bindings(
             NativeFunction::from_copy_closure(css_rule_count_native),
         ),
         (
+            js_string!("__omoikane_css_scope_rules_valid"),
+            1,
+            NativeFunction::from_copy_closure(css_scope_rules_valid_native),
+        ),
+        (
             js_string!("__omoikane_css_supports"),
             2,
             NativeFunction::from_copy_closure(css_supports_native),
@@ -6589,9 +6600,17 @@ fn collect_inline_stylesheets(
         {
             let css = collect_text_recursive(node);
             if !css.trim().is_empty() {
-                let implicit_scope_root = node
-                    .parent_node()
-                    .filter(|parent| parent.node_type() == NodeType::Element);
+                let implicit_scope_root = node.parent_node().and_then(|parent| {
+                    if parent.node_type() == NodeType::Element {
+                        Some(parent)
+                    } else {
+                        // A style element directly in a shadow tree has no
+                        // element parent; CSS Scoping defines its implicit
+                        // scope root as the shadow host.
+                        scope
+                            .and_then(|(root, _)| root.shadow_host())
+                    }
+                });
                 out.push((node.clone(), scope.cloned(), implicit_scope_root, css));
             }
         }
@@ -7861,6 +7880,46 @@ fn css_rule_count_native(
     let sheet = crate::css::parse_stylesheet(&css)
         .map_err(|error| JsError::from(JsNativeError::syntax().with_message(error.to_string())))?;
     Ok(JsValue::from(sheet.rules.len() as f64))
+}
+
+/// Validates every `@scope` prelude in a stylesheet.  The regular stylesheet
+/// parser intentionally keeps malformed at-rules so style resolution can
+/// discard them forgivingly; CSSOM mutation APIs, however, must reject an
+/// invalid scope rule with a SyntaxError before changing the sheet.
+fn css_scope_rules_valid_native(
+    _: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let css = args
+        .first()
+        .cloned()
+        .unwrap_or_default()
+        .to_string(context)?
+        .to_std_string_escaped();
+    // CSSOM mutation validation is concerned with @scope preludes.  Keep the
+    // rest of the stylesheet forgiving so an unrelated malformed rule does
+    // not get reported as an invalid scope prelude.
+    let sheet = crate::paint::stylesheet::parse_stylesheet_forgiving(&css);
+    let valid = scope_rules_valid(&sheet.rules);
+    Ok(JsValue::from(valid))
+}
+
+fn scope_rules_valid(rules: &[crate::css::Rule]) -> bool {
+    rules.iter().all(|rule| match rule {
+        crate::css::Rule::At(at_rule) if at_rule.name.eq_ignore_ascii_case("scope") => {
+            parse_scope_prelude(&at_rule.prelude).is_some()
+                && at_rule
+                    .block
+                    .as_deref()
+                    .is_some_and(scope_rules_valid)
+        }
+        crate::css::Rule::At(at_rule) => at_rule
+            .block
+            .as_deref()
+            .is_none_or(scope_rules_valid),
+        _ => true,
+    })
 }
 
 /// Evaluates the two-argument form of `CSS.supports()` against the same parser
@@ -18595,6 +18654,116 @@ b</textarea></form>"#);
                         commented instanceof CSSScopeRule &&
                         commented.start === ".commented" &&
                         limitOnly.start === null && limitOnly.end === ".limit";
+                })()"#,
+            )
+            .unwrap()
+            .as_boolean()
+            .unwrap());
+    }
+
+    #[test]
+    fn css_scope_grouping_rule_mutations_recompute_cascade() {
+        let doc = crate::html::TreeBuilder::parse(
+            "<html><head><style>@scope (.card) { p { color: red; } }</style></head><body><section class='card'><p id='target'></p></section></body></html>",
+        )
+        .document();
+        let mut runtime = JsRuntime::with_document(doc).unwrap();
+        assert!(runtime
+            .eval(
+                r#"(() => {
+                    const scope = document.styleSheets[0].cssRules[0];
+                    scope.insertRule('#target { width: 33px; }', scope.cssRules.length);
+                    return getComputedStyle(document.getElementById('target')).width === '33px' &&
+                        scope.cssRules.length === 2;
+                })()"#,
+            )
+            .unwrap()
+            .as_boolean()
+            .unwrap());
+        assert_eq!(
+            eval_str(
+                &mut runtime,
+                "document.styleSheets[0].cssRules[0].cssRules[1].selectorText",
+            ),
+            "#target"
+        );
+        assert!(runtime
+            .eval(
+                r#"(() => {
+                    const scope = document.styleSheets[0].cssRules[0];
+                    scope.cssRules[1].selectorText = '#target';
+                    scope.deleteRule(0);
+                    return scope.cssRules.length === 1 &&
+                        getComputedStyle(document.getElementById('target')).width === '33px';
+                })()"#,
+            )
+            .unwrap()
+            .as_boolean()
+            .unwrap());
+        assert!(runtime
+            .eval(
+                r#"(() => {
+                    try {
+                        document.styleSheets[0].insertRule('@scope (.broken) trailing { p {} }', 0);
+                        return false;
+                    } catch (error) {
+                        return error instanceof DOMException && error.name === 'SyntaxError';
+                    }
+                })()"#,
+            )
+            .unwrap()
+            .as_boolean()
+            .unwrap());
+    }
+
+    #[test]
+    fn css_scope_recomputes_after_detach_reattach_and_respects_shadow_boundary() {
+        let doc = crate::html::TreeBuilder::parse(
+            "<html><head><style>p { color: black; }</style></head><body></body></html>",
+        )
+        .document();
+        let mut runtime = JsRuntime::with_document(doc).unwrap();
+        assert!(runtime
+            .eval(
+                r#"(() => {
+                    const card = document.createElement('section');
+                    const scopedStyle = document.createElement('style');
+                    scopedStyle.textContent = '@scope { p { color: red; } }';
+                    const paragraph = document.createElement('p');
+                    card.appendChild(scopedStyle);
+                    card.appendChild(paragraph);
+                    document.body.appendChild(card);
+                    globalThis.__scopeParagraph = paragraph;
+                    globalThis.__scopeCard = card;
+                    return getComputedStyle(paragraph).color === 'rgb(255, 0, 0)';
+                })()"#,
+            )
+            .unwrap()
+            .as_boolean()
+            .unwrap());
+        assert!(runtime
+            .eval(
+                r#"(() => {
+                    __scopeCard.remove();
+                    const detached = getComputedStyle(__scopeParagraph).color;
+                    document.body.appendChild(__scopeCard);
+                    return detached !== 'rgb(255, 0, 0)' &&
+                        getComputedStyle(__scopeParagraph).color === 'rgb(255, 0, 0)';
+                })()"#,
+            )
+            .unwrap()
+            .as_boolean()
+            .unwrap());
+        assert!(runtime
+            .eval(
+                r#"(() => {
+                    const host = document.createElement('x-scoped');
+                    document.body.appendChild(host);
+                    const shadow = host.attachShadow({ mode: 'open' });
+                    shadow.innerHTML = '<style>@scope { p { color: blue; } }</style><p id="shadow-target"></p>';
+                    const target = shadow.querySelector('#shadow-target');
+                    return getComputedStyle(target).color === 'rgb(0, 0, 255)' &&
+                        getComputedStyle(__scopeParagraph).color === 'rgb(255, 0, 0)';
                 })()"#,
             )
             .unwrap()
