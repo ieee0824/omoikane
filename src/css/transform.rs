@@ -117,10 +117,11 @@ impl AffineTransform {
         let numerator_x = self.a * x + self.c * y + self.e;
         let numerator_y = self.b * x + self.d * y + self.f;
         if denominator.abs() <= 1e-7 {
-            return (
-                f32::INFINITY.copysign(numerator_x),
-                f32::INFINITY.copysign(numerator_y),
-            );
+            // A plane crossing the projective horizon has no finite screen
+            // coordinate.  NaN is an explicit sentinel for geometry callers;
+            // they can discard the affected bounds before converting to
+            // integer loop limits instead of accidentally iterating forever.
+            return (f32::NAN, f32::NAN);
         }
         (numerator_x / denominator, numerator_y / denominator)
     }
@@ -1183,6 +1184,17 @@ mod tests {
         let right = matrix.transform_point(100.0, 0.0);
         assert!(right.0 > left.0);
         assert!(right.0 - left.0 < 100.0);
+    }
+
+    #[test]
+    fn projective_horizon_returns_non_finite_sentinel() {
+        let matrix = AffineTransform {
+            g: 1.0,
+            ..AffineTransform::identity()
+        };
+        let point = matrix.transform_point(-1.0, 10.0);
+        assert!(point.0.is_nan());
+        assert!(point.1.is_nan());
     }
 
     #[test]

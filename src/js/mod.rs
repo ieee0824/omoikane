@@ -7236,6 +7236,12 @@ fn transform_rect(rect: Rect, transform: AffineTransform) -> Rect {
         transform.transform_point(rect.x, rect.y + rect.height),
         transform.transform_point(rect.x + rect.width, rect.y + rect.height),
     ];
+    if corners
+        .iter()
+        .any(|point| !point.0.is_finite() || !point.1.is_finite())
+    {
+        return Rect::default();
+    }
     let min_x = corners
         .iter()
         .map(|point| point.0)

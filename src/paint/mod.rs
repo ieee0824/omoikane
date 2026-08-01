@@ -1595,6 +1595,9 @@ fn hit_test_box(
     let transform = ancestor_transform.multiply(layout.transform);
     let inverse = transform.inverse()?;
     let local_point = inverse.transform_point(x, y);
+    if !local_point.0.is_finite() || !local_point.1.is_finite() {
+        return None;
+    }
     let style = resolver.computed_style(&layout.node);
     let border_box = border_box_rect(layout);
     let padding_box = padding_box_rect(layout);
@@ -2133,6 +2136,12 @@ fn composite_affine(
         transform.transform_point(source_min_x as f32, source_max_y as f32),
         transform.transform_point(source_max_x as f32, source_max_y as f32),
     ];
+    if corners
+        .iter()
+        .any(|point| !point.0.is_finite() || !point.1.is_finite())
+    {
+        return;
+    }
     let min_x = corners
         .iter()
         .map(|point| point.0)
@@ -2169,6 +2178,9 @@ fn composite_affine(
                 continue;
             }
             let (source_x, source_y) = inverse.transform_point(x as f32 + 0.5, y as f32 + 0.5);
+            if !source_x.is_finite() || !source_y.is_finite() {
+                continue;
+            }
             let source_x = source_x.floor() as i32;
             let source_y = source_y.floor() as i32;
             if source_x < source_min_x
@@ -2275,6 +2287,12 @@ fn transformed_rect_bounds(rect: Rect, transform: AffineTransform) -> Rect {
         transform.transform_point(rect.x, rect.y + rect.height),
         transform.transform_point(rect.x + rect.width, rect.y + rect.height),
     ];
+    if corners
+        .iter()
+        .any(|point| !point.0.is_finite() || !point.1.is_finite())
+    {
+        return Rect::default();
+    }
     let min_x = corners
         .iter()
         .map(|point| point.0)
