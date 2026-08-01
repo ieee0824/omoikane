@@ -11356,6 +11356,600 @@
   globalThis.CacheStorage = CacheStorage;
   globalThis.caches = new CacheStorage(CACHE_STORAGE_CONSTRUCTION_TOKEN);
 
+  // -------------------------------------------------------------------------
+  // IndexedDB
+  // -------------------------------------------------------------------------
+  //
+  // IndexedDB is intentionally an in-memory, origin-partitioned model here.
+  // The observable request/transaction and schema semantics are kept separate
+  // from durability so pages can exercise the API without making the JS realm
+  // depend on a host database or a process-global lock.
+
+  const IDB_CONSTRUCTION_TOKEN = {};
+  const indexedDatabaseRecords = new Map();
+
+  function idbQueueTask(callback) {
+    if (typeof __omoikane_queue_dom_manipulation_task === "function") {
+      __omoikane_queue_dom_manipulation_task(callback);
+    } else {
+      setTimeout(callback, 0);
+    }
+  }
+
+  function idbOriginKey(name) {
+    const origin = globalThis.location && globalThis.location.origin
+      ? String(globalThis.location.origin) : "null";
+    return origin + "\u0000" + String(name);
+  }
+
+  function idbError(name, message) {
+    return new DOMException(message || name, name);
+  }
+
+  function idbDispatch(target, event) {
+    // fireRealtimeEvent invokes an `on*` property before EventTarget's normal
+    // dispatch path assigns target. IndexedDB handlers commonly read
+    // event.target.result, so establish the target before invoking them.
+    event.target = target;
+    fireRealtimeEvent(target, event);
+  }
+
+  function idbNormalizeKey(value) {
+    if (value instanceof Date) {
+      const time = value.getTime();
+      if (!Number.isFinite(time)) throw idbError("DataError", "The key is not valid.");
+      return time === 0 ? 0 : time;
+    }
+    if (typeof value === "number") {
+      if (!Number.isFinite(value) || Number.isNaN(value)) {
+        throw idbError("DataError", "The key is not valid.");
+      }
+      return Object.is(value, -0) ? 0 : value;
+    }
+    if (typeof value === "string") return value;
+    if (Array.isArray(value)) return value.map(idbNormalizeKey);
+    throw idbError("DataError", "The key is not valid.");
+  }
+
+  function idbKeyToken(key) {
+    if (typeof key === "number") return "number:" + String(key);
+    if (typeof key === "string") return "string:" + key;
+    return "array:" + JSON.stringify(key);
+  }
+
+  function idbCompareKey(left, right) {
+    const a = idbNormalizeKey(left);
+    const b = idbNormalizeKey(right);
+    const rank = value => typeof value === "number" ? 0 : typeof value === "string" ? 1 : 2;
+    const ar = rank(a);
+    const br = rank(b);
+    if (ar !== br) return ar - br;
+    if (ar === 0 || ar === 1) return a < b ? -1 : a > b ? 1 : 0;
+    const length = Math.min(a.length, b.length);
+    for (let index = 0; index < length; index++) {
+      const compared = idbCompareKey(a[index], b[index]);
+      if (compared !== 0) return compared;
+    }
+    return a.length - b.length;
+  }
+
+  function idbExtractKey(value, keyPath) {
+    if (keyPath === null || keyPath === undefined) return undefined;
+    let current = value;
+    for (const part of String(keyPath).split(".")) {
+      if (current === null || current === undefined) return undefined;
+      current = current[part];
+    }
+    return current;
+  }
+
+  function idbAssignKey(value, keyPath, key) {
+    const parts = String(keyPath).split(".");
+    let current = value;
+    for (let index = 0; index < parts.length - 1; index++) {
+      const part = parts[index];
+      if (current[part] === undefined) current[part] = {};
+      if (current[part] === null || typeof current[part] !== "object") {
+        throw idbError("DataError", "The key path cannot be assigned.");
+      }
+      current = current[part];
+    }
+    current[parts[parts.length - 1]] = key;
+  }
+
+  function idbNameList(names) {
+    const values = Array.from(names, String).sort();
+    const result = {
+      get length() { return values.length; },
+      item(index) { return values[Math.trunc(Number(index))] ?? null; },
+      contains(name) { return values.includes(String(name)); },
+      [Symbol.iterator]() { return values[Symbol.iterator](); },
+      get [Symbol.toStringTag]() { return "DOMStringList"; },
+    };
+    for (let index = 0; index < values.length; index++) {
+      Object.defineProperty(result, index, { enumerable: true, value: values[index] });
+    }
+    return result;
+  }
+
+  class IDBVersionChangeEvent extends Event {
+    constructor(type, init = {}) {
+      super(type, init);
+      this.oldVersion = Number(init.oldVersion) || 0;
+      this.newVersion = init.newVersion === null || init.newVersion === undefined
+        ? null : Number(init.newVersion);
+    }
+    get [Symbol.toStringTag]() { return "IDBVersionChangeEvent"; }
+  }
+
+  class IDBRequest extends EventTarget {
+    constructor(source = null, transaction = null) {
+      super();
+      this.result = undefined;
+      this.error = null;
+      this.source = source;
+      this.transaction = transaction;
+      this.readyState = "pending";
+      this.onsuccess = null;
+      this.onerror = null;
+      this.__finished = false;
+    }
+    __success(value) {
+      if (this.__finished) return;
+      this.__finished = true;
+      this.result = value;
+      this.error = null;
+      this.readyState = "done";
+      idbDispatch(this, new Event("success"));
+    }
+    __error(error) {
+      if (this.__finished) return;
+      this.__finished = true;
+      this.result = undefined;
+      this.error = error instanceof DOMException ? error : idbError("UnknownError", String(error));
+      this.readyState = "done";
+      const event = new Event("error", { cancelable: true });
+      idbDispatch(this, event);
+      if (!event.defaultPrevented && this.transaction) this.transaction.abort(this.error);
+    }
+    get [Symbol.toStringTag]() { return "IDBRequest"; }
+  }
+
+  class IDBOpenDBRequest extends IDBRequest {
+    constructor() {
+      super(null, null);
+      this.onblocked = null;
+      this.onupgradeneeded = null;
+    }
+    get [Symbol.toStringTag]() { return "IDBOpenDBRequest"; }
+  }
+
+  class IDBKeyRange {
+    constructor(lower, upper, lowerOpen = false, upperOpen = false) {
+      this.lower = lower === undefined ? undefined : idbNormalizeKey(lower);
+      this.upper = upper === undefined ? undefined : idbNormalizeKey(upper);
+      this.lowerOpen = Boolean(lowerOpen);
+      this.upperOpen = Boolean(upperOpen);
+      if (this.lower !== undefined && this.upper !== undefined && idbCompareKey(this.lower, this.upper) > 0) {
+        throw idbError("DataError", "The lower key is greater than the upper key.");
+      }
+    }
+    includes(value) {
+      const key = idbNormalizeKey(value);
+      if (this.lower !== undefined) {
+        const compared = idbCompareKey(key, this.lower);
+        if (compared < 0 || (this.lowerOpen && compared === 0)) return false;
+      }
+      if (this.upper !== undefined) {
+        const compared = idbCompareKey(key, this.upper);
+        if (compared > 0 || (this.upperOpen && compared === 0)) return false;
+      }
+      return true;
+    }
+    static bound(lower, upper, lowerOpen = false, upperOpen = false) {
+      return new IDBKeyRange(lower, upper, lowerOpen, upperOpen);
+    }
+    static lowerBound(lower, open = false) { return new IDBKeyRange(lower, undefined, open, false); }
+    static upperBound(upper, open = false) { return new IDBKeyRange(undefined, upper, false, open); }
+    static only(value) { return new IDBKeyRange(value, value, false, false); }
+    get [Symbol.toStringTag]() { return "IDBKeyRange"; }
+  }
+
+  class IDBTransaction extends EventTarget {
+    constructor(database, storeNames, mode, token) {
+      if (token !== IDB_CONSTRUCTION_TOKEN) throw new TypeError("Illegal constructor");
+      super();
+      this.db = database;
+      this.objectStoreNames = idbNameList(storeNames);
+      this.mode = String(mode);
+      this.durability = "default";
+      this.error = null;
+      this.__state = "active";
+      this.__pending = 0;
+      this.__completionQueued = false;
+      this.__completionCallbacks = [];
+      this.onabort = null;
+      this.oncomplete = null;
+      this.onerror = null;
+    }
+    objectStore(name) {
+      if (this.__state === "finished") throw idbError("InvalidStateError", "The transaction is finished.");
+      const key = String(name);
+      if (!this.objectStoreNames.contains(key)) throw idbError("NotFoundError", "The object store was not found.");
+      return new IDBObjectStore(this.db.__record.stores.get(key), this);
+    }
+    __request(source, action) {
+      if (this.__state !== "active") throw idbError("TransactionInactiveError", "The transaction is inactive.");
+      const request = new IDBRequest(source, this);
+      this.__pending++;
+      idbQueueTask(() => {
+        if (this.__state === "finished") return;
+        try {
+          request.__success(action());
+        } catch (error) {
+          request.__error(error);
+        } finally {
+          this.__pending--;
+          this.__maybeComplete();
+        }
+      });
+      return request;
+    }
+    __maybeComplete() {
+      if (this.__pending !== 0 || this.__completionQueued || this.__state !== "active") return;
+      this.__completionQueued = true;
+      idbQueueTask(() => {
+        this.__completionQueued = false;
+        if (this.__pending !== 0 || this.__state !== "active") return;
+        this.__state = "finished";
+        idbDispatch(this, new Event("complete"));
+        const callbacks = this.__completionCallbacks.splice(0);
+        for (const callback of callbacks) callback();
+      });
+    }
+    __afterComplete(callback) {
+      if (this.__state === "finished") callback();
+      else this.__completionCallbacks.push(callback);
+      this.__maybeComplete();
+    }
+    abort(reason = idbError("AbortError", "The transaction was aborted.")) {
+      if (this.__state === "finished") return;
+      this.__state = "finished";
+      this.error = reason instanceof DOMException ? reason : idbError("AbortError", String(reason));
+      idbDispatch(this, new Event("abort"));
+      const callbacks = this.__completionCallbacks.splice(0);
+      for (const callback of callbacks) callback();
+    }
+    get [Symbol.toStringTag]() { return "IDBTransaction"; }
+  }
+  IDBTransaction.READ_ONLY = "readonly";
+  IDBTransaction.READ_WRITE = "readwrite";
+  IDBTransaction.VERSION_CHANGE = "versionchange";
+  IDBTransaction.prototype.READ_ONLY = "readonly";
+  IDBTransaction.prototype.READ_WRITE = "readwrite";
+  IDBTransaction.prototype.VERSION_CHANGE = "versionchange";
+
+  function idbStoreKey(store, value, explicitKey, forAdd) {
+    let key = explicitKey;
+    if (store.keyPath !== null) {
+      const embedded = idbExtractKey(value, store.keyPath);
+      if (embedded !== undefined) {
+        if (key !== undefined) throw idbError("DataError", "A key was supplied for an inline key path.");
+        key = embedded;
+      } else if (store.autoIncrement) {
+        key = store.nextKey++;
+        idbAssignKey(value, store.keyPath, key);
+      }
+    }
+    if (key === undefined) {
+      if (!store.autoIncrement) throw idbError("DataError", "A key is required.");
+      key = store.nextKey++;
+    }
+    key = idbNormalizeKey(key);
+    const token = idbKeyToken(key);
+    if (forAdd && store.records.has(token)) throw idbError("ConstraintError", "The key already exists.");
+    return { key, token };
+  }
+
+  function idbQueryKey(query) {
+    if (query === undefined) return null;
+    return query instanceof IDBKeyRange ? query : IDBKeyRange.only(query);
+  }
+
+  function idbSortedRecords(store, query = undefined) {
+    const range = idbQueryKey(query);
+    return Array.from(store.records.values())
+      .filter(entry => range === null || range.includes(entry.key))
+      .sort((left, right) => idbCompareKey(left.key, right.key));
+  }
+
+  function idbKeyPathMatches(value, keyPath, query) {
+    const key = idbExtractKey(value, keyPath);
+    if (key === undefined) return false;
+    try { return query === null || query.includes(key); } catch (_) { return false; }
+  }
+
+  class IDBIndex {
+    constructor(store, definition, token) {
+      if (token !== IDB_CONSTRUCTION_TOKEN) throw new TypeError("Illegal constructor");
+      this.objectStore = store;
+      this.__definition = definition;
+      this.name = definition.name;
+      this.keyPath = definition.keyPath;
+      this.multiEntry = Boolean(definition.multiEntry);
+      this.unique = Boolean(definition.unique);
+    }
+    get(query) {
+      const range = idbQueryKey(query);
+      return this.objectStore.transaction.__request(this, () => {
+        const entry = idbSortedRecords(this.objectStore.__record).find(item =>
+          idbKeyPathMatches(item.value, this.keyPath, range));
+        return entry === undefined ? undefined : structuredClone(entry.value);
+      });
+    }
+    getAll(query = undefined, count = undefined) {
+      const range = idbQueryKey(query);
+      return this.objectStore.transaction.__request(this, () => {
+        const values = idbSortedRecords(this.objectStore.__record)
+          .filter(item => idbKeyPathMatches(item.value, this.keyPath, range))
+          .map(item => structuredClone(item.value));
+        return count === undefined ? values : values.slice(0, Math.max(0, Math.trunc(Number(count))));
+      });
+    }
+    count(query = undefined) {
+      const range = idbQueryKey(query);
+      return this.objectStore.transaction.__request(this, () =>
+        idbSortedRecords(this.objectStore.__record)
+          .filter(item => idbKeyPathMatches(item.value, this.keyPath, range)).length);
+    }
+    get [Symbol.toStringTag]() { return "IDBIndex"; }
+  }
+
+  class IDBObjectStore {
+    constructor(record, transaction) {
+      this.__record = record;
+      this.transaction = transaction;
+      this.name = record.name;
+      this.keyPath = record.keyPath;
+      this.autoIncrement = Boolean(record.autoIncrement);
+    }
+    get indexNames() { return idbNameList(this.__record.indexes.keys()); }
+    add(value, key = undefined) { return this.__write(value, key, true); }
+    put(value, key = undefined) { return this.__write(value, key, false); }
+    __write(value, explicitKey, forAdd) {
+      const store = this.__record;
+      return this.transaction.__request(this, () => {
+        const cloned = structuredClone(value);
+        const shaped = idbStoreKey(store, cloned, explicitKey, forAdd);
+        store.records.set(shaped.token, { key: shaped.key, value: cloned });
+        return shaped.key;
+      });
+    }
+    get(query) {
+      const store = this.__record;
+      const range = idbQueryKey(query);
+      return this.transaction.__request(this, () => {
+        if (range === null) throw idbError("DataError", "A key is required.");
+        const entry = idbSortedRecords(store).find(item => range.includes(item.key));
+        return entry === undefined ? undefined : structuredClone(entry.value);
+      });
+    }
+    getKey(query) {
+      const range = idbQueryKey(query);
+      return this.transaction.__request(this, () => {
+        if (range === null) throw idbError("DataError", "A key is required.");
+        const entry = idbSortedRecords(this.__record).find(item => range.includes(item.key));
+        return entry === undefined ? undefined : entry.key;
+      });
+    }
+    getAll(query = undefined, count = undefined) {
+      const values = () => idbSortedRecords(this.__record, query).map(item => structuredClone(item.value));
+      return this.transaction.__request(this, () => {
+        const result = values();
+        return count === undefined ? result : result.slice(0, Math.max(0, Math.trunc(Number(count))));
+      });
+    }
+    count(query = undefined) {
+      return this.transaction.__request(this, () => idbSortedRecords(this.__record, query).length);
+    }
+    delete(query) {
+      const range = idbQueryKey(query);
+      return this.transaction.__request(this, () => {
+        if (range === null) throw idbError("DataError", "A key is required.");
+        const matches = idbSortedRecords(this.__record).filter(item => range.includes(item.key));
+        for (const entry of matches) this.__record.records.delete(idbKeyToken(entry.key));
+        return undefined;
+      });
+    }
+    clear() {
+      return this.transaction.__request(this, () => {
+        this.__record.records.clear();
+        return undefined;
+      });
+    }
+    createIndex(name, keyPath, options = {}) {
+      if (this.transaction.mode !== "versionchange") {
+        throw idbError("InvalidStateError", "Indexes can only be created during a version change.");
+      }
+      const key = String(name);
+      if (this.__record.indexes.has(key)) throw idbError("ConstraintError", "The index already exists.");
+      if (Array.isArray(keyPath)) throw idbError("NotSupportedError", "Array key paths are not supported.");
+      const definition = { name: key, keyPath: String(keyPath), unique: Boolean(options.unique), multiEntry: Boolean(options.multiEntry) };
+      this.__record.indexes.set(key, definition);
+      return new IDBIndex(this, definition, IDB_CONSTRUCTION_TOKEN);
+    }
+    deleteIndex(name) {
+      if (this.transaction.mode !== "versionchange") {
+        throw idbError("InvalidStateError", "Indexes can only be deleted during a version change.");
+      }
+      if (!this.__record.indexes.delete(String(name))) throw idbError("NotFoundError", "The index was not found.");
+    }
+    index(name) {
+      const definition = this.__record.indexes.get(String(name));
+      if (!definition) throw idbError("NotFoundError", "The index was not found.");
+      return new IDBIndex(this, definition, IDB_CONSTRUCTION_TOKEN);
+    }
+    get [Symbol.toStringTag]() { return "IDBObjectStore"; }
+  }
+
+  class IDBDatabase extends EventTarget {
+    constructor(record, token) {
+      if (token !== IDB_CONSTRUCTION_TOKEN) throw new TypeError("Illegal constructor");
+      super();
+      this.__record = record;
+      this.name = record.name;
+      this.version = record.version;
+      this.onabort = null;
+      this.onerror = null;
+      this.onclose = null;
+      this.onversionchange = null;
+      this.__closed = false;
+      record.connections.add(this);
+    }
+    get objectStoreNames() { return idbNameList(this.__record.stores.keys()); }
+    createObjectStore(name, options = {}) {
+      if (this.__upgradeTransaction === undefined || this.__upgradeTransaction.__state === "finished") {
+        throw idbError("InvalidStateError", "Object stores can only be created during a version change.");
+      }
+      const key = String(name);
+      if (this.__record.stores.has(key)) throw idbError("ConstraintError", "The object store already exists.");
+      let keyPath = null;
+      if (options.keyPath !== undefined && options.keyPath !== null) {
+        if (Array.isArray(options.keyPath)) throw idbError("NotSupportedError", "Array key paths are not supported.");
+        keyPath = String(options.keyPath);
+      }
+      const record = { name: key, keyPath, autoIncrement: Boolean(options.autoIncrement), nextKey: 1, records: new Map(), indexes: new Map() };
+      this.__record.stores.set(key, record);
+      return new IDBObjectStore(record, this.__upgradeTransaction);
+    }
+    deleteObjectStore(name) {
+      if (this.__upgradeTransaction === undefined || this.__upgradeTransaction.__state === "finished") {
+        throw idbError("InvalidStateError", "Object stores can only be deleted during a version change.");
+      }
+      if (!this.__record.stores.delete(String(name))) throw idbError("NotFoundError", "The object store was not found.");
+    }
+    transaction(storeNames, mode = "readonly", options = undefined) {
+      if (this.__closed) throw idbError("InvalidStateError", "The database connection is closed.");
+      const names = typeof storeNames === "string" || storeNames instanceof String ? [String(storeNames)] : Array.from(storeNames || [], String);
+      if (names.length === 0) throw idbError("InvalidAccessError", "At least one object store is required.");
+      const selected = Array.from(new Set(names));
+      for (const name of selected) if (!this.__record.stores.has(name)) throw idbError("NotFoundError", "The object store was not found.");
+      const selectedMode = String(mode);
+      if (!["readonly", "readwrite"].includes(selectedMode)) throw idbError("TypeError", "Invalid transaction mode.");
+      const transaction = new IDBTransaction(this, selected, selectedMode, IDB_CONSTRUCTION_TOKEN);
+      void options;
+      transaction.__maybeComplete();
+      return transaction;
+    }
+    close() {
+      if (this.__closed) return;
+      this.__closed = true;
+      this.__record.connections.delete(this);
+      idbDispatch(this, new Event("close"));
+    }
+    get [Symbol.toStringTag]() { return "IDBDatabase"; }
+  }
+
+  function idbOpenDatabase(name, version, request) {
+    const key = idbOriginKey(name);
+    let record = indexedDatabaseRecords.get(key);
+    const requestedVersion = version === undefined ? undefined : Number(version);
+    if (requestedVersion !== undefined && (!Number.isFinite(requestedVersion) || requestedVersion <= 0 || Math.floor(requestedVersion) !== requestedVersion)) {
+      throw idbError("TypeError", "The database version must be a positive integer.");
+    }
+    if (!record) {
+      record = { key, name: String(name), version: requestedVersion === undefined ? 1 : requestedVersion, stores: new Map(), connections: new Set() };
+      indexedDatabaseRecords.set(key, record);
+      const database = new IDBDatabase(record, IDB_CONSTRUCTION_TOKEN);
+      const transaction = new IDBTransaction(database, [], "versionchange", IDB_CONSTRUCTION_TOKEN);
+      database.__upgradeTransaction = transaction;
+      request.result = database;
+      request.transaction = transaction;
+      idbDispatch(request, new IDBVersionChangeEvent("upgradeneeded", { oldVersion: 0, newVersion: record.version }));
+      transaction.__afterComplete(() => {
+        delete database.__upgradeTransaction;
+        request.transaction = null;
+        request.__success(database);
+      });
+      transaction.__maybeComplete();
+      return;
+    }
+    if (requestedVersion !== undefined && requestedVersion < record.version) {
+      request.__error(idbError("VersionError", "The requested version is lower than the existing version."));
+      return;
+    }
+    if (requestedVersion !== undefined && requestedVersion > record.version) {
+      const oldVersion = record.version;
+      record.version = requestedVersion;
+      const database = new IDBDatabase(record, IDB_CONSTRUCTION_TOKEN);
+      const transaction = new IDBTransaction(database, [], "versionchange", IDB_CONSTRUCTION_TOKEN);
+      database.__upgradeTransaction = transaction;
+      request.result = database;
+      request.transaction = transaction;
+      for (const connection of Array.from(record.connections)) {
+        if (connection !== database) idbDispatch(connection, new IDBVersionChangeEvent("versionchange", { oldVersion, newVersion: requestedVersion }));
+      }
+      idbDispatch(request, new IDBVersionChangeEvent("upgradeneeded", { oldVersion, newVersion: requestedVersion }));
+      transaction.__afterComplete(() => {
+        delete database.__upgradeTransaction;
+        request.transaction = null;
+        request.__success(database);
+      });
+      transaction.__maybeComplete();
+      return;
+    }
+    request.__success(new IDBDatabase(record, IDB_CONSTRUCTION_TOKEN));
+  }
+
+  class IDBFactory {
+    open(name, version = undefined) {
+      const request = new IDBOpenDBRequest();
+      const databaseName = String(name);
+      if (databaseName.length === 0) {
+        request.__error(idbError("TypeError", "The database name must not be empty."));
+        return request;
+      }
+      idbQueueTask(() => {
+        try { idbOpenDatabase(databaseName, version, request); }
+        catch (error) { request.__error(error); }
+      });
+      return request;
+    }
+    deleteDatabase(name) {
+      const request = new IDBOpenDBRequest();
+      const key = idbOriginKey(String(name));
+      idbQueueTask(() => {
+        const record = indexedDatabaseRecords.get(key);
+        if (record) {
+          for (const connection of Array.from(record.connections)) {
+            idbDispatch(connection, new IDBVersionChangeEvent("versionchange", { oldVersion: record.version, newVersion: null }));
+            connection.close();
+          }
+          indexedDatabaseRecords.delete(key);
+        }
+        request.__success(undefined);
+      });
+      return request;
+    }
+    databases() {
+      return Promise.resolve(Array.from(indexedDatabaseRecords.values())
+        .filter(record => record.key.startsWith((globalThis.location && globalThis.location.origin || "null") + "\u0000"))
+        .map(record => ({ name: record.name, version: record.version })));
+    }
+    get [Symbol.toStringTag]() { return "IDBFactory"; }
+  }
+
+  globalThis.IDBVersionChangeEvent = IDBVersionChangeEvent;
+  globalThis.IDBRequest = IDBRequest;
+  globalThis.IDBOpenDBRequest = IDBOpenDBRequest;
+  globalThis.IDBKeyRange = IDBKeyRange;
+  globalThis.IDBTransaction = IDBTransaction;
+  globalThis.IDBDatabase = IDBDatabase;
+  globalThis.IDBObjectStore = IDBObjectStore;
+  globalThis.IDBIndex = IDBIndex;
+  globalThis.IDBFactory = IDBFactory;
+  globalThis.indexedDB = new IDBFactory();
+
   function observerRect(x, y, width, height) {
     x = Number.isFinite(Number(x)) ? Number(x) : 0;
     y = Number.isFinite(Number(y)) ? Number(y) : 0;
