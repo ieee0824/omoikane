@@ -1,8 +1,11 @@
 //! CSS parser: selectors, declarations, and value parsing.
 
-use super::{CssParseError, CssToken, Selector, SelectorPart, RelativeSelector, SimpleSelector, AttributeOperator, Combinator, Declaration, Value, Rule, StyleRule, AtRule, FontFaceRule, Stylesheet};
-use super::tokenizer::{tokenize, render_tokens};
 use super::shorthand::expand_shorthand;
+use super::tokenizer::{render_tokens, tokenize};
+use super::{
+    AtRule, AttributeOperator, Combinator, CssParseError, CssToken, Declaration, FontFaceRule,
+    RelativeSelector, Rule, Selector, SelectorPart, SimpleSelector, StyleRule, Stylesheet, Value,
+};
 
 /// Extract all `@font-face` rules from a stylesheet.
 ///
@@ -116,11 +119,25 @@ fn selector_is_supported_for_dom_query(selector: &Selector) -> bool {
                 let base = base.to_ascii_lowercase();
                 let known = matches!(
                     base.as_str(),
-                    "root" | "scope" | "first-child" | "last-child" | "only-child"
-                        | "nth-child" | "nth-last-child" | "first-of-type"
-                        | "last-of-type" | "only-of-type" | "nth-of-type"
-                        | "nth-last-of-type" | "empty" | "lang" | "enabled"
-                        | "disabled" | "checked" | "before" | "after"
+                    "root"
+                        | "scope"
+                        | "first-child"
+                        | "last-child"
+                        | "only-child"
+                        | "nth-child"
+                        | "nth-last-child"
+                        | "first-of-type"
+                        | "last-of-type"
+                        | "only-of-type"
+                        | "nth-of-type"
+                        | "nth-last-of-type"
+                        | "empty"
+                        | "lang"
+                        | "enabled"
+                        | "disabled"
+                        | "checked"
+                        | "before"
+                        | "after"
                 );
                 known
                     && (!base.starts_with("nth-")
@@ -165,7 +182,11 @@ fn implicit_scope_anchor() -> SelectorPart {
 
 impl Parser {
     fn new(tokens: Vec<CssToken>) -> Self {
-        Self { tokens, index: 0, scope_depth: 0 }
+        Self {
+            tokens,
+            index: 0,
+            scope_depth: 0,
+        }
     }
 
     fn parse_stylesheet(&mut self) -> Result<Stylesheet, CssParseError> {
@@ -262,9 +283,10 @@ impl Parser {
 
                     // Produce a structured FontFace rule when possible.
                     if name.eq_ignore_ascii_case("font-face")
-                        && let Some(ff) = build_font_face_rule(&declarations) {
-                            return Ok(Rule::FontFace(ff));
-                        }
+                        && let Some(ff) = build_font_face_rule(&declarations)
+                    {
+                        return Ok(Rule::FontFace(ff));
+                    }
 
                     return Ok(Rule::At(AtRule {
                         name,
@@ -279,9 +301,7 @@ impl Parser {
                         CssToken::ParenOpen => paren_depth += 1,
                         CssToken::ParenClose => paren_depth = paren_depth.saturating_sub(1),
                         CssToken::BracketOpen => bracket_depth += 1,
-                        CssToken::BracketClose => {
-                            bracket_depth = bracket_depth.saturating_sub(1)
-                        }
+                        CssToken::BracketClose => bracket_depth = bracket_depth.saturating_sub(1),
                         CssToken::CurlyOpen => curly_depth += 1,
                         CssToken::CurlyClose => curly_depth = curly_depth.saturating_sub(1),
                         _ => {}
@@ -605,9 +625,7 @@ impl Parser {
             if !matches!(self.peek(), Some(CssToken::ParenOpen)) {
                 return Ok(SimpleSelector::PseudoElement(name));
             }
-            if !name.eq_ignore_ascii_case("slotted")
-                && !name.eq_ignore_ascii_case("part")
-            {
+            if !name.eq_ignore_ascii_case("slotted") && !name.eq_ignore_ascii_case("part") {
                 return Err(CssParseError::InvalidSelector);
             }
             self.next(); // consume ParenOpen
@@ -633,7 +651,10 @@ impl Parser {
         }
         self.next(); // consume ParenOpen
         let argument_tokens = self.collect_parenthesized_tokens()?;
-        if matches!(name.to_ascii_lowercase().as_str(), "is" | "where" | "not" | "has") {
+        if matches!(
+            name.to_ascii_lowercase().as_str(),
+            "is" | "where" | "not" | "has"
+        ) {
             let argument_str = render_tokens(&argument_tokens).trim().to_string();
             match name.to_ascii_lowercase().as_str() {
                 "is" => Ok(SimpleSelector::Is(parse_forgiving_selector_list(
@@ -788,16 +809,25 @@ impl Parser {
         }
 
         let (value_tokens, important) = split_important(&value_tokens);
-        // CSS masking is intentionally single-layer for now. Preserve the first
-        // top-level layer and ignore subsequent comma-separated layers before
-        // generic value parsing (which otherwise discards comma tokens).
+        // Preserve mask image/mode/composite layer lists.  The paint path uses
+        // the comma-separated values to apply the basic mask compositing
+        // operators; position/size/repeat shorthands still intentionally use
+        // the first layer until their per-layer normalization is available.
         let value_tokens = if matches!(
             name.as_str(),
-            "mask"
-                | "-webkit-mask"
-                | "mask-image"
+            "mask-image"
                 | "-webkit-mask-image"
-                | "mask-position"
+                | "mask"
+                | "-webkit-mask"
+                | "mask-mode"
+                | "-webkit-mask-mode"
+                | "mask-composite"
+                | "-webkit-mask-composite"
+        ) {
+            value_tokens
+        } else if matches!(
+            name.as_str(),
+            "mask-position"
                 | "-webkit-mask-position"
                 | "mask-size"
                 | "-webkit-mask-size"
@@ -808,7 +838,20 @@ impl Parser {
         } else {
             value_tokens
         };
-        let value = if is_layered_background_property(&name) && has_top_level_comma(&value_tokens) {
+        let value = if (is_layered_background_property(&name)
+            || matches!(
+                name.as_str(),
+                "mask"
+                    | "-webkit-mask"
+                    | "mask-image"
+                    | "-webkit-mask-image"
+                    | "mask-mode"
+                    | "-webkit-mask-mode"
+                    | "mask-composite"
+                    | "-webkit-mask-composite"
+            ))
+            && has_top_level_comma(&value_tokens)
+        {
             parse_comma_separated_value(&value_tokens)?
         } else if name == "transition" || name.starts_with("transition-") {
             // Transition lists need their top-level commas. The generic Value
@@ -933,7 +976,10 @@ fn parse_comma_separated_value(tokens: &[CssToken]) -> Result<Value, CssParseErr
             CssToken::ParenOpen | CssToken::BracketOpen => depth += 1,
             CssToken::ParenClose | CssToken::BracketClose => depth = depth.saturating_sub(1),
             CssToken::Comma if depth == 0 => {
-                if layer.iter().all(|token| matches!(token, CssToken::Whitespace)) {
+                if layer
+                    .iter()
+                    .all(|token| matches!(token, CssToken::Whitespace))
+                {
                     return Err(CssParseError::InvalidDeclaration);
                 }
                 layers.push(parse_value_tokens(&layer)?);
@@ -944,7 +990,10 @@ fn parse_comma_separated_value(tokens: &[CssToken]) -> Result<Value, CssParseErr
         }
         layer.push(token.clone());
     }
-    if layer.iter().all(|token| matches!(token, CssToken::Whitespace)) {
+    if layer
+        .iter()
+        .all(|token| matches!(token, CssToken::Whitespace))
+    {
         return Err(CssParseError::InvalidDeclaration);
     }
     layers.push(parse_value_tokens(&layer)?);
@@ -1258,8 +1307,7 @@ fn parse_relative_selector_list(
         }
     }
     selectors.push(
-        parse_single_relative_selector(&tokens[start..])
-            .ok_or(CssParseError::InvalidSelector)?,
+        parse_single_relative_selector(&tokens[start..]).ok_or(CssParseError::InvalidSelector)?,
     );
     Ok(selectors)
 }
@@ -1313,9 +1361,7 @@ fn sanitize_has_argument(selector: &mut Selector) -> bool {
                 selectors.retain_mut(sanitize_has_argument);
                 true
             }
-            SimpleSelector::Not(selectors) => {
-                selectors.iter_mut().all(sanitize_has_argument)
-            }
+            SimpleSelector::Not(selectors) => selectors.iter_mut().all(sanitize_has_argument),
             _ => true,
         })
     })
@@ -1486,9 +1532,7 @@ fn extract_src_descriptor(
                         *out_url = Some(extract_url_from_keyword(k));
                         *out_format = None;
                     }
-                    Value::Function { name, arguments }
-                        if name.eq_ignore_ascii_case("format") =>
-                    {
+                    Value::Function { name, arguments } if name.eq_ignore_ascii_case("format") => {
                         if let Some(arg) = arguments.first() {
                             *out_format = Some(extract_string_value(arg));
                         }
@@ -1526,10 +1570,9 @@ mod selector_list_tests {
 
     #[test]
     fn standalone_selector_list_accepts_lists_and_function_arguments() {
-        let selectors = parse_selector_list(
-            "div.foo, #bar > input:nth-child( -n + 3 ):nth-of-type(3n-1)",
-        )
-        .unwrap();
+        let selectors =
+            parse_selector_list("div.foo, #bar > input:nth-child( -n + 3 ):nth-of-type(3n-1)")
+                .unwrap();
         assert_eq!(selectors.len(), 2);
         assert!(format!("{:?}", selectors).contains("nth-child(-n + 3)"));
         assert!(format!("{:?}", selectors).contains("nth-of-type(3n-1)"));
@@ -1542,7 +1585,10 @@ mod selector_list_tests {
     #[test]
     fn standalone_selector_list_rejects_empty_or_partial_lists() {
         for invalid in ["", "   ", ",div", "div,", "div,,span"] {
-            assert!(parse_selector_list(invalid).is_err(), "accepted {invalid:?}");
+            assert!(
+                parse_selector_list(invalid).is_err(),
+                "accepted {invalid:?}"
+            );
         }
     }
 
@@ -1555,7 +1601,10 @@ mod selector_list_tests {
             ":nth-child(n 3)",
             ":nth-last-of-type(2n 1)",
         ] {
-            assert!(parse_selector_list(invalid).is_err(), "accepted {invalid:?}");
+            assert!(
+                parse_selector_list(invalid).is_err(),
+                "accepted {invalid:?}"
+            );
         }
         // Whitespace around an explicit operator stays valid, and a negative
         // b keeps its sign inside the number token.
@@ -1619,7 +1668,10 @@ mod selector_list_tests {
             "html*.test",
             "div { color: red }",
         ] {
-            assert!(parse_selector_list(invalid).is_err(), "accepted {invalid:?}");
+            assert!(
+                parse_selector_list(invalid).is_err(),
+                "accepted {invalid:?}"
+            );
         }
     }
 
@@ -1634,7 +1686,11 @@ mod selector_list_tests {
         };
         assert_eq!(
             crate::css::specificity(&relative.selectors[0]),
-            crate::css::Specificity { ids: 0, classes: 0, elements: 1 }
+            crate::css::Specificity {
+                ids: 0,
+                classes: 0,
+                elements: 1
+            }
         );
         assert!(parse_stylesheet("> p { color: red; }").is_err());
     }

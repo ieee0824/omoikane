@@ -5913,6 +5913,59 @@ fn clip_path_inset_clips_descendants() {
     assert_eq!(count_pixels(&canvas, Color::rgb(0, 0, 255)), 40 * 40);
 }
 
+#[test]
+fn clip_path_circle_clips_corners_and_keeps_center() {
+    let canvas = paint_clip_path_document(
+        ".target { width: 20px; height: 20px; background: red; \
+         clip-path: circle(50% at 50% 50%); }",
+        "<div class='target'></div>",
+        20.0,
+        20.0,
+    );
+
+    assert_eq!(canvas.pixel(10, 10), Some(Color::rgb(255, 0, 0)));
+    assert_eq!(canvas.pixel(0, 0), Some(Color::rgba(0, 0, 0, 0)));
+    assert_eq!(canvas.pixel(19, 0), Some(Color::rgba(0, 0, 0, 0)));
+    assert_eq!(canvas.pixel(0, 19), Some(Color::rgba(0, 0, 0, 0)));
+    assert_eq!(canvas.pixel(19, 19), Some(Color::rgba(0, 0, 0, 0)));
+}
+
+#[test]
+fn clip_path_ellipse_and_polygon_shapes_clip_paint() {
+    let ellipse = paint_clip_path_document(
+        ".target { width: 20px; height: 10px; background: blue; \
+         clip-path: ellipse(50% 50% at center); }",
+        "<div class='target'></div>",
+        20.0,
+        10.0,
+    );
+    assert_eq!(ellipse.pixel(10, 5), Some(Color::rgb(0, 0, 255)));
+    assert_eq!(ellipse.pixel(0, 0), Some(Color::rgba(0, 0, 0, 0)));
+
+    let triangle = paint_clip_path_document(
+        ".target { width: 20px; height: 20px; background: green; \
+         clip-path: polygon(50% 0%, 100% 100%, 0% 100%); }",
+        "<div class='target'></div>",
+        20.0,
+        20.0,
+    );
+    assert_eq!(triangle.pixel(10, 18), Some(Color::rgb(0, 128, 0)));
+    assert_eq!(triangle.pixel(1, 1), Some(Color::rgba(0, 0, 0, 0)));
+}
+
+#[test]
+fn clip_path_inset_round_clips_rounded_corners() {
+    let canvas = paint_clip_path_document(
+        ".target { width: 20px; height: 20px; background: red; \
+         clip-path: inset(0 round 6px); }",
+        "<div class='target'></div>",
+        20.0,
+        20.0,
+    );
+    assert_eq!(canvas.pixel(10, 10), Some(Color::rgb(255, 0, 0)));
+    assert_eq!(canvas.pixel(0, 0), Some(Color::rgba(0, 0, 0, 0)));
+}
+
 // --- box-shadow テスト ---
 
 #[test]
@@ -8501,6 +8554,50 @@ div {{ position: absolute; left: 10.5px; top: 10.5px;
     assert_eq!(canvas.pixel(12, 12), Some(Color::rgb(255, 0, 0)));
     assert_eq!(canvas.pixel(9, 10), Some(Color::rgba(0, 0, 0, 0)));
     assert_eq!(canvas.pixel(10, 9), Some(Color::rgba(0, 0, 0, 0)));
+}
+
+#[test]
+fn gradient_mask_uses_alpha_channel_and_css_positioning() {
+    let html = r#"<html><head><style>
+body { margin: 0; }
+div { width: 4px; height: 1px; background: red;
+      mask-image: linear-gradient(to right, black 0%, transparent 75%);
+      mask-repeat: no-repeat; }
+</style></head><body><div></div></body></html>"#;
+    let document = TreeBuilder::parse(html).document();
+    let canvas = render_document(
+        &document,
+        Rect { x: 0.0, y: 0.0, width: 4.0, height: 1.0 },
+    )
+    .unwrap();
+    // Sampling at the pixel center gives the first gradient sample a small
+    // interpolation step toward transparent; it remains substantially opaque.
+    assert!(canvas
+        .pixel(0, 0)
+        .is_some_and(|color| color.r == 255 && color.g == 0 && color.b == 0 && color.a > 200));
+    assert!(canvas.pixel(2, 0).is_some_and(|color| color.a < 200));
+    assert_eq!(canvas.pixel(3, 0).unwrap().a, 0);
+}
+
+#[test]
+fn luminance_mask_and_composite_layers_use_basic_semantics() {
+    let html = r#"<html><head><style>
+body { margin: 0; }
+div { width: 2px; height: 1px; background: blue;
+      mask-image: linear-gradient(to right, black, white),
+                  linear-gradient(to right, white, white);
+      mask-mode: luminance, alpha; mask-composite: add; mask-repeat: no-repeat; }
+</style></head><body><div></div></html>"#;
+    let document = TreeBuilder::parse(html).document();
+    let canvas = render_document(
+        &document,
+        Rect { x: 0.0, y: 0.0, width: 2.0, height: 1.0 },
+    )
+    .unwrap();
+    // The second opaque layer is added to the first luminance layer, so both
+    // pixels remain visible and the result never exceeds full opacity.
+    assert!(canvas.pixel(0, 0).is_some_and(|color| color.a > 0));
+    assert!(canvas.pixel(1, 0).is_some_and(|color| color.a > 0));
 }
 
 #[test]

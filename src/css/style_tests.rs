@@ -3211,6 +3211,69 @@ fn canonicalizes_clip_path_inset_and_webkit_alias() {
     assert!(is_supported_property("-webkit-clip-path"));
 }
 
+#[test]
+fn canonicalizes_clip_shape_and_mask_layer_values() {
+    let (_document, body, _title, _html) = sample_tree();
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "body { clip-path: circle(50% at 50% 50%); \
+             mask-image: linear-gradient(to right, black, transparent), url(mask.svg); \
+             mask-mode: luminance, alpha; mask-composite: add; }",
+        )
+        .unwrap(),
+    );
+    let style = resolver.computed_style(&body);
+    assert_eq!(
+        style.get("clip-path"),
+        Some(&ComputedValue::Keyword(
+            "circle(50% at 50% 50%)".to_string()
+        ))
+    );
+    assert_eq!(
+        style.get("mask-image"),
+        Some(&ComputedValue::Keyword(
+            "linear-gradient(to right, black, transparent), url(mask.svg)".to_string()
+        ))
+    );
+    assert_eq!(
+        style.get("mask-mode"),
+        Some(&ComputedValue::Keyword("luminance, alpha".to_string()))
+    );
+    assert_eq!(
+        style.get("mask-composite"),
+        Some(&ComputedValue::Keyword("add".to_string()))
+    );
+    assert!(is_supported_property("mask-mode"));
+    assert!(is_supported_property("mask-composite"));
+}
+
+#[test]
+fn invalid_clip_shape_and_mask_mode_declarations_are_ignored() {
+    let (_document, body, _title, _html) = sample_tree();
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "body { clip-path: made-up(1px); mask-mode: invalid; \
+             clip-path: polygon(0% 0%, 100% 0%, 0% 100%); }",
+        )
+        .unwrap(),
+    );
+    let style = resolver.computed_style(&body);
+    assert_eq!(
+        style.get("clip-path"),
+        Some(&ComputedValue::Keyword(
+            "polygon(0% 0%, 100% 0%, 0% 100%)".to_string()
+        ))
+    );
+    assert_eq!(
+        style.get("mask-mode"),
+        Some(&ComputedValue::Keyword("match-source".to_string()))
+    );
+}
+
 // --- border-radius shorthand 展開テスト ---
 
 #[test]

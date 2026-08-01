@@ -967,6 +967,33 @@ fn is_color_function(name: &str) -> bool {
 }
 
 fn expand_mask_shorthand(value: Value, important: bool) -> Vec<Declaration> {
+    if let Value::CommaList(layers) = value {
+        let mut grouped: Vec<(String, Vec<Value>)> = Vec::new();
+        for layer in layers {
+            for declaration in expand_mask_shorthand(layer, important) {
+                if let Some((_, values)) = grouped
+                    .iter_mut()
+                    .find(|(name, _)| name == &declaration.name)
+                {
+                    values.push(declaration.value);
+                } else {
+                    grouped.push((declaration.name, vec![declaration.value]));
+                }
+            }
+        }
+        return grouped
+            .into_iter()
+            .map(|(name, values)| Declaration {
+                name,
+                value: if values.len() == 1 {
+                    values.into_iter().next().expect("one value")
+                } else {
+                    Value::CommaList(values)
+                },
+                important,
+            })
+            .collect();
+    }
     let values = match value {
         Value::List(values) => values,
         single => vec![single],
@@ -998,6 +1025,11 @@ fn expand_mask_shorthand(value: Value, important: bool) -> Vec<Declaration> {
                     || keyword.eq_ignore_ascii_case("no-repeat") =>
             {
                 repeat = Some(item.clone());
+            }
+            Value::Function { name, .. } if is_mask_image_function(name) => {
+                if image.is_none() {
+                    image = Some(Value::Keyword(render_mask_value(item)));
+                }
             }
             Value::Function { .. } => unsupported_image = true,
             item if is_mask_position_value(item) => position.push(item.clone()),
@@ -1046,6 +1078,46 @@ fn expand_mask_shorthand(value: Value, important: bool) -> Vec<Declaration> {
         });
     }
     declarations
+}
+
+fn is_mask_image_function(name: &str) -> bool {
+    matches!(
+        name.to_ascii_lowercase().as_str(),
+        "linear-gradient"
+            | "repeating-linear-gradient"
+            | "radial-gradient"
+            | "repeating-radial-gradient"
+            | "conic-gradient"
+            | "repeating-conic-gradient"
+    )
+}
+
+fn render_mask_value(value: &Value) -> String {
+    match value {
+        Value::Keyword(value) => value.clone(),
+        Value::Length(number, unit) => format!("{number}{unit}"),
+        Value::Color(value) | Value::String(value) => value.clone(),
+        Value::Number(number) => number.to_string(),
+        Value::Percentage(number) => format!("{number}%"),
+        Value::Function { name, arguments } => format!(
+            "{name}({})",
+            arguments
+                .iter()
+                .map(render_mask_value)
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        Value::List(values) => values
+            .iter()
+            .map(render_mask_value)
+            .collect::<Vec<_>>()
+            .join(" "),
+        Value::CommaList(values) => values
+            .iter()
+            .map(render_mask_value)
+            .collect::<Vec<_>>()
+            .join(", "),
+    }
 }
 
 fn expand_mask_position_shorthand(value: Value, important: bool) -> Vec<Declaration> {
