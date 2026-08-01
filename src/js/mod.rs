@@ -55,7 +55,7 @@ const DOM_CONTENT_LOADED_SCRIPT: &str = concat!(
     "__omoikane_performance_navigation_event('domInteractive'); } catch (_) { void 0; } ",
     "try { if (typeof __omoikane_performance_navigation_event === 'function') ",
     "__omoikane_performance_navigation_event('domContentLoadedStart'); } catch (_) { void 0; } ",
-    "document.dispatchEvent(new Event('DOMContentLoaded')); ",
+    "document.dispatchEvent(new Event('DOMContentLoaded', { bubbles: true })); ",
     "try { if (typeof __omoikane_performance_navigation_event === 'function') ",
     "__omoikane_performance_navigation_event('domContentLoadedEnd'); } catch (_) { void 0; }",
 );
@@ -22600,6 +22600,32 @@ b</textarea></form>"#);
         runtime.fire_dom_content_loaded().unwrap();
         runtime.fire_load().unwrap();
         assert_eq!(eval_str(&mut runtime, "lifecycleEvents.join(',')"), "dcl,load");
+    }
+
+    #[test]
+    fn performance_navigation_duration_and_domcontentloaded_bubble() {
+        let mut runtime = JsRuntime::with_document(default_document()).unwrap();
+        runtime
+            .eval(
+                r#"globalThis.windowDclCount = 0;
+                   window.addEventListener("DOMContentLoaded", () => windowDclCount++);
+                   performance.now = () => 42;"#,
+            )
+            .unwrap();
+        runtime.fire_dom_content_loaded().unwrap();
+        runtime.fire_load().unwrap();
+        assert!(runtime
+            .eval(
+                r#"(() => {
+                  const entry = performance.getEntriesByType("navigation")[0];
+                  return windowDclCount === 1 && entry.loadEventEnd === 42 &&
+                    entry.duration === entry.loadEventEnd - entry.startTime &&
+                    entry.toJSON().duration === entry.duration;
+                })()"#,
+            )
+            .unwrap()
+            .as_boolean()
+            .unwrap());
     }
 
     #[test]

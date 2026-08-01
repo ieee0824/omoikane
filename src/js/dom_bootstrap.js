@@ -10019,7 +10019,11 @@
         name: { value: String(name), enumerable: true },
         entryType: { value: String(entryType), enumerable: true },
         startTime: { value: Number(startTime), enumerable: true },
-        duration: { value: Number(duration), enumerable: true },
+        duration: {
+          value: Number(duration),
+          enumerable: true,
+          configurable: String(entryType) === "navigation",
+        },
       });
     }
     toJSON() {
@@ -10562,13 +10566,27 @@
         // bookkeeping must remain best-effort and never break event dispatch.
       }
     };
+    const updateDuration = () => {
+      const startTime = Number(navigationEntryForLifecycle.startTime) || 0;
+      const loadEventEnd = Number(navigationEntryForLifecycle.loadEventEnd) || 0;
+      try {
+        Object.defineProperty(navigationEntryForLifecycle, "duration", {
+          value: Math.max(0, loadEventEnd - startTime),
+          enumerable: true,
+          configurable: true,
+        });
+      } catch (_) {
+        // A page may have made duration non-configurable.  Lifecycle bookkeeping
+        // remains best-effort and must not break event dispatch.
+      }
+    };
     switch (String(type)) {
       case "domInteractive": update("domInteractive"); break;
       case "domContentLoadedStart": update("domContentLoadedEventStart"); break;
       case "domContentLoadedEnd": update("domContentLoadedEventEnd"); break;
       case "domComplete": update("domComplete"); break;
       case "loadStart": update("loadEventStart"); break;
-      case "loadEnd": update("loadEventEnd"); break;
+      case "loadEnd": update("loadEventEnd"); updateDuration(); break;
       default: break;
     }
   };
