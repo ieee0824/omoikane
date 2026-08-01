@@ -11719,6 +11719,61 @@
       forEach(cb) { this._params.forEach((v, k) => cb(v, k, this)); }
     };
   }
+
+  // XHR and XMLHttpRequestUpload use ProgressEvent for every observable
+  // transfer lifecycle event.  The native binding is installed before this
+  // bootstrap, while ProgressEvent itself is defined later in this file; the
+  // lookup therefore intentionally happens when a request is dispatched.
+  const xhrProgressEventTypes = new Set([
+    "loadstart", "progress", "load", "error", "abort", "timeout", "loadend",
+  ]);
+  function createXhrEvent(type, init = {}) {
+    const EventConstructor = xhrProgressEventTypes.has(String(type))
+      ? globalThis.ProgressEvent
+      : globalThis.Event;
+    return typeof EventConstructor === "function"
+      ? new EventConstructor(type, init)
+      : { type: String(type) };
+  }
+
+  class XMLHttpRequestUpload {
+    constructor() {
+      this._listeners = {};
+      this.onloadstart = null;
+      this.onprogress = null;
+      this.onload = null;
+      this.onabort = null;
+      this.onerror = null;
+      this.onloadend = null;
+    }
+    addEventListener(type, callback) {
+      if (callback == null) return;
+      const key = String(type);
+      const listeners = this._listeners[key] || [];
+      if (!listeners.includes(callback)) listeners.push(callback);
+      this._listeners[key] = listeners;
+    }
+    removeEventListener(type, callback) {
+      const key = String(type);
+      this._listeners[key] = (this._listeners[key] || []).filter(item => item !== callback);
+    }
+    dispatchEvent(event) {
+      const dispatched = event instanceof Event ? event : createXhrEvent(event);
+      dispatched.target = this;
+      dispatched.currentTarget = this;
+      const handler = this["on" + dispatched.type];
+      if (typeof handler === "function") handler.call(this, dispatched);
+      for (const callback of this._listeners[dispatched.type] || []) callback.call(this, dispatched);
+      dispatched.currentTarget = null;
+      return true;
+    }
+    _notify(type, init = {}) {
+      return this.dispatchEvent(createXhrEvent(type, init));
+    }
+    get [Symbol.toStringTag]() { return "XMLHttpRequestUpload"; }
+  }
+  globalThis.XMLHttpRequestUpload = XMLHttpRequestUpload;
+
   globalThis.XMLHttpRequest = class XMLHttpRequest {
     constructor() {
       this._listeners = {};
@@ -11729,17 +11784,38 @@
       this._responseType = "";
       this.response = null;
       this.responseURL = "";
-      this.timeout = 0;
+      this._timeout = 0;
+      this._timeoutTimer = null;
+      this._terminal = false;
+      this._downloadLoaded = 0;
+      this._downloadTotal = 0;
+      this._uploadCompleted = true;
+      this.upload = new XMLHttpRequestUpload();
       this.withCredentials = false;
       this.onreadystatechange = null;
+      this.onloadstart = null;
+      this.onprogress = null;
       this.onload = null;
       this.onerror = null;
+      this.onabort = null;
+      this.ontimeout = null;
       this.onloadend = null;
       this._headers = {};
       this._responseHeaders = [];
       this._requestId = 0;
       this._sendFlag = false;
       this.__resourceTiming = null;
+      Object.defineProperty(this, "timeout", {
+        enumerable: true,
+        configurable: true,
+        get() { return this._timeout; },
+        set(value) {
+          const number = Number(value);
+          if (Number.isNaN(number) || number <= 0) this._timeout = 0;
+          else if (!Number.isFinite(number)) this._timeout = 0xFFFFFFFF;
+          else this._timeout = Math.min(Math.floor(number), 0xFFFFFFFF);
+        },
+      });
       Object.defineProperty(this, "responseText", {
         enumerable: true,
         configurable: true,
@@ -11772,6 +11848,7 @@
     open(method, url, async = true) {
       // Re-opening an active request aborts the old fetch.  Preserve the
       // Resource Timing entry even though no terminal network payload arrives.
+      this._clearTimeout();
       if (this.__resourceTiming) {
         finishResourceTiming(this.__resourceTiming, {}, true);
         this.__resourceTiming = null;
@@ -11785,6 +11862,10 @@
       this._headers = {};
       this._responseHeaders = [];
       this._sendFlag = false;
+      this._terminal = false;
+      this._downloadLoaded = 0;
+      this._downloadTotal = 0;
+      this._uploadCompleted = true;
       this._method = String(method).toUpperCase();
       this._url = isBlobUrl(url) ? String(url) : resolveNetworkUrl(url);
       this._async = async !== false;
@@ -11823,11 +11904,18 @@
       this._listeners[type] = (this._listeners[type] || []).filter(item => item !== callback);
     }
     abort() {
+      const active = this._sendFlag && !this._terminal;
+      if (!active) {
+        this._clearTimeout();
+        return;
+      }
       if (this.__resourceTiming) {
         finishResourceTiming(this.__resourceTiming, {}, true);
         this.__resourceTiming = null;
       }
-      this._requestId++;
+      this._clearTimeout();
+      const abortRequestId = ++this._requestId;
+      this._terminal = true;
       this.readyState = 0;
       this.status = 0;
       this.statusText = "";
@@ -11836,20 +11924,47 @@
       this.responseURL = "";
       this._responseHeaders = [];
       this._sendFlag = false;
-      this._notify("abort");
-      this._notify("loadend");
+      this._queueNetworking(() => {
+        if (this._requestId !== abortRequestId) return;
+        if (!this._uploadCompleted) {
+          this._uploadCompleted = true;
+          this.upload._notify("abort", this._uploadProgressInit(0));
+          this.upload._notify("loadend", this._uploadProgressInit(0));
+        }
+        this._notify("abort");
+        this._notify("loadend");
+      });
     }
     send(body = null) {
       if (this.readyState !== 1 || this._sendFlag) throw new Error("InvalidStateError");
       this._sendFlag = true;
+      this._terminal = false;
       const requestId = this._requestId;
       this.__resourceTiming = beginResourceTiming(this._url, "xmlhttprequest");
       const requestBody = this._method === "GET" || this._method === "HEAD"
         ? EMPTY_BODY
         : extractBody(body);
+      const hasUploadBody = this._method !== "GET" && this._method !== "HEAD" &&
+        body !== null && body !== undefined;
+      this._uploadTotal = hasUploadBody ? bodyAsBytes(requestBody).byteLength : 0;
+      this._uploadCompleted = !hasUploadBody;
+      this._downloadLoaded = 0;
+      this._downloadTotal = 0;
       if (requestBody.contentType !== null && !("content-type" in this._headers)) {
         this._headers["content-type"] = requestBody.contentType;
       }
+      this._queueNetworking(() => {
+        if (requestId !== this._requestId || this._terminal) return;
+        this._notify("loadstart", this._downloadProgressInit(0));
+        if (hasUploadBody) {
+          this.upload._notify("loadstart", this._uploadProgressInit(0));
+          this.upload._notify("progress", this._uploadProgressInit(this._uploadTotal));
+          this.upload._notify("load", this._uploadProgressInit(this._uploadTotal));
+          this.upload._notify("loadend", this._uploadProgressInit(this._uploadTotal));
+          this._uploadCompleted = true;
+        }
+      });
+      this._armTimeout(requestId);
       // A blob URL resolves from the object URL store; anything else goes to the
       // host fetch binding. Both settle to the same payload shape.
       const payload = isBlobUrl(this._url)
@@ -11879,72 +11994,164 @@
               "cors",
               this.withCredentials ? "include" : "same-origin",
               "follow",
+              this._timeout,
             )
           ).then(raw => JSON.parse(String(raw)));
       payload.then(data => {
-        if (requestId !== this._requestId) return;
-        finishResourceTiming(this.__resourceTiming, data, false);
-        this.__resourceTiming = null;
-        this.status = data.status;
-        this.statusText = data.statusText;
-        this.responseURL = data.url;
-        this._responseHeaders = data.headers;
-        this.readyState = 2;
-        this._notify("readystatechange");
-        this.readyState = 3;
-        this._notify("readystatechange");
-        this._responseText = data.bodyText === undefined ? "" : String(data.bodyText);
-        const bytes = xhrResponseBytes(data);
-        switch (this._responseType) {
-          case "arraybuffer":
-            this.response = bytes.slice().buffer;
-            break;
-          case "blob":
-            this.response = new Blob([bytes], { type: xhrResponseMime(data.headers) });
-            break;
-          case "json":
-            try { this.response = JSON.parse(this._responseText); }
-            catch (_) { this.response = null; }
-            break;
-          case "document": {
-            const contentType = xhrResponseMime(data.headers);
-            const mime = contentType.includes("xml") ? "text/xml" : "text/html";
-            try { this.response = new DOMParser().parseFromString(this._responseText, mime); }
-            catch (_) { this.response = null; }
-            break;
-          }
-          default:
-            this.response = this._responseText;
-            break;
+        if (requestId !== this._requestId || this._terminal) return;
+        if (data && data.__omoikane_timeout === true) {
+          this._queueNetworking(() => this._finishTimeout(requestId));
+          return;
         }
-        this.readyState = 4;
-        this._sendFlag = false;
-        this._notify("readystatechange");
-        this._notify("load");
-        this._notify("loadend");
-      }).catch(() => {
-        if (requestId !== this._requestId) return;
-        finishResourceTiming(this.__resourceTiming, {}, true);
-        this.__resourceTiming = null;
-        this.status = 0;
-        this.statusText = "";
-        this._responseText = "";
-        this.response = null;
-        this.responseURL = "";
-        this._responseHeaders = [];
-        this.readyState = 4;
-        this._sendFlag = false;
-        this._notify("readystatechange");
-        this._notify("error");
-        this._notify("loadend");
+        this._queueNetworking(() => this._finishSuccess(data, requestId));
+      }).catch(error => {
+        if (requestId !== this._requestId || this._terminal) return;
+        if (error && error.__omoikane_timeout === true) {
+          this._queueNetworking(() => this._finishTimeout(requestId));
+          return;
+        }
+        this._queueNetworking(() => this._finishError(requestId));
       });
     }
-    _notify(type) {
-      const event = new Event(type);
-      const handler = this["on" + type];
-      if (typeof handler === "function") handler.call(this, event);
-      for (const callback of this._listeners[type] || []) callback.call(this, event);
+    _queueNetworking(callback) {
+      if (typeof __omoikane_queue_networking_task === "function") {
+        __omoikane_queue_networking_task(callback);
+      } else {
+        setTimeout(callback, 0);
+      }
     }
+    _clearTimeout() {
+      if (this._timeoutTimer !== null) {
+        clearTimeout(this._timeoutTimer);
+        this._timeoutTimer = null;
+      }
+    }
+    _armTimeout(requestId) {
+      this._clearTimeout();
+      if (!this._async || this._timeout <= 0) return;
+      this._timeoutTimer = setTimeout(
+        () => this._queueNetworking(() => this._finishTimeout(requestId)),
+        this._timeout,
+      );
+    }
+    _downloadProgressInit(loaded = this._downloadLoaded) {
+      const value = Number(loaded) || 0;
+      return {
+        lengthComputable: this._downloadTotal > 0,
+        loaded: value,
+        total: this._downloadTotal,
+      };
+    }
+    _uploadProgressInit(loaded = 0) {
+      const value = Number(loaded) || 0;
+      return {
+        lengthComputable: this._uploadTotal > 0,
+        loaded: value,
+        total: this._uploadTotal,
+      };
+    }
+    _finishSuccess(data, requestId) {
+      if (requestId !== this._requestId || this._terminal) return;
+      this._clearTimeout();
+      finishResourceTiming(this.__resourceTiming, data, false);
+      this.__resourceTiming = null;
+      this.status = data.status;
+      this.statusText = data.statusText;
+      this.responseURL = data.url;
+      this._responseHeaders = data.headers;
+      this.readyState = 2;
+      this._notify("readystatechange");
+      this.readyState = 3;
+      this._notify("readystatechange");
+      this._responseText = data.bodyText === undefined ? "" : String(data.bodyText);
+      const bytes = xhrResponseBytes(data);
+      const contentLength = xhrResponseContentLength(data.headers);
+      this._downloadLoaded = bytes.byteLength;
+      this._downloadTotal = contentLength === null ? this._downloadLoaded : contentLength;
+      this._notify("progress", this._downloadProgressInit(this._downloadLoaded));
+      switch (this._responseType) {
+        case "arraybuffer":
+          this.response = bytes.slice().buffer;
+          break;
+        case "blob":
+          this.response = new Blob([bytes], { type: xhrResponseMime(data.headers) });
+          break;
+        case "json":
+          try { this.response = JSON.parse(this._responseText); }
+          catch (_) { this.response = null; }
+          break;
+        case "document": {
+          const contentType = xhrResponseMime(data.headers);
+          const mime = contentType.includes("xml") ? "text/xml" : "text/html";
+          try { this.response = new DOMParser().parseFromString(this._responseText, mime); }
+          catch (_) { this.response = null; }
+          break;
+        }
+        default:
+          this.response = this._responseText;
+          break;
+      }
+      this.readyState = 4;
+      this._sendFlag = false;
+      this._terminal = true;
+      this._notify("readystatechange");
+      this._notify("load", this._downloadProgressInit(this._downloadLoaded));
+      this._notify("loadend", this._downloadProgressInit(this._downloadLoaded));
+    }
+    _finishError(requestId) {
+      if (requestId !== this._requestId || this._terminal) return;
+      this._clearTimeout();
+      finishResourceTiming(this.__resourceTiming, {}, true);
+      this.__resourceTiming = null;
+      this.status = 0;
+      this.statusText = "";
+      this._responseText = "";
+      this.response = null;
+      this.responseURL = "";
+      this._responseHeaders = [];
+      this.readyState = 4;
+      this._sendFlag = false;
+      this._terminal = true;
+      this._notify("readystatechange");
+      this._notify("error", this._downloadProgressInit(0));
+      this._notify("loadend", this._downloadProgressInit(0));
+    }
+    _finishTimeout(requestId) {
+      if (requestId !== this._requestId || this._terminal || !this._sendFlag) return;
+      this._clearTimeout();
+      if (this.__resourceTiming) {
+        finishResourceTiming(this.__resourceTiming, {}, true);
+        this.__resourceTiming = null;
+      }
+      this._requestId++;
+      this.status = 0;
+      this.statusText = "";
+      this._responseText = "";
+      this.response = null;
+      this.responseURL = "";
+      this._responseHeaders = [];
+      this.readyState = 4;
+      this._sendFlag = false;
+      this._terminal = true;
+      this._notify("readystatechange");
+      this._notify("timeout", this._downloadProgressInit(this._downloadLoaded));
+      this._notify("loadend", this._downloadProgressInit(this._downloadLoaded));
+    }
+    _notify(type, init = {}) {
+      const event = init instanceof Event ? init : createXhrEvent(type, init);
+      return this.dispatchEvent(event);
+    }
+    dispatchEvent(event) {
+      const dispatched = event instanceof Event ? event : createXhrEvent(event);
+      dispatched.target = this;
+      dispatched.currentTarget = this;
+      const handler = this["on" + dispatched.type];
+      if (typeof handler === "function") handler.call(this, dispatched);
+      for (const callback of (this._listeners[dispatched.type] || []).slice()) callback.call(this, dispatched);
+      dispatched.currentTarget = null;
+      return true;
+    }
+    get [Symbol.toStringTag]() { return "XMLHttpRequest"; }
   };
 
   function xhrResponseBytes(data) {
@@ -11953,6 +12160,13 @@
       return bytesFromBase64(data.bodyBase64);
     }
     return blobTextEncoder.encode(data.bodyText === undefined ? "" : String(data.bodyText));
+  }
+
+  function xhrResponseContentLength(headers) {
+    const entry = (headers || []).find(([name]) => String(name).toLowerCase() === "content-length");
+    if (!entry) return null;
+    const value = Number(entry[1]);
+    return Number.isFinite(value) && value >= 0 ? Math.floor(value) : null;
   }
 
   function xhrResponseMime(headers) {
@@ -13054,6 +13268,12 @@
     }
   }
   globalThis.EventTarget = EventTarget;
+  // XMLHttpRequestUpload is declared beside XMLHttpRequest so the latter can
+  // construct it before this general EventTarget definition is reached.  Link
+  // the prototype chain once EventTarget is initialized so standard brand
+  // checks (`upload instanceof EventTarget`) still behave as expected.
+  Object.setPrototypeOf(XMLHttpRequestUpload.prototype, EventTarget.prototype);
+  Object.setPrototypeOf(XMLHttpRequest.prototype, EventTarget.prototype);
   Object.setPrototypeOf(WebGLEventTarget.prototype, EventTarget.prototype);
   Object.setPrototypeOf(ServiceWorkerEventTarget.prototype, EventTarget.prototype);
   Object.setPrototypeOf(GPUEventTarget.prototype, EventTarget.prototype);

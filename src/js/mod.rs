@@ -10,6 +10,7 @@ use std::sync::mpsc::{Receiver, channel};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::task::{Context as TaskContext, Poll};
 use std::thread;
+use std::time::Duration;
 
 use base64::Engine as _;
 use boa_engine::JsString;
@@ -10235,6 +10236,18 @@ fn fetch_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResul
                 .into());
         }
     };
+    let timeout = if let Some(value) = args.get(7) {
+        let milliseconds = value.to_number(context)?;
+        if milliseconds.is_finite() && milliseconds > 0.0 {
+            Some(Duration::from_millis(
+                milliseconds.ceil().min(u64::MAX as f64) as u64,
+            ))
+        } else {
+            None
+        }
+    } else {
+        None
+    };
 
     with_host_state(|state| {
         let mut state = state.borrow_mut();
@@ -10270,7 +10283,7 @@ fn fetch_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResul
             cors_preflight_cache,
             ..
         } = &mut *state;
-        let fetched = crate::http::cors::fetch(
+        let fetched = match crate::http::cors::fetch_with_timeout(
             http_client,
             request,
             &origin,
@@ -10278,10 +10291,16 @@ fn fetch_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResul
             credentials,
             redirect_mode,
             cors_preflight_cache,
-        )
-        .map_err(|error| {
-            JsError::from(JsNativeError::error().with_message(error.to_string()))
-        })?;
+            timeout,
+        ) {
+            Ok(fetched) => fetched,
+            Err(crate::http::cors::CorsError::Timeout) if timeout.is_some() => {
+                return Ok(js_string!(r#"{"__omoikane_timeout":true}"#).into());
+            }
+            Err(error) => {
+                return Err(JsError::from(JsNativeError::error().with_message(error.to_string())).into());
+            }
+        };
         if let Some(effective_url) = fetched.response.effective_url()
             && !state
                 .csp_policy_for_document(&document)
@@ -17038,7 +17057,7 @@ b</textarea></form>"#);
                     try {{ failedXhr.setRequestHeader("X-Late", "no"); }} catch (_) {{ xhrRequestLocked = true; }}"#
             ))
             .unwrap();
-        runtime.run_jobs().unwrap();
+        runtime.run_until_idle().unwrap();
 
         assert!(runtime
             .eval(r#"!fetchThrew && fetchRejected && !xhrThrew && xhrRequestLocked && failedXhr.status === 0 && failedXhr.readyState === XMLHttpRequest.DONE && failureEvents.join(",") === "error,loadend""#)
@@ -17092,7 +17111,7 @@ b</textarea></form>"#);
                 address.port()
             ))
             .unwrap();
-        runtime.run_jobs().unwrap();
+        runtime.run_until_idle().unwrap();
         handle.join().unwrap();
 
         assert_eq!(runtime.eval("cookieXhr.status").unwrap().as_number(), Some(200.0));
@@ -17128,7 +17147,7 @@ b</textarea></form>"#);
                 address.port()
             ))
             .unwrap();
-        runtime.run_jobs().unwrap();
+        runtime.run_until_idle().unwrap();
         handle.join().unwrap();
 
         assert!(runtime
@@ -17196,7 +17215,7 @@ b</textarea></form>"#);
                 address.port()
             ))
             .unwrap();
-        runtime.run_jobs().unwrap();
+        runtime.run_until_idle().unwrap();
         handle.join().unwrap();
 
         assert!(runtime
@@ -17285,7 +17304,7 @@ b</textarea></form>"#);
                 address.port()
             ))
             .unwrap();
-        runtime.run_jobs().unwrap();
+        runtime.run_until_idle().unwrap();
         handle.join().unwrap();
         assert!(runtime
             .eval("omitFetch === 200 && sameOriginFetch === 200 && credentialFetch === 200 && credentialXhr.status === 200")
@@ -17419,7 +17438,7 @@ b</textarea></form>"#);
                 address.port()
             ))
             .unwrap();
-        runtime.run_jobs().unwrap();
+        runtime.run_until_idle().unwrap();
         handle.join().unwrap();
         assert!(runtime
             .eval(r#"xhr.readyState === XMLHttpRequest.DONE && xhr.status === 200 && xhr.responseText === "hello" && xhrEvents.join(",") === "load,loadend""#)
@@ -17442,7 +17461,7 @@ b</textarea></form>"#);
                 abort_address.port()
             ))
             .unwrap();
-        runtime.run_jobs().unwrap();
+        runtime.run_until_idle().unwrap();
         abort_handle.join().unwrap();
         assert!(runtime
             .eval(r#"xhr.readyState === XMLHttpRequest.UNSENT && xhr.status === 0 && xhr.responseText === "" && xhrEvents.join(",") === "loadend""#)
@@ -17485,7 +17504,7 @@ b</textarea></form>"#);
                 address.port()
             ))
             .unwrap();
-        runtime.run_jobs().unwrap();
+        runtime.run_until_idle().unwrap();
         handle.join().unwrap();
 
         assert!(runtime
@@ -17505,6 +17524,103 @@ b</textarea></form>"#);
             .unwrap()
             .as_boolean()
             .unwrap());
+    }
+
+    #[test]
+    fn xml_http_request_reports_download_and_upload_progress_events() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let handle = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let request = read_http_request(&mut stream);
+            let request = String::from_utf8(request).unwrap();
+            assert!(request.ends_with("\r\n\r\nrequest"));
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello")
+                .unwrap();
+        });
+
+        let mut runtime = JsRuntime::new().unwrap();
+        runtime.set_base_url(format!("http://{address}/").parse().unwrap());
+        runtime
+            .eval(&format!(
+                r#"globalThis.downloadEvents = [];
+                globalThis.uploadEvents = [];
+                const recordProgress = (target, label, type) => event =>
+                  target.push([label, type, event.loaded, event.total,
+                    event.lengthComputable, event instanceof ProgressEvent].join(":"));
+                const xhr = new XMLHttpRequest();
+                for (const type of ["loadstart", "progress", "load", "loadend"])
+                  xhr.addEventListener(type, recordProgress(downloadEvents, "download", type));
+                for (const type of ["loadstart", "progress", "load", "loadend"])
+                  xhr.upload.addEventListener(type, recordProgress(uploadEvents, "upload", type));
+                xhr.open("POST", "http://127.0.0.1:{}/upload");
+                xhr.send("request");
+                globalThis.progressXhr = xhr;"#,
+                address.port()
+            ))
+            .unwrap();
+        runtime.run_until_idle().unwrap();
+        handle.join().unwrap();
+
+        assert!(runtime
+            .eval(
+                r#"downloadEvents.join("|") ===
+                  "download:loadstart:0:0:false:true|download:progress:5:5:true:true|download:load:5:5:true:true|download:loadend:5:5:true:true" &&
+                uploadEvents.join("|") ===
+                  "upload:loadstart:0:7:true:true|upload:progress:7:7:true:true|upload:load:7:7:true:true|upload:loadend:7:7:true:true" &&
+                progressXhr.upload instanceof XMLHttpRequestUpload &&
+                progressXhr.upload instanceof EventTarget &&
+                progressXhr.status === 200 && progressXhr.responseText === "hello""#,
+            )
+            .unwrap()
+            .as_boolean()
+            .unwrap());
+    }
+
+    #[test]
+    fn xml_http_request_timeout_is_exclusive_and_finishes_with_loadend() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let handle = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let _ = read_http_request(&mut stream);
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            let _ = stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\n\r\nlate");
+        });
+
+        let mut runtime = JsRuntime::new().unwrap();
+        runtime.set_base_url(format!("http://{address}/").parse().unwrap());
+        runtime
+            .eval(&format!(
+                r#"globalThis.timeoutEvents = [];
+                const xhr = new XMLHttpRequest();
+                for (const type of ["loadstart", "progress", "load", "error", "timeout", "loadend"])
+                  xhr.addEventListener(type, event => timeoutEvents.push([
+                    type, event.loaded, event.total, event instanceof ProgressEvent].join(":")));
+                xhr.timeout = 10;
+                xhr.open("GET", "http://127.0.0.1:{}/slow");
+                xhr.send();
+                globalThis.timeoutXhr = xhr;"#,
+                address.port()
+            ))
+            .unwrap();
+        runtime.run_until_idle().unwrap();
+        handle.join().unwrap();
+
+        let state = runtime
+            .eval(r#"JSON.stringify([timeoutEvents, timeoutXhr.readyState, timeoutXhr.status, timeoutXhr.responseText])"#)
+            .unwrap();
+        assert!(runtime
+            .eval(
+                r#"timeoutEvents.join("|") ===
+                  "loadstart:0:0:true|timeout:0:0:true|loadend:0:0:true" &&
+                timeoutXhr.readyState === XMLHttpRequest.DONE &&
+                timeoutXhr.status === 0 && timeoutXhr.responseText === """#,
+            )
+            .unwrap()
+            .as_boolean()
+            .unwrap_or(false), "state={}", state.display());
     }
 
     #[test]
@@ -17636,7 +17752,7 @@ b</textarea></form>"#);
                 address.port()
             ))
             .unwrap();
-        runtime.run_jobs().unwrap();
+        runtime.run_until_idle().unwrap();
         handle.join().unwrap();
 
         assert!(runtime

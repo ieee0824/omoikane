@@ -5,6 +5,7 @@ use super::cookie::CookieJar;
 use super::request::{HttpRequest, Method, default_user_agent};
 use super::response::{HttpParseError, HttpResponse};
 use super::url::Url;
+use std::time::Duration;
 
 /// Maximum number of redirects to follow before aborting.
 const DEFAULT_MAX_REDIRECTS: u32 = 10;
@@ -181,10 +182,16 @@ impl Client {
     /// `credentials` controls both Cookie attachment and Set-Cookie storage.
     /// Fetch/CORS uses this primitive so it can re-evaluate policy at every
     /// redirect hop; ordinary callers should continue using [`send`](Self::send).
-    pub(crate) fn send_once(
+    /// Sends one request with an optional transport timeout.
+    ///
+    /// The timeout is applied to the underlying connect/read/write operations;
+    /// `None` keeps the normal client defaults.  This is used by XHR, whose
+    /// timeout is observable as a distinct terminal event.
+    pub(crate) fn send_once_with_timeout(
         &mut self,
         mut request: HttpRequest,
         credentials: bool,
+        timeout: Option<Duration>,
     ) -> Result<HttpResponse, HttpParseError> {
         let built_in_user_agent = default_user_agent();
         if request
@@ -200,7 +207,9 @@ impl Client {
             request.add_header("Cookie", cookie_header);
         }
 
-        let response = self.connections.send(&request, self.insecure)?;
+        let response = self
+            .connections
+            .send_with_timeout(&request, self.insecure, timeout)?;
         if credentials {
             let origin = request.url().clone();
             for (name, value) in response.headers() {

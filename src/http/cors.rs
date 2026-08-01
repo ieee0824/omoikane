@@ -91,6 +91,7 @@ pub struct FetchResponse {
 #[derive(Debug)]
 pub enum CorsError {
     Network(String),
+    Timeout,
     SameOriginMode,
     CorsCheck,
     Preflight,
@@ -102,6 +103,7 @@ impl fmt::Display for CorsError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Network(error) => formatter.write_str(error),
+            Self::Timeout => formatter.write_str("network request timed out"),
             Self::SameOriginMode => {
                 formatter.write_str("cross-origin request blocked by same-origin mode")
             }
@@ -117,12 +119,37 @@ impl std::error::Error for CorsError {}
 
 pub fn fetch(
     client: &mut Client,
+    request: HttpRequest,
+    origin: &Origin,
+    mode: RequestMode,
+    credentials: CredentialsMode,
+    redirect_mode: RedirectMode,
+    cache: &mut PreflightCache,
+) -> Result<FetchResponse, CorsError> {
+    fetch_with_timeout(
+        client,
+        request,
+        origin,
+        mode,
+        credentials,
+        redirect_mode,
+        cache,
+        None,
+    )
+}
+
+/// Fetches a resource with an optional transport timeout.  The timeout is
+/// applied to each network hop (including CORS preflight); callers that need
+/// the ordinary Fetch behavior should use [`fetch`] instead.
+pub fn fetch_with_timeout(
+    client: &mut Client,
     mut request: HttpRequest,
     origin: &Origin,
     mode: RequestMode,
     credentials: CredentialsMode,
     redirect_mode: RedirectMode,
     cache: &mut PreflightCache,
+    timeout: Option<Duration>,
 ) -> Result<FetchResponse, CorsError> {
     let mut redirected = false;
     let mut cross_origin_seen = false;
@@ -143,7 +170,7 @@ pub fn fetch(
             request.set_header("Origin", origin.serialize());
         }
         if cross_origin && mode == RequestMode::Cors {
-            ensure_preflight(client, &request, origin, credentials, cache)?;
+            ensure_preflight(client, &request, origin, credentials, cache, timeout)?;
         }
 
         let send_credentials = match credentials {
@@ -156,8 +183,14 @@ pub fn fetch(
             outbound.remove_header("authorization");
         }
         let mut response = client
-            .send_once(outbound, send_credentials)
-            .map_err(|error| CorsError::Network(error.to_string()))?;
+            .send_once_with_timeout(outbound, send_credentials, timeout)
+            .map_err(|error| {
+                if error.is_timeout() {
+                    CorsError::Timeout
+                } else {
+                    CorsError::Network(error.to_string())
+                }
+            })?;
 
         if is_redirect(response.status_code()) {
             if cross_origin && mode == RequestMode::Cors {
@@ -232,6 +265,7 @@ fn ensure_preflight(
     origin: &Origin,
     credentials: CredentialsMode,
     cache: &mut PreflightCache,
+    timeout: Option<Duration>,
 ) -> Result<(), CorsError> {
     let unsafe_headers = cors_unsafe_header_names(request);
     if is_cors_safelisted_method(request.method()) && unsafe_headers.is_empty() {
@@ -259,8 +293,14 @@ fn ensure_preflight(
         preflight.set_header("Access-Control-Request-Headers", unsafe_headers.join(", "));
     }
     let response = client
-        .send_once(preflight, false)
-        .map_err(|error| CorsError::Network(error.to_string()))?;
+        .send_once_with_timeout(preflight, false, timeout)
+        .map_err(|error| {
+            if error.is_timeout() {
+                CorsError::Timeout
+            } else {
+                CorsError::Network(error.to_string())
+            }
+        })?;
     if !(200..300).contains(&response.status_code())
         || cors_check(&response, origin, credentials).is_err()
         || !header_tokens(&response, "access-control-allow-methods")

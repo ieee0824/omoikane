@@ -30,8 +30,18 @@ impl ConnectionPool {
         request: &HttpRequest,
         insecure: bool,
     ) -> Result<HttpResponse, HttpParseError> {
+        self.send_with_timeout(request, insecure, None)
+    }
+
+    pub(crate) fn send_with_timeout(
+        &mut self,
+        request: &HttpRequest,
+        insecure: bool,
+        timeout: Option<Duration>,
+    ) -> Result<HttpResponse, HttpParseError> {
         if request.url().scheme() != "https" {
-            return send_with_options(request, insecure);
+            let stream = connect_stream_with_timeout(request, timeout)?;
+            return send_over_tcp(stream, request);
         }
 
         let key = format!(
@@ -41,6 +51,7 @@ impl ConnectionPool {
             request.requires_public_ip()
         );
         if let Some(session) = self.http2.get_mut(&key) {
+            session.set_timeout(timeout)?;
             match session.send_request(request) {
                 Ok(response) => {
                     if std::env::var_os("OMOIKANE_LOG_HTTP").is_some() {
@@ -57,6 +68,7 @@ impl ConnectionPool {
             }
         }
         if let Some(session) = self.http1.get_mut(&key) {
+            session.set_timeout(timeout)?;
             match session.send_request(request) {
                 Ok(response) => {
                     if response.header("connection").is_some_and(|value| {
@@ -78,7 +90,7 @@ impl ConnectionPool {
             }
         }
 
-        let stream = connect_stream(request)?;
+        let stream = connect_stream_with_timeout(request, timeout)?;
         let config = if insecure {
             shared_insecure_client_config(true)
         } else {
@@ -96,7 +108,7 @@ impl ConnectionPool {
                 match response {
                     Ok(response) => Ok(response),
                     Err(HttpParseError::InvalidHeader) => {
-                        self.send_new_http1(request, insecure, key)
+                        self.send_new_http1(request, insecure, key, timeout)
                     }
                     Err(error) => Err(error),
                 }
@@ -122,8 +134,9 @@ impl ConnectionPool {
         request: &HttpRequest,
         insecure: bool,
         key: String,
+        timeout: Option<Duration>,
     ) -> Result<HttpResponse, HttpParseError> {
-        let stream = connect_stream(request)?;
+        let stream = connect_stream_with_timeout(request, timeout)?;
         let config = if insecure {
             shared_insecure_client_config(false)
         } else {
@@ -293,6 +306,13 @@ fn send_over_tcp(
 }
 
 fn connect_stream(request: &HttpRequest) -> Result<TcpStream, HttpParseError> {
+    connect_stream_with_timeout(request, None)
+}
+
+fn connect_stream_with_timeout(
+    request: &HttpRequest,
+    timeout: Option<Duration>,
+) -> Result<TcpStream, HttpParseError> {
     let url = request.url();
     let addr = format!("{}:{}", url.host(), url.port());
     let socket_addrs = addr.to_socket_addrs().map_err(HttpParseError::Io)?;
@@ -308,7 +328,7 @@ fn connect_stream(request: &HttpRequest) -> Result<TcpStream, HttpParseError> {
 
     let mut last_error = None;
     for socket_addr in socket_addrs {
-        match connect_socket(socket_addr) {
+        match connect_socket_with_timeout(socket_addr, timeout) {
             Ok(stream) => return Ok(stream),
             Err(error) => last_error = Some(error),
         }
@@ -321,10 +341,14 @@ fn connect_stream(request: &HttpRequest) -> Result<TcpStream, HttpParseError> {
     })))
 }
 
-fn connect_socket(socket_addr: SocketAddr) -> io::Result<TcpStream> {
-    let stream =
-        TcpStream::connect_timeout(&socket_addr, Duration::from_secs(DEFAULT_TIMEOUT_SECS))?;
-    stream.set_read_timeout(Some(Duration::from_secs(DEFAULT_TIMEOUT_SECS)))?;
+fn connect_socket_with_timeout(
+    socket_addr: SocketAddr,
+    timeout: Option<Duration>,
+) -> io::Result<TcpStream> {
+    let timeout = timeout.unwrap_or(Duration::from_secs(DEFAULT_TIMEOUT_SECS));
+    let stream = TcpStream::connect_timeout(&socket_addr, timeout)?;
+    stream.set_read_timeout(Some(timeout))?;
+    stream.set_write_timeout(Some(timeout))?;
     Ok(stream)
 }
 
