@@ -678,6 +678,8 @@ pub struct CdpSession {
     last_key_event: Option<Value>,
     last_mouse_event: Option<Value>,
     mouse_pressed_target: Option<usize>,
+    drag_candidate: bool,
+    drag_active: bool,
     history_entries: Vec<SessionHistoryEntry>,
     history_index: usize,
     document_generation: u64,
@@ -748,6 +750,8 @@ impl CdpSession {
             last_key_event: None,
             last_mouse_event: None,
             mouse_pressed_target: None,
+            drag_candidate: false,
+            drag_active: false,
             history_entries: vec![SessionHistoryEntry {
                 url: "about:blank".to_string(),
                 state_json: "null".to_string(),
@@ -1447,6 +1451,11 @@ impl CdpSession {
             .get("buttons")
             .and_then(Value::as_u64)
             .unwrap_or(default_buttons);
+        let pointer_id = params
+            .get("pointerId")
+            .and_then(Value::as_u64)
+            .filter(|id| *id > 0)
+            .unwrap_or(1);
         let (scroll_x, scroll_y) = self.runtime.window_scroll_offset();
         let mut init = json!({
             "clientX": x, "clientY": y,
@@ -1460,6 +1469,7 @@ impl CdpSession {
             "metaKey": modifiers & 4 != 0,
             "shiftKey": modifiers & 8 != 0,
             "detail": params.get("clickCount").and_then(Value::as_u64).unwrap_or(0),
+            "pointerId": pointer_id,
         });
         if dom_type == "wheel" {
             init["deltaX"] = json!(optional_f64(params, "deltaX", 0.0)?);
@@ -1478,17 +1488,64 @@ impl CdpSession {
             "__omoikane_dispatch_mouse_input({target_id}, {dom_type:?}, {init}, {})",
             dom_type == "mousedown"
         ))?;
+        if dom_type == "mousedown" {
+            if self.drag_active {
+                let _ = self.eval_input_bool(&format!(
+                    "__omoikane_dispatch_drag_input(0, \"cancel\", {init})"
+                ))?;
+            }
+            self.drag_active = false;
+            self.drag_candidate = if not_canceled {
+                self.eval_input_bool(&format!(
+                    "__omoikane_prepare_drag_input({target_id}, {init})"
+                ))?
+            } else {
+                false
+            };
+        }
+        if dom_type == "mousemove"
+            && buttons & button_mask(0) != 0
+            && (self.drag_candidate || self.drag_active)
+        {
+            let active = self.eval_input_bool(&format!(
+                "__omoikane_dispatch_drag_input({target_id}, \"move\", {init})"
+            ))?;
+            self.drag_active = active;
+            if active {
+                self.drag_candidate = false;
+            } else if self.drag_candidate {
+                // A canceled dragstart consumes the candidate and must not be
+                // retried on every subsequent mousemove.
+                self.drag_candidate = false;
+            }
+        }
         let mut click_default_prevented = false;
+        let mut drag_consumed = false;
         if dom_type == "mousedown" {
             self.mouse_pressed_target = target.as_ref().map(NodeHandle::identity);
         } else if dom_type == "mouseup" {
+            let was_drag = self.drag_active;
             let pressed = self.mouse_pressed_target.take();
-            if pressed.is_some() && pressed == target.as_ref().map(NodeHandle::identity) {
+            if was_drag || self.drag_candidate {
+                drag_consumed = self.eval_input_bool(&format!(
+                    "__omoikane_dispatch_drag_input({target_id}, \"end\", {init})"
+                ))? || was_drag;
+                self.drag_active = false;
+                self.drag_candidate = false;
+            }
+            if !drag_consumed
+                && pressed.is_some()
+                && pressed == target.as_ref().map(NodeHandle::identity)
+            {
                 let click_not_canceled = self.eval_input_bool(&format!(
                     "__omoikane_dispatch_mouse_input({target_id}, \"click\", {init}, false)"
                 ))?;
                 click_default_prevented = !click_not_canceled;
             }
+            let _ = self.eval_input_bool(&format!(
+                "__omoikane_release_pointer_capture({})",
+                pointer_id
+            ))?;
         }
         Ok(json!({
             "defaultPrevented": !not_canceled,
@@ -1693,6 +1750,8 @@ impl CdpSession {
 
         self.runtime = runtime;
         self.mouse_pressed_target = None;
+        self.drag_candidate = false;
+        self.drag_active = false;
         self.document_generation = self.document_generation.saturating_add(1);
         self.current_url = url.to_string();
         self.last_html = html.to_string();
@@ -1784,6 +1843,8 @@ impl CdpSession {
 
         self.runtime = runtime;
         self.mouse_pressed_target = None;
+        self.drag_candidate = false;
+        self.drag_active = false;
         self.document_generation = pending.generation;
         self.current_url = pending.url;
         self.last_html = pending.html;
@@ -4553,6 +4614,132 @@ mod tests {
         assert_eq!(
             state["result"]["value"],
             r#"{"events":["ok:mousedown","ok:mouseup","ok:click","ok:mousedown","blocked:mouseup","blocked:mousedown","blocked:mouseup","blocked:click"],"active":"ok","mouseFields":"10:10:10:10:0:1:true:true:true:true","moveFields":"0:0:true","mouseBubble":"blocked"}"#
+        );
+    }
+
+    #[test]
+    fn mouse_input_dispatches_deterministic_drag_lifecycle_and_shared_data_transfer() {
+        let mut session = CdpSession::new().unwrap();
+        session
+            .install_document(
+                "https://example.test/",
+                r#"<html><head><style>*{margin:0}#source,#target{position:absolute;top:0;width:80px;height:40px}#source{left:0}#target{left:100px}</style></head><body>
+                    <div id="source" draggable="true">source</div><div id="target">target</div>
+                    <script>
+                      globalThis.dragEvents=[];globalThis.transfer=null;globalThis.sameTransfer=true;globalThis.clicks=0;
+                      source.addEventListener('click',()=>clicks++);
+                      source.addEventListener('dragstart',e=>{dragEvents.push('start:'+e.bubbles+':'+e.cancelable+':'+(e instanceof DragEvent));transfer=e.dataTransfer;e.dataTransfer.setData('text/plain','payload')});
+                      source.addEventListener('drag',e=>{dragEvents.push('drag');sameTransfer=sameTransfer&&e.dataTransfer===transfer});
+                      source.addEventListener('dragover',e=>{dragEvents.push('over');sameTransfer=sameTransfer&&e.dataTransfer===transfer;e.preventDefault()});
+                      source.addEventListener('drop',e=>{dragEvents.push('drop:'+e.dataTransfer.getData('text/plain'));sameTransfer=sameTransfer&&e.dataTransfer===transfer});
+                      target.addEventListener('dragenter',e=>{dragEvents.push('enter');sameTransfer=sameTransfer&&e.dataTransfer===transfer});
+                      target.addEventListener('dragleave',e=>{dragEvents.push('leave');sameTransfer=sameTransfer&&e.dataTransfer===transfer});
+                      target.addEventListener('dragover',e=>{dragEvents.push('over');sameTransfer=sameTransfer&&e.dataTransfer===transfer;e.preventDefault()});
+                      target.addEventListener('drop',e=>{dragEvents.push('drop:'+e.dataTransfer.getData('text/plain'));sameTransfer=sameTransfer&&e.dataTransfer===transfer});
+                      source.addEventListener('dragend',e=>{dragEvents.push('end:'+e.dataTransfer.getData('text/plain'));sameTransfer=sameTransfer&&e.dataTransfer===transfer});
+                    </script>
+                </body></html>"#,
+                1,
+                "null",
+            )
+            .unwrap();
+
+        session
+            .dispatch(
+                "Input.dispatchMouseEvent",
+                json!({"type":"mousePressed","x":10,"y":10,"button":"left","buttons":1}),
+            )
+            .unwrap();
+        session
+            .dispatch(
+                "Input.dispatchMouseEvent",
+                json!({"type":"mouseMoved","x":110,"y":10,"button":"none","buttons":1}),
+            )
+            .unwrap();
+        session
+            .dispatch(
+                "Input.dispatchMouseEvent",
+                json!({"type":"mouseMoved","x":110,"y":10,"button":"none","buttons":1}),
+            )
+            .unwrap();
+        session
+            .dispatch(
+                "Input.dispatchMouseEvent",
+                json!({"type":"mouseReleased","x":10,"y":10,"button":"left","buttons":0}),
+            )
+            .unwrap();
+
+        let state = session
+            .dispatch(
+                "Runtime.evaluate",
+                json!({
+                    "expression": "JSON.stringify({events:dragEvents,sameTransfer,clicks:globalThis.clicks||0})",
+                    "returnByValue": true,
+                }),
+            )
+            .unwrap();
+        assert_eq!(
+            state["result"]["value"],
+            r#"{"events":["start:true:true:true","drag","enter","over","drag","over","leave","over","drop:payload","end:payload"],"sameTransfer":true,"clicks":0}"#
+        );
+    }
+
+    #[test]
+    fn canceled_dragstart_consumes_candidate_and_keeps_click_default() {
+        let mut session = CdpSession::new().unwrap();
+        session
+            .install_document(
+                "https://example.test/",
+                r#"<html><head><style>*{margin:0}#source{position:absolute;left:0;top:0;width:80px;height:40px}</style></head><body>
+                    <div id="source" draggable="true">source</div>
+                    <script>
+                      globalThis.events=[];globalThis.clicks=0;
+                      source.addEventListener('dragstart',e=>{events.push('dragstart');e.preventDefault()});
+                      source.addEventListener('click',()=>{events.push('click');clicks++});
+                    </script>
+                </body></html>"#,
+                1,
+                "null",
+            )
+            .unwrap();
+
+        session
+            .dispatch(
+                "Input.dispatchMouseEvent",
+                json!({"type":"mousePressed","x":10,"y":10,"button":"left","buttons":1}),
+            )
+            .unwrap();
+        session
+            .dispatch(
+                "Input.dispatchMouseEvent",
+                json!({"type":"mouseMoved","x":20,"y":10,"button":"none","buttons":1}),
+            )
+            .unwrap();
+        session
+            .dispatch(
+                "Input.dispatchMouseEvent",
+                json!({"type":"mouseMoved","x":30,"y":10,"button":"none","buttons":1}),
+            )
+            .unwrap();
+        session
+            .dispatch(
+                "Input.dispatchMouseEvent",
+                json!({"type":"mouseReleased","x":10,"y":10,"button":"left","buttons":0}),
+            )
+            .unwrap();
+
+        let state = session
+            .dispatch(
+                "Runtime.evaluate",
+                json!({
+                    "expression": "JSON.stringify({events,clicks})",
+                    "returnByValue": true,
+                }),
+            )
+            .unwrap();
+        assert_eq!(
+            state["result"]["value"],
+            r#"{"events":["dragstart","click"],"clicks":1}"#
         );
     }
 

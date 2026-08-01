@@ -551,6 +551,15 @@
     }
   }
 
+  class DragEvent extends MouseEvent {
+    constructor(type, init = {}) {
+      init = init ?? {};
+      super(type, init);
+      this.dataTransfer = init.dataTransfer ?? null;
+    }
+    get [Symbol.toStringTag]() { return "DragEvent"; }
+  }
+
   class WheelEvent extends MouseEvent {
     constructor(type, init = {}) {
       init = init ?? {};
@@ -2363,6 +2372,18 @@
   class Element extends Node {
     remove() { removeChildNode.call(this); }
 
+    setPointerCapture(pointerId) {
+      setPointerCaptureTarget(this, normalizePointerId(pointerId));
+    }
+
+    releasePointerCapture(pointerId) {
+      releasePointerCaptureTarget(this, normalizePointerId(pointerId));
+    }
+
+    hasPointerCapture(pointerId) {
+      return pointerCaptureTarget(this.ownerDocument, normalizePointerId(pointerId)) === this;
+    }
+
     get slot() { return this.getAttribute("slot") || ""; }
     set slot(value) { this.setAttribute("slot", String(value)); }
 
@@ -2459,6 +2480,19 @@
 
       super(id);
       throw new TypeError("Illegal constructor");
+    }
+
+    get draggable() {
+      const value = this.getAttribute("draggable");
+      const normalized = value === null ? "auto" : value.trim().toLowerCase();
+      if (normalized === "true") return true;
+      if (normalized === "false") return false;
+      const name = String(this.localName || "").toLowerCase();
+      return name === "img" || (name === "a" && this.hasAttribute("href"));
+    }
+
+    set draggable(value) {
+      this.setAttribute("draggable", value ? "true" : "false");
     }
   }
   class HTMLHtmlElement extends HTMLElement {}
@@ -8393,7 +8427,8 @@
     "click", "dblclick", "mousedown", "mouseup", "mouseover", "mousemove",
     "mouseout", "mouseenter", "mouseleave", "submit", "reset", "change",
     "input", "focus", "blur", "keydown", "keyup", "keypress", "select",
-    "contextmenu", "wheel", "error", "abort", "slotchange", "scroll",
+    "contextmenu", "wheel", "drag", "dragstart", "dragend", "dragenter",
+    "dragleave", "dragover", "drop", "error", "abort", "slotchange", "scroll",
     "cancel", "close",
   ];
   for (const type of EVENT_HANDLER_TYPES) {
@@ -8915,6 +8950,7 @@
   globalThis.CustomEvent = CustomEvent;
   globalThis.MessageEvent = MessageEvent;
   globalThis.MouseEvent = MouseEvent;
+  globalThis.DragEvent = DragEvent;
   globalThis.WheelEvent = WheelEvent;
   globalThis.KeyboardEvent = KeyboardEvent;
   globalThis.FocusEvent = FocusEvent;
@@ -9070,8 +9106,188 @@
       element.dispatchEvent(new Event("error", { bubbles: false }));
     }
   };
+  // CDP mouse input uses pointer id 1. Keep captures scoped to their owner
+  // document so a pointer captured in an iframe cannot leak an event path into
+  // an unrelated browsing context. The native mouse bridge releases a pointer
+  // across all documents when the button is released.
+  const pointerCaptureTargets = new Map();
+  function normalizePointerId(pointerId) {
+    const value = Number(pointerId);
+    const integer = Math.trunc(value);
+    if (!Number.isFinite(value) || integer <= 0) {
+      throw new TypeError("pointerId must be a positive finite number");
+    }
+    return integer;
+  }
+  function pointerCaptureKey(doc, pointerId) {
+    const owner = doc && doc.nodeType === 9 ? doc : doc && doc.ownerDocument;
+    const id = owner && owner.__id !== undefined ? owner.__id : __omoikane_document_id;
+    return String(id) + ":" + pointerId;
+  }
+  function pointerCaptureTarget(doc, pointerId) {
+    const key = pointerCaptureKey(doc, pointerId);
+    const target = pointerCaptureTargets.get(key);
+    if (target && target.isConnected) {
+      return target;
+    }
+    if (target) pointerCaptureTargets.delete(key);
+    return null;
+  }
+  function setPointerCaptureTarget(target, pointerId) {
+    if (!(target instanceof Element) || !target.isConnected) {
+      throw new DOMException("The pointer capture target is not connected.", "NotFoundError");
+    }
+    const doc = target.ownerDocument;
+    if (!doc) throw new DOMException("The pointer has no owner document.", "NotFoundError");
+    pointerCaptureTargets.set(pointerCaptureKey(doc, pointerId), target);
+  }
+  function releasePointerCaptureTarget(target, pointerId) {
+    const doc = target && target.ownerDocument;
+    const key = pointerCaptureKey(doc, pointerId);
+    if (pointerCaptureTargets.get(key) === target) pointerCaptureTargets.delete(key);
+  }
+  function capturedInputTarget(target, pointerId = 1) {
+    const doc = target && target.nodeType === 9 ? target : target && target.ownerDocument;
+    return pointerCaptureTarget(doc || document, normalizePointerId(pointerId)) || target;
+  }
+  globalThis.__omoikane_release_pointer_capture = function(pointerId = 1) {
+    const normalized = normalizePointerId(pointerId);
+    const suffix = ":" + normalized;
+    for (const key of pointerCaptureTargets.keys()) {
+      if (key.endsWith(suffix)) pointerCaptureTargets.delete(key);
+    }
+  };
+
+  function draggableAncestor(target) {
+    for (let current = target; current && current.nodeType === 1; current = current.parentNode) {
+      if (current instanceof HTMLElement && current.draggable) return current;
+    }
+    return null;
+  }
+
+  const dragInputState = {
+    candidate: null,
+    source: null,
+    dataTransfer: null,
+    currentTarget: null,
+    dropAllowed: false,
+    active: false,
+  };
+  function resetDragInputState() {
+    dragInputState.candidate = null;
+    dragInputState.source = null;
+    dragInputState.dataTransfer = null;
+    dragInputState.currentTarget = null;
+    dragInputState.dropAllowed = false;
+    dragInputState.active = false;
+  }
+  function dragEvent(type, init, dataTransfer, relatedTarget = null, cancelable = true) {
+    return new DragEvent(type, {
+      ...init,
+      bubbles: true,
+      cancelable,
+      composed: true,
+      dataTransfer,
+      relatedTarget,
+    });
+  }
+  function dragInputTarget(id, init = {}) {
+    return capturedInputTarget(wrapNode(id) || document, init.pointerId || 1) || document;
+  }
+  function updateDragInputTarget(target, init) {
+    const changed = target !== dragInputState.currentTarget;
+    if (changed) {
+      const previous = dragInputState.currentTarget;
+      if (previous) {
+        previous.dispatchEvent(dragEvent(
+          "dragleave", init, dragInputState.dataTransfer, target, false,
+        ));
+      }
+      dragInputState.currentTarget = target;
+      target.dispatchEvent(dragEvent(
+        "dragenter", init, dragInputState.dataTransfer, previous,
+      ));
+      const over = target.dispatchEvent(dragEvent(
+        "dragover", init, dragInputState.dataTransfer,
+      ));
+      dragInputState.dropAllowed = !over;
+    }
+    return changed;
+  }
+  globalThis.__omoikane_prepare_drag_input = function(id, init = {}) {
+    const target = dragInputTarget(id, init);
+    const source = draggableAncestor(target);
+    resetDragInputState();
+    dragInputState.candidate = source;
+    return !!source;
+  };
+  globalThis.__omoikane_dispatch_drag_input = function(id, phase, init = {}) {
+    if (phase === "cancel") {
+      if (dragInputState.active && dragInputState.source) {
+        dragInputState.source.dispatchEvent(dragEvent(
+          "dragend", init, dragInputState.dataTransfer, null, false,
+        ));
+      }
+      const wasActive = dragInputState.active;
+      resetDragInputState();
+      return wasActive;
+    }
+    if (phase === "move") {
+      if (!dragInputState.active) {
+        const source = dragInputState.candidate;
+        if (!source) return false;
+        const dataTransfer = new DataTransfer();
+        const start = source.dispatchEvent(dragEvent("dragstart", init, dataTransfer));
+        if (!start) {
+          resetDragInputState();
+          return false;
+        }
+        dragInputState.source = source;
+        dragInputState.dataTransfer = dataTransfer;
+        dragInputState.active = true;
+        dragInputState.candidate = null;
+      }
+      const target = dragInputTarget(id, init);
+      dragInputState.source.dispatchEvent(dragEvent(
+        "drag", init, dragInputState.dataTransfer, target,
+      ));
+      const targetChanged = updateDragInputTarget(target, init);
+      if (!targetChanged) {
+        const over = target.dispatchEvent(dragEvent(
+          "dragover", init, dragInputState.dataTransfer,
+        ));
+        dragInputState.dropAllowed = !over;
+      }
+      return true;
+    }
+    if (phase === "end") {
+      if (!dragInputState.active) {
+        resetDragInputState();
+        return false;
+      }
+      const source = dragInputState.source;
+      const dataTransfer = dragInputState.dataTransfer;
+      const finalTarget = dragInputTarget(id, init);
+      const targetChanged = updateDragInputTarget(finalTarget, init);
+      const target = dragInputState.currentTarget;
+      if (target && !targetChanged) {
+        const over = target.dispatchEvent(dragEvent(
+          "dragover", init, dataTransfer,
+        ));
+        dragInputState.dropAllowed = !over;
+      }
+      if (target && dragInputState.dropAllowed) {
+        target.dispatchEvent(dragEvent("drop", init, dataTransfer));
+      }
+      source.dispatchEvent(dragEvent("dragend", init, dataTransfer, null, false));
+      resetDragInputState();
+      return true;
+    }
+    return false;
+  };
+
   globalThis.__omoikane_dispatch_mouse_input = function(id, type, init, focusTarget) {
-    const target = wrapNode(id) || document;
+    const target = capturedInputTarget(wrapNode(id) || document, init && init.pointerId || 1) || document;
     const notCanceled = target.dispatchEvent(new MouseEvent(type, {
       ...init, bubbles: true, cancelable: true, composed: true,
     }));
