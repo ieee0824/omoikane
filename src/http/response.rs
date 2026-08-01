@@ -142,6 +142,15 @@ pub enum HttpParseError {
     MissingLocation,
 }
 
+impl HttpParseError {
+    /// Returns whether the transport stopped waiting because its configured
+    /// socket timeout elapsed.  Higher-level consumers such as XHR need to
+    /// distinguish this terminal condition from an ordinary network error.
+    pub fn is_timeout(&self) -> bool {
+        matches!(self, Self::Io(error) if matches!(error.kind(), io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock))
+    }
+}
+
 impl fmt::Display for HttpParseError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
