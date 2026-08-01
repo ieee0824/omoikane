@@ -9955,75 +9955,79 @@
   // dedicated shared-worker runtime.  The native bridge carries only the
   // context-independent structured-clone wire; this realm owns the endpoint
   // object and its started/queued state.
-  const sharedWorkerPortConstructionToken = {};
-  class SharedWorkerPort extends MessagePort {
-    constructor(token, id) {
-      if (token !== sharedWorkerPortConstructionToken) throw new TypeError("Illegal constructor");
-      super(messagePortConstructionToken);
-      this._id = String(id);
-      this._started = false;
-      this._closed = false;
-      this._pendingMessages = [];
-      this._onmessage = null;
-      this._onmessageerror = null;
-      this._origin = (() => {
-        try { return globalThis.location && String(globalThis.location.origin || ""); } catch (_) { return ""; }
-      })();
-    }
-    postMessage(message, options = undefined) {
-      if (this._closed) throw new DOMException("The SharedWorker port is closed.", "InvalidStateError");
-      const wire = __omoikane_encode_worker_message(message, options);
-      __omoikane_shared_worker_port_post(this._id, wire);
-    }
-    start() {
-      if (this._closed || this._started) return;
-      this._started = true;
-      for (const data of this._pendingMessages.splice(0)) {
+  const createSharedWorkerPort = (() => {
+    // Keep the concrete endpoint private.  SharedWorker callers obtain it via
+    // `worker.port` / connect events, while its MessagePort superclass still
+    // provides the expected `instanceof MessagePort` behavior.
+    const sharedWorkerPortConstructionToken = {};
+    class SharedWorkerPort extends MessagePort {
+      constructor(token, id) {
+        if (token !== sharedWorkerPortConstructionToken) throw new TypeError("Illegal constructor");
+        super(messagePortConstructionToken);
+        this._id = String(id);
+        this._started = false;
+        this._closed = false;
+        this._pendingMessages = [];
+        this._onmessage = null;
+        this._onmessageerror = null;
+        this._origin = (() => {
+          try { return globalThis.location && String(globalThis.location.origin || ""); } catch (_) { return ""; }
+        })();
+      }
+      postMessage(message, options = undefined) {
+        if (this._closed) throw new DOMException("The SharedWorker port is closed.", "InvalidStateError");
+        const wire = __omoikane_encode_worker_message(message, options);
+        __omoikane_shared_worker_port_post(this._id, wire);
+      }
+      start() {
+        if (this._closed || this._started) return;
+        this._started = true;
+        for (const data of this._pendingMessages.splice(0)) {
+          __omoikane_enqueue_posted_message(this, data);
+        }
+      }
+      close() {
+        if (this._closed) return;
+        this._closed = true;
+        this._pendingMessages.length = 0;
+        __omoikane_shared_worker_port_close(this._id);
+      }
+      _queueMessage(data) {
+        if (this._closed) return;
+        if (!this._started) { this._pendingMessages.push(data); return; }
         __omoikane_enqueue_posted_message(this, data);
       }
-    }
-    close() {
-      if (this._closed) return;
-      this._closed = true;
-      this._pendingMessages.length = 0;
-      __omoikane_shared_worker_port_close(this._id);
-    }
-    _queueMessage(data) {
-      if (this._closed) return;
-      if (!this._started) { this._pendingMessages.push(data); return; }
-      __omoikane_enqueue_posted_message(this, data);
-    }
-    _acceptMessage(data) {
-      if (this._closed) return;
-      this.dispatchEvent(new MessageEvent("message", {
-        data,
-        origin: this._origin,
-        source: null,
-        ports: [],
-      }));
-    }
-    get onmessage() { return this._onmessage; }
-    set onmessage(callback) {
-      if (this._onmessage) this.removeEventListener("message", this._onmessage);
-      this._onmessage = typeof callback === "function" ? callback : null;
-      if (this._onmessage) {
-        this.addEventListener("message", this._onmessage);
-        this.start();
+      _acceptMessage(data) {
+        if (this._closed) return;
+        this.dispatchEvent(new MessageEvent("message", {
+          data,
+          origin: this._origin,
+          source: null,
+          ports: [],
+        }));
       }
+      get onmessage() { return this._onmessage; }
+      set onmessage(callback) {
+        if (this._onmessage) this.removeEventListener("message", this._onmessage);
+        this._onmessage = typeof callback === "function" ? callback : null;
+        if (this._onmessage) {
+          this.addEventListener("message", this._onmessage);
+          this.start();
+        }
+      }
+      get onmessageerror() { return this._onmessageerror; }
+      set onmessageerror(callback) {
+        if (this._onmessageerror) this.removeEventListener("messageerror", this._onmessageerror);
+        this._onmessageerror = typeof callback === "function" ? callback : null;
+        if (this._onmessageerror) this.addEventListener("messageerror", this._onmessageerror);
+      }
+      get [Symbol.toStringTag]() { return "MessagePort"; }
     }
-    get onmessageerror() { return this._onmessageerror; }
-    set onmessageerror(callback) {
-      if (this._onmessageerror) this.removeEventListener("messageerror", this._onmessageerror);
-      this._onmessageerror = typeof callback === "function" ? callback : null;
-      if (this._onmessageerror) this.addEventListener("messageerror", this._onmessageerror);
-    }
-    get [Symbol.toStringTag]() { return "MessagePort"; }
-  }
-  function createSharedWorkerPort(id) {
-    return new SharedWorkerPort(sharedWorkerPortConstructionToken, id);
-  }
+    return function createSharedWorkerPort(id) {
+      return new SharedWorkerPort(sharedWorkerPortConstructionToken, id);
+    };
+  })();
   globalThis.MessagePort = MessagePort;
-  globalThis.SharedWorkerPort = SharedWorkerPort;
 
   class SharedWorker extends EventTarget {
     constructor(url, options = undefined) {
@@ -10041,7 +10045,7 @@
       this.__closed = false;
       this.__id = String(__omoikane_shared_worker_connect(requested, name));
       this.port = createSharedWorkerPort(this.__id);
-      __omoikane_shared_worker_bind_port(this.__id, this.port);
+      __omoikane_shared_worker_bind_port(this.__id, this.port, this);
       this.onerror = null;
     }
     get [Symbol.toStringTag]() { return "SharedWorker"; }

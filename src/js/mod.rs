@@ -989,6 +989,11 @@ struct SharedWorkerConnection {
     owner_port: Option<JsValue>,
     owner_origin: String,
     pending_to_owner: VecDeque<String>,
+    /// A startup failure is delivered once the page binds its `SharedWorker`
+    /// object.  Keeping it on the connection lets every caller observe the
+    /// same failed shared runtime without exposing a native error directly
+    /// from the constructor.
+    startup_error: Option<String>,
     closed: bool,
 }
 
@@ -998,6 +1003,7 @@ struct SharedWorkerConnection {
 struct SharedWorkerRuntime {
     key: SharedWorkerKey,
     runtime: Rc<RefCell<JsRuntime>>,
+    startup_error: Option<String>,
     connections: HashMap<u64, SharedWorkerConnection>,
 }
 
@@ -5503,7 +5509,7 @@ fn register_host_bindings(
         ),
         (
             js_string!("__omoikane_shared_worker_bind_port"),
-            2,
+            3,
             NativeFunction::from_copy_closure(shared_worker_bind_port_native),
         ),
         (
@@ -8537,11 +8543,17 @@ fn shared_worker_bind_port_native(
             .with_message("SharedWorker port must be an object")
             .into());
     }
+    let owner_object = args.get(2).cloned().unwrap_or_default();
+    if !owner_object.is_object() {
+        return Err(JsNativeError::typ()
+            .with_message("SharedWorker owner must be an object")
+            .into());
+    }
     with_host_state(|state| {
         let Some(entry) = shared_worker_entry_for_connection(connection_id) else {
             return Ok(JsValue::undefined());
         };
-        let (owner_state, origin, pending) = {
+        let (owner_state, origin, pending, startup_error) = {
             let mut shared = entry.borrow_mut();
             let Some(connection) = shared.connections.get_mut(&connection_id) else {
                 return Ok(JsValue::undefined());
@@ -8558,7 +8570,8 @@ fn shared_worker_bind_port_native(
             connection.owner_port = Some(port.clone());
             let origin = connection.owner_origin.clone();
             let pending = std::mem::take(&mut connection.pending_to_owner);
-            (owner_state, origin, pending)
+            let startup_error = connection.startup_error.take();
+            (owner_state, origin, pending, startup_error)
         };
         state
             .borrow_mut()
@@ -8570,6 +8583,16 @@ fn shared_worker_bind_port_native(
                 port.clone(),
                 data,
                 origin.clone(),
+            );
+        }
+        if let Some(message) = startup_error {
+            // SharedWorker startup failures are reported asynchronously on the
+            // page-facing SharedWorker object, matching Dedicated Worker error
+            // delivery and ensuring construction never silently succeeds.
+            state.borrow_mut().event_loop.enqueue_worker_error(
+                connection_id,
+                Some(owner_object),
+                message,
             );
         }
         Ok(JsValue::undefined())
@@ -8696,6 +8719,9 @@ fn create_shared_worker_for_owner_state(
 ) -> JsResult<u64> {
     let (owner_url, base_url, storage, session_id, user_agent, origin, origin_text) = {
         let state = owner_state.borrow();
+        let origin = shared_worker_origin(&state).ok_or_else(|| {
+            JsNativeError::error().with_message("SharedWorker requires an eligible origin")
+        })?;
         (
             state
                 .base_url
@@ -8706,7 +8732,7 @@ fn create_shared_worker_for_owner_state(
             state.storage_manager.clone(),
             state.storage_session_id,
             state.navigator_user_agent.clone(),
-            shared_worker_origin(&state),
+            Some(origin),
             host_state_origin(&state),
         )
     };
@@ -8736,12 +8762,17 @@ fn create_shared_worker_for_owner_state(
         runtime.eval(&format!(
             "__omoikane_install_shared_worker_global({worker_url:?}, {shared_id:?})"
         ))?;
-        if let Some(source) = source {
-            let _ = runtime.eval(&source);
+        let startup_error = match source {
+            Some(source) => runtime.eval(&source).err().map(|error| error.to_string()),
+            None => Some(format!("failed to fetch SharedWorker script: {requested_url}")),
+        };
+        if startup_error.is_some() {
+            runtime.host_state.borrow_mut().worker_terminated = true;
         }
         let entry = Rc::new(RefCell::new(SharedWorkerRuntime {
             key,
             runtime: Rc::new(RefCell::new(runtime)),
+            startup_error,
             connections: HashMap::new(),
         }));
         SHARED_WORKER_REGISTRY.with(|registry| registry.borrow_mut().push(Rc::clone(&entry)));
@@ -8749,6 +8780,7 @@ fn create_shared_worker_for_owner_state(
     };
 
     let connection_id = next_shared_worker_connection_id();
+    let startup_error = entry.borrow().startup_error.clone();
     entry.borrow_mut().connections.insert(
         connection_id,
         SharedWorkerConnection {
@@ -8756,6 +8788,7 @@ fn create_shared_worker_for_owner_state(
             owner_port: None,
             owner_origin: origin_text,
             pending_to_owner: VecDeque::new(),
+            startup_error,
             closed: false,
         },
     );
@@ -8763,9 +8796,11 @@ fn create_shared_worker_for_owner_state(
     // The runtime is borrowed independently from the registry entry so
     // `postMessage` calls made synchronously by an onconnect handler can
     // safely look the connection up again.
-    let _ = runtime.borrow_mut().eval(&format!(
-        "__omoikane_dispatch_shared_worker_connect({connection_id:?})"
-    ));
+    if entry.borrow().startup_error.is_none() {
+        let _ = runtime.borrow_mut().eval(&format!(
+            "__omoikane_dispatch_shared_worker_connect({connection_id:?})"
+        ));
+    }
     Ok(connection_id)
 }
 
@@ -11210,6 +11245,67 @@ mod tests {
         second_runtime.run_until_idle().unwrap();
         assert_eq!(first_runtime.eval("values[0]").unwrap().as_string().unwrap().to_std_string_escaped(), "first");
         assert_eq!(second_runtime.eval("values[0]").unwrap().as_string().unwrap().to_std_string_escaped(), "second");
+    }
+
+    #[test]
+    fn shared_worker_startup_failure_is_observable_without_stopping_page() {
+        let mut runtime = JsRuntime::new().unwrap();
+        runtime
+            .eval(
+                r#"globalThis.sharedWorkerErrors = [];
+                   const source = encodeURIComponent('throw new Error("shared boom");');
+                   const worker = new SharedWorker('data:text/javascript,' + source);
+                   worker.onerror = event => sharedWorkerErrors.push(event.message);"#,
+            )
+            .unwrap();
+        runtime.run_until_idle().unwrap();
+        assert_eq!(runtime.eval("sharedWorkerErrors.length").unwrap().as_number(), Some(1.0));
+        assert!(runtime
+            .eval("sharedWorkerErrors[0].includes('shared boom')")
+            .unwrap()
+            .as_boolean()
+            .unwrap_or(false));
+        assert_eq!(runtime.eval("3 * 7").unwrap().as_number(), Some(21.0));
+    }
+
+    #[test]
+    fn shared_worker_requires_an_eligible_origin() {
+        let mut runtime = JsRuntime::new().unwrap();
+        runtime.host_state.borrow_mut().base_url = None;
+        let result = runtime
+            .eval(
+                r#"try {
+                     new SharedWorker('http://localhost/shared.js');
+                     'constructed';
+                   } catch (error) {
+                     error.name;
+                   }"#,
+            )
+            .unwrap();
+        assert_eq!(result.as_string().unwrap().to_std_string_escaped(), "Error");
+    }
+
+    #[test]
+    fn shared_worker_port_is_private_but_remains_a_message_port() {
+        let mut runtime = JsRuntime::new().unwrap();
+        runtime
+            .eval(
+                r#"globalThis.sharedPortProbe = [];
+                   const source = encodeURIComponent('onconnect = event => {}');
+                   const worker = new SharedWorker('data:text/javascript,' + source);
+                   sharedPortProbe.push(typeof SharedWorkerPort);
+                   sharedPortProbe.push(worker.port instanceof MessagePort);"#,
+            )
+            .unwrap();
+        assert_eq!(
+            runtime
+                .eval("JSON.stringify(sharedPortProbe)")
+                .unwrap()
+                .as_string()
+                .unwrap()
+                .to_std_string_escaped(),
+            r#"["undefined",true]"#
+        );
     }
 
     #[test]
