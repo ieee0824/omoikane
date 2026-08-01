@@ -9195,7 +9195,7 @@
       const previous = dragInputState.currentTarget;
       if (previous) {
         previous.dispatchEvent(dragEvent(
-          "dragleave", init, dragInputState.dataTransfer, target,
+          "dragleave", init, dragInputState.dataTransfer, target, false,
         ));
       }
       dragInputState.currentTarget = target;
