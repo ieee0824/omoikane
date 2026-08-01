@@ -7390,10 +7390,10 @@
 
     get m11() { return this.a; }
     set m11(value) { this.a = finiteSvgNumber(value); }
-    get m12() { return this.c; }
-    set m12(value) { this.c = finiteSvgNumber(value); }
-    get m21() { return this.b; }
-    set m21(value) { this.b = finiteSvgNumber(value); }
+    get m12() { return this.b; }
+    set m12(value) { this.b = finiteSvgNumber(value); }
+    get m21() { return this.c; }
+    set m21(value) { this.c = finiteSvgNumber(value); }
     get m22() { return this.d; }
     set m22(value) { this.d = finiteSvgNumber(value); }
     get m41() { return this.e; }
@@ -7705,7 +7705,8 @@
   class SVGGraphicsElement extends SVGElement {
     getBBox(options = {}) {
       const box = svgElementBBox(this);
-      if (options && options.stroke && this.getAttribute("stroke") !== "none") {
+      const stroke = this.getAttribute("stroke") || (this.style && this.style.stroke) || "";
+      if (options && options.stroke && stroke && String(stroke).toLowerCase() !== "none") {
         const width = Math.max(0, svgAttributeNumber(this, "stroke-width", 1));
         return new SVGRect(box.x - width / 2, box.y - width / 2,
           box.width + width, box.height + width);

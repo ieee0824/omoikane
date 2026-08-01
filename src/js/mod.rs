@@ -29021,6 +29021,11 @@ b</textarea></form>"#);
                 const circleBox = circle.getBBox();
                 const pathBox = path.getBBox();
                 const ctm = rect.getCTM();
+                const defaultStrokeBox = rect.getBBox({ stroke: true });
+                rect.setAttribute('stroke', 'red');
+                rect.setAttribute('stroke-width', '4');
+                const strokeBox = rect.getBBox({ stroke: true });
+                const matrix = new DOMMatrix([1, 2, 3, 4, 5, 6]);
                 const point = svg.createSVGPoint();
                 point.x = 1;
                 point.y = 2;
@@ -29041,6 +29046,8 @@ b</textarea></form>"#);
                     pathBox.x, pathBox.y, pathBox.width, pathBox.height,
                     ctm.a, ctm.d, ctm.e, ctm.f,
                     transformed.x, transformed.y,
+                    matrix.m12, matrix.m21,
+                    defaultStrokeBox.width, strokeBox.width,
                     svg.createSVGRect().width,
                     widthDescriptor.get !== undefined && widthDescriptor.set === undefined,
                     typeof SVGGraphicsElement.prototype.getBBox,
@@ -29050,7 +29057,7 @@ b</textarea></form>"#);
         );
         assert_eq!(
             actual,
-            "true|true|true|true|true|true|[object SVGRectElement]|[object SVGRect]|[object SVGPoint]|5|6|20|10|35|25|10|10|1|2|10|10|2|2|-14|-32|-12|-28|0|true|function|function"
+            "true|true|true|true|true|true|[object SVGRectElement]|[object SVGRect]|[object SVGPoint]|5|6|20|10|35|25|10|10|1|2|10|10|2|2|-14|-32|-12|-28|2|3|20|24|0|true|function|function"
         );
     }
 
