@@ -9107,8 +9107,9 @@
     }
   };
   // CDP mouse input uses pointer id 1. Keep one capture target per pointer in
-  // the JS realm so a captured pointer remains in its owning document and
-  // cannot leak an event path through an unrelated iframe or browsing context.
+  // the JS realm. A capture is only used while hit testing the same owner
+  // document, so a pointer captured in an iframe cannot leak an event path
+  // into an unrelated browsing context.
   const pointerCaptureTargets = new Map();
   function normalizePointerId(pointerId) {
     const value = Number(pointerId);
@@ -9124,8 +9125,11 @@
   function pointerCaptureTarget(doc, pointerId) {
     const key = pointerCaptureKey(doc, pointerId);
     const target = pointerCaptureTargets.get(key);
-    if (target && target.isConnected) return target;
-    pointerCaptureTargets.delete(key);
+    if (target && target.isConnected) {
+      if (!doc || target.ownerDocument === doc) return target;
+      return null;
+    }
+    if (target) pointerCaptureTargets.delete(key);
     return null;
   }
   function setPointerCaptureTarget(target, pointerId) {
