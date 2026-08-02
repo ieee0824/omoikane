@@ -28191,6 +28191,46 @@ b</textarea></form>"#);
     }
 
     #[test]
+    fn offset_parent_tracks_positioned_ancestor_and_box_visibility() {
+        let html = r#"<html><head><style>
+            * { margin: 0; }
+            #positioned { position: relative; width: 100px; height: 100px; }
+            #child { width: 20px; height: 20px; }
+            #fixed { position: fixed; width: 10px; height: 10px; }
+            #hidden { display: none; }
+        </style></head><body><div id="positioned"><div id="child"></div></div>
+          <div id="fixed"></div><div id="hidden"><div id="hidden-child"></div></div></body></html>"#;
+        let mut runtime = runtime_from_html(html);
+        let actual = eval_str(
+            &mut runtime,
+            r#"(() => {
+                const positioned = document.getElementById('positioned');
+                const child = document.getElementById('child');
+                const fixed = document.getElementById('fixed');
+                const hiddenChild = document.getElementById('hidden-child');
+                const detached = document.createElement('div');
+                const shadowHost = document.createElement('div');
+                shadowHost.style.position = 'relative';
+                document.body.appendChild(shadowHost);
+                const shadowRoot = shadowHost.attachShadow({ mode: 'open' });
+                const slot = document.createElement('slot');
+                shadowRoot.appendChild(slot);
+                const slotted = document.createElement('div');
+                shadowHost.appendChild(slotted);
+                return [
+                    child.offsetParent === positioned,
+                    fixed.offsetParent === null,
+                    hiddenChild.offsetParent === null,
+                    detached.offsetParent === null,
+                    slotted.offsetParent === shadowHost,
+                    child.offsetTop === 0 && child.offsetLeft === 0
+                ].join('|');
+            })()"#,
+        );
+        assert_eq!(actual, "true|true|true|true|true|true");
+    }
+
+    #[test]
     fn bounding_client_rect_includes_transforms_but_offset_size_does_not() {
         let html = r#"<html><head><style>
             * { margin: 0; padding: 0; }

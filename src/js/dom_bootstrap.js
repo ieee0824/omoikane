@@ -2152,7 +2152,28 @@
         this.__applyScroll(current.x + Number(xOrOptions), current.y + Number(y));
       }
     }
-    get offsetParent() { return null; }
+    get offsetParent() {
+      if (!this.isConnected || this.tagName === "BODY") return null;
+      const ownStyle = globalThis.getComputedStyle(this);
+      if (ownStyle.display === "none" || ownStyle.position === "fixed") return null;
+
+      let fallbackBody = null;
+      const composedParent = node => {
+        if (node && node.assignedSlot) return node.assignedSlot;
+        if (node && node.parentNode) return node.parentNode;
+        return node instanceof ShadowRoot ? node.host : null;
+      };
+      for (let ancestor = composedParent(this); ancestor; ancestor = composedParent(ancestor)) {
+        if (ancestor.nodeType !== 1) continue;
+        const style = globalThis.getComputedStyle(ancestor);
+        if (style.display === "none") return null;
+        const tagName = ancestor.tagName;
+        if (tagName === "BODY") fallbackBody = ancestor;
+        if (style.position !== "static" && style.position !== "") return ancestor;
+        if (tagName === "TD" || tagName === "TH" || tagName === "TABLE") return ancestor;
+      }
+      return fallbackBody;
+    }
 
     // Designates this element as its document's focused area and dispatches
     // `blur`/`focusout` on the previously focused element followed by
