@@ -1403,10 +1403,11 @@ impl CdpSession {
                 .map(|parent| parent.node_id.as_str());
             let mut nodes = vec![self.serialize_synthetic_ax_node(&target, &reason, parent_id)];
             if let Some(path) = ancestor_path {
+                let parent_ids = ax_parent_ids(&tree.root);
                 for (index, ancestor) in path.into_iter().rev().enumerate() {
-                    let parent_id = ax_parent_id(&tree.root, &ancestor.node_id);
+                    let parent_id = parent_ids.get(&ancestor.node_id);
                     let mut serialized =
-                        self.serialize_ax_node(ancestor, parent_id.as_deref(), false);
+                        self.serialize_ax_node(ancestor, parent_id.map(String::as_str), false);
                     if index == 0 {
                         let mut child_ids = serialized["childIds"]
                             .as_array()
@@ -1467,10 +1468,11 @@ impl CdpSession {
                 .map(|parent| parent.node_id.as_str());
             let mut nodes = vec![self.serialize_synthetic_ax_node(&target, &reason, parent_id)];
             if let Some(path) = ancestor_path {
+                let parent_ids = ax_parent_ids(&tree.root);
                 for (index, ancestor) in path.into_iter().rev().enumerate() {
-                    let parent_id = ax_parent_id(&tree.root, &ancestor.node_id);
+                    let parent_id = parent_ids.get(&ancestor.node_id);
                     let mut serialized =
-                        self.serialize_ax_node(ancestor, parent_id.as_deref(), false);
+                        self.serialize_ax_node(ancestor, parent_id.map(String::as_str), false);
                     if index == 0 {
                         let mut child_ids = serialized["childIds"]
                             .as_array()
@@ -2561,18 +2563,6 @@ fn collect_reachable_ax_children<'a>(
             collect_reachable_ax_children(child, output);
         }
     }
-}
-
-fn ax_parent_id(node: &AccessibilityNode, target_id: &str) -> Option<String> {
-    for child in &node.children {
-        if child.node_id == target_id {
-            return Some(node.node_id.clone());
-        }
-        if let Some(parent) = ax_parent_id(child, target_id) {
-            return Some(parent);
-        }
-    }
-    None
 }
 
 fn ax_parent_ids(root: &AccessibilityNode) -> HashMap<String, String> {

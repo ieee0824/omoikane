@@ -410,7 +410,8 @@ where
 
     fn hidden_ancestor_cause(&mut self, node: &NodeHandle) -> Option<HiddenCause> {
         let mut current = composed_parent(node);
-        let mut resolved_text_visibility = node.node_type() != NodeType::Text;
+        let check_inherited_visibility = node.node_type() == NodeType::Text;
+        let mut resolved_render_state = false;
         while let Some(ancestor) = current {
             if ancestor.node_type() == NodeType::Element {
                 if ancestor
@@ -441,16 +442,22 @@ where
                 {
                     return Some(HiddenCause::NotRendered);
                 }
-                match (self.render_state)(&ancestor) {
-                    AccessibilityRenderState::NotRendered => {
-                        return Some(HiddenCause::NotRendered);
+                // The render-state resolver includes ancestor display and
+                // inherited visibility, so resolving the closest element once
+                // avoids repeating its ancestor walk at every level here.
+                if !resolved_render_state {
+                    match (self.render_state)(&ancestor) {
+                        AccessibilityRenderState::NotRendered => {
+                            return Some(HiddenCause::NotRendered);
+                        }
+                        AccessibilityRenderState::NotVisible if check_inherited_visibility => {
+                            return Some(HiddenCause::NotVisible);
+                        }
+                        AccessibilityRenderState::Rendered
+                        | AccessibilityRenderState::NotVisible => {}
                     }
-                    AccessibilityRenderState::NotVisible if !resolved_text_visibility => {
-                        return Some(HiddenCause::NotVisible);
-                    }
-                    AccessibilityRenderState::Rendered | AccessibilityRenderState::NotVisible => {}
+                    resolved_render_state = true;
                 }
-                resolved_text_visibility = true;
             }
             current = composed_parent(&ancestor);
         }
@@ -1593,15 +1600,12 @@ fn accessibility_properties(
     if role == "heading" {
         let level = node
             .get_attribute("aria-level")
-            .and_then(|level| level.parse::<f64>().ok())
-            .or_else(|| {
-                tag.strip_prefix('h')
-                    .and_then(|level| level.parse::<f64>().ok())
-            });
+            .and_then(|level| level.parse::<i64>().ok())
+            .or_else(|| tag.strip_prefix('h').and_then(|level| level.parse::<i64>().ok()));
         if let Some(level) = level {
             properties.push(AccessibilityProperty {
                 name: "level".to_string(),
-                value: AccessibilityValue::Integer(level as i64),
+                value: AccessibilityValue::Integer(level),
             });
         }
     }
@@ -1787,6 +1791,39 @@ mod tests {
             property.name == "pressed"
                 && property.value == AccessibilityValue::Tristate("mixed".to_string())
         }));
+    }
+
+    #[test]
+    fn heading_levels_require_integer_values() {
+        let tree = tree(
+            "<html><body><h2 id='implicit'>Implicit</h2>\
+             <div id='explicit' role='heading' aria-level='3'>Explicit</div>\
+             <div id='fractional' role='heading' aria-level='2.7'>Invalid</div>\
+             </body></html>",
+        );
+        let nodes = tree.nodes_preorder();
+        let by_id = |id: &str| {
+            nodes
+                .iter()
+                .copied()
+                .find(|node| node.dom_node.get_attribute("id").as_deref() == Some(id))
+                .unwrap()
+        };
+        let has_level = |node: &AccessibilityNode, level| {
+            node.properties.iter().any(|property| {
+                property.name == "level"
+                    && property.value == AccessibilityValue::Integer(level)
+            })
+        };
+
+        assert!(has_level(by_id("implicit"), 2));
+        assert!(has_level(by_id("explicit"), 3));
+        assert!(
+            by_id("fractional")
+                .properties
+                .iter()
+                .all(|property| property.name != "level")
+        );
     }
 
     #[test]
