@@ -7787,6 +7787,18 @@
     };
   }
 
+  function svgTextRelativeTransform(element, owner) {
+    const path = [];
+    for (let current = element; current && current !== owner; current = current.parentNode) {
+      if (current.nodeType === 1 && current.namespaceURI === SVG_NAMESPACE) path.push(current);
+    }
+    let matrix = new DOMMatrix();
+    for (let index = path.length - 1; index >= 0; index -= 1) {
+      matrix = matrix.multiply(svgTransformMatrix(path[index].getAttribute("transform") || ""));
+    }
+    return matrix;
+  }
+
   function svgTextLayout(element) {
     const records = [];
     if (!element || element.nodeType !== 1) return records;
@@ -7821,9 +7833,17 @@
       if (found) {
         const length = String(element.textContent || "").length;
         const sliced = allRecords.slice(offset, offset + length);
-        const transform = element.getAttribute("transform");
-        if (!transform) return sliced;
-        const inverse = svgTransformMatrix(transform).inverse();
+        const relative = svgTextRelativeTransform(element, owner);
+        if (relative.isIdentity) return sliced;
+        let inverse;
+        try {
+          inverse = relative.inverse();
+        } catch (_) {
+          // A singular SVG transform has no local coordinate system. Keep the
+          // owning text's records usable instead of making geometry queries
+          // throw merely because a transform cannot be inverted.
+          return sliced;
+        }
         return sliced.map(record => {
           const start = inverse.transformPoint(record.start);
           const end = inverse.transformPoint(record.end);

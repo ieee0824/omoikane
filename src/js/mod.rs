@@ -29289,6 +29289,21 @@ b</textarea></form>"#);
                 const box = text.getBBox();
                 const spanStart = span.getStartPositionOfChar(0);
                 const spanBox = span.getBBox();
+                const group = document.createElementNS(ns, 'g');
+                group.setAttribute('transform', 'translate(7 4)');
+                const deep = document.createElementNS(ns, 'tspan');
+                deep.setAttribute('transform', 'scale(2)');
+                deep.appendChild(document.createTextNode('D'));
+                group.appendChild(deep);
+                text.appendChild(group);
+                const deepStart = deep.getStartPositionOfChar(0);
+                const deepBox = deep.getBBox();
+                const singular = document.createElementNS(ns, 'tspan');
+                singular.setAttribute('transform', 'scale(0)');
+                singular.appendChild(document.createTextNode('E'));
+                text.appendChild(singular);
+                let singularSafe = true;
+                try { singular.getBBox(); } catch (_) { singularSafe = false; }
                 const round = value => Math.round(value * 100) / 100;
                 return [
                     text.getNumberOfChars(),
@@ -29306,12 +29321,15 @@ b</textarea></form>"#);
                     span instanceof SVGTSpanElement,
                     round(spanStart.x), round(spanStart.y),
                     round(spanBox.x), round(spanBox.y),
+                    round(deepStart.x), round(deepStart.y),
+                    round(deepBox.x), round(deepBox.y),
+                    singularSafe,
                 ].join('|');
             })()"#,
         );
         assert_eq!(
             actual,
-            "3|18|12|29|23|35|23|29|15|6|10|10|12|25|13|true|true|true|true|true|true|true|24|20|24|12"
+            "5|30|12|29|23|35|23|29|15|6|10|10|12|25|13|true|true|true|true|true|true|true|24|20|24|12|30|20|30|12|true"
         );
     }
 
