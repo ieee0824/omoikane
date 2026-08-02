@@ -1,0 +1,52 @@
+{
+  "schema_version": 1,
+  "boa_revision": "1674beed49e671b991d092a9c4448fd019c275f5",
+  "benchmark_source": "tests/js_benchmark/shapes.js",
+  "benchmark_workloads": [
+    {"id": "arith", "requires": ["parser", "bytecode", "numeric-ops"]},
+    {"id": "prop-mono", "requires": ["objects", "shapes", "mono-ic"]},
+    {"id": "prop-mega", "requires": ["objects", "shapes", "ic-miss"]},
+    {"id": "call", "requires": ["functions", "call-frame"]},
+    {"id": "closure-alloc", "requires": ["closures", "allocation", "gc"]},
+    {"id": "object-alloc", "requires": ["objects", "allocation", "gc"]},
+    {"id": "string-concat", "requires": ["strings", "allocation"]},
+    {"id": "array", "requires": ["arrays", "allocation", "gc"]},
+    {"id": "primitive-string-property", "requires": ["primitive-property"]},
+    {"id": "primitive-string-method", "requires": ["primitive-property", "call"]},
+    {"id": "proto-method", "requires": ["prototype-chain", "mono-ic"]}
+  ],
+  "embedding_surfaces": [
+    {
+      "id": "script-evaluation",
+      "source": "src/js/mod.rs",
+      "symbols": ["JsRuntime::eval", "JsRuntime::eval_async", "JsRuntime::run_jobs"]
+    },
+    {
+      "id": "host-rooting",
+      "source": "src/js/mod.rs",
+      "symbols": ["HostState", "RootProvider", "Trace", "JsRuntime::Drop"]
+    },
+    {
+      "id": "module-and-host-suspension",
+      "source": "src/js/mod.rs",
+      "symbols": ["ModuleLoader", "NativeCallSuspension", "NativeCallContinuation", "AsyncContext"]
+    },
+    {
+      "id": "dom-and-web-api-bootstrap",
+      "source": "src/js/dom_bootstrap.js",
+      "symbols": ["DOM_BOOTSTRAP", "register_host_bindings"]
+    },
+    {
+      "id": "workers-and-realms",
+      "source": "src/js/mod.rs",
+      "symbols": ["WorkerRuntime", "SharedWorkerRuntime", "WorkletRuntimeHandle"]
+    }
+  ],
+  "verification": [
+    "tests/jit_gate1.rs",
+    "tests/boa_inline_cache.rs",
+    "tests/js_benchmark.rs",
+    "tests/wpt_smoke.rs",
+    "tests/acid3_harness.rs"
+  ]
+}
