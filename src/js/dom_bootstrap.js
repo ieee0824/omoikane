@@ -48,7 +48,9 @@
   // must not depend on page-mutable constructors or prototypes.
   const wrapperNodeIds = new WeakMap();
   const wrapperLocalNames = new WeakMap();
-  const ownerDocuments = new WeakMap();
+  // Keep private wrapper metadata primitive-only. Retaining ordinary wrapper
+  // objects as WeakMap values can cross Boa's generational-GC shape edges.
+  const ownerDocumentIds = new WeakMap();
   const canonicalElementWrappers = new WeakSet();
   const canonicalHtmlElementWrappers = new WeakSet();
   const canonicalHtmlSlotWrappers = new WeakSet();
@@ -56,8 +58,8 @@
   const setWrapperNodeId = Function.prototype.call.bind(WeakMap.prototype.set);
   const getWrapperLocalName = Function.prototype.call.bind(WeakMap.prototype.get);
   const setWrapperLocalName = Function.prototype.call.bind(WeakMap.prototype.set);
-  const getOwnerDocument = Function.prototype.call.bind(WeakMap.prototype.get);
-  const setOwnerDocument = Function.prototype.call.bind(WeakMap.prototype.set);
+  const getOwnerDocumentId = Function.prototype.call.bind(WeakMap.prototype.get);
+  const setOwnerDocumentId = Function.prototype.call.bind(WeakMap.prototype.set);
   const addCanonicalElementWrapper = Function.prototype.call.bind(WeakSet.prototype.add);
   const hasCanonicalElementWrapper = Function.prototype.call.bind(WeakSet.prototype.has);
   const deleteCanonicalElementWrapper = Function.prototype.call.bind(WeakSet.prototype.delete);
@@ -335,7 +337,8 @@
     if (__omoikane_node_type(id) === 9) return null;
     const rootId = __omoikane_owner_document(id);
     if (rootId !== null && rootId !== undefined) return wrapNode(rootId);
-    return getOwnerDocument(ownerDocuments, node) || globalThis.document;
+    const fallbackId = getOwnerDocumentId(ownerDocumentIds, node);
+    return fallbackId === undefined ? globalThis.document : wrapNode(fallbackId);
   }
 
   // Stamp `node` and its shadow-including subtree with `doc`. Native ids keep
@@ -345,7 +348,8 @@
     if (!node) return;
     const id = internalNodeId(node);
     if (id === undefined) return;
-    setOwnerDocument(ownerDocuments, node, doc);
+    const docId = internalNodeId(doc);
+    if (docId !== undefined) setOwnerDocumentId(ownerDocumentIds, node, docId);
     if (__omoikane_node_type(id) === 1) {
       if (hasCanonicalElementWrapper(canonicalHtmlElementWrappers, node) &&
           internalNodeLocalName(node) === "template") {
@@ -3993,7 +3997,10 @@
     // detached (before it is inserted into any tree). Once the node is inserted,
     // its tree root wins (see the ownerDocument getter), matching DOM adoption.
     __own(node) {
-      if (node) setOwnerDocument(ownerDocuments, node, this);
+      if (node) {
+        const docId = internalNodeId(this);
+        if (docId !== undefined) setOwnerDocumentId(ownerDocumentIds, node, docId);
+      }
       return node;
     }
 
