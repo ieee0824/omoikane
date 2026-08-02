@@ -1164,6 +1164,86 @@ fn validate_declaration(name: &str, value: &Value) -> DeclarationValidation {
             _ => DeclarationValidation::Invalid,
         };
     }
+    if name.eq_ignore_ascii_case("transform-style") {
+        return match value {
+            Value::Keyword(keyword) => {
+                let lower = keyword.to_ascii_lowercase();
+                if is_css_wide_keyword(&lower)
+                    || matches!(lower.as_str(), "flat" | "preserve-3d")
+                {
+                    DeclarationValidation::Valid(ComputedValue::Keyword(lower))
+                } else {
+                    DeclarationValidation::Invalid
+                }
+            }
+            _ => DeclarationValidation::Invalid,
+        };
+    }
+    if name.eq_ignore_ascii_case("backface-visibility") {
+        return match value {
+            Value::Keyword(keyword) => {
+                let lower = keyword.to_ascii_lowercase();
+                if is_css_wide_keyword(&lower)
+                    || matches!(lower.as_str(), "visible" | "hidden")
+                {
+                    DeclarationValidation::Valid(ComputedValue::Keyword(lower))
+                } else {
+                    DeclarationValidation::Invalid
+                }
+            }
+            _ => DeclarationValidation::Invalid,
+        };
+    }
+    if name.eq_ignore_ascii_case("mix-blend-mode") {
+        return match value {
+            Value::Keyword(keyword) => {
+                let lower = keyword.to_ascii_lowercase();
+                if is_css_wide_keyword(&lower)
+                    || matches!(
+                        lower.as_str(),
+                        "normal"
+                            | "multiply"
+                            | "screen"
+                            | "overlay"
+                            | "darken"
+                            | "lighten"
+                            | "color-dodge"
+                            | "color-burn"
+                            | "hard-light"
+                            | "soft-light"
+                            | "difference"
+                            | "exclusion"
+                            | "hue"
+                            | "saturation"
+                            | "color"
+                            | "luminosity"
+                            | "plus-darker"
+                            | "plus-lighter"
+                    )
+                {
+                    DeclarationValidation::Valid(ComputedValue::Keyword(lower))
+                } else {
+                    DeclarationValidation::Invalid
+                }
+            }
+            _ => DeclarationValidation::Invalid,
+        };
+    }
+    if name.eq_ignore_ascii_case("isolation") {
+        return match value {
+            Value::Keyword(keyword) => {
+                let lower = keyword.to_ascii_lowercase();
+                if is_css_wide_keyword(&lower)
+                    || matches!(lower.as_str(), "auto" | "isolate")
+                {
+                    DeclarationValidation::Valid(ComputedValue::Keyword(lower))
+                } else {
+                    DeclarationValidation::Invalid
+                }
+            }
+            _ => DeclarationValidation::Invalid,
+        };
+    }
     if matches!(
         name.to_ascii_lowercase().as_str(),
         "background-origin" | "background-clip"
@@ -3445,6 +3525,7 @@ pub(super) fn is_supported_property(name: &str) -> bool {
             | "background-repeat"
             | "background-size"
             | "backdrop-filter"
+            | "backface-visibility"
             | "border-bottom-color"
             | "border-bottom-style"
             | "border-bottom-width"
@@ -3547,8 +3628,10 @@ pub(super) fn is_supported_property(name: &str) -> bool {
             | "pointer-events"
             | "right"
             | "row-gap"
+            | "mix-blend-mode"
             | "transform"
             | "transform-origin"
+            | "transform-style"
             | "transition"
             | "transition-property"
             | "transition-duration"
@@ -3572,6 +3655,7 @@ pub(super) fn is_supported_property(name: &str) -> bool {
             | "z-index"
             | "box-shadow"
             | "opacity"
+            | "isolation"
             | "list-style-type"
             | "list-style-position"
             | "aspect-ratio"
@@ -5413,6 +5497,18 @@ fn apply_initial_values(properties: &mut BTreeMap<String, ComputedValue>) {
         .entry("perspective-origin".to_string())
         .or_insert_with(|| ComputedValue::Keyword("50% 50%".to_string()));
     properties
+        .entry("transform-style".to_string())
+        .or_insert_with(|| ComputedValue::Keyword("flat".to_string()));
+    properties
+        .entry("backface-visibility".to_string())
+        .or_insert_with(|| ComputedValue::Keyword("visible".to_string()));
+    properties
+        .entry("mix-blend-mode".to_string())
+        .or_insert_with(|| ComputedValue::Keyword("normal".to_string()));
+    properties
+        .entry("isolation".to_string())
+        .or_insert_with(|| ComputedValue::Keyword("auto".to_string()));
+    properties
         .entry("transition-property".to_string())
         .or_insert_with(|| ComputedValue::Keyword("all".to_string()));
     properties
@@ -5488,6 +5584,10 @@ fn resolve_non_inherited_css_wide_keywords(properties: &mut BTreeMap<String, Com
         "perspective-origin",
         "transform",
         "transform-origin",
+        "transform-style",
+        "backface-visibility",
+        "mix-blend-mode",
+        "isolation",
         "transition-property",
         "transition-duration",
         "transition-timing-function",

@@ -42,10 +42,11 @@
   globalThis.parent = globalThis;
   globalThis.top = globalThis;
   const cache = new Map();
-  const validatesMaskOrClip = new Set([
+  const validatesSpecialStyleProperties = new Set([
     "clip-path", "-webkit-clip-path", "mask", "-webkit-mask",
     "mask-image", "-webkit-mask-image", "mask-mode", "-webkit-mask-mode",
     "mask-composite", "-webkit-mask-composite",
+    "transform-style", "backface-visibility", "mix-blend-mode", "isolation",
   ]);
   const customElementConstructionStack = [];
   const customElementDefinitionByConstructor = new Map();
@@ -1445,7 +1446,7 @@
       // getValue/getPriority.
       const setValue = (kebab, value, priority) => {
         value = String(value);
-        if (kebab === "transition" || kebab.startsWith("transition-") || validatesMaskOrClip.has(kebab)) {
+        if (kebab === "transition" || kebab.startsWith("transition-") || validatesSpecialStyleProperties.has(kebab)) {
           const normalized = __omoikane_normalize_style_value(kebab, value);
           if (normalized === null) return;
           value = normalized;
