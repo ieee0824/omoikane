@@ -671,15 +671,36 @@ impl NodeHandle {
             return Err(DomError::HierarchyRequest);
         }
 
-        let index = self
-            .0
-            .borrow()
-            .children
-            .iter()
-            .position(|child| child == reference_child)
-            .ok_or(DomError::ReferenceChildNotFound)?;
+        // The DOM pre-insert algorithm replaces a self-reference with the
+        // node's next sibling. More generally, detach a moving node before
+        // resolving the reference index: when the node was an earlier sibling,
+        // its removal shifts that index left. Resolving the index first would
+        // incorrectly place it after the reference child.
+        let reference_after_move = {
+            let parent = self.0.borrow();
+            let reference_index = parent
+                .children
+                .iter()
+                .position(|child| child == reference_child)
+                .ok_or(DomError::ReferenceChildNotFound)?;
+            if &new_child == reference_child {
+                parent.children.get(reference_index + 1).cloned()
+            } else {
+                Some(reference_child.clone())
+            }
+        };
 
         detach_from_parent(&new_child);
+        let index = if let Some(reference) = reference_after_move {
+            self.0
+                .borrow()
+                .children
+                .iter()
+                .position(|child| child == &reference)
+                .ok_or(DomError::ReferenceChildNotFound)?
+        } else {
+            self.0.borrow().children.len()
+        };
         new_child.0.borrow_mut().parent = Some(Rc::downgrade(&self.0));
         self.0.borrow_mut().children.insert(index, new_child);
         Ok(())
@@ -1285,6 +1306,34 @@ mod tests {
         parent.insert_before(first.clone(), &second).unwrap();
 
         assert_eq!(parent.child_nodes(), vec![first, second]);
+    }
+
+    #[test]
+    fn insert_before_reorders_an_earlier_sibling_before_the_reference() {
+        let parent = NodeHandle::element("div");
+        let moved = NodeHandle::element("a");
+        let middle = NodeHandle::element("b");
+        let reference = NodeHandle::element("c");
+        let tail = NodeHandle::element("d");
+        for child in [&moved, &middle, &reference, &tail] {
+            parent.append_child(child.clone());
+        }
+
+        parent.insert_before(moved.clone(), &reference).unwrap();
+
+        assert_eq!(
+            parent.child_nodes(),
+            vec![
+                middle.clone(),
+                moved.clone(),
+                reference.clone(),
+                tail.clone(),
+            ]
+        );
+        parent
+            .insert_before(reference.clone(), &reference)
+            .unwrap();
+        assert_eq!(parent.child_nodes(), vec![middle, moved, reference, tail]);
     }
 
     #[test]

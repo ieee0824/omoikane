@@ -33,6 +33,14 @@
       "baseline_supported": false
     },
     {
+      "id": "dom.insert-adjacent",
+      "area": "dom",
+      "description": "Element insert-adjacent methods support all four positions and text insertion",
+      "setup": "globalThis.__adjacentHost = document.createElement('div'); globalThis.__adjacentTarget = document.createElement('section'); globalThis.__adjacentTail = document.createElement('i'); __adjacentHost.appendChild(__adjacentTarget); __adjacentHost.appendChild(__adjacentTail); document.body.appendChild(__adjacentHost); globalThis.__adjacentBefore = document.createElement('b'); globalThis.__adjacentAfter = document.createElement('em'); __adjacentTarget.insertAdjacentElement('BeFoReBeGiN', __adjacentBefore); __adjacentTarget.insertAdjacentElement('AFTEREND', __adjacentAfter); __adjacentTarget.insertAdjacentText('afterbegin', 'front'); __adjacentTarget.insertAdjacentText('beforeend', 'back')",
+      "probe": "typeof Element.prototype.insertAdjacentElement === 'function' && typeof Element.prototype.insertAdjacentText === 'function' && __adjacentHost.firstChild === __adjacentBefore && __adjacentBefore.nextSibling === __adjacentTarget && __adjacentTarget.nextSibling === __adjacentAfter && __adjacentAfter.nextSibling === __adjacentTail && __adjacentTarget.textContent === 'frontback'",
+      "baseline_supported": false
+    },
+    {
       "id": "dom.node-equality",
       "area": "dom",
       "description": "Node identity and structural equality follow the DOM algorithms",

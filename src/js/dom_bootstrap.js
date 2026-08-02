@@ -31,6 +31,7 @@
   const nativeNodeLocalName = globalThis.__omoikane_node_local_name;
   const nativeNodeNamespaceURI = globalThis.__omoikane_node_namespace_uri;
   const nativeNodePrefix = globalThis.__omoikane_node_prefix;
+  const nativeParentNode = globalThis.__omoikane_parent_node;
   const nativeShadowHost = globalThis.__omoikane_shadow_host;
   const nativeDoctypePublicId = globalThis.__omoikane_doctype_public_id;
   const nativeDoctypeSystemId = globalThis.__omoikane_doctype_system_id;
@@ -64,21 +65,54 @@
   globalThis.parent = globalThis;
   globalThis.top = globalThis;
   const cache = new Map();
-  // A Node wrapper's native identity is platform state, not its script-visible
-  // `__id` expando. Keep only primitive private values here: retaining ordinary
-  // JS state objects through a map can cross Boa's generational-GC shape edges.
-  // `cache` already owns every wrapper strongly, so these reverse maps do not
-  // extend wrapper lifetime.
+  // Platform-object identity and insert-adjacent conversions must not depend on
+  // page-mutable expandos, constructors, or prototypes. `cache` already owns
+  // canonical wrappers strongly, so keep all added private state in ordinary
+  // collections with primitive values and native ids. This avoids adding Boa
+  // weak-table or object-valued GC edges.
   const canonicalNodeIds = new Map();
+  const wrapperNodeIds = canonicalNodeIds;
   const canonicalCdataNodes = new Map();
   const canonicalCharacterDataOverrides = new Map();
+  const wrapperLocalNames = new Map();
+  const ownerDocumentIds = new Map();
+  const canonicalElementIds = new Set();
+  const canonicalHtmlElementIds = new Set();
+  const canonicalHtmlSlotIds = new Set();
   const mapHas = Function.prototype.call.bind(Map.prototype.has);
   const mapGet = Function.prototype.call.bind(Map.prototype.get);
   const mapSet = Function.prototype.call.bind(Map.prototype.set);
+  const getWrapperNodeId = mapGet;
+  const setWrapperNodeId = mapSet;
+  const getWrapperLocalName = mapGet;
+  const setWrapperLocalName = mapSet;
+  const getOwnerDocumentId = mapGet;
+  const setOwnerDocumentId = mapSet;
+  const addCanonicalElementId = Function.prototype.call.bind(Set.prototype.add);
+  const hasCanonicalElementId = Function.prototype.call.bind(Set.prototype.has);
+  const intrinsicString = globalThis.String;
   const stringCharCodeAt = Function.prototype.call.bind(String.prototype.charCodeAt);
   const stringFromCharCode = String.fromCharCode;
   const hasOwnProperty = Function.prototype.call.bind(Object.prototype.hasOwnProperty);
   const IntrinsicTypeError = globalThis.TypeError;
+
+  function canonicalWrapperId(node) {
+    if ((typeof node !== "object" && typeof node !== "function") || node === null) {
+      return undefined;
+    }
+    return getWrapperNodeId(wrapperNodeIds, node);
+  }
+
+  function addCanonicalWrapperId(ids, node) {
+    const id = canonicalWrapperId(node);
+    if (id !== undefined) addCanonicalElementId(ids, id);
+  }
+
+  function hasCanonicalWrapperId(ids, node) {
+    const id = canonicalWrapperId(node);
+    return id !== undefined && hasCanonicalElementId(ids, id);
+  }
+
   const validatesSpecialStyleProperties = new Set([
     "clip-path", "-webkit-clip-path", "mask", "-webkit-mask",
     "mask-image", "-webkit-mask-image", "mask-mode", "-webkit-mask-mode",
@@ -184,10 +218,19 @@
   }
 
   function signalFallbackSlotChanges(node) {
-    for (let current = node; current; current = current.parentNode) {
-      if (current instanceof HTMLSlotElement &&
-          current.getRootNode() instanceof ShadowRoot &&
-          current.assignedNodes().length === 0) {
+    for (let current = node; current; current = internalParentNode(current)) {
+      const id = internalNodeId(current);
+      if (id === undefined || __omoikane_node_type(id) !== 1 ||
+          !hasCanonicalWrapperId(canonicalHtmlSlotIds, current)) {
+        continue;
+      }
+      let root = current;
+      let parent;
+      while ((parent = internalParentNode(root))) root = parent;
+      const rootId = internalNodeId(root);
+      if (rootId !== undefined && __omoikane_node_type(rootId) === 11 &&
+          __omoikane_shadow_host(rootId) !== null &&
+          (__omoikane_assigned_nodes(id, false) || []).length === 0) {
         queueSlotChange(current);
       }
     }
@@ -200,7 +243,10 @@
       slotAssignmentRefreshQueued = false;
       for (let index = 0; index < knownSlots.length; index += 1) {
         const node = knownSlots[index];
-        const ids = __omoikane_assigned_nodes(node.__id, false) || [];
+        if (!hasCanonicalWrapperId(canonicalHtmlSlotIds, node)) {
+          continue;
+        }
+        const ids = __omoikane_assigned_nodes(internalNodeId(node), false) || [];
         const signature = ids.join(",");
         const previous = slotAssignmentSignatures.get(node);
         slotAssignmentSignatures.set(node, signature);
@@ -210,6 +256,9 @@
     });
   }
 
+  // Share one ASCII fold between native wrapper classification and the legacy
+  // insert-adjacent position parser. Captured intrinsics keep both paths
+  // independent of page changes to String and its prototype.
   function asciiLowercase(value) {
     let result = "";
     for (let index = 0; index < value.length; index += 1) {
@@ -271,10 +320,93 @@
     } else {
       node = new interfaceType(id);
     }
-    mapSet(canonicalNodeIds, node, id);
+    setWrapperNodeId(wrapperNodeIds, node, id);
+    if (nodeType === 1) {
+      const localName = nativeNodeLocalName(id);
+      setWrapperLocalName(wrapperLocalNames, node, localName);
+      addCanonicalWrapperId(canonicalElementIds, node);
+      if (nativeNodeNamespaceURI(id) === HTML_NAMESPACE ||
+          nativeNodeIsHtmlElement(id)) {
+        addCanonicalWrapperId(canonicalHtmlElementIds, node);
+      }
+      if (interfaceType === HTMLSlotElement) {
+        addCanonicalWrapperId(canonicalHtmlSlotIds, node);
+        knownSlots.push(node);
+      }
+    }
     mapSet(cache, id, node);
-    if (interfaceType === HTMLSlotElement) knownSlots.push(node);
     return node;
+  }
+
+  function internalNodeId(node) {
+    if (!node) return undefined;
+    const id = getWrapperNodeId(wrapperNodeIds, node);
+    // Keep legacy Node operations working for wrappers constructed directly;
+    // canonical wrappers always take the private-map branch above.
+    return id === undefined ? node.__id : id;
+  }
+
+  function internalNodeType(node) {
+    const id = internalNodeId(node);
+    return id === undefined ? undefined : __omoikane_node_type(id);
+  }
+
+  function internalNodeLocalName(node) {
+    const localName = getWrapperLocalName(wrapperLocalNames, node);
+    if (localName !== undefined) return localName;
+    const id = internalNodeId(node);
+    return id === undefined ? undefined : __omoikane_node_local_name(id);
+  }
+
+  function internalParentNode(node) {
+    const id = internalNodeId(node);
+    return id === undefined ? null : wrapNode(__omoikane_parent_node(id));
+  }
+
+  function internalHostIncludingParent(node) {
+    const parent = internalParentNode(node);
+    if (parent) return parent;
+    const id = internalNodeId(node);
+    return id === undefined ? null : wrapNode(__omoikane_shadow_host(id));
+  }
+
+  function internalPreviousSibling(node) {
+    const id = internalNodeId(node);
+    return id === undefined ? null : wrapNode(__omoikane_previous_sibling(id));
+  }
+
+  function internalNextSibling(node) {
+    const id = internalNodeId(node);
+    return id === undefined ? null : wrapNode(__omoikane_next_sibling(id));
+  }
+
+  function internalChildNodes(node) {
+    const id = internalNodeId(node);
+    if (id === undefined) return [];
+    const ids = __omoikane_child_node_ids(id) || [];
+    const children = [];
+    for (let index = 0; index < ids.length; index++) {
+      children.push(wrapNode(ids[index]));
+    }
+    return children;
+  }
+
+  function internalIsConnected(node) {
+    const id = internalNodeId(node);
+    if (id === undefined) return false;
+    const ownerId = __omoikane_owner_document(id);
+    return __omoikane_node_type(id) === 9 ||
+      (ownerId !== null && ownerId !== undefined);
+  }
+
+  function internalOwnerDocument(node) {
+    const id = internalNodeId(node);
+    if (id === undefined) return globalThis.document;
+    if (__omoikane_node_type(id) === 9) return null;
+    const rootId = __omoikane_owner_document(id);
+    if (rootId !== null && rootId !== undefined) return wrapNode(rootId);
+    const fallbackId = getOwnerDocumentId(ownerDocumentIds, node);
+    return fallbackId === undefined ? globalThis.document : wrapNode(fallbackId);
   }
 
   function canonicalNodeId(node) {
@@ -418,21 +550,29 @@
       equalCanonicalNodeIds(leftId, rightId, left, right);
   }
 
-  // Stamps `node` and (for a deep subtree) every descendant with `doc` as its
-  // owning document, mirroring how `Document.create*` stamps `__ownerDoc`. Used
-  // by `cloneNode`, whose native clone carries no wrapper metadata: without this
-  // a detached clone of a sub-document node would fall through the
-  // `ownerDocument` getter to the top-level document. Wrappers are cached by id
-  // (see `wrapNode`), so the stamp persists across later `childNodes` reads.
+  // Stamp `node` and its shadow-including subtree with `doc`. Native ids keep
+  // adoption independent of page changes to wrapper prototypes, and following
+  // shadow roots ensures their detached ownerDocument remains the adopted one.
   function stampOwnerDoc(node, doc) {
-    if (!node) {
-      return;
+    if (!node) return;
+    const id = internalNodeId(node);
+    if (id === undefined) return;
+    const docId = internalNodeId(doc);
+    if (docId !== undefined) setOwnerDocumentId(ownerDocumentIds, node, docId);
+    if (__omoikane_node_type(id) === 1) {
+      if (hasCanonicalWrapperId(canonicalHtmlElementIds, node) &&
+          internalNodeLocalName(node) === "template") {
+        stampOwnerDoc(
+          wrapNode(__omoikane_template_content(id)),
+          templateContentsOwnerDocument(doc)
+        );
+      }
+      const shadowId = __omoikane_shadow_root(id);
+      if (shadowId !== null && shadowId !== undefined) {
+        stampOwnerDoc(wrapNode(shadowId), doc);
+      }
     }
-    node.__ownerDoc = doc;
-    if (node.nodeType === 1 && String(node.localName).toLowerCase() === "template") {
-      stampOwnerDoc(node.content, templateContentsOwnerDocument(doc));
-    }
-    const children = node.childNodes;
+    const children = internalChildNodes(node);
     for (let i = 0; i < children.length; i++) {
       stampOwnerDoc(children[i], doc);
     }
@@ -1245,7 +1385,9 @@
 
   function nodeDocument(node) {
     if (!node) return globalThis.document;
-    return node.nodeType === 9 ? node : (node.ownerDocument || globalThis.document);
+    return internalNodeType(node) === 9
+      ? node
+      : (internalOwnerDocument(node) || globalThis.document);
   }
 
   function nodeRoot(node) {
@@ -1255,7 +1397,9 @@
   }
 
   function isInclusiveDescendant(node, ancestor) {
-    for (let n = node; n; n = n.parentNode) if (n === ancestor) return true;
+    for (let n = node; n; n = internalParentNode(n)) {
+      if (n === ancestor) return true;
+    }
     return false;
   }
 
@@ -1273,12 +1417,92 @@
   }
 
   function notifyImplicitRemoval(node) {
-    if (!node || !node.parentNode) return;
-    const parent = node.parentNode;
-    const previousSibling = node.previousSibling;
-    const nextSibling = node.nextSibling;
+    if (!node) return;
+    const parent = internalParentNode(node);
+    if (!parent) return;
+    const previousSibling = internalPreviousSibling(node);
+    const nextSibling = internalNextSibling(node);
     preRemove(parent, node);
     queueMutation(parent, "childList", { removedNodes: [node], previousSibling, nextSibling });
+  }
+
+  // The DOM insertion algorithm is an internal operation. Resolve tree state
+  // from native ids so changing a genuine wrapper's JavaScript prototype does
+  // not make insertAdjacentElement/Text lose its platform-object identity.
+  function insertNodeBeforeInternal(parent, newNode, refNode) {
+    const parentId = internalNodeId(parent);
+    const newId = internalNodeId(newNode);
+    if (parentId === undefined || newId === undefined) {
+      throw new IntrinsicTypeError("insertBefore requires Node arguments");
+    }
+    let refId = null;
+    if (refNode !== null) {
+      refId = canonicalNodeId(refNode);
+      if (refId === undefined) {
+        throw new IntrinsicTypeError("The reference node must be a Node");
+      }
+      if (nativeParentNode(refId) !== parentId) {
+        throw new DOMException(
+          "The reference node is not a child of this node.",
+          "NotFoundError"
+        );
+      }
+    }
+    if (__omoikane_node_type(newId) !== 11) {
+      for (let ancestor = parent; ancestor; ancestor = internalHostIncludingParent(ancestor)) {
+        if (internalNodeId(ancestor) === newId) {
+          throw new DOMException(
+            "The new child element contains the parent.",
+            "HierarchyRequestError"
+          );
+        }
+      }
+    }
+
+    const childIds = __omoikane_child_node_ids(parentId) || [];
+    const previousSibling = refNode
+      ? internalPreviousSibling(refNode)
+      : (childIds.length ? wrapNode(childIds[childIds.length - 1]) : null);
+
+    if (__omoikane_node_type(newId) === 11) {
+      const children = internalChildNodes(newNode);
+      const connectedBeforeMove = [];
+      for (let index = 0; index < children.length; index++) {
+        connectedBeforeMove.push(internalIsConnected(children[index]));
+      }
+      for (const child of children) {
+        notifyImplicitRemoval(child);
+        __omoikane_insert_before(parentId, internalNodeId(child), refId);
+      }
+      for (let index = 0; index < children.length; index++) {
+        if (connectedBeforeMove[index]) disconnectCustomElementTree(children[index]);
+      }
+      upgradeInsertedCustomElements(parent, children);
+      if (children.length) {
+        queueMutation(parent, "childList", {
+          addedNodes: children,
+          previousSibling,
+          nextSibling: refNode,
+        });
+      }
+      refreshSlotAssignments();
+      signalFallbackSlotChanges(parent);
+      return newNode;
+    }
+
+    const connectedBeforeMove = internalIsConnected(newNode);
+    notifyImplicitRemoval(newNode);
+    __omoikane_insert_before(parentId, newId, refId);
+    if (connectedBeforeMove) disconnectCustomElementTree(newNode);
+    upgradeInsertedCustomElements(parent, [newNode]);
+    queueMutation(parent, "childList", {
+      addedNodes: [newNode],
+      previousSibling,
+      nextSibling: refNode,
+    });
+    refreshSlotAssignments();
+    signalFallbackSlotChanges(parent);
+    return newNode;
   }
 
   // Split a CSS declaration block only at top-level semicolons. Data URLs,
@@ -1973,39 +2197,14 @@
     }
 
     insertBefore(newNode, refNode) {
-      if (refNode !== null && refNode.parentNode !== this) {
-        throw new DOMException("The reference node is not a child of this node.", "NotFoundError");
+      if (arguments.length < 2) {
+        throw new IntrinsicTypeError("insertBefore requires 2 arguments");
       }
-      if (newNode && newNode.nodeType !== 11) {
-        this.__ensureNotAncestor(newNode);
-      }
-      if (newNode && newNode.nodeType === 11) {
-        const children = newNode.childNodes.slice();
-        const connectedBeforeMove = children.map(node => node.isConnected);
-        const previousSibling = refNode ? refNode.previousSibling : this.lastChild;
-        for (const child of children) {
-          notifyImplicitRemoval(child);
-          __omoikane_insert_before(this.__id, child.__id, refNode ? refNode.__id : null);
-        }
-        for (let i = 0; i < children.length; i++) {
-          if (connectedBeforeMove[i]) disconnectCustomElementTree(children[i]);
-        }
-        upgradeInsertedCustomElements(this, children);
-        if (children.length) queueMutation(this, "childList", { addedNodes: children, previousSibling, nextSibling: refNode });
-        refreshSlotAssignments();
-        signalFallbackSlotChanges(this);
-        return newNode;
-      }
-      const previousSibling = refNode ? refNode.previousSibling : this.lastChild;
-      const connectedBeforeMove = !!(newNode && newNode.isConnected);
-      notifyImplicitRemoval(newNode);
-      __omoikane_insert_before(this.__id, newNode.__id, refNode ? refNode.__id : null);
-      if (connectedBeforeMove) disconnectCustomElementTree(newNode);
-      upgradeInsertedCustomElements(this, [newNode]);
-      queueMutation(this, "childList", { addedNodes: [newNode], previousSibling, nextSibling: refNode });
-      refreshSlotAssignments();
-      signalFallbackSlotChanges(this);
-      return newNode;
+      return insertNodeBeforeInternal(
+        this,
+        newNode,
+        refNode === undefined ? null : refNode
+      );
     }
 
     querySelectorAll(selector) {
@@ -2029,21 +2228,7 @@
     }
 
     get ownerDocument() {
-      // A document node has no owner document.
-      if (this.nodeType === 9) {
-        return null;
-      }
-      // Prefer the document at the root of this node's tree: an attached node
-      // belongs to whichever document it currently lives in — the top-level
-      // document or an iframe sub-document — so parent and child contexts stay
-      // separated. A detached node has no document root; fall back to the
-      // document that created it (stamped by the Document.create* methods via
-      // __own), or the top-level document when nothing else is known.
-      const rootId = __omoikane_owner_document(this.__id);
-      if (rootId !== null && rootId !== undefined) {
-        return wrapNode(rootId);
-      }
-      return this.__ownerDoc || globalThis.document;
+      return internalOwnerDocument(this);
     }
 
     get nodeType() {
@@ -2761,8 +2946,111 @@
     "font-face-uri", "font-face-format", "font-face-name", "missing-glyph",
   ]);
 
+  function requireCanonicalElement(value, message) {
+    if ((typeof value !== "object" && typeof value !== "function") ||
+        value === null ||
+        !hasCanonicalWrapperId(canonicalElementIds, value)) {
+      throw new IntrinsicTypeError(message);
+    }
+    return value;
+  }
+
+  // Web IDL DOMString conversion uses ECMAScript ToString, which rejects a
+  // Symbol. Calling the public String function would instead stringify one.
+  function toDOMString(value) {
+    if (typeof value === "symbol") {
+      throw new IntrinsicTypeError("Cannot convert a Symbol value to a string");
+    }
+    return intrinsicString(value);
+  }
+
+  function elementNodeDocument(element) {
+    return internalOwnerDocument(element) || globalThis.document;
+  }
+
+  function ensureInsertAdjacentDocumentValidity(parent, node) {
+    const parentId = internalNodeId(parent);
+    const nodeId = internalNodeId(node);
+    if (__omoikane_node_type(parentId) !== 9) return;
+    const nodeType = __omoikane_node_type(nodeId);
+    const childIds = __omoikane_child_node_ids(parentId) || [];
+    let anotherElement = false;
+    for (let index = 0; index < childIds.length; index++) {
+      const id = childIds[index];
+      if (id !== nodeId && __omoikane_node_type(id) === 1) {
+        anotherElement = true;
+        break;
+      }
+    }
+    if (nodeType === 3 || anotherElement) {
+      throw new DOMException(
+        "The operation would yield an incorrect node tree.",
+        "HierarchyRequestError"
+      );
+    }
+  }
+
+  function insertAdjacent(element, where, node) {
+    const position = asciiLowercase(where);
+    switch (position) {
+      case "beforebegin": {
+        const parent = internalParentNode(element);
+        if (parent === null) return null;
+        ensureInsertAdjacentDocumentValidity(parent, node);
+        return insertNodeBeforeInternal(parent, node, element);
+      }
+      case "afterbegin": {
+        const childIds = nativeChildNodeIds(internalNodeId(element)) || [];
+        const firstChild = childIds.length > 0 ? wrapNode(childIds[0]) : null;
+        return insertNodeBeforeInternal(element, node, firstChild);
+      }
+      case "beforeend":
+        return insertNodeBeforeInternal(element, node, null);
+      case "afterend": {
+        const parent = internalParentNode(element);
+        if (parent === null) return null;
+        ensureInsertAdjacentDocumentValidity(parent, node);
+        return insertNodeBeforeInternal(parent, node, internalNextSibling(element));
+      }
+      default:
+        throw new DOMException("The provided position is not valid.", "SyntaxError");
+    }
+  }
+
   class Element extends Node {
     remove() { removeChildNode.call(this); }
+
+    insertAdjacentElement(where, element) {
+      requireCanonicalElement(
+        this,
+        "insertAdjacentElement called on an incompatible receiver"
+      );
+      if (arguments.length < 2) {
+        throw new IntrinsicTypeError("insertAdjacentElement requires 2 arguments");
+      }
+      where = toDOMString(where);
+      requireCanonicalElement(element, "insertAdjacentElement requires an Element");
+      const owner = elementNodeDocument(this);
+      const inserted = insertAdjacent(this, where, element);
+      if (inserted !== null) stampOwnerDoc(element, owner);
+      return inserted;
+    }
+
+    insertAdjacentText(where, data) {
+      requireCanonicalElement(
+        this,
+        "insertAdjacentText called on an incompatible receiver"
+      );
+      if (arguments.length < 2) {
+        throw new IntrinsicTypeError("insertAdjacentText requires 2 arguments");
+      }
+      where = toDOMString(where);
+      data = toDOMString(data);
+      const owner = elementNodeDocument(this);
+      const text = wrapNode(__omoikane_create_text_node(data));
+      stampOwnerDoc(text, owner);
+      insertAdjacent(this, where, text);
+    }
 
     setPointerCapture(pointerId) {
       setPointerCaptureTarget(this, normalizePointerId(pointerId));
@@ -3935,7 +4223,8 @@
     // its tree root wins (see the ownerDocument getter), matching DOM adoption.
     __own(node) {
       if (node) {
-        node.__ownerDoc = this;
+        const docId = internalNodeId(this);
+        if (docId !== undefined) setOwnerDocumentId(ownerDocumentIds, node, docId);
       }
       return node;
     }
@@ -8851,13 +9140,16 @@
 
   function customElementTreeWalk(root, callback) {
     if (!root) return;
-    if (root.nodeType === 1) {
+    const id = internalNodeId(root);
+    if (id === undefined) return;
+    if (__omoikane_node_type(id) === 1) {
       callback(root);
-      if (root.__shadowRootInternal) {
-        customElementTreeWalk(root.__shadowRootInternal, callback);
+      const shadowId = __omoikane_shadow_root(id);
+      if (shadowId !== null && shadowId !== undefined) {
+        customElementTreeWalk(wrapNode(shadowId), callback);
       }
     }
-    const children = root.childNodes;
+    const children = internalChildNodes(root);
     for (let i = 0; i < children.length; i++) {
       customElementTreeWalk(children[i], callback);
     }
@@ -8884,19 +9176,20 @@
   }
 
   function upgradeCustomElement(element, definition) {
-    if (!element || element.__customElementState === "custom" ||
+    const id = internalNodeId(element);
+    if (!element || id === undefined || element.__customElementState === "custom" ||
         element.__customElementState === "precustomized" ||
         element.__customElementState === "failed" ||
-        element.namespaceURI !== HTML_NAMESPACE && element.namespaceURI !== null ||
-        String(element.localName) !== definition.name) {
+        !hasCanonicalWrapperId(canonicalHtmlElementIds, element) ||
+        internalNodeLocalName(element) !== definition.name) {
       return;
     }
 
-    const wasConnected = element.isConnected;
-    const initialAttributes = (__omoikane_attribute_names(element.__id) || [])
+    const wasConnected = internalIsConnected(element);
+    const initialAttributes = (__omoikane_attribute_names(id) || [])
       .map(name => ({
         name,
-        value: __omoikane_get_attribute(element.__id, name),
+        value: __omoikane_get_attribute(id, name),
       }));
     Object.setPrototypeOf(element, definition.prototype);
     element.__customElementDefinition = definition;
@@ -8931,7 +9224,7 @@
         // The upgrade reaction is based on the element's connectivity when the
         // upgrade started. If its constructor detached it, allow a later real
         // insertion to deliver a new connected callback.
-        if (!element.isConnected) element.__customElementConnected = false;
+        if (!internalIsConnected(element)) element.__customElementConnected = false;
       }
     } catch (error) {
       element.__customElementState = "failed";
@@ -8943,21 +9236,14 @@
 
   function upgradeCustomElementTree(registry, root) {
     if (!root) return;
-    const owner = root.nodeType === 9 ? root : root.ownerDocument;
+    const owner = internalNodeType(root) === 9 ? root : internalOwnerDocument(root);
     if (owner !== registry.__document) return;
-    if (root.nodeType === 1) {
+    customElementTreeWalk(root, element => {
       const definition = registry.__definitions.get(
-        String(root.localName),
+        internalNodeLocalName(element),
       );
-      if (definition) upgradeCustomElement(root, definition);
-      if (root.__shadowRootInternal) {
-        upgradeCustomElementTree(registry, root.__shadowRootInternal);
-      }
-    }
-    const children = root.childNodes;
-    for (let i = 0; i < children.length; i++) {
-      upgradeCustomElementTree(registry, children[i]);
-    }
+      if (definition) upgradeCustomElement(element, definition);
+    });
   }
 
   function considerCustomElement(registry, element) {
@@ -8969,8 +9255,8 @@
   }
 
   function upgradeInsertedCustomElements(parent, nodes) {
-    if (!parent || !parent.isConnected) return;
-    const owner = parent.nodeType === 9 ? parent : parent.ownerDocument;
+    if (!parent || !internalIsConnected(parent)) return;
+    const owner = internalNodeType(parent) === 9 ? parent : internalOwnerDocument(parent);
     const registry = owner && customElementRegistryByDocument.get(owner);
     if (!registry) return;
     for (const node of nodes) {
@@ -8979,7 +9265,9 @@
           connectCustomElement(element);
           return;
         }
-        const definition = registry.__definitions.get(String(element.localName));
+        const definition = registry.__definitions.get(
+          internalNodeLocalName(element)
+        );
         if (definition) upgradeCustomElement(element, definition);
       });
     }

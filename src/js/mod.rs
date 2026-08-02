@@ -20161,6 +20161,486 @@ b</textarea></form>"#);
     }
 
     #[test]
+    fn insert_adjacent_element_follows_dom_positions_and_moves_existing_nodes() {
+        let mut runtime = JsRuntime::with_document(default_document()).unwrap();
+        let actual = eval_str(
+            &mut runtime,
+            r#"(() => {
+                const host = document.createElement("div");
+                const target = document.createElement("section");
+                target.id = "target";
+                const tail = document.createElement("i");
+                tail.id = "tail";
+                host.appendChild(target);
+                host.appendChild(tail);
+                document.body.appendChild(host);
+
+                const before = document.createElement("b");
+                before.id = "before";
+                const after = document.createElement("em");
+                after.id = "after";
+                const front = document.createElement("span");
+                front.id = "front";
+                const back = document.createElement("strong");
+                back.id = "back";
+
+                const returns = [
+                    target.insertAdjacentElement("BeFoReBeGiN", before) === before,
+                    target.insertAdjacentElement("AFTEREND", after) === after,
+                    target.insertAdjacentElement("afterbegin", front) === front,
+                    target.insertAdjacentElement("beforeend", back) === back
+                ];
+                const initialOuterOrder = Array.from(host.children, node => node.id).join(",");
+                const initialInnerOrder = Array.from(target.children, node => node.id).join(",");
+
+                // Moving an earlier sibling after the target exercises the
+                // pre-insert index adjustment required for same-parent moves.
+                const reordered = target.insertAdjacentElement("AfTeReNd", before);
+                const reorderedOuter = Array.from(host.children, node => node.id).join(",");
+
+                const source = document.createElement("aside");
+                const moving = document.createElement("mark");
+                source.appendChild(moving);
+                document.body.appendChild(source);
+                const sourceObserver = new MutationObserver(() => {});
+                const targetObserver = new MutationObserver(() => {});
+                sourceObserver.observe(source, { childList: true });
+                targetObserver.observe(target, { childList: true });
+                const moved = target.insertAdjacentElement("beforeend", moving);
+                const sourceRecords = sourceObserver.takeRecords();
+                const targetRecords = targetObserver.takeRecords();
+
+                const detached = document.createElement("div");
+                const detachedBefore = document.createElement("u");
+                const detachedAfter = document.createElement("u");
+                const detachedInner = document.createElement("u");
+                const detachedBeforeResult = detached.insertAdjacentElement("beforebegin", detachedBefore);
+                const detachedAfterResult = detached.insertAdjacentElement("afterend", detachedAfter);
+                const detachedInnerResult = detached.insertAdjacentElement("afterbegin", detachedInner);
+
+                const invalidCandidate = document.createElement("small");
+                let invalidPosition;
+                let invalidElement;
+                let missingArgument;
+                let invalidReceiver;
+                try { target.insertAdjacentElement("middle", invalidCandidate); }
+                catch (error) { invalidPosition = error.name; }
+                try { target.insertAdjacentElement("beforeend", document.createTextNode("x")); }
+                catch (error) { invalidElement = error.name; }
+                try { target.insertAdjacentElement("beforeend"); }
+                catch (error) { missingArgument = error.name; }
+                try { Element.prototype.insertAdjacentElement.call({}, "beforeend", invalidCandidate); }
+                catch (error) { invalidReceiver = error.name; }
+
+                return [
+                    returns.every(Boolean),
+                    initialOuterOrder === "before,target,after,tail",
+                    initialInnerOrder === "front,back",
+                    reordered === before,
+                    reorderedOuter === "target,before,after,tail",
+                    moved === moving,
+                    source.childNodes.length === 0,
+                    moving.parentNode === target,
+                    sourceRecords.length === 1 && sourceRecords[0].removedNodes[0] === moving,
+                    targetRecords.length === 1 && targetRecords[0].addedNodes[0] === moving,
+                    detachedBeforeResult === null && detachedBefore.parentNode === null,
+                    detachedAfterResult === null && detachedAfter.parentNode === null,
+                    detachedInnerResult === detachedInner && detached.firstChild === detachedInner,
+                    invalidPosition === "SyntaxError" && invalidCandidate.parentNode === null,
+                    invalidElement === "TypeError",
+                    missingArgument === "TypeError",
+                    invalidReceiver === "TypeError",
+                    Object.prototype.hasOwnProperty.call(Element.prototype, "insertAdjacentElement"),
+                    !("insertAdjacentElement" in document)
+                ].every(Boolean);
+            })()"#,
+        );
+        assert_eq!(actual, "true");
+    }
+
+    #[test]
+    fn insert_adjacent_text_uses_the_node_document_and_existing_mutation_path() {
+        let mut runtime = JsRuntime::with_document(default_document()).unwrap();
+        let actual = eval_str(
+            &mut runtime,
+            r#"(() => {
+                const host = document.createElement("div");
+                const target = document.createElement("section");
+                host.appendChild(target);
+                document.body.appendChild(host);
+                const observer = new MutationObserver(() => {});
+                observer.observe(host, { childList: true, subtree: true });
+
+                const results = [
+                    target.insertAdjacentText("AfTeRbEgIn", { toString() { return "front"; } }),
+                    target.insertAdjacentText("beforeend", 7),
+                    target.insertAdjacentText("BEFOREBEGIN", "before"),
+                    target.insertAdjacentText("afterend", "after")
+                ];
+                const records = observer.takeRecords();
+
+                let converted = false;
+                let invalidPosition;
+                let missingArgument;
+                let invalidReceiver;
+                try {
+                    target.insertAdjacentText("middle", {
+                        toString() { converted = true; return "unused"; }
+                    });
+                } catch (error) { invalidPosition = error.name; }
+                try { target.insertAdjacentText("beforeend"); }
+                catch (error) { missingArgument = error.name; }
+                try { Element.prototype.insertAdjacentText.call({}, "beforeend", "x"); }
+                catch (error) { invalidReceiver = error.name; }
+
+                const detached = document.createElement("div");
+                const detachedResult = detached.insertAdjacentText("afterend", "orphan");
+
+                const otherDocument = document.implementation.createHTMLDocument("other");
+                const otherTarget = otherDocument.createElement("p");
+                otherDocument.body.appendChild(otherTarget);
+                otherTarget.insertAdjacentText("beforeend", "owned");
+
+                return [
+                    results.every(value => value === undefined),
+                    host.textContent === "beforefront7after",
+                    target.childNodes.length === 2,
+                    target.firstChild.nodeType === 3 && target.firstChild.data === "front",
+                    target.lastChild.nodeType === 3 && target.lastChild.data === "7",
+                    records.length === 4,
+                    records.every(record => record.addedNodes.length === 1 && record.addedNodes[0].nodeType === 3),
+                    converted && invalidPosition === "SyntaxError",
+                    missingArgument === "TypeError",
+                    invalidReceiver === "TypeError",
+                    detachedResult === undefined && detached.childNodes.length === 0,
+                    otherTarget.firstChild.ownerDocument === otherDocument,
+                    Object.prototype.hasOwnProperty.call(Element.prototype, "insertAdjacentText"),
+                    !("insertAdjacentText" in document)
+                ].every(Boolean);
+            })()"#,
+        );
+        assert_eq!(actual, "true");
+    }
+
+    #[test]
+    fn insert_adjacent_enforces_webidl_brands_hierarchy_and_adoption() {
+        let mut runtime = JsRuntime::with_document(default_document()).unwrap();
+        let actual = eval_str(
+            &mut runtime,
+            r#"(() => {
+                const insertElement = Element.prototype.insertAdjacentElement;
+                const insertText = Element.prototype.insertAdjacentText;
+                const detached = document.createElement("div");
+                const candidate = document.createElement("span");
+
+                let forgedArgument;
+                let forgedReceiver;
+                const forged = Object.create(Element.prototype);
+                try { insertElement.call(detached, "beforebegin", forged); }
+                catch (error) { forgedArgument = error.name; }
+                try { insertElement.call(forged, "beforeend", candidate); }
+                catch (error) { forgedReceiver = error.name; }
+
+                const originalHasInstance = Object.getOwnPropertyDescriptor(
+                    Element, Symbol.hasInstance
+                );
+                let poisonedHasInstance;
+                try {
+                    Object.defineProperty(Element, Symbol.hasInstance, {
+                        configurable: true,
+                        value() { return true; }
+                    });
+                    insertElement.call(detached, "beforebegin", forged);
+                } catch (error) {
+                    poisonedHasInstance = error.name;
+                } finally {
+                    if (originalHasInstance) {
+                        Object.defineProperty(Element, Symbol.hasInstance, originalHasInstance);
+                    } else {
+                        delete Element[Symbol.hasInstance];
+                    }
+                }
+
+                const changedReceiver = document.createElement("div");
+                const changedChild = document.createElement("b");
+                const receiverPrototype = Object.getPrototypeOf(changedReceiver);
+                const childPrototype = Object.getPrototypeOf(changedChild);
+                const receiverId = changedReceiver.__id;
+                const childId = changedChild.__id;
+                let changedPrototypeResult;
+                try {
+                    Object.setPrototypeOf(changedReceiver, null);
+                    Object.setPrototypeOf(changedChild, null);
+                    changedReceiver.__id = -1;
+                    changedChild.__id = -1;
+                    changedPrototypeResult = insertElement.call(
+                        changedReceiver, "beforeend", changedChild
+                    );
+                } finally {
+                    changedReceiver.__id = receiverId;
+                    changedChild.__id = childId;
+                    Object.setPrototypeOf(changedReceiver, receiverPrototype);
+                    Object.setPrototypeOf(changedChild, childPrototype);
+                }
+                const changedPrototypeInsertion =
+                    changedPrototypeResult === changedChild &&
+                    changedReceiver.firstChild === changedChild;
+
+                const changedTextTarget = document.createElement("div");
+                const textTargetPrototype = Object.getPrototypeOf(changedTextTarget);
+                let changedTextResult;
+                try {
+                    Object.setPrototypeOf(changedTextTarget, null);
+                    changedTextResult = insertText.call(
+                        changedTextTarget, "afterbegin", "inside"
+                    );
+                } finally {
+                    Object.setPrototypeOf(changedTextTarget, textTargetPrototype);
+                }
+                const changedTextInsertion = changedTextResult === undefined &&
+                    changedTextTarget.textContent === "inside";
+
+                let symbolWhere;
+                let symbolData;
+                try { insertElement.call(detached, Symbol("where"), candidate); }
+                catch (error) { symbolWhere = error.name; }
+                try { insertText.call(detached, "beforebegin", Symbol("data")); }
+                catch (error) { symbolData = error.name; }
+
+                const OriginalString = globalThis.String;
+                const originalReplace = OriginalString.prototype.replace;
+                const originalToLowerCase = OriginalString.prototype.toLowerCase;
+                const originalCharCodeAt = OriginalString.prototype.charCodeAt;
+                const originalFromCharCode = OriginalString.fromCharCode;
+                const poisonedDocument = document.implementation.createHTMLDocument("poisoned");
+                const poisonedTarget = poisonedDocument.createElement("div");
+                const poisonedSubtree = new DOMParser().parseFromString(
+                    "<root><unwrapped/></root>",
+                    "application/xml"
+                ).documentElement;
+                let poisonedStringResult;
+                try {
+                    globalThis.String = function PoisonedString() { return "middle"; };
+                    OriginalString.prototype.replace = function() { return "middle"; };
+                    OriginalString.prototype.toLowerCase = function() {
+                        throw new Error("poisoned toLowerCase");
+                    };
+                    OriginalString.prototype.charCodeAt = function() { return 0; };
+                    OriginalString.fromCharCode = function() { return "?"; };
+                    poisonedStringResult = insertElement.call(
+                        poisonedTarget, "BeFoReEnD", poisonedSubtree
+                    );
+                } finally {
+                    globalThis.String = OriginalString;
+                    OriginalString.prototype.replace = originalReplace;
+                    OriginalString.prototype.toLowerCase = originalToLowerCase;
+                    OriginalString.prototype.charCodeAt = originalCharCodeAt;
+                    OriginalString.fromCharCode = originalFromCharCode;
+                }
+                poisonedSubtree.remove();
+                const poisonedDescendant = poisonedSubtree.firstChild;
+                const poisonedSubtreeOwner =
+                    poisonedSubtree.ownerDocument === poisonedDocument &&
+                    poisonedDescendant.ownerDocument === poisonedDocument;
+
+                const conversionOrder = [];
+                const converted = insertText.call(
+                    detached,
+                    { toString() { conversionOrder.push("where"); return "beforebegin"; } },
+                    { toString() { conversionOrder.push("data"); return "text"; } }
+                );
+
+                let missingReference;
+                try { detached.insertBefore(document.createElement("u")); }
+                catch (error) { missingReference = error.name; }
+                const undefinedReference = document.createElement("u");
+                const undefinedReferenceResult = detached.insertBefore(
+                    undefinedReference,
+                    undefined
+                );
+
+                const root = document.documentElement;
+                const documentChildCount = document.childNodes.length;
+                const hierarchyErrors = [];
+                for (const position of ["beforebegin", "afterend"]) {
+                    const element = document.createElement("x-hierarchy");
+                    try { insertElement.call(root, position, element); }
+                    catch (error) { hierarchyErrors.push(error.name); }
+                    try { insertText.call(root, position, "text"); }
+                    catch (error) { hierarchyErrors.push(error.name); }
+                    hierarchyErrors.push(element.parentNode === null);
+                }
+
+                const otherDocument = document.implementation.createHTMLDocument("other");
+                const adopted = document.createElement("article");
+                const adoptedChild = document.createElement("span");
+                const adoptedShadow = adopted.attachShadow({ mode: "closed" });
+                const adoptedShadowChild = document.createElement("em");
+                adoptedShadow.appendChild(adoptedShadowChild);
+                adopted.appendChild(adoptedChild);
+                otherDocument.body.insertAdjacentElement("beforeend", adopted);
+                const ownerWhileConnected = adopted.ownerDocument === otherDocument &&
+                    adoptedChild.ownerDocument === otherDocument &&
+                    adoptedShadow.ownerDocument === otherDocument &&
+                    adoptedShadowChild.ownerDocument === otherDocument;
+                adopted.remove();
+                const ownerAfterDetach = adopted.ownerDocument === otherDocument &&
+                    adoptedChild.ownerDocument === otherDocument &&
+                    adoptedShadow.ownerDocument === otherDocument &&
+                    adoptedShadowChild.ownerDocument === otherDocument;
+
+                const notAdopted = document.createElement("aside");
+                const detachedOtherTarget = otherDocument.createElement("div");
+                const detachedOtherResult = detachedOtherTarget.insertAdjacentElement(
+                    "beforebegin", notAdopted
+                );
+
+                return [
+                    forgedArgument === "TypeError",
+                    forgedReceiver === "TypeError",
+                    poisonedHasInstance === "TypeError",
+                    changedPrototypeInsertion,
+                    changedTextInsertion,
+                    symbolWhere === "TypeError",
+                    symbolData === "TypeError",
+                    poisonedStringResult === poisonedSubtree && poisonedSubtreeOwner,
+                    converted === undefined && conversionOrder.join(",") === "where,data",
+                    missingReference === "TypeError",
+                    undefinedReferenceResult === undefinedReference &&
+                        detached.lastChild === undefinedReference,
+                    hierarchyErrors.length === 6,
+                    hierarchyErrors.every(value => value === "HierarchyRequestError" || value === true),
+                    document.documentElement === root &&
+                        document.childNodes.length === documentChildCount,
+                    ownerWhileConnected,
+                    ownerAfterDetach,
+                    detachedOtherResult === null && notAdopted.ownerDocument === document
+                ].every(Boolean);
+            })()"#,
+        );
+        assert_eq!(actual, "true");
+    }
+
+    #[test]
+    fn insert_before_validates_reference_by_native_identity() {
+        let mut runtime = JsRuntime::new().unwrap();
+        let actual = eval_str(
+            &mut runtime,
+            r#"(() => {
+                const parent = document.createElement("div");
+                const reference = parent.appendChild(document.createElement("i"));
+                const inserted = document.createElement("b");
+                const aliasParent = new Node(parent.__id);
+                const aliasResult = Node.prototype.insertBefore.call(
+                    aliasParent,
+                    inserted,
+                    reference
+                );
+
+                const primitiveCandidate = document.createElement("u");
+                let primitiveError;
+                try { parent.insertBefore(primitiveCandidate, 1); }
+                catch (error) { primitiveError = error.name; }
+
+                const forgedCandidate = document.createElement("em");
+                let forgedError;
+                try {
+                    parent.insertBefore(forgedCandidate, { __id: reference.__id });
+                } catch (error) { forgedError = error.name; }
+
+                const other = document.createElement("section");
+                const foreignReference = other.appendChild(document.createElement("span"));
+                const foreignCandidate = document.createElement("strong");
+                let foreignError;
+                try { parent.insertBefore(foreignCandidate, foreignReference); }
+                catch (error) { foreignError = error.name; }
+
+                return [
+                    aliasResult === inserted,
+                    parent.firstChild === inserted && inserted.nextSibling === reference,
+                    primitiveError === "TypeError" && primitiveCandidate.parentNode === null,
+                    forgedError === "TypeError" && forgedCandidate.parentNode === null,
+                    foreignError === "NotFoundError" && foreignCandidate.parentNode === null
+                ].every(Boolean);
+            })()"#,
+        );
+        assert_eq!(actual, "true");
+    }
+
+    #[test]
+    fn fallback_slot_signaling_ignores_non_html_slot_elements() {
+        let mut runtime = JsRuntime::new().unwrap();
+        assert!(runtime
+            .eval(
+                r#"(() => {
+                  const host = document.createElement("div");
+                  const root = host.attachShadow({ mode: "open" });
+                  const svgSlot = document.createElementNS(
+                    "http://www.w3.org/2000/svg",
+                    "slot"
+                  );
+                  const htmlSlot = document.createElementNS(
+                    "http://www.w3.org/1999/xhtml",
+                    "slot"
+                  );
+                  const nullSlot = document.createElementNS(null, "slot");
+                  const xmlSlot = new DOMParser().parseFromString(
+                    "<slot/>",
+                    "application/xml"
+                  ).documentElement;
+                  const xhtmlSlot = new DOMParser().parseFromString(
+                    '<slot xmlns="http://www.w3.org/1999/xhtml"/>',
+                    "application/xhtml+xml"
+                  ).documentElement;
+                  globalThis.svgSlotChanges = 0;
+                  globalThis.htmlSlotChanges = 0;
+                  globalThis.nullSlotChanges = 0;
+                  globalThis.xmlSlotChanges = 0;
+                  globalThis.xhtmlSlotChanges = 0;
+                  svgSlot.addEventListener("slotchange", () => svgSlotChanges++);
+                  htmlSlot.addEventListener("slotchange", () => htmlSlotChanges++);
+                  nullSlot.addEventListener("slotchange", () => nullSlotChanges++);
+                  xmlSlot.addEventListener("slotchange", () => xmlSlotChanges++);
+                  xhtmlSlot.addEventListener("slotchange", () => xhtmlSlotChanges++);
+                  root.appendChild(svgSlot);
+                  root.appendChild(htmlSlot);
+                  root.appendChild(nullSlot);
+                  root.appendChild(xmlSlot);
+                  root.appendChild(xhtmlSlot);
+                  svgSlot.appendChild(document.createElement("span"));
+                  htmlSlot.appendChild(document.createElement("span"));
+                  nullSlot.appendChild(document.createElement("span"));
+                  xmlSlot.appendChild(document.createElement("span"));
+                  xhtmlSlot.appendChild(document.createElement("span"));
+                  return svgSlot.namespaceURI === "http://www.w3.org/2000/svg" &&
+                    htmlSlot instanceof HTMLSlotElement &&
+                    nullSlot instanceof Element && !(nullSlot instanceof HTMLElement) &&
+                    xmlSlot instanceof Element && !(xmlSlot instanceof HTMLElement) &&
+                    xhtmlSlot instanceof HTMLSlotElement &&
+                    svgSlotChanges === 0 && htmlSlotChanges === 0 &&
+                    nullSlotChanges === 0 && xmlSlotChanges === 0 &&
+                    xhtmlSlotChanges === 0;
+                })()"#,
+            )
+            .unwrap()
+            .as_boolean()
+            .unwrap());
+        runtime.run_jobs().unwrap();
+        assert_eq!(
+            runtime
+                .eval(concat!(
+                    "svgSlotChanges + '|' + htmlSlotChanges + '|' + ",
+                    "nullSlotChanges + '|' + xmlSlotChanges + '|' + xhtmlSlotChanges"
+                ))
+                .unwrap()
+                .to_string(&mut runtime.context)
+                .unwrap()
+                .to_std_string_escaped(),
+            "0|1|0|0|1"
+        );
+    }
+
+    #[test]
     fn dom_mixins_and_html_members_have_spec_scoped_prototypes() {
         let mut runtime = JsRuntime::with_document(default_document()).unwrap();
         let actual = eval_str(
