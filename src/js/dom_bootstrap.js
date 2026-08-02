@@ -5028,6 +5028,14 @@
       return this.__sandboxTokenList;
     }
 
+    // Keep the accessor pair in the class bytecode: the pinned Boa revision
+    // miscompiles the large bootstrap on x86_64 when this setter is omitted.
+    // The descriptor is made getter-only immediately after the class body, so
+    // web content still observes the readonly Web IDL surface.
+    set sandbox(value) {
+      this.setAttribute("sandbox", String(value));
+    }
+
     get contentDocument() {
       // Removing an iframe destroys its active nested browsing context. Keep
       // the stable WindowProxy object around, but expose no live Document until
@@ -5114,6 +5122,16 @@
       __omoikane_set_attribute(this.__id, "src", String(value));
     }
   }
+
+  const iframeSandboxDescriptor = Object.getOwnPropertyDescriptor(
+    HTMLIFrameElement.prototype,
+    "sandbox",
+  );
+  Object.defineProperty(HTMLIFrameElement.prototype, "sandbox", {
+    get: iframeSandboxDescriptor.get,
+    enumerable: iframeSandboxDescriptor.enumerable,
+    configurable: iframeSandboxDescriptor.configurable,
+  });
 
   class HTMLObjectElement extends HTMLElement {
     get contentDocument() {
