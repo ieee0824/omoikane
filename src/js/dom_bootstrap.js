@@ -3513,16 +3513,18 @@
   // `item(index)`, `namedItem(name)`, iteration, and named property access by
   // `id` (any element) or `name` (elements in COLLECTION_NAME_TAGS). Out-of-range
   // index access resolves to `null`.
-  function makeHTMLCollection(collect) {
+  function makeHTMLCollection(
+    collect,
+    allowsNamedName = el => COLLECTION_NAME_TAGS.has(el.tagName),
+    missingNamedValue = undefined,
+  ) {
     // Per spec an id match wins over a name match; both scan in tree order.
     const byName = (list, key) => {
       let named = null;
       for (const el of list) {
         if (!el.getAttribute) continue;
         if (el.getAttribute("id") === key) return el;
-        if (named === null &&
-            COLLECTION_NAME_TAGS.has(el.tagName) &&
-            el.getAttribute("name") === key) {
+        if (named === null && allowsNamedName(el) && el.getAttribute("name") === key) {
           named = el;
         }
       }
@@ -3544,6 +3546,9 @@
         // Array prototype members (Symbol.iterator, forEach, ...) and anything
         // else resolve against the live snapshot; bind methods to it.
         const value = list[prop];
+        if (typeof prop === "string" && value === undefined && missingNamedValue !== undefined) {
+          return missingNamedValue;
+        }
         return typeof value === "function" ? value.bind(list) : value;
       },
       has(_target, prop) {
@@ -5812,23 +5817,10 @@
       walk(this);
       return controls;
     }
-    // Live HTMLFormControlsCollection: index access, `.length`, and named access
-    // by control `name`/`id`. Missing named entries resolve to null.
+    // Live HTMLFormControlsCollection: index access, `.length`, `item()`,
+    // `namedItem()`, iteration, and named access by control `name`/`id`.
     get elements() {
-      const controls = this.__controls();
-      return new Proxy(controls, {
-        get(target, prop) {
-          if (prop === "length") return target.length;
-          if (typeof prop !== "string") return target[prop];
-          if (/^\d+$/.test(prop)) return target[Number(prop)] ?? null;
-          const named = target.find(
-            c => (c.name && c.name === prop) || (c.id && c.id === prop)
-          );
-          if (named) return named;
-          if (prop in target) return target[prop];
-          return null;
-        },
-      });
+      return makeHTMLCollection(() => this.__controls(), () => true, null);
     }
     get length() {
       return this.__controls().length;
