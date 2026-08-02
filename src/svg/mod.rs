@@ -228,6 +228,8 @@ fn hit_test_svg_children(
             &attrs,
             local_point,
             style.paint.stroke_width,
+            scale_x,
+            scale_y,
         );
         if geometry.is_empty() {
             continue;
@@ -264,7 +266,10 @@ fn pointer_events_accepts(
     geometry: SvgHitGeometry,
 ) -> bool {
     let fill_painted = paint.fill.is_some() && paint.opacity * paint.fill_opacity > 0.0;
-    let stroke_painted = paint.stroke.is_some() && paint.opacity * paint.stroke_opacity > 0.0;
+    let stroke_painted = paint.stroke.is_some()
+        && paint.stroke_width.is_finite()
+        && paint.stroke_width > 0.0
+        && paint.opacity * paint.stroke_opacity > 0.0;
     match value {
         "none" => false,
         "fill" => geometry.fill,
@@ -286,13 +291,34 @@ fn svg_hit_geometry(
     attrs: &BTreeMap<String, String>,
     point: (f32, f32),
     stroke_width: f32,
+    scale_x: f32,
+    scale_y: f32,
 ) -> SvgHitGeometry {
+    if !scale_x.is_finite() || !scale_y.is_finite() || scale_x <= 0.0 || scale_y <= 0.0 {
+        return SvgHitGeometry::default();
+    }
+    // Geometry is authored in the SVG user coordinate system while the
+    // rasterizer paints it after applying the viewBox-to-viewport scale.  Do
+    // the same conversion here so non-uniform viewBox scaling and the painted
+    // stroke width agree with hit testing.
+    let point = (point.0 * scale_x, point.1 * scale_y);
+    let stroke_width = if stroke_width.is_finite() && stroke_width > 0.0 {
+        stroke_width * scale_x.min(scale_y)
+    } else {
+        0.0
+    };
     match tag {
         "rect" => {
-            let x = parse_svg_coord(attribute_ref(attrs, "x")).unwrap_or(0.0);
-            let y = parse_svg_coord(attribute_ref(attrs, "y")).unwrap_or(0.0);
-            let width = parse_svg_size(attribute_ref(attrs, "width")).unwrap_or(0.0).max(0.0);
-            let height = parse_svg_size(attribute_ref(attrs, "height")).unwrap_or(0.0).max(0.0);
+            let x = parse_svg_coord(attribute_ref(attrs, "x")).unwrap_or(0.0) * scale_x;
+            let y = parse_svg_coord(attribute_ref(attrs, "y")).unwrap_or(0.0) * scale_y;
+            let width = parse_svg_size(attribute_ref(attrs, "width"))
+                .unwrap_or(0.0)
+                .max(0.0)
+                * scale_x;
+            let height = parse_svg_size(attribute_ref(attrs, "height"))
+                .unwrap_or(0.0)
+                .max(0.0)
+                * scale_y;
             if width <= 0.0 || height <= 0.0 {
                 return SvgHitGeometry::default();
             }
@@ -305,9 +331,12 @@ fn svg_hit_geometry(
             }
         }
         "circle" => {
-            let cx = parse_svg_coord(attribute_ref(attrs, "cx")).unwrap_or(0.0);
-            let cy = parse_svg_coord(attribute_ref(attrs, "cy")).unwrap_or(0.0);
-            let radius = parse_svg_size(attribute_ref(attrs, "r")).unwrap_or(0.0).abs();
+            let cx = parse_svg_coord(attribute_ref(attrs, "cx")).unwrap_or(0.0) * scale_x;
+            let cy = parse_svg_coord(attribute_ref(attrs, "cy")).unwrap_or(0.0) * scale_y;
+            let radius = parse_svg_size(attribute_ref(attrs, "r"))
+                .unwrap_or(0.0)
+                .abs()
+                * scale_x.min(scale_y);
             let distance = ((point.0 - cx).powi(2) + (point.1 - cy).powi(2)).sqrt();
             SvgHitGeometry {
                 fill: radius > 0.0 && distance <= radius,
@@ -325,10 +354,16 @@ fn svg_hit_geometry(
             }
         }
         "ellipse" => {
-            let cx = parse_svg_coord(attribute_ref(attrs, "cx")).unwrap_or(0.0);
-            let cy = parse_svg_coord(attribute_ref(attrs, "cy")).unwrap_or(0.0);
-            let rx = parse_svg_size(attribute_ref(attrs, "rx")).unwrap_or(0.0).abs();
-            let ry = parse_svg_size(attribute_ref(attrs, "ry")).unwrap_or(0.0).abs();
+            let cx = parse_svg_coord(attribute_ref(attrs, "cx")).unwrap_or(0.0) * scale_x;
+            let cy = parse_svg_coord(attribute_ref(attrs, "cy")).unwrap_or(0.0) * scale_y;
+            let rx = parse_svg_size(attribute_ref(attrs, "rx"))
+                .unwrap_or(0.0)
+                .abs()
+                * scale_x;
+            let ry = parse_svg_size(attribute_ref(attrs, "ry"))
+                .unwrap_or(0.0)
+                .abs()
+                * scale_y;
             if rx <= 0.0 || ry <= 0.0 {
                 return SvgHitGeometry::default();
             }
@@ -350,12 +385,12 @@ fn svg_hit_geometry(
         }
         "line" => {
             let start = (
-                parse_svg_coord(attribute_ref(attrs, "x1")).unwrap_or(0.0),
-                parse_svg_coord(attribute_ref(attrs, "y1")).unwrap_or(0.0),
+                parse_svg_coord(attribute_ref(attrs, "x1")).unwrap_or(0.0) * scale_x,
+                parse_svg_coord(attribute_ref(attrs, "y1")).unwrap_or(0.0) * scale_y,
             );
             let end = (
-                parse_svg_coord(attribute_ref(attrs, "x2")).unwrap_or(0.0),
-                parse_svg_coord(attribute_ref(attrs, "y2")).unwrap_or(0.0),
+                parse_svg_coord(attribute_ref(attrs, "x2")).unwrap_or(0.0) * scale_x,
+                parse_svg_coord(attribute_ref(attrs, "y2")).unwrap_or(0.0) * scale_y,
             );
             let distance = point_segment_distance(point, start, end);
             let hit = distance <= stroke_width / 2.0;
@@ -364,13 +399,20 @@ fn svg_hit_geometry(
             SvgHitGeometry { fill: false, stroke: hit, bounding_box }
         }
         "polyline" | "polygon" => {
-            let points = parse_svg_points(attribute_ref(attrs, "points"));
+            let points = parse_svg_points(attribute_ref(attrs, "points"))
+                .into_iter()
+                .map(|(x, y)| (x * scale_x, y * scale_y))
+                .collect();
             polygon_hit_geometry(&points, tag == "polygon", point, stroke_width)
         }
         "path" => {
             let subpaths = parse_path_subpaths(attribute_ref(attrs, "d"));
             let mut result = SvgHitGeometry::default();
-            for (points, closed) in subpaths {
+            for (mut points, closed) in subpaths {
+                for point in &mut points {
+                    point.0 *= scale_x;
+                    point.1 *= scale_y;
+                }
                 let geometry = polygon_hit_geometry(&points, closed, point, stroke_width);
                 result.fill |= geometry.fill;
                 result.stroke |= geometry.stroke;
@@ -2528,6 +2570,48 @@ mod tests {
         assert_eq!(pixel(4, 0), Color::rgb(0, 0, 255));
         assert!(pixel(9, 1).a > 0, "commands after close should start at the subpath origin");
         assert_eq!(pixel(9, 6).a, 0, "the closed path must not continue from its old endpoint");
+    }
+
+    #[test]
+    fn svg_hit_geometry_scales_viewbox_strokes_and_rejects_zero_width_paint() {
+        let mut attrs = BTreeMap::new();
+        attrs.insert("x1".to_string(), "5".to_string());
+        attrs.insert("y1".to_string(), "0".to_string());
+        attrs.insert("x2".to_string(), "5".to_string());
+        attrs.insert("y2".to_string(), "10".to_string());
+
+        // The viewBox is stretched 2x horizontally.  A two-unit user-space
+        // stroke is therefore one display pixel wide on each side (the
+        // rasterizer uses min(scale_x, scale_y) for stroke width).
+        let outside = svg_hit_geometry("line", &attrs, (5.6, 5.0), 2.0, 2.0, 1.0);
+        assert!(!outside.stroke, "horizontal viewBox scale must affect stroke distance");
+        let inside = svg_hit_geometry("line", &attrs, (5.4, 5.0), 2.0, 2.0, 1.0);
+        assert!(inside.stroke);
+
+        let zero_width = svg_hit_geometry("line", &attrs, (5.0, 5.0), 0.0, 1.0, 1.0);
+        assert!(!zero_width.stroke, "stroke-width:0 must not create hit geometry");
+
+        let paint = SvgPaint {
+            fill: None,
+            stroke: Some(SvgPaintValue::Solid(Color::rgb(0, 0, 0))),
+            stroke_width: 0.0,
+            line_cap: LineCap::Butt,
+            line_join: LineJoin::Miter,
+            opacity: 1.0,
+            fill_opacity: 1.0,
+            stroke_opacity: 1.0,
+            current_color: Color::rgb(0, 0, 0),
+        };
+        assert!(!pointer_events_accepts(
+            "painted",
+            &paint,
+            true,
+            SvgHitGeometry {
+                fill: false,
+                stroke: true,
+                bounding_box: false,
+            },
+        ));
     }
 
     #[test]
