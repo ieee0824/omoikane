@@ -6328,6 +6328,73 @@
     }
   }
 
+  function parseTableCellSpanAttribute(raw, max) {
+    if (raw === null) return null;
+    const match = /^[\t\n\f\r ]*\+?([0-9]+)/.exec(String(raw));
+    if (!match) return null;
+    const digits = match[1].replace(/^0+(?=\d)/, "");
+    const limit = String(max);
+    if (digits.length > limit.length) return max;
+    if (digits.length === limit.length && digits > limit) return max;
+    return Number.parseInt(digits, 10);
+  }
+
+  function coerceTableCellSpanSetterValue(value) {
+    if (typeof value === "bigint") throw new TypeError("Value is not a finite number");
+    return Number(value) >> 0;
+  }
+
+  // HTMLTableCellElement covers the cell-specific IDL surface shared by
+  // <td> and <th>. The numeric span attributes reflect HTML parsing rules:
+  // getters accept a leading "+" and digit prefix from the content attribute
+  // and clamp oversized values to the HTML limits, while setters first apply
+  // the platform's signed 32-bit integer conversion and serialize negative
+  // results back to the default span value before the getter re-applies the
+  // HTML defaults/caps when the attribute is read.
+  class HTMLTableCellElement extends HTMLElement {
+    get cellIndex() {
+      const parent = this.parentNode;
+      if (!parent || parent.tagName !== "TR") return -1;
+      return parent.cells.findIndex(cell => cell.__id === this.__id);
+    }
+    get colSpan() {
+      const value = parseTableCellSpanAttribute(this.getAttribute("colspan"), 1000);
+      if (value === null) return 1;
+      return Number.isFinite(value) && value >= 1 ? Math.min(value, 1000) : 1;
+    }
+    set colSpan(value) {
+      const normalized = coerceTableCellSpanSetterValue(value);
+      this.setAttribute("colspan", String(normalized < 0 ? 1 : normalized));
+    }
+    get rowSpan() {
+      const value = parseTableCellSpanAttribute(this.getAttribute("rowspan"), 65534);
+      if (value === null) return 1;
+      return Number.isFinite(value) && value >= 0 ? Math.min(value, 65534) : 1;
+    }
+    set rowSpan(value) {
+      const normalized = coerceTableCellSpanSetterValue(value);
+      this.setAttribute("rowspan", String(normalized < 0 ? 1 : normalized));
+    }
+    get headers() {
+      return this.getAttribute("headers") || "";
+    }
+    set headers(value) {
+      this.setAttribute("headers", String(value));
+    }
+    get scope() {
+      return this.getAttribute("scope") || "";
+    }
+    set scope(value) {
+      this.setAttribute("scope", String(value));
+    }
+    get abbr() {
+      return this.getAttribute("abbr") || "";
+    }
+    set abbr(value) {
+      this.setAttribute("abbr", String(value));
+    }
+  }
+
   const FORM_CONTROL_TAGS = new Set([
     "INPUT", "SELECT", "TEXTAREA", "BUTTON", "FIELDSET", "OBJECT", "OUTPUT", "KEYGEN",
   ]);
@@ -9044,6 +9111,8 @@
     tbody: HTMLTableSectionElement,
     tfoot: HTMLTableSectionElement,
     tr: HTMLTableRowElement,
+    td: HTMLTableCellElement,
+    th: HTMLTableCellElement,
     form: HTMLFormElement,
     input: HTMLInputElement,
     textarea: HTMLTextAreaElement,
@@ -9912,6 +9981,7 @@
   globalThis.HTMLTableElement = HTMLTableElement;
   globalThis.HTMLTableSectionElement = HTMLTableSectionElement;
   globalThis.HTMLTableRowElement = HTMLTableRowElement;
+  globalThis.HTMLTableCellElement = HTMLTableCellElement;
   globalThis.HTMLFormElement = HTMLFormElement;
   globalThis.HTMLInputElement = HTMLInputElement;
   globalThis.HTMLTextAreaElement = HTMLTextAreaElement;
