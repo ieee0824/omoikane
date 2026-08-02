@@ -6415,13 +6415,14 @@ fn notification_request_permission_native(
     _args: &[JsValue],
     _context: &mut Context,
 ) -> JsResult<JsValue> {
-    with_host_state(|state| {
+    let permission = with_host_state(|state| {
         let mut state = state.borrow_mut();
         if state.notification_permission == "default" {
             state.notification_permission = "denied".to_string();
         }
-        Ok(js_string!(state.notification_permission.as_str()).into())
-    })
+        Ok(state.notification_permission.clone())
+    })?;
+    Ok(js_string!(permission).into())
 }
 
 fn geolocation_permission_native(
@@ -9350,12 +9351,13 @@ fn create_worklet_native(
     _: &[JsValue],
     _: &mut Context,
 ) -> JsResult<JsValue> {
-    with_host_state(|state| {
+    let id = with_host_state(|state| {
         let mut state = state.borrow_mut();
         let id = state.next_worklet_id;
         state.next_worklet_id = state.next_worklet_id.saturating_add(1);
-        Ok(js_string!(id.to_string()).into())
-    })
+        Ok(id.to_string())
+    })?;
+    Ok(js_string!(id).into())
 }
 
 /// Loads and evaluates one Worklet module in the owner page's isolated
