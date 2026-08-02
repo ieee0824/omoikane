@@ -9,6 +9,14 @@
       "baseline_supported": true
     },
     {
+      "id": "dom.form-controls-collection",
+      "area": "forms",
+      "description": "HTMLFormElement.elements exposes live item and namedItem access",
+      "setup": "globalThis.__formProbe = document.createElement('form'); globalThis.__formControl = document.createElement('input'); __formControl.name = 'field'; __formProbe.appendChild(__formControl)",
+      "probe": "__formProbe.elements.item(0) === __formControl && __formProbe.elements.namedItem('field') === __formControl && Array.from(__formProbe.elements)[0] === __formControl",
+      "baseline_supported": false
+    },
+    {
       "id": "dom.toggle-attribute",
       "area": "dom",
       "description": "Element.toggleAttribute reflects boolean force and returns the resulting presence",
