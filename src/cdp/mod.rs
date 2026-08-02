@@ -4866,11 +4866,11 @@ mod tests {
         session
             .install_document(
                 "https://example.test/",
-                r#"<html><body><svg id="icon" width="100" height="100" viewBox="0 0 100 100">
+                r##"<html><body><svg id="icon" width="100" height="100" viewBox="0 0 100 100">
                     <defs><rect id="template" x="0" y="0" width="20" height="20" fill="blue"></rect></defs>
                     <use id="instance" href="#template" x="40" y="40" pointer-events="fill"></use>
                     <script>globalThis.targets=[];document.addEventListener('click',e=>targets.push(e.target.id||e.target.localName));</script>
-                </svg></body></html>"#,
+                </svg></body></html>"##,
                 1,
                 "null",
             )
