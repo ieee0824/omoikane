@@ -368,6 +368,26 @@ fn applies_origin_importance_specificity_and_source_order() {
 }
 
 #[test]
+fn style_index_matches_class_with_escaped_unicode_whitespace() {
+    let element = NodeHandle::element("p");
+    element.set_attribute(
+        "class",
+        "a\u{20}b\u{9}c\u{a}d\u{d}e\u{c}f\u{2003}g\u{3000}h",
+    );
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(r#".a.b.c.d.e.f\2003g\3000h { z-index: 1; }"#).unwrap(),
+    );
+
+    assert_eq!(
+        resolver.computed_style(&element).get("z-index"),
+        Some(&ComputedValue::Number(1.0))
+    );
+}
+
+#[test]
 fn scope_roots_limits_and_scope_pseudo_control_the_cascade() {
     let document = NodeHandle::document();
     let html = NodeHandle::element("html");
