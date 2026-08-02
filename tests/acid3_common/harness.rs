@@ -417,7 +417,12 @@ fn eval_string(runtime: &mut JsRuntime, expr: &str) -> Option<String> {
     let wrapped = format!(
         "(function(){{ try {{ var __v = ({expr}); return (__v === null || __v === undefined) ? '' : String(__v); }} catch (e) {{ return '<<eval-error: ' + e + '>>'; }} }})()"
     );
-    match runtime.eval(&wrapped) {
+    let result = runtime.eval(&wrapped);
+    // The harness intentionally performs thousands of tiny evaluations while
+    // driving the page. Collect between those host calls so the integration
+    // test remains bounded when host-retained values are exposed to Boa GC.
+    boa_gc::force_collect();
+    match result {
         Ok(value) => value.as_string().map(|s| s.to_std_string_escaped()),
         Err(_) => None,
     }
