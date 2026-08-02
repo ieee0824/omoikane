@@ -4614,7 +4614,7 @@ fn apply_presentational_hints(
             matches!(
                 name.to_ascii_lowercase().as_str(),
                 "svg" | "g" | "rect" | "circle" | "ellipse" | "line"
-                    | "polyline" | "polygon" | "path" | "text" | "tspan" | "textpath"
+                    | "polyline" | "polygon" | "path" | "text" | "tspan" | "textpath" | "use"
             )
         });
     if is_svg_element
