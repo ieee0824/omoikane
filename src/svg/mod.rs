@@ -566,9 +566,9 @@ fn svg_hit_geometry(
             let subpaths = parse_path_subpaths(attribute_ref(attrs, "d"));
             let mut result = SvgHitGeometry::default();
             for (mut points, closed) in subpaths {
-                for point in &mut points {
-                    point.0 *= scale_x;
-                    point.1 *= scale_y;
+                for vertex in &mut points {
+                    vertex.0 *= scale_x;
+                    vertex.1 *= scale_y;
                 }
                 let geometry = polygon_hit_geometry(&points, closed, point, stroke_width);
                 result.fill |= geometry.fill;
@@ -702,6 +702,7 @@ fn parse_path_subpaths(value: Option<&String>) -> Vec<(Vec<(f32, f32)>, bool)> {
                     subpaths.push((std::mem::take(&mut points), true));
                 }
                 current = start;
+                points.clear();
                 points.push(current);
                 closed = false;
             }
@@ -2817,6 +2818,10 @@ mod tests {
             "M0 0 L0 10 Z M20 0 L20 10".to_string(),
         );
         let geometry = svg_hit_geometry("path", &attrs, (10.0, 0.0), 2.0, 1.0, 1.0);
+        assert!(!geometry.stroke);
+
+        attrs.insert("d".to_string(), "M0 0 Z".to_string());
+        let geometry = svg_hit_geometry("path", &attrs, (0.0, 0.0), 2.0, 1.0, 1.0);
         assert!(!geometry.stroke);
     }
 
