@@ -2649,8 +2649,8 @@ impl JsRuntime {
                 true,
                 &mut self.context,
             )?;
-            self.context.eval(Source::from_bytes(DOM_BOOTSTRAP))?;
-            self.context.run_jobs()?;
+            self.with_active_host(|context| context.eval(Source::from_bytes(DOM_BOOTSTRAP)))?;
+            self.with_active_host(|context| context.run_jobs())?;
 
             let parent = if same_origin {
                 top_global.clone()
