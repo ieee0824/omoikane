@@ -1124,11 +1124,12 @@
     }
 
     __tokens() {
-      return Array.from(new Set(
-        (this.__node.getAttribute(this.__attribute) || "")
-          .split(/[\t\n\f\r ]+/)
-          .filter(Boolean)
-      ));
+      const tokens = [];
+      for (const token of (this.__node.getAttribute(this.__attribute) || "")
+        .split(/[\t\n\f\r ]+/)) {
+        if (token && !tokens.includes(token)) tokens.push(token);
+      }
+      return tokens;
     }
 
     __replace(tokens) {
