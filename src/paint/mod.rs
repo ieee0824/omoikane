@@ -1692,7 +1692,6 @@ fn hit_test_box(
     // before line fragments return the SVG viewport element itself.
     if layout.node.tag_name().as_deref() == Some("svg")
         && rect_contains_point(border_box, local_point.0, local_point.1)
-        && accepts_pointer_events(&style)
     {
         let svg_box = border_box_rect(layout);
         let local_x = local_point.0 - svg_box.x;

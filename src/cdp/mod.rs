@@ -4749,7 +4749,7 @@ mod tests {
         session
             .install_document(
                 "https://example.test/",
-                r#"<html><head><style>*{margin:0}#back,#overlay{position:absolute;left:0;top:0;width:120px;height:80px}#back{background:gray}#overlay{background:red;pointer-events:none}#icon{position:absolute;left:130px;top:0;width:100px;height:100px}</style></head><body>
+                r#"<html><head><style>*{margin:0}#back,#overlay{position:absolute;left:0;top:0;width:120px;height:80px}#back{background:gray}#overlay{background:red;pointer-events:none}#icon{position:absolute;left:130px;top:0;width:100px;height:100px;pointer-events:none}#shape{pointer-events:fill}</style></head><body>
                     <div id="back"></div><div id="overlay"></div>
                     <svg id="icon" width="100" height="100" viewBox="0 0 100 100">
                       <rect id="base" x="0" y="0" width="100" height="100" fill="red" pointer-events="none"></rect>

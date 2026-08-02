@@ -132,7 +132,8 @@ pub(crate) fn hit_test_svg(
     };
     let initial = SvgHitStyle {
         paint: resolve_paint(&root_paint, &attrs),
-        pointer_events: property_value(&attrs, "pointer-events")
+        pointer_events: computed_pointer_events(svg_node)
+            .or_else(|| property_value(&attrs, "pointer-events"))
             .unwrap_or_else(|| "visiblepainted".to_string())
             .to_ascii_lowercase(),
         visible: !matches!(
@@ -371,8 +372,15 @@ fn svg_hit_geometry(
             polygon_hit_geometry(&points, tag == "polygon", point, stroke_width)
         }
         "path" => {
-            let points = parse_path_endpoints(attribute_ref(attrs, "d"));
-            polygon_hit_geometry(&points, true, point, stroke_width)
+            let subpaths = parse_path_subpaths(attribute_ref(attrs, "d"));
+            let mut result = SvgHitGeometry::default();
+            for (points, closed) in subpaths {
+                let geometry = polygon_hit_geometry(&points, closed, point, stroke_width);
+                result.fill |= geometry.fill;
+                result.stroke |= geometry.stroke;
+                result.bounding_box |= geometry.bounding_box;
+            }
+            result
         }
         _ => SvgHitGeometry::default(),
     }
@@ -402,13 +410,19 @@ fn polygon_hit_geometry(
     SvgHitGeometry { fill, stroke, bounding_box }
 }
 
-fn parse_path_endpoints(value: Option<&String>) -> Vec<(f32, f32)> {
+fn parse_path_subpaths(value: Option<&String>) -> Vec<(Vec<(f32, f32)>, bool)> {
     let mut points = Vec::new();
+    let mut subpaths = Vec::new();
+    let mut closed = false;
     let mut current = (0.0, 0.0);
     let mut start = (0.0, 0.0);
     for command in parse_path_data(value.map(String::as_str).unwrap_or_default()) {
         match command {
             PathCommand::MoveTo(x, y) => {
+                if points.len() >= 2 {
+                    subpaths.push((std::mem::take(&mut points), closed));
+                }
+                closed = false;
                 current = (x, y);
                 start = current;
                 points.push(current);
@@ -479,12 +493,19 @@ fn parse_path_endpoints(value: Option<&String>) -> Vec<(f32, f32)> {
                 current = (x, y);
             }
             PathCommand::Close => {
+                if points.len() >= 2 {
+                    subpaths.push((std::mem::take(&mut points), true));
+                }
                 current = start;
                 points.push(current);
+                closed = false;
             }
         }
     }
-    points
+    if points.len() >= 2 {
+        subpaths.push((points, closed));
+    }
+    subpaths
 }
 
 fn point_in_rect(point: (f32, f32), rect: Rect) -> bool {
