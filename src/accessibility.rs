@@ -1627,7 +1627,7 @@ fn accessibility_properties(
     }
     for (attribute, property) in [
         ("aria-live", "live"),
-        ("aria-haspopup", "hasPopup"),
+        ("aria-haspopup", "haspopup"),
         ("aria-invalid", "invalid"),
         ("aria-autocomplete", "autocomplete"),
         ("aria-orientation", "orientation"),
@@ -1774,7 +1774,7 @@ mod tests {
             "<html><body><label for='agree'>Accept terms</label>\
              <input id='agree' type='checkbox' checked aria-describedby='help'>\
              <span id='help'>Required to continue</span>\
-             <button aria-pressed='mixed'>Save <strong>now</strong></button></body></html>",
+             <button aria-pressed='mixed' aria-haspopup='menu'>Save <strong>now</strong></button></body></html>",
         );
         let nodes = tree.nodes_preorder();
         let checkbox = nodes.iter().find(|node| node.role == "checkbox").unwrap();
@@ -1789,6 +1789,10 @@ mod tests {
         assert!(button.properties.iter().any(|property| {
             property.name == "pressed"
                 && property.value == AccessibilityValue::Tristate("mixed".to_string())
+        }));
+        assert!(button.properties.iter().any(|property| {
+            property.name == "haspopup"
+                && property.value == AccessibilityValue::Token("menu".to_string())
         }));
     }
 

@@ -1426,9 +1426,7 @@ impl CdpSession {
         let target_ax = *path.last().expect("accessibility path contains target");
         let mut ordered = vec![target_ax];
         if fetch_relatives {
-            if !target_ax.ignored {
-                collect_reachable_ax_children(target_ax, &mut ordered);
-            }
+            collect_reachable_ax_children(target_ax, &mut ordered);
             if path.len() > 1 {
                 for sibling in &path[path.len() - 2].children {
                     if sibling.node_id == target_ax.node_id {
@@ -5499,6 +5497,29 @@ mod tests {
             .unwrap();
         assert_eq!(shadow_root_partial["nodes"], host_partial["nodes"]);
         assert_ne!(shadow_root_partial["nodes"][0]["nodeId"], "0");
+
+        let ignored_host_partial = session
+            .dispatch(
+                "Accessibility.getPartialAXTree",
+                json!({ "nodeId": host_dom_id, "fetchRelatives": true }),
+            )
+            .unwrap();
+        let ignored_host_nodes = ignored_host_partial["nodes"].as_array().unwrap();
+        assert_eq!(ignored_host_nodes[0]["ignored"], true);
+        assert!(
+            ignored_host_nodes[0]["childIds"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|child_id| ignored_host_nodes
+                    .iter()
+                    .any(|node| node["nodeId"] == *child_id))
+        );
+        assert!(
+            ignored_host_nodes
+                .iter()
+                .any(|node| node["name"]["value"] == "Shadow child")
+        );
 
         let partial = session
             .dispatch(
